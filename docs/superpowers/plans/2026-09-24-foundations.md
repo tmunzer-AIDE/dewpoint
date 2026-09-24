@@ -80,7 +80,7 @@ backend/
   src/dewpoint/apps/api/middleware.py     # security headers, CSRF enforcement
   src/dewpoint/apps/api/errors.py         # exception handlers (sanitized)
   src/dewpoint/apps/api/routes/{health,auth,mfa,passkeys,tenants,members,connections,audit}.py
-  src/dewpoint/apps/cli/main.py           # typer: admin init, audit anchor, audit verify, keys rotate
+  src/dewpoint/apps/cli/main.py           # typer: admin init, audit anchor/verify, keys status/rewrap/rotate-dek (Task 15)
   tests/conftest.py                       # postgres container, migrations, role engines, client
   tests/...                               # mirrors src
 frontend/
@@ -331,6 +331,34 @@ async def test_unhandled_error_is_sanitized() -> None:
     assert r.status_code == 500
     assert "secret internal detail" not in r.text
     assert r.json() == {"error": "internal_error"}
+
+
+async def test_error_envelope_is_flat() -> None:
+    from fastapi import HTTPException
+    from pydantic import BaseModel
+
+    app = create_app(_settings())
+    router = APIRouter()
+
+    class In(BaseModel):
+        password: str
+        n: int
+
+    @router.get("/denied")
+    async def denied() -> None:
+        raise HTTPException(403, detail={"error": "step_up_required"})
+
+    @router.post("/typed")
+    async def typed(body: In) -> None:
+        return None
+
+    app.include_router(router)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://testserver") as c:
+        assert (await c.get("/denied")).json() == {"error": "step_up_required"}
+        assert (await c.get("/missing")).json() == {"error": "not_found"}
+        r = await c.post("/typed", json={"password": "hunter2-secret", "n": "x"})
+    assert r.status_code == 422 and r.json() == {"error": "invalid", "fields": ["n"]}
+    assert "hunter2-secret" not in r.text
 ```
 
 - [ ] **Step 2: Run the tests to confirm they fail**
@@ -355,6 +383,8 @@ class Settings(BaseSettings):
     database_url: str
     kek_b64: str = Field(description="Base64 32-byte key-encryption key")
     kek_id: str = "env-1"
+    kek_previous_b64: str | None = None  # set only during a KEK rollout (see docs/operations/key-rotation.md)
+    kek_previous_id: str | None = None
     public_origin: str = Field(description="Browser origin, e.g. https://dewpoint.example.com")
     rp_id: str | None = None  # WebAuthn RP ID; defaults to host of public_origin
     mfa_required: bool = True
@@ -406,12 +436,32 @@ from fastapi.responses import JSONResponse
 log = structlog.get_logger(__name__)
 
 
+_STATUS_CODES = {400: "bad_request", 401: "unauthenticated", 403: "forbidden", 404: "not_found",
+                 405: "method_not_allowed", 409: "conflict", 422: "invalid", 429: "rate_limited"}
+
+
 def install_error_handlers(app: FastAPI) -> None:
+    """Every error response body is {"error": <code>, ...}. Routes raise HTTPException(detail={"error": ...})."""
+
+    @app.exception_handler(StarletteHTTPException)  # also catches fastapi.HTTPException (subclass)
+    async def _http(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        if isinstance(exc.detail, dict) and "error" in exc.detail:
+            body = exc.detail
+        else:
+            body = {"error": _STATUS_CODES.get(exc.status_code, "http_error")}
+        return JSONResponse(status_code=exc.status_code, content=body, headers=getattr(exc, "headers", None))
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation(request: Request, exc: RequestValidationError) -> JSONResponse:
+        fields = [".".join(str(p) for p in e["loc"] if p != "body") for e in exc.errors()]
+        return JSONResponse(status_code=422, content={"error": "invalid", "fields": fields})
+
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
         log.error("unhandled_error", path=request.url.path, exc_info=exc)
         return JSONResponse(status_code=500, content={"error": "internal_error"})
 ```
+Imports for `errors.py`: `from fastapi.exceptions import RequestValidationError` and `from starlette.exceptions import HTTPException as StarletteHTTPException`. The validation handler returns field paths only, never the submitted values (which may be passwords or tokens).
 
 `apps/api/routes/health.py`:
 ```python
@@ -474,7 +524,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Produces:
   - `Base` (DeclarativeBase), plus the mixins `UUIDPk` (`id: Mapped[uuid.UUID]`, server default `gen_random_uuid()`) and `Timestamps` (`created_at`, `updated_at`).
   - `make_engine(url: str) -> AsyncEngine`, `make_sessionmaker(engine) -> async_sessionmaker[AsyncSession]`.
-  - `async def tenant_scope(session: AsyncSession, tenant_id: uuid.UUID | None, user_id: uuid.UUID | None = None) -> None`: runs `set_config('app.tenant_id', …, true)` and `set_config('app.user_id', …, true)`, transaction-local.
+  - `async def tenant_scope(session: AsyncSession, tenant_id: uuid.UUID | None) -> None`: sets `app.tenant_id` **and clears `app.user_id`** (transaction-local).
+  - `async def user_scope(session: AsyncSession, user_id: uuid.UUID) -> None`: sets `app.user_id` **and clears `app.tenant_id`**. It's used only for "which tenants do I belong to" discovery.
+  - The two scopes are **mutually exclusive by construction**. RLS policies that allow `tenant match OR user match` therefore never widen a tenant-scoped query to the caller's other tenants.
   - DB group roles (NOLOGIN): `dewpoint_api`, `dewpoint_ingress`, `dewpoint_dispatch`, `dewpoint_worker`, `dewpoint_admin`.
   - Test fixtures:
     - `pg_url` (owner URL, session scope)
@@ -492,7 +544,17 @@ import uuid
 
 from sqlalchemy import text
 
-from dewpoint.core.db import tenant_scope
+from dewpoint.core.db import tenant_scope, user_scope
+
+
+async def test_scopes_are_exclusive(api_sessionmaker) -> None:
+    tid, uid = uuid.uuid4(), uuid.uuid4()
+    q = text("select current_setting('app.tenant_id', true), current_setting('app.user_id', true)")
+    async with api_sessionmaker() as s, s.begin():
+        await user_scope(s, uid)
+        assert tuple((await s.execute(q)).one()) == ("", str(uid))
+        await tenant_scope(s, tid)
+        assert tuple((await s.execute(q)).one()) == (str(tid), "")
 
 
 async def test_tenant_scope_is_transaction_local(api_sessionmaker) -> None:
@@ -531,12 +593,20 @@ def make_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(engine, expire_on_commit=False)
 
 
-async def tenant_scope(session: AsyncSession, tenant_id: uuid.UUID | None, user_id: uuid.UUID | None = None) -> None:
-    """Set RLS context for the current transaction only. Call after the authoritative check."""
-    await session.execute(
-        text("select set_config('app.tenant_id', :t, true), set_config('app.user_id', :u, true)"),
-        {"t": str(tenant_id) if tenant_id else "", "u": str(user_id) if user_id else ""},
-    )
+async def _set_scope(session: AsyncSession, tenant: str, user: str) -> None:
+    await session.execute(text("select set_config('app.tenant_id', :t, true), set_config('app.user_id', :u, true)"),
+                          {"t": tenant, "u": user})
+
+
+async def tenant_scope(session: AsyncSession, tenant_id: uuid.UUID | None) -> None:
+    """Tenant RLS context for this transaction. Always clears the user-discovery context.
+    Call only after the authoritative membership/run check."""
+    await _set_scope(session, str(tenant_id) if tenant_id else "", "")
+
+
+async def user_scope(session: AsyncSession, user_id: uuid.UUID) -> None:
+    """User-discovery RLS context (own memberships/tenants only). Always clears the tenant context."""
+    await _set_scope(session, "", str(user_id))
 ```
 
 ```python
@@ -613,7 +683,8 @@ from testcontainers.postgres import PostgresContainer
 from dewpoint.core.db import make_engine, make_sessionmaker
 
 BACKEND = Path(__file__).resolve().parents[1]
-TEST_ROLES = ["dewpoint_api", "dewpoint_ingress", "dewpoint_dispatch", "dewpoint_worker", "dewpoint_admin"]
+TEST_ROLES = ["dewpoint_api", "dewpoint_ingress", "dewpoint_dispatch", "dewpoint_worker", "dewpoint_admin",
+              "dewpoint_auditor"]
 
 
 @pytest.fixture(scope="session")
@@ -632,6 +703,7 @@ async def _test_users(pg_url: str) -> None:
         for role in TEST_ROLES:
             await c.execute(text(
                 f"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='t_{role}') "
+                f"AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname='{role}') "  # group roles appear as migrations land
                 f"THEN CREATE ROLE t_{role} LOGIN PASSWORD 'pw' IN ROLE {role}; END IF; END $$"
             ))
     await eng.dispose()
@@ -667,7 +739,7 @@ async def clean_db(owner_sessionmaker: async_sessionmaker[AsyncSession]) -> Asyn
             await s.execute(text("SET LOCAL session_replication_role = replica"))  # bypass audit triggers
             await s.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
 ```
-Later tasks add `worker_sessionmaker` and `ingress_sessionmaker` fixtures built the same way as `api_sessionmaker`, using `_url_for(pg_url, "dewpoint_worker")` and `_url_for(pg_url, "dewpoint_ingress")`.
+Later tasks add `worker_sessionmaker` and `ingress_sessionmaker` fixtures built the same way as `api_sessionmaker`, using `_url_for(pg_url, "dewpoint_worker")` and `_url_for(pg_url, "dewpoint_ingress")`. `dewpoint_auditor` is created by migration 0005 (Task 11). `_test_users` already skips group roles that don't exist yet.
 
 - [ ] **Step 5: Run the tests**
 
@@ -709,7 +781,7 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 
-from dewpoint.core.db import tenant_scope
+from dewpoint.core.db import tenant_scope, user_scope
 from dewpoint.core.models.tenancy import Membership, Tenant
 
 
@@ -740,9 +812,21 @@ async def test_tenant_context_isolates(owner_sessionmaker, api_sessionmaker) -> 
 async def test_user_context_lists_own_memberships(owner_sessionmaker, api_sessionmaker) -> None:
     a, _, u = await _seed(owner_sessionmaker)
     async with api_sessionmaker() as s, s.begin():
-        await tenant_scope(s, None, user_id=u)
+        await user_scope(s, u)
         assert [m.tenant_id for m in (await s.execute(select(Membership))).scalars()] == [a]
         assert [t.id for t in (await s.execute(select(Tenant))).scalars()] == [a]
+
+
+async def test_tenant_scope_does_not_leak_callers_other_tenants(owner_sessionmaker, api_sessionmaker) -> None:
+    a, b, u = await _seed(owner_sessionmaker)
+    async with owner_sessionmaker() as s, s.begin():  # u belongs to BOTH tenants
+        await s.execute(text("insert into memberships(tenant_id,user_id,role) values (:b,:u,'viewer')"), {"b": b, "u": u})
+    async with api_sessionmaker() as s, s.begin():
+        await user_scope(s, u)
+        assert len((await s.execute(select(Membership))).scalars().all()) == 2
+        await tenant_scope(s, b)  # what require() does after the membership check
+        assert [m.tenant_id for m in (await s.execute(select(Membership))).scalars()] == [b]
+        assert [t.id for t in (await s.execute(select(Tenant))).scalars()] == [b]
 
 
 async def test_cross_tenant_insert_rejected(owner_sessionmaker, api_sessionmaker) -> None:
@@ -932,14 +1016,19 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Test: `backend/tests/core/crypto/test_keyring.py`
 
 **Interfaces:**
-- Consumes: `Base`, `UUIDPk` (Task 3); `Settings.kek_b64`, `Settings.kek_id` (Task 2).
+- Consumes: `Base`, `UUIDPk` (Task 3); `Settings.kek_b64`, `kek_id`, `kek_previous_b64`, `kek_previous_id` (Task 2).
 - Produces:
-  - `Kek(key_id: str, key: bytes)` with `.wrap(dek: bytes, aad: bytes) -> bytes` and `.unwrap(blob: bytes, aad: bytes) -> bytes`; `Kek.from_settings(settings) -> Kek`.
-  - `Keyring(kek: Kek)` with:
+  - `Kek(key_id: str, key: bytes)` with `.wrap(dek: bytes, aad: bytes) -> bytes` and `.unwrap(blob: bytes, aad: bytes) -> bytes`.
+  - `KekSet(current: Kek, previous: Sequence[Kek] = ())`:
+    - `.current` wraps every *new* data key;
+    - `.get(kek_id) -> Kek` unwraps with whichever key wrapped the row, and raises `UnknownKekError` otherwise;
+    - `KekSet.from_settings(settings)`.
+  - `Keyring(keks: KekSet)` with:
     - `async encrypt(session, *, tenant_id: UUID | None, purpose: str, context: str, plaintext: bytes) -> bytes`
     - `async decrypt(session, *, tenant_id: UUID | None, purpose: str, context: str, blob: bytes) -> bytes`
-    - `async rotate(session, tenant_id: UUID | None) -> int` (the new active version)
-    - `async rewrap_all(session, new_kek: Kek) -> int` (the number of keys rewrapped)
+    - `async rotate(session, tenant_id: UUID | None) -> int` (data-key rotation; returns the new active version)
+    - `async rewrap_batch(session, batch_size: int = 100) -> int`: rewraps up to `batch_size` rows **not** wrapped by `current` (`FOR UPDATE SKIP LOCKED`); returns the count, 0 when done
+    - `async kek_usage(session) -> dict[str, int]` (`kek_id` → number of data keys)
   - `tenant_id=None` means the platform scope, used for user TOTP secrets.
 
 - [ ] **Step 1: Write the failing tests**
@@ -953,7 +1042,7 @@ import uuid
 import pytest
 from cryptography.exceptions import InvalidTag
 
-from dewpoint.core.crypto.kek import Kek
+from dewpoint.core.crypto.kek import Kek, KekSet, UnknownKekError
 from dewpoint.core.crypto.keyring import Keyring
 
 
@@ -962,7 +1051,7 @@ def _kek(kid: str = "k1") -> Kek:
 
 
 async def test_roundtrip_and_aad_binding(owner_sessionmaker) -> None:
-    kr, t = Keyring(_kek()), uuid.uuid4()
+    kr, t = Keyring(KekSet(_kek())), uuid.uuid4()
     async with owner_sessionmaker() as s, s.begin():
         blob = await kr.encrypt(s, tenant_id=t, purpose="connection.secret", context="c1", plaintext=b"tok")
         assert b"tok" not in blob
@@ -974,7 +1063,7 @@ async def test_roundtrip_and_aad_binding(owner_sessionmaker) -> None:
 
 
 async def test_rotation_keeps_old_ciphertext_readable(owner_sessionmaker) -> None:
-    kr, t = Keyring(_kek()), uuid.uuid4()
+    kr, t = Keyring(KekSet(_kek())), uuid.uuid4()
     async with owner_sessionmaker() as s, s.begin():
         old = await kr.encrypt(s, tenant_id=t, purpose="p", context="x", plaintext=b"a")
         assert await kr.rotate(s, t) == 2
@@ -983,12 +1072,32 @@ async def test_rotation_keeps_old_ciphertext_readable(owner_sessionmaker) -> Non
         assert await kr.decrypt(s, tenant_id=t, purpose="p", context="x", blob=old) == b"a"
 
 
-async def test_rewrap_under_new_kek(owner_sessionmaker) -> None:
-    k1, k2, t = _kek("k1"), _kek("k2"), uuid.uuid4()
+async def test_kek_rollout_phases(owner_sessionmaker) -> None:
+    """Phases from docs/operations/key-rotation.md. Old and new processes coexist in phases A and B."""
+    old, new = _kek("old"), _kek("new")
+    t1, t2 = uuid.uuid4(), uuid.uuid4()
+    only_old = Keyring(KekSet(old))
+    phase_a = Keyring(KekSet(old, previous=[new]))   # new key is read-only everywhere
+    phase_b = Keyring(KekSet(new, previous=[old]))   # new key writes; old still readable
+    only_new = Keyring(KekSet(new))                  # phase D
     async with owner_sessionmaker() as s, s.begin():
-        blob = await Keyring(k1).encrypt(s, tenant_id=t, purpose="p", context="x", plaintext=b"z")
-        assert await Keyring(k1).rewrap_all(s, k2) == 1
-        assert await Keyring(k2).decrypt(s, tenant_id=t, purpose="p", context="x", blob=blob) == b"z"
+        b1 = await only_old.encrypt(s, tenant_id=t1, purpose="p", context="x", plaintext=b"one")
+        b2 = await phase_b.encrypt(s, tenant_id=t2, purpose="p", context="x", plaintext=b"two")  # new DEK, new KEK
+        # a phase-A process (not yet switched) can read what a phase-B process wrote
+        assert await phase_a.decrypt(s, tenant_id=t2, purpose="p", context="x", blob=b2) == b"two"
+        # a process that never got the new key cannot, which is why phase A exists
+        with pytest.raises(UnknownKekError):
+            await only_old.decrypt(s, tenant_id=t2, purpose="p", context="x", blob=b2)
+        assert await phase_b.kek_usage(s) == {"old": 1, "new": 1}
+        with pytest.raises(UnknownKekError):
+            await only_new.decrypt(s, tenant_id=t1, purpose="p", context="x", blob=b1)
+        # phase C: rewrap in batches until nothing references the old KEK
+        assert await phase_b.rewrap_batch(s, batch_size=1) == 1
+        assert await phase_b.rewrap_batch(s, batch_size=1) == 0
+        assert await phase_b.kek_usage(s) == {"new": 2}
+        # phase D: the old KEK can be removed from configuration
+        assert await only_new.decrypt(s, tenant_id=t1, purpose="p", context="x", blob=b1) == b"one"
+        assert await only_new.decrypt(s, tenant_id=t2, purpose="p", context="x", blob=b2) == b"two"
 ```
 
 - [ ] **Step 2: Run the tests to confirm they fail**
@@ -1035,15 +1144,15 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from dewpoint.core.config import Settings
 
 
+class UnknownKekError(LookupError):
+    pass
+
+
 class Kek:
     def __init__(self, key_id: str, key: bytes) -> None:
         if len(key) != 32:
             raise ValueError("KEK must be 32 bytes")
         self.key_id, self._aes = key_id, AESGCM(key)
-
-    @classmethod
-    def from_settings(cls, settings: Settings) -> "Kek":
-        return cls(settings.kek_id, base64.b64decode(settings.kek_b64))
 
     def wrap(self, dek: bytes, aad: bytes) -> bytes:
         nonce = os.urandom(12)
@@ -1051,7 +1160,34 @@ class Kek:
 
     def unwrap(self, blob: bytes, aad: bytes) -> bytes:
         return self._aes.decrypt(blob[:12], blob[12:], aad)
+
+
+class KekSet:
+    """The current KEK wraps new data keys; previous KEKs only unwrap (used during a rollout)."""
+
+    def __init__(self, current: Kek, previous: Sequence[Kek] = ()) -> None:
+        self.current = current
+        self._by_id = {k.key_id: k for k in (*previous, current)}
+        if len(self._by_id) != len(previous) + 1:
+            raise ValueError("KEK ids must be unique")
+
+    def get(self, kek_id: str) -> Kek:
+        try:
+            return self._by_id[kek_id]
+        except KeyError:
+            raise UnknownKekError(kek_id) from None
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> "KekSet":
+        current = Kek(settings.kek_id, base64.b64decode(settings.kek_b64))
+        previous = []
+        if settings.kek_previous_b64:
+            if not settings.kek_previous_id:
+                raise ValueError("DEWPOINT_KEK_PREVIOUS_ID is required with DEWPOINT_KEK_PREVIOUS_B64")
+            previous.append(Kek(settings.kek_previous_id, base64.b64decode(settings.kek_previous_b64)))
+        return cls(current, previous)
 ```
+Add `from collections.abc import Sequence` to the imports.
 
 `core/crypto/keyring.py`:
 ```python
@@ -1064,7 +1200,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dewpoint.core.crypto.kek import Kek
+from dewpoint.core.crypto.kek import KekSet
 from dewpoint.core.models.keys import DataKey
 
 FORMAT_V1 = b"\x01"
@@ -1079,8 +1215,8 @@ def _aad(scope: str, purpose: str, context: str) -> bytes:
 
 
 class Keyring:
-    def __init__(self, kek: Kek) -> None:
-        self._kek = kek
+    def __init__(self, keks: KekSet) -> None:
+        self._keks = keks
 
     async def _active(self, s: AsyncSession, tenant_id: uuid.UUID | None) -> DataKey:
         scope = _scope(tenant_id)
@@ -1094,11 +1230,13 @@ class Keyring:
         return row
 
     def _new_key(self, scope: str, tenant_id: uuid.UUID | None, version: int) -> DataKey:
-        wrapped = self._kek.wrap(AESGCM.generate_key(256), f"dek|{scope}|{version}".encode())
-        return DataKey(scope_key=scope, tenant_id=tenant_id, version=version, wrapped_key=wrapped, kek_id=self._kek.key_id)
+        kek = self._keks.current
+        wrapped = kek.wrap(AESGCM.generate_key(256), f"dek|{scope}|{version}".encode())
+        return DataKey(scope_key=scope, tenant_id=tenant_id, version=version, wrapped_key=wrapped, kek_id=kek.key_id)
 
     def _dek(self, row: DataKey) -> AESGCM:
-        return AESGCM(self._kek.unwrap(row.wrapped_key, f"dek|{row.scope_key}|{row.version}".encode()))
+        kek = self._keks.get(row.kek_id)  # UnknownKekError if this process lacks the wrapping key
+        return AESGCM(kek.unwrap(row.wrapped_key, f"dek|{row.scope_key}|{row.version}".encode()))
 
     async def encrypt(self, s: AsyncSession, *, tenant_id: uuid.UUID | None, purpose: str, context: str,
                       plaintext: bytes) -> bytes:
@@ -1129,15 +1267,22 @@ class Keyring:
         await s.flush()
         return new.version
 
-    async def rewrap_all(self, s: AsyncSession, new_kek: Kek) -> int:
-        rows = (await s.execute(select(DataKey).with_for_update())).scalars().all()
+    async def rewrap_batch(self, s: AsyncSession, batch_size: int = 100) -> int:
+        current = self._keks.current
+        rows = (await s.execute(select(DataKey).where(DataKey.kek_id != current.key_id)
+                                .limit(batch_size).with_for_update(skip_locked=True))).scalars().all()
         for row in rows:
             aad = f"dek|{row.scope_key}|{row.version}".encode()
-            row.wrapped_key = new_kek.wrap(self._kek.unwrap(row.wrapped_key, aad), aad)
-            row.kek_id = new_kek.key_id
+            row.wrapped_key = current.wrap(self._keks.get(row.kek_id).unwrap(row.wrapped_key, aad), aad)
+            row.kek_id = current.key_id
         await s.flush()
         return len(rows)
+
+    async def kek_usage(self, s: AsyncSession) -> dict[str, int]:
+        rows = await s.execute(select(DataKey.kek_id, func.count()).group_by(DataKey.kek_id))
+        return {k: int(n) for k, n in rows.all()}
 ```
+Add `func` to the `sqlalchemy` import.
 
 `0004_keys.py` (with `revision = "0004"` and `down_revision = "0003"`):
 - creates `data_keys` to match the model;
@@ -1152,7 +1297,7 @@ Expected: 3 PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add -A && git commit -m "feat(core): envelope encryption keyring with AAD binding, rotation and KEK rewrap
+git add -A && git commit -m "feat(core): envelope encryption keyring with AAD binding, data-key rotation and dual-KEK rewrap
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -1681,15 +1826,7 @@ In `create_app`, after `app.state.settings = settings`:
     app.state.sessionmaker = make_sessionmaker(app.state.engine)
     app.add_middleware(ClientHeaderMiddleware)
 ```
-(import `make_engine` and `make_sessionmaker` from `dewpoint.core.db`). Also register an `HTTPException` handler in `errors.py` that returns `exc.detail` as the JSON body when `detail` is a dict:
-```python
-    from fastapi import HTTPException
-
-    @app.exception_handler(HTTPException)
-    async def _http(request: Request, exc: HTTPException) -> JSONResponse:
-        body = exc.detail if isinstance(exc.detail, dict) else {"error": "http_error"}
-        return JSONResponse(status_code=exc.status_code, content=body)
-```
+(import `make_engine` and `make_sessionmaker` from `dewpoint.core.db`). Error bodies are already flat `{"error": …}` thanks to Task 2's handlers; the CSRF test above asserts status codes, and Task 10's step-up test asserts the exact body.
 
 - [ ] **Step 5: Run the tests**
 
@@ -1715,11 +1852,11 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Test: `backend/tests/core/auth/test_throttle.py`, `backend/tests/apps/api/test_login_flow.py`
 
 **Interfaces:**
-- Consumes: sessions (Task 7), passwords and users (Task 6), `Keyring` and `Kek` (Task 5), `UserMfa` and `RecoveryCode` (Task 4).
+- Consumes: sessions (Task 7), passwords and users (Task 6), `Keyring` and `KekSet` (Task 5), `UserMfa` and `RecoveryCode` (Task 4).
 - Produces:
   - `throttle.is_locked(s, kind, key, now=None) -> bool`, `throttle.record_failure(s, kind, key, settings, now=None) -> None`, `throttle.reset(s, kind, key) -> None`.
   - `totp.start_enrollment(s, keyring, user) -> str` (an otpauth URI), `totp.confirm_enrollment(s, keyring, user, code) -> list[str]` (10 recovery codes, shown once), `totp.verify(s, keyring, user, code) -> bool` (with replay protection), `totp.use_recovery_code(s, user, code) -> bool`, `totp.has_totp(s, user_id) -> bool`.
-  - `apps/api/deps.py`: `get_keyring(request) -> Keyring`. `create_app` stores `app.state.keyring = Keyring(Kek.from_settings(settings))`.
+  - `apps/api/deps.py`: `get_keyring(request) -> Keyring`. `create_app` stores `app.state.keyring = Keyring(KekSet.from_settings(settings))`.
   - HTTP endpoints, all under `/api/v1/auth`:
     - `POST /login` `{email,password}` → `{state, csrf_token}` and sets the cookie. States: `mfa_pending`, `enroll_required`, `active`.
     - `POST /mfa/totp` `{code}` and `POST /mfa/recovery` `{code}`: valid only from `mfa_pending` → `{state:"active", csrf_token}`.
@@ -1805,6 +1942,17 @@ async def test_bad_password_is_generic_and_locks(client, owner_sessionmaker, api
     assert r.status_code == 429 and r.json() == {"error": "locked"}
     r = await client.post("/api/v1/auth/login", json={"email": "ghost@corp.test", "password": PW})
     assert r.status_code == 401 and r.json() == {"error": "invalid_credentials"}
+
+
+async def test_enrollment_confirm_is_throttled(client, owner_sessionmaker, api_settings) -> None:
+    await _seed(owner_sessionmaker)
+    csrf = (await client.post("/api/v1/auth/login", json={"email": "dana@corp.test", "password": PW})).json()["csrf_token"]
+    await client.post("/api/v1/auth/mfa/totp/enroll", headers={"X-CSRF-Token": csrf})
+    for _ in range(api_settings.login_max_failures):
+        r = await client.post("/api/v1/auth/mfa/totp/confirm", json={"code": "000000"}, headers={"X-CSRF-Token": csrf})
+        assert r.status_code == 401
+    r = await client.post("/api/v1/auth/mfa/totp/confirm", json={"code": "000000"}, headers={"X-CSRF-Token": csrf})
+    assert r.status_code == 429 and r.json() == {"error": "locked"}
 
 
 async def test_password_change_revokes_other_sessions(app, owner_sessionmaker) -> None:
@@ -2139,14 +2287,20 @@ async def confirm(body: CodeIn, response: Response, sess: AuthSession = Depends(
                   db: AsyncSession = Depends(get_db), keyring: Keyring = Depends(get_keyring),
                   settings: Settings = Depends(get_settings_dep)) -> dict[str, object]:
     _require_state(sess, "enroll_required", "active")
+    key = str(sess.user_id)
+    if await throttle.is_locked(db, "mfa_user", key):
+        raise HTTPException(429, detail={"error": "locked"})
     codes = await totp.confirm_enrollment(db, keyring, await _user(db, sess), body.code)
     if codes is None:
+        await throttle.record_failure(db, "mfa_user", key, settings)
+        await db.commit()
         raise HTTPException(401, detail={"error": "invalid_code"})
+    await throttle.reset(db, "mfa_user", key)
     out: dict[str, object] = {"recovery_codes": codes}
     out.update(await _complete(db, sess, response, settings, "totp"))
     return out
 ```
-In `create_app`, add `app.state.keyring = Keyring(Kek.from_settings(settings))` and include `auth.router` and `mfa.router`.
+In `create_app`, add `app.state.keyring = Keyring(KekSet.from_settings(settings))` and include `auth.router` and `mfa.router`.
 
 **Transaction note:** `get_db` wraps the request in `s.begin()`. The explicit `await db.commit()` before raising in `login` and `_second_factor` persists the failure counters; `begin()`'s context manager then finds no active transaction and exits cleanly. Verify this with the lockout test in Step 5.
 
@@ -2410,6 +2564,31 @@ async def test_enroll_passkey_then_passwordless_login(client, owner_sessionmaker
     assert r.status_code == 200 and r.json()["state"] == "active"
     me = (await client.get("/api/v1/auth/session")).json()
     assert me["auth_methods"] == ["passkey"]
+
+
+async def test_passkey_stepup_is_throttled(client, owner_sessionmaker, api_settings, monkeypatch) -> None:
+    def _reject(**kw):
+        raise ValueError("bad signature")
+
+    monkeypatch.setattr(passkeys, "verify_registration_response",
+                        lambda **kw: SimpleNamespace(credential_id=b"cred", credential_public_key=b"pk", sign_count=0))
+    async with owner_sessionmaker() as s, s.begin():
+        await create_user(s, email="f@corp.test", password=PW)
+    csrf = (await client.post("/api/v1/auth/login", json={"email": "f@corp.test", "password": PW})).json()["csrf_token"]
+    o = (await client.post("/api/v1/auth/passkeys/register/options", headers={"X-CSRF-Token": csrf})).json()
+    csrf = (await client.post("/api/v1/auth/passkeys/register/verify", headers={"X-CSRF-Token": csrf},
+                              json={"challenge_id": o["challenge_id"], "credential": CRED})).json()["csrf_token"]
+    monkeypatch.setattr(passkeys, "verify_authentication_response", _reject)
+    h = {"X-CSRF-Token": csrf}
+    for _ in range(api_settings.login_max_failures):
+        o = (await client.post("/api/v1/auth/passkeys/stepup/options", headers=h)).json()
+        r = await client.post("/api/v1/auth/passkeys/stepup/verify", headers=h,
+                              json={"challenge_id": o["challenge_id"], "credential": CRED})
+        assert r.status_code == 401 and r.json() == {"error": "passkey_failed"}
+    o = (await client.post("/api/v1/auth/passkeys/stepup/options", headers=h)).json()
+    r = await client.post("/api/v1/auth/passkeys/stepup/verify", headers=h,
+                          json={"challenge_id": o["challenge_id"], "credential": CRED})
+    assert r.status_code == 429 and r.json() == {"error": "locked"}
 ```
 
 - [ ] **Step 5: Implement `apps/api/routes/passkeys.py`**
@@ -2509,11 +2688,17 @@ async def _factor_options(sess: AuthSession, db: AsyncSession, settings: Setting
 
 async def _factor_verify(body: VerifyIn, response: Response, sess: AuthSession, db: AsyncSession,
                          settings: Settings) -> dict[str, str]:
+    key = str(sess.user_id)  # same "mfa_user" budget as TOTP and recovery codes
+    if await throttle.is_locked(db, "mfa_user", key):
+        raise HTTPException(429, detail={"error": "locked"})
     try:
         await passkeys.finish_authentication(db, body.challenge_id, body.credential, settings,
                                              expected_user_id=sess.user_id)
     except passkeys.PasskeyError:
+        await throttle.record_failure(db, "mfa_user", key, settings)
+        await db.commit()
         raise _fail() from None
+    await throttle.reset(db, "mfa_user", key)
     return await _elevated(db, sess, response, settings)
 
 
@@ -2568,7 +2753,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Create: `backend/src/dewpoint/core/tenancy/__init__.py`, `backend/src/dewpoint/core/tenancy/service.py`
 - Modify: `backend/src/dewpoint/core/http.py` (add `TenantContext`, `require()`, `require_platform_admin`)
 - Create: `backend/src/dewpoint/apps/api/routes/tenants.py`, `backend/src/dewpoint/apps/api/routes/members.py`, `backend/src/dewpoint/apps/api/routes/admin_users.py`
-- Test: `backend/tests/core/authz/test_permissions.py`, `backend/tests/apps/api/test_tenant_matrix.py`
+- Test: `backend/tests/core/authz/test_permissions.py`, `backend/tests/core/tenancy/test_owner_race.py`, `backend/tests/apps/api/test_tenant_matrix.py`
 
 **Interfaces:**
 - Consumes: `Tenant`, `Membership`, `ROLES`, `Role` (Task 4); `current_user`, `active_session`, `get_db` (Task 7); `create_user` (Task 6); `tenant_scope` (Task 3).
@@ -2580,7 +2765,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     - non-member → **404** `{"error":"not_found"}`, so tenant IDs can't be probed;
     - member without the permission → 403 `{"error":"forbidden"}`;
     - tenant with `require_passkey` and a session without `passkey` in its methods → 403 `{"error":"step_up_required"}`;
-    - on success, calls `tenant_scope(db, tenant_id, user.id)`.
+    - on success, calls `tenant_scope(db, tenant_id)`, which also clears the user-discovery scope used for the membership lookup.
   - `require_platform_admin` dependency.
   - The service functions `create_tenant(s, *, name, slug, owner_id) -> Tenant`, `list_user_tenants(s, user_id) -> list[tuple[Tenant, str]]`, `add_member(s, tenant_id, email, role, actor_role) -> Membership`, `change_role(s, tenant_id, user_id, role, actor_role) -> Membership`, `remove_member(s, tenant_id, user_id, actor_role) -> None`, and `LastOwnerError`, `OwnerGrantError`, `UnknownUserError`.
   - Platform admins get **no implicit tenant access**. They must be members like anyone else. (Cross-tenant operator tooling is post-v1, spec §4.1.)
@@ -2692,15 +2877,81 @@ async def test_platform_admin_creates_tenant_and_last_owner_protected(app, owner
         assert r.status_code == 409 and r.json() == {"error": "last_owner"}
 
 
+async def test_unfiltered_query_after_require_sees_only_current_tenant(app, owner_sessionmaker, api_settings) -> None:
+    from fastapi import APIRouter, Depends
+    from sqlalchemy import select
+    from dewpoint.core.authz.permissions import P
+    from dewpoint.core.http import get_db, require
+    from dewpoint.core.models.tenancy import Membership, Tenant
+
+    router = APIRouter()
+
+    @router.get("/api/v1/t/{tenant_id}/_probe")
+    async def probe(_=Depends(require(P.TENANT_VIEW)), db=Depends(get_db)) -> dict[str, int]:
+        return {"memberships": len((await db.execute(select(Membership))).scalars().all()),  # deliberately unfiltered
+                "tenants": len((await db.execute(select(Tenant))).scalars().all())}
+
+    app.include_router(router)
+    c, tid = await _as(app, owner_sessionmaker, api_settings, "owner")
+    other = uuid.uuid4()
+    async with owner_sessionmaker() as s, s.begin():  # same user also owns a second tenant
+        await s.execute(text("insert into tenants(id,name,slug) values (:o,'O',:slug)"), {"o": other, "slug": other.hex[:12]})
+        await s.execute(text("insert into memberships(tenant_id,user_id,role) select :o, user_id, 'owner' "
+                             "from memberships where tenant_id=:t"), {"o": other, "t": tid})
+    async with c:
+        assert (await c.get(f"/api/v1/t/{tid}/_probe")).json() == {"memberships": 1, "tenants": 1}
+
+
 async def test_non_admin_cannot_create_tenant(app, owner_sessionmaker, api_settings) -> None:
     c, _ = await _as(app, owner_sessionmaker, api_settings, "owner")
     async with c:
         assert (await c.post("/api/v1/tenants", json={"name": "X", "slug": "x-tenant"})).status_code == 403
 ```
 
+`backend/tests/core/tenancy/test_owner_race.py`:
+```python
+# SPDX-License-Identifier: Apache-2.0
+import asyncio
+import uuid
+
+from sqlalchemy import select, text
+
+from dewpoint.core.auth.users import create_user
+from dewpoint.core.db import tenant_scope
+from dewpoint.core.models.tenancy import Membership
+from dewpoint.core.tenancy import service
+
+
+async def test_concurrent_owner_removals_leave_one_owner(owner_sessionmaker, api_sessionmaker) -> None:
+    tid = uuid.uuid4()
+    async with owner_sessionmaker() as s, s.begin():
+        a = await create_user(s, email="o1@corp.test", password="violet-otter-canyon-42")
+        b = await create_user(s, email="o2@corp.test", password="violet-otter-canyon-42")
+        await s.execute(text("insert into tenants(id,name,slug) values (:t,'T','race')"), {"t": tid})
+        await s.execute(text("insert into memberships(tenant_id,user_id,role) values (:t,:a,'owner'),(:t,:b,'owner')"),
+                        {"t": tid, "a": a.id, "b": b.id})
+
+    async def remove(uid: uuid.UUID) -> str:
+        try:
+            async with api_sessionmaker() as s, s.begin():
+                await tenant_scope(s, tid)
+                await service.remove_member(s, tid, uid, actor_role="owner")
+                await asyncio.sleep(0.2)  # hold the transaction open to force overlap
+            return "removed"
+        except service.LastOwnerError:
+            return "last_owner"
+
+    results = sorted(await asyncio.gather(remove(a.id), remove(b.id)))
+    assert results == ["last_owner", "removed"]
+    async with owner_sessionmaker() as s:
+        owners = (await s.execute(select(Membership).where(Membership.role == "owner"))).scalars().all()
+    assert len(owners) == 1
+```
+(Add `tests/core/tenancy/__init__.py`.) Without `_lock_tenant()`, both transactions count two owners and both succeed, so this test is the regression guard.
+
 - [ ] **Step 2: Run the tests to confirm they fail**
 
-Run: `uv run pytest tests/core/authz tests/apps/api/test_tenant_matrix.py -v`
+Run: `uv run pytest tests/core/authz tests/core/tenancy tests/apps/api/test_tenant_matrix.py -v`
 Expected: FAIL (module not found)
 
 - [ ] **Step 3: Implement the permissions**
@@ -2751,7 +3002,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.auth.users import get_user_by_email
-from dewpoint.core.db import tenant_scope
+from dewpoint.core.db import tenant_scope, user_scope
 from dewpoint.core.models.tenancy import Membership, Tenant
 
 
@@ -2762,7 +3013,7 @@ class UnknownUserError(Exception): ...
 
 async def create_tenant(s: AsyncSession, *, name: str, slug: str, owner_id: uuid.UUID) -> Tenant:
     tid = uuid.uuid4()
-    await tenant_scope(s, tid, owner_id)
+    await tenant_scope(s, tid)
     tenant = Tenant(id=tid, name=name, slug=slug)
     s.add(tenant)
     await s.flush()
@@ -2772,7 +3023,7 @@ async def create_tenant(s: AsyncSession, *, name: str, slug: str, owner_id: uuid
 
 
 async def list_user_tenants(s: AsyncSession, user_id: uuid.UUID) -> list[tuple[Tenant, str]]:
-    await tenant_scope(s, None, user_id)
+    await user_scope(s, user_id)
     rows = await s.execute(select(Tenant, Membership.role).join(Membership, Membership.tenant_id == Tenant.id)
                            .where(Membership.user_id == user_id).order_by(Tenant.name))
     return [(t, r) for t, r in rows.all()]
@@ -2786,6 +3037,7 @@ async def _owners(s: AsyncSession, tenant_id: uuid.UUID) -> int:
 async def add_member(s: AsyncSession, tenant_id: uuid.UUID, email: str, role: str, actor_role: str) -> Membership:
     if role == "owner" and actor_role != "owner":
         raise OwnerGrantError()
+    await _lock_tenant(s, tenant_id)
     user = await get_user_by_email(s, email)
     if user is None:
         raise UnknownUserError()
@@ -2795,7 +3047,13 @@ async def add_member(s: AsyncSession, tenant_id: uuid.UUID, email: str, role: st
     return m
 
 
+async def _lock_tenant(s: AsyncSession, tenant_id: uuid.UUID) -> None:
+    """Serialize every membership change of a tenant, so owner counts can't race."""
+    await s.execute(select(Tenant.id).where(Tenant.id == tenant_id).with_for_update())
+
+
 async def _membership(s: AsyncSession, tenant_id: uuid.UUID, user_id: uuid.UUID) -> Membership:
+    await _lock_tenant(s, tenant_id)
     m = (await s.execute(select(Membership).where(Membership.tenant_id == tenant_id, Membership.user_id == user_id)
                          .with_for_update())).scalar_one_or_none()
     if m is None:
@@ -2835,7 +3093,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 
 from dewpoint.core.authz.permissions import P, ROLE_PERMISSIONS
-from dewpoint.core.db import tenant_scope
+from dewpoint.core.db import tenant_scope, user_scope
 from dewpoint.core.models.tenancy import Membership, Tenant
 
 
@@ -2850,7 +3108,7 @@ class TenantContext:
 def require(permission: P) -> Callable[..., Awaitable[TenantContext]]:
     async def _dep(tenant_id: uuid.UUID, user: User = Depends(current_user),
                    sess: AuthSession = Depends(active_session), db: AsyncSession = Depends(get_db)) -> TenantContext:
-        await tenant_scope(db, None, user.id)  # authoritative lookup of the caller's own membership
+        await user_scope(db, user.id)  # authoritative lookup of the caller's own membership
         row = (await db.execute(select(Membership.role, Tenant.require_passkey)
                                 .join(Tenant, Tenant.id == Membership.tenant_id)
                                 .where(Membership.tenant_id == tenant_id, Membership.user_id == user.id))).first()
@@ -2861,7 +3119,7 @@ def require(permission: P) -> Callable[..., Awaitable[TenantContext]]:
             raise HTTPException(403, detail={"error": "step_up_required"})
         if permission not in ROLE_PERMISSIONS[role]:
             raise HTTPException(403, detail={"error": "forbidden"})
-        await tenant_scope(db, tenant_id, user.id)
+        await tenant_scope(db, tenant_id)  # clears user scope: no widening to the caller's other tenants
         return TenantContext(tenant_id=tenant_id, user=user, role=role, session=sess)
 
     return _dep
@@ -3062,9 +3320,19 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `async verify_chain(s, scope: str) -> ChainReport(ok: bool, checked: int, first_bad_seq: int | None, head_seq: int | None, head_hash: bytes | None)`.
   - `class FileAnchorSink(path: Path, private_key: Ed25519PrivateKey)` with `.write(scope, seq, hash) -> str` and `.entries() -> list[dict]`.
   - `async anchor_all(s, sink) -> int`.
-  - `async verify_anchors(s, sink_entries: list[dict], public_key: Ed25519PublicKey) -> list[str]` (the problems found; empty means OK).
+  - `async verify_anchors(s, sink_entries: list[dict], public_key: Ed25519PublicKey, *, max_lag: timedelta = timedelta(hours=1), now: datetime | None = None) -> list[str]` (the problems found; empty means OK). It **fails closed**:
+    - no anchors at all is a problem;
+    - every scope's rows older than `max_lag` must be covered by a signed anchor at or after their `seq`;
+    - every scope in the database is chain-verified, not only the anchored ones.
+  - Group role `dewpoint_auditor` and test fixture `auditor_sessionmaker`.
   - Endpoint `GET /api/v1/t/{tenant_id}/audit?before_seq=&limit=` (requires `audit.view`).
   - Action names used in this plan: `auth.login`, `auth.login_failed`, `auth.mfa`, `auth.password_changed`, `auth.passkey_registered`, `tenant.create`, `tenant.update`, `member.add`, `member.role_change`, `member.remove`, `user.create`, `connection.create`, `connection.update`, `connection.delete`, `connection.verify`.
+
+**Dedicated auditor role:** anchoring and verification must read *every* scope, platform and all tenants, which no service role can do under RLS. Migration 0005 therefore creates a narrow group role `dewpoint_auditor`. Its only rights are:
+- `SELECT` on `audit_log` through its own policy `audit_auditor_read … TO dewpoint_auditor USING (true)`;
+- `SELECT, INSERT` on `audit_anchors`.
+
+It has no access to any other table. The anchor and verify commands run as this role, and the tests below use it, not the superuser. Operators run `audit anchor` and `audit verify` with a `dewpoint_auditor` login.
 
 **Documented RLS exception:** `audit_log` uses `ENABLE ROW LEVEL SECURITY` **without** `FORCE`. `audit_append()` is `SECURITY DEFINER`, owned by the table owner, and must read the previous hash across RLS. Service roles only get `SELECT` (RLS-filtered) and `EXECUTE` on the function: no `INSERT`, `UPDATE` or `DELETE`. Triggers also reject `UPDATE`, `DELETE` and `TRUNCATE` for everyone except in replication mode, which only superusers can set.
 
@@ -3143,6 +3411,8 @@ def test_secret_keys_rejected() -> None:
 # SPDX-License-Identifier: Apache-2.0
 import uuid
 
+from datetime import timedelta
+
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import text
 
@@ -3151,29 +3421,71 @@ from dewpoint.core.audit.service import record, verify_chain
 from dewpoint.core.db import tenant_scope
 
 
-async def test_anchor_detects_full_chain_rewrite(tmp_path, api_sessionmaker, owner_sessionmaker) -> None:
+async def test_anchor_detects_full_chain_rewrite(tmp_path, api_sessionmaker, owner_sessionmaker,
+                                                 auditor_sessionmaker) -> None:
     key, t = Ed25519PrivateKey.generate(), uuid.uuid4()
     sink = FileAnchorSink(tmp_path / "anchors.jsonl", key)
     async with api_sessionmaker() as s, s.begin():
         await tenant_scope(s, t)
         await record(s, tenant_id=t, actor_id=None, action="member.add", target_id="a")
-    async with owner_sessionmaker() as s, s.begin():
-        assert await anchor_all(s, sink) == 1
-        assert await anchor_all(s, sink) == 0  # idempotent: head unchanged
-    async with owner_sessionmaker() as s:
-        assert await verify_anchors(s, sink.entries(), key.public_key()) == []
+        await record(s, tenant_id=None, actor_id=None, action="auth.login")
+    # anchoring runs as the narrow auditor role, exactly like production
+    async with auditor_sessionmaker() as s, s.begin():
+        assert await anchor_all(s, sink) == 2  # the tenant scope and the platform scope
+        assert await anchor_all(s, sink) == 0  # idempotent: heads unchanged
+    async with auditor_sessionmaker() as s:
+        assert await verify_anchors(s, sink.entries(), key.public_key(), max_lag=timedelta(0)) == []
     # privileged rewrite: change the row AND correctly recompute its hash, so the chain itself verifies
     async with owner_sessionmaker() as s, s.begin():
         await s.execute(text("SET LOCAL session_replication_role = replica"))
-        await s.execute(text("update audit_log set target_id='z'"))
+        await s.execute(text("update audit_log set target_id='z' where scope <> 'platform'"))
         await s.execute(text(
             "update audit_log set hash = sha256(prev_hash || convert_to(audit_canonical(seq, scope, actor_id, action,"
-            " target_type, target_id, details, created_at), 'UTF8'))"))
-    async with owner_sessionmaker() as s:
+            " target_type, target_id, details, created_at), 'UTF8')) where scope <> 'platform'"))
+    async with auditor_sessionmaker() as s:
         assert (await verify_chain(s, str(t))).ok  # the in-database chain alone cannot detect this
         problems = await verify_anchors(s, sink.entries(), key.public_key())
     assert any("hash mismatch with external anchor" in p for p in problems)
+
+
+async def test_verification_fails_closed(tmp_path, api_sessionmaker, auditor_sessionmaker) -> None:
+    key, t = Ed25519PrivateKey.generate(), uuid.uuid4()
+    sink = FileAnchorSink(tmp_path / "anchors.jsonl", key)
+    async with auditor_sessionmaker() as s:
+        assert "no external anchors found" in await verify_anchors(s, [], key.public_key())
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, t)
+        await record(s, tenant_id=t, actor_id=None, action="member.add")
+    async with auditor_sessionmaker() as s, s.begin():
+        await anchor_all(s, sink)
+    async with api_sessionmaker() as s, s.begin():  # a new row after the last anchor
+        await tenant_scope(s, t)
+        await record(s, tenant_id=t, actor_id=None, action="member.remove")
+    async with auditor_sessionmaker() as s:
+        assert await verify_anchors(s, sink.entries(), key.public_key()) == []  # within max_lag: fine
+        lagging = await verify_anchors(s, sink.entries(), key.public_key(), max_lag=timedelta(0))
+    assert any("not anchored" in p for p in lagging)
+
+
+async def test_auditor_role_is_narrow(auditor_sessionmaker) -> None:
+    from sqlalchemy.exc import DBAPIError
+    import pytest
+    for stmt in ("select 1 from users", "select 1 from tenants", "select 1 from data_keys",
+                 "insert into audit_log(scope,action,prev_hash,hash,created_at) values ('x','y','\\x00','\\x00',now())"):
+        with pytest.raises(DBAPIError, match="permission denied"):
+            async with auditor_sessionmaker() as s, s.begin():
+                await s.execute(text(stmt))
 ```
+
+Add the fixture to `tests/conftest.py`:
+```python
+@pytest.fixture(scope="session")
+async def auditor_sessionmaker(pg_url: str, _test_users: None) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    eng = make_engine(_url_for(pg_url, "dewpoint_auditor"))
+    yield make_sessionmaker(eng)
+    await eng.dispose()
+```
+The `connections` table in `test_auditor_role_is_narrow` exists only from Task 12. Until then, use `tenants`, and switch it to `connections` in Task 12, Step 5.
 
 - [ ] **Step 3: Run the tests to confirm they fail**
 
@@ -3253,9 +3565,16 @@ CREATE TRIGGER audit_no_truncate BEFORE TRUNCATE ON audit_log FOR EACH STATEMENT
 ALTER TABLE audit_log ENABLE ROW LEVEL SECURITY;  -- deliberately not FORCE (see plan)
 CREATE POLICY audit_tenant_read ON audit_log FOR SELECT USING (tenant_id = app_tenant_id());
 
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dewpoint_auditor') THEN CREATE ROLE dewpoint_auditor NOLOGIN; END IF;
+END $$;
+GRANT USAGE ON SCHEMA public TO dewpoint_auditor;
+CREATE POLICY audit_auditor_read ON audit_log FOR SELECT TO dewpoint_auditor USING (true);
+
 REVOKE ALL ON audit_log, audit_anchors FROM PUBLIC;
-GRANT SELECT ON audit_log TO dewpoint_api, dewpoint_admin;
-GRANT SELECT, INSERT ON audit_anchors TO dewpoint_admin;
+GRANT SELECT ON audit_log TO dewpoint_api, dewpoint_admin, dewpoint_auditor;
+GRANT SELECT, INSERT ON audit_anchors TO dewpoint_auditor;
+GRANT USAGE ON SEQUENCE audit_anchors_id_seq TO dewpoint_auditor;
 REVOKE EXECUTE ON FUNCTION audit_append(uuid, uuid, text, text, text, jsonb) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION audit_append(uuid, uuid, text, text, text, jsonb)
   TO dewpoint_api, dewpoint_worker, dewpoint_dispatch, dewpoint_ingress, dewpoint_admin;
@@ -3342,7 +3661,7 @@ async def verify_chain(s: AsyncSession, scope: str) -> ChainReport:
 ```python
 # SPDX-License-Identifier: Apache-2.0
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from cryptography.exceptions import InvalidSignature
@@ -3395,13 +3714,18 @@ async def anchor_all(s: AsyncSession, sink: FileAnchorSink) -> int:
     return written
 
 
-async def verify_anchors(s: AsyncSession, entries: list[dict[str, object]], public_key: Ed25519PublicKey) -> list[str]:
+async def verify_anchors(s: AsyncSession, entries: list[dict[str, object]], public_key: Ed25519PublicKey, *,
+                         max_lag: timedelta = timedelta(hours=1), now: datetime | None = None) -> list[str]:
+    """Fail closed: missing anchors, unanchored old rows, broken chains and mismatches are all problems."""
     problems: list[str] = []
-    scopes = {str(e["scope"]) for e in entries}
-    reports = {sc: await verify_chain(s, sc) for sc in scopes}
-    for sc, rep in reports.items():
+    if not entries:
+        problems.append("no external anchors found")
+    db_scopes = set((await s.execute(text("select distinct scope from audit_log"))).scalars())
+    for sc in sorted(db_scopes | {str(e["scope"]) for e in entries}):
+        rep = await verify_chain(s, sc)
         if not rep.ok:
             problems.append(f"{sc}: chain broken at seq {rep.first_bad_seq}")
+    anchored: dict[str, int] = {}
     for e in entries:
         scope, seq, hash_hex, at = str(e["scope"]), int(e["seq"]), str(e["hash"]), str(e["at"])  # type: ignore[call-overload]
         try:
@@ -3415,6 +3739,14 @@ async def verify_anchors(s: AsyncSession, entries: list[dict[str, object]], publ
             problems.append(f"{scope}:{seq}: anchored row missing")
         elif bytes(row[0]).hex() != hash_hex:
             problems.append(f"{scope}:{seq}: hash mismatch with external anchor")
+        else:
+            anchored[scope] = max(anchored.get(scope, 0), seq)
+    cutoff = (now or datetime.now(UTC)) - max_lag
+    old_rows = await s.execute(text("select scope, max(seq) from audit_log where created_at <= :c group by scope"),
+                               {"c": cutoff})
+    for scope, max_seq in old_rows.all():
+        if anchored.get(scope, 0) < max_seq:
+            problems.append(f"{scope}: rows up to seq {max_seq} older than {max_lag} are not anchored")
     return problems
 ```
 
@@ -3478,7 +3810,7 @@ def audit_verify() -> None:
         raise typer.Exit(1)
     typer.echo("audit chain verified against external anchors")
 ```
-The anchor and verify commands connect with a URL for the `dewpoint_admin` role (operators set `DEWPOINT_DATABASE_URL` accordingly when running them).
+The anchor and verify commands connect as a `dewpoint_auditor` login (operators set `DEWPOINT_DATABASE_URL` to it). `audit verify` exits 1 on any problem, including when no anchors exist, so a misconfigured anchor job can't look healthy.
 
 - [ ] **Step 6: Record audit events from the routes**
 
@@ -3760,6 +4092,8 @@ GRANT SELECT ON connections TO dewpoint_worker;
 ```
 
 - [ ] **Step 5: Write the failing route tests**
+
+In `tests/core/audit/test_anchor.py::test_auditor_role_is_narrow`, change `"select 1 from tenants"` to `"select 1 from connections"`.
 
 `backend/tests/apps/api/test_connections.py`:
 ```python
@@ -4788,13 +5122,16 @@ EXPOSE 8080
 # SPDX-License-Identifier: Apache-2.0
 set -eu
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
-  -v api_pw="$DEWPOINT_API_DB_PASSWORD" -v admin_pw="$DEWPOINT_ADMIN_DB_PASSWORD" <<'SQL'
+  -v api_pw="$DEWPOINT_API_DB_PASSWORD" -v admin_pw="$DEWPOINT_ADMIN_DB_PASSWORD" \
+  -v auditor_pw="$DEWPOINT_AUDITOR_DB_PASSWORD" <<'SQL'
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dewpoint_api') THEN CREATE ROLE dewpoint_api NOLOGIN; END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dewpoint_admin') THEN CREATE ROLE dewpoint_admin NOLOGIN; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dewpoint_auditor') THEN CREATE ROLE dewpoint_auditor NOLOGIN; END IF;
 END $$;
 CREATE ROLE dewpoint_api_login LOGIN PASSWORD :'api_pw' IN ROLE dewpoint_api;
 CREATE ROLE dewpoint_admin_login LOGIN PASSWORD :'admin_pw' IN ROLE dewpoint_admin;
+CREATE ROLE dewpoint_auditor_login LOGIN PASSWORD :'auditor_pw' IN ROLE dewpoint_auditor;
 SQL
 ```
 
@@ -4823,6 +5160,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
       DEWPOINT_API_DB_PASSWORD: ${DEWPOINT_API_DB_PASSWORD:?set in .env}
       DEWPOINT_ADMIN_DB_PASSWORD: ${DEWPOINT_ADMIN_DB_PASSWORD:?set in .env}
+      DEWPOINT_AUDITOR_DB_PASSWORD: ${DEWPOINT_AUDITOR_DB_PASSWORD:?set in .env}
     volumes: [pgdata:/var/lib/postgresql/data, ./initdb:/docker-entrypoint-initdb.d:ro]
     healthcheck: { test: ["CMD-SHELL", "pg_isready -U dewpoint_owner -d dewpoint"], interval: 5s, retries: 20 }
 
@@ -4852,7 +5190,7 @@ services:
     command: ["sh", "-c", "while true; do dewpoint audit anchor; sleep 900; done"]
     environment:
       <<: *appenv
-      DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_admin_login:${DEWPOINT_ADMIN_DB_PASSWORD}@postgres/dewpoint
+      DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_auditor_login:${DEWPOINT_AUDITOR_DB_PASSWORD}@postgres/dewpoint
       DEWPOINT_AUDIT_SIGNING_KEY_B64: ${DEWPOINT_AUDIT_SIGNING_KEY_B64:?set in .env}
       DEWPOINT_AUDIT_ANCHOR_PATH: /anchors/anchors.jsonl
     volumes: [anchors:/anchors]
@@ -4876,7 +5214,8 @@ The `anchors` volume must be writable by UID 10001. Add `user: "10001"` to `audi
 # Generate each secret; never commit the filled .env.
 POSTGRES_PASSWORD=            # openssl rand -base64 24
 DEWPOINT_API_DB_PASSWORD=     # openssl rand -base64 24
-DEWPOINT_ADMIN_DB_PASSWORD=   # openssl rand -base64 24
+DEWPOINT_ADMIN_DB_PASSWORD=   # openssl rand -base64 24  (key-management CLI: dewpoint keys …)
+DEWPOINT_AUDITOR_DB_PASSWORD= # openssl rand -base64 24  (audit anchor/verify only)
 DEWPOINT_KEK_B64=             # openssl rand -base64 32
 DEWPOINT_AUDIT_SIGNING_KEY_B64=  # python -c "import base64,os;print(base64.b64encode(os.urandom(32)).decode())"
 DEWPOINT_PUBLIC_ORIGIN=http://localhost:8080
@@ -5008,6 +5347,7 @@ Append to `.github/workflows/ci.yml`:
             echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)"
             echo "DEWPOINT_API_DB_PASSWORD=$(openssl rand -hex 16)"
             echo "DEWPOINT_ADMIN_DB_PASSWORD=$(openssl rand -hex 16)"
+            echo "DEWPOINT_AUDITOR_DB_PASSWORD=$(openssl rand -hex 16)"
             echo "DEWPOINT_KEK_B64=$(openssl rand -base64 32)"
             echo "DEWPOINT_AUDIT_SIGNING_KEY_B64=$(openssl rand -base64 32)"
           } > .env
@@ -5098,6 +5438,183 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
+### Task 15: Key-management commands and the KEK rollout runbook
+
+**Files:**
+- Modify: `backend/src/dewpoint/apps/cli/main.py` (add the `keys` command group)
+- Create: `docs/operations/key-rotation.md`
+- Test: `backend/tests/apps/cli/test_keys.py`
+
+**Interfaces:**
+- Consumes: `KekSet`, `Keyring.rewrap_batch`, `Keyring.kek_usage`, `Keyring.rotate` (Task 5); `get_settings` (Task 2).
+- Produces:
+  - `dewpoint keys status`: prints `kek_id=count` per line. Exit code 3 if any data key uses a KEK id that isn't in the configured `KekSet` (that process couldn't decrypt it).
+  - `dewpoint keys rewrap [--batch-size 100]`: commits after **each** batch so locks stay short, and prints the total. It refuses (exit 2) unless a previous KEK is configured *and* the current KEK differs from it.
+  - `dewpoint keys rotate-dek (--tenant UUID | --platform)`: data-key rotation. Old versions stay readable, and new encryptions use the new version.
+  - Commands run as a `dewpoint_admin` login.
+
+- [ ] **Step 1: Write the failing tests**
+
+`backend/tests/apps/cli/test_keys.py`:
+```python
+# SPDX-License-Identifier: Apache-2.0
+import base64
+import os
+import uuid
+
+from typer.testing import CliRunner
+
+from dewpoint.apps.cli.main import app
+from dewpoint.core.config import get_settings
+
+OLD, NEW = base64.b64encode(os.urandom(32)).decode(), base64.b64encode(os.urandom(32)).decode()
+
+
+def _env(monkeypatch, pg_url: str, **kek: str) -> None:
+    for k, v in {"DEWPOINT_DATABASE_URL": pg_url, "DEWPOINT_PUBLIC_ORIGIN": "https://dewpoint.test", **kek}.items():
+        monkeypatch.setenv(k, v)
+    for k in ("DEWPOINT_KEK_PREVIOUS_B64", "DEWPOINT_KEK_PREVIOUS_ID"):
+        if k not in kek:
+            monkeypatch.delenv(k, raising=False)
+    get_settings.cache_clear()
+
+
+def test_status_rewrap_and_rotate(pg_url, monkeypatch) -> None:
+    r = CliRunner()
+    _env(monkeypatch, pg_url, DEWPOINT_KEK_B64=OLD, DEWPOINT_KEK_ID="old")
+    t = str(uuid.uuid4())
+    assert r.invoke(app, ["keys", "rotate-dek", "--tenant", t]).exit_code == 0  # creates v1 then v2 under "old"
+    assert "old=2" in r.invoke(app, ["keys", "status"]).output
+    assert r.invoke(app, ["keys", "rewrap"]).exit_code == 2  # no previous key configured: refuse
+
+    _env(monkeypatch, pg_url, DEWPOINT_KEK_B64=NEW, DEWPOINT_KEK_ID="new")  # misconfigured: old key dropped too early
+    assert r.invoke(app, ["keys", "status"]).exit_code == 3
+
+    _env(monkeypatch, pg_url, DEWPOINT_KEK_B64=NEW, DEWPOINT_KEK_ID="new",
+         DEWPOINT_KEK_PREVIOUS_B64=OLD, DEWPOINT_KEK_PREVIOUS_ID="old")
+    out = r.invoke(app, ["keys", "rewrap", "--batch-size", "1"])
+    assert out.exit_code == 0 and "rewrapped 2" in out.output
+    status = r.invoke(app, ["keys", "status"])
+    assert status.exit_code == 0 and "new=2" in status.output and "old=" not in status.output
+```
+`rotate-dek` on a scope with no key yet creates version 1 through `_active()` and then rotates to 2. That's intended, and the test relies on it.
+
+- [ ] **Step 2: Run the tests to confirm they fail**
+
+Run: `uv run pytest tests/apps/cli/test_keys.py -v`
+Expected: FAIL (`No such command 'keys'`)
+
+- [ ] **Step 3: Implement the commands**
+
+Append to `apps/cli/main.py`:
+```python
+keys = typer.Typer(no_args_is_help=True)
+app.add_typer(keys, name="keys")
+
+
+def _keyring() -> "Keyring":
+    from dewpoint.core.crypto.kek import KekSet
+    from dewpoint.core.crypto.keyring import Keyring
+    return Keyring(KekSet.from_settings(get_settings()))
+
+
+async def _with_session(fn):  # type: ignore[no-untyped-def]
+    engine = make_engine(get_settings().database_url)
+    try:
+        async with make_sessionmaker(engine)() as s:
+            return await fn(s)
+    finally:
+        await engine.dispose()
+
+
+@keys.command("status")
+def keys_status() -> None:
+    """Data keys per KEK id. Exit 3 if any are wrapped by a KEK this configuration lacks."""
+    from dewpoint.core.crypto.kek import KekSet, UnknownKekError
+    keks = KekSet.from_settings(get_settings())
+    usage = asyncio.run(_with_session(lambda s: _keyring().kek_usage(s)))
+    missing = []
+    for kek_id, n in sorted(usage.items()):
+        typer.echo(f"{kek_id}={n}")
+        try:
+            keks.get(kek_id)
+        except UnknownKekError:
+            missing.append(kek_id)
+    if missing:
+        typer.echo(f"ERROR: no configured key for: {', '.join(missing)}. Do not remove a KEK before rewrap completes.")
+        raise typer.Exit(3)
+
+
+@keys.command("rewrap")
+def keys_rewrap(batch_size: int = typer.Option(100, min=1, max=1000)) -> None:
+    """Phase C of docs/operations/key-rotation.md: move every data key to the current KEK."""
+    st = get_settings()
+    if not st.kek_previous_b64 or st.kek_previous_id == st.kek_id:
+        typer.echo("refusing: configure the new KEK as current and the old one as previous first (phase B)")
+        raise typer.Exit(2)
+    kr = _keyring()
+
+    async def _run(s) -> int:  # type: ignore[no-untyped-def]
+        total = 0
+        while True:
+            async with s.begin():
+                n = await kr.rewrap_batch(s, batch_size)
+            total += n
+            if n == 0:
+                return total
+
+    typer.echo(f"rewrapped {asyncio.run(_with_session(_run))} data key(s)")
+
+
+@keys.command("rotate-dek")
+def keys_rotate_dek(tenant: str | None = typer.Option(None), platform: bool = typer.Option(False)) -> None:
+    """Rotate one scope's data key. Existing ciphertext stays readable; new writes use the new version."""
+    import uuid as _uuid
+    if bool(tenant) == platform:
+        typer.echo("pass exactly one of --tenant or --platform")
+        raise typer.Exit(2)
+    tid = None if platform else _uuid.UUID(tenant)
+    kr = _keyring()
+
+    async def _run(s) -> int:  # type: ignore[no-untyped-def]
+        async with s.begin():
+            return await kr.rotate(s, tid)
+
+    typer.echo(f"active data key version: {asyncio.run(_with_session(_run))}")
+```
+
+- [ ] **Step 4: Write the runbook**
+
+`docs/operations/key-rotation.md` must contain these four phases verbatim. **No phase may start before the previous one is fully rolled out to every process that reads secrets (`api`, workers, CLI hosts).**
+
+| Phase | Configuration on every process | Why |
+|---|---|---|
+| A. Distribute | `KEK=old` (current), `KEK_PREVIOUS=new` | Every process can *read* data wrapped by the new key before anyone *writes* with it. |
+| B. Switch | `KEK=new` (current), `KEK_PREVIOUS=old` | New data keys are wrapped with `new`; old rows stay readable. |
+| C. Rewrap | unchanged from B; run `dewpoint keys rewrap` | Moves every data key to `new`, in short committed batches. Re-run until it prints `rewrapped 0`. |
+| D. Retire | `KEK=new` only | Only after `dewpoint keys status` shows no `old=` line **and** exits 0. |
+
+The runbook also covers:
+- **Rollback:** during A or B, revert the configuration. After C, rollback means running phases A–C in reverse.
+- **Data-key rotation:** `keys rotate-dek` rotates one tenant's key, or the platform's. It's independent of KEK rotation.
+- **Key generation:** `openssl rand -base64 32`. KEK ids must be unique and never reused.
+- **Backups:** a database backup is only restorable with the KEKs that wrapped its rows at backup time. Keep retired KEKs in escrow for the backup retention period.
+
+- [ ] **Step 5: Run the tests**
+
+Run: `uv run pytest tests/apps/cli -v && uv run pytest tests/core/crypto -v`
+Expected: all PASS
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add -A && git commit -m "feat(keys): key status, batched dual-KEK rewrap, data-key rotation CLI and rollout runbook
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
 ## Spec coverage (Foundations scope, spec §14 item 1)
 
 | Spec requirement | Task |
@@ -5109,9 +5626,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 | Flat tenants and memberships; platform admin without implicit tenant access (§4.1) | 4, 10 |
 | Roles as permission bundles; editors use but can't manage connections (§4.3) | 10 |
 | Authority from membership check; RLS as defence in depth; missing and mismatched tenant-context tests (§4.4) | 4, 10, 11, 12 |
-| Envelope encryption, tenant data keys, key-encryption-key rotation (§5, §11) | 5 |
+| Envelope encryption, tenant data keys, key-encryption-key rotation with a dual-key rollout (§5, §11) | 5, 15 |
 | Generic connections with encrypted secrets, `secret_set` only, Mist type with verify (§5) | 12 |
-| Audit log: append-only hash chain, external anchoring, verification CLI (§11) | 11 |
+| Audit log: append-only hash chain, external anchoring by a narrow auditor role, fail-closed verification (§11) | 11 |
 | Security headers, strict CSP, sanitized errors (§11) | 2, 14 |
 | Minimal React shell under the no-AI-slop visual rules (§10.1) | 13 |
 | Compose, bootstrap CLI, hardened images, SBOM, cosign, provenance (§13) | 6, 14 |
