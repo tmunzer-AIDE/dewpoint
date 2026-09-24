@@ -143,7 +143,7 @@ Import rules are enforced in CI with import-linter:
 | Grants | `service_grants` (tenant-admin grants for unattended agent tool/connection use) |
 | Triggers | `webhook_endpoints`, `trigger_bindings`, `schedules` |
 | Admission | `inbound_events`, `outbox`, `run_requests`, `tenant_run_slots` |
-| Execution | `runs`, `run_steps`, `step_outputs` (claim check), `llm_calls`, `approvals` |
+| Execution | `runs`, `run_inputs` (manual form values and parsed CSV rows, encrypted), `run_steps`, `step_outputs` (claim check), `llm_calls`, `approvals` |
 | Platform | `plugin_manifests`, `node_type_versions` (global, with reference tracking), `egress_allowlist` |
 | Audit | `audit_log` (append-only, hash chain), `audit_anchors` |
 
@@ -168,7 +168,7 @@ Every run starts as a durable `run_requests` row, unique on `(tenant_id, idempot
   - `ingress` verifies the request: HMAC or token, optional IP allowlist, size limit and rate limit. The tenant comes from the endpoint, **never from the payload's `org_id`**.
   - It splits multi-event payloads, and **in one transaction** inserts each `inbound_events` row (unique `(tenant_id, dedupe_key)`, payload encrypted) and its `outbox` row. It returns 2xx only after commit.
   - `dispatcher` claims rows with `FOR UPDATE SKIP LOCKED`, and **in one transaction** matches `trigger_bindings` and freezes one `run_requests` row per `(event_id, workflow_id)`, pinned to the `workflow_version_id` published at match time. Retries see only these frozen rows.
-- **Manual:** `api` inserts a `run_requests` row with the client-supplied idempotency key.
+- **Manual:** `api` inserts a `run_requests` row with the client-supplied idempotency key. The manual trigger declares an **input form** (§6.8), which can include a CSV file.
 - **Schedule:** a Temporal Schedule fires the `ScheduleTick` workflow. Its single activity inserts a `run_requests` row keyed `sched:{schedule_id}:{scheduled_time}`. Schedules never start `RunGraph` directly.
 - **Admission:** `dispatcher` is the only component that starts `RunGraph`.
   - It reserves a per-tenant concurrency slot (`tenant_run_slots`, row lock). The request stays queued, FIFO per tenant, while the tenant is at its limit.
@@ -243,6 +243,25 @@ Every run starts as a durable `run_requests` row, unique on `(tenant_id, idempot
 - Outbound HTTP is a granted capability.
 - The SSRF guard resolves DNS and checks **every** resolved address and **every** redirect hop. It pins the vetted IP for the connection, and disallows cross-host redirects unless the destination is also permitted.
 - Private or local destinations (for example a local LLM or an internal MCP server) are allowed only if listed in the platform-admin `egress_allowlist`. This is checked at connection creation **and on every request**.
+
+### 6.8 Manual trigger inputs and CSV upload
+
+- A manual trigger declares an input form: typed fields (text, number, boolean, select, connection-scoped pickers such as Mist site) and, optionally, **one CSV input**.
+- **Column schema:** the CSV input declares its columns: header name, variable name (a valid identifier), type (`string`, `integer`, `number`, `boolean`, `mac`, `ip`, `cidr`, `enum`), required, and default.
+  - At run time the user maps the file's headers to the declared columns. Headers that match exactly are auto-mapped, and the mapping can be saved as the trigger's default.
+- **Validation on upload, in `api`, before any run is admitted:**
+  - UTF-8 (BOM tolerated); delimiter detected among `,`, `;` and tab.
+  - Size and row caps (platform defaults 5 MB and 10,000 rows; a tenant may lower them).
+  - Every row is type-checked. A per-row error report is shown, and the user fixes the file or chooses **skip invalid rows** (skipped rows are recorded in the run).
+  - The file is parsed as data only. There is no formula evaluation.
+  - Values starting with `=`, `+`, `-` or `@` are escaped whenever Dewpoint later exports them.
+- **Storage:** parsed rows are stored encrypted as a claim-checked `run_inputs` row (tenant retention applies), and only its handle enters Temporal history. The original file isn't kept unless the tenant enables it for audit.
+- **In the graph:**
+  - `trigger.rows` is a typed list of objects keyed by variable name, and `trigger.row_count` is also available. Pills and validation use the declared column types.
+  - A **loop** over `trigger.rows` exposes `loop.item.<column>` (for example `loop.item.site_name`), plus `loop.index`.
+  - The loop loads rows in pages through an activity, in child-workflow batches (§6.2). Loop concurrency and error policy per iteration (stop, or continue and collect failures) are set on the loop node.
+  - The run summary lists the outcome for each row.
+- **UI:** "Run workflow" opens the input form with a file drop zone, a column-mapping step, a preview of the first rows with validation errors highlighted, and the row count. The start button states the row count ("Start run for 248 rows"). Write-capable workflows also show the confirmation rules from §10.4.
 
 ## 7. Plugin SDK (`dewpoint-sdk`)
 
@@ -414,7 +433,7 @@ A filterable list. The run detail replays the run on the canvas from `run_steps`
 ## 14. Delivery sub-projects
 
 1. **Foundations:** monorepo, CI and security pipeline, `core` identity (users, local auth, TOTP, passkeys, sessions, CSRF), tenants and memberships, roles and permissions, RLS and DB roles, envelope encryption and `tenant_keys`, generic `connections` (Mist connection type with a verify call), audit log and anchoring, a minimal React shell (login, MFA, tenant switcher, connections page), and Compose.
-2. **Engine:** SDK, manifest registry, graph model and validator (including path availability), CEL, the `RunGraph` interpreter, admission (`run_requests`, outbox, dispatcher, slots), triggers (manual, schedule, webhook ingress), `run_steps` projection, PayloadCodec, claim check, replay tests.
+2. **Engine:** SDK, manifest registry, graph model and validator (including path availability), CEL, the `RunGraph` interpreter, admission (`run_requests`, outbox, dispatcher, slots), triggers (manual with input forms and CSV upload, schedule, webhook ingress), `run_steps` projection, PayloadCodec, claim check, replay tests.
 3. **First-party plugins:** flow, Mist (curated map + OAS, nested update), messaging, ITSM.
 4. **Editor UI:** design-token pass (Claude Design), canvas, step drawer, pills, simulate vs. live, runs view, Helm.
 5. **AI:** LLM connections, agent library, `AgentLoop`, service grants, approvals inbox, MCP client with pinning, the tool layer and the in-app builder.
