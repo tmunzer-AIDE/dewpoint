@@ -6629,41 +6629,65 @@ Append to `.github/workflows/ci.yml`:
         with: { name: e2e-debug, path: "frontend/playwright-report\ndeploy/compose/compose.log" }
 ```
 
-`.github/workflows/release.yml` (on tags `v*`):
+`.github/workflows/release.yml` (on tags `v*`; a dry run on PRs that touch the release path: build, load and scan locally, with no push or signing; image references lowercased because registries reject an uppercase owner):
 ```yaml
 name: release
-on: { push: { tags: ["v*"] } }
+on:
+  push: { tags: ["v*"] }
+  # Dry run on changes to the release path: build + scan locally, no login/push/sign.
+  pull_request: { paths: [".github/workflows/release.yml", "deploy/docker/**"] }
 permissions: { contents: read, packages: write, id-token: write, attestations: write }
 jobs:
   images:
     runs-on: ubuntu-latest
     strategy: { matrix: { image: [app, web] } }
+    env:
+      RELEASE: ${{ github.event_name == 'push' }}
     steps:
       - uses: actions/checkout@v4
+      # Registry repository names must be lowercase; the owner (e.g. "tmunzer-AIDE") may not be.
+      - id: image
+        run: |
+          owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          echo "ref=ghcr.io/${owner}/dewpoint-${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+          echo "tag=${{ github.event_name == 'push' && github.ref_name || 'dryrun' }}" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+      - if: env.RELEASE == 'true'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
       - id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: deploy/docker/${{ matrix.image }}.Dockerfile
-          push: true
-          tags: ghcr.io/${{ github.repository_owner }}/dewpoint-${{ matrix.image }}:${{ github.ref_name }}
-          provenance: mode=max
-          sbom: true
-      - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+          tags: ${{ steps.image.outputs.ref }}:${{ steps.image.outputs.tag }}
+          push: ${{ env.RELEASE == 'true' }}
+          load: ${{ env.RELEASE != 'true' }}
+          # Attestations need a registry push; the local docker exporter can't store them.
+          provenance: ${{ env.RELEASE == 'true' && 'mode=max' || 'false' }}
+          sbom: ${{ env.RELEASE == 'true' }}
+      - if: env.RELEASE == 'true'
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
-          image: ghcr.io/${{ github.repository_owner }}/dewpoint-${{ matrix.image }}@${{ steps.build.outputs.digest }}
+          image: ${{ steps.image.outputs.ref }}@${{ steps.build.outputs.digest }}
           format: cyclonedx-json
           output-file: sbom-${{ matrix.image }}.cdx.json
-      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
-      - run: cosign sign --yes ghcr.io/${{ github.repository_owner }}/dewpoint-${{ matrix.image }}@${{ steps.build.outputs.digest }}
-      - run: cosign attest --yes --type cyclonedx --predicate sbom-${{ matrix.image }}.cdx.json ghcr.io/${{ github.repository_owner }}/dewpoint-${{ matrix.image }}@${{ steps.build.outputs.digest }}
+      - if: env.RELEASE == 'true'
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - if: env.RELEASE == 'true'
+        run: cosign sign --yes "${{ steps.image.outputs.ref }}@${{ steps.build.outputs.digest }}"
+      - if: env.RELEASE == 'true'
+        run: >-
+          cosign attest --yes --type cyclonedx --predicate "sbom-${{ matrix.image }}.cdx.json"
+          "${{ steps.image.outputs.ref }}@${{ steps.build.outputs.digest }}"
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ghcr.io/${{ github.repository_owner }}/dewpoint-${{ matrix.image }}@${{ steps.build.outputs.digest }}
+          image-ref: >-
+            ${{ env.RELEASE == 'true'
+              && format('{0}@{1}', steps.image.outputs.ref, steps.build.outputs.digest)
+              || format('{0}:{1}', steps.image.outputs.ref, steps.image.outputs.tag) }}
           severity: HIGH,CRITICAL
+          ignore-unfixed: true  # fail on vulnerabilities that have a fix available
           exit-code: "1"
 ```
 
