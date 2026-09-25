@@ -155,7 +155,7 @@ Import rules are enforced in CI with import-linter:
 - `engine_abi` and `cel_profile`;
 - the declared `connection_ids`;
 - pinned sub-flow version IDs;
-- a content hash;
+- a `graph_hash` (the authored graph) and a `version_hash` (the graph plus resolved pins, `cel_profile` and `engine_abi`, used by audit);
 - the publisher and publish time.
 
 ## 6. Execution engine
@@ -182,8 +182,8 @@ Every run starts as a durable `run_requests` row, unique on `(tenant_id, idempot
 - Loads a pinned `workflow_versions` row and walks the graph deterministically.
 - **Control nodes run in the interpreter:** `if`, `switch`, `loop` (for-each over a list; `body` and `done` ports; concurrency and item caps), `delay` / `wait until` (durable timers), `set variables`, `stop` / `fail`, `run workflow` (a child workflow pinned to the sub-flow version recorded at publish; depth ≤ 5; cycle check at publish).
 - **Side-effecting nodes run as versioned activities** named `<type>.v<version>`.
-- **Execution tokens:** join and skip bookkeeping is tracked per execution scope (branch and loop iteration), not per node. A node with several incoming edges runs once every *active* incoming path in its scope has completed; paths not taken are eliminated (dead-path elimination).
-- **Large loops** run as batches of child workflows. Long histories use continue-as-new with a versioned state snapshot.
+- **Execution scopes:** join and skip bookkeeping is tracked per execution scope (the root, or one loop iteration), not per node. Branch decisions resolve outgoing edges as live or dead; they don't create scopes. A node with several incoming edges waits until every incoming edge in its scope is resolved, runs if any is live, and is otherwise eliminated (dead-path elimination). Details: engine-core spec §6.
+- **Large loops** run as batches of child workflows. Long histories use continue-as-new with a versioned state snapshot, only at a quiescent checkpoint (no outstanding activities or children; engine-core spec §6).
 - **`run_steps` projection:** activity wrappers and a batched `project` activity upsert redacted, size-capped rows keyed `(run_id, step_id, iteration_key, attempt)`. The UI reads only this projection, never Temporal history.
 
 ### 6.3 Versioning and upgrades
@@ -191,7 +191,7 @@ Every run starts as a durable `run_requests` row, unique on `(tenant_id, idempot
 - `RunGraph` and `AgentLoop` use **Temporal Worker Versioning with pinned behaviour**. A run completes on the build it started on, including across continue-as-new; v1 does **not** use upgrade-on-continue-as-new.
 - **`max_run_duration` (default 30 days)** is enforced across the whole logical run: continue-as-new, child workflows, waits, delays and approvals. The validator rejects graphs whose static waits exceed it, and the run fails with a timeout when the deadline is reached.
 - Deployments keep every previous worker build running until Temporal reports it **drained**. Only then is it retired. The Helm chart and runbook implement this.
-- **Plugin activity versions** stay registered while any live run or pinned version references them. Manifests may ship config migrations (vN→vN+1), which are applied when a user edits a draft. Published versions are never rewritten.
+- **Plugin activity versions** stay registered in new builds until retired. Retirement is blocked by the pinned closures of active versions and of queued run requests; forced retirement cancels those requests explicitly, with an audit entry. Non-terminal runs keep only their own pinned build (or CEL profile evaluator) alive (engine-core spec §4.5). Manifests may ship config migrations (vN→vN+1), which are applied when a user edits a draft. Published versions are never rewritten.
 - `workflow.patched()` is reserved for emergency fixes.
 - CEL library version and custom functions are part of the build, identified by `cel_profile`.
 
@@ -206,10 +206,10 @@ Every run starts as a durable `run_requests` row, unique on `(tenant_id, idempot
 - Output schemas come from manifests. For Mist, they come from OAS responses.
 - **Publish-time validation:**
   - type checks every ref;
-  - runs **path availability analysis** (dominators): a ref is *always* available if its producer dominates the consumer, otherwise *conditional*;
+  - runs **path availability analysis** with liveness conditions over branch decisions: a ref is *always* available when the producer is upstream and every way the consumer can run implies the producer succeeded (this accepts parallel joins that dominators would reject), otherwise *conditional* (engine-core spec §4.3);
   - requires conditional refs, and manifest- or OAS-optional outputs, to carry a `default` or a `has()` guard.
-- **CEL** is evaluated deterministically in the interpreter, with `now()` = Temporal workflow time. It has a pinned custom function library (strings, time, CIDR/IP, MAC, lists), a cost limit, an output size cap and bounded time. The transform node is bounded the same way.
-- CEL library choice (pure Python vs. Rust bindings) is decided by a spike measuring determinism, cost limiting and performance.
+- **CEL** uses workflow time (`run.now`) and a pinned custom function library (CIDR/IP, MAC, `sortedKeys`), with a fixed per-evaluation iteration budget and an output size cap. The transform node is bounded the same way.
+- **Decided after the spike** (engine-core spec §5): Google's `cel-expr-python` (cel-cpp), provisionally. Only a proven restricted subset with statically bounded work runs inside the interpreter. Every other valid expression runs in an isolated, resource-limited activity whose result is recorded in history. Publish rejects any route from unordered map iteration to an order-dependent value.
 
 ### 6.5 Secrets and sensitive data in Temporal
 
@@ -442,7 +442,7 @@ After v1: the external MCP server (wrapping `core/tools` with `api_tokens`), age
 
 ## 15. Open items to resolve during sub-project planning
 
-- CEL implementation choice (spike in sub-project 2).
+- ~~CEL implementation choice (spike in sub-project 2).~~ Resolved: engine-core spec §5.
 - Default values for the Temporal namespace retention period, per-tenant concurrency and the Mist rate buckets.
 - Destinations for the audit anchor sink shipped in v1 (at least one, in sub-project 1).
 - The curated Mist resource/action map: an initial resource list, agreed in sub-project 3.
