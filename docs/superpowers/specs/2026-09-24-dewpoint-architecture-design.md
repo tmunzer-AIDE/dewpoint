@@ -182,7 +182,7 @@ Every run starts as a durable `run_requests` row, unique on `(tenant_id, idempot
 - Loads a pinned `workflow_versions` row and walks the graph deterministically.
 - **Control nodes run in the interpreter:** `if`, `switch`, `loop` (for-each over a list; `body` and `done` ports; concurrency and item caps), `delay` / `wait until` (durable timers), `set variables`, `stop` / `fail`, `run workflow` (a child workflow pinned to the sub-flow version recorded at publish; depth ≤ 5; cycle check at publish).
 - **Side-effecting nodes run as versioned activities** named `<type>.v<version>`.
-- **Execution tokens:** join and skip bookkeeping is tracked per execution scope (branch and loop iteration), not per node. A node with several incoming edges runs once every *active* incoming path in its scope has completed; paths not taken are eliminated (dead-path elimination).
+- **Execution scopes:** join and skip bookkeeping is tracked per execution scope (the root, or one loop iteration), not per node. Branch decisions resolve outgoing edges as live or dead; they don't create scopes. A node with several incoming edges waits until every incoming edge in its scope is resolved, runs if any is live, and is otherwise eliminated (dead-path elimination). Details: engine-core spec §6.
 - **Large loops** run as batches of child workflows. Long histories use continue-as-new with a versioned state snapshot.
 - **`run_steps` projection:** activity wrappers and a batched `project` activity upsert redacted, size-capped rows keyed `(run_id, step_id, iteration_key, attempt)`. The UI reads only this projection, never Temporal history.
 
@@ -191,7 +191,7 @@ Every run starts as a durable `run_requests` row, unique on `(tenant_id, idempot
 - `RunGraph` and `AgentLoop` use **Temporal Worker Versioning with pinned behaviour**. A run completes on the build it started on, including across continue-as-new; v1 does **not** use upgrade-on-continue-as-new.
 - **`max_run_duration` (default 30 days)** is enforced across the whole logical run: continue-as-new, child workflows, waits, delays and approvals. The validator rejects graphs whose static waits exceed it, and the run fails with a timeout when the deadline is reached.
 - Deployments keep every previous worker build running until Temporal reports it **drained**. Only then is it retired. The Helm chart and runbook implement this.
-- **Plugin activity versions** stay registered while any live run or pinned version references them. Manifests may ship config migrations (vN→vN+1), which are applied when a user edits a draft. Published versions are never rewritten.
+- **Plugin activity versions** stay registered in new builds until retired. Only *startable* versions block retirement. Non-terminal runs keep only their own pinned build alive (engine-core spec §4.5). Manifests may ship config migrations (vN→vN+1), which are applied when a user edits a draft. Published versions are never rewritten.
 - `workflow.patched()` is reserved for emergency fixes.
 - CEL library version and custom functions are part of the build, identified by `cel_profile`.
 
