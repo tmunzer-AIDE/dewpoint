@@ -1,11 +1,12 @@
 # Dewpoint — Engine Core Design (sub-project 2a)
 
-- **Status:** Draft for review, revision 4 (2026-09-25).
+- **Status:** Accepted as the basis for implementation, revision 5 (2026-09-25).
   - Revision 2 addressed join scopes, the local-CEL switch, evaluator isolation, profile routing and retirement.
   - Revision 3 addresses the version lifecycle (activation, queued requests, closure), nested loops, evaluator
     aggregate memory, and Temporal membership.
   - Revision 4 addresses lifecycle locking at admission, continue-as-new at a quiescent checkpoint only, the
     logical-run iteration counter, and the scope of the two-build test.
+  - Revision 5 replaces fixed child allowances with on-demand grants (an exact cap) and makes the drain-headroom test a measurement.
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
   This spec **narrows parent §6.4** (where CEL runs) and resolves the CEL item in parent §15.
 - **Evidence:** CEL spike, branch `spike/cel-evaluation`, commits `d6a8162` and `13a62e1`. See
@@ -628,16 +629,26 @@ abandons or restarts an activity or a child workflow.
 - **Where it lives.** The root `RunGraph` execution owns the counter for the whole logical run. The snapshot
   carries the used and reserved totals through every continue-as-new, so a continued run never gets a fresh cap.
 - **What counts.** An inline iteration or filter item is debited when it starts.
-- **Children draw allowances.** Before starting a child (a loop batch or a sub-flow), the parent reserves an
-  **allowance** from the unreserved budget:
-  - **Size:** ⌊unreserved ÷ the number of child slots that can run concurrently in that scope⌋. If that is less
-    than the batch's own item count, the loop fails with `iteration_cap_exceeded` before the child starts.
-  - The allowance is recorded in the child's input.
-  - The child enforces it, including across its own continue-as-new and in its own children, which receive sub-allowances the same way.
-- **Settlement.** A child that completes returns `iterations_used`. The parent debits that amount and releases the
-  rest. A child that fails or is cancelled is debited its whole allowance, which is conservative.
-- **Why it's deterministic.** Allowances, results and totals are all recorded workflow data. A child can hit its
-  allowance slightly before the run as a whole would reach the cap; its error names the run cap and the allowance.
+- **Children draw grants on demand.** The cap is exact: no child is ever refused while budget is unused elsewhere.
+  - **Initial grant.** When a child starts (a loop batch or a sub-flow), the parent reserves an initial grant from
+    its unreserved budget: the batch's own item count, or 1,000 for a sub-flow. The grant is recorded in the child's input.
+  - **More on demand.** When a child has used up its grant, it asks its parent for more: a signal to the parent,
+    answered by a signal back, in chunks of 1,000.
+    - The parent grants from its unreserved budget, in the order the requests appear in its history.
+    - A child's own children ask it the same way, and it asks up the chain when its budget runs short.
+    - Drain mode still answers grant requests, because answering one isn't new work.
+  - **Waiting, not refusing.** If the unreserved budget can't cover a request, the request waits while any other
+    outstanding child still holds an unused grant. That child returns it when it settles.
+  - **The cap.** Only when the budget is exhausted **and** no outstanding child holds anything unused has the run
+    truly reached its cap. The waiting requests then fail with `iteration_cap_exceeded`, "This run reached its limit
+    of 100,000 loop iterations", and the loop's error policy applies.
+  - **Continue-as-new.** An outstanding grant request counts as outstanding work, so it never spans a continue-as-new.
+    A parent only continues-as-new with no children outstanding, so grant signals always reach the run that issued the grant.
+- **Settlement.**
+  - A completed child returns `iterations_used`; the parent debits that amount and releases the rest.
+  - A failed or cancelled child reports its usage in its failure details.
+  - A child that ends without reporting (terminated) is debited its whole grant. That's conservative, and it happens only on abnormal termination.
+- **Why it's deterministic.** Grants, requests, answers, results and totals are all recorded workflow data.
 - The run summary shows the iterations used.
 
 **Workflow-code rules:**
@@ -745,9 +756,16 @@ abandons or restarts an activity or a child workflow.
 - **Graph regions:** properly nested loops are accepted; crossing regions are rejected; the depth limit.
 - **Iteration counter:**
   - one cap across inline loops, batch children, sub-flows and continue-as-new (parent and child);
-  - allowance reservation and settlement, including children that fail;
+  - **no premature rejection:** with 10 child slots and one busy child, that child can use nearly the whole budget;
+  - requests wait while other children hold unused grants, and are refused only at the exact cap;
+  - grants in drain mode;
+  - settlement of failed and terminated children;
   - no fresh cap after continue-as-new.
-- **Continue-as-new:** the quiescent-checkpoint tests in §6; history stays below the headroom bound with the in-flight cap saturated.
+- **Continue-as-new:**
+  - the quiescent-checkpoint tests in §6;
+  - a **measured** headroom test: drain with the in-flight cap saturated (100 activities and children), including
+    activity retries, failures, heartbeats and grant traffic. It records the actual events and bytes added while
+    draining, and asserts they stay within the stated headroom. The initial numbers are adjusted from this result.
 - **Evaluator limits:** *N* derived from the cgroup limits; refusal to start without a memory limit.
 - **Projection:** idempotent upserts under retries, redaction, and RLS (missing or mismatched tenant).
 - **API:** draft CAS conflicts, publish diagnostics, activation, and the permission matrix for the new routes.
@@ -786,7 +804,7 @@ abandons or restarts an activity or a child workflow.
 10. **Execution boundaries.**
     - Every transaction that creates or uses a reference takes `FOR SHARE` on the closure's lifecycle rows. Retirement takes `FOR UPDATE` first.
     - Continue-as-new happens only at a quiescent checkpoint, with drain mode and an in-flight cap of 100.
-    - One iteration counter per logical run, with allowances for children, carried through continue-as-new.
+    - One iteration counter per logical run, carried through continue-as-new. Children receive grants on demand, so the cap is exact.
 11. **Temporal membership.** One engine deployment whose versioned queue carries workflows, children and plugin activities, all explicitly Pinned. CEL queues sit outside it, routed by profile.
 12. **New `filter` node** (not in the parent's control-node list), so large collections never need a larger CEL budget.
 13. **No public run API until 2b.**
