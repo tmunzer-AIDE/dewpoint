@@ -191,7 +191,7 @@ Every run starts as a durable `run_requests` row, unique on `(tenant_id, idempot
 - `RunGraph` and `AgentLoop` use **Temporal Worker Versioning with pinned behaviour**. A run completes on the build it started on, including across continue-as-new; v1 does **not** use upgrade-on-continue-as-new.
 - **`max_run_duration` (default 30 days)** is enforced across the whole logical run: continue-as-new, child workflows, waits, delays and approvals. The validator rejects graphs whose static waits exceed it, and the run fails with a timeout when the deadline is reached.
 - Deployments keep every previous worker build running until Temporal reports it **drained**. Only then is it retired. The Helm chart and runbook implement this.
-- **Plugin activity versions** stay registered in new builds until retired. Only *startable* versions block retirement. Non-terminal runs keep only their own pinned build alive (engine-core spec §4.5). Manifests may ship config migrations (vN→vN+1), which are applied when a user edits a draft. Published versions are never rewritten.
+- **Plugin activity versions** stay registered in new builds until retired. Retirement is blocked by the pinned closures of active versions and of queued run requests; forced retirement cancels those requests explicitly, with an audit entry. Non-terminal runs keep only their own pinned build (or CEL profile evaluator) alive (engine-core spec §4.5). Manifests may ship config migrations (vN→vN+1), which are applied when a user edits a draft. Published versions are never rewritten.
 - `workflow.patched()` is reserved for emergency fixes.
 - CEL library version and custom functions are part of the build, identified by `cel_profile`.
 

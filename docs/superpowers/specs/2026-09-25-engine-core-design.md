@@ -1,7 +1,9 @@
 # Dewpoint — Engine Core Design (sub-project 2a)
 
-- **Status:** Draft for review, revision 2 (2026-09-25). Revision 2 addresses the first review: join scopes, the
-  local-CEL switch, evaluator isolation, profile routing, and version retirement.
+- **Status:** Draft for review, revision 3 (2026-09-25).
+  - Revision 2 addressed join scopes, the local-CEL switch, evaluator isolation, profile routing and retirement.
+  - Revision 3 addresses the version lifecycle (activation, queued requests, closure), nested loops, evaluator
+    aggregate memory, and Temporal membership.
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
   This spec **narrows parent §6.4** (where CEL runs) and resolves the CEL item in parent §15.
 - **Evidence:** CEL spike, branch `spike/cel-evaluation`, commits `d6a8162` and `13a62e1`. See
@@ -111,6 +113,7 @@ Tenant-scoped tables use FORCE RLS with the foundations policy pattern.
   `cel_profile`, `connection_ids`, `subflow_version_ids`, `input_schema`, `vars_schema`, `content_hash`,
   `published_by`, `published_at`.
   - It also stores the **classification of every expression** (§5.5) and its static bounds, so the runtime never re-derives them.
+  - It stores its **pinned closure** (§4.5) too: `closure_version_ids`, `closure_node_refs` and `closure_cel_profiles`.
   - Rows are insert-only: a trigger rejects UPDATE and DELETE.
 - **`plugin_manifests`, `node_type_versions`:** global. They hold the manifest JSON, schema hashes and a lifecycle
   state: `active`, `deprecated` or `retired` (§4.5).
@@ -133,8 +136,14 @@ Tenant-scoped tables use FORCE RLS with the foundations policy pattern.
   - `on_item_error` sets what an unhandled failure inside an iteration does: `stop` (the default, which fails the
     loop node and then applies its own `on_error`) or `continue`, which records the failure in `output.failures`
     (parent §6.8).
-  - The validator rejects overlapping regions, edges into a region from outside it (other than from the `body`
-    port), and refs from outside a region to steps inside it.
+  - **Regions nest properly or not at all.** Any two regions are either disjoint, or one contains the other
+    entirely, including the inner loop node. The validator rejects:
+    - **crossing regions**, for example a node reachable from the bodies of two loops that aren't nested;
+    - edges into a region from outside it, other than from that region's own `body` port;
+    - refs from outside a region to steps inside it. A region's results leave only through `collect`.
+  - **Nesting depth ≤ 3.** Scopes nest the same way, for example `loop2:7/loop5:3`.
+  - **Per-run iteration cap.** The total of all loop iterations in a run is capped, initially at 100,000, so nested
+    item caps don't multiply. Past the cap, the loop fails with `iteration_cap_exceeded`.
   - The loop's `collect` value is evaluated at the end of each iteration and becomes `steps.<loop>.output.items[i]`.
 
 ### 4.3 Values, scope and availability
@@ -171,48 +180,79 @@ Tenant routes with the foundations session, CSRF and permission model (`workflow
 Publish is audited: version number, content hash, classification summary.
 
 - Publishing sets `active_version_id` to the new version.
-- `POST /workflows/{id}/activate {version_id}` rolls back to an earlier version. It requires `workflow.publish`,
-  is audited, and is refused if that version isn't startable (§4.5).
+- `POST /workflows/{id}/activate {version_id}` rolls back to an earlier version. It requires `workflow.publish`
+  and is audited. It is refused only if the version isn't **activatable** (§4.5). Being superseded is not a reason
+  to refuse: rolling back exists precisely to reactivate a superseded version.
 
 ### 4.5 Version lifecycle and retirement
 
-Rows in `workflow_versions` are never deleted. So "may this still run?" is a separate property from "does this row exist?".
+Rows in `workflow_versions` are never deleted. Whether a version exists is therefore separate from three other questions:
+- can it be activated?
+- can a new request be admitted for it?
+- can an admitted request start?
 
-**Startable versions.** A run can start on a version only if:
-- it is the active version of an enabled workflow, **or** a startable version pins it as a sub-flow (transitively);
-- **and** none of its `node_refs` is `retired`;
-- **and** its `cel_profile` is not `retired`.
+**Closure.**
+- A version's closure is the version itself plus every version it pins, transitively: its sub-flows and its failure handler, at most 5 levels deep.
+- Pins are immutable, so the closure is computed once at publish and stored with the version (§4.1).
+- **Every rule below applies to the whole closure.** A parent is never more runnable than the least runnable version it pins.
 
-Every other version is **superseded**. It stays available as a record (run history, diffs, a rollback target), but
-no new run starts on it. A re-run (parent §10.5) uses the active version, and the UI says so when that version
-differs from the original run's. Starting a non-startable version fails closed with an error naming the cause:
-`version_superseded`, `node_type_retired` or `cel_profile_retired`.
+**Executable.** A version is executable if nothing in its closure is `retired`: no node type and no CEL profile.
+`deprecated` entries are still executable.
 
-**Two kinds of reference, two different jobs:**
+| Question | Rule | Checked |
+|---|---|---|
+| **Activatable:** may `activate` select it? | It belongs to the workflow and is executable. `deprecated` entries produce a warning, not a refusal. (Publishing a *new* version is stricter: see `deprecated` below.) | `activate` |
+| **Admissible:** may a new run request be admitted? | The workflow is enabled, and the request targets the workflow's **active** version, which is executable | When the request is frozen (2b dispatcher, 2a `start_run`) |
+| **Dispatchable:** may an admitted request start? | Its **frozen** version is still executable. Whether that version is still active doesn't matter | At dispatch, in the transaction that marks the request `starting` |
+
+- **Queued requests keep their version.** Publishing a newer version does not affect requests already frozen on the old one: they are dispatched on it.
+- **Superseded versions.** A version that isn't active can't take new admissions, but it can still be activated,
+  and it still executes the requests already frozen on it.
+- **Re-runs** (parent §10.5) are new admissions, so they use the active version. The UI says so when that differs from the original run's version.
+- **Sub-flow versions** only ever run as children, inside a run their parent already admitted.
+- **Disabling a workflow** stops new admissions only. Its queued requests still dispatch unless a user cancels them, which is explicit and audited.
+
+**References and what they block:**
 
 | Reference | Held by | What it blocks |
 |---|---|---|
-| Startable reference | startable versions → `type@version`, `cel_profile` | **Code removal:** whether new builds may drop a node type or a CEL profile |
-| Run reference | non-terminal runs | **Build retirement only:** a run is pinned to its build, and that build already contains the code. It ends when Temporal reports the build drained, within `max_run_duration` |
+| Active | the closure of each enabled workflow's active version | normal retirement |
+| Queued | the closure of each `run_requests` row that hasn't started | normal retirement |
+| Running | the closure of each non-terminal run | **Node types:** only their own build's retirement, since the pinned build already contains the code. **CEL profiles:** shutting down the profile's evaluator, which lives outside the build |
 
-A non-terminal run therefore never blocks retiring a node type. It only keeps its own build alive. For this to
-hold, work a pinned run creates must run on that run's build, as §7 requires:
-- plugin activities;
-- loop-batch and sub-flow child workflows;
-- CEL on its profile's queue.
+Retirement never breaks a run that has started. Its build keeps the code, and its profile's evaluator keeps running
+until no non-terminal run uses that profile.
 
 **Lifecycle of a `type@version` or a `cel_profile`:**
 1. **`deprecated`:**
-   - Publish refuses new versions that use it.
+   - Publish refuses versions whose closure uses it.
    - For node types, the editor offers the manifest's config migration (vN → vN+1).
-   - Startable versions keep running.
+   - Activation shows a warning.
+   - Everything already active, queued or running continues.
 2. **`retired`:**
-   - Allowed immediately if nothing startable references it. The check runs in the same transaction as the change.
-   - Otherwise, a platform admin must retire it explicitly. The command lists every affected startable version,
-     those versions stop being startable, and tenants see the reason on the workflow.
+   - **Normal path.** Allowed only when there are no active and no queued references.
+     - The check runs in the same transaction that locks the entry's row (`FOR UPDATE`).
+     - Dispatch reads the lifecycle states of the closure `FOR SHARE` in its own transaction, so a request can never start at the same time as a retirement.
+   - **Forced path** (platform admin). A preview comes first. Per tenant, it lists:
+     - the affected versions;
+     - every **entry workflow** whose active closure reaches them, including parents that reach them only through a pinned sub-flow;
+     - every queued request that would be cancelled.
+
+     On confirmation, in one transaction:
+     - the entry becomes `retired`;
+     - affected workflows show the reason;
+     - every affected queued request is **cancelled explicitly** (status `cancelled`, reason `node_type_retired` or
+       `cel_profile_retired`), audited and shown in the run list.
+
+     No queued request silently turns into a failure later.
    - Both paths are audited.
-3. **Removed:** only after it is `retired` may a new build stop registering the node type or serving the profile.
-   Older builds that still carry it drain normally.
+3. **Removed:**
+   - A node type: once it is `retired`, a new build may stop registering it. Older builds drain normally.
+   - A CEL profile: once it is `retired` **and** no non-terminal run uses it, its evaluator may be shut down.
+
+**Defensive check at dispatch.** If dispatch still finds a frozen version that isn't executable (the forced path
+should make this impossible), it cancels the request with the same explicit, audited reason. It never fails the
+request as superseded. 2a implements these rules in `start_run`, and 2b's dispatcher reuses them.
 
 ## 5. CEL subsystem
 
@@ -380,7 +420,18 @@ not inside a worker that holds credentials.
 - **Framing.** Length-prefixed frames. A request holds the profile, the expression, its declarations and the referenced values.
 - **Request size ≤ 4 MiB.** The activity checks the size before sending. A larger request is the evaluation outcome `input_too_large`.
 - **Responses ≤ 256 KiB** plus the envelope. A malformed or oversized frame closes the connection.
-- **Concurrency.** At most *N* children run at once (default: the CPU count), with a wait queue of *N*. Anything beyond that gets `busy`.
+- **Aggregate limits.** The evaluator container has cgroup limits: memory (Compose `mem_limit`, Helm
+  `resources.limits.memory`; initially 2 GiB), CPU, and pids.
+  - At startup it reads its own limits (`memory.max`, `cpu.max`) and derives the concurrency *N*:
+    - each slot is charged 256 MiB for its child, plus 8.25 MiB of buffers (one in-flight request, one queued request, one response);
+    - a fixed 256 MiB reserve covers the zygote and the IPC server;
+    - *N* = min(CPU quota, ⌊(memory limit − 256 MiB) / 264.25 MiB⌋). That is 6 at 2 GiB.
+  - **It refuses to start** if there is no memory limit or *N* < 1. Configuration may lower *N*, never raise it.
+    The pids limit is *N* + 8.
+  - **Why this is enough.** `RLIMIT_AS` caps a child's virtual address space, which is always at least its resident
+    memory. So *N* children plus the reserve can't exceed the cgroup limit.
+  - An OOM kill of the whole container is still treated as an infrastructure failure and retried.
+- **Concurrency.** At most *N* children run at once, with a wait queue of *N*. Anything beyond that gets `busy`.
   - The CEL activity worker sets `max_concurrent_activities` = *N*, so `busy` shouldn't happen.
   - If it does, it counts as an infrastructure error.
 
@@ -394,8 +445,7 @@ not inside a worker that holds credentials.
   `profile_mismatch`, and the step fails with `cel_profile_unavailable`.
 - **No evaluator for a profile.** A schedule-to-start timeout (initially 10 minutes) fails the step with
   `cel_profile_unavailable`. Either way, the step follows its error policy. **No other profile ever evaluates the expression.**
-- **Keeping evaluators alive.** A profile's evaluator must keep running while any startable version or
-  non-terminal run uses that profile (§4.5).
+- **Keeping evaluators alive.** A profile's evaluator must keep running while any active, queued or running reference uses that profile (§4.5).
 
 **Results:**
 - The outcome is a value: `{ok: value}` or `{error: code, message}`.
@@ -535,13 +585,32 @@ The version (graph, classifications, bounds) is loaded by one local activity and
 
 ## 7. Versioning, deployment and replay
 
-- **Worker Versioning, pinned** (parent §6.3):
-  - The build ID is `dewpoint-<version>+abi<engine_abi>`. `engine_abi` covers `LOCAL_CEL_PROFILE`.
-  - A build registers every `type@version` that isn't `retired` (§4.5).
-  - A pinned run's plugin activities and child workflows (loop batches, sub-flows) use the run's own task queue, so
-    they execute on the run's build. CEL goes to its profile's queue (§5.7). The deployment test proves this: an
-    N-1 build drains while N serves new runs, and N lacks a node type retired in between.
-  - Old builds, and evaluators for profiles no longer served, run until Temporal reports them drained.
+- **Worker Versioning, pinned** (parent §6.3). This follows Temporal's
+  [inheritance semantics](https://docs.temporal.io/worker-versioning#inheritance-semantics).
+  - **Deployment.** One Worker Deployment, `dewpoint-engine`. Each build is a Deployment Version with build ID
+    `dewpoint-<version>+abi<engine_abi>`, and `engine_abi` covers `LOCAL_CEL_PROFILE`.
+  - **Its versioned task queue**, also `dewpoint-engine`, carries:
+    - `RunGraph`;
+    - its child workflow types: loop batches and sub-flows;
+    - the version-loading local activity;
+    - the projection activities;
+    - every plugin activity.
+
+    Only workers of the matching build poll it for that version.
+  - **Pinned, explicitly.** `RunGraph` and every child workflow type declare `VersioningBehavior.PINNED`. Children
+    are started on `dewpoint-engine`, a queue that belongs to the parent's version, so they inherit that version.
+    Because they are also declared Pinned, they stay on it.
+  - **Activities** that a pinned workflow schedules on a queue belonging to its version run on that version.
+  - **Continue-as-new** stays on `dewpoint-engine` without upgrade-on-continue-as-new, so it inherits the version.
+  - **CEL queues** (`dewpoint-cel.<profile>`) are deliberately **not** part of the engine deployment. They're served
+    by the CEL activity workers whatever the engine build. Correctness comes from profile routing (§5.7), not from
+    inheritance.
+    - The request schema is versioned (`cel.evaluate.v1`).
+    - A CEL worker serves every schema version that any undrained engine build uses.
+  - A build registers every `type@version` that isn't `retired` (§4.5). Old builds run until Temporal reports them drained.
+  - **Two-build deployment test (required).** N-1 drains while N serves new runs, and N lacks a node type retired
+    in between. The N-1 runs exercise child sub-flows, loop batches, plugin activities and continue-as-new. Their
+    histories must show that every workflow and activity task of an N-1 run executed on N-1.
 - **Compose (2a):** adds `temporal`, `worker` and `cel-evaluator` (§5.7). The worker waits for a healthy evaluator
   before it polls a CEL queue.
 - **Golden histories:** every build adds recorded histories to `tests/engine/replay/<build>/`. They cover:
@@ -599,9 +668,15 @@ The version (graph, classifications, bounds) is loaded by one local activity and
   - a profile mismatch fails closed;
   - a missing profile times out to `cel_profile_unavailable`.
 - **Lifecycle:**
-  - startability rules;
-  - deprecate and retire, including the forced path and its audit;
+  - activating a superseded version (rollback);
+  - a queued request dispatches on its frozen version after a newer publish;
+  - closure propagation: a parent becomes non-executable through a retired node type in a pinned sub-flow;
+  - the forced-retirement preview lists parents that reach an entry only through a sub-flow;
+  - the explicit, audited cancellation of queued requests;
+  - retire racing dispatch (`FOR UPDATE` against `FOR SHARE`);
   - node types removed from a build while an N-1 run finishes on N-1.
+- **Graph regions:** properly nested loops are accepted; crossing regions are rejected; the depth limit; the per-run iteration cap.
+- **Evaluator limits:** *N* derived from the cgroup limits; refusal to start without a memory limit.
 - **Projection:** idempotent upserts under retries, redaction, and RLS (missing or mismatched tenant).
 - **API:** draft CAS conflicts, publish diagnostics, activation, and the permission matrix for the new routes.
 
@@ -623,14 +698,22 @@ The version (graph, classifications, bounds) is loaded by one local activity and
 3. **Local evaluation is a build constant** (`LOCAL_CEL_PROFILE`, part of `engine_abi`), set to none until all
    seven CEL gates pass. Enabling it never changes an open run.
 4. **CEL runs in a separate, secretless evaluator** with no egress, reached over bounded IPC. It is routed by the
-   version's `cel_profile` and fails closed.
+   version's `cel_profile` and fails closed. Its concurrency comes from its cgroup memory and CPU limits.
 5. **Scopes are the root or loop iterations only.** Branches resolve edges as live or dead, and joins wait for every incoming edge to resolve.
-6. **Version lifecycle.** Only the active version (and the sub-flows it pins) is startable. Retirement depends on
-   startable references. Non-terminal runs hold only their build.
+6. **Version lifecycle.** Three questions are kept separate:
+   - **Activatable:** executable. This allows rollback.
+   - **Admissible:** the active version.
+   - **Dispatchable:** the frozen version is still executable. Queued requests keep their version.
+
+   Every check covers the pinned closure. Retirement is blocked by active and queued references; forcing it
+   cancels queued requests explicitly, with an audit entry. A running run holds only its build (node types) or its
+   profile's evaluator (CEL).
 7. **Typed-path encoding** (§5.3) is the first CEL item to prove. `asList()` is the fallback.
 8. **Package boundaries** follow the parent rules: `engine` is pure, storage lives in `core`, and wiring lives in `apps`. `testkit` stays under `tests/`.
-9. **New `filter` node** (not in the parent's control-node list), so large collections never need a larger CEL budget.
-10. **No public run API until 2b.**
+9. **Nested loops** are allowed when properly nested (depth ≤ 3, per-run cap of 100,000 iterations). Crossing regions are rejected.
+10. **Temporal membership.** One engine deployment whose versioned queue carries workflows, children and plugin activities, all explicitly Pinned. CEL queues sit outside it, routed by profile.
+11. **New `filter` node** (not in the parent's control-node list), so large collections never need a larger CEL budget.
+12. **No public run API until 2b.**
 
 ## 12. Follow-up sub-projects
 
