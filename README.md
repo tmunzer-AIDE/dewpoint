@@ -35,6 +35,10 @@ in front of the `web` service and set `DEWPOINT_PUBLIC_ORIGIN=https://<host>` an
 
 The `audit-anchor` service writes signed chain heads every 15 minutes. **In production, anchors must live off this
 host** (object storage with object lock, or your SIEM): an anchor file next to the database proves little.
+The `audit-anchor` container exits nonzero if an anchor run fails, and its healthcheck (`dewpoint audit freshness
+--max-age-minutes 30`) turns it `unhealthy` when audit rows older than 30 minutes have no anchor. Alert on both:
+a stopped or unhealthy anchor job means new audit entries are not being protected.
+
 Verify at any time, as the auditor database role:
 
 ```bash

@@ -4,6 +4,7 @@ import base64
 import os
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import timedelta
 from pathlib import Path
 
 import typer
@@ -11,7 +12,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dewpoint.core.audit.anchor import FileAnchorSink, anchor_all, verify_anchors
+from dewpoint.core.audit.anchor import FileAnchorSink, anchor_all, anchor_freshness, verify_anchors
 from dewpoint.core.auth.users import PasswordPolicyError, create_user
 from dewpoint.core.config import get_settings
 from dewpoint.core.crypto.kek import KekSet, UnknownKekError
@@ -107,6 +108,18 @@ def audit_verify() -> None:
     if problems:
         raise typer.Exit(1)
     typer.echo("audit chain verified against external anchors")
+
+
+@audit.command("freshness")
+def audit_freshness(max_age_minutes: int = typer.Option(30, min=0)) -> None:
+    """Exit 1 if any audit rows older than --max-age-minutes have no anchor. Use as the anchor job's
+    healthcheck and in monitoring: a failing or stuck anchor job must not look healthy."""
+    problems = asyncio.run(_in_session(lambda s: anchor_freshness(s, timedelta(minutes=max_age_minutes))))
+    for problem in problems:
+        typer.echo(problem)
+    if problems:
+        raise typer.Exit(1)
+    typer.echo("anchors are fresh")
 
 
 async def _in_session[T](fn: Callable[[AsyncSession], Awaitable[T]]) -> T:

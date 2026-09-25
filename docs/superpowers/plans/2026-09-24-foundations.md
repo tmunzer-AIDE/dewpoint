@@ -4220,13 +4220,38 @@ async def test_auditor_role_is_narrow(auditor_sessionmaker) -> None:
 
     for stmt in (
         "select 1 from users",
-        "select 1 from tenants",
+        "select 1 from connections",
         "select 1 from data_keys",
         "insert into audit_log(scope,action,prev_hash,hash,created_at) values ('x','y','\\x00','\\x00',now())",
     ):
         with pytest.raises(DBAPIError, match="permission denied"):
             async with auditor_sessionmaker() as s, s.begin():
                 await s.execute(text(stmt))
+
+
+async def test_anchor_freshness_flags_unanchored_rows(tmp_path, api_sessionmaker, auditor_sessionmaker) -> None:
+    from dewpoint.core.audit.anchor import anchor_freshness
+
+    key, t = Ed25519PrivateKey.generate(), uuid.uuid4()
+    sink = FileAnchorSink(tmp_path / "anchors.jsonl", key)
+    async with auditor_sessionmaker() as s:
+        assert await anchor_freshness(s, timedelta(0)) == []  # nothing to anchor yet
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, t)
+        await record(s, tenant_id=t, actor_id=None, action="member.add")
+    async with auditor_sessionmaker() as s:
+        stale = await anchor_freshness(s, timedelta(0))
+    assert len(stale) == 1 and stale[0].startswith(str(t))
+    async with auditor_sessionmaker() as s, s.begin():
+        await anchor_all(s, sink)
+    async with auditor_sessionmaker() as s:
+        assert await anchor_freshness(s, timedelta(0)) == []
+    async with api_sessionmaker() as s, s.begin():  # a newer row is fine until it is older than max_age
+        await tenant_scope(s, t)
+        await record(s, tenant_id=t, actor_id=None, action="member.remove")
+    async with auditor_sessionmaker() as s:
+        assert await anchor_freshness(s, timedelta(hours=1)) == []
+        assert len(await anchor_freshness(s, timedelta(0))) == 1
 ```
 
 Add the fixture to `tests/conftest.py`:
@@ -4573,6 +4598,25 @@ async def verify_anchors(
         if anchored.get(scope, 0) < max_seq:
             problems.append(f"{scope}: rows up to seq {max_seq} older than {max_lag} are not anchored")
     return problems
+
+
+async def anchor_freshness(s: AsyncSession, max_age: timedelta, now: datetime | None = None) -> list[str]:
+    """Liveness, not integrity: scopes whose rows older than max_age have no anchor recorded at or after them.
+    Reads the audit_anchors table the anchor job maintains; `audit verify` checks the signed external copy."""
+    cutoff = (now or datetime.now(UTC)) - max_age
+    rows = await s.execute(
+        text(
+            "select l.scope, max(l.seq) as due,"
+            " (select max(a.seq) from audit_anchors a where a.scope = l.scope) as anchored"
+            " from audit_log l where l.created_at <= :cutoff group by l.scope order by l.scope"
+        ),
+        {"cutoff": cutoff},
+    )
+    return [
+        f"{scope}: rows up to seq {due} older than {max_age} have no anchor (latest anchored seq: {anchored or 'none'})"
+        for scope, due, anchored in rows.all()
+        if (anchored or 0) < due
+    ]
 ```
 
 CLI additions in `apps/cli/main.py` (the full module after this task; `audit verify` also requires `DEWPOINT_AUDIT_ANCHOR_PATH` rather than defaulting). Tested by `tests/apps/cli/test_audit_cli.py`, which runs as the auditor role: verify with no anchors exits 1, anchor succeeds, verify then exits 0, and a missing key or path exits 2:
@@ -6096,6 +6140,8 @@ export function ConnectionsPage({ tenantId }: { tenantId: string }) {
 
 Authenticated routes render inside `Shell`. `/t/$tenantId/connections` passes `tenantId` to `ConnectionsPage`. On 403 `step_up_required` (from any query), it shows an inline banner, "This tenant requires a passkey," with a button calling `authenticatePasskey("stepup")` and then invalidating all queries.
 
+**Sign-out:** `lib/signOut.ts` (tested in `signOut.test.ts`) reports success only on 204, or on 401, which means the session is already invalid. It refreshes a stale CSRF token from `/auth/session` once and retries. On any other failure, including a network error, the shell keeps the user on the page and shows an error, because the server session may still be valid.
+
 **As built:** the screens described in prose above are implemented in `frontend/src/`:
 - `components/{StatusBadge,TenantSwitcher,Shell}.tsx`
 - `routes/{Mfa,Enroll,Tenants,Security}.tsx`
@@ -6376,7 +6422,19 @@ services:
   audit-anchor:
     <<: *app
     # Anchors belong OFF this host in production (object lock / SIEM). This volume is for evaluation only.
-    command: ["sh", "-c", "while true; do dewpoint audit anchor; sleep 900; done"]
+    # set -e: a failed anchor run ends the container with a nonzero exit (visible in `docker compose ps -a`),
+    # instead of looping silently without producing anchors.
+    command: ["sh", "-c", "set -e; while true; do dewpoint audit anchor; sleep 900; done"]
+    restart: "no"
+    # Unhealthy when audit rows older than 30 minutes have no anchor (job stuck, failing, or anchors stale).
+    # Alert on this in your monitoring as well.
+    healthcheck:
+      test: ["CMD", "dewpoint", "audit", "freshness", "--max-age-minutes", "30"]
+      interval: 5m
+      timeout: 30s
+      start_period: 1m
+      start_interval: 5s
+      retries: 1
     environment:
       <<: *appenv
       DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_auditor_login:${DEWPOINT_AUDITOR_DB_PASSWORD}@postgres/dewpoint

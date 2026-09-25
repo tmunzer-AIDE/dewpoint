@@ -52,7 +52,19 @@ services:
   audit-anchor:
     <<: *app
     # Anchors belong OFF this host in production (object lock / SIEM). This volume is for evaluation only.
-    command: ["sh", "-c", "while true; do dewpoint audit anchor; sleep 900; done"]
+    # set -e: a failed anchor run ends the container with a nonzero exit (visible in `docker compose ps -a`),
+    # instead of looping silently without producing anchors.
+    command: ["sh", "-c", "set -e; while true; do dewpoint audit anchor; sleep 900; done"]
+    restart: "no"
+    # Unhealthy when audit rows older than 30 minutes have no anchor (job stuck, failing, or anchors stale).
+    # Alert on this in your monitoring as well.
+    healthcheck:
+      test: ["CMD", "dewpoint", "audit", "freshness", "--max-age-minutes", "30"]
+      interval: 5m
+      timeout: 30s
+      start_period: 1m
+      start_interval: 5s
+      retries: 1
     environment:
       <<: *appenv
       DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_auditor_login:${DEWPOINT_AUDITOR_DB_PASSWORD}@postgres/dewpoint

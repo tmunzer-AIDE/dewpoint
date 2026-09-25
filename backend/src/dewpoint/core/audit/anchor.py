@@ -101,3 +101,22 @@ async def verify_anchors(
         if anchored.get(scope, 0) < max_seq:
             problems.append(f"{scope}: rows up to seq {max_seq} older than {max_lag} are not anchored")
     return problems
+
+
+async def anchor_freshness(s: AsyncSession, max_age: timedelta, now: datetime | None = None) -> list[str]:
+    """Liveness, not integrity: scopes whose rows older than max_age have no anchor recorded at or after them.
+    Reads the audit_anchors table the anchor job maintains; `audit verify` checks the signed external copy."""
+    cutoff = (now or datetime.now(UTC)) - max_age
+    rows = await s.execute(
+        text(
+            "select l.scope, max(l.seq) as due,"
+            " (select max(a.seq) from audit_anchors a where a.scope = l.scope) as anchored"
+            " from audit_log l where l.created_at <= :cutoff group by l.scope order by l.scope"
+        ),
+        {"cutoff": cutoff},
+    )
+    return [
+        f"{scope}: rows up to seq {due} older than {max_age} have no anchor (latest anchored seq: {anchored or 'none'})"
+        for scope, due, anchored in rows.all()
+        if (anchored or 0) < due
+    ]

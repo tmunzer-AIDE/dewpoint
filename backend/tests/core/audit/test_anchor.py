@@ -73,3 +73,28 @@ async def test_auditor_role_is_narrow(auditor_sessionmaker) -> None:
         with pytest.raises(DBAPIError, match="permission denied"):
             async with auditor_sessionmaker() as s, s.begin():
                 await s.execute(text(stmt))
+
+
+async def test_anchor_freshness_flags_unanchored_rows(tmp_path, api_sessionmaker, auditor_sessionmaker) -> None:
+    from dewpoint.core.audit.anchor import anchor_freshness
+
+    key, t = Ed25519PrivateKey.generate(), uuid.uuid4()
+    sink = FileAnchorSink(tmp_path / "anchors.jsonl", key)
+    async with auditor_sessionmaker() as s:
+        assert await anchor_freshness(s, timedelta(0)) == []  # nothing to anchor yet
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, t)
+        await record(s, tenant_id=t, actor_id=None, action="member.add")
+    async with auditor_sessionmaker() as s:
+        stale = await anchor_freshness(s, timedelta(0))
+    assert len(stale) == 1 and stale[0].startswith(str(t))
+    async with auditor_sessionmaker() as s, s.begin():
+        await anchor_all(s, sink)
+    async with auditor_sessionmaker() as s:
+        assert await anchor_freshness(s, timedelta(0)) == []
+    async with api_sessionmaker() as s, s.begin():  # a newer row is fine until it is older than max_age
+        await tenant_scope(s, t)
+        await record(s, tenant_id=t, actor_id=None, action="member.remove")
+    async with auditor_sessionmaker() as s:
+        assert await anchor_freshness(s, timedelta(hours=1)) == []
+        assert len(await anchor_freshness(s, timedelta(0))) == 1

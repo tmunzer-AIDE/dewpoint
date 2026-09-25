@@ -55,5 +55,11 @@ def test_anchor_then_verify_as_auditor(pg_url, _test_users, tmp_path, monkeypatc
     verified = runner.invoke(app, ["audit", "verify"])
     assert verified.exit_code == 0, verified.output
 
+    fresh = runner.invoke(app, ["audit", "freshness", "--max-age-minutes", "0"])
+    assert fresh.exit_code == 0 and "anchors are fresh" in fresh.output
+    asyncio.run(_seed(_url_for(pg_url, "dewpoint_api")))  # a new, unanchored row
+    stale = runner.invoke(app, ["audit", "freshness", "--max-age-minutes", "0"])
+    assert stale.exit_code == 1 and "no anchor" in stale.output
+
     _env(monkeypatch, auditor)  # misconfigured: no key / path
     assert runner.invoke(app, ["audit", "anchor"]).exit_code == 2
