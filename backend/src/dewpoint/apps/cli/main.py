@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dewpoint.apps.plugin_loader import PluginLoadError, installed_plugins, prepare
 from dewpoint.core.audit.anchor import FileAnchorSink, anchor_all, anchor_freshness, verify_anchors
 from dewpoint.core.auth.users import PasswordPolicyError, create_user
 from dewpoint.core.config import get_settings
@@ -19,6 +20,17 @@ from dewpoint.core.crypto.kek import KekSet, UnknownKekError
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.db import make_engine, make_sessionmaker
 from dewpoint.core.models.identity import User
+from dewpoint.core.plugins import lifecycle
+from dewpoint.core.plugins.lifecycle import Entry
+from dewpoint.core.plugins.registry import (
+    ContractChangedError,
+    MissingNodeTypeError,
+    ensure_cel_profile,
+    list_node_types,
+    sync_plugins,
+)
+from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
+from dewpoint.sdk import ManifestError
 
 app = typer.Typer(no_args_is_help=True)
 admin = typer.Typer(no_args_is_help=True)
@@ -27,6 +39,10 @@ audit = typer.Typer(no_args_is_help=True)
 app.add_typer(audit, name="audit")
 keys = typer.Typer(no_args_is_help=True)
 app.add_typer(keys, name="keys")
+plugins_cli = typer.Typer(no_args_is_help=True)
+app.add_typer(plugins_cli, name="plugins")
+lifecycle_cli = typer.Typer(no_args_is_help=True)
+app.add_typer(lifecycle_cli, name="lifecycle")
 
 
 async def _init(email: str, password: str) -> None:
@@ -187,3 +203,104 @@ def keys_rotate_dek(tenant: str | None = typer.Option(None), platform: bool = ty
             return await keyring.rotate(s, tenant_id)
 
     typer.echo(f"active data key version: {asyncio.run(_in_session(_run))}")
+
+
+@plugins_cli.command("sync")
+def plugins_sync() -> None:
+    """Register installed plugins and this build's CEL profile. Run as dewpoint_admin on every deploy."""
+    try:
+        prepared = prepare(installed_plugins())
+    except (PluginLoadError, ManifestError) as e:
+        for problem in e.problems:
+            typer.echo(f"ERROR: {problem}")
+        raise typer.Exit(2) from None
+
+    async def _run(s: AsyncSession) -> tuple[int, int]:
+        async with s.begin():
+            report = await sync_plugins(s, prepared)
+            await ensure_cel_profile(s, CURRENT_CEL_PROFILE)
+            return len(report.added), len(report.unchanged)
+
+    try:
+        added, unchanged = asyncio.run(_in_session(_run))
+    except ContractChangedError as e:
+        typer.echo(f"ERROR: the contract of {', '.join(e.refs)} changed; publish a new node type version instead")
+        raise typer.Exit(2) from None
+    except MissingNodeTypeError as e:
+        typer.echo(f"ERROR: this build lacks {', '.join(e.refs)}, which are not retired; retire them first")
+        raise typer.Exit(2) from None
+    typer.echo(f"added {added}, unchanged {unchanged}")
+
+
+@plugins_cli.command("list")
+def plugins_list() -> None:
+    """Node type versions that can still be used (active or deprecated)."""
+
+    async def _run(s: AsyncSession) -> list[str]:
+        return [f"{row.ref} {row.state}" for row in await list_node_types(s)]
+
+    for line in asyncio.run(_in_session(_run)):
+        typer.echo(line)
+
+
+def _entry(node_type: str | None, cel_profile: str | None) -> Entry:
+    if bool(node_type) == bool(cel_profile):
+        typer.echo("pass exactly one of --node-type or --cel-profile")
+        raise typer.Exit(2)
+    return Entry("node", node_type) if node_type else Entry("cel", str(cel_profile))
+
+
+def _print_preview(preview: lifecycle.RetirePreview) -> None:
+    for ref in preview.active_refs:
+        typer.echo(f"  tenant {ref.tenant_id}  workflow {ref.workflow_name} ({ref.workflow_id})  v{ref.version_number}")
+    typer.echo(f"versions whose closure uses it: {preview.affected_versions}")
+
+
+@lifecycle_cli.command("deprecate")
+def lifecycle_deprecate(
+    node_type: str | None = typer.Option(None, help="type@version"),
+    cel_profile: str | None = typer.Option(None),
+) -> None:
+    """Stop new versions from using a node type or CEL profile. Existing ones keep running."""
+    entry = _entry(node_type, cel_profile)
+
+    async def _run(s: AsyncSession) -> str:
+        async with s.begin():
+            return await lifecycle.deprecate(s, entry, actor_id=None)
+
+    try:
+        state = asyncio.run(_in_session(_run))
+    except lifecycle.UnknownEntryError:
+        typer.echo(f"unknown {entry}")
+        raise typer.Exit(2) from None
+    typer.echo(f"{entry}: {state}")
+
+
+@lifecycle_cli.command("retire")
+def lifecycle_retire(
+    node_type: str | None = typer.Option(None, help="type@version"),
+    cel_profile: str | None = typer.Option(None),
+    force: bool = typer.Option(False, help="Retire even though active workflows use it (they stop being startable)."),
+    confirm: bool = typer.Option(False, help="Apply a forced retirement after reviewing its preview."),
+) -> None:
+    """Retire a node type or CEL profile (spec §4.5). New builds may drop it afterwards."""
+    entry = _entry(node_type, cel_profile)
+
+    async def _run(s: AsyncSession) -> lifecycle.RetirePreview:
+        async with s.begin():
+            return await lifecycle.retire(s, entry, force=force, confirm=confirm)
+
+    try:
+        preview = asyncio.run(_in_session(_run))
+    except lifecycle.UnknownEntryError:
+        typer.echo(f"unknown {entry}")
+        raise typer.Exit(2) from None
+    except lifecycle.ReferencedError as e:
+        _print_preview(e.preview)
+        typer.echo("refusing: still used by active workflows. Migrate them, or use --force.")
+        raise typer.Exit(4) from None
+    _print_preview(preview)
+    if not preview.applied:
+        typer.echo("forced retirement NOT applied: review the list above, then re-run with --confirm")
+        raise typer.Exit(3)
+    typer.echo(f"{entry}: retired")
