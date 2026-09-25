@@ -10,6 +10,8 @@ COPY backend/ ./
 RUN uv sync --locked --no-dev --no-editable
 
 FROM python:3.12-slim-bookworm
+# Pick up Debian security fixes published after the base image was built.
+RUN apt-get update && apt-get -y upgrade --no-install-recommends && rm -rf /var/lib/apt/lists/*
 RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin dewpoint
 # Mount point for the evaluation anchor volume; a new named volume inherits this ownership.
 RUN mkdir /anchors && chown 10001:10001 /anchors

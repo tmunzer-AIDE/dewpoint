@@ -21,9 +21,8 @@ async def test_enroll_then_login_with_totp(client, owner_sessionmaker) -> None:
     csrf = r.json()["csrf_token"]
     uri = (await client.post("/api/v1/auth/mfa/totp/enroll", headers={"X-CSRF-Token": csrf})).json()["otpauth_uri"]
     secret = parse_qs(urlparse(uri).query)["secret"][0]
-    r = await client.post(
-        "/api/v1/auth/mfa/totp/confirm", json={"code": pyotp.TOTP(secret).now()}, headers={"X-CSRF-Token": csrf}
-    )
+    confirm_code = pyotp.TOTP(secret).now()
+    r = await client.post("/api/v1/auth/mfa/totp/confirm", json={"code": confirm_code}, headers={"X-CSRF-Token": csrf})
     body = r.json()
     assert r.status_code == 200 and body["state"] == "active" and len(body["recovery_codes"]) == 10
     csrf = body["csrf_token"]
@@ -32,9 +31,8 @@ async def test_enroll_then_login_with_totp(client, owner_sessionmaker) -> None:
     r = await client.post("/api/v1/auth/login", json={"email": "dana@corp.test", "password": PW})
     assert r.json()["state"] == "mfa_pending"
     csrf = r.json()["csrf_token"]
-    # the same TOTP code must not be accepted twice (replay)
-    code = pyotp.TOTP(secret).now()
-    r = await client.post("/api/v1/auth/mfa/totp", json={"code": code}, headers={"X-CSRF-Token": csrf})
+    # replay the exact code already consumed by /confirm: rejected whether or not a 30 s step has passed since
+    r = await client.post("/api/v1/auth/mfa/totp", json={"code": confirm_code}, headers={"X-CSRF-Token": csrf})
     assert r.status_code == 401
     r = await client.post(
         "/api/v1/auth/mfa/recovery", json={"code": body["recovery_codes"][0]}, headers={"X-CSRF-Token": csrf}

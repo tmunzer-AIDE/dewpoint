@@ -2167,32 +2167,95 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 `backend/tests/core/auth/test_throttle.py`:
 ```python
 # SPDX-License-Identifier: Apache-2.0
-from datetime import UTC, datetime, timedelta
+from urllib.parse import parse_qs, urlparse
 
-from dewpoint.core.auth import throttle
+import pyotp
+from sqlalchemy import text
+
+from dewpoint.core.auth.users import create_user
+
+PW = "violet-otter-canyon-42"
 
 
-async def test_locks_after_max_failures_then_expires(owner_sessionmaker, api_settings) -> None:
-    now = datetime.now(UTC)
+async def _seed(owner_sessionmaker) -> None:
     async with owner_sessionmaker() as s, s.begin():
-        for _ in range(api_settings.login_max_failures):
-            assert not await throttle.is_locked(s, "login_email", "a@x.test", now)
-            await throttle.record_failure(s, "login_email", "a@x.test", api_settings, now)
-        assert await throttle.is_locked(s, "login_email", "a@x.test", now)
-        later = now + timedelta(minutes=api_settings.login_lockout_minutes + 1)
-        assert not await throttle.is_locked(s, "login_email", "a@x.test", later)
-        await throttle.reset(s, "login_email", "a@x.test")
+        await create_user(s, email="dana@corp.test", password=PW)
 
 
-async def test_ip_threshold_is_separate_and_higher(owner_sessionmaker, api_settings) -> None:
-    assert api_settings.login_ip_max_failures > api_settings.login_max_failures
-    async with owner_sessionmaker() as s, s.begin():
-        for _ in range(api_settings.login_max_failures):
-            await throttle.record_failure(s, "login_ip", "192.0.2.7", api_settings)
-        assert not await throttle.is_locked(s, "login_ip", "192.0.2.7")
-        for _ in range(api_settings.login_ip_max_failures - api_settings.login_max_failures):
-            await throttle.record_failure(s, "login_ip", "192.0.2.7", api_settings)
-        assert await throttle.is_locked(s, "login_ip", "192.0.2.7")
+async def test_enroll_then_login_with_totp(client, owner_sessionmaker) -> None:
+    await _seed(owner_sessionmaker)
+    r = await client.post("/api/v1/auth/login", json={"email": "dana@corp.test", "password": PW})
+    assert r.status_code == 200 and r.json()["state"] == "enroll_required"
+    csrf = r.json()["csrf_token"]
+    uri = (await client.post("/api/v1/auth/mfa/totp/enroll", headers={"X-CSRF-Token": csrf})).json()["otpauth_uri"]
+    secret = parse_qs(urlparse(uri).query)["secret"][0]
+    confirm_code = pyotp.TOTP(secret).now()
+    r = await client.post("/api/v1/auth/mfa/totp/confirm", json={"code": confirm_code}, headers={"X-CSRF-Token": csrf})
+    body = r.json()
+    assert r.status_code == 200 and body["state"] == "active" and len(body["recovery_codes"]) == 10
+    csrf = body["csrf_token"]
+    assert (await client.post("/api/v1/auth/logout", headers={"X-CSRF-Token": csrf})).status_code == 204
+
+    r = await client.post("/api/v1/auth/login", json={"email": "dana@corp.test", "password": PW})
+    assert r.json()["state"] == "mfa_pending"
+    csrf = r.json()["csrf_token"]
+    # replay the exact code already consumed by /confirm: rejected whether or not a 30 s step has passed since
+    r = await client.post("/api/v1/auth/mfa/totp", json={"code": confirm_code}, headers={"X-CSRF-Token": csrf})
+    assert r.status_code == 401
+    r = await client.post(
+        "/api/v1/auth/mfa/recovery", json={"code": body["recovery_codes"][0]}, headers={"X-CSRF-Token": csrf}
+    )
+    assert r.status_code == 200 and r.json()["state"] == "active"
+    me = (await client.get("/api/v1/auth/session")).json()
+    assert me["user"]["email"] == "dana@corp.test" and me["auth_methods"] == ["password", "recovery"]
+
+
+async def test_bad_password_is_generic_and_locks(client, owner_sessionmaker, api_settings) -> None:
+    await _seed(owner_sessionmaker)
+    for _ in range(api_settings.login_max_failures):
+        r = await client.post("/api/v1/auth/login", json={"email": "dana@corp.test", "password": "nope-nope-nope"})
+        assert r.status_code == 401 and r.json() == {"error": "invalid_credentials"}
+    r = await client.post("/api/v1/auth/login", json={"email": "dana@corp.test", "password": PW})
+    assert r.status_code == 429 and r.json() == {"error": "locked"}
+    # an unknown account gets the same generic answer; the shared client IP is still under its own higher limit
+    r = await client.post("/api/v1/auth/login", json={"email": "ghost@corp.test", "password": PW})
+    assert r.status_code == 401 and r.json() == {"error": "invalid_credentials"}
+
+
+async def test_enrollment_confirm_is_throttled(client, owner_sessionmaker, api_settings) -> None:
+    await _seed(owner_sessionmaker)
+    csrf = (await client.post("/api/v1/auth/login", json={"email": "dana@corp.test", "password": PW})).json()[
+        "csrf_token"
+    ]
+    await client.post("/api/v1/auth/mfa/totp/enroll", headers={"X-CSRF-Token": csrf})
+    for _ in range(api_settings.login_max_failures):
+        r = await client.post("/api/v1/auth/mfa/totp/confirm", json={"code": "000000"}, headers={"X-CSRF-Token": csrf})
+        assert r.status_code == 401
+    r = await client.post("/api/v1/auth/mfa/totp/confirm", json={"code": "000000"}, headers={"X-CSRF-Token": csrf})
+    assert r.status_code == 429 and r.json() == {"error": "locked"}
+
+
+async def test_password_change_revokes_other_sessions(app, owner_sessionmaker) -> None:
+    import httpx
+
+    await _seed(owner_sessionmaker)
+    t = httpx.ASGITransport(app=app)
+    h = {"X-Dewpoint-Client": "web"}
+    async with (
+        httpx.AsyncClient(transport=t, base_url="https://testserver", headers=h) as a,
+        httpx.AsyncClient(transport=t, base_url="https://testserver", headers=h) as b,
+    ):
+        for c in (a, b):
+            r = await c.post("/api/v1/auth/login", json={"email": "dana@corp.test", "password": PW})
+            c.headers["X-CSRF-Token"] = r.json()["csrf_token"]
+        async with owner_sessionmaker() as s, s.begin():  # both sessions completed MFA (not under test here)
+            await s.execute(text("update sessions set state = 'active'"))
+        r = await a.post(
+            "/api/v1/auth/password", json={"current_password": PW, "new_password": "amber-heron-valley-77"}
+        )
+        assert r.status_code == 200 and "csrf_token" in r.json()
+        assert (await b.get("/api/v1/auth/session")).status_code == 401
+        assert (await a.get("/api/v1/auth/session")).status_code == 200
 ```
 
 `backend/tests/apps/api/test_login_flow.py` (see also `tests/apps/api/test_factor_changes.py`, which covers: an abandoned TOTP setup keeps the old factor; replacement needs fresh reauth; an expired pending setup can't be confirmed; adding a passkey while active needs reauth and rotates tokens; password change returns the new CSRF token; anonymous options are rate-limited; expired challenges are purged; outstanding challenges are capped):
@@ -6275,6 +6338,8 @@ COPY backend/ ./
 RUN uv sync --locked --no-dev --no-editable
 
 FROM python:3.12-slim-bookworm
+# Pick up Debian security fixes published after the base image was built.
+RUN apt-get update && apt-get -y upgrade --no-install-recommends && rm -rf /var/lib/apt/lists/*
 RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin dewpoint
 # Mount point for the evaluation anchor volume; a new named volume inherits this ownership.
 RUN mkdir /anchors && chown 10001:10001 /anchors
@@ -6394,7 +6459,11 @@ RUN pnpm install --frozen-lockfile
 COPY frontend/ ./
 RUN pnpm build
 
-FROM nginxinc/nginx-unprivileged:1.27-alpine
+FROM nginxinc/nginx-unprivileged:1.30-alpine
+# Pick up Alpine security fixes published after the base image was built, then drop back to the nginx user.
+USER root
+RUN apk upgrade --no-cache
+USER 101
 COPY deploy/docker/nginx.conf /etc/nginx/conf.d/default.conf
 COPY deploy/docker/security-headers.conf /etc/nginx/snippets/security-headers.conf
 COPY --chmod=0755 deploy/docker/40-dewpoint-real-ip.sh /docker-entrypoint.d/40-dewpoint-real-ip.sh
@@ -6425,94 +6494,64 @@ SQL
 
 `deploy/compose/docker-compose.yml`:
 ```yaml
-# SPDX-License-Identifier: Apache-2.0
-name: dewpoint
-x-app: &app
-  image: ${DEWPOINT_APP_IMAGE:-dewpoint-app:dev}
-  build: { context: ../.., dockerfile: deploy/docker/app.Dockerfile }
-  read_only: true
-  tmpfs: [/tmp]
-  security_opt: ["no-new-privileges:true"]
-  cap_drop: [ALL]
-  environment: &appenv
-    DEWPOINT_KEK_B64: ${DEWPOINT_KEK_B64:?set in .env}
-    DEWPOINT_KEK_ID: ${DEWPOINT_KEK_ID:-env-1}
-    # Set only during a KEK rollout: docs/operations/key-rotation.md
-    DEWPOINT_KEK_PREVIOUS_B64: ${DEWPOINT_KEK_PREVIOUS_B64:-}
-    DEWPOINT_KEK_PREVIOUS_ID: ${DEWPOINT_KEK_PREVIOUS_ID:-}
-    DEWPOINT_PUBLIC_ORIGIN: ${DEWPOINT_PUBLIC_ORIGIN:-http://localhost:8080}
-    DEWPOINT_RP_ID: ${DEWPOINT_RP_ID:-localhost}
-
-services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: dewpoint
-      POSTGRES_USER: dewpoint_owner
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
-      DEWPOINT_API_DB_PASSWORD: ${DEWPOINT_API_DB_PASSWORD:?set in .env}
-      DEWPOINT_ADMIN_DB_PASSWORD: ${DEWPOINT_ADMIN_DB_PASSWORD:?set in .env}
-      DEWPOINT_AUDITOR_DB_PASSWORD: ${DEWPOINT_AUDITOR_DB_PASSWORD:?set in .env}
-    volumes: [pgdata:/var/lib/postgresql/data, ./initdb:/docker-entrypoint-initdb.d:ro]
-    healthcheck: { test: ["CMD-SHELL", "pg_isready -U dewpoint_owner -d dewpoint"], interval: 5s, retries: 20 }
-
-  migrate:
-    <<: *app
-    command: ["alembic", "upgrade", "head"]
-    environment:
-      <<: *appenv
-      DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_owner:${POSTGRES_PASSWORD}@postgres/dewpoint
-    depends_on: { postgres: { condition: service_healthy } }
-    restart: "no"
-
-  api:
-    <<: *app
-    environment:
-      <<: *appenv
-      DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_api_login:${DEWPOINT_API_DB_PASSWORD}@postgres/dewpoint
-    depends_on: { migrate: { condition: service_completed_successfully } }
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/ready').status==200 else 1)"]
-      interval: 5s
-      retries: 20
-
-  audit-anchor:
-    <<: *app
-    # Anchors belong OFF this host in production (object lock / SIEM). This volume is for evaluation only.
-    # set -e: a failed anchor run ends the container with a nonzero exit (visible in `docker compose ps -a`),
-    # instead of looping silently without producing anchors.
-    command: ["sh", "-c", "set -e; while true; do dewpoint audit anchor; sleep 900; done"]
-    restart: "no"
-    # Unhealthy when audit rows older than 30 minutes have no anchor (job stuck, failing, or anchors stale).
-    # Alert on this in your monitoring as well.
-    healthcheck:
-      test: ["CMD", "dewpoint", "audit", "freshness", "--max-age-minutes", "30"]
-      interval: 5m
-      timeout: 30s
-      start_period: 1m
-      start_interval: 5s
-      retries: 1
-    environment:
-      <<: *appenv
-      DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_auditor_login:${DEWPOINT_AUDITOR_DB_PASSWORD}@postgres/dewpoint
-      DEWPOINT_AUDIT_SIGNING_KEY_B64: ${DEWPOINT_AUDIT_SIGNING_KEY_B64:?set in .env}
-      DEWPOINT_AUDIT_ANCHOR_PATH: /anchors/anchors.jsonl
-    volumes: [anchors:/anchors]
-    depends_on: { migrate: { condition: service_completed_successfully } }
-
-  web:
-    image: ${DEWPOINT_WEB_IMAGE:-dewpoint-web:dev}
-    build: { context: ../.., dockerfile: deploy/docker/web.Dockerfile }
-    read_only: true
-    tmpfs: [/tmp, /var/cache/nginx]
-    cap_drop: [ALL]
-    ports: ["127.0.0.1:8080:8080"]
-    environment:
-      # IPs/CIDRs of the TLS proxy / load balancer in front of `web` (see README). Empty = no proxy.
-      DEWPOINT_TRUSTED_PROXIES: ${DEWPOINT_TRUSTED_PROXIES:-}
-    depends_on: { api: { condition: service_healthy } }
-
-volumes: { pgdata: {}, anchors: {} }
+name: release
+on:
+  push: { tags: ["v*"] }
+  # Dry run on changes to the release path: build + scan locally, no login/push/sign.
+  pull_request: { paths: [".github/workflows/release.yml", "deploy/docker/**"] }
+permissions: { contents: read, packages: write, id-token: write, attestations: write }
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    strategy: { fail-fast: false, matrix: { image: [app, web] } }  # always report both images
+    env:
+      RELEASE: ${{ github.event_name == 'push' }}
+    steps:
+      - uses: actions/checkout@v4
+      # Registry repository names must be lowercase; the owner (e.g. "tmunzer-AIDE") may not be.
+      - id: image
+        run: |
+          owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          echo "ref=ghcr.io/${owner}/dewpoint-${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+          echo "tag=${{ github.event_name == 'push' && github.ref_name || 'dryrun' }}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - if: env.RELEASE == 'true'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      - id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/docker/${{ matrix.image }}.Dockerfile
+          tags: ${{ steps.image.outputs.ref }}:${{ steps.image.outputs.tag }}
+          push: ${{ env.RELEASE == 'true' }}
+          load: ${{ env.RELEASE != 'true' }}
+          # Attestations need a registry push; the local docker exporter can't store them.
+          provenance: ${{ env.RELEASE == 'true' && 'mode=max' || 'false' }}
+          sbom: ${{ env.RELEASE == 'true' }}
+      - if: env.RELEASE == 'true'
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ${{ steps.image.outputs.ref }}@${{ steps.build.outputs.digest }}
+          format: cyclonedx-json
+          output-file: sbom-${{ matrix.image }}.cdx.json
+      - if: env.RELEASE == 'true'
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - if: env.RELEASE == 'true'
+        run: cosign sign --yes "${{ steps.image.outputs.ref }}@${{ steps.build.outputs.digest }}"
+      - if: env.RELEASE == 'true'
+        run: >-
+          cosign attest --yes --type cyclonedx --predicate "sbom-${{ matrix.image }}.cdx.json"
+          "${{ steps.image.outputs.ref }}@${{ steps.build.outputs.digest }}"
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: >-
+            ${{ env.RELEASE == 'true'
+              && format('{0}@{1}', steps.image.outputs.ref, steps.build.outputs.digest)
+              || format('{0}:{1}', steps.image.outputs.ref, steps.image.outputs.tag) }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true  # fail on vulnerabilities that have a fix available
+          exit-code: "1"
 ```
 The `anchors` volume must be writable by UID 10001. The app image creates `/anchors` owned by 10001, and a new named volume inherits that ownership, so no manual `chown` is needed.
 

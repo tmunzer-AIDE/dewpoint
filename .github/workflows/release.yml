@@ -7,7 +7,7 @@ permissions: { contents: read, packages: write, id-token: write, attestations: w
 jobs:
   images:
     runs-on: ubuntu-latest
-    strategy: { matrix: { image: [app, web] } }
+    strategy: { fail-fast: false, matrix: { image: [app, web] } }  # always report both images
     env:
       RELEASE: ${{ github.event_name == 'push' }}
     steps:
