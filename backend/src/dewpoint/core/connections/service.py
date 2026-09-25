@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 from cryptography.exceptions import InvalidTag
 from pydantic import BaseModel, SecretStr
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.audit.service import record
@@ -98,7 +99,9 @@ async def update_connection(
         changed.append("secret")
     if {"config", "secret"} & set(changed):
         conn.status, conn.status_detail, conn.privilege = "unverified", "", None
+        conn.revision = Connection.revision + 1  # in SQL: concurrent edits can't collapse into one revision
     await s.flush()
+    await s.refresh(conn)  # load the SQL-computed revision (no lazy loads in async code)
     await record(
         s,
         tenant_id=ctx.tenant_id,
@@ -130,29 +133,42 @@ async def load_secret(s: AsyncSession, keyring: Keyring, conn: Connection) -> Ba
     return _type(conn.type).secret_model.model_validate_json(raw)
 
 
+class StaleVerificationError(Exception):
+    """The connection's config or secret changed while it was being verified; the result was discarded."""
+
+
 async def verify_connection(
     s: AsyncSession, keyring: Keyring, ctx: TenantContext, conn: Connection, http: httpx.AsyncClient
 ) -> Connection:
-    ct = _type(conn.type)
+    """Verify the credentials as loaded, then record the result only if they are still the current revision.
+    Raises StaleVerificationError (after auditing it) when an edit committed while the check was in flight."""
+    ct, loaded_revision = _type(conn.type), conn.revision
     try:
         secret = await load_secret(s, keyring, conn)
     except (InvalidTag, ValueError):
-        conn.status, conn.status_detail, conn.privilege = "error", "secret_unreadable", None
+        status, detail, privilege = "error", "secret_unreadable", None
     else:
         result = await ct.verify(ct.config_model.model_validate(conn.config), secret, http)
-        conn.status = "ok" if result.ok else "error"
-        conn.status_detail, conn.privilege = result.detail, result.privilege
-    conn.last_verified_at = datetime.now(UTC)
-    await s.flush()
+        status, detail, privilege = ("ok" if result.ok else "error"), result.detail, result.privilege
+    applied = await s.execute(
+        update(Connection)
+        .where(Connection.id == conn.id, Connection.revision == loaded_revision)
+        .values(status=status, status_detail=detail, privilege=privilege, last_verified_at=datetime.now(UTC))
+        .execution_options(synchronize_session=False)
+    )
+    await s.refresh(conn)  # current row, including concurrent non-credential edits such as a rename
+    stale = getattr(applied, "rowcount", 0) == 0
     await record(
         s,
         tenant_id=ctx.tenant_id,
         actor_id=ctx.user.id,
-        action="connection.verify",
+        action="connection.verify_discarded" if stale else "connection.verify",
         target_type="connection",
         target_id=str(conn.id),
-        details={"status": conn.status},
+        details={"status": status, "verified_revision": loaded_revision},
     )
+    if stale:
+        raise StaleVerificationError()
     return conn
 
 
@@ -161,6 +177,7 @@ def to_out(conn: Connection) -> dict[str, object]:
         "id": str(conn.id),
         "type": conn.type,
         "name": conn.name,
+        "revision": conn.revision,
         "config": conn.config,
         "secret_set": conn.secret_ct is not None,
         "status": conn.status,

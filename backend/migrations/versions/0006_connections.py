@@ -20,6 +20,8 @@ def upgrade() -> None:
         sa.Column("name", sa.String(100), nullable=False),
         sa.Column("config", pg.JSONB, nullable=False),
         sa.Column("secret_ct", sa.LargeBinary),
+        # Increments whenever config or secret changes; a verification result applies only to the revision it read.
+        sa.Column("revision", sa.Integer, nullable=False, server_default="1"),
         sa.Column("status", sa.String(20), nullable=False, server_default="unverified"),
         sa.Column("status_detail", sa.String(40), nullable=False, server_default=""),
         sa.Column("privilege", sa.String(40)),

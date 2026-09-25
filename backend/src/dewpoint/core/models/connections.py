@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, LargeBinary, String, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Integer, LargeBinary, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -18,6 +18,7 @@ class Connection(UUIDPk, Timestamps, Base):
     name: Mapped[str] = mapped_column(String(100))
     config: Mapped[dict[str, Any]] = mapped_column(JSONB)
     secret_ct: Mapped[bytes | None] = mapped_column(LargeBinary)
+    revision: Mapped[int] = mapped_column(Integer, default=1)  # bumped on config/secret change
     status: Mapped[str] = mapped_column(String(20), default="unverified")  # unverified | ok | error
     status_detail: Mapped[str] = mapped_column(String(40), default="")
     privilege: Mapped[str | None] = mapped_column(String(40))

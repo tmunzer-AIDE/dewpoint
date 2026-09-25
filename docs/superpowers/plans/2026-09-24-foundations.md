@@ -4940,7 +4940,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, LargeBinary, String, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Integer, LargeBinary, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -4955,11 +4955,14 @@ class Connection(UUIDPk, Timestamps, Base):
     name: Mapped[str] = mapped_column(String(100))
     config: Mapped[dict[str, Any]] = mapped_column(JSONB)
     secret_ct: Mapped[bytes | None] = mapped_column(LargeBinary)
+    revision: Mapped[int] = mapped_column(Integer, default=1)  # bumped on config/secret change
     status: Mapped[str] = mapped_column(String(20), default="unverified")  # unverified | ok | error
     status_detail: Mapped[str] = mapped_column(String(40), default="")
     privilege: Mapped[str | None] = mapped_column(String(40))
     last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
 ```
 
 `migrations/versions/0006_connections.py`:
@@ -4986,6 +4989,8 @@ def upgrade() -> None:
         sa.Column("name", sa.String(100), nullable=False),
         sa.Column("config", pg.JSONB, nullable=False),
         sa.Column("secret_ct", sa.LargeBinary),
+        # Increments whenever config or secret changes; a verification result applies only to the revision it read.
+        sa.Column("revision", sa.Integer, nullable=False, server_default="1"),
         sa.Column("status", sa.String(20), nullable=False, server_default="unverified"),
         sa.Column("status_detail", sa.String(40), nullable=False, server_default=""),
         sa.Column("privilege", sa.String(40)),
@@ -5018,8 +5023,10 @@ In `tests/core/audit/test_anchor.py::test_auditor_role_is_narrow`, change `"sele
 `backend/tests/apps/api/test_connections.py`:
 ```python
 # SPDX-License-Identifier: Apache-2.0
+import asyncio
 import uuid
 
+import httpx
 import respx
 from sqlalchemy import text
 
@@ -5102,6 +5109,57 @@ async def test_rename_to_existing_name_is_a_conflict(app, owner_sessionmaker, ap
         other = (await c.post(f"/api/v1/t/{tid}/connections", json={**BODY, "name": "Other"})).json()["id"]
         r = await c.patch(f"/api/v1/t/{tid}/connections/{other}", json={"name": "Acme Prod"})
     assert r.status_code == 409 and r.json() == {"error": "name_taken"}
+
+
+def _paused_mist(release: asyncio.Event, started: asyncio.Event) -> None:
+    async def slow(request: httpx.Request) -> httpx.Response:
+        started.set()
+        await release.wait()  # hold the verification in flight
+        return httpx.Response(200, json={"privileges": [{"scope": "org", "org_id": ORG, "role": "admin"}]})
+
+    respx.get("https://api.eu.mist.com/api/v1/self").mock(side_effect=slow)
+
+
+@respx.mock
+async def test_verification_does_not_certify_credentials_edited_in_flight(
+    app, owner_sessionmaker, api_settings
+) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    started, release = asyncio.Event(), asyncio.Event()
+    _paused_mist(release, started)
+    async with c:
+        cid = (await c.post(f"/api/v1/t/{tid}/connections", json=BODY)).json()["id"]
+        verify = asyncio.create_task(c.post(f"/api/v1/t/{tid}/connections/{cid}/verify"))
+        try:
+            await asyncio.wait_for(started.wait(), 10)  # verification loaded revision 1 and is talking to "Mist"
+            new_secret = {"secret": {"api_token": "tok_" + "b" * 36}}
+            edited = await c.patch(f"/api/v1/t/{tid}/connections/{cid}", json=new_secret)
+        finally:
+            release.set()  # never leave the paused request (and its DB connection) hanging
+            r = await asyncio.wait_for(verify, 10)
+        assert edited.status_code == 200 and edited.json()["revision"] == 2
+        assert r.status_code == 409 and r.json() == {"error": "changed_during_verification"}
+        after = (await c.get(f"/api/v1/t/{tid}/connections/{cid}")).json()
+        actions = [e["action"] for e in (await c.get(f"/api/v1/t/{tid}/audit")).json()]
+    assert after["status"] == "unverified" and after["revision"] == 2  # the edit's state survives
+    assert actions[0] == "connection.verify_discarded"
+
+
+@respx.mock
+async def test_rename_during_verification_keeps_the_result(app, owner_sessionmaker, api_settings) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    started, release = asyncio.Event(), asyncio.Event()
+    _paused_mist(release, started)
+    async with c:
+        cid = (await c.post(f"/api/v1/t/{tid}/connections", json=BODY)).json()["id"]
+        verify = asyncio.create_task(c.post(f"/api/v1/t/{tid}/connections/{cid}/verify"))
+        try:
+            await asyncio.wait_for(started.wait(), 10)
+            await c.patch(f"/api/v1/t/{tid}/connections/{cid}", json={"name": "Renamed"})  # not a credential change
+        finally:
+            release.set()
+            r = await asyncio.wait_for(verify, 10)
+    assert r.status_code == 200 and r.json()["status"] == "ok" and r.json()["name"] == "Renamed"
 ```
 
 - [ ] **Step 6: Implement the service and routes**
@@ -5117,6 +5175,7 @@ from typing import Any
 import httpx
 from cryptography.exceptions import InvalidTag
 from pydantic import BaseModel, SecretStr
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.audit.service import record
@@ -5208,7 +5267,9 @@ async def update_connection(
         changed.append("secret")
     if {"config", "secret"} & set(changed):
         conn.status, conn.status_detail, conn.privilege = "unverified", "", None
+        conn.revision = Connection.revision + 1  # in SQL: concurrent edits can't collapse into one revision
     await s.flush()
+    await s.refresh(conn)  # load the SQL-computed revision (no lazy loads in async code)
     await record(
         s,
         tenant_id=ctx.tenant_id,
@@ -5240,29 +5301,42 @@ async def load_secret(s: AsyncSession, keyring: Keyring, conn: Connection) -> Ba
     return _type(conn.type).secret_model.model_validate_json(raw)
 
 
+class StaleVerificationError(Exception):
+    """The connection's config or secret changed while it was being verified; the result was discarded."""
+
+
 async def verify_connection(
     s: AsyncSession, keyring: Keyring, ctx: TenantContext, conn: Connection, http: httpx.AsyncClient
 ) -> Connection:
-    ct = _type(conn.type)
+    """Verify the credentials as loaded, then record the result only if they are still the current revision.
+    Raises StaleVerificationError (after auditing it) when an edit committed while the check was in flight."""
+    ct, loaded_revision = _type(conn.type), conn.revision
     try:
         secret = await load_secret(s, keyring, conn)
     except (InvalidTag, ValueError):
-        conn.status, conn.status_detail, conn.privilege = "error", "secret_unreadable", None
+        status, detail, privilege = "error", "secret_unreadable", None
     else:
         result = await ct.verify(ct.config_model.model_validate(conn.config), secret, http)
-        conn.status = "ok" if result.ok else "error"
-        conn.status_detail, conn.privilege = result.detail, result.privilege
-    conn.last_verified_at = datetime.now(UTC)
-    await s.flush()
+        status, detail, privilege = ("ok" if result.ok else "error"), result.detail, result.privilege
+    applied = await s.execute(
+        update(Connection)
+        .where(Connection.id == conn.id, Connection.revision == loaded_revision)
+        .values(status=status, status_detail=detail, privilege=privilege, last_verified_at=datetime.now(UTC))
+        .execution_options(synchronize_session=False)
+    )
+    await s.refresh(conn)  # current row, including concurrent non-credential edits such as a rename
+    stale = getattr(applied, "rowcount", 0) == 0
     await record(
         s,
         tenant_id=ctx.tenant_id,
         actor_id=ctx.user.id,
-        action="connection.verify",
+        action="connection.verify_discarded" if stale else "connection.verify",
         target_type="connection",
         target_id=str(conn.id),
-        details={"status": conn.status},
+        details={"status": status, "verified_revision": loaded_revision},
     )
+    if stale:
+        raise StaleVerificationError()
     return conn
 
 
@@ -5271,6 +5345,7 @@ def to_out(conn: Connection) -> dict[str, object]:
         "id": str(conn.id),
         "type": conn.type,
         "name": conn.name,
+        "revision": conn.revision,
         "config": conn.config,
         "secret_set": conn.secret_ct is not None,
         "status": conn.status,
@@ -5428,7 +5503,11 @@ async def verify(
     db: AsyncSession = Depends(get_db),
     keyring: Keyring = Depends(get_keyring),
 ) -> dict[str, object]:
-    conn = await service.verify_connection(db, keyring, ctx, await _get(db, ctx, connection_id), _http(request))
+    try:
+        conn = await service.verify_connection(db, keyring, ctx, await _get(db, ctx, connection_id), _http(request))
+    except service.StaleVerificationError:
+        await db.commit()  # keep the verify_discarded audit entry
+        raise HTTPException(409, detail={"error": "changed_during_verification"}) from None
     return service.to_out(conn)
 ```
 In `create_app`, add a lifespan that creates `app.state.http = httpx.AsyncClient(timeout=10, follow_redirects=False)` and closes it on shutdown. Then include the router.
@@ -5911,7 +5990,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import { ApiError, api } from "../lib/api";
 
 interface Conn {
-  id: string; type: string; name: string; config: { cloud: string; org_id: string };
+  id: string; type: string; name: string; revision: number; config: { cloud: string; org_id: string };
   secret_set: boolean; status: "ok" | "error" | "unverified"; status_detail: string; privilege: string | null;
 }
 interface ConnType { key: string; label: string; clouds?: Record<string, string> }
@@ -5941,7 +6020,20 @@ export function ConnectionsPage({ tenantId }: { tenantId: string }) {
       : e instanceof ApiError && e.status === 403 ? "You don't have permission to manage connections."
       : "Check the fields and try again."),
   });
-  const verify = useMutation({ mutationFn: (id: string) => api<Conn>("POST", `${base}/${id}/verify`), onSuccess: refresh });
+  const [verifyError, setVerifyError] = useState<string | null>(null);
+  const verify = useMutation({
+    mutationFn: (id: string) => api<Conn>("POST", `${base}/${id}/verify`),
+    onMutate: () => setVerifyError(null),
+    onSuccess: refresh,
+    onError: async (e) => {
+      setVerifyError(
+        e instanceof ApiError && e.code === "changed_during_verification"
+          ? "The connection was edited while it was being verified. The result was discarded; verify again."
+          : "Verification could not be completed.",
+      );
+      await refresh();
+    },
+  });
 
   return (
     <section className="flex flex-col gap-4 p-6">
@@ -5949,6 +6041,7 @@ export function ConnectionsPage({ tenantId }: { tenantId: string }) {
         <h1 className="text-xl font-semibold">Connections</h1>
         <Button variant="primary" onClick={() => setOpen(true)} data-testid="conn-add">Add Mist connection</Button>
       </header>
+      {verifyError && <p role="alert" className="text-sm text-danger">{verifyError}</p>}
       <table className="w-full border-collapse rounded-lg border border-line bg-surface text-sm">
         <thead className="bg-surface-2 text-left text-muted">
           <tr><th className="p-3">Name</th><th className="p-3">Cloud</th><th className="p-3">Org ID</th>

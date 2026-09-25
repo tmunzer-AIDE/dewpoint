@@ -143,5 +143,9 @@ async def verify(
     db: AsyncSession = Depends(get_db),
     keyring: Keyring = Depends(get_keyring),
 ) -> dict[str, object]:
-    conn = await service.verify_connection(db, keyring, ctx, await _get(db, ctx, connection_id), _http(request))
+    try:
+        conn = await service.verify_connection(db, keyring, ctx, await _get(db, ctx, connection_id), _http(request))
+    except service.StaleVerificationError:
+        await db.commit()  # keep the verify_discarded audit entry
+        raise HTTPException(409, detail={"error": "changed_during_verification"}) from None
     return service.to_out(conn)

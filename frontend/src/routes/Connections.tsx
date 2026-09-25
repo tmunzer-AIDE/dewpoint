@@ -7,7 +7,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import { ApiError, api } from "../lib/api";
 
 interface Conn {
-  id: string; type: string; name: string; config: { cloud: string; org_id: string };
+  id: string; type: string; name: string; revision: number; config: { cloud: string; org_id: string };
   secret_set: boolean; status: "ok" | "error" | "unverified"; status_detail: string; privilege: string | null;
 }
 interface ConnType { key: string; label: string; clouds?: Record<string, string> }
@@ -37,7 +37,20 @@ export function ConnectionsPage({ tenantId }: { tenantId: string }) {
       : e instanceof ApiError && e.status === 403 ? "You don't have permission to manage connections."
       : "Check the fields and try again."),
   });
-  const verify = useMutation({ mutationFn: (id: string) => api<Conn>("POST", `${base}/${id}/verify`), onSuccess: refresh });
+  const [verifyError, setVerifyError] = useState<string | null>(null);
+  const verify = useMutation({
+    mutationFn: (id: string) => api<Conn>("POST", `${base}/${id}/verify`),
+    onMutate: () => setVerifyError(null),
+    onSuccess: refresh,
+    onError: async (e) => {
+      setVerifyError(
+        e instanceof ApiError && e.code === "changed_during_verification"
+          ? "The connection was edited while it was being verified. The result was discarded; verify again."
+          : "Verification could not be completed.",
+      );
+      await refresh();
+    },
+  });
 
   return (
     <section className="flex flex-col gap-4 p-6">
@@ -45,6 +58,7 @@ export function ConnectionsPage({ tenantId }: { tenantId: string }) {
         <h1 className="text-xl font-semibold">Connections</h1>
         <Button variant="primary" onClick={() => setOpen(true)} data-testid="conn-add">Add Mist connection</Button>
       </header>
+      {verifyError && <p role="alert" className="text-sm text-danger">{verifyError}</p>}
       <table className="w-full border-collapse rounded-lg border border-line bg-surface text-sm">
         <thead className="bg-surface-2 text-left text-muted">
           <tr><th className="p-3">Name</th><th className="p-3">Cloud</th><th className="p-3">Org ID</th>
