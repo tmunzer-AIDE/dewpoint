@@ -1,12 +1,17 @@
 # Dewpoint — Engine Core Design (sub-project 2a)
 
-- **Status:** Accepted as the basis for implementation, revision 5 (2026-09-25).
+- **Status:** Accepted as the basis for implementation, revision 5.1 (2026-09-25).
   - Revision 2 addressed join scopes, the local-CEL switch, evaluator isolation, profile routing and retirement.
   - Revision 3 addresses the version lifecycle (activation, queued requests, closure), nested loops, evaluator
     aggregate memory, and Temporal membership.
   - Revision 4 addresses lifecycle locking at admission, continue-as-new at a quiescent checkpoint only, the
     logical-run iteration counter, and the scope of the two-build test.
   - Revision 5 replaces fixed child allowances with on-demand grants (an exact cap) and makes the drain-headroom test a measurement.
+  - Revision 5.1 folds in the refinements from planning 2a-1:
+    - advisory-lock implementation of the lifecycle locks;
+    - liveness conditions for path availability;
+    - `loops.<key>` refs and template defaults;
+    - workflow-level data in `graph.settings`.
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
   This spec **narrows parent §6.4** (where CEL runs) and resolves the CEL item in parent §15.
 - **Evidence:** CEL spike, branch `spike/cel-evaluation`, commits `d6a8162` and `13a62e1`. See
@@ -111,7 +116,12 @@ class Node(Protocol):
 
 Tenant-scoped tables use FORCE RLS with the foundations policy pattern.
 - **`workflows`:** id, tenant_id, name, `enabled`, `active_version_id`, `draft` (JSONB), `draft_revision` (int,
-  compare-and-swap), `vars_schema`, timestamps.
+  compare-and-swap), timestamps.
+  - Workflow-level data lives in the draft's `graph.settings`, so the draft compare-and-swap covers it too:
+    - `input_schema`;
+    - `vars_schema`, where every variable declares a `default`;
+    - `outputs`: values evaluated when the run succeeds, which define the version's `output_schema`;
+    - `failure_handler`: a workflow id.
 - **`workflow_versions`:** id, tenant_id, workflow_id, number, graph, `node_refs` (`type@version`), `engine_abi`,
   `cel_profile`, `connection_ids`, `subflow_version_ids`, `input_schema`, `vars_schema`, `content_hash`,
   `published_by`, `published_at`.
@@ -155,17 +165,22 @@ Tenant-scoped tables use FORCE RLS with the foundations policy pattern.
 - **Every config field is one of:**
   - `literal`;
   - `ref {path, default?}`;
-  - `template {parts: [text | ref]}`;
+  - `template {parts: [text | ref {path, default?}]}`;
   - `cel {expr}`.
 - **Scope:**
   - `trigger.*`
   - `steps.<key>.output.*`
   - `steps.<key>.error`: `{code, message, attempt}`; only for steps with `on_error` ≠ `fail`.
   - `vars.*`: typed by `vars_schema`.
-  - `loop.item`, `loop.index`
+  - `loop.item`, `loop.index`: the innermost loop.
+  - `loops.<loop_key>.item`, `loops.<loop_key>.index`: any enclosing loop, from inside nested loops.
   - `run.id`, `run.started_at`, `run.now`: workflow time from `workflow.now()`, never the host clock.
-- **Path availability** (parent §6.4) uses dominators over the graph after regions are resolved.
-  - A ref is *always available* if its producer dominates the consumer in the same or an enclosing scope. Otherwise it is *conditional*.
+- **Path availability** (parent §6.4) uses *liveness conditions*, computed per region after regions are resolved.
+  - A liveness condition is a DNF formula over branch decisions: which port each `if`, `switch` or error-routing step took.
+  - A ref is *always available* when the producer is upstream of the consumer and the consumer's condition implies
+    that the producer succeeded, in the same or an enclosing scope. Otherwise it is *conditional*.
+  - This reduces to dominance for exclusive branches, and it also accepts refs after a parallel fan-out/join, which
+    dominators would wrongly reject. A property test checks it against simulated executions.
   - Conditional refs, and schema-optional fields, need a `default` (ref, template) or a `has()` guard (CEL).
 - **Variables:**
   - `set_variables` writes only declared `vars`.
@@ -254,7 +269,13 @@ until no non-terminal run uses that profile.
 
 **Lifecycle locking.** Every transaction that creates or uses a reference locks the lifecycle rows of the version's
 closure. The closure's `node_type_versions` and `cel_profiles` rows are locked `FOR SHARE`, in id order, and then
-it re-checks their states. That applies to:
+it re-checks their states.
+- **Implementation:** transaction-scoped *shared* and *exclusive* advisory locks keyed
+  `dewpoint:lifecycle:<node|cel>:<key>`, acquired in sorted order.
+- **Why not row locks:** they would require UPDATE privilege on the registry tables, which the API role must not have.
+- The semantics below are unchanged.
+
+It applies to:
 - **publish** (the new version's closure);
 - **activate**;
 - **admission:** freezing a new `run_requests` row, or `start_run` in 2a;
@@ -262,7 +283,7 @@ it re-checks their states. That applies to:
 
 The executable check and the insert or update happen in that same transaction.
 
-**Retirement** locks its entry's row `FOR UPDATE` as its first statement. Only then does it count references and
+**Retirement** takes its entry's exclusive lock (the `FOR UPDATE` counterpart) as its first statement. Only then does it count references and
 build the cancellation set, in later statements of the same transaction, at READ COMMITTED (the Postgres default).
 Share and update locks conflict, so the two sides serialize:
 - **Admission commits first.** Retirement's lock waits for that commit, so its later statements see the new
@@ -725,6 +746,8 @@ abandons or restarts an activity or a child workflow.
   - graph model round-trips;
   - validator: structure, regions, types, path availability, variable writers, waits;
   - value model and templates.
+- **Property-based (Hypothesis), liveness soundness:** on random DAGs with branches and parallel joins, whenever the
+  validator treats a reference as always available, the producer ran in every simulated execution in which the consumer ran.
 - **Property-based (Hypothesis), on random DAGs with if/switch/joins/error ports/loops:**
   - every node runs or dies exactly once per scope;
   - dead paths never execute;
@@ -802,7 +825,7 @@ abandons or restarts an activity or a child workflow.
 8. **Package boundaries** follow the parent rules: `engine` is pure, storage lives in `core`, and wiring lives in `apps`. `testkit` stays under `tests/`.
 9. **Nested loops** are allowed when properly nested (depth ≤ 3, per-run cap of 100,000 iterations). Crossing regions are rejected.
 10. **Execution boundaries.**
-    - Every transaction that creates or uses a reference takes `FOR SHARE` on the closure's lifecycle rows. Retirement takes `FOR UPDATE` first.
+    - Every transaction that creates or uses a reference takes a shared lifecycle lock on each entry of the closure. Retirement takes the exclusive lock first. Both are advisory locks.
     - Continue-as-new happens only at a quiescent checkpoint, with drain mode and an in-flight cap of 100.
     - One iteration counter per logical run, carried through continue-as-new. Children receive grants on demand, so the cap is exact.
 11. **Temporal membership.** One engine deployment whose versioned queue carries workflows, children and plugin activities, all explicitly Pinned. CEL queues sit outside it, routed by profile.
