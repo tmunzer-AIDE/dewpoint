@@ -155,7 +155,7 @@ Import rules are enforced in CI with import-linter:
 - `engine_abi` and `cel_profile`;
 - the declared `connection_ids`;
 - pinned sub-flow version IDs;
-- a content hash;
+- a `graph_hash` (the authored graph) and a `version_hash` (the graph plus resolved pins, `cel_profile` and `engine_abi`, used by audit);
 - the publisher and publish time.
 
 ## 6. Execution engine
@@ -206,7 +206,7 @@ Every run starts as a durable `run_requests` row, unique on `(tenant_id, idempot
 - Output schemas come from manifests. For Mist, they come from OAS responses.
 - **Publish-time validation:**
   - type checks every ref;
-  - runs **path availability analysis** (dominators): a ref is *always* available if its producer dominates the consumer, otherwise *conditional*;
+  - runs **path availability analysis** with liveness conditions over branch decisions: a ref is *always* available when the producer is upstream and every way the consumer can run implies the producer succeeded (this accepts parallel joins that dominators would reject), otherwise *conditional* (engine-core spec §4.3);
   - requires conditional refs, and manifest- or OAS-optional outputs, to carry a `default` or a `has()` guard.
 - **CEL** uses workflow time (`run.now`) and a pinned custom function library (CIDR/IP, MAC, `sortedKeys`), with a fixed per-evaluation iteration budget and an output size cap. The transform node is bounded the same way.
 - **Decided after the spike** (engine-core spec §5): Google's `cel-expr-python` (cel-cpp), provisionally. Only a proven restricted subset with statically bounded work runs inside the interpreter. Every other valid expression runs in an isolated, resource-limited activity whose result is recorded in history. Publish rejects any route from unordered map iteration to an order-dependent value.

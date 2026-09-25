@@ -21,13 +21,13 @@
 **Tech Stack:** Python 3.12, Pydantic v2, SQLAlchemy 2 async + asyncpg, Alembic, FastAPI, Typer, `jsonschema` (Draft 2020-12), pytest + Hypothesis + testcontainers.
 
 **Dry run before publication:** the code in Tasks 1–10 was extracted into a scratch worktree and run.
-- 226 tests passed: the 101 foundations tests plus 125 new ones.
+- 257 tests passed: the 101 foundations tests plus 156 new ones. That count is from revision 2 of this plan, after the spec-review fixes.
 - ruff, mypy `strict` and import-linter (6 contracts) were clean.
 - Migration 0007 survived an upgrade → downgrade → upgrade round trip.
 
 Test counts in the steps below come from that run.
 
-**Spec:** `docs/superpowers/specs/2026-09-25-engine-core-design.md` (revision 5.1; §2, §3, §4; §5.2's 16,384-character limit; §10's unit and property tests). Parent: `docs/superpowers/specs/2026-09-24-dewpoint-architecture-design.md`.
+**Spec:** `docs/superpowers/specs/2026-09-25-engine-core-design.md` (revision 5.2; §2, §3, §4; §5.2's 16,384-character limit; §10's unit and property tests). Parent: `docs/superpowers/specs/2026-09-24-dewpoint-architecture-design.md`.
 
 ## Where this plan sits
 
@@ -53,6 +53,21 @@ Each item keeps the spec's intent. They are folded into the spec (revision 5.1) 
 3. **`loops.<loop_key>.item` / `.index`** reach an enclosing loop's item from inside nested loops. `loop.*` still means the innermost loop.
 4. **Workflow-level data lives in `graph.settings`:** `input_schema`, `vars_schema` (every variable declares a `default`), `outputs` (values evaluated when the run succeeds; they define the version's `output_schema`) and `failure_handler`. The draft compare-and-swap therefore covers them, and `workflows` needs no `vars_schema` column.
 5. **Template parts** may carry a `default` (text), like refs.
+
+The spec review of this plan added three more, folded into spec revision 5.2:
+
+6. **Contract hash.** A node type version's registered contract is every manifest field except display metadata:
+   - the manifest's `title` and `description`;
+   - schema annotations, stripped only where schemas appear.
+
+   A re-sync that changes credentials, capabilities, retry policy, timeout, schemas, ports, kind or side effect is refused.
+7. **Local references only.** Tenant-authored schemas (`input_schema`, `vars_schema`) and manifest schemas may use only
+   `#/$defs/<name>` references that resolve, with no cycle that recurses without descending into the data. Anything
+   else is a diagnostic (`settings.unresolvable_ref`) or a manifest problem, never an exception during validation.
+8. **Two hashes per version.**
+   - `graph_hash` covers the authored graph only.
+   - `version_hash` also covers the resolved sub-flow and failure-handler pins, the CEL profile and the engine ABI.
+   - Audit and the versions API carry both. Integrity means `version_hash`.
 
 ## Global Constraints
 
@@ -110,10 +125,11 @@ backend/src/dewpoint/engine/cel/__init__.py
 backend/src/dewpoint/engine/cel/profile.py             # CURRENT_CEL_PROFILE
 backend/src/dewpoint/engine/registry/__init__.py
 backend/src/dewpoint/engine/registry/control.py        # control type refs
-backend/src/dewpoint/engine/registry/catalog.py        # NodeTypeSpec, Catalog, schema_hash, validate_plugin_manifest
+backend/src/dewpoint/engine/schema_refs.py             # ref_problems: only resolvable, acyclic local $refs
+backend/src/dewpoint/engine/registry/catalog.py        # NodeTypeSpec, Catalog, contract_hash, validate_plugin_manifest
 backend/src/dewpoint/engine/graph/__init__.py
 backend/src/dewpoint/engine/graph/diagnostics.py       # Diagnostic
-backend/src/dewpoint/engine/graph/model.py             # Graph model, parse_graph, graph_json, content_hash
+backend/src/dewpoint/engine/graph/model.py             # Graph model, parse_graph, graph_json, graph_hash, version_hash
 backend/src/dewpoint/engine/graph/values.py            # envelopes, RefPath, iter_values, strip_values
 backend/src/dewpoint/engine/graph/schemas.py           # navigate, target_schema, json_types, compatible, markers
 backend/src/dewpoint/engine/graph/structure.py         # analyze_structure: types, ports, edges, topo, regions
@@ -143,6 +159,7 @@ backend/tests/support/workflows.py                     # seed_workflow() (owner-
 backend/tests/sdk/test_manifest.py
 backend/tests/plugins/test_flow_manifests.py
 backend/tests/engine/registry/test_catalog.py
+backend/tests/engine/test_schema_refs.py
 backend/tests/engine/graph/test_model.py
 backend/tests/engine/graph/test_structure.py
 backend/tests/engine/graph/test_values.py
@@ -1173,9 +1190,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 3: Canonical JSON and the manifest registry (engine side)
 
 **Files:**
-- Create: `backend/src/dewpoint/engine/canonical.py`, `backend/src/dewpoint/engine/cel/__init__.py`, `backend/src/dewpoint/engine/cel/profile.py`, `backend/src/dewpoint/engine/registry/__init__.py`, `backend/src/dewpoint/engine/registry/control.py`, `backend/src/dewpoint/engine/registry/catalog.py`
+- Create: `backend/src/dewpoint/engine/canonical.py`, `backend/src/dewpoint/engine/schema_refs.py`, `backend/src/dewpoint/engine/cel/__init__.py`, `backend/src/dewpoint/engine/cel/profile.py`, `backend/src/dewpoint/engine/registry/__init__.py`, `backend/src/dewpoint/engine/registry/control.py`, `backend/src/dewpoint/engine/registry/catalog.py`
 - Create: `backend/tests/support/catalog.py`
-- Test: `backend/tests/engine/__init__.py`, `backend/tests/engine/registry/__init__.py`, `backend/tests/engine/registry/test_catalog.py`
+- Test: `backend/tests/engine/__init__.py`, `backend/tests/engine/registry/__init__.py`, `backend/tests/engine/registry/test_catalog.py`, `backend/tests/engine/test_schema_refs.py`
 
 **Interfaces:**
 - Consumes: `dewpoint.sdk.node.{TYPE_RE, PORT_RE, RESERVED_PORTS, NodeKind, SideEffect}`, `dewpoint.sdk.version.SDK_MAJOR`.
@@ -1184,7 +1201,15 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `CURRENT_CEL_PROFILE: str`.
   - `control.IF, SWITCH, LOOP, FILTER, SET_VARIABLES, DELAY, WAIT_UNTIL, STOP, FAIL, RUN_WORKFLOW, TRANSFORM` (refs such as `"flow.if@1"`), and `CONTROL_TYPES: frozenset[str]`.
   - `NodeTypeSpec(type, version, kind, title, ports, dynamic_ports, config_schema, output_schema, side_effect, state)` with `.ref`.
-  - `spec_from_manifest(node_manifest, state="active")`, `schema_hash(node_manifest) -> str`.
+  - `spec_from_manifest(node_manifest, state="active")`.
+  - `contract_hash(node_manifest) -> str`: covers **everything except display metadata**.
+    - Display metadata is the manifest's `title` and `description`, plus these schema annotations: `title`, `description`, `examples`, `x-widget`, `x-group`.
+    - Annotations are stripped only where schemas appear, so a property that happens to be called `title` is still part of the contract.
+    - Credentials, capabilities, retry, timeout, ports, kind, side effect, schemas and the engine markers are all covered, as is any manifest key added later (unless it is explicitly declared display metadata).
+  - `dewpoint.engine.schema_refs.ref_problems(schema) -> list[str]`: empty only when the schema passes these rules:
+    - every `$ref` is `#/$defs/<name>` and resolves;
+    - there is no `$id`, `$anchor`, `$dynamicRef`, `$dynamicAnchor`, `$recursiveRef` or `$recursiveAnchor`;
+    - no chain of definitions refers back to itself without descending into the data (through `$ref`, `allOf`, `anyOf`, `oneOf`, `not`, `if`/`then`/`else` or `dependentSchemas`).
   - `Catalog(specs)` with `.get(ref) -> NodeTypeSpec | None` and `.refs()`.
   - `validate_plugin_manifest(manifest) -> list[str]`.
   - Test helper `tests.support.catalog.catalog(*plugins, states=None) -> Catalog`.
@@ -1197,14 +1222,59 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 # SPDX-License-Identifier: Apache-2.0
 ```
 
+`backend/tests/engine/test_schema_refs.py`:
+
+```python
+# SPDX-License-Identifier: Apache-2.0
+from typing import Any
+
+import pytest
+
+from dewpoint.engine.schema_refs import ref_problems
+
+TREE = {
+    "type": "object",
+    "properties": {"root": {"$ref": "#/$defs/Node"}},
+    "$defs": {
+        "Node": {"type": "object", "properties": {"children": {"type": "array", "items": {"$ref": "#/$defs/Node"}}}}
+    },
+}
+
+
+def test_local_and_structurally_recursive_refs_are_fine() -> None:
+    assert ref_problems(TREE) == []
+    assert ref_problems({"type": "object", "properties": {"title": {"type": "string"}}}) == []
+
+
+@pytest.mark.parametrize(
+    ("schema", "fragment"),
+    [
+        ({"properties": {"x": {"$ref": "#/$defs/Missing"}}}, "must name an entry"),
+        ({"properties": {"x": {"$ref": "https://example.com/s.json"}}}, "must name an entry"),
+        ({"properties": {"x": {"$ref": "#"}}}, "must name an entry"),
+        ({"$id": "https://example.com/s.json", "type": "object"}, "`$id` isn't supported"),
+        ({"$defs": {"A": {"$dynamicAnchor": "a"}}}, "`$dynamicAnchor` isn't supported"),
+        ({"$defs": {"A": {"$ref": "#/$defs/B"}, "B": {"$ref": "#/$defs/A"}}}, "cycle"),
+        ({"$defs": {"A": {"allOf": [{"$ref": "#/$defs/A"}]}}}, "cycle"),
+        ({"$defs": {"A": {"anyOf": [{"type": "string"}, {"not": {"$ref": "#/$defs/A"}}]}}}, "cycle"),
+    ],
+)
+def test_unsupported_references_are_reported(schema: dict[str, Any], fragment: str) -> None:
+    problems = ref_problems(schema)
+    assert problems and any(fragment in p for p in problems), problems
+```
+
 `backend/tests/engine/registry/test_catalog.py`:
 
 ```python
 # SPDX-License-Identifier: Apache-2.0
 import copy
+from typing import Any
+
+import pytest
 
 from dewpoint.engine.canonical import canonical_json
-from dewpoint.engine.registry.catalog import Catalog, schema_hash, spec_from_manifest, validate_plugin_manifest
+from dewpoint.engine.registry.catalog import Catalog, contract_hash, spec_from_manifest, validate_plugin_manifest
 from dewpoint.plugins.flow import PLUGIN
 from tests.support.catalog import catalog
 from tests.support.plugins.testkit import TESTKIT
@@ -1239,13 +1309,59 @@ def test_flow_must_declare_every_control_type() -> None:
     assert "flow: missing control type flow.stop@1" in validate_plugin_manifest(m)
 
 
-def test_schema_hash_tracks_the_contract_only() -> None:
-    m = copy.deepcopy(TESTKIT.manifest()["nodes"][0])
-    h = schema_hash(m)
-    m["title"] = "Renamed"
-    assert schema_hash(m) == h
-    m["output_schema"]["properties"]["extra"] = {"type": "string"}
-    assert schema_hash(m) != h
+ECHO = TESTKIT.manifest()["nodes"][0]
+
+
+def _changed(path: tuple[str, ...], value: Any) -> dict[str, Any]:
+    m = copy.deepcopy(ECHO)
+    target = m
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    return m
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("credentials",), ["mist"]),
+        (("capabilities",), ["mist.write"]),
+        (("retry", "max_attempts"), 9),
+        (("retry", "non_retryable"), ["testkit.bad"]),
+        (("timeout_s",), 5.0),
+        (("side_effect",), "keyed"),
+        (("ports",), ["out", "other"]),
+        (("dynamic_ports",), "value"),
+        (("kind",), "control"),
+        (("config_schema", "properties", "value", "type"), "string"),
+        (("config_schema", "properties", "value", "x-dewpoint-literal"), True),
+        (("output_schema", "properties", "value", "x-sensitive"), True),
+        (("config_schema", "properties", "title"), {"type": "string"}),  # a *property* named title is contract
+    ],
+)
+def test_contract_hash_covers_everything_that_changes_behaviour(path: tuple[str, ...], value: Any) -> None:
+    assert contract_hash(_changed(path, value)) != contract_hash(ECHO)
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("title",), "Echo (renamed)"),
+        (("description",), "Returns its input."),
+        (("config_schema", "properties", "value", "title"), "Payload"),
+        (("config_schema", "properties", "value", "description"), "Any JSON value."),
+        (("config_schema", "properties", "value", "examples"), [1, "a"]),
+        (("config_schema", "properties", "value", "x-widget"), "pill-text"),
+    ],
+)
+def test_display_metadata_is_not_part_of_the_contract(path: tuple[str, ...], value: Any) -> None:
+    assert contract_hash(_changed(path, value)) == contract_hash(ECHO)
+
+
+def test_manifest_schemas_must_use_resolvable_local_refs() -> None:
+    m = copy.deepcopy(TESTKIT.manifest())
+    m["nodes"][0]["config_schema"]["properties"]["value"] = {"$ref": "https://example.com/value.json"}
+    assert any("must name an entry" in p for p in validate_plugin_manifest(m))
 
 
 def test_catalog_lookup_and_states() -> None:
@@ -1260,10 +1376,94 @@ def test_catalog_lookup_and_states() -> None:
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `uv run pytest tests/engine/registry -q`
-Expected: FAIL: `ModuleNotFoundError: No module named 'dewpoint.engine.canonical'`.
+Run: `uv run pytest tests/engine -q`
+Expected: FAIL: `ModuleNotFoundError: No module named 'dewpoint.engine.canonical'` (or `schema_refs`).
 
 - [ ] **Step 3: Implement**
+
+`backend/src/dewpoint/engine/schema_refs.py`:
+
+```python
+# SPDX-License-Identifier: Apache-2.0
+"""Dewpoint supports only local `$ref`s (`#/$defs/<name>`) that resolve, and no reference chain that recurses without
+descending into the data. Anything else would make validation depend on base-URI rules, network fetches or unbounded
+recursion, so it is reported as a problem instead of raising during validation."""
+
+from collections.abc import Mapping
+from typing import Any
+
+PREFIX = "#/$defs/"
+UNSUPPORTED = ("$id", "$anchor", "$dynamicRef", "$dynamicAnchor", "$recursiveRef", "$recursiveAnchor")
+_SAME_INSTANCE_LISTS = ("allOf", "anyOf", "oneOf")
+_SAME_INSTANCE_ONE = ("not", "if", "then", "else")
+
+
+def _same_instance_refs(node: Any) -> set[str]:
+    """Definitions applied to the *same* instance as `node`, so recursion through them consumes no data."""
+    if not isinstance(node, Mapping):
+        return set()
+    out: set[str] = set()
+    ref = node.get("$ref")
+    if isinstance(ref, str) and ref.startswith(PREFIX):
+        out.add(ref[len(PREFIX) :])
+    for key in _SAME_INSTANCE_LISTS:
+        value = node.get(key)
+        if isinstance(value, list):
+            for sub in value:
+                out |= _same_instance_refs(sub)
+    for key in _SAME_INSTANCE_ONE:
+        out |= _same_instance_refs(node.get(key))
+    dependent = node.get("dependentSchemas")
+    if isinstance(dependent, Mapping):
+        for sub in dependent.values():
+            out |= _same_instance_refs(sub)
+    return out
+
+
+def ref_problems(schema: Any) -> list[str]:
+    if not isinstance(schema, Mapping):
+        return []
+    defs = schema.get("$defs", {})
+    if not isinstance(defs, Mapping):
+        return ["`$defs` must be an object"]
+    problems: list[str] = []
+
+    def walk(node: Any, path: str) -> None:
+        if isinstance(node, Mapping):
+            for key in UNSUPPORTED:
+                if key in node:
+                    problems.append(f"{path or '/'}: `{key}` isn't supported")
+            if "$ref" in node:
+                ref = node["$ref"]
+                if not isinstance(ref, str) or not ref.startswith(PREFIX) or ref[len(PREFIX) :] not in defs:
+                    problems.append(f"{path or '/'}: `$ref` must name an entry of this schema's `$defs` (#/$defs/<name>)")
+            for key, value in node.items():
+                walk(value, f"{path}/{key}")
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                walk(value, f"{path}/{index}")
+
+    walk(schema, "")
+    if problems:
+        return problems
+    edges = {name: _same_instance_refs(sub) for name, sub in defs.items()}
+    state: dict[str, int] = {}  # 1 = on the current path, 2 = finished
+
+    def cyclic(name: str) -> bool:
+        if state.get(name) == 1:
+            return True
+        if state.get(name) == 2:
+            return False
+        state[name] = 1
+        found = any(cyclic(target) for target in sorted(edges.get(name, ())))
+        state[name] = 2
+        return found
+
+    for name in sorted(defs):
+        if cyclic(name):
+            return [f"/$defs/{name}: `$ref` cycle that never descends into the data"]
+    return []
+```
 
 `backend/src/dewpoint/engine/canonical.py`:
 
@@ -1341,10 +1541,14 @@ from jsonschema.exceptions import SchemaError
 
 from dewpoint.engine.canonical import sha256_hex
 from dewpoint.engine.registry.control import CONTROL_TYPES
+from dewpoint.engine.schema_refs import ref_problems
 from dewpoint.sdk.node import PORT_RE, RESERVED_PORTS, TYPE_RE, NodeKind, SideEffect
 from dewpoint.sdk.version import SDK_MAJOR
 
-_HASHED = ("kind", "ports", "dynamic_ports", "config_schema", "output_schema", "side_effect")
+_DISPLAY = frozenset({"title", "description"})  # manifest keys that may change within a version
+_SCHEMA_ANNOTATIONS = frozenset({"title", "description", "examples", "x-widget", "x-group"})
+_NAMED_SUBSCHEMAS = frozenset({"properties", "patternProperties", "$defs", "dependentSchemas"})
+_DATA = frozenset({"default", "const", "enum"})  # JSON values, not schemas: never stripped
 _KINDS = {k.value for k in NodeKind}
 _SIDE_EFFECTS = {s.value for s in SideEffect}
 
@@ -1382,9 +1586,33 @@ def spec_from_manifest(m: Mapping[str, Any], state: str = "active") -> NodeTypeS
     )
 
 
-def schema_hash(m: Mapping[str, Any]) -> str:
-    """Identity of a node type version's contract. Published versions depend on it, so it must never change."""
-    return sha256_hex({k: m.get(k) for k in _HASHED})
+def _schema_contract(node: Any) -> Any:
+    """A schema without display annotations. Only keys in schema positions are dropped: a property that happens to be
+    called `title` stays, and so does anything inside `default`, `const` or `enum`."""
+    if isinstance(node, list):
+        return [_schema_contract(v) for v in node]
+    if not isinstance(node, Mapping):
+        return node
+    out: dict[str, Any] = {}
+    for key, value in node.items():
+        if key in _SCHEMA_ANNOTATIONS:
+            continue
+        if key in _DATA:
+            out[key] = value
+        elif key in _NAMED_SUBSCHEMAS and isinstance(value, Mapping):
+            out[key] = {name: _schema_contract(sub) for name, sub in value.items()}
+        else:
+            out[key] = _schema_contract(value)
+    return out
+
+
+def contract_hash(m: Mapping[str, Any]) -> str:
+    """Identity of a node type version's execution contract: every manifest field except display metadata.
+    Published versions depend on it, so a registered version's contract may never change (sync refuses)."""
+    contract = {k: v for k, v in m.items() if k not in _DISPLAY}
+    for key in ("config_schema", "output_schema"):
+        contract[key] = _schema_contract(m.get(key))
+    return sha256_hex(contract)
 
 
 class Catalog:
@@ -1407,7 +1635,7 @@ def _schema_problems(ref: str, label: str, schema: Any) -> list[str]:
         return [f"{ref}: {label} is not a valid JSON Schema ({e.message})"]
     if schema.get("type") != "object":
         return [f"{ref}: {label} must describe an object"]
-    return []
+    return [f"{ref}: {label}: {p}" for p in ref_problems(schema)]
 
 
 def _node_problems(plugin: str, n: Mapping[str, Any], seen: set[str]) -> list[str]:
@@ -1481,15 +1709,15 @@ def catalog(*plugins: Plugin, states: dict[str, str] | None = None) -> Catalog:
 
 - [ ] **Step 4: Run the tests**
 
-Run: `uv run pytest tests/engine/registry -q`
-Expected: 6 passed.
+Run: `uv run pytest tests/engine -q`
+Expected: all passed.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-uv run ruff format . && uv run ruff check . && uv run mypy src && uv run lint-imports && uv run pytest tests/engine/registry tests/plugins -q && \
+uv run ruff format . && uv run ruff check . && uv run mypy src && uv run lint-imports && uv run pytest tests/engine tests/plugins -q && \
 git add src/dewpoint/engine tests/engine tests/support/catalog.py && \
-git commit -m "feat(engine): canonical JSON, control type refs and manifest registry checks
+git commit -m "feat(engine): canonical JSON, contract hashing, local-ref rules and manifest registry checks
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -1512,7 +1740,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     - `GraphNode(id, key, type, config, position, options: Options(timeout_s, max_attempts, on_error: fail|continue|port))`;
     - `Edge(source: EdgeFrom(node, port="out") [JSON alias "from"], to: EdgeTo(node))`;
     - `GraphSettings(input_schema, vars_schema, outputs, failure_handler: UUID | None)`.
-  - Functions: `parse_graph(data) -> Graph`, which raises `GraphFormatError(diagnostics)`; `graph_json(graph) -> dict`; `content_hash(graph) -> str`.
+  - Functions: `parse_graph(data) -> Graph`, which raises `GraphFormatError(diagnostics)`; `graph_json(graph) -> dict`.
+  - Hashes:
+    - `graph_hash(graph) -> str` identifies **the authored graph only**;
+    - `version_hash(*, graph_hash, subflow_pins, failure_handler_version_id, cel_profile, engine_abi) -> str` identifies an **executable version**: the graph plus everything publish resolves. Audit and integrity checks use this one.
   - Constants: `MAX_NODES = 500`, `MAX_EDGES = 2000`.
   - `analyze_structure(graph, catalog) -> tuple[Structure | None, list[Diagnostic]]`.
     - `Structure` fields: `nodes`, `specs`, `ports` (normal ports: static, then dynamic), `out_edges`, `in_edges`, `topo`, `regions: {loop_id | None: Region(loop, parent, members, depth)}`, `region_of`, `by_key`, and `.chain(region)`.
@@ -1593,7 +1824,7 @@ from typing import Any
 
 import pytest
 
-from dewpoint.engine.graph.model import MAX_NODES, GraphFormatError, content_hash, graph_json, parse_graph
+from dewpoint.engine.graph.model import MAX_NODES, GraphFormatError, graph_hash, graph_json, parse_graph, version_hash
 from tests.support.graphs import G, nid
 
 
@@ -1604,11 +1835,30 @@ def test_round_trip_keeps_the_from_alias() -> None:
     assert parse_graph(data) == g
 
 
-def test_content_hash_is_stable_and_sensitive() -> None:
+def test_graph_hash_is_stable_and_sensitive() -> None:
     a = G().node("a", "testkit.echo@1", {"value": 1}).build()
     b = G().node("a", "testkit.echo@1", {"value": 1}).build()
     c = G().node("a", "testkit.echo@1", {"value": 2}).build()
-    assert content_hash(a) == content_hash(b) != content_hash(c)
+    assert graph_hash(a) == graph_hash(b) != graph_hash(c)
+
+
+def test_version_hash_covers_what_publish_resolves() -> None:
+    base: dict[str, Any] = {
+        "graph_hash": "g",
+        "subflow_pins": {"node": "v1"},
+        "failure_handler_version_id": None,
+        "cel_profile": "p",
+        "engine_abi": 1,
+    }
+    h = version_hash(**base)
+    for change in (
+        {"graph_hash": "g2"},
+        {"subflow_pins": {"node": "v2"}},
+        {"failure_handler_version_id": "f"},
+        {"cel_profile": "p2"},
+        {"engine_abi": 2},
+    ):
+        assert version_hash(**{**base, **change}) != h, change
 
 
 @pytest.mark.parametrize(
@@ -1817,6 +2067,7 @@ class Diagnostic:
 """The workflow graph document (`graph_format: 1`)."""
 
 import uuid
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -1915,8 +2166,30 @@ def graph_json(graph: Graph) -> dict[str, Any]:
     return graph.model_dump(mode="json", by_alias=True)
 
 
-def content_hash(graph: Graph) -> str:
+def graph_hash(graph: Graph) -> str:
+    """The authored graph only. Two versions with equal graph hashes may still run different sub-flow versions."""
     return sha256_hex(graph_json(graph))
+
+
+def version_hash(
+    *,
+    graph_hash: str,
+    subflow_pins: Mapping[str, str],
+    failure_handler_version_id: str | None,
+    cel_profile: str,
+    engine_abi: int,
+) -> str:
+    """Identity of an executable version: the graph plus everything resolved at publish that changes what runs.
+    Pinned versions are immutable, so the pins identify the whole closure. Audit and integrity checks use this."""
+    return sha256_hex(
+        {
+            "graph_hash": graph_hash,
+            "subflow_pins": dict(subflow_pins),
+            "failure_handler_version_id": failure_handler_version_id,
+            "cel_profile": cel_profile,
+            "engine_abi": engine_abi,
+        }
+    )
 ```
 
 - [ ] **Step 4: Implement structural analysis**
@@ -2979,7 +3252,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - Functions: `referenced_workflows(graph) -> set[UUID]`, `validate(graph, ctx) -> ValidationResult`.
   - `MAX_SUBFLOW_DEPTH = 5`.
 - Diagnostic codes introduced:
-  - settings and values: `settings.invalid_schema`, `settings.output_name`, `value.syntax`, `value.literal_only`, `value.kind_not_allowed`, `config.invalid`, `cel.unavailable`;
+  - settings and values: `settings.invalid_schema`, `settings.unresolvable_ref`, `settings.output_name`, `value.syntax`, `value.literal_only`, `value.kind_not_allowed`, `config.invalid`, `cel.unavailable`;
   - references: `ref.unknown_step`, `ref.unknown_var`, `ref.unknown_field`, `ref.out_of_scope`, `ref.not_upstream`, `ref.no_error_output`, `ref.conditional`, `ref.type_mismatch`, `ref.loop_outside`;
   - templates: `template.not_string`, `template.part_not_scalar`;
   - variables: `vars.invalid_name`, `vars.no_default`, `vars.bad_default`, `vars.undeclared`, `vars.write_in_loop`, `vars.concurrent_writers`;
@@ -3291,6 +3564,22 @@ def test_variables() -> None:
     assert codes(no_default) == ["vars.no_default"]
 
 
+def test_settings_schemas_must_use_resolvable_local_refs() -> None:
+    missing = G().node("a", ECHO)
+    missing.settings["vars_schema"] = {"type": "object", "properties": {"x": {"$ref": "#/$defs/Missing", "default": 1}}}
+    assert codes(missing) == ["settings.unresolvable_ref"]  # reported, never raised
+    remote = G().node("a", ECHO)
+    remote.settings["input_schema"] = {"type": "object", "properties": {"s": {"$ref": "https://example.com/s.json"}}}
+    assert codes(remote) == ["settings.unresolvable_ref"]
+    cyclic = G().node("a", ECHO)
+    cyclic.settings["vars_schema"] = {
+        "type": "object",
+        "properties": {"x": {"$ref": "#/$defs/A", "default": 1}},
+        "$defs": {"A": {"allOf": [{"$ref": "#/$defs/A"}]}},
+    }
+    assert codes(cyclic) == ["settings.unresolvable_ref"]
+
+
 def test_static_waits_must_fit_the_run_deadline() -> None:
     day = 86_400
     g = (
@@ -3580,6 +3869,7 @@ from dewpoint.engine.graph.values import (
 )
 from dewpoint.engine.registry import control as C
 from dewpoint.engine.registry.catalog import Catalog, NodeTypeSpec
+from dewpoint.engine.schema_refs import ref_problems
 from dewpoint.sdk.fields import KINDS
 
 MAX_SUBFLOW_DEPTH = 5
@@ -3705,6 +3995,11 @@ def _settings(graph: Graph) -> list[Diagnostic]:
             out.append(
                 Diagnostic(code="settings.invalid_schema", field=f"/settings/{label}", message="It must describe an object.")
             )
+        # Tenant-authored schemas: only resolvable local $refs, so validation can never raise (see schema_refs).
+        out += [
+            Diagnostic(code="settings.unresolvable_ref", field=f"/settings/{label}", message=f"{problem}.")
+            for problem in ref_problems(schema)
+        ]
     if any(d.field == "/settings/vars_schema" for d in out):
         return out
     props = st.vars_schema.get("properties", {})
@@ -4188,7 +4483,8 @@ def validate(graph: Graph, ctx: ValidationContext) -> ValidationResult:
     node_refs = tuple(sorted({n.type for n in graph.nodes}))
     if structure is None:
         return ValidationResult(tuple([*settings, *structural]), node_refs)
-    v = _Validator(graph, structure, ctx, settings_ok=not any(d.code == "settings.invalid_schema" for d in settings))
+    unusable = ("settings.invalid_schema", "settings.unresolvable_ref")
+    v = _Validator(graph, structure, ctx, settings_ok=not any(d.code in unusable for d in settings))
     v.run()
     return ValidationResult(
         diagnostics=tuple([*settings, *structural, *v.diags]),
@@ -4227,9 +4523,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Produces these tables:
-  - Global: `plugin_manifests(name pk, version, sdk_version, manifest, synced_at)`; `node_type_versions((type, version) pk, plugin, kind, manifest, schema_hash, state, state_changed_at, created_at)`; `cel_profiles(profile pk, state, state_changed_at, created_at)`.
+  - Global: `plugin_manifests(name pk, version, sdk_version, manifest, synced_at)`; `node_type_versions((type, version) pk, plugin, kind, manifest, contract_hash, state, state_changed_at, created_at)`; `cel_profiles(profile pk, state, state_changed_at, created_at)`.
   - Tenant, RLS: `workflows(id, tenant_id, name, enabled, active_version_id, draft, draft_revision, created_by, created_at, updated_at)`.
-  - Tenant, RLS, insert-only: `workflow_versions(id, tenant_id, workflow_id, number, graph, node_refs, engine_abi, cel_profile, connection_ids, subflow_version_ids, failure_handler_version_id, input_schema, output_schema, vars_schema, expressions, closure_version_ids, closure_workflow_ids, closure_node_refs, closure_cel_profiles, closure_depth, content_hash, published_by, published_at)`.
+  - Tenant, RLS, insert-only: `workflow_versions(id, tenant_id, workflow_id, number, graph, node_refs, engine_abi, cel_profile, connection_ids, subflow_version_ids, failure_handler_version_id, input_schema, output_schema, vars_schema, expressions, closure_version_ids, closure_workflow_ids, closure_node_refs, closure_cel_profiles, closure_depth, graph_hash, version_hash, published_by, published_at)`.
   - `workflows_active_version_fk`: a composite key `(active_version_id, id) → workflow_versions(id, workflow_id)`, so the active version always belongs to its workflow.
 - Grants:
   - API: `SELECT, INSERT, UPDATE` on `workflows`; `SELECT, INSERT` on `workflow_versions`; `SELECT` on the registry tables.
@@ -4285,10 +4581,11 @@ async def seed_workflow(
             text(
                 "insert into workflow_versions(id,tenant_id,workflow_id,number,graph,node_refs,engine_abi,cel_profile,"
                 "input_schema,output_schema,vars_schema,closure_version_ids,closure_workflow_ids,closure_node_refs,"
-                "closure_cel_profiles,closure_depth,content_hash) values (:v,:t,:w,1,'{}',cast(:refs as text[]),1,"
+                "closure_cel_profiles,closure_depth,graph_hash,version_hash) "
+                "values (:v,:t,:w,1,'{}',cast(:refs as text[]),1,"
                 "cast(:p as text),"
                 "'{}','{}','{}',array[cast(:v as uuid)],array[cast(:w as uuid)],cast(:refs as text[]),"
-                "array[cast(:p as text)],0,'h')"
+                "array[cast(:p as text)],0,'g','v')"
             ),
             {"v": version, "t": tenant, "w": wf, "p": PROFILE, "refs": list(node_refs)},
         )
@@ -4434,7 +4731,7 @@ def upgrade() -> None:
         sa.Column("plugin", sa.String(41), sa.ForeignKey("plugin_manifests.name"), nullable=False),
         sa.Column("kind", sa.String(16), nullable=False),
         sa.Column("manifest", pg.JSONB, nullable=False),
-        sa.Column("schema_hash", sa.String(64), nullable=False),
+        sa.Column("contract_hash", sa.String(64), nullable=False),  # everything but display metadata
         sa.Column("state", sa.String(16), nullable=False, server_default="active"),
         sa.Column("state_changed_at", sa.DateTime(timezone=True)),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
@@ -4483,7 +4780,8 @@ def upgrade() -> None:
         sa.Column("closure_node_refs", pg.ARRAY(sa.Text), nullable=False),
         sa.Column("closure_cel_profiles", pg.ARRAY(sa.Text), nullable=False),
         sa.Column("closure_depth", sa.Integer, nullable=False),
-        sa.Column("content_hash", sa.String(64), nullable=False),
+        sa.Column("graph_hash", sa.String(64), nullable=False),  # the authored graph only
+        sa.Column("version_hash", sa.String(64), nullable=False),  # graph + resolved pins + CEL profile + engine ABI
         # No foreign key: an ON DELETE action would have to UPDATE an immutable row.
         sa.Column("published_by", pg.UUID(as_uuid=True)),
         sa.Column("published_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
@@ -4550,7 +4848,7 @@ class NodeTypeVersion(Base):
     plugin: Mapped[str] = mapped_column(String(41), ForeignKey("plugin_manifests.name"))
     kind: Mapped[str] = mapped_column(String(16))
     manifest: Mapped[dict[str, Any]] = mapped_column(JSONB)
-    schema_hash: Mapped[str] = mapped_column(String(64))
+    contract_hash: Mapped[str] = mapped_column(String(64))
     state: Mapped[str] = mapped_column(String(16), default="active")  # active | deprecated | retired
     state_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -4621,7 +4919,8 @@ class WorkflowVersion(UUIDPk, Base):
     closure_node_refs: Mapped[list[str]] = mapped_column(ARRAY(Text))
     closure_cel_profiles: Mapped[list[str]] = mapped_column(ARRAY(Text))
     closure_depth: Mapped[int] = mapped_column(Integer)
-    content_hash: Mapped[str] = mapped_column(String(64))
+    graph_hash: Mapped[str] = mapped_column(String(64))
+    version_hash: Mapped[str] = mapped_column(String(64))
     published_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 ```
@@ -4673,10 +4972,11 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Test: `backend/tests/core/plugins/__init__.py`, `backend/tests/core/plugins/test_registry.py`, `backend/tests/core/plugins/test_lifecycle.py`, `backend/tests/apps/cli/test_plugins_cli.py`
 
 **Interfaces:**
-- Consumes: the models (Task 7); `validate_plugin_manifest`, `schema_hash` and `CURRENT_CEL_PROFILE` (Task 3); the SDK (Task 1); `core.audit.service.record`; `core.db.tenant_scope`.
+- Consumes: the models (Task 7); `validate_plugin_manifest`, `contract_hash` and `CURRENT_CEL_PROFILE` (Task 3); the SDK (Task 1); `core.audit.service.record`; `core.db.tenant_scope`.
 - Produces from `core.plugins.registry`:
-  - `NodeTypeRow(type, version, kind, manifest, schema_hash)` with `.ref`, and `SyncReport(added, unchanged)`.
-  - Errors: `SchemaChangedError(refs)`, `MissingNodeTypeError(refs)`.
+  - `NodeTypeRow(type, version, kind, manifest, contract_hash)` with `.ref`, and `SyncReport(added, unchanged)`.
+  - Errors: `ContractChangedError(refs)`, `MissingNodeTypeError(refs)`.
+  - A re-sync may change only display metadata; that is stored in place. Any contract change is refused.
   - Functions: `split_ref(ref) -> (type, version)`, `sync_plugins(s, [(manifest, rows)]) -> SyncReport`, `ensure_cel_profile(s, profile)`, `load_node_types(s, refs) -> list[NodeTypeVersion]`, `list_node_types(s, states=("active", "deprecated"))`.
 - Produces from `core.plugins.lifecycle`:
   - `Entry(kind: "node" | "cel", key)` with `.lock_key` and `__str__`; `entries_for(node_refs, cel_profiles) -> list[Entry]` (sorted).
@@ -4720,6 +5020,7 @@ async def sync_test_plugins(sessionmaker: Any) -> None:
 ```python
 # SPDX-License-Identifier: Apache-2.0
 from dataclasses import replace
+from typing import Any
 
 import pytest
 from sqlalchemy import select, text, update
@@ -4729,6 +5030,7 @@ from dewpoint.apps.plugin_loader import PluginLoadError, prepare, sync_installed
 from dewpoint.core.models.plugins import CelProfile, NodeTypeVersion
 from dewpoint.core.plugins import registry
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
+from dewpoint.engine.registry.catalog import contract_hash
 from dewpoint.plugins.flow import PLUGIN
 from dewpoint.sdk import Node, NodeKind, Plugin
 from tests.support.plugins.testkit import TESTKIT
@@ -4747,15 +5049,25 @@ async def test_sync_registers_and_is_idempotent(admin_sessionmaker) -> None:
     assert {"flow.if@1", "testkit.echo@1"} <= refs and state == "active"
 
 
-async def test_contract_changes_are_refused(admin_sessionmaker) -> None:
+async def test_behaviour_changes_are_refused_but_display_changes_are_stored(admin_sessionmaker) -> None:
     async with admin_sessionmaker() as s, s.begin():
         await sync_installed(s, [PLUGIN, TESTKIT])
     flow, (manifest, rows) = prepare([PLUGIN, TESTKIT])
-    changed = [replace(rows[0], schema_hash="0" * 64), *rows[1:]]
-    with pytest.raises(registry.SchemaChangedError) as e:
-        async with admin_sessionmaker() as s, s.begin():
-            await registry.sync_plugins(s, [flow, (manifest, changed)])
-    assert e.value.refs == ["testkit.echo@1"]
+
+    def with_echo(field: str, value: Any) -> list[Any]:
+        node = {**rows[0].manifest, field: value}
+        return [flow, (manifest, [replace(rows[0], manifest=node, contract_hash=contract_hash(node)), *rows[1:]])]
+
+    for field, value in (("timeout_s", 1.0), ("retry", {**rows[0].manifest["retry"], "max_attempts": 9})):
+        with pytest.raises(registry.ContractChangedError) as e:
+            async with admin_sessionmaker() as s, s.begin():
+                await registry.sync_plugins(s, with_echo(field, value))
+        assert e.value.refs == ["testkit.echo@1"], field
+    async with admin_sessionmaker() as s, s.begin():
+        await registry.sync_plugins(s, with_echo("title", "Echo (renamed)"))
+    async with admin_sessionmaker() as s:
+        stored = await s.get(NodeTypeVersion, ("testkit.echo", 1))
+        assert stored is not None and stored.manifest["title"] == "Echo (renamed)"
 
 
 async def test_a_build_cannot_drop_live_node_types(admin_sessionmaker) -> None:
@@ -4971,7 +5283,7 @@ class NodeTypeRow:
     version: int
     kind: str
     manifest: dict[str, Any]
-    schema_hash: str
+    contract_hash: str
 
     @property
     def ref(self) -> str:
@@ -4984,8 +5296,8 @@ class SyncReport:
     unchanged: list[str]
 
 
-class SchemaChangedError(ValueError):
-    """A registered node type version changed its contract. Ship the change as a new version."""
+class ContractChangedError(ValueError):
+    """A registered node type version changed its contract (anything but display metadata). Ship a new version."""
 
     def __init__(self, refs: list[str]) -> None:
         super().__init__(", ".join(refs))
@@ -5042,18 +5354,18 @@ async def sync_plugins(s: AsyncSession, plugins: Sequence[tuple[dict[str, Any], 
                         plugin=manifest["name"],
                         kind=row.kind,
                         manifest=row.manifest,
-                        schema_hash=row.schema_hash,
+                        contract_hash=row.contract_hash,
                         state="active",
                     )
                 )
                 added.append(row.ref)
-            elif existing.schema_hash != row.schema_hash:
+            elif existing.contract_hash != row.contract_hash:
                 changed.append(row.ref)
             else:
-                existing.manifest = row.manifest  # titles and descriptions may change; the contract may not
+                existing.manifest = row.manifest  # equal contract hashes: only display metadata differs
                 unchanged.append(row.ref)
     if changed:
-        raise SchemaChangedError(sorted(changed))
+        raise ContractChangedError(sorted(changed))
     await s.flush()
     live = await s.execute(
         select(NodeTypeVersion.type, NodeTypeVersion.version).where(NodeTypeVersion.state != "retired")
@@ -5312,7 +5624,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.plugins.registry import NodeTypeRow, SyncReport, ensure_cel_profile, sync_plugins
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
-from dewpoint.engine.registry.catalog import schema_hash, validate_plugin_manifest
+from dewpoint.engine.registry.catalog import contract_hash, validate_plugin_manifest
 from dewpoint.sdk import Plugin
 
 GROUP = "dewpoint.plugins"
@@ -5341,7 +5653,7 @@ def prepare(plugins: Sequence[Plugin]) -> list[tuple[dict[str, Any], list[NodeTy
         manifest = plugin.manifest()  # raises ManifestError for class-level problems
         problems += validate_plugin_manifest(manifest)
         rows = [
-            NodeTypeRow(type=n["type"], version=n["version"], kind=n["kind"], manifest=n, schema_hash=schema_hash(n))
+            NodeTypeRow(type=n["type"], version=n["version"], kind=n["kind"], manifest=n, contract_hash=contract_hash(n))
             for n in manifest["nodes"]
         ]
         out.append((manifest, rows))
@@ -5365,8 +5677,8 @@ from dewpoint.apps.plugin_loader import PluginLoadError, installed_plugins, prep
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.plugins.lifecycle import Entry
 from dewpoint.core.plugins.registry import (
+    ContractChangedError,
     MissingNodeTypeError,
-    SchemaChangedError,
     ensure_cel_profile,
     list_node_types,
     sync_plugins,
@@ -5405,7 +5717,7 @@ def plugins_sync() -> None:
 
     try:
         added, unchanged = asyncio.run(_in_session(_run))
-    except SchemaChangedError as e:
+    except ContractChangedError as e:
         typer.echo(f"ERROR: the contract of {', '.join(e.refs)} changed; publish a new node type version instead")
         raise typer.Exit(2) from None
     except MissingNodeTypeError as e:
@@ -5649,6 +5961,23 @@ async def test_subflows_are_pinned_into_the_closure(
     assert v.subflow_version_ids == {str(nid("r")): str(child_v.id)}
     assert set(v.closure_version_ids) == {v.id, child_v.id} and v.closure_depth == 1
     assert v.closure_node_refs == ["flow.run_workflow@1", "testkit.echo@1"]
+
+
+async def test_version_hash_changes_when_a_pinned_subflow_changes(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    child = await create(api_sessionmaker, ctx, ECHO_GRAPH, name="child")
+    await publish(api_sessionmaker, ctx, child, api_settings)
+    parent = await create(api_sessionmaker, ctx, runs(child), name="parent")
+    first = (await publish(api_sessionmaker, ctx, parent, api_settings)).version
+    await save(api_sessionmaker, ctx, child, SENSITIVE_GRAPH)
+    await publish(api_sessionmaker, ctx, child, api_settings)  # the child's active version changes
+    second = (await publish(api_sessionmaker, ctx, parent, api_settings)).version  # same parent graph
+    assert first is not None and second is not None
+    assert second.graph_hash == first.graph_hash and second.version_hash != first.version_hash
+    assert second.subflow_version_ids != first.subflow_version_ids
 
 
 async def test_cycles_through_subflows_are_refused(
@@ -5996,7 +6325,8 @@ class NewVersion:
     closure_node_refs: list[str]
     closure_cel_profiles: list[str]
     closure_depth: int
-    content_hash: str
+    graph_hash: str
+    version_hash: str
     expressions: list[Any] = field(default_factory=list)
     connection_ids: list[uuid.UUID] = field(default_factory=list)
 
@@ -6028,7 +6358,8 @@ async def insert_version(s: AsyncSession, ctx: TenantContext, wf: Workflow, new:
         closure_node_refs=new.closure_node_refs,
         closure_cel_profiles=new.closure_cel_profiles,
         closure_depth=new.closure_depth,
-        content_hash=new.content_hash,
+        graph_hash=new.graph_hash,
+        version_hash=new.version_hash,
         published_by=ctx.user.id,
     )
     s.add(version)
@@ -6046,7 +6377,8 @@ async def insert_version(s: AsyncSession, ctx: TenantContext, wf: Workflow, new:
         details={
             "version": number,
             "version_id": str(version.id),
-            "content_hash": new.content_hash,
+            "graph_hash": new.graph_hash,
+            "version_hash": new.version_hash,
             "closure_depth": new.closure_depth,
         },
     )
@@ -6123,7 +6455,7 @@ from dewpoint.core.workflows import service
 from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.graph.diagnostics import Diagnostic
-from dewpoint.engine.graph.model import Graph, GraphFormatError, content_hash, graph_json, parse_graph
+from dewpoint.engine.graph.model import Graph, GraphFormatError, graph_hash, graph_json, parse_graph, version_hash
 from dewpoint.engine.graph.validate import (
     MAX_SUBFLOW_DEPTH,
     SubflowInfo,
@@ -6245,6 +6577,8 @@ async def publish(
         return Published(None, errors, warnings)
     version_id = uuid.uuid4()
     graph_settings = checked.graph.settings
+    authored = graph_hash(checked.graph)
+    fh = checked.result.failure_handler_version_id
     version = await service.insert_version(
         s,
         ctx,
@@ -6265,7 +6599,14 @@ async def publish(
             closure_node_refs=closure_node_refs,
             closure_cel_profiles=closure_cel_profiles,
             closure_depth=_depth(checked.pins),
-            content_hash=content_hash(checked.graph),
+            graph_hash=authored,
+            version_hash=version_hash(
+                graph_hash=authored,
+                subflow_pins=checked.result.subflow_pins,
+                failure_handler_version_id=str(fh) if fh else None,
+                cel_profile=CURRENT_CEL_PROFILE,
+                engine_abi=ENGINE_ABI,
+            ),
         ),
     )
     return Published(version, [], warnings)
@@ -6297,7 +6638,7 @@ async def activate(s: AsyncSession, ctx: TenantContext, wf: Workflow, version: W
 - [ ] **Step 6: Run the tests**
 
 Run: `uv run pytest tests/apps/test_workflow_ops.py tests/apps/test_lifecycle_races.py -q`
-Expected: 11 passed.
+Expected: 12 passed.
 
 - [ ] **Step 7: Commit**
 
@@ -6329,7 +6670,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `PATCH /t/{tenant_id}/workflows/{id}` (`workflow.publish`), body `{name?, enabled?}`.
   - `POST /t/{tenant_id}/workflows/{id}/validate` (`workflow.edit`): returns `{draft_revision, valid, diagnostics}`.
   - `POST /t/{tenant_id}/workflows/{id}/publish` (`workflow.publish`, `If-Match`): returns 201 `{version_id, number, warnings}`; otherwise 422 `{error: invalid, diagnostics}` or 409 `draft_conflict`.
-  - `GET /t/{tenant_id}/workflows/{id}/versions` (`workflow.view`): `[{id, number, published_at, published_by, content_hash, cel_profile, node_refs, active, executable, blocked_by}]`.
+  - `GET /t/{tenant_id}/workflows/{id}/versions` (`workflow.view`): `[{id, number, published_at, published_by, graph_hash, version_hash, cel_profile, node_refs, active, executable, blocked_by}]`.
   - `POST /t/{tenant_id}/workflows/{id}/activate` (`workflow.publish`), body `{version_id}`: returns `{active_version_id, number, warnings}`; otherwise 404, or 422 `{error: not_activatable, diagnostics}`.
 - The workflow summary is `{id, name, enabled, draft_revision, active_version_id, active_version_number, executable (null when unpublished), blocked_by, created_at, updated_at}`.
 
@@ -6601,7 +6942,8 @@ def _version_out(v: WorkflowVersion, active_id: uuid.UUID | None, blocked: list[
         "number": v.number,
         "published_at": v.published_at.isoformat(),
         "published_by": str(v.published_by) if v.published_by else None,
-        "content_hash": v.content_hash,
+        "graph_hash": v.graph_hash,
+        "version_hash": v.version_hash,
         "cel_profile": v.cel_profile,
         "node_refs": v.node_refs,
         "active": v.id == active_id,
@@ -6813,7 +7155,7 @@ DEWPOINT_DATABASE_URL=postgresql+asyncpg://dewpoint_admin_login:...@postgres/dew
 
 It registers every node type version the build contains, and this build's CEL profile. It refuses to proceed (exit 2) when:
 
-- **a registered version's contract changed.** Its config or output schema, ports, kind or side effect differ from what was registered. Ship the change as a new version (`type@N+1`) with a config migration.
+- **a registered version's contract changed.** Anything other than its title, description or schema annotations (`title`, `description`, `examples`, `x-widget`, `x-group`) differs from what was registered: schemas, ports, kind, side effect, credentials, capabilities, retry policy or timeout. Ship the change as a new version (`type@N+1`) with a config migration. Display-only changes are stored in place.
 - **the build lacks a node type that isn't retired.** Published versions may still need it. Retire it first (below).
 
 ## Deprecate, migrate, retire
@@ -6874,7 +7216,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 | §4.2 | Graph format 1, ports, acyclic, loop regions (properly nested, crossing rejected, depth ≤ 3) | 4 |
 | §4.2 | Per-run iteration cap | Declared here (`item_cap` and the region rules); enforcing the logical-run counter and grants is 2a-3 |
 | §4.3 | Value model, scope roots, path availability, conditional refs need defaults, variable writers | 5, 6 |
-| §4.4 | API: create, draft CAS (`If-Match`), validate, publish, versions, activate (rollback); audited | 9, 10 |
+| §4.4 | API: create, draft CAS (`If-Match`), validate, publish, versions, activate (rollback); audited with `graph_hash` + `version_hash` | 4, 9, 10 |
+| §4.1 | A registered node type version's contract (everything except display metadata) never changes; only resolvable local `$ref`s in manifests and settings | 3, 6, 8 |
 | §4.5 | Closure stored at publish; activatable / admissible / dispatchable; startable references; forced preview; lifecycle locking (both orders); READ COMMITTED asserted | 7, 8, 9 |
 | §4.5 | Queued-request cancellation; admission and dispatch locking | 2b (`run_requests` doesn't exist yet); `RetirePreview` marks where they go |
 | §5.2 | 16,384-character limit on expressions | 5 |

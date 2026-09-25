@@ -1,6 +1,6 @@
 # Dewpoint — Engine Core Design (sub-project 2a)
 
-- **Status:** Accepted as the basis for implementation, revision 5.1 (2026-09-25).
+- **Status:** Accepted as the basis for implementation, revision 5.2 (2026-09-25).
   - Revision 2 addressed join scopes, the local-CEL switch, evaluator isolation, profile routing and retirement.
   - Revision 3 addresses the version lifecycle (activation, queued requests, closure), nested loops, evaluator
     aggregate memory, and Temporal membership.
@@ -12,6 +12,8 @@
     - liveness conditions for path availability;
     - `loops.<key>` refs and template defaults;
     - workflow-level data in `graph.settings`.
+  - Revision 5.2 adds the contract hash (everything except display metadata), local-only schema references, and the
+    two hashes per version (`graph_hash`, `version_hash`). It also states the lifecycle-lock rule directly as advisory locks.
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
   This spec **narrows parent §6.4** (where CEL runs) and resolves the CEL item in parent §15.
 - **Evidence:** CEL spike, branch `spike/cel-evaluation`, commits `d6a8162` and `13a62e1`. See
@@ -122,14 +124,29 @@ Tenant-scoped tables use FORCE RLS with the foundations policy pattern.
     - `vars_schema`, where every variable declares a `default`;
     - `outputs`: values evaluated when the run succeeds, which define the version's `output_schema`;
     - `failure_handler`: a workflow id.
+  - **Tenant-authored schemas** (`input_schema`, `vars_schema`) may use only `$ref`s of the form `#/$defs/<name>` that
+    resolve.
+    - `$id`, anchors and dynamic references are rejected.
+    - So is any cycle that recurses without descending into the data.
+    - These are publish diagnostics, so validation never raises on a schema. The same rule applies to plugin manifest schemas.
 - **`workflow_versions`:** id, tenant_id, workflow_id, number, graph, `node_refs` (`type@version`), `engine_abi`,
-  `cel_profile`, `connection_ids`, `subflow_version_ids`, `input_schema`, `vars_schema`, `content_hash`,
-  `published_by`, `published_at`.
+  `cel_profile`, `connection_ids`, `subflow_version_ids`, `input_schema`, `vars_schema`, `graph_hash`,
+  `version_hash`, `published_by`, `published_at`.
+  - **`graph_hash`** identifies the authored graph only.
+  - **`version_hash`** identifies the executable version: the graph hash plus the resolved sub-flow and failure-handler
+    pins, `cel_profile` and `engine_abi`. Pinned versions are immutable, so the pins determine the whole closure.
+  - Audit and integrity checks use `version_hash`. Republishing an unchanged graph after a sub-flow's active version
+    changed gives the same `graph_hash` but a new `version_hash`.
   - It also stores the **classification of every expression** (§5.5) and its static bounds, so the runtime never re-derives them.
   - It stores its **pinned closure** (§4.5) too: `closure_version_ids`, `closure_node_refs` and `closure_cel_profiles`.
   - Rows are insert-only: a trigger rejects UPDATE and DELETE.
-- **`plugin_manifests`, `node_type_versions`:** global. They hold the manifest JSON, schema hashes and a lifecycle
-  state: `active`, `deprecated` or `retired` (§4.5).
+- **`plugin_manifests`, `node_type_versions`:** global. They hold the manifest JSON, a **contract hash** and a
+  lifecycle state: `active`, `deprecated` or `retired` (§4.5).
+  - The contract is every manifest field except display metadata: schemas, ports, kind, side effect, credentials,
+    capabilities, retry policy, timeout and engine markers.
+  - Display metadata is the manifest's `title` and `description`, plus the schema annotations `title`, `description`,
+    `examples`, `x-widget` and `x-group`.
+  - A registered `type@version` may change only its display metadata. Registration refuses any contract change; ship it as a new version.
 - **`cel_profiles`:** global, with the same lifecycle states (§4.5, §5.1).
 
 ### 4.2 Graph JSON (`graph_format: 1`)
@@ -196,7 +213,7 @@ Tenant routes with the foundations session, CSRF and permission model (`workflow
 - `POST /workflows/{id}/publish` validates, then inserts; it returns 422 with diagnostics on failure.
 - `GET /workflows/{id}/versions`
 
-Publish is audited: version number, content hash, classification summary.
+Publish is audited: version number, `graph_hash`, `version_hash`, classification summary.
 
 - Publishing sets `active_version_id` to the new version.
 - `POST /workflows/{id}/activate {version_id}` rolls back to an earlier version. It requires `workflow.publish`
@@ -267,15 +284,12 @@ until no non-terminal run uses that profile.
    - A node type: once it is `retired`, a new build may stop registering it. Older builds drain normally.
    - A CEL profile: once it is `retired` **and** no non-terminal run uses it, its evaluator may be shut down.
 
-**Lifecycle locking.** Every transaction that creates or uses a reference locks the lifecycle rows of the version's
-closure. The closure's `node_type_versions` and `cel_profiles` rows are locked `FOR SHARE`, in id order, and then
-it re-checks their states.
-- **Implementation:** transaction-scoped *shared* and *exclusive* advisory locks keyed
-  `dewpoint:lifecycle:<node|cel>:<key>`, acquired in sorted order.
-- **Why not row locks:** they would require UPDATE privilege on the registry tables, which the API role must not have.
-- The semantics below are unchanged.
+**Lifecycle locking.** The rule: every transaction that creates or uses a reference takes a **shared lifecycle lock** on
+each entry of the version's closure, in sorted key order. It then re-reads those entries' states.
+- A lifecycle lock is a transaction-scoped Postgres advisory lock keyed `dewpoint:lifecycle:<node|cel>:<key>`.
+- Advisory locks, not row locks, because row locks would require UPDATE privilege on the registry tables, which the API role must not have.
 
-It applies to:
+The rule applies to:
 - **publish** (the new version's closure);
 - **activate**;
 - **admission:** freezing a new `run_requests` row, or `start_run` in 2a;
@@ -283,9 +297,9 @@ It applies to:
 
 The executable check and the insert or update happen in that same transaction.
 
-**Retirement** takes its entry's exclusive lock (the `FOR UPDATE` counterpart) as its first statement. Only then does it count references and
-build the cancellation set, in later statements of the same transaction, at READ COMMITTED (the Postgres default).
-Share and update locks conflict, so the two sides serialize:
+**Retirement** takes its entry's **exclusive lifecycle lock** as its first statement. Only then does it count references
+and build the cancellation set, in later statements of the same transaction, at READ COMMITTED (the Postgres default).
+Shared and exclusive locks conflict, so the two sides serialize:
 - **Admission commits first.** Retirement's lock waits for that commit, so its later statements see the new
   request. Normal retirement is then blocked, or forced retirement cancels the request.
 - **Retirement locks first.** Admission's lock waits, then re-reads `retired` and refuses the request.
