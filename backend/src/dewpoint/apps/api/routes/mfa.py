@@ -72,7 +72,7 @@ async def mfa_totp(
     body: CodeIn,
     response: Response,
     sess: AuthSession = Depends(current_session),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     keyring: Keyring = Depends(get_keyring),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, str]:
@@ -84,7 +84,7 @@ async def mfa_recovery(
     body: CodeIn,
     response: Response,
     sess: AuthSession = Depends(current_session),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     keyring: Keyring = Depends(get_keyring),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, str]:
@@ -94,7 +94,7 @@ async def mfa_recovery(
 @router.post("/totp/enroll")
 async def enroll(
     sess: AuthSession = Depends(current_session),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     keyring: Keyring = Depends(get_keyring),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, str]:
@@ -109,7 +109,7 @@ async def reauth(
     body: CodeIn,
     response: Response,
     sess: AuthSession = Depends(current_session),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     keyring: Keyring = Depends(get_keyring),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, str]:
@@ -131,7 +131,7 @@ async def confirm(
     body: CodeIn,
     response: Response,
     sess: AuthSession = Depends(current_session),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     keyring: Keyring = Depends(get_keyring),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, object]:

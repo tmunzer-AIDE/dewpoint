@@ -51,7 +51,7 @@ async def _elevated(db: AsyncSession, sess: AuthSession, response: Response, set
 
 @router.get("")
 async def list_passkeys(
-    sess: AuthSession = Depends(active_session), db: AsyncSession = Depends(get_db)
+    sess: AuthSession = Depends(active_session), db: AsyncSession = Depends(get_db, scope="function")
 ) -> list[dict[str, Any]]:
     """The caller's own passkeys: names and dates only, never key material."""
     rows = await db.execute(
@@ -73,7 +73,7 @@ async def list_passkeys(
 @router.post("/register/options")
 async def register_options(
     sess: AuthSession = Depends(current_session),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, Any]:
     _state(sess, "enroll_required", "active")
@@ -91,7 +91,7 @@ async def register_verify(
     body: VerifyIn,
     response: Response,
     sess: AuthSession = Depends(current_session),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, str]:
     _state(sess, "enroll_required", "active")
@@ -111,7 +111,9 @@ async def register_verify(
 
 @router.post("/login/options")
 async def login_options(
-    request: Request, db: AsyncSession = Depends(get_db), settings: Settings = Depends(get_settings_dep)
+    request: Request,
+    db: AsyncSession = Depends(get_db, scope="function"),
+    settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, Any]:
     """Anonymous: every call stores a challenge, so issuance is limited per IP and capped platform-wide."""
     ip = request.client.host if request.client else "unknown"
@@ -130,7 +132,7 @@ async def login_verify(
     body: VerifyIn,
     request: Request,
     response: Response,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, str]:
     ip = request.client.host if request.client else "unknown"
@@ -186,7 +188,7 @@ async def _factor_verify(
 @router.post("/mfa/options")
 async def mfa_options(
     sess: AuthSession = Depends(current_session),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, Any]:
     _state(sess, "mfa_pending")
@@ -198,7 +200,7 @@ async def mfa_verify(
     body: VerifyIn,
     response: Response,
     sess: AuthSession = Depends(current_session),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, str]:
     _state(sess, "mfa_pending")
@@ -208,7 +210,7 @@ async def mfa_verify(
 @router.post("/stepup/options")
 async def stepup_options(
     sess: AuthSession = Depends(current_session),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, Any]:
     _state(sess, "active")
@@ -220,7 +222,7 @@ async def stepup_verify(
     body: VerifyIn,
     response: Response,
     sess: AuthSession = Depends(current_session),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, str]:
     _state(sess, "active")

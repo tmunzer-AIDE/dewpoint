@@ -48,7 +48,7 @@ async def login(
     body: LoginIn,
     request: Request,
     response: Response,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, str]:
     ip = request.client.host if request.client else "unknown"
@@ -86,7 +86,7 @@ async def login(
 
 @router.get("/session")
 async def session_info(
-    sess: AuthSession = Depends(current_session), db: AsyncSession = Depends(get_db)
+    sess: AuthSession = Depends(current_session), db: AsyncSession = Depends(get_db, scope="function")
 ) -> dict[str, object]:
     user = await db.get(User, sess.user_id)
     if user is None:  # deleted while signed in
@@ -101,7 +101,9 @@ async def session_info(
 
 @router.post("/logout", status_code=204)
 async def logout(
-    response: Response, sess: AuthSession = Depends(current_session), db: AsyncSession = Depends(get_db)
+    response: Response,
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> Response:
     await revoke(db, sess)
     clear_session_cookie(response)
@@ -115,7 +117,7 @@ async def change_password(
     response: Response,
     user: User = Depends(current_user),
     sess: AuthSession = Depends(current_session),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, str]:
     """Returns the rotated CSRF token so the client can make its next unsafe request."""

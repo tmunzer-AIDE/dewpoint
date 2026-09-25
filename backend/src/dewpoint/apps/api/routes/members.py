@@ -53,7 +53,7 @@ def _map(exc: Exception) -> HTTPException:
 
 @router.get("")
 async def list_members(
-    ctx: TenantContext = Depends(require(P.MEMBER_VIEW)), db: AsyncSession = Depends(get_db)
+    ctx: TenantContext = Depends(require(P.MEMBER_VIEW)), db: AsyncSession = Depends(get_db, scope="function")
 ) -> list[dict[str, str]]:
     rows = await db.execute(
         select(Membership, User.email)
@@ -66,7 +66,9 @@ async def list_members(
 
 @router.post("", status_code=201)
 async def add(
-    body: AddIn, ctx: TenantContext = Depends(require(P.MEMBER_MANAGE)), db: AsyncSession = Depends(get_db)
+    body: AddIn,
+    ctx: TenantContext = Depends(require(P.MEMBER_MANAGE)),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, str]:
     try:
         m = await service.add_member(db, ctx.tenant_id, body.email, body.role, ctx.user.id)
@@ -84,7 +86,7 @@ async def change(
     user_id: uuid.UUID,
     body: RoleChange,
     ctx: TenantContext = Depends(require(P.MEMBER_MANAGE)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, str]:
     try:
         m = await service.change_role(db, ctx.tenant_id, user_id, body.role, ctx.user.id)
@@ -101,7 +103,9 @@ async def change(
 
 @router.delete("/{user_id}", status_code=204)
 async def remove(
-    user_id: uuid.UUID, ctx: TenantContext = Depends(require(P.MEMBER_MANAGE)), db: AsyncSession = Depends(get_db)
+    user_id: uuid.UUID,
+    ctx: TenantContext = Depends(require(P.MEMBER_MANAGE)),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> Response:
     try:
         await service.remove_member(db, ctx.tenant_id, user_id, ctx.user.id)

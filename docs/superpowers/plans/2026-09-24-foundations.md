@@ -2052,14 +2052,20 @@ def clear_session_cookie(response: _CookieResponse) -> None:
 `core/http.py`:
 ```python
 # SPDX-License-Identifier: Apache-2.0
-from collections.abc import AsyncIterator
+import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException, Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dewpoint.core.auth.sessions import SESSION_COOKIE, csrf_valid, load_session
+from dewpoint.core.auth.sessions import SESSION_COOKIE, csrf_valid, load_session, reauth_fresh
+from dewpoint.core.authz.permissions import ROLE_PERMISSIONS, P
 from dewpoint.core.config import Settings
+from dewpoint.core.db import tenant_scope, user_scope
 from dewpoint.core.models.identity import AuthSession, User
+from dewpoint.core.models.tenancy import Membership, Tenant
 
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
@@ -2069,12 +2075,18 @@ def get_settings_dep(request: Request) -> Settings:
 
 
 async def get_db(request: Request) -> AsyncIterator[AsyncSession]:
+    """One transaction per request. Always declare it as Depends(get_db, scope="function"): the default
+    "request" scope commits after the response is sent, so a client could read before its write commits and a
+    failed commit would follow a success response. (Mixing scopes would also create two sessions.)"""
     async with request.app.state.sessionmaker() as s, s.begin():
         yield s
 
 
-async def current_session(request: Request, db: AsyncSession = Depends(get_db),
-                          settings: Settings = Depends(get_settings_dep)) -> AuthSession:
+async def current_session(
+    request: Request,
+    db: AsyncSession = Depends(get_db, scope="function"),
+    settings: Settings = Depends(get_settings_dep),
+) -> AuthSession:
     token = request.cookies.get(SESSION_COOKIE)
     sess = await load_session(db, token, settings) if token else None
     if sess is None:
@@ -2090,13 +2102,64 @@ async def active_session(sess: AuthSession = Depends(current_session)) -> AuthSe
     return sess
 
 
-async def current_user(sess: AuthSession = Depends(active_session), db: AsyncSession = Depends(get_db)) -> User:
+async def current_user(
+    sess: AuthSession = Depends(active_session), db: AsyncSession = Depends(get_db, scope="function")
+) -> User:
     user = await db.get(User, sess.user_id)
     if user is None or not user.is_active:
         raise HTTPException(401, detail={"error": "unauthenticated"})
     return user
+
+
+@dataclass(frozen=True)
+class TenantContext:
+    tenant_id: uuid.UUID
+    user: User
+    role: str
+    session: AuthSession
+
+
+def require(permission: P) -> Callable[..., Awaitable[TenantContext]]:
+    async def _dep(
+        tenant_id: uuid.UUID,
+        user: User = Depends(current_user),
+        sess: AuthSession = Depends(active_session),
+        db: AsyncSession = Depends(get_db, scope="function"),
+    ) -> TenantContext:
+        await user_scope(db, user.id)  # authoritative lookup of the caller's own membership
+        row = (
+            await db.execute(
+                select(Membership.role, Tenant.require_passkey)
+                .join(Tenant, Tenant.id == Membership.tenant_id)
+                .where(Membership.tenant_id == tenant_id, Membership.user_id == user.id)
+            )
+        ).first()
+        if row is None:
+            raise HTTPException(404, detail={"error": "not_found"})
+        role, require_passkey = row
+        if require_passkey and "passkey" not in sess.auth_methods:
+            raise HTTPException(403, detail={"error": "step_up_required"})
+        if permission not in ROLE_PERMISSIONS[role]:
+            raise HTTPException(403, detail={"error": "forbidden"})
+        await tenant_scope(db, tenant_id)  # clears user scope: no widening to the caller's other tenants
+        return TenantContext(tenant_id=tenant_id, user=user, role=role, session=sess)
+
+    return _dep
+
+
+async def require_platform_admin(user: User = Depends(current_user)) -> User:
+    if not user.is_platform_admin:
+        raise HTTPException(403, detail={"error": "forbidden"})
+    return user
+
+
+def ensure_fresh_reauth(sess: AuthSession, settings: Settings) -> None:
+    """Adding or replacing a factor from an active session needs a recently proven second factor.
+    A session still enrolling its first factor (enroll_required) has none to prove and is exempt."""
+    if sess.state == "active" and not reauth_fresh(sess, settings):
+        raise HTTPException(403, detail={"error": "reauth_required"})
 ```
-FastAPI caches `get_db` per request, so every dependency shares one transaction.
+FastAPI caches `get_db` per request, so every dependency shares one transaction. **Always declare it as `Depends(get_db, scope="function")`.** FastAPI's default `"request"` scope for `yield` dependencies commits *after* the response is sent. A client could then read before its own write is committed (this showed up as a CI end-to-end flake), and a failed commit would follow a success response. `tests/apps/api/test_commit_before_response.py` checks visibility at `http.response.start` at the raw ASGI level, and fails if any route uses the unscoped form.
 
 Add to `apps/api/middleware.py`:
 ```python
@@ -2622,7 +2685,7 @@ async def login(
     body: LoginIn,
     request: Request,
     response: Response,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, str]:
     ip = request.client.host if request.client else "unknown"
@@ -2652,7 +2715,7 @@ async def login(
 
 @router.get("/session")
 async def session_info(
-    sess: AuthSession = Depends(current_session), db: AsyncSession = Depends(get_db)
+    sess: AuthSession = Depends(current_session), db: AsyncSession = Depends(get_db, scope="function")
 ) -> dict[str, object]:
     user = await db.get(User, sess.user_id)
     if user is None:  # deleted while signed in
@@ -2667,7 +2730,7 @@ async def session_info(
 
 @router.post("/logout", status_code=204)
 async def logout(
-    response: Response, sess: AuthSession = Depends(current_session), db: AsyncSession = Depends(get_db)
+    response: Response, sess: AuthSession = Depends(current_session), db: AsyncSession = Depends(get_db, scope="function")
 ) -> Response:
     await revoke(db, sess)
     clear_session_cookie(response)
@@ -2681,7 +2744,7 @@ async def change_password(
     response: Response,
     user: User = Depends(current_user),
     sess: AuthSession = Depends(current_session),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, str]:
     """Returns the rotated CSRF token so the client can make its next unsafe request."""
@@ -2773,7 +2836,7 @@ async def mfa_totp(
     body: CodeIn,
     response: Response,
     sess: AuthSession = Depends(current_session),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     keyring: Keyring = Depends(get_keyring),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, str]:
@@ -2785,7 +2848,7 @@ async def mfa_recovery(
     body: CodeIn,
     response: Response,
     sess: AuthSession = Depends(current_session),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     keyring: Keyring = Depends(get_keyring),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, str]:
@@ -2795,7 +2858,7 @@ async def mfa_recovery(
 @router.post("/totp/enroll")
 async def enroll(
     sess: AuthSession = Depends(current_session),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     keyring: Keyring = Depends(get_keyring),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, str]:
@@ -2810,7 +2873,7 @@ async def reauth(
     body: CodeIn,
     response: Response,
     sess: AuthSession = Depends(current_session),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     keyring: Keyring = Depends(get_keyring),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, str]:
@@ -2832,7 +2895,7 @@ async def confirm(
     body: CodeIn,
     response: Response,
     sess: AuthSession = Depends(current_session),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     keyring: Keyring = Depends(get_keyring),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, object]:
@@ -3277,7 +3340,7 @@ async def _elevated(db: AsyncSession, sess: AuthSession, response: Response, set
 @router.post("/register/options")
 async def register_options(
     sess: AuthSession = Depends(current_session),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, Any]:
     _state(sess, "enroll_required", "active")
@@ -3295,7 +3358,7 @@ async def register_verify(
     body: VerifyIn,
     response: Response,
     sess: AuthSession = Depends(current_session),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, str]:
     _state(sess, "enroll_required", "active")
@@ -3314,7 +3377,7 @@ async def register_verify(
 
 @router.post("/login/options")
 async def login_options(
-    request: Request, db: AsyncSession = Depends(get_db), settings: Settings = Depends(get_settings_dep)
+    request: Request, db: AsyncSession = Depends(get_db, scope="function"), settings: Settings = Depends(get_settings_dep)
 ) -> dict[str, Any]:
     """Anonymous: every call stores a challenge, so issuance is limited per IP and capped platform-wide."""
     ip = request.client.host if request.client else "unknown"
@@ -3333,7 +3396,7 @@ async def login_verify(
     body: VerifyIn,
     request: Request,
     response: Response,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, str]:
     ip = request.client.host if request.client else "unknown"
@@ -3388,7 +3451,7 @@ async def _factor_verify(
 @router.post("/mfa/options")
 async def mfa_options(
     sess: AuthSession = Depends(current_session),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, Any]:
     _state(sess, "mfa_pending")
@@ -3400,7 +3463,7 @@ async def mfa_verify(
     body: VerifyIn,
     response: Response,
     sess: AuthSession = Depends(current_session),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, str]:
     _state(sess, "mfa_pending")
@@ -3410,7 +3473,7 @@ async def mfa_verify(
 @router.post("/stepup/options")
 async def stepup_options(
     sess: AuthSession = Depends(current_session),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, Any]:
     _state(sess, "active")
@@ -3422,7 +3485,7 @@ async def stepup_verify(
     body: VerifyIn,
     response: Response,
     sess: AuthSession = Depends(current_session),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, str]:
     _state(sess, "active")
@@ -3582,7 +3645,7 @@ async def test_unfiltered_query_after_require_sees_only_current_tenant(app, owne
     router = APIRouter()
 
     @router.get("/api/v1/t/{tenant_id}/_probe")
-    async def probe(_=Depends(require(P.TENANT_VIEW)), db=Depends(get_db)) -> dict[str, int]:
+    async def probe(_=Depends(require(P.TENANT_VIEW)), db=Depends(get_db, scope="function")) -> dict[str, int]:
         return {
             "memberships": len((await db.execute(select(Membership))).scalars().all()),  # deliberately unfiltered
             "tenants": len((await db.execute(select(Tenant))).scalars().all()),
@@ -3827,7 +3890,7 @@ class TenantContext:
 
 def require(permission: P) -> Callable[..., Awaitable[TenantContext]]:
     async def _dep(tenant_id: uuid.UUID, user: User = Depends(current_user),
-                   sess: AuthSession = Depends(active_session), db: AsyncSession = Depends(get_db)) -> TenantContext:
+                   sess: AuthSession = Depends(active_session), db: AsyncSession = Depends(get_db, scope="function")) -> TenantContext:
         await user_scope(db, user.id)  # authoritative lookup of the caller's own membership
         row = (await db.execute(select(Membership.role, Tenant.require_passkey)
                                 .join(Tenant, Tenant.id == Membership.tenant_id)
@@ -3898,13 +3961,13 @@ def _out(t: Tenant, role: str | None = None) -> dict[str, object]:
 
 
 @router.get("/tenants")
-async def my_tenants(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)) -> list[dict[str, object]]:
+async def my_tenants(user: User = Depends(current_user), db: AsyncSession = Depends(get_db, scope="function")) -> list[dict[str, object]]:
     return [_out(t, r) for t, r in await service.list_user_tenants(db, user.id)]
 
 
 @router.post("/tenants", status_code=201)
 async def create(
-    body: TenantIn, admin: User = Depends(require_platform_admin), db: AsyncSession = Depends(get_db)
+    body: TenantIn, admin: User = Depends(require_platform_admin), db: AsyncSession = Depends(get_db, scope="function")
 ) -> dict[str, object]:
     try:
         t = await service.create_tenant(db, name=body.name, slug=body.slug, owner_id=admin.id)
@@ -3924,7 +3987,7 @@ async def create(
 
 @router.get("/t/{tenant_id}")
 async def get_tenant(
-    ctx: TenantContext = Depends(require(P.TENANT_VIEW)), db: AsyncSession = Depends(get_db)
+    ctx: TenantContext = Depends(require(P.TENANT_VIEW)), db: AsyncSession = Depends(get_db, scope="function")
 ) -> dict[str, object]:
     t = await _tenant(db, ctx)
     return _out(t, ctx.role)
@@ -3932,7 +3995,7 @@ async def get_tenant(
 
 @router.patch("/t/{tenant_id}")
 async def patch_tenant(
-    body: TenantPatch, ctx: TenantContext = Depends(require(P.TENANT_MANAGE)), db: AsyncSession = Depends(get_db)
+    body: TenantPatch, ctx: TenantContext = Depends(require(P.TENANT_MANAGE)), db: AsyncSession = Depends(get_db, scope="function")
 ) -> dict[str, object]:
     t = await _tenant(db, ctx)
     if body.name is not None:
@@ -4007,7 +4070,7 @@ def _map(exc: Exception) -> HTTPException:
 
 @router.get("")
 async def list_members(
-    ctx: TenantContext = Depends(require(P.MEMBER_VIEW)), db: AsyncSession = Depends(get_db)
+    ctx: TenantContext = Depends(require(P.MEMBER_VIEW)), db: AsyncSession = Depends(get_db, scope="function")
 ) -> list[dict[str, str]]:
     rows = await db.execute(
         select(Membership, User.email)
@@ -4020,7 +4083,7 @@ async def list_members(
 
 @router.post("", status_code=201)
 async def add(
-    body: AddIn, ctx: TenantContext = Depends(require(P.MEMBER_MANAGE)), db: AsyncSession = Depends(get_db)
+    body: AddIn, ctx: TenantContext = Depends(require(P.MEMBER_MANAGE)), db: AsyncSession = Depends(get_db, scope="function")
 ) -> dict[str, str]:
     try:
         m = await service.add_member(db, ctx.tenant_id, body.email, body.role, ctx.role)
@@ -4038,7 +4101,7 @@ async def change(
     user_id: uuid.UUID,
     body: RoleChange,
     ctx: TenantContext = Depends(require(P.MEMBER_MANAGE)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, str]:
     try:
         m = await service.change_role(db, ctx.tenant_id, user_id, body.role, ctx.role)
@@ -4050,7 +4113,7 @@ async def change(
 
 @router.delete("/{user_id}", status_code=204)
 async def remove(
-    user_id: uuid.UUID, ctx: TenantContext = Depends(require(P.MEMBER_MANAGE)), db: AsyncSession = Depends(get_db)
+    user_id: uuid.UUID, ctx: TenantContext = Depends(require(P.MEMBER_MANAGE)), db: AsyncSession = Depends(get_db, scope="function")
 ) -> Response:
     try:
         await service.remove_member(db, ctx.tenant_id, user_id, ctx.role)
@@ -4081,7 +4144,7 @@ class UserIn(BaseModel):
 
 @router.post("", status_code=201)
 async def create(
-    body: UserIn, admin: User = Depends(require_platform_admin), db: AsyncSession = Depends(get_db)
+    body: UserIn, admin: User = Depends(require_platform_admin), db: AsyncSession = Depends(get_db, scope="function")
 ) -> dict[str, str]:
     """Create a local account. The new user must enroll MFA at first sign-in."""
     try:
@@ -4827,7 +4890,7 @@ router = APIRouter(prefix="/api/v1/t/{tenant_id}/audit", tags=["audit"])
 @router.get("")
 async def list_audit(before_seq: int | None = None, limit: int = Query(50, ge=1, le=200),
                      ctx: TenantContext = Depends(require(P.AUDIT_VIEW)),
-                     db: AsyncSession = Depends(get_db)) -> list[dict[str, object]]:
+                     db: AsyncSession = Depends(get_db, scope="function")) -> list[dict[str, object]]:
     q = select(AuditEntry).where(AuditEntry.tenant_id == ctx.tenant_id).order_by(AuditEntry.seq.desc()).limit(limit)
     if before_seq:
         q = q.where(AuditEntry.seq < before_seq)
@@ -5537,7 +5600,7 @@ async def connection_types() -> list[dict[str, object]]:
 
 @router.get("/t/{tenant_id}/connections")
 async def list_connections(
-    ctx: TenantContext = Depends(require(P.CONNECTION_VIEW)), db: AsyncSession = Depends(get_db)
+    ctx: TenantContext = Depends(require(P.CONNECTION_VIEW)), db: AsyncSession = Depends(get_db, scope="function")
 ) -> list[dict[str, object]]:
     rows = await db.execute(select(Connection).where(Connection.tenant_id == ctx.tenant_id).order_by(Connection.name))
     return [service.to_out(c) for c in rows.scalars()]
@@ -5547,7 +5610,7 @@ async def list_connections(
 async def create(
     body: CreateIn,
     ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     keyring: Keyring = Depends(get_keyring),
 ) -> dict[str, object]:
     try:
@@ -5567,7 +5630,7 @@ async def create(
 async def get_one(
     connection_id: uuid.UUID,
     ctx: TenantContext = Depends(require(P.CONNECTION_VIEW)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, object]:
     return service.to_out(await _get(db, ctx, connection_id))
 
@@ -5577,7 +5640,7 @@ async def patch(
     connection_id: uuid.UUID,
     body: PatchIn,
     ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     keyring: Keyring = Depends(get_keyring),
 ) -> dict[str, object]:
     conn = await _get(db, ctx, connection_id)
@@ -5596,7 +5659,7 @@ async def patch(
 async def delete(
     connection_id: uuid.UUID,
     ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> Response:
     await service.delete_connection(db, ctx, await _get(db, ctx, connection_id))
     return Response(status_code=204)
@@ -5607,7 +5670,7 @@ async def verify(
     connection_id: uuid.UUID,
     request: Request,
     ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     keyring: Keyring = Depends(get_keyring),
 ) -> dict[str, object]:
     try:

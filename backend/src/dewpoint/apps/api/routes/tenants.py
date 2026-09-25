@@ -40,13 +40,15 @@ def _out(t: Tenant, role: str | None = None) -> dict[str, object]:
 
 
 @router.get("/tenants")
-async def my_tenants(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)) -> list[dict[str, object]]:
+async def my_tenants(
+    user: User = Depends(current_user), db: AsyncSession = Depends(get_db, scope="function")
+) -> list[dict[str, object]]:
     return [_out(t, r) for t, r in await service.list_user_tenants(db, user.id)]
 
 
 @router.post("/tenants", status_code=201)
 async def create(
-    body: TenantIn, admin: User = Depends(require_platform_admin), db: AsyncSession = Depends(get_db)
+    body: TenantIn, admin: User = Depends(require_platform_admin), db: AsyncSession = Depends(get_db, scope="function")
 ) -> dict[str, object]:
     try:
         t = await service.create_tenant(db, name=body.name, slug=body.slug, owner_id=admin.id)
@@ -66,7 +68,7 @@ async def create(
 
 @router.get("/t/{tenant_id}")
 async def get_tenant(
-    ctx: TenantContext = Depends(require(P.TENANT_VIEW)), db: AsyncSession = Depends(get_db)
+    ctx: TenantContext = Depends(require(P.TENANT_VIEW)), db: AsyncSession = Depends(get_db, scope="function")
 ) -> dict[str, object]:
     t = await _tenant(db, ctx)
     return _out(t, ctx.role)
@@ -74,7 +76,9 @@ async def get_tenant(
 
 @router.patch("/t/{tenant_id}")
 async def patch_tenant(
-    body: TenantPatch, ctx: TenantContext = Depends(require(P.TENANT_MANAGE)), db: AsyncSession = Depends(get_db)
+    body: TenantPatch,
+    ctx: TenantContext = Depends(require(P.TENANT_MANAGE)),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, object]:
     t = await _tenant(db, ctx)
     if body.name is not None:

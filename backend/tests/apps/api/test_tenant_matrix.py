@@ -75,7 +75,7 @@ async def test_unfiltered_query_after_require_sees_only_current_tenant(app, owne
     router = APIRouter()
 
     @router.get("/api/v1/t/{tenant_id}/_probe")
-    async def probe(_=Depends(require(P.TENANT_VIEW)), db=Depends(get_db)) -> dict[str, int]:
+    async def probe(_=Depends(require(P.TENANT_VIEW)), db=Depends(get_db, scope="function")) -> dict[str, int]:
         return {
             "memberships": len((await db.execute(select(Membership))).scalars().all()),  # deliberately unfiltered
             "tenants": len((await db.execute(select(Tenant))).scalars().all()),

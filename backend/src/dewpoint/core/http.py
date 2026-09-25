@@ -22,12 +22,17 @@ def get_settings_dep(request: Request) -> Settings:
 
 
 async def get_db(request: Request) -> AsyncIterator[AsyncSession]:
+    """One transaction per request. Always declare it as Depends(get_db, scope="function"): the default
+    "request" scope commits after the response is sent, so a client could read before its write commits and a
+    failed commit would follow a success response. (Mixing scopes would also create two sessions.)"""
     async with request.app.state.sessionmaker() as s, s.begin():
         yield s
 
 
 async def current_session(
-    request: Request, db: AsyncSession = Depends(get_db), settings: Settings = Depends(get_settings_dep)
+    request: Request,
+    db: AsyncSession = Depends(get_db, scope="function"),
+    settings: Settings = Depends(get_settings_dep),
 ) -> AuthSession:
     token = request.cookies.get(SESSION_COOKIE)
     sess = await load_session(db, token, settings) if token else None
@@ -44,7 +49,9 @@ async def active_session(sess: AuthSession = Depends(current_session)) -> AuthSe
     return sess
 
 
-async def current_user(sess: AuthSession = Depends(active_session), db: AsyncSession = Depends(get_db)) -> User:
+async def current_user(
+    sess: AuthSession = Depends(active_session), db: AsyncSession = Depends(get_db, scope="function")
+) -> User:
     user = await db.get(User, sess.user_id)
     if user is None or not user.is_active:
         raise HTTPException(401, detail={"error": "unauthenticated"})
@@ -64,7 +71,7 @@ def require(permission: P) -> Callable[..., Awaitable[TenantContext]]:
         tenant_id: uuid.UUID,
         user: User = Depends(current_user),
         sess: AuthSession = Depends(active_session),
-        db: AsyncSession = Depends(get_db),
+        db: AsyncSession = Depends(get_db, scope="function"),
     ) -> TenantContext:
         await user_scope(db, user.id)  # authoritative lookup of the caller's own membership
         row = (

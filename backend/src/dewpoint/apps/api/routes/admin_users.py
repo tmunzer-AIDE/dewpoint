@@ -18,7 +18,7 @@ class UserIn(BaseModel):
 
 @router.post("", status_code=201)
 async def create(
-    body: UserIn, admin: User = Depends(require_platform_admin), db: AsyncSession = Depends(get_db)
+    body: UserIn, admin: User = Depends(require_platform_admin), db: AsyncSession = Depends(get_db, scope="function")
 ) -> dict[str, str]:
     """Create a local account. The new user must enroll MFA at first sign-in."""
     try:

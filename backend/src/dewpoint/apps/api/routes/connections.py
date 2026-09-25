@@ -70,7 +70,7 @@ async def connection_types() -> list[dict[str, object]]:
 
 @router.get("/t/{tenant_id}/connections")
 async def list_connections(
-    ctx: TenantContext = Depends(require(P.CONNECTION_VIEW)), db: AsyncSession = Depends(get_db)
+    ctx: TenantContext = Depends(require(P.CONNECTION_VIEW)), db: AsyncSession = Depends(get_db, scope="function")
 ) -> list[dict[str, object]]:
     rows = await db.execute(select(Connection).where(Connection.tenant_id == ctx.tenant_id).order_by(Connection.name))
     return [service.to_out(c) for c in rows.scalars()]
@@ -80,7 +80,7 @@ async def list_connections(
 async def create(
     body: CreateIn,
     ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     keyring: Keyring = Depends(get_keyring),
 ) -> dict[str, object]:
     try:
@@ -100,7 +100,7 @@ async def create(
 async def get_one(
     connection_id: uuid.UUID,
     ctx: TenantContext = Depends(require(P.CONNECTION_VIEW)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, object]:
     return service.to_out(await _get(db, ctx, connection_id))
 
@@ -110,7 +110,7 @@ async def patch(
     connection_id: uuid.UUID,
     body: PatchIn,
     ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     keyring: Keyring = Depends(get_keyring),
 ) -> dict[str, object]:
     conn = await _get(db, ctx, connection_id)
@@ -129,7 +129,7 @@ async def patch(
 async def delete(
     connection_id: uuid.UUID,
     ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> Response:
     await service.delete_connection(db, ctx, await _get(db, ctx, connection_id))
     return Response(status_code=204)
@@ -140,7 +140,7 @@ async def verify(
     connection_id: uuid.UUID,
     request: Request,
     ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     keyring: Keyring = Depends(get_keyring),
 ) -> dict[str, object]:
     try:

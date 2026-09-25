@@ -15,7 +15,7 @@ async def list_audit(
     before_seq: int | None = None,
     limit: int = Query(50, ge=1, le=200),
     ctx: TenantContext = Depends(require(P.AUDIT_VIEW)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> list[dict[str, object]]:
     q = select(AuditEntry).where(AuditEntry.tenant_id == ctx.tenant_id).order_by(AuditEntry.seq.desc()).limit(limit)
     if before_seq:
