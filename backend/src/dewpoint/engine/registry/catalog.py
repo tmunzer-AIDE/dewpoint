@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+import math
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeGuard
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
@@ -10,7 +11,7 @@ from jsonschema.exceptions import SchemaError
 from dewpoint.engine.canonical import sha256_hex
 from dewpoint.engine.registry.control import CONTROL_TYPES
 from dewpoint.engine.schema_refs import SCHEMA_LIST, SCHEMA_MAP, SCHEMA_ONE, ref_problems
-from dewpoint.sdk.node import PORT_RE, RESERVED_PORTS, TYPE_RE, NodeKind, SideEffect
+from dewpoint.sdk.node import MAX_RETRY_ATTEMPTS, PORT_RE, RESERVED_PORTS, TYPE_RE, NodeKind, SideEffect
 from dewpoint.sdk.version import SDK_MAJOR
 
 _DISPLAY = frozenset({"title", "description"})  # manifest keys that may change within a version
@@ -106,6 +107,49 @@ def _schema_problems(ref: str, label: str, schema: Any) -> list[str]:
     return [f"{ref}: {label}: {p}" for p in ref_problems(schema)]
 
 
+_RETRY_KEYS = frozenset({"max_attempts", "initial_interval_s", "backoff", "max_interval_s", "non_retryable"})
+
+
+def _finite(value: Any) -> TypeGuard[int | float]:
+    return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _retry_problems(ref: str, retry: Any) -> list[str]:
+    """The same rules the SDK applies to RetryDefaults, for manifests received as data."""
+    usable = (
+        isinstance(retry, Mapping)
+        and set(retry) == _RETRY_KEYS
+        and isinstance(retry["max_attempts"], int)
+        and not isinstance(retry["max_attempts"], bool)
+        and 1 <= retry["max_attempts"] <= MAX_RETRY_ATTEMPTS
+        and _finite(retry["initial_interval_s"])
+        and retry["initial_interval_s"] > 0
+        and _finite(retry["backoff"])
+        and retry["backoff"] >= 1
+        and _finite(retry["max_interval_s"])
+        and retry["max_interval_s"] >= retry["initial_interval_s"]
+        and isinstance(retry["non_retryable"], list)
+        and all(isinstance(code, str) and code for code in retry["non_retryable"])
+    )
+    if usable:
+        return []
+    return [
+        f"{ref}: retry must be {{max_attempts: 1-{MAX_RETRY_ATTEMPTS}, initial_interval_s: > 0, backoff: ≥ 1, "
+        "max_interval_s: ≥ initial_interval_s, non_retryable: [error codes]}"
+    ]
+
+
+def _dynamic_ports_problems(ref: str, n: Mapping[str, Any]) -> list[str]:
+    field = n.get("dynamic_ports")
+    if field is None:
+        return []
+    schema = n.get("config_schema")
+    props = schema.get("properties") if isinstance(schema, Mapping) else None
+    if isinstance(field, str) and isinstance(props, Mapping) and field in props:
+        return []
+    return [f"{ref}: dynamic_ports must name a config field"]
+
+
 def _node_problems(plugin: str, n: Mapping[str, Any], seen: set[str]) -> list[str]:
     t, v = n.get("type"), n.get("version")
     ref = f"{t}@{v}"
@@ -117,8 +161,11 @@ def _node_problems(plugin: str, n: Mapping[str, Any], seen: set[str]) -> list[st
     if ref in seen:
         out.append(f"{ref}: duplicate node type version")
     seen.add(ref)
+    title = n.get("title")
+    if not isinstance(title, str) or not title:
+        out.append(f"{ref}: title must be non-empty text")
     kind = n.get("kind")
-    if kind not in _KINDS:
+    if not isinstance(kind, str) or kind not in _KINDS:  # type first: a list or dict is unhashable
         out.append(f"{ref}: unknown kind {kind!r}")
     elif kind == NodeKind.CONTROL and ref not in CONTROL_TYPES:
         out.append(f"{ref}: only engine control types may use kind 'control'")
@@ -129,13 +176,16 @@ def _node_problems(plugin: str, n: Mapping[str, Any], seen: set[str]) -> list[st
         or any(not isinstance(p, str) or not PORT_RE.match(p) or p in RESERVED_PORTS for p in ports)
     ):
         out.append(f"{ref}: invalid ports")
-    if n.get("side_effect") not in _SIDE_EFFECTS:
-        out.append(f"{ref}: unknown side_effect")
+    side_effect = n.get("side_effect")
+    if not isinstance(side_effect, str) or side_effect not in _SIDE_EFFECTS:
+        out.append(f"{ref}: unknown side_effect {side_effect!r}")
     out += _schema_problems(ref, "config_schema", n.get("config_schema"))
     out += _schema_problems(ref, "output_schema", n.get("output_schema"))
+    out += _dynamic_ports_problems(ref, n)
+    out += _retry_problems(ref, n.get("retry"))
     timeout = n.get("timeout_s")
-    if isinstance(timeout, bool) or not isinstance(timeout, int | float) or timeout <= 0:
-        out.append(f"{ref}: timeout_s must be positive")
+    if not _finite(timeout) or timeout <= 0:
+        out.append(f"{ref}: timeout_s must be a positive number")
     return out
 
 

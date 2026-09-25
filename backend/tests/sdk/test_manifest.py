@@ -83,6 +83,19 @@ def test_manifest_problems() -> None:
         (_node(dynamic_ports="cases", run=_run), "unknown config field"),
         (_node(), "must implement run()"),
         (_node(run=_run, side_effect=SideEffect.RECONCILABLE), "must implement reconcile()"),
+        (_node(run=_run, retry=RetryDefaults(max_attempts=0)), "retry.max_attempts must be between 1 and 20"),
+        (_node(run=_run, retry=RetryDefaults(max_attempts=21)), "retry.max_attempts must be between 1 and 20"),
+        (
+            _node(run=_run, retry=RetryDefaults(initial_interval=timedelta(0))),
+            "retry.initial_interval must be positive",
+        ),
+        (_node(run=_run, retry=RetryDefaults(backoff=0.0)), "retry.backoff must be a finite number ≥ 1"),
+        (_node(run=_run, retry=RetryDefaults(backoff=float("nan"))), "retry.backoff must be a finite number ≥ 1"),
+        (
+            _node(run=_run, retry=RetryDefaults(max_interval=timedelta(milliseconds=500))),
+            "retry.max_interval must be ≥ retry.initial_interval",
+        ),
+        (_node(run=_run, retry=RetryDefaults(non_retryable=("",))), "retry.non_retryable must list error codes"),
     ]
     for node, fragment in cases:
         with pytest.raises(ManifestError) as e:

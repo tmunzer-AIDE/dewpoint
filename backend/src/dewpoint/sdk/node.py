@@ -13,6 +13,7 @@ from dewpoint.sdk.context import StepContext
 TYPE_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
 PORT_RE = re.compile(r"^[a-z][a-z0-9_]{0,30}$")
 RESERVED_PORTS = frozenset({"error"})  # added by the engine when a step routes errors to a port
+MAX_RETRY_ATTEMPTS = 20  # same ceiling as a step's max_attempts override in the graph
 
 
 class NodeKind(StrEnum):

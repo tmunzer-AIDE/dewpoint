@@ -195,7 +195,8 @@ Every new test directory gets an empty `__init__.py` with the license header, as
     - errors: `NodeError(code, message)`, `RetryableError`, `FatalError`, `OutcomeUnknownError`, `ManifestError(problems)`;
     - functions and constants: `node_manifest(cls) -> dict`, `literal_only(...)`, `value_kinds(*kinds, ...)`, `sensitive(...)`, `SDK_VERSION`.
   - `dewpoint.sdk.fields`: `LITERAL="x-dewpoint-literal"`, `KINDS="x-dewpoint-kinds"`, `SENSITIVE="x-sensitive"`, `VALUE_KINDS`.
-  - `dewpoint.sdk.node`: `TYPE_RE`, `PORT_RE`, `RESERVED_PORTS=frozenset({"error"})`.
+  - `dewpoint.sdk.node`: `TYPE_RE`, `PORT_RE`, `RESERVED_PORTS=frozenset({"error"})`, `MAX_RETRY_ATTEMPTS=20`.
+  - `node_manifest` rejects a retry policy the engine can't run: `max_attempts` outside 1–20, an `initial_interval` that isn't positive, a `backoff` below 1 or not finite, `max_interval < initial_interval`, or empty error codes in `non_retryable`.
   - `dewpoint.sdk.version`: `SDK_VERSION="0.1.0"`, `SDK_MAJOR="0"`.
   - `dewpoint.engine.ENGINE_ABI = 1`.
   - Node manifest dict keys: `type, version, kind, title, description, ports, dynamic_ports, config_schema, output_schema, credentials, capabilities, side_effect, retry{max_attempts, initial_interval_s, backoff, max_interval_s, non_retryable}, timeout_s`.
@@ -302,6 +303,19 @@ def test_manifest_problems() -> None:
         (_node(dynamic_ports="cases", run=_run), "unknown config field"),
         (_node(), "must implement run()"),
         (_node(run=_run, side_effect=SideEffect.RECONCILABLE), "must implement reconcile()"),
+        (_node(run=_run, retry=RetryDefaults(max_attempts=0)), "retry.max_attempts must be between 1 and 20"),
+        (_node(run=_run, retry=RetryDefaults(max_attempts=21)), "retry.max_attempts must be between 1 and 20"),
+        (
+            _node(run=_run, retry=RetryDefaults(initial_interval=timedelta(0))),
+            "retry.initial_interval must be positive",
+        ),
+        (_node(run=_run, retry=RetryDefaults(backoff=0.0)), "retry.backoff must be a finite number ≥ 1"),
+        (_node(run=_run, retry=RetryDefaults(backoff=float("nan"))), "retry.backoff must be a finite number ≥ 1"),
+        (
+            _node(run=_run, retry=RetryDefaults(max_interval=timedelta(milliseconds=500))),
+            "retry.max_interval must be ≥ retry.initial_interval",
+        ),
+        (_node(run=_run, retry=RetryDefaults(non_retryable=("",))), "retry.non_retryable must list error codes"),
     ]
     for node, fragment in cases:
         with pytest.raises(ManifestError) as e:
@@ -463,6 +477,7 @@ from dewpoint.sdk.context import StepContext
 TYPE_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
 PORT_RE = re.compile(r"^[a-z][a-z0-9_]{0,30}$")
 RESERVED_PORTS = frozenset({"error"})  # added by the engine when a step routes errors to a port
+MAX_RETRY_ATTEMPTS = 20  # same ceiling as a step's max_attempts override in the graph
 
 
 class NodeKind(StrEnum):
@@ -524,11 +539,12 @@ class Node:
 
 ```python
 # SPDX-License-Identifier: Apache-2.0
+import math
 import re
 from dataclasses import dataclass
 from typing import Any
 
-from dewpoint.sdk.node import PORT_RE, RESERVED_PORTS, TYPE_RE, Node, NodeKind, SideEffect
+from dewpoint.sdk.node import MAX_RETRY_ATTEMPTS, PORT_RE, RESERVED_PORTS, TYPE_RE, Node, NodeKind, SideEffect
 from dewpoint.sdk.version import SDK_VERSION
 
 PLUGIN_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
@@ -538,6 +554,32 @@ class ManifestError(ValueError):
     def __init__(self, problems: list[str]) -> None:
         super().__init__("; ".join(problems))
         self.problems = problems
+
+
+def _retry_problems(name: str, node: type[Node]) -> list[str]:
+    """A retry policy the engine can actually run (Temporal needs a positive interval and a backoff of at least 1)."""
+    r = node.retry
+    out: list[str] = []
+    if (
+        isinstance(r.max_attempts, bool)
+        or not isinstance(r.max_attempts, int)
+        or not 1 <= r.max_attempts <= MAX_RETRY_ATTEMPTS
+    ):
+        out.append(f"{name}: retry.max_attempts must be between 1 and {MAX_RETRY_ATTEMPTS}")
+    if r.initial_interval.total_seconds() <= 0:
+        out.append(f"{name}: retry.initial_interval must be positive")
+    if (
+        isinstance(r.backoff, bool)
+        or not isinstance(r.backoff, int | float)
+        or not math.isfinite(r.backoff)
+        or r.backoff < 1
+    ):
+        out.append(f"{name}: retry.backoff must be a finite number ≥ 1")
+    if r.max_interval < r.initial_interval:
+        out.append(f"{name}: retry.max_interval must be ≥ retry.initial_interval")
+    if not all(isinstance(code, str) and code for code in r.non_retryable):
+        out.append(f"{name}: retry.non_retryable must list error codes")
+    return out
 
 
 def _problems(node: type[Node]) -> list[str]:
@@ -557,8 +599,7 @@ def _problems(node: type[Node]) -> list[str]:
             out.append(f"{name}: invalid port {port!r}")
     if node.dynamic_ports is not None and node.dynamic_ports not in node.Config.model_fields:
         out.append(f"{name}: dynamic_ports names unknown config field {node.dynamic_ports!r}")
-    if node.retry.max_attempts < 1:
-        out.append(f"{name}: retry.max_attempts must be ≥ 1")
+    out += _retry_problems(name, node)
     if node.timeout.total_seconds() <= 0:
         out.append(f"{name}: timeout must be positive")
     if node.kind is NodeKind.ACTION:
@@ -1212,7 +1253,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     - there is no `$id`, `$anchor`, `$dynamicRef`, `$dynamicAnchor`, `$recursiveRef` or `$recursiveAnchor`;
     - no chain of definitions refers back to itself without descending into the data (through `$ref`, `allOf`, `anyOf`, `oneOf`, `not`, `if`/`then`/`else` or `dependentSchemas`).
   - `Catalog(specs)` with `.get(ref) -> NodeTypeSpec | None` and `.refs()`.
-  - `validate_plugin_manifest(manifest) -> list[str]`.
+  - `validate_plugin_manifest(manifest) -> list[str]`. It **never raises** on malformed data: every field is type-checked before it is used.
+    - `title` must be non-empty text.
+    - `kind` and `side_effect` must be known strings.
+    - `dynamic_ports` must be `null` or name a config field.
+    - `retry` must be exactly `{max_attempts: 1–20, initial_interval_s: > 0, backoff: ≥ 1, max_interval_s: ≥ initial_interval_s, non_retryable: [codes]}`, with finite numbers.
+    - `timeout_s` must be a positive, finite number.
   - Test helper `tests.support.catalog.catalog(*plugins, states=None) -> Catalog`.
 
 - [ ] **Step 1: Write the failing test**
@@ -1400,10 +1446,33 @@ def test_display_metadata_is_not_part_of_the_contract(path: tuple[str, ...], val
         (("config_schema", "x-dewpoint-note"), {"title": "a"}, {"title": "b"}),
     ],
 )
-def test_annotation_names_inside_data_are_part_of_the_contract(
-    path: tuple[str, ...], before: Any, after: Any
-) -> None:
+def test_annotation_names_inside_data_are_part_of_the_contract(path: tuple[str, ...], before: Any, after: Any) -> None:
     assert contract_hash(_changed(path, before)) != contract_hash(_changed(path, after))
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "fragment"),
+    [
+        ("kind", ["action"], "unknown kind"),
+        ("side_effect", {"none": True}, "unknown side_effect"),
+        ("title", None, "title must be non-empty text"),
+        ("dynamic_ports", ["value"], "dynamic_ports must name a config field"),
+        ("dynamic_ports", "nope", "dynamic_ports must name a config field"),
+        ("retry", "fast", "retry must be"),
+        ("retry", {**ECHO["retry"], "max_attempts": 0}, "retry must be"),
+        ("retry", {**ECHO["retry"], "initial_interval_s": 0}, "retry must be"),
+        ("retry", {**ECHO["retry"], "backoff": 0}, "retry must be"),
+        ("retry", {**ECHO["retry"], "backoff": float("nan")}, "retry must be"),
+        ("retry", {**ECHO["retry"], "max_interval_s": 0.5}, "retry must be"),
+        ("retry", {**ECHO["retry"], "non_retryable": "testkit.bad"}, "retry must be"),
+        ("retry", {**ECHO["retry"], "jitter": 1}, "retry must be"),
+    ],
+)
+def test_malformed_manifest_fields_are_problems_not_exceptions(field: str, value: Any, fragment: str) -> None:
+    m = copy.deepcopy(TESTKIT.manifest())
+    m["nodes"][0][field] = value
+    problems = validate_plugin_manifest(m)
+    assert any(fragment in p for p in problems), problems
 
 
 def test_manifest_schemas_must_use_resolvable_local_refs() -> None:
@@ -1611,10 +1680,11 @@ CONTROL_TYPES = frozenset(
 
 ```python
 # SPDX-License-Identifier: Apache-2.0
+import math
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeGuard
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
@@ -1622,7 +1692,7 @@ from jsonschema.exceptions import SchemaError
 from dewpoint.engine.canonical import sha256_hex
 from dewpoint.engine.registry.control import CONTROL_TYPES
 from dewpoint.engine.schema_refs import SCHEMA_LIST, SCHEMA_MAP, SCHEMA_ONE, ref_problems
-from dewpoint.sdk.node import PORT_RE, RESERVED_PORTS, TYPE_RE, NodeKind, SideEffect
+from dewpoint.sdk.node import MAX_RETRY_ATTEMPTS, PORT_RE, RESERVED_PORTS, TYPE_RE, NodeKind, SideEffect
 from dewpoint.sdk.version import SDK_MAJOR
 
 _DISPLAY = frozenset({"title", "description"})  # manifest keys that may change within a version
@@ -1718,6 +1788,49 @@ def _schema_problems(ref: str, label: str, schema: Any) -> list[str]:
     return [f"{ref}: {label}: {p}" for p in ref_problems(schema)]
 
 
+_RETRY_KEYS = frozenset({"max_attempts", "initial_interval_s", "backoff", "max_interval_s", "non_retryable"})
+
+
+def _finite(value: Any) -> TypeGuard[int | float]:
+    return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _retry_problems(ref: str, retry: Any) -> list[str]:
+    """The same rules the SDK applies to RetryDefaults, for manifests received as data."""
+    usable = (
+        isinstance(retry, Mapping)
+        and set(retry) == _RETRY_KEYS
+        and isinstance(retry["max_attempts"], int)
+        and not isinstance(retry["max_attempts"], bool)
+        and 1 <= retry["max_attempts"] <= MAX_RETRY_ATTEMPTS
+        and _finite(retry["initial_interval_s"])
+        and retry["initial_interval_s"] > 0
+        and _finite(retry["backoff"])
+        and retry["backoff"] >= 1
+        and _finite(retry["max_interval_s"])
+        and retry["max_interval_s"] >= retry["initial_interval_s"]
+        and isinstance(retry["non_retryable"], list)
+        and all(isinstance(code, str) and code for code in retry["non_retryable"])
+    )
+    if usable:
+        return []
+    return [
+        f"{ref}: retry must be {{max_attempts: 1-{MAX_RETRY_ATTEMPTS}, initial_interval_s: > 0, backoff: ≥ 1, "
+        "max_interval_s: ≥ initial_interval_s, non_retryable: [error codes]}"
+    ]
+
+
+def _dynamic_ports_problems(ref: str, n: Mapping[str, Any]) -> list[str]:
+    field = n.get("dynamic_ports")
+    if field is None:
+        return []
+    schema = n.get("config_schema")
+    props = schema.get("properties") if isinstance(schema, Mapping) else None
+    if isinstance(field, str) and isinstance(props, Mapping) and field in props:
+        return []
+    return [f"{ref}: dynamic_ports must name a config field"]
+
+
 def _node_problems(plugin: str, n: Mapping[str, Any], seen: set[str]) -> list[str]:
     t, v = n.get("type"), n.get("version")
     ref = f"{t}@{v}"
@@ -1729,8 +1842,11 @@ def _node_problems(plugin: str, n: Mapping[str, Any], seen: set[str]) -> list[st
     if ref in seen:
         out.append(f"{ref}: duplicate node type version")
     seen.add(ref)
+    title = n.get("title")
+    if not isinstance(title, str) or not title:
+        out.append(f"{ref}: title must be non-empty text")
     kind = n.get("kind")
-    if kind not in _KINDS:
+    if not isinstance(kind, str) or kind not in _KINDS:  # type first: a list or dict is unhashable
         out.append(f"{ref}: unknown kind {kind!r}")
     elif kind == NodeKind.CONTROL and ref not in CONTROL_TYPES:
         out.append(f"{ref}: only engine control types may use kind 'control'")
@@ -1741,13 +1857,16 @@ def _node_problems(plugin: str, n: Mapping[str, Any], seen: set[str]) -> list[st
         or any(not isinstance(p, str) or not PORT_RE.match(p) or p in RESERVED_PORTS for p in ports)
     ):
         out.append(f"{ref}: invalid ports")
-    if n.get("side_effect") not in _SIDE_EFFECTS:
-        out.append(f"{ref}: unknown side_effect")
+    side_effect = n.get("side_effect")
+    if not isinstance(side_effect, str) or side_effect not in _SIDE_EFFECTS:
+        out.append(f"{ref}: unknown side_effect {side_effect!r}")
     out += _schema_problems(ref, "config_schema", n.get("config_schema"))
     out += _schema_problems(ref, "output_schema", n.get("output_schema"))
+    out += _dynamic_ports_problems(ref, n)
+    out += _retry_problems(ref, n.get("retry"))
     timeout = n.get("timeout_s")
-    if isinstance(timeout, bool) or not isinstance(timeout, int | float) or timeout <= 0:
-        out.append(f"{ref}: timeout_s must be positive")
+    if not _finite(timeout) or timeout <= 0:
+        out.append(f"{ref}: timeout_s must be a positive number")
     return out
 
 
@@ -5737,7 +5856,10 @@ def prepare(plugins: Sequence[Plugin]) -> list[tuple[dict[str, Any], list[NodeTy
     problems: list[str] = []
     for plugin in plugins:
         manifest = plugin.manifest()  # raises ManifestError for class-level problems
-        problems += validate_plugin_manifest(manifest)
+        found = validate_plugin_manifest(manifest)
+        problems += found
+        if found:
+            continue  # never hash a manifest that failed validation: it may hold values canonical JSON rejects
         rows = [
             NodeTypeRow(type=n["type"], version=n["version"], kind=n["kind"], manifest=n, contract_hash=contract_hash(n))
             for n in manifest["nodes"]

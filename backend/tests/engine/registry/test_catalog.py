@@ -103,6 +103,31 @@ def test_annotation_names_inside_data_are_part_of_the_contract(path: tuple[str, 
     assert contract_hash(_changed(path, before)) != contract_hash(_changed(path, after))
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "fragment"),
+    [
+        ("kind", ["action"], "unknown kind"),
+        ("side_effect", {"none": True}, "unknown side_effect"),
+        ("title", None, "title must be non-empty text"),
+        ("dynamic_ports", ["value"], "dynamic_ports must name a config field"),
+        ("dynamic_ports", "nope", "dynamic_ports must name a config field"),
+        ("retry", "fast", "retry must be"),
+        ("retry", {**ECHO["retry"], "max_attempts": 0}, "retry must be"),
+        ("retry", {**ECHO["retry"], "initial_interval_s": 0}, "retry must be"),
+        ("retry", {**ECHO["retry"], "backoff": 0}, "retry must be"),
+        ("retry", {**ECHO["retry"], "backoff": float("nan")}, "retry must be"),
+        ("retry", {**ECHO["retry"], "max_interval_s": 0.5}, "retry must be"),
+        ("retry", {**ECHO["retry"], "non_retryable": "testkit.bad"}, "retry must be"),
+        ("retry", {**ECHO["retry"], "jitter": 1}, "retry must be"),
+    ],
+)
+def test_malformed_manifest_fields_are_problems_not_exceptions(field: str, value: Any, fragment: str) -> None:
+    m = copy.deepcopy(TESTKIT.manifest())
+    m["nodes"][0][field] = value
+    problems = validate_plugin_manifest(m)
+    assert any(fragment in p for p in problems), problems
+
+
 def test_manifest_schemas_must_use_resolvable_local_refs() -> None:
     m = copy.deepcopy(TESTKIT.manifest())
     m["nodes"][0]["config_schema"]["properties"]["value"] = {"$ref": "https://example.com/value.json"}

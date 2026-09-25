@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
+import math
 import re
 from dataclasses import dataclass
 from typing import Any
 
-from dewpoint.sdk.node import PORT_RE, RESERVED_PORTS, TYPE_RE, Node, NodeKind, SideEffect
+from dewpoint.sdk.node import MAX_RETRY_ATTEMPTS, PORT_RE, RESERVED_PORTS, TYPE_RE, Node, NodeKind, SideEffect
 from dewpoint.sdk.version import SDK_VERSION
 
 PLUGIN_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
@@ -13,6 +14,32 @@ class ManifestError(ValueError):
     def __init__(self, problems: list[str]) -> None:
         super().__init__("; ".join(problems))
         self.problems = problems
+
+
+def _retry_problems(name: str, node: type[Node]) -> list[str]:
+    """A retry policy the engine can actually run (Temporal needs a positive interval and a backoff of at least 1)."""
+    r = node.retry
+    out: list[str] = []
+    if (
+        isinstance(r.max_attempts, bool)
+        or not isinstance(r.max_attempts, int)
+        or not 1 <= r.max_attempts <= MAX_RETRY_ATTEMPTS
+    ):
+        out.append(f"{name}: retry.max_attempts must be between 1 and {MAX_RETRY_ATTEMPTS}")
+    if r.initial_interval.total_seconds() <= 0:
+        out.append(f"{name}: retry.initial_interval must be positive")
+    if (
+        isinstance(r.backoff, bool)
+        or not isinstance(r.backoff, int | float)
+        or not math.isfinite(r.backoff)
+        or r.backoff < 1
+    ):
+        out.append(f"{name}: retry.backoff must be a finite number ≥ 1")
+    if r.max_interval < r.initial_interval:
+        out.append(f"{name}: retry.max_interval must be ≥ retry.initial_interval")
+    if not all(isinstance(code, str) and code for code in r.non_retryable):
+        out.append(f"{name}: retry.non_retryable must list error codes")
+    return out
 
 
 def _problems(node: type[Node]) -> list[str]:
@@ -32,8 +59,7 @@ def _problems(node: type[Node]) -> list[str]:
             out.append(f"{name}: invalid port {port!r}")
     if node.dynamic_ports is not None and node.dynamic_ports not in node.Config.model_fields:
         out.append(f"{name}: dynamic_ports names unknown config field {node.dynamic_ports!r}")
-    if node.retry.max_attempts < 1:
-        out.append(f"{name}: retry.max_attempts must be ≥ 1")
+    out += _retry_problems(name, node)
     if node.timeout.total_seconds() <= 0:
         out.append(f"{name}: timeout must be positive")
     if node.kind is NodeKind.ACTION:
