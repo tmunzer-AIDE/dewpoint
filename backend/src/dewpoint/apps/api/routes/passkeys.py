@@ -1,0 +1,179 @@
+# SPDX-License-Identifier: Apache-2.0
+import uuid
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from dewpoint.core.auth import passkeys, throttle
+from dewpoint.core.auth.sessions import create_session, elevate, set_session_cookie
+from dewpoint.core.config import Settings
+from dewpoint.core.http import current_session, get_db, get_settings_dep
+from dewpoint.core.models.identity import AuthSession, User
+
+router = APIRouter(prefix="/api/v1/auth/passkeys", tags=["auth"])
+
+
+class VerifyIn(BaseModel):
+    challenge_id: uuid.UUID
+    credential: dict[str, Any]
+    name: str = Field(default="Passkey", max_length=100)
+
+
+def _state(sess: AuthSession, *allowed: str) -> None:
+    if sess.state not in allowed:
+        raise HTTPException(409, detail={"error": "wrong_state", "state": sess.state})
+
+
+async def _session_user(db: AsyncSession, sess: AuthSession) -> User:
+    user = await db.get(User, sess.user_id)
+    if user is None:  # deleted while signed in
+        raise HTTPException(401, detail={"error": "unauthenticated"})
+    return user
+
+
+def _fail() -> HTTPException:
+    return HTTPException(401, detail={"error": "passkey_failed"})
+
+
+async def _elevated(db: AsyncSession, sess: AuthSession, response: Response, settings: Settings) -> dict[str, str]:
+    token = await elevate(db, sess, method="passkey", state="active")
+    set_session_cookie(response, token, settings)
+    return {"state": "active", "csrf_token": sess.csrf_token}
+
+
+@router.post("/register/options")
+async def register_options(
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, Any]:
+    _state(sess, "enroll_required", "active")
+    user = await _session_user(db, sess)
+    opts, cid = await passkeys.registration_options(db, user, settings)
+    return {"options": opts, "challenge_id": str(cid)}
+
+
+@router.post("/register/verify")
+async def register_verify(
+    body: VerifyIn,
+    response: Response,
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, str]:
+    _state(sess, "enroll_required", "active")
+    user = await _session_user(db, sess)
+    try:
+        await passkeys.finish_registration(db, user, body.challenge_id, body.credential, body.name, settings)
+    except passkeys.PasskeyError:
+        raise _fail() from None
+    if sess.state == "enroll_required":
+        return await _elevated(db, sess, response, settings)
+    return {"state": sess.state, "csrf_token": sess.csrf_token}
+
+
+@router.post("/login/options")
+async def login_options(
+    db: AsyncSession = Depends(get_db), settings: Settings = Depends(get_settings_dep)
+) -> dict[str, Any]:
+    opts, cid = await passkeys.authentication_options(db, settings, None)
+    return {"options": opts, "challenge_id": str(cid)}
+
+
+@router.post("/login/verify")
+async def login_verify(
+    body: VerifyIn,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, str]:
+    ip = request.client.host if request.client else "unknown"
+    if await throttle.is_locked(db, "login_ip", ip):
+        raise HTTPException(429, detail={"error": "locked"})
+    try:
+        user = await passkeys.finish_authentication(db, body.challenge_id, body.credential, settings)
+    except passkeys.PasskeyError:
+        await throttle.record_failure(db, "login_ip", ip, settings)
+        await db.commit()
+        raise _fail() from None
+    sess, token = await create_session(
+        db,
+        user_id=user.id,
+        state="active",
+        methods=["passkey"],
+        settings=settings,
+        ip=ip,
+        user_agent=request.headers.get("user-agent"),
+    )
+    set_session_cookie(response, token, settings)
+    return {"state": "active", "csrf_token": sess.csrf_token}
+
+
+async def _factor_options(sess: AuthSession, db: AsyncSession, settings: Settings) -> dict[str, Any]:
+    opts, cid = await passkeys.authentication_options(db, settings, sess.user_id)
+    return {"options": opts, "challenge_id": str(cid)}
+
+
+async def _factor_verify(
+    body: VerifyIn, response: Response, sess: AuthSession, db: AsyncSession, settings: Settings
+) -> dict[str, str]:
+    key = str(sess.user_id)  # same "mfa_user" budget as TOTP and recovery codes
+    if await throttle.is_locked(db, "mfa_user", key):
+        raise HTTPException(429, detail={"error": "locked"})
+    try:
+        await passkeys.finish_authentication(
+            db, body.challenge_id, body.credential, settings, expected_user_id=sess.user_id
+        )
+    except passkeys.PasskeyError:
+        await throttle.record_failure(db, "mfa_user", key, settings)
+        await db.commit()
+        raise _fail() from None
+    await throttle.reset(db, "mfa_user", key)
+    return await _elevated(db, sess, response, settings)
+
+
+@router.post("/mfa/options")
+async def mfa_options(
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, Any]:
+    _state(sess, "mfa_pending")
+    return await _factor_options(sess, db, settings)
+
+
+@router.post("/mfa/verify")
+async def mfa_verify(
+    body: VerifyIn,
+    response: Response,
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, str]:
+    _state(sess, "mfa_pending")
+    return await _factor_verify(body, response, sess, db, settings)
+
+
+@router.post("/stepup/options")
+async def stepup_options(
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, Any]:
+    _state(sess, "active")
+    return await _factor_options(sess, db, settings)
+
+
+@router.post("/stepup/verify")
+async def stepup_verify(
+    body: VerifyIn,
+    response: Response,
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, str]:
+    _state(sess, "active")
+    return await _factor_verify(body, response, sess, db, settings)

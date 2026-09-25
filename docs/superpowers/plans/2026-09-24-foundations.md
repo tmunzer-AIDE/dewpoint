@@ -2783,15 +2783,25 @@ Expected: FAIL (module not found)
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from urllib.parse import urlparse
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from webauthn import (generate_authentication_options, generate_registration_options, options_to_json,
-                      verify_authentication_response, verify_registration_response)
+from webauthn import (
+    generate_authentication_options,
+    generate_registration_options,
+    options_to_json,
+    verify_authentication_response,
+    verify_registration_response,
+)
 from webauthn.helpers import base64url_to_bytes
-from webauthn.helpers.structs import (AuthenticatorSelectionCriteria, PublicKeyCredentialDescriptor,
-                                      ResidentKeyRequirement, UserVerificationRequirement)
+from webauthn.helpers.structs import (
+    AuthenticatorSelectionCriteria,
+    PublicKeyCredentialDescriptor,
+    ResidentKeyRequirement,
+    UserVerificationRequirement,
+)
 
 from dewpoint.core.config import Settings
 from dewpoint.core.models.identity import User, WebauthnChallenge, WebauthnCredential
@@ -2808,81 +2818,123 @@ def _rp_id(settings: Settings) -> str:
 
 
 async def _store(s: AsyncSession, challenge: bytes, user_id: uuid.UUID | None, purpose: str) -> uuid.UUID:
-    row = WebauthnChallenge(challenge=challenge, user_id=user_id, purpose=purpose,
-                            expires_at=datetime.now(UTC) + CHALLENGE_TTL)
+    row = WebauthnChallenge(
+        challenge=challenge, user_id=user_id, purpose=purpose, expires_at=datetime.now(UTC) + CHALLENGE_TTL
+    )
     s.add(row)
     await s.flush()
     return row.id
 
 
 async def _consume(s: AsyncSession, challenge_id: uuid.UUID, purpose: str) -> WebauthnChallenge:
-    row = (await s.execute(delete(WebauthnChallenge).where(WebauthnChallenge.id == challenge_id,
-                                                           WebauthnChallenge.purpose == purpose)
-                           .returning(WebauthnChallenge))).scalar_one_or_none()
+    row = (
+        await s.execute(
+            delete(WebauthnChallenge)
+            .where(WebauthnChallenge.id == challenge_id, WebauthnChallenge.purpose == purpose)
+            .returning(WebauthnChallenge)
+        )
+    ).scalar_one_or_none()
     if row is None or row.expires_at <= datetime.now(UTC):
         raise PasskeyError("challenge")
     return row
 
 
-async def registration_options(s: AsyncSession, user: User, settings: Settings) -> tuple[dict, uuid.UUID]:
-    existing = (await s.execute(select(WebauthnCredential.credential_id)
-                                .where(WebauthnCredential.user_id == user.id))).scalars().all()
+async def registration_options(s: AsyncSession, user: User, settings: Settings) -> tuple[dict[str, Any], uuid.UUID]:
+    existing = (
+        (await s.execute(select(WebauthnCredential.credential_id).where(WebauthnCredential.user_id == user.id)))
+        .scalars()
+        .all()
+    )
     opts = generate_registration_options(
-        rp_id=_rp_id(settings), rp_name="Dewpoint", user_id=user.id.bytes, user_name=user.email,
-        authenticator_selection=AuthenticatorSelectionCriteria(resident_key=ResidentKeyRequirement.REQUIRED,
-                                                               user_verification=UserVerificationRequirement.REQUIRED),
+        rp_id=_rp_id(settings),
+        rp_name="Dewpoint",
+        user_id=user.id.bytes,
+        user_name=user.email,
+        authenticator_selection=AuthenticatorSelectionCriteria(
+            resident_key=ResidentKeyRequirement.REQUIRED, user_verification=UserVerificationRequirement.REQUIRED
+        ),
         exclude_credentials=[PublicKeyCredentialDescriptor(id=c) for c in existing],
     )
     return json.loads(options_to_json(opts)), await _store(s, opts.challenge, user.id, "register")
 
 
-async def finish_registration(s: AsyncSession, user: User, challenge_id: uuid.UUID, credential: dict, name: str,
-                              settings: Settings) -> WebauthnCredential:
+async def finish_registration(
+    s: AsyncSession, user: User, challenge_id: uuid.UUID, credential: dict[str, Any], name: str, settings: Settings
+) -> WebauthnCredential:
     ch = await _consume(s, challenge_id, "register")
     if ch.user_id != user.id:
         raise PasskeyError("user")
     try:
-        v = verify_registration_response(credential=credential, expected_challenge=ch.challenge,
-                                         expected_origin=settings.public_origin, expected_rp_id=_rp_id(settings),
-                                         require_user_verification=True)
+        v = verify_registration_response(
+            credential=credential,
+            expected_challenge=ch.challenge,
+            expected_origin=settings.public_origin,
+            expected_rp_id=_rp_id(settings),
+            require_user_verification=True,
+        )
     except Exception as exc:  # library raises several types; never leak details
         raise PasskeyError("verify") from exc
-    cred = WebauthnCredential(user_id=user.id, credential_id=v.credential_id, public_key=v.credential_public_key,
-                              sign_count=v.sign_count, transports=[], name=name[:100])
+    cred = WebauthnCredential(
+        user_id=user.id,
+        credential_id=v.credential_id,
+        public_key=v.credential_public_key,
+        sign_count=v.sign_count,
+        transports=[],
+        name=name[:100],
+    )
     s.add(cred)
     await s.flush()
     return cred
 
 
-async def authentication_options(s: AsyncSession, settings: Settings,
-                                 user_id: uuid.UUID | None) -> tuple[dict, uuid.UUID]:
+async def authentication_options(
+    s: AsyncSession, settings: Settings, user_id: uuid.UUID | None
+) -> tuple[dict[str, Any], uuid.UUID]:
     allow = []
     if user_id:
-        ids = (await s.execute(select(WebauthnCredential.credential_id)
-                               .where(WebauthnCredential.user_id == user_id))).scalars().all()
+        ids = (
+            (await s.execute(select(WebauthnCredential.credential_id).where(WebauthnCredential.user_id == user_id)))
+            .scalars()
+            .all()
+        )
         allow = [PublicKeyCredentialDescriptor(id=c) for c in ids]
-    opts = generate_authentication_options(rp_id=_rp_id(settings), allow_credentials=allow,
-                                           user_verification=UserVerificationRequirement.REQUIRED)
+    opts = generate_authentication_options(
+        rp_id=_rp_id(settings), allow_credentials=allow, user_verification=UserVerificationRequirement.REQUIRED
+    )
     return json.loads(options_to_json(opts)), await _store(s, opts.challenge, user_id, "authenticate")
 
 
-async def finish_authentication(s: AsyncSession, challenge_id: uuid.UUID, credential: dict, settings: Settings,
-                                expected_user_id: uuid.UUID | None = None) -> User:
+async def finish_authentication(
+    s: AsyncSession,
+    challenge_id: uuid.UUID,
+    credential: dict[str, Any],
+    settings: Settings,
+    expected_user_id: uuid.UUID | None = None,
+) -> User:
     ch = await _consume(s, challenge_id, "authenticate")
     try:
         raw_id = base64url_to_bytes(str(credential["rawId"]))
     except Exception as exc:
         raise PasskeyError("format") from exc
-    cred = (await s.execute(select(WebauthnCredential).where(WebauthnCredential.credential_id == raw_id)
-                            .with_for_update())).scalar_one_or_none()
-    if cred is None or (ch.user_id and ch.user_id != cred.user_id) or (expected_user_id and expected_user_id != cred.user_id):
+    cred = (
+        await s.execute(select(WebauthnCredential).where(WebauthnCredential.credential_id == raw_id).with_for_update())
+    ).scalar_one_or_none()
+    if (
+        cred is None
+        or (ch.user_id and ch.user_id != cred.user_id)
+        or (expected_user_id and expected_user_id != cred.user_id)
+    ):
         raise PasskeyError("credential")
     try:
-        v = verify_authentication_response(credential=credential, expected_challenge=ch.challenge,
-                                           expected_origin=settings.public_origin, expected_rp_id=_rp_id(settings),
-                                           credential_public_key=cred.public_key,
-                                           credential_current_sign_count=cred.sign_count,
-                                           require_user_verification=True)
+        v = verify_authentication_response(
+            credential=credential,
+            expected_challenge=ch.challenge,
+            expected_origin=settings.public_origin,
+            expected_rp_id=_rp_id(settings),
+            credential_public_key=cred.public_key,
+            credential_current_sign_count=cred.sign_count,
+            require_user_verification=True,
+        )
     except Exception as exc:
         raise PasskeyError("verify") from exc
     cred.sign_count, cred.last_used_at = v.new_sign_count, datetime.now(UTC)
@@ -2984,6 +3036,13 @@ def _state(sess: AuthSession, *allowed: str) -> None:
         raise HTTPException(409, detail={"error": "wrong_state", "state": sess.state})
 
 
+async def _session_user(db: AsyncSession, sess: AuthSession) -> User:
+    user = await db.get(User, sess.user_id)
+    if user is None:  # deleted while signed in
+        raise HTTPException(401, detail={"error": "unauthenticated"})
+    return user
+
+
 def _fail() -> HTTPException:
     return HTTPException(401, detail={"error": "passkey_failed"})
 
@@ -2995,21 +3054,27 @@ async def _elevated(db: AsyncSession, sess: AuthSession, response: Response, set
 
 
 @router.post("/register/options")
-async def register_options(sess: AuthSession = Depends(current_session), db: AsyncSession = Depends(get_db),
-                           settings: Settings = Depends(get_settings_dep)) -> dict[str, Any]:
+async def register_options(
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, Any]:
     _state(sess, "enroll_required", "active")
-    user = await db.get(User, sess.user_id)
-    assert user is not None
+    user = await _session_user(db, sess)
     opts, cid = await passkeys.registration_options(db, user, settings)
     return {"options": opts, "challenge_id": str(cid)}
 
 
 @router.post("/register/verify")
-async def register_verify(body: VerifyIn, response: Response, sess: AuthSession = Depends(current_session),
-                          db: AsyncSession = Depends(get_db), settings: Settings = Depends(get_settings_dep)) -> dict[str, str]:
+async def register_verify(
+    body: VerifyIn,
+    response: Response,
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, str]:
     _state(sess, "enroll_required", "active")
-    user = await db.get(User, sess.user_id)
-    assert user is not None
+    user = await _session_user(db, sess)
     try:
         await passkeys.finish_registration(db, user, body.challenge_id, body.credential, body.name, settings)
     except passkeys.PasskeyError:
@@ -3020,14 +3085,21 @@ async def register_verify(body: VerifyIn, response: Response, sess: AuthSession 
 
 
 @router.post("/login/options")
-async def login_options(db: AsyncSession = Depends(get_db), settings: Settings = Depends(get_settings_dep)) -> dict[str, Any]:
+async def login_options(
+    db: AsyncSession = Depends(get_db), settings: Settings = Depends(get_settings_dep)
+) -> dict[str, Any]:
     opts, cid = await passkeys.authentication_options(db, settings, None)
     return {"options": opts, "challenge_id": str(cid)}
 
 
 @router.post("/login/verify")
-async def login_verify(body: VerifyIn, request: Request, response: Response, db: AsyncSession = Depends(get_db),
-                       settings: Settings = Depends(get_settings_dep)) -> dict[str, str]:
+async def login_verify(
+    body: VerifyIn,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, str]:
     ip = request.client.host if request.client else "unknown"
     if await throttle.is_locked(db, "login_ip", ip):
         raise HTTPException(429, detail={"error": "locked"})
@@ -3037,8 +3109,15 @@ async def login_verify(body: VerifyIn, request: Request, response: Response, db:
         await throttle.record_failure(db, "login_ip", ip, settings)
         await db.commit()
         raise _fail() from None
-    sess, token = await create_session(db, user_id=user.id, state="active", methods=["passkey"], settings=settings,
-                                       ip=ip, user_agent=request.headers.get("user-agent"))
+    sess, token = await create_session(
+        db,
+        user_id=user.id,
+        state="active",
+        methods=["passkey"],
+        settings=settings,
+        ip=ip,
+        user_agent=request.headers.get("user-agent"),
+    )
     set_session_cookie(response, token, settings)
     return {"state": "active", "csrf_token": sess.csrf_token}
 
@@ -3048,14 +3127,16 @@ async def _factor_options(sess: AuthSession, db: AsyncSession, settings: Setting
     return {"options": opts, "challenge_id": str(cid)}
 
 
-async def _factor_verify(body: VerifyIn, response: Response, sess: AuthSession, db: AsyncSession,
-                         settings: Settings) -> dict[str, str]:
+async def _factor_verify(
+    body: VerifyIn, response: Response, sess: AuthSession, db: AsyncSession, settings: Settings
+) -> dict[str, str]:
     key = str(sess.user_id)  # same "mfa_user" budget as TOTP and recovery codes
     if await throttle.is_locked(db, "mfa_user", key):
         raise HTTPException(429, detail={"error": "locked"})
     try:
-        await passkeys.finish_authentication(db, body.challenge_id, body.credential, settings,
-                                             expected_user_id=sess.user_id)
+        await passkeys.finish_authentication(
+            db, body.challenge_id, body.credential, settings, expected_user_id=sess.user_id
+        )
     except passkeys.PasskeyError:
         await throttle.record_failure(db, "mfa_user", key, settings)
         await db.commit()
@@ -3065,37 +3146,62 @@ async def _factor_verify(body: VerifyIn, response: Response, sess: AuthSession, 
 
 
 @router.post("/mfa/options")
-async def mfa_options(sess: AuthSession = Depends(current_session), db: AsyncSession = Depends(get_db),
-                      settings: Settings = Depends(get_settings_dep)) -> dict[str, Any]:
+async def mfa_options(
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, Any]:
     _state(sess, "mfa_pending")
     return await _factor_options(sess, db, settings)
 
 
 @router.post("/mfa/verify")
-async def mfa_verify(body: VerifyIn, response: Response, sess: AuthSession = Depends(current_session),
-                     db: AsyncSession = Depends(get_db), settings: Settings = Depends(get_settings_dep)) -> dict[str, str]:
+async def mfa_verify(
+    body: VerifyIn,
+    response: Response,
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, str]:
     _state(sess, "mfa_pending")
     return await _factor_verify(body, response, sess, db, settings)
 
 
 @router.post("/stepup/options")
-async def stepup_options(sess: AuthSession = Depends(current_session), db: AsyncSession = Depends(get_db),
-                         settings: Settings = Depends(get_settings_dep)) -> dict[str, Any]:
+async def stepup_options(
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, Any]:
     _state(sess, "active")
     return await _factor_options(sess, db, settings)
 
 
 @router.post("/stepup/verify")
-async def stepup_verify(body: VerifyIn, response: Response, sess: AuthSession = Depends(current_session),
-                        db: AsyncSession = Depends(get_db), settings: Settings = Depends(get_settings_dep)) -> dict[str, str]:
+async def stepup_verify(
+    body: VerifyIn,
+    response: Response,
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, str]:
     _state(sess, "active")
     return await _factor_verify(body, response, sess, db, settings)
 ```
 Include the router in `create_app`.
 
+- [ ] **Step 5b: Real-signature tests (no mocks)**
+
+Add `tests/support/soft_authenticator.py`, a software ES256 authenticator with "none" attestation built on `cryptography` and `cbor2` (a webauthn dependency). Add `tests/core/auth/test_passkeys_real_crypto.py`, which covers:
+- registration and authentication with real signatures, including sign-count progression;
+- a wrong origin, a tampered signature and a replayed assertion, each rejected;
+- a missing user-verification flag, rejected at registration.
+
+The test directories get `__init__.py` files so that `tests.support` is importable.
+
 - [ ] **Step 6: Run the tests**
 
-Run: `uv run pytest tests/core/auth/test_passkeys.py tests/apps/api/test_passkey_routes.py -v`
+Run: `uv run pytest tests/core/auth/test_passkeys.py tests/core/auth/test_passkeys_real_crypto.py tests/apps/api/test_passkey_routes.py -v`
 Expected: all PASS
 
 - [ ] **Step 7: Commit**
