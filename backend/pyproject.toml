@@ -59,7 +59,10 @@ select = ["E", "F", "I", "B", "UP", "S", "ASYNC"]
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's dependency/parameter markers are designed to be used as argument defaults.
-extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Path", "fastapi.Body", "fastapi.Header"]
+extend-immutable-calls = [
+  "fastapi.Depends", "fastapi.Query", "fastapi.Path", "fastapi.Body", "fastapi.Header",
+  "dewpoint.core.http.require",
+]
 
 [tool.ruff.lint.per-file-ignores]
 # Tests: asserts, fixed test credentials, `uv` on PATH, and DDL built from constant role names.

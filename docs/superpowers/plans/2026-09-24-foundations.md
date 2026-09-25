@@ -3243,12 +3243,14 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 `backend/tests/core/authz/test_permissions.py`:
 ```python
 # SPDX-License-Identifier: Apache-2.0
-from dewpoint.core.authz.permissions import P, ROLE_PERMISSIONS
+from itertools import pairwise
+
+from dewpoint.core.authz.permissions import ROLE_PERMISSIONS, P
 
 
 def test_role_hierarchy_is_monotonic() -> None:
     order = ["viewer", "operator", "editor", "admin", "owner"]
-    for lower, higher in zip(order, order[1:]):
+    for lower, higher in pairwise(order):
         assert ROLE_PERMISSIONS[lower] <= ROLE_PERMISSIONS[higher], (lower, higher)
 
 
@@ -3276,21 +3278,36 @@ from dewpoint.core.auth.users import create_user
 PW = "violet-otter-canyon-42"
 
 
-async def _as(app, owner_sessionmaker, api_settings, role: str | None, methods=("password", "totp"),
-              require_passkey: bool = False, platform_admin: bool = False):
+async def _as(
+    app,
+    owner_sessionmaker,
+    api_settings,
+    role: str | None,
+    methods=("password", "totp"),
+    require_passkey: bool = False,
+    platform_admin: bool = False,
+):
     tid = uuid.uuid4()
     async with owner_sessionmaker() as s, s.begin():
         u = await create_user(s, email=f"{uuid.uuid4().hex[:8]}@corp.test", password=PW, platform_admin=platform_admin)
-        await s.execute(text("insert into tenants(id,name,slug,require_passkey) values (:t,'T',:slug,:rp)"),
-                        {"t": tid, "slug": tid.hex[:12], "rp": require_passkey})
+        await s.execute(
+            text("insert into tenants(id,name,slug,require_passkey) values (:t,'T',:slug,:rp)"),
+            {"t": tid, "slug": tid.hex[:12], "rp": require_passkey},
+        )
         if role:
-            await s.execute(text("insert into memberships(tenant_id,user_id,role) values (:t,:u,:r)"),
-                            {"t": tid, "u": u.id, "r": role})
-        sess, token = await create_session(s, user_id=u.id, state="active", methods=list(methods),
-                                           settings=api_settings, ip=None, user_agent=None)
-    c = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://testserver",
-                          cookies={SESSION_COOKIE: token},
-                          headers={"X-Dewpoint-Client": "web", "X-CSRF-Token": sess.csrf_token})
+            await s.execute(
+                text("insert into memberships(tenant_id,user_id,role) values (:t,:u,:r)"),
+                {"t": tid, "u": u.id, "r": role},
+            )
+        sess, token = await create_session(
+            s, user_id=u.id, state="active", methods=list(methods), settings=api_settings, ip=None, user_agent=None
+        )
+    c = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="https://testserver",
+        cookies={SESSION_COOKIE: token},
+        headers={"X-Dewpoint-Client": "web", "X-CSRF-Token": sess.csrf_token},
+    )
     return c, tid
 
 
@@ -3299,8 +3316,12 @@ CASES = [
     ("GET", "/api/v1/t/{t}", None, {"viewer": 200, "owner": 200, None: 404}),
     ("PATCH", "/api/v1/t/{t}", {"name": "New"}, {"viewer": 403, "editor": 403, "admin": 200, None: 404}),
     ("GET", "/api/v1/t/{t}/members", None, {"viewer": 200, None: 404}),
-    ("POST", "/api/v1/t/{t}/members", {"email": "nobody@corp.test", "role": "viewer"},
-     {"operator": 403, "admin": 404, None: 404}),  # admin allowed; unknown user -> 404 user_not_found
+    (
+        "POST",
+        "/api/v1/t/{t}/members",
+        {"email": "nobody@corp.test", "role": "viewer"},
+        {"operator": 403, "admin": 404, None: 404},
+    ),  # admin allowed; unknown user -> 404 user_not_found
 ]
 
 
@@ -3348,6 +3369,7 @@ async def test_platform_admin_creates_tenant_and_last_owner_protected(app, owner
 async def test_unfiltered_query_after_require_sees_only_current_tenant(app, owner_sessionmaker, api_settings) -> None:
     from fastapi import APIRouter, Depends
     from sqlalchemy import select
+
     from dewpoint.core.authz.permissions import P
     from dewpoint.core.http import get_db, require
     from dewpoint.core.models.tenancy import Membership, Tenant
@@ -3356,16 +3378,25 @@ async def test_unfiltered_query_after_require_sees_only_current_tenant(app, owne
 
     @router.get("/api/v1/t/{tenant_id}/_probe")
     async def probe(_=Depends(require(P.TENANT_VIEW)), db=Depends(get_db)) -> dict[str, int]:
-        return {"memberships": len((await db.execute(select(Membership))).scalars().all()),  # deliberately unfiltered
-                "tenants": len((await db.execute(select(Tenant))).scalars().all())}
+        return {
+            "memberships": len((await db.execute(select(Membership))).scalars().all()),  # deliberately unfiltered
+            "tenants": len((await db.execute(select(Tenant))).scalars().all()),
+        }
 
     app.include_router(router)
     c, tid = await _as(app, owner_sessionmaker, api_settings, "owner")
     other = uuid.uuid4()
     async with owner_sessionmaker() as s, s.begin():  # same user also owns a second tenant
-        await s.execute(text("insert into tenants(id,name,slug) values (:o,'O',:slug)"), {"o": other, "slug": other.hex[:12]})
-        await s.execute(text("insert into memberships(tenant_id,user_id,role) select :o, user_id, 'owner' "
-                             "from memberships where tenant_id=:t"), {"o": other, "t": tid})
+        await s.execute(
+            text("insert into tenants(id,name,slug) values (:o,'O',:slug)"), {"o": other, "slug": other.hex[:12]}
+        )
+        await s.execute(
+            text(
+                "insert into memberships(tenant_id,user_id,role) select :o, user_id, 'owner' "
+                "from memberships where tenant_id=:t"
+            ),
+            {"o": other, "t": tid},
+        )
     async with c:
         assert (await c.get(f"/api/v1/t/{tid}/_probe")).json() == {"memberships": 1, "tenants": 1}
 
@@ -3374,6 +3405,22 @@ async def test_non_admin_cannot_create_tenant(app, owner_sessionmaker, api_setti
     c, _ = await _as(app, owner_sessionmaker, api_settings, "owner")
     async with c:
         assert (await c.post("/api/v1/tenants", json={"name": "X", "slug": "x-tenant"})).status_code == 403
+
+
+async def test_platform_admin_creates_users(app, owner_sessionmaker, api_settings) -> None:
+    admin, _ = await _as(app, owner_sessionmaker, api_settings, None, platform_admin=True)
+    async with admin:
+        r = await admin.post("/api/v1/admin/users", json={"email": "new@site.local", "password": PW})
+        assert r.status_code == 201 and r.json()["email"] == "new@site.local"
+        r = await admin.post("/api/v1/admin/users", json={"email": "NEW@site.local", "password": PW})
+        assert r.status_code == 409 and r.json() == {"error": "email_taken"}
+        r = await admin.post("/api/v1/admin/users", json={"email": "weak@site.local", "password": "short"})
+        assert r.status_code == 422 and r.json()["error"] == "password_policy"
+        assert "short" not in r.text
+    owner, _ = await _as(app, owner_sessionmaker, api_settings, "owner")
+    async with owner:
+        r = await owner.post("/api/v1/admin/users", json={"email": "x@site.local", "password": PW})
+        assert r.status_code == 403
 ```
 
 `backend/tests/core/tenancy/test_owner_race.py`:
@@ -3630,6 +3677,13 @@ class TenantPatch(BaseModel):
     require_passkey: bool | None = None
 
 
+async def _tenant(db: AsyncSession, ctx: TenantContext) -> Tenant:
+    t = await db.get(Tenant, ctx.tenant_id)
+    if t is None:  # deleted after the membership check in this request
+        raise HTTPException(404, detail={"error": "not_found"})
+    return t
+
+
 def _out(t: Tenant, role: str | None = None) -> dict[str, object]:
     d: dict[str, object] = {"id": str(t.id), "name": t.name, "slug": t.slug, "require_passkey": t.require_passkey}
     if role:
@@ -3643,8 +3697,9 @@ async def my_tenants(user: User = Depends(current_user), db: AsyncSession = Depe
 
 
 @router.post("/tenants", status_code=201)
-async def create(body: TenantIn, admin: User = Depends(require_platform_admin),
-                 db: AsyncSession = Depends(get_db)) -> dict[str, object]:
+async def create(
+    body: TenantIn, admin: User = Depends(require_platform_admin), db: AsyncSession = Depends(get_db)
+) -> dict[str, object]:
     try:
         t = await service.create_tenant(db, name=body.name, slug=body.slug, owner_id=admin.id)
     except IntegrityError:
@@ -3653,18 +3708,18 @@ async def create(body: TenantIn, admin: User = Depends(require_platform_admin),
 
 
 @router.get("/t/{tenant_id}")
-async def get_tenant(ctx: TenantContext = Depends(require(P.TENANT_VIEW)),
-                     db: AsyncSession = Depends(get_db)) -> dict[str, object]:
-    t = await db.get(Tenant, ctx.tenant_id)
-    assert t is not None
+async def get_tenant(
+    ctx: TenantContext = Depends(require(P.TENANT_VIEW)), db: AsyncSession = Depends(get_db)
+) -> dict[str, object]:
+    t = await _tenant(db, ctx)
     return _out(t, ctx.role)
 
 
 @router.patch("/t/{tenant_id}")
-async def patch_tenant(body: TenantPatch, ctx: TenantContext = Depends(require(P.TENANT_MANAGE)),
-                       db: AsyncSession = Depends(get_db)) -> dict[str, object]:
-    t = await db.get(Tenant, ctx.tenant_id)
-    assert t is not None
+async def patch_tenant(
+    body: TenantPatch, ctx: TenantContext = Depends(require(P.TENANT_MANAGE)), db: AsyncSession = Depends(get_db)
+) -> dict[str, object]:
+    t = await _tenant(db, ctx)
     if body.name is not None:
         t.name = body.name
     if body.require_passkey is not None:
@@ -3753,7 +3808,38 @@ async def remove(user_id: uuid.UUID, ctx: TenantContext = Depends(require(P.MEMB
     return Response(status_code=204)
 ```
 
-`apps/api/routes/admin_users.py`: `POST /api/v1/admin/users` `{email, password}`, guarded by `require_platform_admin`. It calls `create_user` and returns `201 {"id","email"}`, maps `PasswordPolicyError` to 422 `{"error":"password_policy","violations":[…]}`, and maps `EmailTakenError` to 409 `{"error":"email_taken"}`. The new user enrolls MFA at first login (Task 8 states).
+`apps/api/routes/admin_users.py` (a platform admin creates local accounts; each new user enrolls MFA at first sign-in; covered by `test_platform_admin_creates_users`):
+```python
+# SPDX-License-Identifier: Apache-2.0
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from dewpoint.core.auth.users import Email, EmailTakenError, PasswordPolicyError, create_user
+from dewpoint.core.http import get_db, require_platform_admin
+from dewpoint.core.models.identity import User
+
+router = APIRouter(prefix="/api/v1/admin/users", tags=["admin"])
+
+
+class UserIn(BaseModel):
+    email: Email
+    password: str = Field(min_length=1, max_length=1024)
+
+
+@router.post("", status_code=201)
+async def create(
+    body: UserIn, admin: User = Depends(require_platform_admin), db: AsyncSession = Depends(get_db)
+) -> dict[str, str]:
+    """Create a local account. The new user must enroll MFA at first sign-in."""
+    try:
+        user = await create_user(db, email=body.email, password=body.password)
+    except PasswordPolicyError as e:
+        raise HTTPException(422, detail={"error": "password_policy", "violations": e.violations}) from None
+    except EmailTakenError:
+        raise HTTPException(409, detail={"error": "email_taken"}) from None
+    return {"id": str(user.id), "email": user.email}
+```
 
 Include all three routers in `create_app`.
 

@@ -1,12 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
-from collections.abc import AsyncIterator
+import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException, Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.auth.sessions import SESSION_COOKIE, csrf_valid, load_session
+from dewpoint.core.authz.permissions import ROLE_PERMISSIONS, P
 from dewpoint.core.config import Settings
+from dewpoint.core.db import tenant_scope, user_scope
 from dewpoint.core.models.identity import AuthSession, User
+from dewpoint.core.models.tenancy import Membership, Tenant
 
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
@@ -42,4 +48,46 @@ async def current_user(sess: AuthSession = Depends(active_session), db: AsyncSes
     user = await db.get(User, sess.user_id)
     if user is None or not user.is_active:
         raise HTTPException(401, detail={"error": "unauthenticated"})
+    return user
+
+
+@dataclass(frozen=True)
+class TenantContext:
+    tenant_id: uuid.UUID
+    user: User
+    role: str
+    session: AuthSession
+
+
+def require(permission: P) -> Callable[..., Awaitable[TenantContext]]:
+    async def _dep(
+        tenant_id: uuid.UUID,
+        user: User = Depends(current_user),
+        sess: AuthSession = Depends(active_session),
+        db: AsyncSession = Depends(get_db),
+    ) -> TenantContext:
+        await user_scope(db, user.id)  # authoritative lookup of the caller's own membership
+        row = (
+            await db.execute(
+                select(Membership.role, Tenant.require_passkey)
+                .join(Tenant, Tenant.id == Membership.tenant_id)
+                .where(Membership.tenant_id == tenant_id, Membership.user_id == user.id)
+            )
+        ).first()
+        if row is None:
+            raise HTTPException(404, detail={"error": "not_found"})
+        role, require_passkey = row
+        if require_passkey and "passkey" not in sess.auth_methods:
+            raise HTTPException(403, detail={"error": "step_up_required"})
+        if permission not in ROLE_PERMISSIONS[role]:
+            raise HTTPException(403, detail={"error": "forbidden"})
+        await tenant_scope(db, tenant_id)  # clears user scope: no widening to the caller's other tenants
+        return TenantContext(tenant_id=tenant_id, user=user, role=role, session=sess)
+
+    return _dep
+
+
+async def require_platform_admin(user: User = Depends(current_user)) -> User:
+    if not user.is_platform_admin:
+        raise HTTPException(403, detail={"error": "forbidden"})
     return user
