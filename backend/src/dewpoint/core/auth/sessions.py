@@ -52,7 +52,9 @@ async def create_session(
     settings: Settings,
     ip: str | None,
     user_agent: str | None,
+    reauth: bool = False,
 ) -> tuple[AuthSession, str]:
+    """reauth=True when the session starts with a proven second factor (passkey with user verification)."""
     token, now = secrets.token_urlsafe(32), datetime.now(UTC)
     sess = AuthSession(
         token_hash=_hash(token),
@@ -65,6 +67,7 @@ async def create_session(
         expires_at=now + timedelta(hours=settings.session_absolute_hours),
         ip=ip,
         user_agent=(user_agent or "")[:400] or None,
+        reauth_at=now if reauth else None,
     )
     s.add(sess)
     await s.flush()
@@ -85,13 +88,26 @@ async def load_session(
     return sess
 
 
-async def elevate(s: AsyncSession, sess: AuthSession, *, method: str, state: str = "active") -> str:
+async def rotate(s: AsyncSession, sess: AuthSession) -> str:
+    """New session token and CSRF token after any privilege-relevant change. Returns the new token."""
     token = secrets.token_urlsafe(32)
-    sess.token_hash, sess.state = _hash(token), state
-    sess.auth_methods = [*sess.auth_methods, method]
-    sess.csrf_token = secrets.token_urlsafe(32)
+    sess.token_hash, sess.csrf_token = _hash(token), secrets.token_urlsafe(32)
     await s.flush()
     return token
+
+
+async def elevate(s: AsyncSession, sess: AuthSession, *, method: str, state: str = "active") -> str:
+    """Record a proven factor: append the method, stamp reauth_at, set the state and rotate tokens."""
+    sess.state = state
+    sess.auth_methods = [*sess.auth_methods, method]
+    sess.reauth_at = datetime.now(UTC)
+    return await rotate(s, sess)
+
+
+def reauth_fresh(sess: AuthSession, settings: Settings, now: datetime | None = None) -> bool:
+    if sess.reauth_at is None:
+        return False
+    return (now or datetime.now(UTC)) - sess.reauth_at <= timedelta(minutes=settings.reauth_minutes)
 
 
 async def revoke(s: AsyncSession, sess: AuthSession) -> None:

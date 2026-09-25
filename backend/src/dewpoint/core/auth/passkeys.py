@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from webauthn import (
     generate_authentication_options,
@@ -28,15 +28,39 @@ from dewpoint.core.models.identity import User, WebauthnChallenge, WebauthnCrede
 CHALLENGE_TTL = timedelta(minutes=5)
 
 
+PURGE_BATCH = 500
+
+
 class PasskeyError(Exception):
     pass
+
+
+class ChallengeCapacityError(Exception):
+    """Too many outstanding challenges platform-wide; callers answer 429."""
 
 
 def _rp_id(settings: Settings) -> str:
     return settings.rp_id or (urlparse(settings.public_origin).hostname or "")
 
 
-async def _store(s: AsyncSession, challenge: bytes, user_id: uuid.UUID | None, purpose: str) -> uuid.UUID:
+async def purge_expired_challenges(s: AsyncSession, limit: int = PURGE_BATCH) -> int:
+    """Delete up to `limit` expired challenges (bounded, so one request never does unbounded work)."""
+    doomed = select(WebauthnChallenge.id).where(WebauthnChallenge.expires_at <= func.now()).limit(limit)
+    result = await s.execute(delete(WebauthnChallenge).where(WebauthnChallenge.id.in_(doomed.scalar_subquery())))
+    return int(getattr(result, "rowcount", 0) or 0)
+
+
+async def _store(
+    s: AsyncSession, challenge: bytes, user_id: uuid.UUID | None, purpose: str, settings: Settings
+) -> uuid.UUID:
+    await purge_expired_challenges(s)
+    outstanding = (
+        await s.execute(
+            select(func.count()).select_from(WebauthnChallenge).where(WebauthnChallenge.expires_at > func.now())
+        )
+    ).scalar_one()
+    if outstanding >= settings.webauthn_challenges_max:
+        raise ChallengeCapacityError()
     row = WebauthnChallenge(
         challenge=challenge, user_id=user_id, purpose=purpose, expires_at=datetime.now(UTC) + CHALLENGE_TTL
     )
@@ -74,7 +98,7 @@ async def registration_options(s: AsyncSession, user: User, settings: Settings) 
         ),
         exclude_credentials=[PublicKeyCredentialDescriptor(id=c) for c in existing],
     )
-    return json.loads(options_to_json(opts)), await _store(s, opts.challenge, user.id, "register")
+    return json.loads(options_to_json(opts)), await _store(s, opts.challenge, user.id, "register", settings)
 
 
 async def finish_registration(
@@ -120,7 +144,7 @@ async def authentication_options(
     opts = generate_authentication_options(
         rp_id=_rp_id(settings), allow_credentials=allow, user_verification=UserVerificationRequirement.REQUIRED
     )
-    return json.loads(options_to_json(opts)), await _store(s, opts.challenge, user_id, "authenticate")
+    return json.loads(options_to_json(opts)), await _store(s, opts.challenge, user_id, "authenticate", settings)
 
 
 async def finish_authentication(

@@ -7,9 +7,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.auth import passkeys, throttle
-from dewpoint.core.auth.sessions import create_session, elevate, set_session_cookie
+from dewpoint.core.auth.sessions import create_session, elevate, rotate, set_session_cookie
 from dewpoint.core.config import Settings
-from dewpoint.core.http import current_session, get_db, get_settings_dep
+from dewpoint.core.http import current_session, ensure_fresh_reauth, get_db, get_settings_dep
 from dewpoint.core.models.identity import AuthSession, User
 
 router = APIRouter(prefix="/api/v1/auth/passkeys", tags=["auth"])
@@ -33,6 +33,10 @@ async def _session_user(db: AsyncSession, sess: AuthSession) -> User:
     return user
 
 
+def _busy() -> HTTPException:
+    return HTTPException(429, detail={"error": "rate_limited"})
+
+
 def _fail() -> HTTPException:
     return HTTPException(401, detail={"error": "passkey_failed"})
 
@@ -50,8 +54,12 @@ async def register_options(
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, Any]:
     _state(sess, "enroll_required", "active")
+    ensure_fresh_reauth(sess, settings)  # a stolen active session must not be able to plant a lasting factor
     user = await _session_user(db, sess)
-    opts, cid = await passkeys.registration_options(db, user, settings)
+    try:
+        opts, cid = await passkeys.registration_options(db, user, settings)
+    except passkeys.ChallengeCapacityError:
+        raise _busy() from None
     return {"options": opts, "challenge_id": str(cid)}
 
 
@@ -71,14 +79,24 @@ async def register_verify(
         raise _fail() from None
     if sess.state == "enroll_required":
         return await _elevated(db, sess, response, settings)
+    token = await rotate(db, sess)  # a factor was added: new session and CSRF tokens
+    set_session_cookie(response, token, settings)
     return {"state": sess.state, "csrf_token": sess.csrf_token}
 
 
 @router.post("/login/options")
 async def login_options(
-    db: AsyncSession = Depends(get_db), settings: Settings = Depends(get_settings_dep)
+    request: Request, db: AsyncSession = Depends(get_db), settings: Settings = Depends(get_settings_dep)
 ) -> dict[str, Any]:
-    opts, cid = await passkeys.authentication_options(db, settings, None)
+    """Anonymous: every call stores a challenge, so issuance is limited per IP and capped platform-wide."""
+    ip = request.client.host if request.client else "unknown"
+    await throttle.purge_stale(db)
+    if not await throttle.consume(db, "challenge_ip", ip, settings.passkey_options_per_ip):
+        raise HTTPException(429, detail={"error": "rate_limited"})
+    try:
+        opts, cid = await passkeys.authentication_options(db, settings, None)
+    except passkeys.ChallengeCapacityError:
+        raise _busy() from None
     return {"options": opts, "challenge_id": str(cid)}
 
 
@@ -107,13 +125,17 @@ async def login_verify(
         settings=settings,
         ip=ip,
         user_agent=request.headers.get("user-agent"),
+        reauth=True,  # a user-verified passkey is a second factor
     )
     set_session_cookie(response, token, settings)
     return {"state": "active", "csrf_token": sess.csrf_token}
 
 
 async def _factor_options(sess: AuthSession, db: AsyncSession, settings: Settings) -> dict[str, Any]:
-    opts, cid = await passkeys.authentication_options(db, settings, sess.user_id)
+    try:
+        opts, cid = await passkeys.authentication_options(db, settings, sess.user_id)
+    except passkeys.ChallengeCapacityError:
+        raise _busy() from None
     return {"options": opts, "challenge_id": str(cid)}
 
 

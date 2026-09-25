@@ -26,6 +26,8 @@ class UserMfa(Base):
     totp_secret_ct: Mapped[bytes | None] = mapped_column(LargeBinary)
     totp_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_totp_step: Mapped[int | None] = mapped_column(Integer)
+    totp_pending_ct: Mapped[bytes | None] = mapped_column(LargeBinary)
+    totp_pending_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class RecoveryCode(UUIDPk, Base):
@@ -57,6 +59,7 @@ class AuthSession(UUIDPk, Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reauth_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ip: Mapped[str | None] = mapped_column(INET)
     user_agent: Mapped[str | None] = mapped_column(String(400))
 

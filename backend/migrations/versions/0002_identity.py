@@ -52,6 +52,9 @@ def upgrade() -> None:
         sa.Column("totp_secret_ct", sa.LargeBinary),
         sa.Column("totp_confirmed_at", sa.DateTime(timezone=True)),
         sa.Column("last_totp_step", sa.Integer),
+        # A new secret awaiting confirmation; the confirmed factor above stays in force until it verifies.
+        sa.Column("totp_pending_ct", sa.LargeBinary),
+        sa.Column("totp_pending_expires_at", sa.DateTime(timezone=True)),
     )
     op.create_table(
         "recovery_codes",
@@ -85,6 +88,7 @@ def upgrade() -> None:
         sa.Column("last_seen_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("revoked_at", sa.DateTime(timezone=True)),
+        sa.Column("reauth_at", sa.DateTime(timezone=True)),  # last time this session proved a second factor
         sa.Column("ip", pg.INET),
         sa.Column("user_agent", sa.String(400)),
     )
@@ -105,6 +109,8 @@ def upgrade() -> None:
         sa.Column("purpose", sa.String(20), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
     )
+    op.create_index("ix_webauthn_challenges_expires", "webauthn_challenges", ["expires_at"])
+    op.create_index("ix_auth_throttle_window", "auth_throttle", ["window_start"])
     op.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON {', '.join(TABLES)} TO dewpoint_api, dewpoint_admin")
 
 

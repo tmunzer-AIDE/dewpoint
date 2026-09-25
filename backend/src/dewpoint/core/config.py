@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     login_max_failures: int = 5  # per account and per MFA user
     login_ip_max_failures: int = 50  # per source IP: higher, because offices share NAT addresses
     login_lockout_minutes: int = 15
+    reauth_minutes: int = 5  # adding/replacing a factor from an active session needs a second factor this recent
+    totp_pending_minutes: int = 10  # an unconfirmed new TOTP secret expires after this
+    passkey_options_per_ip: int = 30  # anonymous passkey challenges per source IP per 15-minute window
+    webauthn_challenges_max: int = 10_000  # outstanding (unexpired) challenges across the platform
     audit_signing_key_b64: str | None = None  # Ed25519 private key (raw 32 bytes, base64)
     audit_anchor_path: str | None = None
 

@@ -393,6 +393,10 @@ class Settings(BaseSettings):
     login_max_failures: int = 5  # per account and per MFA user
     login_ip_max_failures: int = 50  # per source IP: higher, because offices share NAT addresses
     login_lockout_minutes: int = 15
+    reauth_minutes: int = 5  # adding/replacing a factor from an active session needs a second factor this recent
+    totp_pending_minutes: int = 10  # an unconfirmed new TOTP secret expires after this
+    passkey_options_per_ip: int = 30  # anonymous passkey challenges per source IP per 15-minute window
+    webauthn_challenges_max: int = 10_000  # outstanding (unexpired) challenges across the platform
     audit_signing_key_b64: str | None = None  # Ed25519 private key (raw 32 bytes, base64)
     audit_anchor_path: str | None = None
 
@@ -1955,7 +1959,9 @@ async def create_session(
     settings: Settings,
     ip: str | None,
     user_agent: str | None,
+    reauth: bool = False,
 ) -> tuple[AuthSession, str]:
+    """reauth=True when the session starts with a proven second factor (passkey with user verification)."""
     token, now = secrets.token_urlsafe(32), datetime.now(UTC)
     sess = AuthSession(
         token_hash=_hash(token),
@@ -1968,6 +1974,7 @@ async def create_session(
         expires_at=now + timedelta(hours=settings.session_absolute_hours),
         ip=ip,
         user_agent=(user_agent or "")[:400] or None,
+        reauth_at=now if reauth else None,
     )
     s.add(sess)
     await s.flush()
@@ -1988,13 +1995,26 @@ async def load_session(
     return sess
 
 
-async def elevate(s: AsyncSession, sess: AuthSession, *, method: str, state: str = "active") -> str:
+async def rotate(s: AsyncSession, sess: AuthSession) -> str:
+    """New session token and CSRF token after any privilege-relevant change. Returns the new token."""
     token = secrets.token_urlsafe(32)
-    sess.token_hash, sess.state = _hash(token), state
-    sess.auth_methods = [*sess.auth_methods, method]
-    sess.csrf_token = secrets.token_urlsafe(32)
+    sess.token_hash, sess.csrf_token = _hash(token), secrets.token_urlsafe(32)
     await s.flush()
     return token
+
+
+async def elevate(s: AsyncSession, sess: AuthSession, *, method: str, state: str = "active") -> str:
+    """Record a proven factor: append the method, stamp reauth_at, set the state and rotate tokens."""
+    sess.state = state
+    sess.auth_methods = [*sess.auth_methods, method]
+    sess.reauth_at = datetime.now(UTC)
+    return await rotate(s, sess)
+
+
+def reauth_fresh(sess: AuthSession, settings: Settings, now: datetime | None = None) -> bool:
+    if sess.reauth_at is None:
+        return False
+    return (now or datetime.now(UTC)) - sess.reauth_at <= timedelta(minutes=settings.reauth_minutes)
 
 
 async def revoke(s: AsyncSession, sess: AuthSession) -> None:
@@ -2135,7 +2155,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     - `POST /mfa/totp/confirm` `{code}` → `{recovery_codes, state, csrf_token}`.
     - `GET /session` → `{user:{id,email,is_platform_admin}, state, auth_methods, csrf_token}`.
     - `POST /logout` → 204.
-    - `POST /password` `{current_password,new_password}` → 204; revokes all other sessions and rotates the current one.
+    - `POST /password` `{current_password,new_password}` → **200 `{csrf_token}`**. It revokes all other sessions and rotates the current session's token without elevating it, because a password isn't a second factor. The client uses the returned CSRF token for its next unsafe request.
+    - `POST /mfa/totp/reauth` `{code}` (session `active`, throttled) → `{state, csrf_token}`. It re-proves the confirmed TOTP and stamps `sessions.reauth_at`.
+  - **Changing factors:**
+    - `/totp/enroll` stages a *pending* secret (`user_mfa.totp_pending_ct`, which expires after `totp_pending_minutes`). The confirmed secret stays in force until `/totp/confirm` verifies a code from the pending one.
+    - From an `active` session, `/totp/enroll` and `/passkeys/register/options` require `reauth_at` within `reauth_minutes`, else 403 `{"error":"reauth_required"}`. `enroll_required` sessions have no factor yet, so they're exempt.
+    - `elevate()` stamps `reauth_at`. `rotate()` issues new session and CSRF tokens without elevating.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2170,7 +2195,7 @@ async def test_ip_threshold_is_separate_and_higher(owner_sessionmaker, api_setti
         assert await throttle.is_locked(s, "login_ip", "192.0.2.7")
 ```
 
-`backend/tests/apps/api/test_login_flow.py`:
+`backend/tests/apps/api/test_login_flow.py` (see also `tests/apps/api/test_factor_changes.py`, which covers: an abandoned TOTP setup keeps the old factor; replacement needs fresh reauth; an expired pending setup can't be confirmed; adding a passkey while active needs reauth and rotates tokens; password change returns the new CSRF token; anonymous options are rate-limited; expired challenges are purged; outstanding challenges are capped):
 ```python
 # SPDX-License-Identifier: Apache-2.0
 from urllib.parse import parse_qs, urlparse
@@ -2261,7 +2286,7 @@ async def test_password_change_revokes_other_sessions(app, owner_sessionmaker) -
         r = await a.post(
             "/api/v1/auth/password", json={"current_password": PW, "new_password": "amber-heron-valley-77"}
         )
-        assert r.status_code == 204
+        assert r.status_code == 200 and "csrf_token" in r.json()
         assert (await b.get("/api/v1/auth/session")).status_code == 401
         assert (await a.get("/api/v1/auth/session")).status_code == 200
 ```
@@ -2279,7 +2304,7 @@ Expected: FAIL (module not found)
 # SPDX-License-Identifier: Apache-2.0
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete
+from sqlalchemy import delete, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -2287,6 +2312,39 @@ from dewpoint.core.config import Settings
 from dewpoint.core.models.identity import AuthThrottle
 
 WINDOW = timedelta(minutes=15)
+
+
+async def consume(s: AsyncSession, kind: str, key: str, limit: int, now: datetime | None = None) -> bool:
+    """Count one use of a rate-limited action in the current window. False once `limit` uses are exceeded."""
+    now, key = now or datetime.now(UTC), key.lower()
+    await s.execute(
+        insert(AuthThrottle).values(kind=kind, key=key, failures=0, window_start=now).on_conflict_do_nothing()
+    )
+    row = await s.get(AuthThrottle, (kind, key), with_for_update=True)
+    if row is None:  # inserted just above; only reachable if the row was deleted concurrently
+        raise RuntimeError("auth_throttle row vanished")
+    if now - row.window_start > WINDOW:
+        row.failures, row.window_start = 0, now
+    row.failures += 1
+    await s.flush()
+    return row.failures <= limit
+
+
+async def purge_stale(s: AsyncSession, now: datetime | None = None, limit: int = 500) -> int:
+    """Delete up to `limit` throttle rows whose window and lockout are both over."""
+    now = now or datetime.now(UTC)
+    doomed = (
+        select(AuthThrottle.kind, AuthThrottle.key)
+        .where(
+            AuthThrottle.window_start < now - WINDOW,
+            (AuthThrottle.locked_until.is_(None)) | (AuthThrottle.locked_until < now),
+        )
+        .limit(limit)
+    )
+    result = await s.execute(
+        delete(AuthThrottle).where(tuple_(AuthThrottle.kind, AuthThrottle.key).in_(doomed.subquery().select()))
+    )
+    return int(getattr(result, "rowcount", 0) or 0)
 
 
 async def is_locked(s: AsyncSession, kind: str, key: str, now: datetime | None = None) -> bool:
@@ -2320,13 +2378,14 @@ async def reset(s: AsyncSession, kind: str, key: str) -> None:
 # SPDX-License-Identifier: Apache-2.0
 import secrets
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pyotp
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.auth.passwords import hash_password, verify_password
+from dewpoint.core.config import Settings
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.models.identity import RecoveryCode, User, UserMfa
 
@@ -2339,36 +2398,60 @@ async def has_totp(s: AsyncSession, user_id: object) -> bool:
     return bool(row and row.totp_confirmed_at)
 
 
-async def start_enrollment(s: AsyncSession, keyring: Keyring, user: User) -> str:
+def _context(user: User, *, pending: bool) -> str:
+    # Distinct AAD contexts: a pending ciphertext can't be copied into the confirmed slot (or vice versa).
+    return f"{user.id}:pending" if pending else str(user.id)
+
+
+async def start_enrollment(s: AsyncSession, keyring: Keyring, user: User, settings: Settings) -> str:
+    """Stage a new secret. The confirmed factor (if any) stays in force until confirm_enrollment succeeds."""
     secret = pyotp.random_base32()
-    ct = await keyring.encrypt(s, tenant_id=None, purpose=PURPOSE, context=str(user.id), plaintext=secret.encode())
-    row = await s.get(UserMfa, user.id) or UserMfa(user_id=user.id)
-    row.totp_secret_ct, row.totp_confirmed_at, row.last_totp_step = ct, None, None
+    ct = await keyring.encrypt(
+        s, tenant_id=None, purpose=PURPOSE, context=_context(user, pending=True), plaintext=secret.encode()
+    )
+    row = await s.get(UserMfa, user.id, with_for_update=True) or UserMfa(user_id=user.id)
+    row.totp_pending_ct = ct
+    row.totp_pending_expires_at = datetime.now(UTC) + timedelta(minutes=settings.totp_pending_minutes)
     s.add(row)
     await s.flush()
     return pyotp.TOTP(secret).provisioning_uri(name=user.email, issuer_name=ISSUER)
 
 
-async def _check(s: AsyncSession, keyring: Keyring, row: UserMfa, user: User, code: str) -> bool:
-    if not row.totp_secret_ct or not code.isdigit():
-        return False
-    secret = (await keyring.decrypt(s, tenant_id=None, purpose=PURPOSE, context=str(user.id),
-                                    blob=row.totp_secret_ct)).decode()
-    totp, now = pyotp.TOTP(secret), time.time()
-    current = totp.timecode(datetime.fromtimestamp(now, UTC))
+def _match(secret: str, code: str, last_step: int | None) -> int | None:
+    """The matching time step (current +/- 1) newer than last_step, else None."""
+    if not code.isdigit():
+        return None
+    totp = pyotp.TOTP(secret)
+    current = totp.timecode(datetime.fromtimestamp(time.time(), UTC))
     for step in (current - 1, current, current + 1):
-        if step > (row.last_totp_step or -1) and secrets.compare_digest(totp.generate_otp(step), code):
-            row.last_totp_step = step
-            await s.flush()
-            return True
-    return False
+        if step > (last_step if last_step is not None else -1) and secrets.compare_digest(
+            totp.generate_otp(step), code
+        ):
+            return step
+    return None
+
+
+async def _secret(s: AsyncSession, keyring: Keyring, user: User, blob: bytes, *, pending: bool) -> str:
+    raw = await keyring.decrypt(s, tenant_id=None, purpose=PURPOSE, context=_context(user, pending=pending), blob=blob)
+    return raw.decode()
 
 
 async def confirm_enrollment(s: AsyncSession, keyring: Keyring, user: User, code: str) -> list[str] | None:
+    """Promote the pending secret to the confirmed factor. Returns fresh recovery codes, or None."""
     row = await s.get(UserMfa, user.id, with_for_update=True)
-    if row is None or not await _check(s, keyring, row, user, code):
+    if row is None or row.totp_pending_ct is None or row.totp_pending_expires_at is None:
         return None
-    row.totp_confirmed_at = datetime.now(UTC)
+    if row.totp_pending_expires_at <= datetime.now(UTC):
+        return None
+    secret = await _secret(s, keyring, user, row.totp_pending_ct, pending=True)
+    step = _match(secret, code, None)
+    if step is None:
+        return None
+    row.totp_secret_ct = await keyring.encrypt(
+        s, tenant_id=None, purpose=PURPOSE, context=_context(user, pending=False), plaintext=secret.encode()
+    )
+    row.totp_confirmed_at, row.last_totp_step = datetime.now(UTC), step
+    row.totp_pending_ct, row.totp_pending_expires_at = None, None
     await s.execute(delete(RecoveryCode).where(RecoveryCode.user_id == user.id))
     codes = [f"{secrets.token_hex(4)}-{secrets.token_hex(4)}" for _ in range(10)]
     s.add_all(RecoveryCode(user_id=user.id, code_hash=hash_password(c)) for c in codes)
@@ -2377,13 +2460,30 @@ async def confirm_enrollment(s: AsyncSession, keyring: Keyring, user: User, code
 
 
 async def verify(s: AsyncSession, keyring: Keyring, user: User, code: str) -> bool:
+    """Check a code against the confirmed factor only, with replay protection."""
     row = await s.get(UserMfa, user.id, with_for_update=True)
-    return bool(row and row.totp_confirmed_at and await _check(s, keyring, row, user, code))
+    if row is None or row.totp_confirmed_at is None or row.totp_secret_ct is None:
+        return False
+    step = _match(await _secret(s, keyring, user, row.totp_secret_ct, pending=False), code, row.last_totp_step)
+    if step is None:
+        return False
+    row.last_totp_step = step
+    await s.flush()
+    return True
 
 
 async def use_recovery_code(s: AsyncSession, user: User, code: str) -> bool:
-    rows = (await s.execute(select(RecoveryCode).where(RecoveryCode.user_id == user.id, RecoveryCode.used_at.is_(None))
-                            .with_for_update())).scalars().all()
+    rows = (
+        (
+            await s.execute(
+                select(RecoveryCode)
+                .where(RecoveryCode.user_id == user.id, RecoveryCode.used_at.is_(None))
+                .with_for_update()
+            )
+        )
+        .scalars()
+        .all()
+    )
     for rc in rows:
         if verify_password(rc.code_hash, code.strip().lower()):
             rc.used_at = datetime.now(UTC)
@@ -2421,9 +2521,9 @@ from dewpoint.core.auth.passwords import hash_password, policy_violations, verif
 from dewpoint.core.auth.sessions import (
     clear_session_cookie,
     create_session,
-    elevate,
     revoke,
     revoke_all,
+    rotate,
     set_session_cookie,
 )
 from dewpoint.core.auth.users import Email, get_user_by_email
@@ -2512,7 +2612,7 @@ async def logout(
     return response
 
 
-@router.post("/password", status_code=204)
+@router.post("/password")
 async def change_password(
     body: PasswordIn,
     response: Response,
@@ -2520,7 +2620,8 @@ async def change_password(
     sess: AuthSession = Depends(current_session),
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings_dep),
-) -> Response:
+) -> dict[str, str]:
+    """Returns the rotated CSRF token so the client can make its next unsafe request."""
     if not verify_password(user.password_hash, body.current_password):
         raise HTTPException(401, detail={"error": "invalid_credentials"})
     if v := policy_violations(body.new_password, user.email):
@@ -2529,10 +2630,9 @@ async def change_password(
 
     user.password_hash, user.password_changed_at = hash_password(body.new_password), datetime.now(UTC)
     await revoke_all(db, user.id, except_id=sess.id)
-    token = await elevate(db, sess, method="password_change", state="active")
+    token = await rotate(db, sess)  # a password is not a second factor: rotate, don't elevate
     set_session_cookie(response, token, settings)
-    response.status_code = 204
-    return response
+    return {"csrf_token": sess.csrf_token}
 ```
 **Note:** `elevate()` appends `"password_change"` to `auth_methods`. That's intentional: it records that the session re-proved the password.
 
@@ -2548,7 +2648,7 @@ from dewpoint.core.auth import throttle, totp
 from dewpoint.core.auth.sessions import elevate, set_session_cookie
 from dewpoint.core.config import Settings
 from dewpoint.core.crypto.keyring import Keyring
-from dewpoint.core.http import current_session, get_db, get_settings_dep
+from dewpoint.core.http import current_session, ensure_fresh_reauth, get_db, get_settings_dep
 from dewpoint.core.models.identity import AuthSession, User
 
 router = APIRouter(prefix="/api/v1/auth/mfa", tags=["auth"])
@@ -2634,9 +2734,34 @@ async def enroll(
     sess: AuthSession = Depends(current_session),
     db: AsyncSession = Depends(get_db),
     keyring: Keyring = Depends(get_keyring),
+    settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, str]:
+    """Stage a new TOTP secret. An existing confirmed factor stays in force until /totp/confirm succeeds."""
     _require_state(sess, "enroll_required", "active")
-    return {"otpauth_uri": await totp.start_enrollment(db, keyring, await _user(db, sess))}
+    ensure_fresh_reauth(sess, settings)
+    return {"otpauth_uri": await totp.start_enrollment(db, keyring, await _user(db, sess), settings)}
+
+
+@router.post("/totp/reauth")
+async def reauth(
+    body: CodeIn,
+    response: Response,
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db),
+    keyring: Keyring = Depends(get_keyring),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, str]:
+    """Prove the confirmed TOTP again from an active session (before changing factors)."""
+    _require_state(sess, "active")
+    key = str(sess.user_id)
+    if await throttle.is_locked(db, "mfa_user", key):
+        raise HTTPException(429, detail={"error": "locked"})
+    if not await totp.verify(db, keyring, await _user(db, sess), body.code):
+        await throttle.record_failure(db, "mfa_user", key, settings)
+        await db.commit()
+        raise HTTPException(401, detail={"error": "invalid_code"})
+    await throttle.reset(db, "mfa_user", key)
+    return await _complete(db, sess, response, settings, "totp")
 
 
 @router.post("/totp/confirm")
@@ -2700,7 +2825,11 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     - `POST /login/options` and `POST /login/verify` (no session; passwordless; creates an `active` session with methods `["passkey"]`);
     - `POST /mfa/options` and `POST /mfa/verify` (session `mfa_pending`);
     - `POST /stepup/options` and `POST /stepup/verify` (session `active`; appends `passkey`).
-  - Every `*/verify` returns `{state, csrf_token}` and rotates the session token.
+  - Every `*/verify` returns `{state, csrf_token}` and rotates the session token, including registration from an `active` session.
+  - Challenge issuance:
+    - `/login/options` (anonymous) is limited to `passkey_options_per_ip` per 15-minute window (`throttle.consume`, kind `challenge_ip`), returning 429 `{"error":"rate_limited"}`.
+    - Every issuance purges up to 500 expired challenges and refuses to issue (`ChallengeCapacityError`, which becomes 429) once `webauthn_challenges_max` unexpired challenges exist.
+    - Stale throttle rows are purged the same way (`throttle.purge_stale`).
 
 - [ ] **Step 1: Write the failing unit tests**
 
@@ -2786,7 +2915,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from webauthn import (
     generate_authentication_options,
@@ -2809,15 +2938,39 @@ from dewpoint.core.models.identity import User, WebauthnChallenge, WebauthnCrede
 CHALLENGE_TTL = timedelta(minutes=5)
 
 
+PURGE_BATCH = 500
+
+
 class PasskeyError(Exception):
     pass
+
+
+class ChallengeCapacityError(Exception):
+    """Too many outstanding challenges platform-wide; callers answer 429."""
 
 
 def _rp_id(settings: Settings) -> str:
     return settings.rp_id or (urlparse(settings.public_origin).hostname or "")
 
 
-async def _store(s: AsyncSession, challenge: bytes, user_id: uuid.UUID | None, purpose: str) -> uuid.UUID:
+async def purge_expired_challenges(s: AsyncSession, limit: int = PURGE_BATCH) -> int:
+    """Delete up to `limit` expired challenges (bounded, so one request never does unbounded work)."""
+    doomed = select(WebauthnChallenge.id).where(WebauthnChallenge.expires_at <= func.now()).limit(limit)
+    result = await s.execute(delete(WebauthnChallenge).where(WebauthnChallenge.id.in_(doomed.scalar_subquery())))
+    return int(getattr(result, "rowcount", 0) or 0)
+
+
+async def _store(
+    s: AsyncSession, challenge: bytes, user_id: uuid.UUID | None, purpose: str, settings: Settings
+) -> uuid.UUID:
+    await purge_expired_challenges(s)
+    outstanding = (
+        await s.execute(
+            select(func.count()).select_from(WebauthnChallenge).where(WebauthnChallenge.expires_at > func.now())
+        )
+    ).scalar_one()
+    if outstanding >= settings.webauthn_challenges_max:
+        raise ChallengeCapacityError()
     row = WebauthnChallenge(
         challenge=challenge, user_id=user_id, purpose=purpose, expires_at=datetime.now(UTC) + CHALLENGE_TTL
     )
@@ -2855,7 +3008,7 @@ async def registration_options(s: AsyncSession, user: User, settings: Settings) 
         ),
         exclude_credentials=[PublicKeyCredentialDescriptor(id=c) for c in existing],
     )
-    return json.loads(options_to_json(opts)), await _store(s, opts.challenge, user.id, "register")
+    return json.loads(options_to_json(opts)), await _store(s, opts.challenge, user.id, "register", settings)
 
 
 async def finish_registration(
@@ -2901,7 +3054,7 @@ async def authentication_options(
     opts = generate_authentication_options(
         rp_id=_rp_id(settings), allow_credentials=allow, user_verification=UserVerificationRequirement.REQUIRED
     )
-    return json.loads(options_to_json(opts)), await _store(s, opts.challenge, user_id, "authenticate")
+    return json.loads(options_to_json(opts)), await _store(s, opts.challenge, user_id, "authenticate", settings)
 
 
 async def finish_authentication(
@@ -3017,9 +3170,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.auth import passkeys, throttle
-from dewpoint.core.auth.sessions import create_session, elevate, set_session_cookie
+from dewpoint.core.auth.sessions import create_session, elevate, rotate, set_session_cookie
 from dewpoint.core.config import Settings
-from dewpoint.core.http import current_session, get_db, get_settings_dep
+from dewpoint.core.http import current_session, ensure_fresh_reauth, get_db, get_settings_dep
 from dewpoint.core.models.identity import AuthSession, User
 
 router = APIRouter(prefix="/api/v1/auth/passkeys", tags=["auth"])
@@ -3043,6 +3196,10 @@ async def _session_user(db: AsyncSession, sess: AuthSession) -> User:
     return user
 
 
+def _busy() -> HTTPException:
+    return HTTPException(429, detail={"error": "rate_limited"})
+
+
 def _fail() -> HTTPException:
     return HTTPException(401, detail={"error": "passkey_failed"})
 
@@ -3060,8 +3217,12 @@ async def register_options(
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, Any]:
     _state(sess, "enroll_required", "active")
+    ensure_fresh_reauth(sess, settings)  # a stolen active session must not be able to plant a lasting factor
     user = await _session_user(db, sess)
-    opts, cid = await passkeys.registration_options(db, user, settings)
+    try:
+        opts, cid = await passkeys.registration_options(db, user, settings)
+    except passkeys.ChallengeCapacityError:
+        raise _busy() from None
     return {"options": opts, "challenge_id": str(cid)}
 
 
@@ -3081,14 +3242,24 @@ async def register_verify(
         raise _fail() from None
     if sess.state == "enroll_required":
         return await _elevated(db, sess, response, settings)
+    token = await rotate(db, sess)  # a factor was added: new session and CSRF tokens
+    set_session_cookie(response, token, settings)
     return {"state": sess.state, "csrf_token": sess.csrf_token}
 
 
 @router.post("/login/options")
 async def login_options(
-    db: AsyncSession = Depends(get_db), settings: Settings = Depends(get_settings_dep)
+    request: Request, db: AsyncSession = Depends(get_db), settings: Settings = Depends(get_settings_dep)
 ) -> dict[str, Any]:
-    opts, cid = await passkeys.authentication_options(db, settings, None)
+    """Anonymous: every call stores a challenge, so issuance is limited per IP and capped platform-wide."""
+    ip = request.client.host if request.client else "unknown"
+    await throttle.purge_stale(db)
+    if not await throttle.consume(db, "challenge_ip", ip, settings.passkey_options_per_ip):
+        raise HTTPException(429, detail={"error": "rate_limited"})
+    try:
+        opts, cid = await passkeys.authentication_options(db, settings, None)
+    except passkeys.ChallengeCapacityError:
+        raise _busy() from None
     return {"options": opts, "challenge_id": str(cid)}
 
 
@@ -3117,13 +3288,17 @@ async def login_verify(
         settings=settings,
         ip=ip,
         user_agent=request.headers.get("user-agent"),
+        reauth=True,  # a user-verified passkey is a second factor
     )
     set_session_cookie(response, token, settings)
     return {"state": "active", "csrf_token": sess.csrf_token}
 
 
 async def _factor_options(sess: AuthSession, db: AsyncSession, settings: Settings) -> dict[str, Any]:
-    opts, cid = await passkeys.authentication_options(db, settings, sess.user_id)
+    try:
+        opts, cid = await passkeys.authentication_options(db, settings, sess.user_id)
+    except passkeys.ChallengeCapacityError:
+        raise _busy() from None
     return {"options": opts, "challenge_id": str(cid)}
 
 
@@ -5404,7 +5579,7 @@ In `router.tsx`, define `navigateByState(state)`, mapping `mfa_pending` → `/mf
 
 `src/routes/Tenants.tsx`: lists `GET /api/v1/tenants` as rows with name, slug (mono) and role. For platform admins, it adds a "Create tenant" form (`tenant-name`, `tenant-slug`, `tenant-create`) posting to `/api/v1/tenants`, and shows server errors (`slug_taken` → "That slug is already used.").
 
-`src/routes/Security.tsx`: shows the auth methods in use for this session, an "Add a passkey" button (`passkey-add`, name prompt defaulting to "Passkey") calling `registerPasskey`, "Set up authenticator app" (reusing the Enroll step-1 TOTP subcomponent, exported from `Enroll.tsx` as `TotpSetup`), and a change-password form posting `/api/v1/auth/password`.
+`src/routes/Security.tsx`: when an action returns 403 `reauth_required`, it prompts for a TOTP code (`POST /api/v1/auth/mfa/totp/reauth`) or a passkey (`authenticatePasskey("stepup")`), then retries. The change-password response carries the new `csrf_token`, which `api()` picks up automatically. The page shows the auth methods in use for this session, an "Add a passkey" button (`passkey-add`, name prompt defaulting to "Passkey") calling `registerPasskey`, "Set up authenticator app" (reusing the Enroll step-1 TOTP subcomponent, exported from `Enroll.tsx` as `TotpSetup`), and a change-password form posting `/api/v1/auth/password`.
 
 `src/routes/Connections.tsx`:
 ```tsx

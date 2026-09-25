@@ -7,7 +7,7 @@ from fastapi import Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dewpoint.core.auth.sessions import SESSION_COOKIE, csrf_valid, load_session
+from dewpoint.core.auth.sessions import SESSION_COOKIE, csrf_valid, load_session, reauth_fresh
 from dewpoint.core.authz.permissions import ROLE_PERMISSIONS, P
 from dewpoint.core.config import Settings
 from dewpoint.core.db import tenant_scope, user_scope
@@ -91,3 +91,10 @@ async def require_platform_admin(user: User = Depends(current_user)) -> User:
     if not user.is_platform_admin:
         raise HTTPException(403, detail={"error": "forbidden"})
     return user
+
+
+def ensure_fresh_reauth(sess: AuthSession, settings: Settings) -> None:
+    """Adding or replacing a factor from an active session needs a recently proven second factor.
+    A session still enrolling its first factor (enroll_required) has none to prove and is exempt."""
+    if sess.state == "active" and not reauth_fresh(sess, settings):
+        raise HTTPException(403, detail={"error": "reauth_required"})

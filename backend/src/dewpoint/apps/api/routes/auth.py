@@ -9,9 +9,9 @@ from dewpoint.core.auth.passwords import hash_password, policy_violations, verif
 from dewpoint.core.auth.sessions import (
     clear_session_cookie,
     create_session,
-    elevate,
     revoke,
     revoke_all,
+    rotate,
     set_session_cookie,
 )
 from dewpoint.core.auth.users import Email, get_user_by_email
@@ -100,7 +100,7 @@ async def logout(
     return response
 
 
-@router.post("/password", status_code=204)
+@router.post("/password")
 async def change_password(
     body: PasswordIn,
     response: Response,
@@ -108,7 +108,8 @@ async def change_password(
     sess: AuthSession = Depends(current_session),
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings_dep),
-) -> Response:
+) -> dict[str, str]:
+    """Returns the rotated CSRF token so the client can make its next unsafe request."""
     if not verify_password(user.password_hash, body.current_password):
         raise HTTPException(401, detail={"error": "invalid_credentials"})
     if v := policy_violations(body.new_password, user.email):
@@ -117,7 +118,6 @@ async def change_password(
 
     user.password_hash, user.password_changed_at = hash_password(body.new_password), datetime.now(UTC)
     await revoke_all(db, user.id, except_id=sess.id)
-    token = await elevate(db, sess, method="password_change", state="active")
+    token = await rotate(db, sess)  # a password is not a second factor: rotate, don't elevate
     set_session_cookie(response, token, settings)
-    response.status_code = 204
-    return response
+    return {"csrf_token": sess.csrf_token}

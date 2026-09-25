@@ -87,6 +87,6 @@ async def test_password_change_revokes_other_sessions(app, owner_sessionmaker) -
         r = await a.post(
             "/api/v1/auth/password", json={"current_password": PW, "new_password": "amber-heron-valley-77"}
         )
-        assert r.status_code == 204
+        assert r.status_code == 200 and "csrf_token" in r.json()
         assert (await b.get("/api/v1/auth/session")).status_code == 401
         assert (await a.get("/api/v1/auth/session")).status_code == 200
