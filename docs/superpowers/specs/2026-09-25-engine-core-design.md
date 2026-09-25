@@ -1,9 +1,11 @@
 # Dewpoint — Engine Core Design (sub-project 2a)
 
-- **Status:** Draft for review, revision 3 (2026-09-25).
+- **Status:** Draft for review, revision 4 (2026-09-25).
   - Revision 2 addressed join scopes, the local-CEL switch, evaluator isolation, profile routing and retirement.
   - Revision 3 addresses the version lifecycle (activation, queued requests, closure), nested loops, evaluator
     aggregate memory, and Temporal membership.
+  - Revision 4 addresses lifecycle locking at admission, continue-as-new at a quiescent checkpoint only, the
+    logical-run iteration counter, and the scope of the two-build test.
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
   This spec **narrows parent §6.4** (where CEL runs) and resolves the CEL item in parent §15.
 - **Evidence:** CEL spike, branch `spike/cel-evaluation`, commits `d6a8162` and `13a62e1`. See
@@ -142,8 +144,9 @@ Tenant-scoped tables use FORCE RLS with the foundations policy pattern.
     - edges into a region from outside it, other than from that region's own `body` port;
     - refs from outside a region to steps inside it. A region's results leave only through `collect`.
   - **Nesting depth ≤ 3.** Scopes nest the same way, for example `loop2:7/loop5:3`.
-  - **Per-run iteration cap.** The total of all loop iterations in a run is capped, initially at 100,000, so nested
-    item caps don't multiply. Past the cap, the loop fails with `iteration_cap_exceeded`.
+  - **Per-run iteration cap.** All loop iterations and filter items across the whole *logical* run share one cap,
+    initially 100,000, so nested item caps don't multiply. That includes child batches, sub-flows and every
+    continue-as-new. Past the cap, the loop fails with `iteration_cap_exceeded`. §6 explains how the count is kept.
   - The loop's `collect` value is evaluated at the end of each iteration and becomes `steps.<loop>.output.items[i]`.
 
 ### 4.3 Values, scope and availability
@@ -230,9 +233,7 @@ until no non-terminal run uses that profile.
    - Activation shows a warning.
    - Everything already active, queued or running continues.
 2. **`retired`:**
-   - **Normal path.** Allowed only when there are no active and no queued references.
-     - The check runs in the same transaction that locks the entry's row (`FOR UPDATE`).
-     - Dispatch reads the lifecycle states of the closure `FOR SHARE` in its own transaction, so a request can never start at the same time as a retirement.
+   - **Normal path.** Allowed only when there are no active and no queued references (see *Lifecycle locking* below).
    - **Forced path** (platform admin). A preview comes first. Per tenant, it lists:
      - the affected versions;
      - every **entry workflow** whose active closure reaches them, including parents that reach them only through a pinned sub-flow;
@@ -250,9 +251,31 @@ until no non-terminal run uses that profile.
    - A node type: once it is `retired`, a new build may stop registering it. Older builds drain normally.
    - A CEL profile: once it is `retired` **and** no non-terminal run uses it, its evaluator may be shut down.
 
+**Lifecycle locking.** Every transaction that creates or uses a reference locks the lifecycle rows of the version's
+closure. The closure's `node_type_versions` and `cel_profiles` rows are locked `FOR SHARE`, in id order, and then
+it re-checks their states. That applies to:
+- **publish** (the new version's closure);
+- **activate**;
+- **admission:** freezing a new `run_requests` row, or `start_run` in 2a;
+- **dispatch.**
+
+The executable check and the insert or update happen in that same transaction.
+
+**Retirement** locks its entry's row `FOR UPDATE` as its first statement. Only then does it count references and
+build the cancellation set, in later statements of the same transaction, at READ COMMITTED (the Postgres default).
+Share and update locks conflict, so the two sides serialize:
+- **Admission commits first.** Retirement's lock waits for that commit, so its later statements see the new
+  request. Normal retirement is then blocked, or forced retirement cancels the request.
+- **Retirement locks first.** Admission's lock waits, then re-reads `retired` and refuses the request.
+  Nothing is admitted.
+
+Under REPEATABLE READ, the snapshot would predate the wait, so these transactions must not use it. A test asserts
+the isolation level.
+
 **Defensive check at dispatch.** If dispatch still finds a frozen version that isn't executable (the forced path
 should make this impossible), it cancels the request with the same explicit, audited reason. It never fails the
-request as superseded. 2a implements these rules in `start_run`, and 2b's dispatcher reuses them.
+request as superseded. Because admission locks as above, this check should never fire. A metric counts it, and
+the race tests assert that it stays at zero. 2a implements these rules in `start_run`, and 2b's dispatcher reuses them.
 
 ## 5. CEL subsystem
 
@@ -550,6 +573,8 @@ The version (graph, classifications, bounds) is loaded by one local activity and
 - **`stop` and `fail`** end the run, as succeeded or failed. They cancel the run's in-flight work first.
 - **Scheduler.** A single loop owns a ready queue ordered by `(scope, topological index)`. It starts activities and
   child workflows as futures and awaits them. Nothing else in the workflow creates concurrency.
+  - **In-flight cap.** At most 100 activities and child workflows are outstanding per workflow execution (an initial limit).
+  - This bounds how much history in-flight work can still add, which the continue-as-new headroom depends on.
 
 **Node kinds:**
 
@@ -571,11 +596,49 @@ The version (graph, classifications, bounds) is loaded by one local activity and
 - `OutcomeUnknownError` is never retried.
 - An optional workflow failure handler (a pinned sub-flow) runs once with the error summary.
 
-**Continue-as-new:**
-- It happens at 8,000 history events, or at a loop batch boundary when the count is over 4,000.
-- It carries a versioned snapshot (`snapshot_format: 1`): variables, completed outputs (values now, handles after
-  2b), edge and node states per open scope, loop cursors, the yield accumulator and the deadline.
-- Runs are pinned: a run never changes build, even across continue-as-new (parent §6.3).
+**Continue-as-new only at a quiescent checkpoint.** Temporal doesn't carry child workflows into the continued run.
+Closing the run would also apply the children's parent-close policy. So continue-as-new **never** cancels,
+abandons or restarts an activity or a child workflow.
+- **Quiescent** means: no activity and no child workflow is outstanding. Pending timers don't count: a timer has no
+  side effect, so its absolute wake time goes into the snapshot and the continued run re-arms it.
+- **Opportunistic checkpoint.** Once history passes 2,000 events, the scheduler continues-as-new at the next point
+  that is already quiescent, for example between loop batches.
+- **Drain mode.** The scheduler enters drain mode at 4,000 events, or when Temporal suggests continue-as-new, whichever comes first.
+  - It starts no new activity or child workflow. Ready nodes stay queued in the snapshot.
+  - Local work (control nodes, local CEL) continues.
+  - When the last outstanding activity or child settles, it continues-as-new.
+- **Headroom.** With the in-flight cap of 100, and a bounded number of events per activity or child completion,
+  draining adds at most about 1,000 events. That keeps runs far below Temporal's 10,240-event warning and
+  51,200-event limit. The draining run itself adds almost no history while it waits.
+- **Cost.** A long child, for example a sub-flow in a long `delay`, holds the checkpoint back, and parallel branches
+  wait until it settles. That only delays them; it never changes the result. The validator warns when a graph can
+  run a long wait in parallel with other work.
+- **Snapshot** (`snapshot_format: 1`):
+  - variables;
+  - completed outputs (values now, handles after 2b);
+  - edge and node states per open scope, and loop cursors;
+  - the ready queue and timer wake times;
+  - the yield accumulator, the iteration counter (below) and the deadline.
+- **Pinning.** A run never changes build, even across continue-as-new (parent §6.3, §7).
+- **Threshold tests.** Drain mode is entered while loop-batch children, a sub-flow, activities and a timer are
+  outstanding. No child is terminated or restarted, each activity completes once, the timer fires at its original
+  wake time, and the continued run's state equals the snapshot.
+
+**One iteration counter per logical run.**
+- **Where it lives.** The root `RunGraph` execution owns the counter for the whole logical run. The snapshot
+  carries the used and reserved totals through every continue-as-new, so a continued run never gets a fresh cap.
+- **What counts.** An inline iteration or filter item is debited when it starts.
+- **Children draw allowances.** Before starting a child (a loop batch or a sub-flow), the parent reserves an
+  **allowance** from the unreserved budget:
+  - **Size:** ⌊unreserved ÷ the number of child slots that can run concurrently in that scope⌋. If that is less
+    than the batch's own item count, the loop fails with `iteration_cap_exceeded` before the child starts.
+  - The allowance is recorded in the child's input.
+  - The child enforces it, including across its own continue-as-new and in its own children, which receive sub-allowances the same way.
+- **Settlement.** A child that completes returns `iterations_used`. The parent debits that amount and releases the
+  rest. A child that fails or is cancelled is debited its whole allowance, which is conservative.
+- **Why it's deterministic.** Allowances, results and totals are all recorded workflow data. A child can hit its
+  allowance slightly before the run as a whole would reach the cap; its error names the run cap and the allowance.
+- The run summary shows the iterations used.
 
 **Workflow-code rules:**
 - No wall clock, randomness or I/O. `workflow.now()` and `workflow.uuid4()` are the only sources.
@@ -609,8 +672,10 @@ The version (graph, classifications, bounds) is loaded by one local activity and
     - A CEL worker serves every schema version that any undrained engine build uses.
   - A build registers every `type@version` that isn't `retired` (§4.5). Old builds run until Temporal reports them drained.
   - **Two-build deployment test (required).** N-1 drains while N serves new runs, and N lacks a node type retired
-    in between. The N-1 runs exercise child sub-flows, loop batches, plugin activities and continue-as-new. Their
-    histories must show that every workflow and activity task of an N-1 run executed on N-1.
+    in between. The N-1 runs exercise child sub-flows, loop batches, plugin activities and continue-as-new.
+    - Their histories must show that every **engine** task of an N-1 run executed on N-1: workflow tasks and
+      `dewpoint-engine` activities, in the run itself, its children and its continued runs.
+    - `cel.evaluate` is deliberately excluded. Instead, the test asserts that each CEL task ran on a worker serving the version's profile (§5.7).
 - **Compose (2a):** adds `temporal`, `worker` and `cel-evaluator` (§5.7). The worker waits for a healthy evaluator
   before it polls a CEL queue.
 - **Golden histories:** every build adds recorded histories to `tests/engine/replay/<build>/`. They cover:
@@ -673,9 +738,16 @@ The version (graph, classifications, bounds) is loaded by one local activity and
   - closure propagation: a parent becomes non-executable through a retired node type in a pinned sub-flow;
   - the forced-retirement preview lists parents that reach an entry only through a sub-flow;
   - the explicit, audited cancellation of queued requests;
-  - retire racing dispatch (`FOR UPDATE` against `FOR SHARE`);
+  - races between retirement (normal and forced, both orders) and each of admission, dispatch, publish and activate.
+    In every order, a request is either refused at admission, or blocks normal retirement, or is in the forced
+    retirement's cancellation set. The defensive dispatch check never fires;
   - node types removed from a build while an N-1 run finishes on N-1.
-- **Graph regions:** properly nested loops are accepted; crossing regions are rejected; the depth limit; the per-run iteration cap.
+- **Graph regions:** properly nested loops are accepted; crossing regions are rejected; the depth limit.
+- **Iteration counter:**
+  - one cap across inline loops, batch children, sub-flows and continue-as-new (parent and child);
+  - allowance reservation and settlement, including children that fail;
+  - no fresh cap after continue-as-new.
+- **Continue-as-new:** the quiescent-checkpoint tests in §6; history stays below the headroom bound with the in-flight cap saturated.
 - **Evaluator limits:** *N* derived from the cgroup limits; refusal to start without a memory limit.
 - **Projection:** idempotent upserts under retries, redaction, and RLS (missing or mismatched tenant).
 - **API:** draft CAS conflicts, publish diagnostics, activation, and the permission matrix for the new routes.
@@ -690,7 +762,7 @@ The version (graph, classifications, bounds) is loaded by one local activity and
    - caps of 64 KiB per value and in total, 1,000 list elements and 16 KiB per string;
    - loops: 100 items inline; filter: 1,000 items inline;
    - yield thresholds of 20,000 iterations, 8 MiB or 200 evaluations;
-   - continue-as-new at 8,000 events;
+   - continue-as-new: opportunistic checkpoints from 2,000 events, drain mode from 4,000, in-flight cap of 100;
    - evaluator: 256 MiB / 5 s / 4 MiB requests;
    - schedule-to-start timeout of 10 minutes.
 
@@ -711,9 +783,13 @@ The version (graph, classifications, bounds) is loaded by one local activity and
 7. **Typed-path encoding** (§5.3) is the first CEL item to prove. `asList()` is the fallback.
 8. **Package boundaries** follow the parent rules: `engine` is pure, storage lives in `core`, and wiring lives in `apps`. `testkit` stays under `tests/`.
 9. **Nested loops** are allowed when properly nested (depth ≤ 3, per-run cap of 100,000 iterations). Crossing regions are rejected.
-10. **Temporal membership.** One engine deployment whose versioned queue carries workflows, children and plugin activities, all explicitly Pinned. CEL queues sit outside it, routed by profile.
-11. **New `filter` node** (not in the parent's control-node list), so large collections never need a larger CEL budget.
-12. **No public run API until 2b.**
+10. **Execution boundaries.**
+    - Every transaction that creates or uses a reference takes `FOR SHARE` on the closure's lifecycle rows. Retirement takes `FOR UPDATE` first.
+    - Continue-as-new happens only at a quiescent checkpoint, with drain mode and an in-flight cap of 100.
+    - One iteration counter per logical run, with allowances for children, carried through continue-as-new.
+11. **Temporal membership.** One engine deployment whose versioned queue carries workflows, children and plugin activities, all explicitly Pinned. CEL queues sit outside it, routed by profile.
+12. **New `filter` node** (not in the parent's control-node list), so large collections never need a larger CEL budget.
+13. **No public run API until 2b.**
 
 ## 12. Follow-up sub-projects
 

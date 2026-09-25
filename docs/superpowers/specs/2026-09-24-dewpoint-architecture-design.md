@@ -183,7 +183,7 @@ Every run starts as a durable `run_requests` row, unique on `(tenant_id, idempot
 - **Control nodes run in the interpreter:** `if`, `switch`, `loop` (for-each over a list; `body` and `done` ports; concurrency and item caps), `delay` / `wait until` (durable timers), `set variables`, `stop` / `fail`, `run workflow` (a child workflow pinned to the sub-flow version recorded at publish; depth ≤ 5; cycle check at publish).
 - **Side-effecting nodes run as versioned activities** named `<type>.v<version>`.
 - **Execution scopes:** join and skip bookkeeping is tracked per execution scope (the root, or one loop iteration), not per node. Branch decisions resolve outgoing edges as live or dead; they don't create scopes. A node with several incoming edges waits until every incoming edge in its scope is resolved, runs if any is live, and is otherwise eliminated (dead-path elimination). Details: engine-core spec §6.
-- **Large loops** run as batches of child workflows. Long histories use continue-as-new with a versioned state snapshot.
+- **Large loops** run as batches of child workflows. Long histories use continue-as-new with a versioned state snapshot, only at a quiescent checkpoint (no outstanding activities or children; engine-core spec §6).
 - **`run_steps` projection:** activity wrappers and a batched `project` activity upsert redacted, size-capped rows keyed `(run_id, step_id, iteration_key, attempt)`. The UI reads only this projection, never Temporal history.
 
 ### 6.3 Versioning and upgrades
