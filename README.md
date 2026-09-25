@@ -24,6 +24,9 @@ Open <http://localhost:8080>, sign in, and enroll a passkey or authenticator app
 
 **Beyond localhost you must use HTTPS.** `__Host-` session cookies and WebAuthn require a secure origin: terminate TLS
 in front of the `web` service and set `DEWPOINT_PUBLIC_ORIGIN=https://<host>` and `DEWPOINT_RP_ID=<host>`.
+Also set `DEWPOINT_TRUSTED_PROXIES` to that proxy's IP or CIDR: nginx then takes the client address from
+`X-Forwarded-For`, skipping only trusted hops. Without it, every user appears to come from the proxy and shares its
+per-IP rate limits; without a proxy, leave it empty so clients cannot spoof their address.
 
 ## Keys
 

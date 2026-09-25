@@ -12,5 +12,6 @@ RUN pnpm build
 FROM nginxinc/nginx-unprivileged:1.27-alpine
 COPY deploy/docker/nginx.conf /etc/nginx/conf.d/default.conf
 COPY deploy/docker/security-headers.conf /etc/nginx/snippets/security-headers.conf
+COPY --chmod=0755 deploy/docker/40-dewpoint-real-ip.sh /docker-entrypoint.d/40-dewpoint-real-ip.sh
 COPY --from=build /src/dist /usr/share/nginx/html
 EXPOSE 8080

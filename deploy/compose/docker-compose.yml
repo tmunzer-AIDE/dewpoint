@@ -80,6 +80,9 @@ services:
     tmpfs: [/tmp, /var/cache/nginx]
     cap_drop: [ALL]
     ports: ["127.0.0.1:8080:8080"]
+    environment:
+      # IPs/CIDRs of the TLS proxy / load balancer in front of `web` (see README). Empty = no proxy.
+      DEWPOINT_TRUSTED_PROXIES: ${DEWPOINT_TRUSTED_PROXIES:-}
     depends_on: { api: { condition: service_healthy } }
 
 volumes: { pgdata: {}, anchors: {} }
