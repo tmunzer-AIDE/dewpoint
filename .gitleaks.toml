@@ -1,0 +1,8 @@
+# Default gitleaks rules, plus a narrow allowlist for documented, non-secret test fixtures.
+# Allowlist exact values only; never whole directories, so a real secret added to a test still fails CI.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test/CI fixture password used by unit tests and the e2e admin bootstrap (not a credential)"
+regexes = ['''^violet-otter-canyon-42$''']

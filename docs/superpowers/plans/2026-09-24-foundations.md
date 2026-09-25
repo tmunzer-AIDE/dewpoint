@@ -238,7 +238,7 @@ jobs:
     defaults: { run: { working-directory: backend } }
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
       - run: uv sync --locked
       - run: uv run ruff check .
       - run: uv run ruff format --check .
@@ -251,9 +251,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
-      - uses: gitleaks/gitleaks-action@v2
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
         env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
-      - uses: aquasecurity/trivy-action@0.28.0
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with: { scan-type: fs, scan-ref: ., severity: "HIGH,CRITICAL", exit-code: "1" }
 ```
 `.github/workflows/codeql.yml`: the standard CodeQL workflow for languages `python` and `javascript-typescript`, triggered on push, PRs and a weekly cron, with `permissions: { security-events: write, contents: read }`.
@@ -390,8 +390,13 @@ class Settings(BaseSettings):
     mfa_required: bool = True
     session_idle_minutes: int = 30
     session_absolute_hours: int = 12
-    login_max_failures: int = 5
+    login_max_failures: int = 5  # per account and per MFA user
+    login_ip_max_failures: int = 50  # per source IP: higher, because offices share NAT addresses
     login_lockout_minutes: int = 15
+    reauth_minutes: int = 5  # adding/replacing a factor from an active session needs a second factor this recent
+    totp_pending_minutes: int = 10  # an unconfirmed new TOTP secret expires after this
+    passkey_options_per_ip: int = 30  # anonymous passkey challenges per source IP per 15-minute window
+    webauthn_challenges_max: int = 10_000  # outstanding (unexpired) challenges across the platform
     audit_signing_key_b64: str | None = None  # Ed25519 private key (raw 32 bytes, base64)
     audit_anchor_path: str | None = None
 
@@ -1013,7 +1018,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 **Files:**
 - Create: `backend/src/dewpoint/core/crypto/__init__.py`, `kek.py`, `keyring.py`
 - Create: `backend/src/dewpoint/core/models/keys.py`, `backend/migrations/versions/0004_keys.py`
-- Test: `backend/tests/core/crypto/test_keyring.py`
+- Test: `backend/tests/core/crypto/test_keyring.py`, `backend/tests/core/crypto/test_keyring_rls.py`
 
 **Interfaces:**
 - Consumes: `Base`, `UUIDPk` (Task 3); `Settings.kek_b64`, `kek_id`, `kek_previous_b64`, `kek_previous_id` (Task 2).
@@ -1029,7 +1034,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     - `async rotate(session, tenant_id: UUID | None) -> int` (data-key rotation; returns the new active version)
     - `async rewrap_batch(session, batch_size: int = 100) -> int`: rewraps up to `batch_size` rows **not** wrapped by `current` (`FOR UPDATE SKIP LOCKED`); returns the count, 0 when done
     - `async kek_usage(session) -> dict[str, int]` (`kek_id` → number of data keys)
-  - `tenant_id=None` means the platform scope, used for user TOTP secrets.
+  - `tenant_id=None` means the platform scope, used for user TOTP secrets. It's stored in `platform_keys`, while tenant keys live in `data_keys` under RLS.
+  - Callers must run `tenant_scope(session, tenant_id)` before using a tenant's key. Key creation and rotation are serialized per scope with `pg_advisory_xact_lock`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1120,17 +1126,27 @@ from sqlalchemy.orm import Mapped, mapped_column
 from dewpoint.core.models.base import Base, UUIDPk
 
 
-class DataKey(UUIDPk, Base):
-    """Wrapped data-encryption keys. Not RLS-scoped: only reachable through Keyring."""
-    __tablename__ = "data_keys"
-    __table_args__ = (UniqueConstraint("scope_key", "version"),)
-    scope_key: Mapped[str] = mapped_column(String(64))  # "platform" or tenant uuid
-    tenant_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+class _WrappedKey(UUIDPk):
     version: Mapped[int] = mapped_column(Integer)
     wrapped_key: Mapped[bytes] = mapped_column(LargeBinary)
     kek_id: Mapped[str] = mapped_column(String(64))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DataKey(_WrappedKey, Base):
+    """A tenant's wrapped data-encryption keys. RLS-scoped to the tenant (FORCE); key admins see all."""
+
+    __tablename__ = "data_keys"
+    __table_args__ = (UniqueConstraint("tenant_id", "version"),)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+
+
+class PlatformKey(_WrappedKey, Base):
+    """The platform scope's wrapped data keys (user TOTP secrets). Granted to api and admin roles only."""
+
+    __tablename__ = "platform_keys"
+    __table_args__ = (UniqueConstraint("version"),)
 ```
 
 `core/crypto/kek.py`:
@@ -1195,15 +1211,19 @@ Add `from collections.abc import Sequence` to the imports.
 import os
 import struct
 import uuid
+from collections.abc import Sequence
+from typing import Any, cast
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from sqlalchemy import select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.crypto.kek import KekSet
-from dewpoint.core.models.keys import DataKey
+from dewpoint.core.models.keys import DataKey, PlatformKey
 
 FORMAT_V1 = b"\x01"
+type AnyKey = DataKey | PlatformKey
 
 
 def _scope(tenant_id: uuid.UUID | None) -> str:
@@ -1214,80 +1234,266 @@ def _aad(scope: str, purpose: str, context: str) -> bytes:
     return f"dewpoint|{scope}|{purpose}|{context}".encode()
 
 
+def _dek_aad(row: AnyKey) -> bytes:
+    scope = str(row.tenant_id) if isinstance(row, DataKey) else "platform"
+    return f"dek|{scope}|{row.version}".encode()
+
+
+def _scope_filter(tenant_id: uuid.UUID | None) -> tuple[type[AnyKey], list[Any]]:
+    """Tenant keys live in RLS-scoped data_keys; the platform key in the narrowly granted platform_keys."""
+    if tenant_id is None:
+        return PlatformKey, []
+    return DataKey, [DataKey.tenant_id == tenant_id]
+
+
 class Keyring:
     def __init__(self, keks: KekSet) -> None:
         self._keks = keks
 
-    async def _active(self, s: AsyncSession, tenant_id: uuid.UUID | None) -> DataKey:
-        scope = _scope(tenant_id)
-        row = (await s.execute(
-            select(DataKey).where(DataKey.scope_key == scope, DataKey.active.is_(True)).with_for_update()
-        )).scalar_one_or_none()
+    async def _active(self, s: AsyncSession, tenant_id: uuid.UUID | None) -> AnyKey:
+        # Serialize first-use creation and rotation per scope until commit; FOR UPDATE alone can't lock a
+        # row that doesn't exist yet, so two first uses would both insert version 1.
+        await s.execute(
+            text("select pg_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": f"dewpoint:dek:{_scope(tenant_id)}"}
+        )
+        model, where = _scope_filter(tenant_id)
+        found = (
+            await s.execute(select(model).where(*where, model.active.is_(True)).with_for_update())
+        ).scalar_one_or_none()
+        row = cast(AnyKey | None, found)
         if row is None:
-            row = self._new_key(scope, tenant_id, 1)
+            row = self._new_key(tenant_id, 1)
             s.add(row)
             await s.flush()
         return row
 
-    def _new_key(self, scope: str, tenant_id: uuid.UUID | None, version: int) -> DataKey:
+    def _new_key(self, tenant_id: uuid.UUID | None, version: int) -> AnyKey:
         kek = self._keks.current
-        wrapped = kek.wrap(AESGCM.generate_key(256), f"dek|{scope}|{version}".encode())
-        return DataKey(scope_key=scope, tenant_id=tenant_id, version=version, wrapped_key=wrapped, kek_id=kek.key_id)
+        row: AnyKey = (
+            PlatformKey(version=version) if tenant_id is None else DataKey(tenant_id=tenant_id, version=version)
+        )
+        row.wrapped_key = kek.wrap(AESGCM.generate_key(256), _dek_aad(row))
+        row.kek_id = kek.key_id
+        return row
 
-    def _dek(self, row: DataKey) -> AESGCM:
+    def _dek(self, row: AnyKey) -> AESGCM:
         kek = self._keks.get(row.kek_id)  # UnknownKekError if this process lacks the wrapping key
-        return AESGCM(kek.unwrap(row.wrapped_key, f"dek|{row.scope_key}|{row.version}".encode()))
+        return AESGCM(kek.unwrap(row.wrapped_key, _dek_aad(row)))
 
-    async def encrypt(self, s: AsyncSession, *, tenant_id: uuid.UUID | None, purpose: str, context: str,
-                      plaintext: bytes) -> bytes:
+    async def encrypt(
+        self, s: AsyncSession, *, tenant_id: uuid.UUID | None, purpose: str, context: str, plaintext: bytes
+    ) -> bytes:
         row = await self._active(s, tenant_id)
         nonce = os.urandom(12)
-        ct = self._dek(row).encrypt(nonce, plaintext, _aad(row.scope_key, purpose, context))
+        ct = self._dek(row).encrypt(nonce, plaintext, _aad(_scope(tenant_id), purpose, context))
         return FORMAT_V1 + struct.pack(">I", row.version) + nonce + ct
 
-    async def decrypt(self, s: AsyncSession, *, tenant_id: uuid.UUID | None, purpose: str, context: str,
-                      blob: bytes) -> bytes:
+    async def decrypt(
+        self, s: AsyncSession, *, tenant_id: uuid.UUID | None, purpose: str, context: str, blob: bytes
+    ) -> bytes:
         if blob[:1] != FORMAT_V1:
             raise ValueError("unknown ciphertext format")
         (version,) = struct.unpack(">I", blob[1:5])
-        scope = _scope(tenant_id)
-        row = (await s.execute(
-            select(DataKey).where(DataKey.scope_key == scope, DataKey.version == version)
-        )).scalar_one_or_none()
-        if row is None:
-            from cryptography.exceptions import InvalidTag
+        model, where = _scope_filter(tenant_id)
+        found = (await s.execute(select(model).where(*where, model.version == version))).scalar_one_or_none()
+        row = cast(AnyKey | None, found)
+        if row is None:  # missing, or invisible under RLS: indistinguishable from a bad tag on purpose
             raise InvalidTag()
-        return self._dek(row).decrypt(blob[5:17], blob[17:], _aad(scope, purpose, context))
+        return self._dek(row).decrypt(blob[5:17], blob[17:], _aad(_scope(tenant_id), purpose, context))
 
     async def rotate(self, s: AsyncSession, tenant_id: uuid.UUID | None) -> int:
         current = await self._active(s, tenant_id)
-        await s.execute(update(DataKey).where(DataKey.id == current.id).values(active=False))
-        new = self._new_key(current.scope_key, tenant_id, current.version + 1)
+        await s.execute(update(type(current)).where(type(current).id == current.id).values(active=False))
+        new = self._new_key(tenant_id, current.version + 1)
         s.add(new)
         await s.flush()
         return new.version
 
     async def rewrap_batch(self, s: AsyncSession, batch_size: int = 100) -> int:
+        """Rewrap up to batch_size keys not wrapped by the current KEK. Run as a key-admin role."""
         current = self._keks.current
-        rows = (await s.execute(select(DataKey).where(DataKey.kek_id != current.key_id)
-                                .limit(batch_size).with_for_update(skip_locked=True))).scalars().all()
-        for row in rows:
-            aad = f"dek|{row.scope_key}|{row.version}".encode()
-            row.wrapped_key = current.wrap(self._keks.get(row.kek_id).unwrap(row.wrapped_key, aad), aad)
-            row.kek_id = current.key_id
+        done = 0
+        for model in (DataKey, PlatformKey):
+            if done >= batch_size:
+                break
+            q = select(model).where(model.kek_id != current.key_id).limit(batch_size - done)
+            rows = cast(Sequence[AnyKey], (await s.execute(q.with_for_update(skip_locked=True))).scalars().all())
+            for row in rows:
+                aad = _dek_aad(row)
+                row.wrapped_key = current.wrap(self._keks.get(row.kek_id).unwrap(row.wrapped_key, aad), aad)
+                row.kek_id = current.key_id
+            done += len(rows)
         await s.flush()
-        return len(rows)
+        return done
 
     async def kek_usage(self, s: AsyncSession) -> dict[str, int]:
-        rows = await s.execute(select(DataKey.kek_id, func.count()).group_by(DataKey.kek_id))
-        return {k: int(n) for k, n in rows.all()}
+        usage: dict[str, int] = {}
+        for model in (DataKey, PlatformKey):
+            for kek_id, n in (await s.execute(select(model.kek_id, func.count()).group_by(model.kek_id))).all():
+                usage[kek_id] = usage.get(kek_id, 0) + int(n)
+        return usage
 ```
 Add `func` to the `sqlalchemy` import.
 
-`0004_keys.py` (with `revision = "0004"` and `down_revision = "0003"`):
-- creates `data_keys` to match the model;
-- adds a partial unique index `ux_data_keys_active` on `(scope_key) WHERE active`, so there is at most one active key per scope;
-- runs `GRANT SELECT, INSERT, UPDATE ON data_keys TO dewpoint_api, dewpoint_worker, dewpoint_admin`.
+`migrations/versions/0004_keys.py` (tenant keys under FORCE RLS plus a key-admin policy; the platform key in a separate table granted to `api`/`admin` only; one statement per `op.execute`, as asyncpg requires):
+```python
+# SPDX-License-Identifier: Apache-2.0
+"""envelope-encryption keys: tenant data keys (RLS) and platform keys (narrow grants)"""
+
+import sqlalchemy as sa
+from alembic import op
+from sqlalchemy.dialects import postgresql as pg
+
+revision = "0004"
+down_revision = "0003"
+branch_labels = None
+depends_on = None
+
+
+def _key_columns() -> list[sa.Column]:  # type: ignore[type-arg]
+    return [
+        sa.Column("id", pg.UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
+        sa.Column("version", sa.Integer, nullable=False),
+        sa.Column("wrapped_key", sa.LargeBinary, nullable=False),
+        sa.Column("kek_id", sa.String(64), nullable=False),
+        sa.Column("active", sa.Boolean, nullable=False, server_default=sa.true()),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+    ]
+
+
+def upgrade() -> None:
+    op.create_table(
+        "data_keys",
+        *_key_columns(),
+        sa.Column("tenant_id", pg.UUID(as_uuid=True), nullable=False),
+        sa.UniqueConstraint("tenant_id", "version"),
+    )
+    op.create_index("ux_data_keys_active", "data_keys", ["tenant_id"], unique=True, postgresql_where=sa.text("active"))
+    op.create_table("platform_keys", *_key_columns(), sa.UniqueConstraint("version"))
+    op.create_index(
+        "ux_platform_keys_active", "platform_keys", [sa.text("(true)")], unique=True, postgresql_where=sa.text("active")
+    )
+    for stmt in (
+        "ALTER TABLE data_keys ENABLE ROW LEVEL SECURITY",
+        "ALTER TABLE data_keys FORCE ROW LEVEL SECURITY",
+        # Services only ever touch the key of the tenant they are scoped to.
+        "CREATE POLICY data_keys_tenant ON data_keys "
+        "USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id())",
+        # Key administration (status, rewrap, rotate-dek) spans tenants by design.
+        "CREATE POLICY data_keys_key_admin ON data_keys TO dewpoint_admin USING (true) WITH CHECK (true)",
+        "GRANT SELECT, INSERT, UPDATE ON data_keys TO dewpoint_api, dewpoint_worker, dewpoint_admin",
+        # Platform keys protect user TOTP secrets: needed by the API (sign-in) and key admins, never by workers.
+        "GRANT SELECT, INSERT, UPDATE ON platform_keys TO dewpoint_api, dewpoint_admin",
+    ):
+        op.execute(stmt)
+
+
+def downgrade() -> None:
+    op.drop_table("platform_keys")
+    op.execute("DROP POLICY IF EXISTS data_keys_key_admin ON data_keys")
+    op.execute("DROP POLICY IF EXISTS data_keys_tenant ON data_keys")
+    op.drop_table("data_keys")
+```
+
+Add `tests/core/crypto/test_keyring_rls.py`, which covers:
+- concurrent first use creates exactly one key;
+- concurrent rotations serialize to versions 2, 3, 4;
+- tenant keys are invisible without context or under another tenant, and a key can't be created for another tenant;
+- workers are denied the platform key;
+- the admin role sees every key.
+
+It also needs the `worker_sessionmaker` and `admin_sessionmaker` fixtures, built like `api_sessionmaker`.
+```python
+# SPDX-License-Identifier: Apache-2.0
+import asyncio
+import os
+import uuid
+
+import pytest
+from cryptography.exceptions import InvalidTag
+from sqlalchemy import func, select
+from sqlalchemy.exc import DBAPIError
+
+from dewpoint.core.crypto.kek import Kek, KekSet
+from dewpoint.core.crypto.keyring import Keyring
+from dewpoint.core.db import tenant_scope
+from dewpoint.core.models.keys import DataKey, PlatformKey
+
+KR = Keyring(KekSet(Kek("k1", os.urandom(32))))
+
+
+async def test_concurrent_first_use_creates_one_key(api_sessionmaker, owner_sessionmaker) -> None:
+    t = uuid.uuid4()
+
+    async def first_use(i: int) -> bytes:
+        async with api_sessionmaker() as s, s.begin():
+            await tenant_scope(s, t)
+            blob = await KR.encrypt(s, tenant_id=t, purpose="p", context=str(i), plaintext=b"x")
+            await asyncio.sleep(0.1)  # keep transactions overlapping
+            return blob
+
+    blobs = await asyncio.gather(*(first_use(i) for i in range(5)))
+    async with owner_sessionmaker() as s:
+        assert (
+            await s.execute(select(func.count()).select_from(DataKey).where(DataKey.tenant_id == t))
+        ).scalar_one() == 1
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, t)
+        for i, b in enumerate(blobs):
+            assert await KR.decrypt(s, tenant_id=t, purpose="p", context=str(i), blob=b) == b"x"
+
+
+async def test_concurrent_rotations_serialize(api_sessionmaker) -> None:
+    t = uuid.uuid4()
+
+    async def rotate() -> int:
+        async with api_sessionmaker() as s, s.begin():
+            await tenant_scope(s, t)
+            v = await KR.rotate(s, t)
+            await asyncio.sleep(0.1)
+            return v
+
+    assert sorted(await asyncio.gather(rotate(), rotate(), rotate())) == [2, 3, 4]
+
+
+async def test_tenant_keys_are_rls_scoped(api_sessionmaker) -> None:
+    a, b = uuid.uuid4(), uuid.uuid4()
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, a)
+        blob = await KR.encrypt(s, tenant_id=a, purpose="p", context="c", plaintext=b"secret")
+    async with api_sessionmaker() as s, s.begin():  # no tenant context: nothing visible
+        assert (await s.execute(select(DataKey))).scalars().all() == []
+    async with api_sessionmaker() as s, s.begin():  # other tenant's context: key invisible, decrypt fails
+        await tenant_scope(s, b)
+        assert (await s.execute(select(DataKey))).scalars().all() == []
+        with pytest.raises(InvalidTag):
+            await KR.decrypt(s, tenant_id=a, purpose="p", context="c", blob=blob)
+    with pytest.raises(DBAPIError, match="row-level security"):  # can't create a key for another tenant
+        async with api_sessionmaker() as s, s.begin():
+            await tenant_scope(s, b)
+            await KR.encrypt(s, tenant_id=a, purpose="p", context="c", plaintext=b"x")
+
+
+async def test_platform_key_path_is_narrow(api_sessionmaker, worker_sessionmaker) -> None:
+    async with api_sessionmaker() as s, s.begin():
+        blob = await KR.encrypt(s, tenant_id=None, purpose="user.totp", context="u1", plaintext=b"totp")
+        assert await KR.decrypt(s, tenant_id=None, purpose="user.totp", context="u1", blob=blob) == b"totp"
+        assert (await s.execute(select(func.count()).select_from(PlatformKey))).scalar_one() == 1
+    with pytest.raises(DBAPIError, match="permission denied"):
+        async with worker_sessionmaker() as s, s.begin():
+            await s.execute(select(PlatformKey))
+
+
+async def test_admin_role_sees_all_keys(api_sessionmaker, admin_sessionmaker) -> None:
+    for t in (uuid.uuid4(), uuid.uuid4()):
+        async with api_sessionmaker() as s, s.begin():
+            await tenant_scope(s, t)
+            await KR.encrypt(s, tenant_id=t, purpose="p", context="c", plaintext=b"x")
+    async with api_sessionmaker() as s, s.begin():
+        await KR.encrypt(s, tenant_id=None, purpose="p", context="c", plaintext=b"x")
+    async with admin_sessionmaker() as s, s.begin():
+        assert await KR.kek_usage(s) == {"k1": 3}
+```
 
 - [ ] **Step 4: Run the tests**
 
@@ -1340,6 +1546,20 @@ def test_policy() -> None:
     assert "contains_email" in policy_violations("alice-is-great-2026", "alice@corp.test")
     assert "common" in policy_violations("password1234", "x@y.z")
     assert policy_violations("violet-otter-canyon-42", "alice@corp.test") == []
+
+
+def test_email_type_accepts_internal_domains_and_rejects_garbage() -> None:
+    import pytest
+    from pydantic import TypeAdapter, ValidationError
+
+    from dewpoint.core.auth.users import Email
+
+    ta = TypeAdapter(Email)
+    for ok in ("dana@corp.test", "ops@site.local", "a.b+c@mist.internal", "  x@example.com "):
+        assert ta.validate_python(ok) == ok.strip()
+    for bad in ("", "nodomain", "@x.y", "a@", "a b@c.d", "a@b@c", "x" * 321 + "@a.b"):
+        with pytest.raises(ValidationError):
+            ta.validate_python(bad)
 ```
 
 `backend/tests/apps/cli/test_admin_init.py`:
@@ -1433,12 +1653,20 @@ def policy_violations(pw: str, email: str) -> list[str]:
 ```python
 # SPDX-License-Identifier: Apache-2.0
 from datetime import UTC, datetime
+from typing import Annotated
 
+from pydantic import StringConstraints
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.auth.passwords import hash_password, policy_violations
 from dewpoint.core.models.identity import User
+
+# Deliberately lenient: self-hosted customers use internal/special-use domains (.local, .internal, .test)
+# that RFC-strict validators reject. Uniqueness is case-insensitive (see ix_users_email_lower).
+Email = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=3, max_length=320, pattern=r"^[^@\s]+@[^@\s]+$")
+]
 
 
 class PasswordPolicyError(ValueError):
@@ -1460,8 +1688,12 @@ async def create_user(s: AsyncSession, *, email: str, password: str, platform_ad
         raise PasswordPolicyError(v)
     if await get_user_by_email(s, email):
         raise EmailTakenError(email)
-    user = User(email=email.strip(), password_hash=hash_password(password), is_platform_admin=platform_admin,
-                password_changed_at=datetime.now(UTC))
+    user = User(
+        email=email.strip(),
+        password_hash=hash_password(password),
+        is_platform_admin=platform_admin,
+        password_changed_at=datetime.now(UTC),
+    )
     s.add(user)
     await s.flush()
     return user
@@ -1679,7 +1911,7 @@ import hmac
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Literal, Protocol
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1691,28 +1923,67 @@ SESSION_COOKIE = "__Host-dewpoint_session"
 TOUCH_EVERY = timedelta(seconds=60)
 
 
+SameSite = Literal["lax", "strict", "none"]
+
+
 class _CookieResponse(Protocol):
-    def set_cookie(self, key: str, value: str = "", **kw: object) -> None: ...
-    def delete_cookie(self, key: str, **kw: object) -> None: ...
+    """The cookie API of a Starlette response, without importing a web framework into core."""
+
+    def set_cookie(
+        self,
+        key: str,
+        value: str = ...,
+        *,
+        max_age: int | None = ...,
+        path: str | None = ...,
+        secure: bool = ...,
+        httponly: bool = ...,
+        samesite: SameSite | None = ...,
+    ) -> None: ...
+
+    def delete_cookie(
+        self, key: str, *, path: str = ..., secure: bool = ..., httponly: bool = ..., samesite: SameSite | None = ...
+    ) -> None: ...
 
 
 def _hash(token: str) -> bytes:
     return hashlib.sha256(token.encode()).digest()
 
 
-async def create_session(s: AsyncSession, *, user_id: uuid.UUID, state: str, methods: list[str], settings: Settings,
-                         ip: str | None, user_agent: str | None) -> tuple[AuthSession, str]:
+async def create_session(
+    s: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    state: str,
+    methods: list[str],
+    settings: Settings,
+    ip: str | None,
+    user_agent: str | None,
+    reauth: bool = False,
+) -> tuple[AuthSession, str]:
+    """reauth=True when the session starts with a proven second factor (passkey with user verification)."""
     token, now = secrets.token_urlsafe(32), datetime.now(UTC)
-    sess = AuthSession(token_hash=_hash(token), user_id=user_id, state=state, auth_methods=list(methods),
-                       csrf_token=secrets.token_urlsafe(32), created_at=now, last_seen_at=now,
-                       expires_at=now + timedelta(hours=settings.session_absolute_hours), ip=ip,
-                       user_agent=(user_agent or "")[:400] or None)
+    sess = AuthSession(
+        token_hash=_hash(token),
+        user_id=user_id,
+        state=state,
+        auth_methods=list(methods),
+        csrf_token=secrets.token_urlsafe(32),
+        created_at=now,
+        last_seen_at=now,
+        expires_at=now + timedelta(hours=settings.session_absolute_hours),
+        ip=ip,
+        user_agent=(user_agent or "")[:400] or None,
+        reauth_at=now if reauth else None,
+    )
     s.add(sess)
     await s.flush()
     return sess, token
 
 
-async def load_session(s: AsyncSession, token: str, settings: Settings, now: datetime | None = None) -> AuthSession | None:
+async def load_session(
+    s: AsyncSession, token: str, settings: Settings, now: datetime | None = None
+) -> AuthSession | None:
     now = now or datetime.now(UTC)
     sess = (await s.execute(select(AuthSession).where(AuthSession.token_hash == _hash(token)))).scalar_one_or_none()
     if sess is None or sess.revoked_at is not None or now >= sess.expires_at:
@@ -1724,13 +1995,26 @@ async def load_session(s: AsyncSession, token: str, settings: Settings, now: dat
     return sess
 
 
-async def elevate(s: AsyncSession, sess: AuthSession, *, method: str, state: str = "active") -> str:
+async def rotate(s: AsyncSession, sess: AuthSession) -> str:
+    """New session token and CSRF token after any privilege-relevant change. Returns the new token."""
     token = secrets.token_urlsafe(32)
-    sess.token_hash, sess.state = _hash(token), state
-    sess.auth_methods = [*sess.auth_methods, method]
-    sess.csrf_token = secrets.token_urlsafe(32)
+    sess.token_hash, sess.csrf_token = _hash(token), secrets.token_urlsafe(32)
     await s.flush()
     return token
+
+
+async def elevate(s: AsyncSession, sess: AuthSession, *, method: str, state: str = "active") -> str:
+    """Record a proven factor: append the method, stamp reauth_at, set the state and rotate tokens."""
+    sess.state = state
+    sess.auth_methods = [*sess.auth_methods, method]
+    sess.reauth_at = datetime.now(UTC)
+    return await rotate(s, sess)
+
+
+def reauth_fresh(sess: AuthSession, settings: Settings, now: datetime | None = None) -> bool:
+    if sess.reauth_at is None:
+        return False
+    return (now or datetime.now(UTC)) - sess.reauth_at <= timedelta(minutes=settings.reauth_minutes)
 
 
 async def revoke(s: AsyncSession, sess: AuthSession) -> None:
@@ -1750,8 +2034,15 @@ def csrf_valid(sess: AuthSession, header: str | None) -> bool:
 
 
 def set_session_cookie(response: _CookieResponse, token: str, settings: Settings) -> None:
-    response.set_cookie(SESSION_COOKIE, token, httponly=True, secure=True, samesite="lax", path="/",
-                        max_age=settings.session_absolute_hours * 3600)
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/",
+        max_age=settings.session_absolute_hours * 3600,
+    )
 
 
 def clear_session_cookie(response: _CookieResponse) -> None:
@@ -1761,14 +2052,20 @@ def clear_session_cookie(response: _CookieResponse) -> None:
 `core/http.py`:
 ```python
 # SPDX-License-Identifier: Apache-2.0
-from collections.abc import AsyncIterator
+import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException, Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dewpoint.core.auth.sessions import SESSION_COOKIE, csrf_valid, load_session
+from dewpoint.core.auth.sessions import SESSION_COOKIE, csrf_valid, load_session, reauth_fresh
+from dewpoint.core.authz.permissions import ROLE_PERMISSIONS, P
 from dewpoint.core.config import Settings
+from dewpoint.core.db import tenant_scope, user_scope
 from dewpoint.core.models.identity import AuthSession, User
+from dewpoint.core.models.tenancy import Membership, Tenant
 
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
@@ -1778,12 +2075,18 @@ def get_settings_dep(request: Request) -> Settings:
 
 
 async def get_db(request: Request) -> AsyncIterator[AsyncSession]:
+    """One transaction per request. Always declare it as Depends(get_db, scope="function"): the default
+    "request" scope commits after the response is sent, so a client could read before its write commits and a
+    failed commit would follow a success response. (Mixing scopes would also create two sessions.)"""
     async with request.app.state.sessionmaker() as s, s.begin():
         yield s
 
 
-async def current_session(request: Request, db: AsyncSession = Depends(get_db),
-                          settings: Settings = Depends(get_settings_dep)) -> AuthSession:
+async def current_session(
+    request: Request,
+    db: AsyncSession = Depends(get_db, scope="function"),
+    settings: Settings = Depends(get_settings_dep),
+) -> AuthSession:
     token = request.cookies.get(SESSION_COOKIE)
     sess = await load_session(db, token, settings) if token else None
     if sess is None:
@@ -1799,13 +2102,64 @@ async def active_session(sess: AuthSession = Depends(current_session)) -> AuthSe
     return sess
 
 
-async def current_user(sess: AuthSession = Depends(active_session), db: AsyncSession = Depends(get_db)) -> User:
+async def current_user(
+    sess: AuthSession = Depends(active_session), db: AsyncSession = Depends(get_db, scope="function")
+) -> User:
     user = await db.get(User, sess.user_id)
     if user is None or not user.is_active:
         raise HTTPException(401, detail={"error": "unauthenticated"})
     return user
+
+
+@dataclass(frozen=True)
+class TenantContext:
+    tenant_id: uuid.UUID
+    user: User
+    role: str
+    session: AuthSession
+
+
+def require(permission: P) -> Callable[..., Awaitable[TenantContext]]:
+    async def _dep(
+        tenant_id: uuid.UUID,
+        user: User = Depends(current_user),
+        sess: AuthSession = Depends(active_session),
+        db: AsyncSession = Depends(get_db, scope="function"),
+    ) -> TenantContext:
+        await user_scope(db, user.id)  # authoritative lookup of the caller's own membership
+        row = (
+            await db.execute(
+                select(Membership.role, Tenant.require_passkey)
+                .join(Tenant, Tenant.id == Membership.tenant_id)
+                .where(Membership.tenant_id == tenant_id, Membership.user_id == user.id)
+            )
+        ).first()
+        if row is None:
+            raise HTTPException(404, detail={"error": "not_found"})
+        role, require_passkey = row
+        if require_passkey and "passkey" not in sess.auth_methods:
+            raise HTTPException(403, detail={"error": "step_up_required"})
+        if permission not in ROLE_PERMISSIONS[role]:
+            raise HTTPException(403, detail={"error": "forbidden"})
+        await tenant_scope(db, tenant_id)  # clears user scope: no widening to the caller's other tenants
+        return TenantContext(tenant_id=tenant_id, user=user, role=role, session=sess)
+
+    return _dep
+
+
+async def require_platform_admin(user: User = Depends(current_user)) -> User:
+    if not user.is_platform_admin:
+        raise HTTPException(403, detail={"error": "forbidden"})
+    return user
+
+
+def ensure_fresh_reauth(sess: AuthSession, settings: Settings) -> None:
+    """Adding or replacing a factor from an active session needs a recently proven second factor.
+    A session still enrolling its first factor (enroll_required) has none to prove and is exempt."""
+    if sess.state == "active" and not reauth_fresh(sess, settings):
+        raise HTTPException(403, detail={"error": "reauth_required"})
 ```
-FastAPI caches `get_db` per request, so every dependency shares one transaction.
+FastAPI caches `get_db` per request, so every dependency shares one transaction. **Always declare it as `Depends(get_db, scope="function")`.** FastAPI's default `"request"` scope for `yield` dependencies commits *after* the response is sent. A client could then read before its own write is committed (this showed up as a CI end-to-end flake), and a failed commit would follow a success response. `tests/apps/api/test_commit_before_response.py` checks visibility at `http.response.start` at the raw ASGI level, and fails if any route uses the unscoped form.
 
 Add to `apps/api/middleware.py`:
 ```python
@@ -1864,36 +2218,22 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     - `POST /mfa/totp/confirm` `{code}` → `{recovery_codes, state, csrf_token}`.
     - `GET /session` → `{user:{id,email,is_platform_admin}, state, auth_methods, csrf_token}`.
     - `POST /logout` → 204.
-    - `POST /password` `{current_password,new_password}` → 204; revokes all other sessions and rotates the current one.
+    - `POST /password` `{current_password,new_password}` → **200 `{csrf_token}`**. It revokes all other sessions and rotates the current session's token without elevating it, because a password isn't a second factor. The client uses the returned CSRF token for its next unsafe request.
+    - `POST /mfa/totp/reauth` `{code}` (session `active`, throttled) → `{state, csrf_token}`. It re-proves the confirmed TOTP and stamps `sessions.reauth_at`.
+  - **Changing factors:**
+    - `/totp/enroll` stages a *pending* secret (`user_mfa.totp_pending_ct`, which expires after `totp_pending_minutes`). The confirmed secret stays in force until `/totp/confirm` verifies a code from the pending one.
+    - From an `active` session, `/totp/enroll`, `/totp/confirm`, `/passkeys/register/options` and `/passkeys/register/verify` require `reauth_at` within `reauth_minutes`, else 403 `{"error":"reauth_required"}`. Completion is re-checked because a pending secret (10 minutes) or challenge (5 minutes) can outlive the reauth window, and a 403 doesn't consume the pending secret or challenge. `enroll_required` sessions have no factor yet, so they're exempt.
+    - `elevate()` stamps `reauth_at`. `rotate()` issues new session and CSRF tokens without elevating.
 
 - [ ] **Step 1: Write the failing tests**
 
 `backend/tests/core/auth/test_throttle.py`:
 ```python
 # SPDX-License-Identifier: Apache-2.0
-from datetime import UTC, datetime, timedelta
-
-from dewpoint.core.auth import throttle
-
-
-async def test_locks_after_max_failures_then_expires(owner_sessionmaker, api_settings) -> None:
-    now = datetime.now(UTC)
-    async with owner_sessionmaker() as s, s.begin():
-        for _ in range(api_settings.login_max_failures):
-            assert not await throttle.is_locked(s, "login_email", "a@x.test", now)
-            await throttle.record_failure(s, "login_email", "a@x.test", api_settings, now)
-        assert await throttle.is_locked(s, "login_email", "a@x.test", now)
-        later = now + timedelta(minutes=api_settings.login_lockout_minutes + 1)
-        assert not await throttle.is_locked(s, "login_email", "a@x.test", later)
-        await throttle.reset(s, "login_email", "a@x.test")
-```
-
-`backend/tests/apps/api/test_login_flow.py`:
-```python
-# SPDX-License-Identifier: Apache-2.0
 from urllib.parse import parse_qs, urlparse
 
 import pyotp
+from sqlalchemy import text
 
 from dewpoint.core.auth.users import create_user
 
@@ -1912,8 +2252,8 @@ async def test_enroll_then_login_with_totp(client, owner_sessionmaker) -> None:
     csrf = r.json()["csrf_token"]
     uri = (await client.post("/api/v1/auth/mfa/totp/enroll", headers={"X-CSRF-Token": csrf})).json()["otpauth_uri"]
     secret = parse_qs(urlparse(uri).query)["secret"][0]
-    r = await client.post("/api/v1/auth/mfa/totp/confirm", json={"code": pyotp.TOTP(secret).now()},
-                          headers={"X-CSRF-Token": csrf})
+    confirm_code = pyotp.TOTP(secret).now()
+    r = await client.post("/api/v1/auth/mfa/totp/confirm", json={"code": confirm_code}, headers={"X-CSRF-Token": csrf})
     body = r.json()
     assert r.status_code == 200 and body["state"] == "active" and len(body["recovery_codes"]) == 10
     csrf = body["csrf_token"]
@@ -1922,12 +2262,12 @@ async def test_enroll_then_login_with_totp(client, owner_sessionmaker) -> None:
     r = await client.post("/api/v1/auth/login", json={"email": "dana@corp.test", "password": PW})
     assert r.json()["state"] == "mfa_pending"
     csrf = r.json()["csrf_token"]
-    # the same TOTP code must not be accepted twice (replay)
-    code = pyotp.TOTP(secret).now()
-    r = await client.post("/api/v1/auth/mfa/totp", json={"code": code}, headers={"X-CSRF-Token": csrf})
+    # replay the exact code already consumed by /confirm: rejected whether or not a 30 s step has passed since
+    r = await client.post("/api/v1/auth/mfa/totp", json={"code": confirm_code}, headers={"X-CSRF-Token": csrf})
     assert r.status_code == 401
-    r = await client.post("/api/v1/auth/mfa/recovery", json={"code": body["recovery_codes"][0]},
-                          headers={"X-CSRF-Token": csrf})
+    r = await client.post(
+        "/api/v1/auth/mfa/recovery", json={"code": body["recovery_codes"][0]}, headers={"X-CSRF-Token": csrf}
+    )
     assert r.status_code == 200 and r.json()["state"] == "active"
     me = (await client.get("/api/v1/auth/session")).json()
     assert me["user"]["email"] == "dana@corp.test" and me["auth_methods"] == ["password", "recovery"]
@@ -1940,13 +2280,16 @@ async def test_bad_password_is_generic_and_locks(client, owner_sessionmaker, api
         assert r.status_code == 401 and r.json() == {"error": "invalid_credentials"}
     r = await client.post("/api/v1/auth/login", json={"email": "dana@corp.test", "password": PW})
     assert r.status_code == 429 and r.json() == {"error": "locked"}
+    # an unknown account gets the same generic answer; the shared client IP is still under its own higher limit
     r = await client.post("/api/v1/auth/login", json={"email": "ghost@corp.test", "password": PW})
     assert r.status_code == 401 and r.json() == {"error": "invalid_credentials"}
 
 
 async def test_enrollment_confirm_is_throttled(client, owner_sessionmaker, api_settings) -> None:
     await _seed(owner_sessionmaker)
-    csrf = (await client.post("/api/v1/auth/login", json={"email": "dana@corp.test", "password": PW})).json()["csrf_token"]
+    csrf = (await client.post("/api/v1/auth/login", json={"email": "dana@corp.test", "password": PW})).json()[
+        "csrf_token"
+    ]
     await client.post("/api/v1/auth/mfa/totp/enroll", headers={"X-CSRF-Token": csrf})
     for _ in range(api_settings.login_max_failures):
         r = await client.post("/api/v1/auth/mfa/totp/confirm", json={"code": "000000"}, headers={"X-CSRF-Token": csrf})
@@ -1957,16 +2300,119 @@ async def test_enrollment_confirm_is_throttled(client, owner_sessionmaker, api_s
 
 async def test_password_change_revokes_other_sessions(app, owner_sessionmaker) -> None:
     import httpx
+
     await _seed(owner_sessionmaker)
     t = httpx.ASGITransport(app=app)
     h = {"X-Dewpoint-Client": "web"}
-    async with httpx.AsyncClient(transport=t, base_url="https://testserver", headers=h) as a, \
-               httpx.AsyncClient(transport=t, base_url="https://testserver", headers=h) as b:
+    async with (
+        httpx.AsyncClient(transport=t, base_url="https://testserver", headers=h) as a,
+        httpx.AsyncClient(transport=t, base_url="https://testserver", headers=h) as b,
+    ):
         for c in (a, b):
             r = await c.post("/api/v1/auth/login", json={"email": "dana@corp.test", "password": PW})
             c.headers["X-CSRF-Token"] = r.json()["csrf_token"]
-        r = await a.post("/api/v1/auth/password", json={"current_password": PW, "new_password": "amber-heron-valley-77"})
-        assert r.status_code == 204
+        async with owner_sessionmaker() as s, s.begin():  # both sessions completed MFA (not under test here)
+            await s.execute(text("update sessions set state = 'active'"))
+        r = await a.post(
+            "/api/v1/auth/password", json={"current_password": PW, "new_password": "amber-heron-valley-77"}
+        )
+        assert r.status_code == 200 and "csrf_token" in r.json()
+        assert (await b.get("/api/v1/auth/session")).status_code == 401
+        assert (await a.get("/api/v1/auth/session")).status_code == 200
+```
+
+`backend/tests/apps/api/test_login_flow.py` (see also `tests/apps/api/test_factor_changes.py`, which covers: an abandoned TOTP setup keeps the old factor; replacement needs fresh reauth; an expired pending setup can't be confirmed; adding a passkey while active needs reauth and rotates tokens; password change returns the new CSRF token; anonymous options are rate-limited; expired challenges are purged; outstanding challenges are capped):
+```python
+# SPDX-License-Identifier: Apache-2.0
+from urllib.parse import parse_qs, urlparse
+
+import pyotp
+from sqlalchemy import text
+
+from dewpoint.core.auth.users import create_user
+
+PW = "violet-otter-canyon-42"
+
+
+async def _seed(owner_sessionmaker) -> None:
+    async with owner_sessionmaker() as s, s.begin():
+        await create_user(s, email="dana@corp.test", password=PW)
+
+
+async def test_enroll_then_login_with_totp(client, owner_sessionmaker) -> None:
+    await _seed(owner_sessionmaker)
+    r = await client.post("/api/v1/auth/login", json={"email": "dana@corp.test", "password": PW})
+    assert r.status_code == 200 and r.json()["state"] == "enroll_required"
+    csrf = r.json()["csrf_token"]
+    uri = (await client.post("/api/v1/auth/mfa/totp/enroll", headers={"X-CSRF-Token": csrf})).json()["otpauth_uri"]
+    secret = parse_qs(urlparse(uri).query)["secret"][0]
+    r = await client.post(
+        "/api/v1/auth/mfa/totp/confirm", json={"code": pyotp.TOTP(secret).now()}, headers={"X-CSRF-Token": csrf}
+    )
+    body = r.json()
+    assert r.status_code == 200 and body["state"] == "active" and len(body["recovery_codes"]) == 10
+    csrf = body["csrf_token"]
+    assert (await client.post("/api/v1/auth/logout", headers={"X-CSRF-Token": csrf})).status_code == 204
+
+    r = await client.post("/api/v1/auth/login", json={"email": "dana@corp.test", "password": PW})
+    assert r.json()["state"] == "mfa_pending"
+    csrf = r.json()["csrf_token"]
+    # the same TOTP code must not be accepted twice (replay)
+    code = pyotp.TOTP(secret).now()
+    r = await client.post("/api/v1/auth/mfa/totp", json={"code": code}, headers={"X-CSRF-Token": csrf})
+    assert r.status_code == 401
+    r = await client.post(
+        "/api/v1/auth/mfa/recovery", json={"code": body["recovery_codes"][0]}, headers={"X-CSRF-Token": csrf}
+    )
+    assert r.status_code == 200 and r.json()["state"] == "active"
+    me = (await client.get("/api/v1/auth/session")).json()
+    assert me["user"]["email"] == "dana@corp.test" and me["auth_methods"] == ["password", "recovery"]
+
+
+async def test_bad_password_is_generic_and_locks(client, owner_sessionmaker, api_settings) -> None:
+    await _seed(owner_sessionmaker)
+    for _ in range(api_settings.login_max_failures):
+        r = await client.post("/api/v1/auth/login", json={"email": "dana@corp.test", "password": "nope-nope-nope"})
+        assert r.status_code == 401 and r.json() == {"error": "invalid_credentials"}
+    r = await client.post("/api/v1/auth/login", json={"email": "dana@corp.test", "password": PW})
+    assert r.status_code == 429 and r.json() == {"error": "locked"}
+    # an unknown account gets the same generic answer; the shared client IP is still under its own higher limit
+    r = await client.post("/api/v1/auth/login", json={"email": "ghost@corp.test", "password": PW})
+    assert r.status_code == 401 and r.json() == {"error": "invalid_credentials"}
+
+
+async def test_enrollment_confirm_is_throttled(client, owner_sessionmaker, api_settings) -> None:
+    await _seed(owner_sessionmaker)
+    csrf = (await client.post("/api/v1/auth/login", json={"email": "dana@corp.test", "password": PW})).json()[
+        "csrf_token"
+    ]
+    await client.post("/api/v1/auth/mfa/totp/enroll", headers={"X-CSRF-Token": csrf})
+    for _ in range(api_settings.login_max_failures):
+        r = await client.post("/api/v1/auth/mfa/totp/confirm", json={"code": "000000"}, headers={"X-CSRF-Token": csrf})
+        assert r.status_code == 401
+    r = await client.post("/api/v1/auth/mfa/totp/confirm", json={"code": "000000"}, headers={"X-CSRF-Token": csrf})
+    assert r.status_code == 429 and r.json() == {"error": "locked"}
+
+
+async def test_password_change_revokes_other_sessions(app, owner_sessionmaker) -> None:
+    import httpx
+
+    await _seed(owner_sessionmaker)
+    t = httpx.ASGITransport(app=app)
+    h = {"X-Dewpoint-Client": "web"}
+    async with (
+        httpx.AsyncClient(transport=t, base_url="https://testserver", headers=h) as a,
+        httpx.AsyncClient(transport=t, base_url="https://testserver", headers=h) as b,
+    ):
+        for c in (a, b):
+            r = await c.post("/api/v1/auth/login", json={"email": "dana@corp.test", "password": PW})
+            c.headers["X-CSRF-Token"] = r.json()["csrf_token"]
+        async with owner_sessionmaker() as s, s.begin():  # both sessions completed MFA (not under test here)
+            await s.execute(text("update sessions set state = 'active'"))
+        r = await a.post(
+            "/api/v1/auth/password", json={"current_password": PW, "new_password": "amber-heron-valley-77"}
+        )
+        assert r.status_code == 200 and "csrf_token" in r.json()
         assert (await b.get("/api/v1/auth/session")).status_code == 401
         assert (await a.get("/api/v1/auth/session")).status_code == 200
 ```
@@ -1984,7 +2430,7 @@ Expected: FAIL (module not found)
 # SPDX-License-Identifier: Apache-2.0
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete
+from sqlalchemy import delete, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1994,6 +2440,39 @@ from dewpoint.core.models.identity import AuthThrottle
 WINDOW = timedelta(minutes=15)
 
 
+async def consume(s: AsyncSession, kind: str, key: str, limit: int, now: datetime | None = None) -> bool:
+    """Count one use of a rate-limited action in the current window. False once `limit` uses are exceeded."""
+    now, key = now or datetime.now(UTC), key.lower()
+    await s.execute(
+        insert(AuthThrottle).values(kind=kind, key=key, failures=0, window_start=now).on_conflict_do_nothing()
+    )
+    row = await s.get(AuthThrottle, (kind, key), with_for_update=True)
+    if row is None:  # inserted just above; only reachable if the row was deleted concurrently
+        raise RuntimeError("auth_throttle row vanished")
+    if now - row.window_start > WINDOW:
+        row.failures, row.window_start = 0, now
+    row.failures += 1
+    await s.flush()
+    return row.failures <= limit
+
+
+async def purge_stale(s: AsyncSession, now: datetime | None = None, limit: int = 500) -> int:
+    """Delete up to `limit` throttle rows whose window and lockout are both over."""
+    now = now or datetime.now(UTC)
+    doomed = (
+        select(AuthThrottle.kind, AuthThrottle.key)
+        .where(
+            AuthThrottle.window_start < now - WINDOW,
+            (AuthThrottle.locked_until.is_(None)) | (AuthThrottle.locked_until < now),
+        )
+        .limit(limit)
+    )
+    result = await s.execute(
+        delete(AuthThrottle).where(tuple_(AuthThrottle.kind, AuthThrottle.key).in_(doomed.subquery().select()))
+    )
+    return int(getattr(result, "rowcount", 0) or 0)
+
+
 async def is_locked(s: AsyncSession, kind: str, key: str, now: datetime | None = None) -> bool:
     row = await s.get(AuthThrottle, (kind, key.lower()))
     return bool(row and row.locked_until and row.locked_until > (now or datetime.now(UTC)))
@@ -2001,14 +2480,17 @@ async def is_locked(s: AsyncSession, kind: str, key: str, now: datetime | None =
 
 async def record_failure(s: AsyncSession, kind: str, key: str, settings: Settings, now: datetime | None = None) -> None:
     now, key = now or datetime.now(UTC), key.lower()
-    await s.execute(insert(AuthThrottle).values(kind=kind, key=key, failures=0, window_start=now)
-                    .on_conflict_do_nothing())
+    await s.execute(
+        insert(AuthThrottle).values(kind=kind, key=key, failures=0, window_start=now).on_conflict_do_nothing()
+    )
     row = await s.get(AuthThrottle, (kind, key), with_for_update=True)
-    assert row is not None
+    if row is None:  # inserted just above; only reachable if the row was deleted concurrently
+        raise RuntimeError("auth_throttle row vanished")
     if now - row.window_start > WINDOW:
         row.failures, row.window_start, row.locked_until = 0, now, None
     row.failures += 1
-    if row.failures >= settings.login_max_failures:
+    limit = settings.login_ip_max_failures if kind == "login_ip" else settings.login_max_failures
+    if row.failures >= limit:
         row.locked_until = now + timedelta(minutes=settings.login_lockout_minutes)
     await s.flush()
 
@@ -2022,13 +2504,14 @@ async def reset(s: AsyncSession, kind: str, key: str) -> None:
 # SPDX-License-Identifier: Apache-2.0
 import secrets
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pyotp
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.auth.passwords import hash_password, verify_password
+from dewpoint.core.config import Settings
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.models.identity import RecoveryCode, User, UserMfa
 
@@ -2041,36 +2524,60 @@ async def has_totp(s: AsyncSession, user_id: object) -> bool:
     return bool(row and row.totp_confirmed_at)
 
 
-async def start_enrollment(s: AsyncSession, keyring: Keyring, user: User) -> str:
+def _context(user: User, *, pending: bool) -> str:
+    # Distinct AAD contexts: a pending ciphertext can't be copied into the confirmed slot (or vice versa).
+    return f"{user.id}:pending" if pending else str(user.id)
+
+
+async def start_enrollment(s: AsyncSession, keyring: Keyring, user: User, settings: Settings) -> str:
+    """Stage a new secret. The confirmed factor (if any) stays in force until confirm_enrollment succeeds."""
     secret = pyotp.random_base32()
-    ct = await keyring.encrypt(s, tenant_id=None, purpose=PURPOSE, context=str(user.id), plaintext=secret.encode())
-    row = await s.get(UserMfa, user.id) or UserMfa(user_id=user.id)
-    row.totp_secret_ct, row.totp_confirmed_at, row.last_totp_step = ct, None, None
+    ct = await keyring.encrypt(
+        s, tenant_id=None, purpose=PURPOSE, context=_context(user, pending=True), plaintext=secret.encode()
+    )
+    row = await s.get(UserMfa, user.id, with_for_update=True) or UserMfa(user_id=user.id)
+    row.totp_pending_ct = ct
+    row.totp_pending_expires_at = datetime.now(UTC) + timedelta(minutes=settings.totp_pending_minutes)
     s.add(row)
     await s.flush()
     return pyotp.TOTP(secret).provisioning_uri(name=user.email, issuer_name=ISSUER)
 
 
-async def _check(s: AsyncSession, keyring: Keyring, row: UserMfa, user: User, code: str) -> bool:
-    if not row.totp_secret_ct or not code.isdigit():
-        return False
-    secret = (await keyring.decrypt(s, tenant_id=None, purpose=PURPOSE, context=str(user.id),
-                                    blob=row.totp_secret_ct)).decode()
-    totp, now = pyotp.TOTP(secret), time.time()
-    current = totp.timecode(datetime.fromtimestamp(now, UTC))
+def _match(secret: str, code: str, last_step: int | None) -> int | None:
+    """The matching time step (current +/- 1) newer than last_step, else None."""
+    if not code.isdigit():
+        return None
+    totp = pyotp.TOTP(secret)
+    current = totp.timecode(datetime.fromtimestamp(time.time(), UTC))
     for step in (current - 1, current, current + 1):
-        if step > (row.last_totp_step or -1) and secrets.compare_digest(totp.generate_otp(step), code):
-            row.last_totp_step = step
-            await s.flush()
-            return True
-    return False
+        if step > (last_step if last_step is not None else -1) and secrets.compare_digest(
+            totp.generate_otp(step), code
+        ):
+            return step
+    return None
+
+
+async def _secret(s: AsyncSession, keyring: Keyring, user: User, blob: bytes, *, pending: bool) -> str:
+    raw = await keyring.decrypt(s, tenant_id=None, purpose=PURPOSE, context=_context(user, pending=pending), blob=blob)
+    return raw.decode()
 
 
 async def confirm_enrollment(s: AsyncSession, keyring: Keyring, user: User, code: str) -> list[str] | None:
+    """Promote the pending secret to the confirmed factor. Returns fresh recovery codes, or None."""
     row = await s.get(UserMfa, user.id, with_for_update=True)
-    if row is None or not await _check(s, keyring, row, user, code):
+    if row is None or row.totp_pending_ct is None or row.totp_pending_expires_at is None:
         return None
-    row.totp_confirmed_at = datetime.now(UTC)
+    if row.totp_pending_expires_at <= datetime.now(UTC):
+        return None
+    secret = await _secret(s, keyring, user, row.totp_pending_ct, pending=True)
+    step = _match(secret, code, None)
+    if step is None:
+        return None
+    row.totp_secret_ct = await keyring.encrypt(
+        s, tenant_id=None, purpose=PURPOSE, context=_context(user, pending=False), plaintext=secret.encode()
+    )
+    row.totp_confirmed_at, row.last_totp_step = datetime.now(UTC), step
+    row.totp_pending_ct, row.totp_pending_expires_at = None, None
     await s.execute(delete(RecoveryCode).where(RecoveryCode.user_id == user.id))
     codes = [f"{secrets.token_hex(4)}-{secrets.token_hex(4)}" for _ in range(10)]
     s.add_all(RecoveryCode(user_id=user.id, code_hash=hash_password(c)) for c in codes)
@@ -2079,13 +2586,30 @@ async def confirm_enrollment(s: AsyncSession, keyring: Keyring, user: User, code
 
 
 async def verify(s: AsyncSession, keyring: Keyring, user: User, code: str) -> bool:
+    """Check a code against the confirmed factor only, with replay protection."""
     row = await s.get(UserMfa, user.id, with_for_update=True)
-    return bool(row and row.totp_confirmed_at and await _check(s, keyring, row, user, code))
+    if row is None or row.totp_confirmed_at is None or row.totp_secret_ct is None:
+        return False
+    step = _match(await _secret(s, keyring, user, row.totp_secret_ct, pending=False), code, row.last_totp_step)
+    if step is None:
+        return False
+    row.last_totp_step = step
+    await s.flush()
+    return True
 
 
 async def use_recovery_code(s: AsyncSession, user: User, code: str) -> bool:
-    rows = (await s.execute(select(RecoveryCode).where(RecoveryCode.user_id == user.id, RecoveryCode.used_at.is_(None))
-                            .with_for_update())).scalars().all()
+    rows = (
+        (
+            await s.execute(
+                select(RecoveryCode)
+                .where(RecoveryCode.user_id == user.id, RecoveryCode.used_at.is_(None))
+                .with_for_update()
+            )
+        )
+        .scalars()
+        .all()
+    )
     for rc in rows:
         if verify_password(rc.code_hash, code.strip().lower()):
             rc.used_at = datetime.now(UTC)
@@ -2114,15 +2638,21 @@ def get_keyring(request: Request) -> Keyring:
 ```python
 # SPDX-License-Identifier: Apache-2.0
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.auth import throttle, totp
 from dewpoint.core.auth.passwords import hash_password, policy_violations, verify_password
-from dewpoint.core.auth.sessions import (clear_session_cookie, create_session, elevate, revoke, revoke_all,
-                                         set_session_cookie)
-from dewpoint.core.auth.users import get_user_by_email
+from dewpoint.core.auth.sessions import (
+    clear_session_cookie,
+    create_session,
+    revoke,
+    revoke_all,
+    rotate,
+    set_session_cookie,
+)
+from dewpoint.core.auth.users import Email, get_user_by_email
 from dewpoint.core.config import Settings
 from dewpoint.core.http import current_session, current_user, get_db, get_settings_dep
 from dewpoint.core.models.identity import AuthSession, User, WebauthnCredential
@@ -2132,7 +2662,7 @@ _DUMMY_HASH = hash_password("dewpoint-timing-equalizer")
 
 
 class LoginIn(BaseModel):
-    email: EmailStr
+    email: Email
     password: str = Field(min_length=1, max_length=1024)
 
 
@@ -2142,16 +2672,22 @@ class PasswordIn(BaseModel):
 
 
 async def initial_state(db: AsyncSession, user: User, settings: Settings) -> str:
-    has_passkey = (await db.execute(select(WebauthnCredential.id).where(WebauthnCredential.user_id == user.id)
-                                    .limit(1))).first() is not None
+    has_passkey = (
+        await db.execute(select(WebauthnCredential.id).where(WebauthnCredential.user_id == user.id).limit(1))
+    ).first() is not None
     if has_passkey or await totp.has_totp(db, user.id):
         return "mfa_pending"
     return "enroll_required" if settings.mfa_required else "active"
 
 
 @router.post("/login")
-async def login(body: LoginIn, request: Request, response: Response, db: AsyncSession = Depends(get_db),
-                settings: Settings = Depends(get_settings_dep)) -> dict[str, str]:
+async def login(
+    body: LoginIn,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db, scope="function"),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, str]:
     ip = request.client.host if request.client else "unknown"
     if await throttle.is_locked(db, "login_email", body.email) or await throttle.is_locked(db, "login_ip", ip):
         raise HTTPException(429, detail={"error": "locked"})
@@ -2164,44 +2700,65 @@ async def login(body: LoginIn, request: Request, response: Response, db: AsyncSe
         raise HTTPException(401, detail={"error": "invalid_credentials"})
     await throttle.reset(db, "login_email", body.email)
     state = await initial_state(db, user, settings)
-    sess, token = await create_session(db, user_id=user.id, state=state, methods=["password"], settings=settings,
-                                       ip=ip, user_agent=request.headers.get("user-agent"))
+    sess, token = await create_session(
+        db,
+        user_id=user.id,
+        state=state,
+        methods=["password"],
+        settings=settings,
+        ip=ip,
+        user_agent=request.headers.get("user-agent"),
+    )
     set_session_cookie(response, token, settings)
     return {"state": state, "csrf_token": sess.csrf_token}
 
 
 @router.get("/session")
-async def session_info(sess: AuthSession = Depends(current_session), db: AsyncSession = Depends(get_db)) -> dict[str, object]:
+async def session_info(
+    sess: AuthSession = Depends(current_session), db: AsyncSession = Depends(get_db, scope="function")
+) -> dict[str, object]:
     user = await db.get(User, sess.user_id)
-    assert user is not None
-    return {"user": {"id": str(user.id), "email": user.email, "is_platform_admin": user.is_platform_admin},
-            "state": sess.state, "auth_methods": sess.auth_methods, "csrf_token": sess.csrf_token}
+    if user is None:  # deleted while signed in
+        raise HTTPException(401, detail={"error": "unauthenticated"})
+    return {
+        "user": {"id": str(user.id), "email": user.email, "is_platform_admin": user.is_platform_admin},
+        "state": sess.state,
+        "auth_methods": sess.auth_methods,
+        "csrf_token": sess.csrf_token,
+    }
 
 
 @router.post("/logout", status_code=204)
-async def logout(response: Response, sess: AuthSession = Depends(current_session),
-                 db: AsyncSession = Depends(get_db)) -> Response:
+async def logout(
+    response: Response, sess: AuthSession = Depends(current_session), db: AsyncSession = Depends(get_db, scope="function")
+) -> Response:
     await revoke(db, sess)
     clear_session_cookie(response)
     response.status_code = 204
     return response
 
 
-@router.post("/password", status_code=204)
-async def change_password(body: PasswordIn, response: Response, user: User = Depends(current_user),
-                          sess: AuthSession = Depends(current_session), db: AsyncSession = Depends(get_db),
-                          settings: Settings = Depends(get_settings_dep)) -> Response:
+@router.post("/password")
+async def change_password(
+    body: PasswordIn,
+    response: Response,
+    user: User = Depends(current_user),
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db, scope="function"),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, str]:
+    """Returns the rotated CSRF token so the client can make its next unsafe request."""
     if not verify_password(user.password_hash, body.current_password):
         raise HTTPException(401, detail={"error": "invalid_credentials"})
     if v := policy_violations(body.new_password, user.email):
         raise HTTPException(422, detail={"error": "password_policy", "violations": v})
     from datetime import UTC, datetime
+
     user.password_hash, user.password_changed_at = hash_password(body.new_password), datetime.now(UTC)
     await revoke_all(db, user.id, except_id=sess.id)
-    token = await elevate(db, sess, method="password_change", state="active")
+    token = await rotate(db, sess)  # a password is not a second factor: rotate, don't elevate
     set_session_cookie(response, token, settings)
-    response.status_code = 204
-    return response
+    return {"csrf_token": sess.csrf_token}
 ```
 **Note:** `elevate()` appends `"password_change"` to `auth_methods`. That's intentional: it records that the session re-proved the password.
 
@@ -2217,7 +2774,7 @@ from dewpoint.core.auth import throttle, totp
 from dewpoint.core.auth.sessions import elevate, set_session_cookie
 from dewpoint.core.config import Settings
 from dewpoint.core.crypto.keyring import Keyring
-from dewpoint.core.http import current_session, get_db, get_settings_dep
+from dewpoint.core.http import current_session, ensure_fresh_reauth, get_db, get_settings_dep
 from dewpoint.core.models.identity import AuthSession, User
 
 router = APIRouter(prefix="/api/v1/auth/mfa", tags=["auth"])
@@ -2229,7 +2786,8 @@ class CodeIn(BaseModel):
 
 async def _user(db: AsyncSession, sess: AuthSession) -> User:
     user = await db.get(User, sess.user_id)
-    assert user is not None
+    if user is None:  # deleted while signing in
+        raise HTTPException(401, detail={"error": "unauthenticated"})
     return user
 
 
@@ -2238,21 +2796,33 @@ def _require_state(sess: AuthSession, *states: str) -> None:
         raise HTTPException(409, detail={"error": "wrong_state", "state": sess.state})
 
 
-async def _complete(db: AsyncSession, sess: AuthSession, response: Response, settings: Settings,
-                    method: str) -> dict[str, str]:
+async def _complete(
+    db: AsyncSession, sess: AuthSession, response: Response, settings: Settings, method: str
+) -> dict[str, str]:
     token = await elevate(db, sess, method=method, state="active")
     set_session_cookie(response, token, settings)
     return {"state": "active", "csrf_token": sess.csrf_token}
 
 
-async def _second_factor(kind: str, body: CodeIn, response: Response, sess: AuthSession, db: AsyncSession,
-                         keyring: Keyring, settings: Settings) -> dict[str, str]:
+async def _second_factor(
+    kind: str,
+    body: CodeIn,
+    response: Response,
+    sess: AuthSession,
+    db: AsyncSession,
+    keyring: Keyring,
+    settings: Settings,
+) -> dict[str, str]:
     _require_state(sess, "mfa_pending")
     key = str(sess.user_id)
     if await throttle.is_locked(db, "mfa_user", key):
         raise HTTPException(429, detail={"error": "locked"})
     user = await _user(db, sess)
-    ok = await totp.verify(db, keyring, user, body.code) if kind == "totp" else await totp.use_recovery_code(db, user, body.code)
+    ok = (
+        await totp.verify(db, keyring, user, body.code)
+        if kind == "totp"
+        else await totp.use_recovery_code(db, user, body.code)
+    )
     if not ok:
         await throttle.record_failure(db, "mfa_user", key, settings)
         await db.commit()
@@ -2262,31 +2832,75 @@ async def _second_factor(kind: str, body: CodeIn, response: Response, sess: Auth
 
 
 @router.post("/totp")
-async def mfa_totp(body: CodeIn, response: Response, sess: AuthSession = Depends(current_session),
-                   db: AsyncSession = Depends(get_db), keyring: Keyring = Depends(get_keyring),
-                   settings: Settings = Depends(get_settings_dep)) -> dict[str, str]:
+async def mfa_totp(
+    body: CodeIn,
+    response: Response,
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db, scope="function"),
+    keyring: Keyring = Depends(get_keyring),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, str]:
     return await _second_factor("totp", body, response, sess, db, keyring, settings)
 
 
 @router.post("/recovery")
-async def mfa_recovery(body: CodeIn, response: Response, sess: AuthSession = Depends(current_session),
-                       db: AsyncSession = Depends(get_db), keyring: Keyring = Depends(get_keyring),
-                       settings: Settings = Depends(get_settings_dep)) -> dict[str, str]:
+async def mfa_recovery(
+    body: CodeIn,
+    response: Response,
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db, scope="function"),
+    keyring: Keyring = Depends(get_keyring),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, str]:
     return await _second_factor("recovery", body, response, sess, db, keyring, settings)
 
 
 @router.post("/totp/enroll")
-async def enroll(sess: AuthSession = Depends(current_session), db: AsyncSession = Depends(get_db),
-                 keyring: Keyring = Depends(get_keyring)) -> dict[str, str]:
+async def enroll(
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db, scope="function"),
+    keyring: Keyring = Depends(get_keyring),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, str]:
+    """Stage a new TOTP secret. An existing confirmed factor stays in force until /totp/confirm succeeds."""
     _require_state(sess, "enroll_required", "active")
-    return {"otpauth_uri": await totp.start_enrollment(db, keyring, await _user(db, sess))}
+    ensure_fresh_reauth(sess, settings)
+    return {"otpauth_uri": await totp.start_enrollment(db, keyring, await _user(db, sess), settings)}
+
+
+@router.post("/totp/reauth")
+async def reauth(
+    body: CodeIn,
+    response: Response,
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db, scope="function"),
+    keyring: Keyring = Depends(get_keyring),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, str]:
+    """Prove the confirmed TOTP again from an active session (before changing factors)."""
+    _require_state(sess, "active")
+    key = str(sess.user_id)
+    if await throttle.is_locked(db, "mfa_user", key):
+        raise HTTPException(429, detail={"error": "locked"})
+    if not await totp.verify(db, keyring, await _user(db, sess), body.code):
+        await throttle.record_failure(db, "mfa_user", key, settings)
+        await db.commit()
+        raise HTTPException(401, detail={"error": "invalid_code"})
+    await throttle.reset(db, "mfa_user", key)
+    return await _complete(db, sess, response, settings, "totp")
 
 
 @router.post("/totp/confirm")
-async def confirm(body: CodeIn, response: Response, sess: AuthSession = Depends(current_session),
-                  db: AsyncSession = Depends(get_db), keyring: Keyring = Depends(get_keyring),
-                  settings: Settings = Depends(get_settings_dep)) -> dict[str, object]:
+async def confirm(
+    body: CodeIn,
+    response: Response,
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db, scope="function"),
+    keyring: Keyring = Depends(get_keyring),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, object]:
     _require_state(sess, "enroll_required", "active")
+    ensure_fresh_reauth(sess, settings)  # re-checked here: the pending secret outlives the reauth window
     key = str(sess.user_id)
     if await throttle.is_locked(db, "mfa_user", key):
         raise HTTPException(429, detail={"error": "locked"})
@@ -2338,7 +2952,11 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     - `POST /login/options` and `POST /login/verify` (no session; passwordless; creates an `active` session with methods `["passkey"]`);
     - `POST /mfa/options` and `POST /mfa/verify` (session `mfa_pending`);
     - `POST /stepup/options` and `POST /stepup/verify` (session `active`; appends `passkey`).
-  - Every `*/verify` returns `{state, csrf_token}` and rotates the session token.
+  - Every `*/verify` returns `{state, csrf_token}` and rotates the session token, including registration from an `active` session.
+  - Challenge issuance:
+    - `/login/options` (anonymous) is limited to `passkey_options_per_ip` per 15-minute window (`throttle.consume`, kind `challenge_ip`), returning 429 `{"error":"rate_limited"}`.
+    - Every issuance purges up to 500 expired challenges and refuses to issue (`ChallengeCapacityError`, which becomes 429) once `webauthn_challenges_max` unexpired challenges exist.
+    - Stale throttle rows are purged the same way (`throttle.purge_stale`).
 
 - [ ] **Step 1: Write the failing unit tests**
 
@@ -2421,15 +3039,25 @@ Expected: FAIL (module not found)
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from urllib.parse import urlparse
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from webauthn import (generate_authentication_options, generate_registration_options, options_to_json,
-                      verify_authentication_response, verify_registration_response)
+from webauthn import (
+    generate_authentication_options,
+    generate_registration_options,
+    options_to_json,
+    verify_authentication_response,
+    verify_registration_response,
+)
 from webauthn.helpers import base64url_to_bytes
-from webauthn.helpers.structs import (AuthenticatorSelectionCriteria, PublicKeyCredentialDescriptor,
-                                      ResidentKeyRequirement, UserVerificationRequirement)
+from webauthn.helpers.structs import (
+    AuthenticatorSelectionCriteria,
+    PublicKeyCredentialDescriptor,
+    ResidentKeyRequirement,
+    UserVerificationRequirement,
+)
 
 from dewpoint.core.config import Settings
 from dewpoint.core.models.identity import User, WebauthnChallenge, WebauthnCredential
@@ -2437,90 +3065,156 @@ from dewpoint.core.models.identity import User, WebauthnChallenge, WebauthnCrede
 CHALLENGE_TTL = timedelta(minutes=5)
 
 
+PURGE_BATCH = 500
+
+
 class PasskeyError(Exception):
     pass
+
+
+class ChallengeCapacityError(Exception):
+    """Too many outstanding challenges platform-wide; callers answer 429."""
 
 
 def _rp_id(settings: Settings) -> str:
     return settings.rp_id or (urlparse(settings.public_origin).hostname or "")
 
 
-async def _store(s: AsyncSession, challenge: bytes, user_id: uuid.UUID | None, purpose: str) -> uuid.UUID:
-    row = WebauthnChallenge(challenge=challenge, user_id=user_id, purpose=purpose,
-                            expires_at=datetime.now(UTC) + CHALLENGE_TTL)
+async def purge_expired_challenges(s: AsyncSession, limit: int = PURGE_BATCH) -> int:
+    """Delete up to `limit` expired challenges (bounded, so one request never does unbounded work)."""
+    doomed = select(WebauthnChallenge.id).where(WebauthnChallenge.expires_at <= func.now()).limit(limit)
+    result = await s.execute(delete(WebauthnChallenge).where(WebauthnChallenge.id.in_(doomed.scalar_subquery())))
+    return int(getattr(result, "rowcount", 0) or 0)
+
+
+async def _store(
+    s: AsyncSession, challenge: bytes, user_id: uuid.UUID | None, purpose: str, settings: Settings
+) -> uuid.UUID:
+    await purge_expired_challenges(s)
+    outstanding = (
+        await s.execute(
+            select(func.count()).select_from(WebauthnChallenge).where(WebauthnChallenge.expires_at > func.now())
+        )
+    ).scalar_one()
+    if outstanding >= settings.webauthn_challenges_max:
+        raise ChallengeCapacityError()
+    row = WebauthnChallenge(
+        challenge=challenge, user_id=user_id, purpose=purpose, expires_at=datetime.now(UTC) + CHALLENGE_TTL
+    )
     s.add(row)
     await s.flush()
     return row.id
 
 
 async def _consume(s: AsyncSession, challenge_id: uuid.UUID, purpose: str) -> WebauthnChallenge:
-    row = (await s.execute(delete(WebauthnChallenge).where(WebauthnChallenge.id == challenge_id,
-                                                           WebauthnChallenge.purpose == purpose)
-                           .returning(WebauthnChallenge))).scalar_one_or_none()
+    row = (
+        await s.execute(
+            delete(WebauthnChallenge)
+            .where(WebauthnChallenge.id == challenge_id, WebauthnChallenge.purpose == purpose)
+            .returning(WebauthnChallenge)
+        )
+    ).scalar_one_or_none()
     if row is None or row.expires_at <= datetime.now(UTC):
         raise PasskeyError("challenge")
     return row
 
 
-async def registration_options(s: AsyncSession, user: User, settings: Settings) -> tuple[dict, uuid.UUID]:
-    existing = (await s.execute(select(WebauthnCredential.credential_id)
-                                .where(WebauthnCredential.user_id == user.id))).scalars().all()
+async def registration_options(s: AsyncSession, user: User, settings: Settings) -> tuple[dict[str, Any], uuid.UUID]:
+    existing = (
+        (await s.execute(select(WebauthnCredential.credential_id).where(WebauthnCredential.user_id == user.id)))
+        .scalars()
+        .all()
+    )
     opts = generate_registration_options(
-        rp_id=_rp_id(settings), rp_name="Dewpoint", user_id=user.id.bytes, user_name=user.email,
-        authenticator_selection=AuthenticatorSelectionCriteria(resident_key=ResidentKeyRequirement.REQUIRED,
-                                                               user_verification=UserVerificationRequirement.REQUIRED),
+        rp_id=_rp_id(settings),
+        rp_name="Dewpoint",
+        user_id=user.id.bytes,
+        user_name=user.email,
+        authenticator_selection=AuthenticatorSelectionCriteria(
+            resident_key=ResidentKeyRequirement.REQUIRED, user_verification=UserVerificationRequirement.REQUIRED
+        ),
         exclude_credentials=[PublicKeyCredentialDescriptor(id=c) for c in existing],
     )
-    return json.loads(options_to_json(opts)), await _store(s, opts.challenge, user.id, "register")
+    return json.loads(options_to_json(opts)), await _store(s, opts.challenge, user.id, "register", settings)
 
 
-async def finish_registration(s: AsyncSession, user: User, challenge_id: uuid.UUID, credential: dict, name: str,
-                              settings: Settings) -> WebauthnCredential:
+async def finish_registration(
+    s: AsyncSession, user: User, challenge_id: uuid.UUID, credential: dict[str, Any], name: str, settings: Settings
+) -> WebauthnCredential:
     ch = await _consume(s, challenge_id, "register")
     if ch.user_id != user.id:
         raise PasskeyError("user")
     try:
-        v = verify_registration_response(credential=credential, expected_challenge=ch.challenge,
-                                         expected_origin=settings.public_origin, expected_rp_id=_rp_id(settings),
-                                         require_user_verification=True)
+        v = verify_registration_response(
+            credential=credential,
+            expected_challenge=ch.challenge,
+            expected_origin=settings.public_origin,
+            expected_rp_id=_rp_id(settings),
+            require_user_verification=True,
+        )
     except Exception as exc:  # library raises several types; never leak details
         raise PasskeyError("verify") from exc
-    cred = WebauthnCredential(user_id=user.id, credential_id=v.credential_id, public_key=v.credential_public_key,
-                              sign_count=v.sign_count, transports=[], name=name[:100])
+    cred = WebauthnCredential(
+        user_id=user.id,
+        credential_id=v.credential_id,
+        public_key=v.credential_public_key,
+        sign_count=v.sign_count,
+        transports=[],
+        name=name[:100],
+    )
     s.add(cred)
     await s.flush()
     return cred
 
 
-async def authentication_options(s: AsyncSession, settings: Settings,
-                                 user_id: uuid.UUID | None) -> tuple[dict, uuid.UUID]:
+async def authentication_options(
+    s: AsyncSession, settings: Settings, user_id: uuid.UUID | None
+) -> tuple[dict[str, Any], uuid.UUID]:
     allow = []
     if user_id:
-        ids = (await s.execute(select(WebauthnCredential.credential_id)
-                               .where(WebauthnCredential.user_id == user_id))).scalars().all()
+        ids = (
+            (await s.execute(select(WebauthnCredential.credential_id).where(WebauthnCredential.user_id == user_id)))
+            .scalars()
+            .all()
+        )
         allow = [PublicKeyCredentialDescriptor(id=c) for c in ids]
-    opts = generate_authentication_options(rp_id=_rp_id(settings), allow_credentials=allow,
-                                           user_verification=UserVerificationRequirement.REQUIRED)
-    return json.loads(options_to_json(opts)), await _store(s, opts.challenge, user_id, "authenticate")
+    opts = generate_authentication_options(
+        rp_id=_rp_id(settings), allow_credentials=allow, user_verification=UserVerificationRequirement.REQUIRED
+    )
+    return json.loads(options_to_json(opts)), await _store(s, opts.challenge, user_id, "authenticate", settings)
 
 
-async def finish_authentication(s: AsyncSession, challenge_id: uuid.UUID, credential: dict, settings: Settings,
-                                expected_user_id: uuid.UUID | None = None) -> User:
+async def finish_authentication(
+    s: AsyncSession,
+    challenge_id: uuid.UUID,
+    credential: dict[str, Any],
+    settings: Settings,
+    expected_user_id: uuid.UUID | None = None,
+) -> User:
     ch = await _consume(s, challenge_id, "authenticate")
     try:
         raw_id = base64url_to_bytes(str(credential["rawId"]))
     except Exception as exc:
         raise PasskeyError("format") from exc
-    cred = (await s.execute(select(WebauthnCredential).where(WebauthnCredential.credential_id == raw_id)
-                            .with_for_update())).scalar_one_or_none()
-    if cred is None or (ch.user_id and ch.user_id != cred.user_id) or (expected_user_id and expected_user_id != cred.user_id):
+    cred = (
+        await s.execute(select(WebauthnCredential).where(WebauthnCredential.credential_id == raw_id).with_for_update())
+    ).scalar_one_or_none()
+    if (
+        cred is None
+        or (ch.user_id and ch.user_id != cred.user_id)
+        or (expected_user_id and expected_user_id != cred.user_id)
+    ):
         raise PasskeyError("credential")
     try:
-        v = verify_authentication_response(credential=credential, expected_challenge=ch.challenge,
-                                           expected_origin=settings.public_origin, expected_rp_id=_rp_id(settings),
-                                           credential_public_key=cred.public_key,
-                                           credential_current_sign_count=cred.sign_count,
-                                           require_user_verification=True)
+        v = verify_authentication_response(
+            credential=credential,
+            expected_challenge=ch.challenge,
+            expected_origin=settings.public_origin,
+            expected_rp_id=_rp_id(settings),
+            credential_public_key=cred.public_key,
+            credential_current_sign_count=cred.sign_count,
+            require_user_verification=True,
+        )
     except Exception as exc:
         raise PasskeyError("verify") from exc
     cred.sign_count, cred.last_used_at = v.new_sign_count, datetime.now(UTC)
@@ -2603,9 +3297,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.auth import passkeys, throttle
-from dewpoint.core.auth.sessions import create_session, elevate, set_session_cookie
+from dewpoint.core.auth.sessions import create_session, elevate, rotate, set_session_cookie
 from dewpoint.core.config import Settings
-from dewpoint.core.http import current_session, get_db, get_settings_dep
+from dewpoint.core.http import current_session, ensure_fresh_reauth, get_db, get_settings_dep
 from dewpoint.core.models.identity import AuthSession, User
 
 router = APIRouter(prefix="/api/v1/auth/passkeys", tags=["auth"])
@@ -2622,6 +3316,17 @@ def _state(sess: AuthSession, *allowed: str) -> None:
         raise HTTPException(409, detail={"error": "wrong_state", "state": sess.state})
 
 
+async def _session_user(db: AsyncSession, sess: AuthSession) -> User:
+    user = await db.get(User, sess.user_id)
+    if user is None:  # deleted while signed in
+        raise HTTPException(401, detail={"error": "unauthenticated"})
+    return user
+
+
+def _busy() -> HTTPException:
+    return HTTPException(429, detail={"error": "rate_limited"})
+
+
 def _fail() -> HTTPException:
     return HTTPException(401, detail={"error": "passkey_failed"})
 
@@ -2633,39 +3338,67 @@ async def _elevated(db: AsyncSession, sess: AuthSession, response: Response, set
 
 
 @router.post("/register/options")
-async def register_options(sess: AuthSession = Depends(current_session), db: AsyncSession = Depends(get_db),
-                           settings: Settings = Depends(get_settings_dep)) -> dict[str, Any]:
+async def register_options(
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db, scope="function"),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, Any]:
     _state(sess, "enroll_required", "active")
-    user = await db.get(User, sess.user_id)
-    assert user is not None
-    opts, cid = await passkeys.registration_options(db, user, settings)
+    ensure_fresh_reauth(sess, settings)  # a stolen active session must not be able to plant a lasting factor
+    user = await _session_user(db, sess)
+    try:
+        opts, cid = await passkeys.registration_options(db, user, settings)
+    except passkeys.ChallengeCapacityError:
+        raise _busy() from None
     return {"options": opts, "challenge_id": str(cid)}
 
 
 @router.post("/register/verify")
-async def register_verify(body: VerifyIn, response: Response, sess: AuthSession = Depends(current_session),
-                          db: AsyncSession = Depends(get_db), settings: Settings = Depends(get_settings_dep)) -> dict[str, str]:
+async def register_verify(
+    body: VerifyIn,
+    response: Response,
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db, scope="function"),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, str]:
     _state(sess, "enroll_required", "active")
-    user = await db.get(User, sess.user_id)
-    assert user is not None
+    ensure_fresh_reauth(sess, settings)  # re-checked here: the challenge can outlive the reauth window
+    user = await _session_user(db, sess)
     try:
         await passkeys.finish_registration(db, user, body.challenge_id, body.credential, body.name, settings)
     except passkeys.PasskeyError:
         raise _fail() from None
     if sess.state == "enroll_required":
         return await _elevated(db, sess, response, settings)
+    token = await rotate(db, sess)  # a factor was added: new session and CSRF tokens
+    set_session_cookie(response, token, settings)
     return {"state": sess.state, "csrf_token": sess.csrf_token}
 
 
 @router.post("/login/options")
-async def login_options(db: AsyncSession = Depends(get_db), settings: Settings = Depends(get_settings_dep)) -> dict[str, Any]:
-    opts, cid = await passkeys.authentication_options(db, settings, None)
+async def login_options(
+    request: Request, db: AsyncSession = Depends(get_db, scope="function"), settings: Settings = Depends(get_settings_dep)
+) -> dict[str, Any]:
+    """Anonymous: every call stores a challenge, so issuance is limited per IP and capped platform-wide."""
+    ip = request.client.host if request.client else "unknown"
+    await throttle.purge_stale(db)
+    if not await throttle.consume(db, "challenge_ip", ip, settings.passkey_options_per_ip):
+        raise HTTPException(429, detail={"error": "rate_limited"})
+    try:
+        opts, cid = await passkeys.authentication_options(db, settings, None)
+    except passkeys.ChallengeCapacityError:
+        raise _busy() from None
     return {"options": opts, "challenge_id": str(cid)}
 
 
 @router.post("/login/verify")
-async def login_verify(body: VerifyIn, request: Request, response: Response, db: AsyncSession = Depends(get_db),
-                       settings: Settings = Depends(get_settings_dep)) -> dict[str, str]:
+async def login_verify(
+    body: VerifyIn,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db, scope="function"),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, str]:
     ip = request.client.host if request.client else "unknown"
     if await throttle.is_locked(db, "login_ip", ip):
         raise HTTPException(429, detail={"error": "locked"})
@@ -2675,25 +3408,38 @@ async def login_verify(body: VerifyIn, request: Request, response: Response, db:
         await throttle.record_failure(db, "login_ip", ip, settings)
         await db.commit()
         raise _fail() from None
-    sess, token = await create_session(db, user_id=user.id, state="active", methods=["passkey"], settings=settings,
-                                       ip=ip, user_agent=request.headers.get("user-agent"))
+    sess, token = await create_session(
+        db,
+        user_id=user.id,
+        state="active",
+        methods=["passkey"],
+        settings=settings,
+        ip=ip,
+        user_agent=request.headers.get("user-agent"),
+        reauth=True,  # a user-verified passkey is a second factor
+    )
     set_session_cookie(response, token, settings)
     return {"state": "active", "csrf_token": sess.csrf_token}
 
 
 async def _factor_options(sess: AuthSession, db: AsyncSession, settings: Settings) -> dict[str, Any]:
-    opts, cid = await passkeys.authentication_options(db, settings, sess.user_id)
+    try:
+        opts, cid = await passkeys.authentication_options(db, settings, sess.user_id)
+    except passkeys.ChallengeCapacityError:
+        raise _busy() from None
     return {"options": opts, "challenge_id": str(cid)}
 
 
-async def _factor_verify(body: VerifyIn, response: Response, sess: AuthSession, db: AsyncSession,
-                         settings: Settings) -> dict[str, str]:
+async def _factor_verify(
+    body: VerifyIn, response: Response, sess: AuthSession, db: AsyncSession, settings: Settings
+) -> dict[str, str]:
     key = str(sess.user_id)  # same "mfa_user" budget as TOTP and recovery codes
     if await throttle.is_locked(db, "mfa_user", key):
         raise HTTPException(429, detail={"error": "locked"})
     try:
-        await passkeys.finish_authentication(db, body.challenge_id, body.credential, settings,
-                                             expected_user_id=sess.user_id)
+        await passkeys.finish_authentication(
+            db, body.challenge_id, body.credential, settings, expected_user_id=sess.user_id
+        )
     except passkeys.PasskeyError:
         await throttle.record_failure(db, "mfa_user", key, settings)
         await db.commit()
@@ -2703,37 +3449,62 @@ async def _factor_verify(body: VerifyIn, response: Response, sess: AuthSession, 
 
 
 @router.post("/mfa/options")
-async def mfa_options(sess: AuthSession = Depends(current_session), db: AsyncSession = Depends(get_db),
-                      settings: Settings = Depends(get_settings_dep)) -> dict[str, Any]:
+async def mfa_options(
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db, scope="function"),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, Any]:
     _state(sess, "mfa_pending")
     return await _factor_options(sess, db, settings)
 
 
 @router.post("/mfa/verify")
-async def mfa_verify(body: VerifyIn, response: Response, sess: AuthSession = Depends(current_session),
-                     db: AsyncSession = Depends(get_db), settings: Settings = Depends(get_settings_dep)) -> dict[str, str]:
+async def mfa_verify(
+    body: VerifyIn,
+    response: Response,
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db, scope="function"),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, str]:
     _state(sess, "mfa_pending")
     return await _factor_verify(body, response, sess, db, settings)
 
 
 @router.post("/stepup/options")
-async def stepup_options(sess: AuthSession = Depends(current_session), db: AsyncSession = Depends(get_db),
-                         settings: Settings = Depends(get_settings_dep)) -> dict[str, Any]:
+async def stepup_options(
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db, scope="function"),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, Any]:
     _state(sess, "active")
     return await _factor_options(sess, db, settings)
 
 
 @router.post("/stepup/verify")
-async def stepup_verify(body: VerifyIn, response: Response, sess: AuthSession = Depends(current_session),
-                        db: AsyncSession = Depends(get_db), settings: Settings = Depends(get_settings_dep)) -> dict[str, str]:
+async def stepup_verify(
+    body: VerifyIn,
+    response: Response,
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db, scope="function"),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, str]:
     _state(sess, "active")
     return await _factor_verify(body, response, sess, db, settings)
 ```
 Include the router in `create_app`.
 
+- [ ] **Step 5b: Real-signature tests (no mocks)**
+
+Add `tests/support/soft_authenticator.py`, a software ES256 authenticator with "none" attestation built on `cryptography` and `cbor2` (a webauthn dependency). Add `tests/core/auth/test_passkeys_real_crypto.py`, which covers:
+- registration and authentication with real signatures, including sign-count progression;
+- a wrong origin, a tampered signature and a replayed assertion, each rejected;
+- a missing user-verification flag, rejected at registration.
+
+The test directories get `__init__.py` files so that `tests.support` is importable.
+
 - [ ] **Step 6: Run the tests**
 
-Run: `uv run pytest tests/core/auth/test_passkeys.py tests/apps/api/test_passkey_routes.py -v`
+Run: `uv run pytest tests/core/auth/test_passkeys.py tests/core/auth/test_passkeys_real_crypto.py tests/apps/api/test_passkey_routes.py -v`
 Expected: all PASS
 
 - [ ] **Step 7: Commit**
@@ -2775,12 +3546,14 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 `backend/tests/core/authz/test_permissions.py`:
 ```python
 # SPDX-License-Identifier: Apache-2.0
-from dewpoint.core.authz.permissions import P, ROLE_PERMISSIONS
+from itertools import pairwise
+
+from dewpoint.core.authz.permissions import ROLE_PERMISSIONS, P
 
 
 def test_role_hierarchy_is_monotonic() -> None:
     order = ["viewer", "operator", "editor", "admin", "owner"]
-    for lower, higher in zip(order, order[1:]):
+    for lower, higher in pairwise(order):
         assert ROLE_PERMISSIONS[lower] <= ROLE_PERMISSIONS[higher], (lower, higher)
 
 
@@ -2798,32 +3571,12 @@ def test_key_grants() -> None:
 # SPDX-License-Identifier: Apache-2.0
 import uuid
 
-import httpx
 import pytest
 from sqlalchemy import text
 
-from dewpoint.core.auth.sessions import SESSION_COOKIE, create_session
-from dewpoint.core.auth.users import create_user
+from tests.apps.api.helpers import session_client as _as
 
 PW = "violet-otter-canyon-42"
-
-
-async def _as(app, owner_sessionmaker, api_settings, role: str | None, methods=("password", "totp"),
-              require_passkey: bool = False, platform_admin: bool = False):
-    tid = uuid.uuid4()
-    async with owner_sessionmaker() as s, s.begin():
-        u = await create_user(s, email=f"{uuid.uuid4().hex[:8]}@corp.test", password=PW, platform_admin=platform_admin)
-        await s.execute(text("insert into tenants(id,name,slug,require_passkey) values (:t,'T',:slug,:rp)"),
-                        {"t": tid, "slug": tid.hex[:12], "rp": require_passkey})
-        if role:
-            await s.execute(text("insert into memberships(tenant_id,user_id,role) values (:t,:u,:r)"),
-                            {"t": tid, "u": u.id, "r": role})
-        sess, token = await create_session(s, user_id=u.id, state="active", methods=list(methods),
-                                           settings=api_settings, ip=None, user_agent=None)
-    c = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://testserver",
-                          cookies={SESSION_COOKIE: token},
-                          headers={"X-Dewpoint-Client": "web", "X-CSRF-Token": sess.csrf_token})
-    return c, tid
 
 
 CASES = [
@@ -2831,8 +3584,12 @@ CASES = [
     ("GET", "/api/v1/t/{t}", None, {"viewer": 200, "owner": 200, None: 404}),
     ("PATCH", "/api/v1/t/{t}", {"name": "New"}, {"viewer": 403, "editor": 403, "admin": 200, None: 404}),
     ("GET", "/api/v1/t/{t}/members", None, {"viewer": 200, None: 404}),
-    ("POST", "/api/v1/t/{t}/members", {"email": "nobody@corp.test", "role": "viewer"},
-     {"operator": 403, "admin": 404, None: 404}),  # admin allowed; unknown user -> 404 user_not_found
+    (
+        "POST",
+        "/api/v1/t/{t}/members",
+        {"email": "nobody@corp.test", "role": "viewer"},
+        {"operator": 403, "admin": 404, None: 404},
+    ),  # admin allowed; unknown user -> 404 user_not_found
 ]
 
 
@@ -2880,6 +3637,7 @@ async def test_platform_admin_creates_tenant_and_last_owner_protected(app, owner
 async def test_unfiltered_query_after_require_sees_only_current_tenant(app, owner_sessionmaker, api_settings) -> None:
     from fastapi import APIRouter, Depends
     from sqlalchemy import select
+
     from dewpoint.core.authz.permissions import P
     from dewpoint.core.http import get_db, require
     from dewpoint.core.models.tenancy import Membership, Tenant
@@ -2887,17 +3645,26 @@ async def test_unfiltered_query_after_require_sees_only_current_tenant(app, owne
     router = APIRouter()
 
     @router.get("/api/v1/t/{tenant_id}/_probe")
-    async def probe(_=Depends(require(P.TENANT_VIEW)), db=Depends(get_db)) -> dict[str, int]:
-        return {"memberships": len((await db.execute(select(Membership))).scalars().all()),  # deliberately unfiltered
-                "tenants": len((await db.execute(select(Tenant))).scalars().all())}
+    async def probe(_=Depends(require(P.TENANT_VIEW)), db=Depends(get_db, scope="function")) -> dict[str, int]:
+        return {
+            "memberships": len((await db.execute(select(Membership))).scalars().all()),  # deliberately unfiltered
+            "tenants": len((await db.execute(select(Tenant))).scalars().all()),
+        }
 
     app.include_router(router)
     c, tid = await _as(app, owner_sessionmaker, api_settings, "owner")
     other = uuid.uuid4()
     async with owner_sessionmaker() as s, s.begin():  # same user also owns a second tenant
-        await s.execute(text("insert into tenants(id,name,slug) values (:o,'O',:slug)"), {"o": other, "slug": other.hex[:12]})
-        await s.execute(text("insert into memberships(tenant_id,user_id,role) select :o, user_id, 'owner' "
-                             "from memberships where tenant_id=:t"), {"o": other, "t": tid})
+        await s.execute(
+            text("insert into tenants(id,name,slug) values (:o,'O',:slug)"), {"o": other, "slug": other.hex[:12]}
+        )
+        await s.execute(
+            text(
+                "insert into memberships(tenant_id,user_id,role) select :o, user_id, 'owner' "
+                "from memberships where tenant_id=:t"
+            ),
+            {"o": other, "t": tid},
+        )
     async with c:
         assert (await c.get(f"/api/v1/t/{tid}/_probe")).json() == {"memberships": 1, "tenants": 1}
 
@@ -2906,6 +3673,22 @@ async def test_non_admin_cannot_create_tenant(app, owner_sessionmaker, api_setti
     c, _ = await _as(app, owner_sessionmaker, api_settings, "owner")
     async with c:
         assert (await c.post("/api/v1/tenants", json={"name": "X", "slug": "x-tenant"})).status_code == 403
+
+
+async def test_platform_admin_creates_users(app, owner_sessionmaker, api_settings) -> None:
+    admin, _ = await _as(app, owner_sessionmaker, api_settings, None, platform_admin=True)
+    async with admin:
+        r = await admin.post("/api/v1/admin/users", json={"email": "new@site.local", "password": PW})
+        assert r.status_code == 201 and r.json()["email"] == "new@site.local"
+        r = await admin.post("/api/v1/admin/users", json={"email": "NEW@site.local", "password": PW})
+        assert r.status_code == 409 and r.json() == {"error": "email_taken"}
+        r = await admin.post("/api/v1/admin/users", json={"email": "weak@site.local", "password": "short"})
+        assert r.status_code == 422 and r.json()["error"] == "password_policy"
+        assert "short" not in r.text
+    owner, _ = await _as(app, owner_sessionmaker, api_settings, "owner")
+    async with owner:
+        r = await owner.post("/api/v1/admin/users", json={"email": "x@site.local", "password": PW})
+        assert r.status_code == 403
 ```
 
 `backend/tests/core/tenancy/test_owner_race.py`:
@@ -3001,7 +3784,7 @@ import uuid
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dewpoint.core.auth.users import get_user_by_email
+from dewpoint.core.auth.users import Email, get_user_by_email
 from dewpoint.core.db import tenant_scope, user_scope
 from dewpoint.core.models.tenancy import Membership, Tenant
 
@@ -3107,7 +3890,7 @@ class TenantContext:
 
 def require(permission: P) -> Callable[..., Awaitable[TenantContext]]:
     async def _dep(tenant_id: uuid.UUID, user: User = Depends(current_user),
-                   sess: AuthSession = Depends(active_session), db: AsyncSession = Depends(get_db)) -> TenantContext:
+                   sess: AuthSession = Depends(active_session), db: AsyncSession = Depends(get_db, scope="function")) -> TenantContext:
         await user_scope(db, user.id)  # authoritative lookup of the caller's own membership
         row = (await db.execute(select(Membership.role, Tenant.require_passkey)
                                 .join(Tenant, Tenant.id == Membership.tenant_id)
@@ -3142,6 +3925,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dewpoint.core.audit.service import record
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.http import TenantContext, current_user, get_db, require, require_platform_admin
 from dewpoint.core.models.identity import User
@@ -3162,6 +3946,13 @@ class TenantPatch(BaseModel):
     require_passkey: bool | None = None
 
 
+async def _tenant(db: AsyncSession, ctx: TenantContext) -> Tenant:
+    t = await db.get(Tenant, ctx.tenant_id)
+    if t is None:  # deleted after the membership check in this request
+        raise HTTPException(404, detail={"error": "not_found"})
+    return t
+
+
 def _out(t: Tenant, role: str | None = None) -> dict[str, object]:
     d: dict[str, object] = {"id": str(t.id), "name": t.name, "slug": t.slug, "require_passkey": t.require_passkey}
     if role:
@@ -3170,38 +3961,57 @@ def _out(t: Tenant, role: str | None = None) -> dict[str, object]:
 
 
 @router.get("/tenants")
-async def my_tenants(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)) -> list[dict[str, object]]:
+async def my_tenants(user: User = Depends(current_user), db: AsyncSession = Depends(get_db, scope="function")) -> list[dict[str, object]]:
     return [_out(t, r) for t, r in await service.list_user_tenants(db, user.id)]
 
 
 @router.post("/tenants", status_code=201)
-async def create(body: TenantIn, admin: User = Depends(require_platform_admin),
-                 db: AsyncSession = Depends(get_db)) -> dict[str, object]:
+async def create(
+    body: TenantIn, admin: User = Depends(require_platform_admin), db: AsyncSession = Depends(get_db, scope="function")
+) -> dict[str, object]:
     try:
         t = await service.create_tenant(db, name=body.name, slug=body.slug, owner_id=admin.id)
     except IntegrityError:
         raise HTTPException(409, detail={"error": "slug_taken"}) from None
+    await record(
+        db,
+        tenant_id=t.id,
+        actor_id=admin.id,
+        action="tenant.create",
+        target_type="tenant",
+        target_id=str(t.id),
+        details={"slug": t.slug},
+    )
     return _out(t, "owner")
 
 
 @router.get("/t/{tenant_id}")
-async def get_tenant(ctx: TenantContext = Depends(require(P.TENANT_VIEW)),
-                     db: AsyncSession = Depends(get_db)) -> dict[str, object]:
-    t = await db.get(Tenant, ctx.tenant_id)
-    assert t is not None
+async def get_tenant(
+    ctx: TenantContext = Depends(require(P.TENANT_VIEW)), db: AsyncSession = Depends(get_db, scope="function")
+) -> dict[str, object]:
+    t = await _tenant(db, ctx)
     return _out(t, ctx.role)
 
 
 @router.patch("/t/{tenant_id}")
-async def patch_tenant(body: TenantPatch, ctx: TenantContext = Depends(require(P.TENANT_MANAGE)),
-                       db: AsyncSession = Depends(get_db)) -> dict[str, object]:
-    t = await db.get(Tenant, ctx.tenant_id)
-    assert t is not None
+async def patch_tenant(
+    body: TenantPatch, ctx: TenantContext = Depends(require(P.TENANT_MANAGE)), db: AsyncSession = Depends(get_db, scope="function")
+) -> dict[str, object]:
+    t = await _tenant(db, ctx)
     if body.name is not None:
         t.name = body.name
     if body.require_passkey is not None:
         t.require_passkey = body.require_passkey
     await db.flush()
+    await record(
+        db,
+        tenant_id=ctx.tenant_id,
+        actor_id=ctx.user.id,
+        action="tenant.update",
+        target_type="tenant",
+        target_id=str(t.id),
+        details=body.model_dump(exclude_none=True),
+    )
     return _out(t, ctx.role)
 ```
 
@@ -3212,11 +4022,13 @@ import uuid
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dewpoint.core.audit.service import record
+from dewpoint.core.auth.users import Email
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.http import TenantContext, get_db, require
 from dewpoint.core.models.identity import User
@@ -3228,12 +4040,24 @@ RoleIn = Literal["owner", "admin", "editor", "operator", "viewer"]
 
 
 class AddIn(BaseModel):
-    email: EmailStr
+    email: Email
     role: RoleIn
 
 
 class RoleChange(BaseModel):
     role: RoleIn
+
+
+async def _audit(db: AsyncSession, ctx: TenantContext, action: str, user_id: uuid.UUID, role: str | None) -> None:
+    await record(
+        db,
+        tenant_id=ctx.tenant_id,
+        actor_id=ctx.user.id,
+        action=action,
+        target_type="user",
+        target_id=str(user_id),
+        details={"role": role} if role else None,
+    )
 
 
 def _map(exc: Exception) -> HTTPException:
@@ -3245,46 +4069,92 @@ def _map(exc: Exception) -> HTTPException:
 
 
 @router.get("")
-async def list_members(ctx: TenantContext = Depends(require(P.MEMBER_VIEW)),
-                       db: AsyncSession = Depends(get_db)) -> list[dict[str, str]]:
-    rows = await db.execute(select(Membership, User.email).join(User, User.id == Membership.user_id)
-                            .where(Membership.tenant_id == ctx.tenant_id).order_by(User.email))
+async def list_members(
+    ctx: TenantContext = Depends(require(P.MEMBER_VIEW)), db: AsyncSession = Depends(get_db, scope="function")
+) -> list[dict[str, str]]:
+    rows = await db.execute(
+        select(Membership, User.email)
+        .join(User, User.id == Membership.user_id)
+        .where(Membership.tenant_id == ctx.tenant_id)
+        .order_by(User.email)
+    )
     return [{"user_id": str(m.user_id), "email": e, "role": m.role} for m, e in rows.all()]
 
 
 @router.post("", status_code=201)
-async def add(body: AddIn, ctx: TenantContext = Depends(require(P.MEMBER_MANAGE)),
-              db: AsyncSession = Depends(get_db)) -> dict[str, str]:
+async def add(
+    body: AddIn, ctx: TenantContext = Depends(require(P.MEMBER_MANAGE)), db: AsyncSession = Depends(get_db, scope="function")
+) -> dict[str, str]:
     try:
         m = await service.add_member(db, ctx.tenant_id, body.email, body.role, ctx.role)
+        await db.flush()
     except (service.OwnerGrantError, service.UnknownUserError) as e:
         raise _map(e) from None
     except IntegrityError:
         raise HTTPException(409, detail={"error": "already_member"}) from None
+    await _audit(db, ctx, "member.add", m.user_id, m.role)
     return {"user_id": str(m.user_id), "role": m.role}
 
 
 @router.patch("/{user_id}")
-async def change(user_id: uuid.UUID, body: RoleChange, ctx: TenantContext = Depends(require(P.MEMBER_MANAGE)),
-                 db: AsyncSession = Depends(get_db)) -> dict[str, str]:
+async def change(
+    user_id: uuid.UUID,
+    body: RoleChange,
+    ctx: TenantContext = Depends(require(P.MEMBER_MANAGE)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+) -> dict[str, str]:
     try:
         m = await service.change_role(db, ctx.tenant_id, user_id, body.role, ctx.role)
+        await _audit(db, ctx, "member.role_change", user_id, m.role)
     except (service.LastOwnerError, service.OwnerGrantError, service.UnknownUserError) as e:
         raise _map(e) from None
     return {"user_id": str(m.user_id), "role": m.role}
 
 
 @router.delete("/{user_id}", status_code=204)
-async def remove(user_id: uuid.UUID, ctx: TenantContext = Depends(require(P.MEMBER_MANAGE)),
-                 db: AsyncSession = Depends(get_db)) -> Response:
+async def remove(
+    user_id: uuid.UUID, ctx: TenantContext = Depends(require(P.MEMBER_MANAGE)), db: AsyncSession = Depends(get_db, scope="function")
+) -> Response:
     try:
         await service.remove_member(db, ctx.tenant_id, user_id, ctx.role)
+        await _audit(db, ctx, "member.remove", user_id, None)
     except (service.LastOwnerError, service.OwnerGrantError, service.UnknownUserError) as e:
         raise _map(e) from None
     return Response(status_code=204)
 ```
 
-`apps/api/routes/admin_users.py`: `POST /api/v1/admin/users` `{email, password}`, guarded by `require_platform_admin`. It calls `create_user` and returns `201 {"id","email"}`, maps `PasswordPolicyError` to 422 `{"error":"password_policy","violations":[…]}`, and maps `EmailTakenError` to 409 `{"error":"email_taken"}`. The new user enrolls MFA at first login (Task 8 states).
+`apps/api/routes/admin_users.py` (a platform admin creates local accounts; each new user enrolls MFA at first sign-in; covered by `test_platform_admin_creates_users`):
+```python
+# SPDX-License-Identifier: Apache-2.0
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from dewpoint.core.auth.users import Email, EmailTakenError, PasswordPolicyError, create_user
+from dewpoint.core.http import get_db, require_platform_admin
+from dewpoint.core.models.identity import User
+
+router = APIRouter(prefix="/api/v1/admin/users", tags=["admin"])
+
+
+class UserIn(BaseModel):
+    email: Email
+    password: str = Field(min_length=1, max_length=1024)
+
+
+@router.post("", status_code=201)
+async def create(
+    body: UserIn, admin: User = Depends(require_platform_admin), db: AsyncSession = Depends(get_db, scope="function")
+) -> dict[str, str]:
+    """Create a local account. The new user must enroll MFA at first sign-in."""
+    try:
+        user = await create_user(db, email=body.email, password=body.password)
+    except PasswordPolicyError as e:
+        raise HTTPException(422, detail={"error": "password_policy", "violations": e.violations}) from None
+    except EmailTakenError:
+        raise HTTPException(409, detail={"error": "email_taken"}) from None
+    return {"id": str(user.id), "email": user.email}
+```
 
 Include all three routers in `create_app`.
 
@@ -3410,7 +4280,6 @@ def test_secret_keys_rejected() -> None:
 ```python
 # SPDX-License-Identifier: Apache-2.0
 import uuid
-
 from datetime import timedelta
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -3421,8 +4290,9 @@ from dewpoint.core.audit.service import record, verify_chain
 from dewpoint.core.db import tenant_scope
 
 
-async def test_anchor_detects_full_chain_rewrite(tmp_path, api_sessionmaker, owner_sessionmaker,
-                                                 auditor_sessionmaker) -> None:
+async def test_anchor_detects_full_chain_rewrite(
+    tmp_path, api_sessionmaker, owner_sessionmaker, auditor_sessionmaker
+) -> None:
     key, t = Ed25519PrivateKey.generate(), uuid.uuid4()
     sink = FileAnchorSink(tmp_path / "anchors.jsonl", key)
     async with api_sessionmaker() as s, s.begin():
@@ -3439,9 +4309,12 @@ async def test_anchor_detects_full_chain_rewrite(tmp_path, api_sessionmaker, own
     async with owner_sessionmaker() as s, s.begin():
         await s.execute(text("SET LOCAL session_replication_role = replica"))
         await s.execute(text("update audit_log set target_id='z' where scope <> 'platform'"))
-        await s.execute(text(
-            "update audit_log set hash = sha256(prev_hash || convert_to(audit_canonical(seq, scope, actor_id, action,"
-            " target_type, target_id, details, created_at), 'UTF8')) where scope <> 'platform'"))
+        await s.execute(
+            text(
+                "update audit_log set hash = sha256(prev_hash || convert_to(audit_canonical(seq, scope, actor_id,"
+                " action, target_type, target_id, details, created_at), 'UTF8')) where scope <> 'platform'"
+            )
+        )
     async with auditor_sessionmaker() as s:
         assert (await verify_chain(s, str(t))).ok  # the in-database chain alone cannot detect this
         problems = await verify_anchors(s, sink.entries(), key.public_key())
@@ -3468,13 +4341,43 @@ async def test_verification_fails_closed(tmp_path, api_sessionmaker, auditor_ses
 
 
 async def test_auditor_role_is_narrow(auditor_sessionmaker) -> None:
-    from sqlalchemy.exc import DBAPIError
     import pytest
-    for stmt in ("select 1 from users", "select 1 from tenants", "select 1 from data_keys",
-                 "insert into audit_log(scope,action,prev_hash,hash,created_at) values ('x','y','\\x00','\\x00',now())"):
+    from sqlalchemy.exc import DBAPIError
+
+    for stmt in (
+        "select 1 from users",
+        "select 1 from connections",
+        "select 1 from data_keys",
+        "insert into audit_log(scope,action,prev_hash,hash,created_at) values ('x','y','\\x00','\\x00',now())",
+    ):
         with pytest.raises(DBAPIError, match="permission denied"):
             async with auditor_sessionmaker() as s, s.begin():
                 await s.execute(text(stmt))
+
+
+async def test_anchor_freshness_flags_unanchored_rows(tmp_path, api_sessionmaker, auditor_sessionmaker) -> None:
+    from dewpoint.core.audit.anchor import anchor_freshness
+
+    key, t = Ed25519PrivateKey.generate(), uuid.uuid4()
+    sink = FileAnchorSink(tmp_path / "anchors.jsonl", key)
+    async with auditor_sessionmaker() as s:
+        assert await anchor_freshness(s, timedelta(0)) == []  # nothing to anchor yet
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, t)
+        await record(s, tenant_id=t, actor_id=None, action="member.add")
+    async with auditor_sessionmaker() as s:
+        stale = await anchor_freshness(s, timedelta(0))
+    assert len(stale) == 1 and stale[0].startswith(str(t))
+    async with auditor_sessionmaker() as s, s.begin():
+        await anchor_all(s, sink)
+    async with auditor_sessionmaker() as s:
+        assert await anchor_freshness(s, timedelta(0)) == []
+    async with api_sessionmaker() as s, s.begin():  # a newer row is fine until it is older than max_age
+        await tenant_scope(s, t)
+        await record(s, tenant_id=t, actor_id=None, action="member.remove")
+    async with auditor_sessionmaker() as s:
+        assert await anchor_freshness(s, timedelta(hours=1)) == []
+        assert len(await anchor_freshness(s, timedelta(0))) == 1
 ```
 
 Add the fixture to `tests/conftest.py`:
@@ -3496,9 +4399,19 @@ Expected: FAIL (module not found)
 
 `0005_audit.py` (`revision = "0005"`, `down_revision = "0004"`):
 ```python
-def upgrade() -> None:
-    op.execute(r"""
-CREATE TABLE audit_log (
+# SPDX-License-Identifier: Apache-2.0
+"""audit: append-only hash-chained log, anchors, dedicated auditor role"""
+
+from alembic import op
+
+revision = "0005"
+down_revision = "0004"
+branch_labels = None
+depends_on = None
+
+# One statement per execute (asyncpg cannot run multi-statement strings).
+UPGRADE = [
+    r"""CREATE TABLE audit_log (
   seq bigserial PRIMARY KEY,
   scope text NOT NULL,
   tenant_id uuid,
@@ -3510,11 +4423,10 @@ CREATE TABLE audit_log (
   created_at timestamptz NOT NULL,
   prev_hash bytea NOT NULL,
   hash bytea NOT NULL
-);
-CREATE INDEX ix_audit_scope_seq ON audit_log(scope, seq DESC);
-CREATE INDEX ix_audit_tenant_seq ON audit_log(tenant_id, seq DESC);
-
-CREATE TABLE audit_anchors (
+)""",
+    r"""CREATE INDEX ix_audit_scope_seq ON audit_log(scope, seq DESC)""",
+    r"""CREATE INDEX ix_audit_tenant_seq ON audit_log(tenant_id, seq DESC)""",
+    r"""CREATE TABLE audit_anchors (
   id bigserial PRIMARY KEY,
   scope text NOT NULL,
   seq bigint NOT NULL,
@@ -3523,15 +4435,13 @@ CREATE TABLE audit_anchors (
   sink text NOT NULL,
   sink_ref text NOT NULL,
   UNIQUE (scope, seq)
-);
-
-CREATE FUNCTION audit_canonical(p_seq bigint, p_scope text, p_actor uuid, p_action text, p_tt text, p_tid text,
+)""",
+    r"""CREATE FUNCTION audit_canonical(p_seq bigint, p_scope text, p_actor uuid, p_action text, p_tt text, p_tid text,
                                 p_details jsonb, p_ts timestamptz) RETURNS text LANGUAGE sql IMMUTABLE AS $$
   SELECT concat_ws('|', p_seq, p_scope, COALESCE(p_actor::text, ''), p_action, p_tt, p_tid, p_details::text,
                    to_char(p_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'))
-$$;
-
-CREATE FUNCTION audit_append(p_tenant uuid, p_actor uuid, p_action text, p_target_type text, p_target_id text,
+$$""",
+    r"""CREATE FUNCTION audit_append(p_tenant uuid, p_actor uuid, p_action text, p_target_type text, p_target_id text,
                              p_details jsonb) RETURNS bigint
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
@@ -3555,39 +4465,91 @@ BEGIN
   VALUES (v_seq, v_scope, p_tenant, p_actor, p_action, v_tt, v_tid, v_details, v_ts, v_prev,
           sha256(v_prev || convert_to(audit_canonical(v_seq, v_scope, p_actor, p_action, v_tt, v_tid, v_details, v_ts), 'UTF8')));
   RETURN v_seq;
-END $$;
-
-CREATE FUNCTION audit_reject() RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN RAISE EXCEPTION 'audit_log is append-only'; END $$;
-CREATE TRIGGER audit_no_update BEFORE UPDATE OR DELETE ON audit_log FOR EACH ROW EXECUTE FUNCTION audit_reject();
-CREATE TRIGGER audit_no_truncate BEFORE TRUNCATE ON audit_log FOR EACH STATEMENT EXECUTE FUNCTION audit_reject();
-
-ALTER TABLE audit_log ENABLE ROW LEVEL SECURITY;  -- deliberately not FORCE (see plan)
-CREATE POLICY audit_tenant_read ON audit_log FOR SELECT USING (tenant_id = app_tenant_id());
-
-DO $$ BEGIN
+END $$""",
+    r"""CREATE FUNCTION audit_reject() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE EXCEPTION 'audit_log is append-only'; END $$""",
+    r"""CREATE TRIGGER audit_no_update BEFORE UPDATE OR DELETE ON audit_log FOR EACH ROW EXECUTE FUNCTION audit_reject()""",
+    r"""CREATE TRIGGER audit_no_truncate BEFORE TRUNCATE ON audit_log FOR EACH STATEMENT EXECUTE FUNCTION audit_reject()""",
+    r"""ALTER TABLE audit_log ENABLE ROW LEVEL SECURITY""",
+    r"""-- deliberately not FORCE (see plan)
+CREATE POLICY audit_tenant_read ON audit_log FOR SELECT USING (tenant_id = app_tenant_id())""",
+    r"""DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dewpoint_auditor') THEN CREATE ROLE dewpoint_auditor NOLOGIN; END IF;
-END $$;
-GRANT USAGE ON SCHEMA public TO dewpoint_auditor;
-CREATE POLICY audit_auditor_read ON audit_log FOR SELECT TO dewpoint_auditor USING (true);
+END $$""",
+    r"""GRANT USAGE ON SCHEMA public TO dewpoint_auditor""",
+    r"""CREATE POLICY audit_auditor_read ON audit_log FOR SELECT TO dewpoint_auditor USING (true)""",
+    r"""REVOKE ALL ON audit_log, audit_anchors FROM PUBLIC""",
+    r"""GRANT SELECT ON audit_log TO dewpoint_api, dewpoint_admin, dewpoint_auditor""",
+    r"""GRANT SELECT, INSERT ON audit_anchors TO dewpoint_auditor""",
+    r"""GRANT USAGE ON SEQUENCE audit_anchors_id_seq TO dewpoint_auditor""",
+    r"""REVOKE EXECUTE ON FUNCTION audit_append(uuid, uuid, text, text, text, jsonb) FROM PUBLIC""",
+    r"""GRANT EXECUTE ON FUNCTION audit_append(uuid, uuid, text, text, text, jsonb)
+  TO dewpoint_api, dewpoint_worker, dewpoint_dispatch, dewpoint_ingress, dewpoint_admin""",
+]
 
-REVOKE ALL ON audit_log, audit_anchors FROM PUBLIC;
-GRANT SELECT ON audit_log TO dewpoint_api, dewpoint_admin, dewpoint_auditor;
-GRANT SELECT, INSERT ON audit_anchors TO dewpoint_auditor;
-GRANT USAGE ON SEQUENCE audit_anchors_id_seq TO dewpoint_auditor;
-REVOKE EXECUTE ON FUNCTION audit_append(uuid, uuid, text, text, text, jsonb) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION audit_append(uuid, uuid, text, text, text, jsonb)
-  TO dewpoint_api, dewpoint_worker, dewpoint_dispatch, dewpoint_ingress, dewpoint_admin;
-""")
+DOWNGRADE = [
+    "DROP TABLE audit_anchors",
+    "DROP TABLE audit_log",
+    "DROP FUNCTION audit_append(uuid, uuid, text, text, text, jsonb)",
+    "DROP FUNCTION audit_canonical(bigint, text, uuid, text, text, text, jsonb, timestamptz)",
+    "DROP FUNCTION audit_reject()",
+    "REVOKE ALL ON SCHEMA public FROM dewpoint_auditor",
+    "DROP ROLE IF EXISTS dewpoint_auditor",
+]
+
+
+def upgrade() -> None:
+    for stmt in UPGRADE:
+        op.execute(stmt)
 
 
 def downgrade() -> None:
-    op.execute("DROP TABLE audit_anchors; DROP TABLE audit_log; DROP FUNCTION audit_append(uuid, uuid, text, text, text, jsonb);"
-               "DROP FUNCTION audit_canonical(bigint, text, uuid, text, text, text, jsonb, timestamptz); DROP FUNCTION audit_reject();")
+    for stmt in DOWNGRADE:
+        op.execute(stmt)
 ```
 **Test isolation note:** `clean_db` TRUNCATEs with `session_replication_role = replica`, which disables the truncate trigger for the superuser test owner. That matches the fixture from Task 3.
 
-`core/models/audit.py`: read-only ORM mappings `AuditEntry` (every `audit_log` column; `seq` is the primary key) and `AuditAnchor` (every `audit_anchors` column). The application never inserts `AuditEntry` through the ORM.
+`core/models/audit.py` (read-only mappings; rows are written only by `audit_append()`):
+```python
+# SPDX-License-Identifier: Apache-2.0
+"""Read-only mappings. Rows are written only by the audit_append() SQL function."""
+
+import uuid
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import BigInteger, DateTime, LargeBinary, Text
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.orm import Mapped, mapped_column
+
+from dewpoint.core.models.base import Base
+
+
+class AuditEntry(Base):
+    __tablename__ = "audit_log"
+    seq: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    scope: Mapped[str] = mapped_column(Text)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    actor_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    action: Mapped[str] = mapped_column(Text)
+    target_type: Mapped[str] = mapped_column(Text)
+    target_id: Mapped[str] = mapped_column(Text)
+    details: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    prev_hash: Mapped[bytes] = mapped_column(LargeBinary)
+    hash: Mapped[bytes] = mapped_column(LargeBinary)
+
+
+class AuditAnchor(Base):
+    __tablename__ = "audit_anchors"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    scope: Mapped[str] = mapped_column(Text)
+    seq: Mapped[int] = mapped_column(BigInteger)
+    hash: Mapped[bytes] = mapped_column(LargeBinary)
+    anchored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    sink: Mapped[str] = mapped_column(Text)
+    sink_ref: Mapped[str] = mapped_column(Text)
+```
 
 - [ ] **Step 5: Implement the service and anchoring**
 
@@ -3679,6 +4641,7 @@ def _message(scope: str, seq: int, hash_hex: str, at: str) -> bytes:
 class FileAnchorSink:
     """Append-only JSON-lines file, each line Ed25519-signed. Store it outside the database host
     (object storage with object lock, a SIEM, or a separate volume)."""
+
     name = "file"
 
     def __init__(self, path: Path, private_key: Ed25519PrivateKey) -> None:
@@ -3686,8 +4649,9 @@ class FileAnchorSink:
 
     def write(self, scope: str, seq: int, hash_: bytes) -> str:
         at = datetime.now(UTC).isoformat()
-        entry = {"scope": scope, "seq": seq, "hash": hash_.hex(), "at": at}
-        entry["sig"] = self._key.sign(_message(scope, seq, entry["hash"], at)).hex()
+        hash_hex = hash_.hex()
+        sig = self._key.sign(_message(scope, seq, hash_hex, at)).hex()
+        entry = {"scope": scope, "seq": seq, "hash": hash_hex, "at": at, "sig": sig}
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, sort_keys=True) + "\n")
         return f"{self.path.name}:{scope}:{seq}"
@@ -3699,28 +4663,38 @@ class FileAnchorSink:
 
 
 async def anchor_all(s: AsyncSession, sink: FileAnchorSink) -> int:
-    heads = (await s.execute(text(
-        "select distinct on (scope) scope, seq, hash from audit_log order by scope, seq desc"))).all()
+    heads = (
+        await s.execute(text("select distinct on (scope) scope, seq, hash from audit_log order by scope, seq desc"))
+    ).all()
     written = 0
     for scope, seq, h in heads:
-        exists = (await s.execute(text("select 1 from audit_anchors where scope=:s and seq=:q"),
-                                  {"s": scope, "q": seq})).first()
+        exists = (
+            await s.execute(text("select 1 from audit_anchors where scope=:s and seq=:q"), {"s": scope, "q": seq})
+        ).first()
         if exists:
             continue
         ref = sink.write(scope, seq, bytes(h))
-        await s.execute(text("insert into audit_anchors(scope, seq, hash, sink, sink_ref) values (:s,:q,:h,:k,:r)"),
-                        {"s": scope, "q": seq, "h": bytes(h), "k": sink.name, "r": ref})
+        await s.execute(
+            text("insert into audit_anchors(scope, seq, hash, sink, sink_ref) values (:s,:q,:h,:k,:r)"),
+            {"s": scope, "q": seq, "h": bytes(h), "k": sink.name, "r": ref},
+        )
         written += 1
     return written
 
 
-async def verify_anchors(s: AsyncSession, entries: list[dict[str, object]], public_key: Ed25519PublicKey, *,
-                         max_lag: timedelta = timedelta(hours=1), now: datetime | None = None) -> list[str]:
+async def verify_anchors(
+    s: AsyncSession,
+    entries: list[dict[str, object]],
+    public_key: Ed25519PublicKey,
+    *,
+    max_lag: timedelta = timedelta(hours=1),
+    now: datetime | None = None,
+) -> list[str]:
     """Fail closed: missing anchors, unanchored old rows, broken chains and mismatches are all problems."""
     problems: list[str] = []
     if not entries:
         problems.append("no external anchors found")
-    db_scopes = set((await s.execute(text("select distinct scope from audit_log"))).scalars())
+    db_scopes: set[str] = set((await s.execute(text("select distinct scope from audit_log"))).scalars())
     for sc in sorted(db_scopes | {str(e["scope"]) for e in entries}):
         rep = await verify_chain(s, sc)
         if not rep.ok:
@@ -3733,8 +4707,9 @@ async def verify_anchors(s: AsyncSession, entries: list[dict[str, object]], publ
         except (InvalidSignature, ValueError):
             problems.append(f"{scope}:{seq}: bad anchor signature")
             continue
-        row = (await s.execute(text("select hash from audit_log where scope=:s and seq=:q"),
-                               {"s": scope, "q": seq})).first()
+        row = (
+            await s.execute(text("select hash from audit_log where scope=:s and seq=:q"), {"s": scope, "q": seq})
+        ).first()
         if row is None:
             problems.append(f"{scope}:{seq}: anchored row missing")
         elif bytes(row[0]).hex() != hash_hex:
@@ -3742,23 +4717,86 @@ async def verify_anchors(s: AsyncSession, entries: list[dict[str, object]], publ
         else:
             anchored[scope] = max(anchored.get(scope, 0), seq)
     cutoff = (now or datetime.now(UTC)) - max_lag
-    old_rows = await s.execute(text("select scope, max(seq) from audit_log where created_at <= :c group by scope"),
-                               {"c": cutoff})
+    old_rows = await s.execute(
+        text("select scope, max(seq) from audit_log where created_at <= :c group by scope"), {"c": cutoff}
+    )
     for scope, max_seq in old_rows.all():
         if anchored.get(scope, 0) < max_seq:
             problems.append(f"{scope}: rows up to seq {max_seq} older than {max_lag} are not anchored")
     return problems
+
+
+async def anchor_freshness(s: AsyncSession, max_age: timedelta, now: datetime | None = None) -> list[str]:
+    """Liveness, not integrity: scopes whose rows older than max_age have no anchor recorded at or after them.
+    Reads the audit_anchors table the anchor job maintains; `audit verify` checks the signed external copy."""
+    cutoff = (now or datetime.now(UTC)) - max_age
+    rows = await s.execute(
+        text(
+            "select l.scope, max(l.seq) as due,"
+            " (select max(a.seq) from audit_anchors a where a.scope = l.scope) as anchored"
+            " from audit_log l where l.created_at <= :cutoff group by l.scope order by l.scope"
+        ),
+        {"cutoff": cutoff},
+    )
+    return [
+        f"{scope}: rows up to seq {due} older than {max_age} have no anchor (latest anchored seq: {anchored or 'none'})"
+        for scope, due, anchored in rows.all()
+        if (anchored or 0) < due
+    ]
 ```
 
-CLI additions in `apps/cli/main.py`:
+CLI additions in `apps/cli/main.py` (the full module after this task; `audit verify` also requires `DEWPOINT_AUDIT_ANCHOR_PATH` rather than defaulting). Tested by `tests/apps/cli/test_audit_cli.py`, which runs as the auditor role: verify with no anchors exits 1, anchor succeeds, verify then exits 0, and a missing key or path exits 2:
 ```python
+# SPDX-License-Identifier: Apache-2.0
+import asyncio
+import base64
+import os
+from pathlib import Path
+
+import typer
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from sqlalchemy import select
+
+from dewpoint.core.audit.anchor import FileAnchorSink, anchor_all, verify_anchors
+from dewpoint.core.auth.users import PasswordPolicyError, create_user
+from dewpoint.core.config import get_settings
+from dewpoint.core.db import make_engine, make_sessionmaker
+from dewpoint.core.models.identity import User
+
+app = typer.Typer(no_args_is_help=True)
+admin = typer.Typer(no_args_is_help=True)
+app.add_typer(admin, name="admin")
 audit = typer.Typer(no_args_is_help=True)
 app.add_typer(audit, name="audit")
 
 
-def _signing_key() -> "Ed25519PrivateKey":
-    import base64
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+async def _init(email: str, password: str) -> None:
+    engine = make_engine(get_settings().database_url)
+    try:
+        async with make_sessionmaker(engine)() as s, s.begin():
+            if (await s.execute(select(User.id).where(User.is_platform_admin.is_(True)).limit(1))).first():
+                typer.echo("already initialized: a platform admin exists")
+                raise typer.Exit(1)
+            await create_user(s, email=email, password=password, platform_admin=True)
+    finally:
+        await engine.dispose()
+
+
+@admin.command("init")
+def admin_init(email: str = typer.Option(...)) -> None:
+    """Create the first platform admin. Refuses if one already exists."""
+    password = os.environ.get("DEWPOINT_INIT_PASSWORD") or typer.prompt(
+        "Password", hide_input=True, confirmation_prompt=True
+    )
+    try:
+        asyncio.run(_init(email, password))
+    except PasswordPolicyError as e:
+        typer.echo(f"password rejected: {', '.join(e.violations)}")
+        raise typer.Exit(2) from None
+    typer.echo(f"platform admin {email} created. Sign in to enroll MFA.")
+
+
+def _signing_key() -> Ed25519PrivateKey:
     raw = get_settings().audit_signing_key_b64
     if not raw:
         typer.echo("DEWPOINT_AUDIT_SIGNING_KEY_B64 is not set")
@@ -3766,21 +4804,24 @@ def _signing_key() -> "Ed25519PrivateKey":
     return Ed25519PrivateKey.from_private_bytes(base64.b64decode(raw))
 
 
-@audit.command("anchor")
-def audit_anchor() -> None:
-    """Write current chain heads to the external anchor sink. Schedule this (e.g. every 15 minutes)."""
-    from pathlib import Path
-    from dewpoint.core.audit.anchor import FileAnchorSink, anchor_all
+def _anchor_path() -> Path:
     path = get_settings().audit_anchor_path
     if not path:
         typer.echo("DEWPOINT_AUDIT_ANCHOR_PATH is not set")
         raise typer.Exit(2)
+    return Path(path)
+
+
+@audit.command("anchor")
+def audit_anchor() -> None:
+    """Write current chain heads to the external anchor sink. Run as a dewpoint_auditor login, e.g. every 15 min."""
+    sink = FileAnchorSink(_anchor_path(), _signing_key())
 
     async def _run() -> int:
         engine = make_engine(get_settings().database_url)
         try:
             async with make_sessionmaker(engine)() as s, s.begin():
-                return await anchor_all(s, FileAnchorSink(Path(path), _signing_key()))
+                return await anchor_all(s, sink)
         finally:
             await engine.dispose()
 
@@ -3789,11 +4830,10 @@ def audit_anchor() -> None:
 
 @audit.command("verify")
 def audit_verify() -> None:
-    """Recompute every chain and check it against the signed external anchors. Exit 1 on any problem."""
-    from pathlib import Path
-    from dewpoint.core.audit.anchor import FileAnchorSink, verify_anchors
+    """Recompute every chain and check it against the signed external anchors. Exit 1 on any problem,
+    including when no anchors exist, so a broken anchor job can't look healthy."""
     key = _signing_key()
-    sink = FileAnchorSink(Path(get_settings().audit_anchor_path or "anchors.jsonl"), key)
+    sink = FileAnchorSink(_anchor_path(), key)
 
     async def _run() -> list[str]:
         engine = make_engine(get_settings().database_url)
@@ -3804,8 +4844,8 @@ def audit_verify() -> None:
             await engine.dispose()
 
     problems = asyncio.run(_run())
-    for p in problems:
-        typer.echo(p)
+    for problem in problems:
+        typer.echo(problem)
     if problems:
         raise typer.Exit(1)
     typer.echo("audit chain verified against external anchors")
@@ -3814,7 +4854,7 @@ The anchor and verify commands connect as a `dewpoint_auditor` login (operators 
 
 - [ ] **Step 6: Record audit events from the routes**
 
-Add `from dewpoint.core.audit.service import record` to each route module and insert these calls. Each runs inside the request transaction, before the response returns:
+Add `from dewpoint.core.audit.service import record` to each route module and insert these calls. As built, the implementation also records `ip` on `auth.login` and `auth.login_failed`, and adds an `auth.totp_enrolled` event on successful `/totp/confirm`. Each runs inside the request transaction, before the response returns:
 
 | Module / handler | Call |
 |---|---|
@@ -3850,7 +4890,7 @@ router = APIRouter(prefix="/api/v1/t/{tenant_id}/audit", tags=["audit"])
 @router.get("")
 async def list_audit(before_seq: int | None = None, limit: int = Query(50, ge=1, le=200),
                      ctx: TenantContext = Depends(require(P.AUDIT_VIEW)),
-                     db: AsyncSession = Depends(get_db)) -> list[dict[str, object]]:
+                     db: AsyncSession = Depends(get_db, scope="function")) -> list[dict[str, object]]:
     q = select(AuditEntry).where(AuditEntry.tenant_id == ctx.tenant_id).order_by(AuditEntry.seq.desc()).limit(limit)
     if before_seq:
         q = q.where(AuditEntry.seq < before_seq)
@@ -3925,7 +4965,8 @@ def _cfg() -> MistConfig:
 @respx.mock
 async def test_org_privilege_ok() -> None:
     route = respx.get("https://api.eu.mist.com/api/v1/self").respond(
-        200, json={"privileges": [{"scope": "org", "org_id": str(ORG), "role": "write"}]})
+        200, json={"privileges": [{"scope": "org", "org_id": str(ORG), "role": "write"}]}
+    )
     async with httpx.AsyncClient() as http:
         r = await verify_mist(_cfg(), MistSecret(api_token="x" * 40), http)
     assert r.ok and r.privilege == "write"
@@ -3934,7 +4975,9 @@ async def test_org_privilege_ok() -> None:
 
 @respx.mock
 async def test_msp_access_confirmed_via_org_endpoint() -> None:
-    respx.get("https://api.eu.mist.com/api/v1/self").respond(200, json={"privileges": [{"scope": "msp", "role": "admin"}]})
+    respx.get("https://api.eu.mist.com/api/v1/self").respond(
+        200, json={"privileges": [{"scope": "msp", "role": "admin"}]}
+    )
     respx.get(f"https://api.eu.mist.com/api/v1/orgs/{ORG}").respond(200, json={"id": str(ORG)})
     async with httpx.AsyncClient() as http:
         r = await verify_mist(_cfg(), MistSecret(api_token="x" * 40), http)
@@ -3952,6 +4995,14 @@ async def test_bad_token_and_no_access() -> None:
 def test_unknown_cloud_rejected() -> None:
     with pytest.raises(ValidationError):
         MistConfig(cloud="evil.example.com", org_id=ORG)  # type: ignore[arg-type]
+
+
+def test_cloud_literal_matches_allowlist() -> None:
+    from typing import get_args
+
+    from dewpoint.core.connections.types import MIST_CLOUDS, MistCloud
+
+    assert set(MIST_CLOUDS) == set(get_args(MistCloud))
 ```
 
 - [ ] **Step 2: Implement the types and verification**
@@ -4059,7 +5110,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, LargeBinary, String, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Integer, LargeBinary, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -4074,21 +5125,65 @@ class Connection(UUIDPk, Timestamps, Base):
     name: Mapped[str] = mapped_column(String(100))
     config: Mapped[dict[str, Any]] = mapped_column(JSONB)
     secret_ct: Mapped[bytes | None] = mapped_column(LargeBinary)
+    revision: Mapped[int] = mapped_column(Integer, default=1)  # bumped on config/secret change
     status: Mapped[str] = mapped_column(String(20), default="unverified")  # unverified | ok | error
     status_detail: Mapped[str] = mapped_column(String(40), default="")
     privilege: Mapped[str | None] = mapped_column(String(40))
     last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
 ```
 
-`0006_connections.py` (`revision = "0006"`, `down_revision = "0005"`): create the table to match the model, then:
-```sql
-ALTER TABLE connections ENABLE ROW LEVEL SECURITY;
-ALTER TABLE connections FORCE ROW LEVEL SECURITY;
-CREATE POLICY connections_scope ON connections
-  USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id());
-GRANT SELECT, INSERT, UPDATE, DELETE ON connections TO dewpoint_api, dewpoint_admin;
-GRANT SELECT ON connections TO dewpoint_worker;
+`migrations/versions/0006_connections.py`:
+```python
+# SPDX-License-Identifier: Apache-2.0
+"""connections: generic, typed, secrets encrypted with the tenant data key"""
+
+import sqlalchemy as sa
+from alembic import op
+from sqlalchemy.dialects import postgresql as pg
+
+revision = "0006"
+down_revision = "0005"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "connections",
+        sa.Column("id", pg.UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
+        sa.Column("tenant_id", pg.UUID(as_uuid=True), sa.ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("type", sa.String(64), nullable=False),
+        sa.Column("name", sa.String(100), nullable=False),
+        sa.Column("config", pg.JSONB, nullable=False),
+        sa.Column("secret_ct", sa.LargeBinary),
+        # Increments whenever config or secret changes; a verification result applies only to the revision it read.
+        sa.Column("revision", sa.Integer, nullable=False, server_default="1"),
+        sa.Column("status", sa.String(20), nullable=False, server_default="unverified"),
+        sa.Column("status_detail", sa.String(40), nullable=False, server_default=""),
+        sa.Column("privilege", sa.String(40)),
+        sa.Column("last_verified_at", sa.DateTime(timezone=True)),
+        sa.Column("created_by", pg.UUID(as_uuid=True), sa.ForeignKey("users.id", ondelete="SET NULL")),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.UniqueConstraint("tenant_id", "name"),
+    )
+    for stmt in (
+        "ALTER TABLE connections ENABLE ROW LEVEL SECURITY",
+        "ALTER TABLE connections FORCE ROW LEVEL SECURITY",
+        "CREATE POLICY connections_scope ON connections "
+        "USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id())",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON connections TO dewpoint_api, dewpoint_admin",
+        "GRANT SELECT ON connections TO dewpoint_worker",
+    ):
+        op.execute(stmt)
+
+
+def downgrade() -> None:
+    op.execute("DROP POLICY IF EXISTS connections_scope ON connections")
+    op.drop_table("connections")
 ```
 
 - [ ] **Step 5: Write the failing route tests**
@@ -4098,16 +5193,22 @@ In `tests/core/audit/test_anchor.py::test_auditor_role_is_narrow`, change `"sele
 `backend/tests/apps/api/test_connections.py`:
 ```python
 # SPDX-License-Identifier: Apache-2.0
+import asyncio
 import uuid
 
+import httpx
 import respx
 from sqlalchemy import text
 
 from tests.apps.api.helpers import session_client
 
 ORG = str(uuid.uuid4())
-BODY = {"type": "mist", "name": "Acme Prod", "config": {"cloud": "emea_01", "org_id": ORG},
-        "secret": {"api_token": "tok_" + "a" * 36}}
+BODY = {
+    "type": "mist",
+    "name": "Acme Prod",
+    "config": {"cloud": "emea_01", "org_id": ORG},
+    "secret": {"api_token": "tok_" + "a" * 36},
+}
 
 
 async def test_create_list_never_returns_secret(app, owner_sessionmaker, api_settings) -> None:
@@ -4142,7 +5243,8 @@ async def test_invalid_cloud_and_extra_fields_rejected(app, owner_sessionmaker, 
 @respx.mock
 async def test_verify_updates_status_and_audits(app, owner_sessionmaker, api_settings) -> None:
     respx.get("https://api.eu.mist.com/api/v1/self").respond(
-        200, json={"privileges": [{"scope": "org", "org_id": ORG, "role": "admin"}]})
+        200, json={"privileges": [{"scope": "org", "org_id": ORG, "role": "admin"}]}
+    )
     c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
     async with c:
         cid = (await c.post(f"/api/v1/t/{tid}/connections", json=BODY)).json()["id"]
@@ -4161,11 +5263,73 @@ async def test_patch_keeps_secret_when_omitted_and_ciphertext_is_bound(app, owne
         assert r.status_code == 200 and r.json()["secret_set"] is True
         # swapping ciphertext between rows must not decrypt (AAD binds the connection id)
         async with owner_sessionmaker() as s, s.begin():
-            await s.execute(text("update connections set secret_ct=(select secret_ct from connections where id=:a) "
-                                 "where id=:b"), {"a": a, "b": b})
+            await s.execute(
+                text("update connections set secret_ct=(select secret_ct from connections where id=:a) where id=:b"),
+                {"a": a, "b": b},
+            )
         r = await c.post(f"/api/v1/t/{tid}/connections/{b}/verify")
     assert r.status_code == 200
     assert r.json()["status"] == "error" and r.json()["status_detail"] == "secret_unreadable"
+
+
+async def test_rename_to_existing_name_is_a_conflict(app, owner_sessionmaker, api_settings) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    async with c:
+        await c.post(f"/api/v1/t/{tid}/connections", json=BODY)
+        other = (await c.post(f"/api/v1/t/{tid}/connections", json={**BODY, "name": "Other"})).json()["id"]
+        r = await c.patch(f"/api/v1/t/{tid}/connections/{other}", json={"name": "Acme Prod"})
+    assert r.status_code == 409 and r.json() == {"error": "name_taken"}
+
+
+def _paused_mist(release: asyncio.Event, started: asyncio.Event) -> None:
+    async def slow(request: httpx.Request) -> httpx.Response:
+        started.set()
+        await release.wait()  # hold the verification in flight
+        return httpx.Response(200, json={"privileges": [{"scope": "org", "org_id": ORG, "role": "admin"}]})
+
+    respx.get("https://api.eu.mist.com/api/v1/self").mock(side_effect=slow)
+
+
+@respx.mock
+async def test_verification_does_not_certify_credentials_edited_in_flight(
+    app, owner_sessionmaker, api_settings
+) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    started, release = asyncio.Event(), asyncio.Event()
+    _paused_mist(release, started)
+    async with c:
+        cid = (await c.post(f"/api/v1/t/{tid}/connections", json=BODY)).json()["id"]
+        verify = asyncio.create_task(c.post(f"/api/v1/t/{tid}/connections/{cid}/verify"))
+        try:
+            await asyncio.wait_for(started.wait(), 10)  # verification loaded revision 1 and is talking to "Mist"
+            new_secret = {"secret": {"api_token": "tok_" + "b" * 36}}
+            edited = await c.patch(f"/api/v1/t/{tid}/connections/{cid}", json=new_secret)
+        finally:
+            release.set()  # never leave the paused request (and its DB connection) hanging
+            r = await asyncio.wait_for(verify, 10)
+        assert edited.status_code == 200 and edited.json()["revision"] == 2
+        assert r.status_code == 409 and r.json() == {"error": "changed_during_verification"}
+        after = (await c.get(f"/api/v1/t/{tid}/connections/{cid}")).json()
+        actions = [e["action"] for e in (await c.get(f"/api/v1/t/{tid}/audit")).json()]
+    assert after["status"] == "unverified" and after["revision"] == 2  # the edit's state survives
+    assert actions[0] == "connection.verify_discarded"
+
+
+@respx.mock
+async def test_rename_during_verification_keeps_the_result(app, owner_sessionmaker, api_settings) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    started, release = asyncio.Event(), asyncio.Event()
+    _paused_mist(release, started)
+    async with c:
+        cid = (await c.post(f"/api/v1/t/{tid}/connections", json=BODY)).json()["id"]
+        verify = asyncio.create_task(c.post(f"/api/v1/t/{tid}/connections/{cid}/verify"))
+        try:
+            await asyncio.wait_for(started.wait(), 10)
+            await c.patch(f"/api/v1/t/{tid}/connections/{cid}", json={"name": "Renamed"})  # not a credential change
+        finally:
+            release.set()
+            r = await asyncio.wait_for(verify, 10)
+    assert r.status_code == 200 and r.json()["status"] == "ok" and r.json()["name"] == "Renamed"
 ```
 
 - [ ] **Step 6: Implement the service and routes**
@@ -4181,6 +5345,7 @@ from typing import Any
 import httpx
 from cryptography.exceptions import InvalidTag
 from pydantic import BaseModel, SecretStr
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.audit.service import record
@@ -4206,76 +5371,158 @@ def _secret_json(model: BaseModel) -> bytes:
     return json.dumps(data).encode()
 
 
-async def create_connection(s: AsyncSession, keyring: Keyring, ctx: TenantContext, *, type_key: str, name: str,
-                            config: dict[str, Any], secret: dict[str, Any]) -> Connection:
+async def create_connection(
+    s: AsyncSession,
+    keyring: Keyring,
+    ctx: TenantContext,
+    *,
+    type_key: str,
+    name: str,
+    config: dict[str, Any],
+    secret: dict[str, Any],
+) -> Connection:
     ct = _type(type_key)
     cfg, sec = ct.config_model.model_validate(config), ct.secret_model.model_validate(secret)
-    conn = Connection(id=uuid.uuid4(), tenant_id=ctx.tenant_id, type=type_key, name=name,
-                      config=cfg.model_dump(mode="json"), created_by=ctx.user.id)
-    conn.secret_ct = await keyring.encrypt(s, tenant_id=ctx.tenant_id, purpose=PURPOSE, context=str(conn.id),
-                                           plaintext=_secret_json(sec))
+    conn = Connection(
+        id=uuid.uuid4(),
+        tenant_id=ctx.tenant_id,
+        type=type_key,
+        name=name,
+        config=cfg.model_dump(mode="json"),
+        created_by=ctx.user.id,
+    )
+    conn.secret_ct = await keyring.encrypt(
+        s, tenant_id=ctx.tenant_id, purpose=PURPOSE, context=str(conn.id), plaintext=_secret_json(sec)
+    )
     s.add(conn)
     await s.flush()
-    await record(s, tenant_id=ctx.tenant_id, actor_id=ctx.user.id, action="connection.create",
-                 target_type="connection", target_id=str(conn.id), details={"type": type_key, "name": name})
+    await record(
+        s,
+        tenant_id=ctx.tenant_id,
+        actor_id=ctx.user.id,
+        action="connection.create",
+        target_type="connection",
+        target_id=str(conn.id),
+        details={"type": type_key, "name": name},
+    )
     return conn
 
 
-async def update_connection(s: AsyncSession, keyring: Keyring, ctx: TenantContext, conn: Connection, *,
-                            name: str | None, config: dict[str, Any] | None,
-                            secret: dict[str, Any] | None) -> Connection:
-    ct, changed = _type(conn.type), []
+async def update_connection(
+    s: AsyncSession,
+    keyring: Keyring,
+    ctx: TenantContext,
+    conn: Connection,
+    *,
+    name: str | None,
+    config: dict[str, Any] | None,
+    secret: dict[str, Any] | None,
+) -> Connection:
+    ct = _type(conn.type)
+    changed: list[str] = []
     if name is not None:
-        conn.name, changed = name, [*changed, "name"]
+        conn.name = name
+        changed.append("name")
     if config is not None:
-        conn.config, changed = ct.config_model.model_validate(config).model_dump(mode="json"), [*changed, "config"]
+        conn.config = ct.config_model.model_validate(config).model_dump(mode="json")
+        changed.append("config")
     if secret is not None:
-        conn.secret_ct = await keyring.encrypt(s, tenant_id=ctx.tenant_id, purpose=PURPOSE, context=str(conn.id),
-                                               plaintext=_secret_json(ct.secret_model.model_validate(secret)))
+        conn.secret_ct = await keyring.encrypt(
+            s,
+            tenant_id=ctx.tenant_id,
+            purpose=PURPOSE,
+            context=str(conn.id),
+            plaintext=_secret_json(ct.secret_model.model_validate(secret)),
+        )
         changed.append("secret")
     if {"config", "secret"} & set(changed):
         conn.status, conn.status_detail, conn.privilege = "unverified", "", None
+        conn.revision = Connection.revision + 1  # in SQL: concurrent edits can't collapse into one revision
     await s.flush()
-    await record(s, tenant_id=ctx.tenant_id, actor_id=ctx.user.id, action="connection.update",
-                 target_type="connection", target_id=str(conn.id), details={"changed": changed})
+    await s.refresh(conn)  # load the SQL-computed revision (no lazy loads in async code)
+    await record(
+        s,
+        tenant_id=ctx.tenant_id,
+        actor_id=ctx.user.id,
+        action="connection.update",
+        target_type="connection",
+        target_id=str(conn.id),
+        details={"changed": changed},
+    )
     return conn
 
 
 async def delete_connection(s: AsyncSession, ctx: TenantContext, conn: Connection) -> None:
     await s.delete(conn)
-    await record(s, tenant_id=ctx.tenant_id, actor_id=ctx.user.id, action="connection.delete",
-                 target_type="connection", target_id=str(conn.id))
+    await record(
+        s,
+        tenant_id=ctx.tenant_id,
+        actor_id=ctx.user.id,
+        action="connection.delete",
+        target_type="connection",
+        target_id=str(conn.id),
+    )
 
 
 async def load_secret(s: AsyncSession, keyring: Keyring, conn: Connection) -> BaseModel:
-    raw = await keyring.decrypt(s, tenant_id=conn.tenant_id, purpose=PURPOSE, context=str(conn.id),
-                                blob=conn.secret_ct or b"")
+    raw = await keyring.decrypt(
+        s, tenant_id=conn.tenant_id, purpose=PURPOSE, context=str(conn.id), blob=conn.secret_ct or b""
+    )
     return _type(conn.type).secret_model.model_validate_json(raw)
 
 
-async def verify_connection(s: AsyncSession, keyring: Keyring, ctx: TenantContext, conn: Connection,
-                            http: httpx.AsyncClient) -> Connection:
-    ct = _type(conn.type)
+class StaleVerificationError(Exception):
+    """The connection's config or secret changed while it was being verified; the result was discarded."""
+
+
+async def verify_connection(
+    s: AsyncSession, keyring: Keyring, ctx: TenantContext, conn: Connection, http: httpx.AsyncClient
+) -> Connection:
+    """Verify the credentials as loaded, then record the result only if they are still the current revision.
+    Raises StaleVerificationError (after auditing it) when an edit committed while the check was in flight."""
+    ct, loaded_revision = _type(conn.type), conn.revision
     try:
         secret = await load_secret(s, keyring, conn)
     except (InvalidTag, ValueError):
-        conn.status, conn.status_detail, conn.privilege = "error", "secret_unreadable", None
+        status, detail, privilege = "error", "secret_unreadable", None
     else:
         result = await ct.verify(ct.config_model.model_validate(conn.config), secret, http)
-        conn.status = "ok" if result.ok else "error"
-        conn.status_detail, conn.privilege = result.detail, result.privilege
-    conn.last_verified_at = datetime.now(UTC)
-    await s.flush()
-    await record(s, tenant_id=ctx.tenant_id, actor_id=ctx.user.id, action="connection.verify",
-                 target_type="connection", target_id=str(conn.id), details={"status": conn.status})
+        status, detail, privilege = ("ok" if result.ok else "error"), result.detail, result.privilege
+    applied = await s.execute(
+        update(Connection)
+        .where(Connection.id == conn.id, Connection.revision == loaded_revision)
+        .values(status=status, status_detail=detail, privilege=privilege, last_verified_at=datetime.now(UTC))
+        .execution_options(synchronize_session=False)
+    )
+    await s.refresh(conn)  # current row, including concurrent non-credential edits such as a rename
+    stale = getattr(applied, "rowcount", 0) == 0
+    await record(
+        s,
+        tenant_id=ctx.tenant_id,
+        actor_id=ctx.user.id,
+        action="connection.verify_discarded" if stale else "connection.verify",
+        target_type="connection",
+        target_id=str(conn.id),
+        details={"status": status, "verified_revision": loaded_revision},
+    )
+    if stale:
+        raise StaleVerificationError()
     return conn
 
 
 def to_out(conn: Connection) -> dict[str, object]:
-    return {"id": str(conn.id), "type": conn.type, "name": conn.name, "config": conn.config,
-            "secret_set": conn.secret_ct is not None, "status": conn.status, "status_detail": conn.status_detail,
-            "privilege": conn.privilege,
-            "last_verified_at": conn.last_verified_at.isoformat() if conn.last_verified_at else None}
+    return {
+        "id": str(conn.id),
+        "type": conn.type,
+        "name": conn.name,
+        "revision": conn.revision,
+        "config": conn.config,
+        "secret_set": conn.secret_ct is not None,
+        "status": conn.status,
+        "status_detail": conn.status_detail,
+        "privilege": conn.privilege,
+        "last_verified_at": conn.last_verified_at.isoformat() if conn.last_verified_at else None,
+    }
 ```
 `core/connections/service.py` imports `TenantContext` from `dewpoint.core.http`. That's allowed by the import-linter contract, because `core.http` is the one module permitted to import FastAPI and `core.connections` doesn't import FastAPI itself.
 
@@ -4321,12 +5568,17 @@ def _http(request: Request) -> httpx.AsyncClient:
 
 
 def _invalid(exc: ValidationError) -> HTTPException:
-    return HTTPException(422, detail={"error": "invalid", "fields": [".".join(map(str, e["loc"])) for e in exc.errors()]})
+    return HTTPException(
+        422, detail={"error": "invalid", "fields": [".".join(map(str, e["loc"])) for e in exc.errors()]}
+    )
 
 
 async def _get(db: AsyncSession, ctx: TenantContext, connection_id: uuid.UUID) -> Connection:
-    conn = (await db.execute(select(Connection).where(Connection.id == connection_id,
-                                                      Connection.tenant_id == ctx.tenant_id))).scalar_one_or_none()
+    conn = (
+        await db.execute(
+            select(Connection).where(Connection.id == connection_id, Connection.tenant_id == ctx.tenant_id)
+        )
+    ).scalar_one_or_none()
     if conn is None:
         raise HTTPException(404, detail={"error": "not_found"})
     return conn
@@ -4334,24 +5586,37 @@ async def _get(db: AsyncSession, ctx: TenantContext, connection_id: uuid.UUID) -
 
 @router.get("/connection-types", dependencies=[Depends(active_session)])
 async def connection_types() -> list[dict[str, object]]:
-    return [{"key": t.key, "label": t.label, "config_schema": t.config_model.model_json_schema(),
-             "secret_fields": list(t.secret_model.model_fields),
-             **({"clouds": MIST_CLOUDS} if t.key == "mist" else {})} for t in CONNECTION_TYPES.values()]
+    return [
+        {
+            "key": t.key,
+            "label": t.label,
+            "config_schema": t.config_model.model_json_schema(),
+            "secret_fields": list(t.secret_model.model_fields),
+            **({"clouds": MIST_CLOUDS} if t.key == "mist" else {}),
+        }
+        for t in CONNECTION_TYPES.values()
+    ]
 
 
 @router.get("/t/{tenant_id}/connections")
-async def list_connections(ctx: TenantContext = Depends(require(P.CONNECTION_VIEW)),
-                           db: AsyncSession = Depends(get_db)) -> list[dict[str, object]]:
+async def list_connections(
+    ctx: TenantContext = Depends(require(P.CONNECTION_VIEW)), db: AsyncSession = Depends(get_db, scope="function")
+) -> list[dict[str, object]]:
     rows = await db.execute(select(Connection).where(Connection.tenant_id == ctx.tenant_id).order_by(Connection.name))
     return [service.to_out(c) for c in rows.scalars()]
 
 
 @router.post("/t/{tenant_id}/connections", status_code=201)
-async def create(body: CreateIn, ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
-                 db: AsyncSession = Depends(get_db), keyring: Keyring = Depends(get_keyring)) -> dict[str, object]:
+async def create(
+    body: CreateIn,
+    ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+    keyring: Keyring = Depends(get_keyring),
+) -> dict[str, object]:
     try:
-        conn = await service.create_connection(db, keyring, ctx, type_key=body.type, name=body.name,
-                                               config=body.config, secret=body.secret)
+        conn = await service.create_connection(
+            db, keyring, ctx, type_key=body.type, name=body.name, config=body.config, secret=body.secret
+        )
     except service.UnknownTypeError:
         raise HTTPException(422, detail={"error": "unknown_type"}) from None
     except ValidationError as e:
@@ -4362,34 +5627,57 @@ async def create(body: CreateIn, ctx: TenantContext = Depends(require(P.CONNECTI
 
 
 @router.get("/t/{tenant_id}/connections/{connection_id}")
-async def get_one(connection_id: uuid.UUID, ctx: TenantContext = Depends(require(P.CONNECTION_VIEW)),
-                  db: AsyncSession = Depends(get_db)) -> dict[str, object]:
+async def get_one(
+    connection_id: uuid.UUID,
+    ctx: TenantContext = Depends(require(P.CONNECTION_VIEW)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+) -> dict[str, object]:
     return service.to_out(await _get(db, ctx, connection_id))
 
 
 @router.patch("/t/{tenant_id}/connections/{connection_id}")
-async def patch(connection_id: uuid.UUID, body: PatchIn, ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
-                db: AsyncSession = Depends(get_db), keyring: Keyring = Depends(get_keyring)) -> dict[str, object]:
+async def patch(
+    connection_id: uuid.UUID,
+    body: PatchIn,
+    ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+    keyring: Keyring = Depends(get_keyring),
+) -> dict[str, object]:
     conn = await _get(db, ctx, connection_id)
     try:
-        conn = await service.update_connection(db, keyring, ctx, conn, name=body.name, config=body.config,
-                                               secret=body.secret)
+        conn = await service.update_connection(
+            db, keyring, ctx, conn, name=body.name, config=body.config, secret=body.secret
+        )
     except ValidationError as e:
         raise _invalid(e) from None
+    except IntegrityError:
+        raise HTTPException(409, detail={"error": "name_taken"}) from None
     return service.to_out(conn)
 
 
 @router.delete("/t/{tenant_id}/connections/{connection_id}", status_code=204)
-async def delete(connection_id: uuid.UUID, ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
-                 db: AsyncSession = Depends(get_db)) -> Response:
+async def delete(
+    connection_id: uuid.UUID,
+    ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+) -> Response:
     await service.delete_connection(db, ctx, await _get(db, ctx, connection_id))
     return Response(status_code=204)
 
 
 @router.post("/t/{tenant_id}/connections/{connection_id}/verify")
-async def verify(connection_id: uuid.UUID, request: Request, ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
-                 db: AsyncSession = Depends(get_db), keyring: Keyring = Depends(get_keyring)) -> dict[str, object]:
-    conn = await service.verify_connection(db, keyring, ctx, await _get(db, ctx, connection_id), _http(request))
+async def verify(
+    connection_id: uuid.UUID,
+    request: Request,
+    ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+    keyring: Keyring = Depends(get_keyring),
+) -> dict[str, object]:
+    try:
+        conn = await service.verify_connection(db, keyring, ctx, await _get(db, ctx, connection_id), _http(request))
+    except service.StaleVerificationError:
+        await db.commit()  # keep the verify_discarded audit entry
+        raise HTTPException(409, detail={"error": "changed_during_verification"}) from None
     return service.to_out(conn)
 ```
 In `create_app`, add a lifespan that creates `app.state.http = httpx.AsyncClient(timeout=10, follow_redirects=False)` and closes it on shutdown. Then include the router.
@@ -4444,6 +5732,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 {
   "name": "dewpoint-web",
   "private": true,
+  "packageManager": "pnpm@12.6.0",
   "type": "module",
   "license": "Apache-2.0",
   "scripts": {
@@ -4482,23 +5771,24 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     "typescript": "^5.6.3",
     "typescript-eslint": "^8.13.0",
     "vite": "^6.0.0",
-    "vitest": "^2.1.4"
+    "vitest": "^3.2.7"
   }
 }
 ```
-Run: `cd frontend && pnpm install` (this creates `pnpm-lock.yaml`; commit it).
+Run: `cd frontend && npx pnpm@12.6.0 install` (this creates `pnpm-lock.yaml`; commit it). **Don't install pnpm globally.** The shared development machine runs it through `npx` at the version pinned in `packageManager`, and CI uses `pnpm/action-setup`, which reads the same field.
 
 `frontend/vite.config.ts`:
 ```ts
 // SPDX-License-Identifier: Apache-2.0
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: { proxy: { "/api": "http://localhost:8000", "/health": "http://localhost:8000" } },
-  test: { environment: "jsdom", globals: false },
+  build: { sourcemap: false },
+  test: { environment: "jsdom", globals: false, include: ["src/**/*.test.{ts,tsx}"] },
 });
 ```
 Configure `tsconfig.json` with `strict: true`, `noUncheckedIndexedAccess: true`, `jsx: "react-jsx"` and `moduleResolution: "bundler"`. `eslint.config.js` uses `typescript-eslint` recommended-type-checked.
@@ -4559,13 +5849,13 @@ it("shows a generic error and never echoes the password", async () => {
   await userEvent.type(screen.getByTestId("login-email"), "a@corp.test");
   await userEvent.type(screen.getByTestId("login-password"), "hunter2-secret");
   await userEvent.click(screen.getByTestId("login-submit"));
-  expect(await screen.findByRole("alert")).toHaveTextContent("Email or password is incorrect.");
+  expect((await screen.findByRole("alert")).textContent).toBe("Email or password is incorrect.");
   expect(document.body.textContent).not.toContain("hunter2-secret");
   expect(onDone).not.toHaveBeenCalled();
 });
 ```
 
-Run: `pnpm test`
+Run: `npx pnpm@12.6.0 test`
 Expected: FAIL (modules not found)
 
 - [ ] **Step 3: Implement the API client and session**
@@ -4586,7 +5876,12 @@ export function setCsrf(token: string | null): void {
 
 const UNSAFE = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
-export async function api<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
+/** Like api(), but also returns the HTTP status, for callers whose contract depends on it. */
+export async function request<T = unknown>(
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<{ status: number; data: T }> {
   const headers = new Headers({ "X-Dewpoint-Client": "web", Accept: "application/json" });
   if (body !== undefined) headers.set("Content-Type", "application/json");
   if (UNSAFE.has(method) && csrf) headers.set("X-CSRF-Token", csrf);
@@ -4603,7 +5898,11 @@ export async function api<T = unknown>(method: string, path: string, body?: unkn
   }
   const token = (data as { csrf_token?: string } | null)?.csrf_token;
   if (token) setCsrf(token);
-  return data as T;
+  return { status: res.status, data: data as T };
+}
+
+export async function api<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
+  return (await request<T>(method, path, body)).data;
 }
 ```
 
@@ -4643,19 +5942,28 @@ export function useSession() {
 import { startAuthentication, startRegistration } from "@simplewebauthn/browser";
 import { api } from "./api";
 
-interface Options { options: never; challenge_id: string }
+type CreationOptions = Parameters<typeof startRegistration>[0]["optionsJSON"];
+type RequestOptions = Parameters<typeof startAuthentication>[0]["optionsJSON"];
 const BASE = "/api/v1/auth/passkeys";
-
-export async function registerPasskey(name = "Passkey"): Promise<{ state: string }> {
-  const o = await api<Options>("POST", `${BASE}/register/options`);
-  const credential = await startRegistration({ optionsJSON: o.options });
-  return api("POST", `${BASE}/register/verify`, { challenge_id: o.challenge_id, credential, name });
+interface Challenge<T> {
+  options: T;
+  challenge_id: string;
+}
+interface Verified {
+  state: string;
+  csrf_token: string;
 }
 
-export async function authenticatePasskey(kind: "login" | "mfa" | "stepup"): Promise<{ state: string }> {
-  const o = await api<Options>("POST", `${BASE}/${kind}/options`);
+export async function registerPasskey(name = "Passkey"): Promise<Verified> {
+  const o = await api<Challenge<CreationOptions>>("POST", `${BASE}/register/options`);
+  const credential = await startRegistration({ optionsJSON: o.options });
+  return api<Verified>("POST", `${BASE}/register/verify`, { challenge_id: o.challenge_id, credential, name });
+}
+
+export async function authenticatePasskey(kind: "login" | "mfa" | "stepup"): Promise<Verified> {
+  const o = await api<Challenge<RequestOptions>>("POST", `${BASE}/${kind}/options`);
   const credential = await startAuthentication({ optionsJSON: o.options });
-  return api("POST", `${BASE}/${kind}/verify`, { challenge_id: o.challenge_id, credential });
+  return api<Verified>("POST", `${BASE}/${kind}/verify`, { challenge_id: o.challenge_id, credential });
 }
 ```
 
@@ -4848,7 +6156,7 @@ In `router.tsx`, define `navigateByState(state)`, mapping `mfa_pending` → `/mf
 
 `src/routes/Tenants.tsx`: lists `GET /api/v1/tenants` as rows with name, slug (mono) and role. For platform admins, it adds a "Create tenant" form (`tenant-name`, `tenant-slug`, `tenant-create`) posting to `/api/v1/tenants`, and shows server errors (`slug_taken` → "That slug is already used.").
 
-`src/routes/Security.tsx`: shows the auth methods in use for this session, an "Add a passkey" button (`passkey-add`, name prompt defaulting to "Passkey") calling `registerPasskey`, "Set up authenticator app" (reusing the Enroll step-1 TOTP subcomponent, exported from `Enroll.tsx` as `TotpSetup`), and a change-password form posting `/api/v1/auth/password`.
+`src/routes/Security.tsx`: when an action returns 403 `reauth_required`, it prompts for a TOTP code (`POST /api/v1/auth/mfa/totp/reauth`) or a passkey (`authenticatePasskey("stepup")`), then retries. The change-password response carries the new `csrf_token`, which `api()` picks up automatically. The page shows the auth methods in use for this session, an "Add a passkey" button (`passkey-add`, name prompt defaulting to "Passkey") calling `registerPasskey`, "Set up authenticator app" (reusing the Enroll step-1 TOTP subcomponent, exported from `Enroll.tsx` as `TotpSetup`), and a change-password form posting `/api/v1/auth/password`.
 
 `src/routes/Connections.tsx`:
 ```tsx
@@ -4861,7 +6169,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import { ApiError, api } from "../lib/api";
 
 interface Conn {
-  id: string; type: string; name: string; config: { cloud: string; org_id: string };
+  id: string; type: string; name: string; revision: number; config: { cloud: string; org_id: string };
   secret_set: boolean; status: "ok" | "error" | "unverified"; status_detail: string; privilege: string | null;
 }
 interface ConnType { key: string; label: string; clouds?: Record<string, string> }
@@ -4891,7 +6199,20 @@ export function ConnectionsPage({ tenantId }: { tenantId: string }) {
       : e instanceof ApiError && e.status === 403 ? "You don't have permission to manage connections."
       : "Check the fields and try again."),
   });
-  const verify = useMutation({ mutationFn: (id: string) => api<Conn>("POST", `${base}/${id}/verify`), onSuccess: refresh });
+  const [verifyError, setVerifyError] = useState<string | null>(null);
+  const verify = useMutation({
+    mutationFn: (id: string) => api<Conn>("POST", `${base}/${id}/verify`),
+    onMutate: () => setVerifyError(null),
+    onSuccess: refresh,
+    onError: async (e) => {
+      setVerifyError(
+        e instanceof ApiError && e.code === "changed_during_verification"
+          ? "The connection was edited while it was being verified. The result was discarded; verify again."
+          : "Verification could not be completed.",
+      );
+      await refresh();
+    },
+  });
 
   return (
     <section className="flex flex-col gap-4 p-6">
@@ -4899,6 +6220,7 @@ export function ConnectionsPage({ tenantId }: { tenantId: string }) {
         <h1 className="text-xl font-semibold">Connections</h1>
         <Button variant="primary" onClick={() => setOpen(true)} data-testid="conn-add">Add Mist connection</Button>
       </header>
+      {verifyError && <p role="alert" className="text-sm text-danger">{verifyError}</p>}
       <table className="w-full border-collapse rounded-lg border border-line bg-surface text-sm">
         <thead className="bg-surface-2 text-left text-muted">
           <tr><th className="p-3">Name</th><th className="p-3">Cloud</th><th className="p-3">Org ID</th>
@@ -4953,9 +6275,25 @@ export function ConnectionsPage({ tenantId }: { tenantId: string }) {
 
 Authenticated routes render inside `Shell`. `/t/$tenantId/connections` passes `tenantId` to `ConnectionsPage`. On 403 `step_up_required` (from any query), it shows an inline banner, "This tenant requires a passkey," with a button calling `authenticatePasskey("stepup")` and then invalidating all queries.
 
+**Sign-out:** `lib/signOut.ts` (tested in `signOut.test.ts`) reports success only on exactly 204, checked through `request()`, which returns the status; any other 2xx counts as a failure. A 401 also counts as signed out, because the session is already invalid. It refreshes a stale CSRF token from `/auth/session` once and retries. On any other failure, including a network error, the shell keeps the user on the page and shows an error, because the server session may still be valid.
+
+**As built:** the screens described in prose above are implemented in `frontend/src/`:
+- `components/{StatusBadge,TenantSwitcher,Shell}.tsx`
+- `routes/{Mfa,Enroll,Tenants,Security}.tsx`
+- `router.tsx`, `main.tsx`
+- `lib/{events,reauth,useAfterAuth}.ts`: the step-up signal, the `reauth_required` check, and routing by session state
+
+`TotpSetup` takes an `onReauth(retry)` callback, and Security's `ReauthPrompt` re-proves a factor and then retries the action. Tooling changes found during implementation:
+- `vitest ^3.2.7`, because vitest 2 pins Vite 5 and clashes with Vite 6 types;
+- `pnpm-workspace.yaml` with `allowBuilds: { esbuild: true }`, since pnpm 12 blocks dependency build scripts unless they are approved one package at a time;
+- the ESLint config allows its own JS file and disables type-aware rules for `*.js`;
+- the Login test asserts `textContent` rather than adding `@testing-library/jest-dom`.
+
+The backend `GET /api/v1/auth/passkeys` (moved here from Task 14, because the Security page needs it) returns `[{id,name,created_at,last_used_at}]` for the active session. It's tested in `test_passkey_routes.py::test_list_own_passkeys_without_key_material`.
+
 - [ ] **Step 7: Run the checks**
 
-Run: `cd frontend && pnpm lint && pnpm typecheck && pnpm test && pnpm build`
+Run: `cd frontend && P='npx pnpm@12.6.0' && $P lint && $P typecheck && $P test && $P build`
 Expected: all pass. `dist/` builds.
 
 - [ ] **Step 8: Add CI for the frontend**
@@ -4967,8 +6305,8 @@ Append this to `.github/workflows/ci.yml`:
     defaults: { run: { working-directory: frontend } }
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with: { version: 9 }
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4  (version comes from package.json "packageManager")
+        with: { package_json_file: frontend/package.json }
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: pnpm, cache-dependency-path: frontend/pnpm-lock.yaml }
       - run: pnpm install --frozen-lockfile
@@ -5052,21 +6390,29 @@ Expected: PASS
 `deploy/docker/app.Dockerfile`:
 ```dockerfile
 # SPDX-License-Identifier: Apache-2.0
-FROM ghcr.io/astral-sh/uv:0.5-python3.12-bookworm-slim AS build
-WORKDIR /src
+# Base image note: no distroless image ships Python >= 3.12 on a supported Debian yet; this is slim, non-root,
+# without build tools, and meant to run with a read-only root filesystem. Revisit for distroless.
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS build
+WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 COPY backend/pyproject.toml backend/uv.lock ./
 RUN uv sync --locked --no-dev --no-install-project
 COPY backend/ ./
-RUN uv sync --locked --no-dev
+RUN uv sync --locked --no-dev --no-editable
 
 FROM python:3.12-slim-bookworm
+# Pick up Debian security fixes published after the base image was built.
+RUN apt-get update && apt-get -y upgrade --no-install-recommends && rm -rf /var/lib/apt/lists/*
 RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin dewpoint
+# Mount point for the evaluation anchor volume; a new named volume inherits this ownership.
+RUN mkdir /anchors && chown 10001:10001 /anchors
 WORKDIR /app
-COPY --from=build --chown=10001:10001 /src /app
+COPY --from=build --chown=10001:10001 /app /app
 ENV PATH="/app/.venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 USER 10001
 EXPOSE 8000
+# --forwarded-allow-ips "*" is acceptable ONLY because `api` is not published and is reachable solely through `web`
+# on the internal network. The Helm chart (sub-project 4) sets the exact proxy CIDRs.
 CMD ["uvicorn", "dewpoint.apps.api.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", \
      "--proxy-headers", "--forwarded-allow-ips", "*"]
 ```
@@ -5079,22 +6425,88 @@ server {
   server_tokens off;
   root /usr/share/nginx/html;
   client_max_body_size 6m;
-
-  add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'" always;
-  add_header X-Content-Type-Options nosniff always;
-  add_header Referrer-Policy no-referrer always;
-  add_header X-Frame-Options DENY always;
+  # Trusted-proxy client IP recovery (generated at startup from DEWPOINT_TRUSTED_PROXIES).
+  include /tmp/nginx-real-ip.conf;
+  # Re-resolve the api service through Docker's DNS: a static upstream keeps a dead container IP after the api
+  # is restarted or redeployed (502 until web restarts). A variable in proxy_pass forces per-TTL resolution.
+  resolver 127.0.0.11 valid=10s ipv6=off;
+  set $api http://api:8000;
 
   location /api/ {
-    proxy_pass http://api:8000;
+    proxy_pass $api;
     proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $remote_addr;   # overwrite, never append client-supplied values
+    proxy_set_header X-Forwarded-For $remote_addr;   # the recovered client IP; never forward client-supplied values
     proxy_set_header X-Forwarded-Proto $scheme;
   }
-  location /health/ { proxy_pass http://api:8000; }
-  location /assets/ { expires 1y; add_header Cache-Control "public, immutable"; try_files $uri =404; }
-  location / { add_header Cache-Control "no-store" always; try_files $uri /index.html; }
+  location /health/ { proxy_pass $api; }
+  location /assets/ {
+    include /etc/nginx/snippets/security-headers.conf;
+    add_header Cache-Control "public, immutable" always;
+    expires 1y;
+    try_files $uri =404;
+  }
+  location / {
+    include /etc/nginx/snippets/security-headers.conf;
+    add_header Cache-Control "no-store" always;
+    try_files $uri /index.html;
+  }
 }
+```
+
+`deploy/docker/security-headers.conf` (included by the static locations; nginx ignores server-level `add_header` in any location that sets its own):
+```nginx
+# Included by every static location. nginx drops server-level add_header in any location that
+# declares its own add_header, so these can't live at server level. /api responses carry the
+# same headers from the API itself.
+add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'" always;
+add_header X-Content-Type-Options nosniff always;
+add_header Referrer-Policy no-referrer always;
+add_header X-Frame-Options DENY always;
+```
+
+`deploy/docker/40-dewpoint-real-ip.sh` (runs at container start; turns `DEWPOINT_TRUSTED_PROXIES` into `set_real_ip_from` entries with `real_ip_recursive`; validates every entry and writes the include only once all pass, so a bad value stops the container instead of trusting the wrong peers):
+```bash
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Recover the real client IP when Dewpoint runs behind a TLS proxy / load balancer.
+#
+# DEWPOINT_TRUSTED_PROXIES: space- or comma-separated IPs/CIDRs of the proxies in front of this container.
+#   Empty (default): X-Forwarded-For from clients is ignored; the TCP peer is the client.
+#   Set: nginx walks X-Forwarded-For from the right, skipping trusted hops (real_ip_recursive), so a client
+#        can't spoof its address by prepending entries.
+# Every entry is validated; an invalid one aborts startup, and the config file is only written once all pass
+# (nginx refuses to start without it), so a bad value can never silently trust the wrong peers.
+set -eu
+
+out=/tmp/nginx-real-ip.conf
+tmp="${out}.new"
+proxies=$(printf '%s' "${DEWPOINT_TRUSTED_PROXIES:-}" | tr ',' ' ')
+
+ipv4='^([0-9]{1,3}\.){3}[0-9]{1,3}(/([0-9]|[12][0-9]|3[0-2]))?$'
+ipv6='^[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*(/([0-9]|[1-9][0-9]|1[01][0-9]|12[0-8]))?$'
+
+{
+  echo "# generated by 40-dewpoint-real-ip.sh"
+  if [ -n "${proxies}" ]; then
+    echo "real_ip_header X-Forwarded-For;"
+    echo "real_ip_recursive on;"
+  fi
+} > "${tmp}"
+
+for p in ${proxies}; do
+  if printf '%s' "${p}" | grep -Eq "${ipv4}"; then
+    for octet in $(printf '%s' "${p%%/*}" | tr '.' ' '); do
+      [ "${octet}" -le 255 ] || { echo "dewpoint: invalid DEWPOINT_TRUSTED_PROXIES entry: ${p}" >&2; exit 1; }
+    done
+  elif ! printf '%s' "${p}" | grep -Eq "${ipv6}"; then
+    echo "dewpoint: invalid DEWPOINT_TRUSTED_PROXIES entry: ${p}" >&2
+    exit 1
+  fi
+  echo "set_real_ip_from ${p};" >> "${tmp}"
+done
+
+mv "${tmp}" "${out}"
+echo "dewpoint: trusted proxies: ${proxies:-none (clients' X-Forwarded-For ignored)}"
 ```
 
 `deploy/docker/web.Dockerfile`:
@@ -5102,14 +6514,22 @@ server {
 # SPDX-License-Identifier: Apache-2.0
 FROM node:22-bookworm-slim AS build
 WORKDIR /src
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable
-COPY frontend/package.json frontend/pnpm-lock.yaml ./
+# pnpm-workspace.yaml carries the build-script allowlist (esbuild only); pnpm 12 refuses others.
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 COPY frontend/ ./
 RUN pnpm build
 
-FROM nginxinc/nginx-unprivileged:1.27-alpine
+FROM nginxinc/nginx-unprivileged:1.30-alpine
+# Pick up Alpine security fixes published after the base image was built, then drop back to the nginx user.
+USER root
+RUN apk upgrade --no-cache
+USER 101
 COPY deploy/docker/nginx.conf /etc/nginx/conf.d/default.conf
+COPY deploy/docker/security-headers.conf /etc/nginx/snippets/security-headers.conf
+COPY --chmod=0755 deploy/docker/40-dewpoint-real-ip.sh /docker-entrypoint.d/40-dewpoint-real-ip.sh
 COPY --from=build /src/dist /usr/share/nginx/html
 EXPOSE 8080
 ```
@@ -5137,77 +6557,66 @@ SQL
 
 `deploy/compose/docker-compose.yml`:
 ```yaml
-# SPDX-License-Identifier: Apache-2.0
-name: dewpoint
-x-app: &app
-  image: ${DEWPOINT_APP_IMAGE:-dewpoint-app:dev}
-  build: { context: ../.., dockerfile: deploy/docker/app.Dockerfile }
-  read_only: true
-  tmpfs: [/tmp]
-  security_opt: ["no-new-privileges:true"]
-  cap_drop: [ALL]
-  environment: &appenv
-    DEWPOINT_KEK_B64: ${DEWPOINT_KEK_B64:?set in .env}
-    DEWPOINT_PUBLIC_ORIGIN: ${DEWPOINT_PUBLIC_ORIGIN:-http://localhost:8080}
-    DEWPOINT_RP_ID: ${DEWPOINT_RP_ID:-localhost}
-
-services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: dewpoint
-      POSTGRES_USER: dewpoint_owner
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
-      DEWPOINT_API_DB_PASSWORD: ${DEWPOINT_API_DB_PASSWORD:?set in .env}
-      DEWPOINT_ADMIN_DB_PASSWORD: ${DEWPOINT_ADMIN_DB_PASSWORD:?set in .env}
-      DEWPOINT_AUDITOR_DB_PASSWORD: ${DEWPOINT_AUDITOR_DB_PASSWORD:?set in .env}
-    volumes: [pgdata:/var/lib/postgresql/data, ./initdb:/docker-entrypoint-initdb.d:ro]
-    healthcheck: { test: ["CMD-SHELL", "pg_isready -U dewpoint_owner -d dewpoint"], interval: 5s, retries: 20 }
-
-  migrate:
-    <<: *app
-    command: ["alembic", "upgrade", "head"]
-    environment:
-      <<: *appenv
-      DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_owner:${POSTGRES_PASSWORD}@postgres/dewpoint
-    depends_on: { postgres: { condition: service_healthy } }
-    restart: "no"
-
-  api:
-    <<: *app
-    environment:
-      <<: *appenv
-      DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_api_login:${DEWPOINT_API_DB_PASSWORD}@postgres/dewpoint
-    depends_on: { migrate: { condition: service_completed_successfully } }
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/ready').status==200 else 1)"]
-      interval: 5s
-      retries: 20
-
-  audit-anchor:
-    <<: *app
-    # Anchors belong OFF this host in production (object lock / SIEM). This volume is for evaluation only.
-    command: ["sh", "-c", "while true; do dewpoint audit anchor; sleep 900; done"]
-    environment:
-      <<: *appenv
-      DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_auditor_login:${DEWPOINT_AUDITOR_DB_PASSWORD}@postgres/dewpoint
-      DEWPOINT_AUDIT_SIGNING_KEY_B64: ${DEWPOINT_AUDIT_SIGNING_KEY_B64:?set in .env}
-      DEWPOINT_AUDIT_ANCHOR_PATH: /anchors/anchors.jsonl
-    volumes: [anchors:/anchors]
-    depends_on: { migrate: { condition: service_completed_successfully } }
-
-  web:
-    image: ${DEWPOINT_WEB_IMAGE:-dewpoint-web:dev}
-    build: { context: ../.., dockerfile: deploy/docker/web.Dockerfile }
-    read_only: true
-    tmpfs: [/tmp, /var/cache/nginx]
-    cap_drop: [ALL]
-    ports: ["127.0.0.1:8080:8080"]
-    depends_on: { api: { condition: service_healthy } }
-
-volumes: { pgdata: {}, anchors: {} }
+name: release
+on:
+  push: { tags: ["v*"] }
+  # Dry run on changes to the release path: build + scan locally, no login/push/sign.
+  pull_request: { paths: [".github/workflows/release.yml", "deploy/docker/**"] }
+permissions: { contents: read, packages: write, id-token: write, attestations: write }
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    strategy: { fail-fast: false, matrix: { image: [app, web] } }  # always report both images
+    env:
+      RELEASE: ${{ github.event_name == 'push' }}
+    steps:
+      - uses: actions/checkout@v4
+      # Registry repository names must be lowercase; the owner (e.g. "tmunzer-AIDE") may not be.
+      - id: image
+        run: |
+          owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          echo "ref=ghcr.io/${owner}/dewpoint-${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+          echo "tag=${{ github.event_name == 'push' && github.ref_name || 'dryrun' }}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - if: env.RELEASE == 'true'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      - id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/docker/${{ matrix.image }}.Dockerfile
+          tags: ${{ steps.image.outputs.ref }}:${{ steps.image.outputs.tag }}
+          push: ${{ env.RELEASE == 'true' }}
+          load: ${{ env.RELEASE != 'true' }}
+          # Attestations need a registry push; the local docker exporter can't store them.
+          provenance: ${{ env.RELEASE == 'true' && 'mode=max' || 'false' }}
+          sbom: ${{ env.RELEASE == 'true' }}
+      - if: env.RELEASE == 'true'
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ${{ steps.image.outputs.ref }}@${{ steps.build.outputs.digest }}
+          format: cyclonedx-json
+          output-file: sbom-${{ matrix.image }}.cdx.json
+      - if: env.RELEASE == 'true'
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - if: env.RELEASE == 'true'
+        run: cosign sign --yes "${{ steps.image.outputs.ref }}@${{ steps.build.outputs.digest }}"
+      - if: env.RELEASE == 'true'
+        run: >-
+          cosign attest --yes --type cyclonedx --predicate "sbom-${{ matrix.image }}.cdx.json"
+          "${{ steps.image.outputs.ref }}@${{ steps.build.outputs.digest }}"
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: >-
+            ${{ env.RELEASE == 'true'
+              && format('{0}@{1}', steps.image.outputs.ref, steps.build.outputs.digest)
+              || format('{0}:{1}', steps.image.outputs.ref, steps.image.outputs.tag) }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true  # fail on vulnerabilities that have a fix available
+          exit-code: "1"
 ```
-The `anchors` volume must be writable by UID 10001. Add `user: "10001"` to `audit-anchor`, and in the README note: `docker compose run --rm --user root audit-anchor chown 10001 /anchors` on first start.
+The `anchors` volume must be writable by UID 10001. The app image creates `/anchors` owned by 10001, and a new named volume inherits that ownership, so no manual `chown` is needed.
 
 `deploy/compose/.env.example`:
 ```bash
@@ -5220,6 +6629,9 @@ DEWPOINT_KEK_B64=             # openssl rand -base64 32
 DEWPOINT_AUDIT_SIGNING_KEY_B64=  # python -c "import base64,os;print(base64.b64encode(os.urandom(32)).decode())"
 DEWPOINT_PUBLIC_ORIGIN=http://localhost:8080
 DEWPOINT_RP_ID=localhost
+# IPs/CIDRs of the TLS proxy in front of `web`, space- or comma-separated. Leave empty without a proxy;
+# otherwise every client shares the proxy's per-IP rate limits.
+DEWPOINT_TRUSTED_PROXIES=
 ```
 **Non-localhost deployments:** `__Host-` cookies and WebAuthn require HTTPS outside `localhost`. Terminate TLS in front of `web` and set `DEWPOINT_PUBLIC_ORIGIN=https://…` and `DEWPOINT_RP_ID` to the hostname. Write this in the README quick start.
 
@@ -5312,6 +6724,7 @@ test.describe.serial("foundations", () => {
     await expect(page).toHaveURL(/\/mfa/);
     await page.getByTestId("totp-code").fill(code(totpSecret, 30)); // next step: the current one was consumed
     await page.getByTestId("totp-submit").click();
+    await expect(page).toHaveURL(/\/tenants/); // wait: the MFA response rotates the session cookie
     await page.goto("/account/security");
     page.once("dialog", (d) => void d.accept("E2E key"));
     await page.getByTestId("passkey-add").click();
@@ -5324,11 +6737,11 @@ test.describe.serial("foundations", () => {
   });
 });
 ```
-`Security.tsx` must list the user's registered passkeys by name for the `E2E key` assertion. Add the backend endpoint `GET /api/v1/auth/passkeys` → `[{id, name, created_at, last_used_at}]` (active session) to `routes/passkeys.py`, with a test in `test_passkey_routes.py` asserting that the registered name `laptop` is listed and that no `public_key` or `credential_id` fields appear.
+`Security.tsx` lists the user's passkeys by name, which the `E2E key` assertion relies on. The backend `GET /api/v1/auth/passkeys` was built in Task 13.
 
 - [ ] **Step 6: Run the end-to-end tests locally**
 
-Run: `cd frontend && pnpm exec playwright install chromium && pnpm e2e`
+Run: `cd frontend && npx pnpm@12.6.0 exec playwright install chromium && npx pnpm@12.6.0 e2e`
 Expected: 2 passed. (Reset the stack with `docker compose down -v` before re-running, because enrollment happens once per fresh admin.)
 
 - [ ] **Step 7: CI end-to-end job and signed releases**
@@ -5358,8 +6771,8 @@ Append to `.github/workflows/ci.yml`:
           docker compose run --rm -e DEWPOINT_INIT_PASSWORD=violet-otter-canyon-42 \
             -e DEWPOINT_DATABASE_URL="postgresql+asyncpg://dewpoint_api_login:${DEWPOINT_API_DB_PASSWORD}@postgres/dewpoint" \
             api dewpoint admin init --email admin@example.com
-      - uses: pnpm/action-setup@v4
-        with: { version: 9 }
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4  (version comes from package.json "packageManager")
+        with: { package_json_file: frontend/package.json }
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: pnpm, cache-dependency-path: frontend/pnpm-lock.yaml }
       - working-directory: frontend
@@ -5372,41 +6785,65 @@ Append to `.github/workflows/ci.yml`:
         with: { name: e2e-debug, path: "frontend/playwright-report\ndeploy/compose/compose.log" }
 ```
 
-`.github/workflows/release.yml` (on tags `v*`):
+`.github/workflows/release.yml` (on tags `v*`; a dry run on PRs that touch the release path: build, load and scan locally, with no push or signing; image references lowercased because registries reject an uppercase owner):
 ```yaml
 name: release
-on: { push: { tags: ["v*"] } }
+on:
+  push: { tags: ["v*"] }
+  # Dry run on changes to the release path: build + scan locally, no login/push/sign.
+  pull_request: { paths: [".github/workflows/release.yml", "deploy/docker/**"] }
 permissions: { contents: read, packages: write, id-token: write, attestations: write }
 jobs:
   images:
     runs-on: ubuntu-latest
     strategy: { matrix: { image: [app, web] } }
+    env:
+      RELEASE: ${{ github.event_name == 'push' }}
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      # Registry repository names must be lowercase; the owner (e.g. "tmunzer-AIDE") may not be.
+      - id: image
+        run: |
+          owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          echo "ref=ghcr.io/${owner}/dewpoint-${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+          echo "tag=${{ github.event_name == 'push' && github.ref_name || 'dryrun' }}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - if: env.RELEASE == 'true'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
       - id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: deploy/docker/${{ matrix.image }}.Dockerfile
-          push: true
-          tags: ghcr.io/${{ github.repository_owner }}/dewpoint-${{ matrix.image }}:${{ github.ref_name }}
-          provenance: mode=max
-          sbom: true
-      - uses: anchore/sbom-action@v0
+          tags: ${{ steps.image.outputs.ref }}:${{ steps.image.outputs.tag }}
+          push: ${{ env.RELEASE == 'true' }}
+          load: ${{ env.RELEASE != 'true' }}
+          # Attestations need a registry push; the local docker exporter can't store them.
+          provenance: ${{ env.RELEASE == 'true' && 'mode=max' || 'false' }}
+          sbom: ${{ env.RELEASE == 'true' }}
+      - if: env.RELEASE == 'true'
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
-          image: ghcr.io/${{ github.repository_owner }}/dewpoint-${{ matrix.image }}@${{ steps.build.outputs.digest }}
+          image: ${{ steps.image.outputs.ref }}@${{ steps.build.outputs.digest }}
           format: cyclonedx-json
           output-file: sbom-${{ matrix.image }}.cdx.json
-      - uses: sigstore/cosign-installer@v3
-      - run: cosign sign --yes ghcr.io/${{ github.repository_owner }}/dewpoint-${{ matrix.image }}@${{ steps.build.outputs.digest }}
-      - run: cosign attest --yes --type cyclonedx --predicate sbom-${{ matrix.image }}.cdx.json ghcr.io/${{ github.repository_owner }}/dewpoint-${{ matrix.image }}@${{ steps.build.outputs.digest }}
-      - uses: aquasecurity/trivy-action@0.28.0
+      - if: env.RELEASE == 'true'
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - if: env.RELEASE == 'true'
+        run: cosign sign --yes "${{ steps.image.outputs.ref }}@${{ steps.build.outputs.digest }}"
+      - if: env.RELEASE == 'true'
+        run: >-
+          cosign attest --yes --type cyclonedx --predicate "sbom-${{ matrix.image }}.cdx.json"
+          "${{ steps.image.outputs.ref }}@${{ steps.build.outputs.digest }}"
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ghcr.io/${{ github.repository_owner }}/dewpoint-${{ matrix.image }}@${{ steps.build.outputs.digest }}
+          image-ref: >-
+            ${{ env.RELEASE == 'true'
+              && format('{0}@{1}', steps.image.outputs.ref, steps.build.outputs.digest)
+              || format('{0}:{1}', steps.image.outputs.ref, steps.image.outputs.tag) }}
           severity: HIGH,CRITICAL
+          ignore-unfixed: true  # fail on vulnerabilities that have a fix available
           exit-code: "1"
 ```
 
@@ -5426,7 +6863,7 @@ Add to `README.md`:
 Run:
 ```bash
 cd backend && uv run ruff check . && uv run mypy src && uv run lint-imports && uv run pytest -q
-cd ../frontend && pnpm lint && pnpm typecheck && pnpm test
+cd ../frontend && npx pnpm@12.6.0 lint && npx pnpm@12.6.0 typecheck && npx pnpm@12.6.0 test
 ```
 Expected: all green. The end-to-end run from Step 6 has passed.
 
@@ -5490,12 +6927,44 @@ def test_status_rewrap_and_rotate(pg_url, monkeypatch) -> None:
     _env(monkeypatch, pg_url, DEWPOINT_KEK_B64=NEW, DEWPOINT_KEK_ID="new")  # misconfigured: old key dropped too early
     assert r.invoke(app, ["keys", "status"]).exit_code == 3
 
-    _env(monkeypatch, pg_url, DEWPOINT_KEK_B64=NEW, DEWPOINT_KEK_ID="new",
-         DEWPOINT_KEK_PREVIOUS_B64=OLD, DEWPOINT_KEK_PREVIOUS_ID="old")
+    _env(
+        monkeypatch,
+        pg_url,
+        DEWPOINT_KEK_B64=NEW,
+        DEWPOINT_KEK_ID="new",
+        DEWPOINT_KEK_PREVIOUS_B64=OLD,
+        DEWPOINT_KEK_PREVIOUS_ID="old",
+    )
     out = r.invoke(app, ["keys", "rewrap", "--batch-size", "1"])
     assert out.exit_code == 0 and "rewrapped 2" in out.output
     status = r.invoke(app, ["keys", "status"])
     assert status.exit_code == 0 and "new=2" in status.output and "old=" not in status.output
+
+
+def test_key_commands_work_as_the_admin_role(pg_url, _test_users, monkeypatch) -> None:
+    """Production runs these as dewpoint_admin: RLS key-admin policy on data_keys + grants on platform_keys."""
+    from tests.conftest import _url_for
+
+    admin = _url_for(pg_url, "dewpoint_admin")
+    r = CliRunner()
+    _env(monkeypatch, admin, DEWPOINT_KEK_B64=OLD, DEWPOINT_KEK_ID="old")
+    t1, t2 = str(uuid.uuid4()), str(uuid.uuid4())
+    for args in (["--tenant", t1], ["--tenant", t2], ["--platform"]):
+        out = r.invoke(app, ["keys", "rotate-dek", *args])
+        assert out.exit_code == 0 and "version: 2" in out.output, out.output
+    assert "old=6" in r.invoke(app, ["keys", "status"]).output  # tenant keys from two tenants + platform
+
+    _env(
+        monkeypatch,
+        admin,
+        DEWPOINT_KEK_B64=NEW,
+        DEWPOINT_KEK_ID="new",
+        DEWPOINT_KEK_PREVIOUS_B64=OLD,
+        DEWPOINT_KEK_PREVIOUS_ID="old",
+    )
+    assert "rewrapped 6" in r.invoke(app, ["keys", "rewrap", "--batch-size", "4"]).output
+    assert r.invoke(app, ["keys", "status"]).output.strip() == "new=6"
+    assert r.invoke(app, ["keys", "rotate-dek", "--tenant", "not-a-uuid"]).exit_code == 2
 ```
 `rotate-dek` on a scope with no key yet creates version 1 through `_active()` and then rotates to 2. That's intended, and the test relies on it.
 
@@ -5506,19 +6975,120 @@ Expected: FAIL (`No such command 'keys'`)
 
 - [ ] **Step 3: Implement the commands**
 
-Append to `apps/cli/main.py`:
+The full `apps/cli/main.py` after this task (module-level imports, and a typed `_in_session` helper instead of the draft's inline imports). It is also tested as the `dewpoint_admin` role in `test_key_commands_work_as_the_admin_role`: tenant and platform keys, batched rewrap, and a rejected invalid tenant id:
 ```python
+# SPDX-License-Identifier: Apache-2.0
+import asyncio
+import base64
+import os
+import uuid
+from collections.abc import Awaitable, Callable
+from pathlib import Path
+
+import typer
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from dewpoint.core.audit.anchor import FileAnchorSink, anchor_all, verify_anchors
+from dewpoint.core.auth.users import PasswordPolicyError, create_user
+from dewpoint.core.config import get_settings
+from dewpoint.core.crypto.kek import KekSet, UnknownKekError
+from dewpoint.core.crypto.keyring import Keyring
+from dewpoint.core.db import make_engine, make_sessionmaker
+from dewpoint.core.models.identity import User
+
+app = typer.Typer(no_args_is_help=True)
+admin = typer.Typer(no_args_is_help=True)
+app.add_typer(admin, name="admin")
+audit = typer.Typer(no_args_is_help=True)
+app.add_typer(audit, name="audit")
 keys = typer.Typer(no_args_is_help=True)
 app.add_typer(keys, name="keys")
 
 
-def _keyring() -> "Keyring":
-    from dewpoint.core.crypto.kek import KekSet
-    from dewpoint.core.crypto.keyring import Keyring
-    return Keyring(KekSet.from_settings(get_settings()))
+async def _init(email: str, password: str) -> None:
+    engine = make_engine(get_settings().database_url)
+    try:
+        async with make_sessionmaker(engine)() as s, s.begin():
+            if (await s.execute(select(User.id).where(User.is_platform_admin.is_(True)).limit(1))).first():
+                typer.echo("already initialized: a platform admin exists")
+                raise typer.Exit(1)
+            await create_user(s, email=email, password=password, platform_admin=True)
+    finally:
+        await engine.dispose()
 
 
-async def _with_session(fn):  # type: ignore[no-untyped-def]
+@admin.command("init")
+def admin_init(email: str = typer.Option(...)) -> None:
+    """Create the first platform admin. Refuses if one already exists."""
+    password = os.environ.get("DEWPOINT_INIT_PASSWORD") or typer.prompt(
+        "Password", hide_input=True, confirmation_prompt=True
+    )
+    try:
+        asyncio.run(_init(email, password))
+    except PasswordPolicyError as e:
+        typer.echo(f"password rejected: {', '.join(e.violations)}")
+        raise typer.Exit(2) from None
+    typer.echo(f"platform admin {email} created. Sign in to enroll MFA.")
+
+
+def _signing_key() -> Ed25519PrivateKey:
+    raw = get_settings().audit_signing_key_b64
+    if not raw:
+        typer.echo("DEWPOINT_AUDIT_SIGNING_KEY_B64 is not set")
+        raise typer.Exit(2)
+    return Ed25519PrivateKey.from_private_bytes(base64.b64decode(raw))
+
+
+def _anchor_path() -> Path:
+    path = get_settings().audit_anchor_path
+    if not path:
+        typer.echo("DEWPOINT_AUDIT_ANCHOR_PATH is not set")
+        raise typer.Exit(2)
+    return Path(path)
+
+
+@audit.command("anchor")
+def audit_anchor() -> None:
+    """Write current chain heads to the external anchor sink. Run as a dewpoint_auditor login, e.g. every 15 min."""
+    sink = FileAnchorSink(_anchor_path(), _signing_key())
+
+    async def _run() -> int:
+        engine = make_engine(get_settings().database_url)
+        try:
+            async with make_sessionmaker(engine)() as s, s.begin():
+                return await anchor_all(s, sink)
+        finally:
+            await engine.dispose()
+
+    typer.echo(f"anchored {asyncio.run(_run())} scope head(s)")
+
+
+@audit.command("verify")
+def audit_verify() -> None:
+    """Recompute every chain and check it against the signed external anchors. Exit 1 on any problem,
+    including when no anchors exist, so a broken anchor job can't look healthy."""
+    key = _signing_key()
+    sink = FileAnchorSink(_anchor_path(), key)
+
+    async def _run() -> list[str]:
+        engine = make_engine(get_settings().database_url)
+        try:
+            async with make_sessionmaker(engine)() as s:
+                return await verify_anchors(s, sink.entries(), key.public_key())
+        finally:
+            await engine.dispose()
+
+    problems = asyncio.run(_run())
+    for problem in problems:
+        typer.echo(problem)
+    if problems:
+        raise typer.Exit(1)
+    typer.echo("audit chain verified against external anchors")
+
+
+async def _in_session[T](fn: Callable[[AsyncSession], Awaitable[T]]) -> T:
     engine = make_engine(get_settings().database_url)
     try:
         async with make_sessionmaker(engine)() as s:
@@ -5529,10 +7099,9 @@ async def _with_session(fn):  # type: ignore[no-untyped-def]
 
 @keys.command("status")
 def keys_status() -> None:
-    """Data keys per KEK id. Exit 3 if any are wrapped by a KEK this configuration lacks."""
-    from dewpoint.core.crypto.kek import KekSet, UnknownKekError
+    """Data keys per KEK id. Exit 3 if any are wrapped by a KEK this configuration lacks. Run as dewpoint_admin."""
     keks = KekSet.from_settings(get_settings())
-    usage = asyncio.run(_with_session(lambda s: _keyring().kek_usage(s)))
+    usage = asyncio.run(_in_session(Keyring(keks).kek_usage))
     missing = []
     for kek_id, n in sorted(usage.items()):
         typer.echo(f"{kek_id}={n}")
@@ -5547,40 +7116,43 @@ def keys_status() -> None:
 
 @keys.command("rewrap")
 def keys_rewrap(batch_size: int = typer.Option(100, min=1, max=1000)) -> None:
-    """Phase C of docs/operations/key-rotation.md: move every data key to the current KEK."""
+    """Phase C of docs/operations/key-rotation.md: move every data key to the current KEK, in committed batches."""
     st = get_settings()
     if not st.kek_previous_b64 or st.kek_previous_id == st.kek_id:
         typer.echo("refusing: configure the new KEK as current and the old one as previous first (phase B)")
         raise typer.Exit(2)
-    kr = _keyring()
+    keyring = Keyring(KekSet.from_settings(st))
 
-    async def _run(s) -> int:  # type: ignore[no-untyped-def]
+    async def _run(s: AsyncSession) -> int:
         total = 0
         while True:
             async with s.begin():
-                n = await kr.rewrap_batch(s, batch_size)
+                n = await keyring.rewrap_batch(s, batch_size)
             total += n
             if n == 0:
                 return total
 
-    typer.echo(f"rewrapped {asyncio.run(_with_session(_run))} data key(s)")
+    typer.echo(f"rewrapped {asyncio.run(_in_session(_run))} data key(s)")
 
 
 @keys.command("rotate-dek")
 def keys_rotate_dek(tenant: str | None = typer.Option(None), platform: bool = typer.Option(False)) -> None:
     """Rotate one scope's data key. Existing ciphertext stays readable; new writes use the new version."""
-    import uuid as _uuid
     if bool(tenant) == platform:
         typer.echo("pass exactly one of --tenant or --platform")
         raise typer.Exit(2)
-    tid = None if platform else _uuid.UUID(tenant)
-    kr = _keyring()
+    try:
+        tenant_id = None if platform else uuid.UUID(tenant)
+    except ValueError:
+        typer.echo("--tenant must be a UUID")
+        raise typer.Exit(2) from None
+    keyring = Keyring(KekSet.from_settings(get_settings()))
 
-    async def _run(s) -> int:  # type: ignore[no-untyped-def]
+    async def _run(s: AsyncSession) -> int:
         async with s.begin():
-            return await kr.rotate(s, tid)
+            return await keyring.rotate(s, tenant_id)
 
-    typer.echo(f"active data key version: {asyncio.run(_with_session(_run))}")
+    typer.echo(f"active data key version: {asyncio.run(_in_session(_run))}")
 ```
 
 - [ ] **Step 4: Write the runbook**
@@ -5599,6 +7171,11 @@ The runbook also covers:
 - **Data-key rotation:** `keys rotate-dek` rotates one tenant's key, or the platform's. It's independent of KEK rotation.
 - **Key generation:** `openssl rand -base64 32`. KEK ids must be unique and never reused.
 - **Backups:** a database backup is only restorable with the KEKs that wrapped its rows at backup time. Keep retired KEKs in escrow for the backup retention period.
+
+**Live rehearsal (done at this checkpoint):**
+- On the Compose stack, run phases A–D with the rollout variables that Compose now passes through (`DEWPOINT_KEK_ID`, `DEWPOINT_KEK_PREVIOUS_B64`, `DEWPOINT_KEK_PREVIOUS_ID`), restarting `api` for each phase.
+- A probe running as `dewpoint_admin` decrypts every stored secret. It finds tenants through `data_keys` and then sets `tenant_scope`, because `connections` stays RLS-scoped even for the admin role. It prints only a fingerprint.
+- The fingerprint must be identical before, during and after rotation, and `keys status` must exit 3 when configured with the retired key alone.
 
 - [ ] **Step 5: Run the tests**
 

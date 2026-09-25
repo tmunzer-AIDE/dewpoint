@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+node_modules/
+dist/
+.env
+*.pem
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+playwright-report/
+test-results/
+.DS_Store
+*.tsbuildinfo
+frontend/.playwright-browsers/
+.import_linter_cache/

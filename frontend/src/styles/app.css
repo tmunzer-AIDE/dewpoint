@@ -1,0 +1,12 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+@import "tailwindcss";
+@import "./tokens.css";
+@theme inline {
+  --color-ground: var(--ground); --color-surface: var(--surface); --color-surface-2: var(--surface-2);
+  --color-ink: var(--ink); --color-muted: var(--muted); --color-line: var(--line); --color-line-strong: var(--line-strong);
+  --color-accent: var(--accent); --color-accent-ink: var(--accent-ink); --color-accent-soft: var(--accent-soft); --color-on-accent: var(--on-accent);
+  --color-danger: var(--danger); --color-ok: var(--ok); --color-live: var(--live);
+  --font-sans: var(--font-sans); --font-mono: var(--font-mono);
+}
+html, body { background: var(--ground); color: var(--ink); font-family: var(--font-sans); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

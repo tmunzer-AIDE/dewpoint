@@ -1,0 +1,88 @@
+# SPDX-License-Identifier: Apache-2.0
+name: dewpoint
+x-app: &app
+  image: ${DEWPOINT_APP_IMAGE:-dewpoint-app:dev}
+  build: { context: ../.., dockerfile: deploy/docker/app.Dockerfile }
+  read_only: true
+  tmpfs: [/tmp]
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  environment: &appenv
+    DEWPOINT_KEK_B64: ${DEWPOINT_KEK_B64:?set in .env}
+    DEWPOINT_KEK_ID: ${DEWPOINT_KEK_ID:-env-1}
+    # Set only during a KEK rollout: docs/operations/key-rotation.md
+    DEWPOINT_KEK_PREVIOUS_B64: ${DEWPOINT_KEK_PREVIOUS_B64:-}
+    DEWPOINT_KEK_PREVIOUS_ID: ${DEWPOINT_KEK_PREVIOUS_ID:-}
+    DEWPOINT_PUBLIC_ORIGIN: ${DEWPOINT_PUBLIC_ORIGIN:-http://localhost:8080}
+    DEWPOINT_RP_ID: ${DEWPOINT_RP_ID:-localhost}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: dewpoint
+      POSTGRES_USER: dewpoint_owner
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      DEWPOINT_API_DB_PASSWORD: ${DEWPOINT_API_DB_PASSWORD:?set in .env}
+      DEWPOINT_ADMIN_DB_PASSWORD: ${DEWPOINT_ADMIN_DB_PASSWORD:?set in .env}
+      DEWPOINT_AUDITOR_DB_PASSWORD: ${DEWPOINT_AUDITOR_DB_PASSWORD:?set in .env}
+    volumes: [pgdata:/var/lib/postgresql/data, ./initdb:/docker-entrypoint-initdb.d:ro]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U dewpoint_owner -d dewpoint"], interval: 5s, retries: 20 }
+
+  migrate:
+    <<: *app
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      <<: *appenv
+      DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_owner:${POSTGRES_PASSWORD}@postgres/dewpoint
+    depends_on: { postgres: { condition: service_healthy } }
+    restart: "no"
+
+  api:
+    <<: *app
+    environment:
+      <<: *appenv
+      DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_api_login:${DEWPOINT_API_DB_PASSWORD}@postgres/dewpoint
+    depends_on: { migrate: { condition: service_completed_successfully } }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/ready').status==200 else 1)"]
+      interval: 5s
+      retries: 20
+
+  audit-anchor:
+    <<: *app
+    # Anchors belong OFF this host in production (object lock / SIEM). This volume is for evaluation only.
+    # set -e: a failed anchor run ends the container with a nonzero exit (visible in `docker compose ps -a`),
+    # instead of looping silently without producing anchors.
+    command: ["sh", "-c", "set -e; while true; do dewpoint audit anchor; sleep 900; done"]
+    restart: "no"
+    # Unhealthy when audit rows older than 30 minutes have no anchor (job stuck, failing, or anchors stale).
+    # Alert on this in your monitoring as well.
+    healthcheck:
+      test: ["CMD", "dewpoint", "audit", "freshness", "--max-age-minutes", "30"]
+      interval: 5m
+      timeout: 30s
+      start_period: 1m
+      start_interval: 5s
+      retries: 1
+    environment:
+      <<: *appenv
+      DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_auditor_login:${DEWPOINT_AUDITOR_DB_PASSWORD}@postgres/dewpoint
+      DEWPOINT_AUDIT_SIGNING_KEY_B64: ${DEWPOINT_AUDIT_SIGNING_KEY_B64:?set in .env}
+      DEWPOINT_AUDIT_ANCHOR_PATH: /anchors/anchors.jsonl
+    volumes: [anchors:/anchors]
+    depends_on: { migrate: { condition: service_completed_successfully } }
+
+  web:
+    image: ${DEWPOINT_WEB_IMAGE:-dewpoint-web:dev}
+    build: { context: ../.., dockerfile: deploy/docker/web.Dockerfile }
+    read_only: true
+    tmpfs: [/tmp, /var/cache/nginx]
+    cap_drop: [ALL]
+    ports: ["127.0.0.1:8080:8080"]
+    environment:
+      # IPs/CIDRs of the TLS proxy / load balancer in front of `web` (see README). Empty = no proxy.
+      DEWPOINT_TRUSTED_PROXIES: ${DEWPOINT_TRUSTED_PROXIES:-}
+    depends_on: { api: { condition: service_healthy } }
+
+volumes: { pgdata: {}, anchors: {} }

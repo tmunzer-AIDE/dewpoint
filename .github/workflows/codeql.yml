@@ -1,0 +1,35 @@
+name: codeql
+on:
+  push: { branches: [main] }
+  pull_request:
+  schedule: [{ cron: "23 4 * * 1" }]
+permissions: { security-events: write, contents: read, actions: read }
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: { language: [python, javascript-typescript] }
+    steps:
+      - uses: actions/checkout@v4
+      # Uploading to code scanning needs a public repository or GitHub Code Security. While the repository is
+      # private, keep the analysis, gate on its findings here, and keep the SARIF as an artifact instead.
+      - id: repo
+        run: echo "private=$(gh api "repos/${GITHUB_REPOSITORY}" --jq .private)" >> "$GITHUB_OUTPUT"
+        env: { GH_TOKEN: "${{ github.token }}" }
+      - uses: github/codeql-action/init@v3
+        with: { languages: "${{ matrix.language }}" }
+      - uses: github/codeql-action/analyze@v3
+        with:
+          upload: ${{ steps.repo.outputs.private == 'true' && 'never' || 'always' }}
+          output: sarif-results
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.repo.outputs.private == 'true'
+        with: { name: "codeql-${{ matrix.language }}", path: sarif-results, if-no-files-found: ignore }
+      - name: Fail on CodeQL findings (private repository)
+        if: steps.repo.outputs.private == 'true'
+        run: |
+          count=$(jq -s '[.[].runs[].results[]] | length' sarif-results/*.sarif)
+          echo "CodeQL findings: ${count}"
+          jq -r -s '.[].runs[].results[] | "\(.ruleId): \(.locations[0].physicalLocation.artifactLocation.uri):\(.locations[0].physicalLocation.region.startLine) \(.message.text)"' sarif-results/*.sarif
+          test "${count}" -eq 0
