@@ -66,7 +66,7 @@ async def test_auditor_role_is_narrow(auditor_sessionmaker) -> None:
 
     for stmt in (
         "select 1 from users",
-        "select 1 from tenants",
+        "select 1 from connections",
         "select 1 from data_keys",
         "insert into audit_log(scope,action,prev_hash,hash,created_at) values ('x','y','\\x00','\\x00',now())",
     ):

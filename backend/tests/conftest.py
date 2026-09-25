@@ -121,6 +121,7 @@ def api_settings(pg_url: str, _test_users: None) -> Settings:
 async def app(api_settings: Settings):  # type: ignore[no-untyped-def]
     application = create_app(api_settings)
     yield application
+    await application.state.http.aclose()
     await application.state.engine.dispose()
 
 

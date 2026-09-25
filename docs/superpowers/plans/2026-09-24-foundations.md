@@ -4795,7 +4795,8 @@ def _cfg() -> MistConfig:
 @respx.mock
 async def test_org_privilege_ok() -> None:
     route = respx.get("https://api.eu.mist.com/api/v1/self").respond(
-        200, json={"privileges": [{"scope": "org", "org_id": str(ORG), "role": "write"}]})
+        200, json={"privileges": [{"scope": "org", "org_id": str(ORG), "role": "write"}]}
+    )
     async with httpx.AsyncClient() as http:
         r = await verify_mist(_cfg(), MistSecret(api_token="x" * 40), http)
     assert r.ok and r.privilege == "write"
@@ -4804,7 +4805,9 @@ async def test_org_privilege_ok() -> None:
 
 @respx.mock
 async def test_msp_access_confirmed_via_org_endpoint() -> None:
-    respx.get("https://api.eu.mist.com/api/v1/self").respond(200, json={"privileges": [{"scope": "msp", "role": "admin"}]})
+    respx.get("https://api.eu.mist.com/api/v1/self").respond(
+        200, json={"privileges": [{"scope": "msp", "role": "admin"}]}
+    )
     respx.get(f"https://api.eu.mist.com/api/v1/orgs/{ORG}").respond(200, json={"id": str(ORG)})
     async with httpx.AsyncClient() as http:
         r = await verify_mist(_cfg(), MistSecret(api_token="x" * 40), http)
@@ -4822,6 +4825,14 @@ async def test_bad_token_and_no_access() -> None:
 def test_unknown_cloud_rejected() -> None:
     with pytest.raises(ValidationError):
         MistConfig(cloud="evil.example.com", org_id=ORG)  # type: ignore[arg-type]
+
+
+def test_cloud_literal_matches_allowlist() -> None:
+    from typing import get_args
+
+    from dewpoint.core.connections.types import MIST_CLOUDS, MistCloud
+
+    assert set(MIST_CLOUDS) == set(get_args(MistCloud))
 ```
 
 - [ ] **Step 2: Implement the types and verification**
@@ -4951,14 +4962,53 @@ class Connection(UUIDPk, Timestamps, Base):
     created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"))
 ```
 
-`0006_connections.py` (`revision = "0006"`, `down_revision = "0005"`): create the table to match the model, then:
-```sql
-ALTER TABLE connections ENABLE ROW LEVEL SECURITY;
-ALTER TABLE connections FORCE ROW LEVEL SECURITY;
-CREATE POLICY connections_scope ON connections
-  USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id());
-GRANT SELECT, INSERT, UPDATE, DELETE ON connections TO dewpoint_api, dewpoint_admin;
-GRANT SELECT ON connections TO dewpoint_worker;
+`migrations/versions/0006_connections.py`:
+```python
+# SPDX-License-Identifier: Apache-2.0
+"""connections: generic, typed, secrets encrypted with the tenant data key"""
+
+import sqlalchemy as sa
+from alembic import op
+from sqlalchemy.dialects import postgresql as pg
+
+revision = "0006"
+down_revision = "0005"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "connections",
+        sa.Column("id", pg.UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
+        sa.Column("tenant_id", pg.UUID(as_uuid=True), sa.ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("type", sa.String(64), nullable=False),
+        sa.Column("name", sa.String(100), nullable=False),
+        sa.Column("config", pg.JSONB, nullable=False),
+        sa.Column("secret_ct", sa.LargeBinary),
+        sa.Column("status", sa.String(20), nullable=False, server_default="unverified"),
+        sa.Column("status_detail", sa.String(40), nullable=False, server_default=""),
+        sa.Column("privilege", sa.String(40)),
+        sa.Column("last_verified_at", sa.DateTime(timezone=True)),
+        sa.Column("created_by", pg.UUID(as_uuid=True), sa.ForeignKey("users.id", ondelete="SET NULL")),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.UniqueConstraint("tenant_id", "name"),
+    )
+    for stmt in (
+        "ALTER TABLE connections ENABLE ROW LEVEL SECURITY",
+        "ALTER TABLE connections FORCE ROW LEVEL SECURITY",
+        "CREATE POLICY connections_scope ON connections "
+        "USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id())",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON connections TO dewpoint_api, dewpoint_admin",
+        "GRANT SELECT ON connections TO dewpoint_worker",
+    ):
+        op.execute(stmt)
+
+
+def downgrade() -> None:
+    op.execute("DROP POLICY IF EXISTS connections_scope ON connections")
+    op.drop_table("connections")
 ```
 
 - [ ] **Step 5: Write the failing route tests**
@@ -4976,8 +5026,12 @@ from sqlalchemy import text
 from tests.apps.api.helpers import session_client
 
 ORG = str(uuid.uuid4())
-BODY = {"type": "mist", "name": "Acme Prod", "config": {"cloud": "emea_01", "org_id": ORG},
-        "secret": {"api_token": "tok_" + "a" * 36}}
+BODY = {
+    "type": "mist",
+    "name": "Acme Prod",
+    "config": {"cloud": "emea_01", "org_id": ORG},
+    "secret": {"api_token": "tok_" + "a" * 36},
+}
 
 
 async def test_create_list_never_returns_secret(app, owner_sessionmaker, api_settings) -> None:
@@ -5012,7 +5066,8 @@ async def test_invalid_cloud_and_extra_fields_rejected(app, owner_sessionmaker, 
 @respx.mock
 async def test_verify_updates_status_and_audits(app, owner_sessionmaker, api_settings) -> None:
     respx.get("https://api.eu.mist.com/api/v1/self").respond(
-        200, json={"privileges": [{"scope": "org", "org_id": ORG, "role": "admin"}]})
+        200, json={"privileges": [{"scope": "org", "org_id": ORG, "role": "admin"}]}
+    )
     c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
     async with c:
         cid = (await c.post(f"/api/v1/t/{tid}/connections", json=BODY)).json()["id"]
@@ -5031,11 +5086,22 @@ async def test_patch_keeps_secret_when_omitted_and_ciphertext_is_bound(app, owne
         assert r.status_code == 200 and r.json()["secret_set"] is True
         # swapping ciphertext between rows must not decrypt (AAD binds the connection id)
         async with owner_sessionmaker() as s, s.begin():
-            await s.execute(text("update connections set secret_ct=(select secret_ct from connections where id=:a) "
-                                 "where id=:b"), {"a": a, "b": b})
+            await s.execute(
+                text("update connections set secret_ct=(select secret_ct from connections where id=:a) where id=:b"),
+                {"a": a, "b": b},
+            )
         r = await c.post(f"/api/v1/t/{tid}/connections/{b}/verify")
     assert r.status_code == 200
     assert r.json()["status"] == "error" and r.json()["status_detail"] == "secret_unreadable"
+
+
+async def test_rename_to_existing_name_is_a_conflict(app, owner_sessionmaker, api_settings) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    async with c:
+        await c.post(f"/api/v1/t/{tid}/connections", json=BODY)
+        other = (await c.post(f"/api/v1/t/{tid}/connections", json={**BODY, "name": "Other"})).json()["id"]
+        r = await c.patch(f"/api/v1/t/{tid}/connections/{other}", json={"name": "Acme Prod"})
+    assert r.status_code == 409 and r.json() == {"error": "name_taken"}
 ```
 
 - [ ] **Step 6: Implement the service and routes**
@@ -5076,55 +5142,107 @@ def _secret_json(model: BaseModel) -> bytes:
     return json.dumps(data).encode()
 
 
-async def create_connection(s: AsyncSession, keyring: Keyring, ctx: TenantContext, *, type_key: str, name: str,
-                            config: dict[str, Any], secret: dict[str, Any]) -> Connection:
+async def create_connection(
+    s: AsyncSession,
+    keyring: Keyring,
+    ctx: TenantContext,
+    *,
+    type_key: str,
+    name: str,
+    config: dict[str, Any],
+    secret: dict[str, Any],
+) -> Connection:
     ct = _type(type_key)
     cfg, sec = ct.config_model.model_validate(config), ct.secret_model.model_validate(secret)
-    conn = Connection(id=uuid.uuid4(), tenant_id=ctx.tenant_id, type=type_key, name=name,
-                      config=cfg.model_dump(mode="json"), created_by=ctx.user.id)
-    conn.secret_ct = await keyring.encrypt(s, tenant_id=ctx.tenant_id, purpose=PURPOSE, context=str(conn.id),
-                                           plaintext=_secret_json(sec))
+    conn = Connection(
+        id=uuid.uuid4(),
+        tenant_id=ctx.tenant_id,
+        type=type_key,
+        name=name,
+        config=cfg.model_dump(mode="json"),
+        created_by=ctx.user.id,
+    )
+    conn.secret_ct = await keyring.encrypt(
+        s, tenant_id=ctx.tenant_id, purpose=PURPOSE, context=str(conn.id), plaintext=_secret_json(sec)
+    )
     s.add(conn)
     await s.flush()
-    await record(s, tenant_id=ctx.tenant_id, actor_id=ctx.user.id, action="connection.create",
-                 target_type="connection", target_id=str(conn.id), details={"type": type_key, "name": name})
+    await record(
+        s,
+        tenant_id=ctx.tenant_id,
+        actor_id=ctx.user.id,
+        action="connection.create",
+        target_type="connection",
+        target_id=str(conn.id),
+        details={"type": type_key, "name": name},
+    )
     return conn
 
 
-async def update_connection(s: AsyncSession, keyring: Keyring, ctx: TenantContext, conn: Connection, *,
-                            name: str | None, config: dict[str, Any] | None,
-                            secret: dict[str, Any] | None) -> Connection:
-    ct, changed = _type(conn.type), []
+async def update_connection(
+    s: AsyncSession,
+    keyring: Keyring,
+    ctx: TenantContext,
+    conn: Connection,
+    *,
+    name: str | None,
+    config: dict[str, Any] | None,
+    secret: dict[str, Any] | None,
+) -> Connection:
+    ct = _type(conn.type)
+    changed: list[str] = []
     if name is not None:
-        conn.name, changed = name, [*changed, "name"]
+        conn.name = name
+        changed.append("name")
     if config is not None:
-        conn.config, changed = ct.config_model.model_validate(config).model_dump(mode="json"), [*changed, "config"]
+        conn.config = ct.config_model.model_validate(config).model_dump(mode="json")
+        changed.append("config")
     if secret is not None:
-        conn.secret_ct = await keyring.encrypt(s, tenant_id=ctx.tenant_id, purpose=PURPOSE, context=str(conn.id),
-                                               plaintext=_secret_json(ct.secret_model.model_validate(secret)))
+        conn.secret_ct = await keyring.encrypt(
+            s,
+            tenant_id=ctx.tenant_id,
+            purpose=PURPOSE,
+            context=str(conn.id),
+            plaintext=_secret_json(ct.secret_model.model_validate(secret)),
+        )
         changed.append("secret")
     if {"config", "secret"} & set(changed):
         conn.status, conn.status_detail, conn.privilege = "unverified", "", None
     await s.flush()
-    await record(s, tenant_id=ctx.tenant_id, actor_id=ctx.user.id, action="connection.update",
-                 target_type="connection", target_id=str(conn.id), details={"changed": changed})
+    await record(
+        s,
+        tenant_id=ctx.tenant_id,
+        actor_id=ctx.user.id,
+        action="connection.update",
+        target_type="connection",
+        target_id=str(conn.id),
+        details={"changed": changed},
+    )
     return conn
 
 
 async def delete_connection(s: AsyncSession, ctx: TenantContext, conn: Connection) -> None:
     await s.delete(conn)
-    await record(s, tenant_id=ctx.tenant_id, actor_id=ctx.user.id, action="connection.delete",
-                 target_type="connection", target_id=str(conn.id))
+    await record(
+        s,
+        tenant_id=ctx.tenant_id,
+        actor_id=ctx.user.id,
+        action="connection.delete",
+        target_type="connection",
+        target_id=str(conn.id),
+    )
 
 
 async def load_secret(s: AsyncSession, keyring: Keyring, conn: Connection) -> BaseModel:
-    raw = await keyring.decrypt(s, tenant_id=conn.tenant_id, purpose=PURPOSE, context=str(conn.id),
-                                blob=conn.secret_ct or b"")
+    raw = await keyring.decrypt(
+        s, tenant_id=conn.tenant_id, purpose=PURPOSE, context=str(conn.id), blob=conn.secret_ct or b""
+    )
     return _type(conn.type).secret_model.model_validate_json(raw)
 
 
-async def verify_connection(s: AsyncSession, keyring: Keyring, ctx: TenantContext, conn: Connection,
-                            http: httpx.AsyncClient) -> Connection:
+async def verify_connection(
+    s: AsyncSession, keyring: Keyring, ctx: TenantContext, conn: Connection, http: httpx.AsyncClient
+) -> Connection:
     ct = _type(conn.type)
     try:
         secret = await load_secret(s, keyring, conn)
@@ -5136,16 +5254,30 @@ async def verify_connection(s: AsyncSession, keyring: Keyring, ctx: TenantContex
         conn.status_detail, conn.privilege = result.detail, result.privilege
     conn.last_verified_at = datetime.now(UTC)
     await s.flush()
-    await record(s, tenant_id=ctx.tenant_id, actor_id=ctx.user.id, action="connection.verify",
-                 target_type="connection", target_id=str(conn.id), details={"status": conn.status})
+    await record(
+        s,
+        tenant_id=ctx.tenant_id,
+        actor_id=ctx.user.id,
+        action="connection.verify",
+        target_type="connection",
+        target_id=str(conn.id),
+        details={"status": conn.status},
+    )
     return conn
 
 
 def to_out(conn: Connection) -> dict[str, object]:
-    return {"id": str(conn.id), "type": conn.type, "name": conn.name, "config": conn.config,
-            "secret_set": conn.secret_ct is not None, "status": conn.status, "status_detail": conn.status_detail,
-            "privilege": conn.privilege,
-            "last_verified_at": conn.last_verified_at.isoformat() if conn.last_verified_at else None}
+    return {
+        "id": str(conn.id),
+        "type": conn.type,
+        "name": conn.name,
+        "config": conn.config,
+        "secret_set": conn.secret_ct is not None,
+        "status": conn.status,
+        "status_detail": conn.status_detail,
+        "privilege": conn.privilege,
+        "last_verified_at": conn.last_verified_at.isoformat() if conn.last_verified_at else None,
+    }
 ```
 `core/connections/service.py` imports `TenantContext` from `dewpoint.core.http`. That's allowed by the import-linter contract, because `core.http` is the one module permitted to import FastAPI and `core.connections` doesn't import FastAPI itself.
 
@@ -5191,12 +5323,17 @@ def _http(request: Request) -> httpx.AsyncClient:
 
 
 def _invalid(exc: ValidationError) -> HTTPException:
-    return HTTPException(422, detail={"error": "invalid", "fields": [".".join(map(str, e["loc"])) for e in exc.errors()]})
+    return HTTPException(
+        422, detail={"error": "invalid", "fields": [".".join(map(str, e["loc"])) for e in exc.errors()]}
+    )
 
 
 async def _get(db: AsyncSession, ctx: TenantContext, connection_id: uuid.UUID) -> Connection:
-    conn = (await db.execute(select(Connection).where(Connection.id == connection_id,
-                                                      Connection.tenant_id == ctx.tenant_id))).scalar_one_or_none()
+    conn = (
+        await db.execute(
+            select(Connection).where(Connection.id == connection_id, Connection.tenant_id == ctx.tenant_id)
+        )
+    ).scalar_one_or_none()
     if conn is None:
         raise HTTPException(404, detail={"error": "not_found"})
     return conn
@@ -5204,24 +5341,37 @@ async def _get(db: AsyncSession, ctx: TenantContext, connection_id: uuid.UUID) -
 
 @router.get("/connection-types", dependencies=[Depends(active_session)])
 async def connection_types() -> list[dict[str, object]]:
-    return [{"key": t.key, "label": t.label, "config_schema": t.config_model.model_json_schema(),
-             "secret_fields": list(t.secret_model.model_fields),
-             **({"clouds": MIST_CLOUDS} if t.key == "mist" else {})} for t in CONNECTION_TYPES.values()]
+    return [
+        {
+            "key": t.key,
+            "label": t.label,
+            "config_schema": t.config_model.model_json_schema(),
+            "secret_fields": list(t.secret_model.model_fields),
+            **({"clouds": MIST_CLOUDS} if t.key == "mist" else {}),
+        }
+        for t in CONNECTION_TYPES.values()
+    ]
 
 
 @router.get("/t/{tenant_id}/connections")
-async def list_connections(ctx: TenantContext = Depends(require(P.CONNECTION_VIEW)),
-                           db: AsyncSession = Depends(get_db)) -> list[dict[str, object]]:
+async def list_connections(
+    ctx: TenantContext = Depends(require(P.CONNECTION_VIEW)), db: AsyncSession = Depends(get_db)
+) -> list[dict[str, object]]:
     rows = await db.execute(select(Connection).where(Connection.tenant_id == ctx.tenant_id).order_by(Connection.name))
     return [service.to_out(c) for c in rows.scalars()]
 
 
 @router.post("/t/{tenant_id}/connections", status_code=201)
-async def create(body: CreateIn, ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
-                 db: AsyncSession = Depends(get_db), keyring: Keyring = Depends(get_keyring)) -> dict[str, object]:
+async def create(
+    body: CreateIn,
+    ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+    keyring: Keyring = Depends(get_keyring),
+) -> dict[str, object]:
     try:
-        conn = await service.create_connection(db, keyring, ctx, type_key=body.type, name=body.name,
-                                               config=body.config, secret=body.secret)
+        conn = await service.create_connection(
+            db, keyring, ctx, type_key=body.type, name=body.name, config=body.config, secret=body.secret
+        )
     except service.UnknownTypeError:
         raise HTTPException(422, detail={"error": "unknown_type"}) from None
     except ValidationError as e:
@@ -5232,33 +5382,52 @@ async def create(body: CreateIn, ctx: TenantContext = Depends(require(P.CONNECTI
 
 
 @router.get("/t/{tenant_id}/connections/{connection_id}")
-async def get_one(connection_id: uuid.UUID, ctx: TenantContext = Depends(require(P.CONNECTION_VIEW)),
-                  db: AsyncSession = Depends(get_db)) -> dict[str, object]:
+async def get_one(
+    connection_id: uuid.UUID,
+    ctx: TenantContext = Depends(require(P.CONNECTION_VIEW)),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
     return service.to_out(await _get(db, ctx, connection_id))
 
 
 @router.patch("/t/{tenant_id}/connections/{connection_id}")
-async def patch(connection_id: uuid.UUID, body: PatchIn, ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
-                db: AsyncSession = Depends(get_db), keyring: Keyring = Depends(get_keyring)) -> dict[str, object]:
+async def patch(
+    connection_id: uuid.UUID,
+    body: PatchIn,
+    ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+    keyring: Keyring = Depends(get_keyring),
+) -> dict[str, object]:
     conn = await _get(db, ctx, connection_id)
     try:
-        conn = await service.update_connection(db, keyring, ctx, conn, name=body.name, config=body.config,
-                                               secret=body.secret)
+        conn = await service.update_connection(
+            db, keyring, ctx, conn, name=body.name, config=body.config, secret=body.secret
+        )
     except ValidationError as e:
         raise _invalid(e) from None
+    except IntegrityError:
+        raise HTTPException(409, detail={"error": "name_taken"}) from None
     return service.to_out(conn)
 
 
 @router.delete("/t/{tenant_id}/connections/{connection_id}", status_code=204)
-async def delete(connection_id: uuid.UUID, ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
-                 db: AsyncSession = Depends(get_db)) -> Response:
+async def delete(
+    connection_id: uuid.UUID,
+    ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
     await service.delete_connection(db, ctx, await _get(db, ctx, connection_id))
     return Response(status_code=204)
 
 
 @router.post("/t/{tenant_id}/connections/{connection_id}/verify")
-async def verify(connection_id: uuid.UUID, request: Request, ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
-                 db: AsyncSession = Depends(get_db), keyring: Keyring = Depends(get_keyring)) -> dict[str, object]:
+async def verify(
+    connection_id: uuid.UUID,
+    request: Request,
+    ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+    keyring: Keyring = Depends(get_keyring),
+) -> dict[str, object]:
     conn = await service.verify_connection(db, keyring, ctx, await _get(db, ctx, connection_id), _http(request))
     return service.to_out(conn)
 ```
