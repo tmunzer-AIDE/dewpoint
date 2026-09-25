@@ -129,6 +129,7 @@ Tenant-scoped tables use FORCE RLS with the foundations policy pattern.
     - `$id`, anchors and dynamic references are rejected.
     - So is any cycle that recurses without descending into the data.
     - These are publish diagnostics, so validation never raises on a schema. The same rule applies to plugin manifest schemas.
+    - Only schema positions are inspected. A `default`, `const`, `enum` or `examples` value that contains `$ref` or `$id` is data, not a reference.
 - **`workflow_versions`:** id, tenant_id, workflow_id, number, graph, `node_refs` (`type@version`), `engine_abi`,
   `cel_profile`, `connection_ids`, `subflow_version_ids`, `input_schema`, `vars_schema`, `graph_hash`,
   `version_hash`, `published_by`, `published_at`.
@@ -146,6 +147,8 @@ Tenant-scoped tables use FORCE RLS with the foundations policy pattern.
     capabilities, retry policy, timeout and engine markers.
   - Display metadata is the manifest's `title` and `description`, plus the schema annotations `title`, `description`,
     `examples`, `x-widget` and `x-group`.
+  - Annotations are ignored only on schema objects, reached through schema-valued keywords. Data counts in full,
+    verbatim: `default`, `const`, `enum`, `required`, `dependentRequired` and vendor keys.
   - A registered `type@version` may change only its display metadata. Registration refuses any contract change; ship it as a new version.
 - **`cel_profiles`:** global, with the same lifecycle states (§4.5, §5.1).
 

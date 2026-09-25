@@ -21,7 +21,7 @@
 **Tech Stack:** Python 3.12, Pydantic v2, SQLAlchemy 2 async + asyncpg, Alembic, FastAPI, Typer, `jsonschema` (Draft 2020-12), pytest + Hypothesis + testcontainers.
 
 **Dry run before publication:** the code in Tasks 1–10 was extracted into a scratch worktree and run.
-- 257 tests passed: the 101 foundations tests plus 156 new ones. That count is from revision 2 of this plan, after the spec-review fixes.
+- 270 tests passed: the 101 foundations tests plus 169 new ones. That count is from revision 3 of this plan, after two rounds of review fixes.
 - ruff, mypy `strict` and import-linter (6 contracts) were clean.
 - Migration 0007 survived an upgrade → downgrade → upgrade round trip.
 
@@ -1204,9 +1204,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `spec_from_manifest(node_manifest, state="active")`.
   - `contract_hash(node_manifest) -> str`: covers **everything except display metadata**.
     - Display metadata is the manifest's `title` and `description`, plus these schema annotations: `title`, `description`, `examples`, `x-widget`, `x-group`.
-    - Annotations are stripped only where schemas appear, so a property that happens to be called `title` is still part of the contract.
+    - Annotations are stripped only from schema objects, reached through schema-valued keywords (`schema_refs.SCHEMA_ONE`, `SCHEMA_LIST`, `SCHEMA_MAP`).
+    - Every other value is hashed verbatim: `default`, `const`, `enum`, `required`, `dependentRequired` and vendor `x-*` keys. So a property called `title`, or `dependentRequired: {"title": [...]}`, stays part of the contract.
     - Credentials, capabilities, retry, timeout, ports, kind, side effect, schemas and the engine markers are all covered, as is any manifest key added later (unless it is explicitly declared display metadata).
-  - `dewpoint.engine.schema_refs.ref_problems(schema) -> list[str]`: empty only when the schema passes these rules:
+  - `dewpoint.engine.schema_refs.ref_problems(schema) -> list[str]`: empty only when the schema passes the rules below. Only schema positions are inspected; data such as `default`, `const`, `enum`, `examples` and vendor keys never is.
     - every `$ref` is `#/$defs/<name>` and resolves;
     - there is no `$id`, `$anchor`, `$dynamicRef`, `$dynamicAnchor`, `$recursiveRef` or `$recursiveAnchor`;
     - no chain of definitions refers back to itself without descending into the data (through `$ref`, `allOf`, `anyOf`, `oneOf`, `not`, `if`/`then`/`else` or `dependentSchemas`).
@@ -1244,6 +1245,37 @@ TREE = {
 def test_local_and_structurally_recursive_refs_are_fine() -> None:
     assert ref_problems(TREE) == []
     assert ref_problems({"type": "object", "properties": {"title": {"type": "string"}}}) == []
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": "object", "default": {"$ref": "literal data"}},
+        {"type": "object", "properties": {"x": {"const": {"$id": "not-an-id"}}}},
+        {"type": "array", "items": {"enum": [{"$ref": "#/nowhere"}]}},
+        {"type": "string", "examples": [{"$id": "x", "$ref": "y"}]},
+        {"type": "object", "x-dewpoint-note": {"$ref": "vendor data"}},
+        {"type": "object", "properties": {"$ref": {"type": "string"}, "$id": {"type": "string"}}},  # property names
+        {"type": "object", "dependentRequired": {"$ref": ["x"]}},
+    ],
+)
+def test_data_positions_are_never_treated_as_schemas(schema: dict[str, Any]) -> None:
+    assert ref_problems(schema) == []
+
+
+def test_every_schema_position_is_checked() -> None:
+    bad = {"$ref": "https://example.com/s.json"}
+    for schema in (
+        {"items": bad},
+        {"prefixItems": [bad]},
+        {"additionalProperties": bad},
+        {"patternProperties": {"^x": bad}},
+        {"dependentSchemas": {"a": bad}},
+        {"if": bad},
+        {"unevaluatedProperties": bad},
+        {"$defs": {"A": bad}},
+    ):
+        assert ref_problems(schema), schema
 
 
 @pytest.mark.parametrize(
@@ -1358,6 +1390,22 @@ def test_display_metadata_is_not_part_of_the_contract(path: tuple[str, ...], val
     assert contract_hash(_changed(path, value)) == contract_hash(ECHO)
 
 
+@pytest.mark.parametrize(
+    ("path", "before", "after"),
+    [
+        (("config_schema", "dependentRequired"), {"title": ["value"]}, {"title": ["other"]}),
+        (("config_schema", "properties", "value", "default"), {"title": "a"}, {"title": "b"}),
+        (("config_schema", "properties", "value", "const"), {"description": "a"}, {"description": "b"}),
+        (("config_schema", "properties", "value", "enum"), [{"title": "a"}], [{"title": "b"}]),
+        (("config_schema", "x-dewpoint-note"), {"title": "a"}, {"title": "b"}),
+    ],
+)
+def test_annotation_names_inside_data_are_part_of_the_contract(
+    path: tuple[str, ...], before: Any, after: Any
+) -> None:
+    assert contract_hash(_changed(path, before)) != contract_hash(_changed(path, after))
+
+
 def test_manifest_schemas_must_use_resolvable_local_refs() -> None:
     m = copy.deepcopy(TESTKIT.manifest())
     m["nodes"][0]["config_schema"]["properties"]["value"] = {"$ref": "https://example.com/value.json"}
@@ -1389,13 +1437,47 @@ Expected: FAIL: `ModuleNotFoundError: No module named 'dewpoint.engine.canonical
 descending into the data. Anything else would make validation depend on base-URI rules, network fetches or unbounded
 recursion, so it is reported as a problem instead of raising during validation."""
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from typing import Any
 
 PREFIX = "#/$defs/"
 UNSUPPORTED = ("$id", "$anchor", "$dynamicRef", "$dynamicAnchor", "$recursiveRef", "$recursiveAnchor")
 _SAME_INSTANCE_LISTS = ("allOf", "anyOf", "oneOf")
 _SAME_INSTANCE_ONE = ("not", "if", "then", "else")
+
+# Schema positions (JSON Schema 2020-12): the only keywords whose values are schemas. Everything else is data or a
+# non-schema keyword (`default`, `const`, `enum`, `examples`, `required`, `dependentRequired`, vendor `x-*` keys, ...)
+# and must be treated verbatim: never searched for `$ref`, never stripped of annotation-like names.
+SCHEMA_ONE = frozenset(
+    {
+        "additionalProperties",
+        "items",
+        "contains",
+        "propertyNames",
+        "not",
+        "if",
+        "then",
+        "else",
+        "unevaluatedItems",
+        "unevaluatedProperties",
+        "contentSchema",
+    }
+)
+SCHEMA_LIST = frozenset({"allOf", "anyOf", "oneOf", "prefixItems"})
+SCHEMA_MAP = frozenset({"properties", "patternProperties", "$defs", "dependentSchemas"})
+
+
+def subschemas(schema: Mapping[str, Any]) -> Iterator[tuple[str, Any]]:
+    """(relative JSON pointer, subschema) for every schema-valued keyword of `schema`, and nothing else."""
+    for key, value in schema.items():
+        if key in SCHEMA_ONE:
+            yield f"/{key}", value
+        elif key in SCHEMA_LIST and isinstance(value, list):
+            for index, sub in enumerate(value):
+                yield f"/{key}/{index}", sub
+        elif key in SCHEMA_MAP and isinstance(value, Mapping):
+            for name, sub in value.items():
+                yield f"/{key}/{name}", sub
 
 
 def _same_instance_refs(node: Any) -> set[str]:
@@ -1429,19 +1511,17 @@ def ref_problems(schema: Any) -> list[str]:
     problems: list[str] = []
 
     def walk(node: Any, path: str) -> None:
-        if isinstance(node, Mapping):
-            for key in UNSUPPORTED:
-                if key in node:
-                    problems.append(f"{path or '/'}: `{key}` isn't supported")
-            if "$ref" in node:
-                ref = node["$ref"]
-                if not isinstance(ref, str) or not ref.startswith(PREFIX) or ref[len(PREFIX) :] not in defs:
-                    problems.append(f"{path or '/'}: `$ref` must name an entry of this schema's `$defs` (#/$defs/<name>)")
-            for key, value in node.items():
-                walk(value, f"{path}/{key}")
-        elif isinstance(node, list):
-            for index, value in enumerate(node):
-                walk(value, f"{path}/{index}")
+        if not isinstance(node, Mapping):
+            return  # a boolean schema
+        for key in UNSUPPORTED:
+            if key in node:
+                problems.append(f"{path or '/'}: `{key}` isn't supported")
+        if "$ref" in node:
+            ref = node["$ref"]
+            if not isinstance(ref, str) or not ref.startswith(PREFIX) or ref[len(PREFIX) :] not in defs:
+                problems.append(f"{path or '/'}: `$ref` must name an entry of this schema's `$defs` (#/$defs/<name>)")
+        for suffix, sub in subschemas(node):  # schema positions only: data such as `default` is never inspected
+            walk(sub, path + suffix)
 
     walk(schema, "")
     if problems:
@@ -1541,14 +1621,12 @@ from jsonschema.exceptions import SchemaError
 
 from dewpoint.engine.canonical import sha256_hex
 from dewpoint.engine.registry.control import CONTROL_TYPES
-from dewpoint.engine.schema_refs import ref_problems
+from dewpoint.engine.schema_refs import SCHEMA_LIST, SCHEMA_MAP, SCHEMA_ONE, ref_problems
 from dewpoint.sdk.node import PORT_RE, RESERVED_PORTS, TYPE_RE, NodeKind, SideEffect
 from dewpoint.sdk.version import SDK_MAJOR
 
 _DISPLAY = frozenset({"title", "description"})  # manifest keys that may change within a version
 _SCHEMA_ANNOTATIONS = frozenset({"title", "description", "examples", "x-widget", "x-group"})
-_NAMED_SUBSCHEMAS = frozenset({"properties", "patternProperties", "$defs", "dependentSchemas"})
-_DATA = frozenset({"default", "const", "enum"})  # JSON values, not schemas: never stripped
 _KINDS = {k.value for k in NodeKind}
 _SIDE_EFFECTS = {s.value for s in SideEffect}
 
@@ -1586,23 +1664,25 @@ def spec_from_manifest(m: Mapping[str, Any], state: str = "active") -> NodeTypeS
     )
 
 
-def _schema_contract(node: Any) -> Any:
-    """A schema without display annotations. Only keys in schema positions are dropped: a property that happens to be
-    called `title` stays, and so does anything inside `default`, `const` or `enum`."""
-    if isinstance(node, list):
-        return [_schema_contract(v) for v in node]
-    if not isinstance(node, Mapping):
-        return node
+def _schema_contract(schema: Any) -> Any:
+    """A schema without display annotations. Annotations are dropped only from schema objects, and only schema-valued
+    keywords are traversed. Every other value (`default`, `const`, `enum`, `required`, `dependentRequired`, vendor
+    `x-*` keys, ...) is kept verbatim, so `dependentRequired: {"title": [...]}` or a property named `title` stays part
+    of the contract."""
+    if not isinstance(schema, Mapping):
+        return schema  # a boolean schema, or a malformed value: hashed verbatim
     out: dict[str, Any] = {}
-    for key, value in node.items():
+    for key, value in schema.items():
         if key in _SCHEMA_ANNOTATIONS:
             continue
-        if key in _DATA:
-            out[key] = value
-        elif key in _NAMED_SUBSCHEMAS and isinstance(value, Mapping):
+        if key in SCHEMA_ONE:
+            out[key] = _schema_contract(value)
+        elif key in SCHEMA_LIST and isinstance(value, list):
+            out[key] = [_schema_contract(sub) for sub in value]
+        elif key in SCHEMA_MAP and isinstance(value, Mapping):
             out[key] = {name: _schema_contract(sub) for name, sub in value.items()}
         else:
-            out[key] = _schema_contract(value)
+            out[key] = value
     return out
 
 
@@ -3578,6 +3658,12 @@ def test_settings_schemas_must_use_resolvable_local_refs() -> None:
         "$defs": {"A": {"allOf": [{"$ref": "#/$defs/A"}]}},
     }
     assert codes(cyclic) == ["settings.unresolvable_ref"]
+    data = G().node("a", ECHO)
+    data.settings["vars_schema"] = {
+        "type": "object",
+        "properties": {"x": {"type": "object", "default": {"$ref": "literal data", "$id": "also data"}}},
+    }
+    assert codes(data) == []  # defaults are data, not schemas
 
 
 def test_static_waits_must_fit_the_run_deadline() -> None:
