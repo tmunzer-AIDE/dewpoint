@@ -27,6 +27,7 @@ from dewpoint.engine.graph.schemas import (
     literal_on_path,
     literal_type,
     navigate,
+    object_schema,
     standalone,
     target_schema,
 )
@@ -127,22 +128,6 @@ def _descendants(s: Structure) -> dict[uuid.UUID, frozenset[uuid.UUID]]:
             acc |= desc[e.to.node]
         desc[n] = frozenset(acc)
     return desc
-
-
-def _object_schema(props: Mapping[str, Mapping[str, Any]], required: list[str]) -> dict[str, Any]:
-    """An object schema from per-field schemas, hoisting their $defs to the root so $refs still resolve."""
-    defs: dict[str, Any] = {}
-    clean: dict[str, Any] = {}
-    for name, schema in props.items():
-        inner = dict(schema)
-        nested = inner.pop("$defs", None)
-        if isinstance(nested, Mapping):
-            defs.update(nested)
-        clean[name] = inner
-    out: dict[str, Any] = {"type": "object", "properties": clean, "required": required, "additionalProperties": False}
-    if defs:
-        out["$defs"] = defs
-    return out
 
 
 def _static_delay(node: GraphNode, spec: NodeTypeSpec) -> float:
@@ -356,7 +341,7 @@ class _Validator:
                 else:
                     props[name] = {"type": literal_type(fields[name])}
                     required.append(name)
-            return _object_schema(props, required)
+            return object_schema(props, required)
         return spec.output_schema
 
     # ---- values ---------------------------------------------------------------------------------------------
@@ -646,7 +631,7 @@ class _Validator:
                 self._value(_Site(None, where + pointer_str(pointer), None, at_exit=True), value, None, ())
             props[name] = {"type": literal_type(raw)}
             required.append(name)
-        self.output_schema = _object_schema(props, required)
+        self.output_schema = object_schema(props, required)
 
     def _failure_handler(self) -> None:
         workflow = self.g.settings.failure_handler

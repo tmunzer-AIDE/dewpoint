@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from dewpoint.engine.schema_refs import PREFIX, SCHEMA_LIST, SCHEMA_MAP, SCHEMA_ONE
 from dewpoint.sdk.fields import KINDS, LITERAL
 
 Schema = Mapping[str, Any]
@@ -104,10 +105,11 @@ def json_types(schema: Any) -> frozenset[str] | None:
 
 
 def compatible(source: Any, target: Any) -> bool:
+    """True when every type the source admits fits the target. Unknown on either side: the runtime check decides."""
     s, t = json_types(source), json_types(target)
     if s is None or t is None:
         return True
-    return bool(s & t) or ("integer" in s and "number" in t)
+    return all(kind in t or (kind == "integer" and "number" in t) for kind in s)
 
 
 def describe(schema: Any) -> str:
@@ -152,7 +154,7 @@ def navigate(root: Any, path: Sequence[str | int], start: Any = None) -> Resolve
         if isinstance(extra, Mapping) and extra:
             current, conditional = extra, True
             continue
-        if (isinstance(props, Mapping) and props and extra is None) or extra is False:
+        if extra is False:  # only a closed object rules the field out; otherwise it may exist
             raise PathError(f"there is no field `{seg}`")
         return Resolved(None, True)
     final = _deref(root, current)
@@ -255,3 +257,45 @@ def allowed_kinds(root: Any, pointer: Sequence[str | int]) -> frozenset[str] | N
     raw, resolved = steps[-1]
     kinds = raw.get(KINDS, resolved.get(KINDS))
     return frozenset(kinds) if isinstance(kinds, list) else None
+
+
+def _rename_refs(node: Any, names: Mapping[str, str]) -> Any:
+    """Rewrite `#/$defs/<old>` to `#/$defs/<new>` in schema positions. Data (defaults, enums, ...) is copied as is."""
+    if not isinstance(node, Mapping):
+        return node
+    out: dict[str, Any] = {}
+    for key, value in node.items():
+        if key == "$ref" and isinstance(value, str) and value.startswith(PREFIX) and value[len(PREFIX) :] in names:
+            out[key] = PREFIX + names[value[len(PREFIX) :]]
+        elif key in SCHEMA_ONE:
+            out[key] = _rename_refs(value, names)
+        elif key in SCHEMA_LIST and isinstance(value, list):
+            out[key] = [_rename_refs(sub, names) for sub in value]
+        elif key in SCHEMA_MAP and isinstance(value, Mapping):
+            out[key] = {name: _rename_refs(sub, names) for name, sub in value.items()}
+        else:
+            out[key] = value
+    return out
+
+
+def object_schema(props: Mapping[str, Mapping[str, Any]], required: Sequence[str]) -> dict[str, Any]:
+    """A closed object schema built from per-field schemas that may each carry their own `$defs`.
+    Each field keeps its reference scope: its definitions move under a per-field name (`f<index>.<name>`) and its
+    `$ref`s are rewritten to match, so two fields may both define `Item` differently."""
+    defs: dict[str, Any] = {}
+    fields: dict[str, Any] = {}
+    for index, (name, schema) in enumerate(props.items()):
+        local = schema.get("$defs")
+        names = {key: f"f{index}.{key}" for key in local} if isinstance(local, Mapping) else {}
+        fields[name] = _rename_refs({k: v for k, v in schema.items() if k != "$defs"}, names)
+        for key, sub in local.items() if isinstance(local, Mapping) else ():
+            defs[names[key]] = _rename_refs(sub, names)
+    out: dict[str, Any] = {
+        "type": "object",
+        "properties": fields,
+        "required": list(required),
+        "additionalProperties": False,
+    }
+    if defs:
+        out["$defs"] = defs
+    return out

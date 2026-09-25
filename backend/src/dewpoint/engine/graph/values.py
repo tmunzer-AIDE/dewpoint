@@ -166,7 +166,7 @@ def parse_envelope(body: Any) -> Value:
     if not isinstance(body, Mapping):
         raise ValueError("`$value` must be an object")
     kind = body.get("kind")
-    if kind not in _ALLOWED_KEYS:
+    if not isinstance(kind, str) or kind not in _ALLOWED_KEYS:  # type first: a list or dict is unhashable
         raise ValueError("`kind` must be literal, ref, template or cel")
     extra = set(body) - _ALLOWED_KEYS[kind]
     if extra:

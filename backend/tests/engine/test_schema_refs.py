@@ -66,3 +66,14 @@ def test_every_schema_position_is_checked() -> None:
 def test_unsupported_references_are_reported(schema: dict[str, Any], fragment: str) -> None:
     problems = ref_problems(schema)
     assert problems and any(fragment in p for p in problems), problems
+
+
+def test_the_sdk_and_the_engine_agree_on_schema_positions() -> None:
+    from dewpoint.engine import schema_refs
+    from dewpoint.sdk import manifest
+
+    assert (manifest.SCHEMA_ONE, manifest.SCHEMA_LIST, manifest.SCHEMA_MAP) == (
+        schema_refs.SCHEMA_ONE,
+        schema_refs.SCHEMA_LIST,
+        schema_refs.SCHEMA_MAP,
+    )

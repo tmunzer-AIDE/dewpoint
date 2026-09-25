@@ -9,6 +9,44 @@ from dewpoint.sdk.version import SDK_VERSION
 
 PLUGIN_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
 
+# JSON Schema 2020-12 keywords whose values are schemas. The engine keeps the same lists (engine/schema_refs.py; a test
+# checks they agree): the SDK can't import the engine.
+SCHEMA_ONE = frozenset(
+    {
+        "additionalProperties",
+        "items",
+        "contains",
+        "propertyNames",
+        "not",
+        "if",
+        "then",
+        "else",
+        "unevaluatedItems",
+        "unevaluatedProperties",
+        "contentSchema",
+    }
+)
+SCHEMA_LIST = frozenset({"allOf", "anyOf", "oneOf", "prefixItems"})
+SCHEMA_MAP = frozenset({"properties", "patternProperties", "$defs", "dependentSchemas"})
+
+
+def _closed(schema: Any) -> Any:
+    """Pydantic serialization emits only declared fields unless a model allows extras (it then says
+    `additionalProperties: true`). Say so in the output schema, so references to undeclared fields are caught."""
+    if not isinstance(schema, dict):
+        return schema
+    out = dict(schema)
+    if "properties" in out and "additionalProperties" not in out:
+        out["additionalProperties"] = False
+    for key, value in out.items():
+        if key in SCHEMA_ONE:
+            out[key] = _closed(value)
+        elif key in SCHEMA_LIST and isinstance(value, list):
+            out[key] = [_closed(sub) for sub in value]
+        elif key in SCHEMA_MAP and isinstance(value, dict):
+            out[key] = {name: _closed(sub) for name, sub in value.items()}
+    return out
+
 
 class ManifestError(ValueError):
     def __init__(self, problems: list[str]) -> None:
@@ -84,7 +122,7 @@ def node_manifest(node: type[Node]) -> dict[str, Any]:
         "ports": list(node.ports),
         "dynamic_ports": node.dynamic_ports,
         "config_schema": node.Config.model_json_schema(mode="validation"),
-        "output_schema": node.Output.model_json_schema(mode="serialization"),
+        "output_schema": _closed(node.Output.model_json_schema(mode="serialization")),
         "credentials": list(node.credentials),
         "capabilities": sorted(node.capabilities),
         "side_effect": node.side_effect.value,

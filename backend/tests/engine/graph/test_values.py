@@ -2,6 +2,8 @@
 from typing import Any
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from dewpoint.engine.graph.values import (
     CelValue,
@@ -105,3 +107,26 @@ def test_strip_values_replaces_envelopes_with_null() -> None:
 
 def test_pointer_escaping() -> None:
     assert pointer_str(("a/b", "c~d", 0)) == "/a~1b/c~0d/0"
+
+
+@pytest.mark.parametrize("kind", [[], {}, 3, None, True])
+def test_non_text_kinds_are_syntax_errors(kind: Any) -> None:
+    [(_, value)] = list(iter_values({"f": {"$value": {"kind": kind}}}))
+    assert isinstance(value, ValueSyntaxError)
+
+
+KEYS = st.sampled_from(["$value", "kind", "path", "parts", "expr", "value", "default", "text", "ref"]) | st.text(
+    max_size=6
+)
+JSON = st.recursive(
+    st.none() | st.booleans() | st.integers() | st.floats(allow_nan=False) | st.text(max_size=8),
+    lambda inner: st.lists(inner, max_size=4) | st.dictionaries(KEYS, inner, max_size=4),
+    max_leaves=20,
+)
+
+
+@settings(max_examples=300, deadline=None)
+@given(JSON)
+def test_arbitrary_envelopes_are_reported_never_raised(body: Any) -> None:
+    for _, value in iter_values({"f": {"$value": body}, "g": body}):
+        assert value is not None

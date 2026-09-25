@@ -196,6 +196,7 @@ Every new test directory gets an empty `__init__.py` with the license header, as
     - functions and constants: `node_manifest(cls) -> dict`, `literal_only(...)`, `value_kinds(*kinds, ...)`, `sensitive(...)`, `SDK_VERSION`.
   - `dewpoint.sdk.fields`: `LITERAL="x-dewpoint-literal"`, `KINDS="x-dewpoint-kinds"`, `SENSITIVE="x-sensitive"`, `VALUE_KINDS`.
   - `dewpoint.sdk.node`: `TYPE_RE`, `PORT_RE`, `RESERVED_PORTS=frozenset({"error"})`, `MAX_RETRY_ATTEMPTS=20`.
+  - `node_manifest` marks output objects closed. Pydantic serialization emits only declared fields, so every output object that declares `properties` and says nothing about `additionalProperties` gets `additionalProperties: false`; models with `extra="allow"` keep `true`. The SDK defines its own `SCHEMA_ONE`/`SCHEMA_LIST`/`SCHEMA_MAP` (it can't import the engine), and a Task 3 test checks they match the engine's.
   - `node_manifest` rejects a retry policy the engine can't run: `max_attempts` outside 1–20, an `initial_interval` that isn't positive, a `backoff` below 1 or not finite, `max_interval < initial_interval`, or empty error codes in `non_retryable`.
   - `dewpoint.sdk.version`: `SDK_VERSION="0.1.0"`, `SDK_MAJOR="0"`.
   - `dewpoint.engine.ENGINE_ABI = 1`.
@@ -223,7 +224,7 @@ from datetime import timedelta
 from typing import Any
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from dewpoint.sdk import (
     FatalError,
@@ -292,6 +293,23 @@ def test_node_manifest_carries_schemas_and_markers() -> None:
         "non_retryable": ["demo.bad_request"],
     }
     assert m["timeout_s"] == 30.0 and m["side_effect"] == "keyed"
+
+
+class Nested(BaseModel):
+    name: str
+
+
+class OpenOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    nested: Nested
+
+
+def test_output_schemas_say_which_objects_are_closed() -> None:
+    closed = node_manifest(Send)["output_schema"]
+    assert closed["additionalProperties"] is False  # serialization never emits undeclared fields
+    opened = node_manifest(_node(run=_run, Output=OpenOut))["output_schema"]
+    assert opened["additionalProperties"] is True  # extra="allow" keeps its extras
+    assert opened["$defs"]["Nested"]["additionalProperties"] is False
 
 
 def test_manifest_problems() -> None:
@@ -549,6 +567,44 @@ from dewpoint.sdk.version import SDK_VERSION
 
 PLUGIN_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
 
+# JSON Schema 2020-12 keywords whose values are schemas. The engine keeps the same lists (engine/schema_refs.py; a test
+# checks they agree): the SDK can't import the engine.
+SCHEMA_ONE = frozenset(
+    {
+        "additionalProperties",
+        "items",
+        "contains",
+        "propertyNames",
+        "not",
+        "if",
+        "then",
+        "else",
+        "unevaluatedItems",
+        "unevaluatedProperties",
+        "contentSchema",
+    }
+)
+SCHEMA_LIST = frozenset({"allOf", "anyOf", "oneOf", "prefixItems"})
+SCHEMA_MAP = frozenset({"properties", "patternProperties", "$defs", "dependentSchemas"})
+
+
+def _closed(schema: Any) -> Any:
+    """Pydantic serialization emits only declared fields unless a model allows extras (it then says
+    `additionalProperties: true`). Say so in the output schema, so references to undeclared fields are caught."""
+    if not isinstance(schema, dict):
+        return schema
+    out = dict(schema)
+    if "properties" in out and "additionalProperties" not in out:
+        out["additionalProperties"] = False
+    for key, value in out.items():
+        if key in SCHEMA_ONE:
+            out[key] = _closed(value)
+        elif key in SCHEMA_LIST and isinstance(value, list):
+            out[key] = [_closed(sub) for sub in value]
+        elif key in SCHEMA_MAP and isinstance(value, dict):
+            out[key] = {name: _closed(sub) for name, sub in value.items()}
+    return out
+
 
 class ManifestError(ValueError):
     def __init__(self, problems: list[str]) -> None:
@@ -624,7 +680,7 @@ def node_manifest(node: type[Node]) -> dict[str, Any]:
         "ports": list(node.ports),
         "dynamic_ports": node.dynamic_ports,
         "config_schema": node.Config.model_json_schema(mode="validation"),
-        "output_schema": node.Output.model_json_schema(mode="serialization"),
+        "output_schema": _closed(node.Output.model_json_schema(mode="serialization")),
         "credentials": list(node.credentials),
         "capabilities": sorted(node.capabilities),
         "side_effect": node.side_effect.value,
@@ -1340,6 +1396,17 @@ def test_every_schema_position_is_checked() -> None:
 def test_unsupported_references_are_reported(schema: dict[str, Any], fragment: str) -> None:
     problems = ref_problems(schema)
     assert problems and any(fragment in p for p in problems), problems
+
+
+def test_the_sdk_and_the_engine_agree_on_schema_positions() -> None:
+    from dewpoint.engine import schema_refs
+    from dewpoint.sdk import manifest
+
+    assert (manifest.SCHEMA_ONE, manifest.SCHEMA_LIST, manifest.SCHEMA_MAP) == (
+        schema_refs.SCHEMA_ONE,
+        schema_refs.SCHEMA_LIST,
+        schema_refs.SCHEMA_MAP,
+    )
 ```
 
 `backend/tests/engine/registry/test_catalog.py`:
@@ -2718,11 +2785,15 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     - `CelValue(expr)`;
     - the union `Value`.
   - `ValueSyntaxError(message)`: a plain dataclass, not an exception.
+  - `parse_envelope` and `iter_values` never raise on malformed data: every field is type-checked before it is used, including `kind`. A Hypothesis test feeds them arbitrary JSON.
   - Helpers: `is_envelope(obj)`, `parse_envelope(body) -> Value`, `iter_values(config, base=()) -> Iterator[(Pointer, Value | ValueSyntaxError)]`, `strip_values(config) -> (stripped, [Pointer])`, `pointer_str(pointer) -> str`.
 - Produces from `schemas.py`:
   - `Resolved(schema, conditional)`, `PathError`.
   - `navigate(root, path, start=None) -> Resolved`, `target_schema(root, pointer)`, `element_schema(schema)`, `standalone(root, schema)`.
+    - `navigate` follows JSON Schema. Only `additionalProperties: false` makes an undeclared field an error (`PathError`). Otherwise the field may exist, so it resolves as unknown and possibly missing.
   - `json_types(schema) -> frozenset[str] | None`, `compatible(source, target) -> bool`, `describe(schema) -> str`, `literal_type(value) -> str`.
+    - `compatible` requires **every** type the source admits to fit the target (an integer fits a number). If either side is unknown, the runtime check decides.
+  - `object_schema(props, required) -> dict`: a closed object built from per-field schemas that keep their own `$defs` scope. Definitions are renamed `f<index>.<name>` and `$ref`s rewritten, so two fields may each define `Item` differently.
   - Marker checks: `literal_on_path(root, pointer)`, `contains_literal(root, schema)`, `allowed_kinds(root, pointer)`.
 - Reference roots: `trigger.<path>`, `steps.<key>.output.<path>`, `steps.<key>.error[.code|.message|.attempt]`, `vars.<name>.<path>`, `loop.item.<path>`, `loop.index`, `loops.<loop_key>.item.<path>`, `loops.<loop_key>.index`, `run.id|started_at|now`. Path segments are identifiers or `[n]` indexes.
 
@@ -2735,6 +2806,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 from typing import Any
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from dewpoint.engine.graph.values import (
     CelValue,
@@ -2794,7 +2867,11 @@ def test_bad_refs(text: str) -> None:
 def test_iter_values_finds_nested_envelopes_in_order() -> None:
     config = {
         "b": {"$value": {"kind": "ref", "path": "vars.x", "default": 0}},
-        "a": [1, {"$value": {"kind": "cel", "expr": "1 + 1"}}, {"deep": {"$value": {"kind": "literal", "value": {"$value": 1}}}}],
+        "a": [
+            1,
+            {"$value": {"kind": "cel", "expr": "1 + 1"}},
+            {"deep": {"$value": {"kind": "literal", "value": {"$value": 1}}}},
+        ],
         "t": {"$value": {"kind": "template", "parts": [{"text": "hi "}, {"ref": "vars.name", "default": "you"}]}},
     }
     found = list(iter_values(config))
@@ -2834,6 +2911,29 @@ def test_strip_values_replaces_envelopes_with_null() -> None:
 
 def test_pointer_escaping() -> None:
     assert pointer_str(("a/b", "c~d", 0)) == "/a~1b/c~0d/0"
+
+
+@pytest.mark.parametrize("kind", [[], {}, 3, None, True])
+def test_non_text_kinds_are_syntax_errors(kind: Any) -> None:
+    [(_, value)] = list(iter_values({"f": {"$value": {"kind": kind}}}))
+    assert isinstance(value, ValueSyntaxError)
+
+
+KEYS = st.sampled_from(["$value", "kind", "path", "parts", "expr", "value", "default", "text", "ref"]) | st.text(
+    max_size=6
+)
+JSON = st.recursive(
+    st.none() | st.booleans() | st.integers() | st.floats(allow_nan=False) | st.text(max_size=8),
+    lambda inner: st.lists(inner, max_size=4) | st.dictionaries(KEYS, inner, max_size=4),
+    max_leaves=20,
+)
+
+
+@settings(max_examples=300, deadline=None)
+@given(JSON)
+def test_arbitrary_envelopes_are_reported_never_raised(body: Any) -> None:
+    for _, value in iter_values({"f": {"$value": body}, "g": body}):
+        assert value is not None
 ```
 
 `backend/tests/engine/graph/test_schemas.py`:
@@ -2841,6 +2941,7 @@ def test_pointer_escaping() -> None:
 ```python
 # SPDX-License-Identifier: Apache-2.0
 import pytest
+from jsonschema import Draft202012Validator
 from pydantic import BaseModel
 
 from dewpoint.engine.graph.schemas import (
@@ -2852,6 +2953,7 @@ from dewpoint.engine.graph.schemas import (
     json_types,
     literal_on_path,
     navigate,
+    object_schema,
     target_schema,
 )
 from dewpoint.plugins.flow.nodes import FilterConfig, LoopConfig, SwitchConfig
@@ -2884,13 +2986,16 @@ def test_navigate_through_refs_lists_and_optionals() -> None:
     assert element is not None and json_types(navigate(element, ["name"]).schema) == {"string"}
 
 
-def test_unknown_fields_are_errors_on_closed_schemas() -> None:
+def test_only_closed_objects_reject_undeclared_fields() -> None:
+    closed = {"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": False}
     with pytest.raises(PathError, match="no field `nope`"):
-        navigate(OUT, ["site", "nope"])
+        navigate(closed, ["nope"])
     with pytest.raises(PathError, match="isn't a list"):
         navigate(OUT, ["site", 0])
-    open_object = navigate({"type": "object"}, ["anything"])
-    assert open_object.schema is None and open_object.conditional
+    for open_object in (OUT, {"type": "object"}):  # additionalProperties omitted: undeclared fields may exist
+        path = ["site", "nope"] if open_object is OUT else ["anything"]
+        r = navigate(open_object, path)
+        assert r.schema is None and r.conditional
 
 
 def test_compatibility() -> None:
@@ -2899,6 +3004,24 @@ def test_compatibility() -> None:
     assert compatible(None, {"type": "boolean"}) and compatible({"type": "string"}, {})
     assert compatible({"type": "string"}, {"anyOf": [{"type": "string"}, {"type": "null"}]})
     assert json_types({"enum": ["a", 1]}) == {"string", "integer"}
+
+
+def test_every_possible_source_type_must_fit_the_target() -> None:
+    union = {"type": ["string", "integer"]}
+    assert not compatible(union, {"type": "string"})
+    assert compatible(union, {"type": ["string", "integer", "null"]})
+    assert compatible({"anyOf": [{"type": "integer"}, {"type": "number"}]}, {"type": "number"})
+    assert not compatible({"anyOf": [{"type": "string"}, {"type": "null"}]}, {"type": "string"})
+
+
+def test_composed_objects_keep_each_fields_definitions() -> None:
+    text = {"$ref": "#/$defs/Item", "$defs": {"Item": {"type": "string"}}}
+    number = {"$ref": "#/$defs/Item", "$defs": {"Item": {"type": "integer"}}}
+    schema = object_schema({"a": text, "b": number}, ["a", "b"])
+    assert json_types(navigate(schema, ["a"]).schema) == {"string"}
+    assert json_types(navigate(schema, ["b"]).schema) == {"integer"}
+    assert list(Draft202012Validator(schema).iter_errors({"a": "x", "b": 1})) == []
+    assert list(Draft202012Validator(schema).iter_errors({"a": 1, "b": "x"})) != []
 
 
 def test_markers() -> None:
@@ -3090,7 +3213,7 @@ def parse_envelope(body: Any) -> Value:
     if not isinstance(body, Mapping):
         raise ValueError("`$value` must be an object")
     kind = body.get("kind")
-    if kind not in _ALLOWED_KEYS:
+    if not isinstance(kind, str) or kind not in _ALLOWED_KEYS:  # type first: a list or dict is unhashable
         raise ValueError("`kind` must be literal, ref, template or cel")
     extra = set(body) - _ALLOWED_KEYS[kind]
     if extra:
@@ -3166,6 +3289,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from dewpoint.engine.schema_refs import PREFIX, SCHEMA_LIST, SCHEMA_MAP, SCHEMA_ONE
 from dewpoint.sdk.fields import KINDS, LITERAL
 
 Schema = Mapping[str, Any]
@@ -3262,10 +3386,11 @@ def json_types(schema: Any) -> frozenset[str] | None:
 
 
 def compatible(source: Any, target: Any) -> bool:
+    """True when every type the source admits fits the target. Unknown on either side: the runtime check decides."""
     s, t = json_types(source), json_types(target)
     if s is None or t is None:
         return True
-    return bool(s & t) or ("integer" in s and "number" in t)
+    return all(kind in t or (kind == "integer" and "number" in t) for kind in s)
 
 
 def describe(schema: Any) -> str:
@@ -3310,7 +3435,7 @@ def navigate(root: Any, path: Sequence[str | int], start: Any = None) -> Resolve
         if isinstance(extra, Mapping) and extra:
             current, conditional = extra, True
             continue
-        if (isinstance(props, Mapping) and props and extra is None) or extra is False:
+        if extra is False:  # only a closed object rules the field out; otherwise it may exist
             raise PathError(f"there is no field `{seg}`")
         return Resolved(None, True)
     final = _deref(root, current)
@@ -3413,6 +3538,48 @@ def allowed_kinds(root: Any, pointer: Sequence[str | int]) -> frozenset[str] | N
     raw, resolved = steps[-1]
     kinds = raw.get(KINDS, resolved.get(KINDS))
     return frozenset(kinds) if isinstance(kinds, list) else None
+
+
+def _rename_refs(node: Any, names: Mapping[str, str]) -> Any:
+    """Rewrite `#/$defs/<old>` to `#/$defs/<new>` in schema positions. Data (defaults, enums, ...) is copied as is."""
+    if not isinstance(node, Mapping):
+        return node
+    out: dict[str, Any] = {}
+    for key, value in node.items():
+        if key == "$ref" and isinstance(value, str) and value.startswith(PREFIX) and value[len(PREFIX) :] in names:
+            out[key] = PREFIX + names[value[len(PREFIX) :]]
+        elif key in SCHEMA_ONE:
+            out[key] = _rename_refs(value, names)
+        elif key in SCHEMA_LIST and isinstance(value, list):
+            out[key] = [_rename_refs(sub, names) for sub in value]
+        elif key in SCHEMA_MAP and isinstance(value, Mapping):
+            out[key] = {name: _rename_refs(sub, names) for name, sub in value.items()}
+        else:
+            out[key] = value
+    return out
+
+
+def object_schema(props: Mapping[str, Mapping[str, Any]], required: Sequence[str]) -> dict[str, Any]:
+    """A closed object schema built from per-field schemas that may each carry their own `$defs`.
+    Each field keeps its reference scope: its definitions move under a per-field name (`f<index>.<name>`) and its
+    `$ref`s are rewritten to match, so two fields may both define `Item` differently."""
+    defs: dict[str, Any] = {}
+    fields: dict[str, Any] = {}
+    for index, (name, schema) in enumerate(props.items()):
+        local = schema.get("$defs")
+        names = {key: f"f{index}.{key}" for key in local} if isinstance(local, Mapping) else {}
+        fields[name] = _rename_refs({k: v for k, v in schema.items() if k != "$defs"}, names)
+        for key, sub in local.items() if isinstance(local, Mapping) else ():
+            defs[names[key]] = _rename_refs(sub, names)
+    out: dict[str, Any] = {
+        "type": "object",
+        "properties": fields,
+        "required": list(required),
+        "additionalProperties": False,
+    }
+    if defs:
+        out["$defs"] = defs
+    return out
 ```
 
 - [ ] **Step 5: Run the tests**
@@ -3448,7 +3615,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `SubflowInfo(workflow_id, version_id, input_schema, output_schema)`.
   - `ValidationContext(catalog, subflows={}, max_run_duration=30 days)`.
   - `ValidationResult(diagnostics, node_refs, subflow_pins: {node_id_str: version_id_str}, failure_handler_version_id, output_schema)` with `.ok`.
-  - Functions: `referenced_workflows(graph) -> set[UUID]`, `validate(graph, ctx) -> ValidationResult`.
+  - Functions: `referenced_workflows(graph) -> set[UUID]`, `validate(graph, ctx) -> ValidationResult`. `validate` reports and never raises; a Hypothesis test runs it on arbitrary node configs and outputs.
   - `MAX_SUBFLOW_DEPTH = 5`.
 - Diagnostic codes introduced:
   - settings and values: `settings.invalid_schema`, `settings.unresolvable_ref`, `settings.output_name`, `value.syntax`, `value.literal_only`, `value.kind_not_allowed`, `config.invalid`, `cel.unavailable`;
@@ -3559,12 +3726,25 @@ def test_liveness_is_sound_against_simulated_runs(case: Any) -> None:
 
 ```python
 # SPDX-License-Identifier: Apache-2.0
+import copy
 import uuid
 from datetime import timedelta
 from typing import Any
 
-from dewpoint.engine.graph.validate import SubflowInfo, ValidationContext, ValidationResult, referenced_workflows, validate
+from hypothesis import given, settings
+from hypothesis import strategies as st
+from jsonschema import Draft202012Validator
+
+from dewpoint.engine.graph.model import GraphFormatError
+from dewpoint.engine.graph.validate import (
+    SubflowInfo,
+    ValidationContext,
+    ValidationResult,
+    referenced_workflows,
+    validate,
+)
 from dewpoint.plugins.flow import PLUGIN
+from tests.engine.graph.test_values import JSON
 from tests.support.catalog import catalog
 from tests.support.graphs import G, cel, nid, ref, template
 from tests.support.plugins.testkit import TESTKIT
@@ -3695,13 +3875,68 @@ SITES = {
 
 
 def test_loop_item_is_typed_from_the_items_reference() -> None:
-    def g(value: Any) -> G:
+    def g(value: Any, schema: dict[str, Any] = SITES) -> G:
         b = G().node("l", LOOP, {"items": ref("trigger.sites")}).node("leaf", ECHO, {"value": value})
-        b.edge("l", "leaf", "body").settings["input_schema"] = SITES
+        b.edge("l", "leaf", "body").settings["input_schema"] = schema
         return b
 
+    closed = copy.deepcopy(SITES)
+    closed["properties"]["sites"]["items"]["additionalProperties"] = False
     assert codes(g(ref("loop.item.name"))) == []
-    assert codes(g(ref("loop.item.nope"))) == ["ref.unknown_field"]
+    assert codes(g(ref("loop.item.nope"))) == ["ref.conditional"]  # open item schema: the field may exist
+    assert codes(g(ref("loop.item.nope"), closed)) == ["ref.unknown_field"]
+
+
+def test_undeclared_fields_of_open_schemas_are_possibly_missing() -> None:
+    def g(value: Any) -> G:
+        b = G().node("a", ECHO, {"value": value})
+        b.settings["input_schema"] = {"type": "object", "properties": {"site": {"type": "string"}}}
+        return b
+
+    assert codes(g(ref("trigger.other"))) == ["ref.conditional"]
+    assert codes(g(ref("trigger.other", default="x"))) == []
+
+
+def test_a_union_source_must_fit_the_target_entirely() -> None:
+    g = G().node("d", "flow.delay@1", {"duration_s": ref("trigger.wait")})
+    g.settings["input_schema"] = {
+        "type": "object",
+        "properties": {"wait": {"type": ["string", "integer"]}},
+        "required": ["wait"],
+    }
+    assert codes(g) == ["ref.type_mismatch"]
+
+
+def test_composed_schemas_keep_each_producers_definitions() -> None:
+    w1, w2 = uuid.UUID(int=1), uuid.UUID(int=2)
+
+    def sub(workflow: uuid.UUID, item: str) -> SubflowInfo:
+        out = {
+            "type": "object",
+            "properties": {"x": {"type": "object", "properties": {"v": {"$ref": "#/$defs/Item"}}, "required": ["v"]}},
+            "required": ["x"],
+            "additionalProperties": False,
+            "$defs": {"Item": {"type": item}},
+        }
+        return SubflowInfo(workflow, uuid.UUID(int=10 + workflow.int), {"type": "object"}, out)
+
+    g = (
+        G()
+        .node("r1", "flow.run_workflow@1", {"workflow_id": str(w1)})
+        .node("r2", "flow.run_workflow@1", {"workflow_id": str(w2)})
+        .node("t", "flow.transform@1", {"fields": {"a": ref("steps.r1.output.x"), "b": ref("steps.r2.output.x")}})
+        .node("f", "flow.fail@1", {"message": ref("steps.t.output.a.v")})
+        .node("d", "flow.delay@1", {"duration_s": ref("steps.t.output.b.v")})
+        .edge("r1", "t")
+        .edge("r2", "t")
+        .edge("t", "f")
+        .edge("t", "d")
+    )
+    g.settings["outputs"] = {"a": ref("steps.r1.output.x"), "b": ref("steps.r2.output.x")}
+    result = check(g, subflows={w1: sub(w1, "string"), w2: sub(w2, "integer")})
+    assert result.diagnostics == ()
+    valid = {"a": {"v": "text"}, "b": {"v": 3}}
+    assert list(Draft202012Validator(result.output_schema).iter_errors(valid)) == []
 
 
 def test_type_mismatch() -> None:
@@ -3872,6 +4107,65 @@ def test_transform_output_is_typed_from_its_fields() -> None:
 
     assert codes(g(ref("steps.t.output.name"))) == ["ref.type_mismatch"]  # text into a boolean
     assert codes(g(ref("steps.t.output.nope"))) == ["ref.unknown_field"]
+
+
+CONFIG = st.dictionaries(
+    st.sampled_from(
+        [
+            "value",
+            "condition",
+            "items",
+            "cases",
+            "collect",
+            "predicate",
+            "assignments",
+            "duration_s",
+            "until",
+            "message",
+            "workflow_id",
+            "input",
+            "fields",
+            "concurrency",
+        ]
+    )
+    | st.text(max_size=5),
+    JSON,
+    max_size=5,
+)
+TYPES = st.sampled_from(
+    [
+        ECHO,
+        IF,
+        LOOP,
+        SET,
+        "flow.switch@1",
+        "flow.filter@1",
+        "flow.delay@1",
+        "flow.wait_until@1",
+        "flow.fail@1",
+        "flow.run_workflow@1",
+        "flow.transform@1",
+        "flow.stop@1",
+    ]
+)
+
+
+@settings(max_examples=300, deadline=None)
+@given(
+    st.lists(st.tuples(TYPES, CONFIG), min_size=1, max_size=4), st.dictionaries(st.text(max_size=5), JSON, max_size=3)
+)
+def test_validate_reports_never_raises_on_arbitrary_configs(nodes: Any, outputs: Any) -> None:
+    g = G()
+    for index, (type_ref, config) in enumerate(nodes):
+        g.node(f"n{index}", type_ref, config)
+    for index in range(1, len(nodes)):
+        g.edge(f"n{index - 1}", f"n{index}", "true" if nodes[index - 1][0] == IF else "out")
+    g.settings["outputs"] = outputs
+    try:
+        graph = g.build()
+    except GraphFormatError:
+        return  # rejected at parse time, which is also a report
+    validate(graph, ValidationContext(catalog=CAT))
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -4053,6 +4347,7 @@ from dewpoint.engine.graph.schemas import (
     literal_on_path,
     literal_type,
     navigate,
+    object_schema,
     standalone,
     target_schema,
 )
@@ -4155,22 +4450,6 @@ def _descendants(s: Structure) -> dict[uuid.UUID, frozenset[uuid.UUID]]:
     return desc
 
 
-def _object_schema(props: Mapping[str, Mapping[str, Any]], required: list[str]) -> dict[str, Any]:
-    """An object schema from per-field schemas, hoisting their $defs to the root so $refs still resolve."""
-    defs: dict[str, Any] = {}
-    clean: dict[str, Any] = {}
-    for name, schema in props.items():
-        inner = dict(schema)
-        nested = inner.pop("$defs", None)
-        if isinstance(nested, Mapping):
-            defs.update(nested)
-        clean[name] = inner
-    out: dict[str, Any] = {"type": "object", "properties": clean, "required": required, "additionalProperties": False}
-    if defs:
-        out["$defs"] = defs
-    return out
-
-
 def _static_delay(node: GraphNode, spec: NodeTypeSpec) -> float:
     if spec.ref != C.DELAY:
         return 0.0
@@ -4198,7 +4477,9 @@ def _settings(graph: Graph) -> list[Diagnostic]:
             continue
         if schema.get("type", "object") != "object":
             out.append(
-                Diagnostic(code="settings.invalid_schema", field=f"/settings/{label}", message="It must describe an object.")
+                Diagnostic(
+                    code="settings.invalid_schema", field=f"/settings/{label}", message="It must describe an object."
+                )
             )
         # Tenant-authored schemas: only resolvable local $refs, so validation can never raise (see schema_refs).
         out += [
@@ -4380,7 +4661,7 @@ class _Validator:
                 else:
                     props[name] = {"type": literal_type(fields[name])}
                     required.append(name)
-            return _object_schema(props, required)
+            return object_schema(props, required)
         return spec.output_schema
 
     # ---- values ---------------------------------------------------------------------------------------------
@@ -4392,8 +4673,10 @@ class _Validator:
             self.err("value.syntax", value.message, node=site.node, fld=site.field)
             return None
         target = target_schema(root, pointer) if root is not None else None
-        if root is not None and value.kind != "literal" and (
-            literal_on_path(root, pointer) or contains_literal(root, target)
+        if (
+            root is not None
+            and value.kind != "literal"
+            and (literal_on_path(root, pointer) or contains_literal(root, target))
         ):
             self.err("value.literal_only", _LITERAL_ONLY, node=site.node, fld=site.field)
             return None
@@ -4507,7 +4790,10 @@ class _Validator:
             loop = site.region
             if loop is None:
                 self.err(
-                    "ref.loop_outside", "`loop.*` is only available inside a loop's body.", node=site.node, fld=site.field
+                    "ref.loop_outside",
+                    "`loop.*` is only available inside a loop's body.",
+                    node=site.node,
+                    fld=site.field,
                 )
                 return None
         else:
@@ -4665,7 +4951,7 @@ class _Validator:
                 self._value(_Site(None, where + pointer_str(pointer), None, at_exit=True), value, None, ())
             props[name] = {"type": literal_type(raw)}
             required.append(name)
-        self.output_schema = _object_schema(props, required)
+        self.output_schema = object_schema(props, required)
 
     def _failure_handler(self) -> None:
         workflow = self.g.settings.failure_handler

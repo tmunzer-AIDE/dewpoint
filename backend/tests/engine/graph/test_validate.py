@@ -1,8 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
+import copy
 import uuid
 from datetime import timedelta
 from typing import Any
 
+from hypothesis import given, settings
+from hypothesis import strategies as st
+from jsonschema import Draft202012Validator
+
+from dewpoint.engine.graph.model import GraphFormatError
 from dewpoint.engine.graph.validate import (
     SubflowInfo,
     ValidationContext,
@@ -11,6 +17,7 @@ from dewpoint.engine.graph.validate import (
     validate,
 )
 from dewpoint.plugins.flow import PLUGIN
+from tests.engine.graph.test_values import JSON
 from tests.support.catalog import catalog
 from tests.support.graphs import G, cel, nid, ref, template
 from tests.support.plugins.testkit import TESTKIT
@@ -141,13 +148,68 @@ SITES = {
 
 
 def test_loop_item_is_typed_from_the_items_reference() -> None:
-    def g(value: Any) -> G:
+    def g(value: Any, schema: dict[str, Any] = SITES) -> G:
         b = G().node("l", LOOP, {"items": ref("trigger.sites")}).node("leaf", ECHO, {"value": value})
-        b.edge("l", "leaf", "body").settings["input_schema"] = SITES
+        b.edge("l", "leaf", "body").settings["input_schema"] = schema
         return b
 
+    closed = copy.deepcopy(SITES)
+    closed["properties"]["sites"]["items"]["additionalProperties"] = False
     assert codes(g(ref("loop.item.name"))) == []
-    assert codes(g(ref("loop.item.nope"))) == ["ref.unknown_field"]
+    assert codes(g(ref("loop.item.nope"))) == ["ref.conditional"]  # open item schema: the field may exist
+    assert codes(g(ref("loop.item.nope"), closed)) == ["ref.unknown_field"]
+
+
+def test_undeclared_fields_of_open_schemas_are_possibly_missing() -> None:
+    def g(value: Any) -> G:
+        b = G().node("a", ECHO, {"value": value})
+        b.settings["input_schema"] = {"type": "object", "properties": {"site": {"type": "string"}}}
+        return b
+
+    assert codes(g(ref("trigger.other"))) == ["ref.conditional"]
+    assert codes(g(ref("trigger.other", default="x"))) == []
+
+
+def test_a_union_source_must_fit_the_target_entirely() -> None:
+    g = G().node("d", "flow.delay@1", {"duration_s": ref("trigger.wait")})
+    g.settings["input_schema"] = {
+        "type": "object",
+        "properties": {"wait": {"type": ["string", "integer"]}},
+        "required": ["wait"],
+    }
+    assert codes(g) == ["ref.type_mismatch"]
+
+
+def test_composed_schemas_keep_each_producers_definitions() -> None:
+    w1, w2 = uuid.UUID(int=1), uuid.UUID(int=2)
+
+    def sub(workflow: uuid.UUID, item: str) -> SubflowInfo:
+        out = {
+            "type": "object",
+            "properties": {"x": {"type": "object", "properties": {"v": {"$ref": "#/$defs/Item"}}, "required": ["v"]}},
+            "required": ["x"],
+            "additionalProperties": False,
+            "$defs": {"Item": {"type": item}},
+        }
+        return SubflowInfo(workflow, uuid.UUID(int=10 + workflow.int), {"type": "object"}, out)
+
+    g = (
+        G()
+        .node("r1", "flow.run_workflow@1", {"workflow_id": str(w1)})
+        .node("r2", "flow.run_workflow@1", {"workflow_id": str(w2)})
+        .node("t", "flow.transform@1", {"fields": {"a": ref("steps.r1.output.x"), "b": ref("steps.r2.output.x")}})
+        .node("f", "flow.fail@1", {"message": ref("steps.t.output.a.v")})
+        .node("d", "flow.delay@1", {"duration_s": ref("steps.t.output.b.v")})
+        .edge("r1", "t")
+        .edge("r2", "t")
+        .edge("t", "f")
+        .edge("t", "d")
+    )
+    g.settings["outputs"] = {"a": ref("steps.r1.output.x"), "b": ref("steps.r2.output.x")}
+    result = check(g, subflows={w1: sub(w1, "string"), w2: sub(w2, "integer")})
+    assert result.diagnostics == ()
+    valid = {"a": {"v": "text"}, "b": {"v": 3}}
+    assert list(Draft202012Validator(result.output_schema).iter_errors(valid)) == []
 
 
 def test_type_mismatch() -> None:
@@ -318,3 +380,62 @@ def test_transform_output_is_typed_from_its_fields() -> None:
 
     assert codes(g(ref("steps.t.output.name"))) == ["ref.type_mismatch"]  # text into a boolean
     assert codes(g(ref("steps.t.output.nope"))) == ["ref.unknown_field"]
+
+
+CONFIG = st.dictionaries(
+    st.sampled_from(
+        [
+            "value",
+            "condition",
+            "items",
+            "cases",
+            "collect",
+            "predicate",
+            "assignments",
+            "duration_s",
+            "until",
+            "message",
+            "workflow_id",
+            "input",
+            "fields",
+            "concurrency",
+        ]
+    )
+    | st.text(max_size=5),
+    JSON,
+    max_size=5,
+)
+TYPES = st.sampled_from(
+    [
+        ECHO,
+        IF,
+        LOOP,
+        SET,
+        "flow.switch@1",
+        "flow.filter@1",
+        "flow.delay@1",
+        "flow.wait_until@1",
+        "flow.fail@1",
+        "flow.run_workflow@1",
+        "flow.transform@1",
+        "flow.stop@1",
+    ]
+)
+
+
+@settings(max_examples=300, deadline=None)
+@given(
+    st.lists(st.tuples(TYPES, CONFIG), min_size=1, max_size=4), st.dictionaries(st.text(max_size=5), JSON, max_size=3)
+)
+def test_validate_reports_never_raises_on_arbitrary_configs(nodes: Any, outputs: Any) -> None:
+    g = G()
+    for index, (type_ref, config) in enumerate(nodes):
+        g.node(f"n{index}", type_ref, config)
+    for index in range(1, len(nodes)):
+        g.edge(f"n{index - 1}", f"n{index}", "true" if nodes[index - 1][0] == IF else "out")
+    g.settings["outputs"] = outputs
+    try:
+        graph = g.build()
+    except GraphFormatError:
+        return  # rejected at parse time, which is also a report
+    validate(graph, ValidationContext(catalog=CAT))

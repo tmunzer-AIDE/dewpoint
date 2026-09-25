@@ -3,7 +3,7 @@ from datetime import timedelta
 from typing import Any
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from dewpoint.sdk import (
     FatalError,
@@ -72,6 +72,23 @@ def test_node_manifest_carries_schemas_and_markers() -> None:
         "non_retryable": ["demo.bad_request"],
     }
     assert m["timeout_s"] == 30.0 and m["side_effect"] == "keyed"
+
+
+class Nested(BaseModel):
+    name: str
+
+
+class OpenOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    nested: Nested
+
+
+def test_output_schemas_say_which_objects_are_closed() -> None:
+    closed = node_manifest(Send)["output_schema"]
+    assert closed["additionalProperties"] is False  # serialization never emits undeclared fields
+    opened = node_manifest(_node(run=_run, Output=OpenOut))["output_schema"]
+    assert opened["additionalProperties"] is True  # extra="allow" keeps its extras
+    assert opened["$defs"]["Nested"]["additionalProperties"] is False
 
 
 def test_manifest_problems() -> None:
