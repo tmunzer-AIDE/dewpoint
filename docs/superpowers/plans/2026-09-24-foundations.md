@@ -6116,21 +6116,27 @@ Expected: PASS
 `deploy/docker/app.Dockerfile`:
 ```dockerfile
 # SPDX-License-Identifier: Apache-2.0
-FROM ghcr.io/astral-sh/uv:0.5-python3.12-bookworm-slim AS build
-WORKDIR /src
+# Base image note: no distroless image ships Python >= 3.12 on a supported Debian yet; this is slim, non-root,
+# without build tools, and meant to run with a read-only root filesystem. Revisit for distroless.
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS build
+WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 COPY backend/pyproject.toml backend/uv.lock ./
 RUN uv sync --locked --no-dev --no-install-project
 COPY backend/ ./
-RUN uv sync --locked --no-dev
+RUN uv sync --locked --no-dev --no-editable
 
 FROM python:3.12-slim-bookworm
 RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin dewpoint
+# Mount point for the evaluation anchor volume; a new named volume inherits this ownership.
+RUN mkdir /anchors && chown 10001:10001 /anchors
 WORKDIR /app
-COPY --from=build --chown=10001:10001 /src /app
+COPY --from=build --chown=10001:10001 /app /app
 ENV PATH="/app/.venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 USER 10001
 EXPOSE 8000
+# --forwarded-allow-ips "*" is acceptable ONLY because `api` is not published and is reachable solely through `web`
+# on the internal network. The Helm chart (sub-project 4) sets the exact proxy CIDRs.
 CMD ["uvicorn", "dewpoint.apps.api.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", \
      "--proxy-headers", "--forwarded-allow-ips", "*"]
 ```
@@ -6144,11 +6150,6 @@ server {
   root /usr/share/nginx/html;
   client_max_body_size 6m;
 
-  add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'" always;
-  add_header X-Content-Type-Options nosniff always;
-  add_header Referrer-Policy no-referrer always;
-  add_header X-Frame-Options DENY always;
-
   location /api/ {
     proxy_pass http://api:8000;
     proxy_set_header Host $host;
@@ -6156,9 +6157,29 @@ server {
     proxy_set_header X-Forwarded-Proto $scheme;
   }
   location /health/ { proxy_pass http://api:8000; }
-  location /assets/ { expires 1y; add_header Cache-Control "public, immutable"; try_files $uri =404; }
-  location / { add_header Cache-Control "no-store" always; try_files $uri /index.html; }
+  location /assets/ {
+    include /etc/nginx/snippets/security-headers.conf;
+    add_header Cache-Control "public, immutable" always;
+    expires 1y;
+    try_files $uri =404;
+  }
+  location / {
+    include /etc/nginx/snippets/security-headers.conf;
+    add_header Cache-Control "no-store" always;
+    try_files $uri /index.html;
+  }
 }
+```
+
+`deploy/docker/security-headers.conf` (included by the static locations; nginx ignores server-level `add_header` in any location that sets its own):
+```nginx
+# Included by every static location. nginx drops server-level add_header in any location that
+# declares its own add_header, so these can't live at server level. /api responses carry the
+# same headers from the API itself.
+add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'" always;
+add_header X-Content-Type-Options nosniff always;
+add_header Referrer-Policy no-referrer always;
+add_header X-Frame-Options DENY always;
 ```
 
 `deploy/docker/web.Dockerfile`:
@@ -6166,14 +6187,17 @@ server {
 # SPDX-License-Identifier: Apache-2.0
 FROM node:22-bookworm-slim AS build
 WORKDIR /src
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable
-COPY frontend/package.json frontend/pnpm-lock.yaml ./
+# pnpm-workspace.yaml carries the build-script allowlist (esbuild only); pnpm 12 refuses others.
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 COPY frontend/ ./
 RUN pnpm build
 
 FROM nginxinc/nginx-unprivileged:1.27-alpine
 COPY deploy/docker/nginx.conf /etc/nginx/conf.d/default.conf
+COPY deploy/docker/security-headers.conf /etc/nginx/snippets/security-headers.conf
 COPY --from=build /src/dist /usr/share/nginx/html
 EXPOSE 8080
 ```
@@ -6271,7 +6295,7 @@ services:
 
 volumes: { pgdata: {}, anchors: {} }
 ```
-The `anchors` volume must be writable by UID 10001. Add `user: "10001"` to `audit-anchor`, and in the README note: `docker compose run --rm --user root audit-anchor chown 10001 /anchors` on first start.
+The `anchors` volume must be writable by UID 10001. The app image creates `/anchors` owned by 10001, and a new named volume inherits that ownership, so no manual `chown` is needed.
 
 `deploy/compose/.env.example`:
 ```bash
@@ -6376,6 +6400,7 @@ test.describe.serial("foundations", () => {
     await expect(page).toHaveURL(/\/mfa/);
     await page.getByTestId("totp-code").fill(code(totpSecret, 30)); // next step: the current one was consumed
     await page.getByTestId("totp-submit").click();
+    await expect(page).toHaveURL(/\/tenants/); // wait: the MFA response rotates the session cookie
     await page.goto("/account/security");
     page.once("dialog", (d) => void d.accept("E2E key"));
     await page.getByTestId("passkey-add").click();

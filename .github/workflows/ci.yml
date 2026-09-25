@@ -35,3 +35,38 @@ jobs:
         with: { node-version: 22, cache: pnpm, cache-dependency-path: frontend/pnpm-lock.yaml }
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint && pnpm typecheck && pnpm test && pnpm build
+  e2e:
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Write CI env
+        working-directory: deploy/compose
+        run: |
+          {
+            echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)"
+            echo "DEWPOINT_API_DB_PASSWORD=$(openssl rand -hex 16)"
+            echo "DEWPOINT_ADMIN_DB_PASSWORD=$(openssl rand -hex 16)"
+            echo "DEWPOINT_AUDITOR_DB_PASSWORD=$(openssl rand -hex 16)"
+            echo "DEWPOINT_KEK_B64=$(openssl rand -base64 32)"
+            echo "DEWPOINT_AUDIT_SIGNING_KEY_B64=$(openssl rand -base64 32)"
+          } > .env
+      - working-directory: deploy/compose
+        run: |
+          docker compose up -d --build --wait
+          set -a; . ./.env; set +a
+          docker compose run --rm -e DEWPOINT_INIT_PASSWORD=violet-otter-canyon-42 \
+            -e DEWPOINT_DATABASE_URL="postgresql+asyncpg://dewpoint_api_login:${DEWPOINT_API_DB_PASSWORD}@postgres/dewpoint" \
+            api dewpoint admin init --email admin@example.com
+      - uses: pnpm/action-setup@v4  # version comes from package.json "packageManager"
+        with: { package_json_file: frontend/package.json }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm, cache-dependency-path: frontend/pnpm-lock.yaml }
+      - working-directory: frontend
+        run: pnpm install --frozen-lockfile && pnpm exec playwright install --with-deps chromium && pnpm e2e
+      - if: failure()
+        working-directory: deploy/compose
+        run: docker compose logs --no-color > compose.log
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with: { name: e2e-debug, path: "frontend/playwright-report\ndeploy/compose/compose.log" }
