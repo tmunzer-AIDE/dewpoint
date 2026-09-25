@@ -22,5 +22,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute("REVOKE ALL ON SCHEMA public FROM " + ", ".join(ROLES))
     for role in ROLES:
         op.execute(f"DROP ROLE IF EXISTS {role}")

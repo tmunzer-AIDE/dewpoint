@@ -57,9 +57,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute(
-        "DROP POLICY IF EXISTS tenants_scope ON tenants; DROP POLICY IF EXISTS memberships_scope ON memberships;"
-    )
+    op.execute("DROP POLICY IF EXISTS tenants_scope ON tenants")
+    op.execute("DROP POLICY IF EXISTS memberships_scope ON memberships")
     op.drop_table("memberships")
     op.drop_table("tenants")
     op.execute("DROP FUNCTION IF EXISTS app_tenant_id()")
