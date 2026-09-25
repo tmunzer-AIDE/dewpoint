@@ -3,8 +3,10 @@ from fastapi import FastAPI
 
 from dewpoint.apps.api.errors import install_error_handlers
 from dewpoint.apps.api.middleware import ClientHeaderMiddleware, SecurityHeadersMiddleware
-from dewpoint.apps.api.routes import health
+from dewpoint.apps.api.routes import auth, health, mfa
 from dewpoint.core.config import Settings, get_settings
+from dewpoint.core.crypto.kek import KekSet
+from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.db import make_engine, make_sessionmaker
 
 
@@ -14,8 +16,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.engine = make_engine(settings.database_url)
     app.state.sessionmaker = make_sessionmaker(app.state.engine)
+    app.state.keyring = Keyring(KekSet.from_settings(settings))
     app.add_middleware(ClientHeaderMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
     install_error_handlers(app)
-    app.include_router(health.router)
+    for router in (health.router, auth.router, mfa.router):
+        app.include_router(router)
     return app

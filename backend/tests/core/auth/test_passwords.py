@@ -15,3 +15,17 @@ def test_policy() -> None:
     assert "contains_email" in policy_violations("alice-is-great-2026", "alice@corp.test")
     assert "common" in policy_violations("password1234", "x@y.z")
     assert policy_violations("violet-otter-canyon-42", "alice@corp.test") == []
+
+
+def test_email_type_accepts_internal_domains_and_rejects_garbage() -> None:
+    import pytest
+    from pydantic import TypeAdapter, ValidationError
+
+    from dewpoint.core.auth.users import Email
+
+    ta = TypeAdapter(Email)
+    for ok in ("dana@corp.test", "ops@site.local", "a.b+c@mist.internal", "  x@example.com "):
+        assert ta.validate_python(ok) == ok.strip()
+    for bad in ("", "nodomain", "@x.y", "a@", "a b@c.d", "a@b@c", "x" * 321 + "@a.b"):
+        with pytest.raises(ValidationError):
+            ta.validate_python(bad)

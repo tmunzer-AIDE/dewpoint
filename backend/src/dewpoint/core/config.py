@@ -18,7 +18,8 @@ class Settings(BaseSettings):
     mfa_required: bool = True
     session_idle_minutes: int = 30
     session_absolute_hours: int = 12
-    login_max_failures: int = 5
+    login_max_failures: int = 5  # per account and per MFA user
+    login_ip_max_failures: int = 50  # per source IP: higher, because offices share NAT addresses
     login_lockout_minutes: int = 15
     audit_signing_key_b64: str | None = None  # Ed25519 private key (raw 32 bytes, base64)
     audit_anchor_path: str | None = None

@@ -4,7 +4,7 @@ import hmac
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Literal, Protocol
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,9 +16,27 @@ SESSION_COOKIE = "__Host-dewpoint_session"
 TOUCH_EVERY = timedelta(seconds=60)
 
 
+SameSite = Literal["lax", "strict", "none"]
+
+
 class _CookieResponse(Protocol):
-    def set_cookie(self, key: str, value: str = "", **kw: object) -> None: ...
-    def delete_cookie(self, key: str, **kw: object) -> None: ...
+    """The cookie API of a Starlette response, without importing a web framework into core."""
+
+    def set_cookie(
+        self,
+        key: str,
+        value: str = ...,
+        *,
+        max_age: int | None = ...,
+        path: str | None = ...,
+        secure: bool = ...,
+        httponly: bool = ...,
+        samesite: SameSite | None = ...,
+    ) -> None: ...
+
+    def delete_cookie(
+        self, key: str, *, path: str = ..., secure: bool = ..., httponly: bool = ..., samesite: SameSite | None = ...
+    ) -> None: ...
 
 
 def _hash(token: str) -> bytes:

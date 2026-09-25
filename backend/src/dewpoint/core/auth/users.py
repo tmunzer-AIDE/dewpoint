@@ -1,11 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 from datetime import UTC, datetime
+from typing import Annotated
 
+from pydantic import StringConstraints
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.auth.passwords import hash_password, policy_violations
 from dewpoint.core.models.identity import User
+
+# Deliberately lenient: self-hosted customers use internal/special-use domains (.local, .internal, .test)
+# that RFC-strict validators reject. Uniqueness is case-insensitive (see ix_users_email_lower).
+Email = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=3, max_length=320, pattern=r"^[^@\s]+@[^@\s]+$")
+]
 
 
 class PasswordPolicyError(ValueError):

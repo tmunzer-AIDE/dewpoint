@@ -390,7 +390,8 @@ class Settings(BaseSettings):
     mfa_required: bool = True
     session_idle_minutes: int = 30
     session_absolute_hours: int = 12
-    login_max_failures: int = 5
+    login_max_failures: int = 5  # per account and per MFA user
+    login_ip_max_failures: int = 50  # per source IP: higher, because offices share NAT addresses
     login_lockout_minutes: int = 15
     audit_signing_key_b64: str | None = None  # Ed25519 private key (raw 32 bytes, base64)
     audit_anchor_path: str | None = None
@@ -1541,6 +1542,20 @@ def test_policy() -> None:
     assert "contains_email" in policy_violations("alice-is-great-2026", "alice@corp.test")
     assert "common" in policy_violations("password1234", "x@y.z")
     assert policy_violations("violet-otter-canyon-42", "alice@corp.test") == []
+
+
+def test_email_type_accepts_internal_domains_and_rejects_garbage() -> None:
+    import pytest
+    from pydantic import TypeAdapter, ValidationError
+
+    from dewpoint.core.auth.users import Email
+
+    ta = TypeAdapter(Email)
+    for ok in ("dana@corp.test", "ops@site.local", "a.b+c@mist.internal", "  x@example.com "):
+        assert ta.validate_python(ok) == ok.strip()
+    for bad in ("", "nodomain", "@x.y", "a@", "a b@c.d", "a@b@c", "x" * 321 + "@a.b"):
+        with pytest.raises(ValidationError):
+            ta.validate_python(bad)
 ```
 
 `backend/tests/apps/cli/test_admin_init.py`:
@@ -1634,12 +1649,20 @@ def policy_violations(pw: str, email: str) -> list[str]:
 ```python
 # SPDX-License-Identifier: Apache-2.0
 from datetime import UTC, datetime
+from typing import Annotated
 
+from pydantic import StringConstraints
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.auth.passwords import hash_password, policy_violations
 from dewpoint.core.models.identity import User
+
+# Deliberately lenient: self-hosted customers use internal/special-use domains (.local, .internal, .test)
+# that RFC-strict validators reject. Uniqueness is case-insensitive (see ix_users_email_lower).
+Email = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=3, max_length=320, pattern=r"^[^@\s]+@[^@\s]+$")
+]
 
 
 class PasswordPolicyError(ValueError):
@@ -1661,8 +1684,12 @@ async def create_user(s: AsyncSession, *, email: str, password: str, platform_ad
         raise PasswordPolicyError(v)
     if await get_user_by_email(s, email):
         raise EmailTakenError(email)
-    user = User(email=email.strip(), password_hash=hash_password(password), is_platform_admin=platform_admin,
-                password_changed_at=datetime.now(UTC))
+    user = User(
+        email=email.strip(),
+        password_hash=hash_password(password),
+        is_platform_admin=platform_admin,
+        password_changed_at=datetime.now(UTC),
+    )
     s.add(user)
     await s.flush()
     return user
@@ -1880,7 +1907,7 @@ import hmac
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Literal, Protocol
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1892,28 +1919,64 @@ SESSION_COOKIE = "__Host-dewpoint_session"
 TOUCH_EVERY = timedelta(seconds=60)
 
 
+SameSite = Literal["lax", "strict", "none"]
+
+
 class _CookieResponse(Protocol):
-    def set_cookie(self, key: str, value: str = "", **kw: object) -> None: ...
-    def delete_cookie(self, key: str, **kw: object) -> None: ...
+    """The cookie API of a Starlette response, without importing a web framework into core."""
+
+    def set_cookie(
+        self,
+        key: str,
+        value: str = ...,
+        *,
+        max_age: int | None = ...,
+        path: str | None = ...,
+        secure: bool = ...,
+        httponly: bool = ...,
+        samesite: SameSite | None = ...,
+    ) -> None: ...
+
+    def delete_cookie(
+        self, key: str, *, path: str = ..., secure: bool = ..., httponly: bool = ..., samesite: SameSite | None = ...
+    ) -> None: ...
 
 
 def _hash(token: str) -> bytes:
     return hashlib.sha256(token.encode()).digest()
 
 
-async def create_session(s: AsyncSession, *, user_id: uuid.UUID, state: str, methods: list[str], settings: Settings,
-                         ip: str | None, user_agent: str | None) -> tuple[AuthSession, str]:
+async def create_session(
+    s: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    state: str,
+    methods: list[str],
+    settings: Settings,
+    ip: str | None,
+    user_agent: str | None,
+) -> tuple[AuthSession, str]:
     token, now = secrets.token_urlsafe(32), datetime.now(UTC)
-    sess = AuthSession(token_hash=_hash(token), user_id=user_id, state=state, auth_methods=list(methods),
-                       csrf_token=secrets.token_urlsafe(32), created_at=now, last_seen_at=now,
-                       expires_at=now + timedelta(hours=settings.session_absolute_hours), ip=ip,
-                       user_agent=(user_agent or "")[:400] or None)
+    sess = AuthSession(
+        token_hash=_hash(token),
+        user_id=user_id,
+        state=state,
+        auth_methods=list(methods),
+        csrf_token=secrets.token_urlsafe(32),
+        created_at=now,
+        last_seen_at=now,
+        expires_at=now + timedelta(hours=settings.session_absolute_hours),
+        ip=ip,
+        user_agent=(user_agent or "")[:400] or None,
+    )
     s.add(sess)
     await s.flush()
     return sess, token
 
 
-async def load_session(s: AsyncSession, token: str, settings: Settings, now: datetime | None = None) -> AuthSession | None:
+async def load_session(
+    s: AsyncSession, token: str, settings: Settings, now: datetime | None = None
+) -> AuthSession | None:
     now = now or datetime.now(UTC)
     sess = (await s.execute(select(AuthSession).where(AuthSession.token_hash == _hash(token)))).scalar_one_or_none()
     if sess is None or sess.revoked_at is not None or now >= sess.expires_at:
@@ -1951,8 +2014,15 @@ def csrf_valid(sess: AuthSession, header: str | None) -> bool:
 
 
 def set_session_cookie(response: _CookieResponse, token: str, settings: Settings) -> None:
-    response.set_cookie(SESSION_COOKIE, token, httponly=True, secure=True, samesite="lax", path="/",
-                        max_age=settings.session_absolute_hours * 3600)
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/",
+        max_age=settings.session_absolute_hours * 3600,
+    )
 
 
 def clear_session_cookie(response: _CookieResponse) -> None:
@@ -2087,6 +2157,17 @@ async def test_locks_after_max_failures_then_expires(owner_sessionmaker, api_set
         later = now + timedelta(minutes=api_settings.login_lockout_minutes + 1)
         assert not await throttle.is_locked(s, "login_email", "a@x.test", later)
         await throttle.reset(s, "login_email", "a@x.test")
+
+
+async def test_ip_threshold_is_separate_and_higher(owner_sessionmaker, api_settings) -> None:
+    assert api_settings.login_ip_max_failures > api_settings.login_max_failures
+    async with owner_sessionmaker() as s, s.begin():
+        for _ in range(api_settings.login_max_failures):
+            await throttle.record_failure(s, "login_ip", "192.0.2.7", api_settings)
+        assert not await throttle.is_locked(s, "login_ip", "192.0.2.7")
+        for _ in range(api_settings.login_ip_max_failures - api_settings.login_max_failures):
+            await throttle.record_failure(s, "login_ip", "192.0.2.7", api_settings)
+        assert await throttle.is_locked(s, "login_ip", "192.0.2.7")
 ```
 
 `backend/tests/apps/api/test_login_flow.py`:
@@ -2095,6 +2176,7 @@ async def test_locks_after_max_failures_then_expires(owner_sessionmaker, api_set
 from urllib.parse import parse_qs, urlparse
 
 import pyotp
+from sqlalchemy import text
 
 from dewpoint.core.auth.users import create_user
 
@@ -2113,8 +2195,9 @@ async def test_enroll_then_login_with_totp(client, owner_sessionmaker) -> None:
     csrf = r.json()["csrf_token"]
     uri = (await client.post("/api/v1/auth/mfa/totp/enroll", headers={"X-CSRF-Token": csrf})).json()["otpauth_uri"]
     secret = parse_qs(urlparse(uri).query)["secret"][0]
-    r = await client.post("/api/v1/auth/mfa/totp/confirm", json={"code": pyotp.TOTP(secret).now()},
-                          headers={"X-CSRF-Token": csrf})
+    r = await client.post(
+        "/api/v1/auth/mfa/totp/confirm", json={"code": pyotp.TOTP(secret).now()}, headers={"X-CSRF-Token": csrf}
+    )
     body = r.json()
     assert r.status_code == 200 and body["state"] == "active" and len(body["recovery_codes"]) == 10
     csrf = body["csrf_token"]
@@ -2127,8 +2210,9 @@ async def test_enroll_then_login_with_totp(client, owner_sessionmaker) -> None:
     code = pyotp.TOTP(secret).now()
     r = await client.post("/api/v1/auth/mfa/totp", json={"code": code}, headers={"X-CSRF-Token": csrf})
     assert r.status_code == 401
-    r = await client.post("/api/v1/auth/mfa/recovery", json={"code": body["recovery_codes"][0]},
-                          headers={"X-CSRF-Token": csrf})
+    r = await client.post(
+        "/api/v1/auth/mfa/recovery", json={"code": body["recovery_codes"][0]}, headers={"X-CSRF-Token": csrf}
+    )
     assert r.status_code == 200 and r.json()["state"] == "active"
     me = (await client.get("/api/v1/auth/session")).json()
     assert me["user"]["email"] == "dana@corp.test" and me["auth_methods"] == ["password", "recovery"]
@@ -2141,13 +2225,16 @@ async def test_bad_password_is_generic_and_locks(client, owner_sessionmaker, api
         assert r.status_code == 401 and r.json() == {"error": "invalid_credentials"}
     r = await client.post("/api/v1/auth/login", json={"email": "dana@corp.test", "password": PW})
     assert r.status_code == 429 and r.json() == {"error": "locked"}
+    # an unknown account gets the same generic answer; the shared client IP is still under its own higher limit
     r = await client.post("/api/v1/auth/login", json={"email": "ghost@corp.test", "password": PW})
     assert r.status_code == 401 and r.json() == {"error": "invalid_credentials"}
 
 
 async def test_enrollment_confirm_is_throttled(client, owner_sessionmaker, api_settings) -> None:
     await _seed(owner_sessionmaker)
-    csrf = (await client.post("/api/v1/auth/login", json={"email": "dana@corp.test", "password": PW})).json()["csrf_token"]
+    csrf = (await client.post("/api/v1/auth/login", json={"email": "dana@corp.test", "password": PW})).json()[
+        "csrf_token"
+    ]
     await client.post("/api/v1/auth/mfa/totp/enroll", headers={"X-CSRF-Token": csrf})
     for _ in range(api_settings.login_max_failures):
         r = await client.post("/api/v1/auth/mfa/totp/confirm", json={"code": "000000"}, headers={"X-CSRF-Token": csrf})
@@ -2158,15 +2245,22 @@ async def test_enrollment_confirm_is_throttled(client, owner_sessionmaker, api_s
 
 async def test_password_change_revokes_other_sessions(app, owner_sessionmaker) -> None:
     import httpx
+
     await _seed(owner_sessionmaker)
     t = httpx.ASGITransport(app=app)
     h = {"X-Dewpoint-Client": "web"}
-    async with httpx.AsyncClient(transport=t, base_url="https://testserver", headers=h) as a, \
-               httpx.AsyncClient(transport=t, base_url="https://testserver", headers=h) as b:
+    async with (
+        httpx.AsyncClient(transport=t, base_url="https://testserver", headers=h) as a,
+        httpx.AsyncClient(transport=t, base_url="https://testserver", headers=h) as b,
+    ):
         for c in (a, b):
             r = await c.post("/api/v1/auth/login", json={"email": "dana@corp.test", "password": PW})
             c.headers["X-CSRF-Token"] = r.json()["csrf_token"]
-        r = await a.post("/api/v1/auth/password", json={"current_password": PW, "new_password": "amber-heron-valley-77"})
+        async with owner_sessionmaker() as s, s.begin():  # both sessions completed MFA (not under test here)
+            await s.execute(text("update sessions set state = 'active'"))
+        r = await a.post(
+            "/api/v1/auth/password", json={"current_password": PW, "new_password": "amber-heron-valley-77"}
+        )
         assert r.status_code == 204
         assert (await b.get("/api/v1/auth/session")).status_code == 401
         assert (await a.get("/api/v1/auth/session")).status_code == 200
@@ -2202,14 +2296,17 @@ async def is_locked(s: AsyncSession, kind: str, key: str, now: datetime | None =
 
 async def record_failure(s: AsyncSession, kind: str, key: str, settings: Settings, now: datetime | None = None) -> None:
     now, key = now or datetime.now(UTC), key.lower()
-    await s.execute(insert(AuthThrottle).values(kind=kind, key=key, failures=0, window_start=now)
-                    .on_conflict_do_nothing())
+    await s.execute(
+        insert(AuthThrottle).values(kind=kind, key=key, failures=0, window_start=now).on_conflict_do_nothing()
+    )
     row = await s.get(AuthThrottle, (kind, key), with_for_update=True)
-    assert row is not None
+    if row is None:  # inserted just above; only reachable if the row was deleted concurrently
+        raise RuntimeError("auth_throttle row vanished")
     if now - row.window_start > WINDOW:
         row.failures, row.window_start, row.locked_until = 0, now, None
     row.failures += 1
-    if row.failures >= settings.login_max_failures:
+    limit = settings.login_ip_max_failures if kind == "login_ip" else settings.login_max_failures
+    if row.failures >= limit:
         row.locked_until = now + timedelta(minutes=settings.login_lockout_minutes)
     await s.flush()
 
@@ -2315,15 +2412,21 @@ def get_keyring(request: Request) -> Keyring:
 ```python
 # SPDX-License-Identifier: Apache-2.0
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.auth import throttle, totp
 from dewpoint.core.auth.passwords import hash_password, policy_violations, verify_password
-from dewpoint.core.auth.sessions import (clear_session_cookie, create_session, elevate, revoke, revoke_all,
-                                         set_session_cookie)
-from dewpoint.core.auth.users import get_user_by_email
+from dewpoint.core.auth.sessions import (
+    clear_session_cookie,
+    create_session,
+    elevate,
+    revoke,
+    revoke_all,
+    set_session_cookie,
+)
+from dewpoint.core.auth.users import Email, get_user_by_email
 from dewpoint.core.config import Settings
 from dewpoint.core.http import current_session, current_user, get_db, get_settings_dep
 from dewpoint.core.models.identity import AuthSession, User, WebauthnCredential
@@ -2333,7 +2436,7 @@ _DUMMY_HASH = hash_password("dewpoint-timing-equalizer")
 
 
 class LoginIn(BaseModel):
-    email: EmailStr
+    email: Email
     password: str = Field(min_length=1, max_length=1024)
 
 
@@ -2343,16 +2446,22 @@ class PasswordIn(BaseModel):
 
 
 async def initial_state(db: AsyncSession, user: User, settings: Settings) -> str:
-    has_passkey = (await db.execute(select(WebauthnCredential.id).where(WebauthnCredential.user_id == user.id)
-                                    .limit(1))).first() is not None
+    has_passkey = (
+        await db.execute(select(WebauthnCredential.id).where(WebauthnCredential.user_id == user.id).limit(1))
+    ).first() is not None
     if has_passkey or await totp.has_totp(db, user.id):
         return "mfa_pending"
     return "enroll_required" if settings.mfa_required else "active"
 
 
 @router.post("/login")
-async def login(body: LoginIn, request: Request, response: Response, db: AsyncSession = Depends(get_db),
-                settings: Settings = Depends(get_settings_dep)) -> dict[str, str]:
+async def login(
+    body: LoginIn,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, str]:
     ip = request.client.host if request.client else "unknown"
     if await throttle.is_locked(db, "login_email", body.email) or await throttle.is_locked(db, "login_ip", ip):
         raise HTTPException(429, detail={"error": "locked"})
@@ -2365,23 +2474,38 @@ async def login(body: LoginIn, request: Request, response: Response, db: AsyncSe
         raise HTTPException(401, detail={"error": "invalid_credentials"})
     await throttle.reset(db, "login_email", body.email)
     state = await initial_state(db, user, settings)
-    sess, token = await create_session(db, user_id=user.id, state=state, methods=["password"], settings=settings,
-                                       ip=ip, user_agent=request.headers.get("user-agent"))
+    sess, token = await create_session(
+        db,
+        user_id=user.id,
+        state=state,
+        methods=["password"],
+        settings=settings,
+        ip=ip,
+        user_agent=request.headers.get("user-agent"),
+    )
     set_session_cookie(response, token, settings)
     return {"state": state, "csrf_token": sess.csrf_token}
 
 
 @router.get("/session")
-async def session_info(sess: AuthSession = Depends(current_session), db: AsyncSession = Depends(get_db)) -> dict[str, object]:
+async def session_info(
+    sess: AuthSession = Depends(current_session), db: AsyncSession = Depends(get_db)
+) -> dict[str, object]:
     user = await db.get(User, sess.user_id)
-    assert user is not None
-    return {"user": {"id": str(user.id), "email": user.email, "is_platform_admin": user.is_platform_admin},
-            "state": sess.state, "auth_methods": sess.auth_methods, "csrf_token": sess.csrf_token}
+    if user is None:  # deleted while signed in
+        raise HTTPException(401, detail={"error": "unauthenticated"})
+    return {
+        "user": {"id": str(user.id), "email": user.email, "is_platform_admin": user.is_platform_admin},
+        "state": sess.state,
+        "auth_methods": sess.auth_methods,
+        "csrf_token": sess.csrf_token,
+    }
 
 
 @router.post("/logout", status_code=204)
-async def logout(response: Response, sess: AuthSession = Depends(current_session),
-                 db: AsyncSession = Depends(get_db)) -> Response:
+async def logout(
+    response: Response, sess: AuthSession = Depends(current_session), db: AsyncSession = Depends(get_db)
+) -> Response:
     await revoke(db, sess)
     clear_session_cookie(response)
     response.status_code = 204
@@ -2389,14 +2513,20 @@ async def logout(response: Response, sess: AuthSession = Depends(current_session
 
 
 @router.post("/password", status_code=204)
-async def change_password(body: PasswordIn, response: Response, user: User = Depends(current_user),
-                          sess: AuthSession = Depends(current_session), db: AsyncSession = Depends(get_db),
-                          settings: Settings = Depends(get_settings_dep)) -> Response:
+async def change_password(
+    body: PasswordIn,
+    response: Response,
+    user: User = Depends(current_user),
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings_dep),
+) -> Response:
     if not verify_password(user.password_hash, body.current_password):
         raise HTTPException(401, detail={"error": "invalid_credentials"})
     if v := policy_violations(body.new_password, user.email):
         raise HTTPException(422, detail={"error": "password_policy", "violations": v})
     from datetime import UTC, datetime
+
     user.password_hash, user.password_changed_at = hash_password(body.new_password), datetime.now(UTC)
     await revoke_all(db, user.id, except_id=sess.id)
     token = await elevate(db, sess, method="password_change", state="active")
@@ -2430,7 +2560,8 @@ class CodeIn(BaseModel):
 
 async def _user(db: AsyncSession, sess: AuthSession) -> User:
     user = await db.get(User, sess.user_id)
-    assert user is not None
+    if user is None:  # deleted while signing in
+        raise HTTPException(401, detail={"error": "unauthenticated"})
     return user
 
 
@@ -2439,21 +2570,33 @@ def _require_state(sess: AuthSession, *states: str) -> None:
         raise HTTPException(409, detail={"error": "wrong_state", "state": sess.state})
 
 
-async def _complete(db: AsyncSession, sess: AuthSession, response: Response, settings: Settings,
-                    method: str) -> dict[str, str]:
+async def _complete(
+    db: AsyncSession, sess: AuthSession, response: Response, settings: Settings, method: str
+) -> dict[str, str]:
     token = await elevate(db, sess, method=method, state="active")
     set_session_cookie(response, token, settings)
     return {"state": "active", "csrf_token": sess.csrf_token}
 
 
-async def _second_factor(kind: str, body: CodeIn, response: Response, sess: AuthSession, db: AsyncSession,
-                         keyring: Keyring, settings: Settings) -> dict[str, str]:
+async def _second_factor(
+    kind: str,
+    body: CodeIn,
+    response: Response,
+    sess: AuthSession,
+    db: AsyncSession,
+    keyring: Keyring,
+    settings: Settings,
+) -> dict[str, str]:
     _require_state(sess, "mfa_pending")
     key = str(sess.user_id)
     if await throttle.is_locked(db, "mfa_user", key):
         raise HTTPException(429, detail={"error": "locked"})
     user = await _user(db, sess)
-    ok = await totp.verify(db, keyring, user, body.code) if kind == "totp" else await totp.use_recovery_code(db, user, body.code)
+    ok = (
+        await totp.verify(db, keyring, user, body.code)
+        if kind == "totp"
+        else await totp.use_recovery_code(db, user, body.code)
+    )
     if not ok:
         await throttle.record_failure(db, "mfa_user", key, settings)
         await db.commit()
@@ -2463,30 +2606,48 @@ async def _second_factor(kind: str, body: CodeIn, response: Response, sess: Auth
 
 
 @router.post("/totp")
-async def mfa_totp(body: CodeIn, response: Response, sess: AuthSession = Depends(current_session),
-                   db: AsyncSession = Depends(get_db), keyring: Keyring = Depends(get_keyring),
-                   settings: Settings = Depends(get_settings_dep)) -> dict[str, str]:
+async def mfa_totp(
+    body: CodeIn,
+    response: Response,
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db),
+    keyring: Keyring = Depends(get_keyring),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, str]:
     return await _second_factor("totp", body, response, sess, db, keyring, settings)
 
 
 @router.post("/recovery")
-async def mfa_recovery(body: CodeIn, response: Response, sess: AuthSession = Depends(current_session),
-                       db: AsyncSession = Depends(get_db), keyring: Keyring = Depends(get_keyring),
-                       settings: Settings = Depends(get_settings_dep)) -> dict[str, str]:
+async def mfa_recovery(
+    body: CodeIn,
+    response: Response,
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db),
+    keyring: Keyring = Depends(get_keyring),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, str]:
     return await _second_factor("recovery", body, response, sess, db, keyring, settings)
 
 
 @router.post("/totp/enroll")
-async def enroll(sess: AuthSession = Depends(current_session), db: AsyncSession = Depends(get_db),
-                 keyring: Keyring = Depends(get_keyring)) -> dict[str, str]:
+async def enroll(
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db),
+    keyring: Keyring = Depends(get_keyring),
+) -> dict[str, str]:
     _require_state(sess, "enroll_required", "active")
     return {"otpauth_uri": await totp.start_enrollment(db, keyring, await _user(db, sess))}
 
 
 @router.post("/totp/confirm")
-async def confirm(body: CodeIn, response: Response, sess: AuthSession = Depends(current_session),
-                  db: AsyncSession = Depends(get_db), keyring: Keyring = Depends(get_keyring),
-                  settings: Settings = Depends(get_settings_dep)) -> dict[str, object]:
+async def confirm(
+    body: CodeIn,
+    response: Response,
+    sess: AuthSession = Depends(current_session),
+    db: AsyncSession = Depends(get_db),
+    keyring: Keyring = Depends(get_keyring),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, object]:
     _require_state(sess, "enroll_required", "active")
     key = str(sess.user_id)
     if await throttle.is_locked(db, "mfa_user", key):
@@ -3202,7 +3363,7 @@ import uuid
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dewpoint.core.auth.users import get_user_by_email
+from dewpoint.core.auth.users import Email, get_user_by_email
 from dewpoint.core.db import tenant_scope, user_scope
 from dewpoint.core.models.tenancy import Membership, Tenant
 
@@ -3413,7 +3574,7 @@ import uuid
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -3422,6 +3583,7 @@ from dewpoint.core.authz.permissions import P
 from dewpoint.core.http import TenantContext, get_db, require
 from dewpoint.core.models.identity import User
 from dewpoint.core.models.tenancy import Membership
+from dewpoint.core.auth.users import Email
 from dewpoint.core.tenancy import service
 
 router = APIRouter(prefix="/api/v1/t/{tenant_id}/members", tags=["members"])
@@ -3429,7 +3591,7 @@ RoleIn = Literal["owner", "admin", "editor", "operator", "viewer"]
 
 
 class AddIn(BaseModel):
-    email: EmailStr
+    email: Email
     role: RoleIn
 
 
