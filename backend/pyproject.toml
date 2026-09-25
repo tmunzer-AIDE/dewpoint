@@ -67,8 +67,8 @@ extend-immutable-calls = [
 [tool.ruff.lint.per-file-ignores]
 # Tests: asserts, fixed test credentials, `uv` on PATH, and DDL built from constant role names.
 "tests/**" = ["S101", "S105", "S106", "S607", "S608"]
-# Migrations: DDL/policies are built from module constants only, never from user input.
-"migrations/**" = ["S608"]
+# Migrations: DDL/policies are built from module constants only, never from user input; long lines are SQL text.
+"migrations/**" = ["S608", "E501"]
 
 [tool.mypy]
 strict = true

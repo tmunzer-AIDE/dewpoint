@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dewpoint.core.audit.service import record
 from dewpoint.core.auth.users import Email
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.http import TenantContext, get_db, require
@@ -26,6 +27,18 @@ class AddIn(BaseModel):
 
 class RoleChange(BaseModel):
     role: RoleIn
+
+
+async def _audit(db: AsyncSession, ctx: TenantContext, action: str, user_id: uuid.UUID, role: str | None) -> None:
+    await record(
+        db,
+        tenant_id=ctx.tenant_id,
+        actor_id=ctx.user.id,
+        action=action,
+        target_type="user",
+        target_id=str(user_id),
+        details={"role": role} if role else None,
+    )
 
 
 def _map(exc: Exception) -> HTTPException:
@@ -55,10 +68,12 @@ async def add(
 ) -> dict[str, str]:
     try:
         m = await service.add_member(db, ctx.tenant_id, body.email, body.role, ctx.role)
+        await db.flush()
     except (service.OwnerGrantError, service.UnknownUserError) as e:
         raise _map(e) from None
     except IntegrityError:
         raise HTTPException(409, detail={"error": "already_member"}) from None
+    await _audit(db, ctx, "member.add", m.user_id, m.role)
     return {"user_id": str(m.user_id), "role": m.role}
 
 
@@ -71,6 +86,7 @@ async def change(
 ) -> dict[str, str]:
     try:
         m = await service.change_role(db, ctx.tenant_id, user_id, body.role, ctx.role)
+        await _audit(db, ctx, "member.role_change", user_id, m.role)
     except (service.LastOwnerError, service.OwnerGrantError, service.UnknownUserError) as e:
         raise _map(e) from None
     return {"user_id": str(m.user_id), "role": m.role}
@@ -82,6 +98,7 @@ async def remove(
 ) -> Response:
     try:
         await service.remove_member(db, ctx.tenant_id, user_id, ctx.role)
+        await _audit(db, ctx, "member.remove", user_id, None)
     except (service.LastOwnerError, service.OwnerGrantError, service.UnknownUserError) as e:
         raise _map(e) from None
     return Response(status_code=204)

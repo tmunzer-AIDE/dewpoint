@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dewpoint.core.audit.service import record
 from dewpoint.core.auth import passkeys, throttle
 from dewpoint.core.auth.sessions import create_session, elevate, rotate, set_session_cookie
 from dewpoint.core.config import Settings
@@ -78,6 +79,7 @@ async def register_verify(
         await passkeys.finish_registration(db, user, body.challenge_id, body.credential, body.name, settings)
     except passkeys.PasskeyError:
         raise _fail() from None
+    await record(db, tenant_id=None, actor_id=user.id, action="auth.passkey_registered", details={"name": body.name})
     if sess.state == "enroll_required":
         return await _elevated(db, sess, response, settings)
     token = await rotate(db, sess)  # a factor was added: new session and CSRF tokens
@@ -128,6 +130,7 @@ async def login_verify(
         user_agent=request.headers.get("user-agent"),
         reauth=True,  # a user-verified passkey is a second factor
     )
+    await record(db, tenant_id=None, actor_id=user.id, action="auth.login", details={"method": "passkey", "ip": ip})
     set_session_cookie(response, token, settings)
     return {"state": "active", "csrf_token": sess.csrf_token}
 

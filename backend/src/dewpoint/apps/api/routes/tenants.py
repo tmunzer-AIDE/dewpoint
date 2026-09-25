@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dewpoint.core.audit.service import record
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.http import TenantContext, current_user, get_db, require, require_platform_admin
 from dewpoint.core.models.identity import User
@@ -51,6 +52,15 @@ async def create(
         t = await service.create_tenant(db, name=body.name, slug=body.slug, owner_id=admin.id)
     except IntegrityError:
         raise HTTPException(409, detail={"error": "slug_taken"}) from None
+    await record(
+        db,
+        tenant_id=t.id,
+        actor_id=admin.id,
+        action="tenant.create",
+        target_type="tenant",
+        target_id=str(t.id),
+        details={"slug": t.slug},
+    )
     return _out(t, "owner")
 
 
@@ -72,4 +82,13 @@ async def patch_tenant(
     if body.require_passkey is not None:
         t.require_passkey = body.require_passkey
     await db.flush()
+    await record(
+        db,
+        tenant_id=ctx.tenant_id,
+        actor_id=ctx.user.id,
+        action="tenant.update",
+        target_type="tenant",
+        target_id=str(t.id),
+        details=body.model_dump(exclude_none=True),
+    )
     return _out(t, ctx.role)

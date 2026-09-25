@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dewpoint.core.audit.service import record
 from dewpoint.core.auth import throttle, totp
 from dewpoint.core.auth.passwords import hash_password, policy_violations, verify_password
 from dewpoint.core.auth.sessions import (
@@ -58,7 +59,14 @@ async def login(
     if not ok or user is None:
         await throttle.record_failure(db, "login_email", body.email, settings)
         await throttle.record_failure(db, "login_ip", ip, settings)
-        await db.commit()  # persist failure counters despite the error response
+        await record(
+            db,
+            tenant_id=None,
+            actor_id=user.id if user else None,
+            action="auth.login_failed",
+            details={"email": body.email.lower(), "ip": ip},
+        )
+        await db.commit()  # persist failure counters and the audit entry despite the error response
         raise HTTPException(401, detail={"error": "invalid_credentials"})
     await throttle.reset(db, "login_email", body.email)
     state = await initial_state(db, user, settings)
@@ -72,6 +80,7 @@ async def login(
         user_agent=request.headers.get("user-agent"),
     )
     set_session_cookie(response, token, settings)
+    await record(db, tenant_id=None, actor_id=user.id, action="auth.login", details={"state": state, "ip": ip})
     return {"state": state, "csrf_token": sess.csrf_token}
 
 
@@ -119,5 +128,6 @@ async def change_password(
     user.password_hash, user.password_changed_at = hash_password(body.new_password), datetime.now(UTC)
     await revoke_all(db, user.id, except_id=sess.id)
     token = await rotate(db, sess)  # a password is not a second factor: rotate, don't elevate
+    await record(db, tenant_id=None, actor_id=user.id, action="auth.password_changed")
     set_session_cookie(response, token, settings)
     return {"csrf_token": sess.csrf_token}

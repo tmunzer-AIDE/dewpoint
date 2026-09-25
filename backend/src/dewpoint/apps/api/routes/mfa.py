@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps.api.deps import get_keyring
+from dewpoint.core.audit.service import record
 from dewpoint.core.auth import throttle, totp
 from dewpoint.core.auth.sessions import elevate, set_session_cookie
 from dewpoint.core.config import Settings
@@ -35,6 +36,7 @@ async def _complete(
 ) -> dict[str, str]:
     token = await elevate(db, sess, method=method, state="active")
     set_session_cookie(response, token, settings)
+    await record(db, tenant_id=None, actor_id=sess.user_id, action="auth.mfa", details={"method": method})
     return {"state": "active", "csrf_token": sess.csrf_token}
 
 
@@ -139,6 +141,8 @@ async def confirm(
     if await throttle.is_locked(db, "mfa_user", key):
         raise HTTPException(429, detail={"error": "locked"})
     codes = await totp.confirm_enrollment(db, keyring, await _user(db, sess), body.code)
+    if codes is not None:
+        await record(db, tenant_id=None, actor_id=sess.user_id, action="auth.totp_enrolled")
     if codes is None:
         await throttle.record_failure(db, "mfa_user", key, settings)
         await db.commit()

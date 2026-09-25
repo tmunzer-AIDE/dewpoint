@@ -3445,47 +3445,12 @@ def test_key_grants() -> None:
 # SPDX-License-Identifier: Apache-2.0
 import uuid
 
-import httpx
 import pytest
 from sqlalchemy import text
 
-from dewpoint.core.auth.sessions import SESSION_COOKIE, create_session
-from dewpoint.core.auth.users import create_user
+from tests.apps.api.helpers import session_client as _as
 
 PW = "violet-otter-canyon-42"
-
-
-async def _as(
-    app,
-    owner_sessionmaker,
-    api_settings,
-    role: str | None,
-    methods=("password", "totp"),
-    require_passkey: bool = False,
-    platform_admin: bool = False,
-):
-    tid = uuid.uuid4()
-    async with owner_sessionmaker() as s, s.begin():
-        u = await create_user(s, email=f"{uuid.uuid4().hex[:8]}@corp.test", password=PW, platform_admin=platform_admin)
-        await s.execute(
-            text("insert into tenants(id,name,slug,require_passkey) values (:t,'T',:slug,:rp)"),
-            {"t": tid, "slug": tid.hex[:12], "rp": require_passkey},
-        )
-        if role:
-            await s.execute(
-                text("insert into memberships(tenant_id,user_id,role) values (:t,:u,:r)"),
-                {"t": tid, "u": u.id, "r": role},
-            )
-        sess, token = await create_session(
-            s, user_id=u.id, state="active", methods=list(methods), settings=api_settings, ip=None, user_agent=None
-        )
-    c = httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app),
-        base_url="https://testserver",
-        cookies={SESSION_COOKIE: token},
-        headers={"X-Dewpoint-Client": "web", "X-CSRF-Token": sess.csrf_token},
-    )
-    return c, tid
 
 
 CASES = [
@@ -3834,6 +3799,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dewpoint.core.audit.service import record
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.http import TenantContext, current_user, get_db, require, require_platform_admin
 from dewpoint.core.models.identity import User
@@ -3881,6 +3847,15 @@ async def create(
         t = await service.create_tenant(db, name=body.name, slug=body.slug, owner_id=admin.id)
     except IntegrityError:
         raise HTTPException(409, detail={"error": "slug_taken"}) from None
+    await record(
+        db,
+        tenant_id=t.id,
+        actor_id=admin.id,
+        action="tenant.create",
+        target_type="tenant",
+        target_id=str(t.id),
+        details={"slug": t.slug},
+    )
     return _out(t, "owner")
 
 
@@ -3902,6 +3877,15 @@ async def patch_tenant(
     if body.require_passkey is not None:
         t.require_passkey = body.require_passkey
     await db.flush()
+    await record(
+        db,
+        tenant_id=ctx.tenant_id,
+        actor_id=ctx.user.id,
+        action="tenant.update",
+        target_type="tenant",
+        target_id=str(t.id),
+        details=body.model_dump(exclude_none=True),
+    )
     return _out(t, ctx.role)
 ```
 
@@ -3917,11 +3901,12 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dewpoint.core.audit.service import record
+from dewpoint.core.auth.users import Email
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.http import TenantContext, get_db, require
 from dewpoint.core.models.identity import User
 from dewpoint.core.models.tenancy import Membership
-from dewpoint.core.auth.users import Email
 from dewpoint.core.tenancy import service
 
 router = APIRouter(prefix="/api/v1/t/{tenant_id}/members", tags=["members"])
@@ -3937,6 +3922,18 @@ class RoleChange(BaseModel):
     role: RoleIn
 
 
+async def _audit(db: AsyncSession, ctx: TenantContext, action: str, user_id: uuid.UUID, role: str | None) -> None:
+    await record(
+        db,
+        tenant_id=ctx.tenant_id,
+        actor_id=ctx.user.id,
+        action=action,
+        target_type="user",
+        target_id=str(user_id),
+        details={"role": role} if role else None,
+    )
+
+
 def _map(exc: Exception) -> HTTPException:
     if isinstance(exc, service.LastOwnerError):
         return HTTPException(409, detail={"error": "last_owner"})
@@ -3946,40 +3943,55 @@ def _map(exc: Exception) -> HTTPException:
 
 
 @router.get("")
-async def list_members(ctx: TenantContext = Depends(require(P.MEMBER_VIEW)),
-                       db: AsyncSession = Depends(get_db)) -> list[dict[str, str]]:
-    rows = await db.execute(select(Membership, User.email).join(User, User.id == Membership.user_id)
-                            .where(Membership.tenant_id == ctx.tenant_id).order_by(User.email))
+async def list_members(
+    ctx: TenantContext = Depends(require(P.MEMBER_VIEW)), db: AsyncSession = Depends(get_db)
+) -> list[dict[str, str]]:
+    rows = await db.execute(
+        select(Membership, User.email)
+        .join(User, User.id == Membership.user_id)
+        .where(Membership.tenant_id == ctx.tenant_id)
+        .order_by(User.email)
+    )
     return [{"user_id": str(m.user_id), "email": e, "role": m.role} for m, e in rows.all()]
 
 
 @router.post("", status_code=201)
-async def add(body: AddIn, ctx: TenantContext = Depends(require(P.MEMBER_MANAGE)),
-              db: AsyncSession = Depends(get_db)) -> dict[str, str]:
+async def add(
+    body: AddIn, ctx: TenantContext = Depends(require(P.MEMBER_MANAGE)), db: AsyncSession = Depends(get_db)
+) -> dict[str, str]:
     try:
         m = await service.add_member(db, ctx.tenant_id, body.email, body.role, ctx.role)
+        await db.flush()
     except (service.OwnerGrantError, service.UnknownUserError) as e:
         raise _map(e) from None
     except IntegrityError:
         raise HTTPException(409, detail={"error": "already_member"}) from None
+    await _audit(db, ctx, "member.add", m.user_id, m.role)
     return {"user_id": str(m.user_id), "role": m.role}
 
 
 @router.patch("/{user_id}")
-async def change(user_id: uuid.UUID, body: RoleChange, ctx: TenantContext = Depends(require(P.MEMBER_MANAGE)),
-                 db: AsyncSession = Depends(get_db)) -> dict[str, str]:
+async def change(
+    user_id: uuid.UUID,
+    body: RoleChange,
+    ctx: TenantContext = Depends(require(P.MEMBER_MANAGE)),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, str]:
     try:
         m = await service.change_role(db, ctx.tenant_id, user_id, body.role, ctx.role)
+        await _audit(db, ctx, "member.role_change", user_id, m.role)
     except (service.LastOwnerError, service.OwnerGrantError, service.UnknownUserError) as e:
         raise _map(e) from None
     return {"user_id": str(m.user_id), "role": m.role}
 
 
 @router.delete("/{user_id}", status_code=204)
-async def remove(user_id: uuid.UUID, ctx: TenantContext = Depends(require(P.MEMBER_MANAGE)),
-                 db: AsyncSession = Depends(get_db)) -> Response:
+async def remove(
+    user_id: uuid.UUID, ctx: TenantContext = Depends(require(P.MEMBER_MANAGE)), db: AsyncSession = Depends(get_db)
+) -> Response:
     try:
         await service.remove_member(db, ctx.tenant_id, user_id, ctx.role)
+        await _audit(db, ctx, "member.remove", user_id, None)
     except (service.LastOwnerError, service.OwnerGrantError, service.UnknownUserError) as e:
         raise _map(e) from None
     return Response(status_code=204)
@@ -4142,7 +4154,6 @@ def test_secret_keys_rejected() -> None:
 ```python
 # SPDX-License-Identifier: Apache-2.0
 import uuid
-
 from datetime import timedelta
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -4153,8 +4164,9 @@ from dewpoint.core.audit.service import record, verify_chain
 from dewpoint.core.db import tenant_scope
 
 
-async def test_anchor_detects_full_chain_rewrite(tmp_path, api_sessionmaker, owner_sessionmaker,
-                                                 auditor_sessionmaker) -> None:
+async def test_anchor_detects_full_chain_rewrite(
+    tmp_path, api_sessionmaker, owner_sessionmaker, auditor_sessionmaker
+) -> None:
     key, t = Ed25519PrivateKey.generate(), uuid.uuid4()
     sink = FileAnchorSink(tmp_path / "anchors.jsonl", key)
     async with api_sessionmaker() as s, s.begin():
@@ -4171,9 +4183,12 @@ async def test_anchor_detects_full_chain_rewrite(tmp_path, api_sessionmaker, own
     async with owner_sessionmaker() as s, s.begin():
         await s.execute(text("SET LOCAL session_replication_role = replica"))
         await s.execute(text("update audit_log set target_id='z' where scope <> 'platform'"))
-        await s.execute(text(
-            "update audit_log set hash = sha256(prev_hash || convert_to(audit_canonical(seq, scope, actor_id, action,"
-            " target_type, target_id, details, created_at), 'UTF8')) where scope <> 'platform'"))
+        await s.execute(
+            text(
+                "update audit_log set hash = sha256(prev_hash || convert_to(audit_canonical(seq, scope, actor_id,"
+                " action, target_type, target_id, details, created_at), 'UTF8')) where scope <> 'platform'"
+            )
+        )
     async with auditor_sessionmaker() as s:
         assert (await verify_chain(s, str(t))).ok  # the in-database chain alone cannot detect this
         problems = await verify_anchors(s, sink.entries(), key.public_key())
@@ -4200,10 +4215,15 @@ async def test_verification_fails_closed(tmp_path, api_sessionmaker, auditor_ses
 
 
 async def test_auditor_role_is_narrow(auditor_sessionmaker) -> None:
-    from sqlalchemy.exc import DBAPIError
     import pytest
-    for stmt in ("select 1 from users", "select 1 from tenants", "select 1 from data_keys",
-                 "insert into audit_log(scope,action,prev_hash,hash,created_at) values ('x','y','\\x00','\\x00',now())"):
+    from sqlalchemy.exc import DBAPIError
+
+    for stmt in (
+        "select 1 from users",
+        "select 1 from tenants",
+        "select 1 from data_keys",
+        "insert into audit_log(scope,action,prev_hash,hash,created_at) values ('x','y','\\x00','\\x00',now())",
+    ):
         with pytest.raises(DBAPIError, match="permission denied"):
             async with auditor_sessionmaker() as s, s.begin():
                 await s.execute(text(stmt))
@@ -4228,9 +4248,19 @@ Expected: FAIL (module not found)
 
 `0005_audit.py` (`revision = "0005"`, `down_revision = "0004"`):
 ```python
-def upgrade() -> None:
-    op.execute(r"""
-CREATE TABLE audit_log (
+# SPDX-License-Identifier: Apache-2.0
+"""audit: append-only hash-chained log, anchors, dedicated auditor role"""
+
+from alembic import op
+
+revision = "0005"
+down_revision = "0004"
+branch_labels = None
+depends_on = None
+
+# One statement per execute (asyncpg cannot run multi-statement strings).
+UPGRADE = [
+    r"""CREATE TABLE audit_log (
   seq bigserial PRIMARY KEY,
   scope text NOT NULL,
   tenant_id uuid,
@@ -4242,11 +4272,10 @@ CREATE TABLE audit_log (
   created_at timestamptz NOT NULL,
   prev_hash bytea NOT NULL,
   hash bytea NOT NULL
-);
-CREATE INDEX ix_audit_scope_seq ON audit_log(scope, seq DESC);
-CREATE INDEX ix_audit_tenant_seq ON audit_log(tenant_id, seq DESC);
-
-CREATE TABLE audit_anchors (
+)""",
+    r"""CREATE INDEX ix_audit_scope_seq ON audit_log(scope, seq DESC)""",
+    r"""CREATE INDEX ix_audit_tenant_seq ON audit_log(tenant_id, seq DESC)""",
+    r"""CREATE TABLE audit_anchors (
   id bigserial PRIMARY KEY,
   scope text NOT NULL,
   seq bigint NOT NULL,
@@ -4255,15 +4284,13 @@ CREATE TABLE audit_anchors (
   sink text NOT NULL,
   sink_ref text NOT NULL,
   UNIQUE (scope, seq)
-);
-
-CREATE FUNCTION audit_canonical(p_seq bigint, p_scope text, p_actor uuid, p_action text, p_tt text, p_tid text,
+)""",
+    r"""CREATE FUNCTION audit_canonical(p_seq bigint, p_scope text, p_actor uuid, p_action text, p_tt text, p_tid text,
                                 p_details jsonb, p_ts timestamptz) RETURNS text LANGUAGE sql IMMUTABLE AS $$
   SELECT concat_ws('|', p_seq, p_scope, COALESCE(p_actor::text, ''), p_action, p_tt, p_tid, p_details::text,
                    to_char(p_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'))
-$$;
-
-CREATE FUNCTION audit_append(p_tenant uuid, p_actor uuid, p_action text, p_target_type text, p_target_id text,
+$$""",
+    r"""CREATE FUNCTION audit_append(p_tenant uuid, p_actor uuid, p_action text, p_target_type text, p_target_id text,
                              p_details jsonb) RETURNS bigint
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
@@ -4287,39 +4314,91 @@ BEGIN
   VALUES (v_seq, v_scope, p_tenant, p_actor, p_action, v_tt, v_tid, v_details, v_ts, v_prev,
           sha256(v_prev || convert_to(audit_canonical(v_seq, v_scope, p_actor, p_action, v_tt, v_tid, v_details, v_ts), 'UTF8')));
   RETURN v_seq;
-END $$;
-
-CREATE FUNCTION audit_reject() RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN RAISE EXCEPTION 'audit_log is append-only'; END $$;
-CREATE TRIGGER audit_no_update BEFORE UPDATE OR DELETE ON audit_log FOR EACH ROW EXECUTE FUNCTION audit_reject();
-CREATE TRIGGER audit_no_truncate BEFORE TRUNCATE ON audit_log FOR EACH STATEMENT EXECUTE FUNCTION audit_reject();
-
-ALTER TABLE audit_log ENABLE ROW LEVEL SECURITY;  -- deliberately not FORCE (see plan)
-CREATE POLICY audit_tenant_read ON audit_log FOR SELECT USING (tenant_id = app_tenant_id());
-
-DO $$ BEGIN
+END $$""",
+    r"""CREATE FUNCTION audit_reject() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE EXCEPTION 'audit_log is append-only'; END $$""",
+    r"""CREATE TRIGGER audit_no_update BEFORE UPDATE OR DELETE ON audit_log FOR EACH ROW EXECUTE FUNCTION audit_reject()""",
+    r"""CREATE TRIGGER audit_no_truncate BEFORE TRUNCATE ON audit_log FOR EACH STATEMENT EXECUTE FUNCTION audit_reject()""",
+    r"""ALTER TABLE audit_log ENABLE ROW LEVEL SECURITY""",
+    r"""-- deliberately not FORCE (see plan)
+CREATE POLICY audit_tenant_read ON audit_log FOR SELECT USING (tenant_id = app_tenant_id())""",
+    r"""DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dewpoint_auditor') THEN CREATE ROLE dewpoint_auditor NOLOGIN; END IF;
-END $$;
-GRANT USAGE ON SCHEMA public TO dewpoint_auditor;
-CREATE POLICY audit_auditor_read ON audit_log FOR SELECT TO dewpoint_auditor USING (true);
+END $$""",
+    r"""GRANT USAGE ON SCHEMA public TO dewpoint_auditor""",
+    r"""CREATE POLICY audit_auditor_read ON audit_log FOR SELECT TO dewpoint_auditor USING (true)""",
+    r"""REVOKE ALL ON audit_log, audit_anchors FROM PUBLIC""",
+    r"""GRANT SELECT ON audit_log TO dewpoint_api, dewpoint_admin, dewpoint_auditor""",
+    r"""GRANT SELECT, INSERT ON audit_anchors TO dewpoint_auditor""",
+    r"""GRANT USAGE ON SEQUENCE audit_anchors_id_seq TO dewpoint_auditor""",
+    r"""REVOKE EXECUTE ON FUNCTION audit_append(uuid, uuid, text, text, text, jsonb) FROM PUBLIC""",
+    r"""GRANT EXECUTE ON FUNCTION audit_append(uuid, uuid, text, text, text, jsonb)
+  TO dewpoint_api, dewpoint_worker, dewpoint_dispatch, dewpoint_ingress, dewpoint_admin""",
+]
 
-REVOKE ALL ON audit_log, audit_anchors FROM PUBLIC;
-GRANT SELECT ON audit_log TO dewpoint_api, dewpoint_admin, dewpoint_auditor;
-GRANT SELECT, INSERT ON audit_anchors TO dewpoint_auditor;
-GRANT USAGE ON SEQUENCE audit_anchors_id_seq TO dewpoint_auditor;
-REVOKE EXECUTE ON FUNCTION audit_append(uuid, uuid, text, text, text, jsonb) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION audit_append(uuid, uuid, text, text, text, jsonb)
-  TO dewpoint_api, dewpoint_worker, dewpoint_dispatch, dewpoint_ingress, dewpoint_admin;
-""")
+DOWNGRADE = [
+    "DROP TABLE audit_anchors",
+    "DROP TABLE audit_log",
+    "DROP FUNCTION audit_append(uuid, uuid, text, text, text, jsonb)",
+    "DROP FUNCTION audit_canonical(bigint, text, uuid, text, text, text, jsonb, timestamptz)",
+    "DROP FUNCTION audit_reject()",
+    "REVOKE ALL ON SCHEMA public FROM dewpoint_auditor",
+    "DROP ROLE IF EXISTS dewpoint_auditor",
+]
+
+
+def upgrade() -> None:
+    for stmt in UPGRADE:
+        op.execute(stmt)
 
 
 def downgrade() -> None:
-    op.execute("DROP TABLE audit_anchors; DROP TABLE audit_log; DROP FUNCTION audit_append(uuid, uuid, text, text, text, jsonb);"
-               "DROP FUNCTION audit_canonical(bigint, text, uuid, text, text, text, jsonb, timestamptz); DROP FUNCTION audit_reject();")
+    for stmt in DOWNGRADE:
+        op.execute(stmt)
 ```
 **Test isolation note:** `clean_db` TRUNCATEs with `session_replication_role = replica`, which disables the truncate trigger for the superuser test owner. That matches the fixture from Task 3.
 
-`core/models/audit.py`: read-only ORM mappings `AuditEntry` (every `audit_log` column; `seq` is the primary key) and `AuditAnchor` (every `audit_anchors` column). The application never inserts `AuditEntry` through the ORM.
+`core/models/audit.py` (read-only mappings; rows are written only by `audit_append()`):
+```python
+# SPDX-License-Identifier: Apache-2.0
+"""Read-only mappings. Rows are written only by the audit_append() SQL function."""
+
+import uuid
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import BigInteger, DateTime, LargeBinary, Text
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.orm import Mapped, mapped_column
+
+from dewpoint.core.models.base import Base
+
+
+class AuditEntry(Base):
+    __tablename__ = "audit_log"
+    seq: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    scope: Mapped[str] = mapped_column(Text)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    actor_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    action: Mapped[str] = mapped_column(Text)
+    target_type: Mapped[str] = mapped_column(Text)
+    target_id: Mapped[str] = mapped_column(Text)
+    details: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    prev_hash: Mapped[bytes] = mapped_column(LargeBinary)
+    hash: Mapped[bytes] = mapped_column(LargeBinary)
+
+
+class AuditAnchor(Base):
+    __tablename__ = "audit_anchors"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    scope: Mapped[str] = mapped_column(Text)
+    seq: Mapped[int] = mapped_column(BigInteger)
+    hash: Mapped[bytes] = mapped_column(LargeBinary)
+    anchored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    sink: Mapped[str] = mapped_column(Text)
+    sink_ref: Mapped[str] = mapped_column(Text)
+```
 
 - [ ] **Step 5: Implement the service and anchoring**
 
@@ -4411,6 +4490,7 @@ def _message(scope: str, seq: int, hash_hex: str, at: str) -> bytes:
 class FileAnchorSink:
     """Append-only JSON-lines file, each line Ed25519-signed. Store it outside the database host
     (object storage with object lock, a SIEM, or a separate volume)."""
+
     name = "file"
 
     def __init__(self, path: Path, private_key: Ed25519PrivateKey) -> None:
@@ -4418,8 +4498,9 @@ class FileAnchorSink:
 
     def write(self, scope: str, seq: int, hash_: bytes) -> str:
         at = datetime.now(UTC).isoformat()
-        entry = {"scope": scope, "seq": seq, "hash": hash_.hex(), "at": at}
-        entry["sig"] = self._key.sign(_message(scope, seq, entry["hash"], at)).hex()
+        hash_hex = hash_.hex()
+        sig = self._key.sign(_message(scope, seq, hash_hex, at)).hex()
+        entry = {"scope": scope, "seq": seq, "hash": hash_hex, "at": at, "sig": sig}
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, sort_keys=True) + "\n")
         return f"{self.path.name}:{scope}:{seq}"
@@ -4431,28 +4512,38 @@ class FileAnchorSink:
 
 
 async def anchor_all(s: AsyncSession, sink: FileAnchorSink) -> int:
-    heads = (await s.execute(text(
-        "select distinct on (scope) scope, seq, hash from audit_log order by scope, seq desc"))).all()
+    heads = (
+        await s.execute(text("select distinct on (scope) scope, seq, hash from audit_log order by scope, seq desc"))
+    ).all()
     written = 0
     for scope, seq, h in heads:
-        exists = (await s.execute(text("select 1 from audit_anchors where scope=:s and seq=:q"),
-                                  {"s": scope, "q": seq})).first()
+        exists = (
+            await s.execute(text("select 1 from audit_anchors where scope=:s and seq=:q"), {"s": scope, "q": seq})
+        ).first()
         if exists:
             continue
         ref = sink.write(scope, seq, bytes(h))
-        await s.execute(text("insert into audit_anchors(scope, seq, hash, sink, sink_ref) values (:s,:q,:h,:k,:r)"),
-                        {"s": scope, "q": seq, "h": bytes(h), "k": sink.name, "r": ref})
+        await s.execute(
+            text("insert into audit_anchors(scope, seq, hash, sink, sink_ref) values (:s,:q,:h,:k,:r)"),
+            {"s": scope, "q": seq, "h": bytes(h), "k": sink.name, "r": ref},
+        )
         written += 1
     return written
 
 
-async def verify_anchors(s: AsyncSession, entries: list[dict[str, object]], public_key: Ed25519PublicKey, *,
-                         max_lag: timedelta = timedelta(hours=1), now: datetime | None = None) -> list[str]:
+async def verify_anchors(
+    s: AsyncSession,
+    entries: list[dict[str, object]],
+    public_key: Ed25519PublicKey,
+    *,
+    max_lag: timedelta = timedelta(hours=1),
+    now: datetime | None = None,
+) -> list[str]:
     """Fail closed: missing anchors, unanchored old rows, broken chains and mismatches are all problems."""
     problems: list[str] = []
     if not entries:
         problems.append("no external anchors found")
-    db_scopes = set((await s.execute(text("select distinct scope from audit_log"))).scalars())
+    db_scopes: set[str] = set((await s.execute(text("select distinct scope from audit_log"))).scalars())
     for sc in sorted(db_scopes | {str(e["scope"]) for e in entries}):
         rep = await verify_chain(s, sc)
         if not rep.ok:
@@ -4465,8 +4556,9 @@ async def verify_anchors(s: AsyncSession, entries: list[dict[str, object]], publ
         except (InvalidSignature, ValueError):
             problems.append(f"{scope}:{seq}: bad anchor signature")
             continue
-        row = (await s.execute(text("select hash from audit_log where scope=:s and seq=:q"),
-                               {"s": scope, "q": seq})).first()
+        row = (
+            await s.execute(text("select hash from audit_log where scope=:s and seq=:q"), {"s": scope, "q": seq})
+        ).first()
         if row is None:
             problems.append(f"{scope}:{seq}: anchored row missing")
         elif bytes(row[0]).hex() != hash_hex:
@@ -4474,23 +4566,67 @@ async def verify_anchors(s: AsyncSession, entries: list[dict[str, object]], publ
         else:
             anchored[scope] = max(anchored.get(scope, 0), seq)
     cutoff = (now or datetime.now(UTC)) - max_lag
-    old_rows = await s.execute(text("select scope, max(seq) from audit_log where created_at <= :c group by scope"),
-                               {"c": cutoff})
+    old_rows = await s.execute(
+        text("select scope, max(seq) from audit_log where created_at <= :c group by scope"), {"c": cutoff}
+    )
     for scope, max_seq in old_rows.all():
         if anchored.get(scope, 0) < max_seq:
             problems.append(f"{scope}: rows up to seq {max_seq} older than {max_lag} are not anchored")
     return problems
 ```
 
-CLI additions in `apps/cli/main.py`:
+CLI additions in `apps/cli/main.py` (the full module after this task; `audit verify` also requires `DEWPOINT_AUDIT_ANCHOR_PATH` rather than defaulting). Tested by `tests/apps/cli/test_audit_cli.py`, which runs as the auditor role: verify with no anchors exits 1, anchor succeeds, verify then exits 0, and a missing key or path exits 2:
 ```python
+# SPDX-License-Identifier: Apache-2.0
+import asyncio
+import base64
+import os
+from pathlib import Path
+
+import typer
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from sqlalchemy import select
+
+from dewpoint.core.audit.anchor import FileAnchorSink, anchor_all, verify_anchors
+from dewpoint.core.auth.users import PasswordPolicyError, create_user
+from dewpoint.core.config import get_settings
+from dewpoint.core.db import make_engine, make_sessionmaker
+from dewpoint.core.models.identity import User
+
+app = typer.Typer(no_args_is_help=True)
+admin = typer.Typer(no_args_is_help=True)
+app.add_typer(admin, name="admin")
 audit = typer.Typer(no_args_is_help=True)
 app.add_typer(audit, name="audit")
 
 
-def _signing_key() -> "Ed25519PrivateKey":
-    import base64
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+async def _init(email: str, password: str) -> None:
+    engine = make_engine(get_settings().database_url)
+    try:
+        async with make_sessionmaker(engine)() as s, s.begin():
+            if (await s.execute(select(User.id).where(User.is_platform_admin.is_(True)).limit(1))).first():
+                typer.echo("already initialized: a platform admin exists")
+                raise typer.Exit(1)
+            await create_user(s, email=email, password=password, platform_admin=True)
+    finally:
+        await engine.dispose()
+
+
+@admin.command("init")
+def admin_init(email: str = typer.Option(...)) -> None:
+    """Create the first platform admin. Refuses if one already exists."""
+    password = os.environ.get("DEWPOINT_INIT_PASSWORD") or typer.prompt(
+        "Password", hide_input=True, confirmation_prompt=True
+    )
+    try:
+        asyncio.run(_init(email, password))
+    except PasswordPolicyError as e:
+        typer.echo(f"password rejected: {', '.join(e.violations)}")
+        raise typer.Exit(2) from None
+    typer.echo(f"platform admin {email} created. Sign in to enroll MFA.")
+
+
+def _signing_key() -> Ed25519PrivateKey:
     raw = get_settings().audit_signing_key_b64
     if not raw:
         typer.echo("DEWPOINT_AUDIT_SIGNING_KEY_B64 is not set")
@@ -4498,21 +4634,24 @@ def _signing_key() -> "Ed25519PrivateKey":
     return Ed25519PrivateKey.from_private_bytes(base64.b64decode(raw))
 
 
-@audit.command("anchor")
-def audit_anchor() -> None:
-    """Write current chain heads to the external anchor sink. Schedule this (e.g. every 15 minutes)."""
-    from pathlib import Path
-    from dewpoint.core.audit.anchor import FileAnchorSink, anchor_all
+def _anchor_path() -> Path:
     path = get_settings().audit_anchor_path
     if not path:
         typer.echo("DEWPOINT_AUDIT_ANCHOR_PATH is not set")
         raise typer.Exit(2)
+    return Path(path)
+
+
+@audit.command("anchor")
+def audit_anchor() -> None:
+    """Write current chain heads to the external anchor sink. Run as a dewpoint_auditor login, e.g. every 15 min."""
+    sink = FileAnchorSink(_anchor_path(), _signing_key())
 
     async def _run() -> int:
         engine = make_engine(get_settings().database_url)
         try:
             async with make_sessionmaker(engine)() as s, s.begin():
-                return await anchor_all(s, FileAnchorSink(Path(path), _signing_key()))
+                return await anchor_all(s, sink)
         finally:
             await engine.dispose()
 
@@ -4521,11 +4660,10 @@ def audit_anchor() -> None:
 
 @audit.command("verify")
 def audit_verify() -> None:
-    """Recompute every chain and check it against the signed external anchors. Exit 1 on any problem."""
-    from pathlib import Path
-    from dewpoint.core.audit.anchor import FileAnchorSink, verify_anchors
+    """Recompute every chain and check it against the signed external anchors. Exit 1 on any problem,
+    including when no anchors exist, so a broken anchor job can't look healthy."""
     key = _signing_key()
-    sink = FileAnchorSink(Path(get_settings().audit_anchor_path or "anchors.jsonl"), key)
+    sink = FileAnchorSink(_anchor_path(), key)
 
     async def _run() -> list[str]:
         engine = make_engine(get_settings().database_url)
@@ -4536,8 +4674,8 @@ def audit_verify() -> None:
             await engine.dispose()
 
     problems = asyncio.run(_run())
-    for p in problems:
-        typer.echo(p)
+    for problem in problems:
+        typer.echo(problem)
     if problems:
         raise typer.Exit(1)
     typer.echo("audit chain verified against external anchors")
@@ -4546,7 +4684,7 @@ The anchor and verify commands connect as a `dewpoint_auditor` login (operators 
 
 - [ ] **Step 6: Record audit events from the routes**
 
-Add `from dewpoint.core.audit.service import record` to each route module and insert these calls. Each runs inside the request transaction, before the response returns:
+Add `from dewpoint.core.audit.service import record` to each route module and insert these calls. As built, the implementation also records `ip` on `auth.login` and `auth.login_failed`, and adds an `auth.totp_enrolled` event on successful `/totp/confirm`. Each runs inside the request transaction, before the response returns:
 
 | Module / handler | Call |
 |---|---|
