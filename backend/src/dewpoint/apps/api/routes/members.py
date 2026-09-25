@@ -44,6 +44,8 @@ async def _audit(db: AsyncSession, ctx: TenantContext, action: str, user_id: uui
 def _map(exc: Exception) -> HTTPException:
     if isinstance(exc, service.LastOwnerError):
         return HTTPException(409, detail={"error": "last_owner"})
+    if isinstance(exc, service.ActorNotAuthorizedError):
+        return HTTPException(403, detail={"error": "forbidden"})
     if isinstance(exc, service.OwnerGrantError):
         return HTTPException(403, detail={"error": "owner_only"})
     return HTTPException(404, detail={"error": "user_not_found"})
@@ -67,9 +69,9 @@ async def add(
     body: AddIn, ctx: TenantContext = Depends(require(P.MEMBER_MANAGE)), db: AsyncSession = Depends(get_db)
 ) -> dict[str, str]:
     try:
-        m = await service.add_member(db, ctx.tenant_id, body.email, body.role, ctx.role)
+        m = await service.add_member(db, ctx.tenant_id, body.email, body.role, ctx.user.id)
         await db.flush()
-    except (service.OwnerGrantError, service.UnknownUserError) as e:
+    except (service.ActorNotAuthorizedError, service.OwnerGrantError, service.UnknownUserError) as e:
         raise _map(e) from None
     except IntegrityError:
         raise HTTPException(409, detail={"error": "already_member"}) from None
@@ -85,9 +87,14 @@ async def change(
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, str]:
     try:
-        m = await service.change_role(db, ctx.tenant_id, user_id, body.role, ctx.role)
+        m = await service.change_role(db, ctx.tenant_id, user_id, body.role, ctx.user.id)
         await _audit(db, ctx, "member.role_change", user_id, m.role)
-    except (service.LastOwnerError, service.OwnerGrantError, service.UnknownUserError) as e:
+    except (
+        service.ActorNotAuthorizedError,
+        service.LastOwnerError,
+        service.OwnerGrantError,
+        service.UnknownUserError,
+    ) as e:
         raise _map(e) from None
     return {"user_id": str(m.user_id), "role": m.role}
 
@@ -97,8 +104,13 @@ async def remove(
     user_id: uuid.UUID, ctx: TenantContext = Depends(require(P.MEMBER_MANAGE)), db: AsyncSession = Depends(get_db)
 ) -> Response:
     try:
-        await service.remove_member(db, ctx.tenant_id, user_id, ctx.role)
+        await service.remove_member(db, ctx.tenant_id, user_id, ctx.user.id)
         await _audit(db, ctx, "member.remove", user_id, None)
-    except (service.LastOwnerError, service.OwnerGrantError, service.UnknownUserError) as e:
+    except (
+        service.ActorNotAuthorizedError,
+        service.LastOwnerError,
+        service.OwnerGrantError,
+        service.UnknownUserError,
+    ) as e:
         raise _map(e) from None
     return Response(status_code=204)

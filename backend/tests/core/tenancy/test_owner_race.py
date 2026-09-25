@@ -25,7 +25,7 @@ async def test_concurrent_owner_removals_leave_one_owner(owner_sessionmaker, api
         try:
             async with api_sessionmaker() as s, s.begin():
                 await tenant_scope(s, tid)
-                await service.remove_member(s, tid, uid, actor_role="owner")
+                await service.remove_member(s, tid, uid, actor_id=uid)  # each owner leaves the tenant
                 await asyncio.sleep(0.2)  # hold the transaction open to force overlap
             return "removed"
         except service.LastOwnerError:

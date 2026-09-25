@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.auth.users import get_user_by_email
+from dewpoint.core.authz.permissions import ROLE_PERMISSIONS, P
 from dewpoint.core.db import tenant_scope, user_scope
 from dewpoint.core.models.tenancy import Membership, Tenant
 
@@ -16,6 +17,10 @@ class OwnerGrantError(Exception): ...
 
 
 class UnknownUserError(Exception): ...
+
+
+class ActorNotAuthorizedError(Exception):
+    """The acting user no longer holds a role allowing this change (re-checked under the tenant lock)."""
 
 
 async def create_tenant(s: AsyncSession, *, name: str, slug: str, owner_id: uuid.UUID) -> Tenant:
@@ -52,26 +57,26 @@ async def _owners(s: AsyncSession, tenant_id: uuid.UUID) -> int:
     )
 
 
-async def add_member(s: AsyncSession, tenant_id: uuid.UUID, email: str, role: str, actor_role: str) -> Membership:
-    if role == "owner" and actor_role != "owner":
-        raise OwnerGrantError()
-    await _lock_tenant(s, tenant_id)
-    user = await get_user_by_email(s, email)
-    if user is None:
-        raise UnknownUserError()
-    m = Membership(tenant_id=tenant_id, user_id=user.id, role=role)
-    s.add(m)
-    await s.flush()
-    return m
-
-
 async def _lock_tenant(s: AsyncSession, tenant_id: uuid.UUID) -> None:
-    """Serialize every membership change of a tenant, so owner counts can't race."""
+    """Serialize every membership change of a tenant, so owner counts and actor roles can't race."""
     await s.execute(select(Tenant.id).where(Tenant.id == tenant_id).with_for_update())
 
 
-async def _membership(s: AsyncSession, tenant_id: uuid.UUID, user_id: uuid.UUID) -> Membership:
+async def _lock_and_authorize(s: AsyncSession, tenant_id: uuid.UUID, actor_id: uuid.UUID) -> str:
+    """Take the tenant lock, then re-read the actor's role. require() authorized the request earlier, but the
+    actor may have been removed or demoted before this lock was acquired; the returned role is authoritative."""
     await _lock_tenant(s, tenant_id)
+    role = (
+        await s.execute(
+            select(Membership.role).where(Membership.tenant_id == tenant_id, Membership.user_id == actor_id)
+        )
+    ).scalar_one_or_none()
+    if role is None or P.MEMBER_MANAGE not in ROLE_PERMISSIONS[role]:
+        raise ActorNotAuthorizedError()
+    return role
+
+
+async def _membership(s: AsyncSession, tenant_id: uuid.UUID, user_id: uuid.UUID) -> Membership:
     m = (
         await s.execute(
             select(Membership).where(Membership.tenant_id == tenant_id, Membership.user_id == user_id).with_for_update()
@@ -82,9 +87,23 @@ async def _membership(s: AsyncSession, tenant_id: uuid.UUID, user_id: uuid.UUID)
     return m
 
 
+async def add_member(s: AsyncSession, tenant_id: uuid.UUID, email: str, role: str, actor_id: uuid.UUID) -> Membership:
+    actor_role = await _lock_and_authorize(s, tenant_id, actor_id)
+    if role == "owner" and actor_role != "owner":
+        raise OwnerGrantError()
+    user = await get_user_by_email(s, email)
+    if user is None:
+        raise UnknownUserError()
+    m = Membership(tenant_id=tenant_id, user_id=user.id, role=role)
+    s.add(m)
+    await s.flush()
+    return m
+
+
 async def change_role(
-    s: AsyncSession, tenant_id: uuid.UUID, user_id: uuid.UUID, role: str, actor_role: str
+    s: AsyncSession, tenant_id: uuid.UUID, user_id: uuid.UUID, role: str, actor_id: uuid.UUID
 ) -> Membership:
+    actor_role = await _lock_and_authorize(s, tenant_id, actor_id)
     m = await _membership(s, tenant_id, user_id)
     if "owner" in (role, m.role) and actor_role != "owner":
         raise OwnerGrantError()
@@ -95,7 +114,8 @@ async def change_role(
     return m
 
 
-async def remove_member(s: AsyncSession, tenant_id: uuid.UUID, user_id: uuid.UUID, actor_role: str) -> None:
+async def remove_member(s: AsyncSession, tenant_id: uuid.UUID, user_id: uuid.UUID, actor_id: uuid.UUID) -> None:
+    actor_role = await _lock_and_authorize(s, tenant_id, actor_id)
     m = await _membership(s, tenant_id, user_id)
     if m.role == "owner":
         if actor_role != "owner":
