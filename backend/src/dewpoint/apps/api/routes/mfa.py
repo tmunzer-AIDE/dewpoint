@@ -134,6 +134,7 @@ async def confirm(
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, object]:
     _require_state(sess, "enroll_required", "active")
+    ensure_fresh_reauth(sess, settings)  # re-checked here: the pending secret outlives the reauth window
     key = str(sess.user_id)
     if await throttle.is_locked(db, "mfa_user", key):
         raise HTTPException(429, detail={"error": "locked"})

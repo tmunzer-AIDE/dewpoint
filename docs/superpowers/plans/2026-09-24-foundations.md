@@ -2159,7 +2159,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     - `POST /mfa/totp/reauth` `{code}` (session `active`, throttled) → `{state, csrf_token}`. It re-proves the confirmed TOTP and stamps `sessions.reauth_at`.
   - **Changing factors:**
     - `/totp/enroll` stages a *pending* secret (`user_mfa.totp_pending_ct`, which expires after `totp_pending_minutes`). The confirmed secret stays in force until `/totp/confirm` verifies a code from the pending one.
-    - From an `active` session, `/totp/enroll` and `/passkeys/register/options` require `reauth_at` within `reauth_minutes`, else 403 `{"error":"reauth_required"}`. `enroll_required` sessions have no factor yet, so they're exempt.
+    - From an `active` session, `/totp/enroll`, `/totp/confirm`, `/passkeys/register/options` and `/passkeys/register/verify` require `reauth_at` within `reauth_minutes`, else 403 `{"error":"reauth_required"}`. Completion is re-checked because a pending secret (10 minutes) or challenge (5 minutes) can outlive the reauth window, and a 403 doesn't consume the pending secret or challenge. `enroll_required` sessions have no factor yet, so they're exempt.
     - `elevate()` stamps `reauth_at`. `rotate()` issues new session and CSRF tokens without elevating.
 
 - [ ] **Step 1: Write the failing tests**
@@ -2774,6 +2774,7 @@ async def confirm(
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, object]:
     _require_state(sess, "enroll_required", "active")
+    ensure_fresh_reauth(sess, settings)  # re-checked here: the pending secret outlives the reauth window
     key = str(sess.user_id)
     if await throttle.is_locked(db, "mfa_user", key):
         raise HTTPException(429, detail={"error": "locked"})
@@ -3235,6 +3236,7 @@ async def register_verify(
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, str]:
     _state(sess, "enroll_required", "active")
+    ensure_fresh_reauth(sess, settings)  # re-checked here: the challenge can outlive the reauth window
     user = await _session_user(db, sess)
     try:
         await passkeys.finish_registration(db, user, body.challenge_id, body.credential, body.name, settings)

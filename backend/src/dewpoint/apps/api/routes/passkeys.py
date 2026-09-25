@@ -72,6 +72,7 @@ async def register_verify(
     settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, str]:
     _state(sess, "enroll_required", "active")
+    ensure_fresh_reauth(sess, settings)  # re-checked here: the challenge can outlive the reauth window
     user = await _session_user(db, sess)
     try:
         await passkeys.finish_registration(db, user, body.challenge_id, body.credential, body.name, settings)

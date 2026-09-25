@@ -155,3 +155,41 @@ async def test_outstanding_challenges_are_capped(owner_sessionmaker, api_setting
             await passkeys.authentication_options(s, api_settings, None)
         with pytest.raises(passkeys.ChallengeCapacityError):
             await passkeys.authentication_options(s, api_settings, None)
+
+
+async def _expire_reauth_only(owner_sessionmaker) -> None:  # type: ignore[no-untyped-def]
+    """Past the 5-minute reauth window, while pending TOTP (10 min) and challenges (5 min) stay valid."""
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("update sessions set reauth_at = now() - interval '6 minutes'"))
+
+
+async def test_totp_confirm_rechecks_reauth(client, owner_sessionmaker) -> None:
+    old = await _active_totp_user(client, owner_sessionmaker)
+    new = _secret((await client.post("/api/v1/auth/mfa/totp/enroll")).json()["otpauth_uri"])  # reauth fresh here
+    await _expire_reauth_only(owner_sessionmaker)
+    r = await client.post("/api/v1/auth/mfa/totp/confirm", json={"code": _code(new)})
+    assert r.status_code == 403 and r.json() == {"error": "reauth_required"}
+    client.headers["X-CSRF-Token"] = (
+        await client.post("/api/v1/auth/mfa/totp/reauth", json={"code": _code(old, 1)})
+    ).json()["csrf_token"]
+    r = await client.post("/api/v1/auth/mfa/totp/confirm", json={"code": _code(new)})  # pending setup survived
+    assert r.status_code == 200 and len(r.json()["recovery_codes"]) == 10
+
+
+async def test_passkey_register_verify_rechecks_reauth(client, owner_sessionmaker, monkeypatch) -> None:
+    monkeypatch.setattr(
+        passkeys,
+        "verify_registration_response",
+        lambda **kw: SimpleNamespace(credential_id=b"cred", credential_public_key=b"pk", sign_count=0),
+    )
+    secret = await _active_totp_user(client, owner_sessionmaker)
+    o = (await client.post("/api/v1/auth/passkeys/register/options")).json()  # reauth fresh here
+    await _expire_reauth_only(owner_sessionmaker)
+    body = {"challenge_id": o["challenge_id"], "credential": CRED}
+    r = await client.post("/api/v1/auth/passkeys/register/verify", json=body)
+    assert r.status_code == 403 and r.json() == {"error": "reauth_required"}
+    client.headers["X-CSRF-Token"] = (
+        await client.post("/api/v1/auth/mfa/totp/reauth", json={"code": _code(secret, 1)})
+    ).json()["csrf_token"]
+    r = await client.post("/api/v1/auth/passkeys/register/verify", json=body)  # challenge not consumed by the 403
+    assert r.status_code == 200
