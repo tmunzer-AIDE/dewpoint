@@ -65,6 +65,20 @@ async def api_sessionmaker(pg_url: str, _test_users: None) -> AsyncIterator[asyn
     await eng.dispose()
 
 
+@pytest.fixture(scope="session")
+async def worker_sessionmaker(pg_url: str, _test_users: None) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    eng = make_engine(_url_for(pg_url, "dewpoint_worker"))
+    yield make_sessionmaker(eng)
+    await eng.dispose()
+
+
+@pytest.fixture(scope="session")
+async def admin_sessionmaker(pg_url: str, _test_users: None) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    eng = make_engine(_url_for(pg_url, "dewpoint_admin"))
+    yield make_sessionmaker(eng)
+    await eng.dispose()
+
+
 @pytest.fixture(autouse=True)
 async def clean_db(owner_sessionmaker: async_sessionmaker[AsyncSession]) -> AsyncIterator[None]:
     yield

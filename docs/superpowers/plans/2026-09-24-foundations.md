@@ -1013,7 +1013,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 **Files:**
 - Create: `backend/src/dewpoint/core/crypto/__init__.py`, `kek.py`, `keyring.py`
 - Create: `backend/src/dewpoint/core/models/keys.py`, `backend/migrations/versions/0004_keys.py`
-- Test: `backend/tests/core/crypto/test_keyring.py`
+- Test: `backend/tests/core/crypto/test_keyring.py`, `backend/tests/core/crypto/test_keyring_rls.py`
 
 **Interfaces:**
 - Consumes: `Base`, `UUIDPk` (Task 3); `Settings.kek_b64`, `kek_id`, `kek_previous_b64`, `kek_previous_id` (Task 2).
@@ -1029,7 +1029,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     - `async rotate(session, tenant_id: UUID | None) -> int` (data-key rotation; returns the new active version)
     - `async rewrap_batch(session, batch_size: int = 100) -> int`: rewraps up to `batch_size` rows **not** wrapped by `current` (`FOR UPDATE SKIP LOCKED`); returns the count, 0 when done
     - `async kek_usage(session) -> dict[str, int]` (`kek_id` → number of data keys)
-  - `tenant_id=None` means the platform scope, used for user TOTP secrets.
+  - `tenant_id=None` means the platform scope, used for user TOTP secrets. It's stored in `platform_keys`, while tenant keys live in `data_keys` under RLS.
+  - Callers must run `tenant_scope(session, tenant_id)` before using a tenant's key. Key creation and rotation are serialized per scope with `pg_advisory_xact_lock`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1120,17 +1121,27 @@ from sqlalchemy.orm import Mapped, mapped_column
 from dewpoint.core.models.base import Base, UUIDPk
 
 
-class DataKey(UUIDPk, Base):
-    """Wrapped data-encryption keys. Not RLS-scoped: only reachable through Keyring."""
-    __tablename__ = "data_keys"
-    __table_args__ = (UniqueConstraint("scope_key", "version"),)
-    scope_key: Mapped[str] = mapped_column(String(64))  # "platform" or tenant uuid
-    tenant_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+class _WrappedKey(UUIDPk):
     version: Mapped[int] = mapped_column(Integer)
     wrapped_key: Mapped[bytes] = mapped_column(LargeBinary)
     kek_id: Mapped[str] = mapped_column(String(64))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DataKey(_WrappedKey, Base):
+    """A tenant's wrapped data-encryption keys. RLS-scoped to the tenant (FORCE); key admins see all."""
+
+    __tablename__ = "data_keys"
+    __table_args__ = (UniqueConstraint("tenant_id", "version"),)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+
+
+class PlatformKey(_WrappedKey, Base):
+    """The platform scope's wrapped data keys (user TOTP secrets). Granted to api and admin roles only."""
+
+    __tablename__ = "platform_keys"
+    __table_args__ = (UniqueConstraint("version"),)
 ```
 
 `core/crypto/kek.py`:
@@ -1195,15 +1206,19 @@ Add `from collections.abc import Sequence` to the imports.
 import os
 import struct
 import uuid
+from collections.abc import Sequence
+from typing import Any, cast
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from sqlalchemy import select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.crypto.kek import KekSet
-from dewpoint.core.models.keys import DataKey
+from dewpoint.core.models.keys import DataKey, PlatformKey
 
 FORMAT_V1 = b"\x01"
+type AnyKey = DataKey | PlatformKey
 
 
 def _scope(tenant_id: uuid.UUID | None) -> str:
@@ -1214,80 +1229,266 @@ def _aad(scope: str, purpose: str, context: str) -> bytes:
     return f"dewpoint|{scope}|{purpose}|{context}".encode()
 
 
+def _dek_aad(row: AnyKey) -> bytes:
+    scope = str(row.tenant_id) if isinstance(row, DataKey) else "platform"
+    return f"dek|{scope}|{row.version}".encode()
+
+
+def _scope_filter(tenant_id: uuid.UUID | None) -> tuple[type[AnyKey], list[Any]]:
+    """Tenant keys live in RLS-scoped data_keys; the platform key in the narrowly granted platform_keys."""
+    if tenant_id is None:
+        return PlatformKey, []
+    return DataKey, [DataKey.tenant_id == tenant_id]
+
+
 class Keyring:
     def __init__(self, keks: KekSet) -> None:
         self._keks = keks
 
-    async def _active(self, s: AsyncSession, tenant_id: uuid.UUID | None) -> DataKey:
-        scope = _scope(tenant_id)
-        row = (await s.execute(
-            select(DataKey).where(DataKey.scope_key == scope, DataKey.active.is_(True)).with_for_update()
-        )).scalar_one_or_none()
+    async def _active(self, s: AsyncSession, tenant_id: uuid.UUID | None) -> AnyKey:
+        # Serialize first-use creation and rotation per scope until commit; FOR UPDATE alone can't lock a
+        # row that doesn't exist yet, so two first uses would both insert version 1.
+        await s.execute(
+            text("select pg_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": f"dewpoint:dek:{_scope(tenant_id)}"}
+        )
+        model, where = _scope_filter(tenant_id)
+        found = (
+            await s.execute(select(model).where(*where, model.active.is_(True)).with_for_update())
+        ).scalar_one_or_none()
+        row = cast(AnyKey | None, found)
         if row is None:
-            row = self._new_key(scope, tenant_id, 1)
+            row = self._new_key(tenant_id, 1)
             s.add(row)
             await s.flush()
         return row
 
-    def _new_key(self, scope: str, tenant_id: uuid.UUID | None, version: int) -> DataKey:
+    def _new_key(self, tenant_id: uuid.UUID | None, version: int) -> AnyKey:
         kek = self._keks.current
-        wrapped = kek.wrap(AESGCM.generate_key(256), f"dek|{scope}|{version}".encode())
-        return DataKey(scope_key=scope, tenant_id=tenant_id, version=version, wrapped_key=wrapped, kek_id=kek.key_id)
+        row: AnyKey = (
+            PlatformKey(version=version) if tenant_id is None else DataKey(tenant_id=tenant_id, version=version)
+        )
+        row.wrapped_key = kek.wrap(AESGCM.generate_key(256), _dek_aad(row))
+        row.kek_id = kek.key_id
+        return row
 
-    def _dek(self, row: DataKey) -> AESGCM:
+    def _dek(self, row: AnyKey) -> AESGCM:
         kek = self._keks.get(row.kek_id)  # UnknownKekError if this process lacks the wrapping key
-        return AESGCM(kek.unwrap(row.wrapped_key, f"dek|{row.scope_key}|{row.version}".encode()))
+        return AESGCM(kek.unwrap(row.wrapped_key, _dek_aad(row)))
 
-    async def encrypt(self, s: AsyncSession, *, tenant_id: uuid.UUID | None, purpose: str, context: str,
-                      plaintext: bytes) -> bytes:
+    async def encrypt(
+        self, s: AsyncSession, *, tenant_id: uuid.UUID | None, purpose: str, context: str, plaintext: bytes
+    ) -> bytes:
         row = await self._active(s, tenant_id)
         nonce = os.urandom(12)
-        ct = self._dek(row).encrypt(nonce, plaintext, _aad(row.scope_key, purpose, context))
+        ct = self._dek(row).encrypt(nonce, plaintext, _aad(_scope(tenant_id), purpose, context))
         return FORMAT_V1 + struct.pack(">I", row.version) + nonce + ct
 
-    async def decrypt(self, s: AsyncSession, *, tenant_id: uuid.UUID | None, purpose: str, context: str,
-                      blob: bytes) -> bytes:
+    async def decrypt(
+        self, s: AsyncSession, *, tenant_id: uuid.UUID | None, purpose: str, context: str, blob: bytes
+    ) -> bytes:
         if blob[:1] != FORMAT_V1:
             raise ValueError("unknown ciphertext format")
         (version,) = struct.unpack(">I", blob[1:5])
-        scope = _scope(tenant_id)
-        row = (await s.execute(
-            select(DataKey).where(DataKey.scope_key == scope, DataKey.version == version)
-        )).scalar_one_or_none()
-        if row is None:
-            from cryptography.exceptions import InvalidTag
+        model, where = _scope_filter(tenant_id)
+        found = (await s.execute(select(model).where(*where, model.version == version))).scalar_one_or_none()
+        row = cast(AnyKey | None, found)
+        if row is None:  # missing, or invisible under RLS: indistinguishable from a bad tag on purpose
             raise InvalidTag()
-        return self._dek(row).decrypt(blob[5:17], blob[17:], _aad(scope, purpose, context))
+        return self._dek(row).decrypt(blob[5:17], blob[17:], _aad(_scope(tenant_id), purpose, context))
 
     async def rotate(self, s: AsyncSession, tenant_id: uuid.UUID | None) -> int:
         current = await self._active(s, tenant_id)
-        await s.execute(update(DataKey).where(DataKey.id == current.id).values(active=False))
-        new = self._new_key(current.scope_key, tenant_id, current.version + 1)
+        await s.execute(update(type(current)).where(type(current).id == current.id).values(active=False))
+        new = self._new_key(tenant_id, current.version + 1)
         s.add(new)
         await s.flush()
         return new.version
 
     async def rewrap_batch(self, s: AsyncSession, batch_size: int = 100) -> int:
+        """Rewrap up to batch_size keys not wrapped by the current KEK. Run as a key-admin role."""
         current = self._keks.current
-        rows = (await s.execute(select(DataKey).where(DataKey.kek_id != current.key_id)
-                                .limit(batch_size).with_for_update(skip_locked=True))).scalars().all()
-        for row in rows:
-            aad = f"dek|{row.scope_key}|{row.version}".encode()
-            row.wrapped_key = current.wrap(self._keks.get(row.kek_id).unwrap(row.wrapped_key, aad), aad)
-            row.kek_id = current.key_id
+        done = 0
+        for model in (DataKey, PlatformKey):
+            if done >= batch_size:
+                break
+            q = select(model).where(model.kek_id != current.key_id).limit(batch_size - done)
+            rows = cast(Sequence[AnyKey], (await s.execute(q.with_for_update(skip_locked=True))).scalars().all())
+            for row in rows:
+                aad = _dek_aad(row)
+                row.wrapped_key = current.wrap(self._keks.get(row.kek_id).unwrap(row.wrapped_key, aad), aad)
+                row.kek_id = current.key_id
+            done += len(rows)
         await s.flush()
-        return len(rows)
+        return done
 
     async def kek_usage(self, s: AsyncSession) -> dict[str, int]:
-        rows = await s.execute(select(DataKey.kek_id, func.count()).group_by(DataKey.kek_id))
-        return {k: int(n) for k, n in rows.all()}
+        usage: dict[str, int] = {}
+        for model in (DataKey, PlatformKey):
+            for kek_id, n in (await s.execute(select(model.kek_id, func.count()).group_by(model.kek_id))).all():
+                usage[kek_id] = usage.get(kek_id, 0) + int(n)
+        return usage
 ```
 Add `func` to the `sqlalchemy` import.
 
-`0004_keys.py` (with `revision = "0004"` and `down_revision = "0003"`):
-- creates `data_keys` to match the model;
-- adds a partial unique index `ux_data_keys_active` on `(scope_key) WHERE active`, so there is at most one active key per scope;
-- runs `GRANT SELECT, INSERT, UPDATE ON data_keys TO dewpoint_api, dewpoint_worker, dewpoint_admin`.
+`migrations/versions/0004_keys.py` (tenant keys under FORCE RLS plus a key-admin policy; the platform key in a separate table granted to `api`/`admin` only; one statement per `op.execute`, as asyncpg requires):
+```python
+# SPDX-License-Identifier: Apache-2.0
+"""envelope-encryption keys: tenant data keys (RLS) and platform keys (narrow grants)"""
+
+import sqlalchemy as sa
+from alembic import op
+from sqlalchemy.dialects import postgresql as pg
+
+revision = "0004"
+down_revision = "0003"
+branch_labels = None
+depends_on = None
+
+
+def _key_columns() -> list[sa.Column]:  # type: ignore[type-arg]
+    return [
+        sa.Column("id", pg.UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
+        sa.Column("version", sa.Integer, nullable=False),
+        sa.Column("wrapped_key", sa.LargeBinary, nullable=False),
+        sa.Column("kek_id", sa.String(64), nullable=False),
+        sa.Column("active", sa.Boolean, nullable=False, server_default=sa.true()),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+    ]
+
+
+def upgrade() -> None:
+    op.create_table(
+        "data_keys",
+        *_key_columns(),
+        sa.Column("tenant_id", pg.UUID(as_uuid=True), nullable=False),
+        sa.UniqueConstraint("tenant_id", "version"),
+    )
+    op.create_index("ux_data_keys_active", "data_keys", ["tenant_id"], unique=True, postgresql_where=sa.text("active"))
+    op.create_table("platform_keys", *_key_columns(), sa.UniqueConstraint("version"))
+    op.create_index(
+        "ux_platform_keys_active", "platform_keys", [sa.text("(true)")], unique=True, postgresql_where=sa.text("active")
+    )
+    for stmt in (
+        "ALTER TABLE data_keys ENABLE ROW LEVEL SECURITY",
+        "ALTER TABLE data_keys FORCE ROW LEVEL SECURITY",
+        # Services only ever touch the key of the tenant they are scoped to.
+        "CREATE POLICY data_keys_tenant ON data_keys "
+        "USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id())",
+        # Key administration (status, rewrap, rotate-dek) spans tenants by design.
+        "CREATE POLICY data_keys_key_admin ON data_keys TO dewpoint_admin USING (true) WITH CHECK (true)",
+        "GRANT SELECT, INSERT, UPDATE ON data_keys TO dewpoint_api, dewpoint_worker, dewpoint_admin",
+        # Platform keys protect user TOTP secrets: needed by the API (sign-in) and key admins, never by workers.
+        "GRANT SELECT, INSERT, UPDATE ON platform_keys TO dewpoint_api, dewpoint_admin",
+    ):
+        op.execute(stmt)
+
+
+def downgrade() -> None:
+    op.drop_table("platform_keys")
+    op.execute("DROP POLICY IF EXISTS data_keys_key_admin ON data_keys")
+    op.execute("DROP POLICY IF EXISTS data_keys_tenant ON data_keys")
+    op.drop_table("data_keys")
+```
+
+Add `tests/core/crypto/test_keyring_rls.py`, which covers:
+- concurrent first use creates exactly one key;
+- concurrent rotations serialize to versions 2, 3, 4;
+- tenant keys are invisible without context or under another tenant, and a key can't be created for another tenant;
+- workers are denied the platform key;
+- the admin role sees every key.
+
+It also needs the `worker_sessionmaker` and `admin_sessionmaker` fixtures, built like `api_sessionmaker`.
+```python
+# SPDX-License-Identifier: Apache-2.0
+import asyncio
+import os
+import uuid
+
+import pytest
+from cryptography.exceptions import InvalidTag
+from sqlalchemy import func, select
+from sqlalchemy.exc import DBAPIError
+
+from dewpoint.core.crypto.kek import Kek, KekSet
+from dewpoint.core.crypto.keyring import Keyring
+from dewpoint.core.db import tenant_scope
+from dewpoint.core.models.keys import DataKey, PlatformKey
+
+KR = Keyring(KekSet(Kek("k1", os.urandom(32))))
+
+
+async def test_concurrent_first_use_creates_one_key(api_sessionmaker, owner_sessionmaker) -> None:
+    t = uuid.uuid4()
+
+    async def first_use(i: int) -> bytes:
+        async with api_sessionmaker() as s, s.begin():
+            await tenant_scope(s, t)
+            blob = await KR.encrypt(s, tenant_id=t, purpose="p", context=str(i), plaintext=b"x")
+            await asyncio.sleep(0.1)  # keep transactions overlapping
+            return blob
+
+    blobs = await asyncio.gather(*(first_use(i) for i in range(5)))
+    async with owner_sessionmaker() as s:
+        assert (
+            await s.execute(select(func.count()).select_from(DataKey).where(DataKey.tenant_id == t))
+        ).scalar_one() == 1
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, t)
+        for i, b in enumerate(blobs):
+            assert await KR.decrypt(s, tenant_id=t, purpose="p", context=str(i), blob=b) == b"x"
+
+
+async def test_concurrent_rotations_serialize(api_sessionmaker) -> None:
+    t = uuid.uuid4()
+
+    async def rotate() -> int:
+        async with api_sessionmaker() as s, s.begin():
+            await tenant_scope(s, t)
+            v = await KR.rotate(s, t)
+            await asyncio.sleep(0.1)
+            return v
+
+    assert sorted(await asyncio.gather(rotate(), rotate(), rotate())) == [2, 3, 4]
+
+
+async def test_tenant_keys_are_rls_scoped(api_sessionmaker) -> None:
+    a, b = uuid.uuid4(), uuid.uuid4()
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, a)
+        blob = await KR.encrypt(s, tenant_id=a, purpose="p", context="c", plaintext=b"secret")
+    async with api_sessionmaker() as s, s.begin():  # no tenant context: nothing visible
+        assert (await s.execute(select(DataKey))).scalars().all() == []
+    async with api_sessionmaker() as s, s.begin():  # other tenant's context: key invisible, decrypt fails
+        await tenant_scope(s, b)
+        assert (await s.execute(select(DataKey))).scalars().all() == []
+        with pytest.raises(InvalidTag):
+            await KR.decrypt(s, tenant_id=a, purpose="p", context="c", blob=blob)
+    with pytest.raises(DBAPIError, match="row-level security"):  # can't create a key for another tenant
+        async with api_sessionmaker() as s, s.begin():
+            await tenant_scope(s, b)
+            await KR.encrypt(s, tenant_id=a, purpose="p", context="c", plaintext=b"x")
+
+
+async def test_platform_key_path_is_narrow(api_sessionmaker, worker_sessionmaker) -> None:
+    async with api_sessionmaker() as s, s.begin():
+        blob = await KR.encrypt(s, tenant_id=None, purpose="user.totp", context="u1", plaintext=b"totp")
+        assert await KR.decrypt(s, tenant_id=None, purpose="user.totp", context="u1", blob=blob) == b"totp"
+        assert (await s.execute(select(func.count()).select_from(PlatformKey))).scalar_one() == 1
+    with pytest.raises(DBAPIError, match="permission denied"):
+        async with worker_sessionmaker() as s, s.begin():
+            await s.execute(select(PlatformKey))
+
+
+async def test_admin_role_sees_all_keys(api_sessionmaker, admin_sessionmaker) -> None:
+    for t in (uuid.uuid4(), uuid.uuid4()):
+        async with api_sessionmaker() as s, s.begin():
+            await tenant_scope(s, t)
+            await KR.encrypt(s, tenant_id=t, purpose="p", context="c", plaintext=b"x")
+    async with api_sessionmaker() as s, s.begin():
+        await KR.encrypt(s, tenant_id=None, purpose="p", context="c", plaintext=b"x")
+    async with admin_sessionmaker() as s, s.begin():
+        assert await KR.kek_usage(s) == {"k1": 3}
+```
 
 - [ ] **Step 4: Run the tests**
 
@@ -4444,6 +4645,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 {
   "name": "dewpoint-web",
   "private": true,
+  "packageManager": "pnpm@12.6.0",
   "type": "module",
   "license": "Apache-2.0",
   "scripts": {
@@ -4486,7 +4688,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   }
 }
 ```
-Run: `cd frontend && pnpm install` (this creates `pnpm-lock.yaml`; commit it).
+Run: `cd frontend && npx pnpm@12.6.0 install` (this creates `pnpm-lock.yaml`; commit it). **Don't install pnpm globally.** The shared development machine runs it through `npx` at the version pinned in `packageManager`, and CI uses `pnpm/action-setup`, which reads the same field.
 
 `frontend/vite.config.ts`:
 ```ts
@@ -4565,7 +4767,7 @@ it("shows a generic error and never echoes the password", async () => {
 });
 ```
 
-Run: `pnpm test`
+Run: `npx pnpm@12.6.0 test`
 Expected: FAIL (modules not found)
 
 - [ ] **Step 3: Implement the API client and session**
@@ -4955,7 +5157,7 @@ Authenticated routes render inside `Shell`. `/t/$tenantId/connections` passes `t
 
 - [ ] **Step 7: Run the checks**
 
-Run: `cd frontend && pnpm lint && pnpm typecheck && pnpm test && pnpm build`
+Run: `cd frontend && P='npx pnpm@12.6.0' && $P lint && $P typecheck && $P test && $P build`
 Expected: all pass. `dist/` builds.
 
 - [ ] **Step 8: Add CI for the frontend**
@@ -4967,8 +5169,8 @@ Append this to `.github/workflows/ci.yml`:
     defaults: { run: { working-directory: frontend } }
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with: { version: 9 }
+      - uses: pnpm/action-setup@v4  # version comes from package.json "packageManager"
+        with: { package_json_file: frontend/package.json }
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: pnpm, cache-dependency-path: frontend/pnpm-lock.yaml }
       - run: pnpm install --frozen-lockfile
@@ -5328,7 +5530,7 @@ test.describe.serial("foundations", () => {
 
 - [ ] **Step 6: Run the end-to-end tests locally**
 
-Run: `cd frontend && pnpm exec playwright install chromium && pnpm e2e`
+Run: `cd frontend && npx pnpm@12.6.0 exec playwright install chromium && npx pnpm@12.6.0 e2e`
 Expected: 2 passed. (Reset the stack with `docker compose down -v` before re-running, because enrollment happens once per fresh admin.)
 
 - [ ] **Step 7: CI end-to-end job and signed releases**
@@ -5358,8 +5560,8 @@ Append to `.github/workflows/ci.yml`:
           docker compose run --rm -e DEWPOINT_INIT_PASSWORD=violet-otter-canyon-42 \
             -e DEWPOINT_DATABASE_URL="postgresql+asyncpg://dewpoint_api_login:${DEWPOINT_API_DB_PASSWORD}@postgres/dewpoint" \
             api dewpoint admin init --email admin@example.com
-      - uses: pnpm/action-setup@v4
-        with: { version: 9 }
+      - uses: pnpm/action-setup@v4  # version comes from package.json "packageManager"
+        with: { package_json_file: frontend/package.json }
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: pnpm, cache-dependency-path: frontend/pnpm-lock.yaml }
       - working-directory: frontend
@@ -5426,7 +5628,7 @@ Add to `README.md`:
 Run:
 ```bash
 cd backend && uv run ruff check . && uv run mypy src && uv run lint-imports && uv run pytest -q
-cd ../frontend && pnpm lint && pnpm typecheck && pnpm test
+cd ../frontend && npx pnpm@12.6.0 lint && npx pnpm@12.6.0 typecheck && npx pnpm@12.6.0 test
 ```
 Expected: all green. The end-to-end run from Step 6 has passed.
 
