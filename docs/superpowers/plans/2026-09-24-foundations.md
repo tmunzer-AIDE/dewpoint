@@ -238,7 +238,7 @@ jobs:
     defaults: { run: { working-directory: backend } }
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
       - run: uv sync --locked
       - run: uv run ruff check .
       - run: uv run ruff format --check .
@@ -251,9 +251,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
-      - uses: gitleaks/gitleaks-action@v2
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
         env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
-      - uses: aquasecurity/trivy-action@0.28.0
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with: { scan-type: fs, scan-ref: ., severity: "HIGH,CRITICAL", exit-code: "1" }
 ```
 `.github/workflows/codeql.yml`: the standard CodeQL workflow for languages `python` and `javascript-typescript`, triggered on push, PRs and a weekly cron, with `permissions: { security-events: write, contents: read }`.
@@ -6179,7 +6179,7 @@ Append this to `.github/workflows/ci.yml`:
     defaults: { run: { working-directory: frontend } }
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4  # version comes from package.json "packageManager"
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4  (version comes from package.json "packageManager")
         with: { package_json_file: frontend/package.json }
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: pnpm, cache-dependency-path: frontend/pnpm-lock.yaml }
@@ -6615,7 +6615,7 @@ Append to `.github/workflows/ci.yml`:
           docker compose run --rm -e DEWPOINT_INIT_PASSWORD=violet-otter-canyon-42 \
             -e DEWPOINT_DATABASE_URL="postgresql+asyncpg://dewpoint_api_login:${DEWPOINT_API_DB_PASSWORD}@postgres/dewpoint" \
             api dewpoint admin init --email admin@example.com
-      - uses: pnpm/action-setup@v4  # version comes from package.json "packageManager"
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4  (version comes from package.json "packageManager")
         with: { package_json_file: frontend/package.json }
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: pnpm, cache-dependency-path: frontend/pnpm-lock.yaml }
@@ -6640,11 +6640,11 @@ jobs:
     strategy: { matrix: { image: [app, web] } }
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
       - id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: deploy/docker/${{ matrix.image }}.Dockerfile
@@ -6652,15 +6652,15 @@ jobs:
           tags: ghcr.io/${{ github.repository_owner }}/dewpoint-${{ matrix.image }}:${{ github.ref_name }}
           provenance: mode=max
           sbom: true
-      - uses: anchore/sbom-action@v0
+      - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
           image: ghcr.io/${{ github.repository_owner }}/dewpoint-${{ matrix.image }}@${{ steps.build.outputs.digest }}
           format: cyclonedx-json
           output-file: sbom-${{ matrix.image }}.cdx.json
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
       - run: cosign sign --yes ghcr.io/${{ github.repository_owner }}/dewpoint-${{ matrix.image }}@${{ steps.build.outputs.digest }}
       - run: cosign attest --yes --type cyclonedx --predicate sbom-${{ matrix.image }}.cdx.json ghcr.io/${{ github.repository_owner }}/dewpoint-${{ matrix.image }}@${{ steps.build.outputs.digest }}
-      - uses: aquasecurity/trivy-action@0.28.0
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ghcr.io/${{ github.repository_owner }}/dewpoint-${{ matrix.image }}@${{ steps.build.outputs.digest }}
           severity: HIGH,CRITICAL
