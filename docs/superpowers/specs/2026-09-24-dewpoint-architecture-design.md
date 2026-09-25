@@ -208,8 +208,8 @@ Every run starts as a durable `run_requests` row, unique on `(tenant_id, idempot
   - type checks every ref;
   - runs **path availability analysis** (dominators): a ref is *always* available if its producer dominates the consumer, otherwise *conditional*;
   - requires conditional refs, and manifest- or OAS-optional outputs, to carry a `default` or a `has()` guard.
-- **CEL** is evaluated deterministically in the interpreter, with `now()` = Temporal workflow time. It has a pinned custom function library (strings, time, CIDR/IP, MAC, lists), a cost limit, an output size cap and bounded time. The transform node is bounded the same way.
-- CEL library choice (pure Python vs. Rust bindings) is decided by a spike measuring determinism, cost limiting and performance.
+- **CEL** uses workflow time (`run.now`) and a pinned custom function library (CIDR/IP, MAC, `sortedKeys`), with a fixed per-evaluation iteration budget and an output size cap. The transform node is bounded the same way.
+- **Decided after the spike** (engine-core spec §5): Google's `cel-expr-python` (cel-cpp), provisionally. Only a proven restricted subset with statically bounded work runs inside the interpreter. Every other valid expression runs in an isolated, resource-limited activity whose result is recorded in history. Publish rejects any route from unordered map iteration to an order-dependent value.
 
 ### 6.5 Secrets and sensitive data in Temporal
 
@@ -442,7 +442,7 @@ After v1: the external MCP server (wrapping `core/tools` with `api_tokens`), age
 
 ## 15. Open items to resolve during sub-project planning
 
-- CEL implementation choice (spike in sub-project 2).
+- ~~CEL implementation choice (spike in sub-project 2).~~ Resolved: engine-core spec §5.
 - Default values for the Temporal namespace retention period, per-tenant concurrency and the Mist rate buckets.
 - Destinations for the audit anchor sink shipped in v1 (at least one, in sub-project 1).
 - The curated Mist resource/action map: an initial resource list, agreed in sub-project 3.
