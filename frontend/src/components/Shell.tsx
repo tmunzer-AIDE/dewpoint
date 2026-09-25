@@ -2,8 +2,8 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useNavigate, useParams } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { api } from "../lib/api";
 import { onStepUpRequired } from "../lib/events";
+import { signOut } from "../lib/signOut";
 import { authenticatePasskey } from "../lib/webauthn";
 import { Button } from "./Button";
 import { TenantSwitcher } from "./TenantSwitcher";
@@ -24,8 +24,15 @@ export function Shell() {
   const [stepUpError, setStepUpError] = useState<string | null>(null);
   useEffect(() => onStepUpRequired(() => setStepUp(true)), []);
 
-  async function signOut() {
-    await api("POST", "/api/v1/auth/logout").catch(() => undefined);
+  const [signOutError, setSignOutError] = useState<string | null>(null);
+
+  async function handleSignOut() {
+    setSignOutError(null);
+    if ((await signOut()) === "failed") {
+      // The server session may still be valid: never pretend otherwise.
+      setSignOutError("Sign-out failed. You are still signed in; check your connection and try again.");
+      return;
+    }
     qc.clear();
     await navigate({ to: "/login" });
   }
@@ -51,8 +58,13 @@ export function Shell() {
         <TenantSwitcher />
         <div className="grow" />
         <Link to="/account/security" className="text-sm text-muted hover:text-ink">Security</Link>
-        <Button onClick={() => void signOut()}>Sign out</Button>
+        <Button onClick={() => void handleSignOut()}>Sign out</Button>
       </header>
+      {signOutError && (
+        <div role="alert" className="border-b border-danger bg-surface-2 px-4 py-3 text-sm text-danger">
+          {signOutError}
+        </div>
+      )}
       {stepUp && (
         <div role="alert" className="flex items-center gap-3 border-b border-line bg-surface-2 px-4 py-3 text-sm">
           <span>This tenant requires a passkey. Confirm with your passkey to continue.</span>
