@@ -58,7 +58,10 @@ target-version = "py312"
 select = ["E", "F", "I", "B", "UP", "S", "ASYNC"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S105", "S106"]
+# Tests: asserts, fixed test credentials, `uv` on PATH, and DDL built from constant role names.
+"tests/**" = ["S101", "S105", "S106", "S607", "S608"]
+# Migrations: DDL/policies are built from module constants only, never from user input.
+"migrations/**" = ["S608"]
 
 [tool.mypy]
 strict = true
