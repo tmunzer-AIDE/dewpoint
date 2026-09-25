@@ -1,14 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
+import base64
 import os
 import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import httpx
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from testcontainers.community.postgres import PostgresContainer
 
+from dewpoint.apps.api.main import create_app
+from dewpoint.core.config import Settings
 from dewpoint.core.db import make_engine, make_sessionmaker
 
 BACKEND = Path(__file__).resolve().parents[1]
@@ -94,3 +98,28 @@ async def clean_db(owner_sessionmaker: async_sessionmaker[AsyncSession]) -> Asyn
         if tables:
             await s.execute(text("SET LOCAL session_replication_role = replica"))  # bypass audit triggers
             await s.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
+
+
+@pytest.fixture(scope="session")
+def api_settings(pg_url: str, _test_users: None) -> Settings:
+    return Settings(
+        database_url=_url_for(pg_url, "dewpoint_api"),
+        kek_b64=base64.b64encode(b"k" * 32).decode(),
+        public_origin="https://testserver",
+        rp_id="testserver",
+    )
+
+
+@pytest.fixture
+async def app(api_settings: Settings):  # type: ignore[no-untyped-def]
+    application = create_app(api_settings)
+    yield application
+    await application.state.engine.dispose()
+
+
+@pytest.fixture
+async def client(app):  # type: ignore[no-untyped-def]
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://testserver", headers={"X-Dewpoint-Client": "web"}
+    ) as c:
+        yield c

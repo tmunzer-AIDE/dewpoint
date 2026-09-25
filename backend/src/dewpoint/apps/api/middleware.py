@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 
 CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; "
@@ -19,3 +19,14 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
         response.headers["Cache-Control"] = "no-store"
         return response
+
+
+class ClientHeaderMiddleware(BaseHTTPMiddleware):
+    """Unsafe /api requests must carry X-Dewpoint-Client: web. The custom header forces a CORS preflight,
+    blocking cross-site form posts even on unauthenticated endpoints such as login."""
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        if request.url.path.startswith("/api/") and request.method not in {"GET", "HEAD", "OPTIONS"}:
+            if request.headers.get("X-Dewpoint-Client") != "web":
+                return JSONResponse({"error": "forbidden"}, status_code=403)
+        return await call_next(request)
