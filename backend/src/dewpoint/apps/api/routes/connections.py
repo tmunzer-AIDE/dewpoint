@@ -148,4 +148,7 @@ async def verify(
     except service.StaleVerificationError:
         await db.commit()  # keep the verify_discarded audit entry
         raise HTTPException(409, detail={"error": "changed_during_verification"}) from None
+    except service.ConnectionGoneError:
+        await db.commit()  # keep the verify_discarded audit entry
+        raise HTTPException(404, detail={"error": "not_found"}) from None
     return service.to_out(conn)

@@ -136,3 +136,23 @@ async def test_rename_during_verification_keeps_the_result(app, owner_sessionmak
             release.set()
             r = await asyncio.wait_for(verify, 10)
     assert r.status_code == 200 and r.json()["status"] == "ok" and r.json()["name"] == "Renamed"
+
+
+@respx.mock
+async def test_delete_during_verification_is_not_found(app, owner_sessionmaker, api_settings) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    started, release = asyncio.Event(), asyncio.Event()
+    _paused_mist(release, started)
+    async with c:
+        cid = (await c.post(f"/api/v1/t/{tid}/connections", json=BODY)).json()["id"]
+        verify = asyncio.create_task(c.post(f"/api/v1/t/{tid}/connections/{cid}/verify"))
+        try:
+            await asyncio.wait_for(started.wait(), 10)
+            deleted = await c.delete(f"/api/v1/t/{tid}/connections/{cid}")
+        finally:
+            release.set()
+            r = await asyncio.wait_for(verify, 10)
+        actions = [e["action"] for e in (await c.get(f"/api/v1/t/{tid}/audit")).json()]
+    assert deleted.status_code == 204
+    assert r.status_code == 404 and r.json() == {"error": "not_found"}
+    assert actions[0] == "connection.verify_discarded"

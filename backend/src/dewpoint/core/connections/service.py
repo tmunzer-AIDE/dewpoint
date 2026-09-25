@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 from cryptography.exceptions import InvalidTag
 from pydantic import BaseModel, SecretStr
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.audit.service import record
@@ -137,6 +137,10 @@ class StaleVerificationError(Exception):
     """The connection's config or secret changed while it was being verified; the result was discarded."""
 
 
+class ConnectionGoneError(Exception):
+    """The connection was deleted while it was being verified; the result was discarded."""
+
+
 async def verify_connection(
     s: AsyncSession, keyring: Keyring, ctx: TenantContext, conn: Connection, http: httpx.AsyncClient
 ) -> Connection:
@@ -156,20 +160,41 @@ async def verify_connection(
         .values(status=status, status_detail=detail, privilege=privilege, last_verified_at=datetime.now(UTC))
         .execution_options(synchronize_session=False)
     )
-    await s.refresh(conn)  # current row, including concurrent non-credential edits such as a rename
-    stale = getattr(applied, "rowcount", 0) == 0
+    if getattr(applied, "rowcount", 0) == 1:
+        # Our UPDATE holds the row lock until commit, so the row can't vanish before this refresh.
+        await s.refresh(conn)  # current row, including concurrent non-credential edits such as a rename
+        await _audit_verify(s, ctx, conn.id, "connection.verify", status, loaded_revision, None)
+        return conn
+    # Not applied: the connection was deleted, or its credentials changed, while the check was in flight.
+    exists = (await s.execute(select(Connection.id).where(Connection.id == conn.id))).first() is not None
+    reason = "edited" if exists else "deleted"
+    await _audit_verify(s, ctx, conn.id, "connection.verify_discarded", status, loaded_revision, reason)
+    if not exists:
+        raise ConnectionGoneError()
+    raise StaleVerificationError()
+
+
+async def _audit_verify(
+    s: AsyncSession,
+    ctx: TenantContext,
+    connection_id: uuid.UUID,
+    action: str,
+    status: str,
+    revision: int,
+    reason: str | None,
+) -> None:
+    details: dict[str, object] = {"status": status, "verified_revision": revision}
+    if reason:
+        details["reason"] = reason
     await record(
         s,
         tenant_id=ctx.tenant_id,
         actor_id=ctx.user.id,
-        action="connection.verify_discarded" if stale else "connection.verify",
+        action=action,
         target_type="connection",
-        target_id=str(conn.id),
-        details={"status": status, "verified_revision": loaded_revision},
+        target_id=str(connection_id),
+        details=details,
     )
-    if stale:
-        raise StaleVerificationError()
-    return conn
 
 
 def to_out(conn: Connection) -> dict[str, object]:
