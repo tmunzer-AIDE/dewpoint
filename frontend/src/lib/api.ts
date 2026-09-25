@@ -12,7 +12,12 @@ export function setCsrf(token: string | null): void {
 
 const UNSAFE = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
-export async function api<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
+/** Like api(), but also returns the HTTP status, for callers whose contract depends on it. */
+export async function request<T = unknown>(
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<{ status: number; data: T }> {
   const headers = new Headers({ "X-Dewpoint-Client": "web", Accept: "application/json" });
   if (body !== undefined) headers.set("Content-Type", "application/json");
   if (UNSAFE.has(method) && csrf) headers.set("X-CSRF-Token", csrf);
@@ -29,5 +34,9 @@ export async function api<T = unknown>(method: string, path: string, body?: unkn
   }
   const token = (data as { csrf_token?: string } | null)?.csrf_token;
   if (token) setCsrf(token);
-  return data as T;
+  return { status: res.status, data: data as T };
+}
+
+export async function api<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
+  return (await request<T>(method, path, body)).data;
 }

@@ -39,6 +39,11 @@ The `audit-anchor` container exits nonzero if an anchor run fails, and its healt
 --max-age-minutes 30`) turns it `unhealthy` when audit rows older than 30 minutes have no anchor. Alert on both:
 a stopped or unhealthy anchor job means new audit entries are not being protected.
 
+The healthcheck measures anchors **recorded in the database**; it is a liveness check, not an integrity check. It
+does not notice if the external anchor file or sink is deleted, unwritable or unreachable. In production, also
+monitor the external sink itself and run `dewpoint audit verify` on a schedule (it exits nonzero on any mismatch or
+missing anchor).
+
 Verify at any time, as the auditor database role:
 
 ```bash

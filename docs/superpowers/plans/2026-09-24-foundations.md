@@ -5750,7 +5750,12 @@ export function setCsrf(token: string | null): void {
 
 const UNSAFE = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
-export async function api<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
+/** Like api(), but also returns the HTTP status, for callers whose contract depends on it. */
+export async function request<T = unknown>(
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<{ status: number; data: T }> {
   const headers = new Headers({ "X-Dewpoint-Client": "web", Accept: "application/json" });
   if (body !== undefined) headers.set("Content-Type", "application/json");
   if (UNSAFE.has(method) && csrf) headers.set("X-CSRF-Token", csrf);
@@ -5767,7 +5772,11 @@ export async function api<T = unknown>(method: string, path: string, body?: unkn
   }
   const token = (data as { csrf_token?: string } | null)?.csrf_token;
   if (token) setCsrf(token);
-  return data as T;
+  return { status: res.status, data: data as T };
+}
+
+export async function api<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
+  return (await request<T>(method, path, body)).data;
 }
 ```
 
@@ -6140,7 +6149,7 @@ export function ConnectionsPage({ tenantId }: { tenantId: string }) {
 
 Authenticated routes render inside `Shell`. `/t/$tenantId/connections` passes `tenantId` to `ConnectionsPage`. On 403 `step_up_required` (from any query), it shows an inline banner, "This tenant requires a passkey," with a button calling `authenticatePasskey("stepup")` and then invalidating all queries.
 
-**Sign-out:** `lib/signOut.ts` (tested in `signOut.test.ts`) reports success only on 204, or on 401, which means the session is already invalid. It refreshes a stale CSRF token from `/auth/session` once and retries. On any other failure, including a network error, the shell keeps the user on the page and shows an error, because the server session may still be valid.
+**Sign-out:** `lib/signOut.ts` (tested in `signOut.test.ts`) reports success only on exactly 204, checked through `request()`, which returns the status; any other 2xx counts as a failure. A 401 also counts as signed out, because the session is already invalid. It refreshes a stale CSRF token from `/auth/session` once and retries. On any other failure, including a network error, the shell keeps the user on the page and shows an error, because the server session may still be valid.
 
 **As built:** the screens described in prose above are implemented in `frontend/src/`:
 - `components/{StatusBadge,TenantSwitcher,Shell}.tsx`

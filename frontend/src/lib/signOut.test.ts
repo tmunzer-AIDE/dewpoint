@@ -13,6 +13,11 @@ describe("signOut", () => {
     expect(await signOut()).toBe("signed_out");
   });
 
+  it("does not treat any other 2xx as a completed sign-out", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(json(200, { ok: true }));
+    expect(await signOut()).toBe("failed");
+  });
+
   it("treats an already-invalid session as signed out", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(json(401, { error: "unauthenticated" }));
     expect(await signOut()).toBe("signed_out");

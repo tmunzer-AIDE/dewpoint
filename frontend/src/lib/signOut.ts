@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-import { ApiError, api } from "./api";
+import { ApiError, api, request } from "./api";
 
 export type SignOutResult = "signed_out" | "failed";
 
+class UnexpectedLogoutResponse extends Error {}
+
 async function logout(): Promise<void> {
-  await api("POST", "/api/v1/auth/logout");
+  const { status } = await request("POST", "/api/v1/auth/logout");
+  if (status !== 204) throw new UnexpectedLogoutResponse(`logout returned ${status}`); // only 204 ends a session
 }
 
 /**
