@@ -6149,14 +6149,18 @@ server {
   server_tokens off;
   root /usr/share/nginx/html;
   client_max_body_size 6m;
+  # Re-resolve the api service through Docker's DNS: a static upstream keeps a dead container IP after the api
+  # is restarted or redeployed (502 until web restarts). A variable in proxy_pass forces per-TTL resolution.
+  resolver 127.0.0.11 valid=10s ipv6=off;
+  set $api http://api:8000;
 
   location /api/ {
-    proxy_pass http://api:8000;
+    proxy_pass $api;
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-For $remote_addr;   # overwrite, never append client-supplied values
     proxy_set_header X-Forwarded-Proto $scheme;
   }
-  location /health/ { proxy_pass http://api:8000; }
+  location /health/ { proxy_pass $api; }
   location /assets/ {
     include /etc/nginx/snippets/security-headers.conf;
     add_header Cache-Control "public, immutable" always;
@@ -6236,6 +6240,10 @@ x-app: &app
   cap_drop: [ALL]
   environment: &appenv
     DEWPOINT_KEK_B64: ${DEWPOINT_KEK_B64:?set in .env}
+    DEWPOINT_KEK_ID: ${DEWPOINT_KEK_ID:-env-1}
+    # Set only during a KEK rollout: docs/operations/key-rotation.md
+    DEWPOINT_KEK_PREVIOUS_B64: ${DEWPOINT_KEK_PREVIOUS_B64:-}
+    DEWPOINT_KEK_PREVIOUS_ID: ${DEWPOINT_KEK_PREVIOUS_ID:-}
     DEWPOINT_PUBLIC_ORIGIN: ${DEWPOINT_PUBLIC_ORIGIN:-http://localhost:8080}
     DEWPOINT_RP_ID: ${DEWPOINT_RP_ID:-localhost}
 
@@ -6579,12 +6587,44 @@ def test_status_rewrap_and_rotate(pg_url, monkeypatch) -> None:
     _env(monkeypatch, pg_url, DEWPOINT_KEK_B64=NEW, DEWPOINT_KEK_ID="new")  # misconfigured: old key dropped too early
     assert r.invoke(app, ["keys", "status"]).exit_code == 3
 
-    _env(monkeypatch, pg_url, DEWPOINT_KEK_B64=NEW, DEWPOINT_KEK_ID="new",
-         DEWPOINT_KEK_PREVIOUS_B64=OLD, DEWPOINT_KEK_PREVIOUS_ID="old")
+    _env(
+        monkeypatch,
+        pg_url,
+        DEWPOINT_KEK_B64=NEW,
+        DEWPOINT_KEK_ID="new",
+        DEWPOINT_KEK_PREVIOUS_B64=OLD,
+        DEWPOINT_KEK_PREVIOUS_ID="old",
+    )
     out = r.invoke(app, ["keys", "rewrap", "--batch-size", "1"])
     assert out.exit_code == 0 and "rewrapped 2" in out.output
     status = r.invoke(app, ["keys", "status"])
     assert status.exit_code == 0 and "new=2" in status.output and "old=" not in status.output
+
+
+def test_key_commands_work_as_the_admin_role(pg_url, _test_users, monkeypatch) -> None:
+    """Production runs these as dewpoint_admin: RLS key-admin policy on data_keys + grants on platform_keys."""
+    from tests.conftest import _url_for
+
+    admin = _url_for(pg_url, "dewpoint_admin")
+    r = CliRunner()
+    _env(monkeypatch, admin, DEWPOINT_KEK_B64=OLD, DEWPOINT_KEK_ID="old")
+    t1, t2 = str(uuid.uuid4()), str(uuid.uuid4())
+    for args in (["--tenant", t1], ["--tenant", t2], ["--platform"]):
+        out = r.invoke(app, ["keys", "rotate-dek", *args])
+        assert out.exit_code == 0 and "version: 2" in out.output, out.output
+    assert "old=6" in r.invoke(app, ["keys", "status"]).output  # tenant keys from two tenants + platform
+
+    _env(
+        monkeypatch,
+        admin,
+        DEWPOINT_KEK_B64=NEW,
+        DEWPOINT_KEK_ID="new",
+        DEWPOINT_KEK_PREVIOUS_B64=OLD,
+        DEWPOINT_KEK_PREVIOUS_ID="old",
+    )
+    assert "rewrapped 6" in r.invoke(app, ["keys", "rewrap", "--batch-size", "4"]).output
+    assert r.invoke(app, ["keys", "status"]).output.strip() == "new=6"
+    assert r.invoke(app, ["keys", "rotate-dek", "--tenant", "not-a-uuid"]).exit_code == 2
 ```
 `rotate-dek` on a scope with no key yet creates version 1 through `_active()` and then rotates to 2. That's intended, and the test relies on it.
 
@@ -6595,19 +6635,120 @@ Expected: FAIL (`No such command 'keys'`)
 
 - [ ] **Step 3: Implement the commands**
 
-Append to `apps/cli/main.py`:
+The full `apps/cli/main.py` after this task (module-level imports, and a typed `_in_session` helper instead of the draft's inline imports). It is also tested as the `dewpoint_admin` role in `test_key_commands_work_as_the_admin_role`: tenant and platform keys, batched rewrap, and a rejected invalid tenant id:
 ```python
+# SPDX-License-Identifier: Apache-2.0
+import asyncio
+import base64
+import os
+import uuid
+from collections.abc import Awaitable, Callable
+from pathlib import Path
+
+import typer
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from dewpoint.core.audit.anchor import FileAnchorSink, anchor_all, verify_anchors
+from dewpoint.core.auth.users import PasswordPolicyError, create_user
+from dewpoint.core.config import get_settings
+from dewpoint.core.crypto.kek import KekSet, UnknownKekError
+from dewpoint.core.crypto.keyring import Keyring
+from dewpoint.core.db import make_engine, make_sessionmaker
+from dewpoint.core.models.identity import User
+
+app = typer.Typer(no_args_is_help=True)
+admin = typer.Typer(no_args_is_help=True)
+app.add_typer(admin, name="admin")
+audit = typer.Typer(no_args_is_help=True)
+app.add_typer(audit, name="audit")
 keys = typer.Typer(no_args_is_help=True)
 app.add_typer(keys, name="keys")
 
 
-def _keyring() -> "Keyring":
-    from dewpoint.core.crypto.kek import KekSet
-    from dewpoint.core.crypto.keyring import Keyring
-    return Keyring(KekSet.from_settings(get_settings()))
+async def _init(email: str, password: str) -> None:
+    engine = make_engine(get_settings().database_url)
+    try:
+        async with make_sessionmaker(engine)() as s, s.begin():
+            if (await s.execute(select(User.id).where(User.is_platform_admin.is_(True)).limit(1))).first():
+                typer.echo("already initialized: a platform admin exists")
+                raise typer.Exit(1)
+            await create_user(s, email=email, password=password, platform_admin=True)
+    finally:
+        await engine.dispose()
 
 
-async def _with_session(fn):  # type: ignore[no-untyped-def]
+@admin.command("init")
+def admin_init(email: str = typer.Option(...)) -> None:
+    """Create the first platform admin. Refuses if one already exists."""
+    password = os.environ.get("DEWPOINT_INIT_PASSWORD") or typer.prompt(
+        "Password", hide_input=True, confirmation_prompt=True
+    )
+    try:
+        asyncio.run(_init(email, password))
+    except PasswordPolicyError as e:
+        typer.echo(f"password rejected: {', '.join(e.violations)}")
+        raise typer.Exit(2) from None
+    typer.echo(f"platform admin {email} created. Sign in to enroll MFA.")
+
+
+def _signing_key() -> Ed25519PrivateKey:
+    raw = get_settings().audit_signing_key_b64
+    if not raw:
+        typer.echo("DEWPOINT_AUDIT_SIGNING_KEY_B64 is not set")
+        raise typer.Exit(2)
+    return Ed25519PrivateKey.from_private_bytes(base64.b64decode(raw))
+
+
+def _anchor_path() -> Path:
+    path = get_settings().audit_anchor_path
+    if not path:
+        typer.echo("DEWPOINT_AUDIT_ANCHOR_PATH is not set")
+        raise typer.Exit(2)
+    return Path(path)
+
+
+@audit.command("anchor")
+def audit_anchor() -> None:
+    """Write current chain heads to the external anchor sink. Run as a dewpoint_auditor login, e.g. every 15 min."""
+    sink = FileAnchorSink(_anchor_path(), _signing_key())
+
+    async def _run() -> int:
+        engine = make_engine(get_settings().database_url)
+        try:
+            async with make_sessionmaker(engine)() as s, s.begin():
+                return await anchor_all(s, sink)
+        finally:
+            await engine.dispose()
+
+    typer.echo(f"anchored {asyncio.run(_run())} scope head(s)")
+
+
+@audit.command("verify")
+def audit_verify() -> None:
+    """Recompute every chain and check it against the signed external anchors. Exit 1 on any problem,
+    including when no anchors exist, so a broken anchor job can't look healthy."""
+    key = _signing_key()
+    sink = FileAnchorSink(_anchor_path(), key)
+
+    async def _run() -> list[str]:
+        engine = make_engine(get_settings().database_url)
+        try:
+            async with make_sessionmaker(engine)() as s:
+                return await verify_anchors(s, sink.entries(), key.public_key())
+        finally:
+            await engine.dispose()
+
+    problems = asyncio.run(_run())
+    for problem in problems:
+        typer.echo(problem)
+    if problems:
+        raise typer.Exit(1)
+    typer.echo("audit chain verified against external anchors")
+
+
+async def _in_session[T](fn: Callable[[AsyncSession], Awaitable[T]]) -> T:
     engine = make_engine(get_settings().database_url)
     try:
         async with make_sessionmaker(engine)() as s:
@@ -6618,10 +6759,9 @@ async def _with_session(fn):  # type: ignore[no-untyped-def]
 
 @keys.command("status")
 def keys_status() -> None:
-    """Data keys per KEK id. Exit 3 if any are wrapped by a KEK this configuration lacks."""
-    from dewpoint.core.crypto.kek import KekSet, UnknownKekError
+    """Data keys per KEK id. Exit 3 if any are wrapped by a KEK this configuration lacks. Run as dewpoint_admin."""
     keks = KekSet.from_settings(get_settings())
-    usage = asyncio.run(_with_session(lambda s: _keyring().kek_usage(s)))
+    usage = asyncio.run(_in_session(Keyring(keks).kek_usage))
     missing = []
     for kek_id, n in sorted(usage.items()):
         typer.echo(f"{kek_id}={n}")
@@ -6636,40 +6776,43 @@ def keys_status() -> None:
 
 @keys.command("rewrap")
 def keys_rewrap(batch_size: int = typer.Option(100, min=1, max=1000)) -> None:
-    """Phase C of docs/operations/key-rotation.md: move every data key to the current KEK."""
+    """Phase C of docs/operations/key-rotation.md: move every data key to the current KEK, in committed batches."""
     st = get_settings()
     if not st.kek_previous_b64 or st.kek_previous_id == st.kek_id:
         typer.echo("refusing: configure the new KEK as current and the old one as previous first (phase B)")
         raise typer.Exit(2)
-    kr = _keyring()
+    keyring = Keyring(KekSet.from_settings(st))
 
-    async def _run(s) -> int:  # type: ignore[no-untyped-def]
+    async def _run(s: AsyncSession) -> int:
         total = 0
         while True:
             async with s.begin():
-                n = await kr.rewrap_batch(s, batch_size)
+                n = await keyring.rewrap_batch(s, batch_size)
             total += n
             if n == 0:
                 return total
 
-    typer.echo(f"rewrapped {asyncio.run(_with_session(_run))} data key(s)")
+    typer.echo(f"rewrapped {asyncio.run(_in_session(_run))} data key(s)")
 
 
 @keys.command("rotate-dek")
 def keys_rotate_dek(tenant: str | None = typer.Option(None), platform: bool = typer.Option(False)) -> None:
     """Rotate one scope's data key. Existing ciphertext stays readable; new writes use the new version."""
-    import uuid as _uuid
     if bool(tenant) == platform:
         typer.echo("pass exactly one of --tenant or --platform")
         raise typer.Exit(2)
-    tid = None if platform else _uuid.UUID(tenant)
-    kr = _keyring()
+    try:
+        tenant_id = None if platform else uuid.UUID(tenant)
+    except ValueError:
+        typer.echo("--tenant must be a UUID")
+        raise typer.Exit(2) from None
+    keyring = Keyring(KekSet.from_settings(get_settings()))
 
-    async def _run(s) -> int:  # type: ignore[no-untyped-def]
+    async def _run(s: AsyncSession) -> int:
         async with s.begin():
-            return await kr.rotate(s, tid)
+            return await keyring.rotate(s, tenant_id)
 
-    typer.echo(f"active data key version: {asyncio.run(_with_session(_run))}")
+    typer.echo(f"active data key version: {asyncio.run(_in_session(_run))}")
 ```
 
 - [ ] **Step 4: Write the runbook**
@@ -6688,6 +6831,11 @@ The runbook also covers:
 - **Data-key rotation:** `keys rotate-dek` rotates one tenant's key, or the platform's. It's independent of KEK rotation.
 - **Key generation:** `openssl rand -base64 32`. KEK ids must be unique and never reused.
 - **Backups:** a database backup is only restorable with the KEKs that wrapped its rows at backup time. Keep retired KEKs in escrow for the backup retention period.
+
+**Live rehearsal (done at this checkpoint):**
+- On the Compose stack, run phases A–D with the rollout variables that Compose now passes through (`DEWPOINT_KEK_ID`, `DEWPOINT_KEK_PREVIOUS_B64`, `DEWPOINT_KEK_PREVIOUS_ID`), restarting `api` for each phase.
+- A probe running as `dewpoint_admin` decrypts every stored secret. It finds tenants through `data_keys` and then sets `tenant_scope`, because `connections` stays RLS-scoped even for the admin role. It prints only a fingerprint.
+- The fingerprint must be identical before, during and after rotation, and `keys status` must exit 3 when configured with the retired key alone.
 
 - [ ] **Step 5: Run the tests**
 

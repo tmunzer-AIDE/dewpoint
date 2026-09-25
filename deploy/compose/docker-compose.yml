@@ -9,6 +9,10 @@ x-app: &app
   cap_drop: [ALL]
   environment: &appenv
     DEWPOINT_KEK_B64: ${DEWPOINT_KEK_B64:?set in .env}
+    DEWPOINT_KEK_ID: ${DEWPOINT_KEK_ID:-env-1}
+    # Set only during a KEK rollout: docs/operations/key-rotation.md
+    DEWPOINT_KEK_PREVIOUS_B64: ${DEWPOINT_KEK_PREVIOUS_B64:-}
+    DEWPOINT_KEK_PREVIOUS_ID: ${DEWPOINT_KEK_PREVIOUS_ID:-}
     DEWPOINT_PUBLIC_ORIGIN: ${DEWPOINT_PUBLIC_ORIGIN:-http://localhost:8080}
     DEWPOINT_RP_ID: ${DEWPOINT_RP_ID:-localhost}
 
