@@ -4,14 +4,15 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.audit.service import record
 from dewpoint.core.auth import passkeys, throttle
 from dewpoint.core.auth.sessions import create_session, elevate, rotate, set_session_cookie
 from dewpoint.core.config import Settings
-from dewpoint.core.http import current_session, ensure_fresh_reauth, get_db, get_settings_dep
-from dewpoint.core.models.identity import AuthSession, User
+from dewpoint.core.http import active_session, current_session, ensure_fresh_reauth, get_db, get_settings_dep
+from dewpoint.core.models.identity import AuthSession, User, WebauthnCredential
 
 router = APIRouter(prefix="/api/v1/auth/passkeys", tags=["auth"])
 
@@ -46,6 +47,27 @@ async def _elevated(db: AsyncSession, sess: AuthSession, response: Response, set
     token = await elevate(db, sess, method="passkey", state="active")
     set_session_cookie(response, token, settings)
     return {"state": "active", "csrf_token": sess.csrf_token}
+
+
+@router.get("")
+async def list_passkeys(
+    sess: AuthSession = Depends(active_session), db: AsyncSession = Depends(get_db)
+) -> list[dict[str, Any]]:
+    """The caller's own passkeys: names and dates only, never key material."""
+    rows = await db.execute(
+        select(WebauthnCredential)
+        .where(WebauthnCredential.user_id == sess.user_id)
+        .order_by(WebauthnCredential.created_at)
+    )
+    return [
+        {
+            "id": str(c.id),
+            "name": c.name,
+            "created_at": c.created_at.isoformat(),
+            "last_used_at": c.last_used_at.isoformat() if c.last_used_at else None,
+        }
+        for c in rows.scalars()
+    ]
 
 
 @router.post("/register/options")

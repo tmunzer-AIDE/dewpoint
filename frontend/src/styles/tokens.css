@@ -1,0 +1,39 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+:root {
+  --ground: #f4f5f2;
+  --surface: #ffffff;
+  --surface-2: #f8f9f7;
+  --ink: #15181c;
+  --muted: #545b64;
+  --line: #dde1dc;
+  --line-strong: #cbd0ca;
+  --accent: #0e6874;
+  --accent-ink: #0a4f58;
+  --accent-soft: #e3f0f1;
+  --warn-bg: #fff3dc;
+  --warn-line: #e5a93c;
+  --warn-ink: #7a4a00;
+  --danger: #b42318;
+  --danger-bg: #fdecea;
+  --ok: #1c6b3a;
+  --ok-bg: #e5f3ea;
+  --live: #b54708;
+  --live-bg: #fef0e6;
+  --radius: 8px;
+  --font-sans: "IBM Plex Sans", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #111315; --surface: #1a1d20; --surface-2: #202428; --ink: #e8eae6; --muted: #a3aab2;
+    --line: #2c3136; --line-strong: #3a4046; --accent: #3fa7b4; --accent-ink: #8fd3dc; --accent-soft: #15333a;
+    --warn-bg: #3a2a0c; --warn-line: #a8741b; --warn-ink: #f3c878; --danger: #f07a70; --danger-bg: #3a1714;
+    --ok: #6fcf97; --ok-bg: #12301f; --live: #f59e5b; --live-bg: #3a2210;
+  }
+}
+:root[data-theme="dark"] {
+  --ground: #111315; --surface: #1a1d20; --surface-2: #202428; --ink: #e8eae6; --muted: #a3aab2;
+  --line: #2c3136; --line-strong: #3a4046; --accent: #3fa7b4; --accent-ink: #8fd3dc; --accent-soft: #15333a;
+  --warn-bg: #3a2a0c; --warn-line: #a8741b; --warn-ink: #f3c878; --danger: #f07a70; --danger-bg: #3a1714;
+  --ok: #6fcf97; --ok-bg: #12301f; --live: #f59e5b; --live-bg: #3a2210;
+}

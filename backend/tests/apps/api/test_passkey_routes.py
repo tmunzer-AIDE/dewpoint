@@ -72,3 +72,26 @@ async def test_passkey_stepup_is_throttled(client, owner_sessionmaker, api_setti
         "/api/v1/auth/passkeys/stepup/verify", headers=h, json={"challenge_id": o["challenge_id"], "credential": CRED}
     )
     assert r.status_code == 429 and r.json() == {"error": "locked"}
+
+
+async def test_list_own_passkeys_without_key_material(client, owner_sessionmaker, monkeypatch) -> None:
+    monkeypatch.setattr(
+        passkeys,
+        "verify_registration_response",
+        lambda **kw: SimpleNamespace(credential_id=b"cred", credential_public_key=b"pk", sign_count=0),
+    )
+    async with owner_sessionmaker() as s, s.begin():
+        await create_user(s, email="lister@corp.test", password=PW)
+    csrf = (await client.post("/api/v1/auth/login", json={"email": "lister@corp.test", "password": PW})).json()[
+        "csrf_token"
+    ]
+    assert (await client.get("/api/v1/auth/passkeys")).status_code == 403  # enrollment not finished
+    o = (await client.post("/api/v1/auth/passkeys/register/options", headers={"X-CSRF-Token": csrf})).json()
+    await client.post(
+        "/api/v1/auth/passkeys/register/verify",
+        headers={"X-CSRF-Token": csrf},
+        json={"challenge_id": o["challenge_id"], "credential": CRED, "name": "laptop"},
+    )
+    listed = (await client.get("/api/v1/auth/passkeys")).json()
+    assert [p["name"] for p in listed] == ["laptop"]
+    assert set(listed[0]) == {"id", "name", "created_at", "last_used_at"}

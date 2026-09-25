@@ -5522,7 +5522,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     "typescript": "^5.6.3",
     "typescript-eslint": "^8.13.0",
     "vite": "^6.0.0",
-    "vitest": "^2.1.4"
+    "vitest": "^3.2.7"
   }
 }
 ```
@@ -5533,12 +5533,13 @@ Run: `cd frontend && npx pnpm@12.6.0 install` (this creates `pnpm-lock.yaml`; co
 // SPDX-License-Identifier: Apache-2.0
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: { proxy: { "/api": "http://localhost:8000", "/health": "http://localhost:8000" } },
-  test: { environment: "jsdom", globals: false },
+  build: { sourcemap: false },
+  test: { environment: "jsdom", globals: false, include: ["src/**/*.test.{ts,tsx}"] },
 });
 ```
 Configure `tsconfig.json` with `strict: true`, `noUncheckedIndexedAccess: true`, `jsx: "react-jsx"` and `moduleResolution: "bundler"`. `eslint.config.js` uses `typescript-eslint` recommended-type-checked.
@@ -5599,7 +5600,7 @@ it("shows a generic error and never echoes the password", async () => {
   await userEvent.type(screen.getByTestId("login-email"), "a@corp.test");
   await userEvent.type(screen.getByTestId("login-password"), "hunter2-secret");
   await userEvent.click(screen.getByTestId("login-submit"));
-  expect(await screen.findByRole("alert")).toHaveTextContent("Email or password is incorrect.");
+  expect((await screen.findByRole("alert")).textContent).toBe("Email or password is incorrect.");
   expect(document.body.textContent).not.toContain("hunter2-secret");
   expect(onDone).not.toHaveBeenCalled();
 });
@@ -5683,19 +5684,28 @@ export function useSession() {
 import { startAuthentication, startRegistration } from "@simplewebauthn/browser";
 import { api } from "./api";
 
-interface Options { options: never; challenge_id: string }
+type CreationOptions = Parameters<typeof startRegistration>[0]["optionsJSON"];
+type RequestOptions = Parameters<typeof startAuthentication>[0]["optionsJSON"];
 const BASE = "/api/v1/auth/passkeys";
-
-export async function registerPasskey(name = "Passkey"): Promise<{ state: string }> {
-  const o = await api<Options>("POST", `${BASE}/register/options`);
-  const credential = await startRegistration({ optionsJSON: o.options });
-  return api("POST", `${BASE}/register/verify`, { challenge_id: o.challenge_id, credential, name });
+interface Challenge<T> {
+  options: T;
+  challenge_id: string;
+}
+interface Verified {
+  state: string;
+  csrf_token: string;
 }
 
-export async function authenticatePasskey(kind: "login" | "mfa" | "stepup"): Promise<{ state: string }> {
-  const o = await api<Options>("POST", `${BASE}/${kind}/options`);
+export async function registerPasskey(name = "Passkey"): Promise<Verified> {
+  const o = await api<Challenge<CreationOptions>>("POST", `${BASE}/register/options`);
+  const credential = await startRegistration({ optionsJSON: o.options });
+  return api<Verified>("POST", `${BASE}/register/verify`, { challenge_id: o.challenge_id, credential, name });
+}
+
+export async function authenticatePasskey(kind: "login" | "mfa" | "stepup"): Promise<Verified> {
+  const o = await api<Challenge<RequestOptions>>("POST", `${BASE}/${kind}/options`);
   const credential = await startAuthentication({ optionsJSON: o.options });
-  return api("POST", `${BASE}/${kind}/verify`, { challenge_id: o.challenge_id, credential });
+  return api<Verified>("POST", `${BASE}/${kind}/verify`, { challenge_id: o.challenge_id, credential });
 }
 ```
 
@@ -5992,6 +6002,20 @@ export function ConnectionsPage({ tenantId }: { tenantId: string }) {
 - `enroll_required` → `/enroll`.
 
 Authenticated routes render inside `Shell`. `/t/$tenantId/connections` passes `tenantId` to `ConnectionsPage`. On 403 `step_up_required` (from any query), it shows an inline banner, "This tenant requires a passkey," with a button calling `authenticatePasskey("stepup")` and then invalidating all queries.
+
+**As built:** the screens described in prose above are implemented in `frontend/src/`:
+- `components/{StatusBadge,TenantSwitcher,Shell}.tsx`
+- `routes/{Mfa,Enroll,Tenants,Security}.tsx`
+- `router.tsx`, `main.tsx`
+- `lib/{events,reauth,useAfterAuth}.ts`: the step-up signal, the `reauth_required` check, and routing by session state
+
+`TotpSetup` takes an `onReauth(retry)` callback, and Security's `ReauthPrompt` re-proves a factor and then retries the action. Tooling changes found during implementation:
+- `vitest ^3.2.7`, because vitest 2 pins Vite 5 and clashes with Vite 6 types;
+- `pnpm-workspace.yaml` with `allowBuilds: { esbuild: true }`, since pnpm 12 blocks dependency build scripts unless they are approved one package at a time;
+- the ESLint config allows its own JS file and disables type-aware rules for `*.js`;
+- the Login test asserts `textContent` rather than adding `@testing-library/jest-dom`.
+
+The backend `GET /api/v1/auth/passkeys` (moved here from Task 14, because the Security page needs it) returns `[{id,name,created_at,last_used_at}]` for the active session. It's tested in `test_passkey_routes.py::test_list_own_passkeys_without_key_material`.
 
 - [ ] **Step 7: Run the checks**
 
@@ -6364,7 +6388,7 @@ test.describe.serial("foundations", () => {
   });
 });
 ```
-`Security.tsx` must list the user's registered passkeys by name for the `E2E key` assertion. Add the backend endpoint `GET /api/v1/auth/passkeys` → `[{id, name, created_at, last_used_at}]` (active session) to `routes/passkeys.py`, with a test in `test_passkey_routes.py` asserting that the registered name `laptop` is listed and that no `public_key` or `credential_id` fields appear.
+`Security.tsx` lists the user's passkeys by name, which the `E2E key` assertion relies on. The backend `GET /api/v1/auth/passkeys` was built in Task 13.
 
 - [ ] **Step 6: Run the end-to-end tests locally**
 

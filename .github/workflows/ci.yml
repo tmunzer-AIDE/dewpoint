@@ -24,3 +24,14 @@ jobs:
         env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
       - uses: aquasecurity/trivy-action@0.28.0
         with: { scan-type: fs, scan-ref: ., severity: "HIGH,CRITICAL", exit-code: "1" }
+  frontend:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: frontend } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4  # version comes from package.json "packageManager"
+        with: { package_json_file: frontend/package.json }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm, cache-dependency-path: frontend/pnpm-lock.yaml }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint && pnpm typecheck && pnpm test && pnpm build
