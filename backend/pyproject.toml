@@ -25,6 +25,9 @@ dependencies = [
 [project.scripts]
 dewpoint = "dewpoint.apps.cli.main:app"
 
+[project.entry-points."dewpoint.plugins"]
+flow = "dewpoint.plugins.flow:PLUGIN"
+
 [dependency-groups]
 dev = [
   "pytest>=8.3",
