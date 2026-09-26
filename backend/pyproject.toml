@@ -150,3 +150,12 @@ name = "engine.cel reads no schemas and no graph"
 type = "forbidden"
 source_modules = ["dewpoint.engine.cel"]
 forbidden_modules = ["dewpoint.engine.graph", "dewpoint.engine.registry", "jsonschema", "pydantic"]
+
+[[tool.importlinter.contracts]]
+name = "the CEL evaluator loads only engine.cel and the standard library"
+type = "forbidden"
+source_modules = ["dewpoint.apps.cel_evaluator"]
+forbidden_modules = [
+  "dewpoint.core", "dewpoint.plugins", "dewpoint.sdk", "dewpoint.engine.graph", "dewpoint.engine.registry",
+  "sqlalchemy", "asyncpg", "fastapi", "pydantic", "jsonschema", "httpx", "temporalio", "cryptography",
+]
