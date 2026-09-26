@@ -5,6 +5,10 @@ profile, shipped only after the §5.9 gates pass for it."""
 RUNTIME_DISTRIBUTION = "cel-expr-python"
 RUNTIME_VERSION = "0.1.3"
 FUNCTION_LIBRARY = "fn-1"
+# cls-1 is the classifier as plan 2a-2 first ships it. Its rules changed while 2a-2 was built (caps, retained
+# accumulators, work charges, regex eligibility) without a new version: no published version had classified an
+# expression under it, because 2a-1 refused CEL at publish (cel.unavailable) and nothing had been released. Once 2a-2
+# is merged, any change to the caps, the estimator or the classifier's limits is cls-2.
 CLASSIFIER = "cls-1"
 CURRENT_CEL_PROFILE = f"cel-cpp-{RUNTIME_VERSION}/{FUNCTION_LIBRARY}/{CLASSIFIER}"
 

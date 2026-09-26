@@ -20,7 +20,8 @@
     - the step-presence contract, and `has()` guards for schema-declared optional fields;
     - an exact output contract: every serialized field required, dumps by alias, no model serializers;
     - measured limits: 9,999 iterations, a work bound that charges each call by the size of what it reads, retained
-      `map`/`filter` accumulators within 4 MiB, and 200-entry list and map caps (provisional until the Linux gate);
+      `map`/`filter` accumulators within 4 MiB, and 200-entry list and map caps (provisional until the Linux gate).
+      These define `cls-1`, which nothing published had used (§5.1);
     - root projection;
     - batched evaluator requests;
     - the new diagnostic and outcome codes;
@@ -362,6 +363,11 @@ the race tests assert that it stays at zero. 2a implements these rules in `start
 
   Each version stores its profile, and changing any of the three creates a new profile. A new profile ships only
   after the §5.9 gates pass, and it follows the lifecycle in §4.5.
+
+  `cls-1` is the classifier as plan 2a-2 ships it. Its rules changed while 2a-2 was built (the caps, retained
+  accumulators, work charges and regex eligibility in §5.5) without a new version. No published version had
+  classified an expression under `cls-1`: 2a-1 refused CEL at publish (`cel.unavailable`), and nothing had been
+  released. Once 2a-2 is merged, a change to those rules is `cls-2`.
 - **Publish** always uses the API build's single current profile. Deploy order: first the evaluators and workers
   that serve a profile, then the API that publishes with it.
 - **Where evaluation runs:**
