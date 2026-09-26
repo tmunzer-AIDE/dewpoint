@@ -485,8 +485,9 @@ cel-spec protos, Apache-2.0, pinned commit). It assigns exactly one class.
      - Measured: 41–45 bytes per slot at n ≥ 200.
      - A `map` over 1,000 elements keeps about 20 MiB; over 2,000, about 90 MiB. That is why the caps in §5.6 are
        200.
-     - **Provisional:** these numbers (48 bytes, 200, 4 MiB) are set from macOS measurements. They hold until gate 6
-       measures them on Linux.
+     - **Provisional:** these numbers (48 bytes, 200, 4 MiB) are set from macOS measurements. Linux (CI,
+       `ubuntu-latest`, gate 6) measured the worst local cases growing 1.0–2.3 MiB, 0.59–0.74 × their bounds; the
+       owner finalizes them from that measurement.
    - Sizes use a model close to the runtime's memory: 16 bytes per scalar and per container, plus text bytes. A
      value's model size is at most 8 × its canonical JSON size + 8, so the referenced inputs together are at most
      524,296 model bytes. Distinct input references share that mass (`a.x + a.y` is one input's worth); overlapping
@@ -509,7 +510,8 @@ cel-spec protos, Apache-2.0, pinned commit). It assigns exactly one class.
        range.
 
      Local requires ≤ 2,000,000 units (about 0.2 s on the gate machine). **Provisional:** the rates are set from
-     macOS measurements. They hold until gate 7 measures them on Linux.
+     macOS measurements. On Linux (CI, `ubuntu-latest`, gate 7) the heaviest load takes 0.48 s per workflow task;
+     the owner finalizes them from that measurement.
    - The bounds are stored with the version.
 
 **Activity.** Valid expressions that are not local run in the isolated `cel.evaluate` activity (§5.7), and the
@@ -536,8 +538,8 @@ result is recorded in history. This is the parent's `eval` activity (§6.5).
     - There is one load per cost the work bound charges: Python calls, text copies, substring search, regular
       expressions, equality and conversion. Each runs at its heaviest local form, on inputs chosen to be worst within
       the caps.
-    - Measured on macOS, the heaviest (regular expressions) takes 0.28 s per workflow task. Removing any charge, or
-      the work threshold, takes a load past 1 s.
+    - The heaviest load (regular expressions) takes 0.28 s per workflow task on macOS and 0.48 s on Linux (CI,
+      `ubuntu-latest`). Removing any charge, or the work threshold, takes a load past 1 s.
 
 ### 5.7 Isolated evaluation (`cel.evaluate` activity + `cel-evaluator` service)
 
@@ -651,7 +653,10 @@ library, the classifier or the estimator:
    - Measured iterations and result sizes never exceed the stored bounds.
    - Peak RSS growth stays within 1.5 × each probe's stored memory bound and 1.5 × the 4 MiB limit.
      - Probes: the worst local-class cases at the caps, chained `map`/`filter` steps included.
-     - Each probe runs in a fresh process.
+     - Each probe runs in a fresh process. On Linux the process first returns its free heap pages and restarts its
+       peak (`/proc/self/clear_refs`): otherwise an earlier peak hides the probe's growth, as it did in the first
+       Linux run, which measured nothing.
+     - A control allocation must be seen, and a probe that shows no growth fails: a blind measurement never passes.
      - Linux is authoritative.
      - The results (`memory.json`, `cost.json`) tune the provisional numbers in §5.5.
 7. **Local cost:**
