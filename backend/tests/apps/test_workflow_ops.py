@@ -14,8 +14,9 @@ from dewpoint.core.plugins import lifecycle
 from dewpoint.core.plugins.lifecycle import Entry
 from dewpoint.core.workflows import service
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
+from dewpoint.engine.cel.record import ExpressionRecord
 from tests.apps.api.helpers import PW
-from tests.support.graphs import G, nid, ref
+from tests.support.graphs import G, cel, nid, ref
 from tests.support.registry import sync_test_plugins
 
 ECHO = Entry("node", "testkit.echo@1")
@@ -269,3 +270,23 @@ async def test_validation_runs_off_the_event_loop(
         await tenant_scope(s, ctx.tenant_id)
         await workflow_ops.check_draft(s, ctx.tenant_id, ECHO_GRAPH, api_settings)
     assert on_loop_thread == [False]
+
+
+async def test_publish_stores_every_expression_with_its_class(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    graph = G().node("a", "testkit.echo@1", {"value": cel("[1, 2, 3].filter(x, x > 1)")}).data()
+    wf_id = await create(api_sessionmaker, ctx, graph)
+    out = await publish(api_sessionmaker, ctx, wf_id, api_settings)
+    assert out.errors == [] and out.version is not None
+    [stored] = out.version.expressions
+    record = ExpressionRecord.from_json(stored)
+    assert (record.node, record.field, record.expr, record.mode) == (
+        str(nid("a")),
+        "/value",
+        "[1, 2, 3].filter(x, x > 1)",
+        "local",
+    )
+    assert record.iterations == 3 and record.to_json() == stored

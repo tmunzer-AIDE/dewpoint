@@ -162,6 +162,7 @@ async def publish(
             closure_node_refs=closure_node_refs,
             closure_cel_profiles=closure_cel_profiles,
             closure_depth=_depth(checked.pins),
+            expressions=[r.to_json() for r in checked.result.expressions],
             graph_hash=authored,
             version_hash=version_hash(
                 graph_hash=authored,
