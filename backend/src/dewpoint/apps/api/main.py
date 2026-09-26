@@ -7,7 +7,19 @@ from fastapi import FastAPI
 
 from dewpoint.apps.api.errors import install_error_handlers
 from dewpoint.apps.api.middleware import ClientHeaderMiddleware, SecurityHeadersMiddleware
-from dewpoint.apps.api.routes import admin_users, audit, auth, connections, health, members, mfa, passkeys, tenants
+from dewpoint.apps.api.routes import (
+    admin_users,
+    audit,
+    auth,
+    connections,
+    health,
+    members,
+    mfa,
+    node_types,
+    passkeys,
+    tenants,
+    workflows,
+)
 from dewpoint.core.config import Settings, get_settings
 from dewpoint.core.crypto.kek import KekSet
 from dewpoint.core.crypto.keyring import Keyring
@@ -45,6 +57,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         admin_users.router,
         audit.router,
         connections.router,
+        node_types.router,
+        workflows.router,
     ):
         app.include_router(router)
     return app
