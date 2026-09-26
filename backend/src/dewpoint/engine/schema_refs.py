@@ -3,10 +3,13 @@
 descending into the data. Anything else would make validation depend on base-URI rules, network fetches or unbounded
 recursion, so it is reported as a problem instead of raising during validation."""
 
+import re
 from collections.abc import Iterator, Mapping
 from typing import Any
 
 PREFIX = "#/$defs/"
+# JSON Pointer escapes (~0 ~1) and percent-encoding would make validators resolve a different name than we look up.
+DEF_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 UNSUPPORTED = ("$id", "$anchor", "$dynamicRef", "$dynamicAnchor", "$recursiveRef", "$recursiveAnchor")
 _SAME_INSTANCE_LISTS = ("allOf", "anyOf", "oneOf")
 _SAME_INSTANCE_ONE = ("not", "if", "then", "else")
@@ -74,7 +77,13 @@ def ref_problems(schema: Any) -> list[str]:
     defs = schema.get("$defs", {})
     if not isinstance(defs, Mapping):
         return ["`$defs` must be an object"]
-    problems: list[str] = []
+    problems: list[str] = [
+        f"/$defs/{name}: `$defs` names may use only letters, digits, '_', '.' and '-'"
+        for name in defs
+        if not isinstance(name, str) or not DEF_NAME.match(name)
+    ]
+    if problems:
+        return problems
 
     def walk(node: Any, path: str) -> None:
         if not isinstance(node, Mapping):

@@ -56,6 +56,9 @@ class BodyLimitMiddleware:
         while True:
             message = await receive()
             if message["type"] == "http.disconnect":
+                # The client is gone and won't read this; answering keeps the middleware chain from reporting a
+                # missing response as a server error.
+                await JSONResponse({"error": "bad_request"}, status_code=400)(scope, receive, send)
                 return
             chunk = message.get("body", b"")
             size += len(chunk)

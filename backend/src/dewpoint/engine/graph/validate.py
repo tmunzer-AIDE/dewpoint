@@ -50,7 +50,7 @@ from dewpoint.engine.graph.values import (
 )
 from dewpoint.engine.registry import control as C
 from dewpoint.engine.registry.catalog import Catalog, NodeTypeSpec
-from dewpoint.engine.schema_refs import ref_problems
+from dewpoint.engine.schema_refs import ref_problems, subschemas
 from dewpoint.sdk.fields import KINDS
 
 MAX_SUBFLOW_DEPTH = 5
@@ -141,6 +141,19 @@ def _static_delay(node: GraphNode, spec: NodeTypeSpec) -> float:
     return float(raw) if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0 else 0.0
 
 
+def _regex_keywords(schema: Any) -> list[str]:
+    """Pointers of `pattern` / `patternProperties` in schema positions of a tenant-authored schema."""
+    found: list[str] = []
+    stack: list[tuple[Any, str]] = [(schema, "")]
+    while stack:
+        node, path = stack.pop()
+        if not isinstance(node, Mapping):
+            continue
+        found += [f"{path}/{key}" for key in ("pattern", "patternProperties") if key in node]
+        stack.extend((sub, path + suffix) for suffix, sub in subschemas(node))
+    return sorted(found)
+
+
 def _settings(graph: Graph) -> list[Diagnostic]:
     st = graph.settings
     out: list[Diagnostic] = []
@@ -162,12 +175,22 @@ def _settings(graph: Graph) -> list[Diagnostic]:
                     code="settings.invalid_schema", field=f"/settings/{label}", message="It must describe an object."
                 )
             )
+        regexes = _regex_keywords(schema)
+        out += [
+            Diagnostic(
+                code="settings.unsupported_keyword",
+                field=f"/settings/{label}{where}",
+                message="Regular-expression keywords (`pattern`, `patternProperties`) aren't supported in workflow "
+                "schemas yet: Python's regex engine can take exponential time on some inputs.",
+            )
+            for where in regexes
+        ]
         # Tenant-authored schemas: only resolvable local $refs, so validation can never raise (see schema_refs).
         out += [
             Diagnostic(code="settings.unresolvable_ref", field=f"/settings/{label}", message=f"{problem}.")
             for problem in ref_problems(schema)
         ]
-    if any(d.field == "/settings/vars_schema" for d in out):
+    if any((d.field or "").startswith("/settings/vars_schema") for d in out):  # never run defaults through it
         return out
     props = st.vars_schema.get("properties", {})
     defs = st.vars_schema.get("$defs", {})
@@ -213,7 +236,9 @@ class _Validator:
         self.vars_root: dict[str, Any] = {"type": "object", "properties": self.vars, "additionalProperties": False}
         if settings_ok and isinstance(vars_schema.get("$defs"), Mapping):
             self.vars_root["$defs"] = vars_schema["$defs"]
-        self.root_has_stop = any(s.specs[i].ref == C.STOP for i in s.regions[None].members)
+        # `stop` anywhere, inside a loop body too, ends the whole run: outputs may miss steps that hadn't run yet
+        self.has_stop = any(spec.ref == C.STOP for spec in s.specs.values())
+        self.availability: dict[tuple[Any, ...], bool] = {}
 
     def err(
         self, code: str, message: str, *, node: uuid.UUID | None = None, fld: str | None = None, fix: str | None = None
@@ -517,15 +542,18 @@ class _Validator:
             return None
         region = self.live[home]
         consumer: lv.Cond
+        consumer_key: tuple[Any, ...]
         if home == site.region and site.at_exit:
-            consumer, upstream = region.exit, True
+            consumer, upstream, consumer_key = region.exit, True, ("exit",)
         elif home == site.region and site.node is not None:
             consumer, upstream = region.live[site.node], site.node in self.desc[producer]
+            consumer_key = ("node", site.node)
         else:
             ancestor = chain[chain.index(home) - 1]  # the loop node, in `home`, that contains the consumer
             if ancestor is None:
                 return None
             consumer, upstream = region.live[ancestor], ancestor in self.desc[producer]
+            consumer_key = ("node", ancestor)
         if not upstream:
             self.err(
                 "ref.not_upstream",
@@ -546,17 +574,34 @@ class _Validator:
                     fix="Set its error behaviour to continue or to an error output.",
                 )
                 return None
-            available = on_error == "port" and lv.implies(consumer, region.err[producer])
+            available = on_error == "port" and self._implies(home, consumer_key, consumer, producer, "err", region)
             r = navigate(ERROR_SCHEMA, p.rest)
             return Resolved(r.schema, r.conditional or not available)
-        available = on_error != "continue" and lv.implies(consumer, region.ok[producer])
-        if site.at_exit and site.region is None and self.root_has_stop:
+        available = on_error != "continue" and self._implies(home, consumer_key, consumer, producer, "ok", region)
+        if site.at_exit and site.region is None and self.has_stop:
             available = False  # `stop` may end the run while this step is still pending
         schema = self.out_schema.get(producer)
         if schema is None:  # only when the producer is already reported (unknown sub-flow): don't add noise
             return Resolved(None, not available)
         r = navigate(schema, p.rest)
         return Resolved(r.schema, r.conditional or not available)
+
+    def _implies(
+        self,
+        home: uuid.UUID | None,
+        consumer_key: tuple[Any, ...],
+        consumer: lv.Cond,
+        producer: uuid.UUID,
+        outcome: str,
+        region: lv.RegionLiveness,
+    ) -> bool:
+        """lv.implies, memoized: many references share a consumer and a producer, and each check can cost
+        MAX_TERMS² term comparisons."""
+        key = (home, consumer_key, producer, outcome)
+        if key not in self.availability:
+            target = region.err[producer] if outcome == "err" else region.ok[producer]
+            self.availability[key] = lv.implies(consumer, target)
+        return self.availability[key]
 
     # ---- whole-graph checks ---------------------------------------------------------------------------------
 
@@ -656,7 +701,7 @@ def validate(graph: Graph, ctx: ValidationContext) -> ValidationResult:
     node_refs = tuple(sorted({n.type for n in graph.nodes}))
     if structure is None:
         return ValidationResult(tuple([*settings, *structural]), node_refs)
-    unusable = ("settings.invalid_schema", "settings.unresolvable_ref")
+    unusable = ("settings.invalid_schema", "settings.unresolvable_ref", "settings.unsupported_keyword")
     v = _Validator(graph, structure, ctx, settings_ok=not any(d.code in unusable for d in settings))
     v.run()
     return ValidationResult(

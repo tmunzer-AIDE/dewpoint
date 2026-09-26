@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import uuid
+from typing import Any
 
 import pytest
 
@@ -176,3 +177,27 @@ async def test_non_finite_numbers_are_a_format_error_not_a_server_error(app, own
     for r, field in ((huge, "/nodes/0/position/x"), (nan, "/settings/outputs/x")):
         assert r.status_code == 422, r.text
         assert [(d["code"], d["field"]) for d in r.json()["diagnostics"]] == [("graph.format", field)]
+
+
+async def test_deeply_nested_drafts_are_refused_before_they_are_stored(app, owner_sessionmaker, api_settings) -> None:
+    deep: Any = 1
+    for _ in range(300):
+        deep = [deep]
+    nested_schema: dict[str, Any] = {"type": "string"}
+    for _ in range(100):
+        nested_schema = {"type": "object", "properties": {"p": nested_schema}}
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        created = await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "Deep", "draft": _with_value(deep)})
+        assert created.status_code == 422 and created.json()["diagnostics"][0]["code"] == "graph.format"
+        wf = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "W"})).json()
+        base = f"/api/v1/t/{tid}/workflows/{wf['id']}"
+        for draft in (_with_value(deep), {"graph_format": 1, "settings": {"input_schema": nested_schema}}):
+            r = await c.put(f"{base}/draft", json=draft, headers={"If-Match": "1"})
+            assert r.status_code == 422 and r.json()["diagnostics"][0]["code"] == "graph.format"
+        got = await c.get(base)
+        assert got.status_code == 200 and got.json()["draft_revision"] == 1
+
+
+def _with_value(value: Any) -> dict[str, Any]:
+    return G().node("a", "testkit.echo@1", {"value": value}).data()

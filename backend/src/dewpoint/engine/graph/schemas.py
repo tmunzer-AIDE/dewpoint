@@ -8,6 +8,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
+from referencing.exceptions import Unresolvable
+
 from dewpoint.engine.schema_refs import PREFIX, SCHEMA_LIST, SCHEMA_MAP, SCHEMA_ONE
 from dewpoint.sdk.fields import KINDS, LITERAL
 
@@ -302,14 +306,21 @@ def object_schema(props: Mapping[str, Mapping[str, Any]], required: Sequence[str
 
 
 def widen(schema: Schema | None, default: Any) -> Schema | None:
-    """What a reference with a default can produce: the referenced type, or the default's when it differs."""
-    if schema is None:
-        return None
-    types = json_types(schema)
-    kind = literal_type(default)
-    if types is None or kind in types or (kind == "integer" and "number" in types):
+    """What a reference with a default can produce. When the default itself satisfies the referenced schema, that
+    schema still describes every outcome. Otherwise the default adds an *open* alternative of its JSON type, so
+    fields of the referenced schema (required ones included) become possibly missing, as they are when the default
+    is used."""
+    if schema is None or _fits(schema, default):
         return schema
+    kind = literal_type(default)
     out: dict[str, Any] = {"anyOf": [{k: v for k, v in schema.items() if k != "$defs"}, {"type": kind}]}
     if "$defs" in schema:
         out["$defs"] = schema["$defs"]
     return out
+
+
+def _fits(schema: Schema, value: Any) -> bool:
+    try:
+        return bool(Draft202012Validator(schema).is_valid(value))
+    except (SchemaError, Unresolvable):
+        return False

@@ -231,6 +231,68 @@ def test_a_reference_default_widens_the_inferred_type() -> None:
     assert json_types(navigate(widened, ["x"]).schema) == {"string", "integer"}
 
 
+def test_escaped_defs_names_are_reported_not_raised() -> None:
+    g = G().node("a", ECHO)
+    g.settings["vars_schema"] = {
+        "type": "object",
+        "$defs": {"a~1b": {"type": "string"}},
+        "properties": {"v": {"$ref": "#/$defs/a~1b", "default": "s"}},
+    }
+    assert codes(g) == ["settings.unresolvable_ref"]
+
+
+CLOSED_OBJ = {
+    "type": "object",
+    "properties": {"b": {"type": "string"}},
+    "required": ["b"],
+    "additionalProperties": False,
+}
+
+
+def test_a_structured_default_that_does_not_fit_the_reference_makes_fields_conditional() -> None:
+    obj = (
+        G()
+        .node("t", "flow.transform@1", {"fields": {"x": ref("trigger.obj", default={})}})
+        .node("use", ECHO, {"value": ref("steps.t.output.x.b")})
+        .edge("t", "use")
+    )
+    obj.settings["input_schema"] = {"type": "object", "properties": {"obj": CLOSED_OBJ}}
+    assert codes(obj) == ["ref.conditional"]  # when obj is missing, x is {} and has no b
+    items = (
+        G()
+        .node("l", LOOP, {"items": ref("trigger.items", default=[{}])})
+        .node("use", ECHO, {"value": ref("loop.item.b")})
+        .edge("l", "use", "body")
+    )
+    items.settings["input_schema"] = {"type": "object", "properties": {"items": {"type": "array", "items": CLOSED_OBJ}}}
+    assert codes(items) == ["ref.conditional"]
+
+
+def test_stop_anywhere_can_end_the_run_before_outputs_are_ready() -> None:
+    g = (
+        G()
+        .node("l", LOOP, {"items": [1, 2]})
+        .node("s", "flow.stop@1")
+        .node("t", ECHO, {"value": 1})
+        .edge("l", "s", "body")
+        .edge("l", "t", "done")
+    )
+    g.settings["outputs"] = {"r": ref("steps.t.output.value")}
+    assert codes(g) == ["ref.conditional"]
+
+
+def test_tenant_schemas_cannot_use_regular_expressions_yet() -> None:
+    vars_pattern = G().node("a", ECHO)
+    vars_pattern.settings["vars_schema"] = {
+        "type": "object",
+        "properties": {"v": {"type": "string", "pattern": "^(a+)+$", "default": "a" * 24 + "!"}},
+    }
+    assert codes(vars_pattern) == ["settings.unsupported_keyword"]
+    input_pattern = G().node("a", ECHO)
+    input_pattern.settings["input_schema"] = {"type": "object", "patternProperties": {"^x": {"type": "string"}}}
+    assert codes(input_pattern) == ["settings.unsupported_keyword"]
+
+
 def test_type_mismatch() -> None:
     g = G().node("s", "testkit.sensitive@1").node("c", IF, {"condition": ref("steps.s.output.public")}).edge("s", "c")
     assert codes(g) == ["ref.type_mismatch"]

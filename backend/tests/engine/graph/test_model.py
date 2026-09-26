@@ -3,7 +3,16 @@ from typing import Any
 
 import pytest
 
-from dewpoint.engine.graph.model import MAX_NODES, GraphFormatError, graph_hash, graph_json, parse_graph, version_hash
+from dewpoint.engine.graph.model import (
+    MAX_DEPTH,
+    MAX_NODES,
+    MAX_VALUES,
+    GraphFormatError,
+    graph_hash,
+    graph_json,
+    parse_graph,
+    version_hash,
+)
 from tests.support.graphs import G, nid
 
 
@@ -82,3 +91,32 @@ def test_non_finite_numbers_are_format_errors(where: tuple[Any, ...], value: Any
     with pytest.raises(GraphFormatError) as e:
         parse_graph(data)
     assert [(d.code, d.field) for d in e.value.diagnostics] == [("graph.format", field)]
+
+
+def test_nesting_is_limited_at_admission() -> None:
+    deep: Any = 1
+    for _ in range(MAX_DEPTH):
+        deep = [deep]
+    with pytest.raises(GraphFormatError) as e:
+        parse_graph(G().node("a", "testkit.echo@1", {"value": deep}).data())
+    assert [d.code for d in e.value.diagnostics] == ["graph.format"] and "nested" in e.value.diagnostics[0].message
+    very_deep: Any = 1
+    for _ in range(5_000):  # far beyond Python's recursion limit: the admission walk must be iterative
+        very_deep = {"a": very_deep}
+    with pytest.raises(GraphFormatError):
+        parse_graph({"graph_format": 1, "settings": {"outputs": {"x": very_deep}}})
+
+
+def test_numeric_strings_cannot_smuggle_non_finite_floats() -> None:
+    data = G().node("a", "testkit.echo@1").data()
+    data["nodes"][0]["position"] = {"x": "NaN", "y": "1e400"}
+    with pytest.raises(GraphFormatError) as e:
+        parse_graph(data)
+    assert {d.field for d in e.value.diagnostics} == {"/nodes/0/position/x", "/nodes/0/position/y"}
+
+
+def test_the_number_of_values_is_limited() -> None:
+    config = {f"v{i}": {"$value": {"kind": "ref", "path": "trigger.x"}} for i in range(MAX_VALUES + 1)}
+    with pytest.raises(GraphFormatError) as e:
+        parse_graph(G().node("a", "testkit.echo@1", config).data())
+    assert "at most" in e.value.diagnostics[0].message

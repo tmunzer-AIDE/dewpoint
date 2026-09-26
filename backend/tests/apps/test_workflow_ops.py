@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import threading
 import uuid
 from typing import Any
 
@@ -249,3 +250,22 @@ async def test_reenabling_warns_about_deprecated_types(
         await lifecycle.deprecate(s, ECHO, actor_id=None)
     warnings = await update(api_sessionmaker, ctx, wf, enabled=True)
     assert [d.code for d in warnings] == ["lifecycle.deprecated"] and await is_enabled(api_sessionmaker, ctx, wf)
+
+
+async def test_validation_runs_off_the_event_loop(
+    monkeypatch, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    on_loop_thread: list[bool] = []
+    real = workflow_ops.validate
+
+    def spy(graph: Any, context: Any) -> Any:
+        on_loop_thread.append(threading.current_thread() is threading.main_thread())
+        return real(graph, context)
+
+    monkeypatch.setattr(workflow_ops, "validate", spy)
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        await workflow_ops.check_draft(s, ctx.tenant_id, ECHO_GRAPH, api_settings)
+    assert on_loop_thread == [False]

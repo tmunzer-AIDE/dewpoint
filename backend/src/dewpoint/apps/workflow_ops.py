@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Validate, publish and activate workflows: wires core storage to the engine validator (spec §4.4–4.5)."""
 
+import asyncio
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -54,7 +55,7 @@ async def check_draft(s: AsyncSession, tenant_id: uuid.UUID, draft: Any, setting
         subflows={wid: SubflowInfo(wid, v.id, v.input_schema, v.output_schema) for wid, v in pins.items()},
         max_run_duration=timedelta(days=settings.max_run_duration_days),
     )
-    result = validate(graph, ctx)
+    result = await asyncio.to_thread(validate, graph, ctx)  # CPU-bound: keep the event loop serving others
     return Checked(graph, list(result.diagnostics), pins, result)
 
 

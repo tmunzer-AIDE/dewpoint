@@ -22,6 +22,7 @@
 
 **Dry run before publication:** the code in Tasks 1–10 was extracted into a scratch worktree and run.
 - 270 tests passed: the 101 foundations tests plus 169 new ones. That count is from revision 3 of this plan, after two rounds of review fixes.
+- Later, the implemented branch (all checkpoint and whole-branch review fixes folded back into this plan) passed 325 tests.
 - ruff, mypy `strict` and import-linter (6 contracts) were clean.
 - Migration 0007 survived an upgrade → downgrade → upgrade round trip.
 
@@ -1305,6 +1306,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     - Every other value is hashed verbatim: `default`, `const`, `enum`, `required`, `dependentRequired` and vendor `x-*` keys. So a property called `title`, or `dependentRequired: {"title": [...]}`, stays part of the contract.
     - Credentials, capabilities, retry, timeout, ports, kind, side effect, schemas and the engine markers are all covered, as is any manifest key added later (unless it is explicitly declared display metadata).
   - `dewpoint.engine.schema_refs.ref_problems(schema) -> list[str]`: empty only when the schema passes the rules below. Only schema positions are inspected; data such as `default`, `const`, `enum`, `examples` and vendor keys never is.
+    - `$defs` names use only `[A-Za-z0-9_.-]`, the characters pydantic generates. JSON Pointer escapes or percent-encoding would make jsonschema resolve a different name than the one we look up;
     - every `$ref` is `#/$defs/<name>` and resolves;
     - there is no `$id`, `$anchor`, `$dynamicRef`, `$dynamicAnchor`, `$recursiveRef` or `$recursiveAnchor`;
     - no chain of definitions refers back to itself without descending into the data (through `$ref`, `allOf`, `anyOf`, `oneOf`, `not`, `if`/`then`/`else` or `dependentSchemas`).
@@ -1407,6 +1409,12 @@ def test_the_sdk_and_the_engine_agree_on_schema_positions() -> None:
         schema_refs.SCHEMA_LIST,
         schema_refs.SCHEMA_MAP,
     )
+
+
+@pytest.mark.parametrize("name", ["a~1b", "a~0b", "a%25b", "a/b", "a b"])
+def test_defs_names_are_limited_to_plain_characters(name: str) -> None:
+    schema = {"$defs": {name: {"type": "string"}}, "properties": {"v": {"$ref": f"#/$defs/{name}"}}}
+    assert any("names" in p for p in ref_problems(schema)), ref_problems(schema)
 ```
 
 `backend/tests/engine/registry/test_catalog.py`:
@@ -1573,10 +1581,13 @@ Expected: FAIL: `ModuleNotFoundError: No module named 'dewpoint.engine.canonical
 descending into the data. Anything else would make validation depend on base-URI rules, network fetches or unbounded
 recursion, so it is reported as a problem instead of raising during validation."""
 
+import re
 from collections.abc import Iterator, Mapping
 from typing import Any
 
 PREFIX = "#/$defs/"
+# JSON Pointer escapes (~0 ~1) and percent-encoding would make validators resolve a different name than we look up.
+DEF_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 UNSUPPORTED = ("$id", "$anchor", "$dynamicRef", "$dynamicAnchor", "$recursiveRef", "$recursiveAnchor")
 _SAME_INSTANCE_LISTS = ("allOf", "anyOf", "oneOf")
 _SAME_INSTANCE_ONE = ("not", "if", "then", "else")
@@ -1644,7 +1655,13 @@ def ref_problems(schema: Any) -> list[str]:
     defs = schema.get("$defs", {})
     if not isinstance(defs, Mapping):
         return ["`$defs` must be an object"]
-    problems: list[str] = []
+    problems: list[str] = [
+        f"/$defs/{name}: `$defs` names may use only letters, digits, '_', '.' and '-'"
+        for name in defs
+        if not isinstance(name, str) or not DEF_NAME.match(name)
+    ]
+    if problems:
+        return problems
 
     def walk(node: Any, path: str) -> None:
         if not isinstance(node, Mapping):
@@ -2007,7 +2024,11 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     - `Edge(source: EdgeFrom(node, port="out") [JSON alias "from"], to: EdgeTo(node))`;
     - `GraphSettings(input_schema, vars_schema, outputs, failure_handler: UUID | None)`.
   - Functions: `parse_graph(data) -> Graph`, which raises `GraphFormatError(diagnostics)`; `graph_json(graph) -> dict`.
-    - `parse_graph` rejects NaN and infinite numbers anywhere in the document (`graph.format` at the exact pointer). Python's JSON parser accepts `NaN`, `Infinity` and `1e400`, but canonical JSON, the hashes and Postgres JSONB don't.
+    - `parse_graph` first runs an iterative admission walk over the whole document, so no input can exhaust the stack. It rejects, as `graph.format`:
+      - NaN and infinite numbers, at the exact pointer;
+      - nesting deeper than `MAX_DEPTH = 64`;
+      - more than `MAX_VALUES = 2000` value envelopes.
+    - The models use `allow_inf_nan=False`, so the strings `"NaN"`, `"inf"` and `"1e400"` can't become non-finite floats either. Python's JSON parser accepts `NaN`, `Infinity` and `1e400`, but canonical JSON, the hashes and Postgres JSONB don't.
   - Hashes:
     - `graph_hash(graph) -> str` identifies **the authored graph only**;
     - `version_hash(*, graph_hash, subflow_pins, failure_handler_version_id, cel_profile, engine_abi) -> str` identifies an **executable version**: the graph plus everything publish resolves. Audit and integrity checks use this one.
@@ -2091,7 +2112,16 @@ from typing import Any
 
 import pytest
 
-from dewpoint.engine.graph.model import MAX_NODES, GraphFormatError, graph_hash, graph_json, parse_graph, version_hash
+from dewpoint.engine.graph.model import (
+    MAX_DEPTH,
+    MAX_NODES,
+    MAX_VALUES,
+    GraphFormatError,
+    graph_hash,
+    graph_json,
+    parse_graph,
+    version_hash,
+)
 from tests.support.graphs import G, nid
 
 
@@ -2170,6 +2200,35 @@ def test_non_finite_numbers_are_format_errors(where: tuple[Any, ...], value: Any
     with pytest.raises(GraphFormatError) as e:
         parse_graph(data)
     assert [(d.code, d.field) for d in e.value.diagnostics] == [("graph.format", field)]
+
+
+def test_nesting_is_limited_at_admission() -> None:
+    deep: Any = 1
+    for _ in range(MAX_DEPTH):
+        deep = [deep]
+    with pytest.raises(GraphFormatError) as e:
+        parse_graph(G().node("a", "testkit.echo@1", {"value": deep}).data())
+    assert [d.code for d in e.value.diagnostics] == ["graph.format"] and "nested" in e.value.diagnostics[0].message
+    very_deep: Any = 1
+    for _ in range(5_000):  # far beyond Python's recursion limit: the admission walk must be iterative
+        very_deep = {"a": very_deep}
+    with pytest.raises(GraphFormatError):
+        parse_graph({"graph_format": 1, "settings": {"outputs": {"x": very_deep}}})
+
+
+def test_numeric_strings_cannot_smuggle_non_finite_floats() -> None:
+    data = G().node("a", "testkit.echo@1").data()
+    data["nodes"][0]["position"] = {"x": "NaN", "y": "1e400"}
+    with pytest.raises(GraphFormatError) as e:
+        parse_graph(data)
+    assert {d.field for d in e.value.diagnostics} == {"/nodes/0/position/x", "/nodes/0/position/y"}
+
+
+def test_the_number_of_values_is_limited() -> None:
+    config = {f"v{i}": {"$value": {"kind": "ref", "path": "trigger.x"}} for i in range(MAX_VALUES + 1)}
+    with pytest.raises(GraphFormatError) as e:
+        parse_graph(G().node("a", "testkit.echo@1", config).data())
+    assert "at most" in e.value.diagnostics[0].message
 ```
 
 `backend/tests/engine/graph/test_structure.py`:
@@ -2355,7 +2414,7 @@ class Diagnostic:
 
 import math
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -2368,10 +2427,14 @@ TYPE_REF_PATTERN = r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+@[1-9][0-9]{0,3}$"
 PORT_PATTERN = r"^[a-z][a-z0-9_]{0,30}$"
 MAX_NODES = 500
 MAX_EDGES = 2000
+MAX_DEPTH = 64  # nesting of the whole document: far below pydantic's (~254) and jsonschema's (~97 schemas) limits
+MAX_VALUES = 2_000  # value envelopes (refs, templates, expressions) per graph: bounds validation work
+MAX_DIAGNOSTICS = 20
 
 
 class _Strict(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    # allow_inf_nan=False: lax mode would otherwise turn the strings "NaN", "inf" or "1e400" into non-finite floats
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
 
 class Position(_Strict):
@@ -2404,7 +2467,7 @@ class EdgeTo(_Strict):
 
 
 class Edge(_Strict):
-    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True, allow_inf_nan=False)
 
     source: EdgeFrom = Field(alias="from")
     to: EdgeTo
@@ -2438,24 +2501,45 @@ class GraphFormatError(ValueError):
         self.diagnostics = diagnostics
 
 
-def _non_finite(value: Any, path: str = "") -> Iterator[str]:
-    """JSON pointers of NaN and infinite numbers. Python's JSON parser accepts NaN, Infinity and 1e400, but canonical
-    JSON, the graph hashes and Postgres JSONB don't."""
-    if isinstance(value, float) and not math.isfinite(value):
-        yield path or "/"
-    elif isinstance(value, Mapping):
-        for key, item in value.items():
-            yield from _non_finite(item, f"{path}/{str(key).replace('~', '~0').replace('/', '~1')}")
-    elif isinstance(value, list | tuple):
-        for index, item in enumerate(value):
-            yield from _non_finite(item, f"{path}/{index}")
+def _escape(key: Any) -> str:
+    return str(key).replace("~", "~0").replace("/", "~1")
+
+
+def _admission_problems(data: Any) -> list[Diagnostic]:
+    """Checks every value of the document before anything else touches it, iteratively so no input can exhaust the
+    stack. Rejects non-finite numbers (Python's JSON parser accepts NaN, Infinity and 1e400; canonical JSON, the hashes
+    and Postgres JSONB don't), nesting deeper than MAX_DEPTH, and more than MAX_VALUES value envelopes."""
+    problems: list[Diagnostic] = []
+    values = 0
+    stack: list[tuple[Any, str, int]] = [(data, "", 1)]
+    while stack and len(problems) < MAX_DIAGNOSTICS:
+        value, path, depth = stack.pop()
+        if isinstance(value, float) and not math.isfinite(value):
+            message = "Numbers must be finite: NaN and infinity aren't valid JSON."
+            problems.append(Diagnostic(code="graph.format", field=path or "/", message=message))
+            continue
+        if not isinstance(value, Mapping | list | tuple):
+            continue
+        if depth > MAX_DEPTH:
+            message = f"Values can be nested at most {MAX_DEPTH} levels deep."
+            problems.append(Diagnostic(code="graph.format", field=path or "/", message=message))
+            continue
+        if isinstance(value, Mapping):
+            if "$value" in value:
+                values += 1
+            stack.extend((item, f"{path}/{_escape(key)}", depth + 1) for key, item in value.items())
+        else:
+            stack.extend((item, f"{path}/{index}", depth + 1) for index, item in enumerate(value))
+    if values > MAX_VALUES:
+        message = f"A workflow can hold at most {MAX_VALUES} references, templates and expressions."
+        problems.append(Diagnostic(code="graph.format", field="/", message=message))
+    return problems
 
 
 def parse_graph(data: Any) -> Graph:
-    non_finite = list(_non_finite(data))
-    if non_finite:
-        message = "Numbers must be finite: NaN and infinity aren't valid JSON."
-        raise GraphFormatError([Diagnostic(code="graph.format", field=p, message=message) for p in non_finite])
+    problems = _admission_problems(data)
+    if problems:
+        raise GraphFormatError(sorted(problems, key=lambda d: d.field or ""))
     try:
         return Graph.model_validate(data)
     except ValidationError as e:
@@ -2832,7 +2916,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     - `navigate` follows JSON Schema. Only `additionalProperties: false` makes an undeclared field an error (`PathError`). Otherwise the field may exist, so it resolves as unknown and possibly missing.
   - `json_types(schema) -> frozenset[str] | None`, `compatible(source, target) -> bool`, `describe(schema) -> str`, `literal_type(value) -> str`.
     - `compatible` requires **every** type the source admits to fit the target (an integer fits a number). If either side is unknown, the runtime check decides.
-  - `widen(schema, default) -> schema`: what a reference with a default can produce. It is the referenced type, or `anyOf[referenced, default's type]` when they differ, with `$defs` kept at the top.
+  - `widen(schema, default) -> schema`: what a reference with a default can produce.
+    - If the default validates against the referenced schema, that schema is kept.
+    - Otherwise it becomes `anyOf[referenced, {"type": <default's JSON type>}]`, with `$defs` kept at the top. The second alternative is open, so the referenced schema's fields, required ones included, become possibly missing.
   - `object_schema(props, required) -> dict`: a closed object built from per-field schemas that keep their own `$defs` scope. Definitions are renamed `f<index>.<name>` and `$ref`s rewritten, so two fields may each define `Item` differently.
   - Marker checks: `literal_on_path(root, pointer)`, `contains_literal(root, schema)`, `allowed_kinds(root, pointer)`.
 - Reference roots: `trigger.<path>`, `steps.<key>.output.<path>`, `steps.<key>.error[.code|.message|.attempt]`, `vars.<name>.<path>`, `loop.item.<path>`, `loop.index`, `loops.<loop_key>.item.<path>`, `loops.<loop_key>.index`, `run.id|started_at|now`. Path segments are identifiers or `[n]` indexes.
@@ -3329,6 +3415,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
+from referencing.exceptions import Unresolvable
+
 from dewpoint.engine.schema_refs import PREFIX, SCHEMA_LIST, SCHEMA_MAP, SCHEMA_ONE
 from dewpoint.sdk.fields import KINDS, LITERAL
 
@@ -3623,17 +3713,24 @@ def object_schema(props: Mapping[str, Mapping[str, Any]], required: Sequence[str
 
 
 def widen(schema: Schema | None, default: Any) -> Schema | None:
-    """What a reference with a default can produce: the referenced type, or the default's when it differs."""
-    if schema is None:
-        return None
-    types = json_types(schema)
-    kind = literal_type(default)
-    if types is None or kind in types or (kind == "integer" and "number" in types):
+    """What a reference with a default can produce. When the default itself satisfies the referenced schema, that
+    schema still describes every outcome. Otherwise the default adds an *open* alternative of its JSON type, so
+    fields of the referenced schema (required ones included) become possibly missing, as they are when the default
+    is used."""
+    if schema is None or _fits(schema, default):
         return schema
+    kind = literal_type(default)
     out: dict[str, Any] = {"anyOf": [{k: v for k, v in schema.items() if k != "$defs"}, {"type": kind}]}
     if "$defs" in schema:
         out["$defs"] = schema["$defs"]
     return out
+
+
+def _fits(schema: Schema, value: Any) -> bool:
+    try:
+        return bool(Draft202012Validator(schema).is_valid(value))
+    except (SchemaError, Unresolvable):
+        return False
 ```
 
 - [ ] **Step 5: Run the tests**
@@ -3669,11 +3766,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `SubflowInfo(workflow_id, version_id, input_schema, output_schema)`.
   - `ValidationContext(catalog, subflows={}, max_run_duration=30 days)`.
   - `ValidationResult(diagnostics, node_refs, subflow_pins: {node_id_str: version_id_str}, failure_handler_version_id, output_schema)` with `.ok`.
+  - A `stop` in any region, loop bodies included, can end the run, so every reference in the workflow outputs is conditional when the graph contains one.
+  - Availability checks are memoized per (region, consumer, producer, outcome).
   - A reference with a default resolves to `widen(referenced, default)`, so inferred types (transform fields, loop items, workflow outputs) include the default's type.
   - Functions: `referenced_workflows(graph) -> set[UUID]`, `validate(graph, ctx) -> ValidationResult`. `validate` reports and never raises; a Hypothesis test runs it on arbitrary node configs and outputs.
   - `MAX_SUBFLOW_DEPTH = 5`.
 - Diagnostic codes introduced:
-  - settings and values: `settings.invalid_schema`, `settings.unresolvable_ref`, `settings.output_name`, `value.syntax`, `value.literal_only`, `value.kind_not_allowed`, `config.invalid`, `cel.unavailable`;
+  - settings and values: `settings.invalid_schema`, `settings.unresolvable_ref`, `settings.unsupported_keyword` (`pattern` / `patternProperties` in tenant-authored schemas: Python's regex engine can backtrack exponentially), `settings.output_name`, `value.syntax`, `value.literal_only`, `value.kind_not_allowed`, `config.invalid`, `cel.unavailable`;
   - references: `ref.unknown_step`, `ref.unknown_var`, `ref.unknown_field`, `ref.out_of_scope`, `ref.not_upstream`, `ref.no_error_output`, `ref.conditional`, `ref.type_mismatch`, `ref.loop_outside`;
   - templates: `template.not_string`, `template.part_not_scalar`;
   - variables: `vars.invalid_name`, `vars.no_default`, `vars.bad_default`, `vars.undeclared`, `vars.write_in_loop`, `vars.concurrent_writers`;
@@ -4011,6 +4110,68 @@ def test_a_reference_default_widens_the_inferred_type() -> None:
     assert codes(g("fallback")) == []
     widened = check(g(123)).output_schema
     assert json_types(navigate(widened, ["x"]).schema) == {"string", "integer"}
+
+
+def test_escaped_defs_names_are_reported_not_raised() -> None:
+    g = G().node("a", ECHO)
+    g.settings["vars_schema"] = {
+        "type": "object",
+        "$defs": {"a~1b": {"type": "string"}},
+        "properties": {"v": {"$ref": "#/$defs/a~1b", "default": "s"}},
+    }
+    assert codes(g) == ["settings.unresolvable_ref"]
+
+
+CLOSED_OBJ = {
+    "type": "object",
+    "properties": {"b": {"type": "string"}},
+    "required": ["b"],
+    "additionalProperties": False,
+}
+
+
+def test_a_structured_default_that_does_not_fit_the_reference_makes_fields_conditional() -> None:
+    obj = (
+        G()
+        .node("t", "flow.transform@1", {"fields": {"x": ref("trigger.obj", default={})}})
+        .node("use", ECHO, {"value": ref("steps.t.output.x.b")})
+        .edge("t", "use")
+    )
+    obj.settings["input_schema"] = {"type": "object", "properties": {"obj": CLOSED_OBJ}}
+    assert codes(obj) == ["ref.conditional"]  # when obj is missing, x is {} and has no b
+    items = (
+        G()
+        .node("l", LOOP, {"items": ref("trigger.items", default=[{}])})
+        .node("use", ECHO, {"value": ref("loop.item.b")})
+        .edge("l", "use", "body")
+    )
+    items.settings["input_schema"] = {"type": "object", "properties": {"items": {"type": "array", "items": CLOSED_OBJ}}}
+    assert codes(items) == ["ref.conditional"]
+
+
+def test_stop_anywhere_can_end_the_run_before_outputs_are_ready() -> None:
+    g = (
+        G()
+        .node("l", LOOP, {"items": [1, 2]})
+        .node("s", "flow.stop@1")
+        .node("t", ECHO, {"value": 1})
+        .edge("l", "s", "body")
+        .edge("l", "t", "done")
+    )
+    g.settings["outputs"] = {"r": ref("steps.t.output.value")}
+    assert codes(g) == ["ref.conditional"]
+
+
+def test_tenant_schemas_cannot_use_regular_expressions_yet() -> None:
+    vars_pattern = G().node("a", ECHO)
+    vars_pattern.settings["vars_schema"] = {
+        "type": "object",
+        "properties": {"v": {"type": "string", "pattern": "^(a+)+$", "default": "a" * 24 + "!"}},
+    }
+    assert codes(vars_pattern) == ["settings.unsupported_keyword"]
+    input_pattern = G().node("a", ECHO)
+    input_pattern.settings["input_schema"] = {"type": "object", "patternProperties": {"^x": {"type": "string"}}}
+    assert codes(input_pattern) == ["settings.unsupported_keyword"]
 
 
 def test_type_mismatch() -> None:
@@ -4444,7 +4605,7 @@ from dewpoint.engine.graph.values import (
 )
 from dewpoint.engine.registry import control as C
 from dewpoint.engine.registry.catalog import Catalog, NodeTypeSpec
-from dewpoint.engine.schema_refs import ref_problems
+from dewpoint.engine.schema_refs import ref_problems, subschemas
 from dewpoint.sdk.fields import KINDS
 
 MAX_SUBFLOW_DEPTH = 5
@@ -4535,6 +4696,19 @@ def _static_delay(node: GraphNode, spec: NodeTypeSpec) -> float:
     return float(raw) if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0 else 0.0
 
 
+def _regex_keywords(schema: Any) -> list[str]:
+    """Pointers of `pattern` / `patternProperties` in schema positions of a tenant-authored schema."""
+    found: list[str] = []
+    stack: list[tuple[Any, str]] = [(schema, "")]
+    while stack:
+        node, path = stack.pop()
+        if not isinstance(node, Mapping):
+            continue
+        found += [f"{path}/{key}" for key in ("pattern", "patternProperties") if key in node]
+        stack.extend((sub, path + suffix) for suffix, sub in subschemas(node))
+    return sorted(found)
+
+
 def _settings(graph: Graph) -> list[Diagnostic]:
     st = graph.settings
     out: list[Diagnostic] = []
@@ -4556,12 +4730,22 @@ def _settings(graph: Graph) -> list[Diagnostic]:
                     code="settings.invalid_schema", field=f"/settings/{label}", message="It must describe an object."
                 )
             )
+        regexes = _regex_keywords(schema)
+        out += [
+            Diagnostic(
+                code="settings.unsupported_keyword",
+                field=f"/settings/{label}{where}",
+                message="Regular-expression keywords (`pattern`, `patternProperties`) aren't supported in workflow "
+                "schemas yet: Python's regex engine can take exponential time on some inputs.",
+            )
+            for where in regexes
+        ]
         # Tenant-authored schemas: only resolvable local $refs, so validation can never raise (see schema_refs).
         out += [
             Diagnostic(code="settings.unresolvable_ref", field=f"/settings/{label}", message=f"{problem}.")
             for problem in ref_problems(schema)
         ]
-    if any(d.field == "/settings/vars_schema" for d in out):
+    if any((d.field or "").startswith("/settings/vars_schema") for d in out):  # never run defaults through it
         return out
     props = st.vars_schema.get("properties", {})
     defs = st.vars_schema.get("$defs", {})
@@ -4607,7 +4791,9 @@ class _Validator:
         self.vars_root: dict[str, Any] = {"type": "object", "properties": self.vars, "additionalProperties": False}
         if settings_ok and isinstance(vars_schema.get("$defs"), Mapping):
             self.vars_root["$defs"] = vars_schema["$defs"]
-        self.root_has_stop = any(s.specs[i].ref == C.STOP for i in s.regions[None].members)
+        # `stop` anywhere, inside a loop body too, ends the whole run: outputs may miss steps that hadn't run yet
+        self.has_stop = any(spec.ref == C.STOP for spec in s.specs.values())
+        self.availability: dict[tuple[Any, ...], bool] = {}
 
     def err(
         self, code: str, message: str, *, node: uuid.UUID | None = None, fld: str | None = None, fix: str | None = None
@@ -4911,15 +5097,18 @@ class _Validator:
             return None
         region = self.live[home]
         consumer: lv.Cond
+        consumer_key: tuple[Any, ...]
         if home == site.region and site.at_exit:
-            consumer, upstream = region.exit, True
+            consumer, upstream, consumer_key = region.exit, True, ("exit",)
         elif home == site.region and site.node is not None:
             consumer, upstream = region.live[site.node], site.node in self.desc[producer]
+            consumer_key = ("node", site.node)
         else:
             ancestor = chain[chain.index(home) - 1]  # the loop node, in `home`, that contains the consumer
             if ancestor is None:
                 return None
             consumer, upstream = region.live[ancestor], ancestor in self.desc[producer]
+            consumer_key = ("node", ancestor)
         if not upstream:
             self.err(
                 "ref.not_upstream",
@@ -4940,17 +5129,34 @@ class _Validator:
                     fix="Set its error behaviour to continue or to an error output.",
                 )
                 return None
-            available = on_error == "port" and lv.implies(consumer, region.err[producer])
+            available = on_error == "port" and self._implies(home, consumer_key, consumer, producer, "err", region)
             r = navigate(ERROR_SCHEMA, p.rest)
             return Resolved(r.schema, r.conditional or not available)
-        available = on_error != "continue" and lv.implies(consumer, region.ok[producer])
-        if site.at_exit and site.region is None and self.root_has_stop:
+        available = on_error != "continue" and self._implies(home, consumer_key, consumer, producer, "ok", region)
+        if site.at_exit and site.region is None and self.has_stop:
             available = False  # `stop` may end the run while this step is still pending
         schema = self.out_schema.get(producer)
         if schema is None:  # only when the producer is already reported (unknown sub-flow): don't add noise
             return Resolved(None, not available)
         r = navigate(schema, p.rest)
         return Resolved(r.schema, r.conditional or not available)
+
+    def _implies(
+        self,
+        home: uuid.UUID | None,
+        consumer_key: tuple[Any, ...],
+        consumer: lv.Cond,
+        producer: uuid.UUID,
+        outcome: str,
+        region: lv.RegionLiveness,
+    ) -> bool:
+        """lv.implies, memoized: many references share a consumer and a producer, and each check can cost
+        MAX_TERMS² term comparisons."""
+        key = (home, consumer_key, producer, outcome)
+        if key not in self.availability:
+            target = region.err[producer] if outcome == "err" else region.ok[producer]
+            self.availability[key] = lv.implies(consumer, target)
+        return self.availability[key]
 
     # ---- whole-graph checks ---------------------------------------------------------------------------------
 
@@ -5050,7 +5256,7 @@ def validate(graph: Graph, ctx: ValidationContext) -> ValidationResult:
     node_refs = tuple(sorted({n.type for n in graph.nodes}))
     if structure is None:
         return ValidationResult(tuple([*settings, *structural]), node_refs)
-    unusable = ("settings.invalid_schema", "settings.unresolvable_ref")
+    unusable = ("settings.invalid_schema", "settings.unresolvable_ref", "settings.unsupported_keyword")
     v = _Validator(graph, structure, ctx, settings_ok=not any(d.code in unusable for d in settings))
     v.run()
     return ValidationResult(
@@ -6444,7 +6650,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - Workflows: `create_workflow(s, ctx, *, name, draft) -> Workflow`, `get_workflow(s, tenant_id, workflow_id, *, for_update=False)`, `list_workflows(s, tenant_id)`, `save_draft(s, wf, *, expected_revision, draft) -> int`, `update_workflow(s, ctx, wf, *, name, enabled) -> Workflow`.
   - Versions: `NewVersion(...)`, `insert_version(s, ctx, wf, new) -> WorkflowVersion` (sets it active), `set_active(s, ctx, wf, version)`, `get_version(s, workflow_id, version_id)`, `list_versions(s, workflow_id)`, `active_versions(s, tenant_id, workflow_ids) -> {workflow_id: WorkflowVersion}`, `blocked_by(s, version) -> list[str]`.
 - Produces from `apps.workflow_ops`:
-  - `Checked(graph, diagnostics, pins, result)` and `check_draft(s, tenant_id, draft, settings) -> Checked`.
+  - `Checked(graph, diagnostics, pins, result)` and `check_draft(s, tenant_id, draft, settings) -> Checked`. `validate()` runs in a worker thread (`asyncio.to_thread`), so a CPU-heavy draft doesn't stall the event loop for other tenants.
   - `Published(version, errors, warnings)` and `publish(s, ctx, wf, *, expected_revision, settings) -> Published`. `wf` is locked FOR UPDATE by the caller.
   - `NotActivatableError(errors)` and `activate(s, ctx, wf, version) -> list[Diagnostic]` (warnings).
   - `update(s, ctx, wf, *, name, enabled) -> list[Diagnostic]` (warnings): rename, enable or disable. Enabling a workflow that has an active version makes that version's closure an active reference again, so it takes the shared lifecycle locks and re-checks executability exactly like `activate`. It raises `NotActivatableError` when a closure entry is retired or missing. Both use `_check_runnable`.
@@ -6460,6 +6666,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ```python
 # SPDX-License-Identifier: Apache-2.0
+import threading
 import uuid
 from typing import Any
 
@@ -6710,6 +6917,25 @@ async def test_reenabling_warns_about_deprecated_types(
         await lifecycle.deprecate(s, ECHO, actor_id=None)
     warnings = await update(api_sessionmaker, ctx, wf, enabled=True)
     assert [d.code for d in warnings] == ["lifecycle.deprecated"] and await is_enabled(api_sessionmaker, ctx, wf)
+
+
+async def test_validation_runs_off_the_event_loop(
+    monkeypatch, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    on_loop_thread: list[bool] = []
+    real = workflow_ops.validate
+
+    def spy(graph: Any, context: Any) -> Any:
+        on_loop_thread.append(threading.current_thread() is threading.main_thread())
+        return real(graph, context)
+
+    monkeypatch.setattr(workflow_ops, "validate", spy)
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        await workflow_ops.check_draft(s, ctx.tenant_id, ECHO_GRAPH, api_settings)
+    assert on_loop_thread == [False]
 ```
 
 `backend/tests/apps/test_lifecycle_races.py`:
@@ -7202,6 +7428,7 @@ async def blocked_by(s: AsyncSession, version: WorkflowVersion) -> list[str]:
 # SPDX-License-Identifier: Apache-2.0
 """Validate, publish and activate workflows: wires core storage to the engine validator (spec §4.4–4.5)."""
 
+import asyncio
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -7255,7 +7482,7 @@ async def check_draft(s: AsyncSession, tenant_id: uuid.UUID, draft: Any, setting
         subflows={wid: SubflowInfo(wid, v.id, v.input_schema, v.output_schema) for wid, v in pins.items()},
         max_run_duration=timedelta(days=settings.max_run_duration_days),
     )
-    result = validate(graph, ctx)
+    result = await asyncio.to_thread(validate, graph, ctx)  # CPU-bound: keep the event loop serving others
     return Checked(graph, list(result.diagnostics), pins, result)
 
 
@@ -7443,7 +7670,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 **Files:**
 - Create: `backend/src/dewpoint/apps/api/routes/workflows.py`, `backend/src/dewpoint/apps/api/routes/node_types.py`
 - Modify: `backend/src/dewpoint/apps/api/main.py`, `backend/src/dewpoint/apps/api/middleware.py` (`BodyLimitMiddleware`), `backend/src/dewpoint/core/config.py` (`max_request_body_bytes`)
-- Test: `backend/tests/apps/api/test_workflows.py`
+- Test: `backend/tests/apps/api/test_workflows.py`, `backend/tests/apps/api/test_body_limit.py`
 
 **Interfaces:**
 - Consumes: `workflow_ops` and `service` (Task 9); `registry.list_node_types` (Task 8); `require`, `get_db`, `active_session` and `get_settings_dep` from `core.http`.
@@ -7458,7 +7685,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `POST /t/{tenant_id}/workflows/{id}/publish` (`workflow.publish`, `If-Match`): returns 201 `{version_id, number, warnings}`; otherwise 422 `{error: invalid, diagnostics}` or 409 `draft_conflict`.
   - `GET /t/{tenant_id}/workflows/{id}/versions` (`workflow.view`): `[{id, number, published_at, published_by, graph_hash, version_hash, cel_profile, node_refs, active, executable, blocked_by}]`.
   - `POST /t/{tenant_id}/workflows/{id}/activate` (`workflow.publish`), body `{version_id}`: returns `{active_version_id, number, warnings}`; otherwise 404, or 422 `{error: not_activatable, diagnostics}`.
-- Request bodies are capped at `max_request_body_bytes` (1 MiB) **by the bytes actually received**, in an ASGI middleware that runs before FastAPI parses anything. Chunked bodies have no Content-Length, and a route dependency would run only after parsing. The middleware answers 413 `{error: too_large}`.
+- Request bodies are capped at `max_request_body_bytes` (1 MiB) **by the bytes actually received**, in an ASGI middleware that runs before FastAPI parses anything. Chunked bodies have no Content-Length, and a route dependency would run only after parsing. The middleware answers 413 `{error: too_large}`. If the client disconnects mid-body, it answers 400; before, that became a missing response, reported as a server error.
 - The workflow summary is `{id, name, enabled, draft_revision, active_version_id, active_version_number, executable (null when unpublished), blocked_by, created_at, updated_at}`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -7468,6 +7695,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```python
 # SPDX-License-Identifier: Apache-2.0
 import uuid
+from typing import Any
 
 import pytest
 
@@ -7644,6 +7872,70 @@ async def test_non_finite_numbers_are_a_format_error_not_a_server_error(app, own
     for r, field in ((huge, "/nodes/0/position/x"), (nan, "/settings/outputs/x")):
         assert r.status_code == 422, r.text
         assert [(d["code"], d["field"]) for d in r.json()["diagnostics"]] == [("graph.format", field)]
+
+
+async def test_deeply_nested_drafts_are_refused_before_they_are_stored(app, owner_sessionmaker, api_settings) -> None:
+    deep: Any = 1
+    for _ in range(300):
+        deep = [deep]
+    nested_schema: dict[str, Any] = {"type": "string"}
+    for _ in range(100):
+        nested_schema = {"type": "object", "properties": {"p": nested_schema}}
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        created = await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "Deep", "draft": _with_value(deep)})
+        assert created.status_code == 422 and created.json()["diagnostics"][0]["code"] == "graph.format"
+        wf = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "W"})).json()
+        base = f"/api/v1/t/{tid}/workflows/{wf['id']}"
+        for draft in (_with_value(deep), {"graph_format": 1, "settings": {"input_schema": nested_schema}}):
+            r = await c.put(f"{base}/draft", json=draft, headers={"If-Match": "1"})
+            assert r.status_code == 422 and r.json()["diagnostics"][0]["code"] == "graph.format"
+        got = await c.get(base)
+        assert got.status_code == 200 and got.json()["draft_revision"] == 1
+
+
+def _with_value(value: Any) -> dict[str, Any]:
+    return G().node("a", "testkit.echo@1", {"value": value}).data()
+```
+
+`backend/tests/apps/api/test_body_limit.py` (a client that disconnects mid-body gets a 400, never a server error):
+
+```python
+# SPDX-License-Identifier: Apache-2.0
+from typing import Any
+
+
+async def test_a_client_that_disconnects_mid_body_gets_no_server_error(app) -> None:  # type: ignore[no-untyped-def]
+    inbound: list[dict[str, Any]] = [
+        {"type": "http.request", "body": b"{", "more_body": True},
+        {"type": "http.disconnect"},
+    ]
+    sent: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        return inbound.pop(0) if inbound else {"type": "http.disconnect"}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    path = "/api/v1/t/00000000-0000-0000-0000-000000000000/workflows/00000000-0000-0000-0000-000000000000/draft"
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "PUT",
+        "scheme": "https",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"host", b"testserver"), (b"x-dewpoint-client", b"web"), (b"content-type", b"application/json")],
+        "client": ("127.0.0.1", 50000),
+        "server": ("testserver", 443),
+    }
+    await app(scope, receive, send)  # must not raise: an aborted upload is the client's doing, not a server error
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    assert start["status"] == 400
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -7955,6 +8247,9 @@ class BodyLimitMiddleware:
         while True:
             message = await receive()
             if message["type"] == "http.disconnect":
+                # The client is gone and won't read this; answering keeps the middleware chain from reporting a
+                # missing response as a server error.
+                await JSONResponse({"error": "bad_request"}, status_code=400)(scope, receive, send)
                 return
             chunk = message.get("body", b"")
             size += len(chunk)
@@ -8004,8 +8299,8 @@ Then append `node_types.router,` and `workflows.router,` to the router tuple, af
 
 - [ ] **Step 4: Run the tests**
 
-Run: `uv run pytest tests/apps/api/test_workflows.py -q`
-Expected: 10 passed.
+Run: `uv run pytest tests/apps/api/test_workflows.py tests/apps/api/test_body_limit.py -q`
+Expected: 12 passed.
 
 - [ ] **Step 5: Commit**
 

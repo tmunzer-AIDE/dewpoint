@@ -77,3 +77,9 @@ def test_the_sdk_and_the_engine_agree_on_schema_positions() -> None:
         schema_refs.SCHEMA_LIST,
         schema_refs.SCHEMA_MAP,
     )
+
+
+@pytest.mark.parametrize("name", ["a~1b", "a~0b", "a%25b", "a/b", "a b"])
+def test_defs_names_are_limited_to_plain_characters(name: str) -> None:
+    schema = {"$defs": {name: {"type": "string"}}, "properties": {"v": {"$ref": f"#/$defs/{name}"}}}
+    assert any("names" in p for p in ref_problems(schema)), ref_problems(schema)

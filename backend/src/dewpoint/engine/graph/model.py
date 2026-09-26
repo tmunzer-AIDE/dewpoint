@@ -3,7 +3,7 @@
 
 import math
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -16,10 +16,14 @@ TYPE_REF_PATTERN = r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+@[1-9][0-9]{0,3}$"
 PORT_PATTERN = r"^[a-z][a-z0-9_]{0,30}$"
 MAX_NODES = 500
 MAX_EDGES = 2000
+MAX_DEPTH = 64  # nesting of the whole document: far below pydantic's (~254) and jsonschema's (~97 schemas) limits
+MAX_VALUES = 2_000  # value envelopes (refs, templates, expressions) per graph: bounds validation work
+MAX_DIAGNOSTICS = 20
 
 
 class _Strict(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    # allow_inf_nan=False: lax mode would otherwise turn the strings "NaN", "inf" or "1e400" into non-finite floats
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
 
 class Position(_Strict):
@@ -52,7 +56,7 @@ class EdgeTo(_Strict):
 
 
 class Edge(_Strict):
-    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True, allow_inf_nan=False)
 
     source: EdgeFrom = Field(alias="from")
     to: EdgeTo
@@ -86,24 +90,45 @@ class GraphFormatError(ValueError):
         self.diagnostics = diagnostics
 
 
-def _non_finite(value: Any, path: str = "") -> Iterator[str]:
-    """JSON pointers of NaN and infinite numbers. Python's JSON parser accepts NaN, Infinity and 1e400, but canonical
-    JSON, the graph hashes and Postgres JSONB don't."""
-    if isinstance(value, float) and not math.isfinite(value):
-        yield path or "/"
-    elif isinstance(value, Mapping):
-        for key, item in value.items():
-            yield from _non_finite(item, f"{path}/{str(key).replace('~', '~0').replace('/', '~1')}")
-    elif isinstance(value, list | tuple):
-        for index, item in enumerate(value):
-            yield from _non_finite(item, f"{path}/{index}")
+def _escape(key: Any) -> str:
+    return str(key).replace("~", "~0").replace("/", "~1")
+
+
+def _admission_problems(data: Any) -> list[Diagnostic]:
+    """Checks every value of the document before anything else touches it, iteratively so no input can exhaust the
+    stack. Rejects non-finite numbers (Python's JSON parser accepts NaN, Infinity and 1e400; canonical JSON, the hashes
+    and Postgres JSONB don't), nesting deeper than MAX_DEPTH, and more than MAX_VALUES value envelopes."""
+    problems: list[Diagnostic] = []
+    values = 0
+    stack: list[tuple[Any, str, int]] = [(data, "", 1)]
+    while stack and len(problems) < MAX_DIAGNOSTICS:
+        value, path, depth = stack.pop()
+        if isinstance(value, float) and not math.isfinite(value):
+            message = "Numbers must be finite: NaN and infinity aren't valid JSON."
+            problems.append(Diagnostic(code="graph.format", field=path or "/", message=message))
+            continue
+        if not isinstance(value, Mapping | list | tuple):
+            continue
+        if depth > MAX_DEPTH:
+            message = f"Values can be nested at most {MAX_DEPTH} levels deep."
+            problems.append(Diagnostic(code="graph.format", field=path or "/", message=message))
+            continue
+        if isinstance(value, Mapping):
+            if "$value" in value:
+                values += 1
+            stack.extend((item, f"{path}/{_escape(key)}", depth + 1) for key, item in value.items())
+        else:
+            stack.extend((item, f"{path}/{index}", depth + 1) for index, item in enumerate(value))
+    if values > MAX_VALUES:
+        message = f"A workflow can hold at most {MAX_VALUES} references, templates and expressions."
+        problems.append(Diagnostic(code="graph.format", field="/", message=message))
+    return problems
 
 
 def parse_graph(data: Any) -> Graph:
-    non_finite = list(_non_finite(data))
-    if non_finite:
-        message = "Numbers must be finite: NaN and infinity aren't valid JSON."
-        raise GraphFormatError([Diagnostic(code="graph.format", field=p, message=message) for p in non_finite])
+    problems = _admission_problems(data)
+    if problems:
+        raise GraphFormatError(sorted(problems, key=lambda d: d.field or ""))
     try:
         return Graph.model_validate(data)
     except ValidationError as e:
