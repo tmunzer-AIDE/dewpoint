@@ -1,4 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The CEL profile this build publishes with (spec §5.1): runtime pin / function library / classifier rules."""
+"""The CEL profile (spec §5.1): runtime pin / function library / classifier rules. Changing any part is a new
+profile, shipped only after the §5.9 gates pass for it."""
 
-CURRENT_CEL_PROFILE = "cel-cpp-0.1.3/fn-1/cls-1"
+RUNTIME_DISTRIBUTION = "cel-expr-python"
+RUNTIME_VERSION = "0.1.3"
+FUNCTION_LIBRARY = "fn-1"
+CLASSIFIER = "cls-1"
+CURRENT_CEL_PROFILE = f"cel-cpp-{RUNTIME_VERSION}/{FUNCTION_LIBRARY}/{CLASSIFIER}"
+
+# The one profile this worker build evaluates in-process, or None (spec §5.9 rollout). A build constant, never a
+# setting: it is part of engine_abi, so changing it requires bumping ENGINE_ABI (tests/engine/cel/test_profile.py).
+# Stays None until gates 1-7 pass, including the workflow-task gates that 2a-3 adds.
+LOCAL_CEL_PROFILE: str | None = None
+
+
+def profile_of(runtime_version: str) -> str:
+    return f"cel-cpp-{runtime_version}/{FUNCTION_LIBRARY}/{CLASSIFIER}"
