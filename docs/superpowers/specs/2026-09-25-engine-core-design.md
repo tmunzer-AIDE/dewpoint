@@ -124,7 +124,10 @@ class Node(Protocol):
   - outputs become JSON only through `dewpoint.sdk.dump_output`: `model_dump(mode="json", by_alias=True)`, with no
     `exclude_*` option;
   - a `@model_serializer` on the output, or on any model, dataclass or `TypedDict` inside it, is refused at
-    registration: its JSON can drop or rename promised fields. Field serializers are allowed: they keep every key.
+    registration: its JSON can drop or rename promised fields.
+  - a field serializer must declare its return type, which becomes the field's schema. One without (an unannotated
+    `@field_serializer`, a `PlainSerializer` or `WrapSerializer` without `return_type`) is refused: the schema would
+    keep the field's own type whatever it emits. Pydantic's serializers for its own types are trusted.
 - An output field marked `x-sensitive: true` never reaches `run_steps`, previews or samples.
 - The SDK has its own semver. First-party plugins pin a major version.
 
