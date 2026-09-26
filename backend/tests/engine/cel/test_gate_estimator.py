@@ -3,8 +3,10 @@
 inputs within the caps: measured iterations and result sizes never exceed the stored bounds. The size model's own
 bound against canonical JSON is proved here too, since the estimator relies on it."""
 
+import os
 import resource
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -120,31 +122,59 @@ def test_measured_work_never_exceeds_the_stored_bounds(gen: Gen, values: dict[st
         assert sum(_length(r, inputs) for r in gen.ranges) <= c.iterations
 
 
+PEAK_PROBES = [
+    "sortedKeys(m).map(k, m[k])",
+    "l.map(x, x.s + 'b')",
+    "l.filter(x, x.s.startsWith('a')).map(x, x.s)",  # two ranges in sequence, still under 1 MiB
+]
+_RSS_UNIT = 1024  # ru_maxrss is in KiB on Linux
+
+
+def _peak_growth(work: Callable[[], object]) -> int:
+    """Peak RSS growth while `work` runs, in a forked child so the measurement sees nothing else. A child that fails
+    fails the measurement: it never reports a growth it didn't measure."""
+    r, w = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # the child must never return into pytest, whatever happens
+        code = 1
+        try:
+            os.close(r)
+            before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            work()
+            os.write(w, str((resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before) * _RSS_UNIT).encode())
+            code = 0
+        finally:
+            os._exit(code)
+    os.close(w)
+    with os.fdopen(r, "rb") as pipe:
+        reported = pipe.read()
+    _, status = os.waitpid(pid, 0)
+    ok = os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0 and reported
+    assert ok, f"the measuring child failed (wait status {status})"
+    return int(reported)
+
+
+def test_the_peak_memory_probes_are_local_class() -> None:
+    """The memory gate below measures local-class expressions only: each probe must stay local."""
+    for expr in PEAK_PROBES:
+        c = classify.classify(expr, runtime.compile_checked(expr, DECLS).checked)
+        assert c.mode == "local" and c.bytes is not None, (expr, c.reason, c.bytes)
+
+
+def test_a_failing_measurement_child_fails_the_measurement() -> None:
+    def fails() -> None:
+        raise RuntimeError("the evaluation failed")
+
+    with pytest.raises(AssertionError, match="measuring child failed"):
+        _peak_growth(fails)
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="ru_maxrss semantics: Linux reports KiB for the process")
 def test_peak_memory_stays_within_one_and_a_half_times_the_bound() -> None:
     """Worst local-class expressions at the caps, each in a fresh child so ru_maxrss measures only it."""
-    import os
-
-    exprs = ["sortedKeys(m).map(k, m[k])", "l.map(x, x.s + 'b')", "l.filter(x, x.s.startsWith('a')) + l"]
     values = {"l": [{"s": "a" * 40} for _ in range(caps.LIST_LENGTH)], "m": {f"k{i:03d}": i for i in range(1000)}}
     values["s"] = "a" * 10_000
-    for expr in exprs:
+    for expr in PEAK_PROBES:
         program = runtime.compile_checked(expr, DECLS)
-        c = classify.classify(expr, program.checked)
-        assert c.mode == "local" and c.bytes is not None
-        r, w = os.pipe()
-        pid = os.fork()
-        if pid == 0:  # the child must never return into pytest, whatever happens
-            try:
-                os.close(r)
-                before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-                evaluate.run(program, values)
-                grown = (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before) * 1024
-                os.write(w, str(grown).encode())
-            finally:
-                os._exit(0)
-        os.close(w)
-        grown = int(os.read(r, 64) or b"0")
-        os.close(r)
-        os.waitpid(pid, 0)
+        grown = _peak_growth(lambda program=program: evaluate.run(program, values))
         assert grown <= 1.5 * classify.MAX_LOCAL_BYTES, (expr, grown)
