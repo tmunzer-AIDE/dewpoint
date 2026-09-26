@@ -190,7 +190,10 @@ def test_a_failing_measurement_child_fails_the_measurement() -> None:
         _peak_growth("l.map(x, ", {})  # the child can't compile it
 
 
-@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="needs resource.ru_maxrss")
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="only Linux resets the peak: elsewhere an earlier peak can hide part of the growth (Linux is authoritative)",
+)
 def test_the_measurement_sees_a_known_allocation() -> None:
     """A measurement blind to memory would pass every probe (Linux's ru_maxrss did: an earlier peak hid 1-3 MiB of
     growth). The child writes 1 MiB it holds; the measurement must see it."""
