@@ -22,6 +22,7 @@
 
 **Dry run before publication:** the code in Tasks 1–10 was extracted into a scratch worktree and run.
 - 270 tests passed: the 101 foundations tests plus 169 new ones. That count is from revision 3 of this plan, after two rounds of review fixes.
+- Later, the implemented branch (all checkpoint and whole-branch review fixes folded back into this plan) passed 325 tests.
 - ruff, mypy `strict` and import-linter (6 contracts) were clean.
 - Migration 0007 survived an upgrade → downgrade → upgrade round trip.
 
@@ -195,7 +196,9 @@ Every new test directory gets an empty `__init__.py` with the license header, as
     - errors: `NodeError(code, message)`, `RetryableError`, `FatalError`, `OutcomeUnknownError`, `ManifestError(problems)`;
     - functions and constants: `node_manifest(cls) -> dict`, `literal_only(...)`, `value_kinds(*kinds, ...)`, `sensitive(...)`, `SDK_VERSION`.
   - `dewpoint.sdk.fields`: `LITERAL="x-dewpoint-literal"`, `KINDS="x-dewpoint-kinds"`, `SENSITIVE="x-sensitive"`, `VALUE_KINDS`.
-  - `dewpoint.sdk.node`: `TYPE_RE`, `PORT_RE`, `RESERVED_PORTS=frozenset({"error"})`.
+  - `dewpoint.sdk.node`: `TYPE_RE`, `PORT_RE`, `RESERVED_PORTS=frozenset({"error"})`, `MAX_RETRY_ATTEMPTS=20`.
+  - `node_manifest` marks output objects closed. Pydantic serialization emits only declared fields, so every output object that declares `properties` and says nothing about `additionalProperties` gets `additionalProperties: false`; models with `extra="allow"` keep `true`. The SDK defines its own `SCHEMA_ONE`/`SCHEMA_LIST`/`SCHEMA_MAP` (it can't import the engine), and a Task 3 test checks they match the engine's.
+  - `node_manifest` rejects a retry policy the engine can't run: `max_attempts` outside 1–20, an `initial_interval` that isn't positive, a `backoff` below 1 or not finite, `max_interval < initial_interval`, or empty error codes in `non_retryable`.
   - `dewpoint.sdk.version`: `SDK_VERSION="0.1.0"`, `SDK_MAJOR="0"`.
   - `dewpoint.engine.ENGINE_ABI = 1`.
   - Node manifest dict keys: `type, version, kind, title, description, ports, dynamic_ports, config_schema, output_schema, credentials, capabilities, side_effect, retry{max_attempts, initial_interval_s, backoff, max_interval_s, non_retryable}, timeout_s`.
@@ -222,7 +225,7 @@ from datetime import timedelta
 from typing import Any
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from dewpoint.sdk import (
     FatalError,
@@ -293,6 +296,23 @@ def test_node_manifest_carries_schemas_and_markers() -> None:
     assert m["timeout_s"] == 30.0 and m["side_effect"] == "keyed"
 
 
+class Nested(BaseModel):
+    name: str
+
+
+class OpenOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    nested: Nested
+
+
+def test_output_schemas_say_which_objects_are_closed() -> None:
+    closed = node_manifest(Send)["output_schema"]
+    assert closed["additionalProperties"] is False  # serialization never emits undeclared fields
+    opened = node_manifest(_node(run=_run, Output=OpenOut))["output_schema"]
+    assert opened["additionalProperties"] is True  # extra="allow" keeps its extras
+    assert opened["$defs"]["Nested"]["additionalProperties"] is False
+
+
 def test_manifest_problems() -> None:
     cases = [
         (_node(type="Demo", run=_run), "type must look like"),
@@ -302,6 +322,19 @@ def test_manifest_problems() -> None:
         (_node(dynamic_ports="cases", run=_run), "unknown config field"),
         (_node(), "must implement run()"),
         (_node(run=_run, side_effect=SideEffect.RECONCILABLE), "must implement reconcile()"),
+        (_node(run=_run, retry=RetryDefaults(max_attempts=0)), "retry.max_attempts must be between 1 and 20"),
+        (_node(run=_run, retry=RetryDefaults(max_attempts=21)), "retry.max_attempts must be between 1 and 20"),
+        (
+            _node(run=_run, retry=RetryDefaults(initial_interval=timedelta(0))),
+            "retry.initial_interval must be positive",
+        ),
+        (_node(run=_run, retry=RetryDefaults(backoff=0.0)), "retry.backoff must be a finite number ≥ 1"),
+        (_node(run=_run, retry=RetryDefaults(backoff=float("nan"))), "retry.backoff must be a finite number ≥ 1"),
+        (
+            _node(run=_run, retry=RetryDefaults(max_interval=timedelta(milliseconds=500))),
+            "retry.max_interval must be ≥ retry.initial_interval",
+        ),
+        (_node(run=_run, retry=RetryDefaults(non_retryable=("",))), "retry.non_retryable must list error codes"),
     ]
     for node, fragment in cases:
         with pytest.raises(ManifestError) as e:
@@ -463,6 +496,7 @@ from dewpoint.sdk.context import StepContext
 TYPE_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
 PORT_RE = re.compile(r"^[a-z][a-z0-9_]{0,30}$")
 RESERVED_PORTS = frozenset({"error"})  # added by the engine when a step routes errors to a port
+MAX_RETRY_ATTEMPTS = 20  # same ceiling as a step's max_attempts override in the graph
 
 
 class NodeKind(StrEnum):
@@ -524,20 +558,85 @@ class Node:
 
 ```python
 # SPDX-License-Identifier: Apache-2.0
+import math
 import re
 from dataclasses import dataclass
 from typing import Any
 
-from dewpoint.sdk.node import PORT_RE, RESERVED_PORTS, TYPE_RE, Node, NodeKind, SideEffect
+from dewpoint.sdk.node import MAX_RETRY_ATTEMPTS, PORT_RE, RESERVED_PORTS, TYPE_RE, Node, NodeKind, SideEffect
 from dewpoint.sdk.version import SDK_VERSION
 
 PLUGIN_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
+
+# JSON Schema 2020-12 keywords whose values are schemas. The engine keeps the same lists (engine/schema_refs.py; a test
+# checks they agree): the SDK can't import the engine.
+SCHEMA_ONE = frozenset(
+    {
+        "additionalProperties",
+        "items",
+        "contains",
+        "propertyNames",
+        "not",
+        "if",
+        "then",
+        "else",
+        "unevaluatedItems",
+        "unevaluatedProperties",
+        "contentSchema",
+    }
+)
+SCHEMA_LIST = frozenset({"allOf", "anyOf", "oneOf", "prefixItems"})
+SCHEMA_MAP = frozenset({"properties", "patternProperties", "$defs", "dependentSchemas"})
+
+
+def _closed(schema: Any) -> Any:
+    """Pydantic serialization emits only declared fields unless a model allows extras (it then says
+    `additionalProperties: true`). Say so in the output schema, so references to undeclared fields are caught."""
+    if not isinstance(schema, dict):
+        return schema
+    out = dict(schema)
+    if "properties" in out and "additionalProperties" not in out:
+        out["additionalProperties"] = False
+    for key, value in out.items():
+        if key in SCHEMA_ONE:
+            out[key] = _closed(value)
+        elif key in SCHEMA_LIST and isinstance(value, list):
+            out[key] = [_closed(sub) for sub in value]
+        elif key in SCHEMA_MAP and isinstance(value, dict):
+            out[key] = {name: _closed(sub) for name, sub in value.items()}
+    return out
 
 
 class ManifestError(ValueError):
     def __init__(self, problems: list[str]) -> None:
         super().__init__("; ".join(problems))
         self.problems = problems
+
+
+def _retry_problems(name: str, node: type[Node]) -> list[str]:
+    """A retry policy the engine can actually run (Temporal needs a positive interval and a backoff of at least 1)."""
+    r = node.retry
+    out: list[str] = []
+    if (
+        isinstance(r.max_attempts, bool)
+        or not isinstance(r.max_attempts, int)
+        or not 1 <= r.max_attempts <= MAX_RETRY_ATTEMPTS
+    ):
+        out.append(f"{name}: retry.max_attempts must be between 1 and {MAX_RETRY_ATTEMPTS}")
+    if r.initial_interval.total_seconds() <= 0:
+        out.append(f"{name}: retry.initial_interval must be positive")
+    if (
+        isinstance(r.backoff, bool)
+        or not isinstance(r.backoff, int | float)
+        or not math.isfinite(r.backoff)
+        or r.backoff < 1
+    ):
+        out.append(f"{name}: retry.backoff must be a finite number ≥ 1")
+    if r.max_interval < r.initial_interval:
+        out.append(f"{name}: retry.max_interval must be ≥ retry.initial_interval")
+    if not all(isinstance(code, str) and code for code in r.non_retryable):
+        out.append(f"{name}: retry.non_retryable must list error codes")
+    return out
 
 
 def _problems(node: type[Node]) -> list[str]:
@@ -557,8 +656,7 @@ def _problems(node: type[Node]) -> list[str]:
             out.append(f"{name}: invalid port {port!r}")
     if node.dynamic_ports is not None and node.dynamic_ports not in node.Config.model_fields:
         out.append(f"{name}: dynamic_ports names unknown config field {node.dynamic_ports!r}")
-    if node.retry.max_attempts < 1:
-        out.append(f"{name}: retry.max_attempts must be ≥ 1")
+    out += _retry_problems(name, node)
     if node.timeout.total_seconds() <= 0:
         out.append(f"{name}: timeout must be positive")
     if node.kind is NodeKind.ACTION:
@@ -583,7 +681,7 @@ def node_manifest(node: type[Node]) -> dict[str, Any]:
         "ports": list(node.ports),
         "dynamic_ports": node.dynamic_ports,
         "config_schema": node.Config.model_json_schema(mode="validation"),
-        "output_schema": node.Output.model_json_schema(mode="serialization"),
+        "output_schema": _closed(node.Output.model_json_schema(mode="serialization")),
         "credentials": list(node.credentials),
         "capabilities": sorted(node.capabilities),
         "side_effect": node.side_effect.value,
@@ -1208,11 +1306,17 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     - Every other value is hashed verbatim: `default`, `const`, `enum`, `required`, `dependentRequired` and vendor `x-*` keys. So a property called `title`, or `dependentRequired: {"title": [...]}`, stays part of the contract.
     - Credentials, capabilities, retry, timeout, ports, kind, side effect, schemas and the engine markers are all covered, as is any manifest key added later (unless it is explicitly declared display metadata).
   - `dewpoint.engine.schema_refs.ref_problems(schema) -> list[str]`: empty only when the schema passes the rules below. Only schema positions are inspected; data such as `default`, `const`, `enum`, `examples` and vendor keys never is.
+    - `$defs` names use only `[A-Za-z0-9_.-]`, the characters pydantic generates. JSON Pointer escapes or percent-encoding would make jsonschema resolve a different name than the one we look up;
     - every `$ref` is `#/$defs/<name>` and resolves;
     - there is no `$id`, `$anchor`, `$dynamicRef`, `$dynamicAnchor`, `$recursiveRef` or `$recursiveAnchor`;
     - no chain of definitions refers back to itself without descending into the data (through `$ref`, `allOf`, `anyOf`, `oneOf`, `not`, `if`/`then`/`else` or `dependentSchemas`).
   - `Catalog(specs)` with `.get(ref) -> NodeTypeSpec | None` and `.refs()`.
-  - `validate_plugin_manifest(manifest) -> list[str]`.
+  - `validate_plugin_manifest(manifest) -> list[str]`. It **never raises** on malformed data: every field is type-checked before it is used.
+    - `title` must be non-empty text.
+    - `kind` and `side_effect` must be known strings.
+    - `dynamic_ports` must be `null` or name a config field.
+    - `retry` must be exactly `{max_attempts: 1–20, initial_interval_s: > 0, backoff: ≥ 1, max_interval_s: ≥ initial_interval_s, non_retryable: [codes]}`, with finite numbers.
+    - `timeout_s` must be a positive, finite number.
   - Test helper `tests.support.catalog.catalog(*plugins, states=None) -> Catalog`.
 
 - [ ] **Step 1: Write the failing test**
@@ -1294,6 +1398,23 @@ def test_every_schema_position_is_checked() -> None:
 def test_unsupported_references_are_reported(schema: dict[str, Any], fragment: str) -> None:
     problems = ref_problems(schema)
     assert problems and any(fragment in p for p in problems), problems
+
+
+def test_the_sdk_and_the_engine_agree_on_schema_positions() -> None:
+    from dewpoint.engine import schema_refs
+    from dewpoint.sdk import manifest
+
+    assert (manifest.SCHEMA_ONE, manifest.SCHEMA_LIST, manifest.SCHEMA_MAP) == (
+        schema_refs.SCHEMA_ONE,
+        schema_refs.SCHEMA_LIST,
+        schema_refs.SCHEMA_MAP,
+    )
+
+
+@pytest.mark.parametrize("name", ["a~1b", "a~0b", "a%25b", "a/b", "a b"])
+def test_defs_names_are_limited_to_plain_characters(name: str) -> None:
+    schema = {"$defs": {name: {"type": "string"}}, "properties": {"v": {"$ref": f"#/$defs/{name}"}}}
+    assert any("names" in p for p in ref_problems(schema)), ref_problems(schema)
 ```
 
 `backend/tests/engine/registry/test_catalog.py`:
@@ -1400,10 +1521,33 @@ def test_display_metadata_is_not_part_of_the_contract(path: tuple[str, ...], val
         (("config_schema", "x-dewpoint-note"), {"title": "a"}, {"title": "b"}),
     ],
 )
-def test_annotation_names_inside_data_are_part_of_the_contract(
-    path: tuple[str, ...], before: Any, after: Any
-) -> None:
+def test_annotation_names_inside_data_are_part_of_the_contract(path: tuple[str, ...], before: Any, after: Any) -> None:
     assert contract_hash(_changed(path, before)) != contract_hash(_changed(path, after))
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "fragment"),
+    [
+        ("kind", ["action"], "unknown kind"),
+        ("side_effect", {"none": True}, "unknown side_effect"),
+        ("title", None, "title must be non-empty text"),
+        ("dynamic_ports", ["value"], "dynamic_ports must name a config field"),
+        ("dynamic_ports", "nope", "dynamic_ports must name a config field"),
+        ("retry", "fast", "retry must be"),
+        ("retry", {**ECHO["retry"], "max_attempts": 0}, "retry must be"),
+        ("retry", {**ECHO["retry"], "initial_interval_s": 0}, "retry must be"),
+        ("retry", {**ECHO["retry"], "backoff": 0}, "retry must be"),
+        ("retry", {**ECHO["retry"], "backoff": float("nan")}, "retry must be"),
+        ("retry", {**ECHO["retry"], "max_interval_s": 0.5}, "retry must be"),
+        ("retry", {**ECHO["retry"], "non_retryable": "testkit.bad"}, "retry must be"),
+        ("retry", {**ECHO["retry"], "jitter": 1}, "retry must be"),
+    ],
+)
+def test_malformed_manifest_fields_are_problems_not_exceptions(field: str, value: Any, fragment: str) -> None:
+    m = copy.deepcopy(TESTKIT.manifest())
+    m["nodes"][0][field] = value
+    problems = validate_plugin_manifest(m)
+    assert any(fragment in p for p in problems), problems
 
 
 def test_manifest_schemas_must_use_resolvable_local_refs() -> None:
@@ -1437,10 +1581,13 @@ Expected: FAIL: `ModuleNotFoundError: No module named 'dewpoint.engine.canonical
 descending into the data. Anything else would make validation depend on base-URI rules, network fetches or unbounded
 recursion, so it is reported as a problem instead of raising during validation."""
 
+import re
 from collections.abc import Iterator, Mapping
 from typing import Any
 
 PREFIX = "#/$defs/"
+# JSON Pointer escapes (~0 ~1) and percent-encoding would make validators resolve a different name than we look up.
+DEF_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 UNSUPPORTED = ("$id", "$anchor", "$dynamicRef", "$dynamicAnchor", "$recursiveRef", "$recursiveAnchor")
 _SAME_INSTANCE_LISTS = ("allOf", "anyOf", "oneOf")
 _SAME_INSTANCE_ONE = ("not", "if", "then", "else")
@@ -1508,7 +1655,13 @@ def ref_problems(schema: Any) -> list[str]:
     defs = schema.get("$defs", {})
     if not isinstance(defs, Mapping):
         return ["`$defs` must be an object"]
-    problems: list[str] = []
+    problems: list[str] = [
+        f"/$defs/{name}: `$defs` names may use only letters, digits, '_', '.' and '-'"
+        for name in defs
+        if not isinstance(name, str) or not DEF_NAME.match(name)
+    ]
+    if problems:
+        return problems
 
     def walk(node: Any, path: str) -> None:
         if not isinstance(node, Mapping):
@@ -1611,10 +1764,11 @@ CONTROL_TYPES = frozenset(
 
 ```python
 # SPDX-License-Identifier: Apache-2.0
+import math
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeGuard
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
@@ -1622,7 +1776,7 @@ from jsonschema.exceptions import SchemaError
 from dewpoint.engine.canonical import sha256_hex
 from dewpoint.engine.registry.control import CONTROL_TYPES
 from dewpoint.engine.schema_refs import SCHEMA_LIST, SCHEMA_MAP, SCHEMA_ONE, ref_problems
-from dewpoint.sdk.node import PORT_RE, RESERVED_PORTS, TYPE_RE, NodeKind, SideEffect
+from dewpoint.sdk.node import MAX_RETRY_ATTEMPTS, PORT_RE, RESERVED_PORTS, TYPE_RE, NodeKind, SideEffect
 from dewpoint.sdk.version import SDK_MAJOR
 
 _DISPLAY = frozenset({"title", "description"})  # manifest keys that may change within a version
@@ -1718,6 +1872,49 @@ def _schema_problems(ref: str, label: str, schema: Any) -> list[str]:
     return [f"{ref}: {label}: {p}" for p in ref_problems(schema)]
 
 
+_RETRY_KEYS = frozenset({"max_attempts", "initial_interval_s", "backoff", "max_interval_s", "non_retryable"})
+
+
+def _finite(value: Any) -> TypeGuard[int | float]:
+    return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _retry_problems(ref: str, retry: Any) -> list[str]:
+    """The same rules the SDK applies to RetryDefaults, for manifests received as data."""
+    usable = (
+        isinstance(retry, Mapping)
+        and set(retry) == _RETRY_KEYS
+        and isinstance(retry["max_attempts"], int)
+        and not isinstance(retry["max_attempts"], bool)
+        and 1 <= retry["max_attempts"] <= MAX_RETRY_ATTEMPTS
+        and _finite(retry["initial_interval_s"])
+        and retry["initial_interval_s"] > 0
+        and _finite(retry["backoff"])
+        and retry["backoff"] >= 1
+        and _finite(retry["max_interval_s"])
+        and retry["max_interval_s"] >= retry["initial_interval_s"]
+        and isinstance(retry["non_retryable"], list)
+        and all(isinstance(code, str) and code for code in retry["non_retryable"])
+    )
+    if usable:
+        return []
+    return [
+        f"{ref}: retry must be {{max_attempts: 1-{MAX_RETRY_ATTEMPTS}, initial_interval_s: > 0, backoff: ≥ 1, "
+        "max_interval_s: ≥ initial_interval_s, non_retryable: [error codes]}"
+    ]
+
+
+def _dynamic_ports_problems(ref: str, n: Mapping[str, Any]) -> list[str]:
+    field = n.get("dynamic_ports")
+    if field is None:
+        return []
+    schema = n.get("config_schema")
+    props = schema.get("properties") if isinstance(schema, Mapping) else None
+    if isinstance(field, str) and isinstance(props, Mapping) and field in props:
+        return []
+    return [f"{ref}: dynamic_ports must name a config field"]
+
+
 def _node_problems(plugin: str, n: Mapping[str, Any], seen: set[str]) -> list[str]:
     t, v = n.get("type"), n.get("version")
     ref = f"{t}@{v}"
@@ -1729,8 +1926,11 @@ def _node_problems(plugin: str, n: Mapping[str, Any], seen: set[str]) -> list[st
     if ref in seen:
         out.append(f"{ref}: duplicate node type version")
     seen.add(ref)
+    title = n.get("title")
+    if not isinstance(title, str) or not title:
+        out.append(f"{ref}: title must be non-empty text")
     kind = n.get("kind")
-    if kind not in _KINDS:
+    if not isinstance(kind, str) or kind not in _KINDS:  # type first: a list or dict is unhashable
         out.append(f"{ref}: unknown kind {kind!r}")
     elif kind == NodeKind.CONTROL and ref not in CONTROL_TYPES:
         out.append(f"{ref}: only engine control types may use kind 'control'")
@@ -1741,13 +1941,16 @@ def _node_problems(plugin: str, n: Mapping[str, Any], seen: set[str]) -> list[st
         or any(not isinstance(p, str) or not PORT_RE.match(p) or p in RESERVED_PORTS for p in ports)
     ):
         out.append(f"{ref}: invalid ports")
-    if n.get("side_effect") not in _SIDE_EFFECTS:
-        out.append(f"{ref}: unknown side_effect")
+    side_effect = n.get("side_effect")
+    if not isinstance(side_effect, str) or side_effect not in _SIDE_EFFECTS:
+        out.append(f"{ref}: unknown side_effect {side_effect!r}")
     out += _schema_problems(ref, "config_schema", n.get("config_schema"))
     out += _schema_problems(ref, "output_schema", n.get("output_schema"))
+    out += _dynamic_ports_problems(ref, n)
+    out += _retry_problems(ref, n.get("retry"))
     timeout = n.get("timeout_s")
-    if isinstance(timeout, bool) or not isinstance(timeout, int | float) or timeout <= 0:
-        out.append(f"{ref}: timeout_s must be positive")
+    if not _finite(timeout) or timeout <= 0:
+        out.append(f"{ref}: timeout_s must be a positive number")
     return out
 
 
@@ -1821,6 +2024,11 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     - `Edge(source: EdgeFrom(node, port="out") [JSON alias "from"], to: EdgeTo(node))`;
     - `GraphSettings(input_schema, vars_schema, outputs, failure_handler: UUID | None)`.
   - Functions: `parse_graph(data) -> Graph`, which raises `GraphFormatError(diagnostics)`; `graph_json(graph) -> dict`.
+    - `parse_graph` first runs an iterative admission walk over the whole document, so no input can exhaust the stack. It rejects, as `graph.format`:
+      - NaN and infinite numbers, at the exact pointer;
+      - nesting deeper than `MAX_DEPTH = 64`;
+      - more than `MAX_VALUES = 2000` value envelopes.
+    - The models use `allow_inf_nan=False`, so the strings `"NaN"`, `"inf"` and `"1e400"` can't become non-finite floats either. Python's JSON parser accepts `NaN`, `Infinity` and `1e400`, but canonical JSON, the hashes and Postgres JSONB don't.
   - Hashes:
     - `graph_hash(graph) -> str` identifies **the authored graph only**;
     - `version_hash(*, graph_hash, subflow_pins, failure_handler_version_id, cel_profile, engine_abi) -> str` identifies an **executable version**: the graph plus everything publish resolves. Audit and integrity checks use this one.
@@ -1904,7 +2112,16 @@ from typing import Any
 
 import pytest
 
-from dewpoint.engine.graph.model import MAX_NODES, GraphFormatError, graph_hash, graph_json, parse_graph, version_hash
+from dewpoint.engine.graph.model import (
+    MAX_DEPTH,
+    MAX_NODES,
+    MAX_VALUES,
+    GraphFormatError,
+    graph_hash,
+    graph_json,
+    parse_graph,
+    version_hash,
+)
 from tests.support.graphs import G, nid
 
 
@@ -1963,6 +2180,55 @@ def test_node_count_is_capped() -> None:
         g.node(f"n{i}", "testkit.echo@1")
     with pytest.raises(GraphFormatError):
         g.build()
+
+
+@pytest.mark.parametrize(
+    ("where", "value", "field"),
+    [
+        (("nodes", 0, "position"), {"x": float("inf"), "y": 0}, "/nodes/0/position/x"),
+        (("nodes", 0, "config"), {"value": [1, {"deep": float("nan")}]}, "/nodes/0/config/value/1/deep"),
+        (("nodes", 0, "options"), {"timeout_s": float("inf")}, "/nodes/0/options/timeout_s"),
+        (("settings",), {"outputs": {"x": float("-inf")}}, "/settings/outputs/x"),
+    ],
+)
+def test_non_finite_numbers_are_format_errors(where: tuple[Any, ...], value: Any, field: str) -> None:
+    data = G().node("a", "testkit.echo@1", {"value": 1}).data()
+    target = data
+    for key in where[:-1]:
+        target = target[key]
+    target[where[-1]] = value
+    with pytest.raises(GraphFormatError) as e:
+        parse_graph(data)
+    assert [(d.code, d.field) for d in e.value.diagnostics] == [("graph.format", field)]
+
+
+def test_nesting_is_limited_at_admission() -> None:
+    deep: Any = 1
+    for _ in range(MAX_DEPTH):
+        deep = [deep]
+    with pytest.raises(GraphFormatError) as e:
+        parse_graph(G().node("a", "testkit.echo@1", {"value": deep}).data())
+    assert [d.code for d in e.value.diagnostics] == ["graph.format"] and "nested" in e.value.diagnostics[0].message
+    very_deep: Any = 1
+    for _ in range(5_000):  # far beyond Python's recursion limit: the admission walk must be iterative
+        very_deep = {"a": very_deep}
+    with pytest.raises(GraphFormatError):
+        parse_graph({"graph_format": 1, "settings": {"outputs": {"x": very_deep}}})
+
+
+def test_numeric_strings_cannot_smuggle_non_finite_floats() -> None:
+    data = G().node("a", "testkit.echo@1").data()
+    data["nodes"][0]["position"] = {"x": "NaN", "y": "1e400"}
+    with pytest.raises(GraphFormatError) as e:
+        parse_graph(data)
+    assert {d.field for d in e.value.diagnostics} == {"/nodes/0/position/x", "/nodes/0/position/y"}
+
+
+def test_the_number_of_values_is_limited() -> None:
+    config = {f"v{i}": {"$value": {"kind": "ref", "path": "trigger.x"}} for i in range(MAX_VALUES + 1)}
+    with pytest.raises(GraphFormatError) as e:
+        parse_graph(G().node("a", "testkit.echo@1", config).data())
+    assert "at most" in e.value.diagnostics[0].message
 ```
 
 `backend/tests/engine/graph/test_structure.py`:
@@ -2146,6 +2412,7 @@ class Diagnostic:
 # SPDX-License-Identifier: Apache-2.0
 """The workflow graph document (`graph_format: 1`)."""
 
+import math
 import uuid
 from collections.abc import Mapping
 from typing import Any, Literal
@@ -2160,10 +2427,14 @@ TYPE_REF_PATTERN = r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+@[1-9][0-9]{0,3}$"
 PORT_PATTERN = r"^[a-z][a-z0-9_]{0,30}$"
 MAX_NODES = 500
 MAX_EDGES = 2000
+MAX_DEPTH = 64  # nesting of the whole document: far below pydantic's (~254) and jsonschema's (~97 schemas) limits
+MAX_VALUES = 2_000  # value envelopes (refs, templates, expressions) per graph: bounds validation work
+MAX_DIAGNOSTICS = 20
 
 
 class _Strict(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    # allow_inf_nan=False: lax mode would otherwise turn the strings "NaN", "inf" or "1e400" into non-finite floats
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
 
 class Position(_Strict):
@@ -2196,7 +2467,7 @@ class EdgeTo(_Strict):
 
 
 class Edge(_Strict):
-    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True, allow_inf_nan=False)
 
     source: EdgeFrom = Field(alias="from")
     to: EdgeTo
@@ -2230,7 +2501,45 @@ class GraphFormatError(ValueError):
         self.diagnostics = diagnostics
 
 
+def _escape(key: Any) -> str:
+    return str(key).replace("~", "~0").replace("/", "~1")
+
+
+def _admission_problems(data: Any) -> list[Diagnostic]:
+    """Checks every value of the document before anything else touches it, iteratively so no input can exhaust the
+    stack. Rejects non-finite numbers (Python's JSON parser accepts NaN, Infinity and 1e400; canonical JSON, the hashes
+    and Postgres JSONB don't), nesting deeper than MAX_DEPTH, and more than MAX_VALUES value envelopes."""
+    problems: list[Diagnostic] = []
+    values = 0
+    stack: list[tuple[Any, str, int]] = [(data, "", 1)]
+    while stack and len(problems) < MAX_DIAGNOSTICS:
+        value, path, depth = stack.pop()
+        if isinstance(value, float) and not math.isfinite(value):
+            message = "Numbers must be finite: NaN and infinity aren't valid JSON."
+            problems.append(Diagnostic(code="graph.format", field=path or "/", message=message))
+            continue
+        if not isinstance(value, Mapping | list | tuple):
+            continue
+        if depth > MAX_DEPTH:
+            message = f"Values can be nested at most {MAX_DEPTH} levels deep."
+            problems.append(Diagnostic(code="graph.format", field=path or "/", message=message))
+            continue
+        if isinstance(value, Mapping):
+            if "$value" in value:
+                values += 1
+            stack.extend((item, f"{path}/{_escape(key)}", depth + 1) for key, item in value.items())
+        else:
+            stack.extend((item, f"{path}/{index}", depth + 1) for index, item in enumerate(value))
+    if values > MAX_VALUES:
+        message = f"A workflow can hold at most {MAX_VALUES} references, templates and expressions."
+        problems.append(Diagnostic(code="graph.format", field="/", message=message))
+    return problems
+
+
 def parse_graph(data: Any) -> Graph:
+    problems = _admission_problems(data)
+    if problems:
+        raise GraphFormatError(sorted(problems, key=lambda d: d.field or ""))
     try:
         return Graph.model_validate(data)
     except ValidationError as e:
@@ -2599,11 +2908,18 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     - `CelValue(expr)`;
     - the union `Value`.
   - `ValueSyntaxError(message)`: a plain dataclass, not an exception.
+  - `parse_envelope` and `iter_values` never raise on malformed data: every field is type-checked before it is used, including `kind`. A Hypothesis test feeds them arbitrary JSON.
   - Helpers: `is_envelope(obj)`, `parse_envelope(body) -> Value`, `iter_values(config, base=()) -> Iterator[(Pointer, Value | ValueSyntaxError)]`, `strip_values(config) -> (stripped, [Pointer])`, `pointer_str(pointer) -> str`.
 - Produces from `schemas.py`:
   - `Resolved(schema, conditional)`, `PathError`.
   - `navigate(root, path, start=None) -> Resolved`, `target_schema(root, pointer)`, `element_schema(schema)`, `standalone(root, schema)`.
+    - `navigate` follows JSON Schema. Only `additionalProperties: false` makes an undeclared field an error (`PathError`). Otherwise the field may exist, so it resolves as unknown and possibly missing.
   - `json_types(schema) -> frozenset[str] | None`, `compatible(source, target) -> bool`, `describe(schema) -> str`, `literal_type(value) -> str`.
+    - `compatible` requires **every** type the source admits to fit the target (an integer fits a number). If either side is unknown, the runtime check decides.
+  - `widen(schema, default) -> schema`: what a reference with a default can produce.
+    - If the default validates against the referenced schema, that schema is kept.
+    - Otherwise it becomes `anyOf[referenced, {"type": <default's JSON type>}]`, with `$defs` kept at the top. The second alternative is open, so the referenced schema's fields, required ones included, become possibly missing.
+  - `object_schema(props, required) -> dict`: a closed object built from per-field schemas that keep their own `$defs` scope. Definitions are renamed `f<index>.<name>` and `$ref`s rewritten, so two fields may each define `Item` differently.
   - Marker checks: `literal_on_path(root, pointer)`, `contains_literal(root, schema)`, `allowed_kinds(root, pointer)`.
 - Reference roots: `trigger.<path>`, `steps.<key>.output.<path>`, `steps.<key>.error[.code|.message|.attempt]`, `vars.<name>.<path>`, `loop.item.<path>`, `loop.index`, `loops.<loop_key>.item.<path>`, `loops.<loop_key>.index`, `run.id|started_at|now`. Path segments are identifiers or `[n]` indexes.
 
@@ -2616,6 +2932,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 from typing import Any
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from dewpoint.engine.graph.values import (
     CelValue,
@@ -2675,7 +2993,11 @@ def test_bad_refs(text: str) -> None:
 def test_iter_values_finds_nested_envelopes_in_order() -> None:
     config = {
         "b": {"$value": {"kind": "ref", "path": "vars.x", "default": 0}},
-        "a": [1, {"$value": {"kind": "cel", "expr": "1 + 1"}}, {"deep": {"$value": {"kind": "literal", "value": {"$value": 1}}}}],
+        "a": [
+            1,
+            {"$value": {"kind": "cel", "expr": "1 + 1"}},
+            {"deep": {"$value": {"kind": "literal", "value": {"$value": 1}}}},
+        ],
         "t": {"$value": {"kind": "template", "parts": [{"text": "hi "}, {"ref": "vars.name", "default": "you"}]}},
     }
     found = list(iter_values(config))
@@ -2715,6 +3037,29 @@ def test_strip_values_replaces_envelopes_with_null() -> None:
 
 def test_pointer_escaping() -> None:
     assert pointer_str(("a/b", "c~d", 0)) == "/a~1b/c~0d/0"
+
+
+@pytest.mark.parametrize("kind", [[], {}, 3, None, True])
+def test_non_text_kinds_are_syntax_errors(kind: Any) -> None:
+    [(_, value)] = list(iter_values({"f": {"$value": {"kind": kind}}}))
+    assert isinstance(value, ValueSyntaxError)
+
+
+KEYS = st.sampled_from(["$value", "kind", "path", "parts", "expr", "value", "default", "text", "ref"]) | st.text(
+    max_size=6
+)
+JSON = st.recursive(
+    st.none() | st.booleans() | st.integers() | st.floats(allow_nan=False) | st.text(max_size=8),
+    lambda inner: st.lists(inner, max_size=4) | st.dictionaries(KEYS, inner, max_size=4),
+    max_leaves=20,
+)
+
+
+@settings(max_examples=300, deadline=None)
+@given(JSON)
+def test_arbitrary_envelopes_are_reported_never_raised(body: Any) -> None:
+    for _, value in iter_values({"f": {"$value": body}, "g": body}):
+        assert value is not None
 ```
 
 `backend/tests/engine/graph/test_schemas.py`:
@@ -2722,6 +3067,7 @@ def test_pointer_escaping() -> None:
 ```python
 # SPDX-License-Identifier: Apache-2.0
 import pytest
+from jsonschema import Draft202012Validator
 from pydantic import BaseModel
 
 from dewpoint.engine.graph.schemas import (
@@ -2733,6 +3079,7 @@ from dewpoint.engine.graph.schemas import (
     json_types,
     literal_on_path,
     navigate,
+    object_schema,
     target_schema,
 )
 from dewpoint.plugins.flow.nodes import FilterConfig, LoopConfig, SwitchConfig
@@ -2765,13 +3112,16 @@ def test_navigate_through_refs_lists_and_optionals() -> None:
     assert element is not None and json_types(navigate(element, ["name"]).schema) == {"string"}
 
 
-def test_unknown_fields_are_errors_on_closed_schemas() -> None:
+def test_only_closed_objects_reject_undeclared_fields() -> None:
+    closed = {"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": False}
     with pytest.raises(PathError, match="no field `nope`"):
-        navigate(OUT, ["site", "nope"])
+        navigate(closed, ["nope"])
     with pytest.raises(PathError, match="isn't a list"):
         navigate(OUT, ["site", 0])
-    open_object = navigate({"type": "object"}, ["anything"])
-    assert open_object.schema is None and open_object.conditional
+    for open_object in (OUT, {"type": "object"}):  # additionalProperties omitted: undeclared fields may exist
+        path = ["site", "nope"] if open_object is OUT else ["anything"]
+        r = navigate(open_object, path)
+        assert r.schema is None and r.conditional
 
 
 def test_compatibility() -> None:
@@ -2780,6 +3130,24 @@ def test_compatibility() -> None:
     assert compatible(None, {"type": "boolean"}) and compatible({"type": "string"}, {})
     assert compatible({"type": "string"}, {"anyOf": [{"type": "string"}, {"type": "null"}]})
     assert json_types({"enum": ["a", 1]}) == {"string", "integer"}
+
+
+def test_every_possible_source_type_must_fit_the_target() -> None:
+    union = {"type": ["string", "integer"]}
+    assert not compatible(union, {"type": "string"})
+    assert compatible(union, {"type": ["string", "integer", "null"]})
+    assert compatible({"anyOf": [{"type": "integer"}, {"type": "number"}]}, {"type": "number"})
+    assert not compatible({"anyOf": [{"type": "string"}, {"type": "null"}]}, {"type": "string"})
+
+
+def test_composed_objects_keep_each_fields_definitions() -> None:
+    text = {"$ref": "#/$defs/Item", "$defs": {"Item": {"type": "string"}}}
+    number = {"$ref": "#/$defs/Item", "$defs": {"Item": {"type": "integer"}}}
+    schema = object_schema({"a": text, "b": number}, ["a", "b"])
+    assert json_types(navigate(schema, ["a"]).schema) == {"string"}
+    assert json_types(navigate(schema, ["b"]).schema) == {"integer"}
+    assert list(Draft202012Validator(schema).iter_errors({"a": "x", "b": 1})) == []
+    assert list(Draft202012Validator(schema).iter_errors({"a": 1, "b": "x"})) != []
 
 
 def test_markers() -> None:
@@ -2971,7 +3339,7 @@ def parse_envelope(body: Any) -> Value:
     if not isinstance(body, Mapping):
         raise ValueError("`$value` must be an object")
     kind = body.get("kind")
-    if kind not in _ALLOWED_KEYS:
+    if not isinstance(kind, str) or kind not in _ALLOWED_KEYS:  # type first: a list or dict is unhashable
         raise ValueError("`kind` must be literal, ref, template or cel")
     extra = set(body) - _ALLOWED_KEYS[kind]
     if extra:
@@ -3047,6 +3415,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
+from referencing.exceptions import Unresolvable
+
+from dewpoint.engine.schema_refs import PREFIX, SCHEMA_LIST, SCHEMA_MAP, SCHEMA_ONE
 from dewpoint.sdk.fields import KINDS, LITERAL
 
 Schema = Mapping[str, Any]
@@ -3143,10 +3516,11 @@ def json_types(schema: Any) -> frozenset[str] | None:
 
 
 def compatible(source: Any, target: Any) -> bool:
+    """True when every type the source admits fits the target. Unknown on either side: the runtime check decides."""
     s, t = json_types(source), json_types(target)
     if s is None or t is None:
         return True
-    return bool(s & t) or ("integer" in s and "number" in t)
+    return all(kind in t or (kind == "integer" and "number" in t) for kind in s)
 
 
 def describe(schema: Any) -> str:
@@ -3191,7 +3565,7 @@ def navigate(root: Any, path: Sequence[str | int], start: Any = None) -> Resolve
         if isinstance(extra, Mapping) and extra:
             current, conditional = extra, True
             continue
-        if (isinstance(props, Mapping) and props and extra is None) or extra is False:
+        if extra is False:  # only a closed object rules the field out; otherwise it may exist
             raise PathError(f"there is no field `{seg}`")
         return Resolved(None, True)
     final = _deref(root, current)
@@ -3294,6 +3668,69 @@ def allowed_kinds(root: Any, pointer: Sequence[str | int]) -> frozenset[str] | N
     raw, resolved = steps[-1]
     kinds = raw.get(KINDS, resolved.get(KINDS))
     return frozenset(kinds) if isinstance(kinds, list) else None
+
+
+def _rename_refs(node: Any, names: Mapping[str, str]) -> Any:
+    """Rewrite `#/$defs/<old>` to `#/$defs/<new>` in schema positions. Data (defaults, enums, ...) is copied as is."""
+    if not isinstance(node, Mapping):
+        return node
+    out: dict[str, Any] = {}
+    for key, value in node.items():
+        if key == "$ref" and isinstance(value, str) and value.startswith(PREFIX) and value[len(PREFIX) :] in names:
+            out[key] = PREFIX + names[value[len(PREFIX) :]]
+        elif key in SCHEMA_ONE:
+            out[key] = _rename_refs(value, names)
+        elif key in SCHEMA_LIST and isinstance(value, list):
+            out[key] = [_rename_refs(sub, names) for sub in value]
+        elif key in SCHEMA_MAP and isinstance(value, Mapping):
+            out[key] = {name: _rename_refs(sub, names) for name, sub in value.items()}
+        else:
+            out[key] = value
+    return out
+
+
+def object_schema(props: Mapping[str, Mapping[str, Any]], required: Sequence[str]) -> dict[str, Any]:
+    """A closed object schema built from per-field schemas that may each carry their own `$defs`.
+    Each field keeps its reference scope: its definitions move under a per-field name (`f<index>.<name>`) and its
+    `$ref`s are rewritten to match, so two fields may both define `Item` differently."""
+    defs: dict[str, Any] = {}
+    fields: dict[str, Any] = {}
+    for index, (name, schema) in enumerate(props.items()):
+        local = schema.get("$defs")
+        names = {key: f"f{index}.{key}" for key in local} if isinstance(local, Mapping) else {}
+        fields[name] = _rename_refs({k: v for k, v in schema.items() if k != "$defs"}, names)
+        for key, sub in local.items() if isinstance(local, Mapping) else ():
+            defs[names[key]] = _rename_refs(sub, names)
+    out: dict[str, Any] = {
+        "type": "object",
+        "properties": fields,
+        "required": list(required),
+        "additionalProperties": False,
+    }
+    if defs:
+        out["$defs"] = defs
+    return out
+
+
+def widen(schema: Schema | None, default: Any) -> Schema | None:
+    """What a reference with a default can produce. When the default itself satisfies the referenced schema, that
+    schema still describes every outcome. Otherwise the default adds an *open* alternative of its JSON type, so
+    fields of the referenced schema (required ones included) become possibly missing, as they are when the default
+    is used."""
+    if schema is None or _fits(schema, default):
+        return schema
+    kind = literal_type(default)
+    out: dict[str, Any] = {"anyOf": [{k: v for k, v in schema.items() if k != "$defs"}, {"type": kind}]}
+    if "$defs" in schema:
+        out["$defs"] = schema["$defs"]
+    return out
+
+
+def _fits(schema: Schema, value: Any) -> bool:
+    try:
+        return bool(Draft202012Validator(schema).is_valid(value))
+    except (SchemaError, Unresolvable):
+        return False
 ```
 
 - [ ] **Step 5: Run the tests**
@@ -3329,10 +3766,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `SubflowInfo(workflow_id, version_id, input_schema, output_schema)`.
   - `ValidationContext(catalog, subflows={}, max_run_duration=30 days)`.
   - `ValidationResult(diagnostics, node_refs, subflow_pins: {node_id_str: version_id_str}, failure_handler_version_id, output_schema)` with `.ok`.
-  - Functions: `referenced_workflows(graph) -> set[UUID]`, `validate(graph, ctx) -> ValidationResult`.
+  - A `stop` in any region, loop bodies included, can end the run, so every reference in the workflow outputs is conditional when the graph contains one.
+  - Availability checks are memoized per (region, consumer, producer, outcome).
+  - A reference with a default resolves to `widen(referenced, default)`, so inferred types (transform fields, loop items, workflow outputs) include the default's type.
+  - Functions: `referenced_workflows(graph) -> set[UUID]`, `validate(graph, ctx) -> ValidationResult`. `validate` reports and never raises; a Hypothesis test runs it on arbitrary node configs and outputs.
   - `MAX_SUBFLOW_DEPTH = 5`.
 - Diagnostic codes introduced:
-  - settings and values: `settings.invalid_schema`, `settings.unresolvable_ref`, `settings.output_name`, `value.syntax`, `value.literal_only`, `value.kind_not_allowed`, `config.invalid`, `cel.unavailable`;
+  - settings and values: `settings.invalid_schema`, `settings.unresolvable_ref`, `settings.unsupported_keyword` (`pattern` / `patternProperties` in tenant-authored schemas: Python's regex engine can backtrack exponentially), `settings.output_name`, `value.syntax`, `value.literal_only`, `value.kind_not_allowed`, `config.invalid`, `cel.unavailable`;
   - references: `ref.unknown_step`, `ref.unknown_var`, `ref.unknown_field`, `ref.out_of_scope`, `ref.not_upstream`, `ref.no_error_output`, `ref.conditional`, `ref.type_mismatch`, `ref.loop_outside`;
   - templates: `template.not_string`, `template.part_not_scalar`;
   - variables: `vars.invalid_name`, `vars.no_default`, `vars.bad_default`, `vars.undeclared`, `vars.write_in_loop`, `vars.concurrent_writers`;
@@ -3440,12 +3880,26 @@ def test_liveness_is_sound_against_simulated_runs(case: Any) -> None:
 
 ```python
 # SPDX-License-Identifier: Apache-2.0
+import copy
 import uuid
 from datetime import timedelta
 from typing import Any
 
-from dewpoint.engine.graph.validate import SubflowInfo, ValidationContext, ValidationResult, referenced_workflows, validate
+from hypothesis import given, settings
+from hypothesis import strategies as st
+from jsonschema import Draft202012Validator
+
+from dewpoint.engine.graph.model import GraphFormatError
+from dewpoint.engine.graph.schemas import json_types, navigate
+from dewpoint.engine.graph.validate import (
+    SubflowInfo,
+    ValidationContext,
+    ValidationResult,
+    referenced_workflows,
+    validate,
+)
 from dewpoint.plugins.flow import PLUGIN
+from tests.engine.graph.test_values import JSON
 from tests.support.catalog import catalog
 from tests.support.graphs import G, cel, nid, ref, template
 from tests.support.plugins.testkit import TESTKIT
@@ -3576,13 +4030,148 @@ SITES = {
 
 
 def test_loop_item_is_typed_from_the_items_reference() -> None:
-    def g(value: Any) -> G:
+    def g(value: Any, schema: dict[str, Any] = SITES) -> G:
         b = G().node("l", LOOP, {"items": ref("trigger.sites")}).node("leaf", ECHO, {"value": value})
-        b.edge("l", "leaf", "body").settings["input_schema"] = SITES
+        b.edge("l", "leaf", "body").settings["input_schema"] = schema
         return b
 
+    closed = copy.deepcopy(SITES)
+    closed["properties"]["sites"]["items"]["additionalProperties"] = False
     assert codes(g(ref("loop.item.name"))) == []
-    assert codes(g(ref("loop.item.nope"))) == ["ref.unknown_field"]
+    assert codes(g(ref("loop.item.nope"))) == ["ref.conditional"]  # open item schema: the field may exist
+    assert codes(g(ref("loop.item.nope"), closed)) == ["ref.unknown_field"]
+
+
+def test_undeclared_fields_of_open_schemas_are_possibly_missing() -> None:
+    def g(value: Any) -> G:
+        b = G().node("a", ECHO, {"value": value})
+        b.settings["input_schema"] = {"type": "object", "properties": {"site": {"type": "string"}}}
+        return b
+
+    assert codes(g(ref("trigger.other"))) == ["ref.conditional"]
+    assert codes(g(ref("trigger.other", default="x"))) == []
+
+
+def test_a_union_source_must_fit_the_target_entirely() -> None:
+    g = G().node("d", "flow.delay@1", {"duration_s": ref("trigger.wait")})
+    g.settings["input_schema"] = {
+        "type": "object",
+        "properties": {"wait": {"type": ["string", "integer"]}},
+        "required": ["wait"],
+    }
+    assert codes(g) == ["ref.type_mismatch"]
+
+
+def test_composed_schemas_keep_each_producers_definitions() -> None:
+    w1, w2 = uuid.UUID(int=1), uuid.UUID(int=2)
+
+    def sub(workflow: uuid.UUID, item: str) -> SubflowInfo:
+        out = {
+            "type": "object",
+            "properties": {"x": {"type": "object", "properties": {"v": {"$ref": "#/$defs/Item"}}, "required": ["v"]}},
+            "required": ["x"],
+            "additionalProperties": False,
+            "$defs": {"Item": {"type": item}},
+        }
+        return SubflowInfo(workflow, uuid.UUID(int=10 + workflow.int), {"type": "object"}, out)
+
+    g = (
+        G()
+        .node("r1", "flow.run_workflow@1", {"workflow_id": str(w1)})
+        .node("r2", "flow.run_workflow@1", {"workflow_id": str(w2)})
+        .node("t", "flow.transform@1", {"fields": {"a": ref("steps.r1.output.x"), "b": ref("steps.r2.output.x")}})
+        .node("f", "flow.fail@1", {"message": ref("steps.t.output.a.v")})
+        .node("d", "flow.delay@1", {"duration_s": ref("steps.t.output.b.v")})
+        .edge("r1", "t")
+        .edge("r2", "t")
+        .edge("t", "f")
+        .edge("t", "d")
+    )
+    g.settings["outputs"] = {"a": ref("steps.r1.output.x"), "b": ref("steps.r2.output.x")}
+    result = check(g, subflows={w1: sub(w1, "string"), w2: sub(w2, "integer")})
+    assert result.diagnostics == ()
+    valid = {"a": {"v": "text"}, "b": {"v": 3}}
+    assert list(Draft202012Validator(result.output_schema).iter_errors(valid)) == []
+
+
+def test_a_reference_default_widens_the_inferred_type() -> None:
+    def g(default: Any) -> G:
+        b = (
+            G()
+            .node("t", "flow.transform@1", {"fields": {"x": ref("trigger.name", default=default)}})
+            .node("f", "flow.fail@1", {"message": ref("steps.t.output.x")})
+            .edge("t", "f")
+        )
+        b.settings["input_schema"] = {"type": "object", "properties": {"name": {"type": "string"}}}
+        b.settings["outputs"] = {"x": ref("trigger.name", default=default)}
+        return b
+
+    assert codes(g(123)) == ["ref.type_mismatch"]  # x is the name, or 123 when the name is missing
+    assert codes(g("fallback")) == []
+    widened = check(g(123)).output_schema
+    assert json_types(navigate(widened, ["x"]).schema) == {"string", "integer"}
+
+
+def test_escaped_defs_names_are_reported_not_raised() -> None:
+    g = G().node("a", ECHO)
+    g.settings["vars_schema"] = {
+        "type": "object",
+        "$defs": {"a~1b": {"type": "string"}},
+        "properties": {"v": {"$ref": "#/$defs/a~1b", "default": "s"}},
+    }
+    assert codes(g) == ["settings.unresolvable_ref"]
+
+
+CLOSED_OBJ = {
+    "type": "object",
+    "properties": {"b": {"type": "string"}},
+    "required": ["b"],
+    "additionalProperties": False,
+}
+
+
+def test_a_structured_default_that_does_not_fit_the_reference_makes_fields_conditional() -> None:
+    obj = (
+        G()
+        .node("t", "flow.transform@1", {"fields": {"x": ref("trigger.obj", default={})}})
+        .node("use", ECHO, {"value": ref("steps.t.output.x.b")})
+        .edge("t", "use")
+    )
+    obj.settings["input_schema"] = {"type": "object", "properties": {"obj": CLOSED_OBJ}}
+    assert codes(obj) == ["ref.conditional"]  # when obj is missing, x is {} and has no b
+    items = (
+        G()
+        .node("l", LOOP, {"items": ref("trigger.items", default=[{}])})
+        .node("use", ECHO, {"value": ref("loop.item.b")})
+        .edge("l", "use", "body")
+    )
+    items.settings["input_schema"] = {"type": "object", "properties": {"items": {"type": "array", "items": CLOSED_OBJ}}}
+    assert codes(items) == ["ref.conditional"]
+
+
+def test_stop_anywhere_can_end_the_run_before_outputs_are_ready() -> None:
+    g = (
+        G()
+        .node("l", LOOP, {"items": [1, 2]})
+        .node("s", "flow.stop@1")
+        .node("t", ECHO, {"value": 1})
+        .edge("l", "s", "body")
+        .edge("l", "t", "done")
+    )
+    g.settings["outputs"] = {"r": ref("steps.t.output.value")}
+    assert codes(g) == ["ref.conditional"]
+
+
+def test_tenant_schemas_cannot_use_regular_expressions_yet() -> None:
+    vars_pattern = G().node("a", ECHO)
+    vars_pattern.settings["vars_schema"] = {
+        "type": "object",
+        "properties": {"v": {"type": "string", "pattern": "^(a+)+$", "default": "a" * 24 + "!"}},
+    }
+    assert codes(vars_pattern) == ["settings.unsupported_keyword"]
+    input_pattern = G().node("a", ECHO)
+    input_pattern.settings["input_schema"] = {"type": "object", "patternProperties": {"^x": {"type": "string"}}}
+    assert codes(input_pattern) == ["settings.unsupported_keyword"]
 
 
 def test_type_mismatch() -> None:
@@ -3753,6 +4342,65 @@ def test_transform_output_is_typed_from_its_fields() -> None:
 
     assert codes(g(ref("steps.t.output.name"))) == ["ref.type_mismatch"]  # text into a boolean
     assert codes(g(ref("steps.t.output.nope"))) == ["ref.unknown_field"]
+
+
+CONFIG = st.dictionaries(
+    st.sampled_from(
+        [
+            "value",
+            "condition",
+            "items",
+            "cases",
+            "collect",
+            "predicate",
+            "assignments",
+            "duration_s",
+            "until",
+            "message",
+            "workflow_id",
+            "input",
+            "fields",
+            "concurrency",
+        ]
+    )
+    | st.text(max_size=5),
+    JSON,
+    max_size=5,
+)
+TYPES = st.sampled_from(
+    [
+        ECHO,
+        IF,
+        LOOP,
+        SET,
+        "flow.switch@1",
+        "flow.filter@1",
+        "flow.delay@1",
+        "flow.wait_until@1",
+        "flow.fail@1",
+        "flow.run_workflow@1",
+        "flow.transform@1",
+        "flow.stop@1",
+    ]
+)
+
+
+@settings(max_examples=300, deadline=None)
+@given(
+    st.lists(st.tuples(TYPES, CONFIG), min_size=1, max_size=4), st.dictionaries(st.text(max_size=5), JSON, max_size=3)
+)
+def test_validate_reports_never_raises_on_arbitrary_configs(nodes: Any, outputs: Any) -> None:
+    g = G()
+    for index, (type_ref, config) in enumerate(nodes):
+        g.node(f"n{index}", type_ref, config)
+    for index in range(1, len(nodes)):
+        g.edge(f"n{index - 1}", f"n{index}", "true" if nodes[index - 1][0] == IF else "out")
+    g.settings["outputs"] = outputs
+    try:
+        graph = g.build()
+    except GraphFormatError:
+        return  # rejected at parse time, which is also a report
+    validate(graph, ValidationContext(catalog=CAT))
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -3934,8 +4582,10 @@ from dewpoint.engine.graph.schemas import (
     literal_on_path,
     literal_type,
     navigate,
+    object_schema,
     standalone,
     target_schema,
+    widen,
 )
 from dewpoint.engine.graph.structure import Structure, analyze_structure
 from dewpoint.engine.graph.values import (
@@ -3955,7 +4605,7 @@ from dewpoint.engine.graph.values import (
 )
 from dewpoint.engine.registry import control as C
 from dewpoint.engine.registry.catalog import Catalog, NodeTypeSpec
-from dewpoint.engine.schema_refs import ref_problems
+from dewpoint.engine.schema_refs import ref_problems, subschemas
 from dewpoint.sdk.fields import KINDS
 
 MAX_SUBFLOW_DEPTH = 5
@@ -4036,22 +4686,6 @@ def _descendants(s: Structure) -> dict[uuid.UUID, frozenset[uuid.UUID]]:
     return desc
 
 
-def _object_schema(props: Mapping[str, Mapping[str, Any]], required: list[str]) -> dict[str, Any]:
-    """An object schema from per-field schemas, hoisting their $defs to the root so $refs still resolve."""
-    defs: dict[str, Any] = {}
-    clean: dict[str, Any] = {}
-    for name, schema in props.items():
-        inner = dict(schema)
-        nested = inner.pop("$defs", None)
-        if isinstance(nested, Mapping):
-            defs.update(nested)
-        clean[name] = inner
-    out: dict[str, Any] = {"type": "object", "properties": clean, "required": required, "additionalProperties": False}
-    if defs:
-        out["$defs"] = defs
-    return out
-
-
 def _static_delay(node: GraphNode, spec: NodeTypeSpec) -> float:
     if spec.ref != C.DELAY:
         return 0.0
@@ -4060,6 +4694,19 @@ def _static_delay(node: GraphNode, spec: NodeTypeSpec) -> float:
     if isinstance(body, Mapping) and body.get("kind") == "literal":
         raw = body.get("value")
     return float(raw) if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0 else 0.0
+
+
+def _regex_keywords(schema: Any) -> list[str]:
+    """Pointers of `pattern` / `patternProperties` in schema positions of a tenant-authored schema."""
+    found: list[str] = []
+    stack: list[tuple[Any, str]] = [(schema, "")]
+    while stack:
+        node, path = stack.pop()
+        if not isinstance(node, Mapping):
+            continue
+        found += [f"{path}/{key}" for key in ("pattern", "patternProperties") if key in node]
+        stack.extend((sub, path + suffix) for suffix, sub in subschemas(node))
+    return sorted(found)
 
 
 def _settings(graph: Graph) -> list[Diagnostic]:
@@ -4079,14 +4726,26 @@ def _settings(graph: Graph) -> list[Diagnostic]:
             continue
         if schema.get("type", "object") != "object":
             out.append(
-                Diagnostic(code="settings.invalid_schema", field=f"/settings/{label}", message="It must describe an object.")
+                Diagnostic(
+                    code="settings.invalid_schema", field=f"/settings/{label}", message="It must describe an object."
+                )
             )
+        regexes = _regex_keywords(schema)
+        out += [
+            Diagnostic(
+                code="settings.unsupported_keyword",
+                field=f"/settings/{label}{where}",
+                message="Regular-expression keywords (`pattern`, `patternProperties`) aren't supported in workflow "
+                "schemas yet: Python's regex engine can take exponential time on some inputs.",
+            )
+            for where in regexes
+        ]
         # Tenant-authored schemas: only resolvable local $refs, so validation can never raise (see schema_refs).
         out += [
             Diagnostic(code="settings.unresolvable_ref", field=f"/settings/{label}", message=f"{problem}.")
             for problem in ref_problems(schema)
         ]
-    if any(d.field == "/settings/vars_schema" for d in out):
+    if any((d.field or "").startswith("/settings/vars_schema") for d in out):  # never run defaults through it
         return out
     props = st.vars_schema.get("properties", {})
     defs = st.vars_schema.get("$defs", {})
@@ -4132,7 +4791,9 @@ class _Validator:
         self.vars_root: dict[str, Any] = {"type": "object", "properties": self.vars, "additionalProperties": False}
         if settings_ok and isinstance(vars_schema.get("$defs"), Mapping):
             self.vars_root["$defs"] = vars_schema["$defs"]
-        self.root_has_stop = any(s.specs[i].ref == C.STOP for i in s.regions[None].members)
+        # `stop` anywhere, inside a loop body too, ends the whole run: outputs may miss steps that hadn't run yet
+        self.has_stop = any(spec.ref == C.STOP for spec in s.specs.values())
+        self.availability: dict[tuple[Any, ...], bool] = {}
 
     def err(
         self, code: str, message: str, *, node: uuid.UUID | None = None, fld: str | None = None, fix: str | None = None
@@ -4261,7 +4922,7 @@ class _Validator:
                 else:
                     props[name] = {"type": literal_type(fields[name])}
                     required.append(name)
-            return _object_schema(props, required)
+            return object_schema(props, required)
         return spec.output_schema
 
     # ---- values ---------------------------------------------------------------------------------------------
@@ -4273,8 +4934,10 @@ class _Validator:
             self.err("value.syntax", value.message, node=site.node, fld=site.field)
             return None
         target = target_schema(root, pointer) if root is not None else None
-        if root is not None and value.kind != "literal" and (
-            literal_on_path(root, pointer) or contains_literal(root, target)
+        if (
+            root is not None
+            and value.kind != "literal"
+            and (literal_on_path(root, pointer) or contains_literal(root, target))
         ):
             self.err("value.literal_only", _LITERAL_ONLY, node=site.node, fld=site.field)
             return None
@@ -4328,9 +4991,10 @@ class _Validator:
                 node=site.node,
                 fld=site.field,
             )
-        if value.has_default:
-            self._check_instance(site, target, value.default)
-        return Resolved(resolved.schema, resolved.conditional and not value.has_default)
+        if not value.has_default:
+            return resolved
+        self._check_instance(site, target, value.default)
+        return Resolved(widen(resolved.schema, value.default), False)
 
     def _template(self, site: _Site, value: TemplateValue, target: Mapping[str, Any] | None) -> Resolved:
         if target is not None and not compatible({"type": "string"}, target):
@@ -4388,7 +5052,10 @@ class _Validator:
             loop = site.region
             if loop is None:
                 self.err(
-                    "ref.loop_outside", "`loop.*` is only available inside a loop's body.", node=site.node, fld=site.field
+                    "ref.loop_outside",
+                    "`loop.*` is only available inside a loop's body.",
+                    node=site.node,
+                    fld=site.field,
                 )
                 return None
         else:
@@ -4430,15 +5097,18 @@ class _Validator:
             return None
         region = self.live[home]
         consumer: lv.Cond
+        consumer_key: tuple[Any, ...]
         if home == site.region and site.at_exit:
-            consumer, upstream = region.exit, True
+            consumer, upstream, consumer_key = region.exit, True, ("exit",)
         elif home == site.region and site.node is not None:
             consumer, upstream = region.live[site.node], site.node in self.desc[producer]
+            consumer_key = ("node", site.node)
         else:
             ancestor = chain[chain.index(home) - 1]  # the loop node, in `home`, that contains the consumer
             if ancestor is None:
                 return None
             consumer, upstream = region.live[ancestor], ancestor in self.desc[producer]
+            consumer_key = ("node", ancestor)
         if not upstream:
             self.err(
                 "ref.not_upstream",
@@ -4459,17 +5129,34 @@ class _Validator:
                     fix="Set its error behaviour to continue or to an error output.",
                 )
                 return None
-            available = on_error == "port" and lv.implies(consumer, region.err[producer])
+            available = on_error == "port" and self._implies(home, consumer_key, consumer, producer, "err", region)
             r = navigate(ERROR_SCHEMA, p.rest)
             return Resolved(r.schema, r.conditional or not available)
-        available = on_error != "continue" and lv.implies(consumer, region.ok[producer])
-        if site.at_exit and site.region is None and self.root_has_stop:
+        available = on_error != "continue" and self._implies(home, consumer_key, consumer, producer, "ok", region)
+        if site.at_exit and site.region is None and self.has_stop:
             available = False  # `stop` may end the run while this step is still pending
         schema = self.out_schema.get(producer)
         if schema is None:  # only when the producer is already reported (unknown sub-flow): don't add noise
             return Resolved(None, not available)
         r = navigate(schema, p.rest)
         return Resolved(r.schema, r.conditional or not available)
+
+    def _implies(
+        self,
+        home: uuid.UUID | None,
+        consumer_key: tuple[Any, ...],
+        consumer: lv.Cond,
+        producer: uuid.UUID,
+        outcome: str,
+        region: lv.RegionLiveness,
+    ) -> bool:
+        """lv.implies, memoized: many references share a consumer and a producer, and each check can cost
+        MAX_TERMS² term comparisons."""
+        key = (home, consumer_key, producer, outcome)
+        if key not in self.availability:
+            target = region.err[producer] if outcome == "err" else region.ok[producer]
+            self.availability[key] = lv.implies(consumer, target)
+        return self.availability[key]
 
     # ---- whole-graph checks ---------------------------------------------------------------------------------
 
@@ -4546,7 +5233,7 @@ class _Validator:
                 self._value(_Site(None, where + pointer_str(pointer), None, at_exit=True), value, None, ())
             props[name] = {"type": literal_type(raw)}
             required.append(name)
-        self.output_schema = _object_schema(props, required)
+        self.output_schema = object_schema(props, required)
 
     def _failure_handler(self) -> None:
         workflow = self.g.settings.failure_handler
@@ -4569,7 +5256,7 @@ def validate(graph: Graph, ctx: ValidationContext) -> ValidationResult:
     node_refs = tuple(sorted({n.type for n in graph.nodes}))
     if structure is None:
         return ValidationResult(tuple([*settings, *structural]), node_refs)
-    unusable = ("settings.invalid_schema", "settings.unresolvable_ref")
+    unusable = ("settings.invalid_schema", "settings.unresolvable_ref", "settings.unsupported_keyword")
     v = _Validator(graph, structure, ctx, settings_ok=not any(d.code in unusable for d in settings))
     v.run()
     return ValidationResult(
@@ -5067,7 +5754,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Produces from `core.plugins.lifecycle`:
   - `Entry(kind: "node" | "cel", key)` with `.lock_key` and `__str__`; `entries_for(node_refs, cel_profiles) -> list[Entry]` (sorted).
   - Locks and states: `IsolationError`, `assert_read_committed(s)`, `lock_shared(s, entries)`, `lock_exclusive(s, entry)`, `states(s, entries) -> dict[Entry, str]` (`active|deprecated|retired|missing`), `not_executable(states) -> list[Entry]`.
-  - Retirement: `ActiveRef(tenant_id, workflow_id, workflow_name, version_id, version_number)`, `RetirePreview(entry, state, active_refs, affected_versions, applied)`, `ReferencedError(preview)`, `UnknownEntryError`, `deprecate(s, entry, *, actor_id) -> str`, `retire(s, entry, *, force=False, confirm=False, actor_id=None) -> RetirePreview`.
+  - Retirement: `ActiveRef(tenant_id, workflow_id, workflow_name, version_id, version_number)`, `AffectedVersion(tenant_id, workflow_id, workflow_name, version_id, version_number, active, enabled)`, `RetirePreview(entry, state, active_refs, affected: tuple[AffectedVersion, ...], applied)`. The preview lists every affected version per tenant, including superseded ones and versions of disabled workflows (spec §4.5). `ReferencedError(preview)`, `UnknownEntryError`, `deprecate(s, entry, *, actor_id) -> str`, `retire(s, entry, *, force=False, confirm=False, actor_id=None) -> RetirePreview`.
 - Produces from `apps.plugin_loader`: `GROUP = "dewpoint.plugins"`, `PluginLoadError(problems)`, `installed_plugins() -> list[Plugin]`, `prepare(plugins) -> list[(manifest, rows)]`, `sync_installed(s, plugins) -> SyncReport`.
 - CLI (run with the `dewpoint_admin` database URL):
   - `dewpoint plugins sync` (exit 2 on invalid manifests, contract changes or missing live types);
@@ -5229,8 +5916,14 @@ async def test_deprecate_then_retire_when_unused(admin_sessionmaker, owner_sessi
     assert preview.applied and preview.active_refs == ()
     async with owner_sessionmaker() as s:
         actions = (
-            await s.execute(text("select action from audit_log where target_id = 'testkit.echo@1' order by created_at"))
-        ).scalars().all()
+            (
+                await s.execute(
+                    text("select action from audit_log where target_id = 'testkit.echo@1' order by created_at")
+                )
+            )
+            .scalars()
+            .all()
+        )
     assert actions == ["lifecycle.deprecate", "lifecycle.retire"]
 
 
@@ -5245,11 +5938,13 @@ async def test_active_workflows_block_normal_retirement(admin_sessionmaker, owne
 
 async def test_disabled_and_superseded_workflows_do_not_block(admin_sessionmaker, owner_sessionmaker) -> None:
     await sync_test_plugins(admin_sessionmaker)
-    await seed_workflow(owner_sessionmaker, enabled=False)
-    await seed_workflow(owner_sessionmaker, active=False)
+    _, disabled, disabled_v = await seed_workflow(owner_sessionmaker, enabled=False)
+    _, superseded, superseded_v = await seed_workflow(owner_sessionmaker, active=False)
     async with admin_sessionmaker() as s, s.begin():
         preview = await lifecycle.retire(s, ECHO)
-    assert preview.applied and preview.affected_versions == 2
+    assert preview.applied and preview.active_refs == ()
+    affected = {(v.workflow_id, v.version_id, v.active, v.enabled) for v in preview.affected}
+    assert affected == {(disabled, disabled_v, True, False), (superseded, superseded_v, False, True)}
 
 
 async def test_forced_retirement_previews_then_applies(admin_sessionmaker, owner_sessionmaker) -> None:
@@ -5258,6 +5953,7 @@ async def test_forced_retirement_previews_then_applies(admin_sessionmaker, owner
     async with admin_sessionmaker() as s, s.begin():
         preview = await lifecycle.retire(s, ECHO, force=True)
     assert not preview.applied and [r.workflow_id for r in preview.active_refs] == [wf]
+    assert [(v.tenant_id, v.workflow_id, v.version_number) for v in preview.affected] == [(tenant, wf, 1)]
     async with admin_sessionmaker() as s:
         assert (await lifecycle.states(s, [ECHO]))[ECHO] == "active"
     async with admin_sessionmaker() as s, s.begin():
@@ -5594,11 +6290,24 @@ class ActiveRef:
 
 
 @dataclass(frozen=True)
+class AffectedVersion:
+    """A version whose closure uses the entry. After retirement it can no longer run, be activated or be enabled."""
+
+    tenant_id: uuid.UUID
+    workflow_id: uuid.UUID
+    workflow_name: str
+    version_id: uuid.UUID
+    version_number: int
+    active: bool  # it is its workflow's active version
+    enabled: bool  # its workflow is enabled
+
+
+@dataclass(frozen=True)
 class RetirePreview:
     entry: Entry
     state: str
     active_refs: tuple[ActiveRef, ...]  # enabled workflows whose active closure uses the entry
-    affected_versions: int  # every version whose closure uses it
+    affected: tuple[AffectedVersion, ...]  # every version whose closure uses it, per tenant (spec §4.5 preview)
     applied: bool = False
     # Sub-project 2b adds the queued run requests a forced retirement would cancel.
 
@@ -5622,8 +6331,22 @@ async def _preview(s: AsyncSession, entry: Entry, state: str) -> RetirePreview:
         .order_by(Workflow.tenant_id, Workflow.name)
     )
     refs = tuple(ActiveRef(*row) for row in rows)
-    affected = (await s.execute(select(func.count()).select_from(WorkflowVersion).where(uses))).scalar_one()
-    return RetirePreview(entry=entry, state=state, active_refs=refs, affected_versions=int(affected))
+    affected = await s.execute(
+        select(
+            Workflow.tenant_id,
+            Workflow.id,
+            Workflow.name,
+            WorkflowVersion.id,
+            WorkflowVersion.number,
+            Workflow.active_version_id.is_not_distinct_from(WorkflowVersion.id),  # never NULL
+            Workflow.enabled,
+        )
+        .join(Workflow, Workflow.id == WorkflowVersion.workflow_id)
+        .where(uses)
+        .order_by(Workflow.tenant_id, Workflow.name, WorkflowVersion.number)
+    )
+    versions = tuple(AffectedVersion(*row) for row in affected)
+    return RetirePreview(entry=entry, state=state, active_refs=refs, affected=versions)
 
 
 async def _set_state(s: AsyncSession, entry: Entry, state: str) -> None:
@@ -5737,7 +6460,10 @@ def prepare(plugins: Sequence[Plugin]) -> list[tuple[dict[str, Any], list[NodeTy
     problems: list[str] = []
     for plugin in plugins:
         manifest = plugin.manifest()  # raises ManifestError for class-level problems
-        problems += validate_plugin_manifest(manifest)
+        found = validate_plugin_manifest(manifest)
+        problems += found
+        if found:
+            continue  # never hash a manifest that failed validation: it may hold values canonical JSON rejects
         rows = [
             NodeTypeRow(type=n["type"], version=n["version"], kind=n["kind"], manifest=n, contract_hash=contract_hash(n))
             for n in manifest["nodes"]
@@ -5831,9 +6557,15 @@ def _entry(node_type: str | None, cel_profile: str | None) -> Entry:
 
 
 def _print_preview(preview: lifecycle.RetirePreview) -> None:
+    typer.echo(f"active references (enabled workflows): {len(preview.active_refs)}")
     for ref in preview.active_refs:
         typer.echo(f"  tenant {ref.tenant_id}  workflow {ref.workflow_name} ({ref.workflow_id})  v{ref.version_number}")
-    typer.echo(f"versions whose closure uses it: {preview.affected_versions}")
+    typer.echo(f"versions that can no longer run, be activated or be enabled: {len(preview.affected)}")
+    for v in preview.affected:
+        flags = ", ".join(flag for flag, on in (("active", v.active), ("enabled", v.enabled)) if on) or "superseded"
+        typer.echo(
+            f"  tenant {v.tenant_id}  workflow {v.workflow_name} ({v.workflow_id})  v{v.version_number}  [{flags}]"
+        )
 
 
 @lifecycle_cli.command("deprecate")
@@ -5918,9 +6650,11 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - Workflows: `create_workflow(s, ctx, *, name, draft) -> Workflow`, `get_workflow(s, tenant_id, workflow_id, *, for_update=False)`, `list_workflows(s, tenant_id)`, `save_draft(s, wf, *, expected_revision, draft) -> int`, `update_workflow(s, ctx, wf, *, name, enabled) -> Workflow`.
   - Versions: `NewVersion(...)`, `insert_version(s, ctx, wf, new) -> WorkflowVersion` (sets it active), `set_active(s, ctx, wf, version)`, `get_version(s, workflow_id, version_id)`, `list_versions(s, workflow_id)`, `active_versions(s, tenant_id, workflow_ids) -> {workflow_id: WorkflowVersion}`, `blocked_by(s, version) -> list[str]`.
 - Produces from `apps.workflow_ops`:
-  - `Checked(graph, diagnostics, pins, result)` and `check_draft(s, tenant_id, draft, settings) -> Checked`.
+  - `Checked(graph, diagnostics, pins, result)` and `check_draft(s, tenant_id, draft, settings) -> Checked`. `validate()` runs in a worker thread (`asyncio.to_thread`), so a CPU-heavy draft doesn't stall the event loop for other tenants.
   - `Published(version, errors, warnings)` and `publish(s, ctx, wf, *, expected_revision, settings) -> Published`. `wf` is locked FOR UPDATE by the caller.
   - `NotActivatableError(errors)` and `activate(s, ctx, wf, version) -> list[Diagnostic]` (warnings).
+  - `update(s, ctx, wf, *, name, enabled) -> list[Diagnostic]` (warnings): rename, enable or disable. Enabling a workflow that has an active version makes that version's closure an active reference again, so it takes the shared lifecycle locks and re-checks executability exactly like `activate`. It raises `NotActivatableError` when a closure entry is retired or missing. Both use `_check_runnable`.
+  - `core.workflows.service.update_workflow` stays a storage primitive; callers enable workflows through `workflow_ops.update`.
   - `_lifecycle_locked()`: an async no-op hook that runs right after the lifecycle locks are held; the race tests patch it.
 - Settings: `max_run_duration_days: int = 30`.
 - Diagnostic codes introduced: `subflow.cycle`, `subflow.too_deep`. It also reuses `lifecycle.retired` and `lifecycle.deprecated`; a `missing` entry reports as `lifecycle.retired`.
@@ -5932,6 +6666,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ```python
 # SPDX-License-Identifier: Apache-2.0
+import threading
 import uuid
 from typing import Any
 
@@ -6000,6 +6735,22 @@ async def activate(api_sessionmaker: Any, ctx: TenantContext, wf_id: uuid.UUID, 
         return await workflow_ops.activate(s, ctx, wf, version)
 
 
+async def update(api_sessionmaker: Any, ctx: TenantContext, wf_id: uuid.UUID, **changes: Any) -> list[Any]:
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        wf = await service.get_workflow(s, ctx.tenant_id, wf_id, for_update=True)
+        assert wf is not None
+        return await workflow_ops.update(s, ctx, wf, name=changes.get("name"), enabled=changes.get("enabled"))
+
+
+async def is_enabled(api_sessionmaker: Any, ctx: TenantContext, wf_id: uuid.UUID) -> bool:
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        wf = await service.get_workflow(s, ctx.tenant_id, wf_id)
+        assert wf is not None
+        return wf.enabled
+
+
 async def test_publish_creates_an_active_version_with_its_closure(
     owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
 ) -> None:
@@ -6023,7 +6774,9 @@ async def test_publish_refuses_invalid_graphs_and_stale_revisions(
 ) -> None:
     await sync_test_plugins(admin_sessionmaker)
     ctx = await actor(owner_sessionmaker)
-    wf_id = await create(api_sessionmaker, ctx, G().node("a", "testkit.echo@1", {"value": ref("steps.nope.output")}).data())
+    wf_id = await create(
+        api_sessionmaker, ctx, G().node("a", "testkit.echo@1", {"value": ref("steps.nope.output")}).data()
+    )
     out = await publish(api_sessionmaker, ctx, wf_id, api_settings)
     assert out.version is None and [d.code for d in out.errors] == ["ref.unknown_step"]
     with pytest.raises(service.DraftConflictError):
@@ -6133,6 +6886,56 @@ async def test_retiring_a_subflow_type_blocks_its_parents(
         assert wf is not None and wf.active_version_id is not None
         version = await service.get_version(s, parent, wf.active_version_id)
         assert version is not None and await service.blocked_by(s, version) == ["testkit.echo@1"]
+
+
+async def test_reenabling_rechecks_the_active_closure(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    wf = await create(api_sessionmaker, ctx, ECHO_GRAPH)
+    await publish(api_sessionmaker, ctx, wf, api_settings)
+    assert await update(api_sessionmaker, ctx, wf, enabled=False) == []
+    async with admin_sessionmaker() as s, s.begin():
+        assert (await lifecycle.retire(s, ECHO)).applied  # normal path: the only user is disabled
+    with pytest.raises(workflow_ops.NotActivatableError) as e:
+        await update(api_sessionmaker, ctx, wf, enabled=True)
+    assert [d.code for d in e.value.errors] == ["lifecycle.retired"]
+    assert not await is_enabled(api_sessionmaker, ctx, wf)
+    assert await update(api_sessionmaker, ctx, wf, name="Renamed") == []  # renaming needs no lifecycle check
+
+
+async def test_reenabling_warns_about_deprecated_types(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    wf = await create(api_sessionmaker, ctx, ECHO_GRAPH)
+    await publish(api_sessionmaker, ctx, wf, api_settings)
+    await update(api_sessionmaker, ctx, wf, enabled=False)
+    async with admin_sessionmaker() as s, s.begin():
+        await lifecycle.deprecate(s, ECHO, actor_id=None)
+    warnings = await update(api_sessionmaker, ctx, wf, enabled=True)
+    assert [d.code for d in warnings] == ["lifecycle.deprecated"] and await is_enabled(api_sessionmaker, ctx, wf)
+
+
+async def test_validation_runs_off_the_event_loop(
+    monkeypatch, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    on_loop_thread: list[bool] = []
+    real = workflow_ops.validate
+
+    def spy(graph: Any, context: Any) -> Any:
+        on_loop_thread.append(threading.current_thread() is threading.main_thread())
+        return real(graph, context)
+
+    monkeypatch.setattr(workflow_ops, "validate", spy)
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        await workflow_ops.check_draft(s, ctx.tenant_id, ECHO_GRAPH, api_settings)
+    assert on_loop_thread == [False]
 ```
 
 `backend/tests/apps/test_lifecycle_races.py`:
@@ -6150,7 +6953,17 @@ from sqlalchemy import text
 from dewpoint.apps import workflow_ops
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.plugins.lifecycle import Entry
-from tests.apps.test_workflow_ops import ECHO_GRAPH, SENSITIVE_GRAPH, activate, actor, create, publish, save
+from tests.apps.test_workflow_ops import (
+    ECHO_GRAPH,
+    SENSITIVE_GRAPH,
+    activate,
+    actor,
+    create,
+    is_enabled,
+    publish,
+    save,
+    update,
+)
 from tests.support.registry import sync_test_plugins
 
 ECHO = Entry("node", "testkit.echo@1")
@@ -6170,14 +6983,23 @@ async def until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker: Any) -> N
 
 @pytest.fixture
 def pause_after_lock(monkeypatch):  # type: ignore[no-untyped-def]
+    """Pause the next lifecycle-locked operation once armed. Setup steps (publishing, disabling) run through the same
+    hook, so the test arms it right before starting the operation under test."""
     reached, release = asyncio.Event(), asyncio.Event()
+    armed = {"on": False}
 
     async def paused() -> None:
+        if not armed["on"]:
+            return
+        armed["on"] = False
         reached.set()
         await release.wait()
 
+    def arm() -> None:
+        armed["on"] = True
+
     monkeypatch.setattr(workflow_ops, "_lifecycle_locked", paused)
-    return reached, release
+    return reached, release, arm
 
 
 async def test_retirement_first_makes_publish_refuse(
@@ -6199,10 +7021,11 @@ async def test_retirement_first_makes_publish_refuse(
 async def test_publish_first_blocks_normal_retirement(
     owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, pause_after_lock
 ) -> None:
-    reached, release = pause_after_lock
+    reached, release, arm = pause_after_lock
     await sync_test_plugins(admin_sessionmaker)
     ctx = await actor(owner_sessionmaker)
     wf = await create(api_sessionmaker, ctx, ECHO_GRAPH)
+    arm()
     publishing = asyncio.create_task(publish(api_sessionmaker, ctx, wf, api_settings))
     await asyncio.wait_for(reached.wait(), 10)
 
@@ -6222,10 +7045,11 @@ async def test_publish_first_blocks_normal_retirement(
 async def test_publish_first_is_included_in_a_forced_retirement(
     owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, pause_after_lock
 ) -> None:
-    reached, release = pause_after_lock
+    reached, release, arm = pause_after_lock
     await sync_test_plugins(admin_sessionmaker)
     ctx = await actor(owner_sessionmaker)
     wf = await create(api_sessionmaker, ctx, ECHO_GRAPH)
+    arm()
     publishing = asyncio.create_task(publish(api_sessionmaker, ctx, wf, api_settings))
     await asyncio.wait_for(reached.wait(), 10)
 
@@ -6241,8 +7065,14 @@ async def test_publish_first_is_included_in_a_forced_retirement(
     assert preview.applied and [r.workflow_id for r in preview.active_refs] == [wf]
     async with owner_sessionmaker() as s:
         tenants = (
-            await s.execute(text("select tenant_id from audit_log where action = 'lifecycle.retire' and tenant_id is not null"))
-        ).scalars().all()
+            (
+                await s.execute(
+                    text("select tenant_id from audit_log where action = 'lifecycle.retire' and tenant_id is not null")
+                )
+            )
+            .scalars()
+            .all()
+        )
     assert tenants == [ctx.tenant_id]
 
 
@@ -6264,6 +7094,79 @@ async def test_retirement_first_makes_activate_refuse(
             assert (await lifecycle.retire(a, ECHO)).applied  # nothing active uses echo: normal path
     with pytest.raises(workflow_ops.NotActivatableError):
         await asyncio.wait_for(activating, 10)
+
+
+async def test_retirement_first_makes_enable_refuse(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    wf = await create(api_sessionmaker, ctx, ECHO_GRAPH)
+    await publish(api_sessionmaker, ctx, wf, api_settings)
+    await update(api_sessionmaker, ctx, wf, enabled=False)
+    async with admin_sessionmaker() as a:
+        async with a.begin():
+            await lifecycle.lock_exclusive(a, ECHO)
+            enabling = asyncio.create_task(update(api_sessionmaker, ctx, wf, enabled=True))
+            await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
+            assert (await lifecycle.retire(a, ECHO)).applied  # the workflow is disabled: normal path
+    with pytest.raises(workflow_ops.NotActivatableError):
+        await asyncio.wait_for(enabling, 10)
+    assert not await is_enabled(api_sessionmaker, ctx, wf)
+
+
+async def test_enable_first_blocks_normal_retirement(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, pause_after_lock
+) -> None:
+    reached, release, arm = pause_after_lock
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    wf = await create(api_sessionmaker, ctx, ECHO_GRAPH)
+    await publish(api_sessionmaker, ctx, wf, api_settings)
+    await update(api_sessionmaker, ctx, wf, enabled=False)
+    arm()
+    enabling = asyncio.create_task(update(api_sessionmaker, ctx, wf, enabled=True))
+    await asyncio.wait_for(reached.wait(), 10)
+
+    async def retire() -> lifecycle.RetirePreview:
+        async with admin_sessionmaker() as a, a.begin():
+            return await lifecycle.retire(a, ECHO)
+
+    retiring = asyncio.create_task(retire())
+    await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
+    release.set()
+    await asyncio.wait_for(enabling, 10)
+    with pytest.raises(lifecycle.ReferencedError) as e:
+        await asyncio.wait_for(retiring, 10)
+    assert [r.workflow_id for r in e.value.preview.active_refs] == [wf]
+
+
+async def test_activation_first_blocks_normal_retirement(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, pause_after_lock
+) -> None:
+    reached, release, arm = pause_after_lock
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    wf = await create(api_sessionmaker, ctx, ECHO_GRAPH)
+    v1 = (await publish(api_sessionmaker, ctx, wf, api_settings)).version
+    await save(api_sessionmaker, ctx, wf, SENSITIVE_GRAPH)
+    await publish(api_sessionmaker, ctx, wf, api_settings)  # v2 is active and doesn't use echo
+    assert v1 is not None
+    arm()
+    activating = asyncio.create_task(activate(api_sessionmaker, ctx, wf, v1.id))  # rolls back to v1 (uses echo)
+    await asyncio.wait_for(reached.wait(), 10)
+
+    async def retire() -> lifecycle.RetirePreview:
+        async with admin_sessionmaker() as a, a.begin():
+            return await lifecycle.retire(a, ECHO)
+
+    retiring = asyncio.create_task(retire())
+    await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
+    release.set()
+    await asyncio.wait_for(activating, 10)
+    with pytest.raises(lifecycle.ReferencedError) as e:
+        await asyncio.wait_for(retiring, 10)
+    assert [(r.workflow_id, r.version_id) for r in e.value.preview.active_refs] == [(wf, v1.id)]
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -6525,6 +7428,7 @@ async def blocked_by(s: AsyncSession, version: WorkflowVersion) -> list[str]:
 # SPDX-License-Identifier: Apache-2.0
 """Validate, publish and activate workflows: wires core storage to the engine validator (spec §4.4–4.5)."""
 
+import asyncio
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -6578,7 +7482,7 @@ async def check_draft(s: AsyncSession, tenant_id: uuid.UUID, draft: Any, setting
         subflows={wid: SubflowInfo(wid, v.id, v.input_schema, v.output_schema) for wid, v in pins.items()},
         max_run_duration=timedelta(days=settings.max_run_duration_days),
     )
-    result = validate(graph, ctx)
+    result = await asyncio.to_thread(validate, graph, ctx)  # CPU-bound: keep the event loop serving others
     return Checked(graph, list(result.diagnostics), pins, result)
 
 
@@ -6698,9 +7602,10 @@ async def publish(
     return Published(version, [], warnings)
 
 
-async def activate(s: AsyncSession, ctx: TenantContext, wf: Workflow, version: WorkflowVersion) -> list[Diagnostic]:
-    """Make an existing version active (rollback). Any executable version qualifies, superseded or not.
-    `wf` must be locked FOR UPDATE. Returns warnings; raises NotActivatableError if the version can't run."""
+async def _check_runnable(s: AsyncSession, version: WorkflowVersion) -> list[Diagnostic]:
+    """Lock the version's closure (shared) and re-read its lifecycle states. Raises NotActivatableError when something
+    in it is retired or missing; returns warnings for deprecated entries. Used by every operation that makes a version
+    an active reference again: activate, and enabling a workflow."""
     entries = lifecycle.entries_for(version.closure_node_refs, version.closure_cel_profiles)
     await lifecycle.lock_shared(s, entries)
     await _lifecycle_locked()
@@ -6708,7 +7613,6 @@ async def activate(s: AsyncSession, ctx: TenantContext, wf: Workflow, version: W
     errors = _lifecycle_errors(current, refuse_deprecated=False)
     if errors:
         raise NotActivatableError(errors)
-    await service.set_active(s, ctx, wf, version)
     return [
         Diagnostic(
             code="lifecycle.deprecated",
@@ -6719,12 +7623,35 @@ async def activate(s: AsyncSession, ctx: TenantContext, wf: Workflow, version: W
         for entry, state in sorted(current.items())
         if state == "deprecated"
     ]
+
+
+async def activate(s: AsyncSession, ctx: TenantContext, wf: Workflow, version: WorkflowVersion) -> list[Diagnostic]:
+    """Make an existing version active (rollback). Any executable version qualifies, superseded or not.
+    `wf` must be locked FOR UPDATE. Returns warnings; raises NotActivatableError if the version can't run."""
+    warnings = await _check_runnable(s, version)
+    await service.set_active(s, ctx, wf, version)
+    return warnings
+
+
+async def update(
+    s: AsyncSession, ctx: TenantContext, wf: Workflow, *, name: str | None, enabled: bool | None
+) -> list[Diagnostic]:
+    """Rename, enable or disable. Enabling makes the active version's closure an active reference again (spec §4.5),
+    so it takes the lifecycle locks and re-checks executability exactly like activate(). `wf` must be locked
+    FOR UPDATE. Returns warnings; raises NotActivatableError when the active version can't run."""
+    warnings: list[Diagnostic] = []
+    if enabled and not wf.enabled and wf.active_version_id is not None:
+        version = await service.get_version(s, wf.id, wf.active_version_id)
+        if version is not None:
+            warnings = await _check_runnable(s, version)
+    await service.update_workflow(s, ctx, wf, name=name, enabled=enabled)
+    return warnings
 ```
 
 - [ ] **Step 6: Run the tests**
 
 Run: `uv run pytest tests/apps/test_workflow_ops.py tests/apps/test_lifecycle_races.py -q`
-Expected: 12 passed.
+Expected: 17 passed.
 
 - [ ] **Step 7: Commit**
 
@@ -6742,8 +7669,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Files:**
 - Create: `backend/src/dewpoint/apps/api/routes/workflows.py`, `backend/src/dewpoint/apps/api/routes/node_types.py`
-- Modify: `backend/src/dewpoint/apps/api/main.py`
-- Test: `backend/tests/apps/api/test_workflows.py`
+- Modify: `backend/src/dewpoint/apps/api/main.py`, `backend/src/dewpoint/apps/api/middleware.py` (`BodyLimitMiddleware`), `backend/src/dewpoint/core/config.py` (`max_request_body_bytes`)
+- Test: `backend/tests/apps/api/test_workflows.py`, `backend/tests/apps/api/test_body_limit.py`
 
 **Interfaces:**
 - Consumes: `workflow_ops` and `service` (Task 9); `registry.list_node_types` (Task 8); `require`, `get_db`, `active_session` and `get_settings_dep` from `core.http`.
@@ -6753,11 +7680,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `POST /t/{tenant_id}/workflows` (`workflow.edit`), body `{name, draft?}`: returns 201 with the summary and `draft`, or 409 `name_taken`.
   - `GET /t/{tenant_id}/workflows/{id}` (`workflow.view`): the summary plus `draft`.
   - `PUT /t/{tenant_id}/workflows/{id}/draft` (`workflow.edit`, `If-Match: <revision>`): returns `{draft_revision}`. Errors: 428 `revision_required`, 409 `{error: draft_conflict, draft_revision}`, 422 `{error: invalid, diagnostics}` for a malformed graph, 413 `too_large` above 1 MiB.
-  - `PATCH /t/{tenant_id}/workflows/{id}` (`workflow.publish`), body `{name?, enabled?}`.
+  - `PATCH /t/{tenant_id}/workflows/{id}` (`workflow.publish`), body `{name?, enabled?}`: returns the summary plus `warnings`. It goes through `workflow_ops.update`, so re-enabling re-checks the active version's closure under the lifecycle locks: 422 `{error: not_enableable, diagnostics}` when it can't run.
   - `POST /t/{tenant_id}/workflows/{id}/validate` (`workflow.edit`): returns `{draft_revision, valid, diagnostics}`.
   - `POST /t/{tenant_id}/workflows/{id}/publish` (`workflow.publish`, `If-Match`): returns 201 `{version_id, number, warnings}`; otherwise 422 `{error: invalid, diagnostics}` or 409 `draft_conflict`.
   - `GET /t/{tenant_id}/workflows/{id}/versions` (`workflow.view`): `[{id, number, published_at, published_by, graph_hash, version_hash, cel_profile, node_refs, active, executable, blocked_by}]`.
   - `POST /t/{tenant_id}/workflows/{id}/activate` (`workflow.publish`), body `{version_id}`: returns `{active_version_id, number, warnings}`; otherwise 404, or 422 `{error: not_activatable, diagnostics}`.
+- Request bodies are capped at `max_request_body_bytes` (1 MiB) **by the bytes actually received**, in an ASGI middleware that runs before FastAPI parses anything. Chunked bodies have no Content-Length, and a route dependency would run only after parsing. The middleware answers 413 `{error: too_large}`. If the client disconnects mid-body, it answers 400; before, that became a missing response, reported as a server error.
 - The workflow summary is `{id, name, enabled, draft_revision, active_version_id, active_version_number, executable (null when unpublished), blocked_by, created_at, updated_at}`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -6767,6 +7695,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```python
 # SPDX-License-Identifier: Apache-2.0
 import uuid
+from typing import Any
 
 import pytest
 
@@ -6873,6 +7802,23 @@ async def test_disable_and_rename(app, owner_sessionmaker, api_settings) -> None
         assert taken.status_code == 409 and taken.json() == {"error": "name_taken"}
 
 
+async def test_reenabling_a_blocked_workflow_is_refused(
+    app, owner_sessionmaker, api_settings, admin_sessionmaker
+) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        wf = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "W", "draft": GRAPH})).json()
+        base = f"/api/v1/t/{tid}/workflows/{wf['id']}"
+        assert (await c.post(f"{base}/publish", headers={"If-Match": "1"})).status_code == 201
+        assert (await c.patch(base, json={"enabled": False})).json()["enabled"] is False
+        async with admin_sessionmaker() as s, s.begin():
+            assert (await lifecycle.retire(s, Entry("node", "testkit.echo@1"))).applied  # its only user is disabled
+        r = await c.patch(base, json={"enabled": True})
+        assert r.status_code == 422 and r.json()["error"] == "not_enableable"
+        assert [d["code"] for d in r.json()["diagnostics"]] == ["lifecycle.retired"]
+        assert (await c.get(base)).json()["enabled"] is False
+
+
 async def test_oversized_draft_is_rejected(app, owner_sessionmaker, api_settings) -> None:
     c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
     async with c:
@@ -6891,6 +7837,105 @@ async def test_node_types_catalog(app, owner_sessionmaker, api_settings, admin_s
         types = {t["ref"]: t for t in (await c.get("/api/v1/node-types")).json()}
     assert types["flow.if@1"]["ports"] == ["true", "false"] and types["testkit.echo@1"]["state"] == "active"
     assert types["testkit.slow@1"]["state"] == "deprecated" and "testkit.fail_n@1" not in types
+
+
+async def test_oversized_drafts_are_rejected_without_a_trustworthy_length(
+    app, owner_sessionmaker, api_settings
+) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        wf = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "W"})).json()
+        base = f"/api/v1/t/{tid}/workflows/{wf['id']}"
+
+        async def chunks():  # type: ignore[no-untyped-def]  # an async body is sent chunked: no Content-Length
+            yield b'{"graph_format": 1, "settings": {"outputs": {"x": "'
+            for _ in range(20):
+                yield b"a" * 65_536
+            yield b'"}}}'
+
+        r = await c.put(
+            f"{base}/draft", content=chunks(), headers={"If-Match": "1", "Content-Type": "application/json"}
+        )
+        assert r.status_code == 413 and r.json() == {"error": "too_large"}
+        assert (await c.get(base)).json()["draft_revision"] == 1
+
+
+async def test_non_finite_numbers_are_a_format_error_not_a_server_error(app, owner_sessionmaker, api_settings) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        wf = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "W"})).json()
+        url = f"/api/v1/t/{tid}/workflows/{wf['id']}/draft"
+        headers = {"If-Match": "1", "Content-Type": "application/json"}
+        node = f'{{"id": "{uuid.uuid4()}", "key": "a", "type": "testkit.echo@1", "position": {{"x": 1e400, "y": 0}}}}'
+        huge = await c.put(url, content=f'{{"graph_format": 1, "nodes": [{node}]}}'.encode(), headers=headers)
+        nan = await c.put(url, content=b'{"graph_format": 1, "settings": {"outputs": {"x": NaN}}}', headers=headers)
+    for r, field in ((huge, "/nodes/0/position/x"), (nan, "/settings/outputs/x")):
+        assert r.status_code == 422, r.text
+        assert [(d["code"], d["field"]) for d in r.json()["diagnostics"]] == [("graph.format", field)]
+
+
+async def test_deeply_nested_drafts_are_refused_before_they_are_stored(app, owner_sessionmaker, api_settings) -> None:
+    deep: Any = 1
+    for _ in range(300):
+        deep = [deep]
+    nested_schema: dict[str, Any] = {"type": "string"}
+    for _ in range(100):
+        nested_schema = {"type": "object", "properties": {"p": nested_schema}}
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        created = await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "Deep", "draft": _with_value(deep)})
+        assert created.status_code == 422 and created.json()["diagnostics"][0]["code"] == "graph.format"
+        wf = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "W"})).json()
+        base = f"/api/v1/t/{tid}/workflows/{wf['id']}"
+        for draft in (_with_value(deep), {"graph_format": 1, "settings": {"input_schema": nested_schema}}):
+            r = await c.put(f"{base}/draft", json=draft, headers={"If-Match": "1"})
+            assert r.status_code == 422 and r.json()["diagnostics"][0]["code"] == "graph.format"
+        got = await c.get(base)
+        assert got.status_code == 200 and got.json()["draft_revision"] == 1
+
+
+def _with_value(value: Any) -> dict[str, Any]:
+    return G().node("a", "testkit.echo@1", {"value": value}).data()
+```
+
+`backend/tests/apps/api/test_body_limit.py` (a client that disconnects mid-body gets a 400, never a server error):
+
+```python
+# SPDX-License-Identifier: Apache-2.0
+from typing import Any
+
+
+async def test_a_client_that_disconnects_mid_body_gets_no_server_error(app) -> None:  # type: ignore[no-untyped-def]
+    inbound: list[dict[str, Any]] = [
+        {"type": "http.request", "body": b"{", "more_body": True},
+        {"type": "http.disconnect"},
+    ]
+    sent: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        return inbound.pop(0) if inbound else {"type": "http.disconnect"}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    path = "/api/v1/t/00000000-0000-0000-0000-000000000000/workflows/00000000-0000-0000-0000-000000000000/draft"
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "PUT",
+        "scheme": "https",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"host", b"testserver"), (b"x-dewpoint-client", b"web"), (b"content-type", b"application/json")],
+        "client": ("127.0.0.1", 50000),
+        "server": ("testserver", 443),
+    }
+    await app(scope, receive, send)  # must not raise: an aborted upload is the client's doing, not a server error
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    assert start["status"] == 400
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -6941,7 +7986,7 @@ async def node_types(db: AsyncSession = Depends(get_db, scope="function")) -> li
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -6955,7 +8000,6 @@ from dewpoint.core.workflows import service
 from dewpoint.engine.graph.model import GraphFormatError, parse_graph
 
 router = APIRouter(prefix="/api/v1", tags=["workflows"])
-MAX_DRAFT_BYTES = 1024 * 1024
 EMPTY_DRAFT: dict[str, Any] = {"graph_format": 1, "nodes": [], "edges": []}
 
 
@@ -6971,12 +8015,6 @@ class PatchIn(BaseModel):
 
 class ActivateIn(BaseModel):
     version_id: uuid.UUID
-
-
-def _size_guard(request: Request) -> None:
-    length = request.headers.get("content-length", "")
-    if length.isdigit() and int(length) > MAX_DRAFT_BYTES:
-        raise HTTPException(413, detail={"error": "too_large"})
 
 
 def _revision(if_match: str | None) -> int:
@@ -7045,7 +8083,7 @@ async def list_workflows(
     return [await _summary(db, wf) for wf in await service.list_workflows(db, ctx.tenant_id)]
 
 
-@router.post("/t/{tenant_id}/workflows", status_code=201, dependencies=[Depends(_size_guard)])
+@router.post("/t/{tenant_id}/workflows", status_code=201)
 async def create(
     body: CreateIn,
     ctx: TenantContext = Depends(require(P.WORKFLOW_EDIT)),
@@ -7070,7 +8108,7 @@ async def get_one(
     return {**await _summary(db, wf), "draft": wf.draft}
 
 
-@router.put("/t/{tenant_id}/workflows/{workflow_id}/draft", dependencies=[Depends(_size_guard)])
+@router.put("/t/{tenant_id}/workflows/{workflow_id}/draft")
 async def put_draft(
     workflow_id: uuid.UUID,
     draft: dict[str, Any] = Body(...),
@@ -7097,10 +8135,13 @@ async def patch(
 ) -> dict[str, object]:
     wf = await _get(db, ctx, workflow_id, for_update=True)
     try:
-        wf = await service.update_workflow(db, ctx, wf, name=body.name, enabled=body.enabled)
+        warnings = await workflow_ops.update(db, ctx, wf, name=body.name, enabled=body.enabled)
+    except workflow_ops.NotActivatableError as e:
+        diagnostics = [d.to_json() for d in e.errors]
+        raise HTTPException(422, detail={"error": "not_enableable", "diagnostics": diagnostics}) from None
     except IntegrityError:
         raise HTTPException(409, detail={"error": "name_taken"}) from None
-    return await _summary(db, wf)
+    return {**await _summary(db, wf), "warnings": [w.to_json() for w in warnings]}
 
 
 @router.post("/t/{tenant_id}/workflows/{workflow_id}/validate")
@@ -7175,7 +8216,68 @@ async def activate(
     return {"active_version_id": str(version.id), "number": version.number, "warnings": [w.to_json() for w in warnings]}
 ```
 
-In `backend/src/dewpoint/apps/api/main.py`, change the routes import to:
+In `backend/src/dewpoint/core/config.py`, add this field to `Settings`, before `max_run_duration_days`:
+
+```python
+    max_request_body_bytes: int = 1_048_576  # counted as received: chunked bodies have no Content-Length
+```
+
+In `backend/src/dewpoint/apps/api/middleware.py`, add `from starlette.datastructures import Headers` and `from starlette.types import ASGIApp, Message, Receive, Scope, Send` to the imports, then append:
+
+```python
+class BodyLimitMiddleware:
+    """Caps request bodies by the bytes actually received. Content-Length can't be relied on: chunked requests have
+    none, and FastAPI parses a body before any route dependency could object. The body is buffered up to the limit
+    before the app runs; one byte more answers 413 without reading the rest."""
+
+    def __init__(self, app: ASGIApp, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        declared = Headers(scope=scope).get("content-length", "")
+        if declared.isdigit() and int(declared) > self.max_bytes:
+            await JSONResponse({"error": "too_large"}, status_code=413)(scope, receive, send)
+            return
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                # The client is gone and won't read this; answering keeps the middleware chain from reporting a
+                # missing response as a server error.
+                await JSONResponse({"error": "bad_request"}, status_code=400)(scope, receive, send)
+                return
+            chunk = message.get("body", b"")
+            size += len(chunk)
+            if size > self.max_bytes:
+                await JSONResponse({"error": "too_large"}, status_code=413)(scope, receive, send)
+                return
+            chunks.append(chunk)
+            if not message.get("more_body", False):
+                break
+        replayed = False
+
+        async def replay() -> Message:
+            nonlocal replayed
+            if replayed:
+                return await receive()  # after the body: disconnect notifications
+            replayed = True
+            return {"type": "http.request", "body": b"".join(chunks), "more_body": False}
+
+        await self.app(scope, replay, send)
+```
+
+In `backend/src/dewpoint/apps/api/main.py`, import `BodyLimitMiddleware` next to the other middleware, and register it first (innermost, so its 413 still gets the security headers):
+
+```python
+    app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_request_body_bytes)  # innermost: its 413 gets security headers
+```
+
+Then, in the same file, change the routes import to:
 
 ```python
 from dewpoint.apps.api.routes import (
@@ -7197,8 +8299,8 @@ Then append `node_types.router,` and `workflows.router,` to the router tuple, af
 
 - [ ] **Step 4: Run the tests**
 
-Run: `uv run pytest tests/apps/api/test_workflows.py -q`
-Expected: 7 passed.
+Run: `uv run pytest tests/apps/api/test_workflows.py tests/apps/api/test_body_limit.py -q`
+Expected: 12 passed.
 
 - [ ] **Step 5: Commit**
 
@@ -7257,7 +8359,8 @@ It registers every node type version the build contains, and this build's CEL pr
    - `... retire --node-type X --force` prints the preview and changes nothing (exit 3).
    - `... retire --node-type X --force --confirm` applies it.
    - Each affected tenant gets an audit entry, and the workflows show `executable: false` with `blocked_by`.
-5. After retirement, a later build may drop the code.
+5. Re-enabling a disabled workflow re-checks its active version the same way activation does. If anything it uses is retired, the request is refused (`not_enableable`). Normal retirement doesn't count disabled workflows, so this check is what stops them coming back.
+6. After retirement, a later build may drop the code.
    - Runs already in progress are unaffected: they stay on the worker build they started on, which still has the code, until Temporal reports that build drained. (The engine plan 2a-3 covers this.)
 
 CEL profiles follow the same commands with `--cel-profile <profile>`. A profile's evaluator must keep running until no

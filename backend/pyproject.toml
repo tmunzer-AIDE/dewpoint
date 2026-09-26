@@ -19,10 +19,14 @@ dependencies = [
   "httpx>=0.28",
   "typer>=0.13",
   "structlog>=24.4",
+  "jsonschema>=4.23",
 ]
 
 [project.scripts]
 dewpoint = "dewpoint.apps.cli.main:app"
+
+[project.entry-points."dewpoint.plugins"]
+flow = "dewpoint.plugins.flow:PLUGIN"
 
 [dependency-groups]
 dev = [
@@ -35,6 +39,7 @@ dev = [
   "mypy>=1.13",
   "import-linter>=2.1",
   "pip-licenses>=5.0",
+  "types-jsonschema>=4.23",
 ]
 
 [build-system]
@@ -93,3 +98,27 @@ forbidden_modules = ["fastapi"]
 ignore_imports = ["dewpoint.core.http -> fastapi"]
 unmatched_ignore_imports_alerting = "none"
 allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "sdk is self-contained"
+type = "forbidden"
+source_modules = ["dewpoint.sdk"]
+forbidden_modules = ["dewpoint.core", "dewpoint.engine", "dewpoint.plugins", "dewpoint.apps"]
+
+[[tool.importlinter.contracts]]
+name = "plugins depend only on the sdk"
+type = "forbidden"
+source_modules = ["dewpoint.plugins"]
+forbidden_modules = ["dewpoint.core", "dewpoint.engine", "dewpoint.apps"]
+
+[[tool.importlinter.contracts]]
+name = "engine is pure and depends only on the sdk"
+type = "forbidden"
+source_modules = ["dewpoint.engine"]
+forbidden_modules = ["dewpoint.core", "dewpoint.plugins", "dewpoint.apps", "sqlalchemy", "asyncpg", "fastapi", "httpx"]
+
+[[tool.importlinter.contracts]]
+name = "core depends on neither engine nor plugins"
+type = "forbidden"
+source_modules = ["dewpoint.core"]
+forbidden_modules = ["dewpoint.engine", "dewpoint.plugins"]

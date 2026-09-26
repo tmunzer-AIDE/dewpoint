@@ -295,6 +295,7 @@ each entry of the version's closure, in sorted key order. It then re-reads those
 The rule applies to:
 - **publish** (the new version's closure);
 - **activate**;
+- **enabling a workflow**, which makes its active version's closure an active reference again;
 - **admission:** freezing a new `run_requests` row, or `start_run` in 2a;
 - **dispatch.**
 

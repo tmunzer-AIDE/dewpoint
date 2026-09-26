@@ -6,8 +6,20 @@ import httpx
 from fastapi import FastAPI
 
 from dewpoint.apps.api.errors import install_error_handlers
-from dewpoint.apps.api.middleware import ClientHeaderMiddleware, SecurityHeadersMiddleware
-from dewpoint.apps.api.routes import admin_users, audit, auth, connections, health, members, mfa, passkeys, tenants
+from dewpoint.apps.api.middleware import BodyLimitMiddleware, ClientHeaderMiddleware, SecurityHeadersMiddleware
+from dewpoint.apps.api.routes import (
+    admin_users,
+    audit,
+    auth,
+    connections,
+    health,
+    members,
+    mfa,
+    node_types,
+    passkeys,
+    tenants,
+    workflows,
+)
 from dewpoint.core.config import Settings, get_settings
 from dewpoint.core.crypto.kek import KekSet
 from dewpoint.core.crypto.keyring import Keyring
@@ -32,6 +44,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.keyring = Keyring(KekSet.from_settings(settings))
     # Created eagerly (not in the lifespan) so ASGI test transports, which skip lifespan, get it too.
     app.state.http = httpx.AsyncClient(timeout=10, follow_redirects=False)
+    app.add_middleware(
+        BodyLimitMiddleware, max_bytes=settings.max_request_body_bytes
+    )  # innermost: its 413 gets security headers
     app.add_middleware(ClientHeaderMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
     install_error_handlers(app)
@@ -45,6 +60,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         admin_users.router,
         audit.router,
         connections.router,
+        node_types.router,
+        workflows.router,
     ):
         app.include_router(router)
     return app

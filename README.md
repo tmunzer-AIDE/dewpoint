@@ -34,6 +34,12 @@ per-IP rate limits; without a proxy, leave it empty so clients cannot spoof thei
   keep it in a secret manager. Rotation: [`docs/operations/key-rotation.md`](docs/operations/key-rotation.md).
 - `DEWPOINT_AUDIT_SIGNING_KEY_B64` — Ed25519 key that signs audit anchors.
 
+## Node types and CEL profiles
+
+Run `dewpoint plugins sync` with the `dewpoint_admin` database credentials on every deploy, before the new build
+serves traffic. Deprecation, retirement and code removal:
+[`docs/operations/plugin-lifecycle.md`](docs/operations/plugin-lifecycle.md).
+
 ## Audit integrity
 
 The `audit-anchor` service writes signed chain heads every 15 minutes. **In production, anchors must live off this
