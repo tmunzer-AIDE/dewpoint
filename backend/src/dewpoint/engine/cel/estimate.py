@@ -5,9 +5,12 @@ input is at the runtime caps. Sizes use caps.model_size.
 *Memory* is the largest intermediate value plus what the runtime *retains*: every accumulator copy a map or filter
 makes (caps.ACCUMULATOR_SLOT), which lives until the evaluation ends, so a chain's copies add up.
 
-*Work* counts node evaluations (a comprehension body once per iteration), with Python-implemented fn-1 calls and
-regular expressions weighted by what they cost relative to a native node. Iterations alone don't bound CPU: a body
-can call a Python function hundreds of times per element. The yield policy sums work (route.py).
+*Work* counts node evaluations (a comprehension body once per iteration), plus what a call costs by the size of what
+it reads, at rates measured against a native node: Python-implemented fn-1 calls and the values they convert, text
+copied or compared, lists and maps compared node by node, substring search (text x needle) and regular expressions
+(text x pattern). Iterations alone don't bound CPU: a body can call a Python function hundreds of times per element,
+or copy a 16 KiB string. Text from the inputs is at most a string at the cap per reference, and at most the inputs'
+JSON over a whole range. The yield policy sums work (route.py).
 
 A value's bound has three parts: a constant, a multiple of the current comprehension element's size
 (`l.map(e, e.name)` stays near the size of `l`), and the *input mass* it may contain. All referenced inputs together
@@ -22,8 +25,15 @@ from dewpoint.engine.cel import ast, caps
 from dewpoint.engine.cel.proto import checked_pb2, syntax_pb2
 
 MAX_REGEX_CODE_POINTS = 256
-FN_WORK = 15  # a Python-implemented fn-1 call, relative to a native node (measured: gate 7 records the ratio)
-REGEX_BYTES_PER_WORK = 64  # a regular expression scans its input: one work unit per 64 bytes
+# Work rates, relative to a native node (~15-35 ns measured). Gate 7 runs the worst case of each against the CPU
+# target of a workflow task.
+FN_WORK = 15  # a Python-implemented fn-1 call
+TEXT_BYTES_PER_WORK = 64  # text copied or read: concatenation, size, conversions, comparisons (<= 0.7 ns a byte)
+VALUE_BYTES_PER_WORK = 16  # a value walked node by node: list and map equality, conversion for Python (~1.3 ns a byte)
+SEARCH_PAIRS_PER_WORK = 2048  # `contains` may compare every needle byte at every text position (~19 ps a pair)
+REGEX_BYTE_POINTS_PER_WORK = 4  # RE2, plain patterns: ~9 ns a text byte per pattern code point, ~19 on short texts
+_REGEX_ESCAPES = frozenset("dDsSwWbBAznrtfv")  # besides escaped punctuation
+_REGEX_COUNT = re.compile(r"\{([0-9]+)(,([0-9]*))?\}")
 _FIXED_ZONE = re.compile(r"UTC|[+-][0-9]{2}:[0-9]{2}")
 _NUM = ("int64", "uint64", "double")
 _ORDERED = (*_NUM, "bool", "string", "bytes", "duration", "timestamp")
@@ -65,10 +75,18 @@ SHORT_STRING = {
     "timestamp_to_string": 40, "duration_to_string": 40, "macNormalize_string": 12, "macOui_string": 6,
 }  # fmt: skip
 LOCAL_OVERLOADS = SCALAR | ZONED | REGEX | SUM | SAME | SAME_COUNT | ELEMENT | {"conditional", *SHORT_STRING}
-FN_OVERLOADS = frozenset(
-    {"sortedKeys_map", "asList_list", "ipInCidr_string_string", "cidrContains_string_string"}
-    | {"macNormalize_string", "macOui_string"}
-)  # implemented in Python (functions.py): each call crosses into the interpreter
+# Implemented in Python (functions.py): each call crosses into the interpreter and converts its arguments.
+FN_TEXT = frozenset({"ipInCidr_string_string", "cidrContains_string_string", "macNormalize_string", "macOui_string"})
+FN_VALUE = frozenset({"sortedKeys_map", "asList_list"})
+TEXT_READ = frozenset(
+    {
+        "add_string", "add_bytes", "size_string", "string_size", "string_to_bytes", "bytes_to_string",
+        "string_to_int64", "string_to_uint64", "string_to_double", "string_to_bool", "string_to_timestamp",
+        "string_to_duration", "starts_with_string", "ends_with_string",
+        *(f"{op}_{t}" for op in _CMP for t in ("string", "bytes")),
+    }
+)  # fmt: skip
+KEY_READ = {"in_map": 0, "index_map": 1}  # the operand holding the key, which is hashed
 
 
 class NotLocal(Exception):
@@ -125,6 +143,7 @@ def _sum(parts: list[Est], extra: int = 0, count: int | None = None) -> Est:
 
 SCALAR_EST = Est(caps.SCALAR)
 INPUT_STRING = Est(caps.SCALAR + caps.STRING_BYTES)
+SEARCH_NEEDLE_FLOOR = SEARCH_PAIRS_PER_WORK // TEXT_BYTES_PER_WORK  # a short needle still costs one pass of the text
 ELEMENT_EST = Est(0, 1, COUNT)
 
 
@@ -145,6 +164,7 @@ class _Run:
     work: int = 0
     repeat: int = 1  # how many times the node being estimated runs (a comprehension body: once per iteration)
     element: int = 0  # size bound of the current comprehension element (0 outside comprehensions)
+    element_text: int = 0  # text in all of the current range's elements together
     keyed: tuple[ast.Path, str] | None = None  # inside `sortedKeys(m).…(k, …)`: m's chain and k
     seen: dict[int, Est] = field(default_factory=dict)
 
@@ -203,29 +223,60 @@ class _Run:
         ops = ast.operands(e)
         if REGEX & set(ids):
             _literal(ops[-1], MAX_REGEX_CODE_POINTS, None, "a regular expression that isn't a short literal")
+            if not _plain_regex(ops[-1].const_expr.string_value):
+                raise NotLocal("a regular expression with (?) groups or unsupported escapes")
         if ZONED & set(ids):
             _literal(ops[-1], 64, _FIXED_ZONE, "a named time zone (only UTC and fixed offsets run inline)")
+        args = [self.value(op, local) for op in ops]
+        self.work += max(self._charge(i, ops, args) for i in ids)  # whichever overload runs
         if self.keyed is not None and set(ids) <= ELEMENT and len(ops) == 2:
             chain, key = self.keyed
             if ast.chain_path(ops[0], frozenset(local)) == chain and _is_ident(ops[1], key):
-                for op in ops:
-                    self.value(op, local)
                 return ELEMENT_EST  # m[k] over sortedKeys(m): distinct keys, so the values sum to at most m
-        args = [self.value(op, local) for op in ops]
-        if FN_OVERLOADS & set(ids):
-            self.work += self.repeat * (
-                FN_WORK + (args[0].count if SAME_COUNT & set(ids) or "asList_list" in ids else 0)
-            )
-        if REGEX & set(ids):  # the scanned text: its per-iteration part repeats, its element part sums to the range
-            text = args[0]
-            scanned = (
-                self.repeat * (text.const + overlap(text.refs) * caps.INPUT_MODEL_BYTES) + text.coef * self.element
-            )
-            self.work += scanned // REGEX_BYTES_PER_WORK
         out = self._rule(ids[0], args)
         for overload in ids[1:]:
             out = out.join(self._rule(overload, args))
         return out
+
+    def _value(self, x: Est) -> int:
+        """Model bytes a call reads from `x` over the run: its own part once per run of the node, its element part
+        summed over the range."""
+        return self.repeat * (x.const + overlap(x.refs) * caps.INPUT_MODEL_BYTES) + x.coef * self.element
+
+    def _text_once(self, x: Est) -> int:
+        """Text bytes `x` holds in one run of the node, when it is a string or bytes."""
+        inputs = min(len(x.refs) * INPUT_STRING.const, overlap(x.refs) * caps.TOTAL_JSON)
+        return x.const + inputs + x.coef * min(self.element_text, INPUT_STRING.const)
+
+    def _text(self, x: Est) -> int:
+        """Text bytes a call reads from `x` over the run (as `_value`, for strings and bytes)."""
+        inputs = min(len(x.refs) * INPUT_STRING.const, overlap(x.refs) * caps.TOTAL_JSON)
+        return self.repeat * (x.const + inputs) + x.coef * self.element_text
+
+    def _charge(self, overload: str, ops: list[ast.Expr], args: list[Est]) -> int:
+        """What a call costs beyond its own node, by the size of what it reads."""
+        if overload in FN_TEXT:
+            return self.repeat * FN_WORK + sum(map(self._text, args)) // TEXT_BYTES_PER_WORK
+        if overload in FN_VALUE:
+            converted = sum(map(self._value, args)) // VALUE_BYTES_PER_WORK
+            return self.repeat * (FN_WORK + args[0].count) + converted
+        if overload in TEXT_READ:
+            return sum(map(self._text, args)) // TEXT_BYTES_PER_WORK
+        if overload in KEY_READ:
+            return self._text(args[KEY_READ[overload]]) // TEXT_BYTES_PER_WORK
+        if overload in ("equals", "not_equals"):  # node by node, stopping at the smaller value
+            return min(map(self._value, args)) // VALUE_BYTES_PER_WORK
+        if overload == "in_list":
+            return self._value(args[1]) // VALUE_BYTES_PER_WORK
+        if overload == "add_list":
+            return self.repeat * sum(a.count for a in args)
+        if overload == "contains_string":
+            needle = max(self._text_once(args[1]), SEARCH_NEEDLE_FLOOR)
+            return self._text(args[0]) * needle // SEARCH_PAIRS_PER_WORK
+        if overload in REGEX:
+            points = _regex_points(ops[-1].const_expr.string_value)
+            return self._text(args[0]) * points // REGEX_BYTE_POINTS_PER_WORK
+        return 0
 
     def _rule(self, overload: str, args: list[Est]) -> Est:
         if overload in SUM:
@@ -250,6 +301,7 @@ class _Run:
         self.iterations += source.count
         start = self.value(ce.accu_init, local)
         self.element = source.bytes(0)  # every element is no bigger than the list holding it
+        self.element_text = source.const + overlap(source.refs) * caps.TOTAL_JSON
         self.keyed = _keyed(ce, self.checked, frozenset(local))
         self.repeat = source.count
         body = {**local, ce.iter_var: ELEMENT_EST, ce.accu_var: start}
@@ -264,7 +316,7 @@ class _Run:
             repeated = source.count * (x.const + overlap(x.refs) * caps.INPUT_MODEL_BYTES)
             result = Est(start.const + repeated + x.coef * source.const, 0, source.count, source.refs * x.coef)
             self.retained += caps.ACCUMULATOR_SLOT * source.count * (source.count + 1) // 2
-        self.element, self.keyed = 0, None
+        self.element, self.element_text, self.keyed = 0, 0, None
         self.peak = max(self.peak, result.bytes(0))
         return self.value(ce.result, {**local, ce.accu_var: result})
 
@@ -274,6 +326,51 @@ def _literal(e: ast.Expr, limit: int, pattern: re.Pattern[str] | None, reason: s
     text = e.const_expr.string_value if ok else ""
     if not ok or len(text) > limit or (pattern is not None and not pattern.fullmatch(text)):
         raise NotLocal(reason)
+
+
+def _plain_regex(pattern: str) -> bool:
+    """No `(?` groups (flags, names) or letter escapes beyond \\d \\s \\w \\b \\A \\z and control characters (Unicode
+    classes, code points): RE2's compiled size then follows the pattern written out, which the work charge assumes."""
+    escapes = pattern.split("\\")[1:]
+    return "(?" not in pattern and all(
+        e[:1] and (e[0] in _REGEX_ESCAPES or (e[0].isascii() and not e[0].isalnum())) for e in escapes
+    )
+
+
+def _regex_points(pattern: str) -> int:
+    """The pattern's length with every `{n,m}` count written out: a count copies the atom before it (a character,
+    escape, class or group) n or m times, `{n,}` once more for its star."""
+    levels: list[list[int]] = [[]]  # atom sizes, per open group
+    i = 0
+    while i < len(pattern):
+        count = _REGEX_COUNT.match(pattern, i)
+        if count and levels[-1]:
+            low, comma, high = count.groups()
+            copies = max(1, int(high) if high else int(low) + 1 if comma else int(low))
+            levels[-1][-1] = levels[-1][-1] * copies + len(count.group())
+            i = count.end()
+        elif pattern[i] == "(":
+            levels.append([])
+            i += 1
+        elif pattern[i] == ")" and len(levels) > 1:
+            group = levels.pop()
+            levels[-1].append(sum(group) + 2)
+            i += 1
+        else:
+            end = i + 2 if pattern[i] == "\\" else _class_end(pattern, i) if pattern[i] == "[" else i + 1
+            levels[-1].append(end - i)
+            i = end
+    return sum(map(sum, levels)) + len(levels) - 1  # an unclosed group's "(" counts too
+
+
+def _class_end(pattern: str, i: int) -> int:
+    """Just past the character class opening at `i` (a leading ] or ^] is literal; [:alpha:] is one member)."""
+    j = i + 1 + pattern.startswith("^", i + 1)
+    j += pattern.startswith("]", j)
+    while j < len(pattern) and pattern[j] != "]":
+        posix = pattern.find(":]", j + 2) if pattern.startswith("[:", j) else -1
+        j = posix + 2 if posix >= 0 else j + 2 if pattern[j] == "\\" else j + 1
+    return j + 1
 
 
 def _is_ident(e: ast.Expr, name: str) -> bool:

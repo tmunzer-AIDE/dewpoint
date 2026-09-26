@@ -11,9 +11,15 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from dewpoint.engine.cel import caps, evaluate, route
+from dewpoint.engine.cel import bind, caps, evaluate, route
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from tests.engine.cel.support import make_record
+
+
+def _ab(i: int) -> str:
+    """320 characters of a and b, varied enough that an automaton for `a.......c` keeps finding new states."""
+    return "".join("ab"[(i * 320 + j) * 2654435761 >> 20 & 1] for j in range(320))
+
 
 AT_CAPS: dict[str, Any] = {
     "events": [
@@ -22,6 +28,12 @@ AT_CAPS: dict[str, Any] = {
     ],
     "m": {f"k{i:03d}": i for i in range(caps.MAP_ENTRIES)},
     "s": "a" * caps.STRING_BYTES,
+    # Worst cases within the caps for the adversarial loads below (each load reads only its own):
+    "needle": "a" * (caps.STRING_BYTES // 2 - 1) + "b",  # searched in s: half the needle compared at every position
+    "texts": [_ab(i) for i in range(caps.LIST_LENGTH)],  # scanned by a pattern like a.......c
+    "c1": [[0] * caps.LIST_LENGTH for _ in range(80)],  # the most nodes two values within the caps can hold
+    "c2": [[0] * caps.LIST_LENGTH for _ in range(79)] + [[0] * (caps.LIST_LENGTH - 1) + [1]],
+    "dense": {f"k{i:03d}": [0] * 150 for i in range(caps.MAP_ENTRIES)},  # the most nodes a map at the cap can hold
 }
 WORST = [
     "trigger.events.filter(e, e.type == 'AP_DISCONNECTED').map(e, e.mac)",
@@ -53,11 +65,10 @@ def test_local_latency_and_the_cpu_between_two_yield_points() -> None:
         p99 = statistics.quantiles(samples, n=100, method="inclusive")[98]
         report["latency"][r.expr] = {"p99_s": p99, "max_s": max(samples)}
         assert p99 <= P99_CEILING_S, (r.expr, p99)
-    report["task"] = {
-        "mixed": _task(records, v),
-        "adversarial": _task([_heaviest_local(_calls)], v),
-        "adversarial_regex": _task([_heaviest_local(_scans)], v),
-    }
+    report["task"] = {"mixed": _task(records, v)}
+    for name, template in ADVERSARIAL.items():
+        heaviest = _heaviest_local(template, v)
+        report["task"][name] = {"expr_chars": len(heaviest.expr), "work": heaviest.work, **_task([heaviest], v)}
     if directory := os.environ.get("DEWPOINT_CEL_GATE_RESULTS"):
         os.makedirs(directory, exist_ok=True)
         with open(os.path.join(directory, "cost.json"), "w") as f:
@@ -76,22 +87,36 @@ def _task(records: list[Any], v: Any) -> dict[str, Any]:
     return {"evaluations": done, "cpu_s": time.process_time() - cpu}
 
 
-def _calls(n: int) -> str:
-    return " || ".join(["macOui(e.mac) == 'x'"] * n)  # Python-implemented calls per element
+def _per_event(body: str, n: int) -> str:
+    return "trigger.events.exists(e, " + " || ".join([body] * n) + ")"
 
 
-def _scans(n: int) -> str:
-    return " || ".join(f"trigger.s.matches('z{i}')" for i in range(n))  # full scans of a string at the cap
+def _times(body: str, n: int) -> str:
+    return "[" + ", ".join(["0"] * n) + "].exists(i, " + body + ")"
 
 
-def _heaviest_local(body: Callable[[int], str]) -> Any:
-    """The body with the most work per element that still classifies local: it maxes out the work bound (or the
-    expression length), which is what the yield policy must keep within a task's CPU target."""
+# One load per cost the work bound charges, each at its heaviest local form (spec §5.5): what the yield policy must
+# keep within a task's CPU target.
+ADVERSARIAL: dict[str, Callable[[int], str]] = {
+    "python_calls": lambda n: _per_event("macOui(e.mac) == 'x'", n),  # Python-implemented calls per item
+    "text": lambda n: _per_event("size(trigger.s + '' + trigger.s) == 0", n),  # copying strings at the cap
+    "search": lambda n: _times("trigger.s.contains(trigger.needle)", n),  # substring search, text x needle
+    "regex": lambda n: "trigger.texts.exists(t, t.matches('a" + "." * n + "c'))",  # pattern size x text
+    "equality": lambda n: _times("trigger.c1 == trigger.c2", n),  # lists compared node by node
+    "conversion": lambda n: _times("size(sortedKeys(trigger.dense)) == 0", n),  # a map converted for Python
+}
+
+
+def _heaviest_local(template: Callable[[int], str], v: Any) -> Any:
+    """The largest n that still classifies local: it maxes out the work bound (or the expression or pattern
+    length). Its inputs are within the caps and it evaluates, so the load is real."""
     best = None
     for n in range(1, 400):
-        r = make_record(f"trigger.events.exists(e, {body(n)})", {"trigger.events": "list<map<string, dyn>>"})
+        r = make_record(template(n), {"trigger.events": "list<map<string, dyn>>"})
         if r.mode != "local":
             break
         best = r
-    assert best is not None
+    assert best is not None, template(1)
+    assert bind.measure(bind.bind(best, v)).within_caps, best.expr[:80]
+    assert evaluate.evaluate_local(best, v).ok, best.expr[:80]
     return best
