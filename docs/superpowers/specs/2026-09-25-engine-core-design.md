@@ -489,7 +489,8 @@ cel-spec protos, Apache-2.0, pinned commit). It assigns exactly one class.
      - A `map` over 1,000 elements keeps about 20 MiB; over 2,000, about 90 MiB. That is why the caps in §5.6 are
        200.
      - **Final** (owner, checkpoint 3): 56 bytes, 200, 4 MiB. Linux (CI, `ubuntu-latest`, gate 6) measured the worst
-       local cases growing 1.0–2.3 MiB, 0.59–0.74 × their bounds at 48 bytes a slot. Gate 6 keeps measuring them.
+       local cases growing 1.0–2.3 MiB: 0.59–0.74 × their bounds at 48 bytes a slot, 0.55–0.65 × at 56. Gate 6
+       keeps measuring them.
    - Sizes use a model close to the runtime's memory: 16 bytes per scalar and per container, plus text bytes. A
      value's model size is at most 8 × its canonical JSON size + 8, so the referenced inputs together are at most
      524,296 model bytes. Distinct input references share that mass (`a.x + a.y` is one input's worth); overlapping
@@ -512,8 +513,8 @@ cel-spec protos, Apache-2.0, pinned commit). It assigns exactly one class.
        range.
 
      Local requires ≤ 2,000,000 units (about 0.2 s on the gate machine). **Final** (owner, checkpoint 3): the rates
-     are set from macOS measurements, and on Linux (CI, `ubuntu-latest`, gate 7) the heaviest load takes 0.48 s per
-     workflow task.
+     are set from macOS measurements, and on Linux (CI, `ubuntu-latest`, gate 7) the heaviest load takes 0.47–0.57 s
+     per workflow task across three runs.
    - The bounds are stored with the version.
 
 **Activity.** Valid expressions that are not local run in the isolated `cel.evaluate` activity (§5.7), and the
@@ -540,8 +541,8 @@ result is recorded in history. This is the parent's `eval` activity (§6.5).
     - There is one load per cost the work bound charges: Python calls, text copies, substring search, regular
       expressions, equality and conversion. Each runs at its heaviest local form, on inputs chosen to be worst within
       the caps.
-    - The heaviest load (regular expressions) takes 0.28 s per workflow task on macOS and 0.48 s on Linux (CI,
-      `ubuntu-latest`). Removing any charge, or the work threshold, takes a load past 1 s.
+    - The heaviest load (regular expressions) takes 0.28 s per workflow task on macOS and 0.47–0.57 s on Linux (CI,
+      `ubuntu-latest`, three runs). Removing any charge, or the work threshold, takes a load past 1 s.
 
 ### 5.7 Isolated evaluation (`cel.evaluate` activity + `cel-evaluator` service)
 
