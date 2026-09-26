@@ -11,6 +11,7 @@ SETTINGS = frozenset({"DEWPOINT_CEL_SOCKET", "DEWPOINT_CEL_MAX_SLOTS", "DEWPOINT
 PLATFORM = frozenset(
     {
         "PATH", "HOME", "HOSTNAME", "LANG", "LC_ALL", "TERM", "TZ",
+        "LC_CTYPE",  # Python sets it itself when it coerces a C locale (PEP 538)
         "PYTHONPATH", "PYTHONHASHSEED", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED",
         "PYTHON_VERSION", "PYTHON_SHA256", "GPG_KEY",
     }

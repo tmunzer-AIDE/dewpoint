@@ -3,10 +3,10 @@
 a single-threaded zygote; in-process, its tests must fork from a single-threaded pytest too."""
 
 import asyncio
-import os
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
@@ -19,7 +19,13 @@ def clean_db() -> None:
 def _threads() -> list[str]:
     """This process's threads: the OS's view on Linux, where C libraries' threads count too; Python's elsewhere."""
     if sys.platform == "linux":
-        return [open(f"/proc/self/task/{t}/comm").read().strip() for t in os.listdir("/proc/self/task")]
+        names = []
+        for task in Path("/proc/self/task").iterdir():
+            try:
+                names.append((task / "comm").read_text().strip())
+            except FileNotFoundError:  # it exited since the listing
+                pass
+        return names
     return [t.name for t in threading.enumerate()]
 
 
@@ -34,4 +40,8 @@ async def single_threaded() -> None:
     loop.set_default_executor(ThreadPoolExecutor(thread_name_prefix="asyncio"))
     if old is not None:
         old.shutdown(wait=True)
+    for _ in range(200):  # a joined thread can take a moment to leave the OS's list
+        if len(_threads()) == 1:
+            break
+        await asyncio.sleep(0.01)
     assert len(_threads()) == 1, _threads()

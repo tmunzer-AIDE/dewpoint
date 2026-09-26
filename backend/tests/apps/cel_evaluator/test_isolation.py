@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 FORBIDDEN = (
     "sqlalchemy", "asyncpg", "fastapi", "starlette", "pydantic", "jsonschema", "httpx", "temporalio",
@@ -30,3 +31,14 @@ def test_it_refuses_to_start_with_anything_secret_looking_in_its_environment() -
     )
     assert done.returncode == 2
     assert "DEWPOINT_KEK_B64" in done.stderr and secret not in done.stderr  # names the variable, never its value
+
+
+def test_it_accepts_what_its_own_interpreter_sets(tmp_path: Path) -> None:
+    """Under a C locale Python itself sets LC_CTYPE (PEP 538): refusing it would stop every evaluator started without
+    LANG. The empty cgroup directory makes it exit at once, for another reason."""
+    env = {"PATH": os.environ["PATH"], "PYTHONPATH": os.environ.get("PYTHONPATH", "")}
+    env["DEWPOINT_CEL_CGROUP"] = str(tmp_path)
+    done = subprocess.run(
+        [sys.executable, "-m", "dewpoint.apps.cel_evaluator"], env=env, capture_output=True, text=True, timeout=60
+    )
+    assert done.returncode == 2 and "LC_CTYPE" not in done.stderr, done.stderr
