@@ -45,6 +45,12 @@ def test_distinct_inputs_share_the_input_mass_and_overlapping_ones_add_up() -> N
     assert bounds("trigger.a + trigger.a.b").bytes > 2 * INPUT  # a prefix overlaps its extension
 
 
+def test_the_slot_covers_what_linux_measured() -> None:
+    """Gate 6 on Linux (CI, checkpoint 3): a single map step at the cap grew about 52 bytes per retained slot, fixed
+    overhead included. The slot charge must cover it on its own, not only through the bound's other terms."""
+    assert caps.ACCUMULATOR_SLOT >= 52
+
+
 def test_list_building_comprehensions_charge_every_retained_accumulator() -> None:
     """cel-expr-python keeps each iteration's copy of a map or filter accumulator until the evaluation ends: memory
     quadratic in the range, summed over a chain (measured; tests/engine/cel/test_gate_estimator.py)."""

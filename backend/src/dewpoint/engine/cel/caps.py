@@ -17,8 +17,9 @@ SCALAR = 16  # model bytes of null, bool, numbers, timestamps and durations; als
 INPUT_MODEL_BYTES = 8 * TOTAL_JSON + 8  # model_size(v) <= 8 * len(canonical_json(v)) + 8 (proved in the tests)
 # Bytes the runtime keeps per accumulator slot. cel-expr-python 0.1.3 builds a map or filter result by copying the
 # accumulator every iteration and keeps every copy until the evaluation ends: n(n + 1) / 2 slots for a range of n,
-# summed over a chain. Measured 41-45 bytes per slot at n >= 200 (gate 6 re-measures it on Linux).
-ACCUMULATOR_SLOT = 48
+# summed over a chain. Measured at n = 200: 41-45 bytes on macOS, about 52 on Linux for a single step (fixed overhead
+# included); 56 covers both (owner, checkpoint 3). Gate 6 re-measures it.
+ACCUMULATOR_SLOT = 56
 
 
 def model_size(value: Any) -> int:

@@ -12,7 +12,9 @@ from dewpoint.engine.cel.proto import checked_pb2
 
 MAX_LOCAL_CODE_POINTS = 4_096
 MAX_LOCAL_ITERATIONS = 9_999  # the runtime's budget of 10,000 lets 9,999 pass (tests/engine/cel/test_runtime.py)
-MAX_LOCAL_BYTES = 4 * 1_048_576  # the largest value plus retained accumulators (estimate.py); measured by gate 6
+# A classification bound on the estimated memory (the largest value plus retained accumulators, estimate.py), not a
+# hard RSS ceiling: gate 6 allows measured growth up to 1.5 x it.
+MAX_LOCAL_BYTES = 4 * 1_048_576
 MAX_LOCAL_WORK = 2_000_000  # roughly 0.2 s of CPU at the rate gate 7 measured; tuned from its results
 
 

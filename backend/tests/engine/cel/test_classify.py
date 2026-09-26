@@ -85,7 +85,9 @@ def test_bounds_are_affine_in_the_element() -> None:
 
 def test_a_three_step_chain_at_the_caps_stays_local() -> None:
     got = _classify("trigger.events.map(e, e.mac).filter(m, m != '').map(m, m + 'a')")
-    assert got.mode == "local", got
+    assert got.mode == "local" and got.bytes is not None, got
+    n = caps.LIST_LENGTH  # all three steps' copies are charged (3.72 MiB with the largest value), still under 4 MiB
+    assert got.bytes >= 3 * caps.ACCUMULATOR_SLOT * n * (n + 1) // 2
 
 
 def test_every_fn1_overload_has_a_size_rule() -> None:
