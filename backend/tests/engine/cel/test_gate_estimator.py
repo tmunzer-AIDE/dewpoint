@@ -4,6 +4,7 @@ inputs within the caps: measured iterations and result sizes never exceed the st
 bound against canonical JSON is proved here too, since the estimator relies on it."""
 
 import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -122,10 +123,15 @@ def test_measured_work_never_exceeds_the_stored_bounds(gen: Gen, values: dict[st
         assert sum(_length(r, inputs) for r in gen.ranges) <= c.iterations
 
 
+# The worst local-class cases at the caps: single map/filter steps and chains, whose accumulators the runtime keeps
+# until the evaluation ends (caps.ACCUMULATOR_SLOT).
 PEAK_PROBES = [
     "sortedKeys(m).map(k, m[k])",
     "l.map(x, x.s + 'b')",
-    "l.filter(x, x.s.startsWith('a')).map(x, x.s)",  # two ranges in sequence, still under 1 MiB
+    "l.filter(x, x.s.startsWith('a')).map(x, x.s)",
+    "sortedKeys(m).map(k, m[k]).filter(v, v >= 0)",
+    "l.map(x, x.s) + l.map(x, x.s)",
+    "l.map(x, x.s).filter(y, y != '').map(z, z + 'b')",
 ]
 # Measured in a fresh process: forking pytest (multi-threaded once the database tests have run) risks a deadlocked
 # child. The child warms the runtime on a trivial evaluation first, so only the probe's own work is measured.
@@ -139,7 +145,8 @@ MEASURE = textwrap.dedent(
     evaluate.run(runtime.compile_checked("1 + 1", {}), {})
     before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     evaluate.run(program, values)
-    print((resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before) * 1024)  # ru_maxrss is KiB on Linux
+    unit = 1 if sys.platform == "darwin" else 1024  # ru_maxrss: bytes on macOS, KiB on Linux
+    print((resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before) * unit)
     """
 )
 
@@ -170,11 +177,25 @@ def test_a_failing_measurement_child_fails_the_measurement() -> None:
         _peak_growth("l.map(x, ", {})  # the child can't compile it
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="ru_maxrss semantics: Linux reports KiB for the process")
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="needs resource.ru_maxrss")
 def test_peak_memory_stays_within_one_and_a_half_times_the_bound() -> None:
-    """Worst local-class expressions at the caps, each in a fresh child so ru_maxrss measures only it."""
-    values = {"l": [{"s": "a" * 40} for _ in range(caps.LIST_LENGTH)], "m": {f"k{i:03d}": i for i in range(1000)}}
-    values["s"] = "a" * 10_000
+    """Worst local-class expressions at the caps, each in a fresh process: peak growth stays within 1.5 x its own
+    stored bound and 1.5 x the local limit. Linux (the CI gate job) is authoritative; results go to
+    $DEWPOINT_CEL_GATE_RESULTS/memory.json when set, to tune ACCUMULATOR_SLOT and the caps."""
+    values: dict[str, Any] = {
+        "l": [{"s": "a" * 40} for _ in range(caps.LIST_LENGTH)],
+        "m": {f"k{i:03d}": i for i in range(caps.MAP_ENTRIES)},
+        "s": "a" * 10_000,
+    }
+    measured: dict[str, dict[str, int]] = {}
     for expr in PEAK_PROBES:
-        grown = _peak_growth(expr, values)
-        assert grown <= 1.5 * classify.MAX_LOCAL_BYTES, (expr, grown)
+        c = classify.classify(expr, runtime.compile_checked(expr, DECLS).checked)
+        assert c.bytes is not None
+        measured[expr] = {"grown": _peak_growth(expr, values), "bound": c.bytes}
+    if directory := os.environ.get("DEWPOINT_CEL_GATE_RESULTS"):
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, "memory.json"), "w") as f:
+            json.dump({"platform": sys.platform, "probes": measured}, f, indent=1, sort_keys=True)
+    for expr, m in measured.items():
+        assert m["grown"] <= 1.5 * m["bound"], (expr, m)
+        assert m["grown"] <= 1.5 * classify.MAX_LOCAL_BYTES, (expr, m)

@@ -12,7 +12,7 @@ from dewpoint.engine.cel.proto import checked_pb2
 
 MAX_LOCAL_CODE_POINTS = 4_096
 MAX_LOCAL_ITERATIONS = 9_999  # the runtime's budget of 10,000 lets 9,999 pass (tests/engine/cel/test_runtime.py)
-MAX_LOCAL_BYTES = 1_048_576
+MAX_LOCAL_BYTES = 4 * 1_048_576  # the largest value plus retained accumulators (estimate.py); measured by gate 6
 MAX_LOCAL_WORK = 2_000_000  # roughly 0.2 s of CPU at the rate gate 7 measured; tuned from its results
 
 
@@ -76,7 +76,7 @@ def classify(expr: str, checked: checked_pb2.CheckedExpr) -> Classification:
     if bounds.iterations > MAX_LOCAL_ITERATIONS:
         return Classification("activity", "may iterate 10,000 times or more with large inputs", *facts)
     if bounds.bytes > MAX_LOCAL_BYTES:
-        return Classification("activity", "may build values larger than 1 MiB", *facts)
+        return Classification("activity", "may need more than 4 MiB of memory", *facts)
     if bounds.work > MAX_LOCAL_WORK:
         return Classification("activity", "does too much work per item to run inline", *facts)
     return Classification("local", None, *facts)

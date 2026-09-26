@@ -9,12 +9,16 @@ from typing import Any
 
 VALUE_JSON = 65_536  # canonical JSON bytes, per referenced value
 TOTAL_JSON = 65_536  # canonical JSON bytes, all referenced values together
-LIST_LENGTH = 1_000  # elements per list
-MAP_ENTRIES = 1_000  # entries per map (the estimator needs a count bound for sortedKeys ranges)
+LIST_LENGTH = 200  # elements per list: map/filter memory is quadratic in it (ACCUMULATOR_SLOT)
+MAP_ENTRIES = 200  # entries per map (the estimator needs a count bound for sortedKeys ranges)
 STRING_BYTES = 16_384  # UTF-8 bytes per string
 
 SCALAR = 16  # model bytes of null, bool, numbers, timestamps and durations; also every container's own overhead
 INPUT_MODEL_BYTES = 8 * TOTAL_JSON + 8  # model_size(v) <= 8 * len(canonical_json(v)) + 8 (proved in the tests)
+# Bytes the runtime keeps per accumulator slot. cel-expr-python 0.1.3 builds a map or filter result by copying the
+# accumulator every iteration and keeps every copy until the evaluation ends: n(n + 1) / 2 slots for a range of n,
+# summed over a chain. Measured 41-45 bytes per slot at n >= 200 (gate 6 re-measures it on Linux).
+ACCUMULATOR_SLOT = 48
 
 
 def model_size(value: Any) -> int:

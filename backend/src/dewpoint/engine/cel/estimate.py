@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Static bound estimator (spec §5.5, rule 4): worst-case iterations, largest intermediate value and work, assuming
-every referenced input is at the runtime caps. Sizes use caps.model_size.
+"""Static bound estimator (spec §5.5, rule 4): worst-case iterations, memory and work, assuming every referenced
+input is at the runtime caps. Sizes use caps.model_size.
+
+*Memory* is the largest intermediate value plus what the runtime *retains*: every accumulator copy a map or filter
+makes (caps.ACCUMULATOR_SLOT), which lives until the evaluation ends, so a chain's copies add up.
 
 *Work* counts node evaluations (a comprehension body once per iteration), with Python-implemented fn-1 calls and
 regular expressions weighted by what they cost relative to a native node. Iterations alone don't bound CPU: a body
@@ -128,8 +131,9 @@ ELEMENT_EST = Est(0, 1, COUNT)
 @dataclass(frozen=True)
 class Bounds:
     iterations: int
-    bytes: int
+    bytes: int  # the largest intermediate value plus `retained`
     work: int
+    retained: int = 0  # accumulator copies the runtime keeps until the evaluation ends
 
 
 @dataclass
@@ -137,6 +141,7 @@ class _Run:
     checked: checked_pb2.CheckedExpr
     iterations: int = 0
     peak: int = 0
+    retained: int = 0
     work: int = 0
     repeat: int = 1  # how many times the node being estimated runs (a comprehension body: once per iteration)
     element: int = 0  # size bound of the current comprehension element (0 outside comprehensions)
@@ -258,6 +263,7 @@ class _Run:
             x = self.seen[appended]
             repeated = source.count * (x.const + overlap(x.refs) * caps.INPUT_MODEL_BYTES)
             result = Est(start.const + repeated + x.coef * source.const, 0, source.count, source.refs * x.coef)
+            self.retained += caps.ACCUMULATOR_SLOT * source.count * (source.count + 1) // 2
         self.element, self.keyed = 0, None
         self.peak = max(self.peak, result.bytes(0))
         return self.value(ce.result, {**local, ce.accu_var: result})
@@ -306,4 +312,4 @@ def estimate(checked: checked_pb2.CheckedExpr) -> Bounds:
     """Raises NotLocal when the expression is outside the allow-list."""
     run = _Run(checked)
     run.value(checked.expr, {})
-    return Bounds(run.iterations, run.peak, run.work)
+    return Bounds(run.iterations, run.peak + run.retained, run.work, run.retained)

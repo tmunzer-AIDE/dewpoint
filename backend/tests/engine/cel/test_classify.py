@@ -54,14 +54,18 @@ def test_local_subset(expr: str) -> None:
         ("trigger.events.map(e, trigger.events.map(f, f))", "more than one nested loop"),
         ("s.matches(trigger.pattern)", "a regular expression that isn't a short literal"),
         ("timestamp(trigger.at).getHours('Europe/Paris')", "a named time zone (only UTC and fixed offsets run inline)"),
-        ("trigger.events.map(e, s + s + s)", "may build values larger than 1 MiB"),
+        ("trigger.events.map(e, s + s + s)", "may need more than 4 MiB of memory"),
+        (
+            "trigger.events.map(e, e.mac).filter(m, m != '').map(m, m + 'a').filter(m, m != 'b')",
+            "may need more than 4 MiB of memory",  # four accumulators kept at once
+        ),
         ("'x' + '" + "a" * 4100 + "'", "longer than 4,096 characters"),
         (
-            " && ".join(["trigger.events.all(e, e.mac != 'x')"] * 10),  # 10,000 iterations: the runtime stops at 10,000
+            " && ".join(["trigger.events.all(e, e.mac != 'x')"] * 50),  # 50 x 200 = 10,000: the runtime stops there
             "may iterate 10,000 times or more with large inputs",
         ),
         (
-            "trigger.events.exists(e, " + " || ".join(["macOui(e.mac) == 'x'"] * 150) + ")",
+            "trigger.events.exists(e, " + " || ".join([f"s.matches('z{i}')" for i in range(50)]) + ")",  # scans
             "does too much work per item to run inline",
         ),
     ],
@@ -75,7 +79,13 @@ def test_bounds_are_affine_in_the_element() -> None:
     """`map(e, e.mac)` stays near the list's own size instead of 1,000 x the largest input."""
     got = _classify("trigger.events.map(e, e.mac)")
     assert got.iterations == caps.LIST_LENGTH
-    assert got.bytes is not None and got.bytes <= 2 * caps.INPUT_MODEL_BYTES
+    retained = caps.ACCUMULATOR_SLOT * caps.LIST_LENGTH * (caps.LIST_LENGTH + 1) // 2
+    assert got.bytes is not None and got.bytes <= 2 * caps.INPUT_MODEL_BYTES + retained
+
+
+def test_a_three_step_chain_at_the_caps_stays_local() -> None:
+    got = _classify("trigger.events.map(e, e.mac).filter(m, m != '').map(m, m + 'a')")
+    assert got.mode == "local", got
 
 
 def test_every_fn1_overload_has_a_size_rule() -> None:

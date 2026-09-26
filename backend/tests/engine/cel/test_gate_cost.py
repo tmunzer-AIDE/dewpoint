@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Gate 7 (spec §5.9), in-process half: latency per local evaluation at the caps, and the CPU a workflow task spends
 on local evaluations between two yield points. The workflow-task half (the same load inside RunGraph, against
-Temporal's timeout) runs in 2a-3. Results go to $DEWPOINT_CEL_GATE_RESULTS when set, to tune the thresholds."""
+Temporal's timeout) runs in 2a-3. Results go to $DEWPOINT_CEL_GATE_RESULTS/cost.json when set, to tune the
+thresholds."""
 
 import json
 import os
 import statistics
 import time
+from collections.abc import Callable
 from typing import Any
 
 from dewpoint.engine.cel import caps, evaluate, route
@@ -14,9 +16,12 @@ from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from tests.engine.cel.support import make_record
 
 AT_CAPS: dict[str, Any] = {
-    "events": [{"mac": f"5c5b35{i:06x}", "type": "AP_DISCONNECTED" if i % 2 else "AP_CONNECTED"} for i in range(1000)],
+    "events": [
+        {"mac": f"5c5b35{i:06x}", "type": "AP_DISCONNECTED" if i % 2 else "AP_CONNECTED"}
+        for i in range(caps.LIST_LENGTH)
+    ],
     "m": {f"k{i:03d}": i for i in range(caps.MAP_ENTRIES)},
-    "s": "a" * 8_000,
+    "s": "a" * caps.STRING_BYTES,
 }
 WORST = [
     "trigger.events.filter(e, e.type == 'AP_DISCONNECTED').map(e, e.mac)",
@@ -48,9 +53,14 @@ def test_local_latency_and_the_cpu_between_two_yield_points() -> None:
         p99 = statistics.quantiles(samples, n=100, method="inclusive")[98]
         report["latency"][r.expr] = {"p99_s": p99, "max_s": max(samples)}
         assert p99 <= P99_CEILING_S, (r.expr, p99)
-    report["task"] = {"mixed": _task(records, v), "adversarial": _task([_heaviest_local()], v)}
-    if path := os.environ.get("DEWPOINT_CEL_GATE_RESULTS"):
-        with open(path, "w") as f:
+    report["task"] = {
+        "mixed": _task(records, v),
+        "adversarial": _task([_heaviest_local(_calls)], v),
+        "adversarial_regex": _task([_heaviest_local(_scans)], v),
+    }
+    if directory := os.environ.get("DEWPOINT_CEL_GATE_RESULTS"):
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, "cost.json"), "w") as f:
             json.dump(report, f, indent=1, sort_keys=True)
     for name, task in report["task"].items():
         assert task["cpu_s"] <= TASK_CPU_TARGET_S, (name, task)
@@ -66,13 +76,20 @@ def _task(records: list[Any], v: Any) -> dict[str, Any]:
     return {"evaluations": done, "cpu_s": time.process_time() - cpu}
 
 
-def _heaviest_local() -> Any:
-    """The body with the most Python-implemented calls per element that still classifies local: it maxes out the
-    work bound, which is what the yield policy must keep within a task's CPU target."""
+def _calls(n: int) -> str:
+    return " || ".join(["macOui(e.mac) == 'x'"] * n)  # Python-implemented calls per element
+
+
+def _scans(n: int) -> str:
+    return " || ".join(f"trigger.s.matches('z{i}')" for i in range(n))  # full scans of a string at the cap
+
+
+def _heaviest_local(body: Callable[[int], str]) -> Any:
+    """The body with the most work per element that still classifies local: it maxes out the work bound (or the
+    expression length), which is what the yield policy must keep within a task's CPU target."""
     best = None
-    for calls in range(10, 400, 10):
-        body = " || ".join(["macOui(e.mac) == 'x'"] * calls)
-        r = make_record(f"trigger.events.exists(e, {body})", {"trigger.events": "list<map<string, dyn>>"})
+    for n in range(1, 400):
+        r = make_record(f"trigger.events.exists(e, {body(n)})", {"trigger.events": "list<map<string, dyn>>"})
         if r.mode != "local":
             break
         best = r
