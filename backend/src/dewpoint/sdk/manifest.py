@@ -4,6 +4,10 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from pydantic import BaseModel
+from pydantic.json_schema import GenerateJsonSchema
+from pydantic_core import core_schema
+
 from dewpoint.sdk.node import MAX_RETRY_ATTEMPTS, PORT_RE, RESERVED_PORTS, TYPE_RE, Node, NodeKind, SideEffect
 from dewpoint.sdk.version import SDK_VERSION
 
@@ -28,6 +32,52 @@ SCHEMA_ONE = frozenset(
 )
 SCHEMA_LIST = frozenset({"allOf", "anyOf", "oneOf", "prefixItems"})
 SCHEMA_MAP = frozenset({"properties", "patternProperties", "$defs", "dependentSchemas"})
+
+
+class _SerializedOutput(GenerateJsonSchema):
+    """Output schemas describe what serialization emits. Pydantic leaves fields with defaults out of `required`
+    (unless a model sets json_schema_serialization_defaults_required), yet model_dump always emits them: a reference
+    or a CEL guard must not treat them as possibly missing. TypedDict keys that aren't required, and fields excluded
+    conditionally, can be absent from the output, so they keep pydantic's answer."""
+
+    def field_is_required(
+        self,
+        field: core_schema.ModelField | core_schema.DataclassField | core_schema.TypedDictField,
+        total: bool,
+    ) -> bool:
+        if field["type"] == "typed-dict-field" or field.get("serialization_exclude_if") is not None:
+            return super().field_is_required(field, total)
+        return True
+
+
+def dump_output(output: BaseModel) -> dict[str, Any]:
+    """The one way a node's output becomes JSON: by alias, as the output schema names it, with every field."""
+    return output.model_dump(mode="json", by_alias=True)
+
+
+_SELF_SERIALIZING = frozenset({"function-plain", "function-wrap"})
+
+
+def _self_serializing(schema: Any) -> list[str]:
+    """Models, dataclasses and TypedDicts reachable from an output that serialize themselves (`@model_serializer`):
+    their JSON can drop or rename fields the generated schema promises, so no schema describes it."""
+    found: set[str] = set()
+    seen: set[int] = set()
+    stack = [schema]
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, dict):
+            ser = node.get("serialization")
+            custom = isinstance(ser, dict) and ser.get("type") in _SELF_SERIALIZING
+            if custom and node.get("type") in ("model", "dataclass", "typed-dict"):
+                found.add(getattr(node.get("cls"), "__name__", "a nested type"))
+            stack.extend(node.values())
+        elif isinstance(node, list | tuple):
+            stack.extend(node)
+    return sorted(found)
 
 
 def _closed(schema: Any) -> Any:
@@ -98,6 +148,11 @@ def _problems(node: type[Node]) -> list[str]:
     if node.dynamic_ports is not None and node.dynamic_ports not in node.Config.model_fields:
         out.append(f"{name}: dynamic_ports names unknown config field {node.dynamic_ports!r}")
     out += _retry_problems(name, node)
+    out += [
+        f"{name}: output type {cls} uses @model_serializer; outputs must serialize field by field "
+        "(use fields, computed fields or field serializers)"
+        for cls in _self_serializing(node.Output.__pydantic_core_schema__)
+    ]
     if node.timeout.total_seconds() <= 0:
         out.append(f"{name}: timeout must be positive")
     if node.kind is NodeKind.ACTION:
@@ -122,7 +177,9 @@ def node_manifest(node: type[Node]) -> dict[str, Any]:
         "ports": list(node.ports),
         "dynamic_ports": node.dynamic_ports,
         "config_schema": node.Config.model_json_schema(mode="validation"),
-        "output_schema": _closed(node.Output.model_json_schema(mode="serialization")),
+        "output_schema": _closed(
+            node.Output.model_json_schema(mode="serialization", schema_generator=_SerializedOutput)
+        ),
         "credentials": list(node.credentials),
         "capabilities": sorted(node.capabilities),
         "side_effect": node.side_effect.value,
