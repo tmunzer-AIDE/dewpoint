@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     totp_pending_minutes: int = 10  # an unconfirmed new TOTP secret expires after this
     passkey_options_per_ip: int = 30  # anonymous passkey challenges per source IP per 15-minute window
     webauthn_challenges_max: int = 10_000  # outstanding (unexpired) challenges across the platform
+    max_request_body_bytes: int = 1_048_576  # counted as received: chunked bodies have no Content-Length
     max_run_duration_days: int = 30  # spec §6: whole logical run, including continue-as-new and waits
     audit_signing_key_b64: str | None = None  # Ed25519 private key (raw 32 bytes, base64)
     audit_anchor_path: str | None = None

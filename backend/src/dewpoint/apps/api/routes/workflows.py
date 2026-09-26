@@ -2,7 +2,7 @@
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,7 +16,6 @@ from dewpoint.core.workflows import service
 from dewpoint.engine.graph.model import GraphFormatError, parse_graph
 
 router = APIRouter(prefix="/api/v1", tags=["workflows"])
-MAX_DRAFT_BYTES = 1024 * 1024
 EMPTY_DRAFT: dict[str, Any] = {"graph_format": 1, "nodes": [], "edges": []}
 
 
@@ -32,12 +31,6 @@ class PatchIn(BaseModel):
 
 class ActivateIn(BaseModel):
     version_id: uuid.UUID
-
-
-def _size_guard(request: Request) -> None:
-    length = request.headers.get("content-length", "")
-    if length.isdigit() and int(length) > MAX_DRAFT_BYTES:
-        raise HTTPException(413, detail={"error": "too_large"})
 
 
 def _revision(if_match: str | None) -> int:
@@ -106,7 +99,7 @@ async def list_workflows(
     return [await _summary(db, wf) for wf in await service.list_workflows(db, ctx.tenant_id)]
 
 
-@router.post("/t/{tenant_id}/workflows", status_code=201, dependencies=[Depends(_size_guard)])
+@router.post("/t/{tenant_id}/workflows", status_code=201)
 async def create(
     body: CreateIn,
     ctx: TenantContext = Depends(require(P.WORKFLOW_EDIT)),
@@ -131,7 +124,7 @@ async def get_one(
     return {**await _summary(db, wf), "draft": wf.draft}
 
 
-@router.put("/t/{tenant_id}/workflows/{workflow_id}/draft", dependencies=[Depends(_size_guard)])
+@router.put("/t/{tenant_id}/workflows/{workflow_id}/draft")
 async def put_draft(
     workflow_id: uuid.UUID,
     draft: dict[str, Any] = Body(...),

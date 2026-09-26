@@ -299,3 +299,17 @@ def object_schema(props: Mapping[str, Mapping[str, Any]], required: Sequence[str
     if defs:
         out["$defs"] = defs
     return out
+
+
+def widen(schema: Schema | None, default: Any) -> Schema | None:
+    """What a reference with a default can produce: the referenced type, or the default's when it differs."""
+    if schema is None:
+        return None
+    types = json_types(schema)
+    kind = literal_type(default)
+    if types is None or kind in types or (kind == "integer" and "number" in types):
+        return schema
+    out: dict[str, Any] = {"anyOf": [{k: v for k, v in schema.items() if k != "$defs"}, {"type": kind}]}
+    if "$defs" in schema:
+        out["$defs"] = schema["$defs"]
+    return out

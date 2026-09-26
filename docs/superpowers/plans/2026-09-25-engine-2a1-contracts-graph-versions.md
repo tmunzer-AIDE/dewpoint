@@ -2007,6 +2007,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     - `Edge(source: EdgeFrom(node, port="out") [JSON alias "from"], to: EdgeTo(node))`;
     - `GraphSettings(input_schema, vars_schema, outputs, failure_handler: UUID | None)`.
   - Functions: `parse_graph(data) -> Graph`, which raises `GraphFormatError(diagnostics)`; `graph_json(graph) -> dict`.
+    - `parse_graph` rejects NaN and infinite numbers anywhere in the document (`graph.format` at the exact pointer). Python's JSON parser accepts `NaN`, `Infinity` and `1e400`, but canonical JSON, the hashes and Postgres JSONB don't.
   - Hashes:
     - `graph_hash(graph) -> str` identifies **the authored graph only**;
     - `version_hash(*, graph_hash, subflow_pins, failure_handler_version_id, cel_profile, engine_abi) -> str` identifies an **executable version**: the graph plus everything publish resolves. Audit and integrity checks use this one.
@@ -2149,6 +2150,26 @@ def test_node_count_is_capped() -> None:
         g.node(f"n{i}", "testkit.echo@1")
     with pytest.raises(GraphFormatError):
         g.build()
+
+
+@pytest.mark.parametrize(
+    ("where", "value", "field"),
+    [
+        (("nodes", 0, "position"), {"x": float("inf"), "y": 0}, "/nodes/0/position/x"),
+        (("nodes", 0, "config"), {"value": [1, {"deep": float("nan")}]}, "/nodes/0/config/value/1/deep"),
+        (("nodes", 0, "options"), {"timeout_s": float("inf")}, "/nodes/0/options/timeout_s"),
+        (("settings",), {"outputs": {"x": float("-inf")}}, "/settings/outputs/x"),
+    ],
+)
+def test_non_finite_numbers_are_format_errors(where: tuple[Any, ...], value: Any, field: str) -> None:
+    data = G().node("a", "testkit.echo@1", {"value": 1}).data()
+    target = data
+    for key in where[:-1]:
+        target = target[key]
+    target[where[-1]] = value
+    with pytest.raises(GraphFormatError) as e:
+        parse_graph(data)
+    assert [(d.code, d.field) for d in e.value.diagnostics] == [("graph.format", field)]
 ```
 
 `backend/tests/engine/graph/test_structure.py`:
@@ -2332,8 +2353,9 @@ class Diagnostic:
 # SPDX-License-Identifier: Apache-2.0
 """The workflow graph document (`graph_format: 1`)."""
 
+import math
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -2416,7 +2438,24 @@ class GraphFormatError(ValueError):
         self.diagnostics = diagnostics
 
 
+def _non_finite(value: Any, path: str = "") -> Iterator[str]:
+    """JSON pointers of NaN and infinite numbers. Python's JSON parser accepts NaN, Infinity and 1e400, but canonical
+    JSON, the graph hashes and Postgres JSONB don't."""
+    if isinstance(value, float) and not math.isfinite(value):
+        yield path or "/"
+    elif isinstance(value, Mapping):
+        for key, item in value.items():
+            yield from _non_finite(item, f"{path}/{str(key).replace('~', '~0').replace('/', '~1')}")
+    elif isinstance(value, list | tuple):
+        for index, item in enumerate(value):
+            yield from _non_finite(item, f"{path}/{index}")
+
+
 def parse_graph(data: Any) -> Graph:
+    non_finite = list(_non_finite(data))
+    if non_finite:
+        message = "Numbers must be finite: NaN and infinity aren't valid JSON."
+        raise GraphFormatError([Diagnostic(code="graph.format", field=p, message=message) for p in non_finite])
     try:
         return Graph.model_validate(data)
     except ValidationError as e:
@@ -2793,6 +2832,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     - `navigate` follows JSON Schema. Only `additionalProperties: false` makes an undeclared field an error (`PathError`). Otherwise the field may exist, so it resolves as unknown and possibly missing.
   - `json_types(schema) -> frozenset[str] | None`, `compatible(source, target) -> bool`, `describe(schema) -> str`, `literal_type(value) -> str`.
     - `compatible` requires **every** type the source admits to fit the target (an integer fits a number). If either side is unknown, the runtime check decides.
+  - `widen(schema, default) -> schema`: what a reference with a default can produce. It is the referenced type, or `anyOf[referenced, default's type]` when they differ, with `$defs` kept at the top.
   - `object_schema(props, required) -> dict`: a closed object built from per-field schemas that keep their own `$defs` scope. Definitions are renamed `f<index>.<name>` and `$ref`s rewritten, so two fields may each define `Item` differently.
   - Marker checks: `literal_on_path(root, pointer)`, `contains_literal(root, schema)`, `allowed_kinds(root, pointer)`.
 - Reference roots: `trigger.<path>`, `steps.<key>.output.<path>`, `steps.<key>.error[.code|.message|.attempt]`, `vars.<name>.<path>`, `loop.item.<path>`, `loop.index`, `loops.<loop_key>.item.<path>`, `loops.<loop_key>.index`, `run.id|started_at|now`. Path segments are identifiers or `[n]` indexes.
@@ -3580,6 +3620,20 @@ def object_schema(props: Mapping[str, Mapping[str, Any]], required: Sequence[str
     if defs:
         out["$defs"] = defs
     return out
+
+
+def widen(schema: Schema | None, default: Any) -> Schema | None:
+    """What a reference with a default can produce: the referenced type, or the default's when it differs."""
+    if schema is None:
+        return None
+    types = json_types(schema)
+    kind = literal_type(default)
+    if types is None or kind in types or (kind == "integer" and "number" in types):
+        return schema
+    out: dict[str, Any] = {"anyOf": [{k: v for k, v in schema.items() if k != "$defs"}, {"type": kind}]}
+    if "$defs" in schema:
+        out["$defs"] = schema["$defs"]
+    return out
 ```
 
 - [ ] **Step 5: Run the tests**
@@ -3615,6 +3669,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `SubflowInfo(workflow_id, version_id, input_schema, output_schema)`.
   - `ValidationContext(catalog, subflows={}, max_run_duration=30 days)`.
   - `ValidationResult(diagnostics, node_refs, subflow_pins: {node_id_str: version_id_str}, failure_handler_version_id, output_schema)` with `.ok`.
+  - A reference with a default resolves to `widen(referenced, default)`, so inferred types (transform fields, loop items, workflow outputs) include the default's type.
   - Functions: `referenced_workflows(graph) -> set[UUID]`, `validate(graph, ctx) -> ValidationResult`. `validate` reports and never raises; a Hypothesis test runs it on arbitrary node configs and outputs.
   - `MAX_SUBFLOW_DEPTH = 5`.
 - Diagnostic codes introduced:
@@ -3736,6 +3791,7 @@ from hypothesis import strategies as st
 from jsonschema import Draft202012Validator
 
 from dewpoint.engine.graph.model import GraphFormatError
+from dewpoint.engine.graph.schemas import json_types, navigate
 from dewpoint.engine.graph.validate import (
     SubflowInfo,
     ValidationContext,
@@ -3937,6 +3993,24 @@ def test_composed_schemas_keep_each_producers_definitions() -> None:
     assert result.diagnostics == ()
     valid = {"a": {"v": "text"}, "b": {"v": 3}}
     assert list(Draft202012Validator(result.output_schema).iter_errors(valid)) == []
+
+
+def test_a_reference_default_widens_the_inferred_type() -> None:
+    def g(default: Any) -> G:
+        b = (
+            G()
+            .node("t", "flow.transform@1", {"fields": {"x": ref("trigger.name", default=default)}})
+            .node("f", "flow.fail@1", {"message": ref("steps.t.output.x")})
+            .edge("t", "f")
+        )
+        b.settings["input_schema"] = {"type": "object", "properties": {"name": {"type": "string"}}}
+        b.settings["outputs"] = {"x": ref("trigger.name", default=default)}
+        return b
+
+    assert codes(g(123)) == ["ref.type_mismatch"]  # x is the name, or 123 when the name is missing
+    assert codes(g("fallback")) == []
+    widened = check(g(123)).output_schema
+    assert json_types(navigate(widened, ["x"]).schema) == {"string", "integer"}
 
 
 def test_type_mismatch() -> None:
@@ -4350,6 +4424,7 @@ from dewpoint.engine.graph.schemas import (
     object_schema,
     standalone,
     target_schema,
+    widen,
 )
 from dewpoint.engine.graph.structure import Structure, analyze_structure
 from dewpoint.engine.graph.values import (
@@ -4730,9 +4805,10 @@ class _Validator:
                 node=site.node,
                 fld=site.field,
             )
-        if value.has_default:
-            self._check_instance(site, target, value.default)
-        return Resolved(resolved.schema, resolved.conditional and not value.has_default)
+        if not value.has_default:
+            return resolved
+        self._check_instance(site, target, value.default)
+        return Resolved(widen(resolved.schema, value.default), False)
 
     def _template(self, site: _Site, value: TemplateValue, target: Mapping[str, Any] | None) -> Resolved:
         if target is not None and not compatible({"type": "string"}, target):
@@ -7366,7 +7442,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Files:**
 - Create: `backend/src/dewpoint/apps/api/routes/workflows.py`, `backend/src/dewpoint/apps/api/routes/node_types.py`
-- Modify: `backend/src/dewpoint/apps/api/main.py`
+- Modify: `backend/src/dewpoint/apps/api/main.py`, `backend/src/dewpoint/apps/api/middleware.py` (`BodyLimitMiddleware`), `backend/src/dewpoint/core/config.py` (`max_request_body_bytes`)
 - Test: `backend/tests/apps/api/test_workflows.py`
 
 **Interfaces:**
@@ -7382,6 +7458,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `POST /t/{tenant_id}/workflows/{id}/publish` (`workflow.publish`, `If-Match`): returns 201 `{version_id, number, warnings}`; otherwise 422 `{error: invalid, diagnostics}` or 409 `draft_conflict`.
   - `GET /t/{tenant_id}/workflows/{id}/versions` (`workflow.view`): `[{id, number, published_at, published_by, graph_hash, version_hash, cel_profile, node_refs, active, executable, blocked_by}]`.
   - `POST /t/{tenant_id}/workflows/{id}/activate` (`workflow.publish`), body `{version_id}`: returns `{active_version_id, number, warnings}`; otherwise 404, or 422 `{error: not_activatable, diagnostics}`.
+- Request bodies are capped at `max_request_body_bytes` (1 MiB) **by the bytes actually received**, in an ASGI middleware that runs before FastAPI parses anything. Chunked bodies have no Content-Length, and a route dependency would run only after parsing. The middleware answers 413 `{error: too_large}`.
 - The workflow summary is `{id, name, enabled, draft_revision, active_version_id, active_version_number, executable (null when unpublished), blocked_by, created_at, updated_at}`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -7497,7 +7574,9 @@ async def test_disable_and_rename(app, owner_sessionmaker, api_settings) -> None
         assert taken.status_code == 409 and taken.json() == {"error": "name_taken"}
 
 
-async def test_reenabling_a_blocked_workflow_is_refused(app, owner_sessionmaker, api_settings, admin_sessionmaker) -> None:
+async def test_reenabling_a_blocked_workflow_is_refused(
+    app, owner_sessionmaker, api_settings, admin_sessionmaker
+) -> None:
     c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
     async with c:
         wf = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "W", "draft": GRAPH})).json()
@@ -7530,6 +7609,41 @@ async def test_node_types_catalog(app, owner_sessionmaker, api_settings, admin_s
         types = {t["ref"]: t for t in (await c.get("/api/v1/node-types")).json()}
     assert types["flow.if@1"]["ports"] == ["true", "false"] and types["testkit.echo@1"]["state"] == "active"
     assert types["testkit.slow@1"]["state"] == "deprecated" and "testkit.fail_n@1" not in types
+
+
+async def test_oversized_drafts_are_rejected_without_a_trustworthy_length(
+    app, owner_sessionmaker, api_settings
+) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        wf = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "W"})).json()
+        base = f"/api/v1/t/{tid}/workflows/{wf['id']}"
+
+        async def chunks():  # type: ignore[no-untyped-def]  # an async body is sent chunked: no Content-Length
+            yield b'{"graph_format": 1, "settings": {"outputs": {"x": "'
+            for _ in range(20):
+                yield b"a" * 65_536
+            yield b'"}}}'
+
+        r = await c.put(
+            f"{base}/draft", content=chunks(), headers={"If-Match": "1", "Content-Type": "application/json"}
+        )
+        assert r.status_code == 413 and r.json() == {"error": "too_large"}
+        assert (await c.get(base)).json()["draft_revision"] == 1
+
+
+async def test_non_finite_numbers_are_a_format_error_not_a_server_error(app, owner_sessionmaker, api_settings) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        wf = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "W"})).json()
+        url = f"/api/v1/t/{tid}/workflows/{wf['id']}/draft"
+        headers = {"If-Match": "1", "Content-Type": "application/json"}
+        node = f'{{"id": "{uuid.uuid4()}", "key": "a", "type": "testkit.echo@1", "position": {{"x": 1e400, "y": 0}}}}'
+        huge = await c.put(url, content=f'{{"graph_format": 1, "nodes": [{node}]}}'.encode(), headers=headers)
+        nan = await c.put(url, content=b'{"graph_format": 1, "settings": {"outputs": {"x": NaN}}}', headers=headers)
+    for r, field in ((huge, "/nodes/0/position/x"), (nan, "/settings/outputs/x")):
+        assert r.status_code == 422, r.text
+        assert [(d["code"], d["field"]) for d in r.json()["diagnostics"]] == [("graph.format", field)]
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -7580,7 +7694,7 @@ async def node_types(db: AsyncSession = Depends(get_db, scope="function")) -> li
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7594,7 +7708,6 @@ from dewpoint.core.workflows import service
 from dewpoint.engine.graph.model import GraphFormatError, parse_graph
 
 router = APIRouter(prefix="/api/v1", tags=["workflows"])
-MAX_DRAFT_BYTES = 1024 * 1024
 EMPTY_DRAFT: dict[str, Any] = {"graph_format": 1, "nodes": [], "edges": []}
 
 
@@ -7610,12 +7723,6 @@ class PatchIn(BaseModel):
 
 class ActivateIn(BaseModel):
     version_id: uuid.UUID
-
-
-def _size_guard(request: Request) -> None:
-    length = request.headers.get("content-length", "")
-    if length.isdigit() and int(length) > MAX_DRAFT_BYTES:
-        raise HTTPException(413, detail={"error": "too_large"})
 
 
 def _revision(if_match: str | None) -> int:
@@ -7684,7 +7791,7 @@ async def list_workflows(
     return [await _summary(db, wf) for wf in await service.list_workflows(db, ctx.tenant_id)]
 
 
-@router.post("/t/{tenant_id}/workflows", status_code=201, dependencies=[Depends(_size_guard)])
+@router.post("/t/{tenant_id}/workflows", status_code=201)
 async def create(
     body: CreateIn,
     ctx: TenantContext = Depends(require(P.WORKFLOW_EDIT)),
@@ -7709,7 +7816,7 @@ async def get_one(
     return {**await _summary(db, wf), "draft": wf.draft}
 
 
-@router.put("/t/{tenant_id}/workflows/{workflow_id}/draft", dependencies=[Depends(_size_guard)])
+@router.put("/t/{tenant_id}/workflows/{workflow_id}/draft")
 async def put_draft(
     workflow_id: uuid.UUID,
     draft: dict[str, Any] = Body(...),
@@ -7817,7 +7924,65 @@ async def activate(
     return {"active_version_id": str(version.id), "number": version.number, "warnings": [w.to_json() for w in warnings]}
 ```
 
-In `backend/src/dewpoint/apps/api/main.py`, change the routes import to:
+In `backend/src/dewpoint/core/config.py`, add this field to `Settings`, before `max_run_duration_days`:
+
+```python
+    max_request_body_bytes: int = 1_048_576  # counted as received: chunked bodies have no Content-Length
+```
+
+In `backend/src/dewpoint/apps/api/middleware.py`, add `from starlette.datastructures import Headers` and `from starlette.types import ASGIApp, Message, Receive, Scope, Send` to the imports, then append:
+
+```python
+class BodyLimitMiddleware:
+    """Caps request bodies by the bytes actually received. Content-Length can't be relied on: chunked requests have
+    none, and FastAPI parses a body before any route dependency could object. The body is buffered up to the limit
+    before the app runs; one byte more answers 413 without reading the rest."""
+
+    def __init__(self, app: ASGIApp, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        declared = Headers(scope=scope).get("content-length", "")
+        if declared.isdigit() and int(declared) > self.max_bytes:
+            await JSONResponse({"error": "too_large"}, status_code=413)(scope, receive, send)
+            return
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            chunk = message.get("body", b"")
+            size += len(chunk)
+            if size > self.max_bytes:
+                await JSONResponse({"error": "too_large"}, status_code=413)(scope, receive, send)
+                return
+            chunks.append(chunk)
+            if not message.get("more_body", False):
+                break
+        replayed = False
+
+        async def replay() -> Message:
+            nonlocal replayed
+            if replayed:
+                return await receive()  # after the body: disconnect notifications
+            replayed = True
+            return {"type": "http.request", "body": b"".join(chunks), "more_body": False}
+
+        await self.app(scope, replay, send)
+```
+
+In `backend/src/dewpoint/apps/api/main.py`, import `BodyLimitMiddleware` next to the other middleware, and register it first (innermost, so its 413 still gets the security headers):
+
+```python
+    app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_request_body_bytes)  # innermost: its 413 gets security headers
+```
+
+Then, in the same file, change the routes import to:
 
 ```python
 from dewpoint.apps.api.routes import (
@@ -7840,7 +8005,7 @@ Then append `node_types.router,` and `workflows.router,` to the router tuple, af
 - [ ] **Step 4: Run the tests**
 
 Run: `uv run pytest tests/apps/api/test_workflows.py -q`
-Expected: 8 passed.
+Expected: 10 passed.
 
 - [ ] **Step 5: Commit**
 

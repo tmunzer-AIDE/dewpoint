@@ -9,6 +9,7 @@ from hypothesis import strategies as st
 from jsonschema import Draft202012Validator
 
 from dewpoint.engine.graph.model import GraphFormatError
+from dewpoint.engine.graph.schemas import json_types, navigate
 from dewpoint.engine.graph.validate import (
     SubflowInfo,
     ValidationContext,
@@ -210,6 +211,24 @@ def test_composed_schemas_keep_each_producers_definitions() -> None:
     assert result.diagnostics == ()
     valid = {"a": {"v": "text"}, "b": {"v": 3}}
     assert list(Draft202012Validator(result.output_schema).iter_errors(valid)) == []
+
+
+def test_a_reference_default_widens_the_inferred_type() -> None:
+    def g(default: Any) -> G:
+        b = (
+            G()
+            .node("t", "flow.transform@1", {"fields": {"x": ref("trigger.name", default=default)}})
+            .node("f", "flow.fail@1", {"message": ref("steps.t.output.x")})
+            .edge("t", "f")
+        )
+        b.settings["input_schema"] = {"type": "object", "properties": {"name": {"type": "string"}}}
+        b.settings["outputs"] = {"x": ref("trigger.name", default=default)}
+        return b
+
+    assert codes(g(123)) == ["ref.type_mismatch"]  # x is the name, or 123 when the name is missing
+    assert codes(g("fallback")) == []
+    widened = check(g(123)).output_schema
+    assert json_types(navigate(widened, ["x"]).schema) == {"string", "integer"}
 
 
 def test_type_mismatch() -> None:

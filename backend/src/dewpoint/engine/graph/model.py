@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """The workflow graph document (`graph_format: 1`)."""
 
+import math
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -85,7 +86,24 @@ class GraphFormatError(ValueError):
         self.diagnostics = diagnostics
 
 
+def _non_finite(value: Any, path: str = "") -> Iterator[str]:
+    """JSON pointers of NaN and infinite numbers. Python's JSON parser accepts NaN, Infinity and 1e400, but canonical
+    JSON, the graph hashes and Postgres JSONB don't."""
+    if isinstance(value, float) and not math.isfinite(value):
+        yield path or "/"
+    elif isinstance(value, Mapping):
+        for key, item in value.items():
+            yield from _non_finite(item, f"{path}/{str(key).replace('~', '~0').replace('/', '~1')}")
+    elif isinstance(value, list | tuple):
+        for index, item in enumerate(value):
+            yield from _non_finite(item, f"{path}/{index}")
+
+
 def parse_graph(data: Any) -> Graph:
+    non_finite = list(_non_finite(data))
+    if non_finite:
+        message = "Numbers must be finite: NaN and infinity aren't valid JSON."
+        raise GraphFormatError([Diagnostic(code="graph.format", field=p, message=message) for p in non_finite])
     try:
         return Graph.model_validate(data)
     except ValidationError as e:

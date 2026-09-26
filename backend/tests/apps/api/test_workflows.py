@@ -141,3 +141,38 @@ async def test_node_types_catalog(app, owner_sessionmaker, api_settings, admin_s
         types = {t["ref"]: t for t in (await c.get("/api/v1/node-types")).json()}
     assert types["flow.if@1"]["ports"] == ["true", "false"] and types["testkit.echo@1"]["state"] == "active"
     assert types["testkit.slow@1"]["state"] == "deprecated" and "testkit.fail_n@1" not in types
+
+
+async def test_oversized_drafts_are_rejected_without_a_trustworthy_length(
+    app, owner_sessionmaker, api_settings
+) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        wf = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "W"})).json()
+        base = f"/api/v1/t/{tid}/workflows/{wf['id']}"
+
+        async def chunks():  # type: ignore[no-untyped-def]  # an async body is sent chunked: no Content-Length
+            yield b'{"graph_format": 1, "settings": {"outputs": {"x": "'
+            for _ in range(20):
+                yield b"a" * 65_536
+            yield b'"}}}'
+
+        r = await c.put(
+            f"{base}/draft", content=chunks(), headers={"If-Match": "1", "Content-Type": "application/json"}
+        )
+        assert r.status_code == 413 and r.json() == {"error": "too_large"}
+        assert (await c.get(base)).json()["draft_revision"] == 1
+
+
+async def test_non_finite_numbers_are_a_format_error_not_a_server_error(app, owner_sessionmaker, api_settings) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        wf = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "W"})).json()
+        url = f"/api/v1/t/{tid}/workflows/{wf['id']}/draft"
+        headers = {"If-Match": "1", "Content-Type": "application/json"}
+        node = f'{{"id": "{uuid.uuid4()}", "key": "a", "type": "testkit.echo@1", "position": {{"x": 1e400, "y": 0}}}}'
+        huge = await c.put(url, content=f'{{"graph_format": 1, "nodes": [{node}]}}'.encode(), headers=headers)
+        nan = await c.put(url, content=b'{"graph_format": 1, "settings": {"outputs": {"x": NaN}}}', headers=headers)
+    for r, field in ((huge, "/nodes/0/position/x"), (nan, "/settings/outputs/x")):
+        assert r.status_code == 422, r.text
+        assert [(d["code"], d["field"]) for d in r.json()["diagnostics"]] == [("graph.format", field)]

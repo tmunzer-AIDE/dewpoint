@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+from starlette.datastructures import Headers
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; "
@@ -30,3 +32,46 @@ class ClientHeaderMiddleware(BaseHTTPMiddleware):
             if request.headers.get("X-Dewpoint-Client") != "web":
                 return JSONResponse({"error": "forbidden"}, status_code=403)
         return await call_next(request)
+
+
+class BodyLimitMiddleware:
+    """Caps request bodies by the bytes actually received. Content-Length can't be relied on: chunked requests have
+    none, and FastAPI parses a body before any route dependency could object. The body is buffered up to the limit
+    before the app runs; one byte more answers 413 without reading the rest."""
+
+    def __init__(self, app: ASGIApp, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        declared = Headers(scope=scope).get("content-length", "")
+        if declared.isdigit() and int(declared) > self.max_bytes:
+            await JSONResponse({"error": "too_large"}, status_code=413)(scope, receive, send)
+            return
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            chunk = message.get("body", b"")
+            size += len(chunk)
+            if size > self.max_bytes:
+                await JSONResponse({"error": "too_large"}, status_code=413)(scope, receive, send)
+                return
+            chunks.append(chunk)
+            if not message.get("more_body", False):
+                break
+        replayed = False
+
+        async def replay() -> Message:
+            nonlocal replayed
+            if replayed:
+                return await receive()  # after the body: disconnect notifications
+            replayed = True
+            return {"type": "http.request", "body": b"".join(chunks), "more_body": False}
+
+        await self.app(scope, replay, send)

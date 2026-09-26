@@ -30,6 +30,7 @@ from dewpoint.engine.graph.schemas import (
     object_schema,
     standalone,
     target_schema,
+    widen,
 )
 from dewpoint.engine.graph.structure import Structure, analyze_structure
 from dewpoint.engine.graph.values import (
@@ -410,9 +411,10 @@ class _Validator:
                 node=site.node,
                 fld=site.field,
             )
-        if value.has_default:
-            self._check_instance(site, target, value.default)
-        return Resolved(resolved.schema, resolved.conditional and not value.has_default)
+        if not value.has_default:
+            return resolved
+        self._check_instance(site, target, value.default)
+        return Resolved(widen(resolved.schema, value.default), False)
 
     def _template(self, site: _Site, value: TemplateValue, target: Mapping[str, Any] | None) -> Resolved:
         if target is not None and not compatible({"type": "string"}, target):

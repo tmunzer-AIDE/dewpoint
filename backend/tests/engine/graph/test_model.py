@@ -62,3 +62,23 @@ def test_node_count_is_capped() -> None:
         g.node(f"n{i}", "testkit.echo@1")
     with pytest.raises(GraphFormatError):
         g.build()
+
+
+@pytest.mark.parametrize(
+    ("where", "value", "field"),
+    [
+        (("nodes", 0, "position"), {"x": float("inf"), "y": 0}, "/nodes/0/position/x"),
+        (("nodes", 0, "config"), {"value": [1, {"deep": float("nan")}]}, "/nodes/0/config/value/1/deep"),
+        (("nodes", 0, "options"), {"timeout_s": float("inf")}, "/nodes/0/options/timeout_s"),
+        (("settings",), {"outputs": {"x": float("-inf")}}, "/settings/outputs/x"),
+    ],
+)
+def test_non_finite_numbers_are_format_errors(where: tuple[Any, ...], value: Any, field: str) -> None:
+    data = G().node("a", "testkit.echo@1", {"value": 1}).data()
+    target = data
+    for key in where[:-1]:
+        target = target[key]
+    target[where[-1]] = value
+    with pytest.raises(GraphFormatError) as e:
+        parse_graph(data)
+    assert [(d.code, d.field) for d in e.value.diagnostics] == [("graph.format", field)]
