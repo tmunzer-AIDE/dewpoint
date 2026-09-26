@@ -34,6 +34,7 @@ from dewpoint.engine.graph.schemas import (
 )
 from dewpoint.engine.graph.structure import Structure, analyze_structure
 from dewpoint.engine.graph.values import (
+    CEL_KEYWORDS,
     ENVELOPE,
     LiteralValue,
     Pointer,
@@ -118,6 +119,7 @@ class _Site:
     field: str  # JSON pointer, for diagnostics
     region: uuid.UUID | None  # the scope the value is evaluated in
     at_exit: bool = False  # evaluated when that scope ends (loop `collect`, workflow outputs)
+    item_node: uuid.UUID | None = None  # whose `item` and `index` are in scope: the innermost loop, or a filter
 
 
 def _descendants(s: Structure) -> dict[uuid.UUID, frozenset[uuid.UUID]]:
@@ -196,9 +198,13 @@ def _settings(graph: Graph) -> list[Diagnostic]:
     defs = st.vars_schema.get("$defs", {})
     for name, schema in props.items() if isinstance(props, Mapping) else ():
         where = f"/settings/vars_schema/properties/{name}"
-        if not IDENT.match(name):
+        if not IDENT.match(name) or name in CEL_KEYWORDS:
             out.append(
-                Diagnostic(code="vars.invalid_name", field=where, message="Variable names are lowercase identifiers.")
+                Diagnostic(
+                    code="vars.invalid_name",
+                    field=where,
+                    message="Variable names are lowercase identifiers, and not `in`, `true`, `false` or `null`.",
+                )
             )
         if not isinstance(schema, Mapping) or "default" not in schema:
             out.append(Diagnostic(code="vars.no_default", field=where, message="Every variable needs a default value."))
@@ -246,6 +252,14 @@ class _Validator:
         self.diags.append(Diagnostic(code=code, message=message, node=node, field=fld, fix=fix))
 
     def run(self) -> None:
+        for n in self.g.nodes:
+            if n.key in CEL_KEYWORDS:
+                self.err(
+                    "graph.reserved_key",
+                    f"`{n.key}` can't be a step key: expressions couldn't refer to it.",
+                    node=n.id,
+                    fix="Rename the step.",
+                )
         for n_id in self.s.topo:
             self._node(self.s.nodes[n_id])
         for site, value in self.deferred:
@@ -268,10 +282,10 @@ class _Validator:
                 self.err("value.literal_only", _LITERAL_ONLY, node=n.id, fld=where)
                 continue
             if spec.ref == C.LOOP and pointer[0] == "collect":
-                self.deferred.append((_Site(n.id, where, n.id, at_exit=True), value))
+                self.deferred.append((_Site(n.id, where, n.id, at_exit=True, item_node=n.id), value))
                 continue
             root, inner = self._value_root(n, spec, pointer)
-            resolved[pointer] = self._value(_Site(n.id, where, region), value, root, inner)
+            resolved[pointer] = self._value(_Site(n.id, where, region, item_node=region), value, root, inner)
         if spec.ref == C.LOOP:
             items = resolved.get(("items",))
             self.item_schema[n.id] = element_schema(items.schema) if items is not None else None
@@ -485,7 +499,7 @@ class _Validator:
                     )
                     return None
                 return navigate(self.vars_root, p.rest, start=self.vars[str(p.name)])
-            if p.root in ("loop", "loops"):
+            if p.root in ("item", "index", "loops"):
                 return self._resolve_loop(site, p)
             return self._resolve_step(site, p)
         except PathError as e:
@@ -493,12 +507,12 @@ class _Validator:
             return None
 
     def _resolve_loop(self, site: _Site, p: RefPath) -> Resolved | None:
-        if p.root == "loop":
-            loop = site.region
+        if p.root in ("item", "index"):
+            loop = site.item_node
             if loop is None:
                 self.err(
                     "ref.loop_outside",
-                    "`loop.*` is only available inside a loop's body.",
+                    "`item` and `index` exist only inside a loop body or a filter predicate.",
                     node=site.node,
                     fld=site.field,
                 )
