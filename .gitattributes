@@ -1,0 +1,3 @@
+# Vendored cel-spec protos are kept byte-for-byte as pinned upstream (their git blob hashes are tested), including
+# two lines of trailing whitespace in checked.proto: whitespace checks don't apply to them.
+backend/src/dewpoint/engine/cel/proto/*.proto -whitespace

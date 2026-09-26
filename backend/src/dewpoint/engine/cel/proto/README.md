@@ -10,6 +10,8 @@ The CEL classifier reads checked ASTs (`google.protobuf.Any` wrapping `cel.expr.
 
 License: Apache-2.0 (the headers in the `.proto` files; the same license as Dewpoint). `tests/engine/cel/test_protos.py`
 checks the blob hashes.
+The `.proto` files are never reformatted: `checked.proto` has two lines of upstream trailing whitespace, so
+`.gitattributes` exempts these files from whitespace checks rather than changing their hashes.
 
 `*_pb2.py` and `*_pb2.pyi` are protoc output from grpcio-tools 1.84.0 (protobuf gencode 7.35.1). The only edit is the
 import of `syntax_pb2` in `checked_pb2.py` and `checked_pb2.pyi`, from `cel.expr` to this package. To regenerate, from
