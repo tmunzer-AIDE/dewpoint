@@ -202,7 +202,8 @@ Every run starts as a durable `run_requests` row, unique on `(tenant_id, idempot
   - `ref`: for example `steps.get_site.output.name`, optionally with a `default`
   - `template`: text with embedded refs
   - `cel`
-- **Scope:** `trigger.*`, `steps.<key>.output.*`, `steps.<key>.error`, `vars.*`, `loop.item`, `loop.index`, `run.*`.
+- **Scope:** `trigger.*`, `steps.<key>.output.*`, `steps.<key>.error`, `vars.*`, `item`, `index`, `loops.<key>.*`,
+  `run.*`. The innermost loop is `item`/`index` because CEL reserves `loop` (engine spec §4.3).
 - Output schemas come from manifests. For Mist, they come from OAS responses.
 - **Publish-time validation:**
   - type checks every ref;
@@ -258,7 +259,7 @@ Every run starts as a durable `run_requests` row, unique on `(tenant_id, idempot
 - **Storage:** parsed rows are stored encrypted as a claim-checked `run_inputs` row (tenant retention applies), and only its handle enters Temporal history. The original file isn't kept unless the tenant enables it for audit.
 - **In the graph:**
   - `trigger.rows` is a typed list of objects keyed by variable name, and `trigger.row_count` is also available. Pills and validation use the declared column types.
-  - A **loop** over `trigger.rows` exposes `loop.item.<column>` (for example `loop.item.site_name`), plus `loop.index`.
+  - A **loop** over `trigger.rows` exposes `item.<column>` (for example `item.site_name`), plus `index`.
   - The loop loads rows in pages through an activity, in child-workflow batches (§6.2). Loop concurrency and error policy per iteration (stop, or continue and collect failures) are set on the loop node.
   - The run summary lists the outcome for each row.
 - **UI:** "Run workflow" opens the input form with a file drop zone, a column-mapping step, a preview of the first rows with validation errors highlighted, and the row count. The start button states the row count ("Start run for 248 rows"). Write-capable workflows also show the confirmation rules from §10.4.

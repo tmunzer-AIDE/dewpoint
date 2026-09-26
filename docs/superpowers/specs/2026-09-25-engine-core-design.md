@@ -1,6 +1,6 @@
 # Dewpoint — Engine Core Design (sub-project 2a)
 
-- **Status:** Accepted as the basis for implementation, revision 5.2 (2026-09-25).
+- **Status:** Accepted as the basis for implementation, revision 5.3 (2026-09-26).
   - Revision 2 addressed join scopes, the local-CEL switch, evaluator isolation, profile routing and retirement.
   - Revision 3 addresses the version lifecycle (activation, queued requests, closure), nested loops, evaluator
     aggregate memory, and Temporal membership.
@@ -14,6 +14,15 @@
     - workflow-level data in `graph.settings`.
   - Revision 5.2 adds the contract hash (everything except display metadata), local-only schema references, and the
     two hashes per version (`graph_hash`, `version_hash`). It also states the lifecycle-lock rule directly as advisory locks.
+  - Revision 5.3 folds in plan 2a-2 (CEL) and its review:
+    - the typed-path proof and its conditions;
+    - `item`/`index` in place of the reserved `loop`;
+    - the step-presence contract, and `has()` guards for schema-declared optional fields;
+    - output schemas that list every serialized field as required;
+    - the work bound and the measured iteration limit, map caps and root projection;
+    - batched evaluator requests;
+    - the new diagnostic and outcome codes;
+    - the evaluator's Kubernetes transport, deferred to the Helm chart.
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
   This spec **narrows parent §6.4** (where CEL runs) and resolves the CEL item in parent §15.
 - **Evidence:** CEL spike, branch `spike/cel-evaluation`, commits `d6a8162` and `13a62e1`. See
@@ -109,6 +118,9 @@ class Node(Protocol):
 
 **Other rules:**
 - The activity wrapper validates `Config` before `run()` and `Output` after it. Output that doesn't match its schema is a `FatalError` (`output_schema_violation`).
+- The output schema is `Output`'s serialization schema, closed, and lists as required every field serialization
+  emits, including fields with defaults. Only `TypedDict` keys that aren't required, and fields with `exclude_if`,
+  may be absent. The wrapper serializes with `model_dump(mode="json")` and no `exclude_*` option.
 - An output field marked `x-sensitive: true` never reaches `run_steps`, previews or samples.
 - The SDK has its own semver. First-party plugins pin a major version.
 
@@ -192,7 +204,8 @@ Tenant-scoped tables use FORCE RLS with the foundations policy pattern.
   - `steps.<key>.output.*`
   - `steps.<key>.error`: `{code, message, attempt}`; only for steps with `on_error` ≠ `fail`.
   - `vars.*`: typed by `vars_schema`.
-  - `loop.item`, `loop.index`: the innermost loop.
+  - `item`, `index`: the innermost loop's item and position; inside a `filter` predicate, the filter's item. (CEL
+    reserves `loop` as a word, so references and CEL use the same names.)
   - `loops.<loop_key>.item`, `loops.<loop_key>.index`: any enclosing loop, from inside nested loops.
   - `run.id`, `run.started_at`, `run.now`: workflow time from `workflow.now()`, never the host clock.
 - **Path availability** (parent §6.4) uses *liveness conditions*, computed per region after regions are resolved.
@@ -201,7 +214,15 @@ Tenant-scoped tables use FORCE RLS with the foundations policy pattern.
     that the producer succeeded, in the same or an enclosing scope. Otherwise it is *conditional*.
   - This reduces to dominance for exclusive branches, and it also accepts refs after a parallel fan-out/join, which
     dominators would wrongly reject. A property test checks it against simulated executions.
-  - Conditional refs, and schema-optional fields, need a `default` (ref, template) or a `has()` guard (CEL).
+  - Conditional refs, and schema-optional fields, need a `default` (ref, template) or a `has()` guard (CEL). A
+    `default` replaces a missing *or* null value.
+  - In CEL:
+    - a step that may not have run is guarded with `has(steps.<key>.output)` (or `has(steps.<key>.error)`);
+    - a field the schema declares but doesn't require, and every such ancestor, is guarded with `has()` on that field,
+      e.g. `has(trigger.a) && has(trigger.a.b) && trigger.a.b.c == 1`;
+    - data the schema doesn't declare (open objects, schemaless bodies) needs no guard. If it's missing at run time,
+      the evaluation fails with `evaluation_error` and the step's error policy applies. (§5.10 `cel.conditional_ref`)
+- **Names.** `in`, `true`, `false` and `null` can't be step keys or variable names: CEL can't select them as fields.
 - **Variables:**
   - `set_variables` writes only declared `vars`.
   - The validator rejects two writers of the same variable on branches that can run concurrently.
@@ -364,15 +385,30 @@ the race tests assert that it stays at zero. 2a implements these rules in `start
     qualified name, so that path type-checks as a list.
   - Only always-available paths get a typed declaration. Conditional paths stay reachable only through the `dyn` roots behind `has()`.
   - Fields with no schema (for example raw webhook bodies) remain `dyn`.
-- **This encoding goes beyond what the spike validated.** Before anything relies on it, the implementation plan's
-  first CEL task must prove, with tests, how it behaves in cel-cpp 0.1.3:
-  - qualified-name resolution;
-  - interaction with `has()`;
-  - binding of both the root and the qualified identifier.
-  If it fails, `asList()` (§5.4) becomes the only way to use a list-valued `dyn` range.
-- **Binding checks.** Before evaluation, every bound value is checked against its declared kind (list, map, string,
-  int, double, bool). A mismatch fails the evaluation with `type_mismatch` before any CEL runs. This makes the
-  classifier's type facts hold at runtime, even if a producer violated its schema.
+- **Proven for cel-cpp 0.1.3** (plan 2a-2; `tests/engine/cel/test_typed_paths.py` pins every behaviour below):
+  - the checker resolves the longest declared qualified name, so the range types as a list; undeclared paths,
+    `x["key"]` index syntax and lists nested inside elements stay `dyn` (use `asList()`);
+  - comprehension variables shadow roots in the checker and the runtime alike;
+  - binding both the root and the qualified identifier works; the qualified binding is what the expression reads;
+  - the runtime converts every bound value against its declared type, deeply;
+  - `has()` works on roots and on prefixes of typed paths. On a declared typed path itself, the checker collapses
+    `has(p)` into `p`: publish rejects that form (`cel.has_on_typed_path`), and a `has()` test alone never declares
+    the path;
+  - `loop` is a reserved identifier, and `in`, `true`, `false`, `null` can't be selected as fields (§4.3 names);
+  - the runtime's own AST serialization isn't deterministic (protobuf maps); nothing stores or hashes it.
+- **Declarations are per expression.** Roots always; `item` (`dyn`, or a typed list) and `index` (`int`) where they
+  exist; and, for each select chain in the expression, every prefix that is an always-available, non-null array.
+  Element types: objects `map<string, dyn>`, strings `string`, booleans `bool`, arrays `list<dyn>`, anything else
+  `dyn` (numbers stay `dyn`: the runtime would convert an int in a `double` slot, or refuse `3.0` in an `int` one).
+- **Projection.** A root is bound as the part the expression's chains can observe: maps keep only keys on a chain,
+  a chain's end keeps its whole value, a `has()` test keeps only the key. Measurement (§5.6) and requests (§5.7) see
+  that projection, never the whole workflow state.
+- **Step presence.** `steps` holds every step visible from the scope: `{"output": …}` once it succeeded,
+  `{"error": …}` once it failed with a handled error, `{}` before either. So `has(steps.x.output)` is the guard.
+- **Binding checks.** Before evaluation, every bound value is checked against its declared type, deeply, and must be
+  plain JSON: text map keys, finite numbers, integers within int64. A mismatch fails the evaluation with
+  `type_mismatch` before any CEL runs. This makes the classifier's type facts hold at runtime, even if a producer
+  violated its schema.
 - **Time.** `datetime` isn't accepted as an input variable (spike). `run.now` and `run.started_at` are bound as
   RFC 3339 UTC strings, used as `timestamp(run.now)`. The activity evaluator receives them from the workflow; it never reads its own clock.
 
@@ -381,11 +417,13 @@ the race tests assert that it stays at zero. 2a implements these rules in `start
 | Function | Purpose | Cost | Output bound |
 |---|---|---|---|
 | `sortedKeys(map<string, dyn>) → list<string>` | the only way to iterate a map (code-point order) | O(n log n), n ≤ map size | ≤ input |
-| `asList(dyn) → list<dyn>` | proves a `dyn` range is a list; `type_mismatch` error otherwise (a map is never accepted) | O(1) | = input |
+| `asList(list<dyn>) → list<dyn>` | proves a `dyn` range is a list: the runtime dispatches only lists to it, anything else is `type_mismatch` (a map is never accepted) | O(n) conversion | = input |
 | `ipInCidr(string, string) → bool`, `cidrContains(string, string) → bool` | IP/CIDR tests (IPv4/IPv6) | O(1) | bool |
-| `macNormalize(string) → string`, `macOui(string) → string` | MAC formats | O(1) | ≤ 17 code points |
+| `macNormalize(string) → string`, `macOui(string) → string` | MAC formats: 12 lowercase hex digits (Mist's form) from `aa:bb:…`, `aa-bb-…`, `aabb.ccdd.eeff` or bare hex; the first 6 | O(1) | 12 / 6 code points |
 
 - Also available: the CEL standard library, **minus** extension libraries and `cel.bind`, which aren't enabled.
+- IP, CIDR and MAC arguments longer than 64 code points are errors, not work. A function's error is a CEL error
+  value, so `||` and `&&` can absorb it.
 - **Every function declares** that it is deterministic (no time, randomness, I/O or locale), its cost class, its
   output bound, and whether it takes a map.
 - **A function that takes a map must not expose the map's iteration order.** `sortedKeys` does this by sorting.
@@ -420,7 +458,16 @@ cel-spec protos, Apache-2.0, pinned commit). It assigns exactly one class.
    largest intermediate value in bytes. It assumes every referenced input is at the runtime caps (§5.6) and uses
    each allow-list entry's rule; for example, concatenation adds its operands' bounds, and a comprehension
    multiplies its body's bound by the range's list-length cap.
-   - Local requires ≤ 10,000 iterations, so the budget can never fire locally, and ≤ 1 MiB for the largest intermediate value.
+   - Local requires ≤ 9,999 iterations (the runtime's budget of 10,000 lets 9,999 pass), so the budget can never
+     fire locally, and ≤ 1 MiB for the largest intermediate value.
+   - Sizes use a model close to the runtime's memory: 16 bytes per scalar and per container, plus text bytes. A
+     value's model size is at most 8 × its canonical JSON size + 8, so the referenced inputs together are at most
+     524,296 model bytes. Distinct input references share that mass (`a.x + a.y` is one input's worth); overlapping
+     ones count again (`s + s`). Inside a comprehension, a bound may grow with the current element, whose sizes sum to
+     the range's (`l.map(e, e.name)` stays near `l`); `m[k]` over `sortedKeys(m)` sums to `m`.
+   - **Work.** Iterations alone don't bound CPU: a body can call Python-implemented functions hundreds of times per
+     element. The estimator also bounds *work*: one unit per node evaluation, 15 per `fn-1` call, one per 64 bytes a
+     regular expression scans. Local requires ≤ 2,000,000 units (about 0.2 s on the gate machine).
    - The bounds are stored with the version.
 
 **Activity.** Valid expressions that are not local run in the isolated `cel.evaluate` activity (§5.7), and the
@@ -431,14 +478,14 @@ result is recorded in history. This is the parent's `eval` activity (§6.5).
 - Before a local evaluation, `RunGraph` measures the values the expression references (identifiers from the checked AST's reference map). Those values are already in workflow state, so measuring is deterministic.
 - **Caps (the estimator's assumptions):**
   - each referenced value ≤ 64 KiB of canonical JSON, and ≤ 64 KiB in total;
-  - every list ≤ 1,000 elements;
+  - every list ≤ 1,000 elements, every map ≤ 1,000 entries;
   - every string ≤ 16 KiB.
 - If any cap is exceeded, the same expression runs in `cel.evaluate` instead. Routing depends only on recorded values, so a replay routes the same way.
 - **Workflow-task time.** Since its last await, the scheduler sums the **stored static bounds** of the local
   evaluations it has run: their iterations and intermediate bytes. Before an evaluation that would push the sum past the yield
   threshold, it awaits a 1 ms durable timer, which creates a yield point. It also yields after 200 evaluations,
   whatever their bounds.
-  - Initial thresholds: 20,000 iterations or 8 MiB.
+  - Initial thresholds: 20,000 iterations, 8 MiB or 4,000,000 work units (§5.5).
   - The decision uses only stored bounds and a count, so it replays identically. The timer events count toward the continue-as-new threshold.
   - **This is a policy to measure, not a proven CPU bound.** A p99 latency says nothing about the worst case.
     Before local evaluation is enabled, the plan must run an adversarial test: expressions that max out the
@@ -461,7 +508,15 @@ not inside a worker that holds credentials.
   allow-list of its own settings, and a startup check refuses to run if anything else is present.
 - **No egress.**
   - In Compose: `network_mode: none`, with a Unix socket on a volume shared only with the CEL activity worker.
-  - In Helm: its own Deployment, with a NetworkPolicy that denies all egress and admits only the CEL activity worker's pods.
+  - **Kubernetes: deferred to the Helm chart (§12).** A Unix socket can't cross pods. A sidecar in the worker's pod
+    would share the worker's network namespace and egress, so it can't be the answer. Before the chart ships CEL
+    evaluation, a network transport must be designed and approved:
+    - authenticated: mTLS or equivalent, with a credential that grants only evaluator calls;
+    - the evaluator in its own Deployment, with a NetworkPolicy that admits only the CEL activity worker's pods and
+      denies all egress;
+    - no Kubernetes API access: no service-account token, no injected service variables.
+
+    Until then, Kubernetes deployments can't run activity-class CEL.
 - **Minimal process rights.** Its own non-root UID, distinct from the worker's. Read-only root filesystem, all
   capabilities dropped, `no-new-privileges`, and the runtime's default seccomp profile.
 - **Tenant data** enters only as the values one evaluation references, and it leaves only as that evaluation's
@@ -480,11 +535,13 @@ not inside a worker that holds credentials.
 - **Linux only.** The evaluator refuses to start if it can't apply these limits.
 
 **IPC limits:**
-- **Framing.** Length-prefixed frames. A request holds the profile, the expression, its declarations and the referenced values.
+- **Framing.** Length-prefixed frames of canonical JSON, schema `cel.evaluate.v1`. A request holds the profile, the
+  expression, its declarations and 1 to 1,000 binding sets; each set is its own evaluation with its own budget (the
+  `filter` batches of §6). The evaluator re-checks the declared types and the order rule before evaluating.
 - **Request size ≤ 4 MiB.** The activity checks the size before sending. A larger request is the evaluation outcome `input_too_large`.
 - **Responses ≤ 256 KiB** plus the envelope. A malformed or oversized frame closes the connection.
-- **Aggregate limits.** The evaluator container has cgroup limits: memory (Compose `mem_limit`, Helm
-  `resources.limits.memory`; initially 2 GiB), CPU, and pids.
+- **Aggregate limits.** The evaluator container has cgroup limits: memory (Compose `mem_limit`; initially 2 GiB),
+  CPU, and pids.
   - At startup it reads its own limits (`memory.max`, `cpu.max`) and derives the concurrency *N*:
     - each slot is charged 256 MiB for its child, plus 8.25 MiB of buffers (one in-flight request, one queued request, one response);
     - a fixed 256 MiB reserve covers the zygote and the IPC server;
@@ -513,7 +570,9 @@ not inside a worker that holds credentials.
 **Results:**
 - The outcome is a value: `{ok: value}` or `{error: code, message}`.
 - `input_too_large`, `memory_limit`, `cpu_limit`, `timeout`, `iteration_budget_exceeded` and `output_too_large`
-  are evaluation outcomes. They are **recorded and not retried**.
+  are evaluation outcomes, as are `type_mismatch`, `evaluation_error` (any other CEL runtime error),
+  `non_json_value` (§5.8) and `evaluation_crashed` (the child died by another signal). They are **recorded and not
+  retried**. A child killed by SIGXCPU, or by SIGKILL at the hard CPU limit, is `cpu_limit`.
 - Temporal retries (3 attempts, backoff) cover only infrastructure failures: the evaluator is unreachable, the zygote died, or the answer is `busy`.
 
 ### 5.8 Output canonicalization
@@ -550,7 +609,9 @@ library, the classifier or the estimator:
 **Rollout: local evaluation is a build property, never a runtime setting.**
 - Each worker build has a constant, `LOCAL_CEL_PROFILE`: the one profile it evaluates in-process, or none.
   - The constant is part of `engine_abi`, so changing it produces a new build ID.
-  - Builds ship with none until gates 1–7 pass for that profile.
+  - Builds ship with none until gates 1–7 pass for that profile. Plan 2a-2 ports gates 1, 2, 3, 5, 6 and the
+    in-process half of 7; gate 4 (Temporal replay) and the workflow-task half of gate 7 need `RunGraph` and run in
+    2a-3, which is also where `LOCAL_CEL_PROFILE` can first be set.
 - **Routing is a pure function of three things:**
   - the build's `LOCAL_CEL_PROFILE`;
   - the version's profile, classes and bounds, loaded once by a local activity and so recorded;
@@ -575,11 +636,19 @@ library, the classifier or the estimator:
 | `cel.iteration_budget` | "An expression can iterate at most 10,000 times. For large lists, use a Loop or Filter node." |
 | `cel.too_long` | "Expressions are limited to 16,384 characters." |
 | `cel.unknown_function` | "`f` isn't available. Available functions: …" |
-| `cel.conditional_ref` | "`steps.x` may not have run on every path. Guard it with `has(steps.x)`." |
+| `cel.conditional_ref` | "`steps.x` may not have run on every path, so `steps.x.output` may be missing. Guard it with `has(steps.x.output)`." Or: "`trigger.a` is optional in its schema, so it may be missing. Guard it with `has(trigger.a)`." |
+| `cel.invalid` | "This expression isn't valid: …" (the checker's message, with line and column) |
+| `cel.unknown_name` | "`x` isn't defined here. Expressions start with trigger, steps, vars, item, index, loops or run." |
+| `cel.bad_path` | "`steps.a.outputs`: after `steps.<key>` comes `output` or `error`." (the reference grammar's message) |
+| `cel.has_on_typed_path` | "`p` always exists here, and `has()` on it gives the list, not true. Remove the `has()` test." |
+| `cel.type_mismatch` | "This expression gives integer, but this field expects boolean." |
+| `cel.non_json_result` | "This expression gives a value JSON can't hold (bytes or a type)." |
+| `graph.reserved_key` | "`in` can't be a step key: expressions couldn't refer to it." |
+- `cel.iteration_budget` is a warning: nested loops, or a bound over 9,999, may stop at the budget with large inputs.
 
 - Run errors (`steps.<key>.error.code`) use the same documented codes for the runtime outcomes:
   `iteration_budget_exceeded`, `memory_limit`, `cpu_limit`, `timeout`, `type_mismatch`, `input_too_large`,
-  `output_too_large`, `cel_profile_unavailable`.
+  `output_too_large`, `cel_profile_unavailable`, `evaluation_error`, `non_json_value`, `evaluation_crashed`.
 
 ## 6. `RunGraph` interpreter
 
@@ -839,7 +908,8 @@ abandons or restarts an activity or a child workflow.
    Every check covers the pinned closure. Retirement is blocked by active and queued references; forcing it
    cancels queued requests explicitly, with an audit entry. A running run holds only its build (node types) or its
    profile's evaluator (CEL).
-7. **Typed-path encoding** (§5.3) is the first CEL item to prove. `asList()` is the fallback.
+7. **Typed-path encoding** (§5.3): proven in plan 2a-2, with the conditions listed there. `asList()` remains the
+   way to iterate `dyn` and nested lists.
 8. **Package boundaries** follow the parent rules: `engine` is pure, storage lives in `core`, and wiring lives in `apps`. `testkit` stays under `tests/`.
 9. **Nested loops** are allowed when properly nested (depth ≤ 3, per-run cap of 100,000 iterations). Crossing regions are rejected.
 10. **Execution boundaries.**
@@ -858,5 +928,9 @@ abandons or restarts an activity or a child workflow.
   - PayloadCodec and claim check, including `cel.evaluate` inputs by handle, and results derived from sensitive data staying claimed;
   - retention.
 - **3:** flow plugin completion, and the Mist, messaging and ITSM plugins, with `ctx.connection()` and `ctx.http`.
-- **4:** editor UI: CEL class badges, and the diagnostics from §5.10.
+- **4:** editor UI: CEL class badges, and the diagnostics from §5.10. With the Helm chart: the evaluator's network
+  transport (§5.7).
+  - It must be designed and approved before the chart runs activity-class CEL.
+  - The Compose socket design doesn't carry over: a Unix socket can't cross pods, and a sidecar in the worker's pod
+    would share the worker's egress.
 - **5:** AI.
