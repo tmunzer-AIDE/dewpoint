@@ -38,10 +38,11 @@ async def read_frame(reader: asyncio.StreamReader, limit: int) -> dict[str, Any]
     (length,) = _HEADER.unpack(header)
     if length > limit:
         raise FrameError(f"frame of {length} bytes exceeds {limit}")
+    body = await reader.readexactly(length)
     try:
-        message = json.loads(await reader.readexactly(length))
-    except (UnicodeDecodeError, json.JSONDecodeError) as e:
-        raise FrameError("frame isn't JSON") from e
+        message = json.loads(body)
+    except (ValueError, RecursionError) as e:  # not UTF-8 or not JSON, too many digits, nested too deep
+        raise FrameError("frame isn't JSON this protocol can read") from e
     if not isinstance(message, dict) or message.get("schema") != SCHEMA:
         raise FrameError(f"frame isn't a {SCHEMA} message")
     return message
@@ -80,7 +81,9 @@ def parse_request(message: Mapping[str, Any]) -> IdentityRequest | EvaluateReque
     profile, expr, decls, bindings = (message[k] for k in ("profile", "expr", "declarations", "bindings"))
     if not isinstance(profile, str) or not isinstance(expr, str) or not 0 < len(expr) <= MAX_EXPR:
         raise FrameError("bad profile or expression")
-    if not isinstance(decls, dict) or not all(isinstance(k, str) and v in T.SIGNATURES for k, v in decls.items()):
+    if not isinstance(decls, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) and v in T.SIGNATURES for k, v in decls.items()
+    ):
         raise FrameError("bad declarations")
     if not isinstance(bindings, list) or not 0 < len(bindings) <= MAX_BATCH:
         raise FrameError(f"between 1 and {MAX_BATCH} binding sets")

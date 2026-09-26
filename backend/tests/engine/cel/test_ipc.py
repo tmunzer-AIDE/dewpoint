@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import struct
 from typing import Any
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from dewpoint.engine.cel import evaluate as E
 from dewpoint.engine.cel import ipc
@@ -36,6 +39,8 @@ async def test_frames_round_trip_and_are_bounded() -> None:
     [
         {"schema": ipc.SCHEMA, "kind": "evaluate"},
         {**request("x", {"x": 1}).to_json(), "declarations": {"x": "list(dyn)"}},
+        {**request("x", {"x": 1}).to_json(), "declarations": {"x": ["list"]}},  # unhashable: was a TypeError
+        {**request("x", {"x": 1}).to_json(), "declarations": {"x": {"a": 1}}},
         {**request("x", {"x": 1}).to_json(), "bindings": []},
         {**request("x", {"x": 1}).to_json(), "bindings": [{"y": 1}]},
         {**request("x", {"x": 1}).to_json(), "expr": ""},
@@ -45,6 +50,46 @@ async def test_frames_round_trip_and_are_bounded() -> None:
 def test_malformed_requests_are_refused(message: dict[str, Any]) -> None:
     with pytest.raises(ipc.FrameError):
         ipc.parse_request(message)
+
+
+def _frame(body: bytes) -> bytes:
+    return struct.pack(">I", len(body)) + body
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"[" * 100_000 + b"]" * 100_000,  # deeply nested but within the size limit: was a RecursionError
+        b'{"schema": "cel.evaluate.v1", "n": ' + b"9" * 5_000 + b"}",  # past Python's int-digit limit: ValueError
+        b'{"schema": "cel.evaluate.v1", "s": "\ud800"}' + b"\xff",  # invalid JSON after a valid prefix
+    ],
+)
+async def test_malformed_frames_are_frame_errors(body: bytes) -> None:
+    assert len(body) <= ipc.MAX_REQUEST
+    with pytest.raises(ipc.FrameError):
+        await _roundtrip(_frame(body), ipc.MAX_REQUEST)
+
+
+json_values = st.recursive(
+    st.none() | st.booleans() | st.integers() | st.floats(allow_nan=False) | st.text(max_size=8),
+    lambda inner: st.lists(inner, max_size=4) | st.dictionaries(st.text(max_size=8), inner, max_size=4),
+    max_leaves=20,
+)
+VALID = request("x + 1", {"x": 1}).to_json()
+
+
+@given(
+    st.fixed_dictionaries({k: st.just(v) | json_values for k, v in VALID.items() if k != "schema"}),
+    st.booleans(),
+)
+def test_parse_request_refuses_anything_malformed_with_a_frame_error(message: dict[str, Any], extra: bool) -> None:
+    """Whatever JSON arrives, parsing either gives a request or raises FrameError: the server closes the connection
+    on FrameError and nothing else. Each field is either valid or arbitrary JSON, so every check gets reached."""
+    candidate = {**message, "schema": ipc.SCHEMA, **({"other": 1} if extra else {})}
+    try:
+        ipc.parse_request(candidate)
+    except ipc.FrameError:
+        pass
 
 
 def test_each_binding_set_is_its_own_evaluation() -> None:
