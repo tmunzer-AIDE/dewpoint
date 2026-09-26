@@ -14,6 +14,12 @@ jobs:
       - run: uv run mypy src
       - run: uv run lint-imports
       - run: uv run pytest -q
+        env: { DEWPOINT_CEL_GATE_RESULTS: cel-gate-results }  # CEL gates 6 and 7 record their measurements (spec §5.9)
+      - if: always()
+        run: cat cel-gate-results/*.json || echo "no CEL gate results"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: cel-gate-results, path: backend/cel-gate-results/ }
       - run: uv run pip-licenses --fail-on="GPL;AGPL;LGPL;SSPL;BUSL" --partial-match
   security:
     runs-on: ubuntu-latest
