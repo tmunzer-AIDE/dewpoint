@@ -12,8 +12,10 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 
+from dewpoint.engine.cel.record import ExpressionRecord
+from dewpoint.engine.graph import cel_check
 from dewpoint.engine.graph import liveness as lv
-from dewpoint.engine.graph.diagnostics import Diagnostic
+from dewpoint.engine.graph.diagnostics import Diagnostic, Severity
 from dewpoint.engine.graph.model import Graph, GraphNode
 from dewpoint.engine.graph.schemas import (
     PathError,
@@ -21,6 +23,7 @@ from dewpoint.engine.graph.schemas import (
     allowed_kinds,
     compatible,
     contains_literal,
+    declared_optional,
     describe,
     element_schema,
     json_types,
@@ -36,6 +39,7 @@ from dewpoint.engine.graph.structure import Structure, analyze_structure
 from dewpoint.engine.graph.values import (
     CEL_KEYWORDS,
     ENVELOPE,
+    CelValue,
     LiteralValue,
     Pointer,
     RefPath,
@@ -93,6 +97,7 @@ class ValidationResult:
     subflow_pins: Mapping[str, str] = field(default_factory=dict)  # node id -> pinned version id
     failure_handler_version_id: uuid.UUID | None = None
     output_schema: Mapping[str, Any] = field(default_factory=dict)
+    expressions: tuple[ExpressionRecord, ...] = ()  # every CEL value, classified (spec §5.5)
 
     @property
     def ok(self) -> bool:
@@ -245,11 +250,19 @@ class _Validator:
         # `stop` anywhere, inside a loop body too, ends the whole run: outputs may miss steps that hadn't run yet
         self.has_stop = any(spec.ref == C.STOP for spec in s.specs.values())
         self.availability: dict[tuple[Any, ...], bool] = {}
+        self.expressions: list[ExpressionRecord] = []
 
     def err(
-        self, code: str, message: str, *, node: uuid.UUID | None = None, fld: str | None = None, fix: str | None = None
+        self,
+        code: str,
+        message: str,
+        *,
+        node: uuid.UUID | None = None,
+        fld: str | None = None,
+        fix: str | None = None,
+        severity: Severity = "error",
     ) -> None:
-        self.diags.append(Diagnostic(code=code, message=message, node=node, field=fld, fix=fix))
+        self.diags.append(Diagnostic(code=code, message=message, node=node, field=fld, fix=fix, severity=severity))
 
     def run(self) -> None:
         for n in self.g.nodes:
@@ -276,7 +289,10 @@ class _Validator:
         self._check_literals(n, spec)
         resolved: dict[Pointer, Resolved | None] = {}
         region = self.s.region_of[n.id]
-        for pointer, value in iter_values(n.config):
+        values = list(iter_values(n.config))
+        if spec.ref in (C.LOOP, C.FILTER):  # `items` first: the predicate and `collect` read its element type
+            values.sort(key=lambda pv: pv[0][:1] != ("items",))
+        for pointer, value in values:
             where = pointer_str(pointer)
             if not pointer or ((spec.ref, pointer[0]) in _WHOLE_LITERAL and len(pointer) == 1):
                 self.err("value.literal_only", _LITERAL_ONLY, node=n.id, fld=where)
@@ -284,12 +300,13 @@ class _Validator:
             if spec.ref == C.LOOP and pointer[0] == "collect":
                 self.deferred.append((_Site(n.id, where, n.id, at_exit=True, item_node=n.id), value))
                 continue
+            item_node = n.id if spec.ref == C.FILTER and pointer[0] == "predicate" else region
             root, inner = self._value_root(n, spec, pointer)
-            resolved[pointer] = self._value(_Site(n.id, where, region, item_node=region), value, root, inner)
-        if spec.ref == C.LOOP:
-            items = resolved.get(("items",))
-            self.item_schema[n.id] = element_schema(items.schema) if items is not None else None
-        elif spec.ref == C.RUN_WORKFLOW:
+            resolved[pointer] = self._value(_Site(n.id, where, region, item_node=item_node), value, root, inner)
+            if spec.ref in (C.LOOP, C.FILTER) and pointer == ("items",):
+                items = resolved[pointer]
+                self.item_schema[n.id] = element_schema(items.schema) if items is not None else None
+        if spec.ref == C.RUN_WORKFLOW:
             info = self._subflow(n)
             if info is None:
                 self.err(
@@ -416,14 +433,15 @@ class _Validator:
             return self._ref_value(site, value, target)
         if isinstance(value, TemplateValue):
             return self._template(site, value, target)
-        self.err(
-            "cel.unavailable",
-            "CEL expressions aren't available in this build yet.",
-            node=site.node,
-            fld=site.field,
-            fix="Use a reference or a template for now.",
+        return self._cel(site, value, target)
+
+    def _cel(self, site: _Site, value: CelValue, target: Mapping[str, Any] | None) -> Resolved | None:
+        result = cel_check.check(
+            value.expr, target, _CelSite(self, site), node=str(site.node) if site.node else None, field=site.field
         )
-        return None
+        if result.record is not None:
+            self.expressions.append(result.record)
+        return result.resolved
 
     def _check_instance(self, site: _Site, schema: Mapping[str, Any] | None, instance: Any) -> None:
         if schema is None:
@@ -486,7 +504,15 @@ class _Validator:
 
     # ---- references -----------------------------------------------------------------------------------------
 
-    def _resolve(self, site: _Site, p: RefPath) -> Resolved | None:
+    def _resolve(self, site: _Site, p: RefPath, *, report: bool = True) -> Resolved | None:
+        """`report=False` answers a question (e.g. is this path a typed list?) without adding diagnostics."""
+        mark = len(self.diags)
+        resolved = self._resolve_reported(site, p)
+        if not report:
+            del self.diags[mark:]
+        return resolved
+
+    def _resolve_reported(self, site: _Site, p: RefPath) -> Resolved | None:
         try:
             if p.root == "trigger":
                 return navigate(self.g.settings.input_schema, p.rest)
@@ -600,6 +626,21 @@ class _Validator:
         r = navigate(schema, p.rest)
         return Resolved(r.schema, r.conditional or not available)
 
+    def _declared_optional(self, site: _Site, p: RefPath) -> tuple[int, ...]:
+        """Positions in `p.rest` the schema declares optional (spec §4.3): CEL guards them, references default them."""
+        if p.root == "trigger":
+            return declared_optional(self.g.settings.input_schema, p.rest)
+        if p.root == "vars" and p.name in self.vars:
+            return declared_optional(self.vars_root, p.rest, start=self.vars[str(p.name)])
+        if p.root in ("item", "loops") and p.section == "item":
+            loop = site.item_node if p.root == "item" else self.s.by_key.get(str(p.name))
+            return declared_optional(self.item_schema.get(loop) if loop else None, p.rest)
+        if p.root == "steps":
+            producer = self.s.by_key.get(str(p.name))
+            schema = ERROR_SCHEMA if p.section == "error" else self.out_schema.get(producer) if producer else None
+            return declared_optional(schema, p.rest)
+        return ()
+
     def _implies(
         self,
         home: uuid.UUID | None,
@@ -709,6 +750,23 @@ class _Validator:
             self.failure_handler_version_id = info.version_id
 
 
+class _CelSite:
+    """The validator's view for one CEL value (cel_check.CelContext)."""
+
+    def __init__(self, v: _Validator, site: _Site) -> None:
+        self.v, self.site = v, site
+        self.has_item = site.item_node is not None
+
+    def resolve(self, path: RefPath, *, report: bool) -> Resolved | None:
+        return self.v._resolve(self.site, path, report=report)
+
+    def optional_fields(self, path: RefPath) -> tuple[int, ...]:
+        return self.v._declared_optional(self.site, path)
+
+    def error(self, code: str, message: str, *, fix: str | None = None, severity: Severity = "error") -> None:
+        self.v.err(code, message, node=self.site.node, fld=self.site.field, fix=fix, severity=severity)
+
+
 def validate(graph: Graph, ctx: ValidationContext) -> ValidationResult:
     settings = _settings(graph)
     structure, structural = analyze_structure(graph, ctx.catalog)
@@ -724,4 +782,5 @@ def validate(graph: Graph, ctx: ValidationContext) -> ValidationResult:
         subflow_pins=dict(v.pins),
         failure_handler_version_id=v.failure_handler_version_id,
         output_schema=v.output_schema,
+        expressions=tuple(sorted(v.expressions, key=lambda r: (r.node or "", r.field))),
     )

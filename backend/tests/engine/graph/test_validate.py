@@ -304,7 +304,7 @@ def test_literal_only_kinds_and_cel() -> None:
     assert codes(G().node("f", "flow.filter@1", {"items": [1], "predicate": True})) == ["value.kind_not_allowed"]
     filtered = G().node("f", "flow.filter@1", {"items": [1], "predicate": ref("vars.x", default=True)})
     assert codes(filtered) == ["value.kind_not_allowed"]
-    assert codes(G().node("f", "flow.filter@1", {"items": [1], "predicate": cel("item > 1")})) == ["cel.unavailable"]
+    assert codes(G().node("f", "flow.filter@1", {"items": [1], "predicate": cel("item > 1")})) == []
 
 
 def test_literal_config_is_validated() -> None:

@@ -8,6 +8,7 @@ from dewpoint.engine.graph.schemas import (
     allowed_kinds,
     compatible,
     contains_literal,
+    declared_optional,
     element_schema,
     json_types,
     literal_on_path,
@@ -92,3 +93,22 @@ def test_markers() -> None:
     assert not contains_literal(switch, target_schema(switch, ["cases", 0, "when"]))
     assert allowed_kinds(FilterConfig.model_json_schema(), ["predicate"]) == frozenset({"cel"})
     assert allowed_kinds(loop, ["items"]) is None
+
+
+def test_declared_optional_positions_stop_where_the_schema_stops() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "a": {"type": "object", "properties": {"b": {"$ref": "#/$defs/B"}}, "required": ["b"]},
+            "open": {"type": "object"},
+            "n": {"type": ["object", "null"], "properties": {"x": {"type": "string"}}},
+        },
+        "required": ["open", "n"],
+        "$defs": {"B": {"type": "object", "properties": {"c": {"type": "string"}}}},
+    }
+    assert declared_optional(schema, ("a", "b", "c")) == (0, 2)  # a optional, b required, c optional (through $ref)
+    assert declared_optional(schema, ("open", "anything", "deeper")) == ()  # undeclared: open data
+    assert declared_optional(schema, ("n", "x")) == (1,)  # null is a value, not absence: n itself is required
+    assert declared_optional(schema, ("a", 0)) == (0,)  # an index ends the walk
+    assert declared_optional(None, ("a",)) == ()
+    assert declared_optional(schema, ("c",), start=schema["$defs"]["B"]) == (0,)
