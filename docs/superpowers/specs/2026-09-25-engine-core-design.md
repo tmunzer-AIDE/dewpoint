@@ -20,7 +20,8 @@
     - the step-presence contract, and `has()` guards for schema-declared optional fields;
     - an exact output contract: every serialized field required, dumps by alias, no model serializers;
     - measured limits: 9,999 iterations, a work bound that charges each call by the size of what it reads, retained
-      `map`/`filter` accumulators within 4 MiB, and 200-entry list and map caps (provisional until the Linux gate).
+      `map`/`filter` accumulators within a 4 MiB classification bound, and 200-entry list and map caps (measured on
+      Linux, finalized at checkpoint 3).
       These define `cls-1`, which nothing published had used (§5.1);
     - root projection;
     - batched evaluator requests;
@@ -478,16 +479,17 @@ cel-spec protos, Apache-2.0, pinned commit). It assigns exactly one class.
    each allow-list entry's rule; for example, concatenation adds its operands' bounds, and a comprehension
    multiplies its body's bound by the range's list-length cap.
    - Local requires ≤ 9,999 iterations (the runtime's budget of 10,000 lets 9,999 pass), so the budget can never
-     fire locally, and ≤ 4 MiB of memory.
+     fire locally, and ≤ 4 MiB of estimated memory. That is a classification bound, not a hard RSS ceiling: gate 6
+     allows measured growth up to 1.5 × it.
    - **Memory** is the largest intermediate value plus what the runtime retains. cel-expr-python 0.1.3 copies a
      `map` or `filter` accumulator every iteration and keeps every copy until the evaluation ends, so the estimator
-     charges 48 bytes × n(n + 1)/2 per list-building step over a range of n, summed over a chain.
-     - Measured: 41–45 bytes per slot at n ≥ 200.
+     charges 56 bytes × n(n + 1)/2 per list-building step over a range of n, summed over a chain.
+     - Measured at n = 200: 41–45 bytes per slot on macOS, and about 52 on Linux for a single step (fixed overhead
+       included). 56 covers both.
      - A `map` over 1,000 elements keeps about 20 MiB; over 2,000, about 90 MiB. That is why the caps in §5.6 are
        200.
-     - **Provisional:** these numbers (48 bytes, 200, 4 MiB) are set from macOS measurements. Linux (CI,
-       `ubuntu-latest`, gate 6) measured the worst local cases growing 1.0–2.3 MiB, 0.59–0.74 × their bounds; the
-       owner finalizes them from that measurement.
+     - **Final** (owner, checkpoint 3): 56 bytes, 200, 4 MiB. Linux (CI, `ubuntu-latest`, gate 6) measured the worst
+       local cases growing 1.0–2.3 MiB, 0.59–0.74 × their bounds at 48 bytes a slot. Gate 6 keeps measuring them.
    - Sizes use a model close to the runtime's memory: 16 bytes per scalar and per container, plus text bytes. A
      value's model size is at most 8 × its canonical JSON size + 8, so the referenced inputs together are at most
      524,296 model bytes. Distinct input references share that mass (`a.x + a.y` is one input's worth); overlapping
@@ -509,9 +511,9 @@ cel-spec protos, Apache-2.0, pinned commit). It assigns exactly one class.
      - Text from the inputs is at most a string at the cap per reference, and at most the inputs' JSON over a whole
        range.
 
-     Local requires ≤ 2,000,000 units (about 0.2 s on the gate machine). **Provisional:** the rates are set from
-     macOS measurements. On Linux (CI, `ubuntu-latest`, gate 7) the heaviest load takes 0.48 s per workflow task;
-     the owner finalizes them from that measurement.
+     Local requires ≤ 2,000,000 units (about 0.2 s on the gate machine). **Final** (owner, checkpoint 3): the rates
+     are set from macOS measurements, and on Linux (CI, `ubuntu-latest`, gate 7) the heaviest load takes 0.48 s per
+     workflow task.
    - The bounds are stored with the version.
 
 **Activity.** Valid expressions that are not local run in the isolated `cel.evaluate` activity (§5.7), and the
@@ -651,14 +653,15 @@ library, the classifier or the estimator:
 5. **Classifier:** a table of reject, local and activity expressions, including every reject route in §5.5 and the typed-path encoding in §5.3.
 6. **Estimator soundness:** fuzzed local-class expressions (Hypothesis, over the allow-list) evaluated on inputs at the caps.
    - Measured iterations and result sizes never exceed the stored bounds.
-   - Peak RSS growth stays within 1.5 × each probe's stored memory bound and 1.5 × the 4 MiB limit.
+   - Peak RSS growth stays within 1.5 × each probe's stored memory bound and 1.5 × the 4 MiB classification bound.
      - Probes: the worst local-class cases at the caps, chained `map`/`filter` steps included.
      - Each probe runs in a fresh process. On Linux the process first returns its free heap pages and restarts its
        peak (`/proc/self/clear_refs`): otherwise an earlier peak hides the probe's growth, as it did in the first
        Linux run, which measured nothing.
      - A control allocation must be seen, and a probe that shows no growth fails: a blind measurement never passes.
      - Linux is authoritative.
-     - The results (`memory.json`, `cost.json`) tune the provisional numbers in §5.5.
+     - The results (`memory.json`, `cost.json`) are what the numbers in §5.5 were finalized from. Changing those
+       numbers is a new classifier version (§5.1).
 7. **Local cost:**
    - p99 and maximum latency per local evaluation at the caps;
    - the adversarial workflow-task test from §5.6, with one load per work charge (§5.5). Linux is authoritative.
@@ -943,15 +946,15 @@ abandons or restarts an activity or a child workflow.
 
 1. **CEL placement.**
    - Every comprehension over a range not proven to be a list is rejected, including the boolean macros. This is stricter than the spike's validator.
-   - Local evaluation requires the allow-listed subset, static bounds (≤ 9,999 iterations, ≤ 4 MiB of memory
-     including retained accumulators, ≤ 2,000,000 work units charged by what each call reads) and runtime caps.
+   - Local evaluation requires the allow-listed subset, static bounds (≤ 9,999 iterations, ≤ 4 MiB of estimated
+     memory including retained accumulators, a classification bound, ≤ 2,000,000 work units charged by what each call reads) and runtime caps.
    - Everything else goes to the isolated evaluator.
 2. **Numbers are initial limits to measure, not guarantees:**
-   - caps of 64 KiB per value and in total, 200 list elements or map entries, and 16 KiB per string (provisional
-     until the Linux gate measures them, §5.5);
+   - caps of 64 KiB per value and in total, 200 list elements or map entries, and 16 KiB per string (measured on
+     Linux and finalized at checkpoint 3, §5.5);
    - loops: 100 items inline; filter: 1,000 items inline;
    - yield thresholds of 20,000 iterations, 8 MiB, 4,000,000 work units or 200 evaluations, and the work rates in
-     §5.5 (provisional until the Linux gate);
+     §5.5 (finalized at checkpoint 3);
    - continue-as-new: opportunistic checkpoints from 2,000 events, drain mode from 4,000, in-flight cap of 100;
    - evaluator: 256 MiB / 5 s / 4 MiB requests;
    - schedule-to-start timeout of 10 minutes.
