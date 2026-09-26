@@ -1,10 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
-from datetime import timedelta
-from typing import Any, TypedDict
+import decimal
+import enum
+import ipaddress
+import pathlib
+import uuid
+from datetime import UTC, date, datetime, timedelta
+from typing import Annotated, Any, TypedDict
 
 import pytest
 from jsonschema import Draft202012Validator
-from pydantic import BaseModel, ConfigDict, Field, computed_field, field_serializer, model_serializer
+from pydantic import (
+    AnyUrl,
+    BaseModel,
+    ConfigDict,
+    Field,
+    PlainSerializer,
+    SecretStr,
+    WrapSerializer,
+    computed_field,
+    field_serializer,
+    model_serializer,
+)
 
 from dewpoint.sdk import (
     FatalError,
@@ -208,3 +224,92 @@ def test_outputs_that_serialize_themselves_are_refused(output: type[BaseModel]) 
     """A @model_serializer can drop a field the schema requires (here: b), anywhere inside the output."""
     with pytest.raises(ManifestError, match="output type SelfSerializing uses @model_serializer"):
         node_manifest(_node(run=_run, Output=output))
+
+
+class UntypedLabel(BaseModel):
+    value: int
+
+    @field_serializer("value")
+    def _label(self, value):  # type: ignore[no-untyped-def]  # no return type: the schema would still say integer
+        return f"v-{value}"
+
+
+class UntypedAnnotated(BaseModel):
+    value: Annotated[int, PlainSerializer(lambda v: f"v-{v}")]
+
+
+class UntypedWrap(BaseModel):
+    value: Annotated[int, WrapSerializer(lambda v, handler: handler(v))]
+
+
+class HoldsUntyped(BaseModel):
+    inner: list[UntypedLabel]
+
+
+@pytest.mark.parametrize(
+    ("output", "where"),
+    [
+        (UntypedLabel, "UntypedLabel.value"),
+        (UntypedAnnotated, "UntypedAnnotated.value"),
+        (UntypedWrap, "UntypedWrap.value"),
+        (HoldsUntyped, "UntypedLabel.value"),
+    ],
+)
+def test_serializers_must_declare_what_they_emit(output: type[BaseModel], where: str) -> None:
+    """Without a return type, pydantic keeps the field's own type in the schema while the dump emits whatever the
+    serializer returns (here: `value: integer`, emitted as "v-1")."""
+    with pytest.raises(ManifestError, match=f"{where} has a serializer without a declared return type"):
+        node_manifest(_node(run=_run, Output=output))
+
+
+class TypedLabel(BaseModel):
+    value: int
+    other: Annotated[int, PlainSerializer(lambda v: f"o-{v}", return_type=str)] = 0
+
+    @field_serializer("value")
+    def _label(self, value: int) -> str:
+        return f"v-{value}"
+
+
+class Hue(enum.Enum):
+    RED = "red"
+
+
+class PydanticTypes(BaseModel):
+    at: datetime
+    day: date
+    span: timedelta
+    id: uuid.UUID
+    amount: decimal.Decimal
+    hue: Hue
+    ip: ipaddress.IPv4Address
+    net: ipaddress.IPv4Network
+    path: pathlib.Path
+    secret: SecretStr
+    url: AnyUrl
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        TypedLabel(value=1),
+        PydanticTypes(
+            at=datetime(2026, 1, 1, tzinfo=UTC),
+            day=date(2026, 1, 1),
+            span=timedelta(seconds=90),
+            id=uuid.UUID(int=1),
+            amount=decimal.Decimal("1.5"),
+            hue=Hue.RED,
+            ip=ipaddress.IPv4Address("10.0.0.1"),
+            net=ipaddress.IPv4Network("10.0.0.0/8"),
+            path=pathlib.Path("reports/x.csv"),
+            secret=SecretStr("s"),
+            url=AnyUrl("https://example.com/x"),
+        ),
+    ],
+)
+def test_declared_and_pydantic_serializers_match_their_schema(value: BaseModel) -> None:
+    """A declared return type is the schema; pydantic's own serializers (dates, paths, addresses, URLs, secrets)
+    describe what they emit through their types."""
+    schema = node_manifest(_node(run=_run, Output=type(value)))["output_schema"]
+    assert list(Draft202012Validator(schema).iter_errors(dump_output(value))) == []
