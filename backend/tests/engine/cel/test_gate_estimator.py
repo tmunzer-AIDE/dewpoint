@@ -93,9 +93,10 @@ inputs = st.fixed_dictionaries(
 )
 
 
-# Within the caps, but with the most model bytes per JSON byte: many tiny values. Random inputs rarely get here.
+# Within the caps, but with the most model bytes per JSON byte: many tiny values, near the total JSON cap. Random
+# inputs rarely get here.
 DENSE: dict[str, Any] = {
-    "l": [{"s": "a", "a": 0, "b": 0, "c": 0, "d": 0} for _ in range(caps.LIST_LENGTH)],
+    "l": [{"s": "a", **{f"a{i:02d}": 0 for i in range(35)}} for _ in range(caps.LIST_LENGTH)],
     "m": {f"{i:03d}": 0 for i in range(caps.MAP_ENTRIES)},
     "s": "ab",
 }
