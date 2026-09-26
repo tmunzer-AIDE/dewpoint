@@ -135,24 +135,36 @@ PEAK_PROBES = [
     "l.map(x, x.s).filter(y, y != '').map(z, z + 'b')",
 ]
 # Measured in a fresh process: forking pytest (multi-threaded once the database tests have run) risks a deadlocked
-# child. The child warms the runtime on a trivial evaluation first, so only the probe's own work is measured.
+# child. The child warms the runtime on a trivial evaluation first, so only the probe's own work is measured. On
+# Linux it then returns free heap pages (glibc) and restarts the high-water mark from the current RSS: otherwise an
+# earlier peak, or resident pages the probe reuses, hides its growth. An empty expression is the control: `values`
+# bytes, written and held.
 MEASURE = textwrap.dedent(
     """
-    import json, resource, sys
+    import ctypes, json, resource, sys
     from dewpoint.engine.cel import evaluate, runtime
 
+    def peak():
+        if sys.platform == "linux":
+            with open("/proc/self/status") as f:
+                return next(int(line.split()[1]) * 1024 for line in f if line.startswith("VmHWM:"))
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss  # bytes on macOS
+
     expr, decls, values = json.load(sys.stdin)
-    program = runtime.compile_checked(expr, decls)
+    program = runtime.compile_checked(expr, decls) if expr else None
     evaluate.run(runtime.compile_checked("1 + 1", {}), {})
-    before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    evaluate.run(program, values)
-    unit = 1 if sys.platform == "darwin" else 1024  # ru_maxrss: bytes on macOS, KiB on Linux
-    print((resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before) * unit)
+    if sys.platform == "linux":
+        ctypes.CDLL(None).malloc_trim(0)
+        with open("/proc/self/clear_refs", "w") as f:
+            f.write("5")
+    before = peak()
+    held = evaluate.run(program, values) if program else b"x" * values
+    print(peak() - before)
     """
 )
 
 
-def _peak_growth(expr: str, values: dict[str, Any]) -> int:
+def _peak_growth(expr: str, values: dict[str, Any] | int) -> int:
     """Peak RSS growth while the probe evaluates. A child that fails fails the measurement: it never reports a growth
     it didn't measure."""
     done = subprocess.run(
@@ -179,6 +191,13 @@ def test_a_failing_measurement_child_fails_the_measurement() -> None:
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="needs resource.ru_maxrss")
+def test_the_measurement_sees_a_known_allocation() -> None:
+    """A measurement blind to memory would pass every probe (Linux's ru_maxrss did: an earlier peak hid 1-3 MiB of
+    growth). The child writes 1 MiB it holds; the measurement must see it."""
+    assert _peak_growth("", 1 << 20) >= 0.9 * (1 << 20)
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="needs resource.ru_maxrss")
 def test_peak_memory_stays_within_one_and_a_half_times_the_bound() -> None:
     """Worst local-class expressions at the caps, each in a fresh process: peak growth stays within 1.5 x its own
     stored bound and 1.5 x the local limit. Linux (the CI gate job) is authoritative; results go to
@@ -198,5 +217,6 @@ def test_peak_memory_stays_within_one_and_a_half_times_the_bound() -> None:
         with open(os.path.join(directory, "memory.json"), "w") as f:
             json.dump({"platform": sys.platform, "probes": measured}, f, indent=1, sort_keys=True)
     for expr, m in measured.items():
+        assert m["grown"] > 0, (expr, m, "the measurement is blind: every probe keeps its accumulator copies")
         assert m["grown"] <= 1.5 * m["bound"], (expr, m)
         assert m["grown"] <= 1.5 * classify.MAX_LOCAL_BYTES, (expr, m)

@@ -61,7 +61,7 @@ def _frame(body: bytes) -> bytes:
     [
         b"[" * 100_000 + b"]" * 100_000,  # deeply nested but within the size limit: was a RecursionError
         b'{"schema": "cel.evaluate.v1", "n": ' + b"9" * 5_000 + b"}",  # past Python's int-digit limit: ValueError
-        b'{"schema": "cel.evaluate.v1", "s": "\ud800"}' + b"\xff",  # invalid JSON after a valid prefix
+        b'{"schema": "cel.evaluate.v1", "s": "\\ud800"}' + b"\xff",  # invalid JSON after a valid prefix
     ],
 )
 async def test_malformed_frames_are_frame_errors(body: bytes) -> None:
