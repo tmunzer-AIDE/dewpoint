@@ -13,7 +13,7 @@ from typing import Any
 from cel_expr_python import cel as _cel
 from google.protobuf import any_pb2
 
-from dewpoint.engine.cel import types
+from dewpoint.engine.cel import functions, types
 from dewpoint.engine.cel.proto import checked_pb2, syntax_pb2
 
 _PROBLEM = re.compile(r"ERROR: <input>:(\d+):(\d+): ([^\n]*)")
@@ -56,8 +56,18 @@ def _type(signature: str) -> Any:
     return _cel.Type(signature)
 
 
+def _functions() -> list[Any]:
+    return [
+        _cel.FunctionDecl(
+            f.name,
+            [_cel.Overload(o.id, _type(o.result), [_type(p) for p in o.params], impl=o.impl) for o in f.overloads],
+        )
+        for f in functions.FUNCTIONS
+    ]
+
+
 def _env(declarations: Mapping[str, str]) -> Any:
-    return _cel.NewEnv(variables={name: _type(sig) for name, sig in declarations.items()})
+    return _cel.NewEnv(variables={name: _type(sig) for name, sig in declarations.items()}, functions=_functions())
 
 
 def _unpack(serialized: bytes, message: Any) -> Any:
