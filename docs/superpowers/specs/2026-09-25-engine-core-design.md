@@ -18,7 +18,7 @@
     - the typed-path proof and its conditions;
     - `item`/`index` in place of the reserved `loop`;
     - the step-presence contract, and `has()` guards for schema-declared optional fields;
-    - output schemas that list every serialized field as required;
+    - an exact output contract: every serialized field required, dumps by alias, no model serializers;
     - the work bound and the measured iteration limit, map caps and root projection;
     - batched evaluator requests;
     - the new diagnostic and outcome codes;
@@ -118,9 +118,13 @@ class Node(Protocol):
 
 **Other rules:**
 - The activity wrapper validates `Config` before `run()` and `Output` after it. Output that doesn't match its schema is a `FatalError` (`output_schema_violation`).
-- The output schema is `Output`'s serialization schema, closed, and lists as required every field serialization
-  emits, including fields with defaults. Only `TypedDict` keys that aren't required, and fields with `exclude_if`,
-  may be absent. The wrapper serializes with `model_dump(mode="json")` and no `exclude_*` option.
+- **The output contract.** The output schema is `Output`'s serialization schema, closed, by alias:
+  - it lists as required every field serialization emits, including fields with defaults and computed fields; only
+    `TypedDict` keys that aren't required, and fields with `exclude_if`, may be absent;
+  - outputs become JSON only through `dewpoint.sdk.dump_output`: `model_dump(mode="json", by_alias=True)`, with no
+    `exclude_*` option;
+  - a `@model_serializer` on the output, or on any model, dataclass or `TypedDict` inside it, is refused at
+    registration: its JSON can drop or rename promised fields. Field serializers are allowed: they keep every key.
 - An output field marked `x-sensitive: true` never reaches `run_steps`, previews or samples.
 - The SDK has its own semver. First-party plugins pin a major version.
 
