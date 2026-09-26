@@ -5472,7 +5472,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Produces from `core.plugins.lifecycle`:
   - `Entry(kind: "node" | "cel", key)` with `.lock_key` and `__str__`; `entries_for(node_refs, cel_profiles) -> list[Entry]` (sorted).
   - Locks and states: `IsolationError`, `assert_read_committed(s)`, `lock_shared(s, entries)`, `lock_exclusive(s, entry)`, `states(s, entries) -> dict[Entry, str]` (`active|deprecated|retired|missing`), `not_executable(states) -> list[Entry]`.
-  - Retirement: `ActiveRef(tenant_id, workflow_id, workflow_name, version_id, version_number)`, `RetirePreview(entry, state, active_refs, affected_versions, applied)`, `ReferencedError(preview)`, `UnknownEntryError`, `deprecate(s, entry, *, actor_id) -> str`, `retire(s, entry, *, force=False, confirm=False, actor_id=None) -> RetirePreview`.
+  - Retirement: `ActiveRef(tenant_id, workflow_id, workflow_name, version_id, version_number)`, `AffectedVersion(tenant_id, workflow_id, workflow_name, version_id, version_number, active, enabled)`, `RetirePreview(entry, state, active_refs, affected: tuple[AffectedVersion, ...], applied)`. The preview lists every affected version per tenant, including superseded ones and versions of disabled workflows (spec §4.5). `ReferencedError(preview)`, `UnknownEntryError`, `deprecate(s, entry, *, actor_id) -> str`, `retire(s, entry, *, force=False, confirm=False, actor_id=None) -> RetirePreview`.
 - Produces from `apps.plugin_loader`: `GROUP = "dewpoint.plugins"`, `PluginLoadError(problems)`, `installed_plugins() -> list[Plugin]`, `prepare(plugins) -> list[(manifest, rows)]`, `sync_installed(s, plugins) -> SyncReport`.
 - CLI (run with the `dewpoint_admin` database URL):
   - `dewpoint plugins sync` (exit 2 on invalid manifests, contract changes or missing live types);
@@ -5634,8 +5634,14 @@ async def test_deprecate_then_retire_when_unused(admin_sessionmaker, owner_sessi
     assert preview.applied and preview.active_refs == ()
     async with owner_sessionmaker() as s:
         actions = (
-            await s.execute(text("select action from audit_log where target_id = 'testkit.echo@1' order by created_at"))
-        ).scalars().all()
+            (
+                await s.execute(
+                    text("select action from audit_log where target_id = 'testkit.echo@1' order by created_at")
+                )
+            )
+            .scalars()
+            .all()
+        )
     assert actions == ["lifecycle.deprecate", "lifecycle.retire"]
 
 
@@ -5650,11 +5656,13 @@ async def test_active_workflows_block_normal_retirement(admin_sessionmaker, owne
 
 async def test_disabled_and_superseded_workflows_do_not_block(admin_sessionmaker, owner_sessionmaker) -> None:
     await sync_test_plugins(admin_sessionmaker)
-    await seed_workflow(owner_sessionmaker, enabled=False)
-    await seed_workflow(owner_sessionmaker, active=False)
+    _, disabled, disabled_v = await seed_workflow(owner_sessionmaker, enabled=False)
+    _, superseded, superseded_v = await seed_workflow(owner_sessionmaker, active=False)
     async with admin_sessionmaker() as s, s.begin():
         preview = await lifecycle.retire(s, ECHO)
-    assert preview.applied and preview.affected_versions == 2
+    assert preview.applied and preview.active_refs == ()
+    affected = {(v.workflow_id, v.version_id, v.active, v.enabled) for v in preview.affected}
+    assert affected == {(disabled, disabled_v, True, False), (superseded, superseded_v, False, True)}
 
 
 async def test_forced_retirement_previews_then_applies(admin_sessionmaker, owner_sessionmaker) -> None:
@@ -5663,6 +5671,7 @@ async def test_forced_retirement_previews_then_applies(admin_sessionmaker, owner
     async with admin_sessionmaker() as s, s.begin():
         preview = await lifecycle.retire(s, ECHO, force=True)
     assert not preview.applied and [r.workflow_id for r in preview.active_refs] == [wf]
+    assert [(v.tenant_id, v.workflow_id, v.version_number) for v in preview.affected] == [(tenant, wf, 1)]
     async with admin_sessionmaker() as s:
         assert (await lifecycle.states(s, [ECHO]))[ECHO] == "active"
     async with admin_sessionmaker() as s, s.begin():
@@ -5999,11 +6008,24 @@ class ActiveRef:
 
 
 @dataclass(frozen=True)
+class AffectedVersion:
+    """A version whose closure uses the entry. After retirement it can no longer run, be activated or be enabled."""
+
+    tenant_id: uuid.UUID
+    workflow_id: uuid.UUID
+    workflow_name: str
+    version_id: uuid.UUID
+    version_number: int
+    active: bool  # it is its workflow's active version
+    enabled: bool  # its workflow is enabled
+
+
+@dataclass(frozen=True)
 class RetirePreview:
     entry: Entry
     state: str
     active_refs: tuple[ActiveRef, ...]  # enabled workflows whose active closure uses the entry
-    affected_versions: int  # every version whose closure uses it
+    affected: tuple[AffectedVersion, ...]  # every version whose closure uses it, per tenant (spec §4.5 preview)
     applied: bool = False
     # Sub-project 2b adds the queued run requests a forced retirement would cancel.
 
@@ -6027,8 +6049,22 @@ async def _preview(s: AsyncSession, entry: Entry, state: str) -> RetirePreview:
         .order_by(Workflow.tenant_id, Workflow.name)
     )
     refs = tuple(ActiveRef(*row) for row in rows)
-    affected = (await s.execute(select(func.count()).select_from(WorkflowVersion).where(uses))).scalar_one()
-    return RetirePreview(entry=entry, state=state, active_refs=refs, affected_versions=int(affected))
+    affected = await s.execute(
+        select(
+            Workflow.tenant_id,
+            Workflow.id,
+            Workflow.name,
+            WorkflowVersion.id,
+            WorkflowVersion.number,
+            Workflow.active_version_id.is_not_distinct_from(WorkflowVersion.id),  # never NULL
+            Workflow.enabled,
+        )
+        .join(Workflow, Workflow.id == WorkflowVersion.workflow_id)
+        .where(uses)
+        .order_by(Workflow.tenant_id, Workflow.name, WorkflowVersion.number)
+    )
+    versions = tuple(AffectedVersion(*row) for row in affected)
+    return RetirePreview(entry=entry, state=state, active_refs=refs, affected=versions)
 
 
 async def _set_state(s: AsyncSession, entry: Entry, state: str) -> None:
@@ -6239,9 +6275,15 @@ def _entry(node_type: str | None, cel_profile: str | None) -> Entry:
 
 
 def _print_preview(preview: lifecycle.RetirePreview) -> None:
+    typer.echo(f"active references (enabled workflows): {len(preview.active_refs)}")
     for ref in preview.active_refs:
         typer.echo(f"  tenant {ref.tenant_id}  workflow {ref.workflow_name} ({ref.workflow_id})  v{ref.version_number}")
-    typer.echo(f"versions whose closure uses it: {preview.affected_versions}")
+    typer.echo(f"versions that can no longer run, be activated or be enabled: {len(preview.affected)}")
+    for v in preview.affected:
+        flags = ", ".join(flag for flag, on in (("active", v.active), ("enabled", v.enabled)) if on) or "superseded"
+        typer.echo(
+            f"  tenant {v.tenant_id}  workflow {v.workflow_name} ({v.workflow_id})  v{v.version_number}  [{flags}]"
+        )
 
 
 @lifecycle_cli.command("deprecate")
@@ -6329,6 +6371,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `Checked(graph, diagnostics, pins, result)` and `check_draft(s, tenant_id, draft, settings) -> Checked`.
   - `Published(version, errors, warnings)` and `publish(s, ctx, wf, *, expected_revision, settings) -> Published`. `wf` is locked FOR UPDATE by the caller.
   - `NotActivatableError(errors)` and `activate(s, ctx, wf, version) -> list[Diagnostic]` (warnings).
+  - `update(s, ctx, wf, *, name, enabled) -> list[Diagnostic]` (warnings): rename, enable or disable. Enabling a workflow that has an active version makes that version's closure an active reference again, so it takes the shared lifecycle locks and re-checks executability exactly like `activate`. It raises `NotActivatableError` when a closure entry is retired or missing. Both use `_check_runnable`.
+  - `core.workflows.service.update_workflow` stays a storage primitive; callers enable workflows through `workflow_ops.update`.
   - `_lifecycle_locked()`: an async no-op hook that runs right after the lifecycle locks are held; the race tests patch it.
 - Settings: `max_run_duration_days: int = 30`.
 - Diagnostic codes introduced: `subflow.cycle`, `subflow.too_deep`. It also reuses `lifecycle.retired` and `lifecycle.deprecated`; a `missing` entry reports as `lifecycle.retired`.
@@ -6408,6 +6452,22 @@ async def activate(api_sessionmaker: Any, ctx: TenantContext, wf_id: uuid.UUID, 
         return await workflow_ops.activate(s, ctx, wf, version)
 
 
+async def update(api_sessionmaker: Any, ctx: TenantContext, wf_id: uuid.UUID, **changes: Any) -> list[Any]:
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        wf = await service.get_workflow(s, ctx.tenant_id, wf_id, for_update=True)
+        assert wf is not None
+        return await workflow_ops.update(s, ctx, wf, name=changes.get("name"), enabled=changes.get("enabled"))
+
+
+async def is_enabled(api_sessionmaker: Any, ctx: TenantContext, wf_id: uuid.UUID) -> bool:
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        wf = await service.get_workflow(s, ctx.tenant_id, wf_id)
+        assert wf is not None
+        return wf.enabled
+
+
 async def test_publish_creates_an_active_version_with_its_closure(
     owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
 ) -> None:
@@ -6431,7 +6491,9 @@ async def test_publish_refuses_invalid_graphs_and_stale_revisions(
 ) -> None:
     await sync_test_plugins(admin_sessionmaker)
     ctx = await actor(owner_sessionmaker)
-    wf_id = await create(api_sessionmaker, ctx, G().node("a", "testkit.echo@1", {"value": ref("steps.nope.output")}).data())
+    wf_id = await create(
+        api_sessionmaker, ctx, G().node("a", "testkit.echo@1", {"value": ref("steps.nope.output")}).data()
+    )
     out = await publish(api_sessionmaker, ctx, wf_id, api_settings)
     assert out.version is None and [d.code for d in out.errors] == ["ref.unknown_step"]
     with pytest.raises(service.DraftConflictError):
@@ -6541,6 +6603,37 @@ async def test_retiring_a_subflow_type_blocks_its_parents(
         assert wf is not None and wf.active_version_id is not None
         version = await service.get_version(s, parent, wf.active_version_id)
         assert version is not None and await service.blocked_by(s, version) == ["testkit.echo@1"]
+
+
+async def test_reenabling_rechecks_the_active_closure(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    wf = await create(api_sessionmaker, ctx, ECHO_GRAPH)
+    await publish(api_sessionmaker, ctx, wf, api_settings)
+    assert await update(api_sessionmaker, ctx, wf, enabled=False) == []
+    async with admin_sessionmaker() as s, s.begin():
+        assert (await lifecycle.retire(s, ECHO)).applied  # normal path: the only user is disabled
+    with pytest.raises(workflow_ops.NotActivatableError) as e:
+        await update(api_sessionmaker, ctx, wf, enabled=True)
+    assert [d.code for d in e.value.errors] == ["lifecycle.retired"]
+    assert not await is_enabled(api_sessionmaker, ctx, wf)
+    assert await update(api_sessionmaker, ctx, wf, name="Renamed") == []  # renaming needs no lifecycle check
+
+
+async def test_reenabling_warns_about_deprecated_types(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    wf = await create(api_sessionmaker, ctx, ECHO_GRAPH)
+    await publish(api_sessionmaker, ctx, wf, api_settings)
+    await update(api_sessionmaker, ctx, wf, enabled=False)
+    async with admin_sessionmaker() as s, s.begin():
+        await lifecycle.deprecate(s, ECHO, actor_id=None)
+    warnings = await update(api_sessionmaker, ctx, wf, enabled=True)
+    assert [d.code for d in warnings] == ["lifecycle.deprecated"] and await is_enabled(api_sessionmaker, ctx, wf)
 ```
 
 `backend/tests/apps/test_lifecycle_races.py`:
@@ -6558,7 +6651,17 @@ from sqlalchemy import text
 from dewpoint.apps import workflow_ops
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.plugins.lifecycle import Entry
-from tests.apps.test_workflow_ops import ECHO_GRAPH, SENSITIVE_GRAPH, activate, actor, create, publish, save
+from tests.apps.test_workflow_ops import (
+    ECHO_GRAPH,
+    SENSITIVE_GRAPH,
+    activate,
+    actor,
+    create,
+    is_enabled,
+    publish,
+    save,
+    update,
+)
 from tests.support.registry import sync_test_plugins
 
 ECHO = Entry("node", "testkit.echo@1")
@@ -6578,14 +6681,23 @@ async def until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker: Any) -> N
 
 @pytest.fixture
 def pause_after_lock(monkeypatch):  # type: ignore[no-untyped-def]
+    """Pause the next lifecycle-locked operation once armed. Setup steps (publishing, disabling) run through the same
+    hook, so the test arms it right before starting the operation under test."""
     reached, release = asyncio.Event(), asyncio.Event()
+    armed = {"on": False}
 
     async def paused() -> None:
+        if not armed["on"]:
+            return
+        armed["on"] = False
         reached.set()
         await release.wait()
 
+    def arm() -> None:
+        armed["on"] = True
+
     monkeypatch.setattr(workflow_ops, "_lifecycle_locked", paused)
-    return reached, release
+    return reached, release, arm
 
 
 async def test_retirement_first_makes_publish_refuse(
@@ -6607,10 +6719,11 @@ async def test_retirement_first_makes_publish_refuse(
 async def test_publish_first_blocks_normal_retirement(
     owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, pause_after_lock
 ) -> None:
-    reached, release = pause_after_lock
+    reached, release, arm = pause_after_lock
     await sync_test_plugins(admin_sessionmaker)
     ctx = await actor(owner_sessionmaker)
     wf = await create(api_sessionmaker, ctx, ECHO_GRAPH)
+    arm()
     publishing = asyncio.create_task(publish(api_sessionmaker, ctx, wf, api_settings))
     await asyncio.wait_for(reached.wait(), 10)
 
@@ -6630,10 +6743,11 @@ async def test_publish_first_blocks_normal_retirement(
 async def test_publish_first_is_included_in_a_forced_retirement(
     owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, pause_after_lock
 ) -> None:
-    reached, release = pause_after_lock
+    reached, release, arm = pause_after_lock
     await sync_test_plugins(admin_sessionmaker)
     ctx = await actor(owner_sessionmaker)
     wf = await create(api_sessionmaker, ctx, ECHO_GRAPH)
+    arm()
     publishing = asyncio.create_task(publish(api_sessionmaker, ctx, wf, api_settings))
     await asyncio.wait_for(reached.wait(), 10)
 
@@ -6649,8 +6763,14 @@ async def test_publish_first_is_included_in_a_forced_retirement(
     assert preview.applied and [r.workflow_id for r in preview.active_refs] == [wf]
     async with owner_sessionmaker() as s:
         tenants = (
-            await s.execute(text("select tenant_id from audit_log where action = 'lifecycle.retire' and tenant_id is not null"))
-        ).scalars().all()
+            (
+                await s.execute(
+                    text("select tenant_id from audit_log where action = 'lifecycle.retire' and tenant_id is not null")
+                )
+            )
+            .scalars()
+            .all()
+        )
     assert tenants == [ctx.tenant_id]
 
 
@@ -6672,6 +6792,79 @@ async def test_retirement_first_makes_activate_refuse(
             assert (await lifecycle.retire(a, ECHO)).applied  # nothing active uses echo: normal path
     with pytest.raises(workflow_ops.NotActivatableError):
         await asyncio.wait_for(activating, 10)
+
+
+async def test_retirement_first_makes_enable_refuse(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    wf = await create(api_sessionmaker, ctx, ECHO_GRAPH)
+    await publish(api_sessionmaker, ctx, wf, api_settings)
+    await update(api_sessionmaker, ctx, wf, enabled=False)
+    async with admin_sessionmaker() as a:
+        async with a.begin():
+            await lifecycle.lock_exclusive(a, ECHO)
+            enabling = asyncio.create_task(update(api_sessionmaker, ctx, wf, enabled=True))
+            await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
+            assert (await lifecycle.retire(a, ECHO)).applied  # the workflow is disabled: normal path
+    with pytest.raises(workflow_ops.NotActivatableError):
+        await asyncio.wait_for(enabling, 10)
+    assert not await is_enabled(api_sessionmaker, ctx, wf)
+
+
+async def test_enable_first_blocks_normal_retirement(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, pause_after_lock
+) -> None:
+    reached, release, arm = pause_after_lock
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    wf = await create(api_sessionmaker, ctx, ECHO_GRAPH)
+    await publish(api_sessionmaker, ctx, wf, api_settings)
+    await update(api_sessionmaker, ctx, wf, enabled=False)
+    arm()
+    enabling = asyncio.create_task(update(api_sessionmaker, ctx, wf, enabled=True))
+    await asyncio.wait_for(reached.wait(), 10)
+
+    async def retire() -> lifecycle.RetirePreview:
+        async with admin_sessionmaker() as a, a.begin():
+            return await lifecycle.retire(a, ECHO)
+
+    retiring = asyncio.create_task(retire())
+    await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
+    release.set()
+    await asyncio.wait_for(enabling, 10)
+    with pytest.raises(lifecycle.ReferencedError) as e:
+        await asyncio.wait_for(retiring, 10)
+    assert [r.workflow_id for r in e.value.preview.active_refs] == [wf]
+
+
+async def test_activation_first_blocks_normal_retirement(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, pause_after_lock
+) -> None:
+    reached, release, arm = pause_after_lock
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    wf = await create(api_sessionmaker, ctx, ECHO_GRAPH)
+    v1 = (await publish(api_sessionmaker, ctx, wf, api_settings)).version
+    await save(api_sessionmaker, ctx, wf, SENSITIVE_GRAPH)
+    await publish(api_sessionmaker, ctx, wf, api_settings)  # v2 is active and doesn't use echo
+    assert v1 is not None
+    arm()
+    activating = asyncio.create_task(activate(api_sessionmaker, ctx, wf, v1.id))  # rolls back to v1 (uses echo)
+    await asyncio.wait_for(reached.wait(), 10)
+
+    async def retire() -> lifecycle.RetirePreview:
+        async with admin_sessionmaker() as a, a.begin():
+            return await lifecycle.retire(a, ECHO)
+
+    retiring = asyncio.create_task(retire())
+    await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
+    release.set()
+    await asyncio.wait_for(activating, 10)
+    with pytest.raises(lifecycle.ReferencedError) as e:
+        await asyncio.wait_for(retiring, 10)
+    assert [(r.workflow_id, r.version_id) for r in e.value.preview.active_refs] == [(wf, v1.id)]
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -7106,9 +7299,10 @@ async def publish(
     return Published(version, [], warnings)
 
 
-async def activate(s: AsyncSession, ctx: TenantContext, wf: Workflow, version: WorkflowVersion) -> list[Diagnostic]:
-    """Make an existing version active (rollback). Any executable version qualifies, superseded or not.
-    `wf` must be locked FOR UPDATE. Returns warnings; raises NotActivatableError if the version can't run."""
+async def _check_runnable(s: AsyncSession, version: WorkflowVersion) -> list[Diagnostic]:
+    """Lock the version's closure (shared) and re-read its lifecycle states. Raises NotActivatableError when something
+    in it is retired or missing; returns warnings for deprecated entries. Used by every operation that makes a version
+    an active reference again: activate, and enabling a workflow."""
     entries = lifecycle.entries_for(version.closure_node_refs, version.closure_cel_profiles)
     await lifecycle.lock_shared(s, entries)
     await _lifecycle_locked()
@@ -7116,7 +7310,6 @@ async def activate(s: AsyncSession, ctx: TenantContext, wf: Workflow, version: W
     errors = _lifecycle_errors(current, refuse_deprecated=False)
     if errors:
         raise NotActivatableError(errors)
-    await service.set_active(s, ctx, wf, version)
     return [
         Diagnostic(
             code="lifecycle.deprecated",
@@ -7127,12 +7320,35 @@ async def activate(s: AsyncSession, ctx: TenantContext, wf: Workflow, version: W
         for entry, state in sorted(current.items())
         if state == "deprecated"
     ]
+
+
+async def activate(s: AsyncSession, ctx: TenantContext, wf: Workflow, version: WorkflowVersion) -> list[Diagnostic]:
+    """Make an existing version active (rollback). Any executable version qualifies, superseded or not.
+    `wf` must be locked FOR UPDATE. Returns warnings; raises NotActivatableError if the version can't run."""
+    warnings = await _check_runnable(s, version)
+    await service.set_active(s, ctx, wf, version)
+    return warnings
+
+
+async def update(
+    s: AsyncSession, ctx: TenantContext, wf: Workflow, *, name: str | None, enabled: bool | None
+) -> list[Diagnostic]:
+    """Rename, enable or disable. Enabling makes the active version's closure an active reference again (spec §4.5),
+    so it takes the lifecycle locks and re-checks executability exactly like activate(). `wf` must be locked
+    FOR UPDATE. Returns warnings; raises NotActivatableError when the active version can't run."""
+    warnings: list[Diagnostic] = []
+    if enabled and not wf.enabled and wf.active_version_id is not None:
+        version = await service.get_version(s, wf.id, wf.active_version_id)
+        if version is not None:
+            warnings = await _check_runnable(s, version)
+    await service.update_workflow(s, ctx, wf, name=name, enabled=enabled)
+    return warnings
 ```
 
 - [ ] **Step 6: Run the tests**
 
 Run: `uv run pytest tests/apps/test_workflow_ops.py tests/apps/test_lifecycle_races.py -q`
-Expected: 12 passed.
+Expected: 17 passed.
 
 - [ ] **Step 7: Commit**
 
@@ -7161,7 +7377,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `POST /t/{tenant_id}/workflows` (`workflow.edit`), body `{name, draft?}`: returns 201 with the summary and `draft`, or 409 `name_taken`.
   - `GET /t/{tenant_id}/workflows/{id}` (`workflow.view`): the summary plus `draft`.
   - `PUT /t/{tenant_id}/workflows/{id}/draft` (`workflow.edit`, `If-Match: <revision>`): returns `{draft_revision}`. Errors: 428 `revision_required`, 409 `{error: draft_conflict, draft_revision}`, 422 `{error: invalid, diagnostics}` for a malformed graph, 413 `too_large` above 1 MiB.
-  - `PATCH /t/{tenant_id}/workflows/{id}` (`workflow.publish`), body `{name?, enabled?}`.
+  - `PATCH /t/{tenant_id}/workflows/{id}` (`workflow.publish`), body `{name?, enabled?}`: returns the summary plus `warnings`. It goes through `workflow_ops.update`, so re-enabling re-checks the active version's closure under the lifecycle locks: 422 `{error: not_enableable, diagnostics}` when it can't run.
   - `POST /t/{tenant_id}/workflows/{id}/validate` (`workflow.edit`): returns `{draft_revision, valid, diagnostics}`.
   - `POST /t/{tenant_id}/workflows/{id}/publish` (`workflow.publish`, `If-Match`): returns 201 `{version_id, number, warnings}`; otherwise 422 `{error: invalid, diagnostics}` or 409 `draft_conflict`.
   - `GET /t/{tenant_id}/workflows/{id}/versions` (`workflow.view`): `[{id, number, published_at, published_by, graph_hash, version_hash, cel_profile, node_refs, active, executable, blocked_by}]`.
@@ -7279,6 +7495,21 @@ async def test_disable_and_rename(app, owner_sessionmaker, api_settings) -> None
         assert r.status_code == 200 and r.json()["enabled"] is False and r.json()["name"] == "Renamed"
         taken = await c.patch(f"/api/v1/t/{tid}/workflows/{a['id']}", json={"name": "B"})
         assert taken.status_code == 409 and taken.json() == {"error": "name_taken"}
+
+
+async def test_reenabling_a_blocked_workflow_is_refused(app, owner_sessionmaker, api_settings, admin_sessionmaker) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        wf = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "W", "draft": GRAPH})).json()
+        base = f"/api/v1/t/{tid}/workflows/{wf['id']}"
+        assert (await c.post(f"{base}/publish", headers={"If-Match": "1"})).status_code == 201
+        assert (await c.patch(base, json={"enabled": False})).json()["enabled"] is False
+        async with admin_sessionmaker() as s, s.begin():
+            assert (await lifecycle.retire(s, Entry("node", "testkit.echo@1"))).applied  # its only user is disabled
+        r = await c.patch(base, json={"enabled": True})
+        assert r.status_code == 422 and r.json()["error"] == "not_enableable"
+        assert [d["code"] for d in r.json()["diagnostics"]] == ["lifecycle.retired"]
+        assert (await c.get(base)).json()["enabled"] is False
 
 
 async def test_oversized_draft_is_rejected(app, owner_sessionmaker, api_settings) -> None:
@@ -7505,10 +7736,13 @@ async def patch(
 ) -> dict[str, object]:
     wf = await _get(db, ctx, workflow_id, for_update=True)
     try:
-        wf = await service.update_workflow(db, ctx, wf, name=body.name, enabled=body.enabled)
+        warnings = await workflow_ops.update(db, ctx, wf, name=body.name, enabled=body.enabled)
+    except workflow_ops.NotActivatableError as e:
+        diagnostics = [d.to_json() for d in e.errors]
+        raise HTTPException(422, detail={"error": "not_enableable", "diagnostics": diagnostics}) from None
     except IntegrityError:
         raise HTTPException(409, detail={"error": "name_taken"}) from None
-    return await _summary(db, wf)
+    return {**await _summary(db, wf), "warnings": [w.to_json() for w in warnings]}
 
 
 @router.post("/t/{tenant_id}/workflows/{workflow_id}/validate")
@@ -7606,7 +7840,7 @@ Then append `node_types.router,` and `workflows.router,` to the router tuple, af
 - [ ] **Step 4: Run the tests**
 
 Run: `uv run pytest tests/apps/api/test_workflows.py -q`
-Expected: 7 passed.
+Expected: 8 passed.
 
 - [ ] **Step 5: Commit**
 
@@ -7665,7 +7899,8 @@ It registers every node type version the build contains, and this build's CEL pr
    - `... retire --node-type X --force` prints the preview and changes nothing (exit 3).
    - `... retire --node-type X --force --confirm` applies it.
    - Each affected tenant gets an audit entry, and the workflows show `executable: false` with `blocked_by`.
-5. After retirement, a later build may drop the code.
+5. Re-enabling a disabled workflow re-checks its active version the same way activation does. If anything it uses is retired, the request is refused (`not_enableable`). Normal retirement doesn't count disabled workflows, so this check is what stops them coming back.
+6. After retirement, a later build may drop the code.
    - Runs already in progress are unaffected: they stay on the worker build they started on, which still has the code, until Temporal reports that build drained. (The engine plan 2a-3 covers this.)
 
 CEL profiles follow the same commands with `--cel-profile <profile>`. A profile's evaluator must keep running until no

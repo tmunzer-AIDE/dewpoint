@@ -67,6 +67,22 @@ async def activate(api_sessionmaker: Any, ctx: TenantContext, wf_id: uuid.UUID, 
         return await workflow_ops.activate(s, ctx, wf, version)
 
 
+async def update(api_sessionmaker: Any, ctx: TenantContext, wf_id: uuid.UUID, **changes: Any) -> list[Any]:
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        wf = await service.get_workflow(s, ctx.tenant_id, wf_id, for_update=True)
+        assert wf is not None
+        return await workflow_ops.update(s, ctx, wf, name=changes.get("name"), enabled=changes.get("enabled"))
+
+
+async def is_enabled(api_sessionmaker: Any, ctx: TenantContext, wf_id: uuid.UUID) -> bool:
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        wf = await service.get_workflow(s, ctx.tenant_id, wf_id)
+        assert wf is not None
+        return wf.enabled
+
+
 async def test_publish_creates_an_active_version_with_its_closure(
     owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
 ) -> None:
@@ -202,3 +218,34 @@ async def test_retiring_a_subflow_type_blocks_its_parents(
         assert wf is not None and wf.active_version_id is not None
         version = await service.get_version(s, parent, wf.active_version_id)
         assert version is not None and await service.blocked_by(s, version) == ["testkit.echo@1"]
+
+
+async def test_reenabling_rechecks_the_active_closure(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    wf = await create(api_sessionmaker, ctx, ECHO_GRAPH)
+    await publish(api_sessionmaker, ctx, wf, api_settings)
+    assert await update(api_sessionmaker, ctx, wf, enabled=False) == []
+    async with admin_sessionmaker() as s, s.begin():
+        assert (await lifecycle.retire(s, ECHO)).applied  # normal path: the only user is disabled
+    with pytest.raises(workflow_ops.NotActivatableError) as e:
+        await update(api_sessionmaker, ctx, wf, enabled=True)
+    assert [d.code for d in e.value.errors] == ["lifecycle.retired"]
+    assert not await is_enabled(api_sessionmaker, ctx, wf)
+    assert await update(api_sessionmaker, ctx, wf, name="Renamed") == []  # renaming needs no lifecycle check
+
+
+async def test_reenabling_warns_about_deprecated_types(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    wf = await create(api_sessionmaker, ctx, ECHO_GRAPH)
+    await publish(api_sessionmaker, ctx, wf, api_settings)
+    await update(api_sessionmaker, ctx, wf, enabled=False)
+    async with admin_sessionmaker() as s, s.begin():
+        await lifecycle.deprecate(s, ECHO, actor_id=None)
+    warnings = await update(api_sessionmaker, ctx, wf, enabled=True)
+    assert [d.code for d in warnings] == ["lifecycle.deprecated"] and await is_enabled(api_sessionmaker, ctx, wf)

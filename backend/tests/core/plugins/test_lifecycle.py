@@ -58,11 +58,13 @@ async def test_active_workflows_block_normal_retirement(admin_sessionmaker, owne
 
 async def test_disabled_and_superseded_workflows_do_not_block(admin_sessionmaker, owner_sessionmaker) -> None:
     await sync_test_plugins(admin_sessionmaker)
-    await seed_workflow(owner_sessionmaker, enabled=False)
-    await seed_workflow(owner_sessionmaker, active=False)
+    _, disabled, disabled_v = await seed_workflow(owner_sessionmaker, enabled=False)
+    _, superseded, superseded_v = await seed_workflow(owner_sessionmaker, active=False)
     async with admin_sessionmaker() as s, s.begin():
         preview = await lifecycle.retire(s, ECHO)
-    assert preview.applied and preview.affected_versions == 2
+    assert preview.applied and preview.active_refs == ()
+    affected = {(v.workflow_id, v.version_id, v.active, v.enabled) for v in preview.affected}
+    assert affected == {(disabled, disabled_v, True, False), (superseded, superseded_v, False, True)}
 
 
 async def test_forced_retirement_previews_then_applies(admin_sessionmaker, owner_sessionmaker) -> None:
@@ -71,6 +73,7 @@ async def test_forced_retirement_previews_then_applies(admin_sessionmaker, owner
     async with admin_sessionmaker() as s, s.begin():
         preview = await lifecycle.retire(s, ECHO, force=True)
     assert not preview.applied and [r.workflow_id for r in preview.active_refs] == [wf]
+    assert [(v.tenant_id, v.workflow_id, v.version_number) for v in preview.affected] == [(tenant, wf, 1)]
     async with admin_sessionmaker() as s:
         assert (await lifecycle.states(s, [ECHO]))[ECHO] == "active"
     async with admin_sessionmaker() as s, s.begin():

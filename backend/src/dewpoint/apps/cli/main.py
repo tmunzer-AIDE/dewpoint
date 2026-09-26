@@ -251,9 +251,15 @@ def _entry(node_type: str | None, cel_profile: str | None) -> Entry:
 
 
 def _print_preview(preview: lifecycle.RetirePreview) -> None:
+    typer.echo(f"active references (enabled workflows): {len(preview.active_refs)}")
     for ref in preview.active_refs:
         typer.echo(f"  tenant {ref.tenant_id}  workflow {ref.workflow_name} ({ref.workflow_id})  v{ref.version_number}")
-    typer.echo(f"versions whose closure uses it: {preview.affected_versions}")
+    typer.echo(f"versions that can no longer run, be activated or be enabled: {len(preview.affected)}")
+    for v in preview.affected:
+        flags = ", ".join(flag for flag, on in (("active", v.active), ("enabled", v.enabled)) if on) or "superseded"
+        typer.echo(
+            f"  tenant {v.tenant_id}  workflow {v.workflow_name} ({v.workflow_id})  v{v.version_number}  [{flags}]"
+        )
 
 
 @lifecycle_cli.command("deprecate")

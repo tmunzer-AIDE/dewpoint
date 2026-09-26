@@ -104,11 +104,24 @@ class ActiveRef:
 
 
 @dataclass(frozen=True)
+class AffectedVersion:
+    """A version whose closure uses the entry. After retirement it can no longer run, be activated or be enabled."""
+
+    tenant_id: uuid.UUID
+    workflow_id: uuid.UUID
+    workflow_name: str
+    version_id: uuid.UUID
+    version_number: int
+    active: bool  # it is its workflow's active version
+    enabled: bool  # its workflow is enabled
+
+
+@dataclass(frozen=True)
 class RetirePreview:
     entry: Entry
     state: str
     active_refs: tuple[ActiveRef, ...]  # enabled workflows whose active closure uses the entry
-    affected_versions: int  # every version whose closure uses it
+    affected: tuple[AffectedVersion, ...]  # every version whose closure uses it, per tenant (spec §4.5 preview)
     applied: bool = False
     # Sub-project 2b adds the queued run requests a forced retirement would cancel.
 
@@ -132,8 +145,22 @@ async def _preview(s: AsyncSession, entry: Entry, state: str) -> RetirePreview:
         .order_by(Workflow.tenant_id, Workflow.name)
     )
     refs = tuple(ActiveRef(*row) for row in rows)
-    affected = (await s.execute(select(func.count()).select_from(WorkflowVersion).where(uses))).scalar_one()
-    return RetirePreview(entry=entry, state=state, active_refs=refs, affected_versions=int(affected))
+    affected = await s.execute(
+        select(
+            Workflow.tenant_id,
+            Workflow.id,
+            Workflow.name,
+            WorkflowVersion.id,
+            WorkflowVersion.number,
+            Workflow.active_version_id.is_not_distinct_from(WorkflowVersion.id),  # never NULL
+            Workflow.enabled,
+        )
+        .join(Workflow, Workflow.id == WorkflowVersion.workflow_id)
+        .where(uses)
+        .order_by(Workflow.tenant_id, Workflow.name, WorkflowVersion.number)
+    )
+    versions = tuple(AffectedVersion(*row) for row in affected)
+    return RetirePreview(entry=entry, state=state, active_refs=refs, affected=versions)
 
 
 async def _set_state(s: AsyncSession, entry: Entry, state: str) -> None:

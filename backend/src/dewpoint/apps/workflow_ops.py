@@ -174,9 +174,10 @@ async def publish(
     return Published(version, [], warnings)
 
 
-async def activate(s: AsyncSession, ctx: TenantContext, wf: Workflow, version: WorkflowVersion) -> list[Diagnostic]:
-    """Make an existing version active (rollback). Any executable version qualifies, superseded or not.
-    `wf` must be locked FOR UPDATE. Returns warnings; raises NotActivatableError if the version can't run."""
+async def _check_runnable(s: AsyncSession, version: WorkflowVersion) -> list[Diagnostic]:
+    """Lock the version's closure (shared) and re-read its lifecycle states. Raises NotActivatableError when something
+    in it is retired or missing; returns warnings for deprecated entries. Used by every operation that makes a version
+    an active reference again: activate, and enabling a workflow."""
     entries = lifecycle.entries_for(version.closure_node_refs, version.closure_cel_profiles)
     await lifecycle.lock_shared(s, entries)
     await _lifecycle_locked()
@@ -184,7 +185,6 @@ async def activate(s: AsyncSession, ctx: TenantContext, wf: Workflow, version: W
     errors = _lifecycle_errors(current, refuse_deprecated=False)
     if errors:
         raise NotActivatableError(errors)
-    await service.set_active(s, ctx, wf, version)
     return [
         Diagnostic(
             code="lifecycle.deprecated",
@@ -195,3 +195,26 @@ async def activate(s: AsyncSession, ctx: TenantContext, wf: Workflow, version: W
         for entry, state in sorted(current.items())
         if state == "deprecated"
     ]
+
+
+async def activate(s: AsyncSession, ctx: TenantContext, wf: Workflow, version: WorkflowVersion) -> list[Diagnostic]:
+    """Make an existing version active (rollback). Any executable version qualifies, superseded or not.
+    `wf` must be locked FOR UPDATE. Returns warnings; raises NotActivatableError if the version can't run."""
+    warnings = await _check_runnable(s, version)
+    await service.set_active(s, ctx, wf, version)
+    return warnings
+
+
+async def update(
+    s: AsyncSession, ctx: TenantContext, wf: Workflow, *, name: str | None, enabled: bool | None
+) -> list[Diagnostic]:
+    """Rename, enable or disable. Enabling makes the active version's closure an active reference again (spec §4.5),
+    so it takes the lifecycle locks and re-checks executability exactly like activate(). `wf` must be locked
+    FOR UPDATE. Returns warnings; raises NotActivatableError when the active version can't run."""
+    warnings: list[Diagnostic] = []
+    if enabled and not wf.enabled and wf.active_version_id is not None:
+        version = await service.get_version(s, wf.id, wf.active_version_id)
+        if version is not None:
+            warnings = await _check_runnable(s, version)
+    await service.update_workflow(s, ctx, wf, name=name, enabled=enabled)
+    return warnings
