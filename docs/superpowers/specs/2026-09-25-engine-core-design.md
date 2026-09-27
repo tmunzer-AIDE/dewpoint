@@ -17,7 +17,8 @@
   - Revision 5.3 folds in plan 2a-2 (CEL) and its review:
     - the typed-path proof and its conditions;
     - `item`/`index` in place of the reserved `loop`;
-    - the step-presence contract, and `has()` guards for schema-declared optional fields;
+    - the step-presence contract, `has()` guards for schema-declared optional fields, and (checkpoint 4) `!= null`
+      guards below schema-nullable ones; a key in brackets is checked like the field it names;
     - an exact output contract: every serialized field required, dumps by alias, no model serializers;
     - measured limits: 9,999 iterations, a work bound that charges each call by the size of what it reads, retained
       `map`/`filter` accumulators within a 4 MiB classification bound, and 200-entry list and map caps (measured on
@@ -231,6 +232,14 @@ Tenant-scoped tables use FORCE RLS with the foundations policy pattern.
     - a step that may not have run is guarded with `has(steps.<key>.output)` (or `has(steps.<key>.error)`);
     - a field the schema declares but doesn't require, and every such ancestor, is guarded with `has()` on that field,
       e.g. `has(trigger.a) && has(trigger.a.b) && trigger.a.b.c == 1`;
+    - a field the schema says may be null (a `null` type, or a union with null such as pydantic's `Optional`) is
+      guarded with `!= null` before anything below it is read, a `has()` test included, e.g.
+      `trigger.a != null && trigger.a.b == 1` (checkpoint 4). A reference to it needs a `default`, as above. Reading
+      the value itself needs no guard: null is a value. `has()` doesn't prove a value non-null, and `!= null` doesn't
+      prove it present;
+    - a literal key that could be written as a field (`steps["b"]`, `trigger["a"]`) is that field, with the same
+      checks and guards. `steps` and `loops` take no other key: publish can't check one chosen at run time
+      (`cel.bad_path`). Other data may be indexed freely;
     - data the schema doesn't declare (open objects, schemaless bodies) needs no guard. If it's missing at run time,
       the evaluation fails with `evaluation_error` and the step's error policy applies. (§5.10 `cel.conditional_ref`)
 - **Names.** `in`, `true`, `false` and `null` can't be step keys or variable names: CEL can't select them as fields.
@@ -413,7 +422,7 @@ the race tests assert that it stays at zero. 2a implements these rules in `start
   - `loop` is a reserved identifier, and `in`, `true`, `false`, `null` can't be selected as fields (§4.3 names);
   - the runtime's own AST serialization isn't deterministic (protobuf maps); nothing stores or hashes it.
 - **Declarations are per expression.** Roots always; `item` (`dyn`, or a typed list) and `index` (`int`) where they
-  exist; and, for each select chain in the expression, every prefix that is an always-available, non-null array.
+  exist; and, for each chain in the expression (selects, and literal keys that could be fields), every prefix that is an always-available, non-null array.
   Element types: objects `map<string, dyn>`, strings `string`, booleans `bool`, arrays `list<dyn>`, anything else
   `dyn` (numbers stay `dyn`: the runtime would convert an int in a `double` slot, or refuse `3.0` in an `int` one).
 - **Projection.** A root is bound as the part the expression's chains can observe: maps keep only keys on a chain,
@@ -603,7 +612,8 @@ not inside a worker that holds credentials.
   - **Why this is enough.** `RLIMIT_AS` caps a child's virtual address space, which is always at least its resident
     memory. So *N* children plus the reserve can't exceed the cgroup limit.
   - An OOM kill of the whole container is still treated as an infrastructure failure and retried.
-- **Concurrency.** At most *N* children run at once, with a wait queue of *N*. Anything beyond that gets `busy`.
+- **Concurrency.** At most *N* children run at once, with a wait queue of *N*. Anything beyond that gets `busy`, and
+  so does a request the OS can't start a child for (no process, memory or descriptor to spare).
   - The CEL activity worker sets `max_concurrent_activities` = *N*, so `busy` shouldn't happen.
   - If it does, it counts as an infrastructure error.
 
@@ -628,7 +638,7 @@ not inside a worker that holds credentials.
 - Because `map` and `filter` memory is quadratic (§5.5), a `map` or `filter` over more than about 3,000 elements
   exceeds the child's 256 MiB and ends in `memory_limit`. Large collections belong in the engine's `loop` and
   `filter` nodes, which evaluate per item (§5.2).
-- Temporal retries (3 attempts, backoff) cover only infrastructure failures: the evaluator is unreachable, the zygote died, or the answer is `busy`.
+- Temporal retries (3 attempts, backoff) cover only infrastructure failures: the evaluator is unreachable, the zygote died, the answer is `busy`, or the reply breaks the protocol (a malformed reply, or a number of results other than the request's binding sets). None of these is ever recorded as the step's outcome.
 
 ### 5.8 Output canonicalization
 
@@ -699,10 +709,10 @@ library, the classifier or the estimator:
 | `cel.iteration_budget` | "An expression can iterate at most 10,000 times. For large lists, use a Loop or Filter node." |
 | `cel.too_long` | "Expressions are limited to 16,384 characters." |
 | `cel.unknown_function` | "`f` isn't available. Available functions: …" |
-| `cel.conditional_ref` | "`steps.x` may not have run on every path, so `steps.x.output` may be missing. Guard it with `has(steps.x.output)`." Or: "`trigger.a` is optional in its schema, so it may be missing. Guard it with `has(trigger.a)`." |
+| `cel.conditional_ref` | "`steps.x` may not have run on every path, so `steps.x.output` may be missing. Guard it with `has(steps.x.output)`." Or: "`trigger.a` is optional in its schema, so it may be missing. Guard it with `has(trigger.a)`." Or: "`trigger.a` may be null in its schema, so reading its fields fails when it is. Guard it with `trigger.a != null`." |
 | `cel.invalid` | "This expression isn't valid: …" (the checker's message, with line and column) |
 | `cel.unknown_name` | "`x` isn't defined here. Expressions start with trigger, steps, vars, item, index, loops or run." |
-| `cel.bad_path` | "`steps.a.outputs`: after `steps.<key>` comes `output` or `error`." (the reference grammar's message) |
+| `cel.bad_path` | "`steps.a.outputs`: after `steps.<key>` comes `output` or `error`." (the reference grammar's message) Or: "`steps[…]` chooses a step at run time, so publish can't check it. Name it: `steps.<key>.output`." |
 | `cel.has_on_typed_path` | "`p` always exists here, and `has()` on it gives the list, not true. Remove the `has()` test." |
 | `cel.type_mismatch` | "This expression gives integer, but this field expects boolean." |
 | `cel.non_json_result` | "This expression gives a value JSON can't hold (bytes or a type)." |

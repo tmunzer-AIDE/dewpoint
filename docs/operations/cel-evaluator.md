@@ -38,8 +38,9 @@ The evaluator reads its own cgroup limits at start and derives its concurrency:
   never raised.
 - Each slot is one child: `RLIMIT_AS` 256 MiB, `RLIMIT_CPU` 5 s, 16 descriptors, no file writes, no core dumps, and a
   5 s wall-clock kill. The 8.25 MiB per slot covers one in-flight request, one queued request and one response.
-- At most N children run, with N more queued; beyond that the answer is `busy`, which the activity retries. Set the
-  CEL worker's `max_concurrent_activities` to N so that doesn't happen.
+- At most N children run, with N more queued; beyond that the answer is `busy`, which the activity retries. So is a
+  request the OS can't start a child for (no process, memory or descriptor to spare). Set the CEL worker's
+  `max_concurrent_activities` to N so that doesn't happen.
 
 Compose gives it 2 GiB, 2 CPUs and 14 pids: N = 2. Give it more CPUs (up to 6 at 2 GiB) for more concurrency, and
 keep `pids_limit` at N + 8.
@@ -60,4 +61,4 @@ workflow version uses it (`docs/operations/plugin-lifecycle.md`). A request for 
 Every evaluation ends in a value or a recorded outcome, never a retry: `timeout`, `cpu_limit`, `memory_limit`,
 `iteration_budget_exceeded`, `type_mismatch`, `evaluation_error`, `non_json_value`, `output_too_large`,
 `input_too_large` or `evaluation_crashed`. Only infrastructure failures are retried: the socket is unreachable, the
-connection drops, or the answer is `busy`.
+connection drops, the answer is `busy`, or a reply breaks the protocol (it is never recorded as an outcome).
