@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 from pydantic_core import PydanticCustomError
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
@@ -107,6 +107,26 @@ class Constructed(Node):
 
     async def run(self, ctx: StepContext, config: Any) -> Any:
         return LiarOutput.model_construct(n="not-an-int", key="ok")
+
+
+class Tagged(BaseModel):
+    """A valid output whose field serializer changes the type: an `int` is emitted as text, as its schema says."""
+
+    id: int
+
+    @field_serializer("id")
+    def _tag(self, value: int) -> str:
+        return f"id-{value}"
+
+
+class Serialized(Node):
+    type = "testkit.serialized"
+    version = 1
+    title = "Serialized"
+    Output = Tagged
+
+    async def run(self, ctx: StepContext, config: Any) -> Any:
+        return Tagged(id=3)
 
 
 class Broken(Node):
@@ -272,4 +292,12 @@ async def test_an_output_instance_is_validated_too() -> None:
     instances only when they're built through it. It's checked like any other output."""
     bad = await failure(step_activity_for(Constructed), step("testkit.constructed@1"))
     assert (bad.type, bad.non_retryable) == ("output_schema_violation", True)
-    assert bad.message == "The output doesn't match `testkit.constructed@1`: n (int_parsing)."
+    assert bad.message == "The output doesn't match `testkit.constructed@1`: n (type)."  # the output schema's rule
+
+
+async def test_a_field_serializer_emits_what_the_output_schema_declares() -> None:
+    """Checkpoint-2 re-review: an instance is checked as it's emitted, against the declared output schema, not
+    against the model's input types, which a typed field serializer may change."""
+    assert await call(step_activity_for(Serialized), step("testkit.serialized@1")) == StepResult(
+        {"id": "id-3"}, "applied"
+    )

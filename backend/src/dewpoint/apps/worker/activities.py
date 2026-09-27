@@ -22,6 +22,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any, Protocol, get_args
 
 import structlog
+from jsonschema import Draft202012Validator
 from pydantic import BaseModel, ValidationError
 from pydantic_core import PydanticSerializationError
 from pydantic_core.core_schema import ErrorType
@@ -58,6 +59,7 @@ from dewpoint.sdk import (
     RetryableError,
     SideEffect,
     dump_output,
+    node_manifest,
 )
 
 CONFIG_INVALID = "config_invalid"
@@ -138,20 +140,25 @@ async def _call(node: type[Node], step: StepInput, schema: Mapping[str, Any]) ->
 def step_activity_for(node: type[Node]) -> Callable[[StepInput], Awaitable[StepResult]]:
     ref = f"{node.type}@{node.version}"
     config_schema = node.Config.model_json_schema(mode="validation")
-    output_schema = node.Output.model_json_schema(mode="serialization")
+    output_schema = node_manifest(node)["output_schema"]  # what the node promises to emit: serialized and closed
+    emitted = Draft202012Validator(output_schema)
 
     @activity.defn(name=step_activity(ref))
     async def run_step(step: StepInput) -> StepResult:
         try:
             result, outcome = await _call(node, step, config_schema)
-            # an instance too: pydantic trusts instances it didn't build (`model_construct`, assignment)
-            data = (
-                result.model_dump(mode="json", by_alias=True, warnings=False)
-                if isinstance(result, BaseModel)
-                else result
-            )
-            output = node.Output.model_validate(data)
-            return StepResult(dump_output(output), outcome)
+            if not isinstance(result, BaseModel):
+                return StepResult(dump_output(node.Output.model_validate(result)), outcome)
+            # pydantic trusts instances it didn't build (`model_construct`, assignment): check what the instance emits
+            # against the declared output schema, not against the model's input types (a field serializer may change
+            # them)
+            data = result.model_dump(mode="json", by_alias=True, warnings=False)
+            problems = sorted(emitted.iter_errors(data), key=lambda e: [str(p) for p in e.absolute_path])
+            if problems:
+                where = "; ".join(f"{location(list(e.absolute_path), output_schema)} ({e.validator})" for e in problems)
+                message = f"The output doesn't match `{ref}`: {where}."
+                raise ApplicationError(message, {"outcome": None}, type=OUTPUT_SCHEMA_VIOLATION, non_retryable=True)
+            return StepResult(data, outcome)
         except _StepFailed as f:
             details = {"outcome": f.outcome}
             raise ApplicationError(f.message, details, type=f.code, non_retryable=not f.retryable) from None
