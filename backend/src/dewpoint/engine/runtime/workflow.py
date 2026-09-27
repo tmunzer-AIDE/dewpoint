@@ -7,7 +7,7 @@ concurrency."""
 
 import asyncio
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -17,6 +17,7 @@ from temporalio.exceptions import ActivityError, ApplicationError, TimeoutError
 from temporalio.exceptions import CancelledError as ActivityCancelled
 
 with workflow.unsafe.imports_passed_through():
+    from dewpoint.engine.canonical import canonical_json
     from dewpoint.engine.cel import evaluate as cel
     from dewpoint.engine.cel.profile import LOCAL_CEL_PROFILE
     from dewpoint.engine.cel.route import YieldBudget
@@ -56,6 +57,7 @@ with workflow.unsafe.imports_passed_through():
     )
 
 IN_FLIGHT_CAP = 100  # activities and child workflows outstanding per execution (spec §6)
+PROJECT_BYTES = 256 * 1024  # a projection's rows at most, as JSON: far below Temporal's 2 MiB payload limit
 CEL_BATCH = 1_000  # binding sets per cel.evaluate request
 DEADLINE_EXCEEDED = "deadline_exceeded"
 VERSION_UNUSABLE = "version_unusable"  # this build can't load or compile the version
@@ -207,9 +209,8 @@ class RunGraph:
                     tasks[unit] = asyncio.create_task(self._unit(unit))
                 self._queue_settled()
                 if self._rows and not any(key[0] == "project" for key in tasks):  # one at a time: rows wait for it
-                    rows, self._rows = list(self._rows.values()), {}
                     self._projects += 1
-                    tasks[("project", self._projects)] = asyncio.create_task(self._project(rows))
+                    tasks[("project", self._projects)] = asyncio.create_task(self._project(self._take_rows()))
                 if self.sched.ended is not None:
                     break
                 if not tasks:
@@ -280,6 +281,19 @@ class RunGraph:
     def _queue(self, row: StepRow) -> None:
         """Queue a row for the next projection. A later row of the same attempt replaces it."""
         self._rows[(row.step_id, row.iteration_key, row.attempt)] = row
+
+    def _take_rows(self) -> list[StepRow]:
+        """The next projection's rows, oldest first, within PROJECT_BYTES; one row at least. A backlog (after a
+        database outage, say) takes several projections, each well within Temporal's payload limit."""
+        taken: list[StepRow] = []
+        size = 0
+        for key in list(self._rows):
+            row_size = len(canonical_json(asdict(self._rows[key])))
+            if taken and size + row_size > PROJECT_BYTES:
+                break
+            taken.append(self._rows.pop(key))
+            size += row_size
+        return taken
 
     def _learn(self, value: Any, schema: Mapping[str, Any] | None) -> None:
         self._secrets = remember(self._secrets, sensitive_values(value, schema))
@@ -581,8 +595,7 @@ class RunGraph:
             iterations=self.sched.iterations,
         )
         self._queue_settled()
-        rows, self._rows = list(self._rows.values()), {}
-        await self._project_end(rows, summary)
+        await self._project_end(summary)
         return RunResult(status=end.status, outputs=outputs, error=error, iterations=self.sched.iterations)
 
     async def _end_early(self, end: RunEnd) -> RunResult:
@@ -595,7 +608,7 @@ class RunGraph:
             error_code=error["code"] if error else None,
             error_message=error["message"] if error else None,
         )
-        await self._project_end([], summary)
+        await self._project_end(summary)
         return RunResult(status=end.status, error=error)
 
     async def _outputs(self) -> dict[str, Any]:
@@ -605,18 +618,23 @@ class RunGraph:
         assembled = resolve.assemble({"settings": {"outputs": settings_outputs}}, values)
         return dict(assembled["settings"]["outputs"])
 
-    async def _project_end(self, rows: list[StepRow], summary: RunSummary) -> None:
-        """The run's last projection. A cancel that arrives while it's written comes too late to unmake the end it
-        records: the write is shielded, so it's never cancelled, and it lands; the run's result stands, so the
-        projection and Temporal agree."""
-        write = asyncio.create_task(self._project(rows, summary))
+    async def _project_end(self, summary: RunSummary) -> None:
+        """The run's last projections: the rows still queued, in batches, the last one with the run's end. A cancel
+        that arrives meanwhile comes too late to unmake the end they record: each write is shielded, so it's never
+        cancelled, and it lands; the run's result stands, so the projection and Temporal agree."""
         while True:
-            try:
-                await asyncio.shield(write)
+            rows = self._take_rows()
+            last = not self._rows
+            write = asyncio.create_task(self._project(rows, summary if last else None))
+            while True:
+                try:
+                    await asyncio.shield(write)
+                    break
+                except asyncio.CancelledError:
+                    if write.cancelled():
+                        raise
+            if last:
                 return
-            except asyncio.CancelledError:
-                if write.cancelled():
-                    raise
 
     async def _project(self, rows: list[StepRow], summary: RunSummary | None = None) -> None:
         await workflow.execute_activity(
@@ -634,6 +652,7 @@ __all__ = [
     "INTERNAL_ERROR",
     "IN_FLIGHT_CAP",
     "NODE_TYPE_UNAVAILABLE",
+    "PROJECT_BYTES",
     "VERSION_UNUSABLE",
     "RunGraph",
 ]

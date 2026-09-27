@@ -13,10 +13,11 @@ from temporalio.client import WorkflowFailureError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner
 
+from dewpoint.engine.canonical import canonical_json
 from dewpoint.engine.graph.validate import SubflowInfo
 from dewpoint.engine.runtime import nodes
 from dewpoint.engine.runtime.activities import CEL_EVALUATE, ENGINE_QUEUE, PROJECT, ProjectInput, RunInput
-from dewpoint.engine.runtime.workflow import RunGraph
+from dewpoint.engine.runtime.workflow import PROJECT_BYTES, RunGraph
 from tests.apps.worker.harness import TENANT, MemoryStore, run, start, workers
 from tests.support.graphs import G, cel, ref, template
 from tests.support.plugins.testkit import SlowSend
@@ -367,6 +368,34 @@ async def test_a_database_outage_never_repeats_an_effect_and_the_rows_catch_up(e
     assert result.status == "succeeded" and SlowSend.sent.count(handle.id) == 1 and store.down == 0
     assert [(r.node_key, r.status) for r in store.steps(handle.id)] == [("s", "succeeded"), ("t", "succeeded")]
     assert store.runs[handle.id].status == "succeeded"
+
+
+class BatchStore(FlakyStore):
+    """Down for its first writes, and records the size of each projection's rows."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sizes: list[int] = []
+
+    async def project(self, data: ProjectInput) -> None:
+        await super().project(data)
+        self.sizes.append(sum(len(canonical_json(dataclasses.asdict(r))) for r in data.steps))
+
+
+async def test_a_backlog_is_projected_in_bounded_batches(env: WorkflowEnvironment) -> None:
+    """Final review: rows that settle while a projection is outstanding all went into the next one. After a database
+    outage the catch-up exceeded Temporal's payload limit, and the run could no longer progress."""
+    store = BatchStore()
+    g = graph().node("l", LOOP, {"items": list(range(40))}).node("e", ECHO, {"value": "x" * 7000})
+    g.edge("l", "e", "body")
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, TRIGGER)
+        result = await asyncio.wait_for(handle.result(), 60)
+    assert result.status == "succeeded" and store.down == 0
+    assert max(store.sizes) <= PROJECT_BYTES < sum(store.sizes)  # the backlog took more than one batch
+    assert sorted(r.iteration_key for r in store.steps(handle.id) if r.node_key == "e") == sorted(
+        f"l:{i}" for i in range(40)
+    )
 
 
 async def test_sensitive_values_never_reach_the_projection(env: WorkflowEnvironment) -> None:
