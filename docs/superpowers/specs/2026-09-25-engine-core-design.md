@@ -387,8 +387,9 @@ row lock.
 - It is a transaction-scoped advisory lock keyed `dewpoint:workflow:<id>`, for the lifecycle locks' reason: a row
   lock would need UPDATE on `workflows`, which the dispatch role must not have.
 - Both sides take it before any lifecycle lock.
-- Admission reads the two fields from the database after it takes the lock, never from an object its session
-  already holds, which would predate the change the lock waited for.
+- Both sides read the workflow from the database after they take the lock, never from an object their session
+  already holds, which would predate the change the lock waited for. Admission reads the two fields as columns; a
+  writer's locked read replaces the session's copy.
 - **Admission locks first:** the change waits until the request exists. The workflow admitted it when it was frozen.
 - **The change locks first:** admission waits, then reads the committed change and refuses.
 

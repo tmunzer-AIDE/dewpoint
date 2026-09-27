@@ -38,7 +38,7 @@ what 2a-3 consumes. The owner split 2a-3 into three plans on 2026-09-27:
 1. **Go/no-go experiments ran first** (next section), on temporalio 1.33.0 from the CEL spike's environment. The
    owner approved the SDK's download of its time-skipping test server for planning, the suite and CI.
 2. **Every module was prototyped** in a scratch copy of `backend/` until it passed its tests, `ruff`, `ruff format`,
-   `mypy --strict` (132 source files) and `lint-imports` (10 contracts). The prototype's full suite gives 878 passed
+   `mypy --strict` (132 source files) and `lint-imports` (10 contracts). The prototype's full suite gives 879 passed
    and 8 skipped (the Linux-only evaluator tests), against `main`'s 726 collected.
 3. **The code blocks below are those files, verbatim.** Diffs to existing files were generated from the prototype.
 4. **Each task was staged and checked on its own.** Stage *N* is `main` plus tasks 1..*N*. Every stage passed the
@@ -351,6 +351,8 @@ checkpoint 3 found a workflow change committing during admission, closed by deci
     - After the lock, admission reads `enabled` and `active_version_id` as columns. A `Workflow` the session already
       holds would come back from the ORM as it was loaded, before the change the lock waited for. 2b's dispatcher
       calls `admit` in its own session.
+    - A writer's locked read refreshes a `Workflow` its session already holds (`populate_existing`). Otherwise it
+      could publish a draft that has since been replaced, or take an enable after a disable for a no-op.
 
     (Task 6)
 
@@ -5879,7 +5881,8 @@ cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy
 dispatch role, in one READ COMMITTED transaction that first takes two kinds of shared lock (§4.5, decision 23):
 - the workflow's admission lock, before it reads whether the workflow is enabled and which version is active. A
   disable, publish or activation takes that lock exclusively, so it either commits before the read or waits until the
-  run exists. The read goes to the database, never to a `Workflow` the session already holds;
+  run exists. The read goes to the database, never to a `Workflow` the session already holds, and so does a
+  writer's: the row it locks replaces the session's copy;
 - the lifecycle locks on the version's closure. So a retirement either sees the run, or the run sees the retirement.
 
 Then `RunGraph` starts, with the run's id as its workflow id and `REJECT_DUPLICATE`. A lost acknowledgement looks like
@@ -5893,6 +5896,7 @@ Only a confirmed refusal records the run as failed (`start_failed`). An answer t
 - Modify: `backend/src/dewpoint/core/workflows/service.py` (the workflow's admission lock)
 - Create: `backend/tests/apps/test_runs.py`
 - Modify: `backend/tests/apps/test_lifecycle_races.py` (the lock-wait helper covers both kinds of lock)
+- Modify: `backend/tests/apps/test_workflow_ops.py` (a writer acts on what's committed)
 
 **Interfaces:**
 - Consumes:
@@ -5907,7 +5911,8 @@ Only a confirmed refusal records the run as failed (`start_failed`). An answer t
   - `core/workflows/service.py`: `lock_for_admission(s, tenant_id, workflow_id) -> AdmissionState | None` takes the
     workflow's admission lock, shared, then reads `enabled` and `active_version_id` as columns (`AdmissionState`).
     With `for_update`, `get_workflow` now takes the lock exclusively before the row lock, so publish, activate,
-    enable, disable and rename all do;
+    enable, disable and rename all do, and it refreshes a `Workflow` the session already holds
+    (`populate_existing`);
   - `apps/runs.py`:
     - `START_FAILED = "start_failed"` and `START_RETRY_S = (0.5, 2.0)`;
     - `NotAdmissibleError(reasons)` with `.reasons`, `StartRefusedError`, and `StartUncertainError(run_id)` with
@@ -6009,6 +6014,43 @@ diff --git a/backend/tests/apps/test_lifecycle_races.py b/backend/tests/apps/tes
      release.set()
      await asyncio.wait_for(activating, 10)
      with pytest.raises(lifecycle.ReferencedError) as e:
+```
+
+Add a writer whose session held the workflow before its lock to `backend/tests/apps/test_workflow_ops.py`:
+
+```diff
+diff --git a/backend/tests/apps/test_workflow_ops.py b/backend/tests/apps/test_workflow_ops.py
+--- a/backend/tests/apps/test_workflow_ops.py
++++ b/backend/tests/apps/test_workflow_ops.py
+@@ -290,3 +290,28 @@
+         "local",
+     )
+     assert record.iterations == 3 and record.to_json() == stored
++
++
++async def test_a_writer_sees_what_was_committed_while_its_session_held_the_workflow(
++    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
++) -> None:
++    """A session may hold the `Workflow` from before its lock: the writer must act on what's committed, not on that
++    copy. Here another transaction saves a draft and disables the workflow in between."""
++    await sync_test_plugins(admin_sessionmaker)
++    ctx = await actor(owner_sessionmaker)
++    wf_id = await create(api_sessionmaker, ctx, ECHO_GRAPH)
++    assert (await publish(api_sessionmaker, ctx, wf_id, api_settings)).version is not None
++    async with api_sessionmaker() as s, s.begin():
++        await tenant_scope(s, ctx.tenant_id)
++        held = await service.get_workflow(s, ctx.tenant_id, wf_id)  # the session holds it while this reference lives
++        assert held is not None and held.enabled
++        seen = held.draft_revision
++        await save(api_sessionmaker, ctx, wf_id, SENSITIVE_GRAPH)
++        await update(api_sessionmaker, ctx, wf_id, enabled=False)
++        wf = await service.get_workflow(s, ctx.tenant_id, wf_id, for_update=True)
++        assert wf is not None
++        assert (wf.draft_revision, wf.draft, wf.enabled) == (seen + 1, SENSITIVE_GRAPH, False)
++        with pytest.raises(service.DraftConflictError):  # the draft this session saw is no longer the draft
++            await workflow_ops.publish(s, ctx, wf, expected_revision=seen, settings=api_settings)
++        await workflow_ops.update(s, ctx, wf, name=None, enabled=True)  # an enable, not a no-op
++    assert await is_enabled(api_sessionmaker, ctx, wf_id)
 ```
 
 Create `backend/tests/apps/test_runs.py`:
@@ -6400,6 +6442,10 @@ async def test_admission_reads_the_workflow_afresh_in_a_session_that_loaded_it(
 Run: `cd backend && uv run pytest -q tests/apps/test_runs.py`
 Expected: a collection error, `ImportError: cannot import name 'runs' from 'dewpoint.apps'`.
 
+Run: `cd backend && uv run pytest -q tests/apps/test_workflow_ops.py -k committed_while`
+Expected: 1 failed. The writer sees the revision, draft and `enabled` its session loaded: `assert (1, {…}, True) ==
+(2, {…}, False)`.
+
 - [ ] **Step 3: Implement**
 
 Add the setting to `backend/src/dewpoint/core/config.py`:
@@ -6433,7 +6479,7 @@ diff --git a/backend/src/dewpoint/core/workflows/service.py b/backend/src/dewpoi
  from sqlalchemy.ext.asyncio import AsyncSession
 
  from dewpoint.core.audit.service import record
-@@ -46,11 +46,54 @@
+@@ -46,12 +46,56 @@
      return wf
 
 
@@ -6479,14 +6525,17 @@ diff --git a/backend/src/dewpoint/core/workflows/service.py b/backend/src/dewpoi
  ) -> Workflow | None:
 +    """With `for_update`, take the workflow's admission lock exclusively (`lock_for_admission`), then its row lock.
 +    Both are held until the change commits, so a run is admitted either before the change or after it. The admission
-+    lock comes first: a change waiting for an admission holds nothing that admission's insert could need."""
++    lock comes first: a change waiting for an admission holds nothing that admission's insert could need. The locked
++    row overwrites any `Workflow` the session already holds, so the writer acts on what's committed."""
      q = select(Workflow).where(Workflow.id == workflow_id, Workflow.tenant_id == tenant_id)
      if for_update:
+-        q = q.with_for_update()
 +        await s.execute(
 +            text("select pg_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": _admission_key(workflow_id)}
 +        )
-         q = q.with_for_update()
++        q = q.with_for_update().execution_options(populate_existing=True)
      return (await s.execute(q)).scalar_one_or_none()
+
 
 ```
 
@@ -6682,9 +6731,12 @@ __all__ = [
 - [ ] **Step 4: Run the tests**
 
 Run: `cd backend && uv run pytest -q tests/apps/test_runs.py tests/apps/test_lifecycle_races.py tests/apps/test_workflow_ops.py`
-Expected: all pass. There are 17 new tests: 6 races between admission and a disable, activation or publish, in both
-orders, and 3 admissions in a session that already holds the workflow. The lifecycle race and workflow tests pass
-unchanged.
+Expected: all pass. There are 18 new tests:
+- 6 races between admission and a disable, activation or publish, in both orders;
+- 3 admissions in a session that already holds the workflow;
+- 1 writer in such a session.
+
+The lifecycle race tests and the other workflow tests pass unchanged.
 
 - [ ] **Step 5: Checks and commit**
 
@@ -6693,7 +6745,7 @@ cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy
   && uv run pytest -q tests/apps/test_runs.py tests/apps/test_lifecycle_races.py tests/apps/test_workflow_ops.py \
        tests/core \
   && git add src/dewpoint/apps/runs.py src/dewpoint/core/config.py src/dewpoint/core/workflows/service.py \
-       tests/apps/test_runs.py tests/apps/test_lifecycle_races.py \
+       tests/apps/test_runs.py tests/apps/test_lifecycle_races.py tests/apps/test_workflow_ops.py \
   && git commit -m "feat(apps): admit and start runs under the workflow's admission lock and the lifecycle locks" \
        -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -7555,7 +7607,7 @@ cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy
        -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-Expected: 868 passed and 8 skipped (the Linux-only evaluator tests).
+Expected: 869 passed and 8 skipped (the Linux-only evaluator tests).
 
 ---
 
@@ -7847,7 +7899,7 @@ cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy
        -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-Expected: 878 passed and 8 skipped locally (`main` collects 726 tests; this plan adds 160). On Linux the 8
+Expected: 879 passed and 8 skipped locally (`main` collects 726 tests; this plan adds 161). On Linux the 8
 evaluator-limit tests run too. Push only when the owner says so; CI then runs the same suite, downloading the test
 server on first use.
 
