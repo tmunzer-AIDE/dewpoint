@@ -73,6 +73,26 @@ services:
     volumes: [anchors:/anchors]
     depends_on: { migrate: { condition: service_completed_successfully } }
 
+  cel-evaluator:
+    image: ${DEWPOINT_CEL_EVALUATOR_IMAGE:-dewpoint-cel-evaluator:dev}
+    build: { context: ../.., dockerfile: deploy/docker/cel-evaluator.Dockerfile }
+    # Secretless and egress-free (spec §5.7): no network at all, no environment beyond its own settings. The CEL
+    # activity worker (2a-3) reaches it through the socket on the `cel-socket` volume, which only the two mount.
+    network_mode: none
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    # The evaluator derives its concurrency from these: N = min(CPUs, floor((memory - 256 MiB) / 264.25 MiB)).
+    mem_limit: 2g
+    cpus: 2
+    pids_limit: 14  # N + 8, for up to 6 slots
+    volumes: [cel-socket:/run/dewpoint-cel]
+    healthcheck:
+      test: ["CMD", "python", "-m", "dewpoint.apps.cel_evaluator", "--health"]
+      interval: 5s
+      retries: 20
+
   web:
     image: ${DEWPOINT_WEB_IMAGE:-dewpoint-web:dev}
     build: { context: ../.., dockerfile: deploy/docker/web.Dockerfile }
@@ -85,4 +105,4 @@ services:
       DEWPOINT_TRUSTED_PROXIES: ${DEWPOINT_TRUSTED_PROXIES:-}
     depends_on: { api: { condition: service_healthy } }
 
-volumes: { pgdata: {}, anchors: {} }
+volumes: { pgdata: {}, anchors: {}, cel-socket: {} }

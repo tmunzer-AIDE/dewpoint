@@ -13,6 +13,7 @@ MAX_REF_LENGTH = 512
 MAX_TEMPLATE_PARTS = 100
 MAX_TEXT = 4096
 MAX_CEL = 16_384  # spec §5.2: longer expressions are rejected
+CEL_KEYWORDS = frozenset({"in", "true", "false", "null"})  # CEL can't select these as fields: never keys or names
 
 Pointer = tuple[str | int, ...]
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -32,7 +33,7 @@ class RefSyntaxError(ValueError):
 @dataclass(frozen=True)
 class RefPath:
     text: str
-    root: str  # trigger | steps | vars | loop | loops | run
+    root: str  # trigger | steps | vars | item | index | loops | run
     name: str | None  # step key, variable name or loop key
     section: str | None  # output | error | item | index | id | started_at | now
     rest: tuple[str | int, ...]
@@ -91,8 +92,10 @@ def parse_ref(text: Any) -> RefPath:
         return RefPath(text, "steps", name, section, rest)
     if root == "vars":
         return RefPath(text, "vars", _name(t, 1, "a variable name"), None, tuple(t[2:]))
+    if root in ("item", "index"):  # the innermost loop's item, or the filter item in a predicate
+        return _loop_ref(text, root, None, root, t[1:])
     if root == "loop":
-        return _loop_ref(text, "loop", None, _name(t, 1, "`item` or `index`"), t[2:])
+        raise RefSyntaxError("`loop.item` is written `item`, and `loop.index` is `index`")
     if root == "loops":
         return _loop_ref(text, "loops", _name(t, 1, "a loop key"), _name(t, 2, "`item` or `index`"), t[3:])
     if root == "run":
@@ -100,7 +103,7 @@ def parse_ref(text: Any) -> RefPath:
         if section not in ("id", "started_at", "now") or len(t) > 2:
             raise RefSyntaxError("`run` has `id`, `started_at` and `now`")
         return RefPath(text, "run", None, section, ())
-    raise RefSyntaxError(f"references start with trigger, steps, vars, loop, loops or run, not `{root}`")
+    raise RefSyntaxError(f"references start with trigger, steps, vars, item, index, loops or run, not `{root}`")
 
 
 @dataclass(frozen=True)

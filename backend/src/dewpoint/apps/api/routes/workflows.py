@@ -169,10 +169,13 @@ async def validate_draft(
 ) -> dict[str, object]:
     wf = await _get(db, ctx, workflow_id)
     checked = await workflow_ops.check_draft(db, ctx.tenant_id, wf.draft, settings)
+    expressions = checked.result.expressions if checked.result is not None else ()
     return {
         "draft_revision": wf.draft_revision,
         "valid": not any(d.severity == "error" for d in checked.diagnostics),
         "diagnostics": [d.to_json() for d in checked.diagnostics],
+        # How each CEL value runs, for the editor (spec §5.10): "local" runs inline, "activity" as a separate step.
+        "expressions": [{"node": r.node, "field": r.field, "mode": r.mode, "reason": r.reason} for r in expressions],
     }
 
 

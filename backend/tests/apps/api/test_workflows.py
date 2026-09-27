@@ -7,7 +7,7 @@ import pytest
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.plugins.lifecycle import Entry
 from tests.apps.api.helpers import member_client, session_client
-from tests.support.graphs import G, ref
+from tests.support.graphs import G, cel, nid, ref
 from tests.support.registry import sync_test_plugins
 
 GRAPH = G().node("a", "testkit.echo@1", {"value": 1}).data()
@@ -201,3 +201,19 @@ async def test_deeply_nested_drafts_are_refused_before_they_are_stored(app, owne
 
 def _with_value(value: Any) -> dict[str, Any]:
     return G().node("a", "testkit.echo@1", {"value": value}).data()
+
+
+async def test_validate_reports_how_each_expression_runs(app, owner_sessionmaker, api_settings) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    nested = cel("[1, 2].map(x, [1, 2].map(y, x * y))")
+    async with c:
+        wf = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "C"})).json()
+        base = f"/api/v1/t/{tid}/workflows/{wf['id']}"
+        draft = G().node("a", "testkit.echo@1", {"value": nested}).data()
+        assert (await c.put(f"{base}/draft", json=draft, headers={"If-Match": "1"})).status_code == 200
+        checked = (await c.post(f"{base}/validate")).json()
+    assert checked["valid"] is True
+    assert [(d["code"], d["severity"]) for d in checked["diagnostics"]] == [("cel.iteration_budget", "warning")]
+    assert checked["expressions"] == [
+        {"node": str(nid("a")), "field": "/value", "mode": "activity", "reason": "more than one nested loop"}
+    ]

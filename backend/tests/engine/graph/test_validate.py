@@ -129,8 +129,8 @@ def _loops(collect: Any, leaf_value: Any, after_value: Any = None) -> G:
 
 
 def test_loop_scopes() -> None:
-    assert codes(_loops(ref("steps.inner.output.count"), [ref("loop.item"), ref("loops.outer.item")])) == []
-    assert codes(_loops(None, None, ref("loop.item"))) == ["ref.loop_outside"]
+    assert codes(_loops(ref("steps.inner.output.count"), [ref("item"), ref("loops.outer.item")])) == []
+    assert codes(_loops(None, None, ref("item"))) == ["ref.loop_outside"]
     assert codes(_loops(None, None, ref("steps.leaf.output.value"))) == ["ref.out_of_scope"]
     assert codes(_loops(ref("steps.leaf.output.value"), None)) == ["ref.out_of_scope"]
     assert codes(_loops(None, None, ref("steps.outer.output.count"))) == []
@@ -156,9 +156,9 @@ def test_loop_item_is_typed_from_the_items_reference() -> None:
 
     closed = copy.deepcopy(SITES)
     closed["properties"]["sites"]["items"]["additionalProperties"] = False
-    assert codes(g(ref("loop.item.name"))) == []
-    assert codes(g(ref("loop.item.nope"))) == ["ref.conditional"]  # open item schema: the field may exist
-    assert codes(g(ref("loop.item.nope"), closed)) == ["ref.unknown_field"]
+    assert codes(g(ref("item.name"))) == []
+    assert codes(g(ref("item.nope"))) == ["ref.conditional"]  # open item schema: the field may exist
+    assert codes(g(ref("item.nope"), closed)) == ["ref.unknown_field"]
 
 
 def test_undeclared_fields_of_open_schemas_are_possibly_missing() -> None:
@@ -261,7 +261,7 @@ def test_a_structured_default_that_does_not_fit_the_reference_makes_fields_condi
     items = (
         G()
         .node("l", LOOP, {"items": ref("trigger.items", default=[{}])})
-        .node("use", ECHO, {"value": ref("loop.item.b")})
+        .node("use", ECHO, {"value": ref("item.b")})
         .edge("l", "use", "body")
     )
     items.settings["input_schema"] = {"type": "object", "properties": {"items": {"type": "array", "items": CLOSED_OBJ}}}
@@ -304,7 +304,7 @@ def test_literal_only_kinds_and_cel() -> None:
     assert codes(G().node("f", "flow.filter@1", {"items": [1], "predicate": True})) == ["value.kind_not_allowed"]
     filtered = G().node("f", "flow.filter@1", {"items": [1], "predicate": ref("vars.x", default=True)})
     assert codes(filtered) == ["value.kind_not_allowed"]
-    assert codes(G().node("f", "flow.filter@1", {"items": [1], "predicate": cel("item > 1")})) == ["cel.unavailable"]
+    assert codes(G().node("f", "flow.filter@1", {"items": [1], "predicate": cel("item > 1")})) == []
 
 
 def test_literal_config_is_validated() -> None:
@@ -520,3 +520,10 @@ def test_validate_reports_never_raises_on_arbitrary_configs(nodes: Any, outputs:
     except GraphFormatError:
         return  # rejected at parse time, which is also a report
     validate(graph, ValidationContext(catalog=CAT))
+
+
+def test_cel_keywords_are_rejected_as_step_keys_and_variable_names() -> None:
+    assert codes(G().node("in", ECHO)) == ["graph.reserved_key"]
+    g = G().node("a", ECHO)
+    g.settings = {"vars_schema": {"type": "object", "properties": {"true": {"type": "integer", "default": 0}}}}
+    assert codes(g) == ["vars.invalid_name"]

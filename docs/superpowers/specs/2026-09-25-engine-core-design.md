@@ -17,9 +17,15 @@
   - Revision 5.3 folds in plan 2a-2 (CEL) and its review:
     - the typed-path proof and its conditions;
     - `item`/`index` in place of the reserved `loop`;
-    - the step-presence contract, and `has()` guards for schema-declared optional fields;
+    - the step-presence contract, `has()` guards for schema-declared optional fields, and (checkpoint 4) `!= null`
+      guards below schema-nullable ones; a key in brackets is checked like the field it names, and a reference is
+      read only through its path (PR #7 review);
     - an exact output contract: every serialized field required, dumps by alias, no model serializers;
-    - the work bound and the measured iteration limit, map caps and root projection;
+    - measured limits: 9,999 iterations, a work bound that charges each call by the size of what it reads, retained
+      `map`/`filter` accumulators within a 4 MiB classification bound, and 200-entry list and map caps (measured on
+      Linux, finalized at checkpoint 3).
+      These define `cls-1`, which nothing published had used (§5.1);
+    - root projection;
     - batched evaluator requests;
     - the new diagnostic and outcome codes;
     - the evaluator's Kubernetes transport, deferred to the Helm chart.
@@ -124,7 +130,10 @@ class Node(Protocol):
   - outputs become JSON only through `dewpoint.sdk.dump_output`: `model_dump(mode="json", by_alias=True)`, with no
     `exclude_*` option;
   - a `@model_serializer` on the output, or on any model, dataclass or `TypedDict` inside it, is refused at
-    registration: its JSON can drop or rename promised fields. Field serializers are allowed: they keep every key.
+    registration: its JSON can drop or rename promised fields.
+  - a field serializer must declare its return type, which becomes the field's schema. One without (an unannotated
+    `@field_serializer`, a `PlainSerializer` or `WrapSerializer` without `return_type`) is refused: the schema would
+    keep the field's own type whatever it emits. Pydantic's serializers for its own types are trusted.
 - An output field marked `x-sensitive: true` never reaches `run_steps`, previews or samples.
 - The SDK has its own semver. First-party plugins pin a major version.
 
@@ -224,6 +233,18 @@ Tenant-scoped tables use FORCE RLS with the foundations policy pattern.
     - a step that may not have run is guarded with `has(steps.<key>.output)` (or `has(steps.<key>.error)`);
     - a field the schema declares but doesn't require, and every such ancestor, is guarded with `has()` on that field,
       e.g. `has(trigger.a) && has(trigger.a.b) && trigger.a.b.c == 1`;
+    - a field the schema says may be null (a `null` type, or a union with null such as pydantic's `Optional`) is
+      guarded with `!= null` before anything below it is read, a `has()` test included, e.g.
+      `trigger.a != null && trigger.a.b == 1` (checkpoint 4). A reference to it needs a `default`, as above. Reading
+      the value itself needs no guard: null is a value. `has()` doesn't prove a value non-null, and `!= null` doesn't
+      prove it present;
+    - a literal key that could be written as a field (`steps["b"]`, `trigger["a"]`) is that field, with the same
+      checks and guards. `steps` and `loops` take no other key: publish can't check one chosen at run time
+      (`cel.bad_path`). Other data may be indexed freely;
+    - a reference is read only through its path. A read of a reference hidden in a list, a map, a condition,
+      `dyn()`, a list concatenation or a comprehension (`[steps][0]["b"]`, `[trigger][0].opt`) is refused
+      (`cel.bad_path`): publish couldn't check its path or guards. An element of a path, by index or iteration
+      (`trigger.events[0].mac`, `trigger.events.map(e, e.mac)`), is data, read freely;
     - data the schema doesn't declare (open objects, schemaless bodies) needs no guard. If it's missing at run time,
       the evaluation fails with `evaluation_error` and the step's error policy applies. (§5.10 `cel.conditional_ref`)
 - **Names.** `in`, `true`, `false` and `null` can't be step keys or variable names: CEL can't select them as fields.
@@ -357,6 +378,11 @@ the race tests assert that it stays at zero. 2a implements these rules in `start
 
   Each version stores its profile, and changing any of the three creates a new profile. A new profile ships only
   after the §5.9 gates pass, and it follows the lifecycle in §4.5.
+
+  `cls-1` is the classifier as plan 2a-2 ships it. Its rules changed while 2a-2 was built (the caps, retained
+  accumulators, work charges and regex eligibility in §5.5) without a new version. No published version had
+  classified an expression under `cls-1`: 2a-1 refused CEL at publish (`cel.unavailable`), and nothing had been
+  released. Once 2a-2 is merged, a change to those rules is `cls-2`.
 - **Publish** always uses the API build's single current profile. Deploy order: first the evaluators and workers
   that serve a profile, then the API that publishes with it.
 - **Where evaluation runs:**
@@ -401,7 +427,7 @@ the race tests assert that it stays at zero. 2a implements these rules in `start
   - `loop` is a reserved identifier, and `in`, `true`, `false`, `null` can't be selected as fields (§4.3 names);
   - the runtime's own AST serialization isn't deterministic (protobuf maps); nothing stores or hashes it.
 - **Declarations are per expression.** Roots always; `item` (`dyn`, or a typed list) and `index` (`int`) where they
-  exist; and, for each select chain in the expression, every prefix that is an always-available, non-null array.
+  exist; and, for each chain in the expression (selects, and literal keys that could be fields), every prefix that is an always-available, non-null array.
   Element types: objects `map<string, dyn>`, strings `string`, booleans `bool`, arrays `list<dyn>`, anything else
   `dyn` (numbers stay `dyn`: the runtime would convert an int in a `double` slot, or refuse `3.0` in an `int` one).
 - **Projection.** A root is bound as the part the expression's chains can observe: maps keep only keys on a chain,
@@ -453,25 +479,56 @@ cel-spec protos, Apache-2.0, pinned commit). It assigns exactly one class.
 **Local** (evaluated inside `RunGraph`). Every condition must hold. Together they are the **proven restricted subset**:
 1. **Allow-list, not deny-list.** Every AST node kind, operator and function is on the local allow-list, and each
    entry records its rule for size and work.
-   - Excluded: regex `matches` with a non-literal pattern or a pattern over 256 code points; time-zone accessors with
-     a named zone (they depend on tzdata; UTC and fixed offsets are allowed); anything added to the standard library
-     after the pin.
+   - Excluded:
+     - regex `matches` with a non-literal pattern, a pattern over 256 code points, or a pattern with `(?` groups
+       (flags, names) or letter escapes other than `\d \D \s \S \w \W \b \B \A \z` and control characters
+       (Unicode classes, code points). Those can compile far larger than they are written, and the work charge
+       follows the written-out pattern;
+     - time-zone accessors with a named zone (they depend on tzdata; UTC and fixed offsets are allowed);
+     - anything added to the standard library after the pin.
 2. **At most one comprehension level.** The only list growth inside a comprehension body is the macro's own accumulator.
 3. **≤ 4,096 code points.**
-4. **Bounded intermediate work, proven statically.** The **bound estimator** computes worst-case iterations and the
-   largest intermediate value in bytes. It assumes every referenced input is at the runtime caps (§5.6) and uses
+4. **Bounded intermediate work, proven statically.** The **bound estimator** computes worst-case iterations, memory
+   and work. It assumes every referenced input is at the runtime caps (§5.6) and uses
    each allow-list entry's rule; for example, concatenation adds its operands' bounds, and a comprehension
    multiplies its body's bound by the range's list-length cap.
    - Local requires ≤ 9,999 iterations (the runtime's budget of 10,000 lets 9,999 pass), so the budget can never
-     fire locally, and ≤ 1 MiB for the largest intermediate value.
+     fire locally, and ≤ 4 MiB of estimated memory. That is a classification bound, not a hard RSS ceiling: gate 6
+     allows measured growth up to 1.5 × it.
+   - **Memory** is the largest intermediate value plus what the runtime retains. cel-expr-python 0.1.3 copies a
+     `map` or `filter` accumulator every iteration and keeps every copy until the evaluation ends, so the estimator
+     charges 56 bytes × n(n + 1)/2 per list-building step over a range of n, summed over a chain.
+     - Measured at n = 200: 41–45 bytes per slot on macOS, and about 52 on Linux for a single step (fixed overhead
+       included). 56 covers both.
+     - A `map` over 1,000 elements keeps about 20 MiB; over 2,000, about 90 MiB. That is why the caps in §5.6 are
+       200.
+     - **Final** (owner, checkpoint 3): 56 bytes, 200, 4 MiB. Linux (CI, `ubuntu-latest`, gate 6) measured the worst
+       local cases growing 1.0–2.3 MiB: 0.59–0.74 × their bounds at 48 bytes a slot, 0.55–0.65 × at 56. Gate 6
+       keeps measuring them.
    - Sizes use a model close to the runtime's memory: 16 bytes per scalar and per container, plus text bytes. A
      value's model size is at most 8 × its canonical JSON size + 8, so the referenced inputs together are at most
      524,296 model bytes. Distinct input references share that mass (`a.x + a.y` is one input's worth); overlapping
      ones count again (`s + s`). Inside a comprehension, a bound may grow with the current element, whose sizes sum to
      the range's (`l.map(e, e.name)` stays near `l`); `m[k]` over `sortedKeys(m)` sums to `m`.
    - **Work.** Iterations alone don't bound CPU: a body can call Python-implemented functions hundreds of times per
-     element. The estimator also bounds *work*: one unit per node evaluation, 15 per `fn-1` call, one per 64 bytes a
-     regular expression scans. Local requires ≤ 2,000,000 units (about 0.2 s on the gate machine).
+     element, or copy a 16 KiB string. The estimator also bounds *work*: one unit per node evaluation, plus what each
+     call costs by the size of what it reads. The rates are measured against a native node (15–35 ns), and each is
+     at most about 40 ns a unit:
+     - an `fn-1` call: 15, plus the arguments it converts;
+     - text copied or read (concatenation, `size`, conversions, comparisons, prefixes, map keys): one per 64 bytes;
+     - values walked node by node (list and map equality, which stops at the smaller value; `in` over a list; a map
+       or list converted for a Python function): one per 16 model bytes;
+     - `contains`: text × needle / 2,048. A search may compare the needle at every position: an 8 KiB needle in
+       16 KiB takes 1.3 ms;
+     - `matches`: text × pattern code points / 4, with `{n,m}` counts written out. RE2's cost per byte follows the
+       compiled pattern: up to about 9 ns a byte per code point on 16 KiB, 19 on short texts, so 36 ms for a
+       256-point pattern over 16 KiB.
+     - Text from the inputs is at most a string at the cap per reference, and at most the inputs' JSON over a whole
+       range.
+
+     Local requires ≤ 2,000,000 units (about 0.2 s on the gate machine). **Final** (owner, checkpoint 3): the rates
+     are set from macOS measurements, and on Linux (CI, `ubuntu-latest`, gate 7) the heaviest load takes 0.47–0.57 s
+     per workflow task across three runs.
    - The bounds are stored with the version.
 
 **Activity.** Valid expressions that are not local run in the isolated `cel.evaluate` activity (§5.7), and the
@@ -482,7 +539,7 @@ result is recorded in history. This is the parent's `eval` activity (§6.5).
 - Before a local evaluation, `RunGraph` measures the values the expression references (identifiers from the checked AST's reference map). Those values are already in workflow state, so measuring is deterministic.
 - **Caps (the estimator's assumptions):**
   - each referenced value ≤ 64 KiB of canonical JSON, and ≤ 64 KiB in total;
-  - every list ≤ 1,000 elements, every map ≤ 1,000 entries;
+  - every list ≤ 200 elements, every map ≤ 200 entries (larger inputs run in the evaluator; §5.5 memory);
   - every string ≤ 16 KiB.
 - If any cap is exceeded, the same expression runs in `cel.evaluate` instead. Routing depends only on recorded values, so a replay routes the same way.
 - **Workflow-task time.** Since its last await, the scheduler sums the **stored static bounds** of the local
@@ -495,6 +552,11 @@ result is recorded in history. This is the parent's `eval` activity (§6.5).
     Before local evaluation is enabled, the plan must run an adversarial test: expressions that max out the
     estimator's bounds, on inputs at the caps, evaluated back to back up to the threshold. The measured worst-case
     CPU per workflow task must stay within a target of 1 s, against Temporal's 10 s workflow-task timeout. The thresholds are tuned from that measurement.
+    - There is one load per cost the work bound charges: Python calls, text copies, substring search, regular
+      expressions, equality and conversion. Each runs at its heaviest local form, on inputs chosen to be worst within
+      the caps.
+    - The heaviest load (regular expressions) takes 0.28 s per workflow task on macOS and 0.47–0.57 s on Linux (CI,
+      `ubuntu-latest`, three runs). Removing any charge, or the work threshold, takes a load past 1 s.
 
 ### 5.7 Isolated evaluation (`cel.evaluate` activity + `cel-evaluator` service)
 
@@ -555,7 +617,8 @@ not inside a worker that holds credentials.
   - **Why this is enough.** `RLIMIT_AS` caps a child's virtual address space, which is always at least its resident
     memory. So *N* children plus the reserve can't exceed the cgroup limit.
   - An OOM kill of the whole container is still treated as an infrastructure failure and retried.
-- **Concurrency.** At most *N* children run at once, with a wait queue of *N*. Anything beyond that gets `busy`.
+- **Concurrency.** At most *N* children run at once, with a wait queue of *N*. Anything beyond that gets `busy`, and
+  so does a request the OS can't start a child for (no process, memory or descriptor to spare).
   - The CEL activity worker sets `max_concurrent_activities` = *N*, so `busy` shouldn't happen.
   - If it does, it counts as an infrastructure error.
 
@@ -577,7 +640,10 @@ not inside a worker that holds credentials.
   are evaluation outcomes, as are `type_mismatch`, `evaluation_error` (any other CEL runtime error),
   `non_json_value` (§5.8) and `evaluation_crashed` (the child died by another signal). They are **recorded and not
   retried**. A child killed by SIGXCPU, or by SIGKILL at the hard CPU limit, is `cpu_limit`.
-- Temporal retries (3 attempts, backoff) cover only infrastructure failures: the evaluator is unreachable, the zygote died, or the answer is `busy`.
+- Because `map` and `filter` memory is quadratic (§5.5), a `map` or `filter` over more than about 3,000 elements
+  exceeds the child's 256 MiB and ends in `memory_limit`. Large collections belong in the engine's `loop` and
+  `filter` nodes, which evaluate per item (§5.2).
+- Temporal retries (3 attempts, backoff) cover only infrastructure failures: the evaluator is unreachable, the zygote died, the answer is `busy`, or the reply breaks the protocol (a malformed reply, or a number of results other than the request's binding sets). None of these is ever recorded as the step's outcome.
 
 ### 5.8 Output canonicalization
 
@@ -603,10 +669,18 @@ library, the classifier or the estimator:
 5. **Classifier:** a table of reject, local and activity expressions, including every reject route in §5.5 and the typed-path encoding in §5.3.
 6. **Estimator soundness:** fuzzed local-class expressions (Hypothesis, over the allow-list) evaluated on inputs at the caps.
    - Measured iterations and result sizes never exceed the stored bounds.
-   - Peak RSS growth stays under 1.5 × the 1 MiB bound.
+   - Peak RSS growth stays within 1.5 × each probe's stored memory bound and 1.5 × the 4 MiB classification bound.
+     - Probes: the worst local-class cases at the caps, chained `map`/`filter` steps included.
+     - Each probe runs in a fresh process. On Linux the process first returns its free heap pages and restarts its
+       peak (`/proc/self/clear_refs`): otherwise an earlier peak hides the probe's growth, as it did in the first
+       Linux run, which measured nothing.
+     - A control allocation must be seen, and a probe that shows no growth fails: a blind measurement never passes.
+     - Linux is authoritative.
+     - The results (`memory.json`, `cost.json`) are what the numbers in §5.5 were finalized from. Changing those
+       numbers is a new classifier version (§5.1).
 7. **Local cost:**
    - p99 and maximum latency per local evaluation at the caps;
-   - the adversarial workflow-task test from §5.6.
+   - the adversarial workflow-task test from §5.6, with one load per work charge (§5.5). Linux is authoritative.
 
    The results are recorded per profile and tune the initial thresholds.
 
@@ -640,10 +714,10 @@ library, the classifier or the estimator:
 | `cel.iteration_budget` | "An expression can iterate at most 10,000 times. For large lists, use a Loop or Filter node." |
 | `cel.too_long` | "Expressions are limited to 16,384 characters." |
 | `cel.unknown_function` | "`f` isn't available. Available functions: …" |
-| `cel.conditional_ref` | "`steps.x` may not have run on every path, so `steps.x.output` may be missing. Guard it with `has(steps.x.output)`." Or: "`trigger.a` is optional in its schema, so it may be missing. Guard it with `has(trigger.a)`." |
+| `cel.conditional_ref` | "`steps.x` may not have run on every path, so `steps.x.output` may be missing. Guard it with `has(steps.x.output)`." Or: "`trigger.a` is optional in its schema, so it may be missing. Guard it with `has(trigger.a)`." Or: "`trigger.a` may be null in its schema, so reading its fields fails when it is. Guard it with `trigger.a != null`." |
 | `cel.invalid` | "This expression isn't valid: …" (the checker's message, with line and column) |
 | `cel.unknown_name` | "`x` isn't defined here. Expressions start with trigger, steps, vars, item, index, loops or run." |
-| `cel.bad_path` | "`steps.a.outputs`: after `steps.<key>` comes `output` or `error`." (the reference grammar's message) |
+| `cel.bad_path` | "`steps.a.outputs`: after `steps.<key>` comes `output` or `error`." (the reference grammar's message) Or: "`steps[…]` chooses a step at run time, so publish can't check it. Name it: `steps.<key>.output`." Or: "This reads a reference through a list, a map, a condition or `dyn()`, so publish can't check the path or its guards." |
 | `cel.has_on_typed_path` | "`p` always exists here, and `has()` on it gives the list, not true. Remove the `has()` test." |
 | `cel.type_mismatch` | "This expression gives integer, but this field expects boolean." |
 | `cel.non_json_result` | "This expression gives a value JSON can't hold (bytes or a type)." |
@@ -888,12 +962,15 @@ abandons or restarts an activity or a child workflow.
 
 1. **CEL placement.**
    - Every comprehension over a range not proven to be a list is rejected, including the boolean macros. This is stricter than the spike's validator.
-   - Local evaluation requires the allow-listed subset, static bounds (≤ 10,000 iterations, ≤ 1 MiB intermediate) and runtime caps.
+   - Local evaluation requires the allow-listed subset, static bounds (≤ 9,999 iterations, ≤ 4 MiB of estimated
+     memory including retained accumulators, a classification bound, ≤ 2,000,000 work units charged by what each call reads) and runtime caps.
    - Everything else goes to the isolated evaluator.
 2. **Numbers are initial limits to measure, not guarantees:**
-   - caps of 64 KiB per value and in total, 1,000 list elements and 16 KiB per string;
+   - caps of 64 KiB per value and in total, 200 list elements or map entries, and 16 KiB per string (measured on
+     Linux and finalized at checkpoint 3, §5.5);
    - loops: 100 items inline; filter: 1,000 items inline;
-   - yield thresholds of 20,000 iterations, 8 MiB or 200 evaluations;
+   - yield thresholds of 20,000 iterations, 8 MiB, 4,000,000 work units or 200 evaluations, and the work rates in
+     §5.5 (finalized at checkpoint 3);
    - continue-as-new: opportunistic checkpoints from 2,000 events, drain mode from 4,000, in-flight cap of 100;
    - evaluator: 256 MiB / 5 s / 4 MiB requests;
    - schedule-to-start timeout of 10 minutes.

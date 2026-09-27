@@ -27,8 +27,8 @@ from dewpoint.engine.graph.values import (
         ("steps.get_site.output.name", "steps", "get_site", "output", ("name",)),
         ("steps.get_site.error.code", "steps", "get_site", "error", ("code",)),
         ("vars.count", "vars", "count", None, ()),
-        ("loop.item.name", "loop", None, "item", ("name",)),
-        ("loop.index", "loop", None, "index", ()),
+        ("item.name", "item", None, "item", ("name",)),
+        ("index", "index", None, "index", ()),
         ("loops.outer.item", "loops", "outer", "item", ()),
         ("run.now", "run", None, "now", ()),
     ],
@@ -46,7 +46,7 @@ def test_parse_ref(text: str, root: str, name: str | None, section: str | None, 
         "steps.a",
         "steps.a.oops",
         "steps.a.error.detail",
-        "loop.index.x",
+        "index.x",
         "run.clock",
         "env.HOME",
         "trigger..x",
@@ -130,3 +130,9 @@ JSON = st.recursive(
 def test_arbitrary_envelopes_are_reported_never_raised(body: Any) -> None:
     for _, value in iter_values({"f": {"$value": body}, "g": body}):
         assert value is not None
+
+
+def test_the_old_loop_root_points_to_item_and_index() -> None:
+    """CEL reserves `loop`, so the innermost loop is `item` / `index` everywhere (references and CEL alike)."""
+    with pytest.raises(RefSyntaxError, match="`loop.item` is written `item`"):
+        parse_ref("loop.item.name")

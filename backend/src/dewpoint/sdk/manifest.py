@@ -4,6 +4,10 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from pydantic import BaseModel
+from pydantic.json_schema import GenerateJsonSchema
+from pydantic_core import core_schema
+
 from dewpoint.sdk.node import MAX_RETRY_ATTEMPTS, PORT_RE, RESERVED_PORTS, TYPE_RE, Node, NodeKind, SideEffect
 from dewpoint.sdk.version import SDK_VERSION
 
@@ -28,6 +32,80 @@ SCHEMA_ONE = frozenset(
 )
 SCHEMA_LIST = frozenset({"allOf", "anyOf", "oneOf", "prefixItems"})
 SCHEMA_MAP = frozenset({"properties", "patternProperties", "$defs", "dependentSchemas"})
+
+
+class _SerializedOutput(GenerateJsonSchema):
+    """Output schemas describe what serialization emits. Pydantic leaves fields with defaults out of `required`
+    (unless a model sets json_schema_serialization_defaults_required), yet model_dump always emits them: a reference
+    or a CEL guard must not treat them as possibly missing. TypedDict keys that aren't required, and fields excluded
+    conditionally, can be absent from the output, so they keep pydantic's answer."""
+
+    def field_is_required(
+        self,
+        field: core_schema.ModelField | core_schema.DataclassField | core_schema.TypedDictField,
+        total: bool,
+    ) -> bool:
+        if field["type"] == "typed-dict-field" or field.get("serialization_exclude_if") is not None:
+            return super().field_is_required(field, total)
+        return True
+
+
+def dump_output(output: BaseModel) -> dict[str, Any]:
+    """The one way a node's output becomes JSON: by alias, as the output schema names it, with every field."""
+    return output.model_dump(mode="json", by_alias=True)
+
+
+_FUNCTION_SERIALIZERS = frozenset({"function-plain", "function-wrap"})
+_CONTAINERS = ("model", "dataclass", "typed-dict")
+
+
+def _pydantic_own(function: Any) -> bool:
+    """Pydantic's serializers for its own types (paths, addresses, URLs, secrets…) emit what those types' schemas
+    say. Anything else, a plugin's or a third-party type's, has to declare its return type."""
+    module = getattr(function, "__module__", None) or ""
+    return module == "pydantic" or module.startswith(("pydantic.", "pydantic_core"))
+
+
+def _serializer_problems(schema: Any) -> list[str]:
+    """Where an output's JSON can differ from its generated schema, anywhere inside the output:
+    - a model, dataclass or TypedDict that serializes itself (`@model_serializer`) can drop or rename promised fields;
+    - a field serializer without a return type (an unannotated `@field_serializer`, a `PlainSerializer` or
+      `WrapSerializer` without `return_type`) leaves the field's own type in the schema, whatever it emits."""
+    found: set[str] = set()
+    seen: set[int] = set()
+    stack: list[tuple[Any, str]] = [(schema, "the output")]
+    while stack:
+        node, where = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, list | tuple):
+            stack.extend((item, where) for item in node)
+            continue
+        if not isinstance(node, dict):
+            continue
+        kind = node.get("type")
+        if kind in _CONTAINERS and node.get("cls") is not None:
+            where = node["cls"].__name__
+        ser = node.get("serialization")
+        if isinstance(ser, dict) and ser.get("type") in _FUNCTION_SERIALIZERS:
+            if kind in _CONTAINERS:
+                found.add(
+                    f"output type {where} uses @model_serializer; outputs must serialize field by field "
+                    "(use fields, computed fields or field serializers)"
+                )
+            elif "return_schema" not in ser and not _pydantic_own(ser.get("function")):
+                found.add(
+                    f"{where} has a serializer without a declared return type; declare it (`-> str`, or "
+                    "`return_type=`) so the output schema says what it emits"
+                )
+        fields = node.get("fields")
+        if isinstance(fields, dict):  # model and TypedDict fields, by name
+            stack.extend((field, f"{where}.{name}") for name, field in fields.items())
+        elif isinstance(fields, list):  # dataclass fields
+            stack.extend((f, f"{where}.{f.get('name')}" if isinstance(f, dict) else where) for f in fields)
+        stack.extend((value, where) for key, value in node.items() if key != "fields")
+    return sorted(found)
 
 
 def _closed(schema: Any) -> Any:
@@ -98,6 +176,7 @@ def _problems(node: type[Node]) -> list[str]:
     if node.dynamic_ports is not None and node.dynamic_ports not in node.Config.model_fields:
         out.append(f"{name}: dynamic_ports names unknown config field {node.dynamic_ports!r}")
     out += _retry_problems(name, node)
+    out += [f"{name}: {problem}" for problem in _serializer_problems(node.Output.__pydantic_core_schema__)]
     if node.timeout.total_seconds() <= 0:
         out.append(f"{name}: timeout must be positive")
     if node.kind is NodeKind.ACTION:
@@ -122,7 +201,9 @@ def node_manifest(node: type[Node]) -> dict[str, Any]:
         "ports": list(node.ports),
         "dynamic_ports": node.dynamic_ports,
         "config_schema": node.Config.model_json_schema(mode="validation"),
-        "output_schema": _closed(node.Output.model_json_schema(mode="serialization")),
+        "output_schema": _closed(
+            node.Output.model_json_schema(mode="serialization", schema_generator=_SerializedOutput)
+        ),
         "credentials": list(node.credentials),
         "capabilities": sorted(node.capabilities),
         "side_effect": node.side_effect.value,

@@ -20,6 +20,8 @@ dependencies = [
   "typer>=0.13",
   "structlog>=24.4",
   "jsonschema>=4.23",
+  "cel-expr-python==0.1.3",
+  "protobuf>=7.35.1,<8",
 ]
 
 [project.scripts]
@@ -40,6 +42,7 @@ dev = [
   "import-linter>=2.1",
   "pip-licenses>=5.0",
   "types-jsonschema>=4.23",
+  "types-protobuf>=7.35",
 ]
 
 [build-system]
@@ -58,6 +61,7 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 120
 target-version = "py312"
+extend-exclude = ["src/dewpoint/engine/cel/proto/*_pb2.py", "src/dewpoint/engine/cel/proto/*_pb2.pyi"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "S", "ASYNC"]
@@ -71,7 +75,7 @@ extend-immutable-calls = [
 
 [tool.ruff.lint.per-file-ignores]
 # Tests: asserts, fixed test credentials, `uv` on PATH, and DDL built from constant role names.
-"tests/**" = ["S101", "S105", "S106", "S607", "S608"]
+"tests/**" = ["S101", "S105", "S106", "S603", "S607", "S608"]
 # Migrations: DDL/policies are built from module constants only, never from user input; long lines are SQL text.
 "migrations/**" = ["S608", "E501"]
 
@@ -79,6 +83,16 @@ extend-immutable-calls = [
 strict = true
 plugins = ["pydantic.mypy"]
 mypy_path = "src"
+
+[[tool.mypy.overrides]]
+# Vendored protoc output: the .pyi stubs next to it are what mypy reads (see engine/cel/proto/README.md).
+module = ["dewpoint.engine.cel.proto.*"]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+# cel-expr-python ships a .pyi but no py.typed marker; only engine.cel.runtime imports it.
+module = ["cel_expr_python", "cel_expr_python.*"]
+ignore_missing_imports = true
 
 [tool.importlinter]
 root_package = "dewpoint"
@@ -122,3 +136,26 @@ name = "core depends on neither engine nor plugins"
 type = "forbidden"
 source_modules = ["dewpoint.core"]
 forbidden_modules = ["dewpoint.engine", "dewpoint.plugins"]
+
+[[tool.importlinter.contracts]]
+name = "only the CEL runtime adapter imports cel-expr-python"
+type = "forbidden"
+source_modules = ["dewpoint"]
+forbidden_modules = ["cel_expr_python"]
+ignore_imports = ["dewpoint.engine.cel.runtime -> cel_expr_python"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "engine.cel reads no schemas and no graph"
+type = "forbidden"
+source_modules = ["dewpoint.engine.cel"]
+forbidden_modules = ["dewpoint.engine.graph", "dewpoint.engine.registry", "jsonschema", "pydantic"]
+
+[[tool.importlinter.contracts]]
+name = "the CEL evaluator loads only engine.cel and the standard library"
+type = "forbidden"
+source_modules = ["dewpoint.apps.cel_evaluator"]
+forbidden_modules = [
+  "dewpoint.core", "dewpoint.plugins", "dewpoint.sdk", "dewpoint.engine.graph", "dewpoint.engine.registry",
+  "sqlalchemy", "asyncpg", "fastapi", "pydantic", "jsonschema", "httpx", "temporalio", "cryptography",
+]

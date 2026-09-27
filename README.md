@@ -40,6 +40,10 @@ Run `dewpoint plugins sync` with the `dewpoint_admin` database credentials on ev
 serves traffic. Deprecation, retirement and code removal:
 [`docs/operations/plugin-lifecycle.md`](docs/operations/plugin-lifecycle.md).
 
+CEL expressions that can't run inline go to the `cel-evaluator` service: no secrets, no network, one Unix socket
+(Docker Compose; Kubernetes support comes with the Helm chart). Sizing, refusals and health:
+[`docs/operations/cel-evaluator.md`](docs/operations/cel-evaluator.md).
+
 ## Audit integrity
 
 The `audit-anchor` service writes signed chain heads every 15 minutes. **In production, anchors must live off this

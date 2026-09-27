@@ -4,7 +4,7 @@
 from dewpoint.sdk.context import StepContext, StepLogger
 from dewpoint.sdk.errors import FatalError, NodeError, OutcomeUnknownError, RetryableError
 from dewpoint.sdk.fields import literal_only, sensitive, value_kinds
-from dewpoint.sdk.manifest import ManifestError, Plugin, node_manifest
+from dewpoint.sdk.manifest import ManifestError, Plugin, dump_output, node_manifest
 from dewpoint.sdk.node import Empty, Node, NodeKind, RetryDefaults, SideEffect
 from dewpoint.sdk.version import SDK_VERSION
 
@@ -23,6 +23,7 @@ __all__ = [
     "SideEffect",
     "StepContext",
     "StepLogger",
+    "dump_output",
     "literal_only",
     "node_manifest",
     "sensitive",
