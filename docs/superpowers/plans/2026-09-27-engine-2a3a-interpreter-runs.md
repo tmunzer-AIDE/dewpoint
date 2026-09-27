@@ -38,7 +38,7 @@ what 2a-3 consumes. The owner split 2a-3 into three plans on 2026-09-27:
 1. **Go/no-go experiments ran first** (next section), on temporalio 1.33.0 from the CEL spike's environment. The
    owner approved the SDK's download of its time-skipping test server for planning, the suite and CI.
 2. **Every module was prototyped** in a scratch copy of `backend/` until it passed its tests, `ruff`, `ruff format`,
-   `mypy --strict` (132 source files) and `lint-imports` (10 contracts). The prototype's full suite gives 867 passed
+   `mypy --strict` (132 source files) and `lint-imports` (10 contracts). The prototype's full suite gives 868 passed
    and 8 skipped (the Linux-only evaluator tests), against `main`'s 726 collected.
 3. **The code blocks below are those files, verbatim.** Diffs to existing files were generated from the prototype.
 4. **Each task was staged and checked on its own.** Stage *N* is `main` plus tasks 1..*N*. Every stage passed the
@@ -84,7 +84,9 @@ what 2a-3 consumes. The owner split 2a-3 into three plans on 2026-09-27:
 11. **Checkpoint 2 found three more**, fixed test-first on the branch and carried here:
     - the workflow's outputs were evaluated outside the run's cancellation handler and deadline;
     - a malformed output envelope compiled and failed later outside any handler;
-    - an instance of a node's `Output` was returned without validation.
+    - an instance of a node's `Output` was returned without validation. The re-review found that the first fix
+      broke typed field serializers, so an instance is now checked as it's emitted, against the declared output
+      schema.
 
     See decisions 7, 11 and 15.
 
@@ -182,9 +184,14 @@ field declared elsewhere: both closed in decision 21 by walking the schema along
    | raises anything else | `unexpected_error` | yes; for an `ambiguous` node, `outcome_unknown` and never |
    | times out, or its worker is lost | `timeout` (or `error`) | yes; for an `ambiguous` node, `outcome_unknown` and never |
    | config doesn't validate | `config_invalid` | no |
-   | output doesn't validate (an `Output` instance included: pydantic trusts instances it didn't build) | `output_schema_violation` | no |
+   | output doesn't validate | `output_schema_violation` | no |
    | is `reconcilable`, on attempt 2 or later | calls `reconcile()` first and keeps what it finds | |
    | isn't served by any worker of the build | `node_type_unavailable` (the SDK's `NotFoundError`) | yes |
+
+   A plain result is validated into the node's `Output` model. An `Output` instance can't be trusted as it stands:
+   pydantic doesn't check instances built with `model_construct` or changed by assignment. So it is checked as it's
+   emitted, dumped with its serializers, against the declared output schema. That schema is generated in
+   serialization mode and is closed, so a typed field serializer that changes a type is honoured (checkpoint 2).
 
    The cost is history: each retry adds its activity's events and a timer, where Temporal's own retries add none. So
    2a-3b's headroom arithmetic counts `max_attempts`. (Tasks 4, 5)
@@ -306,6 +313,8 @@ field declared elsewhere: both closed in decision 21 by walking the schema along
       - An unexpected exception names only its type (`The node raised ConnectionError.`), and its text goes to the
         worker's log.
       - `version_unusable`, `internal_error` and `cel_profile_unavailable` likewise.
+      - An `Output` instance that breaks the declared output schema names the schema-walked location and the
+        jsonschema keyword (`n (type)`), never the value.
       - CEL error messages are kept, masked: they explain the tenant's own expression, and everything an expression
         reads is data the run has already seen, so its sensitive parts have been learned.
     - Temporal's history still holds values in full, until 2b's payload encryption.
@@ -3456,7 +3465,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 from pydantic_core import PydanticCustomError
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
@@ -3550,6 +3559,26 @@ class Constructed(Node):
 
     async def run(self, ctx: StepContext, config: Any) -> Any:
         return LiarOutput.model_construct(n="not-an-int", key="ok")
+
+
+class Tagged(BaseModel):
+    """A valid output whose field serializer changes the type: an `int` is emitted as text, as its schema says."""
+
+    id: int
+
+    @field_serializer("id")
+    def _tag(self, value: int) -> str:
+        return f"id-{value}"
+
+
+class Serialized(Node):
+    type = "testkit.serialized"
+    version = 1
+    title = "Serialized"
+    Output = Tagged
+
+    async def run(self, ctx: StepContext, config: Any) -> Any:
+        return Tagged(id=3)
 
 
 class Broken(Node):
@@ -3715,7 +3744,15 @@ async def test_an_output_instance_is_validated_too() -> None:
     instances only when they're built through it. It's checked like any other output."""
     bad = await failure(step_activity_for(Constructed), step("testkit.constructed@1"))
     assert (bad.type, bad.non_retryable) == ("output_schema_violation", True)
-    assert bad.message == "The output doesn't match `testkit.constructed@1`: n (int_parsing)."
+    assert bad.message == "The output doesn't match `testkit.constructed@1`: n (type)."  # the output schema's rule
+
+
+async def test_a_field_serializer_emits_what_the_output_schema_declares() -> None:
+    """Checkpoint-2 re-review: an instance is checked as it's emitted, against the declared output schema, not
+    against the model's input types, which a typed field serializer may change."""
+    assert await call(step_activity_for(Serialized), step("testkit.serialized@1")) == StepResult(
+        {"id": "id-3"}, "applied"
+    )
 ```
 
 - [ ] **Step 3: Run them and watch them fail**
@@ -3956,6 +3993,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any, Protocol, get_args
 
 import structlog
+from jsonschema import Draft202012Validator
 from pydantic import BaseModel, ValidationError
 from pydantic_core import PydanticSerializationError
 from pydantic_core.core_schema import ErrorType
@@ -3992,6 +4030,7 @@ from dewpoint.sdk import (
     RetryableError,
     SideEffect,
     dump_output,
+    node_manifest,
 )
 
 CONFIG_INVALID = "config_invalid"
@@ -4072,20 +4111,25 @@ async def _call(node: type[Node], step: StepInput, schema: Mapping[str, Any]) ->
 def step_activity_for(node: type[Node]) -> Callable[[StepInput], Awaitable[StepResult]]:
     ref = f"{node.type}@{node.version}"
     config_schema = node.Config.model_json_schema(mode="validation")
-    output_schema = node.Output.model_json_schema(mode="serialization")
+    output_schema = node_manifest(node)["output_schema"]  # what the node promises to emit: serialized and closed
+    emitted = Draft202012Validator(output_schema)
 
     @activity.defn(name=step_activity(ref))
     async def run_step(step: StepInput) -> StepResult:
         try:
             result, outcome = await _call(node, step, config_schema)
-            # an instance too: pydantic trusts instances it didn't build (`model_construct`, assignment)
-            data = (
-                result.model_dump(mode="json", by_alias=True, warnings=False)
-                if isinstance(result, BaseModel)
-                else result
-            )
-            output = node.Output.model_validate(data)
-            return StepResult(dump_output(output), outcome)
+            if not isinstance(result, BaseModel):
+                return StepResult(dump_output(node.Output.model_validate(result)), outcome)
+            # pydantic trusts instances it didn't build (`model_construct`, assignment): check what the instance emits
+            # against the declared output schema, not against the model's input types (a field serializer may change
+            # them)
+            data = result.model_dump(mode="json", by_alias=True, warnings=False)
+            problems = sorted(emitted.iter_errors(data), key=lambda e: [str(p) for p in e.absolute_path])
+            if problems:
+                where = "; ".join(f"{location(list(e.absolute_path), output_schema)} ({e.validator})" for e in problems)
+                message = f"The output doesn't match `{ref}`: {where}."
+                raise ApplicationError(message, {"outcome": None}, type=OUTPUT_SCHEMA_VIOLATION, non_retryable=True)
+            return StepResult(data, outcome)
         except _StepFailed as f:
             details = {"outcome": f.outcome}
             raise ApplicationError(f.message, details, type=f.code, non_retryable=not f.retryable) from None
@@ -4168,7 +4212,7 @@ __all__ = [
 - [ ] **Step 5: Run the tests**
 
 Run: `cd backend && uv run pytest -q tests/apps/worker/test_activities.py tests/core/plugins/test_registry.py`
-Expected: 18 passed (13 + 5).
+Expected: 19 passed (14 + 5).
 
 - [ ] **Step 6: Checks and commit**
 
@@ -5716,7 +5760,7 @@ __all__ = [
 - [ ] **Step 4: Run the tests**
 
 Run: `cd backend && uv run pytest -q tests/apps/worker`
-Expected: 55 passed (13 + 14 + 28) in about 20 s: the timeout tests wait a few real seconds, on test servers of their
+Expected: 56 passed (14 + 14 + 28) in about 20 s: the timeout tests wait a few real seconds, on test servers of their
 own. The first run downloads Temporal's test server into the SDK's cache (the owner approved it). The warnings that
 activities "completed as failed" are the tests' own failing steps and the flaky store's refused writes.
 
@@ -7112,7 +7156,7 @@ cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy
        -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-Expected: 857 passed and 8 skipped (the Linux-only evaluator tests).
+Expected: 858 passed and 8 skipped (the Linux-only evaluator tests).
 
 ---
 
@@ -7404,7 +7448,7 @@ cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy
        -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-Expected: 867 passed and 8 skipped locally (`main` collects 726 tests; this plan adds 149). On Linux the 8
+Expected: 868 passed and 8 skipped locally (`main` collects 726 tests; this plan adds 150). On Linux the 8
 evaluator-limit tests run too. Push only when the owner says so; CI then runs the same suite, downloading the test
 server on first use.
 
