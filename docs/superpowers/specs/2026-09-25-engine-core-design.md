@@ -40,7 +40,16 @@
       messages never quote input;
     - a start is recorded as failed only when Temporal refused it;
     - `wait_until` needs a time zone;
-    - golden histories start with `engine_abi` 1.
+    - golden histories start with `engine_abi` 1;
+    - from execution's checkpoint 1: redaction also covers patterned-key maps, tuple positions and sensitive keys,
+      and the iteration cap ends a loop's open iterations first;
+    - from checkpoint 2: the outputs are evaluated under the run's deadline and cancellation, and a malformed output
+      is refused at compile;
+    - from checkpoint 3: admission reads the workflow under the workflow's admission lock, which every change to the
+      workflow takes exclusively (§4.5);
+    - from the final review: only failures a step's activity maps count as the node's; the run's end write is
+      shielded from a late cancel; projections are bounded batches that never hold what Postgres refuses; waits out
+      of range fail their step (§6, §8).
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
   This spec **narrows parent §6.4** (where CEL runs) and resolves the CEL item in parent §15.
 - **Evidence:** CEL spike, branch `spike/cel-evaluation`, commits `d6a8162` and `13a62e1`. See
@@ -214,7 +223,8 @@ Tenant-scoped tables use FORCE RLS with the foundations policy pattern.
   - **Nesting depth ≤ 3.** Scopes nest the same way, for example `loop2:7/loop5:3`.
   - **Per-run iteration cap.** All loop iterations and filter items across the whole *logical* run share one cap,
     initially 100,000, so nested item caps don't multiply. That includes child batches, sub-flows and every
-    continue-as-new. Past the cap, the loop fails with `iteration_cap_exceeded`. §6 explains how the count is kept.
+    continue-as-new. Past the cap, the loop fails with `iteration_cap_exceeded`, after ending the iterations it had
+    opened, as under `on_item_error: stop`. §6 explains how the count is kept.
   - The loop's `collect` value is evaluated at the end of each iteration and becomes `steps.<loop>.output.items[i]`.
     A failed iteration (`on_item_error: continue`) leaves `items[i] = null` and adds `{index, code, message}` to
     `failures`; a `collect` that can't be computed fails its iteration the same way. `count` is the number of items.
@@ -371,6 +381,20 @@ Shared and exclusive locks conflict, so the two sides serialize:
 
 Under REPEATABLE READ, the snapshot would predate the wait, so these transactions must not use it. A test asserts
 the isolation level.
+
+**The workflow's admission lock.** Admission also reads the workflow: whether it is enabled, and which version is
+active. A disable, publish or activation that commits between that read and the insert would leave a request the
+workflow no longer admits. So admission takes the workflow's admission lock, **shared**, before it reads the workflow,
+and holds it until the request is frozen. Every change to a workflow takes it **exclusively**, before the workflow's
+row lock.
+- It is a transaction-scoped advisory lock keyed `dewpoint:workflow:<id>`, for the lifecycle locks' reason: a row
+  lock would need UPDATE on `workflows`, which the dispatch role must not have.
+- Both sides take it before any lifecycle lock.
+- Both sides read the workflow from the database after they take the lock, never from an object their session
+  already holds, which would predate the change the lock waited for. Admission reads the two fields as columns; a
+  writer's locked read replaces the session's copy.
+- **Admission locks first:** the change waits until the request exists. The workflow admitted it when it was frozen.
+- **The change locks first:** admission waits, then reads the committed change and refuses.
 
 **Defensive check at dispatch.** If dispatch still finds a frozen version that isn't executable (the forced path
 should make this impossible), it cancels the request with the same explicit, audited reason. It never fails the
@@ -779,7 +803,8 @@ The version (graph, classifications, bounds) is loaded by one local activity and
 - **Scheduler.** A single loop owns a ready queue ordered by `(scope, topological index)`. It starts activities and
   child workflows as futures and awaits them. Nothing else in the workflow creates concurrency.
   - **In-flight cap.** At most 100 activities and child workflows are outstanding per workflow execution (an initial limit).
-    Besides them, at most one projection is in flight; rows that settle meanwhile go in the next one.
+    Besides them, at most one projection is in flight; rows that settle meanwhile go in the next one. Each
+    projection takes at most 256 KiB of rows, so a backlog takes several.
   - This bounds how much history in-flight work can still add, which the continue-as-new headroom depends on.
 
 **Node kinds:**
@@ -787,7 +812,7 @@ The version (graph, classifications, bounds) is loaded by one local activity and
 | Kind | Nodes | Execution |
 |---|---|---|
 | Control | `if`, `switch` (cases in declared order, first match), `set_variables`, `stop`, `fail` | values via §5 (local or `cel.evaluate`) |
-| Time | `delay`, `wait_until` | durable timers. Static waits beyond `max_run_duration` are rejected at publish. Dynamic waits past the deadline end the run with `deadline_exceeded` when the deadline is reached. `wait_until` takes RFC 3339 with an offset: a time without a zone fails the step (`type_mismatch`) |
+| Time | `delay`, `wait_until` | durable timers. Static waits beyond `max_run_duration` are rejected at publish. Dynamic waits past the deadline end the run with `deadline_exceeded` when the deadline is reached. `wait_until` takes RFC 3339 with an offset: a time without a zone fails the step (`type_mismatch`). A value resolved at run time is checked too: `delay` takes 0 to 30 days, and `wait_until` an instant from year 1 to 9999 in UTC; anything else fails the step (`type_mismatch`) |
 | Loop | `loop` (`items`: a list value; `concurrency` 1–10, default 1; item cap default 10,000) | ≤ 100 items run inline; more run as child workflows in batches of 100 within the parent's concurrency |
 | Filter | `filter` (`items`, per-item predicate) | ≤ 1,000 items: predicate per item, inline (local class) or batched `cel.evaluate` calls; each item is its own evaluation with its own 10,000 budget. Larger lists are batched through `cel.evaluate` in chunks of 1,000 |
 | Transform | `flow.transform` | each output field is a separate value (§4.3) with its own class |
@@ -801,8 +826,10 @@ The version (graph, classifications, bounds) is loaded by one local activity and
     `has(steps.<key>.output)` is false (§5.3), so a reference's default applies;
   - `port`: follow the `error` port.
 - `OutcomeUnknownError` is never retried. The workflow schedules each attempt of a plugin step as its own activity
-  execution and decides every retry. For an `ambiguous` node, an attempt that timed out or lost its worker may have
-  sent its request, so it records `outcome_unknown` and is never repeated.
+  execution and decides every retry. Only the failures the step's activity maps count as the node's own. For an
+  `ambiguous` node, an attempt that timed out, lost its worker or failed any other way may have sent its request, so
+  it records `outcome_unknown` and is never repeated. A stopping worker lets running attempts finish for a grace
+  period first.
 - An optional workflow failure handler (a pinned sub-flow) runs once with the error summary.
 
 **Continue-as-new only at a quiescent checkpoint.** Temporal doesn't carry child workflows into the continued run.
@@ -861,7 +888,10 @@ abandons or restarts an activity or a child workflow.
 
 **Every end is recorded.** Temporal retries a failed workflow task forever, which would leave the run open and
 `running` in the projection. So a version the build can't load or compile fails the run with `version_unusable`
-before any step runs, and any other exception in workflow code fails it with `internal_error`.
+before any step runs, and any other exception in workflow code fails it with `internal_error`. The workflow's
+outputs are evaluated under the same handlers and deadline as its steps. A cancel that arrives while the run's end
+is being written comes too late to unmake it: the write is shielded from the cancel, and the run's result stands. A
+cancel while the version loads cancels the run.
 
 **Workflow-code rules:**
 - No wall clock, randomness or I/O. `workflow.now()` and `workflow.uuid4()` are the only sources.
@@ -925,16 +955,23 @@ before any step runs, and any other exception in workflow code fails it with `in
   - A batched `project` activity upserts rows keyed `(run_id, step_id, iteration_key, attempt)`. It is the only
     writer: a plugin step's activity runs one attempt and writes nothing, and the workflow queues each attempt's
     `running` and final rows. The projection retries until the database answers, so a write can't repeat an effect.
+    What Postgres can't store (NUL, lone surrogates) is stored as U+FFFD, and a number JSON can't hold as its name.
+    The workflow queues each row, and the run's error, already in that form, so a projection is sized by what it
+    sends. A row the database still refuses for its data (SQLSTATE class 22 or 23) is logged and skipped, so its run
+    still ends.
     `step_id` is the graph node's id, and `iteration_key` names the scope (`loop2:7/loop5:3`, empty in the root).
   - Control nodes are projected at each scheduler await.
   - The worker writes through the worker DB role inside `tenant_scope`.
 - **Redaction:** `x-sensitive` fields become `"[redacted]"`, and oversize previews become `"[truncated]"`.
-  Redaction follows local `$ref`s and every branch of `anyOf`, `oneOf` and `allOf`. Strings the run has seen at
-  sensitive positions (of plugin outputs and configs, and of the trigger by its input schema; 4 characters or more)
-  are masked wherever they reappear, CEL errors included. Messages never quote input: validation errors give the
-  location only as far as the schema declares it (map keys, numeric or not, show as `*`) and the rule's code, if
-  pydantic defines it (`custom_error` otherwise), and unexpected exceptions, unusable versions and interpreter errors
-  only their type.
+  Redaction follows local `$ref`s, every branch of `anyOf`, `oneOf` and `allOf`, every `patternProperties` schema of
+  an object (for every key, declared ones included) and each tuple position (`prefixItems`); a map whose keys are
+  sensitive (`propertyNames`) is redacted whole.
+  Strings the run has seen at sensitive positions (of plugin outputs and configs, and of the trigger by its input
+  schema; 4 characters or more) are masked wherever they reappear, CEL errors included. Messages never quote input:
+  validation errors give the location only as far as the schema declares it (map keys, numeric or not, show as `*`)
+  and the rule's code, if pydantic defines it (`custom_error` otherwise); an output instance, checked as emitted
+  against the declared output schema, names the schema keyword. Unexpected exceptions, unusable versions and
+  interpreter errors name only their type.
 - **Run error codes** add `workflow_failed` (a `fail` node), `start_failed`, `version_unusable`, `internal_error`,
   `deadline_exceeded`, `cancelled`, `not_supported` (loop batches and sub-flows, until plan 2a-3b) and
   `node_type_unavailable` (no worker of the build runs the node type).
@@ -985,6 +1022,8 @@ before any step runs, and any other exception in workflow code fails it with `in
   - races between retirement (normal and forced, both orders) and each of admission, dispatch, publish and activate.
     In every order, a request is either refused at admission, or blocks normal retirement, or is in the forced
     retirement's cancellation set. The defensive dispatch check never fires;
+  - races between admission and each of disable, publish and activate, in both orders: the request is either
+    refused, or frozen before the change commits;
   - node types removed from a build while an N-1 run finishes on N-1.
 - **Graph regions:** properly nested loops are accepted; crossing regions are rejected; the depth limit.
 - **Iteration counter:**
@@ -1048,7 +1087,7 @@ before any step runs, and any other exception in workflow code fails it with `in
 14. **Run-time behaviour from plan 2a-3a:** a handled failure leaves no output; a failed iteration collects `null`;
     every run's end is recorded; the workflow decides every retry, never repeating an ambiguous request; only the
     projection writes; learned sensitive values are masked; a start fails only on a confirmed refusal; `wait_until`
-    needs a time zone.
+    needs a time zone; waits out of range fail their step; projections are bounded and never stop a run.
 
 ## 12. Follow-up sub-projects
 

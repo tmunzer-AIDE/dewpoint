@@ -38,7 +38,7 @@ what 2a-3 consumes. The owner split 2a-3 into three plans on 2026-09-27:
 1. **Go/no-go experiments ran first** (next section), on temporalio 1.33.0 from the CEL spike's environment. The
    owner approved the SDK's download of its time-skipping test server for planning, the suite and CI.
 2. **Every module was prototyped** in a scratch copy of `backend/` until it passed its tests, `ruff`, `ruff format`,
-   `mypy --strict` (132 source files) and `lint-imports` (10 contracts). The prototype's full suite gives 858 passed
+   `mypy --strict` (132 source files) and `lint-imports` (10 contracts). The prototype's full suite gives 902 passed
    and 8 skipped (the Linux-only evaluator tests), against `main`'s 726 collected.
 3. **The code blocks below are those files, verbatim.** Diffs to existing files were generated from the prototype.
 4. **Each task was staged and checked on its own.** Stage *N* is `main` plus tasks 1..*N*. Every stage passed the
@@ -75,6 +75,20 @@ what 2a-3 consumes. The owner split 2a-3 into three plans on 2026-09-27:
    walking the schema along it, and shows anything the schema doesn't declare at that place as `*`. Checking the
    rest of the message found that a custom validation error's type can carry the value too; only pydantic's own
    codes show now (decision 21).
+10. **Execution's checkpoint 1 found two more gaps**, fixed test-first on `feat/engine-2a3a` and carried into this
+    plan:
+    - redaction ignored `patternProperties`, and then, for a declared key a pattern also covers. Probing pydantic's
+      schemas found the same gap for tuple positions (`prefixItems`) and sensitive keys (`propertyNames`)
+      (decision 21);
+    - the iteration cap left a loop's opened iterations running (decision 3).
+11. **Checkpoint 2 found three more**, fixed test-first on the branch and carried here:
+    - the workflow's outputs were evaluated outside the run's cancellation handler and deadline;
+    - a malformed output envelope compiled and failed later outside any handler;
+    - an instance of a node's `Output` was returned without validation. The re-review found that the first fix
+      broke typed field serializers, so an instance is now checked as it's emitted, against the declared output
+      schema, and the one after that added a fixed list of formats to the check.
+
+    See decisions 7, 11 and 15.
 
 Not run during planning: the new dependency install (Task 4 downloads it, with the owner's confirmation), and CI.
 
@@ -106,7 +120,11 @@ The owner's review of the first draft (2026-09-27) accepted decisions 1, 2, 4 an
 Their fixes are decisions 7 and 12 (rewritten), 21 and 22 (new), and the messages in 6 and 11. The second review
 accepted 7, 12 and 22, and found two more paths for secrets, both closed in decision 21: validator prose, and
 sensitive config values. The third found a map key in a validation location, and the fourth a numeric map key and a key named like a
-field declared elsewhere: both closed in decision 21 by walking the schema along the location.
+field declared elsewhere: both closed in decision 21 by walking the schema along the location. During execution,
+checkpoint 3 found a workflow change committing during admission, closed by decision 23. The final whole-branch review
+found failures the activity never mapped trusted as the node's and the `time` format checked (decision 7), a cancel
+missed during the end write (11), data Postgres refuses stopping a run (12), unbounded catch-up projections (13), and
+waits out of range crashing the run (14). The PR #9 review found rows sized before they were normalized (12).
 
 1. **A handled failure leaves an error and no output.** With `on_error: continue` or `port`, `steps.<key>` becomes
    `{"error": {code, message, attempt}}`, with no `output` key. That is 2a-2's presence contract (§5.3, decision 3
@@ -124,7 +142,10 @@ field declared elsewhere: both closed in decision 21 by walking the schema along
    - in the root, it fails the run with the step's error.
 
    `stop`, `fail` and the deadline cancel every running step. A result that arrives from cancelled work is ignored.
-   Policies compose across nested loops: an inner loop that stops fails its outer iteration only. (Task 1)
+   Policies compose across nested loops: an inner loop that stops fails its outer iteration only. A loop that ends
+   early, when an iteration fails under `stop` or the run reaches its iteration cap, ends its open iterations
+   first: running steps are cancelled and queued ones dropped. Only then does its own `on_error` apply, so nothing
+   it opened runs beside the steps after it (checkpoint 1). (Task 1)
 4. **Until 2a-3b, some graphs fail at run time with `not_supported`:** loops over more than 100 items (batches of
    child workflows) and `run_workflow` (sub-flows). The step fails and its error policy applies. Publish is
    unchanged, so versions published now run fully once 2a-3b ships. The workflow failure handler doesn't run until
@@ -165,11 +186,26 @@ field declared elsewhere: both closed in decision 21 by walking the schema along
    | raises `FatalError` | fails with its code | no |
    | raises `OutcomeUnknownError` | fails with its code, outcome `outcome_unknown` | never |
    | raises anything else | `unexpected_error` | yes; for an `ambiguous` node, `outcome_unknown` and never |
-   | times out, or its worker is lost | `timeout` (or `error`) | yes; for an `ambiguous` node, `outcome_unknown` and never |
-   | config doesn't validate | `config_invalid` | no |
-   | output doesn't validate | `output_schema_violation` | no |
+   | times out, its worker is lost or stops, or fails in a way the activity didn't map | `timeout` (or `error`) | yes; for an `ambiguous` node, `outcome_unknown` and never |
+   | config doesn't validate, or checking it raises (a validator's bug) | `config_invalid` | no |
+   | output doesn't validate, or checking it raises | `output_schema_violation` | no |
    | is `reconcilable`, on attempt 2 or later | calls `reconcile()` first and keeps what it finds | |
    | isn't served by any worker of the build | `node_type_unavailable` (the SDK's `NotFoundError`) | yes |
+
+   Every failure the activity maps carries `MAPPED` in its details, and `RunGraph` trusts no other failure as the
+   node's. The SDK makes its own (`WorkerShutdown`, an exception nothing caught), and those say nothing of whether
+   the request went out (final review). A stopping worker lets running attempts finish for
+   `DEWPOINT_WORKER_SHUTDOWN_GRACE_S` before it cancels them, so a deploy rarely ends one as `outcome_unknown`.
+
+   A plain result is validated into the node's `Output` model. An `Output` instance can't be trusted as it stands:
+   pydantic doesn't check instances built with `model_construct` or changed by assignment. So it is checked as it's
+   emitted, dumped with its serializers, against the declared output schema. That schema is generated in
+   serialization mode and is closed, so a typed field serializer that changes a type is honoured (checkpoint 2).
+   Its formats are checked too, from a fixed list whose checks agree with what pydantic emits: `date`, `uuid`,
+   `email`, `ipv4`, `ipv6` and `regex` (`CHECKED_FORMATS`). `date-time` and `time` aren't on it: RFC 3339 wants an
+   offset, which pydantic's naive values lack, and without the optional library `time` is checked as `HH:MM:SS`,
+   refusing the fractions and zones pydantic writes (final review). The list is fixed so that installing an optional
+   library can't turn it on.
 
    The cost is history: each retry adds its activity's events and a timer, where Temporal's own retries add none. So
    2a-3b's headroom arithmetic counts `max_attempts`. (Tasks 4, 5)
@@ -201,6 +237,13 @@ field declared elsewhere: both closed in decision 21 by walking the schema along
     - Any other exception fails it with `internal_error`. The message names only the exception's type, because its
       text may quote run data; the worker's log has the rest (decision 21).
     - Cancellation projects `cancelled`.
+    - The workflow's outputs are evaluated inside the same handlers and deadline as its steps (checkpoint 2), and so
+      is the setup before the first step. A cancel or the deadline while they're computed ends the run as anywhere
+      else. A malformed output envelope is refused at compile, as `version_unusable`.
+    - A cancel that arrives while the run's end is being written comes too late to unmake that end. The write is
+      shielded: it's never cancelled, it lands, and the run returns its result, so the projection and Temporal agree.
+      (The SDK reports the cancel of an awaited activity as an `ActivityError`, which a repeat after
+      `CancelledError` missed: final review.) A cancel while the version loads cancels the run.
 
     (Tasks 1, 5)
 12. **Only the projection writes rows** (rewritten after review). A plugin step's activity runs its attempt and
@@ -214,19 +257,30 @@ field declared elsewhere: both closed in decision 21 by walking the schema along
       state.
     - A plugin step that fails before its first attempt, because its values can't be computed, still gets its one
       row: attempt 1, `failed`, with the value's code.
+    - What Postgres can't store (NUL, lone surrogates) is stored as U+FFFD, and a number JSON can't hold as its name.
+      A write the database still refuses for its data (SQLSTATE class 22 or 23) is repeated row by row, and a row
+      refused again is logged and skipped: its run still ends (final review).
+    - The workflow queues each row, and the run's error, as storage will write them. It sizes a projection by the rows
+      it sends, and a character strict UTF-8 can't encode would fail that in workflow code, on every retry (PR #9
+      review). `engine` can't import `core`, so `projection.storable` and `sanitize` mirror the storage's, and a test
+      holds them equal.
 
-    (Tasks 4, 5)
+    (Tasks 3, 4, 5, 7)
 13. **One projection in flight.** At most 100 steps (and loop `collect`s) are in flight per execution. Each has at
     most one activity outstanding: its CEL values, then its plugin activity. There is also at most one projection,
     and rows that settle meanwhile go in the next one. Unbounded projections would break §6's drain-headroom
-    arithmetic in 2a-3b. (Task 5)
+    arithmetic in 2a-3b. A projection takes the oldest rows within `PROJECT_BYTES` (256 KiB of JSON), so a backlog
+    after an outage takes several, and the run's end as many as it needs, the last with the summary (final review).
+    (Task 5)
 14. **`wait_until` needs a time zone.** It takes RFC 3339 with an offset. A time without a zone (whose 9 o'clock?)
-    or anything unparseable fails the step with `type_mismatch`. A past instant doesn't wait. (Task 2)
+    or anything unparseable fails the step with `type_mismatch`, and so does an instant before year 1 or after 9999
+    in UTC. A past instant doesn't wait. `flow.delay` takes 0 to 30 days, its own bound: a value resolved at run time
+    isn't checked by the node's schema, and a larger one overflowed the timer (final review). (Task 2)
 15. **How a run ends:**
     - a `fail` node: `failed`, with code `workflow_failed` and the node's message;
     - `stop`: `succeeded`, with the workflow outputs evaluated;
     - an output that can't be computed fails the run with that value's code;
-    - the deadline: `deadline_exceeded`, without outputs.
+    - the deadline: `deadline_exceeded`, without outputs, including while the outputs are being computed.
 
     (Tasks 2, 5)
 16. **A filter fails on its first bad item.** An item whose predicate errors fails the whole filter step with that
@@ -236,8 +290,8 @@ field declared elsewhere: both closed in decision 21 by walking the schema along
     loops with 63-character keys already exceed 200 characters, and nothing bounds a plugin's codes. Codes are
     sanitized like messages: no control characters, at most 500 characters. (Task 3)
 18. **New settings:** `DEWPOINT_TEMPORAL_ADDRESS` (default `localhost:7233`), `DEWPOINT_TEMPORAL_NAMESPACE`
-    (`default`), `DEWPOINT_CEL_SOCKET` (none), `DEWPOINT_CEL_MAX_CONCURRENT` (2), and
-    `DEWPOINT_CEL_SCHEDULE_TO_START_S` (600). (Tasks 6, 7)
+    (`default`), `DEWPOINT_CEL_SOCKET` (none), `DEWPOINT_CEL_MAX_CONCURRENT` (2),
+    `DEWPOINT_CEL_SCHEDULE_TO_START_S` (600), and `DEWPOINT_WORKER_SHUTDOWN_GRACE_S` (30). (Tasks 6, 7)
 19. **Golden histories start here, with `ENGINE_ABI = 1`.** The build id is `dewpoint-<version>+abi<ENGINE_ABI>`
     (spec §7), today `dewpoint-0.1.0+abi1`.
     - Eight scenarios cover what 2a-3a runs. 2a-3b and 2a-3c add theirs.
@@ -254,6 +308,11 @@ field declared elsewhere: both closed in decision 21 by walking the schema along
     - **Redaction follows the schema everywhere.** A field marked `x-sensitive` is redacted behind local `$ref`s and in
       every branch of `anyOf`, `oneOf` and `allOf`: sensitive in one branch means redacted in all. Pydantic writes
       every nested or optional model that way.
+      - Every `patternProperties` schema applies to every key of its object, matched or not and declared keys
+        included (JSON Schema applies a declared property and a matching pattern together). No regex runs on data in
+        the workflow; a sensitive pattern over-redacts rather than leaks.
+      - A tuple's position is redacted by its `prefixItems` schema.
+      - A map whose keys are sensitive (`propertyNames`) is redacted whole, and its keys are learned (checkpoint 1).
     - **Learned values are masked.** The workflow remembers the strings found at sensitive positions of:
       - each plugin output, once its result is recorded;
       - each plugin config: a literal when the run starts, so even a copy projected earlier is masked, and a resolved
@@ -281,6 +340,8 @@ field declared elsewhere: both closed in decision 21 by walking the schema along
       - An unexpected exception names only its type (`The node raised ConnectionError.`), and its text goes to the
         worker's log.
       - `version_unusable`, `internal_error` and `cel_profile_unavailable` likewise.
+      - An `Output` instance that breaks the declared output schema names the schema-walked location and the
+        jsonschema keyword (`n (type)`), never the value.
       - CEL error messages are kept, masked: they explain the tenant's own expression, and everything an expression
         reads is data the run has already seen, so its sensitive parts have been learned.
     - Temporal's history still holds values in full, until 2b's payload encryption.
@@ -298,6 +359,24 @@ field declared elsewhere: both closed in decision 21 by walking the schema along
       dispatcher retries until it knows.
 
     (Tasks 6, 7)
+23. **Admission holds the workflow still** (new at checkpoint 3). Admission reads whether the workflow is enabled and
+    which version is active; a disable, publish or activation that committed between that read and the insert left a
+    run the workflow no longer admits.
+    - Admission takes the workflow's admission lock *shared* before it reads the workflow, and holds it until the run
+      is inserted. Every change to a workflow takes it *exclusively*, before its row lock (`get_workflow` with
+      `for_update`). So a change either commits before the read, and admission refuses, or waits until the run
+      exists.
+    - It is an advisory lock keyed `dewpoint:workflow:<id>`, like the lifecycle locks: a row lock would need UPDATE
+      on `workflows`, which `dewpoint_dispatch` must not have.
+    - Both sides take the workflow's lock before any lifecycle lock. A change waiting for an admission holds nothing
+      that admission's insert needs.
+    - After the lock, admission reads `enabled` and `active_version_id` as columns. A `Workflow` the session already
+      holds would come back from the ORM as it was loaded, before the change the lock waited for. 2b's dispatcher
+      calls `admit` in its own session.
+    - A writer's locked read refreshes a `Workflow` its session already holds (`populate_existing`). Otherwise it
+      could publish a draft that has since been replaced, or take an enable after a disable for a no-op.
+
+    (Task 6)
 
 ## Global Constraints
 
@@ -389,6 +468,7 @@ backend/src/dewpoint/core/runs/            __init__.py, service.py: runs and run
 backend/src/dewpoint/core/models/runs.py   Run, RunStep (and models/__init__.py)                    Task 3
 backend/migrations/versions/0008_runs.py   runs, run_steps, RLS, grants                             Task 3
 backend/src/dewpoint/apps/runs.py          admit, start_run                                         Task 6
+backend/src/dewpoint/core/workflows/service.py  (modify) the workflow's admission lock              Task 6
 backend/src/dewpoint/core/config.py        (modify) Temporal and CEL settings                       Tasks 6, 7
 backend/src/dewpoint/apps/api/routes/runs.py, api/main.py (modify)   GET /runs, GET /runs/{id}      Task 7
 backend/src/dewpoint/apps/cli/main.py      (modify) `dewpoint worker`, `dewpoint dev run`           Task 7
@@ -397,7 +477,7 @@ backend/tests/engine/runtime/              support.py and unit and property test
 backend/tests/core/runs/                   storage tests; tests/conftest.py (modify) dispatch role  Task 3
 backend/tests/support/plugins/testkit.py   (modify) Echo.simulate, the Reconcile node               Task 4
 backend/tests/apps/worker/                 activity, RunGraph, database and dev-run tests; harness  Tasks 4, 5, 7
-backend/tests/apps/test_runs.py            admission                                                Task 6
+backend/tests/apps/test_runs.py            admission; test_lifecycle_races.py (modify)              Task 6
 backend/tests/apps/cli/test_dev_run_cli.py                                                          Task 7
 backend/tests/engine/replay/               scenarios, recorder, replay test, recorded histories     Task 8
 docs/operations/runs.md, README.md                                                                  Task 7
@@ -552,6 +632,16 @@ def test_a_version_this_build_cannot_run_is_refused() -> None:
     g.settings["outputs"] = {"n": cel("has(steps.l.output) ? steps.l.output.count : 0")}
     records = [r for r in expressions(g) if r["node"] is not None]
     with pytest.raises(ProgramError, match="no expression record for /settings/outputs/n"):
+        compile_program(g.data(), MANIFESTS, records, CURRENT_CEL_PROFILE)
+
+
+def test_a_damaged_output_is_refused() -> None:
+    """Checkpoint-2 finding: compile checked the outputs' CEL records but not their envelopes, so a malformed output
+    compiled, and evaluating it later raised outside the run's handlers."""
+    g = graph()
+    records = expressions(g)
+    g.settings["outputs"] = {"n": {"$value": {"kind": "ref", "path": 5}}}  # publish refuses this; a damaged row
+    with pytest.raises(ProgramError, match="/settings/outputs/n"):
         compile_program(g.data(), MANIFESTS, records, CURRENT_CEL_PROFILE)
 ```
 
@@ -798,6 +888,38 @@ def test_the_iteration_cap_fails_the_loop() -> None:
     s.open_loop(loop, [1, 2, 3], concurrency=3, stop_on_error=True)
     assert s.ended is not None and s.ended.failure is not None
     assert s.ended.failure.code == "iteration_cap_exceeded"
+
+
+def test_the_iteration_cap_ends_the_loops_queued_iterations_too() -> None:
+    """Checkpoint-1 finding: the cap failed the loop but left the iterations it had already opened. With `continue`,
+    the steps after the loop ran beside them, and the run could end with a child unsettled."""
+    g = loop_graph()
+    g.nodes[0]["options"]["on_error"] = "continue"
+    s = Scheduler(program(g), iteration_cap=2)
+    s.start()
+    [loop] = s.take_ready()
+    s.open_loop(loop, [1, 2, 3], concurrency=3, stop_on_error=True)  # opens 0 and 1, then the third hits the cap
+    assert ready(s) == ["after"]  # the queued iterations never start
+    assert s.take_cancels() == [] and s.scopes[()].results["l"]["error"]["code"] == "iteration_cap_exceeded"
+
+
+def test_the_iteration_cap_cancels_the_loops_running_iterations() -> None:
+    g = loop_graph()
+    g.nodes[0]["options"]["on_error"] = "continue"
+    s = Scheduler(program(g), iteration_cap=2)
+    s.start()
+    [loop] = s.take_ready()
+    s.open_loop(loop, [1, 2, 3], concurrency=2, stop_on_error=True)
+    x0, x1 = s.take_ready()
+    s.succeed(x0, {})
+    [y0] = s.take_ready()
+    s.succeed(y0, {})
+    [collect] = s.take_collects()
+    s.collected(collect.loop, collect.index, "first")  # the third iteration hits the cap while l:1 still runs
+    assert [name(s, i) for i in s.take_cancels()] == ["l:1/x"]
+    assert ready(s) == ["after"]
+    s.succeed(x1, {})  # the cancelled iteration's late result counts for nothing
+    assert s.take_ready() == [] and "y" not in s.scopes[(("l", 1),)].results
 
 
 def test_a_stop_ends_the_run_and_cancels_running_work() -> None:
@@ -1099,6 +1221,8 @@ def compile_program(
             if isinstance(value, CelValue) and (str(step.id), field) not in records:
                 raise ProgramError(f"`{step.key}`: no expression record for {field}")
     for path, value in iter_values(graph.settings.outputs, ("settings", "outputs")):
+        if isinstance(value, ValueSyntaxError):  # publish refuses these: the stored version is damaged
+            raise ProgramError(f"output {pointer_str(path)}: {value.message}")
         if isinstance(value, CelValue) and (None, pointer_str(path)) not in records:
             raise ProgramError(f"no expression record for {pointer_str(path)}")
     return Program(
@@ -1477,26 +1601,29 @@ class Scheduler:
         loop.open.remove(index)
         loop.collecting.discard(index)
         if loop.stop_on_error:
-            del self.loops[loop.instance]
-            key = self.program.steps[loop.instance.step].key
-            for other in loop.open:  # stop: the loop's other iterations end too
-                self._fail_scope(self.scopes[(*loop.instance.scope, (key, other))], failure, report=False)
-            parent = self.scopes[loop.instance.scope]
-            if parent.failure is None and self.ended is None:
-                self.fail(loop.instance, failure)
+            self._abort(loop, failure)
             return
         loop.failures.append({"index": index, "code": failure.code, "message": failure.message})
         self._advance(loop)
+
+    def _abort(self, loop: LoopRun, failure: Failure) -> None:
+        """The loop ends early (an iteration failed under `stop`, or the run reached its iteration cap): its open
+        iterations end first, running steps cancelled and queued ones dropped, and then the loop step fails, so its
+        own `on_error` applies. Nothing the loop opened outlives it."""
+        del self.loops[loop.instance]
+        key = self.program.steps[loop.instance.step].key
+        for other in loop.open:
+            self._fail_scope(self.scopes[(*loop.instance.scope, (key, other))], failure, report=False)
+        parent = self.scopes[loop.instance.scope]
+        if parent.failure is None and self.ended is None:
+            self.fail(loop.instance, failure)
 
     def _advance(self, loop: LoopRun) -> None:
         """Open iterations up to the concurrency, or complete the loop when every item is done."""
         step = self.program.steps[loop.instance.step]
         while loop.next < len(loop.items) and len(loop.open) < loop.concurrency:
             if not self.debit(1):
-                del self.loops[loop.instance]
-                self.fail(
-                    loop.instance, Failure(ITERATION_CAP_EXCEEDED, "This run reached its limit of loop iterations.")
-                )
+                self._abort(loop, Failure(ITERATION_CAP_EXCEEDED, "This run reached its limit of loop iterations."))
                 return
             index = loop.next
             loop.next += 1
@@ -1550,7 +1677,7 @@ diff --git a/backend/pyproject.toml b/backend/pyproject.toml
 - [ ] **Step 4: Run the tests, and check that the contract bites**
 
 Run: `cd backend && uv run pytest -q tests/engine/runtime`
-Expected: 18 passed (2 program, 15 scheduler, 1 property test over 300 random graphs).
+Expected: 21 passed (3 program, 17 scheduler, 1 property test over 300 random graphs).
 
 Then plant `import random` at the top of `scheduler.py`, run `uv run lint-imports`, and remove it again.
 Expected: `engine.runtime is deterministic … BROKEN` naming `dewpoint.engine.runtime.scheduler -> random`, then
@@ -1758,8 +1885,9 @@ from typing import Any
 
 import pytest
 
-from dewpoint.engine.runtime.nodes import Decision, LoopStart, decide
+from dewpoint.engine.runtime.nodes import MAX_DELAY_S, Decision, LoopStart, decide
 from dewpoint.engine.runtime.scheduler import Failure, RunEnd
+from tests.engine.runtime.support import MANIFESTS
 
 
 @pytest.mark.parametrize(
@@ -1782,6 +1910,7 @@ from dewpoint.engine.runtime.scheduler import Failure, RunEnd
             Decision(output={}, end=RunEnd("failed", Failure("workflow_failed", "no"))),
         ),
         ("flow.delay@1", {"duration_s": 60}, Decision(output={}, wait_s=60.0)),
+        ("flow.delay@1", {"duration_s": 30 * 86_400}, Decision(output={}, wait_s=30 * 86_400.0)),
         (
             "flow.wait_until@1",
             {"until": "2027-01-01T01:00:00+01:00"},
@@ -1812,6 +1941,13 @@ def test_a_control_node_decides(ref: str, config: dict[str, Any], decision: Deci
         ("flow.switch@1", {"cases": [{"port": "a", "when": 1}]}, "type_mismatch"),
         ("flow.delay@1", {"duration_s": True}, "type_mismatch"),
         ("flow.delay@1", {"duration_s": -1}, "type_mismatch"),
+        # Final review: a value from the run, unbounded by the node's schema, overflowed the timer: `internal_error`
+        ("flow.delay@1", {"duration_s": 30 * 86_400 + 1}, "type_mismatch"),
+        ("flow.delay@1", {"duration_s": 1e300}, "type_mismatch"),
+        ("flow.delay@1", {"duration_s": float("nan")}, "type_mismatch"),
+        ("flow.delay@1", {"duration_s": float("inf")}, "type_mismatch"),
+        ("flow.wait_until@1", {"until": "0001-01-01T00:00:00+01:00"}, "type_mismatch"),  # before year 1 in UTC
+        ("flow.wait_until@1", {"until": "9999-12-31T23:59:59-01:00"}, "type_mismatch"),  # after year 9999 in UTC
         ("flow.wait_until@1", {"until": 5}, "type_mismatch"),
         ("flow.wait_until@1", {"until": "tomorrow"}, "type_mismatch"),  # a ref to open data
         ("flow.wait_until@1", {"until": "2027-01-01T09:00:00"}, "type_mismatch"),  # no zone: whose 9 o'clock?
@@ -1825,6 +1961,10 @@ def test_a_control_node_decides(ref: str, config: dict[str, Any], decision: Deci
 def test_a_control_node_refuses(ref: str, config: dict[str, Any], code: str) -> None:
     failure = decide(ref, config).failure
     assert failure is not None and failure.code == code
+
+
+def test_a_delay_is_bounded_as_the_node_declares() -> None:
+    assert MAX_DELAY_S == MANIFESTS["flow.delay@1"]["config_schema"]["properties"]["duration_s"]["maximum"]
 
 
 def test_a_loop_of_exactly_a_hundred_items_runs_inline() -> None:
@@ -1843,10 +1983,10 @@ Create `backend/tests/engine/runtime/test_projection.py`:
 """`run_steps` previews (spec §8): `x-sensitive` fields are redacted wherever the schema puts them, values learned to be
 sensitive are masked wherever they reappear, and oversize previews are truncated."""
 
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
 from dewpoint.engine.runtime.projection import (
     MIN_SECRET,
@@ -1926,6 +2066,54 @@ def test_redaction_follows_references_and_unions() -> None:
         "many": [{"user": "w", "secret": REDACTED}],
     }
     assert preview({"cred": None, "maybe": None, "many": []}, NESTED) == {"cred": None, "maybe": None, "many": []}
+
+
+Secret = Annotated[str, sensitive()]
+
+
+class Overlap(BaseModel):
+    """A declared field that a sensitive pattern also covers: JSON Schema applies both to it."""
+
+    model_config = ConfigDict(json_schema_extra={"patternProperties": {"^x-": {"type": "string", "x-sensitive": True}}})
+    token: str = Field(alias="x-token")
+    name: str
+
+
+class Shapes(BaseModel):
+    patterned: dict[Annotated[str, StringConstraints(pattern=r"^x-")], Secret]  # patternProperties
+    pair: tuple[str, Secret]  # prefixItems
+    keyed: dict[Secret, int]  # propertyNames: the keys are the secret
+    overlap: Overlap  # properties and patternProperties at once
+
+
+class ShapesNode(Node):
+    type = "testkit.shapes"
+    version = 1
+    title = "Shapes"
+    Output = Shapes
+
+    async def run(self, ctx: Any, config: Any) -> Shapes:
+        raise NotImplementedError
+
+
+def test_redaction_covers_patterned_maps_tuples_and_sensitive_keys() -> None:
+    """Checkpoint-1 finding: a patterned-key map's values sit under `patternProperties`, which redaction didn't read,
+    so the credential showed and was never learned. Tuple positions (`prefixItems`) and sensitive keys
+    (`propertyNames`) had the same gap."""
+    schema = node_manifest(ShapesNode)["output_schema"]
+    value = {
+        "patterned": {"x-api": "k3y-one"},
+        "pair": ["public", "k3y-two"],
+        "keyed": {"k3y-three": 1},
+        "overlap": {"x-token": "k3y-four", "name": "n"},  # checkpoint-1 re-review: a declared key a pattern covers
+    }
+    assert preview(value, schema) == {
+        "patterned": {"x-api": REDACTED},
+        "pair": ["public", REDACTED],
+        "keyed": REDACTED,
+        "overlap": {"x-token": REDACTED, "name": REDACTED},  # every pattern applies, matched or not: over-redaction
+    }
+    assert sensitive_values(value, schema) == ["k3y-one", "k3y-two", "k3y-three", "k3y-four", "n"]
 
 
 def test_a_recursive_schema_ends() -> None:
@@ -2235,6 +2423,7 @@ from dewpoint.engine.registry import control
 from dewpoint.engine.runtime.scheduler import Failure, RunEnd
 
 INLINE_ITEMS = 100  # larger loops run as batches of child workflows (2a-3b)
+MAX_DELAY_S = 30 * 86_400  # flow.delay's own bound: a value resolved at run time isn't checked by its schema
 ITEM_CAP_EXCEEDED = "item_cap_exceeded"
 NOT_SUPPORTED = "not_supported"  # until 2a-3b: sub-flows, loops over more than INLINE_ITEMS items
 WORKFLOW_FAILED = "workflow_failed"  # a fail node ended the run
@@ -2266,9 +2455,9 @@ def _instant(value: Any) -> datetime | None:
         return None
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00").replace("z", "+00:00"))
-    except ValueError:
+        return parsed.astimezone(UTC) if parsed.tzinfo is not None else None
+    except (ValueError, OverflowError):  # not a date-time; or before year 1 or after 9999 once in UTC
         return None
-    return parsed.astimezone(UTC) if parsed.tzinfo is not None else None
 
 
 def _mismatch(message: str) -> Decision:
@@ -2298,8 +2487,8 @@ def decide(ref: str, config: Mapping[str, Any]) -> Decision:
         return Decision(output={}, end=RunEnd("failed", Failure(WORKFLOW_FAILED, str(config.get("message", "")))))
     if ref == control.DELAY:
         seconds = config.get("duration_s")
-        if isinstance(seconds, bool) or not isinstance(seconds, int | float) or seconds < 0:
-            return _mismatch("`duration_s` must be a number of seconds.")
+        if isinstance(seconds, bool) or not isinstance(seconds, int | float) or not 0 <= seconds <= MAX_DELAY_S:
+            return _mismatch(f"`duration_s` must be a number of seconds, from 0 to {MAX_DELAY_S}.")
         return Decision(output={}, wait_s=float(seconds))
     if ref == control.WAIT_UNTIL:
         until = _instant(config.get("until"))
@@ -2333,6 +2522,7 @@ def decide(ref: str, config: Mapping[str, Any]) -> Decision:
 
 __all__ = [
     "INLINE_ITEMS",
+    "MAX_DELAY_S",
     "ITEM_CAP_EXCEEDED",
     "NOT_SUPPORTED",
     "WORKFLOW_FAILED",
@@ -2347,25 +2537,34 @@ Create `backend/src/dewpoint/engine/runtime/projection.py`:
 ```python
 # SPDX-License-Identifier: Apache-2.0
 """Previews for `run_steps` (spec §8). The projection is tenant-readable, so:
-- a field its schema marks `x-sensitive` becomes "[redacted]" wherever the schema puts it: behind local `$ref`s, and in
-  any branch of `anyOf`, `oneOf` or `allOf` (sensitive in one branch, redacted in all);
+- a field its schema marks `x-sensitive` becomes "[redacted]" wherever the schema puts it: behind local `$ref`s, in
+  any branch of `anyOf`, `oneOf` or `allOf` (sensitive in one branch, redacted in all), under any `patternProperties`
+  schema of its object (declared keys included: JSON Schema applies both) and at a tuple's position (`prefixItems`);
+  a map whose keys are sensitive (`propertyNames`) is redacted whole;
 - a value the run learned is sensitive (MIN_SECRET characters or more) is masked wherever it reappears, in strings and
   keys: copied by a transform, embedded by a template, echoed by an error message;
-- a preview larger than 8 KiB of canonical JSON becomes "[truncated]".
+- a preview larger than 8 KiB of canonical JSON becomes "[truncated]";
+- every row the workflow queues holds what storage will write (`storable`, `sanitize`): the workflow sizes each
+  projection by the rows it sends, and a character strict UTF-8 can't encode would fail that in workflow code.
 
 It runs in the workflow. `remember` keeps the learned values in one sorted order, so every replay masks the same way.
 Masking catches copies, not transformations: a secret that CEL encodes or slices is no longer the same text."""
 
+import math
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from dewpoint.engine.canonical import canonical_json
 
 PREVIEW_BYTES = 8 * 1024
+MESSAGE_LIMIT = 500  # characters of a stored code or message
 REDACTED, TRUNCATED = "[redacted]", "[truncated]"
 SENSITIVE = "x-sensitive"
 MIN_SECRET = 4  # shorter values would mask ordinary text ("1", "yes") everywhere
 _MAX_DEPTH = 64  # a schema that refers to itself ends here
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+_UNSTORABLE = re.compile("[\x00\ud800-\udfff]")  # Postgres takes no NUL, and a lone surrogate isn't UTF-8
 
 Secrets = tuple[str, ...]
 
@@ -2395,15 +2594,49 @@ def _branches(schema: Any, root: Mapping[str, Any], depth: int = 0) -> list[Mapp
     return out
 
 
+def _patterns(branch: Mapping[str, Any]) -> list[Any]:
+    """Every `patternProperties` schema, matched or not: no regex runs on data in the workflow, so a sensitive
+    pattern redacts every key's value in its object, declared keys included (over-redaction, never a leak)."""
+    patterns = branch.get("patternProperties")
+    return list(patterns.values()) if isinstance(patterns, Mapping) else []
+
+
+def _map_values(branches: list[Mapping[str, Any]]) -> list[Any]:
+    """The schemas that may govern an undeclared key's value: `additionalProperties` and every pattern."""
+    out: list[Any] = []
+    for b in branches:
+        if isinstance(b.get("additionalProperties"), Mapping):
+            out.append(b["additionalProperties"])
+        out.extend(_patterns(b))
+    return out
+
+
 def _children(branches: list[Mapping[str, Any]], key: str) -> list[Any]:
+    """The schemas that may govern `key`'s value. JSON Schema applies a declared property and every matching pattern
+    together; `additionalProperties` only to keys neither covers."""
     out: list[Any] = []
     for b in branches:
         props = b.get("properties")
         if isinstance(props, Mapping) and key in props:
-            out.append(props[key])
-        elif isinstance(b.get("additionalProperties"), Mapping):
-            out.append(b["additionalProperties"])
+            out += [props[key], *_patterns(b)]
+        else:
+            out += _map_values([b])
     return out
+
+
+def _elements(branches: list[Mapping[str, Any]], index: int) -> list[Any]:
+    """The schemas that may govern a list's element `index`: its tuple position (`prefixItems`), and `items`."""
+    out: list[Any] = [b["items"] for b in branches if isinstance(b.get("items"), Mapping)]
+    for b in branches:
+        prefix = b.get("prefixItems")
+        if isinstance(prefix, list) and index < len(prefix):
+            out.append(prefix[index])
+    return out
+
+
+def _keys_sensitive(branches: list[Mapping[str, Any]], root: Mapping[str, Any]) -> bool:
+    names = [b["propertyNames"] for b in branches if isinstance(b.get("propertyNames"), Mapping)]
+    return any(n.get(SENSITIVE) is True for s in names for n in _branches(s, root))
 
 
 def _walk(value: Any, schemas: list[Any], root: Mapping[str, Any], found: list[Any] | None) -> Any:
@@ -2414,10 +2647,15 @@ def _walk(value: Any, schemas: list[Any], root: Mapping[str, Any], found: list[A
             found.append(value)
         return REDACTED
     if isinstance(value, dict):
+        if _keys_sensitive(branches, root):  # the keys are the secret: the whole map goes, its keys are learned
+            if found is not None:
+                found.extend(value)
+                for k, v in value.items():
+                    _walk(v, _children(branches, k), root, found)
+            return REDACTED
         return {k: _walk(v, _children(branches, k), root, found) for k, v in value.items()}
     if isinstance(value, list):
-        items = [b["items"] for b in branches if isinstance(b.get("items"), Mapping)]
-        return [_walk(v, items, root, found) for v in value]
+        return [_walk(v, _elements(branches, i), root, found) for i, v in enumerate(value)]
     return value
 
 
@@ -2478,9 +2716,10 @@ def location(loc: Sequence[str | int], schema: Mapping[str, Any]) -> str:
         found: list[Any] = []
         if isinstance(part, str):
             found = [
-                b["properties"][part]
+                c
                 for b in branches
                 if isinstance(b.get("properties"), Mapping) and part in b["properties"]
+                for c in (b["properties"][part], *_patterns(b))
             ]
         elif isinstance(part, int):
             for b in branches:
@@ -2494,10 +2733,31 @@ def location(loc: Sequence[str | int], schema: Mapping[str, Any]) -> str:
             candidates = found
         else:
             parts.append("*")
-            candidates = [
-                b["additionalProperties"] for b in branches if isinstance(b.get("additionalProperties"), Mapping)
-            ]
+            candidates = _map_values(branches)
     return ".".join(parts) or "(root)"
+
+
+def sanitize(message: str | None) -> str | None:
+    """A code or message as storage writes it (`core.runs.service.sanitize`; a test holds the two equal): no control
+    characters, no lone surrogates, at most MESSAGE_LIMIT characters."""
+    if message is None:
+        return None
+    clean = _UNSTORABLE.sub("\ufffd", _CONTROL.sub(" ", message))
+    return clean if len(clean) <= MESSAGE_LIMIT else clean[: MESSAGE_LIMIT - 1] + "…"
+
+
+def storable(value: Any) -> Any:
+    """A value as storage writes it to jsonb (`core.runs.service.storable`; a test holds the two equal): NUL and lone
+    surrogates, in strings and keys, become U+FFFD, and a number JSON can't hold (NaN, infinity) its name."""
+    if isinstance(value, str):
+        return _UNSTORABLE.sub("\ufffd", value)
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {storable(k): storable(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [storable(v) for v in value]
+    return value
 
 
 def preview(value: Any, schema: Mapping[str, Any] | None = None, secrets: Secrets = ()) -> Any:
@@ -2510,6 +2770,7 @@ def preview(value: Any, schema: Mapping[str, Any] | None = None, secrets: Secret
 
 
 __all__ = [
+    "MESSAGE_LIMIT",
     "MIN_SECRET",
     "PREVIEW_BYTES",
     "REDACTED",
@@ -2519,14 +2780,16 @@ __all__ = [
     "mask",
     "preview",
     "remember",
+    "sanitize",
     "sensitive_values",
+    "storable",
 ]
 ```
 
 - [ ] **Step 4: Run the tests**
 
 Run: `cd backend && uv run pytest -q tests/engine/runtime`
-Expected: 59 passed.
+Expected: 71 passed.
 
 - [ ] **Step 5: Checks and commit, then pause for checkpoint 1**
 
@@ -2613,6 +2876,7 @@ from sqlalchemy.exc import DBAPIError
 
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.runs import service
+from dewpoint.engine.runtime import projection
 from tests.support.workflows import seed_workflow
 
 
@@ -2719,6 +2983,49 @@ async def test_runs_list_newest_first_and_page(owner_sessionmaker, dispatch_sess
         first = await service.list_runs(s, limit=2)
         rest = await service.list_runs(s, before=first[-1].started_at, limit=2)
     assert [r.id for r in first + rest] == ids[::-1]
+
+
+async def test_previews_and_messages_hold_nothing_the_database_refuses(
+    owner_sessionmaker, dispatch_sessionmaker, worker_sessionmaker
+) -> None:
+    """Final review: Postgres refuses NUL in jsonb and text, and a lone surrogate isn't UTF-8. A refused write is
+    retried forever, and the run behind it never ends. What it can't store becomes U+FFFD, a number JSON can't hold its
+    name."""
+    tenant, run_id = await seeded_run(owner_sessionmaker, dispatch_sessionmaker)
+    data = {"k\x00ey": ["a\x00b", "c\ud800d"], "n": float("nan")}
+    async with worker_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        await service.upsert_steps(
+            s, tenant, [row(run_id, "failed", input_preview=data, output_preview="\x00", error_message="m\ud800")]
+        )
+        await service.finish_run(s, run_id, status="failed", ended_at=datetime.now(UTC), error_code="c\ud800")
+    [only] = await steps(owner_sessionmaker, tenant, run_id)
+    assert only.input_preview == {"k�ey": ["a�b", "c�d"], "n": "nan"}
+    assert (only.output_preview, only.error_message) == ("�", "m�")
+    async with owner_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        assert (await service.get_run(s, run_id)).error_code == "c�"  # type: ignore[union-attr]
+
+
+HOSTILE: list[Any] = [
+    "plain",
+    "nul\x00 esc\x1b bell\x07 tab\t newline\n",
+    "lone \ud800 and \udfff surrogates",
+    "x" * 900,
+    {"k\x00ey": ["a\ud800b", float("nan"), float("-inf"), 1.5, None, True, {"deep\ud801": "\x00"}]},
+]
+
+
+@pytest.mark.parametrize("value", HOSTILE)
+def test_the_engine_sends_what_storage_writes(value: Any) -> None:
+    """PR #9 review: the workflow sizes a projection by the rows it sends, so it normalizes them as storage will
+    (`engine.runtime.projection` can't import `core`, nor `core` the engine): the same values, and a second pass
+    changes nothing."""
+    assert projection.storable(value) == service.storable(value)
+    assert service.storable(projection.storable(value)) == projection.storable(value)
+    if isinstance(value, str):
+        assert projection.sanitize(value) == service.sanitize(value)
+        assert service.sanitize(projection.sanitize(value)) == projection.sanitize(value)
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
@@ -2908,6 +3215,7 @@ Create `backend/src/dewpoint/core/runs/service.py`:
 nothing of the engine. Every write is idempotent, so a retried projection changes nothing twice, and a late
 `running` row never overwrites a finished attempt."""
 
+import math
 import re
 import uuid
 from collections.abc import Iterable, Mapping
@@ -2922,6 +3230,7 @@ from dewpoint.core.models.runs import Run, RunStep
 
 MESSAGE_LIMIT = 500
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+_UNSTORABLE = re.compile("[\x00\ud800-\udfff]")  # Postgres takes no NUL, and a lone surrogate isn't UTF-8
 STEP_FIELDS = (
     "node_key",
     "status",
@@ -2937,11 +3246,26 @@ STEP_FIELDS = (
 
 
 def sanitize(message: str | None) -> str | None:
-    """A message or code fit to show: no control characters, at most MESSAGE_LIMIT characters."""
+    """A message or code fit to show and to store: no control characters, no lone surrogates, at most MESSAGE_LIMIT
+    characters."""
     if message is None:
         return None
-    clean = _CONTROL.sub(" ", message)
+    clean = _UNSTORABLE.sub("\ufffd", _CONTROL.sub(" ", message))
     return clean if len(clean) <= MESSAGE_LIMIT else clean[: MESSAGE_LIMIT - 1] + "…"
+
+
+def storable(value: Any) -> Any:
+    """A preview Postgres stores as jsonb: NUL and lone surrogates, in strings and keys, become U+FFFD, and a number
+    JSON can't hold (NaN, infinity) its name. A refused write would be retried forever, and its run never end."""
+    if isinstance(value, str):
+        return _UNSTORABLE.sub("\ufffd", value)
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {storable(k): storable(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [storable(v) for v in value]
+    return value
 
 
 async def insert_run(
@@ -3004,6 +3328,8 @@ async def upsert_steps(s: AsyncSession, tenant_id: uuid.UUID, rows: Iterable[Map
         }
         values["error_code"] = sanitize(values["error_code"])
         values["error_message"] = sanitize(values["error_message"])
+        values["input_preview"] = storable(values["input_preview"])
+        values["output_preview"] = storable(values["output_preview"])
         statement = insert(RunStep).values(**values)
         fresh = statement.excluded
         await s.execute(
@@ -3043,7 +3369,7 @@ async def run_steps(s: AsyncSession, run_id: uuid.UUID) -> list[RunStep]:
 - [ ] **Step 4: Run the tests and the migration round trip**
 
 Run: `cd backend && uv run pytest -q tests/core/runs`
-Expected: 5 passed. The session fixture migrates a fresh container to head.
+Expected: 11 passed. The session fixture migrates a fresh container to head.
 
 Then check the downgrade on a scratch database (the image is the approved test image):
 
@@ -3287,6 +3613,8 @@ runs one attempt of the node and writes nothing: `RunGraph` counts the attempts 
 
 import asyncio
 import dataclasses
+import datetime
+import ipaddress
 import os
 import tempfile
 import uuid
@@ -3296,17 +3624,18 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from jsonschema import FormatChecker
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 from pydantic_core import PydanticCustomError
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
-from dewpoint.apps.worker.activities import cel_activity, remote_evaluator, step_activity_for
+from dewpoint.apps.worker.activities import CHECKED_FORMATS, cel_activity, remote_evaluator, step_activity_for
 from dewpoint.apps.worker.context import idempotency_key
 from dewpoint.engine.cel import ipc
 from dewpoint.engine.cel import types as T
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
-from dewpoint.engine.runtime.activities import CelInput, CelResult, StepInput, StepResult
+from dewpoint.engine.runtime.activities import MAPPED, CelInput, CelResult, StepInput, StepResult
 from dewpoint.sdk import Node, SideEffect, StepContext, sensitive
 from tests.support.plugins.testkit import AmbiguousSend, Echo, FailN, Reconcile, Sensitive, Slow
 
@@ -3380,6 +3709,118 @@ class Keyed(Node):
         return {"headers": {f"x-{SECRET}": "not-an-int"}, "codes": {428319: "not-an-int"}}
 
 
+class Constructed(Node):
+    """Returns an instance built without validation: `model_construct` holds whatever it's given."""
+
+    type = "testkit.constructed"
+    version = 1
+    title = "Constructed"
+    Output = LiarOutput
+
+    async def run(self, ctx: StepContext, config: Any) -> Any:
+        return LiarOutput.model_construct(n="not-an-int", key="ok")
+
+
+class FormatsConfig(BaseModel):
+    valid: bool
+
+
+class Tagged(BaseModel):
+    """A valid output whose field serializer changes the type: an `int` is emitted as text, as its schema says."""
+
+    id: int
+
+    @field_serializer("id")
+    def _tag(self, value: int) -> str:
+        return f"id-{value}"
+
+
+class Serialized(Node):
+    type = "testkit.serialized"
+    version = 1
+    title = "Serialized"
+    Output = Tagged
+
+    async def run(self, ctx: StepContext, config: Any) -> Any:
+        return Tagged(id=3)
+
+
+class Formatted(BaseModel):
+    """Values whose output schema declares a `format`, as pydantic writes it."""
+
+    id: uuid.UUID
+    at: datetime.datetime
+    on: datetime.date
+    ip: ipaddress.IPv4Address
+
+
+class Formats(Node):
+    type = "testkit.formats"
+    version = 1
+    title = "Formats"
+    Config = FormatsConfig
+    Output = Formatted
+
+    async def run(self, ctx: StepContext, config: FormatsConfig) -> Any:
+        valid = Formatted(
+            id=uuid.UUID(int=5), at=datetime.datetime(2026, 9, 27, 10, 0), on=datetime.date(2026, 9, 27), ip="10.0.0.1"
+        )
+        return valid if config.valid else Formatted.model_construct(**{**dict(valid), "id": "not-a-uuid"})
+
+
+class Timed(BaseModel):
+    precise: datetime.time
+    zoned: datetime.time
+
+
+class Times(Node):
+    type = "testkit.times"
+    version = 1
+    title = "Times"
+    Output = Timed
+
+    async def run(self, ctx: StepContext, config: Any) -> Any:
+        return Timed(precise=datetime.time(10, 0, 0, 123456), zoned=datetime.time(10, 0, tzinfo=datetime.UTC))
+
+
+def _buggy(value: str) -> str:
+    """A validator with a bug: it raises something other than ValueError, and the error quotes the value."""
+    raise KeyError(value)
+
+
+class BuggyOutput(BaseModel):
+    key: str
+    _key = field_validator("key")(_buggy)
+
+
+class BuggyConfig(BaseModel):
+    key: str = "k"
+    _key = field_validator("key")(_buggy)
+
+
+class BuggySend(Node):
+    """Sends, then its output's validator fails with a bug: after the request went out."""
+
+    type = "testkit.buggy_send"
+    version = 1
+    title = "Buggy send"
+    Output = BuggyOutput
+    side_effect = SideEffect.AMBIGUOUS
+
+    async def run(self, ctx: StepContext, config: Any) -> Any:
+        return {"key": SECRET}
+
+
+class BuggyConfigured(Node):
+    type = "testkit.buggy_configured"
+    version = 1
+    title = "Buggy config"
+    Config = BuggyConfig
+
+    async def run(self, ctx: StepContext, config: BuggyConfig) -> Any:
+        return {}
+
+
 class Broken(Node):
     type = "testkit.broken"
     version = 1
@@ -3451,21 +3892,48 @@ async def test_errors_map_to_retries_and_outcomes() -> None:
     retry = await failure(step_activity_for(FailN), step("testkit.fail_n@1", {"failures": 1}))
     fatal = await failure(step_activity_for(AmbiguousSend), step("testkit.ambiguous_send@1", {"outcome": "rejected"}))
     unknown = await failure(step_activity_for(AmbiguousSend), step("testkit.ambiguous_send@1", {"outcome": "unknown"}))
-    assert (retry.type, retry.non_retryable, retry.details) == ("testkit.transient", False, ({"outcome": None},))
+    assert (retry.type, retry.non_retryable, retry.details) == (
+        "testkit.transient",
+        False,
+        ({"outcome": None, MAPPED: True},),
+    )
     assert (fatal.type, fatal.non_retryable) == ("testkit.rejected", True)
     assert (unknown.type, unknown.non_retryable, unknown.details) == (
         "testkit.timeout_after_send",
         True,
-        ({"outcome": "outcome_unknown"},),
+        ({"outcome": "outcome_unknown", MAPPED: True},),
     )
 
 
 async def test_an_unexpected_exception_is_retried_unless_the_request_may_have_been_sent() -> None:
     plain = await failure(step_activity_for(Broken), step("testkit.broken@1"))
     sent = await failure(step_activity_for(BrokenSend), step("testkit.broken_send@1"))
-    assert (plain.type, plain.non_retryable, plain.details) == ("unexpected_error", False, ({"outcome": None},))
-    assert (sent.type, sent.non_retryable, sent.details) == ("outcome_unknown", True, ({"outcome": "outcome_unknown"},))
+    assert (plain.type, plain.non_retryable, plain.details) == (
+        "unexpected_error",
+        False,
+        ({"outcome": None, MAPPED: True},),
+    )
+    assert (sent.type, sent.non_retryable, sent.details) == (
+        "outcome_unknown",
+        True,
+        ({"outcome": "outcome_unknown", MAPPED: True},),
+    )
     assert plain.message == "The node raised ConnectionError." and SECRET not in sent.message  # the text goes to logs
+
+
+async def test_a_validator_bug_is_mapped_never_retried_and_quotes_nothing() -> None:
+    """Final review: a validator raising something other than ValueError escaped the mapping. The SDK made it a
+    retryable failure carrying its text: an ambiguous send was repeated, and the message quoted the data."""
+    output = await failure(step_activity_for(BuggySend), step("testkit.buggy_send@1"))
+    config = await failure(step_activity_for(BuggyConfigured), step("testkit.buggy_configured@1", {"key": SECRET}))
+    assert (output.type, output.non_retryable, output.details) == (
+        "output_schema_violation",
+        True,
+        ({"outcome": None, MAPPED: True},),
+    )
+    assert output.message == "The output doesn't match `testkit.buggy_send@1`: checking it raised KeyError."
+    assert (config.type, config.non_retryable) == ("config_invalid", True)
+    assert config.message == "The config doesn't match `testkit.buggy_configured@1`: checking it raised KeyError."
 
 
 async def test_the_attempt_comes_from_the_workflow() -> None:
@@ -3536,6 +4004,49 @@ async def test_cel_evaluate_records_outcomes_and_retries_an_unavailable_evaluato
     with pytest.raises(ApplicationError) as invalid:
         await ActivityEnvironment().run(nowhere, CelInput({"schema": "nope"}))
     assert (invalid.value.type, invalid.value.non_retryable) == ("invalid_request", True)
+
+
+async def test_an_output_instance_is_validated_too() -> None:
+    """Checkpoint-2 finding: an instance of the node's own Output was trusted as it stood, but pydantic validates
+    instances only when they're built through it. It's checked like any other output."""
+    bad = await failure(step_activity_for(Constructed), step("testkit.constructed@1"))
+    assert (bad.type, bad.non_retryable) == ("output_schema_violation", True)
+    assert bad.message == "The output doesn't match `testkit.constructed@1`: n (type)."  # the output schema's rule
+
+
+async def test_an_instance_breaking_a_format_is_refused_and_valid_formats_pass() -> None:
+    """Checkpoint-2 re-review: without a format checker, `format: uuid` held nothing. The formats checked are the ones
+    whose checks agree with what pydantic emits: a naive datetime is valid output, so `date-time` isn't checked."""
+    bad = await failure(step_activity_for(Formats), step("testkit.formats@1", {"valid": False}))
+    assert (bad.type, bad.message) == (
+        "output_schema_violation",
+        "The output doesn't match `testkit.formats@1`: id (format).",
+    )
+    assert set(FormatChecker(formats=CHECKED_FORMATS).checkers) == set(CHECKED_FORMATS)  # each one really checked
+    good = await call(step_activity_for(Formats), step("testkit.formats@1", {"valid": True}))
+    assert good.output == {
+        "id": str(uuid.UUID(int=5)),
+        "at": "2026-09-27T10:00:00",
+        "on": "2026-09-27",
+        "ip": "10.0.0.1",
+    }
+
+
+async def test_times_pydantic_emits_are_valid_output() -> None:
+    """Final review: without an optional library, jsonschema checks `time` as `HH:MM:SS` and refuses the
+    fractions and zones pydantic writes for valid times; with it, it wants a zone. `time` isn't checked."""
+    assert await call(step_activity_for(Times), step("testkit.times@1")) == StepResult(
+        {"precise": "10:00:00.123456", "zoned": "10:00:00Z"}, "applied"
+    )
+    assert "time" not in CHECKED_FORMATS
+
+
+async def test_a_field_serializer_emits_what_the_output_schema_declares() -> None:
+    """Checkpoint-2 re-review: an instance is checked as it's emitted, against the declared output schema, not
+    against the model's input types, which a typed field serializer may change."""
+    assert await call(step_activity_for(Serialized), step("testkit.serialized@1")) == StepResult(
+        {"id": "id-3"}, "applied"
+    )
 ```
 
 - [ ] **Step 3: Run them and watch them fail**
@@ -3562,6 +4073,10 @@ PROJECT = "dewpoint.project"
 CEL_EVALUATE = "cel.evaluate"
 LIVE, SIMULATE = "live", "simulate"
 APPLIED, SIMULATED, OUTCOME_UNKNOWN = "applied", "simulated", "outcome_unknown"
+# In a plugin step's failure details: the activity's own mapping made this failure. `RunGraph` trusts no other failure
+# as the node's: the SDK makes its own (a worker shutting down, an exception nothing caught), and those say nothing
+# of whether the request went out.
+MAPPED = "mapped"
 
 
 def step_activity(ref: str) -> str:
@@ -3766,17 +4281,22 @@ never repeat an effect, and a timeout after an ambiguous send is never retried. 
   retried;
 - maps any other exception to `unexpected_error`, retryable, except from an `ambiguous` node, where the request may
   have been sent: `outcome_unknown`;
+- maps a check that fails with something other than a validation error (a validator's bug) like a failed check,
+  never retried: after `run()`, the effect happened;
 - for a `reconcilable` node on attempt 2 or later, calls `reconcile()` first and keeps what it finds.
 
-The projection is tenant-readable, so a message never quotes input: a validation error names each field and its
-rule's code, and an unexpected exception names only its type. Its text goes to the worker's log."""
+Every failure it raises is marked `MAPPED`; `RunGraph` trusts no other failure as the node's. The projection is
+tenant-readable, so a message never quotes input: a validation error names each field and its rule's code, and an
+unexpected exception names only its type. Its text goes to the worker's log."""
 
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any, Protocol, get_args
 
 import structlog
+from jsonschema import Draft202012Validator, FormatChecker
 from pydantic import BaseModel, ValidationError
+from pydantic_core import PydanticSerializationError
 from pydantic_core.core_schema import ErrorType
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -3788,6 +4308,7 @@ from dewpoint.engine.runtime.activities import (
     APPLIED,
     CEL_EVALUATE,
     LOAD_VERSION,
+    MAPPED,
     OUTCOME_UNKNOWN,
     PROJECT,
     SIMULATE,
@@ -3811,6 +4332,7 @@ from dewpoint.sdk import (
     RetryableError,
     SideEffect,
     dump_output,
+    node_manifest,
 )
 
 CONFIG_INVALID = "config_invalid"
@@ -3820,6 +4342,11 @@ UNEXPECTED_ERROR = "unexpected_error"
 INVALID_REQUEST = "invalid_request"
 _log = structlog.get_logger("dewpoint.worker")
 _PYDANTIC_CODES = frozenset(get_args(ErrorType))  # every built-in validation error type
+# The `format`s an emitted output is checked for: those whose checks agree with what pydantic emits, and need no
+# optional library. `date-time` and `time` aren't: RFC 3339 wants an offset, which pydantic's naive values lack, and
+# without the optional library `time` is checked as `HH:MM:SS`, refusing fractions and zones. Listing them keeps the
+# check from changing when an optional format library happens to be installed.
+CHECKED_FORMATS = ("date", "uuid", "email", "ipv4", "ipv6", "regex")
 
 
 class RunStore(Protocol):
@@ -3831,6 +4358,22 @@ class _StepFailed(Exception):
     def __init__(self, code: str, message: str, *, retryable: bool, outcome: str | None = None) -> None:
         super().__init__(message)
         self.code, self.message, self.retryable, self.outcome = code, message, retryable, outcome
+
+    def mapped(self) -> ApplicationError:
+        details = {"outcome": self.outcome, MAPPED: True}
+        return ApplicationError(self.message, details, type=self.code, non_retryable=not self.retryable)
+
+
+def _bug(what: str, step: StepInput, e: Exception) -> None:
+    _log.warning(
+        what,
+        run_id=step.run_id,
+        step_id=step.step_id,
+        iteration_key=step.iteration_key,
+        attempt=step.attempt,
+        error_type=type(e).__name__,
+        error=str(e)[:500],
+    )
 
 
 def _fields(error: ValidationError, schema: Mapping[str, Any]) -> str:
@@ -3852,9 +4395,13 @@ async def _call(node: type[Node], step: StepInput, schema: Mapping[str, Any]) ->
     except ValidationError as e:
         message = f"The config doesn't match `{step.ref}`: {_fields(e, schema)}"
         raise _StepFailed(CONFIG_INVALID, message, retryable=False) from None
-    ctx = context(step.tenant_id, step.run_id, step.step_id, step.iteration_key, step.attempt)
-    instance = node()
+    except Exception as e:  # a validator's bug: it raised something pydantic doesn't turn into a validation error
+        _bug("step_config_check_failed", step, e)
+        message = f"The config doesn't match `{step.ref}`: checking it raised {type(e).__name__}."
+        raise _StepFailed(CONFIG_INVALID, message, retryable=False) from None
     try:
+        ctx = context(step.tenant_id, step.run_id, step.step_id, step.iteration_key, step.attempt)
+        instance = node()
         if step.mode == SIMULATE:
             return await instance.simulate(ctx, config), SIMULATED
         if node.side_effect == SideEffect.RECONCILABLE and step.attempt > 1:
@@ -3873,15 +4420,7 @@ async def _call(node: type[Node], step: StepInput, schema: Mapping[str, Any]) ->
     except Exception as e:
         if isinstance(e, NotImplementedError) and step.mode == SIMULATE:
             raise _StepFailed(SIMULATION_UNAVAILABLE, f"`{step.ref}` can't be simulated.", retryable=False) from None
-        _log.warning(
-            "step_unexpected_error",
-            run_id=step.run_id,
-            step_id=step.step_id,
-            iteration_key=step.iteration_key,
-            attempt=step.attempt,
-            error_type=type(e).__name__,
-            error=str(e)[:500],
-        )
+        _bug("step_unexpected_error", step, e)
         message = f"The node raised {type(e).__name__}."
         if node.side_effect == SideEffect.AMBIGUOUS:
             raise _StepFailed(OUTCOME_UNKNOWN, message, retryable=False, outcome=OUTCOME_UNKNOWN) from None
@@ -3891,22 +4430,42 @@ async def _call(node: type[Node], step: StepInput, schema: Mapping[str, Any]) ->
 def step_activity_for(node: type[Node]) -> Callable[[StepInput], Awaitable[StepResult]]:
     ref = f"{node.type}@{node.version}"
     config_schema = node.Config.model_json_schema(mode="validation")
-    output_schema = node.Output.model_json_schema(mode="serialization")
+    output_schema = node_manifest(node)["output_schema"]  # what the node promises to emit: serialized and closed
+    emitted = Draft202012Validator(output_schema, format_checker=FormatChecker(formats=CHECKED_FORMATS))
+
+    def violation(detail: str) -> _StepFailed:
+        return _StepFailed(OUTPUT_SCHEMA_VIOLATION, f"The output doesn't match `{ref}`: {detail}", retryable=False)
+
+    def output_of(result: Any) -> Any:
+        if not isinstance(result, BaseModel):
+            return dump_output(node.Output.model_validate(result))
+        # pydantic trusts instances it didn't build (`model_construct`, assignment): check what the instance emits
+        # against the declared output schema, not against the model's input types (a field serializer may change them)
+        data = result.model_dump(mode="json", by_alias=True, warnings=False)
+        problems = sorted(emitted.iter_errors(data), key=lambda e: [str(p) for p in e.absolute_path])
+        if problems:
+            raise violation(
+                "; ".join(f"{location(list(e.absolute_path), output_schema)} ({e.validator})" for e in problems) + "."
+            )
+        return data
 
     @activity.defn(name=step_activity(ref))
     async def run_step(step: StepInput) -> StepResult:
         try:
             result, outcome = await _call(node, step, config_schema)
-            output = result if isinstance(result, node.Output) else node.Output.model_validate(result)
-            return StepResult(dump_output(output), outcome)
         except _StepFailed as f:
-            details = {"outcome": f.outcome}
-            raise ApplicationError(f.message, details, type=f.code, non_retryable=not f.retryable) from None
+            raise f.mapped() from None
+        try:  # the node ran: whatever fails from here, its effect happened, so nothing is retried
+            return StepResult(output_of(result), outcome)
+        except _StepFailed as f:
+            raise f.mapped() from None
+        except PydanticSerializationError:
+            raise violation("it can't be written as JSON.").mapped() from None
         except ValidationError as e:
-            message = f"The output doesn't match `{ref}`: {_fields(e, output_schema)}"
-            raise ApplicationError(
-                message, {"outcome": None}, type=OUTPUT_SCHEMA_VIOLATION, non_retryable=True
-            ) from None
+            raise violation(_fields(e, output_schema)).mapped() from None
+        except Exception as e:  # a validator's bug: it raised something pydantic doesn't turn into a validation error
+            _bug("step_output_check_failed", step, e)
+            raise violation(f"checking it raised {type(e).__name__}.").mapped() from None
 
     return run_step
 
@@ -3959,6 +4518,7 @@ def cel_activity(evaluate: Evaluate) -> Callable[[CelInput], Awaitable[CelResult
 
 
 __all__ = [
+    "CHECKED_FORMATS",
     "CONFIG_INVALID",
     "INVALID_REQUEST",
     "OUTPUT_SCHEMA_VIOLATION",
@@ -3976,7 +4536,7 @@ __all__ = [
 - [ ] **Step 5: Run the tests**
 
 Run: `cd backend && uv run pytest -q tests/apps/worker/test_activities.py tests/core/plugins/test_registry.py`
-Expected: 17 passed (12 + 5).
+Expected: 22 passed (17 + 5).
 
 - [ ] **Step 6: Checks and commit**
 
@@ -4410,10 +4970,11 @@ from temporalio.client import WorkflowFailureError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner
 
+from dewpoint.engine.canonical import canonical_json
 from dewpoint.engine.graph.validate import SubflowInfo
 from dewpoint.engine.runtime import nodes
-from dewpoint.engine.runtime.activities import ENGINE_QUEUE, PROJECT, ProjectInput, RunInput
-from dewpoint.engine.runtime.workflow import RunGraph
+from dewpoint.engine.runtime.activities import CEL_EVALUATE, ENGINE_QUEUE, PROJECT, ProjectInput, RunInput
+from dewpoint.engine.runtime.workflow import PROJECT_BYTES, RunGraph
 from tests.apps.worker.harness import TENANT, MemoryStore, run, start, workers
 from tests.support.graphs import G, cel, ref, template
 from tests.support.plugins.testkit import SlowSend
@@ -4445,7 +5006,8 @@ async def test_a_switch_takes_its_first_matching_case(env: WorkflowEnvironment) 
 
 async def test_wait_until_waits_durably_then_transform_shapes_values(env: WorkflowEnvironment) -> None:
     store = MemoryStore()
-    until = (await env.get_current_time() + timedelta(days=2)).isoformat()  # the server's clock, not the host's
+    at = await env.get_current_time() + timedelta(days=2)  # the server's clock, not the host's
+    until = at.isoformat()
     g = graph(t=ref("steps.t.output")).node("w", "flow.wait_until@1", {"until": until})
     g.node("t", "flow.transform@1", {"fields": {"double": cel("trigger.x * 2"), "label": "fixed"}}).edge("w", "t")
     async with workers(env.client, store):
@@ -4453,7 +5015,9 @@ async def test_wait_until_waits_durably_then_transform_shapes_values(env: Workfl
         result = await handle.result()
         info = await handle.describe()
     assert result.outputs == {"t": {"double": 14, "label": "fixed"}}
-    assert info.close_time and info.close_time - info.start_time >= timedelta(days=2)
+    assert (
+        info.close_time and info.close_time >= at
+    )  # the instant, reckoned before the run started: not 2 days after it
 
 
 def failing_loop(on_item_error: str) -> G:
@@ -4699,6 +5263,31 @@ async def test_a_timeout_after_an_ambiguous_send_is_never_retried(own_env: Workf
     assert (row.attempt, row.status, row.error_code, row.outcome) == (1, "failed", "timeout", "outcome_unknown")
 
 
+async def sent(run_id: str) -> None:
+    for _ in range(200):
+        if run_id in SlowSend.sent:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("the request was never sent")
+
+
+async def test_a_worker_lost_during_an_ambiguous_attempt_never_repeats_it(own_env: WorkflowEnvironment) -> None:
+    """Final review: a worker that shuts down mid-attempt reports a failure the activity never mapped
+    (`WorkerShutdown`), and it was taken for the node's own retryable error: the request went out twice."""
+    store = MemoryStore()
+    g = graph().node("s", "testkit.slow_send@1", {"seconds": 5})
+    g.nodes[0]["options"].update(max_attempts=3)
+    async with workers(own_env.client, store, cache=0):  # no sticky queue: the next worker takes over at once
+        handle = await start(own_env.client, store, g, TRIGGER)
+        await sent(handle.id)
+    async with workers(own_env.client, store):  # another worker carries the run on
+        result = await asyncio.wait_for(handle.result(), 30)
+    assert SlowSend.sent.count(handle.id) == 1
+    [row] = store.steps(handle.id)
+    assert (row.attempt, row.status, row.error_code, row.outcome) == (1, "failed", "error", "outcome_unknown")
+    assert result.status == "failed"
+
+
 async def test_a_timeout_is_retried_when_repeating_is_safe(own_env: WorkflowEnvironment) -> None:
     store = MemoryStore()
     g = graph().node("s", "testkit.slow@1", {"seconds": 3})
@@ -4736,6 +5325,34 @@ async def test_a_database_outage_never_repeats_an_effect_and_the_rows_catch_up(e
     assert result.status == "succeeded" and SlowSend.sent.count(handle.id) == 1 and store.down == 0
     assert [(r.node_key, r.status) for r in store.steps(handle.id)] == [("s", "succeeded"), ("t", "succeeded")]
     assert store.runs[handle.id].status == "succeeded"
+
+
+class BatchStore(FlakyStore):
+    """Down for its first writes, and records the size of each projection's rows."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sizes: list[int] = []
+
+    async def project(self, data: ProjectInput) -> None:
+        await super().project(data)
+        self.sizes.append(sum(len(canonical_json(dataclasses.asdict(r))) for r in data.steps))
+
+
+async def test_a_backlog_is_projected_in_bounded_batches(env: WorkflowEnvironment) -> None:
+    """Final review: rows that settle while a projection is outstanding all went into the next one. After a database
+    outage the catch-up exceeded Temporal's payload limit, and the run could no longer progress."""
+    store = BatchStore()
+    g = graph().node("l", LOOP, {"items": list(range(40))}).node("e", ECHO, {"value": "x" * 7000})
+    g.edge("l", "e", "body")
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, TRIGGER)
+        result = await asyncio.wait_for(handle.result(), 60)
+    assert result.status == "succeeded" and store.down == 0
+    assert max(store.sizes) <= PROJECT_BYTES < sum(store.sizes)  # the backlog took more than one batch
+    assert sorted(r.iteration_key for r in store.steps(handle.id) if r.node_key == "e") == sorted(
+        f"l:{i}" for i in range(40)
+    )
 
 
 async def test_sensitive_values_never_reach_the_projection(env: WorkflowEnvironment) -> None:
@@ -4808,6 +5425,139 @@ async def test_a_sensitive_config_value_is_masked_where_it_is_copied_or_echoed(e
     assert rows["p"].input_preview == {"outcome": "rejected", "token": "[redacted]"}
     assert rows["p"].error_message == rows["q"].error_message == "the receiver rejected the request for [redacted]"
     assert token not in repr(store.rows) + repr(store.runs) and passed not in repr(store.rows) + repr(store.runs)
+
+
+async def output_evaluation_started(handle: Any) -> None:
+    """Wait until the run is evaluating its outputs: their `cel.evaluate` is scheduled."""
+    while True:
+        for event in (await handle.fetch_history()).events:
+            if event.HasField("activity_task_scheduled_event_attributes"):
+                if event.activity_task_scheduled_event_attributes.activity_type.name == CEL_EVALUATE:
+                    return
+        await asyncio.sleep(0.05)
+
+
+async def test_a_cancel_while_the_outputs_are_evaluated_projects_cancelled(env: WorkflowEnvironment) -> None:
+    """Checkpoint-2 finding: the outputs were evaluated outside the run's cancellation handler, so a cancel then
+    closed the workflow with nothing projected: the run stayed `running`."""
+    store = MemoryStore()
+    g = graph(n=cel("trigger.x + 1")).node("a", ECHO)
+    async with workers(env.client, store, evaluate=None):  # no evaluator: the output's CEL waits for one
+        handle = await start(env.client, store, g, TRIGGER, cel_schedule_to_start_s=60)
+        await asyncio.wait_for(output_evaluation_started(handle), 10)
+        await handle.cancel()
+        with pytest.raises(WorkflowFailureError):
+            await asyncio.wait_for(handle.result(), 10)
+    assert store.runs[handle.id].status == "cancelled"
+
+
+async def test_the_deadline_holds_while_the_outputs_are_evaluated(env: WorkflowEnvironment) -> None:
+    """Checkpoint-2 finding: past the deadline, a run waited on its outputs' evaluator and ended as its failure."""
+    store = MemoryStore()
+    g = graph(n=cel("trigger.x + 1")).node("a", ECHO)
+    async with workers(env.client, store, evaluate=None):
+        handle = await start(env.client, store, g, TRIGGER, max_run_duration_s=1, cel_schedule_to_start_s=5)
+        result = await asyncio.wait_for(handle.result(), 10)
+    assert (result.status, result.error and result.error["code"]) == ("deadline_exceeded", "deadline_exceeded")
+    assert store.runs[handle.id].status == "deadline_exceeded"
+
+
+async def test_a_damaged_output_fails_the_run_as_unusable(env: WorkflowEnvironment) -> None:
+    store = MemoryStore()
+    version_id = store.add(graph(n=ref("trigger.x")).node("a", ECHO))
+    damaged = {**store.versions[version_id].graph}
+    damaged["settings"] = {**damaged["settings"], "outputs": {"n": {"$value": {"kind": "ref", "path": 5}}}}
+    store.versions[version_id] = dataclasses.replace(store.versions[version_id], graph=damaged)
+    run_id = str(uuid.uuid4())
+    async with workers(env.client, store):
+        handle = await env.client.start_workflow(
+            RunGraph.run, RunInput(TENANT, run_id, version_id, TRIGGER), id=run_id, task_queue=ENGINE_QUEUE
+        )
+        result = await asyncio.wait_for(handle.result(), 10)
+    assert result.error and result.error["code"] == "version_unusable" and store.steps(run_id) == []
+
+
+class HeldStore(MemoryStore):
+    """Holds the run's summary write open until the test lets it go: a cancel can arrive in between."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.writing, self.release = asyncio.Event(), asyncio.Event()
+
+    async def project(self, data: ProjectInput) -> None:
+        if data.run is not None and not self.writing.is_set():
+            self.writing.set()
+            await self.release.wait()
+        await super().project(data)
+
+
+async def test_a_cancel_after_the_run_concluded_leaves_its_outcome(env: WorkflowEnvironment) -> None:
+    """A cancel that arrives while the run's end is being written can't unmake that end: the write is repeated and
+    the run's own result stands, so the projection and Temporal agree."""
+    store = HeldStore()
+    g = graph(v=ref("steps.a.output.value")).node("a", ECHO, {"value": 1})
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, TRIGGER)
+        await asyncio.wait_for(store.writing.wait(), 10)
+        await handle.cancel()
+        store.release.set()
+        result = await asyncio.wait_for(handle.result(), 10)
+    assert (result.status, result.outputs, store.runs[handle.id].status) == ("succeeded", {"v": 1}, "succeeded")
+
+
+async def cancel_acted_on(handle: Any) -> None:
+    """Until a workflow task after the cancel request has completed: the workflow has acted on the cancel."""
+    for _ in range(200):
+        kinds = [e.event_type for e in (await handle.fetch_history()).events]
+        if EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCEL_REQUESTED in kinds:
+            after = kinds[kinds.index(EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCEL_REQUESTED) :]
+            if EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED in after:
+                return
+        await asyncio.sleep(0.05)
+    raise AssertionError("the workflow never acted on the cancel")
+
+
+async def test_a_cancel_acted_on_before_the_end_is_written_still_leaves_its_outcome(env: WorkflowEnvironment) -> None:
+    """Final review: the SDK reports the cancel of the awaited end write as an `ActivityError`, unless the write had
+    already finished in the same activation. Only `CancelledError` repeated the write, so Temporal closed the run
+    `cancelled` while its row said `succeeded`, or stayed `running` if the write never landed."""
+    store = HeldStore()
+    g = graph(v=ref("steps.a.output.value")).node("a", ECHO, {"value": 1})
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, TRIGGER)
+        await asyncio.wait_for(store.writing.wait(), 10)
+        await handle.cancel()
+        await cancel_acted_on(handle)  # the held write outlives the cancel's activation
+        store.release.set()
+        result = await asyncio.wait_for(handle.result(), 10)
+    assert (result.status, result.outputs, store.runs[handle.id].status) == ("succeeded", {"v": 1}, "succeeded")
+
+
+class LoadingStore(MemoryStore):
+    """Holds the version's load open until the test lets it go."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.loading, self.release = asyncio.Event(), asyncio.Event()
+
+    async def version(self, tenant_id: str, version_id: str) -> Any:
+        self.loading.set()
+        await self.release.wait()
+        return await super().version(tenant_id, version_id)
+
+
+async def test_a_cancel_while_the_version_loads_cancels_the_run(env: WorkflowEnvironment) -> None:
+    """Final review: the cancel of the version's load arrives as an `ActivityError`, which was taken for a version
+    this build can't run (`version_unusable`)."""
+    store = LoadingStore()
+    async with workers(env.client, store):
+        handle = await start(env.client, store, graph().node("a", ECHO, {"value": 1}), TRIGGER)
+        await asyncio.wait_for(store.loading.wait(), 10)
+        await handle.cancel()
+        with pytest.raises(WorkflowFailureError):
+            await asyncio.wait_for(handle.result(), 10)
+        store.release.set()
+    assert (store.runs[handle.id].status, store.runs[handle.id].error_code) == ("cancelled", "cancelled")
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
@@ -4829,7 +5579,7 @@ concurrency."""
 
 import asyncio
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -4839,6 +5589,7 @@ from temporalio.exceptions import ActivityError, ApplicationError, TimeoutError
 from temporalio.exceptions import CancelledError as ActivityCancelled
 
 with workflow.unsafe.imports_passed_through():
+    from dewpoint.engine.canonical import canonical_json
     from dewpoint.engine.cel import evaluate as cel
     from dewpoint.engine.cel.profile import LOCAL_CEL_PROFILE
     from dewpoint.engine.cel.route import YieldBudget
@@ -4847,6 +5598,7 @@ with workflow.unsafe.imports_passed_through():
     from dewpoint.engine.runtime.activities import (
         CEL_EVALUATE,
         LOAD_VERSION,
+        MAPPED,
         OUTCOME_UNKNOWN,
         PROJECT,
         CelInput,
@@ -4864,7 +5616,15 @@ with workflow.unsafe.imports_passed_through():
         step_activity,
     )
     from dewpoint.engine.runtime.program import Step, compile_program
-    from dewpoint.engine.runtime.projection import Secrets, mask, preview, remember, sensitive_values
+    from dewpoint.engine.runtime.projection import (
+        Secrets,
+        mask,
+        preview,
+        remember,
+        sanitize,
+        sensitive_values,
+        storable,
+    )
     from dewpoint.engine.runtime.scheduler import (
         ITERATION_CAP_EXCEEDED,
         Collect,
@@ -4877,6 +5637,7 @@ with workflow.unsafe.imports_passed_through():
     )
 
 IN_FLIGHT_CAP = 100  # activities and child workflows outstanding per execution (spec §6)
+PROJECT_BYTES = 256 * 1024  # a projection's rows at most, as JSON: far below Temporal's 2 MiB payload limit
 CEL_BATCH = 1_000  # binding sets per cel.evaluate request
 DEADLINE_EXCEEDED = "deadline_exceeded"
 VERSION_UNUSABLE = "version_unusable"  # this build can't load or compile the version
@@ -4907,12 +5668,13 @@ def _attempt_failed(
     cause = error.cause
     if isinstance(cause, ApplicationError) and cause.type == "NotFoundError":  # the SDK: no such activity here
         return Failure(NODE_TYPE_UNAVAILABLE, f"No worker of this build runs `{key}`'s node type.", attempt), None, True
-    if isinstance(cause, ApplicationError):  # the node's own error, mapped by the activity
-        details = cause.details[0] if cause.details and isinstance(cause.details[0], dict) else {}
-        code = cause.type or "error"
+    details = cause.details[0] if isinstance(cause, ApplicationError) and cause.details else None
+    if isinstance(cause, ApplicationError) and isinstance(details, dict) and details.get(MAPPED) is True:
+        code = cause.type or "error"  # the node's own error, mapped by the activity
         retryable = not cause.non_retryable and code not in non_retryable
         return Failure(code, cause.message, attempt), details.get("outcome"), retryable
-    # A timeout or a lost worker: the node may have done its work, and it never saw the error to map it.
+    # Anything else: a timeout, a worker lost or shutting down, a failure the activity never mapped. The node may have
+    # done its work, and nothing that saw what happened described it.
     code, message = (
         (cel.TIMEOUT, f"`{key}` didn't finish in time.")
         if isinstance(cause, TimeoutError)
@@ -4924,6 +5686,14 @@ def _attempt_failed(
     if ambiguous:  # the request may have been sent: never repeat it (parent §6.6)
         return Failure(code, f"{message} Its request may have been sent.", attempt), OUTCOME_UNKNOWN, False
     return Failure(code, message, attempt), None, True
+
+
+def _cancelled(e: BaseException) -> bool:
+    """Our own cancel, as the SDK reports it: `CancelledError` when the awaited activity had already finished in the
+    same activation, an `ActivityError` caused by Temporal's `CancelledError` otherwise."""
+    return isinstance(e, asyncio.CancelledError) or (
+        isinstance(e, ActivityError) and isinstance(e.cause, ActivityCancelled)
+    )
 
 
 def _backoff(retry: Mapping[str, Any], attempt: int) -> float:
@@ -4947,7 +5717,8 @@ class RunGraph:
         """Every way a run ends is projected. Python exceptions in workflow code would fail the workflow task, which
         Temporal retries forever: the run would hang, `running` in the projection. So a version this build can't
         load or compile fails the run (`version_unusable`) before any step runs, and any other exception fails it
-        (`internal_error`)."""
+        (`internal_error`). The workflow's outputs are evaluated under the same deadline and handlers as its steps:
+        a cancel or the deadline while they're computed ends the run as it would anywhere else."""
         self.input = start
         self.started_at = workflow.info().start_time
         try:
@@ -4962,28 +5733,39 @@ class RunGraph:
             await self._end_early(RunEnd("cancelled", CANCELLED))
             raise
         except Exception as e:  # its text may quote the version: the log has it, the projection names the type
+            if _cancelled(e):
+                await self._end_early(RunEnd("cancelled", CANCELLED))
+                raise asyncio.CancelledError from None
             workflow.logger.error("run_version_unusable", exc_info=True)
             message = f"This build can't run the version ({type(e).__name__}); the worker's log has the details."
             return await self._end_early(RunEnd("failed", Failure(VERSION_UNUSABLE, message)))
         self.sched = Scheduler(self.program)
+        deadline = self.started_at + timedelta(seconds=start.max_run_duration_s)
+        outputs: dict[str, Any] | None = None
+        try:
+            self._prepare(start)
+            await self._drive(deadline)
+            end = self.sched.ended or RunEnd("failed", Failure("error", "The run ended without a result."))
+            if end.status == "succeeded":
+                end, outputs = await self._outputs_by(deadline, end)
+        except asyncio.CancelledError:
+            self.sched.end(RunEnd("cancelled", CANCELLED))
+            await self._finish(RunEnd("cancelled", CANCELLED))
+            raise
+        except Exception as e:  # a bug: the text may quote run data, so it goes to the log, not the projection
+            workflow.logger.error("run_internal_error", exc_info=True)
+            message = f"The interpreter failed ({type(e).__name__}); the worker's log has the details."
+            end, outputs = RunEnd("failed", Failure(INTERNAL_ERROR, message)), None
+        return await self._finish(end, outputs)
+
+    def _prepare(self, start: RunInput) -> None:
+        """What the run knows before its first step: the sensitive values it can see already, and its variables."""
         self._learn(start.trigger, self.program.graph.settings.input_schema)
         for step in self.program.steps.values():  # sensitive literals in plugin configs: masked from the start
             if not step.control:
                 self._learn(resolve.assemble(step.config, {}), self.program.manifests[step.ref]["config_schema"])
         schema = self.program.graph.settings.vars_schema
-        self.vars: dict[str, Any] = {k: p.get("default") for k, p in sorted(schema.get("properties", {}).items())}
-        deadline = self.started_at + timedelta(seconds=start.max_run_duration_s)
-        try:
-            await self._drive(deadline)
-        except asyncio.CancelledError:
-            self.sched.end(RunEnd("cancelled", CANCELLED))
-            await self._finish()
-            raise
-        except Exception as e:  # a bug: the text may quote run data, so it goes to the log, not the projection
-            workflow.logger.error("run_internal_error", exc_info=True)
-            message = f"The interpreter failed ({type(e).__name__}); the worker's log has the details."
-            self.sched.end(RunEnd("failed", Failure(INTERNAL_ERROR, message)))
-        return await self._finish()
+        self.vars = {k: p.get("default") for k, p in sorted(schema.get("properties", {}).items())}
 
     # --- the scheduler loop ----------------------------------------------------------------------------------------
 
@@ -5007,9 +5789,8 @@ class RunGraph:
                     tasks[unit] = asyncio.create_task(self._unit(unit))
                 self._queue_settled()
                 if self._rows and not any(key[0] == "project" for key in tasks):  # one at a time: rows wait for it
-                    rows, self._rows = list(self._rows.values()), {}
                     self._projects += 1
-                    tasks[("project", self._projects)] = asyncio.create_task(self._project(rows))
+                    tasks[("project", self._projects)] = asyncio.create_task(self._project(self._take_rows()))
                 if self.sched.ended is not None:
                     break
                 if not tasks:
@@ -5078,8 +5859,37 @@ class RunGraph:
     # --- the projection -------------------------------------------------------------------------------------------
 
     def _queue(self, row: StepRow) -> None:
-        """Queue a row for the next projection. A later row of the same attempt replaces it."""
+        """Queue a row for the next projection, as storage will write it: `_take_rows` sizes the rows it sends, and a
+        character strict UTF-8 can't encode would fail that in workflow code, on every retry. A later row of the same
+        attempt replaces it."""
+        row = replace(
+            row,
+            input_preview=storable(row.input_preview),
+            output_preview=storable(row.output_preview),
+            error_code=sanitize(row.error_code),
+            error_message=sanitize(row.error_message),
+        )
         self._rows[(row.step_id, row.iteration_key, row.attempt)] = row
+
+    @staticmethod
+    def _stored(error: dict[str, Any] | None) -> dict[str, Any] | None:
+        """A run's error as storage writes it: the summary and the run's result say the same."""
+        if error is None:
+            return None
+        return {**error, "code": sanitize(error["code"]), "message": sanitize(error["message"])}
+
+    def _take_rows(self) -> list[StepRow]:
+        """The next projection's rows, oldest first, within PROJECT_BYTES; one row at least. A backlog (after a
+        database outage, say) takes several projections, each well within Temporal's payload limit."""
+        taken: list[StepRow] = []
+        size = 0
+        for key in list(self._rows):
+            row_size = len(canonical_json(asdict(self._rows[key])))
+            if taken and size + row_size > PROJECT_BYTES:
+                break
+            taken.append(self._rows.pop(key))
+            size += row_size
+        return taken
 
     def _learn(self, value: Any, schema: Mapping[str, Any] | None) -> None:
         self._secrets = remember(self._secrets, sensitive_values(value, schema))
@@ -5347,17 +6157,32 @@ class RunGraph:
 
     # --- the end ---------------------------------------------------------------------------------------------------
 
-    async def _finish(self) -> RunResult:
-        end = self.sched.ended or RunEnd("failed", Failure("error", "The run ended without a result."))
-        outputs: dict[str, Any] | None = None
-        if end.status == "succeeded":
-            try:
-                outputs = await self._outputs()
-            except resolve.ValueFailure as e:
-                end = RunEnd("failed", e.failure)
+    async def _outputs_by(self, deadline: datetime, end: RunEnd) -> tuple[RunEnd, dict[str, Any] | None]:
+        """The workflow's outputs, within the run's deadline. Past it, their evaluation is cancelled and the run ends
+        `deadline_exceeded`; an output that can't be computed fails the run with its code."""
+        task = asyncio.create_task(self._outputs())
+        clock = asyncio.create_task(asyncio.sleep(max(0.0, (deadline - workflow.now()).total_seconds())))
+        try:
+            done, _ = await workflow.wait([task, clock], return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:  # the run was cancelled: so is what it was computing
+            task.cancel()
+            clock.cancel()
+            raise
+        clock.cancel()
+        if task not in done:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            return RunEnd(DEADLINE_EXCEEDED, Failure(DEADLINE_EXCEEDED, "The run passed its deadline.")), None
+        try:
+            return end, task.result()
+        except resolve.ValueFailure as e:
+            return RunEnd("failed", e.failure), None
+
+    async def _finish(self, end: RunEnd, outputs: dict[str, Any] | None = None) -> RunResult:
         error = end.failure.to_json() if end.failure is not None and end.status != "succeeded" else None
         if error is not None:
             error["message"] = mask(error["message"], self._secrets)
+        error = self._stored(error)
         summary = RunSummary(
             run_id=self.input.run_id,
             status=end.status,
@@ -5367,13 +6192,12 @@ class RunGraph:
             iterations=self.sched.iterations,
         )
         self._queue_settled()
-        rows, self._rows = list(self._rows.values()), {}
-        await self._project(rows, summary)
+        await self._project_end(summary)
         return RunResult(status=end.status, outputs=outputs, error=error, iterations=self.sched.iterations)
 
     async def _end_early(self, end: RunEnd) -> RunResult:
         """The run ends before it has a program: nothing ran, so only the run is projected."""
-        error = end.failure.to_json() if end.failure is not None else None
+        error = self._stored(end.failure.to_json() if end.failure is not None else None)
         summary = RunSummary(
             run_id=self.input.run_id,
             status=end.status,
@@ -5381,7 +6205,7 @@ class RunGraph:
             error_code=error["code"] if error else None,
             error_message=error["message"] if error else None,
         )
-        await self._project([], summary)
+        await self._project_end(summary)
         return RunResult(status=end.status, error=error)
 
     async def _outputs(self) -> dict[str, Any]:
@@ -5390,6 +6214,24 @@ class RunGraph:
         values, _ = await self._values(None, pairs, ())
         assembled = resolve.assemble({"settings": {"outputs": settings_outputs}}, values)
         return dict(assembled["settings"]["outputs"])
+
+    async def _project_end(self, summary: RunSummary) -> None:
+        """The run's last projections: the rows still queued, in batches, the last one with the run's end. A cancel
+        that arrives meanwhile comes too late to unmake the end they record: each write is shielded, so it's never
+        cancelled, and it lands; the run's result stands, so the projection and Temporal agree."""
+        while True:
+            rows = self._take_rows()
+            last = not self._rows
+            write = asyncio.create_task(self._project(rows, summary if last else None))
+            while True:
+                try:
+                    await asyncio.shield(write)
+                    break
+                except asyncio.CancelledError:
+                    if write.cancelled():
+                        raise
+            if last:
+                return
 
     async def _project(self, rows: list[StepRow], summary: RunSummary | None = None) -> None:
         await workflow.execute_activity(
@@ -5407,6 +6249,7 @@ __all__ = [
     "INTERNAL_ERROR",
     "IN_FLIGHT_CAP",
     "NODE_TYPE_UNAVAILABLE",
+    "PROJECT_BYTES",
     "VERSION_UNUSABLE",
     "RunGraph",
 ]
@@ -5415,8 +6258,8 @@ __all__ = [
 - [ ] **Step 4: Run the tests**
 
 Run: `cd backend && uv run pytest -q tests/apps/worker`
-Expected: 50 passed (12 + 14 + 24) in about 20 s: the timeout tests wait a few real seconds, on test servers of their
-own. The first run downloads Temporal's test server into the SDK's cache (the owner approved it). The warnings that
+Expected: 63 passed (17 + 14 + 32) in about 30 s: the timeout and worker-shutdown tests wait a few real seconds, on
+test servers of their own. The first run downloads Temporal's test server into the SDK's cache (the owner approved it). The warnings that
 activities "completed as failed" are the tests' own failing steps and the flaky store's refused writes.
 
 - [ ] **Step 5: Check that the in-flight, projection, ambiguous-timeout and masking tests bite**
@@ -5456,8 +6299,12 @@ cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy
 ### Task 6: Admission and `start_run`
 
 2a's only way to start a run (spec §9), and the admission 2b's dispatcher will reuse. The run is inserted as the
-dispatch role, in the same READ COMMITTED transaction that holds the shared lifecycle locks on the version's
-closure (§4.5). So a retirement either sees the run, or the run sees the retirement.
+dispatch role, in one READ COMMITTED transaction that first takes two kinds of shared lock (§4.5, decision 23):
+- the workflow's admission lock, before it reads whether the workflow is enabled and which version is active. A
+  disable, publish or activation takes that lock exclusively, so it either commits before the read or waits until the
+  run exists. The read goes to the database, never to a `Workflow` the session already holds, and so does a
+  writer's: the row it locks replaces the session's copy;
+- the lifecycle locks on the version's closure. So a retirement either sees the run, or the run sees the retirement.
 
 Then `RunGraph` starts, with the run's id as its workflow id and `REJECT_DUPLICATE`. A lost acknowledgement looks like
 a failure, so an uncertain attempt is repeated with the same id, and a duplicate refusal confirms the earlier start.
@@ -5467,7 +6314,10 @@ Only a confirmed refusal records the run as failed (`start_failed`). An answer t
 **Files:**
 - Create: `backend/src/dewpoint/apps/runs.py`
 - Modify: `backend/src/dewpoint/core/config.py` (`cel_schedule_to_start_s`)
+- Modify: `backend/src/dewpoint/core/workflows/service.py` (the workflow's admission lock)
 - Create: `backend/tests/apps/test_runs.py`
+- Modify: `backend/tests/apps/test_lifecycle_races.py` (the lock-wait helper covers both kinds of lock)
+- Modify: `backend/tests/apps/test_workflow_ops.py` (a writer acts on what's committed)
 
 **Interfaces:**
 - Consumes:
@@ -5479,15 +6329,150 @@ Only a confirmed refusal records the run as failed (`start_failed`). An answer t
     `tests/apps/test_lifecycle_races.py` and `tests/apps/test_workflow_ops.py`.
 - Produces:
   - `Settings.cel_schedule_to_start_s` (default 600);
+  - `core/workflows/service.py`: `lock_for_admission(s, tenant_id, workflow_id) -> AdmissionState | None` takes the
+    workflow's admission lock, shared, then reads `enabled` and `active_version_id` as columns (`AdmissionState`).
+    With `for_update`, `get_workflow` now takes the lock exclusively before the row lock, so publish, activate,
+    enable, disable and rename all do, and it refreshes a `Workflow` the session already holds
+    (`populate_existing`);
   - `apps/runs.py`:
     - `START_FAILED = "start_failed"` and `START_RETRY_S = (0.5, 2.0)`;
     - `NotAdmissibleError(reasons)` with `.reasons`, `StartRefusedError`, and `StartUncertainError(run_id)` with
       `.run_id`;
     - `admit(s, *, tenant_id, version_id, mode=LIVE, started_by=None) -> Run`;
     - `start_run(sessionmaker, client, settings, *, tenant_id, version_id, trigger, mode=LIVE, started_by=None) -> uuid.UUID`;
-    - the test hook `_admission_locked()`.
+    - the test hook `_admission_locked()`;
+  - in `tests/apps/test_lifecycle_races.py`, `until_someone_waits_for_a_lock` (renamed from
+    `until_someone_waits_for_a_lifecycle_lock`).
 
 - [ ] **Step 1: Write the failing tests**
+
+The workflow's admission lock is an advisory lock too, so rename the lock-wait helper in
+`backend/tests/apps/test_lifecycle_races.py`:
+
+```diff
+diff --git a/backend/tests/apps/test_lifecycle_races.py b/backend/tests/apps/test_lifecycle_races.py
+--- a/backend/tests/apps/test_lifecycle_races.py
++++ b/backend/tests/apps/test_lifecycle_races.py
+@@ -26,7 +26,8 @@
+ ECHO = Entry("node", "testkit.echo@1")
+
+
+-async def until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker: Any) -> None:
++async def until_someone_waits_for_a_lock(owner_sessionmaker: Any) -> None:
++    """Until a transaction waits for an advisory lock: a lifecycle entry's, or a workflow's admission lock."""
+     for _ in range(200):
+         async with owner_sessionmaker() as s:
+             waiting = (
+@@ -35,7 +36,7 @@
+         if waiting:
+             return
+         await asyncio.sleep(0.05)
+-    raise AssertionError("nobody is waiting for a lifecycle lock")
++    raise AssertionError("nobody is waiting for a lock")
+
+
+ @pytest.fixture
+@@ -69,7 +70,7 @@
+         async with a.begin():
+             await lifecycle.lock_exclusive(a, ECHO)
+             publishing = asyncio.create_task(publish(api_sessionmaker, ctx, wf, api_settings))
+-            await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
++            await until_someone_waits_for_a_lock(owner_sessionmaker)
+             assert (await lifecycle.retire(a, ECHO)).applied
+     out = await asyncio.wait_for(publishing, 10)
+     assert out.version is None and [d.code for d in out.errors] == ["lifecycle.retired"]
+@@ -91,7 +92,7 @@
+             return await lifecycle.retire(a, ECHO)
+
+     retiring = asyncio.create_task(retire())
+-    await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
++    await until_someone_waits_for_a_lock(owner_sessionmaker)
+     release.set()
+     assert (await asyncio.wait_for(publishing, 10)).version is not None
+     with pytest.raises(lifecycle.ReferencedError) as e:
+@@ -115,7 +116,7 @@
+             return await lifecycle.retire(a, ECHO, force=True, confirm=True)
+
+     retiring = asyncio.create_task(retire())
+-    await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
++    await until_someone_waits_for_a_lock(owner_sessionmaker)
+     release.set()
+     assert (await asyncio.wait_for(publishing, 10)).version is not None
+     preview = await asyncio.wait_for(retiring, 10)
+@@ -147,7 +148,7 @@
+         async with a.begin():
+             await lifecycle.lock_exclusive(a, ECHO)
+             activating = asyncio.create_task(activate(api_sessionmaker, ctx, wf, v1.id))
+-            await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
++            await until_someone_waits_for_a_lock(owner_sessionmaker)
+             assert (await lifecycle.retire(a, ECHO)).applied  # nothing active uses echo: normal path
+     with pytest.raises(workflow_ops.NotActivatableError):
+         await asyncio.wait_for(activating, 10)
+@@ -165,7 +166,7 @@
+         async with a.begin():
+             await lifecycle.lock_exclusive(a, ECHO)
+             enabling = asyncio.create_task(update(api_sessionmaker, ctx, wf, enabled=True))
+-            await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
++            await until_someone_waits_for_a_lock(owner_sessionmaker)
+             assert (await lifecycle.retire(a, ECHO)).applied  # the workflow is disabled: normal path
+     with pytest.raises(workflow_ops.NotActivatableError):
+         await asyncio.wait_for(enabling, 10)
+@@ -190,7 +191,7 @@
+             return await lifecycle.retire(a, ECHO)
+
+     retiring = asyncio.create_task(retire())
+-    await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
++    await until_someone_waits_for_a_lock(owner_sessionmaker)
+     release.set()
+     await asyncio.wait_for(enabling, 10)
+     with pytest.raises(lifecycle.ReferencedError) as e:
+@@ -218,7 +219,7 @@
+             return await lifecycle.retire(a, ECHO)
+
+     retiring = asyncio.create_task(retire())
+-    await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
++    await until_someone_waits_for_a_lock(owner_sessionmaker)
+     release.set()
+     await asyncio.wait_for(activating, 10)
+     with pytest.raises(lifecycle.ReferencedError) as e:
+```
+
+Add a writer whose session held the workflow before its lock to `backend/tests/apps/test_workflow_ops.py`:
+
+```diff
+diff --git a/backend/tests/apps/test_workflow_ops.py b/backend/tests/apps/test_workflow_ops.py
+--- a/backend/tests/apps/test_workflow_ops.py
++++ b/backend/tests/apps/test_workflow_ops.py
+@@ -290,3 +290,28 @@
+         "local",
+     )
+     assert record.iterations == 3 and record.to_json() == stored
++
++
++async def test_a_writer_sees_what_was_committed_while_its_session_held_the_workflow(
++    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
++) -> None:
++    """A session may hold the `Workflow` from before its lock: the writer must act on what's committed, not on that
++    copy. Here another transaction saves a draft and disables the workflow in between."""
++    await sync_test_plugins(admin_sessionmaker)
++    ctx = await actor(owner_sessionmaker)
++    wf_id = await create(api_sessionmaker, ctx, ECHO_GRAPH)
++    assert (await publish(api_sessionmaker, ctx, wf_id, api_settings)).version is not None
++    async with api_sessionmaker() as s, s.begin():
++        await tenant_scope(s, ctx.tenant_id)
++        held = await service.get_workflow(s, ctx.tenant_id, wf_id)  # the session holds it while this reference lives
++        assert held is not None and held.enabled
++        seen = held.draft_revision
++        await save(api_sessionmaker, ctx, wf_id, SENSITIVE_GRAPH)
++        await update(api_sessionmaker, ctx, wf_id, enabled=False)
++        wf = await service.get_workflow(s, ctx.tenant_id, wf_id, for_update=True)
++        assert wf is not None
++        assert (wf.draft_revision, wf.draft, wf.enabled) == (seen + 1, SENSITIVE_GRAPH, False)
++        with pytest.raises(service.DraftConflictError):  # the draft this session saw is no longer the draft
++            await workflow_ops.publish(s, ctx, wf, expected_revision=seen, settings=api_settings)
++        await workflow_ops.update(s, ctx, wf, name=None, enabled=True)  # an enable, not a no-op
++    assert await is_enabled(api_sessionmaker, ctx, wf_id)
+```
 
 Create `backend/tests/apps/test_runs.py`:
 
@@ -5497,6 +6482,8 @@ Create `backend/tests/apps/test_runs.py`:
 
 import asyncio
 import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -5506,12 +6493,14 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from dewpoint.apps import runs as run_ops
+from dewpoint.apps import workflow_ops
 from dewpoint.apps.runs import START_FAILED, NotAdmissibleError, StartRefusedError, StartUncertainError, start_run
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.runs import service
+from dewpoint.core.workflows import service as workflows
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, SIMULATE, RunInput
-from tests.apps.test_lifecycle_races import until_someone_waits_for_a_lifecycle_lock
+from tests.apps.test_lifecycle_races import until_someone_waits_for_a_lock
 from tests.apps.test_workflow_ops import ECHO, ECHO_GRAPH, actor, create, publish, save, update
 from tests.support.registry import sync_test_plugins
 
@@ -5689,7 +6678,7 @@ async def test_retirement_first_makes_admission_refuse(
                     trigger={},
                 )  # fmt: skip
             )
-            await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
+            await until_someone_waits_for_a_lock(owner_sessionmaker)
             await lifecycle.retire(a, ECHO, force=True, confirm=True)
     with pytest.raises(NotAdmissibleError, match="retired"):
         await asyncio.wait_for(starting, 10)
@@ -5724,17 +6713,159 @@ async def test_admission_first_holds_retirement_until_the_run_exists(
             return await lifecycle.retire(a, ECHO, force=True, confirm=True)
 
     retiring = asyncio.create_task(retire())
-    await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)  # retirement waits for admission's lock
+    await until_someone_waits_for_a_lock(owner_sessionmaker)  # retirement waits for admission's lock
     release.set()
     run_id = await asyncio.wait_for(starting, 10)
     assert (await asyncio.wait_for(retiring, 10)).applied
     assert client.started and (await run_row(owner_sessionmaker, ctx.tenant_id, run_id)).status == "running"
+
+
+# A change to what admission checks (spec §4.5, "Admissible"), made as the API makes it: in a transaction that locks
+# the workflow for update. Each one makes the version admission was asked for inadmissible, and admission says why.
+Change = Callable[[Any, Any], Awaitable[object]]
+REFUSED = {"disable": "disabled", "activate": "active version", "publish": "active version"}
+
+
+async def admissible(
+    how: str, owner: Any, api: Any, admin: Any, settings: Any
+) -> tuple[Any, uuid.UUID, uuid.UUID, Change]:
+    """A workflow, the version admission is asked for, and the change `how` that makes that version inadmissible:
+    disabling the workflow, activating an older version, or publishing a newer one."""
+    ctx, wf, version = await published(owner, api, admin, settings)
+    older = version
+    if how in ("activate", "publish"):
+        await save(api, ctx, wf, ECHO_GRAPH)  # a draft for `publish`, or for the newer version `activate` replaces
+    if how == "activate":
+        newer = (await publish(api, ctx, wf, settings)).version
+        assert newer is not None
+        version = newer.id
+
+    async def change(s: Any, row: Any) -> object:
+        if how == "disable":
+            return await workflow_ops.update(s, ctx, row, name=None, enabled=False)
+        if how == "activate":
+            return await workflow_ops.activate(s, ctx, row, await workflows.get_version(s, wf, older))
+        out = await workflow_ops.publish(s, ctx, row, expected_revision=row.draft_revision, settings=settings)
+        assert out.version is not None
+        return out
+
+    return ctx, wf, version, change
+
+
+@asynccontextmanager
+async def changing(api: Any, ctx: Any, wf: uuid.UUID, change: Change) -> AsyncIterator[None]:
+    """Make the change in a transaction that stays open for the block, and commit it when the block ends."""
+    async with api() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        row = await workflows.get_workflow(s, ctx.tenant_id, wf, for_update=True)
+        assert row is not None
+        await change(s, row)
+        yield
+
+
+async def change_committed(api: Any, ctx: Any, wf: uuid.UUID, change: Change) -> None:
+    async with changing(api, ctx, wf, change):
+        pass
+
+
+async def until_waiting_or_done(task: asyncio.Task[Any], owner: Any) -> None:
+    """Until `task` has finished, or someone waits for a lock."""
+    waiting = asyncio.create_task(until_someone_waits_for_a_lock(owner))
+    done, _ = await asyncio.wait({task, waiting}, return_when=asyncio.FIRST_COMPLETED)
+    if waiting in done:
+        waiting.result()  # nobody waited in time: AssertionError
+    else:
+        waiting.cancel()
+
+
+@pytest.mark.parametrize("how", REFUSED)
+async def test_a_workflow_change_first_makes_admission_refuse(
+    how, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    ctx, wf, version, change = await admissible(
+        how, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+    )
+    client = FakeClient()
+    async with changing(api_sessionmaker, ctx, wf, change):
+        starting = asyncio.create_task(
+            start_run(
+                dispatch_sessionmaker,
+                client,
+                api_settings,  # type: ignore[arg-type]
+                tenant_id=ctx.tenant_id,
+                version_id=version,
+                trigger={},
+            )  # fmt: skip
+        )
+        await until_waiting_or_done(starting, owner_sessionmaker)  # admission waits for the change to commit
+    with pytest.raises(NotAdmissibleError, match=REFUSED[how]):
+        await asyncio.wait_for(starting, 10)
+    assert not client.started
+
+
+@pytest.mark.parametrize("how", REFUSED)
+async def test_admission_first_holds_a_workflow_change_until_the_run_exists(
+    how, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings, monkeypatch
+) -> None:
+    ctx, wf, version, change = await admissible(
+        how, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+    )
+    reached, release = asyncio.Event(), asyncio.Event()
+
+    async def paused() -> None:
+        reached.set()
+        await release.wait()
+
+    monkeypatch.setattr(run_ops, "_admission_locked", paused)
+    client = FakeClient()
+    starting = asyncio.create_task(
+        start_run(
+            dispatch_sessionmaker,
+            client,
+            api_settings,  # type: ignore[arg-type]
+            tenant_id=ctx.tenant_id,
+            version_id=version,
+            trigger={},
+        )  # fmt: skip
+    )
+    await asyncio.wait_for(reached.wait(), 10)
+    changed = asyncio.create_task(change_committed(api_sessionmaker, ctx, wf, change))
+    await until_waiting_or_done(changed, owner_sessionmaker)  # the change waits for the run
+    changed_first = changed.done()
+    release.set()
+    run_id = await asyncio.wait_for(starting, 10)
+    await asyncio.wait_for(changed, 10)
+    assert not changed_first, f"`{how}` committed while a run of the version it makes inadmissible was admitted"
+    row = await run_row(owner_sessionmaker, ctx.tenant_id, run_id)
+    assert client.started and (row.status, row.workflow_version_id) == ("running", version)
+
+
+@pytest.mark.parametrize("how", REFUSED)
+async def test_admission_reads_the_workflow_afresh_in_a_session_that_loaded_it(
+    how, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """2b's dispatcher calls `admit` in its own session, which may already hold the workflow: the change committed
+    since must still refuse the run."""
+    ctx, wf, version, change = await admissible(
+        how, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+    )
+    async with dispatch_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        held = await workflows.get_workflow(s, ctx.tenant_id, wf)  # the session holds it while this reference lives
+        assert held is not None and held.enabled and held.active_version_id == version
+        await change_committed(api_sessionmaker, ctx, wf, change)
+        with pytest.raises(NotAdmissibleError, match=REFUSED[how]):
+            await run_ops.admit(s, tenant_id=ctx.tenant_id, version_id=version)
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
 
 Run: `cd backend && uv run pytest -q tests/apps/test_runs.py`
 Expected: a collection error, `ImportError: cannot import name 'runs' from 'dewpoint.apps'`.
+
+Run: `cd backend && uv run pytest -q tests/apps/test_workflow_ops.py -k committed_while`
+Expected: 1 failed. The writer sees the revision, draft and `enabled` its session loaded: `assert (1, {…}, True) ==
+(2, {…}, False)`.
 
 - [ ] **Step 3: Implement**
 
@@ -5754,14 +6885,92 @@ diff --git a/backend/src/dewpoint/core/config.py b/backend/src/dewpoint/core/con
 
 ```
 
+Add the workflow's admission lock to `backend/src/dewpoint/core/workflows/service.py`:
+
+```diff
+diff --git a/backend/src/dewpoint/core/workflows/service.py b/backend/src/dewpoint/core/workflows/service.py
+--- a/backend/src/dewpoint/core/workflows/service.py
++++ b/backend/src/dewpoint/core/workflows/service.py
+@@ -6,7 +6,7 @@
+ from dataclasses import dataclass, field
+ from typing import Any
+
+-from sqlalchemy import func, select, update
++from sqlalchemy import func, select, text, update
+ from sqlalchemy.ext.asyncio import AsyncSession
+
+ from dewpoint.core.audit.service import record
+@@ -46,12 +46,56 @@
+     return wf
+
+
++def _admission_key(workflow_id: uuid.UUID) -> str:
++    return f"dewpoint:workflow:{workflow_id}"
++
++
++@dataclass(frozen=True)
++class AdmissionState:
++    """What admission checks of a workflow, as the database has it."""
++
++    enabled: bool
++    active_version_id: uuid.UUID | None
++
++
++async def lock_for_admission(s: AsyncSession, tenant_id: uuid.UUID, workflow_id: uuid.UUID) -> AdmissionState | None:
++    """Take the workflow's admission lock, then read what admission checks, which holds until this transaction ends
++    (spec §4.5). None if the tenant has no such workflow.
++
++    Admission takes the lock *shared*, and keeps it until the run is inserted. Every change to a workflow takes it
++    *exclusively* first (`get_workflow` with `for_update`). So a change either commits before admission reads, or
++    waits until the run exists. Like the lifecycle locks, it is a transaction-scoped advisory lock: a row lock would
++    need UPDATE on `workflows`, which the dispatch role must not have.
++
++    The fields are read as columns, never through a `Workflow` the session already holds: the ORM would return that
++    object as it was loaded, from before the change this lock waited for."""
++    await lifecycle.assert_read_committed(s)  # the read after the lock must see what a change committed
++    await s.execute(
++        text("select pg_advisory_xact_lock_shared(hashtextextended(:k, 0))"), {"k": _admission_key(workflow_id)}
++    )
++    row = (
++        await s.execute(
++            select(Workflow.enabled, Workflow.active_version_id).where(
++                Workflow.id == workflow_id, Workflow.tenant_id == tenant_id
++            )
++        )
++    ).one_or_none()
++    return None if row is None else AdmissionState(enabled=row.enabled, active_version_id=row.active_version_id)
++
++
+ async def get_workflow(
+     s: AsyncSession, tenant_id: uuid.UUID, workflow_id: uuid.UUID, *, for_update: bool = False
+ ) -> Workflow | None:
++    """With `for_update`, take the workflow's admission lock exclusively (`lock_for_admission`), then its row lock.
++    Both are held until the change commits, so a run is admitted either before the change or after it. The admission
++    lock comes first: a change waiting for an admission holds nothing that admission's insert could need. The locked
++    row overwrites any `Workflow` the session already holds, so the writer acts on what's committed."""
+     q = select(Workflow).where(Workflow.id == workflow_id, Workflow.tenant_id == tenant_id)
+     if for_update:
+-        q = q.with_for_update()
++        await s.execute(
++            text("select pg_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": _admission_key(workflow_id)}
++        )
++        q = q.with_for_update().execution_options(populate_existing=True)
+     return (await s.execute(q)).scalar_one_or_none()
+
+
+```
+
 Create `backend/src/dewpoint/apps/runs.py`:
 
 ```python
 # SPDX-License-Identifier: Apache-2.0
 """Starting runs (spec §9). `start_run` is 2a's admission, and 2b's dispatcher reuses `admit`: the workflow is
-enabled, the version is its active one, and nothing in the version's closure is retired. The closure is checked under
-shared lifecycle locks, in the transaction that inserts the run (§4.5), so a retirement either sees the run or the
-run sees the retirement.
+enabled, the version is its active one, and nothing in the version's closure is retired. All three are checked in the
+transaction that inserts the run (§4.5), under locks the other side takes too:
+- the workflow is read under its admission lock (shared), so a disable, publish or activation either commits before
+  the read or waits until the run exists;
+- the closure is read under the lifecycle locks (shared), so a retirement either sees the run or the run sees the
+  retirement.
 
 Then `RunGraph` starts, with the run's id as its workflow id. A lost acknowledgement looks like a failure, so an
 uncertain start is repeated with the same id: Temporal refuses a duplicate id (`REJECT_DUPLICATE`, which also covers
@@ -5785,7 +6994,7 @@ from dewpoint.core.models.runs import Run
 from dewpoint.core.models.workflows import WorkflowVersion
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.runs import service as runs
-from dewpoint.core.workflows.service import get_workflow
+from dewpoint.core.workflows.service import lock_for_admission
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, LIVE, RunInput
 from dewpoint.engine.runtime.workflow import RunGraph
 
@@ -5825,7 +7034,8 @@ class StartUncertainError(Exception):
 
 
 async def _admission_locked() -> None:
-    """Hook that runs right after the lifecycle locks are held. A no-op; the race tests pause here."""
+    """Hook that runs once the workflow's admission lock and the lifecycle locks are held. A no-op; the race tests
+    pause here."""
 
 
 async def admit(
@@ -5841,7 +7051,7 @@ async def admit(
     version = await s.get(WorkflowVersion, version_id)
     if version is None:
         raise NotAdmissibleError(["There is no such version."])
-    workflow = await get_workflow(s, tenant_id, version.workflow_id)
+    workflow = await lock_for_admission(s, tenant_id, version.workflow_id)  # stands until the run exists
     if workflow is None or not workflow.enabled:
         raise NotAdmissibleError(["The workflow is disabled."])
     if workflow.active_version_id != version.id:
@@ -5941,16 +7151,23 @@ __all__ = [
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cd backend && uv run pytest -q tests/apps/test_runs.py tests/apps/test_lifecycle_races.py`
-Expected: all pass (8 new, and the lifecycle race tests unchanged).
+Run: `cd backend && uv run pytest -q tests/apps/test_runs.py tests/apps/test_lifecycle_races.py tests/apps/test_workflow_ops.py`
+Expected: all pass. There are 18 new tests:
+- 6 races between admission and a disable, activation or publish, in both orders;
+- 3 admissions in a session that already holds the workflow;
+- 1 writer in such a session.
+
+The lifecycle race tests and the other workflow tests pass unchanged.
 
 - [ ] **Step 5: Checks and commit**
 
 ```bash
 cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy src && uv run lint-imports \
-  && uv run pytest -q tests/apps/test_runs.py tests/apps/test_lifecycle_races.py tests/core \
-  && git add src/dewpoint/apps/runs.py src/dewpoint/core/config.py tests/apps/test_runs.py \
-  && git commit -m "feat(apps): admit and start runs under the lifecycle locks" \
+  && uv run pytest -q tests/apps/test_runs.py tests/apps/test_lifecycle_races.py tests/apps/test_workflow_ops.py \
+       tests/core \
+  && git add src/dewpoint/apps/runs.py src/dewpoint/core/config.py src/dewpoint/core/workflows/service.py \
+       tests/apps/test_runs.py tests/apps/test_lifecycle_races.py tests/apps/test_workflow_ops.py \
+  && git commit -m "feat(apps): admit and start runs under the workflow's admission lock and the lifecycle locks" \
        -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
@@ -5972,7 +7189,7 @@ The operations doc explains all four.
 - Create: `backend/src/dewpoint/apps/api/routes/runs.py`; modify `backend/src/dewpoint/apps/api/main.py`
 - Modify: `backend/src/dewpoint/apps/cli/main.py`, `backend/src/dewpoint/core/config.py`
 - Create: `backend/tests/apps/worker/test_worker_db.py`, `backend/tests/apps/worker/test_dev_run.py`,
-  `backend/tests/apps/cli/test_dev_run_cli.py`
+  `backend/tests/apps/worker/test_main.py`, `backend/tests/apps/cli/test_dev_run_cli.py`
 - Create: `docs/operations/runs.md`; modify `README.md`
 
 **Interfaces:**
@@ -5987,9 +7204,10 @@ The operations doc explains all four.
 - Produces:
   - `DbRunStore(sessionmaker)`, a `RunStore`;
   - `apps/worker/main.py`: `evaluator_profile(socket_path, *, wait_s=2.0)`,
-    `engine_worker(client, store, plugins)`, `cel_worker(client, socket_path, profile, *, max_concurrent)` and
-    `run(settings)`;
-  - the settings `temporal_address`, `temporal_namespace`, `cel_socket` and `cel_max_concurrent`;
+    `engine_worker(client, store, plugins, settings)`, `cel_worker(client, socket_path, profile, *, max_concurrent)`
+    and `run(settings)`;
+  - the settings `temporal_address`, `temporal_namespace`, `cel_socket`, `cel_max_concurrent` and
+    `worker_shutdown_grace_s`;
   - the API:
     - `GET /api/v1/t/{tenant_id}/runs?workflow_id=&before=&limit=` (1–200, default 50) lists runs, each with `id`,
       `workflow_id`, `version_id`, `mode`, `status`, `started_at`, `ended_at`, `error` (`{code, message}` or
@@ -6012,17 +7230,23 @@ Create `backend/tests/apps/worker/test_worker_db.py`:
 """A run end to end (spec §8, §9): admitted by `start_run`, executed by `RunGraph`, projected by the worker into
 `runs` and `run_steps` under RLS, and read back through the runs API."""
 
+import asyncio
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from temporalio.testing import WorkflowEnvironment
 
 from dewpoint.apps.runs import start_run
 from dewpoint.apps.worker.store import DbRunStore
+from dewpoint.core.db import tenant_scope
+from dewpoint.core.runs import service as runs
+from dewpoint.engine.runtime.activities import ProjectInput, RunSummary, StepRow
 from dewpoint.engine.runtime.workflow import RunGraph
 from tests.apps.api.helpers import member_client
 from tests.apps.test_workflow_ops import actor, create, publish
 from tests.apps.worker.harness import workers
+from tests.core.runs.test_service import seeded_run
 from tests.support.graphs import G, cel, ref
 from tests.support.registry import sync_test_plugins
 
@@ -6082,6 +7306,67 @@ async def test_a_run_is_projected_and_readable_through_the_api(
     assert (await stranger.get(f"/api/v1/t/{other.tenant_id}/runs")).json() == []
     assert (await stranger.get(f"/api/v1/t/{other.tenant_id}/runs/{run_id}")).status_code == 404
     assert (await viewer.get(f"/api/v1/t/{ctx.tenant_id}/runs/{uuid.uuid4()}")).status_code == 404
+
+
+async def test_a_row_the_database_refuses_never_holds_up_the_others_or_the_run(
+    owner_sessionmaker, dispatch_sessionmaker, worker_sessionmaker
+) -> None:
+    """Final review: a projection the database refuses (a deterministic error, SQLSTATE class 22 or 23) was retried
+    forever: no later row landed, and the run never ended. Each row is then written alone, and one refused again is
+    logged and skipped."""
+    tenant, run_id = await seeded_run(owner_sessionmaker, dispatch_sessionmaker)
+    step = str(uuid.UUID(int=7))
+
+    def attempt(n: int, status: str) -> StepRow:
+        return StepRow(str(run_id), step, "a", "", n, status, ended_at=datetime.now(UTC).isoformat())
+
+    summary = RunSummary(str(run_id), "succeeded", datetime.now(UTC).isoformat(), iterations=2)
+    await DbRunStore(worker_sessionmaker).project(
+        ProjectInput(str(tenant), [attempt(1, "failed"), attempt(2, "bogus"), attempt(3, "succeeded")], summary)
+    )
+    async with owner_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        stored = [(r.attempt, r.status) for r in await runs.run_steps(s, run_id)]
+        run = await runs.get_run(s, run_id)
+    assert stored == [(1, "failed"), (3, "succeeded")]
+    assert run is not None and (run.status, run.iterations) == ("succeeded", 2)
+
+
+async def test_a_character_the_database_refuses_never_keeps_its_run_open(
+    env: WorkflowEnvironment,
+    owner_sessionmaker: Any,
+    api_sessionmaker: Any,
+    admin_sessionmaker: Any,
+    dispatch_sessionmaker: Any,
+    worker_sessionmaker: Any,
+    api_settings: Any,
+) -> None:
+    """PR #9 review: rows were sized as strict UTF-8 in workflow code, before storage replaced what Postgres refuses.
+    A `fail` node's message read from a trigger with a lone surrogate raised there: the workflow task failed on every
+    retry, no row or summary landed, and the run stayed `running`."""
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    g = G()
+    g.settings = {"input_schema": {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"]}}
+    g.node("f", "flow.fail@1", {"message": ref("trigger.note")})
+    out = await publish(api_sessionmaker, ctx, await create(api_sessionmaker, ctx, g.data()), api_settings)
+    assert out.version is not None
+    async with workers(env.client, DbRunStore(worker_sessionmaker)):
+        run_id = await start_run(
+            dispatch_sessionmaker, env.client, api_settings,
+            tenant_id=ctx.tenant_id, version_id=out.version.id, trigger={"note": "bad \ud800 note"},
+        )  # fmt: skip
+        handle = env.client.get_workflow_handle_for(RunGraph.run, str(run_id))
+        result = await asyncio.wait_for(handle.result(), 30)
+    assert result.status == "failed" and result.error is not None
+    assert (result.error["code"], result.error["message"]) == ("workflow_failed", "bad \ufffd note")
+    async with owner_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        run = await runs.get_run(s, run_id)
+        steps = await runs.run_steps(s, run_id)
+    assert run is not None
+    assert (run.status, run.error_code, run.error_message) == ("failed", "workflow_failed", "bad \ufffd note")
+    assert [r.node_key for r in steps] == ["f"]
 ```
 
 Create `backend/tests/apps/worker/test_dev_run.py`:
@@ -6135,6 +7420,37 @@ async def test_dev_run_starts_the_active_version(
     assert waited is not None and (waited.status, waited.outputs) == ("succeeded", {"v": 2})
     assert simulated is not None and simulated.outputs == {"v": {"simulated": 2}}
     assert nothing is None
+```
+
+Create `backend/tests/apps/worker/test_main.py`:
+
+```python
+# SPDX-License-Identifier: Apache-2.0
+"""`dewpoint worker`'s workers."""
+
+from datetime import timedelta
+
+from temporalio.testing import WorkflowEnvironment
+
+from dewpoint.apps.worker.main import engine_worker
+from dewpoint.core.config import Settings
+from tests.apps.worker.harness import MemoryStore
+from tests.support.plugins.testkit import TESTKIT
+
+
+async def test_a_stopping_worker_lets_running_attempts_finish(own_env: WorkflowEnvironment) -> None:
+    """Final review: a worker that stops cancels its running attempts at once by default, so every deploy would end
+    the ambiguous ones as `outcome_unknown`. It gives them the configured grace first. (A server of its own: a worker
+    holds its task queue on its client until it runs and stops.)"""
+    settings = Settings(
+        database_url="postgresql+asyncpg://u:p@localhost/x",
+        kek_b64="A" * 43 + "=",
+        public_origin="https://dewpoint.test",
+        worker_shutdown_grace_s=45,
+    )
+    worker = engine_worker(own_env.client, MemoryStore(), [TESTKIT], settings)
+    assert worker.config()["graceful_shutdown_timeout"] == timedelta(seconds=45)
+    assert Settings.model_fields["worker_shutdown_grace_s"].default == 30
 ```
 
 Create `backend/tests/apps/cli/test_dev_run_cli.py`:
@@ -6242,9 +7558,10 @@ def test_a_start_temporal_refused_or_never_confirmed(
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `cd backend && uv run pytest -q tests/apps/worker/test_worker_db.py tests/apps/worker/test_dev_run.py tests/apps/cli/test_dev_run_cli.py`
-Expected: 2 collection errors: `ModuleNotFoundError: No module named 'dewpoint.apps.worker.store'` and
-`ImportError: cannot import name 'dev_run_version' from 'dewpoint.apps.cli.main'`.
+Run: `cd backend && uv run pytest -q tests/apps/worker/test_worker_db.py tests/apps/worker/test_dev_run.py tests/apps/worker/test_main.py tests/apps/cli/test_dev_run_cli.py`
+Expected: 3 collection errors: `ModuleNotFoundError: No module named 'dewpoint.apps.worker.store'`,
+`ImportError: cannot import name 'dev_run_version' from 'dewpoint.apps.cli.main'` and
+`ModuleNotFoundError: No module named 'dewpoint.apps.worker.main'`.
 
 - [ ] **Step 3: Implement the store, the worker and the settings**
 
@@ -6254,7 +7571,7 @@ Add the settings to `backend/src/dewpoint/core/config.py`:
 diff --git a/backend/src/dewpoint/core/config.py b/backend/src/dewpoint/core/config.py
 --- a/backend/src/dewpoint/core/config.py
 +++ b/backend/src/dewpoint/core/config.py
-@@ -27,6 +27,10 @@
+@@ -27,7 +27,12 @@
      webauthn_challenges_max: int = 10_000  # outstanding (unexpired) challenges across the platform
      max_request_body_bytes: int = 1_048_576  # counted as received: chunked bodies have no Content-Length
      max_run_duration_days: int = 30  # spec §6: whole logical run, including continue-as-new and waits
@@ -6263,20 +7580,28 @@ diff --git a/backend/src/dewpoint/core/config.py b/backend/src/dewpoint/core/con
 +    cel_socket: str | None = None  # the cel-evaluator's socket; a worker without one serves no CEL queue
 +    cel_max_concurrent: int = 2  # the evaluator's N (docs/operations/cel-evaluator.md)
      cel_schedule_to_start_s: float = 600  # spec §5.7: no evaluator for a profile after this: cel_profile_unavailable
++    worker_shutdown_grace_s: float = 30  # a stopping worker lets running attempts finish this long, then cancels them
      audit_signing_key_b64: str | None = None  # Ed25519 private key (raw 32 bytes, base64)
      audit_anchor_path: str | None = None
+
 ```
 
 Create `backend/src/dewpoint/apps/worker/store.py`:
 
 ```python
 # SPDX-License-Identifier: Apache-2.0
-"""The worker's `RunStore` over the database, as the worker role and inside the run's tenant (spec §8)."""
+"""The worker's `RunStore` over the database, as the worker role and inside the run's tenant (spec §8).
+
+A projection the database refuses for its data (SQLSTATE class 22 or 23) would be refused on every retry, and no
+later write of its run would land. It's written again row by row: a row refused again is logged and skipped, so the
+others, and the run's end, land. Any other error is left to Temporal's retries: the database may take it later."""
 
 import uuid
 from datetime import datetime
 from typing import Any
 
+import structlog
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.exceptions import ApplicationError
 
@@ -6284,7 +7609,16 @@ from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.workflows import WorkflowVersion
 from dewpoint.core.plugins.registry import load_node_types
 from dewpoint.core.runs import service as runs
-from dewpoint.engine.runtime.activities import ProjectInput, StepRow, VersionData
+from dewpoint.engine.runtime.activities import ProjectInput, RunSummary, StepRow, VersionData
+
+REFUSED = ("22", "23")  # SQLSTATE classes: data exceptions, integrity violations
+_log = structlog.get_logger("dewpoint.worker")
+
+
+def _refused(e: DBAPIError) -> str | None:
+    """The SQLSTATE of an error the database would give again for the same data; None for any other."""
+    state = getattr(e.orig, "sqlstate", None)
+    return state if isinstance(state, str) and state[:2] in REFUSED else None
 
 
 def _at(value: str | None) -> datetime | None:
@@ -6323,19 +7657,57 @@ class DbRunStore:
 
     async def project(self, data: ProjectInput) -> None:
         tenant = uuid.UUID(data.tenant_id)
+        try:
+            async with self.sessionmaker() as s, s.begin():
+                await tenant_scope(s, tenant)
+                await runs.upsert_steps(s, tenant, [_row(r) for r in data.steps])
+                if data.run is not None:
+                    await _finish(s, data.run)
+        except DBAPIError as e:
+            if _refused(e) is None:
+                raise
+            await self._one_by_one(tenant, data)
+
+    async def _one_by_one(self, tenant: uuid.UUID, data: ProjectInput) -> None:
         async with self.sessionmaker() as s, s.begin():
             await tenant_scope(s, tenant)
-            await runs.upsert_steps(s, tenant, [_row(r) for r in data.steps])
+            for row in data.steps:
+                try:
+                    async with s.begin_nested():
+                        await runs.upsert_steps(s, tenant, [_row(row)])
+                except DBAPIError as e:
+                    state = _refused(e)
+                    if state is None:
+                        raise
+                    _log.warning(
+                        "projection_row_refused",
+                        run_id=row.run_id,
+                        step_id=row.step_id,
+                        iteration_key=row.iteration_key,
+                        attempt=row.attempt,
+                        sqlstate=state,
+                    )
             if data.run is not None:
-                await runs.finish_run(
-                    s,
-                    uuid.UUID(data.run.run_id),
-                    status=data.run.status,
-                    ended_at=datetime.fromisoformat(data.run.ended_at),
-                    error_code=data.run.error_code,
-                    error_message=data.run.error_message,
-                    iterations=data.run.iterations,
-                )
+                try:
+                    async with s.begin_nested():
+                        await _finish(s, data.run)
+                except DBAPIError as e:
+                    state = _refused(e)
+                    if state is None:
+                        raise
+                    _log.warning("projection_run_refused", run_id=data.run.run_id, sqlstate=state)
+
+
+async def _finish(s: AsyncSession, run: RunSummary) -> None:
+    await runs.finish_run(
+        s,
+        uuid.UUID(run.run_id),
+        status=run.status,
+        ended_at=datetime.fromisoformat(run.ended_at),
+        error_code=run.error_code,
+        error_message=run.error_message,
+        iterations=run.iterations,
+    )
 ```
 
 Create `backend/src/dewpoint/apps/worker/main.py`:
@@ -6348,6 +7720,7 @@ evaluator, then asks its identity. Worker Versioning (the pinned deployment) com
 
 import asyncio
 from collections.abc import Iterable
+from datetime import timedelta
 
 import structlog
 from temporalio.client import Client
@@ -6376,8 +7749,16 @@ async def evaluator_profile(socket_path: str, *, wait_s: float = 2.0) -> str:
             await asyncio.sleep(wait_s)
 
 
-def engine_worker(client: Client, store: RunStore, plugins: Iterable[Plugin]) -> Worker:
-    return Worker(client, task_queue=ENGINE_QUEUE, workflows=[RunGraph], activities=engine_activities(store, plugins))
+def engine_worker(client: Client, store: RunStore, plugins: Iterable[Plugin], settings: Settings) -> Worker:
+    """A stopping worker lets running attempts finish for `worker_shutdown_grace_s`: one it cancels ends as it would
+    on a lost worker, `outcome_unknown` for an ambiguous node."""
+    return Worker(
+        client,
+        task_queue=ENGINE_QUEUE,
+        workflows=[RunGraph],
+        activities=engine_activities(store, plugins),
+        graceful_shutdown_timeout=timedelta(seconds=settings.worker_shutdown_grace_s),
+    )
 
 
 def cel_worker(client: Client, socket_path: str, profile: str, *, max_concurrent: int) -> Worker:
@@ -6393,7 +7774,7 @@ async def run(settings: Settings) -> None:
     client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
     engine = make_engine(settings.database_url)
     try:
-        workers = [engine_worker(client, DbRunStore(make_sessionmaker(engine)), installed_plugins())]
+        workers = [engine_worker(client, DbRunStore(make_sessionmaker(engine)), installed_plugins(), settings)]
         if settings.cel_socket:
             profile = await evaluator_profile(settings.cel_socket)
             log.info("cel_queue", profile=profile)
@@ -6646,8 +8027,9 @@ diff --git a/backend/src/dewpoint/apps/cli/main.py b/backend/src/dewpoint/apps/c
 - [ ] **Step 5: Run the tests**
 
 Run: `cd backend && uv run pytest -q tests/apps/worker tests/apps/cli tests/apps/api`
-Expected: all pass, among them the 8 new tests (1 end-to-end through the database and the API, 1 `dev_run_version`,
-6 CLI exit codes).
+Expected: all pass, among them the 11 new tests: 1 end-to-end through the database and the API, 1 run whose trigger
+holds a character the database refuses, 1 row the database refuses, 1 `dev_run_version`, 1 worker shutdown grace, and
+6 CLI exit codes.
 
 - [ ] **Step 6: Document it**
 
@@ -6679,6 +8061,9 @@ activity per installed plugin node type. It needs:
   CEL profile it serves, and serves `cel.evaluate` on that profile's queue (`dewpoint-cel.<profile>`) with
   `DEWPOINT_CEL_MAX_CONCURRENT` activities at a time (default 2; match the evaluator's slots,
   [`cel-evaluator.md`](cel-evaluator.md)).
+- `DEWPOINT_WORKER_SHUTDOWN_GRACE_S` (default 30): a stopping worker lets running attempts finish this long, then
+  cancels them. A cancelled attempt ends as on a lost worker: `outcome_unknown` for an `ambiguous` node. Give the
+  process manager a stop timeout longer than this.
 
 Without an evaluator, CEL expressions that can't run inline wait `DEWPOINT_CEL_SCHEDULE_TO_START_S` (default 600
 seconds) and then fail the step with `cel_profile_unavailable`. In 2a every CEL expression runs through the evaluator:
@@ -6734,6 +8119,8 @@ Anyone who can view runs can read the projection, so it keeps secrets out:
   `custom_error`. An unexpected exception, a version this build can't run and an interpreter error name only the
   error's type. The full text goes to the worker's log.
 - Previews hold at most 8 KiB of JSON each; a larger one shows as `[truncated]`.
+- Characters Postgres can't store (NUL, lone surrogates) show as U+FFFD, and a number JSON can't hold (NaN,
+  infinity) as its name.
 
 Temporal's own history still holds the values in full until 2b's payload encryption: restrict access to Temporal.
 
@@ -6748,7 +8135,7 @@ Temporal's own history still holds the values in full until 2b's payload encrypt
 | `failed` | `version_unusable` | This build can't load or run the version, for example a node type it lacks. Nothing ran. |
 | `failed` | `internal_error` | A bug in the interpreter. The message names the exception's type, and the worker's log has the details; please report it. |
 | `deadline_exceeded` | `deadline_exceeded` | The run passed `DEWPOINT_MAX_RUN_DURATION_DAYS` (default 30). Running steps were cancelled. |
-| `cancelled` | `cancelled` | The run was cancelled in Temporal. |
+| `cancelled` | `cancelled` | The run was cancelled in Temporal. A cancel that arrives while the run's end is being written leaves that end. |
 
 Step error codes include the plugin's own codes and `config_invalid`, `output_schema_violation`, `unexpected_error`,
 `evaluation_error`, `type_mismatch`, `timeout`, `cel_profile_unavailable`, `item_cap_exceeded`,
@@ -6762,8 +8149,11 @@ retry settings (`max_attempts` and `timeout_s` can be overridden per step), and 
 
 - A node's `RetryableError` and unexpected exceptions are retried, and so are timeouts, unless the node is
   `ambiguous`.
-- For an `ambiguous` node, a timeout or a lost worker means the request may have been sent: the attempt records
-  `outcome_unknown` and is never repeated. So is an `OutcomeUnknownError`, from any node.
+- For an `ambiguous` node, a timeout, a lost or stopping worker, or any failure the step's activity didn't describe
+  itself means the request may have been sent: the attempt records `outcome_unknown` and is never repeated. So is an
+  `OutcomeUnknownError`, from any node.
+- A config or output check that fails with something other than a validation error (a validator's bug) fails the
+  step as `config_invalid` or `output_schema_violation`, never retried.
 - A `reconcilable` node checks with `reconcile()` before each retry.
 
 ## Limits in this build
@@ -6772,12 +8162,16 @@ retry settings (`max_attempts` and `timeout_s` can be overridden per step), and 
 - Loops over more than 100 items, and `run_workflow` sub-flows, fail their step with `not_supported`: loop batches and
   sub-flows arrive with plan 2a-3b, as do continue-as-new and the workflow failure handler.
 - A run counts at most 100,000 loop iterations and filter items (`iteration_cap_exceeded`).
+- `flow.delay` waits 0 to 30 days, and `wait_until` takes instants from year 1 to 9999 in UTC. A value outside that,
+  resolved at run time, fails the step with `type_mismatch`.
 
 ## If the database is unavailable
 
 Plugin steps never write to the database: the interpreter projects every row through one activity, which retries
 until the database answers. A step's effect therefore never repeats because of a failed write, rows catch up when the
-database is back, and a run's end waits for its summary to be written.
+database is back, and a run's end waits for its summary to be written. A backlog is written in batches of at most
+256 KiB. A row the database refuses for its data (SQLSTATE class 22 or 23) is logged in the worker's log and
+skipped, so the other rows, and the run's end, still land.
 ````
 
 Point to it from `README.md`:
@@ -6811,7 +8205,7 @@ cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy
        -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-Expected: 848 passed and 8 skipped (the Linux-only evaluator tests).
+Expected: 892 passed and 8 skipped (the Linux-only evaluator tests).
 
 ---
 
@@ -7103,7 +8497,7 @@ cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy
        -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-Expected: 858 passed and 8 skipped locally (`main` collects 726 tests; this plan adds 140). On Linux the 8
+Expected: 902 passed and 8 skipped locally (`main` collects 726 tests; this plan adds 184). On Linux the 8
 evaluator-limit tests run too. Push only when the owner says so; CI then runs the same suite, downloading the test
 server on first use.
 
@@ -7186,7 +8580,7 @@ server on first use.
 | §8 | redaction of `x-sensitive` fields | Tasks 2, 5 (decision 21): through `$ref`s and unions, plus masking of learned values |
 | §8 | the worker role inside `tenant_scope`; redaction; truncation; the read API | Tasks 7, 2, 7 |
 | §9 | `start_run` for tests and the dev CLI; no public run API | Tasks 6, 7 (decisions 20, 22) |
-| §4.5 | admission under shared lifecycle locks, in the transaction that inserts the run | Task 6 |
+| §4.5 | admission under shared lifecycle locks, in the transaction that inserts the run; the workflow read under its admission lock | Task 6 (decision 23) |
 | §5.7 | a missing evaluator times out to `cel_profile_unavailable` | Task 5 (decision 6) |
 | §10 | interpreter tests: every node kind and error policy, `on_item_error`, the deadline | Tasks 1, 5; batching, sub-flows, continue-as-new: 2a-3b; yield points: 2a-3c |
 | §10 | property tests: once per scope, dead paths never run, same-scope joins, no pending edge | Task 1 |

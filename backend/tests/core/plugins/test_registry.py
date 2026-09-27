@@ -19,10 +19,10 @@ from tests.support.plugins.testkit import TESTKIT
 async def test_sync_registers_and_is_idempotent(admin_sessionmaker) -> None:
     async with admin_sessionmaker() as s, s.begin():
         report = await sync_installed(s, [PLUGIN, TESTKIT])
-    assert len(report.added) == 16 and report.unchanged == []
+    assert len(report.added) == 18 and report.unchanged == []
     async with admin_sessionmaker() as s, s.begin():
         report = await sync_installed(s, [PLUGIN, TESTKIT])
-    assert report.added == [] and len(report.unchanged) == 16
+    assert report.added == [] and len(report.unchanged) == 18
     async with admin_sessionmaker() as s:
         refs = {r.ref for r in await registry.list_node_types(s)}
         state = (

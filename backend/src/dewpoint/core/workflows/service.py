@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.audit.service import record
@@ -46,12 +46,56 @@ async def create_workflow(s: AsyncSession, ctx: TenantContext, *, name: str, dra
     return wf
 
 
+def _admission_key(workflow_id: uuid.UUID) -> str:
+    return f"dewpoint:workflow:{workflow_id}"
+
+
+@dataclass(frozen=True)
+class AdmissionState:
+    """What admission checks of a workflow, as the database has it."""
+
+    enabled: bool
+    active_version_id: uuid.UUID | None
+
+
+async def lock_for_admission(s: AsyncSession, tenant_id: uuid.UUID, workflow_id: uuid.UUID) -> AdmissionState | None:
+    """Take the workflow's admission lock, then read what admission checks, which holds until this transaction ends
+    (spec §4.5). None if the tenant has no such workflow.
+
+    Admission takes the lock *shared*, and keeps it until the run is inserted. Every change to a workflow takes it
+    *exclusively* first (`get_workflow` with `for_update`). So a change either commits before admission reads, or
+    waits until the run exists. Like the lifecycle locks, it is a transaction-scoped advisory lock: a row lock would
+    need UPDATE on `workflows`, which the dispatch role must not have.
+
+    The fields are read as columns, never through a `Workflow` the session already holds: the ORM would return that
+    object as it was loaded, from before the change this lock waited for."""
+    await lifecycle.assert_read_committed(s)  # the read after the lock must see what a change committed
+    await s.execute(
+        text("select pg_advisory_xact_lock_shared(hashtextextended(:k, 0))"), {"k": _admission_key(workflow_id)}
+    )
+    row = (
+        await s.execute(
+            select(Workflow.enabled, Workflow.active_version_id).where(
+                Workflow.id == workflow_id, Workflow.tenant_id == tenant_id
+            )
+        )
+    ).one_or_none()
+    return None if row is None else AdmissionState(enabled=row.enabled, active_version_id=row.active_version_id)
+
+
 async def get_workflow(
     s: AsyncSession, tenant_id: uuid.UUID, workflow_id: uuid.UUID, *, for_update: bool = False
 ) -> Workflow | None:
+    """With `for_update`, take the workflow's admission lock exclusively (`lock_for_admission`), then its row lock.
+    Both are held until the change commits, so a run is admitted either before the change or after it. The admission
+    lock comes first: a change waiting for an admission holds nothing that admission's insert could need. The locked
+    row overwrites any `Workflow` the session already holds, so the writer acts on what's committed."""
     q = select(Workflow).where(Workflow.id == workflow_id, Workflow.tenant_id == tenant_id)
     if for_update:
-        q = q.with_for_update()
+        await s.execute(
+            text("select pg_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": _admission_key(workflow_id)}
+        )
+        q = q.with_for_update().execution_options(populate_existing=True)
     return (await s.execute(q)).scalar_one_or_none()
 
 
