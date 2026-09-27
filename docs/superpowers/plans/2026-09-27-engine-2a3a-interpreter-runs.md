@@ -38,7 +38,7 @@ what 2a-3 consumes. The owner split 2a-3 into three plans on 2026-09-27:
 1. **Go/no-go experiments ran first** (next section), on temporalio 1.33.0 from the CEL spike's environment. The
    owner approved the SDK's download of its time-skipping test server for planning, the suite and CI.
 2. **Every module was prototyped** in a scratch copy of `backend/` until it passed its tests, `ruff`, `ruff format`,
-   `mypy --strict` (132 source files) and `lint-imports` (10 contracts). The prototype's full suite gives 868 passed
+   `mypy --strict` (132 source files) and `lint-imports` (10 contracts). The prototype's full suite gives 869 passed
    and 8 skipped (the Linux-only evaluator tests), against `main`'s 726 collected.
 3. **The code blocks below are those files, verbatim.** Diffs to existing files were generated from the prototype.
 4. **Each task was staged and checked on its own.** Stage *N* is `main` plus tasks 1..*N*. Every stage passed the
@@ -86,7 +86,7 @@ what 2a-3 consumes. The owner split 2a-3 into three plans on 2026-09-27:
     - a malformed output envelope compiled and failed later outside any handler;
     - an instance of a node's `Output` was returned without validation. The re-review found that the first fix
       broke typed field serializers, so an instance is now checked as it's emitted, against the declared output
-      schema.
+      schema, and the one after that added a fixed list of formats to the check.
 
     See decisions 7, 11 and 15.
 
@@ -192,6 +192,10 @@ field declared elsewhere: both closed in decision 21 by walking the schema along
    pydantic doesn't check instances built with `model_construct` or changed by assignment. So it is checked as it's
    emitted, dumped with its serializers, against the declared output schema. That schema is generated in
    serialization mode and is closed, so a typed field serializer that changes a type is honoured (checkpoint 2).
+   Its formats are checked too, from a fixed list whose checks agree with what pydantic emits: `date`, `time`,
+   `uuid`, `email`, `ipv4`, `ipv6` and `regex` (`CHECKED_FORMATS`). `date-time` isn't on it, because RFC 3339 wants
+   an offset and pydantic emits naive datetimes without one. The list is fixed so that installing an optional
+   library can't turn it on.
 
    The cost is history: each retry adds its activity's events and a timer, where Temporal's own retries add none. So
    2a-3b's headroom arithmetic counts `max_attempts`. (Tasks 4, 5)
@@ -3456,6 +3460,8 @@ runs one attempt of the node and writes nothing: `RunGraph` counts the attempts 
 
 import asyncio
 import dataclasses
+import datetime
+import ipaddress
 import os
 import tempfile
 import uuid
@@ -3465,12 +3471,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from jsonschema import FormatChecker
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 from pydantic_core import PydanticCustomError
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
-from dewpoint.apps.worker.activities import cel_activity, remote_evaluator, step_activity_for
+from dewpoint.apps.worker.activities import CHECKED_FORMATS, cel_activity, remote_evaluator, step_activity_for
 from dewpoint.apps.worker.context import idempotency_key
 from dewpoint.engine.cel import ipc
 from dewpoint.engine.cel import types as T
@@ -3561,6 +3568,10 @@ class Constructed(Node):
         return LiarOutput.model_construct(n="not-an-int", key="ok")
 
 
+class FormatsConfig(BaseModel):
+    valid: bool
+
+
 class Tagged(BaseModel):
     """A valid output whose field serializer changes the type: an `int` is emitted as text, as its schema says."""
 
@@ -3579,6 +3590,29 @@ class Serialized(Node):
 
     async def run(self, ctx: StepContext, config: Any) -> Any:
         return Tagged(id=3)
+
+
+class Formatted(BaseModel):
+    """Values whose output schema declares a `format`, as pydantic writes it."""
+
+    id: uuid.UUID
+    at: datetime.datetime
+    on: datetime.date
+    ip: ipaddress.IPv4Address
+
+
+class Formats(Node):
+    type = "testkit.formats"
+    version = 1
+    title = "Formats"
+    Config = FormatsConfig
+    Output = Formatted
+
+    async def run(self, ctx: StepContext, config: FormatsConfig) -> Any:
+        valid = Formatted(
+            id=uuid.UUID(int=5), at=datetime.datetime(2026, 9, 27, 10, 0), on=datetime.date(2026, 9, 27), ip="10.0.0.1"
+        )
+        return valid if config.valid else Formatted.model_construct(**{**dict(valid), "id": "not-a-uuid"})
 
 
 class Broken(Node):
@@ -3745,6 +3779,24 @@ async def test_an_output_instance_is_validated_too() -> None:
     bad = await failure(step_activity_for(Constructed), step("testkit.constructed@1"))
     assert (bad.type, bad.non_retryable) == ("output_schema_violation", True)
     assert bad.message == "The output doesn't match `testkit.constructed@1`: n (type)."  # the output schema's rule
+
+
+async def test_an_instance_breaking_a_format_is_refused_and_valid_formats_pass() -> None:
+    """Checkpoint-2 re-review: without a format checker, `format: uuid` held nothing. The formats checked are the ones
+    whose checks agree with what pydantic emits: a naive datetime is valid output, so `date-time` isn't checked."""
+    bad = await failure(step_activity_for(Formats), step("testkit.formats@1", {"valid": False}))
+    assert (bad.type, bad.message) == (
+        "output_schema_violation",
+        "The output doesn't match `testkit.formats@1`: id (format).",
+    )
+    assert set(FormatChecker(formats=CHECKED_FORMATS).checkers) == set(CHECKED_FORMATS)  # each one really checked
+    good = await call(step_activity_for(Formats), step("testkit.formats@1", {"valid": True}))
+    assert good.output == {
+        "id": str(uuid.UUID(int=5)),
+        "at": "2026-09-27T10:00:00",
+        "on": "2026-09-27",
+        "ip": "10.0.0.1",
+    }
 
 
 async def test_a_field_serializer_emits_what_the_output_schema_declares() -> None:
@@ -3993,7 +4045,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any, Protocol, get_args
 
 import structlog
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, FormatChecker
 from pydantic import BaseModel, ValidationError
 from pydantic_core import PydanticSerializationError
 from pydantic_core.core_schema import ErrorType
@@ -4040,6 +4092,10 @@ UNEXPECTED_ERROR = "unexpected_error"
 INVALID_REQUEST = "invalid_request"
 _log = structlog.get_logger("dewpoint.worker")
 _PYDANTIC_CODES = frozenset(get_args(ErrorType))  # every built-in validation error type
+# The `format`s an emitted output is checked for: those whose checks agree with what pydantic emits, and need no
+# optional library. `date-time` isn't one (RFC 3339 wants an offset; pydantic emits naive datetimes without one).
+# Listing them keeps the check from changing when an optional format library happens to be installed.
+CHECKED_FORMATS = ("date", "time", "uuid", "email", "ipv4", "ipv6", "regex")
 
 
 class RunStore(Protocol):
@@ -4112,7 +4168,7 @@ def step_activity_for(node: type[Node]) -> Callable[[StepInput], Awaitable[StepR
     ref = f"{node.type}@{node.version}"
     config_schema = node.Config.model_json_schema(mode="validation")
     output_schema = node_manifest(node)["output_schema"]  # what the node promises to emit: serialized and closed
-    emitted = Draft202012Validator(output_schema)
+    emitted = Draft202012Validator(output_schema, format_checker=FormatChecker(formats=CHECKED_FORMATS))
 
     @activity.defn(name=step_activity(ref))
     async def run_step(step: StepInput) -> StepResult:
@@ -4195,6 +4251,7 @@ def cel_activity(evaluate: Evaluate) -> Callable[[CelInput], Awaitable[CelResult
 
 
 __all__ = [
+    "CHECKED_FORMATS",
     "CONFIG_INVALID",
     "INVALID_REQUEST",
     "OUTPUT_SCHEMA_VIOLATION",
@@ -4212,7 +4269,7 @@ __all__ = [
 - [ ] **Step 5: Run the tests**
 
 Run: `cd backend && uv run pytest -q tests/apps/worker/test_activities.py tests/core/plugins/test_registry.py`
-Expected: 19 passed (14 + 5).
+Expected: 20 passed (15 + 5).
 
 - [ ] **Step 6: Checks and commit**
 
@@ -5760,7 +5817,7 @@ __all__ = [
 - [ ] **Step 4: Run the tests**
 
 Run: `cd backend && uv run pytest -q tests/apps/worker`
-Expected: 56 passed (14 + 14 + 28) in about 20 s: the timeout tests wait a few real seconds, on test servers of their
+Expected: 57 passed (15 + 14 + 28) in about 20 s: the timeout tests wait a few real seconds, on test servers of their
 own. The first run downloads Temporal's test server into the SDK's cache (the owner approved it). The warnings that
 activities "completed as failed" are the tests' own failing steps and the flaky store's refused writes.
 
@@ -7156,7 +7213,7 @@ cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy
        -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-Expected: 858 passed and 8 skipped (the Linux-only evaluator tests).
+Expected: 859 passed and 8 skipped (the Linux-only evaluator tests).
 
 ---
 
@@ -7448,7 +7505,7 @@ cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy
        -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-Expected: 868 passed and 8 skipped locally (`main` collects 726 tests; this plan adds 150). On Linux the 8
+Expected: 869 passed and 8 skipped locally (`main` collects 726 tests; this plan adds 151). On Linux the 8
 evaluator-limit tests run too. Push only when the owner says so; CI then runs the same suite, downloading the test
 server on first use.
 
