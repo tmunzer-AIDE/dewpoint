@@ -6,21 +6,28 @@
   a map whose keys are sensitive (`propertyNames`) is redacted whole;
 - a value the run learned is sensitive (MIN_SECRET characters or more) is masked wherever it reappears, in strings and
   keys: copied by a transform, embedded by a template, echoed by an error message;
-- a preview larger than 8 KiB of canonical JSON becomes "[truncated]".
+- a preview larger than 8 KiB of canonical JSON becomes "[truncated]";
+- every row the workflow queues holds what storage will write (`storable`, `sanitize`): the workflow sizes each
+  projection by the rows it sends, and a character strict UTF-8 can't encode would fail that in workflow code.
 
 It runs in the workflow. `remember` keeps the learned values in one sorted order, so every replay masks the same way.
 Masking catches copies, not transformations: a secret that CEL encodes or slices is no longer the same text."""
 
+import math
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from dewpoint.engine.canonical import canonical_json
 
 PREVIEW_BYTES = 8 * 1024
+MESSAGE_LIMIT = 500  # characters of a stored code or message
 REDACTED, TRUNCATED = "[redacted]", "[truncated]"
 SENSITIVE = "x-sensitive"
 MIN_SECRET = 4  # shorter values would mask ordinary text ("1", "yes") everywhere
 _MAX_DEPTH = 64  # a schema that refers to itself ends here
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+_UNSTORABLE = re.compile("[\x00\ud800-\udfff]")  # Postgres takes no NUL, and a lone surrogate isn't UTF-8
 
 Secrets = tuple[str, ...]
 
@@ -193,6 +200,29 @@ def location(loc: Sequence[str | int], schema: Mapping[str, Any]) -> str:
     return ".".join(parts) or "(root)"
 
 
+def sanitize(message: str | None) -> str | None:
+    """A code or message as storage writes it (`core.runs.service.sanitize`; a test holds the two equal): no control
+    characters, no lone surrogates, at most MESSAGE_LIMIT characters."""
+    if message is None:
+        return None
+    clean = _UNSTORABLE.sub("\ufffd", _CONTROL.sub(" ", message))
+    return clean if len(clean) <= MESSAGE_LIMIT else clean[: MESSAGE_LIMIT - 1] + "…"
+
+
+def storable(value: Any) -> Any:
+    """A value as storage writes it to jsonb (`core.runs.service.storable`; a test holds the two equal): NUL and lone
+    surrogates, in strings and keys, become U+FFFD, and a number JSON can't hold (NaN, infinity) its name."""
+    if isinstance(value, str):
+        return _UNSTORABLE.sub("\ufffd", value)
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {storable(k): storable(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [storable(v) for v in value]
+    return value
+
+
 def preview(value: Any, schema: Mapping[str, Any] | None = None, secrets: Secrets = ()) -> Any:
     shown = mask(_walk(value, [schema] if schema else [], schema or {}, None), secrets)
     try:
@@ -203,6 +233,7 @@ def preview(value: Any, schema: Mapping[str, Any] | None = None, secrets: Secret
 
 
 __all__ = [
+    "MESSAGE_LIMIT",
     "MIN_SECRET",
     "PREVIEW_BYTES",
     "REDACTED",
@@ -212,5 +243,7 @@ __all__ = [
     "mask",
     "preview",
     "remember",
+    "sanitize",
     "sensitive_values",
+    "storable",
 ]

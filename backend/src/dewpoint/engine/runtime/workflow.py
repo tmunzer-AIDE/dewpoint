@@ -44,7 +44,15 @@ with workflow.unsafe.imports_passed_through():
         step_activity,
     )
     from dewpoint.engine.runtime.program import Step, compile_program
-    from dewpoint.engine.runtime.projection import Secrets, mask, preview, remember, sensitive_values
+    from dewpoint.engine.runtime.projection import (
+        Secrets,
+        mask,
+        preview,
+        remember,
+        sanitize,
+        sensitive_values,
+        storable,
+    )
     from dewpoint.engine.runtime.scheduler import (
         ITERATION_CAP_EXCEEDED,
         Collect,
@@ -279,8 +287,24 @@ class RunGraph:
     # --- the projection -------------------------------------------------------------------------------------------
 
     def _queue(self, row: StepRow) -> None:
-        """Queue a row for the next projection. A later row of the same attempt replaces it."""
+        """Queue a row for the next projection, as storage will write it: `_take_rows` sizes the rows it sends, and a
+        character strict UTF-8 can't encode would fail that in workflow code, on every retry. A later row of the same
+        attempt replaces it."""
+        row = replace(
+            row,
+            input_preview=storable(row.input_preview),
+            output_preview=storable(row.output_preview),
+            error_code=sanitize(row.error_code),
+            error_message=sanitize(row.error_message),
+        )
         self._rows[(row.step_id, row.iteration_key, row.attempt)] = row
+
+    @staticmethod
+    def _stored(error: dict[str, Any] | None) -> dict[str, Any] | None:
+        """A run's error as storage writes it: the summary and the run's result say the same."""
+        if error is None:
+            return None
+        return {**error, "code": sanitize(error["code"]), "message": sanitize(error["message"])}
 
     def _take_rows(self) -> list[StepRow]:
         """The next projection's rows, oldest first, within PROJECT_BYTES; one row at least. A backlog (after a
@@ -586,6 +610,7 @@ class RunGraph:
         error = end.failure.to_json() if end.failure is not None and end.status != "succeeded" else None
         if error is not None:
             error["message"] = mask(error["message"], self._secrets)
+        error = self._stored(error)
         summary = RunSummary(
             run_id=self.input.run_id,
             status=end.status,
@@ -600,7 +625,7 @@ class RunGraph:
 
     async def _end_early(self, end: RunEnd) -> RunResult:
         """The run ends before it has a program: nothing ran, so only the run is projected."""
-        error = end.failure.to_json() if end.failure is not None else None
+        error = self._stored(end.failure.to_json() if end.failure is not None else None)
         summary = RunSummary(
             run_id=self.input.run_id,
             status=end.status,

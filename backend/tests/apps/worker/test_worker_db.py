@@ -2,6 +2,7 @@
 """A run end to end (spec §8, §9): admitted by `start_run`, executed by `RunGraph`, projected by the worker into
 `runs` and `run_steps` under RLS, and read back through the runs API."""
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -101,3 +102,40 @@ async def test_a_row_the_database_refuses_never_holds_up_the_others_or_the_run(
         run = await runs.get_run(s, run_id)
     assert stored == [(1, "failed"), (3, "succeeded")]
     assert run is not None and (run.status, run.iterations) == ("succeeded", 2)
+
+
+async def test_a_character_the_database_refuses_never_keeps_its_run_open(
+    env: WorkflowEnvironment,
+    owner_sessionmaker: Any,
+    api_sessionmaker: Any,
+    admin_sessionmaker: Any,
+    dispatch_sessionmaker: Any,
+    worker_sessionmaker: Any,
+    api_settings: Any,
+) -> None:
+    """PR #9 review: rows were sized as strict UTF-8 in workflow code, before storage replaced what Postgres refuses.
+    A `fail` node's message read from a trigger with a lone surrogate raised there: the workflow task failed on every
+    retry, no row or summary landed, and the run stayed `running`."""
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    g = G()
+    g.settings = {"input_schema": {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"]}}
+    g.node("f", "flow.fail@1", {"message": ref("trigger.note")})
+    out = await publish(api_sessionmaker, ctx, await create(api_sessionmaker, ctx, g.data()), api_settings)
+    assert out.version is not None
+    async with workers(env.client, DbRunStore(worker_sessionmaker)):
+        run_id = await start_run(
+            dispatch_sessionmaker, env.client, api_settings,
+            tenant_id=ctx.tenant_id, version_id=out.version.id, trigger={"note": "bad \ud800 note"},
+        )  # fmt: skip
+        handle = env.client.get_workflow_handle_for(RunGraph.run, str(run_id))
+        result = await asyncio.wait_for(handle.result(), 30)
+    assert result.status == "failed" and result.error is not None
+    assert (result.error["code"], result.error["message"]) == ("workflow_failed", "bad \ufffd note")
+    async with owner_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        run = await runs.get_run(s, run_id)
+        steps = await runs.run_steps(s, run_id)
+    assert run is not None
+    assert (run.status, run.error_code, run.error_message) == ("failed", "workflow_failed", "bad \ufffd note")
+    assert [r.node_key for r in steps] == ["f"]

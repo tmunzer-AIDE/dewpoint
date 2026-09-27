@@ -10,6 +10,7 @@ from sqlalchemy.exc import DBAPIError
 
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.runs import service
+from dewpoint.engine.runtime import projection
 from tests.support.workflows import seed_workflow
 
 
@@ -138,3 +139,24 @@ async def test_previews_and_messages_hold_nothing_the_database_refuses(
     async with owner_sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant)
         assert (await service.get_run(s, run_id)).error_code == "c�"  # type: ignore[union-attr]
+
+
+HOSTILE: list[Any] = [
+    "plain",
+    "nul\x00 esc\x1b bell\x07 tab\t newline\n",
+    "lone \ud800 and \udfff surrogates",
+    "x" * 900,
+    {"k\x00ey": ["a\ud800b", float("nan"), float("-inf"), 1.5, None, True, {"deep\ud801": "\x00"}]},
+]
+
+
+@pytest.mark.parametrize("value", HOSTILE)
+def test_the_engine_sends_what_storage_writes(value: Any) -> None:
+    """PR #9 review: the workflow sizes a projection by the rows it sends, so it normalizes them as storage will
+    (`engine.runtime.projection` can't import `core`, nor `core` the engine): the same values, and a second pass
+    changes nothing."""
+    assert projection.storable(value) == service.storable(value)
+    assert service.storable(projection.storable(value)) == projection.storable(value)
+    if isinstance(value, str):
+        assert projection.sanitize(value) == service.sanitize(value)
+        assert service.sanitize(projection.sanitize(value)) == projection.sanitize(value)
