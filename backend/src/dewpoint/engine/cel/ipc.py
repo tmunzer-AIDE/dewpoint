@@ -104,6 +104,53 @@ def results_response(outcomes: list[evaluate.Outcome]) -> dict[str, Any]:
     return {"schema": SCHEMA, "results": [o.to_json() for o in outcomes]}
 
 
+# What a reply may record: an evaluation's outcome codes, per binding set or for the whole request, and the
+# request-level refusals. `busy` and `profile_mismatch` are answers the client acts on.
+RESULT_ERRORS = frozenset(
+    {
+        evaluate.ITERATION_BUDGET, evaluate.TYPE_MISMATCH, evaluate.EVALUATION_ERROR, evaluate.NON_JSON,
+        evaluate.OUTPUT_TOO_LARGE, evaluate.INPUT_TOO_LARGE, evaluate.MEMORY_LIMIT, evaluate.CPU_LIMIT,
+        evaluate.TIMEOUT, evaluate.CRASHED,
+    }
+)  # fmt: skip
+REPLY_ERRORS = RESULT_ERRORS | {"invalid_request", "rejected", "busy", "profile_mismatch"}
+
+
+@dataclass(frozen=True)
+class EvaluateReply:
+    outcomes: tuple[evaluate.Outcome, ...] = ()  # one per binding set, unless `error` answers the whole request
+    error: str | None = None
+    message: str = ""
+
+
+def _error(data: Mapping[str, Any], allowed: frozenset[str], envelope: set[str]) -> tuple[str, str] | None:
+    code, text = data.get("error"), data.get("message", "")
+    if set(data) not in ({"error"} | envelope, {"error", "message"} | envelope):
+        return None
+    return (code, text) if isinstance(code, str) and code in allowed and isinstance(text, str) else None
+
+
+def parse_reply(message: Mapping[str, Any], count: int) -> EvaluateReply:
+    """The evaluator's answer to a request with `count` binding sets, strictly: FrameError for anything else,
+    including a number of results other than `count`. The client retries it; it is never recorded."""
+    if set(message) == {"schema", "results"}:
+        results = message["results"]
+        if not isinstance(results, list) or len(results) != count:
+            raise FrameError(f"a reply must carry {count} results")
+        outcomes = []
+        for r in results:
+            if isinstance(r, dict) and set(r) == {"ok"}:
+                outcomes.append(evaluate.Outcome(value=r["ok"]))
+            elif isinstance(r, dict) and (found := _error(r, RESULT_ERRORS, set())) is not None:
+                outcomes.append(evaluate.Outcome(error=found[0], message=found[1]))
+            else:
+                raise FrameError("a result must be {ok} or {error, message} with a known code")
+        return EvaluateReply(tuple(outcomes))
+    if (found := _error(message, REPLY_ERRORS, {"schema"})) is not None:
+        return EvaluateReply(error=found[0], message=found[1])
+    raise FrameError("a reply must be {results} or {error, message} with a known code")
+
+
 def _checked_bindings(request: EvaluateRequest, values: Mapping[str, Any]) -> evaluate.Outcome | None:
     for name, value in values.items():
         if not T.conforms(request.declarations[name], value):

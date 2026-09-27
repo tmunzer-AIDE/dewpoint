@@ -119,3 +119,68 @@ async def test_oversized_requests_are_an_outcome_before_sending(tmp_path: Path) 
     big = request("x", {"x": "y" * (ipc.MAX_REQUEST + 1)})
     got = await cel_client.evaluate_remote(str(tmp_path / "nowhere.sock"), big, served_profile=P)
     assert got[0].error == E.INPUT_TOO_LARGE
+
+
+async def _replying(reply: Any) -> AsyncIterator[str]:
+    """A fake evaluator answering every request with `reply`, framed."""
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await ipc.read_frame(reader, ipc.MAX_REQUEST)
+        writer.write(ipc.encode(reply))
+        await writer.drain()
+        writer.close()
+
+    with tempfile.TemporaryDirectory(dir="/tmp") as d:
+        path = os.path.join(d, "cel.sock")
+        async with await asyncio.start_unix_server(handle, path=path):
+            yield path
+
+
+TWO = request("x + 1", {"x": 1}, {"x": "a"})  # two binding sets
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"schema": ipc.SCHEMA},  # neither results nor an error: was recorded as the error "None"
+        {"schema": ipc.SCHEMA, "results": [{"ok": 2}]},  # one result for two binding sets
+        {"schema": ipc.SCHEMA, "results": [{"ok": 2}, {"ok": 3}, {"ok": 4}]},
+        {"schema": ipc.SCHEMA, "results": "x"},
+        {"schema": ipc.SCHEMA, "results": [{"ok": 2}, {"nope": 1}]},
+        {"schema": ipc.SCHEMA, "results": [{"ok": 2}, {"ok": 3, "error": "timeout"}]},
+        {"schema": ipc.SCHEMA, "results": [{"ok": 2}, {"error": "made_up"}]},
+        {"schema": ipc.SCHEMA, "results": [{"ok": 2}, {"error": ["timeout"]}]},
+        {"schema": ipc.SCHEMA, "error": 5},
+        {"schema": ipc.SCHEMA, "error": "made_up"},
+        {"schema": ipc.SCHEMA, "error": "timeout", "message": 5},
+        {"schema": "other.v9", "results": [{"ok": 2}, {"ok": 3}]},
+        {"schema": ipc.SCHEMA, "results": [{"ok": 2}, {"ok": 3}], "extra": 1},
+    ],
+)
+async def test_a_reply_that_breaks_the_protocol_is_an_infrastructure_error(reply: Any) -> None:
+    """Review finding: a malformed reply must be retried, never recorded as the step's outcome."""
+    gen, path = await _one(lambda: _replying(reply))
+    try:
+        with pytest.raises(cel_client.EvaluatorUnavailable):
+            await cel_client.evaluate_remote(path, TWO, served_profile=P)
+    finally:
+        await gen.aclose()
+
+
+@pytest.mark.parametrize(
+    ("reply", "outcomes"),
+    [
+        (
+            {"schema": ipc.SCHEMA, "results": [{"ok": 2}, {"error": E.TYPE_MISMATCH, "message": "m"}]},
+            [E.Outcome(value=2), E.Outcome(error=E.TYPE_MISMATCH, message="m")],
+        ),
+        ({"schema": ipc.SCHEMA, "error": E.TIMEOUT, "message": "t"}, [E.Outcome(error=E.TIMEOUT, message="t")] * 2),
+        ({"schema": ipc.SCHEMA, "error": "rejected"}, [E.Outcome(error="rejected")] * 2),
+    ],
+)
+async def test_a_well_formed_reply_is_recorded(reply: Any, outcomes: list[E.Outcome]) -> None:
+    gen, path = await _one(lambda: _replying(reply))
+    try:
+        assert await cel_client.evaluate_remote(path, TWO, served_profile=P) == outcomes
+    finally:
+        await gen.aclose()

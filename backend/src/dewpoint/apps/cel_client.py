@@ -3,7 +3,8 @@
 wrapper, its task queue per profile and the identity-gated polling arrive with the worker in 2a-3.
 
 Evaluation outcomes (timeout, limits, errors) come back as values and are recorded. Only infrastructure failures
-raise EvaluatorUnavailable, which the activity lets Temporal retry: unreachable socket, dropped connection, `busy`."""
+raise EvaluatorUnavailable, which the activity lets Temporal retry: unreachable socket, dropped connection, `busy`, or
+a reply the protocol doesn't allow."""
 
 import asyncio
 from typing import Any
@@ -53,12 +54,14 @@ async def evaluate_remote(
     message = request.to_json()
     if len(ipc.encode(message)) - 4 > ipc.MAX_REQUEST:
         return every(evaluate.INPUT_TOO_LARGE, "the referenced values exceed the 4 MiB request limit")
-    response = await call(socket_path, message)
-    if "results" in response:
-        return [evaluate.Outcome.from_json(r) for r in response["results"]]
-    code, text = str(response.get("error")), str(response.get("message", ""))
-    if code == "busy":
+    try:
+        reply = ipc.parse_reply(await call(socket_path, message), count)
+    except ipc.FrameError as e:
+        raise EvaluatorUnavailable(f"the evaluator's reply breaks the protocol: {e}") from e
+    if reply.error is None:
+        return list(reply.outcomes)
+    if reply.error == "busy":
         raise EvaluatorUnavailable("the evaluator is busy")
-    if code == "profile_mismatch":
-        return every(evaluate.PROFILE_UNAVAILABLE, text)
-    return every(code, text)
+    if reply.error == "profile_mismatch":
+        return every(evaluate.PROFILE_UNAVAILABLE, reply.message)
+    return every(reply.error, reply.message)
