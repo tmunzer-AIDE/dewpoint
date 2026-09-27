@@ -48,7 +48,8 @@ async def test_a_switch_takes_its_first_matching_case(env: WorkflowEnvironment) 
 
 async def test_wait_until_waits_durably_then_transform_shapes_values(env: WorkflowEnvironment) -> None:
     store = MemoryStore()
-    until = (await env.get_current_time() + timedelta(days=2)).isoformat()  # the server's clock, not the host's
+    at = await env.get_current_time() + timedelta(days=2)  # the server's clock, not the host's
+    until = at.isoformat()
     g = graph(t=ref("steps.t.output")).node("w", "flow.wait_until@1", {"until": until})
     g.node("t", "flow.transform@1", {"fields": {"double": cel("trigger.x * 2"), "label": "fixed"}}).edge("w", "t")
     async with workers(env.client, store):
@@ -56,7 +57,9 @@ async def test_wait_until_waits_durably_then_transform_shapes_values(env: Workfl
         result = await handle.result()
         info = await handle.describe()
     assert result.outputs == {"t": {"double": 14, "label": "fixed"}}
-    assert info.close_time and info.close_time - info.start_time >= timedelta(days=2)
+    assert (
+        info.close_time and info.close_time >= at
+    )  # the instant, reckoned before the run started: not 2 days after it
 
 
 def failing_loop(on_item_error: str) -> G:
