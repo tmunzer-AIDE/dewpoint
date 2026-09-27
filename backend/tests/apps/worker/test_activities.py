@@ -97,6 +97,18 @@ class Keyed(Node):
         return {"headers": {f"x-{SECRET}": "not-an-int"}, "codes": {428319: "not-an-int"}}
 
 
+class Constructed(Node):
+    """Returns an instance built without validation: `model_construct` holds whatever it's given."""
+
+    type = "testkit.constructed"
+    version = 1
+    title = "Constructed"
+    Output = LiarOutput
+
+    async def run(self, ctx: StepContext, config: Any) -> Any:
+        return LiarOutput.model_construct(n="not-an-int", key="ok")
+
+
 class Broken(Node):
     type = "testkit.broken"
     version = 1
@@ -253,3 +265,11 @@ async def test_cel_evaluate_records_outcomes_and_retries_an_unavailable_evaluato
     with pytest.raises(ApplicationError) as invalid:
         await ActivityEnvironment().run(nowhere, CelInput({"schema": "nope"}))
     assert (invalid.value.type, invalid.value.non_retryable) == ("invalid_request", True)
+
+
+async def test_an_output_instance_is_validated_too() -> None:
+    """Checkpoint-2 finding: an instance of the node's own Output was trusted as it stood, but pydantic validates
+    instances only when they're built through it. It's checked like any other output."""
+    bad = await failure(step_activity_for(Constructed), step("testkit.constructed@1"))
+    assert (bad.type, bad.non_retryable) == ("output_schema_violation", True)
+    assert bad.message == "The output doesn't match `testkit.constructed@1`: n (int_parsing)."

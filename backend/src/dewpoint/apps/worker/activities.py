@@ -23,6 +23,7 @@ from typing import Any, Protocol, get_args
 
 import structlog
 from pydantic import BaseModel, ValidationError
+from pydantic_core import PydanticSerializationError
 from pydantic_core.core_schema import ErrorType
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -143,11 +144,22 @@ def step_activity_for(node: type[Node]) -> Callable[[StepInput], Awaitable[StepR
     async def run_step(step: StepInput) -> StepResult:
         try:
             result, outcome = await _call(node, step, config_schema)
-            output = result if isinstance(result, node.Output) else node.Output.model_validate(result)
+            # an instance too: pydantic trusts instances it didn't build (`model_construct`, assignment)
+            data = (
+                result.model_dump(mode="json", by_alias=True, warnings=False)
+                if isinstance(result, BaseModel)
+                else result
+            )
+            output = node.Output.model_validate(data)
             return StepResult(dump_output(output), outcome)
         except _StepFailed as f:
             details = {"outcome": f.outcome}
             raise ApplicationError(f.message, details, type=f.code, non_retryable=not f.retryable) from None
+        except PydanticSerializationError:
+            message = f"The output doesn't match `{ref}`: it can't be written as JSON."
+            raise ApplicationError(
+                message, {"outcome": None}, type=OUTPUT_SCHEMA_VIOLATION, non_retryable=True
+            ) from None
         except ValidationError as e:
             message = f"The output doesn't match `{ref}`: {_fields(e, output_schema)}"
             raise ApplicationError(

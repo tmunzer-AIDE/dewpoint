@@ -120,6 +120,8 @@ def compile_program(
             if isinstance(value, CelValue) and (str(step.id), field) not in records:
                 raise ProgramError(f"`{step.key}`: no expression record for {field}")
     for path, value in iter_values(graph.settings.outputs, ("settings", "outputs")):
+        if isinstance(value, ValueSyntaxError):  # publish refuses these: the stored version is damaged
+            raise ProgramError(f"output {pointer_str(path)}: {value.message}")
         if isinstance(value, CelValue) and (None, pointer_str(path)) not in records:
             raise ProgramError(f"no expression record for {pointer_str(path)}")
     return Program(

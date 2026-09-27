@@ -125,7 +125,8 @@ class RunGraph:
         """Every way a run ends is projected. Python exceptions in workflow code would fail the workflow task, which
         Temporal retries forever: the run would hang, `running` in the projection. So a version this build can't
         load or compile fails the run (`version_unusable`) before any step runs, and any other exception fails it
-        (`internal_error`)."""
+        (`internal_error`). The workflow's outputs are evaluated under the same deadline and handlers as its steps:
+        a cancel or the deadline while they're computed ends the run as it would anywhere else."""
         self.input = start
         self.started_at = workflow.info().start_time
         try:
@@ -144,24 +145,32 @@ class RunGraph:
             message = f"This build can't run the version ({type(e).__name__}); the worker's log has the details."
             return await self._end_early(RunEnd("failed", Failure(VERSION_UNUSABLE, message)))
         self.sched = Scheduler(self.program)
+        deadline = self.started_at + timedelta(seconds=start.max_run_duration_s)
+        outputs: dict[str, Any] | None = None
+        try:
+            self._prepare(start)
+            await self._drive(deadline)
+            end = self.sched.ended or RunEnd("failed", Failure("error", "The run ended without a result."))
+            if end.status == "succeeded":
+                end, outputs = await self._outputs_by(deadline, end)
+        except asyncio.CancelledError:
+            self.sched.end(RunEnd("cancelled", CANCELLED))
+            await self._finish(RunEnd("cancelled", CANCELLED))
+            raise
+        except Exception as e:  # a bug: the text may quote run data, so it goes to the log, not the projection
+            workflow.logger.error("run_internal_error", exc_info=True)
+            message = f"The interpreter failed ({type(e).__name__}); the worker's log has the details."
+            end, outputs = RunEnd("failed", Failure(INTERNAL_ERROR, message)), None
+        return await self._finish(end, outputs)
+
+    def _prepare(self, start: RunInput) -> None:
+        """What the run knows before its first step: the sensitive values it can see already, and its variables."""
         self._learn(start.trigger, self.program.graph.settings.input_schema)
         for step in self.program.steps.values():  # sensitive literals in plugin configs: masked from the start
             if not step.control:
                 self._learn(resolve.assemble(step.config, {}), self.program.manifests[step.ref]["config_schema"])
         schema = self.program.graph.settings.vars_schema
-        self.vars: dict[str, Any] = {k: p.get("default") for k, p in sorted(schema.get("properties", {}).items())}
-        deadline = self.started_at + timedelta(seconds=start.max_run_duration_s)
-        try:
-            await self._drive(deadline)
-        except asyncio.CancelledError:
-            self.sched.end(RunEnd("cancelled", CANCELLED))
-            await self._finish()
-            raise
-        except Exception as e:  # a bug: the text may quote run data, so it goes to the log, not the projection
-            workflow.logger.error("run_internal_error", exc_info=True)
-            message = f"The interpreter failed ({type(e).__name__}); the worker's log has the details."
-            self.sched.end(RunEnd("failed", Failure(INTERNAL_ERROR, message)))
-        return await self._finish()
+        self.vars = {k: p.get("default") for k, p in sorted(schema.get("properties", {}).items())}
 
     # --- the scheduler loop ----------------------------------------------------------------------------------------
 
@@ -525,14 +534,28 @@ class RunGraph:
 
     # --- the end ---------------------------------------------------------------------------------------------------
 
-    async def _finish(self) -> RunResult:
-        end = self.sched.ended or RunEnd("failed", Failure("error", "The run ended without a result."))
-        outputs: dict[str, Any] | None = None
-        if end.status == "succeeded":
-            try:
-                outputs = await self._outputs()
-            except resolve.ValueFailure as e:
-                end = RunEnd("failed", e.failure)
+    async def _outputs_by(self, deadline: datetime, end: RunEnd) -> tuple[RunEnd, dict[str, Any] | None]:
+        """The workflow's outputs, within the run's deadline. Past it, their evaluation is cancelled and the run ends
+        `deadline_exceeded`; an output that can't be computed fails the run with its code."""
+        task = asyncio.create_task(self._outputs())
+        clock = asyncio.create_task(asyncio.sleep(max(0.0, (deadline - workflow.now()).total_seconds())))
+        try:
+            done, _ = await workflow.wait([task, clock], return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:  # the run was cancelled: so is what it was computing
+            task.cancel()
+            clock.cancel()
+            raise
+        clock.cancel()
+        if task not in done:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            return RunEnd(DEADLINE_EXCEEDED, Failure(DEADLINE_EXCEEDED, "The run passed its deadline.")), None
+        try:
+            return end, task.result()
+        except resolve.ValueFailure as e:
+            return RunEnd("failed", e.failure), None
+
+    async def _finish(self, end: RunEnd, outputs: dict[str, Any] | None = None) -> RunResult:
         error = end.failure.to_json() if end.failure is not None and end.status != "succeeded" else None
         if error is not None:
             error["message"] = mask(error["message"], self._secrets)
@@ -546,7 +569,7 @@ class RunGraph:
         )
         self._queue_settled()
         rows, self._rows = list(self._rows.values()), {}
-        await self._project(rows, summary)
+        await self._project_end(rows, summary)
         return RunResult(status=end.status, outputs=outputs, error=error, iterations=self.sched.iterations)
 
     async def _end_early(self, end: RunEnd) -> RunResult:
@@ -559,7 +582,7 @@ class RunGraph:
             error_code=error["code"] if error else None,
             error_message=error["message"] if error else None,
         )
-        await self._project([], summary)
+        await self._project_end([], summary)
         return RunResult(status=end.status, error=error)
 
     async def _outputs(self) -> dict[str, Any]:
@@ -568,6 +591,14 @@ class RunGraph:
         values, _ = await self._values(None, pairs, ())
         assembled = resolve.assemble({"settings": {"outputs": settings_outputs}}, values)
         return dict(assembled["settings"]["outputs"])
+
+    async def _project_end(self, rows: list[StepRow], summary: RunSummary) -> None:
+        """The run's last projection. A cancel that arrives while it's written comes too late to unmake the end it
+        records: the write is repeated and the run's result stands, so the projection and Temporal agree."""
+        try:
+            await self._project(rows, summary)
+        except asyncio.CancelledError:
+            await self._project(rows, summary)
 
     async def _project(self, rows: list[StepRow], summary: RunSummary | None = None) -> None:
         await workflow.execute_activity(

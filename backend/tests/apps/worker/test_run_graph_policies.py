@@ -15,7 +15,7 @@ from temporalio.worker import UnsandboxedWorkflowRunner
 
 from dewpoint.engine.graph.validate import SubflowInfo
 from dewpoint.engine.runtime import nodes
-from dewpoint.engine.runtime.activities import ENGINE_QUEUE, PROJECT, ProjectInput, RunInput
+from dewpoint.engine.runtime.activities import CEL_EVALUATE, ENGINE_QUEUE, PROJECT, ProjectInput, RunInput
 from dewpoint.engine.runtime.workflow import RunGraph
 from tests.apps.worker.harness import TENANT, MemoryStore, run, start, workers
 from tests.support.graphs import G, cel, ref, template
@@ -411,3 +411,81 @@ async def test_a_sensitive_config_value_is_masked_where_it_is_copied_or_echoed(e
     assert rows["p"].input_preview == {"outcome": "rejected", "token": "[redacted]"}
     assert rows["p"].error_message == rows["q"].error_message == "the receiver rejected the request for [redacted]"
     assert token not in repr(store.rows) + repr(store.runs) and passed not in repr(store.rows) + repr(store.runs)
+
+
+async def output_evaluation_started(handle: Any) -> None:
+    """Wait until the run is evaluating its outputs: their `cel.evaluate` is scheduled."""
+    while True:
+        for event in (await handle.fetch_history()).events:
+            if event.HasField("activity_task_scheduled_event_attributes"):
+                if event.activity_task_scheduled_event_attributes.activity_type.name == CEL_EVALUATE:
+                    return
+        await asyncio.sleep(0.05)
+
+
+async def test_a_cancel_while_the_outputs_are_evaluated_projects_cancelled(env: WorkflowEnvironment) -> None:
+    """Checkpoint-2 finding: the outputs were evaluated outside the run's cancellation handler, so a cancel then
+    closed the workflow with nothing projected: the run stayed `running`."""
+    store = MemoryStore()
+    g = graph(n=cel("trigger.x + 1")).node("a", ECHO)
+    async with workers(env.client, store, evaluate=None):  # no evaluator: the output's CEL waits for one
+        handle = await start(env.client, store, g, TRIGGER, cel_schedule_to_start_s=60)
+        await asyncio.wait_for(output_evaluation_started(handle), 10)
+        await handle.cancel()
+        with pytest.raises(WorkflowFailureError):
+            await asyncio.wait_for(handle.result(), 10)
+    assert store.runs[handle.id].status == "cancelled"
+
+
+async def test_the_deadline_holds_while_the_outputs_are_evaluated(env: WorkflowEnvironment) -> None:
+    """Checkpoint-2 finding: past the deadline, a run waited on its outputs' evaluator and ended as its failure."""
+    store = MemoryStore()
+    g = graph(n=cel("trigger.x + 1")).node("a", ECHO)
+    async with workers(env.client, store, evaluate=None):
+        handle = await start(env.client, store, g, TRIGGER, max_run_duration_s=1, cel_schedule_to_start_s=5)
+        result = await asyncio.wait_for(handle.result(), 10)
+    assert (result.status, result.error and result.error["code"]) == ("deadline_exceeded", "deadline_exceeded")
+    assert store.runs[handle.id].status == "deadline_exceeded"
+
+
+async def test_a_damaged_output_fails_the_run_as_unusable(env: WorkflowEnvironment) -> None:
+    store = MemoryStore()
+    version_id = store.add(graph(n=ref("trigger.x")).node("a", ECHO))
+    damaged = {**store.versions[version_id].graph}
+    damaged["settings"] = {**damaged["settings"], "outputs": {"n": {"$value": {"kind": "ref", "path": 5}}}}
+    store.versions[version_id] = dataclasses.replace(store.versions[version_id], graph=damaged)
+    run_id = str(uuid.uuid4())
+    async with workers(env.client, store):
+        handle = await env.client.start_workflow(
+            RunGraph.run, RunInput(TENANT, run_id, version_id, TRIGGER), id=run_id, task_queue=ENGINE_QUEUE
+        )
+        result = await asyncio.wait_for(handle.result(), 10)
+    assert result.error and result.error["code"] == "version_unusable" and store.steps(run_id) == []
+
+
+class HeldStore(MemoryStore):
+    """Holds the run's summary write open until the test lets it go: a cancel can arrive in between."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.writing, self.release = asyncio.Event(), asyncio.Event()
+
+    async def project(self, data: ProjectInput) -> None:
+        if data.run is not None and not self.writing.is_set():
+            self.writing.set()
+            await self.release.wait()
+        await super().project(data)
+
+
+async def test_a_cancel_after_the_run_concluded_leaves_its_outcome(env: WorkflowEnvironment) -> None:
+    """A cancel that arrives while the run's end is being written can't unmake that end: the write is repeated and
+    the run's own result stands, so the projection and Temporal agree."""
+    store = HeldStore()
+    g = graph(v=ref("steps.a.output.value")).node("a", ECHO, {"value": 1})
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, TRIGGER)
+        await asyncio.wait_for(store.writing.wait(), 10)
+        await handle.cancel()
+        store.release.set()
+        result = await asyncio.wait_for(handle.result(), 10)
+    assert (result.status, result.outputs, store.runs[handle.id].status) == ("succeeded", {"v": 1}, "succeeded")

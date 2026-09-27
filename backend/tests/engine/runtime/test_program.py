@@ -41,3 +41,13 @@ def test_a_version_this_build_cannot_run_is_refused() -> None:
     records = [r for r in expressions(g) if r["node"] is not None]
     with pytest.raises(ProgramError, match="no expression record for /settings/outputs/n"):
         compile_program(g.data(), MANIFESTS, records, CURRENT_CEL_PROFILE)
+
+
+def test_a_damaged_output_is_refused() -> None:
+    """Checkpoint-2 finding: compile checked the outputs' CEL records but not their envelopes, so a malformed output
+    compiled, and evaluating it later raised outside the run's handlers."""
+    g = graph()
+    records = expressions(g)
+    g.settings["outputs"] = {"n": {"$value": {"kind": "ref", "path": 5}}}  # publish refuses this; a damaged row
+    with pytest.raises(ProgramError, match="/settings/outputs/n"):
+        compile_program(g.data(), MANIFESTS, records, CURRENT_CEL_PROFILE)
