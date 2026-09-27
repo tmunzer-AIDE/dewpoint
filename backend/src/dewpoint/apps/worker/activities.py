@@ -22,7 +22,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any, Protocol, get_args
 
 import structlog
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, FormatChecker
 from pydantic import BaseModel, ValidationError
 from pydantic_core import PydanticSerializationError
 from pydantic_core.core_schema import ErrorType
@@ -69,6 +69,10 @@ UNEXPECTED_ERROR = "unexpected_error"
 INVALID_REQUEST = "invalid_request"
 _log = structlog.get_logger("dewpoint.worker")
 _PYDANTIC_CODES = frozenset(get_args(ErrorType))  # every built-in validation error type
+# The `format`s an emitted output is checked for: those whose checks agree with what pydantic emits, and need no
+# optional library. `date-time` isn't one (RFC 3339 wants an offset; pydantic emits naive datetimes without one).
+# Listing them keeps the check from changing when an optional format library happens to be installed.
+CHECKED_FORMATS = ("date", "time", "uuid", "email", "ipv4", "ipv6", "regex")
 
 
 class RunStore(Protocol):
@@ -141,7 +145,7 @@ def step_activity_for(node: type[Node]) -> Callable[[StepInput], Awaitable[StepR
     ref = f"{node.type}@{node.version}"
     config_schema = node.Config.model_json_schema(mode="validation")
     output_schema = node_manifest(node)["output_schema"]  # what the node promises to emit: serialized and closed
-    emitted = Draft202012Validator(output_schema)
+    emitted = Draft202012Validator(output_schema, format_checker=FormatChecker(formats=CHECKED_FORMATS))
 
     @activity.defn(name=step_activity(ref))
     async def run_step(step: StepInput) -> StepResult:
@@ -224,6 +228,7 @@ def cel_activity(evaluate: Evaluate) -> Callable[[CelInput], Awaitable[CelResult
 
 
 __all__ = [
+    "CHECKED_FORMATS",
     "CONFIG_INVALID",
     "INVALID_REQUEST",
     "OUTPUT_SCHEMA_VIOLATION",

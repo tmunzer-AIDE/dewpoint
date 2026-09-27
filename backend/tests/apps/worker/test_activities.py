@@ -4,6 +4,8 @@ runs one attempt of the node and writes nothing: `RunGraph` counts the attempts 
 
 import asyncio
 import dataclasses
+import datetime
+import ipaddress
 import os
 import tempfile
 import uuid
@@ -13,12 +15,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from jsonschema import FormatChecker
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 from pydantic_core import PydanticCustomError
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
-from dewpoint.apps.worker.activities import cel_activity, remote_evaluator, step_activity_for
+from dewpoint.apps.worker.activities import CHECKED_FORMATS, cel_activity, remote_evaluator, step_activity_for
 from dewpoint.apps.worker.context import idempotency_key
 from dewpoint.engine.cel import ipc
 from dewpoint.engine.cel import types as T
@@ -109,6 +112,10 @@ class Constructed(Node):
         return LiarOutput.model_construct(n="not-an-int", key="ok")
 
 
+class FormatsConfig(BaseModel):
+    valid: bool
+
+
 class Tagged(BaseModel):
     """A valid output whose field serializer changes the type: an `int` is emitted as text, as its schema says."""
 
@@ -127,6 +134,29 @@ class Serialized(Node):
 
     async def run(self, ctx: StepContext, config: Any) -> Any:
         return Tagged(id=3)
+
+
+class Formatted(BaseModel):
+    """Values whose output schema declares a `format`, as pydantic writes it."""
+
+    id: uuid.UUID
+    at: datetime.datetime
+    on: datetime.date
+    ip: ipaddress.IPv4Address
+
+
+class Formats(Node):
+    type = "testkit.formats"
+    version = 1
+    title = "Formats"
+    Config = FormatsConfig
+    Output = Formatted
+
+    async def run(self, ctx: StepContext, config: FormatsConfig) -> Any:
+        valid = Formatted(
+            id=uuid.UUID(int=5), at=datetime.datetime(2026, 9, 27, 10, 0), on=datetime.date(2026, 9, 27), ip="10.0.0.1"
+        )
+        return valid if config.valid else Formatted.model_construct(**{**dict(valid), "id": "not-a-uuid"})
 
 
 class Broken(Node):
@@ -293,6 +323,24 @@ async def test_an_output_instance_is_validated_too() -> None:
     bad = await failure(step_activity_for(Constructed), step("testkit.constructed@1"))
     assert (bad.type, bad.non_retryable) == ("output_schema_violation", True)
     assert bad.message == "The output doesn't match `testkit.constructed@1`: n (type)."  # the output schema's rule
+
+
+async def test_an_instance_breaking_a_format_is_refused_and_valid_formats_pass() -> None:
+    """Checkpoint-2 re-review: without a format checker, `format: uuid` held nothing. The formats checked are the ones
+    whose checks agree with what pydantic emits: a naive datetime is valid output, so `date-time` isn't checked."""
+    bad = await failure(step_activity_for(Formats), step("testkit.formats@1", {"valid": False}))
+    assert (bad.type, bad.message) == (
+        "output_schema_violation",
+        "The output doesn't match `testkit.formats@1`: id (format).",
+    )
+    assert set(FormatChecker(formats=CHECKED_FORMATS).checkers) == set(CHECKED_FORMATS)  # each one really checked
+    good = await call(step_activity_for(Formats), step("testkit.formats@1", {"valid": True}))
+    assert good.output == {
+        "id": str(uuid.UUID(int=5)),
+        "at": "2026-09-27T10:00:00",
+        "on": "2026-09-27",
+        "ip": "10.0.0.1",
+    }
 
 
 async def test_a_field_serializer_emits_what_the_output_schema_declares() -> None:
