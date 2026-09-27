@@ -77,8 +77,9 @@ what 2a-3 consumes. The owner split 2a-3 into three plans on 2026-09-27:
    codes show now (decision 21).
 10. **Execution's checkpoint 1 found two more gaps**, fixed test-first on `feat/engine-2a3a` and carried into this
     plan:
-    - redaction ignored `patternProperties`. Probing pydantic's schemas found the same gap for tuple positions
-      (`prefixItems`) and sensitive keys (`propertyNames`) (decision 21);
+    - redaction ignored `patternProperties`, and then, for a declared key a pattern also covers. Probing pydantic's
+      schemas found the same gap for tuple positions (`prefixItems`) and sensitive keys (`propertyNames`)
+      (decision 21);
     - the iteration cap left a loop's opened iterations running (decision 3).
 
 Not run during planning: the new dependency install (Task 4 downloads it, with the owner's confirmation), and CI.
@@ -262,8 +263,9 @@ field declared elsewhere: both closed in decision 21 by walking the schema along
     - **Redaction follows the schema everywhere.** A field marked `x-sensitive` is redacted behind local `$ref`s and in
       every branch of `anyOf`, `oneOf` and `allOf`: sensitive in one branch means redacted in all. Pydantic writes
       every nested or optional model that way.
-      - A patterned-key map's values are redacted under every `patternProperties` schema, matched or not: no regex
-        runs on data in the workflow.
+      - Every `patternProperties` schema applies to every key of its object, matched or not and declared keys
+        included (JSON Schema applies a declared property and a matching pattern together). No regex runs on data in
+        the workflow; a sensitive pattern over-redacts rather than leaks.
       - A tuple's position is redacted by its `prefixItems` schema.
       - A map whose keys are sensitive (`propertyNames`) is redacted whole, and its keys are learned (checkpoint 1).
     - **Learned values are masked.** The workflow remembers the strings found at sensitive positions of:
@@ -1893,7 +1895,7 @@ sensitive are masked wherever they reappear, and oversize previews are truncated
 from typing import Annotated, Any
 
 import pytest
-from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
 from dewpoint.engine.runtime.projection import (
     MIN_SECRET,
@@ -1978,10 +1980,19 @@ def test_redaction_follows_references_and_unions() -> None:
 Secret = Annotated[str, sensitive()]
 
 
+class Overlap(BaseModel):
+    """A declared field that a sensitive pattern also covers: JSON Schema applies both to it."""
+
+    model_config = ConfigDict(json_schema_extra={"patternProperties": {"^x-": {"type": "string", "x-sensitive": True}}})
+    token: str = Field(alias="x-token")
+    name: str
+
+
 class Shapes(BaseModel):
     patterned: dict[Annotated[str, StringConstraints(pattern=r"^x-")], Secret]  # patternProperties
     pair: tuple[str, Secret]  # prefixItems
     keyed: dict[Secret, int]  # propertyNames: the keys are the secret
+    overlap: Overlap  # properties and patternProperties at once
 
 
 class ShapesNode(Node):
@@ -1999,9 +2010,19 @@ def test_redaction_covers_patterned_maps_tuples_and_sensitive_keys() -> None:
     so the credential showed and was never learned. Tuple positions (`prefixItems`) and sensitive keys
     (`propertyNames`) had the same gap."""
     schema = node_manifest(ShapesNode)["output_schema"]
-    value = {"patterned": {"x-api": "k3y-one"}, "pair": ["public", "k3y-two"], "keyed": {"k3y-three": 1}}
-    assert preview(value, schema) == {"patterned": {"x-api": REDACTED}, "pair": ["public", REDACTED], "keyed": REDACTED}
-    assert sensitive_values(value, schema) == ["k3y-one", "k3y-two", "k3y-three"]
+    value = {
+        "patterned": {"x-api": "k3y-one"},
+        "pair": ["public", "k3y-two"],
+        "keyed": {"k3y-three": 1},
+        "overlap": {"x-token": "k3y-four", "name": "n"},  # checkpoint-1 re-review: a declared key a pattern covers
+    }
+    assert preview(value, schema) == {
+        "patterned": {"x-api": REDACTED},
+        "pair": ["public", REDACTED],
+        "keyed": REDACTED,
+        "overlap": {"x-token": REDACTED, "name": REDACTED},  # every pattern applies, matched or not: over-redaction
+    }
+    assert sensitive_values(value, schema) == ["k3y-one", "k3y-two", "k3y-three", "k3y-four", "n"]
 
 
 def test_a_recursive_schema_ends() -> None:
@@ -2424,9 +2445,9 @@ Create `backend/src/dewpoint/engine/runtime/projection.py`:
 # SPDX-License-Identifier: Apache-2.0
 """Previews for `run_steps` (spec §8). The projection is tenant-readable, so:
 - a field its schema marks `x-sensitive` becomes "[redacted]" wherever the schema puts it: behind local `$ref`s, in
-  any branch of `anyOf`, `oneOf` or `allOf` (sensitive in one branch, redacted in all), as a patterned-key map's value
-  (`patternProperties`) and at a tuple's position (`prefixItems`); a map whose keys are sensitive (`propertyNames`) is
-  redacted whole;
+  any branch of `anyOf`, `oneOf` or `allOf` (sensitive in one branch, redacted in all), under any `patternProperties`
+  schema of its object (declared keys included: JSON Schema applies both) and at a tuple's position (`prefixItems`);
+  a map whose keys are sensitive (`propertyNames`) is redacted whole;
 - a value the run learned is sensitive (MIN_SECRET characters or more) is masked wherever it reappears, in strings and
   keys: copied by a transform, embedded by a template, echoed by an error message;
 - a preview larger than 8 KiB of canonical JSON becomes "[truncated]".
@@ -2473,26 +2494,33 @@ def _branches(schema: Any, root: Mapping[str, Any], depth: int = 0) -> list[Mapp
     return out
 
 
+def _patterns(branch: Mapping[str, Any]) -> list[Any]:
+    """Every `patternProperties` schema, matched or not: no regex runs on data in the workflow, so a sensitive
+    pattern redacts every key's value in its object, declared keys included (over-redaction, never a leak)."""
+    patterns = branch.get("patternProperties")
+    return list(patterns.values()) if isinstance(patterns, Mapping) else []
+
+
 def _map_values(branches: list[Mapping[str, Any]]) -> list[Any]:
-    """The schemas that may govern an undeclared key's value: `additionalProperties` and every `patternProperties`
-    schema. Every pattern, matched or not: no regex runs on data in the workflow, and a sensitive pattern's values
-    are redacted whichever key holds them."""
+    """The schemas that may govern an undeclared key's value: `additionalProperties` and every pattern."""
     out: list[Any] = []
     for b in branches:
         if isinstance(b.get("additionalProperties"), Mapping):
             out.append(b["additionalProperties"])
-        patterns = b.get("patternProperties")
-        if isinstance(patterns, Mapping):
-            out.extend(patterns.values())
+        out.extend(_patterns(b))
     return out
 
 
 def _children(branches: list[Mapping[str, Any]], key: str) -> list[Any]:
-    """The schemas that may govern `key`'s value: its declared property, or else the map's value schemas."""
+    """The schemas that may govern `key`'s value. JSON Schema applies a declared property and every matching pattern
+    together; `additionalProperties` only to keys neither covers."""
     out: list[Any] = []
     for b in branches:
         props = b.get("properties")
-        out.extend([props[key]] if isinstance(props, Mapping) and key in props else _map_values([b]))
+        if isinstance(props, Mapping) and key in props:
+            out += [props[key], *_patterns(b)]
+        else:
+            out += _map_values([b])
     return out
 
 
@@ -2588,9 +2616,10 @@ def location(loc: Sequence[str | int], schema: Mapping[str, Any]) -> str:
         found: list[Any] = []
         if isinstance(part, str):
             found = [
-                b["properties"][part]
+                c
                 for b in branches
                 if isinstance(b.get("properties"), Mapping) and part in b["properties"]
+                for c in (b["properties"][part], *_patterns(b))
             ]
         elif isinstance(part, int):
             for b in branches:

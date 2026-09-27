@@ -932,8 +932,9 @@ before any step runs, and any other exception in workflow code fails it with `in
   - Control nodes are projected at each scheduler await.
   - The worker writes through the worker DB role inside `tenant_scope`.
 - **Redaction:** `x-sensitive` fields become `"[redacted]"`, and oversize previews become `"[truncated]"`.
-  Redaction follows local `$ref`s, every branch of `anyOf`, `oneOf` and `allOf`, every `patternProperties` schema of a
-  map and each tuple position (`prefixItems`); a map whose keys are sensitive (`propertyNames`) is redacted whole.
+  Redaction follows local `$ref`s, every branch of `anyOf`, `oneOf` and `allOf`, every `patternProperties` schema of
+  an object (for every key, declared ones included) and each tuple position (`prefixItems`); a map whose keys are
+  sensitive (`propertyNames`) is redacted whole.
   Strings the run has seen at sensitive positions (of plugin outputs and configs, and of the trigger by its input
   schema; 4 characters or more) are masked wherever they reappear, CEL errors included. Messages never quote input:
   validation errors give the location only as far as the schema declares it (map keys, numeric or not, show as `*`)
