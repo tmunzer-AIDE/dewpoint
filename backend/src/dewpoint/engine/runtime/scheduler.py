@@ -356,26 +356,29 @@ class Scheduler:
         loop.open.remove(index)
         loop.collecting.discard(index)
         if loop.stop_on_error:
-            del self.loops[loop.instance]
-            key = self.program.steps[loop.instance.step].key
-            for other in loop.open:  # stop: the loop's other iterations end too
-                self._fail_scope(self.scopes[(*loop.instance.scope, (key, other))], failure, report=False)
-            parent = self.scopes[loop.instance.scope]
-            if parent.failure is None and self.ended is None:
-                self.fail(loop.instance, failure)
+            self._abort(loop, failure)
             return
         loop.failures.append({"index": index, "code": failure.code, "message": failure.message})
         self._advance(loop)
+
+    def _abort(self, loop: LoopRun, failure: Failure) -> None:
+        """The loop ends early (an iteration failed under `stop`, or the run reached its iteration cap): its open
+        iterations end first, running steps cancelled and queued ones dropped, and then the loop step fails, so its
+        own `on_error` applies. Nothing the loop opened outlives it."""
+        del self.loops[loop.instance]
+        key = self.program.steps[loop.instance.step].key
+        for other in loop.open:
+            self._fail_scope(self.scopes[(*loop.instance.scope, (key, other))], failure, report=False)
+        parent = self.scopes[loop.instance.scope]
+        if parent.failure is None and self.ended is None:
+            self.fail(loop.instance, failure)
 
     def _advance(self, loop: LoopRun) -> None:
         """Open iterations up to the concurrency, or complete the loop when every item is done."""
         step = self.program.steps[loop.instance.step]
         while loop.next < len(loop.items) and len(loop.open) < loop.concurrency:
             if not self.debit(1):
-                del self.loops[loop.instance]
-                self.fail(
-                    loop.instance, Failure(ITERATION_CAP_EXCEEDED, "This run reached its limit of loop iterations.")
-                )
+                self._abort(loop, Failure(ITERATION_CAP_EXCEEDED, "This run reached its limit of loop iterations."))
                 return
             index = loop.next
             loop.next += 1

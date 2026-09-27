@@ -2,10 +2,10 @@
 """`run_steps` previews (spec §8): `x-sensitive` fields are redacted wherever the schema puts them, values learned to be
 sensitive are masked wherever they reappear, and oversize previews are truncated."""
 
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError
 
 from dewpoint.engine.runtime.projection import (
     MIN_SECRET,
@@ -85,6 +85,35 @@ def test_redaction_follows_references_and_unions() -> None:
         "many": [{"user": "w", "secret": REDACTED}],
     }
     assert preview({"cred": None, "maybe": None, "many": []}, NESTED) == {"cred": None, "maybe": None, "many": []}
+
+
+Secret = Annotated[str, sensitive()]
+
+
+class Shapes(BaseModel):
+    patterned: dict[Annotated[str, StringConstraints(pattern=r"^x-")], Secret]  # patternProperties
+    pair: tuple[str, Secret]  # prefixItems
+    keyed: dict[Secret, int]  # propertyNames: the keys are the secret
+
+
+class ShapesNode(Node):
+    type = "testkit.shapes"
+    version = 1
+    title = "Shapes"
+    Output = Shapes
+
+    async def run(self, ctx: Any, config: Any) -> Shapes:
+        raise NotImplementedError
+
+
+def test_redaction_covers_patterned_maps_tuples_and_sensitive_keys() -> None:
+    """Checkpoint-1 finding: a patterned-key map's values sit under `patternProperties`, which redaction didn't read,
+    so the credential showed and was never learned. Tuple positions (`prefixItems`) and sensitive keys
+    (`propertyNames`) had the same gap."""
+    schema = node_manifest(ShapesNode)["output_schema"]
+    value = {"patterned": {"x-api": "k3y-one"}, "pair": ["public", "k3y-two"], "keyed": {"k3y-three": 1}}
+    assert preview(value, schema) == {"patterned": {"x-api": REDACTED}, "pair": ["public", REDACTED], "keyed": REDACTED}
+    assert sensitive_values(value, schema) == ["k3y-one", "k3y-two", "k3y-three"]
 
 
 def test_a_recursive_schema_ends() -> None:

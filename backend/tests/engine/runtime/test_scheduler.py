@@ -240,6 +240,38 @@ def test_the_iteration_cap_fails_the_loop() -> None:
     assert s.ended.failure.code == "iteration_cap_exceeded"
 
 
+def test_the_iteration_cap_ends_the_loops_queued_iterations_too() -> None:
+    """Checkpoint-1 finding: the cap failed the loop but left the iterations it had already opened. With `continue`,
+    the steps after the loop ran beside them, and the run could end with a child unsettled."""
+    g = loop_graph()
+    g.nodes[0]["options"]["on_error"] = "continue"
+    s = Scheduler(program(g), iteration_cap=2)
+    s.start()
+    [loop] = s.take_ready()
+    s.open_loop(loop, [1, 2, 3], concurrency=3, stop_on_error=True)  # opens 0 and 1, then the third hits the cap
+    assert ready(s) == ["after"]  # the queued iterations never start
+    assert s.take_cancels() == [] and s.scopes[()].results["l"]["error"]["code"] == "iteration_cap_exceeded"
+
+
+def test_the_iteration_cap_cancels_the_loops_running_iterations() -> None:
+    g = loop_graph()
+    g.nodes[0]["options"]["on_error"] = "continue"
+    s = Scheduler(program(g), iteration_cap=2)
+    s.start()
+    [loop] = s.take_ready()
+    s.open_loop(loop, [1, 2, 3], concurrency=2, stop_on_error=True)
+    x0, x1 = s.take_ready()
+    s.succeed(x0, {})
+    [y0] = s.take_ready()
+    s.succeed(y0, {})
+    [collect] = s.take_collects()
+    s.collected(collect.loop, collect.index, "first")  # the third iteration hits the cap while l:1 still runs
+    assert [name(s, i) for i in s.take_cancels()] == ["l:1/x"]
+    assert ready(s) == ["after"]
+    s.succeed(x1, {})  # the cancelled iteration's late result counts for nothing
+    assert s.take_ready() == [] and "y" not in s.scopes[(("l", 1),)].results
+
+
 def test_a_stop_ends_the_run_and_cancels_running_work() -> None:
     s = started(G().node("a", ECHO).node("b", ECHO))
     a, _ = s.take_ready()

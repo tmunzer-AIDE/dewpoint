@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Previews for `run_steps` (spec §8). The projection is tenant-readable, so:
-- a field its schema marks `x-sensitive` becomes "[redacted]" wherever the schema puts it: behind local `$ref`s, and in
-  any branch of `anyOf`, `oneOf` or `allOf` (sensitive in one branch, redacted in all);
+- a field its schema marks `x-sensitive` becomes "[redacted]" wherever the schema puts it: behind local `$ref`s, in
+  any branch of `anyOf`, `oneOf` or `allOf` (sensitive in one branch, redacted in all), as a patterned-key map's value
+  (`patternProperties`) and at a tuple's position (`prefixItems`); a map whose keys are sensitive (`propertyNames`) is
+  redacted whole;
 - a value the run learned is sensitive (MIN_SECRET characters or more) is masked wherever it reappears, in strings and
   keys: copied by a transform, embedded by a template, echoed by an error message;
 - a preview larger than 8 KiB of canonical JSON becomes "[truncated]".
@@ -48,15 +50,42 @@ def _branches(schema: Any, root: Mapping[str, Any], depth: int = 0) -> list[Mapp
     return out
 
 
+def _map_values(branches: list[Mapping[str, Any]]) -> list[Any]:
+    """The schemas that may govern an undeclared key's value: `additionalProperties` and every `patternProperties`
+    schema. Every pattern, matched or not: no regex runs on data in the workflow, and a sensitive pattern's values
+    are redacted whichever key holds them."""
+    out: list[Any] = []
+    for b in branches:
+        if isinstance(b.get("additionalProperties"), Mapping):
+            out.append(b["additionalProperties"])
+        patterns = b.get("patternProperties")
+        if isinstance(patterns, Mapping):
+            out.extend(patterns.values())
+    return out
+
+
 def _children(branches: list[Mapping[str, Any]], key: str) -> list[Any]:
+    """The schemas that may govern `key`'s value: its declared property, or else the map's value schemas."""
     out: list[Any] = []
     for b in branches:
         props = b.get("properties")
-        if isinstance(props, Mapping) and key in props:
-            out.append(props[key])
-        elif isinstance(b.get("additionalProperties"), Mapping):
-            out.append(b["additionalProperties"])
+        out.extend([props[key]] if isinstance(props, Mapping) and key in props else _map_values([b]))
     return out
+
+
+def _elements(branches: list[Mapping[str, Any]], index: int) -> list[Any]:
+    """The schemas that may govern a list's element `index`: its tuple position (`prefixItems`), and `items`."""
+    out: list[Any] = [b["items"] for b in branches if isinstance(b.get("items"), Mapping)]
+    for b in branches:
+        prefix = b.get("prefixItems")
+        if isinstance(prefix, list) and index < len(prefix):
+            out.append(prefix[index])
+    return out
+
+
+def _keys_sensitive(branches: list[Mapping[str, Any]], root: Mapping[str, Any]) -> bool:
+    names = [b["propertyNames"] for b in branches if isinstance(b.get("propertyNames"), Mapping)]
+    return any(n.get(SENSITIVE) is True for s in names for n in _branches(s, root))
 
 
 def _walk(value: Any, schemas: list[Any], root: Mapping[str, Any], found: list[Any] | None) -> Any:
@@ -67,10 +96,15 @@ def _walk(value: Any, schemas: list[Any], root: Mapping[str, Any], found: list[A
             found.append(value)
         return REDACTED
     if isinstance(value, dict):
+        if _keys_sensitive(branches, root):  # the keys are the secret: the whole map goes, its keys are learned
+            if found is not None:
+                found.extend(value)
+                for k, v in value.items():
+                    _walk(v, _children(branches, k), root, found)
+            return REDACTED
         return {k: _walk(v, _children(branches, k), root, found) for k, v in value.items()}
     if isinstance(value, list):
-        items = [b["items"] for b in branches if isinstance(b.get("items"), Mapping)]
-        return [_walk(v, items, root, found) for v in value]
+        return [_walk(v, _elements(branches, i), root, found) for i, v in enumerate(value)]
     return value
 
 
@@ -147,9 +181,7 @@ def location(loc: Sequence[str | int], schema: Mapping[str, Any]) -> str:
             candidates = found
         else:
             parts.append("*")
-            candidates = [
-                b["additionalProperties"] for b in branches if isinstance(b.get("additionalProperties"), Mapping)
-            ]
+            candidates = _map_values(branches)
     return ".".join(parts) or "(root)"
 
 
