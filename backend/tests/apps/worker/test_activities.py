@@ -159,6 +159,21 @@ class Formats(Node):
         return valid if config.valid else Formatted.model_construct(**{**dict(valid), "id": "not-a-uuid"})
 
 
+class Timed(BaseModel):
+    precise: datetime.time
+    zoned: datetime.time
+
+
+class Times(Node):
+    type = "testkit.times"
+    version = 1
+    title = "Times"
+    Output = Timed
+
+    async def run(self, ctx: StepContext, config: Any) -> Any:
+        return Timed(precise=datetime.time(10, 0, 0, 123456), zoned=datetime.time(10, 0, tzinfo=datetime.UTC))
+
+
 def _buggy(value: str) -> str:
     """A validator with a bug: it raises something other than ValueError, and the error quotes the value."""
     raise KeyError(value)
@@ -406,6 +421,15 @@ async def test_an_instance_breaking_a_format_is_refused_and_valid_formats_pass()
         "on": "2026-09-27",
         "ip": "10.0.0.1",
     }
+
+
+async def test_times_pydantic_emits_are_valid_output() -> None:
+    """Final review: without an optional library, jsonschema checks `time` as `HH:MM:SS` and refuses the
+    fractions and zones pydantic writes for valid times; with it, it wants a zone. `time` isn't checked."""
+    assert await call(step_activity_for(Times), step("testkit.times@1")) == StepResult(
+        {"precise": "10:00:00.123456", "zoned": "10:00:00Z"}, "applied"
+    )
+    assert "time" not in CHECKED_FORMATS
 
 
 async def test_a_field_serializer_emits_what_the_output_schema_declares() -> None:

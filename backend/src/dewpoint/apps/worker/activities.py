@@ -74,9 +74,10 @@ INVALID_REQUEST = "invalid_request"
 _log = structlog.get_logger("dewpoint.worker")
 _PYDANTIC_CODES = frozenset(get_args(ErrorType))  # every built-in validation error type
 # The `format`s an emitted output is checked for: those whose checks agree with what pydantic emits, and need no
-# optional library. `date-time` isn't one (RFC 3339 wants an offset; pydantic emits naive datetimes without one).
-# Listing them keeps the check from changing when an optional format library happens to be installed.
-CHECKED_FORMATS = ("date", "time", "uuid", "email", "ipv4", "ipv6", "regex")
+# optional library. `date-time` and `time` aren't: RFC 3339 wants an offset, which pydantic's naive values lack, and
+# without the optional library `time` is checked as `HH:MM:SS`, refusing fractions and zones. Listing them keeps the
+# check from changing when an optional format library happens to be installed.
+CHECKED_FORMATS = ("date", "uuid", "email", "ipv4", "ipv6", "regex")
 
 
 class RunStore(Protocol):
