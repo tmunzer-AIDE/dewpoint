@@ -290,3 +290,28 @@ async def test_publish_stores_every_expression_with_its_class(
         "local",
     )
     assert record.iterations == 3 and record.to_json() == stored
+
+
+async def test_a_writer_sees_what_was_committed_while_its_session_held_the_workflow(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    """A session may hold the `Workflow` from before its lock: the writer must act on what's committed, not on that
+    copy. Here another transaction saves a draft and disables the workflow in between."""
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    wf_id = await create(api_sessionmaker, ctx, ECHO_GRAPH)
+    assert (await publish(api_sessionmaker, ctx, wf_id, api_settings)).version is not None
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        held = await service.get_workflow(s, ctx.tenant_id, wf_id)  # the session holds it while this reference lives
+        assert held is not None and held.enabled
+        seen = held.draft_revision
+        await save(api_sessionmaker, ctx, wf_id, SENSITIVE_GRAPH)
+        await update(api_sessionmaker, ctx, wf_id, enabled=False)
+        wf = await service.get_workflow(s, ctx.tenant_id, wf_id, for_update=True)
+        assert wf is not None
+        assert (wf.draft_revision, wf.draft, wf.enabled) == (seen + 1, SENSITIVE_GRAPH, False)
+        with pytest.raises(service.DraftConflictError):  # the draft this session saw is no longer the draft
+            await workflow_ops.publish(s, ctx, wf, expected_revision=seen, settings=api_settings)
+        await workflow_ops.update(s, ctx, wf, name=None, enabled=True)  # an enable, not a no-op
+    assert await is_enabled(api_sessionmaker, ctx, wf_id)
