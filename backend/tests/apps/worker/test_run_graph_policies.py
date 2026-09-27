@@ -302,6 +302,31 @@ async def test_a_timeout_after_an_ambiguous_send_is_never_retried(own_env: Workf
     assert (row.attempt, row.status, row.error_code, row.outcome) == (1, "failed", "timeout", "outcome_unknown")
 
 
+async def sent(run_id: str) -> None:
+    for _ in range(200):
+        if run_id in SlowSend.sent:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("the request was never sent")
+
+
+async def test_a_worker_lost_during_an_ambiguous_attempt_never_repeats_it(own_env: WorkflowEnvironment) -> None:
+    """Final review: a worker that shuts down mid-attempt reports a failure the activity never mapped
+    (`WorkerShutdown`), and it was taken for the node's own retryable error: the request went out twice."""
+    store = MemoryStore()
+    g = graph().node("s", "testkit.slow_send@1", {"seconds": 5})
+    g.nodes[0]["options"].update(max_attempts=3)
+    async with workers(own_env.client, store, cache=0):  # no sticky queue: the next worker takes over at once
+        handle = await start(own_env.client, store, g, TRIGGER)
+        await sent(handle.id)
+    async with workers(own_env.client, store):  # another worker carries the run on
+        result = await asyncio.wait_for(handle.result(), 30)
+    assert SlowSend.sent.count(handle.id) == 1
+    [row] = store.steps(handle.id)
+    assert (row.attempt, row.status, row.error_code, row.outcome) == (1, "failed", "error", "outcome_unknown")
+    assert result.status == "failed"
+
+
 async def test_a_timeout_is_retried_when_repeating_is_safe(own_env: WorkflowEnvironment) -> None:
     store = MemoryStore()
     g = graph().node("s", "testkit.slow@1", {"seconds": 3})

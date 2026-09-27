@@ -26,7 +26,7 @@ from dewpoint.apps.worker.context import idempotency_key
 from dewpoint.engine.cel import ipc
 from dewpoint.engine.cel import types as T
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
-from dewpoint.engine.runtime.activities import CelInput, CelResult, StepInput, StepResult
+from dewpoint.engine.runtime.activities import MAPPED, CelInput, CelResult, StepInput, StepResult
 from dewpoint.sdk import Node, SideEffect, StepContext, sensitive
 from tests.support.plugins.testkit import AmbiguousSend, Echo, FailN, Reconcile, Sensitive, Slow
 
@@ -159,6 +159,44 @@ class Formats(Node):
         return valid if config.valid else Formatted.model_construct(**{**dict(valid), "id": "not-a-uuid"})
 
 
+def _buggy(value: str) -> str:
+    """A validator with a bug: it raises something other than ValueError, and the error quotes the value."""
+    raise KeyError(value)
+
+
+class BuggyOutput(BaseModel):
+    key: str
+    _key = field_validator("key")(_buggy)
+
+
+class BuggyConfig(BaseModel):
+    key: str = "k"
+    _key = field_validator("key")(_buggy)
+
+
+class BuggySend(Node):
+    """Sends, then its output's validator fails with a bug: after the request went out."""
+
+    type = "testkit.buggy_send"
+    version = 1
+    title = "Buggy send"
+    Output = BuggyOutput
+    side_effect = SideEffect.AMBIGUOUS
+
+    async def run(self, ctx: StepContext, config: Any) -> Any:
+        return {"key": SECRET}
+
+
+class BuggyConfigured(Node):
+    type = "testkit.buggy_configured"
+    version = 1
+    title = "Buggy config"
+    Config = BuggyConfig
+
+    async def run(self, ctx: StepContext, config: BuggyConfig) -> Any:
+        return {}
+
+
 class Broken(Node):
     type = "testkit.broken"
     version = 1
@@ -230,21 +268,48 @@ async def test_errors_map_to_retries_and_outcomes() -> None:
     retry = await failure(step_activity_for(FailN), step("testkit.fail_n@1", {"failures": 1}))
     fatal = await failure(step_activity_for(AmbiguousSend), step("testkit.ambiguous_send@1", {"outcome": "rejected"}))
     unknown = await failure(step_activity_for(AmbiguousSend), step("testkit.ambiguous_send@1", {"outcome": "unknown"}))
-    assert (retry.type, retry.non_retryable, retry.details) == ("testkit.transient", False, ({"outcome": None},))
+    assert (retry.type, retry.non_retryable, retry.details) == (
+        "testkit.transient",
+        False,
+        ({"outcome": None, MAPPED: True},),
+    )
     assert (fatal.type, fatal.non_retryable) == ("testkit.rejected", True)
     assert (unknown.type, unknown.non_retryable, unknown.details) == (
         "testkit.timeout_after_send",
         True,
-        ({"outcome": "outcome_unknown"},),
+        ({"outcome": "outcome_unknown", MAPPED: True},),
     )
 
 
 async def test_an_unexpected_exception_is_retried_unless_the_request_may_have_been_sent() -> None:
     plain = await failure(step_activity_for(Broken), step("testkit.broken@1"))
     sent = await failure(step_activity_for(BrokenSend), step("testkit.broken_send@1"))
-    assert (plain.type, plain.non_retryable, plain.details) == ("unexpected_error", False, ({"outcome": None},))
-    assert (sent.type, sent.non_retryable, sent.details) == ("outcome_unknown", True, ({"outcome": "outcome_unknown"},))
+    assert (plain.type, plain.non_retryable, plain.details) == (
+        "unexpected_error",
+        False,
+        ({"outcome": None, MAPPED: True},),
+    )
+    assert (sent.type, sent.non_retryable, sent.details) == (
+        "outcome_unknown",
+        True,
+        ({"outcome": "outcome_unknown", MAPPED: True},),
+    )
     assert plain.message == "The node raised ConnectionError." and SECRET not in sent.message  # the text goes to logs
+
+
+async def test_a_validator_bug_is_mapped_never_retried_and_quotes_nothing() -> None:
+    """Final review: a validator raising something other than ValueError escaped the mapping. The SDK made it a
+    retryable failure carrying its text: an ambiguous send was repeated, and the message quoted the data."""
+    output = await failure(step_activity_for(BuggySend), step("testkit.buggy_send@1"))
+    config = await failure(step_activity_for(BuggyConfigured), step("testkit.buggy_configured@1", {"key": SECRET}))
+    assert (output.type, output.non_retryable, output.details) == (
+        "output_schema_violation",
+        True,
+        ({"outcome": None, MAPPED: True},),
+    )
+    assert output.message == "The output doesn't match `testkit.buggy_send@1`: checking it raised KeyError."
+    assert (config.type, config.non_retryable) == ("config_invalid", True)
+    assert config.message == "The config doesn't match `testkit.buggy_configured@1`: checking it raised KeyError."
 
 
 async def test_the_attempt_comes_from_the_workflow() -> None:

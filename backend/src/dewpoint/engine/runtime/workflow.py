@@ -25,6 +25,7 @@ with workflow.unsafe.imports_passed_through():
     from dewpoint.engine.runtime.activities import (
         CEL_EVALUATE,
         LOAD_VERSION,
+        MAPPED,
         OUTCOME_UNKNOWN,
         PROJECT,
         CelInput,
@@ -85,12 +86,13 @@ def _attempt_failed(
     cause = error.cause
     if isinstance(cause, ApplicationError) and cause.type == "NotFoundError":  # the SDK: no such activity here
         return Failure(NODE_TYPE_UNAVAILABLE, f"No worker of this build runs `{key}`'s node type.", attempt), None, True
-    if isinstance(cause, ApplicationError):  # the node's own error, mapped by the activity
-        details = cause.details[0] if cause.details and isinstance(cause.details[0], dict) else {}
-        code = cause.type or "error"
+    details = cause.details[0] if isinstance(cause, ApplicationError) and cause.details else None
+    if isinstance(cause, ApplicationError) and isinstance(details, dict) and details.get(MAPPED) is True:
+        code = cause.type or "error"  # the node's own error, mapped by the activity
         retryable = not cause.non_retryable and code not in non_retryable
         return Failure(code, cause.message, attempt), details.get("outcome"), retryable
-    # A timeout or a lost worker: the node may have done its work, and it never saw the error to map it.
+    # Anything else: a timeout, a worker lost or shutting down, a failure the activity never mapped. The node may have
+    # done its work, and nothing that saw what happened described it.
     code, message = (
         (cel.TIMEOUT, f"`{key}` didn't finish in time.")
         if isinstance(cause, TimeoutError)

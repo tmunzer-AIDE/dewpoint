@@ -5,6 +5,7 @@ evaluator, then asks its identity. Worker Versioning (the pinned deployment) com
 
 import asyncio
 from collections.abc import Iterable
+from datetime import timedelta
 
 import structlog
 from temporalio.client import Client
@@ -33,8 +34,16 @@ async def evaluator_profile(socket_path: str, *, wait_s: float = 2.0) -> str:
             await asyncio.sleep(wait_s)
 
 
-def engine_worker(client: Client, store: RunStore, plugins: Iterable[Plugin]) -> Worker:
-    return Worker(client, task_queue=ENGINE_QUEUE, workflows=[RunGraph], activities=engine_activities(store, plugins))
+def engine_worker(client: Client, store: RunStore, plugins: Iterable[Plugin], settings: Settings) -> Worker:
+    """A stopping worker lets running attempts finish for `worker_shutdown_grace_s`: one it cancels ends as it would
+    on a lost worker, `outcome_unknown` for an ambiguous node."""
+    return Worker(
+        client,
+        task_queue=ENGINE_QUEUE,
+        workflows=[RunGraph],
+        activities=engine_activities(store, plugins),
+        graceful_shutdown_timeout=timedelta(seconds=settings.worker_shutdown_grace_s),
+    )
 
 
 def cel_worker(client: Client, socket_path: str, profile: str, *, max_concurrent: int) -> Worker:
@@ -50,7 +59,7 @@ async def run(settings: Settings) -> None:
     client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
     engine = make_engine(settings.database_url)
     try:
-        workers = [engine_worker(client, DbRunStore(make_sessionmaker(engine)), installed_plugins())]
+        workers = [engine_worker(client, DbRunStore(make_sessionmaker(engine)), installed_plugins(), settings)]
         if settings.cel_socket:
             profile = await evaluator_profile(settings.cel_socket)
             log.info("cel_queue", profile=profile)

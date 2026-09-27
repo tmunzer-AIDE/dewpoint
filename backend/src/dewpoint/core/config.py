@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     cel_socket: str | None = None  # the cel-evaluator's socket; a worker without one serves no CEL queue
     cel_max_concurrent: int = 2  # the evaluator's N (docs/operations/cel-evaluator.md)
     cel_schedule_to_start_s: float = 600  # spec §5.7: no evaluator for a profile after this: cel_profile_unavailable
+    worker_shutdown_grace_s: float = 30  # a stopping worker lets running attempts finish this long, then cancels them
     audit_signing_key_b64: str | None = None  # Ed25519 private key (raw 32 bytes, base64)
     audit_anchor_path: str | None = None
 

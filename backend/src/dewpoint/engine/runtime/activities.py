@@ -12,6 +12,10 @@ PROJECT = "dewpoint.project"
 CEL_EVALUATE = "cel.evaluate"
 LIVE, SIMULATE = "live", "simulate"
 APPLIED, SIMULATED, OUTCOME_UNKNOWN = "applied", "simulated", "outcome_unknown"
+# In a plugin step's failure details: the activity's own mapping made this failure. `RunGraph` trusts no other failure
+# as the node's: the SDK makes its own (a worker shutting down, an exception nothing caught), and those say nothing
+# of whether the request went out.
+MAPPED = "mapped"
 
 
 def step_activity(ref: str) -> str:

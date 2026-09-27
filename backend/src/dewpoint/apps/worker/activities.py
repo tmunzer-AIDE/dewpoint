@@ -12,10 +12,13 @@ never repeat an effect, and a timeout after an ambiguous send is never retried. 
   retried;
 - maps any other exception to `unexpected_error`, retryable, except from an `ambiguous` node, where the request may
   have been sent: `outcome_unknown`;
+- maps a check that fails with something other than a validation error (a validator's bug) like a failed check,
+  never retried: after `run()`, the effect happened;
 - for a `reconcilable` node on attempt 2 or later, calls `reconcile()` first and keeps what it finds.
 
-The projection is tenant-readable, so a message never quotes input: a validation error names each field and its
-rule's code, and an unexpected exception names only its type. Its text goes to the worker's log."""
+Every failure it raises is marked `MAPPED`; `RunGraph` trusts no other failure as the node's. The projection is
+tenant-readable, so a message never quotes input: a validation error names each field and its rule's code, and an
+unexpected exception names only its type. Its text goes to the worker's log."""
 
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable, Mapping
@@ -36,6 +39,7 @@ from dewpoint.engine.runtime.activities import (
     APPLIED,
     CEL_EVALUATE,
     LOAD_VERSION,
+    MAPPED,
     OUTCOME_UNKNOWN,
     PROJECT,
     SIMULATE,
@@ -85,6 +89,22 @@ class _StepFailed(Exception):
         super().__init__(message)
         self.code, self.message, self.retryable, self.outcome = code, message, retryable, outcome
 
+    def mapped(self) -> ApplicationError:
+        details = {"outcome": self.outcome, MAPPED: True}
+        return ApplicationError(self.message, details, type=self.code, non_retryable=not self.retryable)
+
+
+def _bug(what: str, step: StepInput, e: Exception) -> None:
+    _log.warning(
+        what,
+        run_id=step.run_id,
+        step_id=step.step_id,
+        iteration_key=step.iteration_key,
+        attempt=step.attempt,
+        error_type=type(e).__name__,
+        error=str(e)[:500],
+    )
+
 
 def _fields(error: ValidationError, schema: Mapping[str, Any]) -> str:
     """Each failing field and its rule's stable code (`int_parsing`, `value_error`), nothing else: pydantic's
@@ -105,9 +125,13 @@ async def _call(node: type[Node], step: StepInput, schema: Mapping[str, Any]) ->
     except ValidationError as e:
         message = f"The config doesn't match `{step.ref}`: {_fields(e, schema)}"
         raise _StepFailed(CONFIG_INVALID, message, retryable=False) from None
-    ctx = context(step.tenant_id, step.run_id, step.step_id, step.iteration_key, step.attempt)
-    instance = node()
+    except Exception as e:  # a validator's bug: it raised something pydantic doesn't turn into a validation error
+        _bug("step_config_check_failed", step, e)
+        message = f"The config doesn't match `{step.ref}`: checking it raised {type(e).__name__}."
+        raise _StepFailed(CONFIG_INVALID, message, retryable=False) from None
     try:
+        ctx = context(step.tenant_id, step.run_id, step.step_id, step.iteration_key, step.attempt)
+        instance = node()
         if step.mode == SIMULATE:
             return await instance.simulate(ctx, config), SIMULATED
         if node.side_effect == SideEffect.RECONCILABLE and step.attempt > 1:
@@ -126,15 +150,7 @@ async def _call(node: type[Node], step: StepInput, schema: Mapping[str, Any]) ->
     except Exception as e:
         if isinstance(e, NotImplementedError) and step.mode == SIMULATE:
             raise _StepFailed(SIMULATION_UNAVAILABLE, f"`{step.ref}` can't be simulated.", retryable=False) from None
-        _log.warning(
-            "step_unexpected_error",
-            run_id=step.run_id,
-            step_id=step.step_id,
-            iteration_key=step.iteration_key,
-            attempt=step.attempt,
-            error_type=type(e).__name__,
-            error=str(e)[:500],
-        )
+        _bug("step_unexpected_error", step, e)
         message = f"The node raised {type(e).__name__}."
         if node.side_effect == SideEffect.AMBIGUOUS:
             raise _StepFailed(OUTCOME_UNKNOWN, message, retryable=False, outcome=OUTCOME_UNKNOWN) from None
@@ -147,35 +163,39 @@ def step_activity_for(node: type[Node]) -> Callable[[StepInput], Awaitable[StepR
     output_schema = node_manifest(node)["output_schema"]  # what the node promises to emit: serialized and closed
     emitted = Draft202012Validator(output_schema, format_checker=FormatChecker(formats=CHECKED_FORMATS))
 
+    def violation(detail: str) -> _StepFailed:
+        return _StepFailed(OUTPUT_SCHEMA_VIOLATION, f"The output doesn't match `{ref}`: {detail}", retryable=False)
+
+    def output_of(result: Any) -> Any:
+        if not isinstance(result, BaseModel):
+            return dump_output(node.Output.model_validate(result))
+        # pydantic trusts instances it didn't build (`model_construct`, assignment): check what the instance emits
+        # against the declared output schema, not against the model's input types (a field serializer may change them)
+        data = result.model_dump(mode="json", by_alias=True, warnings=False)
+        problems = sorted(emitted.iter_errors(data), key=lambda e: [str(p) for p in e.absolute_path])
+        if problems:
+            raise violation(
+                "; ".join(f"{location(list(e.absolute_path), output_schema)} ({e.validator})" for e in problems) + "."
+            )
+        return data
+
     @activity.defn(name=step_activity(ref))
     async def run_step(step: StepInput) -> StepResult:
         try:
             result, outcome = await _call(node, step, config_schema)
-            if not isinstance(result, BaseModel):
-                return StepResult(dump_output(node.Output.model_validate(result)), outcome)
-            # pydantic trusts instances it didn't build (`model_construct`, assignment): check what the instance emits
-            # against the declared output schema, not against the model's input types (a field serializer may change
-            # them)
-            data = result.model_dump(mode="json", by_alias=True, warnings=False)
-            problems = sorted(emitted.iter_errors(data), key=lambda e: [str(p) for p in e.absolute_path])
-            if problems:
-                where = "; ".join(f"{location(list(e.absolute_path), output_schema)} ({e.validator})" for e in problems)
-                message = f"The output doesn't match `{ref}`: {where}."
-                raise ApplicationError(message, {"outcome": None}, type=OUTPUT_SCHEMA_VIOLATION, non_retryable=True)
-            return StepResult(data, outcome)
         except _StepFailed as f:
-            details = {"outcome": f.outcome}
-            raise ApplicationError(f.message, details, type=f.code, non_retryable=not f.retryable) from None
+            raise f.mapped() from None
+        try:  # the node ran: whatever fails from here, its effect happened, so nothing is retried
+            return StepResult(output_of(result), outcome)
+        except _StepFailed as f:
+            raise f.mapped() from None
         except PydanticSerializationError:
-            message = f"The output doesn't match `{ref}`: it can't be written as JSON."
-            raise ApplicationError(
-                message, {"outcome": None}, type=OUTPUT_SCHEMA_VIOLATION, non_retryable=True
-            ) from None
+            raise violation("it can't be written as JSON.").mapped() from None
         except ValidationError as e:
-            message = f"The output doesn't match `{ref}`: {_fields(e, output_schema)}"
-            raise ApplicationError(
-                message, {"outcome": None}, type=OUTPUT_SCHEMA_VIOLATION, non_retryable=True
-            ) from None
+            raise violation(_fields(e, output_schema)).mapped() from None
+        except Exception as e:  # a validator's bug: it raised something pydantic doesn't turn into a validation error
+            _bug("step_output_check_failed", step, e)
+            raise violation(f"checking it raised {type(e).__name__}.").mapped() from None
 
     return run_step
 
