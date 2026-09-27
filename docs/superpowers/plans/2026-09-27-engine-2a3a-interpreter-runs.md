@@ -38,7 +38,7 @@ what 2a-3 consumes. The owner split 2a-3 into three plans on 2026-09-27:
 1. **Go/no-go experiments ran first** (next section), on temporalio 1.33.0 from the CEL spike's environment. The
    owner approved the SDK's download of its time-skipping test server for planning, the suite and CI.
 2. **Every module was prototyped** in a scratch copy of `backend/` until it passed its tests, `ruff`, `ruff format`,
-   `mypy --strict` (132 source files) and `lint-imports` (10 contracts). The prototype's full suite gives 869 passed
+   `mypy --strict` (132 source files) and `lint-imports` (10 contracts). The prototype's full suite gives 875 passed
    and 8 skipped (the Linux-only evaluator tests), against `main`'s 726 collected.
 3. **The code blocks below are those files, verbatim.** Diffs to existing files were generated from the prototype.
 4. **Each task was staged and checked on its own.** Stage *N* is `main` plus tasks 1..*N*. Every stage passed the
@@ -120,7 +120,8 @@ The owner's review of the first draft (2026-09-27) accepted decisions 1, 2, 4 an
 Their fixes are decisions 7 and 12 (rewritten), 21 and 22 (new), and the messages in 6 and 11. The second review
 accepted 7, 12 and 22, and found two more paths for secrets, both closed in decision 21: validator prose, and
 sensitive config values. The third found a map key in a validation location, and the fourth a numeric map key and a key named like a
-field declared elsewhere: both closed in decision 21 by walking the schema along the location.
+field declared elsewhere: both closed in decision 21 by walking the schema along the location. During execution,
+checkpoint 3 found a workflow change committing during admission, closed by decision 23.
 
 1. **A handled failure leaves an error and no output.** With `on_error: continue` or `port`, `steps.<key>` becomes
    `{"error": {code, message, attempt}}`, with no `output` key. That is 2a-2's presence contract (§5.3, decision 3
@@ -336,6 +337,19 @@ field declared elsewhere: both closed in decision 21 by walking the schema along
       dispatcher retries until it knows.
 
     (Tasks 6, 7)
+23. **Admission holds the workflow still** (new at checkpoint 3). Admission reads whether the workflow is enabled and
+    which version is active; a disable, publish or activation that committed between that read and the insert left a
+    run the workflow no longer admits.
+    - Admission takes the workflow's admission lock *shared* before it reads the workflow, and holds it until the run
+      is inserted. Every change to a workflow takes it *exclusively*, before its row lock (`get_workflow` with
+      `for_update`). So a change either commits before the read, and admission refuses, or waits until the run
+      exists.
+    - It is an advisory lock keyed `dewpoint:workflow:<id>`, like the lifecycle locks: a row lock would need UPDATE
+      on `workflows`, which `dewpoint_dispatch` must not have.
+    - Both sides take the workflow's lock before any lifecycle lock. A change waiting for an admission holds nothing
+      that admission's insert needs.
+
+    (Task 6)
 
 ## Global Constraints
 
@@ -427,6 +441,7 @@ backend/src/dewpoint/core/runs/            __init__.py, service.py: runs and run
 backend/src/dewpoint/core/models/runs.py   Run, RunStep (and models/__init__.py)                    Task 3
 backend/migrations/versions/0008_runs.py   runs, run_steps, RLS, grants                             Task 3
 backend/src/dewpoint/apps/runs.py          admit, start_run                                         Task 6
+backend/src/dewpoint/core/workflows/service.py  (modify) the workflow's admission lock              Task 6
 backend/src/dewpoint/core/config.py        (modify) Temporal and CEL settings                       Tasks 6, 7
 backend/src/dewpoint/apps/api/routes/runs.py, api/main.py (modify)   GET /runs, GET /runs/{id}      Task 7
 backend/src/dewpoint/apps/cli/main.py      (modify) `dewpoint worker`, `dewpoint dev run`           Task 7
@@ -435,7 +450,7 @@ backend/tests/engine/runtime/              support.py and unit and property test
 backend/tests/core/runs/                   storage tests; tests/conftest.py (modify) dispatch role  Task 3
 backend/tests/support/plugins/testkit.py   (modify) Echo.simulate, the Reconcile node               Task 4
 backend/tests/apps/worker/                 activity, RunGraph, database and dev-run tests; harness  Tasks 4, 5, 7
-backend/tests/apps/test_runs.py            admission                                                Task 6
+backend/tests/apps/test_runs.py            admission; test_lifecycle_races.py (modify)              Task 6
 backend/tests/apps/cli/test_dev_run_cli.py                                                          Task 7
 backend/tests/engine/replay/               scenarios, recorder, replay test, recorded histories     Task 8
 docs/operations/runs.md, README.md                                                                  Task 7
@@ -5858,8 +5873,11 @@ cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy
 ### Task 6: Admission and `start_run`
 
 2a's only way to start a run (spec §9), and the admission 2b's dispatcher will reuse. The run is inserted as the
-dispatch role, in the same READ COMMITTED transaction that holds the shared lifecycle locks on the version's
-closure (§4.5). So a retirement either sees the run, or the run sees the retirement.
+dispatch role, in one READ COMMITTED transaction that first takes two kinds of shared lock (§4.5, decision 23):
+- the workflow's admission lock, before it reads whether the workflow is enabled and which version is active. A
+  disable, publish or activation takes that lock exclusively, so it either commits before the read or waits until the
+  run exists;
+- the lifecycle locks on the version's closure. So a retirement either sees the run, or the run sees the retirement.
 
 Then `RunGraph` starts, with the run's id as its workflow id and `REJECT_DUPLICATE`. A lost acknowledgement looks like
 a failure, so an uncertain attempt is repeated with the same id, and a duplicate refusal confirms the earlier start.
@@ -5869,7 +5887,9 @@ Only a confirmed refusal records the run as failed (`start_failed`). An answer t
 **Files:**
 - Create: `backend/src/dewpoint/apps/runs.py`
 - Modify: `backend/src/dewpoint/core/config.py` (`cel_schedule_to_start_s`)
+- Modify: `backend/src/dewpoint/core/workflows/service.py` (the workflow's admission lock)
 - Create: `backend/tests/apps/test_runs.py`
+- Modify: `backend/tests/apps/test_lifecycle_races.py` (the lock-wait helper covers both kinds of lock)
 
 **Interfaces:**
 - Consumes:
@@ -5881,15 +5901,111 @@ Only a confirmed refusal records the run as failed (`start_failed`). An answer t
     `tests/apps/test_lifecycle_races.py` and `tests/apps/test_workflow_ops.py`.
 - Produces:
   - `Settings.cel_schedule_to_start_s` (default 600);
+  - `core/workflows/service.py`: `lock_for_admission(s, workflow_id)`, the workflow's admission lock, shared. With
+    `for_update`, `get_workflow` now takes it exclusively before the row lock, so publish, activate, enable, disable
+    and rename all do;
   - `apps/runs.py`:
     - `START_FAILED = "start_failed"` and `START_RETRY_S = (0.5, 2.0)`;
     - `NotAdmissibleError(reasons)` with `.reasons`, `StartRefusedError`, and `StartUncertainError(run_id)` with
       `.run_id`;
     - `admit(s, *, tenant_id, version_id, mode=LIVE, started_by=None) -> Run`;
     - `start_run(sessionmaker, client, settings, *, tenant_id, version_id, trigger, mode=LIVE, started_by=None) -> uuid.UUID`;
-    - the test hook `_admission_locked()`.
+    - the test hook `_admission_locked()`;
+  - in `tests/apps/test_lifecycle_races.py`, `until_someone_waits_for_a_lock` (renamed from
+    `until_someone_waits_for_a_lifecycle_lock`).
 
 - [ ] **Step 1: Write the failing tests**
+
+The workflow's admission lock is an advisory lock too, so rename the lock-wait helper in
+`backend/tests/apps/test_lifecycle_races.py`:
+
+```diff
+diff --git a/backend/tests/apps/test_lifecycle_races.py b/backend/tests/apps/test_lifecycle_races.py
+--- a/backend/tests/apps/test_lifecycle_races.py
++++ b/backend/tests/apps/test_lifecycle_races.py
+@@ -26,7 +26,8 @@
+ ECHO = Entry("node", "testkit.echo@1")
+
+
+-async def until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker: Any) -> None:
++async def until_someone_waits_for_a_lock(owner_sessionmaker: Any) -> None:
++    """Until a transaction waits for an advisory lock: a lifecycle entry's, or a workflow's admission lock."""
+     for _ in range(200):
+         async with owner_sessionmaker() as s:
+             waiting = (
+@@ -35,7 +36,7 @@
+         if waiting:
+             return
+         await asyncio.sleep(0.05)
+-    raise AssertionError("nobody is waiting for a lifecycle lock")
++    raise AssertionError("nobody is waiting for a lock")
+
+
+ @pytest.fixture
+@@ -69,7 +70,7 @@
+         async with a.begin():
+             await lifecycle.lock_exclusive(a, ECHO)
+             publishing = asyncio.create_task(publish(api_sessionmaker, ctx, wf, api_settings))
+-            await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
++            await until_someone_waits_for_a_lock(owner_sessionmaker)
+             assert (await lifecycle.retire(a, ECHO)).applied
+     out = await asyncio.wait_for(publishing, 10)
+     assert out.version is None and [d.code for d in out.errors] == ["lifecycle.retired"]
+@@ -91,7 +92,7 @@
+             return await lifecycle.retire(a, ECHO)
+
+     retiring = asyncio.create_task(retire())
+-    await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
++    await until_someone_waits_for_a_lock(owner_sessionmaker)
+     release.set()
+     assert (await asyncio.wait_for(publishing, 10)).version is not None
+     with pytest.raises(lifecycle.ReferencedError) as e:
+@@ -115,7 +116,7 @@
+             return await lifecycle.retire(a, ECHO, force=True, confirm=True)
+
+     retiring = asyncio.create_task(retire())
+-    await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
++    await until_someone_waits_for_a_lock(owner_sessionmaker)
+     release.set()
+     assert (await asyncio.wait_for(publishing, 10)).version is not None
+     preview = await asyncio.wait_for(retiring, 10)
+@@ -147,7 +148,7 @@
+         async with a.begin():
+             await lifecycle.lock_exclusive(a, ECHO)
+             activating = asyncio.create_task(activate(api_sessionmaker, ctx, wf, v1.id))
+-            await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
++            await until_someone_waits_for_a_lock(owner_sessionmaker)
+             assert (await lifecycle.retire(a, ECHO)).applied  # nothing active uses echo: normal path
+     with pytest.raises(workflow_ops.NotActivatableError):
+         await asyncio.wait_for(activating, 10)
+@@ -165,7 +166,7 @@
+         async with a.begin():
+             await lifecycle.lock_exclusive(a, ECHO)
+             enabling = asyncio.create_task(update(api_sessionmaker, ctx, wf, enabled=True))
+-            await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
++            await until_someone_waits_for_a_lock(owner_sessionmaker)
+             assert (await lifecycle.retire(a, ECHO)).applied  # the workflow is disabled: normal path
+     with pytest.raises(workflow_ops.NotActivatableError):
+         await asyncio.wait_for(enabling, 10)
+@@ -190,7 +191,7 @@
+             return await lifecycle.retire(a, ECHO)
+
+     retiring = asyncio.create_task(retire())
+-    await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
++    await until_someone_waits_for_a_lock(owner_sessionmaker)
+     release.set()
+     await asyncio.wait_for(enabling, 10)
+     with pytest.raises(lifecycle.ReferencedError) as e:
+@@ -218,7 +219,7 @@
+             return await lifecycle.retire(a, ECHO)
+
+     retiring = asyncio.create_task(retire())
+-    await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
++    await until_someone_waits_for_a_lock(owner_sessionmaker)
+     release.set()
+     await asyncio.wait_for(activating, 10)
+     with pytest.raises(lifecycle.ReferencedError) as e:
+```
 
 Create `backend/tests/apps/test_runs.py`:
 
@@ -5899,6 +6015,8 @@ Create `backend/tests/apps/test_runs.py`:
 
 import asyncio
 import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -5908,12 +6026,14 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from dewpoint.apps import runs as run_ops
+from dewpoint.apps import workflow_ops
 from dewpoint.apps.runs import START_FAILED, NotAdmissibleError, StartRefusedError, StartUncertainError, start_run
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.runs import service
+from dewpoint.core.workflows import service as workflows
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, SIMULATE, RunInput
-from tests.apps.test_lifecycle_races import until_someone_waits_for_a_lifecycle_lock
+from tests.apps.test_lifecycle_races import until_someone_waits_for_a_lock
 from tests.apps.test_workflow_ops import ECHO, ECHO_GRAPH, actor, create, publish, save, update
 from tests.support.registry import sync_test_plugins
 
@@ -6091,7 +6211,7 @@ async def test_retirement_first_makes_admission_refuse(
                     trigger={},
                 )  # fmt: skip
             )
-            await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
+            await until_someone_waits_for_a_lock(owner_sessionmaker)
             await lifecycle.retire(a, ECHO, force=True, confirm=True)
     with pytest.raises(NotAdmissibleError, match="retired"):
         await asyncio.wait_for(starting, 10)
@@ -6126,11 +6246,131 @@ async def test_admission_first_holds_retirement_until_the_run_exists(
             return await lifecycle.retire(a, ECHO, force=True, confirm=True)
 
     retiring = asyncio.create_task(retire())
-    await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)  # retirement waits for admission's lock
+    await until_someone_waits_for_a_lock(owner_sessionmaker)  # retirement waits for admission's lock
     release.set()
     run_id = await asyncio.wait_for(starting, 10)
     assert (await asyncio.wait_for(retiring, 10)).applied
     assert client.started and (await run_row(owner_sessionmaker, ctx.tenant_id, run_id)).status == "running"
+
+
+# A change to what admission checks (spec §4.5, "Admissible"), made as the API makes it: in a transaction that locks
+# the workflow for update. Each one makes the version admission was asked for inadmissible, and admission says why.
+Change = Callable[[Any, Any], Awaitable[object]]
+REFUSED = {"disable": "disabled", "activate": "active version", "publish": "active version"}
+
+
+async def admissible(
+    how: str, owner: Any, api: Any, admin: Any, settings: Any
+) -> tuple[Any, uuid.UUID, uuid.UUID, Change]:
+    """A workflow, the version admission is asked for, and the change `how` that makes that version inadmissible:
+    disabling the workflow, activating an older version, or publishing a newer one."""
+    ctx, wf, version = await published(owner, api, admin, settings)
+    older = version
+    if how in ("activate", "publish"):
+        await save(api, ctx, wf, ECHO_GRAPH)  # a draft for `publish`, or for the newer version `activate` replaces
+    if how == "activate":
+        newer = (await publish(api, ctx, wf, settings)).version
+        assert newer is not None
+        version = newer.id
+
+    async def change(s: Any, row: Any) -> object:
+        if how == "disable":
+            return await workflow_ops.update(s, ctx, row, name=None, enabled=False)
+        if how == "activate":
+            return await workflow_ops.activate(s, ctx, row, await workflows.get_version(s, wf, older))
+        out = await workflow_ops.publish(s, ctx, row, expected_revision=row.draft_revision, settings=settings)
+        assert out.version is not None
+        return out
+
+    return ctx, wf, version, change
+
+
+@asynccontextmanager
+async def changing(api: Any, ctx: Any, wf: uuid.UUID, change: Change) -> AsyncIterator[None]:
+    """Make the change in a transaction that stays open for the block, and commit it when the block ends."""
+    async with api() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        row = await workflows.get_workflow(s, ctx.tenant_id, wf, for_update=True)
+        assert row is not None
+        await change(s, row)
+        yield
+
+
+async def change_committed(api: Any, ctx: Any, wf: uuid.UUID, change: Change) -> None:
+    async with changing(api, ctx, wf, change):
+        pass
+
+
+async def until_waiting_or_done(task: asyncio.Task[Any], owner: Any) -> None:
+    """Until `task` has finished, or someone waits for a lock."""
+    waiting = asyncio.create_task(until_someone_waits_for_a_lock(owner))
+    done, _ = await asyncio.wait({task, waiting}, return_when=asyncio.FIRST_COMPLETED)
+    if waiting in done:
+        waiting.result()  # nobody waited in time: AssertionError
+    else:
+        waiting.cancel()
+
+
+@pytest.mark.parametrize("how", REFUSED)
+async def test_a_workflow_change_first_makes_admission_refuse(
+    how, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    ctx, wf, version, change = await admissible(
+        how, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+    )
+    client = FakeClient()
+    async with changing(api_sessionmaker, ctx, wf, change):
+        starting = asyncio.create_task(
+            start_run(
+                dispatch_sessionmaker,
+                client,
+                api_settings,  # type: ignore[arg-type]
+                tenant_id=ctx.tenant_id,
+                version_id=version,
+                trigger={},
+            )  # fmt: skip
+        )
+        await until_waiting_or_done(starting, owner_sessionmaker)  # admission waits for the change to commit
+    with pytest.raises(NotAdmissibleError, match=REFUSED[how]):
+        await asyncio.wait_for(starting, 10)
+    assert not client.started
+
+
+@pytest.mark.parametrize("how", REFUSED)
+async def test_admission_first_holds_a_workflow_change_until_the_run_exists(
+    how, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings, monkeypatch
+) -> None:
+    ctx, wf, version, change = await admissible(
+        how, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+    )
+    reached, release = asyncio.Event(), asyncio.Event()
+
+    async def paused() -> None:
+        reached.set()
+        await release.wait()
+
+    monkeypatch.setattr(run_ops, "_admission_locked", paused)
+    client = FakeClient()
+    starting = asyncio.create_task(
+        start_run(
+            dispatch_sessionmaker,
+            client,
+            api_settings,  # type: ignore[arg-type]
+            tenant_id=ctx.tenant_id,
+            version_id=version,
+            trigger={},
+        )  # fmt: skip
+    )
+    await asyncio.wait_for(reached.wait(), 10)
+    changed = asyncio.create_task(change_committed(api_sessionmaker, ctx, wf, change))
+    await until_waiting_or_done(changed, owner_sessionmaker)  # the change waits for the run
+    changed_first = changed.done()
+    release.set()
+    run_id = await asyncio.wait_for(starting, 10)
+    await asyncio.wait_for(changed, 10)
+    assert not changed_first, f"`{how}` committed while a run of the version it makes inadmissible was admitted"
+    row = await run_row(owner_sessionmaker, ctx.tenant_id, run_id)
+    assert client.started and (row.status, row.workflow_version_id) == ("running", version)
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
@@ -6156,14 +6396,70 @@ diff --git a/backend/src/dewpoint/core/config.py b/backend/src/dewpoint/core/con
 
 ```
 
+Add the workflow's admission lock to `backend/src/dewpoint/core/workflows/service.py`:
+
+```diff
+diff --git a/backend/src/dewpoint/core/workflows/service.py b/backend/src/dewpoint/core/workflows/service.py
+--- a/backend/src/dewpoint/core/workflows/service.py
++++ b/backend/src/dewpoint/core/workflows/service.py
+@@ -6,7 +6,7 @@
+ from dataclasses import dataclass, field
+ from typing import Any
+
+-from sqlalchemy import func, select, update
++from sqlalchemy import func, select, text, update
+ from sqlalchemy.ext.asyncio import AsyncSession
+
+ from dewpoint.core.audit.service import record
+@@ -46,11 +46,35 @@
+     return wf
+
+
++def _admission_key(workflow_id: uuid.UUID) -> str:
++    return f"dewpoint:workflow:{workflow_id}"
++
++
++async def lock_for_admission(s: AsyncSession, workflow_id: uuid.UUID) -> None:
++    """Hold what admission checks (`enabled`, `active_version_id`) until this transaction ends (spec §4.5).
++
++    Admission takes the workflow's admission lock *shared* before it reads the workflow, and keeps it until the run
++    is inserted. Every change to a workflow takes it *exclusively* first (`get_workflow` with `for_update`). So a
++    change either commits before admission reads, or waits until the run exists. Like the lifecycle locks, it is
++    a transaction-scoped advisory lock: a row lock would need UPDATE on `workflows`, which the dispatch role must
++    not have."""
++    await lifecycle.assert_read_committed(s)  # the read after the lock must see what a change committed
++    await s.execute(
++        text("select pg_advisory_xact_lock_shared(hashtextextended(:k, 0))"), {"k": _admission_key(workflow_id)}
++    )
++
++
+ async def get_workflow(
+     s: AsyncSession, tenant_id: uuid.UUID, workflow_id: uuid.UUID, *, for_update: bool = False
+ ) -> Workflow | None:
++    """With `for_update`, take the workflow's admission lock exclusively (`lock_for_admission`), then its row lock.
++    Both are held until the change commits, so a run is admitted either before the change or after it. The admission
++    lock comes first: a change waiting for an admission holds nothing that admission's insert could need."""
+     q = select(Workflow).where(Workflow.id == workflow_id, Workflow.tenant_id == tenant_id)
+     if for_update:
++        await s.execute(
++            text("select pg_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": _admission_key(workflow_id)}
++        )
+         q = q.with_for_update()
+     return (await s.execute(q)).scalar_one_or_none()
+
+```
+
 Create `backend/src/dewpoint/apps/runs.py`:
 
 ```python
 # SPDX-License-Identifier: Apache-2.0
 """Starting runs (spec §9). `start_run` is 2a's admission, and 2b's dispatcher reuses `admit`: the workflow is
-enabled, the version is its active one, and nothing in the version's closure is retired. The closure is checked under
-shared lifecycle locks, in the transaction that inserts the run (§4.5), so a retirement either sees the run or the
-run sees the retirement.
+enabled, the version is its active one, and nothing in the version's closure is retired. All three are checked in the
+transaction that inserts the run (§4.5), under locks the other side takes too:
+- the workflow is read under its admission lock (shared), so a disable, publish or activation either commits before
+  the read or waits until the run exists;
+- the closure is read under the lifecycle locks (shared), so a retirement either sees the run or the run sees the
+  retirement.
 
 Then `RunGraph` starts, with the run's id as its workflow id. A lost acknowledgement looks like a failure, so an
 uncertain start is repeated with the same id: Temporal refuses a duplicate id (`REJECT_DUPLICATE`, which also covers
@@ -6187,7 +6483,7 @@ from dewpoint.core.models.runs import Run
 from dewpoint.core.models.workflows import WorkflowVersion
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.runs import service as runs
-from dewpoint.core.workflows.service import get_workflow
+from dewpoint.core.workflows.service import get_workflow, lock_for_admission
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, LIVE, RunInput
 from dewpoint.engine.runtime.workflow import RunGraph
 
@@ -6227,7 +6523,8 @@ class StartUncertainError(Exception):
 
 
 async def _admission_locked() -> None:
-    """Hook that runs right after the lifecycle locks are held. A no-op; the race tests pause here."""
+    """Hook that runs once the workflow's admission lock and the lifecycle locks are held. A no-op; the race tests
+    pause here."""
 
 
 async def admit(
@@ -6243,6 +6540,7 @@ async def admit(
     version = await s.get(WorkflowVersion, version_id)
     if version is None:
         raise NotAdmissibleError(["There is no such version."])
+    await lock_for_admission(s, version.workflow_id)  # first: the workflow read below stands until the run exists
     workflow = await get_workflow(s, tenant_id, version.workflow_id)
     if workflow is None or not workflow.enabled:
         raise NotAdmissibleError(["The workflow is disabled."])
@@ -6343,16 +6641,19 @@ __all__ = [
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cd backend && uv run pytest -q tests/apps/test_runs.py tests/apps/test_lifecycle_races.py`
-Expected: all pass (8 new, and the lifecycle race tests unchanged).
+Run: `cd backend && uv run pytest -q tests/apps/test_runs.py tests/apps/test_lifecycle_races.py tests/apps/test_workflow_ops.py`
+Expected: all pass: 14 new, 6 of them races between admission and a disable, activation or publish, in both orders.
+The lifecycle race and workflow tests pass unchanged.
 
 - [ ] **Step 5: Checks and commit**
 
 ```bash
 cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy src && uv run lint-imports \
-  && uv run pytest -q tests/apps/test_runs.py tests/apps/test_lifecycle_races.py tests/core \
-  && git add src/dewpoint/apps/runs.py src/dewpoint/core/config.py tests/apps/test_runs.py \
-  && git commit -m "feat(apps): admit and start runs under the lifecycle locks" \
+  && uv run pytest -q tests/apps/test_runs.py tests/apps/test_lifecycle_races.py tests/apps/test_workflow_ops.py \
+       tests/core \
+  && git add src/dewpoint/apps/runs.py src/dewpoint/core/config.py src/dewpoint/core/workflows/service.py \
+       tests/apps/test_runs.py tests/apps/test_lifecycle_races.py \
+  && git commit -m "feat(apps): admit and start runs under the workflow's admission lock and the lifecycle locks" \
        -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
@@ -7213,7 +7514,7 @@ cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy
        -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-Expected: 859 passed and 8 skipped (the Linux-only evaluator tests).
+Expected: 865 passed and 8 skipped (the Linux-only evaluator tests).
 
 ---
 
@@ -7505,7 +7806,7 @@ cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy
        -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-Expected: 869 passed and 8 skipped locally (`main` collects 726 tests; this plan adds 151). On Linux the 8
+Expected: 875 passed and 8 skipped locally (`main` collects 726 tests; this plan adds 157). On Linux the 8
 evaluator-limit tests run too. Push only when the owner says so; CI then runs the same suite, downloading the test
 server on first use.
 
@@ -7588,7 +7889,7 @@ server on first use.
 | §8 | redaction of `x-sensitive` fields | Tasks 2, 5 (decision 21): through `$ref`s and unions, plus masking of learned values |
 | §8 | the worker role inside `tenant_scope`; redaction; truncation; the read API | Tasks 7, 2, 7 |
 | §9 | `start_run` for tests and the dev CLI; no public run API | Tasks 6, 7 (decisions 20, 22) |
-| §4.5 | admission under shared lifecycle locks, in the transaction that inserts the run | Task 6 |
+| §4.5 | admission under shared lifecycle locks, in the transaction that inserts the run; the workflow read under its admission lock | Task 6 (decision 23) |
 | §5.7 | a missing evaluator times out to `cel_profile_unavailable` | Task 5 (decision 6) |
 | §10 | interpreter tests: every node kind and error policy, `on_item_error`, the deadline | Tasks 1, 5; batching, sub-flows, continue-as-new: 2a-3b; yield points: 2a-3c |
 | §10 | property tests: once per scope, dead paths never run, same-scope joins, no pending edge | Task 1 |

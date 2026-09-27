@@ -44,7 +44,9 @@
     - from execution's checkpoint 1: redaction also covers patterned-key maps, tuple positions and sensitive keys,
       and the iteration cap ends a loop's open iterations first;
     - from checkpoint 2: the outputs are evaluated under the run's deadline and cancellation, and a malformed output
-      is refused at compile.
+      is refused at compile;
+    - from checkpoint 3: admission reads the workflow under the workflow's admission lock, which every change to the
+      workflow takes exclusively (§4.5).
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
   This spec **narrows parent §6.4** (where CEL runs) and resolves the CEL item in parent §15.
 - **Evidence:** CEL spike, branch `spike/cel-evaluation`, commits `d6a8162` and `13a62e1`. See
@@ -376,6 +378,17 @@ Shared and exclusive locks conflict, so the two sides serialize:
 
 Under REPEATABLE READ, the snapshot would predate the wait, so these transactions must not use it. A test asserts
 the isolation level.
+
+**The workflow's admission lock.** Admission also reads the workflow: whether it is enabled, and which version is
+active. A disable, publish or activation that commits between that read and the insert would leave a request the
+workflow no longer admits. So admission takes the workflow's admission lock, **shared**, before it reads the workflow,
+and holds it until the request is frozen. Every change to a workflow takes it **exclusively**, before the workflow's
+row lock.
+- It is a transaction-scoped advisory lock keyed `dewpoint:workflow:<id>`, for the lifecycle locks' reason: a row
+  lock would need UPDATE on `workflows`, which the dispatch role must not have.
+- Both sides take it before any lifecycle lock.
+- **Admission locks first:** the change waits until the request exists. The workflow admitted it when it was frozen.
+- **The change locks first:** admission waits, then reads the committed change and refuses.
 
 **Defensive check at dispatch.** If dispatch still finds a frozen version that isn't executable (the forced path
 should make this impossible), it cancels the request with the same explicit, audited reason. It never fails the
@@ -995,6 +1008,8 @@ is being written comes too late to unmake it: the write is repeated and the run'
   - races between retirement (normal and forced, both orders) and each of admission, dispatch, publish and activate.
     In every order, a request is either refused at admission, or blocks normal retirement, or is in the forced
     retirement's cancellation set. The defensive dispatch check never fires;
+  - races between admission and each of disable, publish and activate, in both orders: the request is either
+    refused, or frozen before the change commits;
   - node types removed from a build while an N-1 run finishes on N-1.
 - **Graph regions:** properly nested loops are accepted; crossing regions are rejected; the depth limit.
 - **Iteration counter:**
