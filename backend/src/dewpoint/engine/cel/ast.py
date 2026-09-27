@@ -5,6 +5,7 @@ A *chain* is a run of field selections starting at a global identifier: `steps.a
 typed path arrives as one dotted identifier (`steps.a.output.devices`), which splits back into the same chain.
 Comprehension variables shadow globals, as they do in the checker and the runtime."""
 
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 
@@ -79,12 +80,36 @@ def scoped(e: Expr, scope: frozenset[str]) -> Iterator[tuple[Expr, frozenset[str
             stack.extend((child, names) for child in reversed(children(node)))
 
 
+INDEX = "_[_]"
+_FIELD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_NOT_SELECTABLE = frozenset({"in", "true", "false", "null"})  # CEL can't select these as fields
+
+
+def field_key(e: Expr) -> str | None:
+    """The key of `m["a"]` when it could have been written `m.a`: the same chain, checked the same way."""
+    if e.WhichOneof("expr_kind") != "const_expr" or e.const_expr.WhichOneof("constant_kind") != "string_value":
+        return None
+    key = str(e.const_expr.string_value)
+    return key if _FIELD.fullmatch(key) and key not in _NOT_SELECTABLE else None
+
+
+def _step(node: Expr) -> tuple[str, Expr] | None:
+    """One link of a chain: a field select, or an index by a field-like literal key."""
+    kind = node.WhichOneof("expr_kind")
+    if kind == "select_expr" and not node.select_expr.test_only:
+        return node.select_expr.field, node.select_expr.operand
+    if kind == "call_expr" and node.call_expr.function == INDEX and len(node.call_expr.args) == 2:
+        key = field_key(node.call_expr.args[1])
+        return (key, node.call_expr.args[0]) if key is not None else None
+    return None
+
+
 def _chain(e: Expr, scope: frozenset[str]) -> tuple[str, Path] | None:
     fields: list[str] = []
     node = e
-    while node.WhichOneof("expr_kind") == "select_expr" and not node.select_expr.test_only:
-        fields.append(node.select_expr.field)
-        node = node.select_expr.operand
+    while (link := _step(node)) is not None:
+        fields.append(link[0])
+        node = link[1]
     if node.WhichOneof("expr_kind") != "ident_expr":
         return None
     name = node.ident_expr.name
@@ -94,7 +119,8 @@ def _chain(e: Expr, scope: frozenset[str]) -> tuple[str, Path] | None:
 
 
 def chain_path(e: Expr, scope: frozenset[str]) -> Path | None:
-    """The chain an ident or (non-test) select denotes, or None if it isn't a chain from a global."""
+    """The chain an ident, a (non-test) select or a field-like index denotes, or None if it isn't a chain from a
+    global."""
     found = _chain(e, scope)
     return found[1] if found is not None else None
 
@@ -111,7 +137,7 @@ def chains(root: Expr) -> list[Chain]:
             if base is not None:
                 out.append(Chain((*base[1], e.select_expr.field), True, e.id, base[0]))
                 continue
-        elif kind in ("select_expr", "ident_expr"):
+        elif kind in ("select_expr", "ident_expr", "call_expr"):
             found = _chain(e, scope)
             if found is not None:
                 out.append(Chain(found[1], False, e.id, found[0]))
@@ -124,6 +150,16 @@ def chains(root: Expr) -> list[Chain]:
             stack.extend(reversed(parts))
         else:
             stack.extend((child, scope) for child in reversed(children(e)))
+    return out
+
+
+def keyed_chains(root: Expr) -> list[Path]:
+    """Chains indexed by a key that isn't a field name: one chosen at run time, or a literal like "a-b"."""
+    out: list[Path] = []
+    for e, scope in scoped(root, frozenset()):
+        if e.WhichOneof("expr_kind") == "call_expr" and e.call_expr.function == INDEX and len(e.call_expr.args) == 2:
+            if field_key(e.call_expr.args[1]) is None and (found := _chain(e.call_expr.args[0], scope)) is not None:
+                out.append(found[1])
     return out
 
 

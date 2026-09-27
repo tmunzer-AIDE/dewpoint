@@ -119,8 +119,28 @@ def _optional_prefixes(chain: ast.Chain, ref: RefPath, ctx: CelContext) -> list[
     return [chain.path[: offset + i + 1] for i in ctx.optional_fields(ref) if offset + i + 1 <= read]
 
 
-def _references(checked: Any, ctx: CelContext) -> bool:
+_STRUCTURAL = {"steps": ("a step", "`steps.<key>.output`"), "loops": ("a loop", "`loops.<key>.item`")}
+
+
+def _structural_keys(checked: Any, ctx: CelContext) -> bool:
+    """`steps` and `loops` keys are the graph's own: publish checks them (exists, in scope, upstream, guarded), so a
+    key chosen at run time, or one no step could have, is refused. Other data may be indexed freely."""
     ok = True
+    for path in ast.keyed_chains(checked.expr):
+        if path[0] in _STRUCTURAL and len(path) <= 2:
+            what, written = _STRUCTURAL[path[0]]
+            ok = False
+            ctx.error(
+                "cel.bad_path",
+                f"`{'.'.join(path)}[…]` chooses {what if len(path) == 1 else 'its field'} at run time, so publish "
+                "can't check it.",
+                fix=f"Name it: {written}.",
+            )
+    return ok
+
+
+def _references(checked: Any, ctx: CelContext) -> bool:
+    ok = _structural_keys(checked, ctx)
     facts = guards.facts_at(checked.expr)
     reported: set[ast.Path] = set()
     for chain in ast.chains(checked.expr):

@@ -159,6 +159,58 @@ def test_reference_diagnostics_match_refs() -> None:
     assert codes(one("1 +")) == ["cel.invalid"]
 
 
+@pytest.mark.parametrize(
+    ("bracket", "dotted"),
+    [
+        ('steps["nope"].output.x', "steps.nope.output.x"),
+        ('steps["b"].output.value', "steps.b.output.value"),  # b can't reach a
+        ('steps.b["output"].value', "steps.b.output.value"),
+        ('trigger["opt"]["x"].y == "a"', "trigger.opt.x.y == 'a'"),  # optional fields need guards
+        (  # bracket guards count as guards: only `y` is left unguarded on both sides
+            'has(trigger.opt) && has(trigger["opt"].x) && trigger.opt["x"]["y"] == "a"',
+            "has(trigger.opt) && has(trigger.opt.x) && trigger.opt.x.y == 'a'",
+        ),
+    ],
+)
+def test_a_key_written_in_brackets_is_checked_like_the_dotted_field(bracket: str, dotted: str) -> None:
+    """Review finding: `steps["b"]` skipped the step checks (and `trigger["opt"]` the guards) that `steps.b` gets."""
+
+    def graph(expr: str) -> G:
+        return G().node("a", ECHO, {"value": cel(expr)}).node("b", ECHO)
+
+    g, h = graph(bracket), graph(dotted)
+    g.settings = h.settings = {"input_schema": INPUT}
+    assert codes(g) == codes(h) != []
+
+
+def test_a_bracket_key_and_its_dotted_field_are_one_projection() -> None:
+    r = record(one('trigger["site"]["id"] == "x" && has(trigger.site.name)'))
+    assert r.projections == (
+        Projection(("trigger", "site", "id"), False),
+        Projection(("trigger", "site", "name"), True),
+    )
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "steps[trigger.site.k].output.x",  # a step chosen at run time
+        'steps["not a key"].output',  # no step key looks like that
+        "steps.b[trigger.site.k]",  # output or error, chosen at run time
+        "loops[trigger.site.k].item",
+    ],
+)
+def test_steps_and_loops_take_keys_publish_can_check(expr: str) -> None:
+    g = G().node("b", ECHO).node("a", ECHO, {"value": cel(expr)}).edge("b", "a")
+    g.settings = {"input_schema": INPUT}
+    assert codes(g) == ["cel.bad_path"]
+
+
+def test_data_keys_in_brackets_stay_allowed() -> None:
+    """Keys that aren't field names, or chosen at run time, read data as before: open data carries no promise."""
+    assert codes(one('trigger.site["content-type"] == "x" && trigger.site[trigger.site.k] == 1')) == []
+
+
 def test_item_and_index_inside_loops_and_filter_predicates() -> None:
     body = (
         G()
