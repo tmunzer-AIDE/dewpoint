@@ -26,7 +26,8 @@ from tests.support.registry import sync_test_plugins
 ECHO = Entry("node", "testkit.echo@1")
 
 
-async def until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker: Any) -> None:
+async def until_someone_waits_for_a_lock(owner_sessionmaker: Any) -> None:
+    """Until a transaction waits for an advisory lock: a lifecycle entry's, or a workflow's admission lock."""
     for _ in range(200):
         async with owner_sessionmaker() as s:
             waiting = (
@@ -35,7 +36,7 @@ async def until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker: Any) -> N
         if waiting:
             return
         await asyncio.sleep(0.05)
-    raise AssertionError("nobody is waiting for a lifecycle lock")
+    raise AssertionError("nobody is waiting for a lock")
 
 
 @pytest.fixture
@@ -69,7 +70,7 @@ async def test_retirement_first_makes_publish_refuse(
         async with a.begin():
             await lifecycle.lock_exclusive(a, ECHO)
             publishing = asyncio.create_task(publish(api_sessionmaker, ctx, wf, api_settings))
-            await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
+            await until_someone_waits_for_a_lock(owner_sessionmaker)
             assert (await lifecycle.retire(a, ECHO)).applied
     out = await asyncio.wait_for(publishing, 10)
     assert out.version is None and [d.code for d in out.errors] == ["lifecycle.retired"]
@@ -91,7 +92,7 @@ async def test_publish_first_blocks_normal_retirement(
             return await lifecycle.retire(a, ECHO)
 
     retiring = asyncio.create_task(retire())
-    await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
+    await until_someone_waits_for_a_lock(owner_sessionmaker)
     release.set()
     assert (await asyncio.wait_for(publishing, 10)).version is not None
     with pytest.raises(lifecycle.ReferencedError) as e:
@@ -115,7 +116,7 @@ async def test_publish_first_is_included_in_a_forced_retirement(
             return await lifecycle.retire(a, ECHO, force=True, confirm=True)
 
     retiring = asyncio.create_task(retire())
-    await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
+    await until_someone_waits_for_a_lock(owner_sessionmaker)
     release.set()
     assert (await asyncio.wait_for(publishing, 10)).version is not None
     preview = await asyncio.wait_for(retiring, 10)
@@ -147,7 +148,7 @@ async def test_retirement_first_makes_activate_refuse(
         async with a.begin():
             await lifecycle.lock_exclusive(a, ECHO)
             activating = asyncio.create_task(activate(api_sessionmaker, ctx, wf, v1.id))
-            await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
+            await until_someone_waits_for_a_lock(owner_sessionmaker)
             assert (await lifecycle.retire(a, ECHO)).applied  # nothing active uses echo: normal path
     with pytest.raises(workflow_ops.NotActivatableError):
         await asyncio.wait_for(activating, 10)
@@ -165,7 +166,7 @@ async def test_retirement_first_makes_enable_refuse(
         async with a.begin():
             await lifecycle.lock_exclusive(a, ECHO)
             enabling = asyncio.create_task(update(api_sessionmaker, ctx, wf, enabled=True))
-            await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
+            await until_someone_waits_for_a_lock(owner_sessionmaker)
             assert (await lifecycle.retire(a, ECHO)).applied  # the workflow is disabled: normal path
     with pytest.raises(workflow_ops.NotActivatableError):
         await asyncio.wait_for(enabling, 10)
@@ -190,7 +191,7 @@ async def test_enable_first_blocks_normal_retirement(
             return await lifecycle.retire(a, ECHO)
 
     retiring = asyncio.create_task(retire())
-    await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
+    await until_someone_waits_for_a_lock(owner_sessionmaker)
     release.set()
     await asyncio.wait_for(enabling, 10)
     with pytest.raises(lifecycle.ReferencedError) as e:
@@ -218,7 +219,7 @@ async def test_activation_first_blocks_normal_retirement(
             return await lifecycle.retire(a, ECHO)
 
     retiring = asyncio.create_task(retire())
-    await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
+    await until_someone_waits_for_a_lock(owner_sessionmaker)
     release.set()
     await asyncio.wait_for(activating, 10)
     with pytest.raises(lifecycle.ReferencedError) as e:

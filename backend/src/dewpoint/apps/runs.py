@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Starting runs (spec §9). `start_run` is 2a's admission, and 2b's dispatcher reuses `admit`: the workflow is
-enabled, the version is its active one, and nothing in the version's closure is retired. The closure is checked under
-shared lifecycle locks, in the transaction that inserts the run (§4.5), so a retirement either sees the run or the
-run sees the retirement.
+enabled, the version is its active one, and nothing in the version's closure is retired. All three are checked in the
+transaction that inserts the run (§4.5), under locks the other side takes too:
+- the workflow is read under its admission lock (shared), so a disable, publish or activation either commits before
+  the read or waits until the run exists;
+- the closure is read under the lifecycle locks (shared), so a retirement either sees the run or the run sees the
+  retirement.
 
 Then `RunGraph` starts, with the run's id as its workflow id. A lost acknowledgement looks like a failure, so an
 uncertain start is repeated with the same id: Temporal refuses a duplicate id (`REJECT_DUPLICATE`, which also covers
@@ -26,7 +29,7 @@ from dewpoint.core.models.runs import Run
 from dewpoint.core.models.workflows import WorkflowVersion
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.runs import service as runs
-from dewpoint.core.workflows.service import get_workflow
+from dewpoint.core.workflows.service import get_workflow, lock_for_admission
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, LIVE, RunInput
 from dewpoint.engine.runtime.workflow import RunGraph
 
@@ -66,7 +69,8 @@ class StartUncertainError(Exception):
 
 
 async def _admission_locked() -> None:
-    """Hook that runs right after the lifecycle locks are held. A no-op; the race tests pause here."""
+    """Hook that runs once the workflow's admission lock and the lifecycle locks are held. A no-op; the race tests
+    pause here."""
 
 
 async def admit(
@@ -82,6 +86,7 @@ async def admit(
     version = await s.get(WorkflowVersion, version_id)
     if version is None:
         raise NotAdmissibleError(["There is no such version."])
+    await lock_for_admission(s, version.workflow_id)  # first: the workflow read below stands until the run exists
     workflow = await get_workflow(s, tenant_id, version.workflow_id)
     if workflow is None or not workflow.enabled:
         raise NotAdmissibleError(["The workflow is disabled."])

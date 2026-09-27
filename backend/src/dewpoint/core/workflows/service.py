@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.audit.service import record
@@ -46,11 +46,35 @@ async def create_workflow(s: AsyncSession, ctx: TenantContext, *, name: str, dra
     return wf
 
 
+def _admission_key(workflow_id: uuid.UUID) -> str:
+    return f"dewpoint:workflow:{workflow_id}"
+
+
+async def lock_for_admission(s: AsyncSession, workflow_id: uuid.UUID) -> None:
+    """Hold what admission checks (`enabled`, `active_version_id`) until this transaction ends (spec §4.5).
+
+    Admission takes the workflow's admission lock *shared* before it reads the workflow, and keeps it until the run
+    is inserted. Every change to a workflow takes it *exclusively* first (`get_workflow` with `for_update`). So a
+    change either commits before admission reads, or waits until the run exists. Like the lifecycle locks, it is
+    a transaction-scoped advisory lock: a row lock would need UPDATE on `workflows`, which the dispatch role must
+    not have."""
+    await lifecycle.assert_read_committed(s)  # the read after the lock must see what a change committed
+    await s.execute(
+        text("select pg_advisory_xact_lock_shared(hashtextextended(:k, 0))"), {"k": _admission_key(workflow_id)}
+    )
+
+
 async def get_workflow(
     s: AsyncSession, tenant_id: uuid.UUID, workflow_id: uuid.UUID, *, for_update: bool = False
 ) -> Workflow | None:
+    """With `for_update`, take the workflow's admission lock exclusively (`lock_for_admission`), then its row lock.
+    Both are held until the change commits, so a run is admitted either before the change or after it. The admission
+    lock comes first: a change waiting for an admission holds nothing that admission's insert could need."""
     q = select(Workflow).where(Workflow.id == workflow_id, Workflow.tenant_id == tenant_id)
     if for_update:
+        await s.execute(
+            text("select pg_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": _admission_key(workflow_id)}
+        )
         q = q.with_for_update()
     return (await s.execute(q)).scalar_one_or_none()
 

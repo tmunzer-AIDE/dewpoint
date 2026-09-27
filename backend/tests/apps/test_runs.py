@@ -3,6 +3,8 @@
 
 import asyncio
 import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -12,12 +14,14 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from dewpoint.apps import runs as run_ops
+from dewpoint.apps import workflow_ops
 from dewpoint.apps.runs import START_FAILED, NotAdmissibleError, StartRefusedError, StartUncertainError, start_run
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.runs import service
+from dewpoint.core.workflows import service as workflows
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, SIMULATE, RunInput
-from tests.apps.test_lifecycle_races import until_someone_waits_for_a_lifecycle_lock
+from tests.apps.test_lifecycle_races import until_someone_waits_for_a_lock
 from tests.apps.test_workflow_ops import ECHO, ECHO_GRAPH, actor, create, publish, save, update
 from tests.support.registry import sync_test_plugins
 
@@ -195,7 +199,7 @@ async def test_retirement_first_makes_admission_refuse(
                     trigger={},
                 )  # fmt: skip
             )
-            await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)
+            await until_someone_waits_for_a_lock(owner_sessionmaker)
             await lifecycle.retire(a, ECHO, force=True, confirm=True)
     with pytest.raises(NotAdmissibleError, match="retired"):
         await asyncio.wait_for(starting, 10)
@@ -230,8 +234,128 @@ async def test_admission_first_holds_retirement_until_the_run_exists(
             return await lifecycle.retire(a, ECHO, force=True, confirm=True)
 
     retiring = asyncio.create_task(retire())
-    await until_someone_waits_for_a_lifecycle_lock(owner_sessionmaker)  # retirement waits for admission's lock
+    await until_someone_waits_for_a_lock(owner_sessionmaker)  # retirement waits for admission's lock
     release.set()
     run_id = await asyncio.wait_for(starting, 10)
     assert (await asyncio.wait_for(retiring, 10)).applied
     assert client.started and (await run_row(owner_sessionmaker, ctx.tenant_id, run_id)).status == "running"
+
+
+# A change to what admission checks (spec §4.5, "Admissible"), made as the API makes it: in a transaction that locks
+# the workflow for update. Each one makes the version admission was asked for inadmissible, and admission says why.
+Change = Callable[[Any, Any], Awaitable[object]]
+REFUSED = {"disable": "disabled", "activate": "active version", "publish": "active version"}
+
+
+async def admissible(
+    how: str, owner: Any, api: Any, admin: Any, settings: Any
+) -> tuple[Any, uuid.UUID, uuid.UUID, Change]:
+    """A workflow, the version admission is asked for, and the change `how` that makes that version inadmissible:
+    disabling the workflow, activating an older version, or publishing a newer one."""
+    ctx, wf, version = await published(owner, api, admin, settings)
+    older = version
+    if how in ("activate", "publish"):
+        await save(api, ctx, wf, ECHO_GRAPH)  # a draft for `publish`, or for the newer version `activate` replaces
+    if how == "activate":
+        newer = (await publish(api, ctx, wf, settings)).version
+        assert newer is not None
+        version = newer.id
+
+    async def change(s: Any, row: Any) -> object:
+        if how == "disable":
+            return await workflow_ops.update(s, ctx, row, name=None, enabled=False)
+        if how == "activate":
+            return await workflow_ops.activate(s, ctx, row, await workflows.get_version(s, wf, older))
+        out = await workflow_ops.publish(s, ctx, row, expected_revision=row.draft_revision, settings=settings)
+        assert out.version is not None
+        return out
+
+    return ctx, wf, version, change
+
+
+@asynccontextmanager
+async def changing(api: Any, ctx: Any, wf: uuid.UUID, change: Change) -> AsyncIterator[None]:
+    """Make the change in a transaction that stays open for the block, and commit it when the block ends."""
+    async with api() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        row = await workflows.get_workflow(s, ctx.tenant_id, wf, for_update=True)
+        assert row is not None
+        await change(s, row)
+        yield
+
+
+async def change_committed(api: Any, ctx: Any, wf: uuid.UUID, change: Change) -> None:
+    async with changing(api, ctx, wf, change):
+        pass
+
+
+async def until_waiting_or_done(task: asyncio.Task[Any], owner: Any) -> None:
+    """Until `task` has finished, or someone waits for a lock."""
+    waiting = asyncio.create_task(until_someone_waits_for_a_lock(owner))
+    done, _ = await asyncio.wait({task, waiting}, return_when=asyncio.FIRST_COMPLETED)
+    if waiting in done:
+        waiting.result()  # nobody waited in time: AssertionError
+    else:
+        waiting.cancel()
+
+
+@pytest.mark.parametrize("how", REFUSED)
+async def test_a_workflow_change_first_makes_admission_refuse(
+    how, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    ctx, wf, version, change = await admissible(
+        how, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+    )
+    client = FakeClient()
+    async with changing(api_sessionmaker, ctx, wf, change):
+        starting = asyncio.create_task(
+            start_run(
+                dispatch_sessionmaker,
+                client,
+                api_settings,  # type: ignore[arg-type]
+                tenant_id=ctx.tenant_id,
+                version_id=version,
+                trigger={},
+            )  # fmt: skip
+        )
+        await until_waiting_or_done(starting, owner_sessionmaker)  # admission waits for the change to commit
+    with pytest.raises(NotAdmissibleError, match=REFUSED[how]):
+        await asyncio.wait_for(starting, 10)
+    assert not client.started
+
+
+@pytest.mark.parametrize("how", REFUSED)
+async def test_admission_first_holds_a_workflow_change_until_the_run_exists(
+    how, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings, monkeypatch
+) -> None:
+    ctx, wf, version, change = await admissible(
+        how, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+    )
+    reached, release = asyncio.Event(), asyncio.Event()
+
+    async def paused() -> None:
+        reached.set()
+        await release.wait()
+
+    monkeypatch.setattr(run_ops, "_admission_locked", paused)
+    client = FakeClient()
+    starting = asyncio.create_task(
+        start_run(
+            dispatch_sessionmaker,
+            client,
+            api_settings,  # type: ignore[arg-type]
+            tenant_id=ctx.tenant_id,
+            version_id=version,
+            trigger={},
+        )  # fmt: skip
+    )
+    await asyncio.wait_for(reached.wait(), 10)
+    changed = asyncio.create_task(change_committed(api_sessionmaker, ctx, wf, change))
+    await until_waiting_or_done(changed, owner_sessionmaker)  # the change waits for the run
+    changed_first = changed.done()
+    release.set()
+    run_id = await asyncio.wait_for(starting, 10)
+    await asyncio.wait_for(changed, 10)
+    assert not changed_first, f"`{how}` committed while a run of the version it makes inadmissible was admitted"
+    row = await run_row(owner_sessionmaker, ctx.tenant_id, run_id)
+    assert client.started and (row.status, row.workflow_version_id) == ("running", version)
