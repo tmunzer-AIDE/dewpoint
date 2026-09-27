@@ -42,7 +42,9 @@
     - `wait_until` needs a time zone;
     - golden histories start with `engine_abi` 1;
     - from execution's checkpoint 1: redaction also covers patterned-key maps, tuple positions and sensitive keys,
-      and the iteration cap ends a loop's open iterations first.
+      and the iteration cap ends a loop's open iterations first;
+    - from checkpoint 2: the outputs are evaluated under the run's deadline and cancellation, and a malformed output
+      is refused at compile.
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
   This spec **narrows parent §6.4** (where CEL runs) and resolves the CEL item in parent §15.
 - **Evidence:** CEL spike, branch `spike/cel-evaluation`, commits `d6a8162` and `13a62e1`. See
@@ -864,7 +866,9 @@ abandons or restarts an activity or a child workflow.
 
 **Every end is recorded.** Temporal retries a failed workflow task forever, which would leave the run open and
 `running` in the projection. So a version the build can't load or compile fails the run with `version_unusable`
-before any step runs, and any other exception in workflow code fails it with `internal_error`.
+before any step runs, and any other exception in workflow code fails it with `internal_error`. The workflow's
+outputs are evaluated under the same handlers and deadline as its steps. A cancel that arrives while the run's end
+is being written comes too late to unmake it: the write is repeated and the run's result stands.
 
 **Workflow-code rules:**
 - No wall clock, randomness or I/O. `workflow.now()` and `workflow.uuid4()` are the only sources.

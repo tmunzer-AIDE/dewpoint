@@ -38,7 +38,7 @@ what 2a-3 consumes. The owner split 2a-3 into three plans on 2026-09-27:
 1. **Go/no-go experiments ran first** (next section), on temporalio 1.33.0 from the CEL spike's environment. The
    owner approved the SDK's download of its time-skipping test server for planning, the suite and CI.
 2. **Every module was prototyped** in a scratch copy of `backend/` until it passed its tests, `ruff`, `ruff format`,
-   `mypy --strict` (132 source files) and `lint-imports` (10 contracts). The prototype's full suite gives 861 passed
+   `mypy --strict` (132 source files) and `lint-imports` (10 contracts). The prototype's full suite gives 867 passed
    and 8 skipped (the Linux-only evaluator tests), against `main`'s 726 collected.
 3. **The code blocks below are those files, verbatim.** Diffs to existing files were generated from the prototype.
 4. **Each task was staged and checked on its own.** Stage *N* is `main` plus tasks 1..*N*. Every stage passed the
@@ -81,6 +81,12 @@ what 2a-3 consumes. The owner split 2a-3 into three plans on 2026-09-27:
       schemas found the same gap for tuple positions (`prefixItems`) and sensitive keys (`propertyNames`)
       (decision 21);
     - the iteration cap left a loop's opened iterations running (decision 3).
+11. **Checkpoint 2 found three more**, fixed test-first on the branch and carried here:
+    - the workflow's outputs were evaluated outside the run's cancellation handler and deadline;
+    - a malformed output envelope compiled and failed later outside any handler;
+    - an instance of a node's `Output` was returned without validation.
+
+    See decisions 7, 11 and 15.
 
 Not run during planning: the new dependency install (Task 4 downloads it, with the owner's confirmation), and CI.
 
@@ -176,7 +182,7 @@ field declared elsewhere: both closed in decision 21 by walking the schema along
    | raises anything else | `unexpected_error` | yes; for an `ambiguous` node, `outcome_unknown` and never |
    | times out, or its worker is lost | `timeout` (or `error`) | yes; for an `ambiguous` node, `outcome_unknown` and never |
    | config doesn't validate | `config_invalid` | no |
-   | output doesn't validate | `output_schema_violation` | no |
+   | output doesn't validate (an `Output` instance included: pydantic trusts instances it didn't build) | `output_schema_violation` | no |
    | is `reconcilable`, on attempt 2 or later | calls `reconcile()` first and keeps what it finds | |
    | isn't served by any worker of the build | `node_type_unavailable` (the SDK's `NotFoundError`) | yes |
 
@@ -210,6 +216,11 @@ field declared elsewhere: both closed in decision 21 by walking the schema along
     - Any other exception fails it with `internal_error`. The message names only the exception's type, because its
       text may quote run data; the worker's log has the rest (decision 21).
     - Cancellation projects `cancelled`.
+    - The workflow's outputs are evaluated inside the same handlers and deadline as its steps (checkpoint 2), and so
+      is the setup before the first step. A cancel or the deadline while they're computed ends the run as anywhere
+      else. A malformed output envelope is refused at compile, as `version_unusable`.
+    - A cancel that arrives while the run's end is being written comes too late to unmake that end. The write is
+      repeated and the run returns its result, so the projection and Temporal agree.
 
     (Tasks 1, 5)
 12. **Only the projection writes rows** (rewritten after review). A plugin step's activity runs its attempt and
@@ -235,7 +246,7 @@ field declared elsewhere: both closed in decision 21 by walking the schema along
     - a `fail` node: `failed`, with code `workflow_failed` and the node's message;
     - `stop`: `succeeded`, with the workflow outputs evaluated;
     - an output that can't be computed fails the run with that value's code;
-    - the deadline: `deadline_exceeded`, without outputs.
+    - the deadline: `deadline_exceeded`, without outputs, including while the outputs are being computed.
 
     (Tasks 2, 5)
 16. **A filter fails on its first bad item.** An item whose predicate errors fails the whole filter step with that
@@ -566,6 +577,16 @@ def test_a_version_this_build_cannot_run_is_refused() -> None:
     g.settings["outputs"] = {"n": cel("has(steps.l.output) ? steps.l.output.count : 0")}
     records = [r for r in expressions(g) if r["node"] is not None]
     with pytest.raises(ProgramError, match="no expression record for /settings/outputs/n"):
+        compile_program(g.data(), MANIFESTS, records, CURRENT_CEL_PROFILE)
+
+
+def test_a_damaged_output_is_refused() -> None:
+    """Checkpoint-2 finding: compile checked the outputs' CEL records but not their envelopes, so a malformed output
+    compiled, and evaluating it later raised outside the run's handlers."""
+    g = graph()
+    records = expressions(g)
+    g.settings["outputs"] = {"n": {"$value": {"kind": "ref", "path": 5}}}  # publish refuses this; a damaged row
+    with pytest.raises(ProgramError, match="/settings/outputs/n"):
         compile_program(g.data(), MANIFESTS, records, CURRENT_CEL_PROFILE)
 ```
 
@@ -1145,6 +1166,8 @@ def compile_program(
             if isinstance(value, CelValue) and (str(step.id), field) not in records:
                 raise ProgramError(f"`{step.key}`: no expression record for {field}")
     for path, value in iter_values(graph.settings.outputs, ("settings", "outputs")):
+        if isinstance(value, ValueSyntaxError):  # publish refuses these: the stored version is damaged
+            raise ProgramError(f"output {pointer_str(path)}: {value.message}")
         if isinstance(value, CelValue) and (None, pointer_str(path)) not in records:
             raise ProgramError(f"no expression record for {pointer_str(path)}")
     return Program(
@@ -1599,7 +1622,7 @@ diff --git a/backend/pyproject.toml b/backend/pyproject.toml
 - [ ] **Step 4: Run the tests, and check that the contract bites**
 
 Run: `cd backend && uv run pytest -q tests/engine/runtime`
-Expected: 20 passed (2 program, 17 scheduler, 1 property test over 300 random graphs).
+Expected: 21 passed (3 program, 17 scheduler, 1 property test over 300 random graphs).
 
 Then plant `import random` at the top of `scheduler.py`, run `uv run lint-imports`, and remove it again.
 Expected: `engine.runtime is deterministic … BROKEN` naming `dewpoint.engine.runtime.scheduler -> random`, then
@@ -2663,7 +2686,7 @@ __all__ = [
 - [ ] **Step 4: Run the tests**
 
 Run: `cd backend && uv run pytest -q tests/engine/runtime`
-Expected: 62 passed.
+Expected: 63 passed.
 
 - [ ] **Step 5: Checks and commit, then pause for checkpoint 1**
 
@@ -3517,6 +3540,18 @@ class Keyed(Node):
         return {"headers": {f"x-{SECRET}": "not-an-int"}, "codes": {428319: "not-an-int"}}
 
 
+class Constructed(Node):
+    """Returns an instance built without validation: `model_construct` holds whatever it's given."""
+
+    type = "testkit.constructed"
+    version = 1
+    title = "Constructed"
+    Output = LiarOutput
+
+    async def run(self, ctx: StepContext, config: Any) -> Any:
+        return LiarOutput.model_construct(n="not-an-int", key="ok")
+
+
 class Broken(Node):
     type = "testkit.broken"
     version = 1
@@ -3673,6 +3708,14 @@ async def test_cel_evaluate_records_outcomes_and_retries_an_unavailable_evaluato
     with pytest.raises(ApplicationError) as invalid:
         await ActivityEnvironment().run(nowhere, CelInput({"schema": "nope"}))
     assert (invalid.value.type, invalid.value.non_retryable) == ("invalid_request", True)
+
+
+async def test_an_output_instance_is_validated_too() -> None:
+    """Checkpoint-2 finding: an instance of the node's own Output was trusted as it stood, but pydantic validates
+    instances only when they're built through it. It's checked like any other output."""
+    bad = await failure(step_activity_for(Constructed), step("testkit.constructed@1"))
+    assert (bad.type, bad.non_retryable) == ("output_schema_violation", True)
+    assert bad.message == "The output doesn't match `testkit.constructed@1`: n (int_parsing)."
 ```
 
 - [ ] **Step 3: Run them and watch them fail**
@@ -3914,6 +3957,7 @@ from typing import Any, Protocol, get_args
 
 import structlog
 from pydantic import BaseModel, ValidationError
+from pydantic_core import PydanticSerializationError
 from pydantic_core.core_schema import ErrorType
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -4034,11 +4078,22 @@ def step_activity_for(node: type[Node]) -> Callable[[StepInput], Awaitable[StepR
     async def run_step(step: StepInput) -> StepResult:
         try:
             result, outcome = await _call(node, step, config_schema)
-            output = result if isinstance(result, node.Output) else node.Output.model_validate(result)
+            # an instance too: pydantic trusts instances it didn't build (`model_construct`, assignment)
+            data = (
+                result.model_dump(mode="json", by_alias=True, warnings=False)
+                if isinstance(result, BaseModel)
+                else result
+            )
+            output = node.Output.model_validate(data)
             return StepResult(dump_output(output), outcome)
         except _StepFailed as f:
             details = {"outcome": f.outcome}
             raise ApplicationError(f.message, details, type=f.code, non_retryable=not f.retryable) from None
+        except PydanticSerializationError:
+            message = f"The output doesn't match `{ref}`: it can't be written as JSON."
+            raise ApplicationError(
+                message, {"outcome": None}, type=OUTPUT_SCHEMA_VIOLATION, non_retryable=True
+            ) from None
         except ValidationError as e:
             message = f"The output doesn't match `{ref}`: {_fields(e, output_schema)}"
             raise ApplicationError(
@@ -4113,7 +4168,7 @@ __all__ = [
 - [ ] **Step 5: Run the tests**
 
 Run: `cd backend && uv run pytest -q tests/apps/worker/test_activities.py tests/core/plugins/test_registry.py`
-Expected: 17 passed (12 + 5).
+Expected: 18 passed (13 + 5).
 
 - [ ] **Step 6: Checks and commit**
 
@@ -4549,7 +4604,7 @@ from temporalio.worker import UnsandboxedWorkflowRunner
 
 from dewpoint.engine.graph.validate import SubflowInfo
 from dewpoint.engine.runtime import nodes
-from dewpoint.engine.runtime.activities import ENGINE_QUEUE, PROJECT, ProjectInput, RunInput
+from dewpoint.engine.runtime.activities import CEL_EVALUATE, ENGINE_QUEUE, PROJECT, ProjectInput, RunInput
 from dewpoint.engine.runtime.workflow import RunGraph
 from tests.apps.worker.harness import TENANT, MemoryStore, run, start, workers
 from tests.support.graphs import G, cel, ref, template
@@ -4945,6 +5000,84 @@ async def test_a_sensitive_config_value_is_masked_where_it_is_copied_or_echoed(e
     assert rows["p"].input_preview == {"outcome": "rejected", "token": "[redacted]"}
     assert rows["p"].error_message == rows["q"].error_message == "the receiver rejected the request for [redacted]"
     assert token not in repr(store.rows) + repr(store.runs) and passed not in repr(store.rows) + repr(store.runs)
+
+
+async def output_evaluation_started(handle: Any) -> None:
+    """Wait until the run is evaluating its outputs: their `cel.evaluate` is scheduled."""
+    while True:
+        for event in (await handle.fetch_history()).events:
+            if event.HasField("activity_task_scheduled_event_attributes"):
+                if event.activity_task_scheduled_event_attributes.activity_type.name == CEL_EVALUATE:
+                    return
+        await asyncio.sleep(0.05)
+
+
+async def test_a_cancel_while_the_outputs_are_evaluated_projects_cancelled(env: WorkflowEnvironment) -> None:
+    """Checkpoint-2 finding: the outputs were evaluated outside the run's cancellation handler, so a cancel then
+    closed the workflow with nothing projected: the run stayed `running`."""
+    store = MemoryStore()
+    g = graph(n=cel("trigger.x + 1")).node("a", ECHO)
+    async with workers(env.client, store, evaluate=None):  # no evaluator: the output's CEL waits for one
+        handle = await start(env.client, store, g, TRIGGER, cel_schedule_to_start_s=60)
+        await asyncio.wait_for(output_evaluation_started(handle), 10)
+        await handle.cancel()
+        with pytest.raises(WorkflowFailureError):
+            await asyncio.wait_for(handle.result(), 10)
+    assert store.runs[handle.id].status == "cancelled"
+
+
+async def test_the_deadline_holds_while_the_outputs_are_evaluated(env: WorkflowEnvironment) -> None:
+    """Checkpoint-2 finding: past the deadline, a run waited on its outputs' evaluator and ended as its failure."""
+    store = MemoryStore()
+    g = graph(n=cel("trigger.x + 1")).node("a", ECHO)
+    async with workers(env.client, store, evaluate=None):
+        handle = await start(env.client, store, g, TRIGGER, max_run_duration_s=1, cel_schedule_to_start_s=5)
+        result = await asyncio.wait_for(handle.result(), 10)
+    assert (result.status, result.error and result.error["code"]) == ("deadline_exceeded", "deadline_exceeded")
+    assert store.runs[handle.id].status == "deadline_exceeded"
+
+
+async def test_a_damaged_output_fails_the_run_as_unusable(env: WorkflowEnvironment) -> None:
+    store = MemoryStore()
+    version_id = store.add(graph(n=ref("trigger.x")).node("a", ECHO))
+    damaged = {**store.versions[version_id].graph}
+    damaged["settings"] = {**damaged["settings"], "outputs": {"n": {"$value": {"kind": "ref", "path": 5}}}}
+    store.versions[version_id] = dataclasses.replace(store.versions[version_id], graph=damaged)
+    run_id = str(uuid.uuid4())
+    async with workers(env.client, store):
+        handle = await env.client.start_workflow(
+            RunGraph.run, RunInput(TENANT, run_id, version_id, TRIGGER), id=run_id, task_queue=ENGINE_QUEUE
+        )
+        result = await asyncio.wait_for(handle.result(), 10)
+    assert result.error and result.error["code"] == "version_unusable" and store.steps(run_id) == []
+
+
+class HeldStore(MemoryStore):
+    """Holds the run's summary write open until the test lets it go: a cancel can arrive in between."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.writing, self.release = asyncio.Event(), asyncio.Event()
+
+    async def project(self, data: ProjectInput) -> None:
+        if data.run is not None and not self.writing.is_set():
+            self.writing.set()
+            await self.release.wait()
+        await super().project(data)
+
+
+async def test_a_cancel_after_the_run_concluded_leaves_its_outcome(env: WorkflowEnvironment) -> None:
+    """A cancel that arrives while the run's end is being written can't unmake that end: the write is repeated and
+    the run's own result stands, so the projection and Temporal agree."""
+    store = HeldStore()
+    g = graph(v=ref("steps.a.output.value")).node("a", ECHO, {"value": 1})
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, TRIGGER)
+        await asyncio.wait_for(store.writing.wait(), 10)
+        await handle.cancel()
+        store.release.set()
+        result = await asyncio.wait_for(handle.result(), 10)
+    assert (result.status, result.outputs, store.runs[handle.id].status) == ("succeeded", {"v": 1}, "succeeded")
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
@@ -5084,7 +5217,8 @@ class RunGraph:
         """Every way a run ends is projected. Python exceptions in workflow code would fail the workflow task, which
         Temporal retries forever: the run would hang, `running` in the projection. So a version this build can't
         load or compile fails the run (`version_unusable`) before any step runs, and any other exception fails it
-        (`internal_error`)."""
+        (`internal_error`). The workflow's outputs are evaluated under the same deadline and handlers as its steps:
+        a cancel or the deadline while they're computed ends the run as it would anywhere else."""
         self.input = start
         self.started_at = workflow.info().start_time
         try:
@@ -5103,24 +5237,32 @@ class RunGraph:
             message = f"This build can't run the version ({type(e).__name__}); the worker's log has the details."
             return await self._end_early(RunEnd("failed", Failure(VERSION_UNUSABLE, message)))
         self.sched = Scheduler(self.program)
+        deadline = self.started_at + timedelta(seconds=start.max_run_duration_s)
+        outputs: dict[str, Any] | None = None
+        try:
+            self._prepare(start)
+            await self._drive(deadline)
+            end = self.sched.ended or RunEnd("failed", Failure("error", "The run ended without a result."))
+            if end.status == "succeeded":
+                end, outputs = await self._outputs_by(deadline, end)
+        except asyncio.CancelledError:
+            self.sched.end(RunEnd("cancelled", CANCELLED))
+            await self._finish(RunEnd("cancelled", CANCELLED))
+            raise
+        except Exception as e:  # a bug: the text may quote run data, so it goes to the log, not the projection
+            workflow.logger.error("run_internal_error", exc_info=True)
+            message = f"The interpreter failed ({type(e).__name__}); the worker's log has the details."
+            end, outputs = RunEnd("failed", Failure(INTERNAL_ERROR, message)), None
+        return await self._finish(end, outputs)
+
+    def _prepare(self, start: RunInput) -> None:
+        """What the run knows before its first step: the sensitive values it can see already, and its variables."""
         self._learn(start.trigger, self.program.graph.settings.input_schema)
         for step in self.program.steps.values():  # sensitive literals in plugin configs: masked from the start
             if not step.control:
                 self._learn(resolve.assemble(step.config, {}), self.program.manifests[step.ref]["config_schema"])
         schema = self.program.graph.settings.vars_schema
-        self.vars: dict[str, Any] = {k: p.get("default") for k, p in sorted(schema.get("properties", {}).items())}
-        deadline = self.started_at + timedelta(seconds=start.max_run_duration_s)
-        try:
-            await self._drive(deadline)
-        except asyncio.CancelledError:
-            self.sched.end(RunEnd("cancelled", CANCELLED))
-            await self._finish()
-            raise
-        except Exception as e:  # a bug: the text may quote run data, so it goes to the log, not the projection
-            workflow.logger.error("run_internal_error", exc_info=True)
-            message = f"The interpreter failed ({type(e).__name__}); the worker's log has the details."
-            self.sched.end(RunEnd("failed", Failure(INTERNAL_ERROR, message)))
-        return await self._finish()
+        self.vars = {k: p.get("default") for k, p in sorted(schema.get("properties", {}).items())}
 
     # --- the scheduler loop ----------------------------------------------------------------------------------------
 
@@ -5484,14 +5626,28 @@ class RunGraph:
 
     # --- the end ---------------------------------------------------------------------------------------------------
 
-    async def _finish(self) -> RunResult:
-        end = self.sched.ended or RunEnd("failed", Failure("error", "The run ended without a result."))
-        outputs: dict[str, Any] | None = None
-        if end.status == "succeeded":
-            try:
-                outputs = await self._outputs()
-            except resolve.ValueFailure as e:
-                end = RunEnd("failed", e.failure)
+    async def _outputs_by(self, deadline: datetime, end: RunEnd) -> tuple[RunEnd, dict[str, Any] | None]:
+        """The workflow's outputs, within the run's deadline. Past it, their evaluation is cancelled and the run ends
+        `deadline_exceeded`; an output that can't be computed fails the run with its code."""
+        task = asyncio.create_task(self._outputs())
+        clock = asyncio.create_task(asyncio.sleep(max(0.0, (deadline - workflow.now()).total_seconds())))
+        try:
+            done, _ = await workflow.wait([task, clock], return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:  # the run was cancelled: so is what it was computing
+            task.cancel()
+            clock.cancel()
+            raise
+        clock.cancel()
+        if task not in done:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            return RunEnd(DEADLINE_EXCEEDED, Failure(DEADLINE_EXCEEDED, "The run passed its deadline.")), None
+        try:
+            return end, task.result()
+        except resolve.ValueFailure as e:
+            return RunEnd("failed", e.failure), None
+
+    async def _finish(self, end: RunEnd, outputs: dict[str, Any] | None = None) -> RunResult:
         error = end.failure.to_json() if end.failure is not None and end.status != "succeeded" else None
         if error is not None:
             error["message"] = mask(error["message"], self._secrets)
@@ -5505,7 +5661,7 @@ class RunGraph:
         )
         self._queue_settled()
         rows, self._rows = list(self._rows.values()), {}
-        await self._project(rows, summary)
+        await self._project_end(rows, summary)
         return RunResult(status=end.status, outputs=outputs, error=error, iterations=self.sched.iterations)
 
     async def _end_early(self, end: RunEnd) -> RunResult:
@@ -5518,7 +5674,7 @@ class RunGraph:
             error_code=error["code"] if error else None,
             error_message=error["message"] if error else None,
         )
-        await self._project([], summary)
+        await self._project_end([], summary)
         return RunResult(status=end.status, error=error)
 
     async def _outputs(self) -> dict[str, Any]:
@@ -5527,6 +5683,14 @@ class RunGraph:
         values, _ = await self._values(None, pairs, ())
         assembled = resolve.assemble({"settings": {"outputs": settings_outputs}}, values)
         return dict(assembled["settings"]["outputs"])
+
+    async def _project_end(self, rows: list[StepRow], summary: RunSummary) -> None:
+        """The run's last projection. A cancel that arrives while it's written comes too late to unmake the end it
+        records: the write is repeated and the run's result stands, so the projection and Temporal agree."""
+        try:
+            await self._project(rows, summary)
+        except asyncio.CancelledError:
+            await self._project(rows, summary)
 
     async def _project(self, rows: list[StepRow], summary: RunSummary | None = None) -> None:
         await workflow.execute_activity(
@@ -5552,7 +5716,7 @@ __all__ = [
 - [ ] **Step 4: Run the tests**
 
 Run: `cd backend && uv run pytest -q tests/apps/worker`
-Expected: 50 passed (12 + 14 + 24) in about 20 s: the timeout tests wait a few real seconds, on test servers of their
+Expected: 55 passed (13 + 14 + 28) in about 20 s: the timeout tests wait a few real seconds, on test servers of their
 own. The first run downloads Temporal's test server into the SDK's cache (the owner approved it). The warnings that
 activities "completed as failed" are the tests' own failing steps and the flaky store's refused writes.
 
@@ -6948,7 +7112,7 @@ cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy
        -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-Expected: 851 passed and 8 skipped (the Linux-only evaluator tests).
+Expected: 857 passed and 8 skipped (the Linux-only evaluator tests).
 
 ---
 
@@ -7240,7 +7404,7 @@ cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy
        -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-Expected: 861 passed and 8 skipped locally (`main` collects 726 tests; this plan adds 143). On Linux the 8
+Expected: 867 passed and 8 skipped locally (`main` collects 726 tests; this plan adds 149). On Linux the 8
 evaluator-limit tests run too. Push only when the owner says so; CI then runs the same suite, downloading the test
 server on first use.
 
