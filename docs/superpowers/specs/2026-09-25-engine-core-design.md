@@ -955,9 +955,10 @@ cancel while the version loads cancels the run.
   - A batched `project` activity upserts rows keyed `(run_id, step_id, iteration_key, attempt)`. It is the only
     writer: a plugin step's activity runs one attempt and writes nothing, and the workflow queues each attempt's
     `running` and final rows. The projection retries until the database answers, so a write can't repeat an effect.
-    What Postgres can't store (NUL, lone surrogates) is stored as U+FFFD, and a number JSON can't hold as its name. A
-    row the database still refuses for its data (SQLSTATE class 22 or 23) is logged and skipped, so its run still
-    ends.
+    What Postgres can't store (NUL, lone surrogates) is stored as U+FFFD, and a number JSON can't hold as its name.
+    The workflow queues each row, and the run's error, already in that form, so a projection is sized by what it
+    sends. A row the database still refuses for its data (SQLSTATE class 22 or 23) is logged and skipped, so its run
+    still ends.
     `step_id` is the graph node's id, and `iteration_key` names the scope (`loop2:7/loop5:3`, empty in the root).
   - Control nodes are projected at each scheduler await.
   - The worker writes through the worker DB role inside `tenant_scope`.

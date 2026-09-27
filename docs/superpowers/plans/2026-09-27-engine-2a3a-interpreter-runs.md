@@ -38,7 +38,7 @@ what 2a-3 consumes. The owner split 2a-3 into three plans on 2026-09-27:
 1. **Go/no-go experiments ran first** (next section), on temporalio 1.33.0 from the CEL spike's environment. The
    owner approved the SDK's download of its time-skipping test server for planning, the suite and CI.
 2. **Every module was prototyped** in a scratch copy of `backend/` until it passed its tests, `ruff`, `ruff format`,
-   `mypy --strict` (132 source files) and `lint-imports` (10 contracts). The prototype's full suite gives 896 passed
+   `mypy --strict` (132 source files) and `lint-imports` (10 contracts). The prototype's full suite gives 902 passed
    and 8 skipped (the Linux-only evaluator tests), against `main`'s 726 collected.
 3. **The code blocks below are those files, verbatim.** Diffs to existing files were generated from the prototype.
 4. **Each task was staged and checked on its own.** Stage *N* is `main` plus tasks 1..*N*. Every stage passed the
@@ -124,7 +124,7 @@ field declared elsewhere: both closed in decision 21 by walking the schema along
 checkpoint 3 found a workflow change committing during admission, closed by decision 23. The final whole-branch review
 found failures the activity never mapped trusted as the node's and the `time` format checked (decision 7), a cancel
 missed during the end write (11), data Postgres refuses stopping a run (12), unbounded catch-up projections (13), and
-waits out of range crashing the run (14).
+waits out of range crashing the run (14). The PR #9 review found rows sized before they were normalized (12).
 
 1. **A handled failure leaves an error and no output.** With `on_error: continue` or `port`, `steps.<key>` becomes
    `{"error": {code, message, attempt}}`, with no `output` key. That is 2a-2's presence contract (§5.3, decision 3
@@ -260,6 +260,10 @@ waits out of range crashing the run (14).
     - What Postgres can't store (NUL, lone surrogates) is stored as U+FFFD, and a number JSON can't hold as its name.
       A write the database still refuses for its data (SQLSTATE class 22 or 23) is repeated row by row, and a row
       refused again is logged and skipped: its run still ends (final review).
+    - The workflow queues each row, and the run's error, as storage will write them. It sizes a projection by the rows
+      it sends, and a character strict UTF-8 can't encode would fail that in workflow code, on every retry (PR #9
+      review). `engine` can't import `core`, so `projection.storable` and `sanitize` mirror the storage's, and a test
+      holds them equal.
 
     (Tasks 3, 4, 5, 7)
 13. **One projection in flight.** At most 100 steps (and loop `collect`s) are in flight per execution. Each has at
@@ -2539,21 +2543,28 @@ Create `backend/src/dewpoint/engine/runtime/projection.py`:
   a map whose keys are sensitive (`propertyNames`) is redacted whole;
 - a value the run learned is sensitive (MIN_SECRET characters or more) is masked wherever it reappears, in strings and
   keys: copied by a transform, embedded by a template, echoed by an error message;
-- a preview larger than 8 KiB of canonical JSON becomes "[truncated]".
+- a preview larger than 8 KiB of canonical JSON becomes "[truncated]";
+- every row the workflow queues holds what storage will write (`storable`, `sanitize`): the workflow sizes each
+  projection by the rows it sends, and a character strict UTF-8 can't encode would fail that in workflow code.
 
 It runs in the workflow. `remember` keeps the learned values in one sorted order, so every replay masks the same way.
 Masking catches copies, not transformations: a secret that CEL encodes or slices is no longer the same text."""
 
+import math
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from dewpoint.engine.canonical import canonical_json
 
 PREVIEW_BYTES = 8 * 1024
+MESSAGE_LIMIT = 500  # characters of a stored code or message
 REDACTED, TRUNCATED = "[redacted]", "[truncated]"
 SENSITIVE = "x-sensitive"
 MIN_SECRET = 4  # shorter values would mask ordinary text ("1", "yes") everywhere
 _MAX_DEPTH = 64  # a schema that refers to itself ends here
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+_UNSTORABLE = re.compile("[\x00\ud800-\udfff]")  # Postgres takes no NUL, and a lone surrogate isn't UTF-8
 
 Secrets = tuple[str, ...]
 
@@ -2726,6 +2737,29 @@ def location(loc: Sequence[str | int], schema: Mapping[str, Any]) -> str:
     return ".".join(parts) or "(root)"
 
 
+def sanitize(message: str | None) -> str | None:
+    """A code or message as storage writes it (`core.runs.service.sanitize`; a test holds the two equal): no control
+    characters, no lone surrogates, at most MESSAGE_LIMIT characters."""
+    if message is None:
+        return None
+    clean = _UNSTORABLE.sub("\ufffd", _CONTROL.sub(" ", message))
+    return clean if len(clean) <= MESSAGE_LIMIT else clean[: MESSAGE_LIMIT - 1] + "…"
+
+
+def storable(value: Any) -> Any:
+    """A value as storage writes it to jsonb (`core.runs.service.storable`; a test holds the two equal): NUL and lone
+    surrogates, in strings and keys, become U+FFFD, and a number JSON can't hold (NaN, infinity) its name."""
+    if isinstance(value, str):
+        return _UNSTORABLE.sub("\ufffd", value)
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {storable(k): storable(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [storable(v) for v in value]
+    return value
+
+
 def preview(value: Any, schema: Mapping[str, Any] | None = None, secrets: Secrets = ()) -> Any:
     shown = mask(_walk(value, [schema] if schema else [], schema or {}, None), secrets)
     try:
@@ -2736,6 +2770,7 @@ def preview(value: Any, schema: Mapping[str, Any] | None = None, secrets: Secret
 
 
 __all__ = [
+    "MESSAGE_LIMIT",
     "MIN_SECRET",
     "PREVIEW_BYTES",
     "REDACTED",
@@ -2745,7 +2780,9 @@ __all__ = [
     "mask",
     "preview",
     "remember",
+    "sanitize",
     "sensitive_values",
+    "storable",
 ]
 ```
 
@@ -2839,6 +2876,7 @@ from sqlalchemy.exc import DBAPIError
 
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.runs import service
+from dewpoint.engine.runtime import projection
 from tests.support.workflows import seed_workflow
 
 
@@ -2967,6 +3005,27 @@ async def test_previews_and_messages_hold_nothing_the_database_refuses(
     async with owner_sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant)
         assert (await service.get_run(s, run_id)).error_code == "c�"  # type: ignore[union-attr]
+
+
+HOSTILE: list[Any] = [
+    "plain",
+    "nul\x00 esc\x1b bell\x07 tab\t newline\n",
+    "lone \ud800 and \udfff surrogates",
+    "x" * 900,
+    {"k\x00ey": ["a\ud800b", float("nan"), float("-inf"), 1.5, None, True, {"deep\ud801": "\x00"}]},
+]
+
+
+@pytest.mark.parametrize("value", HOSTILE)
+def test_the_engine_sends_what_storage_writes(value: Any) -> None:
+    """PR #9 review: the workflow sizes a projection by the rows it sends, so it normalizes them as storage will
+    (`engine.runtime.projection` can't import `core`, nor `core` the engine): the same values, and a second pass
+    changes nothing."""
+    assert projection.storable(value) == service.storable(value)
+    assert service.storable(projection.storable(value)) == projection.storable(value)
+    if isinstance(value, str):
+        assert projection.sanitize(value) == service.sanitize(value)
+        assert service.sanitize(projection.sanitize(value)) == projection.sanitize(value)
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
@@ -3310,7 +3369,7 @@ async def run_steps(s: AsyncSession, run_id: uuid.UUID) -> list[RunStep]:
 - [ ] **Step 4: Run the tests and the migration round trip**
 
 Run: `cd backend && uv run pytest -q tests/core/runs`
-Expected: 6 passed. The session fixture migrates a fresh container to head.
+Expected: 11 passed. The session fixture migrates a fresh container to head.
 
 Then check the downgrade on a scratch database (the image is the approved test image):
 
@@ -5557,7 +5616,15 @@ with workflow.unsafe.imports_passed_through():
         step_activity,
     )
     from dewpoint.engine.runtime.program import Step, compile_program
-    from dewpoint.engine.runtime.projection import Secrets, mask, preview, remember, sensitive_values
+    from dewpoint.engine.runtime.projection import (
+        Secrets,
+        mask,
+        preview,
+        remember,
+        sanitize,
+        sensitive_values,
+        storable,
+    )
     from dewpoint.engine.runtime.scheduler import (
         ITERATION_CAP_EXCEEDED,
         Collect,
@@ -5792,8 +5859,24 @@ class RunGraph:
     # --- the projection -------------------------------------------------------------------------------------------
 
     def _queue(self, row: StepRow) -> None:
-        """Queue a row for the next projection. A later row of the same attempt replaces it."""
+        """Queue a row for the next projection, as storage will write it: `_take_rows` sizes the rows it sends, and a
+        character strict UTF-8 can't encode would fail that in workflow code, on every retry. A later row of the same
+        attempt replaces it."""
+        row = replace(
+            row,
+            input_preview=storable(row.input_preview),
+            output_preview=storable(row.output_preview),
+            error_code=sanitize(row.error_code),
+            error_message=sanitize(row.error_message),
+        )
         self._rows[(row.step_id, row.iteration_key, row.attempt)] = row
+
+    @staticmethod
+    def _stored(error: dict[str, Any] | None) -> dict[str, Any] | None:
+        """A run's error as storage writes it: the summary and the run's result say the same."""
+        if error is None:
+            return None
+        return {**error, "code": sanitize(error["code"]), "message": sanitize(error["message"])}
 
     def _take_rows(self) -> list[StepRow]:
         """The next projection's rows, oldest first, within PROJECT_BYTES; one row at least. A backlog (after a
@@ -6099,6 +6182,7 @@ class RunGraph:
         error = end.failure.to_json() if end.failure is not None and end.status != "succeeded" else None
         if error is not None:
             error["message"] = mask(error["message"], self._secrets)
+        error = self._stored(error)
         summary = RunSummary(
             run_id=self.input.run_id,
             status=end.status,
@@ -6113,7 +6197,7 @@ class RunGraph:
 
     async def _end_early(self, end: RunEnd) -> RunResult:
         """The run ends before it has a program: nothing ran, so only the run is projected."""
-        error = end.failure.to_json() if end.failure is not None else None
+        error = self._stored(end.failure.to_json() if end.failure is not None else None)
         summary = RunSummary(
             run_id=self.input.run_id,
             status=end.status,
@@ -7146,6 +7230,7 @@ Create `backend/tests/apps/worker/test_worker_db.py`:
 """A run end to end (spec §8, §9): admitted by `start_run`, executed by `RunGraph`, projected by the worker into
 `runs` and `run_steps` under RLS, and read back through the runs API."""
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -7245,6 +7330,43 @@ async def test_a_row_the_database_refuses_never_holds_up_the_others_or_the_run(
         run = await runs.get_run(s, run_id)
     assert stored == [(1, "failed"), (3, "succeeded")]
     assert run is not None and (run.status, run.iterations) == ("succeeded", 2)
+
+
+async def test_a_character_the_database_refuses_never_keeps_its_run_open(
+    env: WorkflowEnvironment,
+    owner_sessionmaker: Any,
+    api_sessionmaker: Any,
+    admin_sessionmaker: Any,
+    dispatch_sessionmaker: Any,
+    worker_sessionmaker: Any,
+    api_settings: Any,
+) -> None:
+    """PR #9 review: rows were sized as strict UTF-8 in workflow code, before storage replaced what Postgres refuses.
+    A `fail` node's message read from a trigger with a lone surrogate raised there: the workflow task failed on every
+    retry, no row or summary landed, and the run stayed `running`."""
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    g = G()
+    g.settings = {"input_schema": {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"]}}
+    g.node("f", "flow.fail@1", {"message": ref("trigger.note")})
+    out = await publish(api_sessionmaker, ctx, await create(api_sessionmaker, ctx, g.data()), api_settings)
+    assert out.version is not None
+    async with workers(env.client, DbRunStore(worker_sessionmaker)):
+        run_id = await start_run(
+            dispatch_sessionmaker, env.client, api_settings,
+            tenant_id=ctx.tenant_id, version_id=out.version.id, trigger={"note": "bad \ud800 note"},
+        )  # fmt: skip
+        handle = env.client.get_workflow_handle_for(RunGraph.run, str(run_id))
+        result = await asyncio.wait_for(handle.result(), 30)
+    assert result.status == "failed" and result.error is not None
+    assert (result.error["code"], result.error["message"]) == ("workflow_failed", "bad \ufffd note")
+    async with owner_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        run = await runs.get_run(s, run_id)
+        steps = await runs.run_steps(s, run_id)
+    assert run is not None
+    assert (run.status, run.error_code, run.error_message) == ("failed", "workflow_failed", "bad \ufffd note")
+    assert [r.node_key for r in steps] == ["f"]
 ```
 
 Create `backend/tests/apps/worker/test_dev_run.py`:
@@ -7905,8 +8027,9 @@ diff --git a/backend/src/dewpoint/apps/cli/main.py b/backend/src/dewpoint/apps/c
 - [ ] **Step 5: Run the tests**
 
 Run: `cd backend && uv run pytest -q tests/apps/worker tests/apps/cli tests/apps/api`
-Expected: all pass, among them the 10 new tests: 1 end-to-end through the database and the API, 1 row the database
-refuses, 1 `dev_run_version`, 1 worker shutdown grace, and 6 CLI exit codes.
+Expected: all pass, among them the 11 new tests: 1 end-to-end through the database and the API, 1 run whose trigger
+holds a character the database refuses, 1 row the database refuses, 1 `dev_run_version`, 1 worker shutdown grace, and
+6 CLI exit codes.
 
 - [ ] **Step 6: Document it**
 
@@ -8082,7 +8205,7 @@ cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy
        -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-Expected: 886 passed and 8 skipped (the Linux-only evaluator tests).
+Expected: 892 passed and 8 skipped (the Linux-only evaluator tests).
 
 ---
 
@@ -8374,7 +8497,7 @@ cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy
        -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-Expected: 896 passed and 8 skipped locally (`main` collects 726 tests; this plan adds 178). On Linux the 8
+Expected: 902 passed and 8 skipped locally (`main` collects 726 tests; this plan adds 184). On Linux the 8
 evaluator-limit tests run too. Push only when the owner says so; CI then runs the same suite, downloading the test
 server on first use.
 
