@@ -514,3 +514,58 @@ async def test_a_cancel_after_the_run_concluded_leaves_its_outcome(env: Workflow
         store.release.set()
         result = await asyncio.wait_for(handle.result(), 10)
     assert (result.status, result.outputs, store.runs[handle.id].status) == ("succeeded", {"v": 1}, "succeeded")
+
+
+async def cancel_acted_on(handle: Any) -> None:
+    """Until a workflow task after the cancel request has completed: the workflow has acted on the cancel."""
+    for _ in range(200):
+        kinds = [e.event_type for e in (await handle.fetch_history()).events]
+        if EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCEL_REQUESTED in kinds:
+            after = kinds[kinds.index(EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCEL_REQUESTED) :]
+            if EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED in after:
+                return
+        await asyncio.sleep(0.05)
+    raise AssertionError("the workflow never acted on the cancel")
+
+
+async def test_a_cancel_acted_on_before_the_end_is_written_still_leaves_its_outcome(env: WorkflowEnvironment) -> None:
+    """Final review: the SDK reports the cancel of the awaited end write as an `ActivityError`, unless the write had
+    already finished in the same activation. Only `CancelledError` repeated the write, so Temporal closed the run
+    `cancelled` while its row said `succeeded`, or stayed `running` if the write never landed."""
+    store = HeldStore()
+    g = graph(v=ref("steps.a.output.value")).node("a", ECHO, {"value": 1})
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, TRIGGER)
+        await asyncio.wait_for(store.writing.wait(), 10)
+        await handle.cancel()
+        await cancel_acted_on(handle)  # the held write outlives the cancel's activation
+        store.release.set()
+        result = await asyncio.wait_for(handle.result(), 10)
+    assert (result.status, result.outputs, store.runs[handle.id].status) == ("succeeded", {"v": 1}, "succeeded")
+
+
+class LoadingStore(MemoryStore):
+    """Holds the version's load open until the test lets it go."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.loading, self.release = asyncio.Event(), asyncio.Event()
+
+    async def version(self, tenant_id: str, version_id: str) -> Any:
+        self.loading.set()
+        await self.release.wait()
+        return await super().version(tenant_id, version_id)
+
+
+async def test_a_cancel_while_the_version_loads_cancels_the_run(env: WorkflowEnvironment) -> None:
+    """Final review: the cancel of the version's load arrives as an `ActivityError`, which was taken for a version
+    this build can't run (`version_unusable`)."""
+    store = LoadingStore()
+    async with workers(env.client, store):
+        handle = await start(env.client, store, graph().node("a", ECHO, {"value": 1}), TRIGGER)
+        await asyncio.wait_for(store.loading.wait(), 10)
+        await handle.cancel()
+        with pytest.raises(WorkflowFailureError):
+            await asyncio.wait_for(handle.result(), 10)
+        store.release.set()
+    assert (store.runs[handle.id].status, store.runs[handle.id].error_code) == ("cancelled", "cancelled")

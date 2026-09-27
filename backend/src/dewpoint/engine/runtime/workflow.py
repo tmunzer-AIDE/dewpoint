@@ -106,6 +106,14 @@ def _attempt_failed(
     return Failure(code, message, attempt), None, True
 
 
+def _cancelled(e: BaseException) -> bool:
+    """Our own cancel, as the SDK reports it: `CancelledError` when the awaited activity had already finished in the
+    same activation, an `ActivityError` caused by Temporal's `CancelledError` otherwise."""
+    return isinstance(e, asyncio.CancelledError) or (
+        isinstance(e, ActivityError) and isinstance(e.cause, ActivityCancelled)
+    )
+
+
 def _backoff(retry: Mapping[str, Any], attempt: int) -> float:
     """Seconds before attempt `attempt + 1`, from the manifest's retry settings."""
     delay = float(retry["initial_interval_s"]) * float(retry["backoff"]) ** (attempt - 1)
@@ -143,6 +151,9 @@ class RunGraph:
             await self._end_early(RunEnd("cancelled", CANCELLED))
             raise
         except Exception as e:  # its text may quote the version: the log has it, the projection names the type
+            if _cancelled(e):
+                await self._end_early(RunEnd("cancelled", CANCELLED))
+                raise asyncio.CancelledError from None
             workflow.logger.error("run_version_unusable", exc_info=True)
             message = f"This build can't run the version ({type(e).__name__}); the worker's log has the details."
             return await self._end_early(RunEnd("failed", Failure(VERSION_UNUSABLE, message)))
@@ -596,11 +607,16 @@ class RunGraph:
 
     async def _project_end(self, rows: list[StepRow], summary: RunSummary) -> None:
         """The run's last projection. A cancel that arrives while it's written comes too late to unmake the end it
-        records: the write is repeated and the run's result stands, so the projection and Temporal agree."""
-        try:
-            await self._project(rows, summary)
-        except asyncio.CancelledError:
-            await self._project(rows, summary)
+        records: the write is shielded, so it's never cancelled, and it lands; the run's result stands, so the
+        projection and Temporal agree."""
+        write = asyncio.create_task(self._project(rows, summary))
+        while True:
+            try:
+                await asyncio.shield(write)
+                return
+            except asyncio.CancelledError:
+                if write.cancelled():
+                    raise
 
     async def _project(self, rows: list[StepRow], summary: RunSummary | None = None) -> None:
         await workflow.execute_activity(
