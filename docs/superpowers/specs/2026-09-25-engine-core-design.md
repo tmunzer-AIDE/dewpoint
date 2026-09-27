@@ -46,7 +46,10 @@
     - from checkpoint 2: the outputs are evaluated under the run's deadline and cancellation, and a malformed output
       is refused at compile;
     - from checkpoint 3: admission reads the workflow under the workflow's admission lock, which every change to the
-      workflow takes exclusively (§4.5).
+      workflow takes exclusively (§4.5);
+    - from the final review: only failures a step's activity maps count as the node's; the run's end write is
+      shielded from a late cancel; projections are bounded batches that never hold what Postgres refuses; waits out
+      of range fail their step (§6, §8).
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
   This spec **narrows parent §6.4** (where CEL runs) and resolves the CEL item in parent §15.
 - **Evidence:** CEL spike, branch `spike/cel-evaluation`, commits `d6a8162` and `13a62e1`. See
@@ -800,7 +803,8 @@ The version (graph, classifications, bounds) is loaded by one local activity and
 - **Scheduler.** A single loop owns a ready queue ordered by `(scope, topological index)`. It starts activities and
   child workflows as futures and awaits them. Nothing else in the workflow creates concurrency.
   - **In-flight cap.** At most 100 activities and child workflows are outstanding per workflow execution (an initial limit).
-    Besides them, at most one projection is in flight; rows that settle meanwhile go in the next one.
+    Besides them, at most one projection is in flight; rows that settle meanwhile go in the next one. Each
+    projection takes at most 256 KiB of rows, so a backlog takes several.
   - This bounds how much history in-flight work can still add, which the continue-as-new headroom depends on.
 
 **Node kinds:**
@@ -808,7 +812,7 @@ The version (graph, classifications, bounds) is loaded by one local activity and
 | Kind | Nodes | Execution |
 |---|---|---|
 | Control | `if`, `switch` (cases in declared order, first match), `set_variables`, `stop`, `fail` | values via §5 (local or `cel.evaluate`) |
-| Time | `delay`, `wait_until` | durable timers. Static waits beyond `max_run_duration` are rejected at publish. Dynamic waits past the deadline end the run with `deadline_exceeded` when the deadline is reached. `wait_until` takes RFC 3339 with an offset: a time without a zone fails the step (`type_mismatch`) |
+| Time | `delay`, `wait_until` | durable timers. Static waits beyond `max_run_duration` are rejected at publish. Dynamic waits past the deadline end the run with `deadline_exceeded` when the deadline is reached. `wait_until` takes RFC 3339 with an offset: a time without a zone fails the step (`type_mismatch`). A value resolved at run time is checked too: `delay` takes 0 to 30 days, and `wait_until` an instant from year 1 to 9999 in UTC; anything else fails the step (`type_mismatch`) |
 | Loop | `loop` (`items`: a list value; `concurrency` 1–10, default 1; item cap default 10,000) | ≤ 100 items run inline; more run as child workflows in batches of 100 within the parent's concurrency |
 | Filter | `filter` (`items`, per-item predicate) | ≤ 1,000 items: predicate per item, inline (local class) or batched `cel.evaluate` calls; each item is its own evaluation with its own 10,000 budget. Larger lists are batched through `cel.evaluate` in chunks of 1,000 |
 | Transform | `flow.transform` | each output field is a separate value (§4.3) with its own class |
@@ -822,8 +826,10 @@ The version (graph, classifications, bounds) is loaded by one local activity and
     `has(steps.<key>.output)` is false (§5.3), so a reference's default applies;
   - `port`: follow the `error` port.
 - `OutcomeUnknownError` is never retried. The workflow schedules each attempt of a plugin step as its own activity
-  execution and decides every retry. For an `ambiguous` node, an attempt that timed out or lost its worker may have
-  sent its request, so it records `outcome_unknown` and is never repeated.
+  execution and decides every retry. Only the failures the step's activity maps count as the node's own. For an
+  `ambiguous` node, an attempt that timed out, lost its worker or failed any other way may have sent its request, so
+  it records `outcome_unknown` and is never repeated. A stopping worker lets running attempts finish for a grace
+  period first.
 - An optional workflow failure handler (a pinned sub-flow) runs once with the error summary.
 
 **Continue-as-new only at a quiescent checkpoint.** Temporal doesn't carry child workflows into the continued run.
@@ -884,7 +890,8 @@ abandons or restarts an activity or a child workflow.
 `running` in the projection. So a version the build can't load or compile fails the run with `version_unusable`
 before any step runs, and any other exception in workflow code fails it with `internal_error`. The workflow's
 outputs are evaluated under the same handlers and deadline as its steps. A cancel that arrives while the run's end
-is being written comes too late to unmake it: the write is repeated and the run's result stands.
+is being written comes too late to unmake it: the write is shielded from the cancel, and the run's result stands. A
+cancel while the version loads cancels the run.
 
 **Workflow-code rules:**
 - No wall clock, randomness or I/O. `workflow.now()` and `workflow.uuid4()` are the only sources.
@@ -948,6 +955,9 @@ is being written comes too late to unmake it: the write is repeated and the run'
   - A batched `project` activity upserts rows keyed `(run_id, step_id, iteration_key, attempt)`. It is the only
     writer: a plugin step's activity runs one attempt and writes nothing, and the workflow queues each attempt's
     `running` and final rows. The projection retries until the database answers, so a write can't repeat an effect.
+    What Postgres can't store (NUL, lone surrogates) is stored as U+FFFD, and a number JSON can't hold as its name. A
+    row the database still refuses for its data (SQLSTATE class 22 or 23) is logged and skipped, so its run still
+    ends.
     `step_id` is the graph node's id, and `iteration_key` names the scope (`loop2:7/loop5:3`, empty in the root).
   - Control nodes are projected at each scheduler await.
   - The worker writes through the worker DB role inside `tenant_scope`.
@@ -1076,7 +1086,7 @@ is being written comes too late to unmake it: the write is repeated and the run'
 14. **Run-time behaviour from plan 2a-3a:** a handled failure leaves no output; a failed iteration collects `null`;
     every run's end is recorded; the workflow decides every retry, never repeating an ambiguous request; only the
     projection writes; learned sensitive values are masked; a start fails only on a confirmed refusal; `wait_until`
-    needs a time zone.
+    needs a time zone; waits out of range fail their step; projections are bounded and never stop a run.
 
 ## 12. Follow-up sub-projects
 

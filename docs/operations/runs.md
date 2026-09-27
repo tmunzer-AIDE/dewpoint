@@ -23,6 +23,9 @@ activity per installed plugin node type. It needs:
   CEL profile it serves, and serves `cel.evaluate` on that profile's queue (`dewpoint-cel.<profile>`) with
   `DEWPOINT_CEL_MAX_CONCURRENT` activities at a time (default 2; match the evaluator's slots,
   [`cel-evaluator.md`](cel-evaluator.md)).
+- `DEWPOINT_WORKER_SHUTDOWN_GRACE_S` (default 30): a stopping worker lets running attempts finish this long, then
+  cancels them. A cancelled attempt ends as on a lost worker: `outcome_unknown` for an `ambiguous` node. Give the
+  process manager a stop timeout longer than this.
 
 Without an evaluator, CEL expressions that can't run inline wait `DEWPOINT_CEL_SCHEDULE_TO_START_S` (default 600
 seconds) and then fail the step with `cel_profile_unavailable`. In 2a every CEL expression runs through the evaluator:
@@ -78,6 +81,8 @@ Anyone who can view runs can read the projection, so it keeps secrets out:
   `custom_error`. An unexpected exception, a version this build can't run and an interpreter error name only the
   error's type. The full text goes to the worker's log.
 - Previews hold at most 8 KiB of JSON each; a larger one shows as `[truncated]`.
+- Characters Postgres can't store (NUL, lone surrogates) show as U+FFFD, and a number JSON can't hold (NaN,
+  infinity) as its name.
 
 Temporal's own history still holds the values in full until 2b's payload encryption: restrict access to Temporal.
 
@@ -92,7 +97,7 @@ Temporal's own history still holds the values in full until 2b's payload encrypt
 | `failed` | `version_unusable` | This build can't load or run the version, for example a node type it lacks. Nothing ran. |
 | `failed` | `internal_error` | A bug in the interpreter. The message names the exception's type, and the worker's log has the details; please report it. |
 | `deadline_exceeded` | `deadline_exceeded` | The run passed `DEWPOINT_MAX_RUN_DURATION_DAYS` (default 30). Running steps were cancelled. |
-| `cancelled` | `cancelled` | The run was cancelled in Temporal. |
+| `cancelled` | `cancelled` | The run was cancelled in Temporal. A cancel that arrives while the run's end is being written leaves that end. |
 
 Step error codes include the plugin's own codes and `config_invalid`, `output_schema_violation`, `unexpected_error`,
 `evaluation_error`, `type_mismatch`, `timeout`, `cel_profile_unavailable`, `item_cap_exceeded`,
@@ -106,8 +111,11 @@ retry settings (`max_attempts` and `timeout_s` can be overridden per step), and 
 
 - A node's `RetryableError` and unexpected exceptions are retried, and so are timeouts, unless the node is
   `ambiguous`.
-- For an `ambiguous` node, a timeout or a lost worker means the request may have been sent: the attempt records
-  `outcome_unknown` and is never repeated. So is an `OutcomeUnknownError`, from any node.
+- For an `ambiguous` node, a timeout, a lost or stopping worker, or any failure the step's activity didn't describe
+  itself means the request may have been sent: the attempt records `outcome_unknown` and is never repeated. So is an
+  `OutcomeUnknownError`, from any node.
+- A config or output check that fails with something other than a validation error (a validator's bug) fails the
+  step as `config_invalid` or `output_schema_violation`, never retried.
 - A `reconcilable` node checks with `reconcile()` before each retry.
 
 ## Limits in this build
@@ -116,9 +124,13 @@ retry settings (`max_attempts` and `timeout_s` can be overridden per step), and 
 - Loops over more than 100 items, and `run_workflow` sub-flows, fail their step with `not_supported`: loop batches and
   sub-flows arrive with plan 2a-3b, as do continue-as-new and the workflow failure handler.
 - A run counts at most 100,000 loop iterations and filter items (`iteration_cap_exceeded`).
+- `flow.delay` waits 0 to 30 days, and `wait_until` takes instants from year 1 to 9999 in UTC. A value outside that,
+  resolved at run time, fails the step with `type_mismatch`.
 
 ## If the database is unavailable
 
 Plugin steps never write to the database: the interpreter projects every row through one activity, which retries
 until the database answers. A step's effect therefore never repeats because of a failed write, rows catch up when the
-database is back, and a run's end waits for its summary to be written.
+database is back, and a run's end waits for its summary to be written. A backlog is written in batches of at most
+256 KiB. A row the database refuses for its data (SQLSTATE class 22 or 23) is logged in the worker's log and
+skipped, so the other rows, and the run's end, still land.
