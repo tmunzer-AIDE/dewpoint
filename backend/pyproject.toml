@@ -159,3 +159,9 @@ forbidden_modules = [
   "dewpoint.core", "dewpoint.plugins", "dewpoint.sdk", "dewpoint.engine.graph", "dewpoint.engine.registry",
   "sqlalchemy", "asyncpg", "fastapi", "pydantic", "jsonschema", "httpx", "temporalio", "cryptography",
 ]
+
+[[tool.importlinter.contracts]]
+name = "engine.runtime is deterministic: no clock, randomness, I/O or threads (spec §6)"
+type = "forbidden"
+source_modules = ["dewpoint.engine.runtime"]
+forbidden_modules = ["random", "secrets", "time", "socket", "subprocess", "threading", "os", "structlog"]
