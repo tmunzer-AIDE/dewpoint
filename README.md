@@ -44,6 +44,12 @@ CEL expressions that can't run inline go to the `cel-evaluator` service: no secr
 (Docker Compose; Kubernetes support comes with the Helm chart). Sizing, refusals and health:
 [`docs/operations/cel-evaluator.md`](docs/operations/cel-evaluator.md).
 
+## Runs
+
+Until sub-project 2b brings triggers, runs start only from `dewpoint dev run` and the tests; `dewpoint worker` executes
+them on Temporal. Settings, how a run ends, and this build's limits:
+[`docs/operations/runs.md`](docs/operations/runs.md).
+
 ## Audit integrity
 
 The `audit-anchor` service writes signed chain heads every 15 minutes. **In production, anchors must live off this

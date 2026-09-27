@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     webauthn_challenges_max: int = 10_000  # outstanding (unexpired) challenges across the platform
     max_request_body_bytes: int = 1_048_576  # counted as received: chunked bodies have no Content-Length
     max_run_duration_days: int = 30  # spec §6: whole logical run, including continue-as-new and waits
+    temporal_address: str = "localhost:7233"
+    temporal_namespace: str = "default"
+    cel_socket: str | None = None  # the cel-evaluator's socket; a worker without one serves no CEL queue
+    cel_max_concurrent: int = 2  # the evaluator's N (docs/operations/cel-evaluator.md)
     cel_schedule_to_start_s: float = 600  # spec §5.7: no evaluator for a profile after this: cel_profile_unavailable
     audit_signing_key_b64: str | None = None  # Ed25519 private key (raw 32 bytes, base64)
     audit_anchor_path: str | None = None

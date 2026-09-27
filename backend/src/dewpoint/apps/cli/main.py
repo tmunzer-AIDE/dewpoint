@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import base64
+import json
 import os
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
 
@@ -11,11 +13,14 @@ import typer
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from temporalio.client import Client
 
 from dewpoint.apps.plugin_loader import PluginLoadError, installed_plugins, prepare
+from dewpoint.apps.runs import NotAdmissibleError, StartRefusedError, StartUncertainError, start_run
+from dewpoint.apps.worker.main import run as run_worker
 from dewpoint.core.audit.anchor import FileAnchorSink, anchor_all, anchor_freshness, verify_anchors
 from dewpoint.core.auth.users import PasswordPolicyError, create_user
-from dewpoint.core.config import get_settings
+from dewpoint.core.config import Settings, get_settings
 from dewpoint.core.crypto.kek import KekSet, UnknownKekError
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.db import make_engine, make_sessionmaker
@@ -30,6 +35,8 @@ from dewpoint.core.plugins.registry import (
     sync_plugins,
 )
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
+from dewpoint.engine.runtime.activities import LIVE, SIMULATE, RunResult
+from dewpoint.engine.runtime.workflow import RunGraph
 from dewpoint.sdk import ManifestError
 
 app = typer.Typer(no_args_is_help=True)
@@ -43,6 +50,8 @@ plugins_cli = typer.Typer(no_args_is_help=True)
 app.add_typer(plugins_cli, name="plugins")
 lifecycle_cli = typer.Typer(no_args_is_help=True)
 app.add_typer(lifecycle_cli, name="lifecycle")
+dev_cli = typer.Typer(no_args_is_help=True)
+app.add_typer(dev_cli, name="dev")
 
 
 async def _init(email: str, password: str) -> None:
@@ -310,3 +319,80 @@ def lifecycle_retire(
         typer.echo("forced retirement NOT applied: review the list above, then re-run with --confirm")
         raise typer.Exit(3)
     typer.echo(f"{entry}: retired")
+
+
+@app.command("worker")
+def worker() -> None:
+    """Run the Temporal worker: RunGraph and its activities, and cel.evaluate when DEWPOINT_CEL_SOCKET is set."""
+    asyncio.run(run_worker(get_settings()))
+
+
+async def dev_run_version(
+    settings: Settings,
+    client: Client,
+    *,
+    tenant_id: uuid.UUID,
+    version_id: uuid.UUID,
+    trigger: dict[str, object],
+    simulate: bool = False,
+    wait: bool = True,
+) -> tuple[uuid.UUID, RunResult | None]:
+    engine = make_engine(settings.database_url)
+    try:
+        run_id = await start_run(
+            make_sessionmaker(engine),
+            client,
+            settings,
+            tenant_id=tenant_id,
+            version_id=version_id,
+            trigger=trigger,
+            mode=SIMULATE if simulate else LIVE,
+        )
+    finally:
+        await engine.dispose()
+    if not wait:
+        return run_id, None
+    return run_id, await client.get_workflow_handle_for(RunGraph.run, str(run_id)).result()
+
+
+@dev_cli.command("run")
+def dev_run(
+    version_id: uuid.UUID,
+    tenant: str = typer.Option(..., "--tenant", help="tenant id"),
+    input_file: str | None = typer.Option(None, "--input", help="JSON trigger payload (test data only until 2b)"),
+    simulate: bool = typer.Option(False, "--simulate", help="Plugin steps call simulate(): nothing is sent"),
+    wait: bool = typer.Option(True, "--wait/--no-wait"),
+) -> None:
+    """Start a run of a workflow's active version. Development only: 2b brings admission and triggers."""
+    trigger = json.loads(Path(input_file).read_text()) if input_file else {}
+
+    async def _go() -> tuple[uuid.UUID, RunResult | None]:
+        settings = get_settings()
+        client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
+        return await dev_run_version(
+            settings,
+            client,
+            tenant_id=uuid.UUID(tenant),
+            version_id=version_id,
+            trigger=trigger,
+            simulate=simulate,
+            wait=wait,
+        )
+
+    try:
+        run_id, result = asyncio.run(_go())
+    except NotAdmissibleError as e:
+        for reason in e.reasons:
+            typer.echo(f"ERROR: {reason}")
+        raise typer.Exit(2) from None
+    except StartRefusedError as e:
+        typer.echo(f"ERROR: {e}")
+        raise typer.Exit(1) from None
+    except StartUncertainError as e:
+        typer.echo(f"WARNING: {e}")
+        raise typer.Exit(3) from None
+    typer.echo(f"run {run_id}")
+    if result is not None:
+        typer.echo(json.dumps(asdict(result), indent=2, sort_keys=True))
+        if result.status != "succeeded":
+            raise typer.Exit(1)

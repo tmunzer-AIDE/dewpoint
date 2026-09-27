@@ -17,6 +17,7 @@ from dewpoint.apps.api.routes import (
     mfa,
     node_types,
     passkeys,
+    runs,
     tenants,
     workflows,
 )
@@ -62,6 +63,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         connections.router,
         node_types.router,
         workflows.router,
+        runs.router,
     ):
         app.include_router(router)
     return app
