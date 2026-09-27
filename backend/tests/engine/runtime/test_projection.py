@@ -5,7 +5,7 @@ sensitive are masked wherever they reappear, and oversize previews are truncated
 from typing import Annotated, Any
 
 import pytest
-from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
 from dewpoint.engine.runtime.projection import (
     MIN_SECRET,
@@ -90,10 +90,19 @@ def test_redaction_follows_references_and_unions() -> None:
 Secret = Annotated[str, sensitive()]
 
 
+class Overlap(BaseModel):
+    """A declared field that a sensitive pattern also covers: JSON Schema applies both to it."""
+
+    model_config = ConfigDict(json_schema_extra={"patternProperties": {"^x-": {"type": "string", "x-sensitive": True}}})
+    token: str = Field(alias="x-token")
+    name: str
+
+
 class Shapes(BaseModel):
     patterned: dict[Annotated[str, StringConstraints(pattern=r"^x-")], Secret]  # patternProperties
     pair: tuple[str, Secret]  # prefixItems
     keyed: dict[Secret, int]  # propertyNames: the keys are the secret
+    overlap: Overlap  # properties and patternProperties at once
 
 
 class ShapesNode(Node):
@@ -111,9 +120,19 @@ def test_redaction_covers_patterned_maps_tuples_and_sensitive_keys() -> None:
     so the credential showed and was never learned. Tuple positions (`prefixItems`) and sensitive keys
     (`propertyNames`) had the same gap."""
     schema = node_manifest(ShapesNode)["output_schema"]
-    value = {"patterned": {"x-api": "k3y-one"}, "pair": ["public", "k3y-two"], "keyed": {"k3y-three": 1}}
-    assert preview(value, schema) == {"patterned": {"x-api": REDACTED}, "pair": ["public", REDACTED], "keyed": REDACTED}
-    assert sensitive_values(value, schema) == ["k3y-one", "k3y-two", "k3y-three"]
+    value = {
+        "patterned": {"x-api": "k3y-one"},
+        "pair": ["public", "k3y-two"],
+        "keyed": {"k3y-three": 1},
+        "overlap": {"x-token": "k3y-four", "name": "n"},  # checkpoint-1 re-review: a declared key a pattern covers
+    }
+    assert preview(value, schema) == {
+        "patterned": {"x-api": REDACTED},
+        "pair": ["public", REDACTED],
+        "keyed": REDACTED,
+        "overlap": {"x-token": REDACTED, "name": REDACTED},  # every pattern applies, matched or not: over-redaction
+    }
+    assert sensitive_values(value, schema) == ["k3y-one", "k3y-two", "k3y-three", "k3y-four", "n"]
 
 
 def test_a_recursive_schema_ends() -> None:

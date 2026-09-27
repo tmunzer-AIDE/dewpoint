@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Previews for `run_steps` (spec §8). The projection is tenant-readable, so:
 - a field its schema marks `x-sensitive` becomes "[redacted]" wherever the schema puts it: behind local `$ref`s, in
-  any branch of `anyOf`, `oneOf` or `allOf` (sensitive in one branch, redacted in all), as a patterned-key map's value
-  (`patternProperties`) and at a tuple's position (`prefixItems`); a map whose keys are sensitive (`propertyNames`) is
-  redacted whole;
+  any branch of `anyOf`, `oneOf` or `allOf` (sensitive in one branch, redacted in all), under any `patternProperties`
+  schema of its object (declared keys included: JSON Schema applies both) and at a tuple's position (`prefixItems`);
+  a map whose keys are sensitive (`propertyNames`) is redacted whole;
 - a value the run learned is sensitive (MIN_SECRET characters or more) is masked wherever it reappears, in strings and
   keys: copied by a transform, embedded by a template, echoed by an error message;
 - a preview larger than 8 KiB of canonical JSON becomes "[truncated]".
@@ -50,26 +50,33 @@ def _branches(schema: Any, root: Mapping[str, Any], depth: int = 0) -> list[Mapp
     return out
 
 
+def _patterns(branch: Mapping[str, Any]) -> list[Any]:
+    """Every `patternProperties` schema, matched or not: no regex runs on data in the workflow, so a sensitive
+    pattern redacts every key's value in its object, declared keys included (over-redaction, never a leak)."""
+    patterns = branch.get("patternProperties")
+    return list(patterns.values()) if isinstance(patterns, Mapping) else []
+
+
 def _map_values(branches: list[Mapping[str, Any]]) -> list[Any]:
-    """The schemas that may govern an undeclared key's value: `additionalProperties` and every `patternProperties`
-    schema. Every pattern, matched or not: no regex runs on data in the workflow, and a sensitive pattern's values
-    are redacted whichever key holds them."""
+    """The schemas that may govern an undeclared key's value: `additionalProperties` and every pattern."""
     out: list[Any] = []
     for b in branches:
         if isinstance(b.get("additionalProperties"), Mapping):
             out.append(b["additionalProperties"])
-        patterns = b.get("patternProperties")
-        if isinstance(patterns, Mapping):
-            out.extend(patterns.values())
+        out.extend(_patterns(b))
     return out
 
 
 def _children(branches: list[Mapping[str, Any]], key: str) -> list[Any]:
-    """The schemas that may govern `key`'s value: its declared property, or else the map's value schemas."""
+    """The schemas that may govern `key`'s value. JSON Schema applies a declared property and every matching pattern
+    together; `additionalProperties` only to keys neither covers."""
     out: list[Any] = []
     for b in branches:
         props = b.get("properties")
-        out.extend([props[key]] if isinstance(props, Mapping) and key in props else _map_values([b]))
+        if isinstance(props, Mapping) and key in props:
+            out += [props[key], *_patterns(b)]
+        else:
+            out += _map_values([b])
     return out
 
 
@@ -165,9 +172,10 @@ def location(loc: Sequence[str | int], schema: Mapping[str, Any]) -> str:
         found: list[Any] = []
         if isinstance(part, str):
             found = [
-                b["properties"][part]
+                c
                 for b in branches
                 if isinstance(b.get("properties"), Mapping) and part in b["properties"]
+                for c in (b["properties"][part], *_patterns(b))
             ]
         elif isinstance(part, int):
             for b in branches:
