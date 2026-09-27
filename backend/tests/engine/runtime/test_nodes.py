@@ -6,8 +6,9 @@ from typing import Any
 
 import pytest
 
-from dewpoint.engine.runtime.nodes import Decision, LoopStart, decide
+from dewpoint.engine.runtime.nodes import MAX_DELAY_S, Decision, LoopStart, decide
 from dewpoint.engine.runtime.scheduler import Failure, RunEnd
+from tests.engine.runtime.support import MANIFESTS
 
 
 @pytest.mark.parametrize(
@@ -30,6 +31,7 @@ from dewpoint.engine.runtime.scheduler import Failure, RunEnd
             Decision(output={}, end=RunEnd("failed", Failure("workflow_failed", "no"))),
         ),
         ("flow.delay@1", {"duration_s": 60}, Decision(output={}, wait_s=60.0)),
+        ("flow.delay@1", {"duration_s": 30 * 86_400}, Decision(output={}, wait_s=30 * 86_400.0)),
         (
             "flow.wait_until@1",
             {"until": "2027-01-01T01:00:00+01:00"},
@@ -60,6 +62,13 @@ def test_a_control_node_decides(ref: str, config: dict[str, Any], decision: Deci
         ("flow.switch@1", {"cases": [{"port": "a", "when": 1}]}, "type_mismatch"),
         ("flow.delay@1", {"duration_s": True}, "type_mismatch"),
         ("flow.delay@1", {"duration_s": -1}, "type_mismatch"),
+        # Final review: a value from the run, unbounded by the node's schema, overflowed the timer: `internal_error`
+        ("flow.delay@1", {"duration_s": 30 * 86_400 + 1}, "type_mismatch"),
+        ("flow.delay@1", {"duration_s": 1e300}, "type_mismatch"),
+        ("flow.delay@1", {"duration_s": float("nan")}, "type_mismatch"),
+        ("flow.delay@1", {"duration_s": float("inf")}, "type_mismatch"),
+        ("flow.wait_until@1", {"until": "0001-01-01T00:00:00+01:00"}, "type_mismatch"),  # before year 1 in UTC
+        ("flow.wait_until@1", {"until": "9999-12-31T23:59:59-01:00"}, "type_mismatch"),  # after year 9999 in UTC
         ("flow.wait_until@1", {"until": 5}, "type_mismatch"),
         ("flow.wait_until@1", {"until": "tomorrow"}, "type_mismatch"),  # a ref to open data
         ("flow.wait_until@1", {"until": "2027-01-01T09:00:00"}, "type_mismatch"),  # no zone: whose 9 o'clock?
@@ -73,6 +82,10 @@ def test_a_control_node_decides(ref: str, config: dict[str, Any], decision: Deci
 def test_a_control_node_refuses(ref: str, config: dict[str, Any], code: str) -> None:
     failure = decide(ref, config).failure
     assert failure is not None and failure.code == code
+
+
+def test_a_delay_is_bounded_as_the_node_declares() -> None:
+    assert MAX_DELAY_S == MANIFESTS["flow.delay@1"]["config_schema"]["properties"]["duration_s"]["maximum"]
 
 
 def test_a_loop_of_exactly_a_hundred_items_runs_inline() -> None:

@@ -12,6 +12,7 @@ from dewpoint.engine.registry import control
 from dewpoint.engine.runtime.scheduler import Failure, RunEnd
 
 INLINE_ITEMS = 100  # larger loops run as batches of child workflows (2a-3b)
+MAX_DELAY_S = 30 * 86_400  # flow.delay's own bound: a value resolved at run time isn't checked by its schema
 ITEM_CAP_EXCEEDED = "item_cap_exceeded"
 NOT_SUPPORTED = "not_supported"  # until 2a-3b: sub-flows, loops over more than INLINE_ITEMS items
 WORKFLOW_FAILED = "workflow_failed"  # a fail node ended the run
@@ -43,9 +44,9 @@ def _instant(value: Any) -> datetime | None:
         return None
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00").replace("z", "+00:00"))
-    except ValueError:
+        return parsed.astimezone(UTC) if parsed.tzinfo is not None else None
+    except (ValueError, OverflowError):  # not a date-time; or before year 1 or after 9999 once in UTC
         return None
-    return parsed.astimezone(UTC) if parsed.tzinfo is not None else None
 
 
 def _mismatch(message: str) -> Decision:
@@ -75,8 +76,8 @@ def decide(ref: str, config: Mapping[str, Any]) -> Decision:
         return Decision(output={}, end=RunEnd("failed", Failure(WORKFLOW_FAILED, str(config.get("message", "")))))
     if ref == control.DELAY:
         seconds = config.get("duration_s")
-        if isinstance(seconds, bool) or not isinstance(seconds, int | float) or seconds < 0:
-            return _mismatch("`duration_s` must be a number of seconds.")
+        if isinstance(seconds, bool) or not isinstance(seconds, int | float) or not 0 <= seconds <= MAX_DELAY_S:
+            return _mismatch(f"`duration_s` must be a number of seconds, from 0 to {MAX_DELAY_S}.")
         return Decision(output={}, wait_s=float(seconds))
     if ref == control.WAIT_UNTIL:
         until = _instant(config.get("until"))
@@ -110,6 +111,7 @@ def decide(ref: str, config: Mapping[str, Any]) -> Decision:
 
 __all__ = [
     "INLINE_ITEMS",
+    "MAX_DELAY_S",
     "ITEM_CAP_EXCEEDED",
     "NOT_SUPPORTED",
     "WORKFLOW_FAILED",
