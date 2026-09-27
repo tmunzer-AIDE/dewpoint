@@ -29,7 +29,7 @@ from dewpoint.core.models.runs import Run
 from dewpoint.core.models.workflows import WorkflowVersion
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.runs import service as runs
-from dewpoint.core.workflows.service import get_workflow, lock_for_admission
+from dewpoint.core.workflows.service import lock_for_admission
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, LIVE, RunInput
 from dewpoint.engine.runtime.workflow import RunGraph
 
@@ -86,8 +86,7 @@ async def admit(
     version = await s.get(WorkflowVersion, version_id)
     if version is None:
         raise NotAdmissibleError(["There is no such version."])
-    await lock_for_admission(s, version.workflow_id)  # first: the workflow read below stands until the run exists
-    workflow = await get_workflow(s, tenant_id, version.workflow_id)
+    workflow = await lock_for_admission(s, tenant_id, version.workflow_id)  # stands until the run exists
     if workflow is None or not workflow.enabled:
         raise NotAdmissibleError(["The workflow is disabled."])
     if workflow.active_version_id != version.id:

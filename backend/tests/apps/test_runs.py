@@ -359,3 +359,21 @@ async def test_admission_first_holds_a_workflow_change_until_the_run_exists(
     assert not changed_first, f"`{how}` committed while a run of the version it makes inadmissible was admitted"
     row = await run_row(owner_sessionmaker, ctx.tenant_id, run_id)
     assert client.started and (row.status, row.workflow_version_id) == ("running", version)
+
+
+@pytest.mark.parametrize("how", REFUSED)
+async def test_admission_reads_the_workflow_afresh_in_a_session_that_loaded_it(
+    how, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """2b's dispatcher calls `admit` in its own session, which may already hold the workflow: the change committed
+    since must still refuse the run."""
+    ctx, wf, version, change = await admissible(
+        how, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+    )
+    async with dispatch_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        held = await workflows.get_workflow(s, ctx.tenant_id, wf)  # the session holds it while this reference lives
+        assert held is not None and held.enabled and held.active_version_id == version
+        await change_committed(api_sessionmaker, ctx, wf, change)
+        with pytest.raises(NotAdmissibleError, match=REFUSED[how]):
+            await run_ops.admit(s, tenant_id=ctx.tenant_id, version_id=version)

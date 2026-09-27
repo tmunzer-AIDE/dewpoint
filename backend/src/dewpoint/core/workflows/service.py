@@ -50,18 +50,37 @@ def _admission_key(workflow_id: uuid.UUID) -> str:
     return f"dewpoint:workflow:{workflow_id}"
 
 
-async def lock_for_admission(s: AsyncSession, workflow_id: uuid.UUID) -> None:
-    """Hold what admission checks (`enabled`, `active_version_id`) until this transaction ends (spec §4.5).
+@dataclass(frozen=True)
+class AdmissionState:
+    """What admission checks of a workflow, as the database has it."""
 
-    Admission takes the workflow's admission lock *shared* before it reads the workflow, and keeps it until the run
-    is inserted. Every change to a workflow takes it *exclusively* first (`get_workflow` with `for_update`). So a
-    change either commits before admission reads, or waits until the run exists. Like the lifecycle locks, it is
-    a transaction-scoped advisory lock: a row lock would need UPDATE on `workflows`, which the dispatch role must
-    not have."""
+    enabled: bool
+    active_version_id: uuid.UUID | None
+
+
+async def lock_for_admission(s: AsyncSession, tenant_id: uuid.UUID, workflow_id: uuid.UUID) -> AdmissionState | None:
+    """Take the workflow's admission lock, then read what admission checks, which holds until this transaction ends
+    (spec §4.5). None if the tenant has no such workflow.
+
+    Admission takes the lock *shared*, and keeps it until the run is inserted. Every change to a workflow takes it
+    *exclusively* first (`get_workflow` with `for_update`). So a change either commits before admission reads, or
+    waits until the run exists. Like the lifecycle locks, it is a transaction-scoped advisory lock: a row lock would
+    need UPDATE on `workflows`, which the dispatch role must not have.
+
+    The fields are read as columns, never through a `Workflow` the session already holds: the ORM would return that
+    object as it was loaded, from before the change this lock waited for."""
     await lifecycle.assert_read_committed(s)  # the read after the lock must see what a change committed
     await s.execute(
         text("select pg_advisory_xact_lock_shared(hashtextextended(:k, 0))"), {"k": _admission_key(workflow_id)}
     )
+    row = (
+        await s.execute(
+            select(Workflow.enabled, Workflow.active_version_id).where(
+                Workflow.id == workflow_id, Workflow.tenant_id == tenant_id
+            )
+        )
+    ).one_or_none()
+    return None if row is None else AdmissionState(enabled=row.enabled, active_version_id=row.active_version_id)
 
 
 async def get_workflow(
