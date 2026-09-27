@@ -3,6 +3,7 @@
 nothing of the engine. Every write is idempotent, so a retried projection changes nothing twice, and a late
 `running` row never overwrites a finished attempt."""
 
+import math
 import re
 import uuid
 from collections.abc import Iterable, Mapping
@@ -17,6 +18,7 @@ from dewpoint.core.models.runs import Run, RunStep
 
 MESSAGE_LIMIT = 500
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+_UNSTORABLE = re.compile("[\x00\ud800-\udfff]")  # Postgres takes no NUL, and a lone surrogate isn't UTF-8
 STEP_FIELDS = (
     "node_key",
     "status",
@@ -32,11 +34,26 @@ STEP_FIELDS = (
 
 
 def sanitize(message: str | None) -> str | None:
-    """A message or code fit to show: no control characters, at most MESSAGE_LIMIT characters."""
+    """A message or code fit to show and to store: no control characters, no lone surrogates, at most MESSAGE_LIMIT
+    characters."""
     if message is None:
         return None
-    clean = _CONTROL.sub(" ", message)
+    clean = _UNSTORABLE.sub("\ufffd", _CONTROL.sub(" ", message))
     return clean if len(clean) <= MESSAGE_LIMIT else clean[: MESSAGE_LIMIT - 1] + "…"
+
+
+def storable(value: Any) -> Any:
+    """A preview Postgres stores as jsonb: NUL and lone surrogates, in strings and keys, become U+FFFD, and a number
+    JSON can't hold (NaN, infinity) its name. A refused write would be retried forever, and its run never end."""
+    if isinstance(value, str):
+        return _UNSTORABLE.sub("\ufffd", value)
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {storable(k): storable(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [storable(v) for v in value]
+    return value
 
 
 async def insert_run(
@@ -99,6 +116,8 @@ async def upsert_steps(s: AsyncSession, tenant_id: uuid.UUID, rows: Iterable[Map
         }
         values["error_code"] = sanitize(values["error_code"])
         values["error_message"] = sanitize(values["error_message"])
+        values["input_preview"] = storable(values["input_preview"])
+        values["output_preview"] = storable(values["output_preview"])
         statement = insert(RunStep).values(**values)
         fresh = statement.excluded
         await s.execute(

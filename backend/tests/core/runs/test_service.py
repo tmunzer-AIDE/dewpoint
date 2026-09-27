@@ -116,3 +116,25 @@ async def test_runs_list_newest_first_and_page(owner_sessionmaker, dispatch_sess
         first = await service.list_runs(s, limit=2)
         rest = await service.list_runs(s, before=first[-1].started_at, limit=2)
     assert [r.id for r in first + rest] == ids[::-1]
+
+
+async def test_previews_and_messages_hold_nothing_the_database_refuses(
+    owner_sessionmaker, dispatch_sessionmaker, worker_sessionmaker
+) -> None:
+    """Final review: Postgres refuses NUL in jsonb and text, and a lone surrogate isn't UTF-8. A refused write is
+    retried forever, and the run behind it never ends. What it can't store becomes U+FFFD, a number JSON can't hold its
+    name."""
+    tenant, run_id = await seeded_run(owner_sessionmaker, dispatch_sessionmaker)
+    data = {"k\x00ey": ["a\x00b", "c\ud800d"], "n": float("nan")}
+    async with worker_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        await service.upsert_steps(
+            s, tenant, [row(run_id, "failed", input_preview=data, output_preview="\x00", error_message="m\ud800")]
+        )
+        await service.finish_run(s, run_id, status="failed", ended_at=datetime.now(UTC), error_code="c\ud800")
+    [only] = await steps(owner_sessionmaker, tenant, run_id)
+    assert only.input_preview == {"k�ey": ["a�b", "c�d"], "n": "nan"}
+    assert (only.output_preview, only.error_message) == ("�", "m�")
+    async with owner_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        assert (await service.get_run(s, run_id)).error_code == "c�"  # type: ignore[union-attr]

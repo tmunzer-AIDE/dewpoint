@@ -3,16 +3,21 @@
 `runs` and `run_steps` under RLS, and read back through the runs API."""
 
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from temporalio.testing import WorkflowEnvironment
 
 from dewpoint.apps.runs import start_run
 from dewpoint.apps.worker.store import DbRunStore
+from dewpoint.core.db import tenant_scope
+from dewpoint.core.runs import service as runs
+from dewpoint.engine.runtime.activities import ProjectInput, RunSummary, StepRow
 from dewpoint.engine.runtime.workflow import RunGraph
 from tests.apps.api.helpers import member_client
 from tests.apps.test_workflow_ops import actor, create, publish
 from tests.apps.worker.harness import workers
+from tests.core.runs.test_service import seeded_run
 from tests.support.graphs import G, cel, ref
 from tests.support.registry import sync_test_plugins
 
@@ -72,3 +77,27 @@ async def test_a_run_is_projected_and_readable_through_the_api(
     assert (await stranger.get(f"/api/v1/t/{other.tenant_id}/runs")).json() == []
     assert (await stranger.get(f"/api/v1/t/{other.tenant_id}/runs/{run_id}")).status_code == 404
     assert (await viewer.get(f"/api/v1/t/{ctx.tenant_id}/runs/{uuid.uuid4()}")).status_code == 404
+
+
+async def test_a_row_the_database_refuses_never_holds_up_the_others_or_the_run(
+    owner_sessionmaker, dispatch_sessionmaker, worker_sessionmaker
+) -> None:
+    """Final review: a projection the database refuses (a deterministic error, SQLSTATE class 22 or 23) was retried
+    forever: no later row landed, and the run never ended. Each row is then written alone, and one refused again is
+    logged and skipped."""
+    tenant, run_id = await seeded_run(owner_sessionmaker, dispatch_sessionmaker)
+    step = str(uuid.UUID(int=7))
+
+    def attempt(n: int, status: str) -> StepRow:
+        return StepRow(str(run_id), step, "a", "", n, status, ended_at=datetime.now(UTC).isoformat())
+
+    summary = RunSummary(str(run_id), "succeeded", datetime.now(UTC).isoformat(), iterations=2)
+    await DbRunStore(worker_sessionmaker).project(
+        ProjectInput(str(tenant), [attempt(1, "failed"), attempt(2, "bogus"), attempt(3, "succeeded")], summary)
+    )
+    async with owner_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        stored = [(r.attempt, r.status) for r in await runs.run_steps(s, run_id)]
+        run = await runs.get_run(s, run_id)
+    assert stored == [(1, "failed"), (3, "succeeded")]
+    assert run is not None and (run.status, run.iterations) == ("succeeded", 2)
