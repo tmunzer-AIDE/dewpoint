@@ -1,6 +1,6 @@
 # Dewpoint — Engine Core Design (sub-project 2a)
 
-- **Status:** Accepted as the basis for implementation, revision 5.3 (2026-09-26).
+- **Status:** Accepted as the basis for implementation, revision 5.4 (2026-09-27).
   - Revision 2 addressed join scopes, the local-CEL switch, evaluator isolation, profile routing and retirement.
   - Revision 3 addresses the version lifecycle (activation, queued requests, closure), nested loops, evaluator
     aggregate memory, and Temporal membership.
@@ -29,6 +29,18 @@
     - batched evaluator requests;
     - the new diagnostic and outcome codes;
     - the evaluator's Kubernetes transport, deferred to the Helm chart.
+  - Revision 5.4 folds in plan 2a-3a (the interpreter and runs):
+    - a handled failure leaves an error and no output, as §5.3's presence contract says;
+    - a failed iteration collects `null` and is listed in `failures`;
+    - every run's end is recorded (`version_unusable`, `internal_error`), and none hangs on a failed workflow task;
+    - the workflow schedules each attempt of a plugin step, so an ambiguous request is never repeated, a timeout
+      after the send included;
+    - only the projection writes rows, at most one projection is in flight, and no write can repeat an effect;
+    - redaction follows `$ref`s and unions, values learned to be sensitive are masked wherever they reappear, and
+      messages never quote input;
+    - a start is recorded as failed only when Temporal refused it;
+    - `wait_until` needs a time zone;
+    - golden histories start with `engine_abi` 1.
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
   This spec **narrows parent §6.4** (where CEL runs) and resolves the CEL item in parent §15.
 - **Evidence:** CEL spike, branch `spike/cel-evaluation`, commits `d6a8162` and `13a62e1`. See
@@ -204,6 +216,8 @@ Tenant-scoped tables use FORCE RLS with the foundations policy pattern.
     initially 100,000, so nested item caps don't multiply. That includes child batches, sub-flows and every
     continue-as-new. Past the cap, the loop fails with `iteration_cap_exceeded`. §6 explains how the count is kept.
   - The loop's `collect` value is evaluated at the end of each iteration and becomes `steps.<loop>.output.items[i]`.
+    A failed iteration (`on_item_error: continue`) leaves `items[i] = null` and adds `{index, code, message}` to
+    `failures`; a `collect` that can't be computed fails its iteration the same way. `count` is the number of items.
 
 ### 4.3 Values, scope and availability
 
@@ -757,10 +771,15 @@ The version (graph, classifications, bounds) is loaded by one local activity and
 - **Loops.** The `body` port opens one child scope per item. An iteration has settled when every node of the
   region in its scope is `done`, `failed` (handled by `on_item_error`) or `dead`. When all iterations have settled,
   the loop's `done` edges resolve in the parent scope. Region nodes read outer values from enclosing scopes.
+  - An unhandled failure (`on_error: fail`) ends its scope only: in a body, its iteration, where running steps are
+    cancelled and `on_item_error` decides; in the root, the run.
+  - With `on_item_error: stop`, the first failed iteration cancels the others and fails the loop step, whose own
+    `on_error` then applies. So an inner loop that stops fails only its outer iteration.
 - **`stop` and `fail`** end the run, as succeeded or failed. They cancel the run's in-flight work first.
 - **Scheduler.** A single loop owns a ready queue ordered by `(scope, topological index)`. It starts activities and
   child workflows as futures and awaits them. Nothing else in the workflow creates concurrency.
   - **In-flight cap.** At most 100 activities and child workflows are outstanding per workflow execution (an initial limit).
+    Besides them, at most one projection is in flight; rows that settle meanwhile go in the next one.
   - This bounds how much history in-flight work can still add, which the continue-as-new headroom depends on.
 
 **Node kinds:**
@@ -768,7 +787,7 @@ The version (graph, classifications, bounds) is loaded by one local activity and
 | Kind | Nodes | Execution |
 |---|---|---|
 | Control | `if`, `switch` (cases in declared order, first match), `set_variables`, `stop`, `fail` | values via §5 (local or `cel.evaluate`) |
-| Time | `delay`, `wait_until` | durable timers. Static waits beyond `max_run_duration` are rejected at publish. Dynamic waits past the deadline end the run with `deadline_exceeded` when the deadline is reached |
+| Time | `delay`, `wait_until` | durable timers. Static waits beyond `max_run_duration` are rejected at publish. Dynamic waits past the deadline end the run with `deadline_exceeded` when the deadline is reached. `wait_until` takes RFC 3339 with an offset: a time without a zone fails the step (`type_mismatch`) |
 | Loop | `loop` (`items`: a list value; `concurrency` 1–10, default 1; item cap default 10,000) | ≤ 100 items run inline; more run as child workflows in batches of 100 within the parent's concurrency |
 | Filter | `filter` (`items`, per-item predicate) | ≤ 1,000 items: predicate per item, inline (local class) or batched `cel.evaluate` calls; each item is its own evaluation with its own 10,000 budget. Larger lists are batched through `cel.evaluate` in chunks of 1,000 |
 | Transform | `flow.transform` | each output field is a separate value (§4.3) with its own class |
@@ -778,9 +797,12 @@ The version (graph, classifications, bounds) is loaded by one local activity and
 **Errors (parent §6.6):**
 - `on_error` is one of:
   - `fail` (default);
-  - `continue`: the output is `null` and `steps.<key>.error` is set;
+  - `continue`: the normal edges are live. The step has an error and no output: `steps.<key>.error` is set and
+    `has(steps.<key>.output)` is false (§5.3), so a reference's default applies;
   - `port`: follow the `error` port.
-- `OutcomeUnknownError` is never retried.
+- `OutcomeUnknownError` is never retried. The workflow schedules each attempt of a plugin step as its own activity
+  execution and decides every retry. For an `ambiguous` node, an attempt that timed out or lost its worker may have
+  sent its request, so it records `outcome_unknown` and is never repeated.
 - An optional workflow failure handler (a pinned sub-flow) runs once with the error summary.
 
 **Continue-as-new only at a quiescent checkpoint.** Temporal doesn't carry child workflows into the continued run.
@@ -837,6 +859,10 @@ abandons or restarts an activity or a child workflow.
 - **Why it's deterministic.** Grants, requests, answers, results and totals are all recorded workflow data.
 - The run summary shows the iterations used.
 
+**Every end is recorded.** Temporal retries a failed workflow task forever, which would leave the run open and
+`running` in the projection. So a version the build can't load or compile fails the run with `version_unusable`
+before any step runs, and any other exception in workflow code fails it with `internal_error`.
+
 **Workflow-code rules:**
 - No wall clock, randomness or I/O. `workflow.now()` and `workflow.uuid4()` are the only sources.
 - No iteration over sets.
@@ -875,7 +901,9 @@ abandons or restarts an activity or a child workflow.
     - `cel.evaluate` is deliberately excluded. Instead, the test asserts that each CEL task ran on a worker serving the version's profile (§5.7).
 - **Compose (2a):** adds `temporal`, `worker` and `cel-evaluator` (§5.7). The worker waits for a healthy evaluator
   before it polls a CEL queue.
-- **Golden histories:** every build adds recorded histories to `tests/engine/replay/<build>/`. They cover:
+- **Golden histories:** every build adds recorded histories to `tests/engine/replay/<build>/`, starting with
+  2a-3a at `engine_abi` 1. A history is recorded once and never rewritten; the recorder replaces the worker identity
+  and stack traces. They cover:
   - branches, joins, dead paths and switch;
   - inline and batched loops, filter and transform;
   - sub-flows and every error policy;
@@ -894,16 +922,33 @@ abandons or restarts an activity or a child workflow.
   previews (≤ 8 KiB each), error code and sanitized message, `outcome` (`applied`, `simulated`, `outcome_unknown`),
   and the CEL mode used (`local`, `activity`).
 - **Writes:**
-  - Activity wrappers and a batched `project` activity upsert rows keyed `(run_id, step_id, iteration_key, attempt)`.
+  - A batched `project` activity upserts rows keyed `(run_id, step_id, iteration_key, attempt)`. It is the only
+    writer: a plugin step's activity runs one attempt and writes nothing, and the workflow queues each attempt's
+    `running` and final rows. The projection retries until the database answers, so a write can't repeat an effect.
+    `step_id` is the graph node's id, and `iteration_key` names the scope (`loop2:7/loop5:3`, empty in the root).
   - Control nodes are projected at each scheduler await.
   - The worker writes through the worker DB role inside `tenant_scope`.
 - **Redaction:** `x-sensitive` fields become `"[redacted]"`, and oversize previews become `"[truncated]"`.
+  Redaction follows local `$ref`s and every branch of `anyOf`, `oneOf` and `allOf`. Strings the run has seen at
+  sensitive positions (of plugin outputs and configs, and of the trigger by its input schema; 4 characters or more)
+  are masked wherever they reappear, CEL errors included. Messages never quote input: validation errors give the
+  location only as far as the schema declares it (map keys, numeric or not, show as `*`) and the rule's code, if
+  pydantic defines it (`custom_error` otherwise), and unexpected exceptions, unusable versions and interpreter errors
+  only their type.
+- **Run error codes** add `workflow_failed` (a `fail` node), `start_failed`, `version_unusable`, `internal_error`,
+  `deadline_exceeded`, `cancelled`, `not_supported` (loop batches and sub-flows, until plan 2a-3b) and
+  `node_type_unavailable` (no worker of the build runs the node type).
 - **Read API:** `GET /runs` and `GET /runs/{id}` (with steps). The UI never reads Temporal history.
 
 ## 9. Starting runs in 2a
 
 - **Internal only:** `engine` defines the start request. `apps` provides `start_run(version_id, payload, *, mode)` for tests, the dev CLI (`dewpoint dev run <version> --input file.json`) and, later, 2b's dispatcher.
 - **No public run API in 2a.** Admission, idempotency keys and tenant slots arrive in 2b.
+- **Payloads are test data in 2a.** 2b validates them against the input schema. Until then a payload that breaks its
+  schema fails the step that reads the bad value.
+- **A start is failed only when Temporal refused it.** The workflow id is the run id, with `REJECT_DUPLICATE`. An
+  unanswered start is retried with the same id, and a duplicate refusal confirms it. `start_failed` is recorded only
+  for a confirmed refusal; a start that stays unanswered leaves the run `running`.
 
 ## 10. Testing strategy
 
@@ -1000,6 +1045,10 @@ abandons or restarts an activity or a child workflow.
 11. **Temporal membership.** One engine deployment whose versioned queue carries workflows, children and plugin activities, all explicitly Pinned. CEL queues sit outside it, routed by profile.
 12. **New `filter` node** (not in the parent's control-node list), so large collections never need a larger CEL budget.
 13. **No public run API until 2b.**
+14. **Run-time behaviour from plan 2a-3a:** a handled failure leaves no output; a failed iteration collects `null`;
+    every run's end is recorded; the workflow decides every retry, never repeating an ambiguous request; only the
+    projection writes; learned sensitive values are masked; a start fails only on a confirmed refusal; `wait_until`
+    needs a time zone.
 
 ## 12. Follow-up sub-projects
 
