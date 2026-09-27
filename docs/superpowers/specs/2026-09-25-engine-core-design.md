@@ -942,8 +942,9 @@ is being written comes too late to unmake it: the write is repeated and the run'
   Strings the run has seen at sensitive positions (of plugin outputs and configs, and of the trigger by its input
   schema; 4 characters or more) are masked wherever they reappear, CEL errors included. Messages never quote input:
   validation errors give the location only as far as the schema declares it (map keys, numeric or not, show as `*`)
-  and the rule's code, if pydantic defines it (`custom_error` otherwise), and unexpected exceptions, unusable versions
-  and interpreter errors only their type.
+  and the rule's code, if pydantic defines it (`custom_error` otherwise); an output instance, checked as emitted
+  against the declared output schema, names the schema keyword. Unexpected exceptions, unusable versions and
+  interpreter errors name only their type.
 - **Run error codes** add `workflow_failed` (a `fail` node), `start_failed`, `version_unusable`, `internal_error`,
   `deadline_exceeded`, `cancelled`, `not_supported` (loop batches and sub-flows, until plan 2a-3b) and
   `node_type_unavailable` (no worker of the build runs the node type).
