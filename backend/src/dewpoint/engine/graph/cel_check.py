@@ -150,8 +150,23 @@ def _nullable_prefixes(chain: ast.Chain, ref: RefPath, ctx: CelContext) -> list[
     return [chain.path[: offset + i + 1] for i in ctx.nullable_fields(ref) if offset + i + 1 < len(chain.path)]
 
 
+def _wrapped_reads(checked: Any, ctx: CelContext) -> bool:
+    """A reference hidden in a list, a map, a condition, dyn() or a comprehension, then read, would skip the checks
+    and guards its path gets (review finding: `[steps][0]["b"]`, `[trigger][0].opt`)."""
+    if not ast.opaque_reads(checked.expr):
+        return True
+    ctx.error(
+        "cel.bad_path",
+        "This reads a reference through a list, a map, a condition or `dyn()`, so publish can't check the path or "
+        "its guards.",
+        fix="Read it through its path, e.g. `steps.<key>.output.<field>` or `trigger.<field>`.",
+    )
+    return False
+
+
 def _references(checked: Any, ctx: CelContext) -> bool:
-    ok = _structural_keys(checked, ctx)
+    ok = _wrapped_reads(checked, ctx)
+    ok = _structural_keys(checked, ctx) and ok
     facts = guards.facts_at(checked.expr)
     non_null = guards.facts_at(checked.expr, guards.non_null)
     unguarded_null: set[ast.Path] = set()

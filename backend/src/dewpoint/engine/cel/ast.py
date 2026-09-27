@@ -163,6 +163,78 @@ def keyed_chains(root: Expr) -> list[Path]:
     return out
 
 
+_NONE, _ELEMENT, _CHAIN, _OPAQUE = range(4)  # where a value comes from, least to most in need of checking
+
+
+def opaque_reads(root: Expr) -> list[int]:
+    """Ids of reads (a field, an index, a has() test) of a value that hides a chain: a list or map holding it, a
+    condition choosing it, dyn(), or a comprehension carrying it. Publish checks references and guards along chains,
+    so a read through such a wrapper would skip them. An element of a chain (by index or iteration) is data, read
+    freely, and so is anything built from elements."""
+    found: set[int] = set()
+
+    def read(e: Expr, operand: int) -> int:
+        if operand == _OPAQUE:
+            found.add(e.id)
+            return _OPAQUE
+        return _NONE if operand == _NONE else _ELEMENT
+
+    def wrap(o: int) -> int:
+        return _OPAQUE if o >= _CHAIN else o
+
+    def items(o: int) -> int:  # what iterating or listing a value gives
+        return _ELEMENT if o == _CHAIN else o
+
+    def origin(e: Expr, scope: dict[str, int]) -> int:
+        if _chain(e, frozenset(scope)) is not None:
+            return _CHAIN
+        kind = e.WhichOneof("expr_kind")
+        if kind == "ident_expr":  # a local: globals are chains
+            return scope.get(e.ident_expr.name, _NONE)
+        if kind == "select_expr":
+            operand = read(e, origin(e.select_expr.operand, scope))
+            return _NONE if e.select_expr.test_only else operand
+        if kind == "list_expr":
+            return max((wrap(origin(x, scope)) for x in e.list_expr.elements), default=_NONE)
+        if kind == "struct_expr":
+            out = _NONE
+            for entry in e.struct_expr.entries:
+                if entry.WhichOneof("key_kind") == "map_key":
+                    origin(entry.map_key, scope)
+                out = max(out, wrap(origin(entry.value, scope)))
+            return out
+        if kind == "call_expr":
+            args = [origin(x, scope) for x in operands(e)]
+            function = e.call_expr.function
+            if function == INDEX and len(args) == 2:
+                return read(e, args[0])
+            if function == "_?_:_" and len(args) == 3:
+                return max(wrap(args[1]), wrap(args[2]))
+            if function == "dyn" and len(args) == 1:
+                return wrap(args[0])
+            if function == "asList" and len(args) == 1:
+                return items(args[0])
+            if function == "_+_":  # list concatenation carries elements
+                return _OPAQUE if _OPAQUE in args else _ELEMENT if any(args) else _NONE
+            return _NONE
+        if kind == "comprehension_expr":
+            ce = e.comprehension_expr
+            element = items(origin(ce.iter_range, scope))
+            accu = origin(ce.accu_init, scope)
+            while True:  # the accumulator's origin can only grow, over four levels
+                body = {**scope, ce.iter_var: element, ce.accu_var: accu}
+                origin(ce.loop_condition, body)
+                grown = max(accu, origin(ce.loop_step, body))
+                if grown == accu:
+                    break
+                accu = grown
+            return origin(ce.result, {**scope, ce.accu_var: accu})
+        return _NONE
+
+    origin(root, {})
+    return sorted(found)
+
+
 def global_idents(root: Expr) -> list[str]:
     """Global identifiers the expression reads (dotted for typed paths), sorted, each once."""
     names = {

@@ -249,6 +249,48 @@ def test_steps_and_loops_take_keys_publish_can_check(expr: str) -> None:
     assert codes(g) == ["cel.bad_path"]
 
 
+def _with_b(expr: str) -> G:
+    g = G().node("a", ECHO, {"value": cel(expr)}).node("b", ECHO)  # b can't reach a
+    g.settings = {"input_schema": INPUT}
+    return g
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        '[steps][0]["b"].output.value',  # review finding: published although b can't run before a
+        '[trigger][0].opt.x.y == "a"',  # review finding: skipped the optional-field guards
+        '{"s": steps}.s.b.output.value',
+        "(true ? trigger : trigger).opt.x",
+        "dyn(trigger).opt.x",
+        "[trigger].map(t, t.opt.x).size() > 0",
+        "[trigger].exists(t, has(t.opt))",
+        "trigger.events.map(e, trigger.opt)[0].x",
+        "[steps.b][0].output.value",
+    ],
+)
+def test_a_reference_read_through_a_wrapper_is_refused(expr: str) -> None:
+    """A list, a map, a condition, dyn() or a comprehension hides which path is read, so publish can't check it."""
+    assert "cel.bad_path" in codes(_with_b(expr))
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "trigger.events.map(e, e.mac).size() > 0",  # elements of a checked path are data
+        "trigger.events[0].mac",
+        "trigger.events.filter(e, e.mac != '').map(e, e.mac).size() > 0",
+        "trigger.events.map(e, [e][0].mac).size() > 0",
+        "sortedKeys(trigger.site).map(k, trigger.site[k]).size() > 0",
+        "[1, 2][0] + {'a': 1}.a",
+        "size(trigger) > 0 && 'x' in trigger.site",
+        "[trigger.tags, trigger.tags].size()",  # wrapped, but never read through
+    ],
+)
+def test_data_read_through_elements_stays_allowed(expr: str) -> None:
+    assert codes(_with_b(expr)) == []
+
+
 def test_data_keys_in_brackets_stay_allowed() -> None:
     """Keys that aren't field names, or chosen at run time, read data as before: open data carries no promise."""
     assert codes(one('trigger.site["content-type"] == "x" && trigger.site[trigger.site.k] == 1')) == []
