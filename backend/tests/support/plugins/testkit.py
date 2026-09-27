@@ -2,7 +2,7 @@
 """Engine test fixtures. Lives under tests/, so it is never packaged or registered in production."""
 
 import asyncio
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, Field
 
@@ -36,6 +36,9 @@ class Echo(Node):
 
     async def run(self, ctx: StepContext, config: EchoConfig) -> EchoOutput:
         return EchoOutput(value=config.value)
+
+    async def simulate(self, ctx: StepContext, config: EchoConfig) -> EchoOutput:
+        return EchoOutput(value={"simulated": config.value})
 
 
 class FailNConfig(BaseModel):
@@ -75,9 +78,15 @@ class Slow(Node):
         return Empty()
 
 
+class Login(BaseModel):
+    user: str
+    password: str = sensitive()
+
+
 class SensitiveOutput(BaseModel):
     public: str
     secret_value: str = sensitive()
+    login: Login  # a nested model: its schema sits behind a $ref
 
 
 class Sensitive(Node):
@@ -87,11 +96,15 @@ class Sensitive(Node):
     Output = SensitiveOutput
 
     async def run(self, ctx: StepContext, config: Empty) -> SensitiveOutput:
-        return SensitiveOutput(public="visible", secret_value="s3cr3t-value")
+        return SensitiveOutput(
+            public="visible", secret_value="s3cr3t-value", login=Login(user="ops", password="pa55word")
+        )
 
 
 class AmbiguousConfig(BaseModel):
     outcome: Literal["sent", "unknown", "rejected"] = "sent"
+    detail: str = ""  # appended to the rejection: a receiver that echoes what it was sent
+    token: str = sensitive(default="")  # and a credential it echoes too
 
 
 class AmbiguousSend(Node):
@@ -105,8 +118,52 @@ class AmbiguousSend(Node):
         if config.outcome == "unknown":
             raise OutcomeUnknownError("testkit.timeout_after_send", "the request may have been delivered")
         if config.outcome == "rejected":
-            raise FatalError("testkit.rejected", "the receiver rejected the request")
+            detail = (f": {config.detail}" if config.detail else "") + (f" for {config.token}" if config.token else "")
+            raise FatalError("testkit.rejected", "the receiver rejected the request" + detail)
         return Empty()
 
 
-TESTKIT = Plugin(name="testkit", version="0.0.0", nodes=(Echo, FailN, Slow, Sensitive, AmbiguousSend))
+class SlowSendConfig(BaseModel):
+    seconds: float = Field(ge=0, le=600)
+
+
+class SlowSend(Node):
+    """Sends at once, then takes `seconds` to hear back. Past its timeout the request went out, but no reply came:
+    the case a retry would duplicate. `sent` counts the sends, for the tests."""
+
+    type = "testkit.slow_send"
+    version = 1
+    title = "Slow send"
+    Config = SlowSendConfig
+    side_effect = SideEffect.AMBIGUOUS
+    sent: ClassVar[list[str]] = []
+
+    async def run(self, ctx: StepContext, config: SlowSendConfig) -> Empty:
+        SlowSend.sent.append(str(ctx.run_id))
+        await asyncio.sleep(config.seconds)
+        return Empty()
+
+
+class ReconcileOutput(BaseModel):
+    found: bool
+
+
+class Reconcile(Node):
+    """Its first attempt applies the effect and then loses the reply; `reconcile()` finds the effect on a retry."""
+
+    type = "testkit.reconcile"
+    version = 1
+    title = "Reconcilable"
+    Output = ReconcileOutput
+    side_effect = SideEffect.RECONCILABLE
+
+    async def run(self, ctx: StepContext, config: Empty) -> ReconcileOutput:
+        raise RetryableError("testkit.lost_reply", "the effect happened, but the reply was lost")
+
+    async def reconcile(self, ctx: StepContext, config: Empty) -> ReconcileOutput | None:
+        return ReconcileOutput(found=True)
+
+
+TESTKIT = Plugin(
+    name="testkit", version="0.0.0", nodes=(Echo, FailN, Slow, Sensitive, AmbiguousSend, SlowSend, Reconcile)
+)
