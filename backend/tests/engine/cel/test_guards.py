@@ -49,3 +49,47 @@ def test_guarded(expr: str) -> None:
 )
 def test_unguarded(expr: str) -> None:
     assert not _guarded(expr)
+
+
+NOT_NULL = ("trigger", "n")
+
+
+def _not_null(expr: str) -> bool:
+    """Whether every read below trigger.n (a field, or a has() on one) has trigger.n among its non-null facts."""
+    checked = runtime.compile_checked(expr, {"steps": T.MAP, "trigger": T.MAP}).checked
+    facts = guards.facts_at(checked.expr, guards.non_null)
+    uses = [c for c in ast.chains(checked.expr) if c.path[:2] == NOT_NULL and len(c.path) > 2]
+    assert uses, "the expression must read below trigger.n"
+    return all(NOT_NULL in facts[c.expr_id] for c in uses)
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "trigger.n != null && trigger.n.x == 'a'",
+        "null != trigger.n && trigger.n.x == 'a'",
+        "!(trigger.n == null) && trigger.n.x == 'a'",
+        "trigger.n == null || trigger.n.x == 'a'",
+        "trigger.n == null ? '' : trigger.n.x",
+        "trigger.n != null ? trigger.n.x : ''",
+        "trigger.n != null && has(trigger.n.x)",
+        "trigger.n.x != null && trigger.n != null",  # && absorbs the error when the guard is false
+    ],
+)
+def test_non_null_guarded(expr: str) -> None:
+    assert _not_null(expr)
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "trigger.n.x == 'a'",
+        "has(trigger.n) && trigger.n.x == 'a'",  # present isn't non-null
+        "trigger.n == null && trigger.n.x == 'a'",
+        "trigger.n != null || trigger.n.x == 'a'",
+        "has(trigger.n.x)",  # has() reads trigger.n
+        "(trigger.n != null ? 1 : trigger.n.x) > 0",
+    ],
+)
+def test_non_null_unguarded(expr: str) -> None:
+    assert not _not_null(expr)

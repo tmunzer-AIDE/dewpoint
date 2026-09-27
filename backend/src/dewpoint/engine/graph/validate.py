@@ -4,7 +4,7 @@
 import contextlib
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
@@ -23,6 +23,7 @@ from dewpoint.engine.graph.schemas import (
     allowed_kinds,
     compatible,
     contains_literal,
+    declared_nullable,
     declared_optional,
     describe,
     element_schema,
@@ -628,17 +629,26 @@ class _Validator:
 
     def _declared_optional(self, site: _Site, p: RefPath) -> tuple[int, ...]:
         """Positions in `p.rest` the schema declares optional (spec §4.3): CEL guards them, references default them."""
+        return self._declared(site, p, declared_optional)
+
+    def _declared_nullable(self, site: _Site, p: RefPath) -> tuple[int, ...]:
+        """Positions in `p.rest` the schema declares may be null (spec §4.3): CEL guards reads below them."""
+        return self._declared(site, p, declared_nullable)
+
+    def _declared(
+        self, site: _Site, p: RefPath, find: Callable[[Any, Sequence[str | int], Any], tuple[int, ...]]
+    ) -> tuple[int, ...]:
         if p.root == "trigger":
-            return declared_optional(self.g.settings.input_schema, p.rest)
+            return find(self.g.settings.input_schema, p.rest, None)
         if p.root == "vars" and p.name in self.vars:
-            return declared_optional(self.vars_root, p.rest, start=self.vars[str(p.name)])
+            return find(self.vars_root, p.rest, self.vars[str(p.name)])
         if p.root in ("item", "loops") and p.section == "item":
             loop = site.item_node if p.root == "item" else self.s.by_key.get(str(p.name))
-            return declared_optional(self.item_schema.get(loop) if loop else None, p.rest)
+            return find(self.item_schema.get(loop) if loop else None, p.rest, None)
         if p.root == "steps":
             producer = self.s.by_key.get(str(p.name))
             schema = ERROR_SCHEMA if p.section == "error" else self.out_schema.get(producer) if producer else None
-            return declared_optional(schema, p.rest)
+            return find(schema, p.rest, None)
         return ()
 
     def _implies(
@@ -762,6 +772,9 @@ class _CelSite:
 
     def optional_fields(self, path: RefPath) -> tuple[int, ...]:
         return self.v._declared_optional(self.site, path)
+
+    def nullable_fields(self, path: RefPath) -> tuple[int, ...]:
+        return self.v._declared_nullable(self.site, path)
 
     def error(self, code: str, message: str, *, fix: str | None = None, severity: Severity = "error") -> None:
         self.v.err(code, message, node=self.site.node, fld=self.site.field, fix=fix, severity=severity)

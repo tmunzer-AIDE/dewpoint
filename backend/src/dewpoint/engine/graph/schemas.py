@@ -195,6 +195,31 @@ def declared_optional(root: Any, path: Sequence[str | int], start: Any = None) -
     return tuple(out)
 
 
+def declared_nullable(root: Any, path: Sequence[str | int], start: Any = None) -> tuple[int, ...]:
+    """Positions in `path` of fields the schema declares may be null (a `null` type, or a union with null). Like
+    declared_optional, it stops where the schema stops describing the data."""
+    if not isinstance(root, Mapping):
+        return ()
+    current: Any = root if start is None else start
+    out: list[int] = []
+    for i, seg in enumerate(path):
+        schema = _deref(root, current)
+        if schema is None or isinstance(seg, int):
+            break
+        schema, _ = _strip_null(schema)
+        schema = _deref(root, schema)
+        props = schema.get("properties") if schema is not None else None
+        if not isinstance(props, Mapping) or seg not in props:
+            break
+        field = _deref(root, props[seg])
+        if field is None:
+            break
+        if _strip_null(field)[1]:
+            out.append(i)
+        current = props[seg]
+    return tuple(out)
+
+
 def element_schema(schema: Schema | None) -> Schema | None:
     """The item schema of a list schema, or None when unknown."""
     if schema is None:

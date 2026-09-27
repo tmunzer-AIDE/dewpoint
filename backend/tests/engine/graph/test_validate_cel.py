@@ -73,6 +73,49 @@ def test_schema_declared_optional_fields_need_a_guard() -> None:
     assert messages == ["`trigger.opt` is optional in its schema, so it may be missing."]
 
 
+NULLABLE: dict[str, Any] = {
+    **INPUT,
+    "properties": {
+        **INPUT["properties"],
+        "n": {"type": ["object", "null"], "properties": {"x": {"type": "string"}}, "required": ["x"]},
+        "u": {  # pydantic's Optional[Model]
+            "anyOf": [{"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]}, {"type": "null"}]
+        },
+        "m": {"type": ["object", "null"], "properties": {"x": {"type": "string"}}},  # optional and nullable
+    },
+    "required": [*INPUT["required"], "n", "u"],
+}
+
+
+def nullable(expr: str) -> G:
+    g = one(expr)
+    g.settings["input_schema"] = NULLABLE
+    return g
+
+
+def test_fields_of_a_nullable_value_need_a_non_null_guard() -> None:
+    """Checkpoint-4 ruling: the schema says the value may be null, and a field of null fails, so it needs a guard,
+    as a reference to it needs a default. Reading the value itself is fine: null is a value."""
+    assert codes(nullable("trigger.n.x == 'a'")) == ["cel.conditional_ref"]
+    assert codes(nullable("trigger.u.x == 'a'")) == ["cel.conditional_ref"]
+    assert codes(nullable("has(trigger.n.x)")) == ["cel.conditional_ref"]  # has() reads trigger.n
+    assert codes(nullable("trigger.n == null")) == []
+    for guarded in (
+        "trigger.n != null && trigger.n.x == 'a'",
+        "trigger.n == null ? '' : trigger.n.x",
+        "trigger.n == null || trigger.n.x == 'a'",
+        'trigger.u != null && trigger["u"].x == "a"',
+    ):
+        assert codes(nullable(guarded)) == [], guarded
+    assert codes(nullable("trigger.m.x == 'a'")) == ["cel.conditional_ref"] * 3  # absent, null, and x absent
+    assert codes(nullable("has(trigger.m) && trigger.m != null && has(trigger.m.x) && trigger.m.x == 'a'")) == []
+    [d] = check(nullable("trigger.n.x == 'a'")).diagnostics
+    assert (d.message, d.fix) == (
+        "`trigger.n` may be null in its schema, so reading its fields fails when it is.",
+        "Guard it with `trigger.n != null`.",
+    )
+
+
 def test_open_and_schemaless_data_needs_no_guard() -> None:
     """Fields the schema doesn't declare carry no promise: missing at run time is an evaluation_error."""
     assert codes(one("trigger.site.name == 'Paris'")) == []  # `site` is an open object

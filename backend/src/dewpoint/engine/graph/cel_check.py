@@ -28,6 +28,10 @@ class CelContext(Protocol):
         """Positions in `path.rest` of fields its schema declares but doesn't require."""
         ...
 
+    def nullable_fields(self, path: RefPath) -> tuple[int, ...]:
+        """Positions in `path.rest` of fields its schema declares may be null."""
+        ...
+
     def error(self, code: str, message: str, *, fix: str | None = None, severity: Severity = "error") -> None: ...
 
 
@@ -139,9 +143,18 @@ def _structural_keys(checked: Any, ctx: CelContext) -> bool:
     return ok
 
 
+def _nullable_prefixes(chain: ast.Chain, ref: RefPath, ctx: CelContext) -> list[ast.Path]:
+    """Every prefix ending at a field its schema says may be null, with something read below it: a field, or a
+    presence test on one. Reading the value itself is fine: null is a value."""
+    offset = len(chain.path) - len(ref.rest)
+    return [chain.path[: offset + i + 1] for i in ctx.nullable_fields(ref) if offset + i + 1 < len(chain.path)]
+
+
 def _references(checked: Any, ctx: CelContext) -> bool:
     ok = _structural_keys(checked, ctx)
     facts = guards.facts_at(checked.expr)
+    non_null = guards.facts_at(checked.expr, guards.non_null)
+    unguarded_null: set[ast.Path] = set()
     reported: set[ast.Path] = set()
     for chain in ast.chains(checked.expr):
         text = _diagnostic_path(chain.path)
@@ -178,6 +191,16 @@ def _references(checked: Any, ctx: CelContext) -> bool:
                 "cel.conditional_ref",
                 f"`{'.'.join(optional)}` is optional in its schema, so it may be missing.",
                 fix=f"Guard it with `has({'.'.join(optional)})`.",
+            )
+        for nullable in _nullable_prefixes(chain, ref, ctx):
+            if nullable in non_null[chain.expr_id] or nullable in unguarded_null:
+                continue
+            unguarded_null.add(nullable)
+            ok = False
+            ctx.error(
+                "cel.conditional_ref",
+                f"`{'.'.join(nullable)}` may be null in its schema, so reading its fields fails when it is.",
+                fix=f"Guard it with `{'.'.join(nullable)} != null`.",
             )
     return ok
 
