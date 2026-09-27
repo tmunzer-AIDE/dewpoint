@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """The zygote's IPC server (spec §5.7): single-threaded asyncio on a Unix socket, one request per connection.
 
-At most N children run at once, with a wait queue of N; anything beyond gets `busy`. A child that isn't done after
+At most N children run at once, with a wait queue of N; anything beyond gets `busy`, and so does a request the OS
+can't start a child for (no process, memory or descriptor to spare). A child that isn't done after
 5 s of wall-clock time is killed (`timeout`). How a child ended decides the outcome: its own frame, `cpu_limit`
 (SIGXCPU, or SIGKILL at the hard CPU limit), or `evaluation_crashed`."""
 
@@ -62,8 +63,16 @@ class Evaluator:
             self._running.release()
 
     async def _fork(self, request: ipc.EvaluateRequest) -> dict[str, Any]:
-        read_fd, write_fd = os.pipe()
-        pid = os.fork()
+        try:
+            read_fd, write_fd = os.pipe()
+        except OSError as e:
+            return ipc.error_response("busy", f"no descriptor for an evaluation: {e.strerror}")
+        try:
+            pid = os.fork()
+        except OSError as e:  # out of processes or memory: the client retries, as for any busy answer
+            os.close(read_fd)
+            os.close(write_fd)
+            return ipc.error_response("busy", f"couldn't start an evaluation: {e.strerror}")
         if pid == 0:  # the child: never returns
             os.close(read_fd)
             child.run(request, write_fd, self.limit)

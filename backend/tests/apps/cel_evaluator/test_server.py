@@ -3,6 +3,7 @@
 rlimits are exercised on Linux in test_limits.py."""
 
 import asyncio
+import errno
 import os
 import signal
 import sys
@@ -182,5 +183,34 @@ async def test_a_well_formed_reply_is_recorded(reply: Any, outcomes: list[E.Outc
     gen, path = await _one(lambda: _replying(reply))
     try:
         assert await cel_client.evaluate_remote(path, TWO, served_profile=P) == outcomes
+    finally:
+        await gen.aclose()
+
+
+async def _settled_fds(at_most: int) -> int:
+    """Open descriptors, once closed sockets have left (their transports close on a later loop turn)."""
+    for _ in range(100):
+        count = len(os.listdir("/dev/fd"))
+        if count <= at_most:
+            return count
+        await asyncio.sleep(0.01)
+    return count
+
+
+async def test_a_failed_fork_leaks_no_descriptor_and_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review finding: every failed fork left both ends of its pipe open, and the connection just dropped."""
+
+    def refuse() -> int:
+        raise BlockingIOError(errno.EAGAIN, os.strerror(errno.EAGAIN))
+
+    gen, path = await _one(evaluator_with())
+    try:
+        assert (await cel_client.evaluate_remote(path, request(), served_profile=P))[0].ok
+        before = await _settled_fds(10_000)
+        monkeypatch.setattr(os, "fork", refuse)
+        for _ in range(3):
+            with pytest.raises(cel_client.EvaluatorUnavailable, match="busy"):
+                await cel_client.evaluate_remote(path, request(), served_profile=P)
+        assert await _settled_fds(before) == before
     finally:
         await gen.aclose()
