@@ -18,7 +18,8 @@
     - the typed-path proof and its conditions;
     - `item`/`index` in place of the reserved `loop`;
     - the step-presence contract, `has()` guards for schema-declared optional fields, and (checkpoint 4) `!= null`
-      guards below schema-nullable ones; a key in brackets is checked like the field it names;
+      guards below schema-nullable ones; a key in brackets is checked like the field it names, and a reference is
+      read only through its path (PR #7 review);
     - an exact output contract: every serialized field required, dumps by alias, no model serializers;
     - measured limits: 9,999 iterations, a work bound that charges each call by the size of what it reads, retained
       `map`/`filter` accumulators within a 4 MiB classification bound, and 200-entry list and map caps (measured on
@@ -240,6 +241,10 @@ Tenant-scoped tables use FORCE RLS with the foundations policy pattern.
     - a literal key that could be written as a field (`steps["b"]`, `trigger["a"]`) is that field, with the same
       checks and guards. `steps` and `loops` take no other key: publish can't check one chosen at run time
       (`cel.bad_path`). Other data may be indexed freely;
+    - a reference is read only through its path. A read of a reference hidden in a list, a map, a condition,
+      `dyn()`, a list concatenation or a comprehension (`[steps][0]["b"]`, `[trigger][0].opt`) is refused
+      (`cel.bad_path`): publish couldn't check its path or guards. An element of a path, by index or iteration
+      (`trigger.events[0].mac`, `trigger.events.map(e, e.mac)`), is data, read freely;
     - data the schema doesn't declare (open objects, schemaless bodies) needs no guard. If it's missing at run time,
       the evaluation fails with `evaluation_error` and the step's error policy applies. (§5.10 `cel.conditional_ref`)
 - **Names.** `in`, `true`, `false` and `null` can't be step keys or variable names: CEL can't select them as fields.
@@ -712,7 +717,7 @@ library, the classifier or the estimator:
 | `cel.conditional_ref` | "`steps.x` may not have run on every path, so `steps.x.output` may be missing. Guard it with `has(steps.x.output)`." Or: "`trigger.a` is optional in its schema, so it may be missing. Guard it with `has(trigger.a)`." Or: "`trigger.a` may be null in its schema, so reading its fields fails when it is. Guard it with `trigger.a != null`." |
 | `cel.invalid` | "This expression isn't valid: …" (the checker's message, with line and column) |
 | `cel.unknown_name` | "`x` isn't defined here. Expressions start with trigger, steps, vars, item, index, loops or run." |
-| `cel.bad_path` | "`steps.a.outputs`: after `steps.<key>` comes `output` or `error`." (the reference grammar's message) Or: "`steps[…]` chooses a step at run time, so publish can't check it. Name it: `steps.<key>.output`." |
+| `cel.bad_path` | "`steps.a.outputs`: after `steps.<key>` comes `output` or `error`." (the reference grammar's message) Or: "`steps[…]` chooses a step at run time, so publish can't check it. Name it: `steps.<key>.output`." Or: "This reads a reference through a list, a map, a condition or `dyn()`, so publish can't check the path or its guards." |
 | `cel.has_on_typed_path` | "`p` always exists here, and `has()` on it gives the list, not true. Remove the `has()` test." |
 | `cel.type_mismatch` | "This expression gives integer, but this field expects boolean." |
 | `cel.non_json_result` | "This expression gives a value JSON can't hold (bytes or a type)." |
