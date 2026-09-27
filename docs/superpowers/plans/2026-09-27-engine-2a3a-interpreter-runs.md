@@ -38,7 +38,7 @@ what 2a-3 consumes. The owner split 2a-3 into three plans on 2026-09-27:
 1. **Go/no-go experiments ran first** (next section), on temporalio 1.33.0 from the CEL spike's environment. The
    owner approved the SDK's download of its time-skipping test server for planning, the suite and CI.
 2. **Every module was prototyped** in a scratch copy of `backend/` until it passed its tests, `ruff`, `ruff format`,
-   `mypy --strict` (132 source files) and `lint-imports` (10 contracts). The prototype's full suite gives 858 passed
+   `mypy --strict` (132 source files) and `lint-imports` (10 contracts). The prototype's full suite gives 861 passed
    and 8 skipped (the Linux-only evaluator tests), against `main`'s 726 collected.
 3. **The code blocks below are those files, verbatim.** Diffs to existing files were generated from the prototype.
 4. **Each task was staged and checked on its own.** Stage *N* is `main` plus tasks 1..*N*. Every stage passed the
@@ -75,6 +75,11 @@ what 2a-3 consumes. The owner split 2a-3 into three plans on 2026-09-27:
    walking the schema along it, and shows anything the schema doesn't declare at that place as `*`. Checking the
    rest of the message found that a custom validation error's type can carry the value too; only pydantic's own
    codes show now (decision 21).
+10. **Execution's checkpoint 1 found two more gaps**, fixed test-first on `feat/engine-2a3a` and carried into this
+    plan:
+    - redaction ignored `patternProperties`. Probing pydantic's schemas found the same gap for tuple positions
+      (`prefixItems`) and sensitive keys (`propertyNames`) (decision 21);
+    - the iteration cap left a loop's opened iterations running (decision 3).
 
 Not run during planning: the new dependency install (Task 4 downloads it, with the owner's confirmation), and CI.
 
@@ -124,7 +129,10 @@ field declared elsewhere: both closed in decision 21 by walking the schema along
    - in the root, it fails the run with the step's error.
 
    `stop`, `fail` and the deadline cancel every running step. A result that arrives from cancelled work is ignored.
-   Policies compose across nested loops: an inner loop that stops fails its outer iteration only. (Task 1)
+   Policies compose across nested loops: an inner loop that stops fails its outer iteration only. A loop that ends
+   early, when an iteration fails under `stop` or the run reaches its iteration cap, ends its open iterations
+   first: running steps are cancelled and queued ones dropped. Only then does its own `on_error` apply, so nothing
+   it opened runs beside the steps after it (checkpoint 1). (Task 1)
 4. **Until 2a-3b, some graphs fail at run time with `not_supported`:** loops over more than 100 items (batches of
    child workflows) and `run_workflow` (sub-flows). The step fails and its error policy applies. Publish is
    unchanged, so versions published now run fully once 2a-3b ships. The workflow failure handler doesn't run until
@@ -254,6 +262,10 @@ field declared elsewhere: both closed in decision 21 by walking the schema along
     - **Redaction follows the schema everywhere.** A field marked `x-sensitive` is redacted behind local `$ref`s and in
       every branch of `anyOf`, `oneOf` and `allOf`: sensitive in one branch means redacted in all. Pydantic writes
       every nested or optional model that way.
+      - A patterned-key map's values are redacted under every `patternProperties` schema, matched or not: no regex
+        runs on data in the workflow.
+      - A tuple's position is redacted by its `prefixItems` schema.
+      - A map whose keys are sensitive (`propertyNames`) is redacted whole, and its keys are learned (checkpoint 1).
     - **Learned values are masked.** The workflow remembers the strings found at sensitive positions of:
       - each plugin output, once its result is recorded;
       - each plugin config: a literal when the run starts, so even a copy projected earlier is masked, and a resolved
@@ -798,6 +810,38 @@ def test_the_iteration_cap_fails_the_loop() -> None:
     s.open_loop(loop, [1, 2, 3], concurrency=3, stop_on_error=True)
     assert s.ended is not None and s.ended.failure is not None
     assert s.ended.failure.code == "iteration_cap_exceeded"
+
+
+def test_the_iteration_cap_ends_the_loops_queued_iterations_too() -> None:
+    """Checkpoint-1 finding: the cap failed the loop but left the iterations it had already opened. With `continue`,
+    the steps after the loop ran beside them, and the run could end with a child unsettled."""
+    g = loop_graph()
+    g.nodes[0]["options"]["on_error"] = "continue"
+    s = Scheduler(program(g), iteration_cap=2)
+    s.start()
+    [loop] = s.take_ready()
+    s.open_loop(loop, [1, 2, 3], concurrency=3, stop_on_error=True)  # opens 0 and 1, then the third hits the cap
+    assert ready(s) == ["after"]  # the queued iterations never start
+    assert s.take_cancels() == [] and s.scopes[()].results["l"]["error"]["code"] == "iteration_cap_exceeded"
+
+
+def test_the_iteration_cap_cancels_the_loops_running_iterations() -> None:
+    g = loop_graph()
+    g.nodes[0]["options"]["on_error"] = "continue"
+    s = Scheduler(program(g), iteration_cap=2)
+    s.start()
+    [loop] = s.take_ready()
+    s.open_loop(loop, [1, 2, 3], concurrency=2, stop_on_error=True)
+    x0, x1 = s.take_ready()
+    s.succeed(x0, {})
+    [y0] = s.take_ready()
+    s.succeed(y0, {})
+    [collect] = s.take_collects()
+    s.collected(collect.loop, collect.index, "first")  # the third iteration hits the cap while l:1 still runs
+    assert [name(s, i) for i in s.take_cancels()] == ["l:1/x"]
+    assert ready(s) == ["after"]
+    s.succeed(x1, {})  # the cancelled iteration's late result counts for nothing
+    assert s.take_ready() == [] and "y" not in s.scopes[(("l", 1),)].results
 
 
 def test_a_stop_ends_the_run_and_cancels_running_work() -> None:
@@ -1477,26 +1521,29 @@ class Scheduler:
         loop.open.remove(index)
         loop.collecting.discard(index)
         if loop.stop_on_error:
-            del self.loops[loop.instance]
-            key = self.program.steps[loop.instance.step].key
-            for other in loop.open:  # stop: the loop's other iterations end too
-                self._fail_scope(self.scopes[(*loop.instance.scope, (key, other))], failure, report=False)
-            parent = self.scopes[loop.instance.scope]
-            if parent.failure is None and self.ended is None:
-                self.fail(loop.instance, failure)
+            self._abort(loop, failure)
             return
         loop.failures.append({"index": index, "code": failure.code, "message": failure.message})
         self._advance(loop)
+
+    def _abort(self, loop: LoopRun, failure: Failure) -> None:
+        """The loop ends early (an iteration failed under `stop`, or the run reached its iteration cap): its open
+        iterations end first, running steps cancelled and queued ones dropped, and then the loop step fails, so its
+        own `on_error` applies. Nothing the loop opened outlives it."""
+        del self.loops[loop.instance]
+        key = self.program.steps[loop.instance.step].key
+        for other in loop.open:
+            self._fail_scope(self.scopes[(*loop.instance.scope, (key, other))], failure, report=False)
+        parent = self.scopes[loop.instance.scope]
+        if parent.failure is None and self.ended is None:
+            self.fail(loop.instance, failure)
 
     def _advance(self, loop: LoopRun) -> None:
         """Open iterations up to the concurrency, or complete the loop when every item is done."""
         step = self.program.steps[loop.instance.step]
         while loop.next < len(loop.items) and len(loop.open) < loop.concurrency:
             if not self.debit(1):
-                del self.loops[loop.instance]
-                self.fail(
-                    loop.instance, Failure(ITERATION_CAP_EXCEEDED, "This run reached its limit of loop iterations.")
-                )
+                self._abort(loop, Failure(ITERATION_CAP_EXCEEDED, "This run reached its limit of loop iterations."))
                 return
             index = loop.next
             loop.next += 1
@@ -1550,7 +1597,7 @@ diff --git a/backend/pyproject.toml b/backend/pyproject.toml
 - [ ] **Step 4: Run the tests, and check that the contract bites**
 
 Run: `cd backend && uv run pytest -q tests/engine/runtime`
-Expected: 18 passed (2 program, 15 scheduler, 1 property test over 300 random graphs).
+Expected: 20 passed (2 program, 17 scheduler, 1 property test over 300 random graphs).
 
 Then plant `import random` at the top of `scheduler.py`, run `uv run lint-imports`, and remove it again.
 Expected: `engine.runtime is deterministic … BROKEN` naming `dewpoint.engine.runtime.scheduler -> random`, then
@@ -1843,10 +1890,10 @@ Create `backend/tests/engine/runtime/test_projection.py`:
 """`run_steps` previews (spec §8): `x-sensitive` fields are redacted wherever the schema puts them, values learned to be
 sensitive are masked wherever they reappear, and oversize previews are truncated."""
 
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError
 
 from dewpoint.engine.runtime.projection import (
     MIN_SECRET,
@@ -1926,6 +1973,35 @@ def test_redaction_follows_references_and_unions() -> None:
         "many": [{"user": "w", "secret": REDACTED}],
     }
     assert preview({"cred": None, "maybe": None, "many": []}, NESTED) == {"cred": None, "maybe": None, "many": []}
+
+
+Secret = Annotated[str, sensitive()]
+
+
+class Shapes(BaseModel):
+    patterned: dict[Annotated[str, StringConstraints(pattern=r"^x-")], Secret]  # patternProperties
+    pair: tuple[str, Secret]  # prefixItems
+    keyed: dict[Secret, int]  # propertyNames: the keys are the secret
+
+
+class ShapesNode(Node):
+    type = "testkit.shapes"
+    version = 1
+    title = "Shapes"
+    Output = Shapes
+
+    async def run(self, ctx: Any, config: Any) -> Shapes:
+        raise NotImplementedError
+
+
+def test_redaction_covers_patterned_maps_tuples_and_sensitive_keys() -> None:
+    """Checkpoint-1 finding: a patterned-key map's values sit under `patternProperties`, which redaction didn't read,
+    so the credential showed and was never learned. Tuple positions (`prefixItems`) and sensitive keys
+    (`propertyNames`) had the same gap."""
+    schema = node_manifest(ShapesNode)["output_schema"]
+    value = {"patterned": {"x-api": "k3y-one"}, "pair": ["public", "k3y-two"], "keyed": {"k3y-three": 1}}
+    assert preview(value, schema) == {"patterned": {"x-api": REDACTED}, "pair": ["public", REDACTED], "keyed": REDACTED}
+    assert sensitive_values(value, schema) == ["k3y-one", "k3y-two", "k3y-three"]
 
 
 def test_a_recursive_schema_ends() -> None:
@@ -2347,8 +2423,10 @@ Create `backend/src/dewpoint/engine/runtime/projection.py`:
 ```python
 # SPDX-License-Identifier: Apache-2.0
 """Previews for `run_steps` (spec §8). The projection is tenant-readable, so:
-- a field its schema marks `x-sensitive` becomes "[redacted]" wherever the schema puts it: behind local `$ref`s, and in
-  any branch of `anyOf`, `oneOf` or `allOf` (sensitive in one branch, redacted in all);
+- a field its schema marks `x-sensitive` becomes "[redacted]" wherever the schema puts it: behind local `$ref`s, in
+  any branch of `anyOf`, `oneOf` or `allOf` (sensitive in one branch, redacted in all), as a patterned-key map's value
+  (`patternProperties`) and at a tuple's position (`prefixItems`); a map whose keys are sensitive (`propertyNames`) is
+  redacted whole;
 - a value the run learned is sensitive (MIN_SECRET characters or more) is masked wherever it reappears, in strings and
   keys: copied by a transform, embedded by a template, echoed by an error message;
 - a preview larger than 8 KiB of canonical JSON becomes "[truncated]".
@@ -2395,15 +2473,42 @@ def _branches(schema: Any, root: Mapping[str, Any], depth: int = 0) -> list[Mapp
     return out
 
 
+def _map_values(branches: list[Mapping[str, Any]]) -> list[Any]:
+    """The schemas that may govern an undeclared key's value: `additionalProperties` and every `patternProperties`
+    schema. Every pattern, matched or not: no regex runs on data in the workflow, and a sensitive pattern's values
+    are redacted whichever key holds them."""
+    out: list[Any] = []
+    for b in branches:
+        if isinstance(b.get("additionalProperties"), Mapping):
+            out.append(b["additionalProperties"])
+        patterns = b.get("patternProperties")
+        if isinstance(patterns, Mapping):
+            out.extend(patterns.values())
+    return out
+
+
 def _children(branches: list[Mapping[str, Any]], key: str) -> list[Any]:
+    """The schemas that may govern `key`'s value: its declared property, or else the map's value schemas."""
     out: list[Any] = []
     for b in branches:
         props = b.get("properties")
-        if isinstance(props, Mapping) and key in props:
-            out.append(props[key])
-        elif isinstance(b.get("additionalProperties"), Mapping):
-            out.append(b["additionalProperties"])
+        out.extend([props[key]] if isinstance(props, Mapping) and key in props else _map_values([b]))
     return out
+
+
+def _elements(branches: list[Mapping[str, Any]], index: int) -> list[Any]:
+    """The schemas that may govern a list's element `index`: its tuple position (`prefixItems`), and `items`."""
+    out: list[Any] = [b["items"] for b in branches if isinstance(b.get("items"), Mapping)]
+    for b in branches:
+        prefix = b.get("prefixItems")
+        if isinstance(prefix, list) and index < len(prefix):
+            out.append(prefix[index])
+    return out
+
+
+def _keys_sensitive(branches: list[Mapping[str, Any]], root: Mapping[str, Any]) -> bool:
+    names = [b["propertyNames"] for b in branches if isinstance(b.get("propertyNames"), Mapping)]
+    return any(n.get(SENSITIVE) is True for s in names for n in _branches(s, root))
 
 
 def _walk(value: Any, schemas: list[Any], root: Mapping[str, Any], found: list[Any] | None) -> Any:
@@ -2414,10 +2519,15 @@ def _walk(value: Any, schemas: list[Any], root: Mapping[str, Any], found: list[A
             found.append(value)
         return REDACTED
     if isinstance(value, dict):
+        if _keys_sensitive(branches, root):  # the keys are the secret: the whole map goes, its keys are learned
+            if found is not None:
+                found.extend(value)
+                for k, v in value.items():
+                    _walk(v, _children(branches, k), root, found)
+            return REDACTED
         return {k: _walk(v, _children(branches, k), root, found) for k, v in value.items()}
     if isinstance(value, list):
-        items = [b["items"] for b in branches if isinstance(b.get("items"), Mapping)]
-        return [_walk(v, items, root, found) for v in value]
+        return [_walk(v, _elements(branches, i), root, found) for i, v in enumerate(value)]
     return value
 
 
@@ -2494,9 +2604,7 @@ def location(loc: Sequence[str | int], schema: Mapping[str, Any]) -> str:
             candidates = found
         else:
             parts.append("*")
-            candidates = [
-                b["additionalProperties"] for b in branches if isinstance(b.get("additionalProperties"), Mapping)
-            ]
+            candidates = _map_values(branches)
     return ".".join(parts) or "(root)"
 
 
@@ -2526,7 +2634,7 @@ __all__ = [
 - [ ] **Step 4: Run the tests**
 
 Run: `cd backend && uv run pytest -q tests/engine/runtime`
-Expected: 59 passed.
+Expected: 62 passed.
 
 - [ ] **Step 5: Checks and commit, then pause for checkpoint 1**
 
@@ -6811,7 +6919,7 @@ cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy
        -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-Expected: 848 passed and 8 skipped (the Linux-only evaluator tests).
+Expected: 851 passed and 8 skipped (the Linux-only evaluator tests).
 
 ---
 
@@ -7103,7 +7211,7 @@ cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy
        -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-Expected: 858 passed and 8 skipped locally (`main` collects 726 tests; this plan adds 140). On Linux the 8
+Expected: 861 passed and 8 skipped locally (`main` collects 726 tests; this plan adds 143). On Linux the 8
 evaluator-limit tests run too. Push only when the owner says so; CI then runs the same suite, downloading the test
 server on first use.
 

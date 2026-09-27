@@ -40,7 +40,9 @@
       messages never quote input;
     - a start is recorded as failed only when Temporal refused it;
     - `wait_until` needs a time zone;
-    - golden histories start with `engine_abi` 1.
+    - golden histories start with `engine_abi` 1;
+    - from execution's checkpoint 1: redaction also covers patterned-key maps, tuple positions and sensitive keys,
+      and the iteration cap ends a loop's open iterations first.
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
   This spec **narrows parent §6.4** (where CEL runs) and resolves the CEL item in parent §15.
 - **Evidence:** CEL spike, branch `spike/cel-evaluation`, commits `d6a8162` and `13a62e1`. See
@@ -214,7 +216,8 @@ Tenant-scoped tables use FORCE RLS with the foundations policy pattern.
   - **Nesting depth ≤ 3.** Scopes nest the same way, for example `loop2:7/loop5:3`.
   - **Per-run iteration cap.** All loop iterations and filter items across the whole *logical* run share one cap,
     initially 100,000, so nested item caps don't multiply. That includes child batches, sub-flows and every
-    continue-as-new. Past the cap, the loop fails with `iteration_cap_exceeded`. §6 explains how the count is kept.
+    continue-as-new. Past the cap, the loop fails with `iteration_cap_exceeded`, after ending the iterations it had
+    opened, as under `on_item_error: stop`. §6 explains how the count is kept.
   - The loop's `collect` value is evaluated at the end of each iteration and becomes `steps.<loop>.output.items[i]`.
     A failed iteration (`on_item_error: continue`) leaves `items[i] = null` and adds `{index, code, message}` to
     `failures`; a `collect` that can't be computed fails its iteration the same way. `count` is the number of items.
@@ -929,12 +932,13 @@ before any step runs, and any other exception in workflow code fails it with `in
   - Control nodes are projected at each scheduler await.
   - The worker writes through the worker DB role inside `tenant_scope`.
 - **Redaction:** `x-sensitive` fields become `"[redacted]"`, and oversize previews become `"[truncated]"`.
-  Redaction follows local `$ref`s and every branch of `anyOf`, `oneOf` and `allOf`. Strings the run has seen at
-  sensitive positions (of plugin outputs and configs, and of the trigger by its input schema; 4 characters or more)
-  are masked wherever they reappear, CEL errors included. Messages never quote input: validation errors give the
-  location only as far as the schema declares it (map keys, numeric or not, show as `*`) and the rule's code, if
-  pydantic defines it (`custom_error` otherwise), and unexpected exceptions, unusable versions and interpreter errors
-  only their type.
+  Redaction follows local `$ref`s, every branch of `anyOf`, `oneOf` and `allOf`, every `patternProperties` schema of a
+  map and each tuple position (`prefixItems`); a map whose keys are sensitive (`propertyNames`) is redacted whole.
+  Strings the run has seen at sensitive positions (of plugin outputs and configs, and of the trigger by its input
+  schema; 4 characters or more) are masked wherever they reappear, CEL errors included. Messages never quote input:
+  validation errors give the location only as far as the schema declares it (map keys, numeric or not, show as `*`)
+  and the rule's code, if pydantic defines it (`custom_error` otherwise), and unexpected exceptions, unusable versions
+  and interpreter errors only their type.
 - **Run error codes** add `workflow_failed` (a `fail` node), `start_failed`, `version_unusable`, `internal_error`,
   `deadline_exceeded`, `cancelled`, `not_supported` (loop batches and sub-flows, until plan 2a-3b) and
   `node_type_unavailable` (no worker of the build runs the node type).
