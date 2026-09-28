@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 from sqlalchemy import text
 
+import dewpoint
 from dewpoint.apps import workflow_ops
 from dewpoint.core.auth.users import create_user
 from dewpoint.core.db import tenant_scope
@@ -15,6 +16,8 @@ from dewpoint.core.plugins.lifecycle import Entry
 from dewpoint.core.workflows import service
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.cel.record import ExpressionRecord
+from dewpoint.engine.graph.model import version_hash
+from dewpoint.engine.runtime.build import build_id
 from tests.apps.api.helpers import PW
 from tests.support.graphs import G, cel, nid, ref
 from tests.support.registry import sync_test_plugins
@@ -101,6 +104,27 @@ async def test_publish_creates_an_active_version_with_its_closure(
         await tenant_scope(s, ctx.tenant_id)
         wf = await service.get_workflow(s, ctx.tenant_id, wf_id)
         assert wf is not None and wf.active_version_id == v.id
+
+
+async def test_a_published_version_carries_the_abi_of_this_build(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    """Spec §7: a version is stamped and hashed with the ABI this build's id names, the one its runs' histories are
+    recorded and replayed under."""
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    wf_id = await create(api_sessionmaker, ctx, ECHO_GRAPH)
+    v = (await publish(api_sessionmaker, ctx, wf_id, api_settings)).version
+    assert v is not None
+    abi = int(build_id(dewpoint.__version__).rpartition("+abi")[2])
+    assert v.engine_abi == abi
+    assert v.version_hash == version_hash(
+        graph_hash=v.graph_hash,
+        subflow_pins={},
+        failure_handler_version_id=None,
+        cel_profile=v.cel_profile,
+        engine_abi=abi,
+    )
 
 
 async def test_publish_refuses_invalid_graphs_and_stale_revisions(

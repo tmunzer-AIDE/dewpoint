@@ -14,8 +14,8 @@ from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner
 
 from dewpoint.engine.canonical import canonical_json
-from dewpoint.engine.graph.validate import SubflowInfo
 from dewpoint.engine.runtime import nodes
+from dewpoint.engine.runtime import workflow as run_graph
 from dewpoint.engine.runtime.activities import CEL_EVALUATE, ENGINE_QUEUE, PROJECT, ProjectInput, RunInput
 from dewpoint.engine.runtime.workflow import PROJECT_BYTES, RunGraph
 from tests.apps.worker.harness import TENANT, MemoryStore, run, start, workers
@@ -85,28 +85,45 @@ async def test_continue_records_failed_items_and_stop_fails_the_loop(env: Workfl
     assert stopped.status == "failed" and stopped.error and stopped.error["code"] == "testkit.rejected"
 
 
-@pytest.mark.parametrize(
-    ("config", "code"),
-    [
-        ({"items": list(range(101))}, "not_supported"),  # batches arrive with 2a-3b
-        ({"items": [1, 2, 3], "item_cap": 2}, "item_cap_exceeded"),
-    ],
-)
-async def test_loop_limits_fail_the_loop(env: WorkflowEnvironment, config: dict[str, Any], code: str) -> None:
+async def test_an_iteration_that_fails_while_a_sibling_runs_cancels_only_that_sibling(env: WorkflowEnvironment) -> None:
+    """The failed iteration's other step is cancelled, and the loop carries on under `continue`: the run isn't."""
     store = MemoryStore()
-    g = graph(code=ref("steps.l.error.code", default="none")).node("l", LOOP, config, on_error="continue")
+    g = graph(out=ref("steps.l.output"))
+    g.node("l", LOOP, {"items": [0, 1, 2], "on_item_error": "continue", "collect": ref("item")})
+    g.node("f", "testkit.ambiguous_send@1", {"outcome": cel("item == 0 ? 'rejected' : 'sent'")})
+    g.node("d", "flow.delay@1", {"duration_s": cel("item == 0 ? 3600 : 0")})
+    g.edge("l", "f", "body").edge("l", "d", "body")
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, TRIGGER)
+        result = await asyncio.wait_for(handle.result(), 60)
+        info = await handle.describe()
+    assert (result.status, result.iterations) == ("succeeded", 3)
+    assert [f["index"] for f in result.outputs["out"]["failures"]] == [0]
+    assert info.close_time and info.close_time - info.start_time < timedelta(hours=1)  # the delay was cancelled
+
+
+async def test_the_item_cap_fails_the_loop(env: WorkflowEnvironment) -> None:
+    store = MemoryStore()
+    g = graph(code=ref("steps.l.error.code", default="none"))
+    g.node("l", LOOP, {"items": [1, 2, 3], "item_cap": 2}, on_error="continue")
     g.node("x", ECHO).edge("l", "x", "body")
     async with workers(env.client, store):
-        assert (await run(env.client, store, g, TRIGGER)).outputs == {"code": code}
+        assert (await run(env.client, store, g, TRIGGER)).outputs == {"code": "item_cap_exceeded"}
 
 
-async def test_sub_flows_are_not_supported_yet(env: WorkflowEnvironment) -> None:
-    child = uuid.uuid4()
-    store = MemoryStore(subflows={child: SubflowInfo(child, uuid.uuid4(), {"type": "object"}, {"type": "object"})})
-    g = graph(code=ref("steps.r.error.code", default="none"))
-    g.node("r", "flow.run_workflow@1", {"workflow_id": str(child)}, on_error="continue")
-    async with workers(env.client, store):
-        assert (await run(env.client, store, g, TRIGGER)).outputs == {"code": "not_supported"}
+async def test_a_loop_past_the_runs_iteration_cap_fails(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The run's cap (spec §6): the iteration past it is refused and its loop fails. The run doesn't wait for budget
+    nothing could release."""
+    monkeypatch.setattr(run_graph, "ITERATION_CAP", 2)
+    store = MemoryStore()
+    g = graph(code=ref("steps.l.error.code", default="none"))
+    g.node("l", LOOP, {"items": [1, 2, 3]}, on_error="continue")
+    g.node("x", ECHO).edge("l", "x", "body")
+    async with workers(env.client, store, runner=UnsandboxedWorkflowRunner()):
+        result = await asyncio.wait_for(run(env.client, store, g, TRIGGER), 60)
+    assert (result.outputs, result.iterations) == ({"code": "iteration_cap_exceeded"}, 2)
 
 
 async def test_a_failing_collect_fails_its_iteration(env: WorkflowEnvironment) -> None:
@@ -191,6 +208,34 @@ async def test_one_projection_is_outstanding_at_a_time(env: WorkflowEnvironment)
             outstanding.discard(event.activity_task_completed_event_attributes.scheduled_event_id)
     assert most == 1
     assert sorted(r.node_key for r in store.steps(handle.id)) == sorted(f"{k}{i}" for k in "et" for i in range(4))
+
+
+async def test_a_projection_in_flight_takes_no_units_slot(env: WorkflowEnvironment) -> None:
+    """Spec §6: 100 units in flight, and besides them one projection. A slow projection is still in flight when 105
+    more steps become ready: 99 of them start beside the slow step, so draining can wait on the full cap."""
+    store = SlowStore()
+    g = graph().node("x", "testkit.slow@1", {"seconds": 1})
+    g.node("t0", "flow.transform@1", {"fields": {"a": 1}}).node("t1", "flow.transform@1", {"fields": {"a": 2}})
+    g.edge("t0", "t1")  # when t1 settles, the projection of x's first row is in flight
+    for i in range(105):
+        g.node(f"e{i}", ECHO, {"value": i}).edge("t1", f"e{i}")
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, TRIGGER)
+        await handle.result()
+        history = await handle.fetch_history()
+    kinds = {
+        e.event_id: e.activity_task_scheduled_event_attributes.activity_type.name
+        for e in history.events
+        if e.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED
+    }
+    steps = 0
+    for event in history.events:
+        if event.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_COMPLETED:
+            if kinds[event.activity_task_completed_event_attributes.scheduled_event_id] != PROJECT:
+                break  # the first step that ended
+        elif event.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED:
+            steps += kinds[event.event_id] != PROJECT
+    assert steps == 100  # the slow step and 99 others
 
 
 async def test_the_deadline_cancels_running_work(own_env: WorkflowEnvironment) -> None:

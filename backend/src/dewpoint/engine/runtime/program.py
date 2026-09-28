@@ -1,17 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 """A published version compiled for execution (spec §6): each step with its edges by port, its region and its
-topological index, and the expression records by (node, field). Built once per run from the loaded version, and
-never changed."""
+topological index, the expression records by (node, field), and the versions it pins (its sub-flows and its failure
+handler). Built once per run from the loaded version, and never changed."""
 
 import uuid
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from dewpoint.engine.cel.record import ExpressionRecord
 from dewpoint.engine.graph.model import Graph, parse_graph
 from dewpoint.engine.graph.structure import ERROR_PORT, Region, analyze_structure
-from dewpoint.engine.graph.values import CelValue, Value, ValueSyntaxError, iter_values, pointer_str
+from dewpoint.engine.graph.values import (
+    CelValue,
+    RefValue,
+    TemplateRef,
+    TemplateValue,
+    Value,
+    ValueSyntaxError,
+    iter_values,
+    pointer_str,
+)
 from dewpoint.engine.registry.catalog import Catalog, spec_from_manifest
 
 BODY, DONE = "body", "done"
@@ -57,6 +66,8 @@ class Program:
     records: Mapping[tuple[str | None, str], ExpressionRecord]
     manifests: Mapping[str, Mapping[str, Any]]  # type@version -> the registered manifest
     cel_profile: str
+    subflows: Mapping[str, str] = field(default_factory=dict)  # run_workflow node id -> its pinned version id
+    failure_handler: str | None = None  # the pinned failure-handler version id
 
     def chain(self, region: uuid.UUID | None) -> list[uuid.UUID | None]:
         """`region` and every region enclosing it, innermost first, ending with the root (None)."""
@@ -72,12 +83,42 @@ class Program:
             raise ProgramError(f"no expression record for {field!r}")
         return found
 
+    def outer_reads(self, loop: uuid.UUID) -> frozenset[str] | None:
+        """The steps outside `loop`'s body that the body (its nested loops included) and the loop's `collect` read:
+        what a batch child needs from the enclosing scopes. None when an expression reads `steps` as a whole."""
+        inside = {r for r in self.regions if r is not None and loop in self.chain(r)}
+        members = {m for r in inside for m in self.regions[r].members}
+        names: set[str] = set()
+        sites = [(m, p, v) for m in members for p, v in self.steps[m].values]
+        sites += [(loop, p, v) for p, v in self.steps[loop].values if p == "/collect" or p.startswith("/collect/")]
+        for owner, pointer, value in sites:
+            if isinstance(value, RefValue):
+                paths = [value.path]
+            elif isinstance(value, TemplateValue):
+                paths = [part.path for part in value.parts if isinstance(part, TemplateRef)]
+            elif isinstance(value, CelValue):
+                record = self.record(owner, pointer)
+                projected = [p.path for p in record.projections if p.path[:1] == ("steps",)]
+                for ident in record.idents:  # a typed path is a dotted identifier; `steps` alone binds the root
+                    if ident.startswith("steps."):
+                        names.add(ident.split(".")[1])
+                    elif ident == "steps" and (not projected or any(len(path) < 2 for path in projected)):
+                        return None
+                names |= {path[1] for path in projected}
+                continue
+            else:
+                continue
+            names |= {str(p.name) for p in paths if p.root == "steps" and p.name is not None}
+        return frozenset(names - {self.steps[m].key for m in members})
+
 
 def compile_program(
     graph_json: Mapping[str, Any],
     manifests: Mapping[str, Mapping[str, Any]],
     expressions: Iterable[Mapping[str, Any]],
     cel_profile: str,
+    subflows: Mapping[str, str] | None = None,
+    failure_handler: str | None = None,
 ) -> Program:
     graph = parse_graph(graph_json)
     structure, diagnostics = analyze_structure(graph, Catalog(spec_from_manifest(m) for m in manifests.values()))
@@ -116,9 +157,9 @@ def compile_program(
         )
     records = {(r.node, r.field): r for r in (ExpressionRecord.from_json(x) for x in expressions)}
     for step in steps.values():  # every CEL value needs its record: checked before any step runs
-        for field, value in step.values:
-            if isinstance(value, CelValue) and (str(step.id), field) not in records:
-                raise ProgramError(f"`{step.key}`: no expression record for {field}")
+        for where, value in step.values:
+            if isinstance(value, CelValue) and (str(step.id), where) not in records:
+                raise ProgramError(f"`{step.key}`: no expression record for {where}")
     for path, value in iter_values(graph.settings.outputs, ("settings", "outputs")):
         if isinstance(value, ValueSyntaxError):  # publish refuses these: the stored version is damaged
             raise ProgramError(f"output {pointer_str(path)}: {value.message}")
@@ -133,6 +174,8 @@ def compile_program(
         records=records,
         manifests=dict(manifests),
         cel_profile=cel_profile,
+        subflows=dict(sorted((subflows or {}).items())),
+        failure_handler=failure_handler,
     )
 
 

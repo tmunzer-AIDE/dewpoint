@@ -9,27 +9,29 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from temporalio.client import Client, WorkflowHandle
+from temporalio.exceptions import ApplicationError
 from temporalio.worker import Worker, WorkflowRunner
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
 from dewpoint.apps.worker.activities import Evaluate, RunStore, cel_activity, engine_activities
 from dewpoint.engine.cel import ipc
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
-from dewpoint.engine.graph.validate import SubflowInfo
+from dewpoint.engine.graph.validate import SubflowInfo, ValidationContext, validate
 from dewpoint.engine.runtime.activities import (
     ENGINE_QUEUE,
     LIVE,
     ProjectInput,
     RunInput,
     RunResult,
+    RunStart,
     RunSummary,
     StepRow,
     VersionData,
     cel_queue,
 )
-from dewpoint.engine.runtime.workflow import RunGraph
+from dewpoint.engine.runtime.workflow import LoopBatch, RunGraph
 from dewpoint.sdk import Plugin
-from tests.engine.runtime.support import MANIFESTS, expressions
+from tests.engine.runtime.support import CATALOG, MANIFESTS
 from tests.support.graphs import G
 from tests.support.plugins.testkit import TESTKIT
 
@@ -42,24 +44,48 @@ class MemoryStore:
     rows: dict[tuple[str, str, str, int], StepRow] = field(default_factory=dict)
     runs: dict[str, RunSummary] = field(default_factory=dict)
     subflows: dict[uuid.UUID, SubflowInfo] = field(default_factory=dict)  # what validation sees as published
+    starts: dict[str, RunStart] = field(default_factory=dict)  # sub-runs' own rows
+    schemas: dict[str, dict[str, Any]] = field(default_factory=dict)  # version -> its output schema
 
-    def add(self, g: G) -> str:
+    def add(self, g: G, workflow_id: uuid.UUID | None = None) -> str:
+        """Publish `g` as a version, pinned to the sub-flows it runs (as `publish` registered them)."""
+        result = validate(g.build(), ValidationContext(catalog=CATALOG, subflows=self.subflows))
+        errors = [d.to_json() for d in result.diagnostics if d.severity == "error"]
+        assert not errors, errors
         version_id = str(uuid.uuid4())
         refs = {n["type"] for n in g.nodes}
+        handler = result.failure_handler_version_id
         self.versions[version_id] = VersionData(
             version_id=version_id,
-            workflow_id=str(uuid.uuid4()),
+            workflow_id=str(workflow_id or uuid.uuid4()),
             graph=g.data(),
-            expressions=expressions(g, self.subflows),
+            expressions=[r.to_json() for r in result.expressions],
             cel_profile=CURRENT_CEL_PROFILE,
             manifests={r: MANIFESTS[r] for r in sorted(refs)},
+            subflow_version_ids=dict(result.subflow_pins),
+            failure_handler_version_id=str(handler) if handler else None,
         )
+        self.schemas[version_id] = dict(result.output_schema)
         return version_id
 
+    def publish(self, g: G) -> uuid.UUID:
+        """A workflow other graphs can run as a sub-flow or a failure handler: its id."""
+        workflow_id = uuid.uuid4()
+        version_id = self.add(g, workflow_id)
+        input_schema = g.settings.get("input_schema", {"type": "object"})
+        self.subflows[workflow_id] = SubflowInfo(
+            workflow_id, uuid.UUID(version_id), input_schema, self.schemas[version_id]
+        )
+        return workflow_id
+
     async def version(self, tenant_id: str, version_id: str) -> VersionData:
+        if version_id not in self.versions:  # as the database store: a version that isn't there is never retried
+            raise ApplicationError(f"version {version_id} not found", type="version_not_found", non_retryable=True)
         return self.versions[version_id]
 
     async def project(self, data: ProjectInput) -> None:
+        if data.start is not None:
+            self.starts.setdefault(data.start.run_id, data.start)
         for row in data.steps:
             self.rows[(row.run_id, row.step_id, row.iteration_key, row.attempt)] = row
         if data.run is not None:
@@ -92,7 +118,7 @@ async def workers(
     engine = Worker(
         client,
         task_queue=ENGINE_QUEUE,
-        workflows=[RunGraph],
+        workflows=[RunGraph, LoopBatch],
         activities=engine_activities(store, plugins),
         workflow_runner=runner or SandboxedWorkflowRunner(),
         max_cached_workflows=cache,

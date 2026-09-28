@@ -13,8 +13,8 @@ public run API arrive with sub-project 2b, and so do admission control and idemp
 
 ## The worker
 
-`dewpoint worker` polls the `dewpoint-engine` task queue: `RunGraph`, the version loader, the projection, and one
-activity per installed plugin node type. It needs:
+`dewpoint worker` polls the `dewpoint-engine` task queue: the `RunGraph` and `LoopBatch` workflows, the version
+loader, the projection, and one activity per installed plugin node type. It needs:
 
 - `DEWPOINT_DATABASE_URL` with a login in the `dewpoint_worker` role. That role reads versions and writes `runs` and
   `run_steps`, inside the run's tenant only (row-level security).
@@ -58,10 +58,42 @@ records the run as failed (`start_failed`). If no attempt is answered at all, th
 
 ## Reading runs
 
-`GET /api/v1/t/{tenant}/runs` lists runs, newest first (`workflow_id`, `before` and `limit` filter and page them).
-`GET /api/v1/t/{tenant}/runs/{run_id}` returns one run with its steps: one row per step, loop iteration and attempt.
-The `iteration_key` is the loop step's key and the item's index, like `each_ap:3`, or `outer:1/inner:4` when nested.
-Both need the `run.view` permission.
+`GET /api/v1/t/{tenant}/runs` lists top-level runs, newest first (`workflow_id`, `before` and `limit` filter and page
+them). `GET /api/v1/t/{tenant}/runs/{run_id}` returns one run with its steps (one row per step, loop iteration and
+attempt) and its `children`: the sub-runs it started. The `iteration_key` is the loop step's key and the item's index,
+like `each_ap:3`, or `outer:1/inner:4` when nested. Both need the `run.view` permission.
+
+Every run has a `kind`. A sub-flow's run (`subflow`) and a failure handler's (`failure_handler`) are runs of their
+own, with their own steps, and point at the run that started them (`parent_run_id`, and for a sub-flow the step and
+iteration that ran it). Their own id opens them like any other run. A sub-run's row appears as soon as it starts,
+before its version loads, so a sub-run that ends right away still shows, with its end. A cancelled sub-run says
+`cancelled` here, but Temporal shows its workflow as completed: it returns what it used to its parent instead of
+ending as cancelled.
+
+## Sub-flows, failure handlers and large loops
+
+- **A `run_workflow` step** runs the workflow version it was pinned to at publish, as a child run. The child's outputs
+  are the step's output; its failure fails the step, with the child's error code and message, and the step's own
+  `on_error` applies. A sub-flow shares its parent's deadline, and nests at most 5 deep.
+- **A workflow's failure handler**, when it has one, runs once when a run of it fails or passes its deadline (not when
+  it's cancelled), as a child run whose trigger is `{run_id, workflow_id, version_id, error: {code, message}}`. It
+  gets its own deadline. The run's end is decided when it fails, but the run shows `running` until its handler has
+  finished; then its end is recorded, counting the handler's iterations. The handler's end doesn't change the
+  run's, and neither does a cancel while it runs: that cancels the handler. A failure handler's own failure runs no
+  handler.
+- **A loop over more than 100 items** runs in batches of 100, each a child workflow, one batch at a time; inside a
+  batch, the items run with the loop's own concurrency. Its iterations' rows, keys and results are the same as if
+  they had run inline, and its `on_item_error` works across batches.
+- **One budget per run.** The 100,000 loop iterations and filter items a run may use are shared by everything it
+  starts: its batches, its sub-flows (and theirs), and its failure handler. A child that needs more asks its parent;
+  a request waits while another child may still give budget back, and is refused only when nothing is left anywhere.
+
+## Long runs
+
+A run whose Temporal history passes 2,000 events carries on as a new Temporal execution (continue-as-new) at the next
+point where no activity and no child is outstanding: nothing is cancelled or repeated, and a timer keeps its wake
+time. Past 4,000 events, or when Temporal suggests it, the run drains: it starts nothing new, waits for what's
+outstanding, then continues. The run keeps its id, its rows and its budget; only Temporal's history starts afresh.
 
 ## What the projection shows
 
@@ -101,8 +133,8 @@ Temporal's own history still holds the values in full until 2b's payload encrypt
 
 Step error codes include the plugin's own codes and `config_invalid`, `output_schema_violation`, `unexpected_error`,
 `evaluation_error`, `type_mismatch`, `timeout`, `cel_profile_unavailable`, `item_cap_exceeded`,
-`iteration_cap_exceeded`, `not_supported` and `node_type_unavailable` (the registry lists the node type, but no worker
-of this build runs it: install its plugin on the workers).
+`iteration_cap_exceeded` and `node_type_unavailable` (the registry lists the node type, but no worker of this build
+runs it: install its plugin on the workers). A sub-flow step fails with its sub-flow's code.
 
 ## Attempts and retries
 
@@ -120,10 +152,11 @@ retry settings (`max_attempts` and `timeout_s` can be overridden per step), and 
 
 ## Limits in this build
 
-- At most 100 steps run at once per run.
-- Loops over more than 100 items, and `run_workflow` sub-flows, fail their step with `not_supported`: loop batches and
-  sub-flows arrive with plan 2a-3b, as do continue-as-new and the workflow failure handler.
-- A run counts at most 100,000 loop iterations and filter items (`iteration_cap_exceeded`).
+- At most 100 steps, batches and sub-flows run at once per run (and per child).
+- A run counts at most 100,000 loop iterations and filter items, its children's included (`iteration_cap_exceeded`).
+- A batch's or a sub-flow's input, and a run's continue-as-new snapshot, travel through Temporal, whose payloads are
+  limited to 2 MiB: a loop body that reads very large outside values, or a very large loop, can pass it until 2b's
+  claim check.
 - `flow.delay` waits 0 to 30 days, and `wait_until` takes instants from year 1 to 9999 in UTC. A value outside that,
   resolved at run time, fails the step with `type_mismatch`.
 

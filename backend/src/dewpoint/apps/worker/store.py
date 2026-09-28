@@ -18,7 +18,7 @@ from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.workflows import WorkflowVersion
 from dewpoint.core.plugins.registry import load_node_types
 from dewpoint.core.runs import service as runs
-from dewpoint.engine.runtime.activities import ProjectInput, RunSummary, StepRow, VersionData
+from dewpoint.engine.runtime.activities import ProjectInput, RunStart, RunSummary, StepRow, VersionData
 
 REFUSED = ("22", "23")  # SQLSTATE classes: data exceptions, integrity violations
 _log = structlog.get_logger("dewpoint.worker")
@@ -62,6 +62,8 @@ class DbRunStore:
                 expressions=list(v.expressions),
                 cel_profile=v.cel_profile,
                 manifests={t.ref: t.manifest for t in types},
+                subflow_version_ids=dict(sorted(v.subflow_version_ids.items())),
+                failure_handler_version_id=str(v.failure_handler_version_id) if v.failure_handler_version_id else None,
             )
 
     async def project(self, data: ProjectInput) -> None:
@@ -69,6 +71,8 @@ class DbRunStore:
         try:
             async with self.sessionmaker() as s, s.begin():
                 await tenant_scope(s, tenant)
+                if data.start is not None:
+                    await _start(s, tenant, data.start)
                 await runs.upsert_steps(s, tenant, [_row(r) for r in data.steps])
                 if data.run is not None:
                     await _finish(s, data.run)
@@ -80,6 +84,8 @@ class DbRunStore:
     async def _one_by_one(self, tenant: uuid.UUID, data: ProjectInput) -> None:
         async with self.sessionmaker() as s, s.begin():
             await tenant_scope(s, tenant)
+            if data.start is not None:
+                await _start(s, tenant, data.start)
             for row in data.steps:
                 try:
                     async with s.begin_nested():
@@ -105,6 +111,22 @@ class DbRunStore:
                     if state is None:
                         raise
                     _log.warning("projection_run_refused", run_id=data.run.run_id, sqlstate=state)
+
+
+async def _start(s: AsyncSession, tenant: uuid.UUID, start: RunStart) -> None:
+    await runs.ensure_run(
+        s,
+        run_id=uuid.UUID(start.run_id),
+        tenant_id=tenant,
+        workflow_id=uuid.UUID(start.workflow_id),
+        version_id=uuid.UUID(start.version_id),
+        mode=start.mode,
+        kind=start.kind,
+        parent_run_id=uuid.UUID(start.parent_run_id),
+        parent_step_id=uuid.UUID(start.parent_step_id) if start.parent_step_id else None,
+        parent_iteration_key=start.parent_iteration_key,
+        started_at=datetime.fromisoformat(start.started_at),
+    )
 
 
 async def _finish(s: AsyncSession, run: RunSummary) -> None:

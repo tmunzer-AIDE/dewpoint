@@ -3,8 +3,12 @@
 - every node runs or dies exactly once per scope;
 - dead paths never run;
 - a step runs in its own region's scope, so branches that reconverge meet in the same scope;
-- no edge is left pending when a run succeeds, so nothing deadlocks."""
+- no edge is left pending when a run succeeds, so nothing deadlocks.
 
+The same runs also take snapshots at random points and carry on from them (continue-as-new), and some loops run in
+batches whose children report random outcomes (2a-3b)."""
+
+import json
 from typing import Any
 
 from hypothesis import HealthCheck, given, settings
@@ -12,6 +16,8 @@ from hypothesis import strategies as st
 
 from dewpoint.engine.runtime.scheduler import (
     SETTLED,
+    Batch,
+    BatchOutcome,
     EdgeState,
     Failure,
     Instance,
@@ -99,8 +105,16 @@ def test_random_runs_keep_the_scheduling_invariants(g: G, data: st.DataObject) -
     s.start()
     running: list[Instance] = []
     collects: list[Any] = []
+    batches: list[Batch] = []
     handed: dict[Instance, int] = {}
     while s.ended is None:
+        cancelled = set(s.take_cancels())
+        running = [r for r in running if r not in cancelled]
+        batches = [b for b in batches if b.loop not in cancelled]
+        # continue-as-new: carry on from a snapshot, taken with work still queued, as drain mode leaves it
+        if data.draw(st.integers(0, 7), label="snapshot") == 0:
+            s.take_settled()
+            s = Scheduler.from_json(s.program, json.loads(json.dumps(s.to_json())))
         for inst in s.take_ready():
             handed[inst] = handed.get(inst, 0) + 1
             assert handed[inst] == 1, "a step ran twice in one scope"
@@ -108,11 +122,22 @@ def test_random_runs_keep_the_scheduling_invariants(g: G, data: st.DataObject) -
             assert _entry_ok(s, inst), "a step ran without a live incoming edge"
             running.append(inst)
         collects += s.take_collects()
-        cancelled = set(s.take_cancels())
-        running = [r for r in running if r not in cancelled]
-        if not running and not collects:
+        batches += s.take_batches()
+        if not running and not collects and not batches:
             raise AssertionError("stuck: nothing running, nothing to collect, and the run hasn't ended")
-        pick = data.draw(st.integers(0, len(running) + len(collects) - 1))
+        pick = data.draw(st.integers(0, len(running) + len(collects) + len(batches) - 1))
+        if pick >= len(running) + len(collects):
+            b = batches.pop(pick - len(running) - len(collects))
+            how = data.draw(st.sampled_from(["ok", "ok", "item_failed", "stopped", "failed"]), label="batch")
+            if how == "failed":
+                s.batch_failed(b.loop, b.start, Failure("internal_error", "the child failed"))
+                continue
+            failures = (
+                [{"index": b.start, "code": "testkit.boom", "message": "it broke"}] if how == "item_failed" else []
+            )
+            stopped = Failure("testkit.boom", "it broke") if how == "stopped" else None
+            s.batch_done(b.loop, b.start, BatchOutcome([b.start + i for i in range(len(b.items))], failures, stopped))
+            continue
         if pick >= len(running):
             c = collects.pop(pick - len(running))
             if data.draw(st.integers(0, 5), label="collect") == 0:
@@ -123,12 +148,13 @@ def test_random_runs_keep_the_scheduling_invariants(g: G, data: st.DataObject) -
         inst = running.pop(pick)
         step = s.step(inst)
         if step.ref == LOOP:
-            items = list(range(data.draw(st.integers(0, 3), label="items")))
+            items = list(range(data.draw(st.integers(0, 5), label="items")))
             s.open_loop(
                 inst,
                 items,
                 concurrency=data.draw(st.integers(1, 2), label="concurrency"),
                 stop_on_error=data.draw(st.booleans(), label="stop"),
+                batch=data.draw(st.sampled_from([0, 0, 2]), label="batch"),
             )
         elif step.ref in (IF, SWITCH):
             s.succeed(inst, {}, (data.draw(st.sampled_from(step.ports), label="port"),))

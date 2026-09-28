@@ -65,7 +65,11 @@
       projection is flushed before continuing;
     - the headroom test shows the cap saturated when draining begins, and bounds bytes as well as events;
     - the snapshot's contents, and the thresholds as run inputs;
-    - golden histories record every execution, and `engine_abi` becomes 2 (§6, §7, §8).
+    - from the final review: a step or timer cancelled mid-run doesn't cancel its run; a cancel while the run gets
+      ready to continue-as-new ends it `cancelled`; a request from a child that has ended is dropped; a child
+      cancelled before its start went out is debited nothing;
+    - golden histories record every execution, and `engine_abi` becomes 2: one value, which publishing stamps and
+      the build ID names (§6, §7, §8).
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
   This spec **narrows parent §6.4** (where CEL runs) and resolves the CEL item in parent §15.
 - **Evidence:** CEL spike, branch `spike/cel-evaluation`, commits `d6a8162` and `13a62e1`. See
@@ -860,6 +864,9 @@ The version (graph, classifications, bounds) is loaded by one local activity and
   budget, and writes its own `runs` row with its first projection, before anything else, even its version's load.
   So every way it can end has a row to record the end. A cancelled child returns its result, with its usage,
   instead of ending as cancelled: Temporal shows it as completed, while its row says `cancelled`.
+- **Cancelled work.** When an iteration fails, or its scope otherwise ends early, the steps, timers and children
+  still outstanding in it are cancelled, and the run waits for each to settle. Their cancels are theirs, not the
+  run's: the run carries on under the loop's error policy.
 
 **Continue-as-new only at a quiescent checkpoint.** Temporal doesn't carry child workflows into the continued run.
 Closing the run would also apply the children's parent-close policy. So continue-as-new **never** cancels,
@@ -878,6 +885,8 @@ abandons or restarts an activity or a child workflow.
   - It starts nothing new: ready nodes, control nodes included, stay queued in the snapshot. They're cheap to run
     after the continue, and the run reaches quiescence sooner.
   - When the last outstanding activity or child settles, it flushes the projection and continues-as-new.
+- **A cancel meanwhile.** A continued run doesn't inherit a cancel request. So a cancel that arrives while the run
+  flushes its projection and signals before continuing ends it `cancelled` instead, once they have landed.
 - **Thresholds.** 2,000 and 4,000 are run inputs with those defaults, so tests can reach them early: Temporal's
   test server never suggests continue-as-new.
 - **Headroom.** With the in-flight cap of 100, and a bounded number of events per activity or child completion,
@@ -920,7 +929,11 @@ abandons or restarts an activity or a child workflow.
     - Drain mode still answers grant requests, because answering one isn't new work.
   - **Waiting, not refusing.** If the unreserved budget can't cover a request, the request waits while any other
     outstanding child that isn't itself asking may still hold an unused grant. That child returns it when it
-    settles.
+    settles. A child that is asking reports what its subtree holds unused (its own unreserved budget, and what its
+    asking children reported). It can release that only once it's answered and ends, and it may spend some first,
+    so what it holds may come back, not must. So when what asking children hold would cover a request, their
+    requests are refused first, latest first, and the request waits for them, and is decided again once they have
+    settled.
   - **The cap.** Only when the budget is exhausted **and** no outstanding child holds anything unused has the run
     truly reached its cap. The waiting requests then fail with `iteration_cap_exceeded`, "This run reached its limit
     of 100,000 loop iterations", and the loop's error policy applies.
@@ -931,6 +944,10 @@ abandons or restarts an activity or a child workflow.
   - A failed or cancelled child run returns its result, with its usage. A batch returns its usage with its
     outcome.
   - A child that ends without reporting (terminated, or failed as a workflow) is debited its whole grant. That's conservative, and it happens only on abnormal termination.
+  - A child cancelled before its start went out never ran, and is debited nothing. A cancel after the start went
+    out keeps the whole grant until the child reports, because it may have run.
+  - A request from a child that has already settled is dropped: nothing reads the answer, and a grant would stay
+    reserved for a child that can't release it.
 - **Why it's deterministic.** Grants, requests, answers, results and totals are all recorded workflow data.
 - The run summary shows the iterations used.
 
@@ -938,7 +955,9 @@ abandons or restarts an activity or a child workflow.
 `running` in the projection. So a version the build can't load or compile fails the run with `version_unusable`
 before any step runs, and any other exception in workflow code fails it with `internal_error`. The workflow's
 outputs are evaluated under the same handlers and deadline as its steps. A cancel that arrives while the run's end
-is being written comes too late to unmake it: the write is shielded from the cancel, and the run's result stands. A
+is being written comes too late to unmake it: the write is shielded from the cancel, and the run's result stands.
+Likewise, an ending run waits for the children it cancelled to report back, and a cancel meanwhile doesn't reach
+them again: Temporal refuses a second cancel of the same child, and the workflow task could never complete. A
 cancel while the version loads cancels the run.
 
 **Workflow-code rules:**
@@ -992,7 +1011,9 @@ cancel while the version loads cancels the run.
   - the yield-point timer.
 - **Replay gate:** CI replays each history against **its own** build.
 - **Upgrade paths:** snapshot-compatibility tests (N-1 → N) run only where an upgrade path is declared.
-- **`engine_abi`:** increments on any change that can alter the command sequence. A change that doesn't increment it must pass the previous build's golden replays.
+- **`engine_abi`:** one value per build. Publishing stamps and hashes a version with it (`workflow_versions`), and
+  the build ID names it, so a version and its runs' histories name the same ABI. It increments on any change that
+  can alter the command sequence. A change that doesn't increment it must pass the previous build's golden replays.
 
 ## 8. Run and step projection
 

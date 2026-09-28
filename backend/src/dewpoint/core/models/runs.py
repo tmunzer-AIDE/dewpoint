@@ -10,10 +10,12 @@ from sqlalchemy.orm import Mapped, mapped_column
 from dewpoint.core.models.base import Base
 
 RUN_STATUSES = ("running", "succeeded", "failed", "cancelled", "deadline_exceeded")
+RUN_KINDS = ("run", "subflow", "failure_handler")  # a sub-flow's or failure handler's run points at its parent
 
 
 class Run(Base):
-    """One run of a pinned workflow version. Its id is the Temporal workflow id."""
+    """One run of a pinned workflow version. Its id is the Temporal workflow id. A sub-run (a sub-flow's, a failure
+    handler's) points at the run and step that started it."""
 
     __tablename__ = "runs"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
@@ -28,6 +30,10 @@ class Run(Base):
     error_message: Mapped[str | None] = mapped_column(Text)
     iterations: Mapped[int] = mapped_column(Integer, default=0)
     started_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    kind: Mapped[str] = mapped_column(String(32), default="run")
+    parent_run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id"))
+    parent_step_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    parent_iteration_key: Mapped[str | None] = mapped_column(Text)
 
 
 class RunStep(Base):

@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 from dewpoint.core.db import tenant_scope
@@ -160,3 +161,79 @@ def test_the_engine_sends_what_storage_writes(value: Any) -> None:
     if isinstance(value, str):
         assert projection.sanitize(value) == service.sanitize(value)
         assert service.sanitize(projection.sanitize(value)) == projection.sanitize(value)
+
+
+async def sub_run(worker: Any, tenant: uuid.UUID, parent: uuid.UUID, wf: uuid.UUID, version: uuid.UUID) -> uuid.UUID:
+    run_id = uuid.uuid4()
+    for _ in range(2):  # a retried projection writes it once
+        async with worker() as s, s.begin():
+            await tenant_scope(s, tenant)
+            await service.ensure_run(
+                s,
+                run_id=run_id,
+                tenant_id=tenant,
+                workflow_id=wf,
+                version_id=version,
+                mode="live",
+                kind="subflow",
+                parent_run_id=parent,
+                parent_step_id=uuid.UUID(int=9),
+                parent_iteration_key="l:3",
+                started_at=datetime.now(UTC),
+            )
+    return run_id
+
+
+async def test_a_sub_run_writes_its_own_row_and_is_listed_with_its_parent(
+    owner_sessionmaker, dispatch_sessionmaker, worker_sessionmaker
+) -> None:
+    """2a-3b: a sub-flow's or failure handler's run is a run of its own, pointing at the run and step that started
+    it. The worker writes its row (the sub-run's first projection); the list shows top-level runs only."""
+    tenant, wf, version = await seed_workflow(owner_sessionmaker)
+    async with dispatch_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        parent = (
+            await service.insert_run(
+                s, run_id=uuid.uuid4(), tenant_id=tenant, workflow_id=wf, version_id=version, mode="live"
+            )
+        ).id
+    child = await sub_run(worker_sessionmaker, tenant, parent, wf, version)
+    async with owner_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        assert [r.id for r in await service.list_runs(s)] == [parent]
+        [row] = await service.children(s, parent)
+    assert (row.id, row.kind, row.parent_step_id, row.parent_iteration_key, row.status) == (
+        child,
+        "subflow",
+        uuid.UUID(int=9),
+        "l:3",
+        "running",
+    )
+    other, _ = await seeded_run(owner_sessionmaker, dispatch_sessionmaker)
+    with pytest.raises(DBAPIError, match="row-level security"):  # a sub-run for another tenant is refused
+        async with worker_sessionmaker() as s, s.begin():
+            await tenant_scope(s, other)
+            await service.ensure_run(
+                s,
+                run_id=uuid.uuid4(),
+                tenant_id=tenant,
+                workflow_id=wf,
+                version_id=version,
+                mode="live",
+                kind="subflow",
+                parent_run_id=parent,
+                parent_step_id=None,
+                parent_iteration_key="",
+                started_at=datetime.now(UTC),
+            )
+
+
+async def test_a_sub_run_needs_a_parent(owner_sessionmaker, dispatch_sessionmaker, worker_sessionmaker) -> None:
+    tenant, wf, version = await seed_workflow(owner_sessionmaker)
+    with pytest.raises(DBAPIError, match="runs_parent"):  # a sub-run's kind and its parent go together
+        async with owner_sessionmaker() as s, s.begin():
+            await tenant_scope(s, tenant)
+            await service.insert_run(
+                s, run_id=uuid.uuid4(), tenant_id=tenant, workflow_id=wf, version_id=version, mode="live"
+            )
+            await s.execute(text("update runs set kind = 'subflow'"))

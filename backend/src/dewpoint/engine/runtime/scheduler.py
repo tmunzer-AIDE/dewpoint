@@ -5,18 +5,29 @@ reports how it ended. It is deterministic: its dicts are filled in a fixed order
 (scope, topological index).
 
 A scope is the root, or one loop iteration: `()` or `(("loop2", 7), ("loop5", 3))`. Branches don't open scopes, so
-paths that split at an `if` meet again in the same scope. Each node runs or dies exactly once per scope."""
+paths that split at an `if` meet again in the same scope. Each node runs or dies exactly once per scope.
+
+Loops over more than `INLINE_ITEMS` items run in batches (2a-3b): the loop hands out one `Batch` at a time, which the
+workflow runs as a child execution, and takes back its results. A batch child's scheduler runs one slice of the loop
+(`start_batch`) over read-only copies of the loop's enclosing scopes, so its iteration keys are the inline ones.
+
+Every iteration and filter item is debited from the execution's `Budget` (spec §6, one counter per logical run). An
+iteration that can't be debited waits for budget, or ends the loop at the cap. A settled iteration's scope is pruned
+once its loop has taken its result: only open scopes stay, which keeps a continue-as-new snapshot small."""
 
 import uuid
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from dewpoint.engine.runtime.budget import LOCAL, Answer, Ask, Budget, Need
 from dewpoint.engine.runtime.program import BODY, DONE, ERROR_PORT, Program, Step
 
 ScopeKey = tuple[tuple[str, int], ...]
 ITERATION_CAP = 100_000  # loop iterations and filter items across the whole logical run (spec §4.2)
 ITERATION_CAP_EXCEEDED = "iteration_cap_exceeded"
+CAP_MESSAGE = "This run reached its limit of 100,000 loop iterations."
+SNAPSHOT_FORMAT = 1
 
 
 class NodeState(StrEnum):
@@ -58,6 +69,10 @@ class Failure:
     def to_json(self) -> dict[str, Any]:
         return {"code": self.code, "message": self.message, "attempt": self.attempt}
 
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> "Failure":
+        return cls(str(data["code"]), str(data["message"]), int(data.get("attempt", 1)))
+
 
 @dataclass
 class Scope:
@@ -69,6 +84,7 @@ class Scope:
     item: Any = None
     index: int | None = None
     failure: Failure | None = None  # the unhandled failure that ended this scope
+    frozen: bool = False  # an enclosing scope a batch child reads, and never runs
 
     @property
     def settled(self) -> bool:
@@ -77,17 +93,22 @@ class Scope:
 
 @dataclass
 class LoopRun:
-    """A loop node's iterations: opened in order, at most `concurrency` at a time."""
+    """A loop node's iterations: opened in order, at most `concurrency` at a time. `offset` is the index of
+    `items[0]` (a batch child runs a slice). With `batch`, the items run in children of that many, one at a time."""
 
     instance: Instance
     items: list[Any]
     concurrency: int
     stop_on_error: bool
-    next: int = 0
-    open: list[int] = field(default_factory=list)
+    offset: int = 0
+    batch: int = 0
+    next: int = 0  # the next item to open, as a position in `items`
+    open: list[int] = field(default_factory=list)  # open iterations, by absolute index
     collecting: set[int] = field(default_factory=set)  # settled iterations whose `collect` is being evaluated
-    collected: list[Any] = field(default_factory=list)
+    collected: list[Any] = field(default_factory=list)  # per item of `items`
     failures: list[dict[str, Any]] = field(default_factory=list)
+    running_batch: int | None = None  # the start of the batch a child is running
+    waiting: bool = False  # the next iteration waits for budget
 
 
 @dataclass(frozen=True)
@@ -100,33 +121,104 @@ class Collect:
 
 
 @dataclass(frozen=True)
+class Batch:
+    """A batch of a loop's items, for a child: items `start` .. `start + len(items)`."""
+
+    loop: Instance
+    start: int
+    items: list[Any]
+
+
+@dataclass(frozen=True)
+class BatchOutcome:
+    """What a batch child's slice produced: the collected values, the failed iterations, and the failure that stopped
+    it under `on_item_error: stop`."""
+
+    collected: list[Any]
+    failures: list[dict[str, Any]]
+    stopped: Failure | None = None
+
+
+@dataclass(frozen=True)
+class OuterScope:
+    """An enclosing scope, as a batch child reads it: the results its region can reference, and the loop item."""
+
+    key: ScopeKey
+    results: dict[str, dict[str, Any]]
+    item: Any = None
+    index: int | None = None
+
+
+@dataclass(frozen=True)
 class RunEnd:
     status: str  # succeeded | failed | deadline_exceeded | cancelled
     failure: Failure | None = None
     stopped: bool = False  # ended by a stop node: workflow outputs are still evaluated
 
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "failure": self.failure.to_json() if self.failure else None,
+            "stopped": self.stopped,
+        }
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> "RunEnd":
+        failure = data.get("failure")
+        return cls(str(data["status"]), Failure.from_json(failure) if failure else None, bool(data.get("stopped")))
+
 
 class Scheduler:
-    def __init__(self, program: Program, *, iteration_cap: int = ITERATION_CAP) -> None:
+    def __init__(self, program: Program, *, budget: Budget | None = None) -> None:
         self.program = program
-        self.iteration_cap = iteration_cap
-        self.iterations = 0
+        self.budget = budget if budget is not None else Budget(ITERATION_CAP, root=True)
         self.scopes: dict[ScopeKey, Scope] = {}
         self.loops: dict[Instance, LoopRun] = {}
         self.ended: RunEnd | None = None
+        self.batch_loop: Instance | None = None  # a batch child: the loop whose slice it runs
+        self.outcome: BatchOutcome | None = None  # a batch child: its slice's result, once it's done
         self._ready: list[Instance] = []
         self._collects: list[Collect] = []
+        self._batches: list[Batch] = []
         self._cancels: list[Instance] = []
-        self._settled: list[Instance] = []
+        self._settled: list[tuple[Instance, dict[str, Any]]] = []
+        self._budget_waits: dict[str, Instance] = {}  # a need's key -> the loop waiting for it
         self._topo_of_key = {s.key: s.topo for s in program.steps.values()}
         self._members: dict[uuid.UUID | None, tuple[uuid.UUID, ...]] = {
             region: r.members for region, r in program.regions.items()
         }
 
+    @property
+    def iterations(self) -> int:
+        """Iterations and filter items this execution used, its settled children's included."""
+        return self.budget.used
+
     # --- the workflow's side ---------------------------------------------------------------------------------------
 
     def start(self) -> None:
         self._open_scope((), None)
+
+    def start_batch(
+        self,
+        loop_step: uuid.UUID,
+        outer: list[OuterScope],
+        items: list[Any],
+        *,
+        offset: int,
+        concurrency: int,
+        stop_on_error: bool,
+    ) -> None:
+        """A batch child: rebuild the loop's enclosing scopes read-only, outermost first, and run items `offset` ..
+        `offset + len(items)` of it. The loop's own scope is the last one."""
+        chain = self.program.chain(self.program.steps[loop_step].region)  # innermost first
+        for depth, o in enumerate(outer):
+            region = chain[len(outer) - 1 - depth]
+            self.scopes[o.key] = Scope(o.key, region, {}, {}, dict(o.results), o.item, o.index, frozen=True)
+        loop_inst = Instance(outer[-1].key, loop_step)
+        self.batch_loop = loop_inst
+        loop = LoopRun(loop_inst, list(items), concurrency, stop_on_error, offset=offset, collected=[None] * len(items))
+        self.loops[loop_inst] = loop
+        self._advance(loop)
 
     def take_ready(self) -> list[Instance]:
         """Ready steps, in (scope, topological) order. They are running from now on."""
@@ -140,8 +232,13 @@ class Scheduler:
         out, self._collects = self._collects, []
         return out
 
-    def take_settled(self) -> list[Instance]:
-        """Steps that succeeded or failed since the last call, loops completed by their last iteration included."""
+    def take_batches(self) -> list[Batch]:
+        out, self._batches = self._batches, []
+        return out
+
+    def take_settled(self) -> list[tuple[Instance, dict[str, Any]]]:
+        """Steps that succeeded or failed since the last call, with their result as it was when they settled (loops
+        completed by their last iteration included)."""
         out, self._settled = self._settled, []
         return out
 
@@ -151,6 +248,13 @@ class Scheduler:
         out, self._cancels = sorted(self._cancels, key=self.order), []
         return out
 
+    def give_back(self, steps: list[Instance], collects: list[Collect], batches: list[Batch]) -> None:
+        """Work handed over but never started (drain mode, the in-flight cap): it waits in the queues again, first,
+        for the continued run."""
+        self._ready = steps + self._ready
+        self._collects = collects + self._collects
+        self._batches = batches + self._batches
+
     def succeed(self, inst: Instance, output: Any, ports: tuple[str, ...] | None = None) -> None:
         """The step succeeded. `ports`: the normal ports whose edges are live (if/switch pick one); all by default."""
         scope, step = self._running(inst)
@@ -158,7 +262,7 @@ class Scheduler:
             return
         scope.nodes[step.id] = NodeState.DONE
         scope.results[step.key] = {"output": output}
-        self._settled.append(inst)
+        self._settled.append((inst, scope.results[step.key]))
         live = set(step.ports if ports is None else ports)
         self._resolve(scope, step, {p for p in step.ports if p in live} - {BODY})
         self._after_settle(scope)
@@ -171,7 +275,7 @@ class Scheduler:
         if scope is None:
             return
         scope.nodes[step.id] = NodeState.FAILED
-        self._settled.append(inst)
+        self._settled.append((inst, {"error": failure.to_json()}))
         if step.on_error == "port":
             scope.results[step.key] = {"error": failure.to_json()}
             self._resolve(scope, step, {ERROR_PORT})
@@ -183,21 +287,17 @@ class Scheduler:
             return
         self._after_settle(scope)
 
-    def open_loop(self, inst: Instance, items: list[Any], *, concurrency: int, stop_on_error: bool) -> None:
-        """The loop node's `items` are known: open its first iterations. An empty list completes it at once."""
+    def open_loop(
+        self, inst: Instance, items: list[Any], *, concurrency: int, stop_on_error: bool, batch: int = 0
+    ) -> None:
+        """The loop node's `items` are known: open its first iterations, or hand out its first batch. An empty list
+        completes it at once."""
         scope, step = self._running(inst)
         if scope is None:
             return
-        loop = LoopRun(inst, list(items), concurrency, stop_on_error, collected=[None] * len(items))
+        loop = LoopRun(inst, list(items), concurrency, stop_on_error, batch=batch, collected=[None] * len(items))
         self.loops[inst] = loop
         self._advance(loop)
-
-    def debit(self, count: int) -> bool:
-        """Take `count` iterations (filter items) from the run's budget; False, and nothing taken, past the cap."""
-        if self.iterations + count > self.iteration_cap:
-            return False
-        self.iterations += count
-        return True
 
     def collected(self, loop_inst: Instance, index: int, value: Any) -> None:
         loop = self.loops.get(loop_inst)
@@ -205,7 +305,8 @@ class Scheduler:
             return
         loop.open.remove(index)
         loop.collecting.discard(index)
-        loop.collected[index] = value
+        loop.collected[index - loop.offset] = value
+        self._prune(self._iteration_scope(loop, index))
         self._advance(loop)
 
     def collect_failed(self, loop_inst: Instance, index: int, failure: Failure) -> None:
@@ -214,6 +315,28 @@ class Scheduler:
         if loop is None or index not in loop.open:
             return
         self._iteration_failed(loop, index, failure)
+
+    def batch_done(self, loop_inst: Instance, start: int, outcome: BatchOutcome) -> None:
+        """A batch child finished its slice: take its results, then hand out the next batch or complete the loop. A
+        slice stopped by a failed iteration (`on_item_error: stop`) fails the loop."""
+        loop = self.loops.get(loop_inst)
+        if loop is None or loop.running_batch != start:
+            return
+        loop.running_batch = None
+        loop.collected[start : start + len(outcome.collected)] = outcome.collected
+        loop.failures.extend(outcome.failures)
+        if outcome.stopped is not None:
+            self._abort(loop, outcome.stopped)
+            return
+        self._advance(loop)
+
+    def batch_failed(self, loop_inst: Instance, start: int, failure: Failure) -> None:
+        """A batch child failed as a whole (not one of its iterations): the loop fails with it."""
+        loop = self.loops.get(loop_inst)
+        if loop is None or loop.running_batch != start:
+            return
+        loop.running_batch = None
+        self._abort(loop, failure)
 
     def finish(self, inst: Instance, end: RunEnd, output: Any = None) -> None:
         """A stop or fail node: record its result, then end the run (it has no edges to resolve)."""
@@ -226,7 +349,7 @@ class Scheduler:
         else:
             scope.nodes[step.id] = NodeState.FAILED
             scope.results[step.key] = {"error": end.failure.to_json()}
-        self._settled.append(inst)
+        self._settled.append((inst, scope.results[step.key]))
         self.end(end)
 
     def end(self, end: RunEnd) -> None:
@@ -240,6 +363,30 @@ class Scheduler:
                 if state == NodeState.RUNNING and Instance(scope.key, node_id) not in queued:
                     self._cancels.append(Instance(scope.key, node_id))
         self._ready = []
+        self._batches = []
+
+    def answer_budget(self) -> tuple[list[Answer], Ask | None]:
+        """Serve the budget's waiting needs. The loops' own answers are applied here: a granted iteration opens, a
+        refused one ends its loop at the cap. The other answers (a filter's, a child's) and the Ask for the parent
+        are the workflow's to deliver."""
+        others: list[Answer] = []
+        answers, ask = self.budget.decide()
+        for a in answers:
+            inst = self._budget_waits.pop(a.need.key, None) if a.need.requester == LOCAL else None
+            if inst is None:
+                others.append(a)
+                continue
+            loop = self.loops.get(inst)
+            if loop is None:  # the loop ended meanwhile: give back what it was granted
+                self.budget.used -= a.granted
+                continue
+            loop.waiting = False
+            if not a.granted:
+                self._abort(loop, Failure(ITERATION_CAP_EXCEEDED, CAP_MESSAGE))
+                continue
+            self._open_next(loop)
+            self._advance(loop)
+        return others, ask
 
     def step(self, inst: Instance) -> Step:
         return self.program.steps[inst.step]
@@ -257,7 +404,7 @@ class Scheduler:
         """The instance's scope, or None when its result no longer counts (the scope failed, the run ended)."""
         step = self.program.steps[inst.step]
         scope = self.scopes.get(inst.scope)
-        if self.ended is not None or scope is None or scope.failure is not None:
+        if self.ended is not None or scope is None or scope.failure is not None or scope.frozen:
             return None, step
         if scope.nodes.get(inst.step) != NodeState.RUNNING:
             raise ValueError(f"`{step.key}` isn't running in {iteration_key(inst.scope)!r}")
@@ -277,6 +424,11 @@ class Scheduler:
         for node_id in members:
             self._check_ready(scope, node_id)
         self._after_settle(scope)
+
+    def _prune(self, key: ScopeKey) -> None:
+        """Forget a settled iteration's scope and every scope nested in it: its loop has what it needs."""
+        for k in [k for k in self.scopes if k[: len(key)] == key]:
+            del self.scopes[k]
 
     def _resolve(self, scope: Scope, step: Step, live_ports: set[str]) -> None:
         """Resolve every outgoing edge of `step` in `scope` exactly once. Body edges belong to the iterations."""
@@ -328,17 +480,30 @@ class Scheduler:
                     inner.nodes[node_id] = NodeState.DEAD
         self._ready = [r for r in self._ready if r.scope[: len(scope.key)] != scope.key]
         for inst in [i for i in self.loops if i.scope[: len(scope.key)] == scope.key]:
-            del self.loops[inst]
+            self._drop_loop(self.loops[inst])
         if scope.key == ():
             self.end(RunEnd("failed", failure))
         elif report:
             self._iteration_settled(scope)
 
+    def _drop_loop(self, loop: LoopRun) -> None:
+        """The loop ends: nothing it waits for is still wanted."""
+        del self.loops[loop.instance]
+        for key in [k for k, inst in self._budget_waits.items() if inst == loop.instance]:
+            del self._budget_waits[key]
+            self.budget.waiting = [n for n in self.budget.waiting if not (n.requester == LOCAL and n.key == key)]
+        self._batches = [b for b in self._batches if b.loop != loop.instance]
+
     def _after_settle(self, scope: Scope) -> None:
+        if scope.frozen:
+            return
         if scope.key != () and scope.settled:
             self._iteration_settled(scope)
         elif scope.key == () and scope.settled and self.ended is None:
             self.ended = RunEnd("succeeded")
+
+    def _iteration_scope(self, loop: LoopRun, index: int) -> ScopeKey:
+        return (*loop.instance.scope, (self.program.steps[loop.instance.step].key, index))
 
     def _iteration_settled(self, scope: Scope) -> None:
         *outer, (loop_key, index) = scope.key
@@ -355,6 +520,7 @@ class Scheduler:
     def _iteration_failed(self, loop: LoopRun, index: int, failure: Failure) -> None:
         loop.open.remove(index)
         loop.collecting.discard(index)
+        self._prune(self._iteration_scope(loop, index))
         if loop.stop_on_error:
             self._abort(loop, failure)
             return
@@ -364,37 +530,184 @@ class Scheduler:
     def _abort(self, loop: LoopRun, failure: Failure) -> None:
         """The loop ends early (an iteration failed under `stop`, or the run reached its iteration cap): its open
         iterations end first, running steps cancelled and queued ones dropped, and then the loop step fails, so its
-        own `on_error` applies. Nothing the loop opened outlives it."""
-        del self.loops[loop.instance]
-        key = self.program.steps[loop.instance.step].key
+        own `on_error` applies. Nothing the loop opened outlives it. In a batch child, its slice stops instead."""
+        self._drop_loop(loop)
         for other in loop.open:
-            self._fail_scope(self.scopes[(*loop.instance.scope, (key, other))], failure, report=False)
+            key = self._iteration_scope(loop, other)
+            self._fail_scope(self.scopes[key], failure, report=False)
+            self._prune(key)
+        if loop.instance == self.batch_loop:
+            self._batch_over(loop, failure)
+            return
         parent = self.scopes[loop.instance.scope]
         if parent.failure is None and self.ended is None:
             self.fail(loop.instance, failure)
 
+    def _batch_over(self, loop: LoopRun, stopped: Failure | None) -> None:
+        if self.ended is None:
+            self.outcome = BatchOutcome(list(loop.collected), list(loop.failures), stopped)
+            self.ended = RunEnd("succeeded")
+
+    def _open_next(self, loop: LoopRun) -> None:
+        index = loop.offset + loop.next
+        item = loop.items[loop.next]
+        loop.next += 1
+        loop.open.append(index)
+        self._open_scope(self._iteration_scope(loop, index), loop.instance.step, item=item, index=index)
+
     def _advance(self, loop: LoopRun) -> None:
-        """Open iterations up to the concurrency, or complete the loop when every item is done."""
-        step = self.program.steps[loop.instance.step]
-        while loop.next < len(loop.items) and len(loop.open) < loop.concurrency:
-            if not self.debit(1):
-                self._abort(loop, Failure(ITERATION_CAP_EXCEEDED, "This run reached its limit of loop iterations."))
+        """Open iterations up to the concurrency (or hand out the next batch), or complete the loop when every item
+        is done."""
+        if loop.batch:
+            if loop.running_batch is None and loop.next < len(loop.items):
+                start = loop.next
+                loop.next = min(start + loop.batch, len(loop.items))
+                loop.running_batch = start
+                self._batches.append(Batch(loop.instance, start, loop.items[start : loop.next]))
                 return
-            index = loop.next
-            loop.next += 1
-            loop.open.append(index)
-            self._open_scope((*loop.instance.scope, (step.key, index)), step.id, item=loop.items[index], index=index)
-            if loop.instance not in self.loops:  # the iteration failed at once and stopped the loop
+        else:
+            while loop.next < len(loop.items) and len(loop.open) < loop.concurrency and not loop.waiting:
+                if not self.budget.take(1):
+                    loop.waiting = True
+                    key = f"loop:{iteration_key(loop.instance.scope)}:{self.program.steps[loop.instance.step].key}"
+                    self._budget_waits[key] = loop.instance
+                    self.budget.request(Need(LOCAL, key, 1, 1))
+                    return
+                self._open_next(loop)
+                if loop.instance not in self.loops:  # the iteration failed at once and stopped the loop
+                    return
+        if not loop.open and loop.next >= len(loop.items) and loop.running_batch is None and not loop.waiting:
+            self._drop_loop(loop)
+            if loop.instance == self.batch_loop:
+                self._batch_over(loop, None)
                 return
-        if not loop.open and loop.next >= len(loop.items):
-            del self.loops[loop.instance]
             output = {"items": loop.collected, "failures": loop.failures, "count": len(loop.items)}
             scope = self.scopes.get(loop.instance.scope)
             if scope is not None and scope.failure is None and self.ended is None:
                 self.succeed(loop.instance, output, (DONE,))
 
+    # --- continue-as-new ---------------------------------------------------------------------------------------------
+
+    def to_json(self) -> dict[str, Any]:
+        """The scheduler's state for a continue-as-new snapshot. Taken between units: nothing settled or cancelled
+        is left to hand over."""
+        if self._settled or self._cancels or self.ended is not None:
+            raise ValueError("a snapshot is taken only between units, and never after the run ended")
+        return {
+            "snapshot_format": SNAPSHOT_FORMAT,
+            "scopes": [_scope_json(s) for s in self.scopes.values()],
+            "loops": [_loop_json(loop) for loop in self.loops.values()],
+            "ready": [_inst_json(i) for i in self._ready],
+            "collects": [[_inst_json(c.loop), c.index, _key_json(c.scope)] for c in self._collects],
+            "batches": [[_inst_json(b.loop), b.start, b.items] for b in self._batches],
+            "budget": self.budget.to_json(),
+            "budget_waits": [[k, _inst_json(i)] for k, i in self._budget_waits.items()],
+            "batch_loop": _inst_json(self.batch_loop) if self.batch_loop else None,
+        }
+
+    @classmethod
+    def from_json(cls, program: Program, data: dict[str, Any]) -> "Scheduler":
+        if data.get("snapshot_format") != SNAPSHOT_FORMAT:
+            raise ValueError(f"unknown snapshot format {data.get('snapshot_format')!r}")
+        s = cls(program, budget=Budget.from_json(data["budget"]))
+        for raw in data["scopes"]:
+            scope = _scope_from(raw)
+            s.scopes[scope.key] = scope
+        for raw in data["loops"]:
+            loop = _loop_from(raw)
+            s.loops[loop.instance] = loop
+        s._ready = [_inst_from(i) for i in data["ready"]]
+        s._collects = [Collect(_inst_from(i), int(n), _key_from(k)) for i, n, k in data["collects"]]
+        s._batches = [Batch(_inst_from(i), int(n), list(items)) for i, n, items in data["batches"]]
+        s._budget_waits = {str(k): _inst_from(i) for k, i in data["budget_waits"]}
+        s.batch_loop = _inst_from(data["batch_loop"]) if data["batch_loop"] else None
+        return s
+
+
+def _key_json(key: ScopeKey) -> list[list[Any]]:
+    return [[loop, index] for loop, index in key]
+
+
+def _key_from(raw: list[list[Any]]) -> ScopeKey:
+    return tuple((str(loop), int(index)) for loop, index in raw)
+
+
+def _inst_json(inst: Instance) -> list[Any]:
+    return [_key_json(inst.scope), str(inst.step)]
+
+
+def _inst_from(raw: list[Any]) -> Instance:
+    return Instance(_key_from(raw[0]), uuid.UUID(raw[1]))
+
+
+def _scope_json(s: Scope) -> dict[str, Any]:
+    return {
+        "key": _key_json(s.key),
+        "region": str(s.region) if s.region else None,
+        "nodes": [[str(n), state.value] for n, state in s.nodes.items()],
+        "edges": [[e, state.value] for e, state in s.edges.items()],
+        "results": s.results,
+        "item": s.item,
+        "index": s.index,
+        "failure": s.failure.to_json() if s.failure else None,
+        "frozen": s.frozen,
+    }
+
+
+def _scope_from(raw: dict[str, Any]) -> Scope:
+    return Scope(
+        key=_key_from(raw["key"]),
+        region=uuid.UUID(raw["region"]) if raw["region"] else None,
+        nodes={uuid.UUID(n): NodeState(state) for n, state in raw["nodes"]},
+        edges={int(e): EdgeState(state) for e, state in raw["edges"]},
+        results=dict(raw["results"]),
+        item=raw["item"],
+        index=raw["index"],
+        failure=Failure.from_json(raw["failure"]) if raw["failure"] else None,
+        frozen=bool(raw["frozen"]),
+    )
+
+
+def _loop_json(loop: LoopRun) -> dict[str, Any]:
+    return {
+        "instance": _inst_json(loop.instance),
+        "items": loop.items,
+        "concurrency": loop.concurrency,
+        "stop_on_error": loop.stop_on_error,
+        "offset": loop.offset,
+        "batch": loop.batch,
+        "next": loop.next,
+        "open": list(loop.open),
+        "collecting": sorted(loop.collecting),
+        "collected": loop.collected,
+        "failures": loop.failures,
+        "running_batch": loop.running_batch,
+        "waiting": loop.waiting,
+    }
+
+
+def _loop_from(raw: dict[str, Any]) -> LoopRun:
+    return LoopRun(
+        instance=_inst_from(raw["instance"]),
+        items=list(raw["items"]),
+        concurrency=int(raw["concurrency"]),
+        stop_on_error=bool(raw["stop_on_error"]),
+        offset=int(raw["offset"]),
+        batch=int(raw["batch"]),
+        next=int(raw["next"]),
+        open=[int(i) for i in raw["open"]],
+        collecting={int(i) for i in raw["collecting"]},
+        collected=list(raw["collected"]),
+        failures=list(raw["failures"]),
+        running_batch=raw["running_batch"],
+        waiting=bool(raw["waiting"]),
+    )
+
 
 __all__ = [
+    "Batch",
+    "BatchOutcome",
+    "CAP_MESSAGE",
     "Collect",
     "EdgeState",
     "Failure",
@@ -403,7 +716,9 @@ __all__ = [
     "ITERATION_CAP_EXCEEDED",
     "LoopRun",
     "NodeState",
+    "OuterScope",
     "RunEnd",
+    "SNAPSHOT_FORMAT",
     "Scheduler",
     "Scope",
     "ScopeKey",

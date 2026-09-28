@@ -2,6 +2,7 @@
 """Engine test fixtures. Lives under tests/, so it is never packaged or registered in production."""
 
 import asyncio
+from datetime import UTC, datetime
 from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, Field
@@ -63,10 +64,13 @@ class SlowConfig(BaseModel):
 
 
 class Slow(Node):
+    """Takes `seconds`, heartbeating each second. `beats` records each heartbeat's run and time, for the tests."""
+
     type = "testkit.slow"
     version = 1
     title = "Slow"
     Config = SlowConfig
+    beats: ClassVar[list[tuple[str, datetime]]] = []
 
     async def run(self, ctx: StepContext, config: SlowConfig) -> Empty:
         remaining = config.seconds
@@ -75,6 +79,7 @@ class Slow(Node):
             await asyncio.sleep(step)
             remaining -= step
             ctx.heartbeat(remaining)
+            Slow.beats.append((str(ctx.run_id), datetime.now(UTC)))
         return Empty()
 
 
