@@ -6,7 +6,7 @@ import pytest
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.runtime.program import ProgramError, compile_program
 from tests.engine.runtime.support import MANIFESTS, expressions, program
-from tests.support.graphs import G, cel, nid, ref
+from tests.support.graphs import G, cel, nid, ref, template
 
 
 def graph() -> G:
@@ -51,3 +51,32 @@ def test_a_damaged_output_is_refused() -> None:
     g.settings["outputs"] = {"n": {"$value": {"kind": "ref", "path": 5}}}  # publish refuses this; a damaged row
     with pytest.raises(ProgramError, match="/settings/outputs/n"):
         compile_program(g.data(), MANIFESTS, records, CURRENT_CEL_PROFILE)
+
+
+def test_a_program_carries_the_versions_it_pins() -> None:
+    """2a-3b: the version publish pinned for each `run_workflow` node, in a fixed order, and the failure handler's."""
+    g = graph()
+    p = compile_program(g.data(), MANIFESTS, expressions(g), CURRENT_CEL_PROFILE, {"n2": "v2", "n1": "v1"}, "h1")
+    assert (list(p.subflows.items()), p.failure_handler) == ([("n1", "v1"), ("n2", "v2")], "h1")
+    assert (program(g).subflows, program(g).failure_handler) == ({}, None)
+
+
+def test_a_loops_outer_reads_are_the_outside_steps_its_body_references() -> None:
+    """2a-3b: a batch child gets only the enclosing results its loop's body (nested loops included) and `collect`
+    read, by reference, template or CEL; everything when an expression reads `steps` whole."""
+    g = G().node("a", "testkit.echo@1").node("b", "testkit.echo@1").node("c", "testkit.echo@1")
+    g.node("d", "testkit.echo@1").node("unread", "testkit.echo@1")
+    g.node("l", "flow.loop@1", {"items": [1], "collect": ref("steps.d.output")})
+    g.node("x", "testkit.echo@1", {"value": ref("steps.a.output.value", default=0)})
+    g.node("y", "testkit.echo@1", {"value": template({"ref": "steps.b.output.value"}, "!")})
+    g.node("i", "flow.loop@1", {"items": [1]}).node("z", "testkit.echo@1", {"value": cel("steps.c.output.value + 1")})
+    for src, dst in [("a", "b"), ("b", "c"), ("c", "d"), ("d", "unread"), ("unread", "l"), ("x", "y"), ("y", "i")]:
+        g.edge(src, dst)
+    g.edge("l", "x", "body").edge("i", "z", "body")
+    p = program(g)
+    assert p.outer_reads(p.by_key["l"]) == {"a", "b", "c", "d"}
+    assert p.outer_reads(p.by_key["i"]) == {"c"}  # the inner loop's outside includes the outer body's steps
+    whole = G().node("a", "testkit.echo@1").node("l", "flow.loop@1", {"items": [1]})
+    whole.node("x", "testkit.echo@1", {"value": cel("size(steps) > 0")}).edge("a", "l").edge("l", "x", "body")
+    p = program(whole)
+    assert p.outer_reads(p.by_key["l"]) is None
