@@ -191,6 +191,19 @@ def test_no_premature_rejection_one_busy_child_among_ten_takes_nearly_everything
     assert busy == cap - 9
 
 
+def test_a_request_from_a_child_that_has_ended_is_dropped() -> None:
+    """A child's request can arrive after its end (reviewed): nothing would read the answer, and a grant would stay
+    reserved for good, so later needs would wait for a child that can't release anything."""
+    b = Budget(1500, root=False)
+    b.start_child("c", 1000)
+    b.settle_child("c", 1000)
+    b.request(Need("c", "1", 5, CHUNK))
+    b.request(local("own", 1))
+    answers, ask = b.decide()
+    assert [(a.need.requester, a.granted) for a in answers] == [(LOCAL, 1)] and ask is None
+    assert b.reserved == {} and b.waiting == []
+
+
 def test_the_state_round_trips_through_json() -> None:
     b = Budget(100, root=False, used=3, reserved={"c": 4}, waiting=[Need("c", "r", 1, CHUNK, held=2)], asking=True)
     assert Budget.from_json(b.to_json()) == b
@@ -244,6 +257,8 @@ class Tree:
 
     def deliver(self, i: int) -> None:
         kind, to, payload = self.mail.pop(i)
+        if to.done:  # it ended meanwhile: nothing reads what was sent to it
+            return
         if kind == "ask":
             assert isinstance(payload, Need)
             to.budget.request(payload)
@@ -262,7 +277,7 @@ def run(data: st.DataObject, cap: int, unit: bool) -> Tree:
     tree = Tree(cap, root, [root])
     for _ in range(data.draw(st.integers(10, 120))):
         live = [e for e in tree.everyone if not e.done]
-        moves = ["need", "child", "finish"] + (["mail"] if tree.mail else [])
+        moves = ["need", "child", "finish", "abandon"] + (["mail"] if tree.mail else [])
         move = data.draw(st.sampled_from(moves))
         if move == "mail":
             tree.deliver(data.draw(st.integers(0, len(tree.mail) - 1)))
@@ -289,6 +304,19 @@ def run(data: st.DataObject, cap: int, unit: bool) -> Tree:
                 e.done = True
                 assert e.parent is not None
                 tree.mail.append(("ended", e.parent, (e.name, e.budget.used)))
+        elif (
+            move == "abandon"
+            and e is not root
+            and (e.pending or e.budget.asking)
+            and all(c.done for c in e.children)
+            and not any(m[0] == "ended" and m[1] is e for m in tree.mail)  # its children have all reported back
+        ):
+            # It ends while a need of its own waits (it failed, was cancelled, passed its deadline): its ask may still
+            # be on its way to its parent, and arrive after its end.
+            e.done = True
+            e.pending.clear()
+            assert e.parent is not None
+            tree.mail.append(("ended", e.parent, (e.name, e.budget.used)))
         assert tree.served() <= cap, "the cap was exceeded"
     return tree
 

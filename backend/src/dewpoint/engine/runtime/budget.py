@@ -70,6 +70,10 @@ class Budget:
         return True
 
     def request(self, need: Need) -> None:
+        """A need of this execution's own, or a child's. A child's request can arrive after it ended: it's dropped,
+        since nothing reads the answer, and a grant would stay reserved for a child that can't release it."""
+        if need.requester != LOCAL and need.requester not in self.reserved:
+            return
         self.waiting.append(need)
 
     def start_child(self, child: str, initial: int) -> int:
