@@ -139,3 +139,54 @@ async def test_a_character_the_database_refuses_never_keeps_its_run_open(
     assert run is not None
     assert (run.status, run.error_code, run.error_message) == ("failed", "workflow_failed", "bad \ufffd note")
     assert [r.node_key for r in steps] == ["f"]
+
+
+async def test_a_sub_flow_is_projected_as_a_run_of_its_own(
+    env: WorkflowEnvironment,
+    owner_sessionmaker: Any,
+    api_sessionmaker: Any,
+    admin_sessionmaker: Any,
+    dispatch_sessionmaker: Any,
+    worker_sessionmaker: Any,
+    api_settings: Any,
+    app: Any,
+) -> None:
+    """2a-3b: a sub-flow writes its own `runs` row (as the worker role, with its first projection) before any of its
+    steps, pointing at the run and step that started it. The list shows top-level runs; a run shows its children."""
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    sub = G()
+    sub.settings = {
+        "input_schema": {"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]},
+        "outputs": {"double": ref("steps.t.output.double")},
+    }
+    sub.node("t", "flow.transform@1", {"fields": {"double": cel("trigger.n * 2")}})
+    sub_id = await create(api_sessionmaker, ctx, sub.data(), name="doubler")
+    assert (await publish(api_sessionmaker, ctx, sub_id, api_settings)).version is not None
+    g = G()
+    g.settings = {"input_schema": {"type": "object"}, "outputs": {"double": ref("steps.r.output.double")}}
+    g.node("r", "flow.run_workflow@1", {"workflow_id": str(sub_id), "input": {"n": 21}})
+    out = await publish(api_sessionmaker, ctx, await create(api_sessionmaker, ctx, g.data()), api_settings)
+    assert out.version is not None
+    async with workers(env.client, DbRunStore(worker_sessionmaker)):
+        run_id = await start_run(
+            dispatch_sessionmaker, env.client, api_settings,
+            tenant_id=ctx.tenant_id, version_id=out.version.id, trigger={},
+        )  # fmt: skip
+        result = await asyncio.wait_for(env.client.get_workflow_handle_for(RunGraph.run, str(run_id)).result(), 60)
+    assert (result.status, result.outputs) == ("succeeded", {"double": 42})
+    viewer, _ = await member_client(app, owner_sessionmaker, api_settings, ctx.tenant_id, "viewer")
+    listed = (await viewer.get(f"/api/v1/t/{ctx.tenant_id}/runs")).json()
+    assert [r["id"] for r in listed] == [str(run_id)]  # the sub-run isn't listed on its own
+    detail = (await viewer.get(f"/api/v1/t/{ctx.tenant_id}/runs/{run_id}")).json()
+    [child] = detail["children"]
+    step = next(n["id"] for n in g.nodes if n["key"] == "r")
+    assert (child["kind"], child["parent_run_id"], child["parent_step_id"], child["status"]) == (
+        "subflow",
+        str(run_id),
+        step,
+        "succeeded",
+    )
+    assert child["workflow_id"] == str(sub_id)
+    sub_detail = (await viewer.get(f"/api/v1/t/{ctx.tenant_id}/runs/{child['id']}")).json()
+    assert [s["key"] for s in sub_detail["steps"]] == ["t"] and sub_detail["parent_run_id"] == str(run_id)

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Runs, read-only (spec §8): the list, and one run with its steps. The UI reads this projection, never Temporal
-history. Starting runs isn't public until 2b."""
+"""Runs, read-only (spec §8): the list of top-level runs, and one run with its steps and the sub-runs it started (its
+sub-flows and failure handler). The UI reads this projection, never Temporal history. Starting runs isn't public
+until 2b."""
 
 import uuid
 from datetime import datetime
@@ -31,6 +32,16 @@ def _run(r: Run) -> dict[str, object]:
         "ended_at": _when(r.ended_at),
         "error": {"code": r.error_code, "message": r.error_message} if r.error_code else None,
         "iterations": r.iterations,
+        "kind": r.kind,
+        "parent_run_id": str(r.parent_run_id) if r.parent_run_id else None,
+    }
+
+
+def _child(r: Run) -> dict[str, object]:
+    return {
+        **_run(r),
+        "parent_step_id": str(r.parent_step_id) if r.parent_step_id else None,
+        "parent_iteration_key": r.parent_iteration_key,
     }
 
 
@@ -71,4 +82,8 @@ async def get_run(
     run = await service.get_run(db, run_id)
     if run is None or run.tenant_id != ctx.tenant_id:
         raise HTTPException(404, detail={"error": "not_found"})
-    return {**_run(run), "steps": [_step(r) for r in await service.run_steps(db, run.id)]}
+    return {
+        **_run(run),
+        "steps": [_step(r) for r in await service.run_steps(db, run.id)],
+        "children": [_child(c) for c in await service.children(db, run.id)],
+    }
