@@ -920,7 +920,9 @@ abandons or restarts an activity or a child workflow.
     - Drain mode still answers grant requests, because answering one isn't new work.
   - **Waiting, not refusing.** If the unreserved budget can't cover a request, the request waits while any other
     outstanding child that isn't itself asking may still hold an unused grant. That child returns it when it
-    settles.
+    settles. A child that is asking reports what it holds unused, and releases it only once it's answered and
+    ends. So when what asking children hold would cover a request, their requests are refused first, latest first,
+    and the request waits for them.
   - **The cap.** Only when the budget is exhausted **and** no outstanding child holds anything unused has the run
     truly reached its cap. The waiting requests then fail with `iteration_cap_exceeded`, "This run reached its limit
     of 100,000 loop iterations", and the loop's error policy applies.
