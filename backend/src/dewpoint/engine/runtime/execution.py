@@ -1028,8 +1028,10 @@ class Execution:
             self._resume.append(inst)
 
     async def _flush(self) -> None:
-        """Before continuing as new: every queued row written, and every signal sent."""
-        await self._project_end(None)
+        """Before continuing as new: every queued row written, and every signal sent. A cancel that arrived meanwhile
+        ends the execution instead (raised once they have landed): a continued run wouldn't inherit it."""
+        if await self._project_end(None):
+            raise asyncio.CancelledError
 
 
 __all__ = [

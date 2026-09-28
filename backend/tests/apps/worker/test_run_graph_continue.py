@@ -4,6 +4,7 @@ draining past `drain_events`. Nothing outstanding is cancelled, abandoned or res
 the budget carries over; and draining adds a bounded number of events (the measured headroom test)."""
 
 import asyncio
+import dataclasses
 import json
 import uuid
 from datetime import datetime, timedelta
@@ -15,7 +16,7 @@ from temporalio.client import Client, WorkflowFailureError, WorkflowHistory
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
 
-from dewpoint.engine.runtime.activities import BATCH, BUDGET, ENGINE_QUEUE, BatchInput, Parent
+from dewpoint.engine.runtime.activities import BATCH, BUDGET, ENGINE_QUEUE, BatchInput, Parent, ProjectInput
 from dewpoint.engine.runtime.workflow import LoopBatch
 from tests.apps.worker.harness import TENANT, MemoryStore, start, workers
 from tests.support.graphs import G, cel, ref
@@ -72,6 +73,34 @@ async def test_a_long_run_continues_as_new_and_ends_as_it_would_have(env: Workfl
     assert result.iterations == 40  # the budget carried over: no fresh cap after continue-as-new
     rows = [r for r in store.steps(handle.id) if r.node_key == "x"]
     assert len(rows) == 40 and {(r.attempt, r.status) for r in rows} == {(1, "succeeded")}
+
+
+@dataclasses.dataclass
+class SlowFlush(MemoryStore):
+    """The rows the run writes just before it continues as new take a while to land: `a`'s last row goes then."""
+
+    flushing: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
+
+    async def project(self, data: ProjectInput) -> None:
+        if any(r.node_key == "a" and r.status == "succeeded" for r in data.steps):
+            self.flushing.set()
+            await asyncio.sleep(1)
+        await super().project(data)
+
+
+async def test_a_cancel_while_the_run_gets_ready_to_continue_as_new_ends_it_cancelled(env: WorkflowEnvironment) -> None:
+    """A continued run wouldn't inherit the cancel, and would carry on: the run ends cancelled instead."""
+    store = SlowFlush()
+    g = graph().node("a", ECHO, {"value": 1}).node("b", ECHO, {"value": 2}).edge("a", "b")
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {}, checkpoint_events=10)  # past it once `a` has run
+        await asyncio.wait_for(store.flushing.wait(), 30)
+        await handle.cancel()
+        with pytest.raises(WorkflowFailureError):
+            await asyncio.wait_for(handle.result(), 30)
+        runs = await chain(env.client, handle.id, handle.first_execution_run_id or "")
+    assert len(runs) == 1 and store.runs[handle.id].status == "cancelled"
+    assert [(r.node_key, r.status) for r in store.steps(handle.id)] == [("a", "succeeded")]  # `b` never started
 
 
 def doubler() -> G:
