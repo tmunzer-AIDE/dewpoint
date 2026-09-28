@@ -106,19 +106,21 @@ def test_cel_runs_inline_only_when_this_build_runs_the_profile() -> None:
     double, divide, count = (p.record(step, f"/fields/{f}") for f in ("y", "z", "n"))
     views = [scope_view(trigger={"x": 3}), scope_view(trigger={"x": 0})]
 
-    remote = resolve.cel_task(double, views, local_profile=None, version_profile=CURRENT_CEL_PROFILE)
+    remote = resolve.cel_task(
+        double, [resolve.bind_view(double, v) for v in views], local_profile=None, version_profile=CURRENT_CEL_PROFILE
+    )
     assert not remote.local
     assert remote.request(CURRENT_CEL_PROFILE)["bindings"] == [{"trigger": {"x": 3}}, {"trigger": {"x": 0}}]
 
-    local = resolve.cel_task(divide, views, local_profile=CURRENT_CEL_PROFILE, version_profile=CURRENT_CEL_PROFILE)
-    ok, failed = local.run_local()
+    bound = [resolve.bind_view(divide, v) for v in views]
+    assert [b.measured.nodes for b in bound] == [2, 2]  # each binding set: `trigger` and its `x`
+    local = resolve.cel_task(divide, bound, local_profile=CURRENT_CEL_PROFILE, version_profile=CURRENT_CEL_PROFILE)
+    ok, failed = (local.run_one(b) for b in local.bindings)
     assert local.local and resolve.outcome_value(ok) == 3
     with pytest.raises(ValueFailure) as e:
         resolve.outcome_value(failed)
     assert e.value.failure.code == "evaluation_error"
 
     with pytest.raises(ValueFailure) as bad:  # a typed list path (spec §5.3) is checked as it's bound
-        resolve.cel_task(
-            count, [scope_view(trigger={"x": 1, "names": "ap-1"})], local_profile=None, version_profile="p"
-        )
+        resolve.bind_view(count, scope_view(trigger={"x": 1, "names": "ap-1"}))
     assert bad.value.failure.code == "type_mismatch"

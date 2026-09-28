@@ -69,6 +69,9 @@ def test_local_latency_and_the_cpu_between_two_yield_points() -> None:
     for name, template in ADVERSARIAL.items():
         heaviest = _heaviest_local(template, v)
         report["task"][name] = {"expr_chars": len(heaviest.expr), "work": heaviest.work, **_task([heaviest], v)}
+    binding = make_record(BINDING)
+    assert binding.mode == "local" and bind.measure(bind.bind(binding, v)).within_caps
+    report["task"]["binding"] = {"nodes": bind.measure(bind.bind(binding, v)).nodes, **_task([binding], v)}
     if directory := os.environ.get("DEWPOINT_CEL_GATE_RESULTS"):
         os.makedirs(directory, exist_ok=True)
         with open(os.path.join(directory, "cost.json"), "w") as f:
@@ -78,10 +81,16 @@ def test_local_latency_and_the_cpu_between_two_yield_points() -> None:
 
 
 def _task(records: list[Any], v: Any) -> dict[str, Any]:
-    """Evaluate back to back, cycling through `records`, until the yield policy demands a yield."""
+    """Bind and evaluate back to back, cycling through `records`, until the yield policy demands a yield: what
+    RunGraph does in one workflow task (execution.py, `_cel_task` and `_evaluate`)."""
     budget, cpu, done = route.YieldBudget(), time.process_time(), 0
-    while not budget.must_yield(r := records[done % len(records)]):
-        evaluate.evaluate_local(r, v)
+    while not budget.must_yield():
+        r = records[done % len(records)]
+        bindings = bind.bind(r, v)
+        budget.charge(nodes=bind.measure(bindings).nodes)
+        if budget.must_yield(r):
+            break
+        evaluate.run(evaluate.compiled(r.expr, r.declarations), bindings)
         budget.charge(r)
         done += 1
     return {"evaluations": done, "cpu_s": time.process_time() - cpu}
@@ -105,6 +114,10 @@ ADVERSARIAL: dict[str, Callable[[int], str]] = {
     "equality": lambda n: _times("trigger.c1 == trigger.c2", n),  # lists compared node by node
     "conversion": lambda n: _times("size(sortedKeys(trigger.dense)) == 0", n),  # a map converted for Python
 }
+
+
+# Cheap by its stored bounds, but binding the most values the caps allow: the cost the budget charges by `nodes`.
+BINDING = "size(trigger.c1) + size(trigger.c2) >= 0"
 
 
 def _heaviest_local(template: Callable[[int], str], v: Any) -> Any:

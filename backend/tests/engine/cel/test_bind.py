@@ -58,6 +58,12 @@ def test_values_must_be_plain_json_the_runtime_can_hold(bad: Any) -> None:
         bind.bind(r, view(vars={"x": bad}))
 
 
+def test_measure_counts_every_value_it_binds() -> None:
+    """What binding costs grows with the values converted, not their bytes: containers count as well as scalars."""
+    assert bind.measure({"a": [1, [2, 3]], "b": {"c": "x"}}).nodes == 7
+    assert bind.measure({"a": "x" * 10_000}).nodes == 1
+
+
 def test_measure_against_the_caps() -> None:
     m = bind.measure({"a": [1] * caps.LIST_LENGTH, "b": "x" * 10})
     assert m.within_caps and m.longest_list == caps.LIST_LENGTH and m.longest_string == 10

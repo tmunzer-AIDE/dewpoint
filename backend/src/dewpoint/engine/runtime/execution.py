@@ -27,6 +27,7 @@ with workflow.unsafe.imports_passed_through():
     from dewpoint.engine.canonical import canonical_json
     from dewpoint.engine.cel import evaluate as cel
     from dewpoint.engine.cel.profile import LOCAL_CEL_PROFILE
+    from dewpoint.engine.cel.record import ExpressionRecord
     from dewpoint.engine.cel.route import YieldBudget
     from dewpoint.engine.graph.values import CelValue, RefValue, TemplateValue
     from dewpoint.engine.registry import control
@@ -186,7 +187,9 @@ class Execution:
     sched: Scheduler
 
     def __init__(self) -> None:
-        self._yield = YieldBudget()
+        self._yield = YieldBudget()  # the local evaluations of the current workflow task (spec §5.6)
+        self._yield_task = -1  # the history length that workflow task started with
+        self._yield_timer: asyncio.Task[None] | None = None  # the one yield point every waiter shares
         self._rows: dict[tuple[str, str, int], StepRow] = {}  # queued for the next projection, per attempt
         self._secrets: Secrets = ()  # sensitive values seen so far: masked in everything projected
         self._started: dict[Instance, str] = {}
@@ -318,7 +321,6 @@ class Execution:
                 )
                 done, _ = await workflow.wait([*tasks.values(), clock, wake], return_when=asyncio.FIRST_COMPLETED)
                 wake.cancel()
-                self._yield.reset()
                 if clock in done:
                     self.sched.end(
                         RunEnd(DEADLINE_EXCEEDED, Failure(DEADLINE_EXCEEDED, "The run passed its deadline."))
@@ -636,9 +638,7 @@ class Execution:
                 values[pointer] = resolve.template(v, value)
             elif isinstance(value, CelValue):
                 record = self.program.record(owner.id if owner is not None else None, pointer)
-                task = resolve.cel_task(
-                    record, [v], local_profile=LOCAL_CEL_PROFILE, version_profile=self.program.cel_profile
-                )
+                task = await self._cel_task(record, [v])
                 [outcome] = await self._evaluate(task)
                 values[pointer] = resolve.outcome_value(outcome)
                 mode = "activity" if mode == "activity" or not task.local else "local"
@@ -646,13 +646,25 @@ class Execution:
                 values[pointer] = value.value
         return values, mode
 
+    async def _cel_task(self, record: ExpressionRecord, views: Sequence[Any]) -> resolve.CelTask:
+        """Bind each view within the workflow task's budget (spec §5.6). Binding converts every value it binds, so
+        it's charged as they are (`Measure.nodes`), whether the expression then runs here or in `cel.evaluate`."""
+        bound: list[resolve.Bound] = []
+        for v in views:
+            await self._yield_point(None)
+            b = resolve.bind_view(record, v)
+            self._yield.charge(nodes=b.measured.nodes)
+            bound.append(b)
+        return resolve.cel_task(
+            record, bound, local_profile=LOCAL_CEL_PROFILE, version_profile=self.program.cel_profile
+        )
+
     async def _evaluate(self, task: resolve.CelTask) -> list[cel.Outcome]:
         if task.local:
-            if self._yield.must_yield(task.record):
-                await asyncio.sleep(0.001)  # a durable timer: the workflow task ends here (spec §5.6)
-                self._yield.reset()
-            outcomes = task.run_local()
-            for _ in outcomes:
+            outcomes = []
+            for bindings in task.bindings:  # a filter's items one at a time: each is an evaluation
+                await self._yield_point(task.record)
+                outcomes.append(task.run_one(bindings))
                 self._yield.charge(task.record)
             return outcomes
         out: list[cel.Outcome] = []
@@ -676,6 +688,22 @@ class Execution:
                 return [cel.Outcome(error=cel.PROFILE_UNAVAILABLE, message=message)] * len(task.bindings)
             out += [cel.Outcome.from_json(o) for o in result.outcomes]
         return out
+
+    async def _yield_point(self, record: ExpressionRecord | None) -> None:
+        """Before binding a view (`record` None) or evaluating `record` locally: when the current workflow task's budget
+        is spent, await a 1 ms durable timer, which ends the task (spec §5.6). The budget belongs to one workflow task:
+        it starts afresh when the history length changes, which happens only between tasks, in a replay too.
+        Concurrent units share the budget and one timer, and each checks again once it fires."""
+        while True:
+            length = workflow.info().get_current_history_length()
+            if length != self._yield_task:
+                self._yield_task = length
+                self._yield.reset()
+            if not self._yield.must_yield(record):
+                return
+            if self._yield_timer is None or self._yield_timer.done():
+                self._yield_timer = asyncio.create_task(asyncio.sleep(0.001))
+            await asyncio.shield(self._yield_timer)
 
     # --- steps -----------------------------------------------------------------------------------------------------
 
@@ -729,9 +757,7 @@ class Execution:
         record = self.program.record(step.id, "/predicate")
         views = [self._view(inst.scope, item=(item, i)) for i, item in enumerate(items)]
         try:
-            task = resolve.cel_task(
-                record, views, local_profile=LOCAL_CEL_PROFILE, version_profile=self.program.cel_profile
-            )
+            task = await self._cel_task(record, views)
         except resolve.ValueFailure as e:
             return _Effect(failure=e.failure)
         kept: list[Any] = []

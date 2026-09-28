@@ -146,6 +146,7 @@ class Measure:
     longest_list: int
     largest_map: int
     longest_string: int
+    nodes: int  # every value bound, containers included: what binding them costs grows with this (spec §5.6)
 
     @property
     def within_caps(self) -> bool:
@@ -160,10 +161,11 @@ class Measure:
 
 def measure(bindings: Mapping[str, Any]) -> Measure:
     sizes = [len(canonical_json(v)) for v in bindings.values()]
-    lists = maps = strings = 0
+    lists = maps = strings = nodes = 0
     stack = list(bindings.values())
     while stack:
         v = stack.pop()
+        nodes += 1
         if isinstance(v, dict):
             maps = max(maps, len(v))
             stack.extend(v.values())
@@ -172,4 +174,4 @@ def measure(bindings: Mapping[str, Any]) -> Measure:
             stack.extend(v)
         elif isinstance(v, str):
             strings = max(strings, len(v.encode()))
-    return Measure(sum(sizes), max(sizes, default=0), lists, maps, strings)
+    return Measure(sum(sizes), max(sizes, default=0), lists, maps, strings, nodes)

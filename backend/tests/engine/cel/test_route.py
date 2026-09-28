@@ -35,3 +35,15 @@ def test_the_yield_budget_uses_stored_bounds_and_a_count() -> None:
     budget.reset()
     budget.charge(small)
     assert budget.must_yield(big)
+
+
+def test_the_yield_budget_charges_the_values_each_view_binds() -> None:
+    """Binding a view converts every value it binds, a cost the stored bounds don't count: a cheap expression over
+    the largest inputs would otherwise bind them 200 times in one workflow task (spec §5.6)."""
+    cheap = replace(make_record("trigger.x == 1"), iterations=0, bytes=0, work=0)
+    budget = route.YieldBudget()
+    assert not budget.must_yield()  # the first binding of a task always runs, however large
+    budget.charge(nodes=route.YIELD_NODES - 1)
+    assert not budget.must_yield() and not budget.must_yield(cheap)
+    budget.charge(cheap, nodes=1)
+    assert budget.must_yield()  # the values bound reached the budget: the next view waits for the next task

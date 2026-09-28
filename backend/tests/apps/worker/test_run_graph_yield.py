@@ -1,0 +1,139 @@
+# SPDX-License-Identifier: Apache-2.0
+"""The yield policy inside RunGraph (spec §5.6): one budget per workflow task, however many units share it. A view's
+binding is charged as the values it binds, whether the expression then runs here or in `cel.evaluate`; a local
+evaluation is charged its stored bounds. When the budget is spent, the work waits for a 1 ms durable timer."""
+
+import asyncio
+from collections import defaultdict
+from typing import Any
+
+import pytest
+from temporalio import workflow
+from temporalio.testing import WorkflowEnvironment
+
+from dewpoint.engine.cel import route
+from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
+from dewpoint.engine.graph.validate import ValidationContext, validate
+from dewpoint.engine.runtime import execution
+from tests.apps.worker.harness import CATALOG, MemoryStore, start, workers
+from tests.engine.cel.test_gate_cost import ADVERSARIAL, AT_CAPS
+from tests.support.graphs import G, cel
+
+S = {"type": "string"}
+SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "s": S,
+        "needle": S,
+        "xs": {"type": "array", "items": {"type": "integer"}},
+        "c1": {"type": "array", "items": {"type": "array", "items": {"type": "integer"}}},
+    },
+    "required": ["s", "needle", "xs", "c1"],
+}
+TRIGGER = {"s": AT_CAPS["s"], "needle": AT_CAPS["needle"], "xs": list(range(450)), "c1": AT_CAPS["c1"]}
+TASKS: dict[int, list[tuple[str, int]]] = defaultdict(list)  # history length -> ("bind", nodes) / ("eval", work)
+
+
+class Recording(route.YieldBudget):
+    """Records every charge under the workflow task it was made in (its history length). A replay makes the same
+    charges again, for tasks already recorded: those aren't recorded twice."""
+
+    def charge(self, record: Any = None, *, nodes: int = 0) -> None:
+        if not workflow.unsafe.is_replaying():
+            task = TASKS[workflow.info().get_current_history_length()]
+            if nodes:
+                task.append(("bind", nodes))
+            if record is not None:
+                task.append(("eval", record.work or 0))
+        super().charge(record, nodes=nodes)
+
+
+@pytest.fixture
+def recorded(monkeypatch: pytest.MonkeyPatch) -> dict[int, list[tuple[str, int]]]:
+    """The engine modules are passed through the sandbox, so this reaches RunGraph's budget too."""
+    TASKS.clear()
+    monkeypatch.setattr(execution, "YieldBudget", Recording)
+    return TASKS
+
+
+def local_cel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """What setting `LOCAL_CEL_PROFILE` does in a build (Task 11)."""
+    monkeypatch.setattr(execution, "LOCAL_CEL_PROFILE", CURRENT_CEL_PROFILE)
+
+
+def graph(**outputs: Any) -> G:
+    g = G()
+    g.settings = {"input_schema": SCHEMA, "outputs": outputs}
+    return g
+
+
+def heaviest_search() -> str:
+    """The heaviest substring search that still publishes local: about half the work budget per evaluation."""
+    best = ""
+    for n in range(1, 60):
+        g = graph().node("x", "flow.transform@1", {"fields": {"r": cel(ADVERSARIAL["search"](n))}})
+        result = validate(g.build(), ValidationContext(catalog=CATALOG, subflows={}))
+        if any(d.severity == "error" for d in result.diagnostics) or result.expressions[0].mode != "local":
+            break
+        best = ADVERSARIAL["search"](n)
+    assert best
+    return best
+
+
+async def finished(env: WorkflowEnvironment, store: MemoryStore, g: G, *, cache: int = 1000) -> tuple[Any, Any]:
+    async with workers(env.client, store, cache=cache):
+        handle = await start(env.client, store, g, TRIGGER)
+        return handle, await asyncio.wait_for(handle.result(), 120)
+
+
+@pytest.mark.parametrize("cache", [1000, 0], ids=["cached", "replaying every task"])
+async def test_concurrent_evaluations_share_one_budget_per_workflow_task(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch, recorded: dict[int, list[tuple[str, int]]], cache: int
+) -> None:
+    """Ten iterations run at once, each evaluating about half the work budget: each workflow task evaluates two at
+    most. Waiting units share one timer and check again once it fires. With no worker cache, every workflow task
+    replays the run's history: the budget, keyed on the history length, decides the same way."""
+    local_cel(monkeypatch)
+    store = MemoryStore()
+    g = graph(count=cel("size(steps.l.output.items)"))
+    g.node("l", "flow.loop@1", {"items": list(range(20)), "concurrency": 10, "collect": cel("steps.x.output.r")})
+    g.node("x", "flow.transform@1", {"fields": {"r": cel(heaviest_search())}}).edge("l", "x", "body")
+    handle, result = await finished(env, store, g, cache=cache)
+    assert (result.status, result.outputs) == ("succeeded", {"count": 20})
+    assert {r.cel_mode for r in store.steps(handle.id) if r.node_key == "x"} == {"local"}
+    evaluating = [[w for kind, w in t if kind == "eval"] for t in recorded.values()]
+    evaluating = [works for works in evaluating if works]
+    assert sum(len(works) for works in evaluating) >= 20 and len(evaluating) >= 10  # the budget split them
+    assert all(len(works) == 1 or sum(works) <= route.YIELD_WORK for works in evaluating)
+
+
+async def test_a_local_filter_evaluates_its_items_within_the_budget(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch, recorded: dict[int, list[tuple[str, int]]]
+) -> None:
+    """A filter's 450 items are 450 evaluations: at most 200 in one workflow task (they used to run all at once)."""
+    local_cel(monkeypatch)
+    store = MemoryStore()
+    g = graph(kept=cel("steps.f.output.count"))
+    g.node("f", "flow.filter@1", {"items": cel("trigger.xs"), "predicate": cel("item % 3 == 0")})
+    handle, result = await finished(env, store, g)
+    assert (result.status, result.outputs) == ("succeeded", {"kept": 150})
+    assert [r.cel_mode for r in store.steps(handle.id) if r.node_key == "f"] == ["local"]
+    counts = [sum(kind == "eval" for kind, _ in t) for t in recorded.values()]
+    assert max(counts) <= route.YIELD_EVALUATIONS and sum(counts) >= 450
+
+
+async def test_binding_is_charged_when_the_evaluator_runs_the_expression(
+    env: WorkflowEnvironment, recorded: dict[int, list[tuple[str, int]]]
+) -> None:
+    """No local CEL: each of the filter's 20 views still binds `trigger.c1` (16,081 values) in the workflow. A
+    workflow task binds up to the budget, and the next view waits for the next task."""
+    store = MemoryStore()
+    g = graph(kept=cel("steps.f.output.count"))
+    g.node("f", "flow.filter@1", {"items": list(range(20)), "predicate": cel("size(trigger.c1) > item")})
+    handle, result = await finished(env, store, g)
+    assert (result.status, result.outputs) == ("succeeded", {"kept": 20})
+    assert [r.cel_mode for r in store.steps(handle.id) if r.node_key == "f"] == ["activity"]
+    binding = [[n for kind, n in t if kind == "bind" and n > 16_000] for t in recorded.values()]  # the 20 views
+    binding = [nodes for nodes in binding if nodes]
+    assert sum(len(nodes) for nodes in binding) == 20 and len(binding) == 3  # 7, 7 and 6: 6 fit, the 7th passes it
+    assert all(sum(nodes[:-1]) < route.YIELD_NODES for nodes in binding)  # the last one may pass it: then it yields
