@@ -17,6 +17,7 @@ from temporalio.worker import UnsandboxedWorkflowRunner
 from dewpoint.engine.runtime import execution
 from dewpoint.engine.runtime import workflow as run_graph
 from dewpoint.engine.runtime.activities import ProjectInput, VersionData
+from dewpoint.engine.runtime.scheduler import Scheduler
 from tests.apps.worker.harness import MemoryStore, start, workers
 from tests.support.graphs import G, cel, ref
 
@@ -295,6 +296,39 @@ async def child_cancels(handle: Any) -> int:
     return sum(
         e.HasField("request_cancel_external_workflow_execution_initiated_event_attributes") for e in history.events
     )
+
+
+async def test_a_sub_flow_that_waits_for_its_first_grant_gets_it(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checkpoint-2 review: with no initial grant (its parent had nothing unreserved), a sub-flow's loop can't open
+    its first iteration, and nothing else runs while the sub-flow asks its parent. That's a wait, not a stuck run:
+    the parent's grant opens the iteration. Before, the sub-flow failed with `internal_error`."""
+    monkeypatch.setattr(execution, "SUBFLOW_GRANT", 0)
+    store = MemoryStore()
+    sub = graph(n=ref("steps.l.output.count"))
+    sub.node("l", LOOP, {"items": [1]}).node("x", ECHO, {"value": ref("item")}).edge("l", "x", "body")
+    sub_id = store.publish(sub)
+    g = graph(n=ref("steps.r.output.n", default=None), code=ref("steps.r.error.code", default="none"))
+    g.node("r", RUN, {"workflow_id": str(sub_id), "input": {"items": []}}, on_error="continue")
+    async with workers(env.client, store, runner=UnsandboxedWorkflowRunner()):
+        handle = await start(env.client, store, g, {})
+        result = await asyncio.wait_for(handle.result(), 60)
+    assert (result.status, result.outputs, result.iterations) == ("succeeded", {"n": 1, "code": "none"}, 1)
+
+
+async def test_a_run_with_nothing_running_and_no_answer_to_wait_for_still_fails(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checkpoint-2 review: waiting for a grant isn't stuck, but a run with nothing running and no answer to wait for
+    is, and it still ends `internal_error` instead of hanging. The bug here: ready steps are never handed out."""
+    monkeypatch.setattr(Scheduler, "take_ready", lambda self: [])
+    store = MemoryStore()
+    g = graph().node("a", ECHO, {"value": 1})
+    async with workers(env.client, store, runner=UnsandboxedWorkflowRunner()):
+        handle = await start(env.client, store, g, {"items": []})
+        result = await asyncio.wait_for(handle.result(), 30)
+    assert (result.status, result.error["code"]) == ("failed", "internal_error")
 
 
 async def test_the_cap_holds_across_children(env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch) -> None:

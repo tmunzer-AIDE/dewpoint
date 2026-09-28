@@ -266,7 +266,7 @@ class Execution:
                 if self._rows and not any(key[0] == "project" for key in tasks):  # one at a time: rows wait for it
                     self._projects += 1
                     tasks[("project", self._projects)] = asyncio.create_task(self._project(self._take_rows()))
-                if not tasks:
+                if not tasks and self._ask is None:  # waiting for our parent's answer isn't stuck: nothing else is
                     raise RuntimeError("nothing is running and the run hasn't ended")
                 wake = asyncio.create_task(
                     workflow.wait_condition(lambda: bool(self._mail or self._answers or self._dirty))
