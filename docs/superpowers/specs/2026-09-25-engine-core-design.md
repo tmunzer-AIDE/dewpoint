@@ -1,6 +1,6 @@
 # Dewpoint — Engine Core Design (sub-project 2a)
 
-- **Status:** Accepted as the basis for implementation, revision 5.5 (2026-09-27).
+- **Status:** Accepted as the basis for implementation, revision 5.6 (2026-09-28).
   - Revision 2 addressed join scopes, the local-CEL switch, evaluator isolation, profile routing and retirement.
   - Revision 3 addresses the version lifecycle (activation, queued requests, closure), nested loops, evaluator
     aggregate memory, and Temporal membership.
@@ -70,6 +70,23 @@
       cancelled before its start went out is debited nothing;
     - golden histories record every execution, and `engine_abi` becomes 2: one value, which publishing stamps and
       the build ID names (§6, §7, §8).
+  - Revision 5.6 folds in plan 2a-3c (deployment and gates):
+    - a workflow task's CEL budget belongs to the task, however many units share it, and it charges the values each
+      binding converts, not only each local evaluation's stored bounds (§5.6);
+    - gates 4 and 7b, and `LOCAL_CEL_PROFILE` set with `engine_abi` 3 (§5.9);
+    - an operator promotes a build to the deployment's current version, Compose's single build promotes itself, the
+      two-build test runs on Temporal's dev server, and the replay gate keeps recorded histories unchanged (§7);
+    - from the final review of 2a-3b: a terminated sub-run's end is written by its parent, with the new error code
+      `terminated`; a refused child asks again for a later need; a run's end drops what its loops wait for; a
+      continued run's iterations travel outside its snapshot; a cancel while the run settles before continuing lets
+      the projection land; a sub-run's refused row is logged and skipped (§6, §8);
+    - from the final review of 2a-3a: a cancelled ambiguous attempt is `outcome_unknown`; the runs list pages by
+      start time and id (§8);
+    - from the owner's reviews of plan 2a-3c: a version runs only on a build of its engine ABI, compared at admission
+      and dispatch with the deployment's current build, so after an ABI change each workflow is published again,
+      children first, and a queued request the current build can't run is cancelled explicitly (§4.5, §7); the
+      loader's ABI refusal is the one version-load error whose text is shown (§8); the runs cursor is the pair, never
+      half of it (§8); local CEL waits for gate 7b's Linux result (§5.9).
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
   This spec **narrows parent §6.4** (where CEL runs) and resolves the CEL item in parent §15.
 - **Evidence:** CEL spike, branch `spike/cel-evaluation`, commits `d6a8162` and `13a62e1`. See
@@ -331,15 +348,16 @@ Rows in `workflow_versions` are never deleted. Whether a version exists is there
 | Question | Rule | Checked |
 |---|---|---|
 | **Activatable:** may `activate` select it? | It belongs to the workflow and is executable. `deprecated` entries produce a warning, not a refusal. (Publishing a *new* version is stricter: see `deprecated` below.) | `activate` |
-| **Admissible:** may a new run request be admitted? | The workflow is enabled, and the request targets the workflow's **active** version, which is executable | When the request is frozen (2b dispatcher, 2a `start_run`) |
-| **Dispatchable:** may an admitted request start? | Its **frozen** version is still executable. Whether that version is still active doesn't matter | At dispatch, in the transaction that marks the request `starting` |
+| **Admissible:** may a new run request be admitted? | The workflow is enabled, and the request targets the workflow's **active** version, which is executable, and whose closure was published for the `engine_abi` of the deployment's current build (§7) | When the request is frozen (2b dispatcher, 2a `start_run`) |
+| **Dispatchable:** may an admitted request start? | Its **frozen** version is still executable, and of the current build's `engine_abi` (a request whose version isn't is cancelled: see *An ABI change and queued requests* below). Whether that version is still active doesn't matter | At dispatch, in the transaction that marks the request `starting` |
 
-- **Queued requests keep their version.** Publishing a newer version does not affect requests already frozen on the old one: they are dispatched on it.
+- **Queued requests keep their version.** Publishing a newer version does not affect requests already frozen on the old one: they are dispatched on it, as long as the deployment's current build runs its `engine_abi` (below).
 - **Superseded versions.** A version that isn't active can't take new admissions, but it can still be activated,
-  and it still executes the requests already frozen on it.
+  and it still executes the requests already frozen on it, unless the current build can't run it (`engine_abi_changed`,
+  below).
 - **Re-runs** (parent §10.5) are new admissions, so they use the active version. The UI says so when that differs from the original run's version.
 - **Sub-flow versions** only ever run as children, inside a run their parent already admitted.
-- **Disabling a workflow** stops new admissions only. Its queued requests still dispatch unless a user cancels them, which is explicit and audited.
+- **Disabling a workflow** stops new admissions only. Its queued requests still dispatch unless a user cancels them, which is explicit and audited, or the current build can't run their version, which cancels them explicitly too (`engine_abi_changed`, below).
 
 **References and what they block:**
 
@@ -420,6 +438,20 @@ row lock.
 should make this impossible), it cancels the request with the same explicit, audited reason. It never fails the
 request as superseded. Because admission locks as above, this check should never fire. A metric counts it, and
 the race tests assert that it stays at zero. 2a implements these rules in `start_run`, and 2b's dispatcher reuses them.
+
+**An ABI change and queued requests.** A queued request is frozen on its version, and a version runs only on a build
+of its `engine_abi` (§7). Once a build of another ABI is current, the request can't start, and publishing the workflow
+again doesn't change the version it's frozen on. So dispatch cancels it explicitly, in the transaction that would
+mark it `starting`: status `cancelled`, reason `engine_abi_changed`, audited with the version's ABI and the current
+build's, and shown in the run list. A user starts it again as a re-run, a new admission on the active version, once
+that's published for the current build.
+- Dispatch reads the current build from Temporal before that transaction, as admission does. A promotion between
+  that read and the start is caught when the run loads its version (§7): the run, not the request, then fails with
+  `version_unusable`.
+- Unlike the defensive check above, this one fires in the normal course of an ABI change, in either direction: a
+  promotion, or a rollback to the old build. So it has a metric of its own, and the defensive check's stays at zero.
+- Promoting a build of another ABI cancels the old ABI's queued requests as they come up. An operator who wants
+  none cancelled lets the queue drain first.
 
 ## 5. CEL subsystem
 
@@ -600,11 +632,16 @@ result is recorded in history. This is the parent's `eval` activity (§6.5).
   - every list ≤ 200 elements, every map ≤ 200 entries (larger inputs run in the evaluator; §5.5 memory);
   - every string ≤ 16 KiB.
 - If any cap is exceeded, the same expression runs in `cel.evaluate` instead. Routing depends only on recorded values, so a replay routes the same way.
-- **Workflow-task time.** Since its last await, the scheduler sums the **stored static bounds** of the local
-  evaluations it has run: their iterations and intermediate bytes. Before an evaluation that would push the sum past the yield
-  threshold, it awaits a 1 ms durable timer, which creates a yield point. It also yields after 200 evaluations,
-  whatever their bounds.
-  - Initial thresholds: 20,000 iterations, 8 MiB or 4,000,000 work units (§5.5).
+- **Workflow-task time.** Each workflow task has a budget for the CEL work the interpreter does in it. A local
+  evaluation is charged its **stored static bounds** (iterations, intermediate bytes, work). Binding a view is
+  charged the values it converts (their count, `nodes`), whether the expression then runs locally or in
+  `cel.evaluate`: a cheap expression over the largest inputs costs its binding. Before binding or evaluating past the
+  budget, the interpreter awaits a 1 ms durable timer, which ends the workflow task. It also yields after 200
+  evaluations, whatever their bounds.
+  - The budget belongs to one workflow task, however many units run in it: it starts afresh when the history length
+    changes, which happens only between tasks, in a replay too. Waiting units share one timer, and each checks again
+    once it fires. A filter's items are checked one by one.
+  - Initial thresholds: 20,000 iterations, 8 MiB, 4,000,000 work units or 100,000 bound values (§5.5).
   - The decision uses only stored bounds and a count, so it replays identically. The timer events count toward the continue-as-new threshold.
   - **This is a policy to measure, not a proven CPU bound.** A p99 latency says nothing about the worst case.
     Before local evaluation is enabled, the plan must run an adversarial test: expressions that max out the
@@ -615,6 +652,10 @@ result is recorded in history. This is the parent's `eval` activity (§6.5).
       the caps.
     - The heaviest load (regular expressions) takes 0.28 s per workflow task on macOS and 0.47–0.57 s on Linux (CI,
       `ubuntu-latest`, three runs). Removing any charge, or the work threshold, takes a load past 1 s.
+    - A binding load runs too: a cheap expression over the most values the caps allow.
+    - Inside `RunGraph` (gate 7b), where a loop's iterations share workflow tasks, the worst task took 1.83 s before
+      the budget belonged to the task and charged binding, and takes 0.44 s since (macOS), the run's first task
+      included.
 
 ### 5.7 Isolated evaluation (`cel.evaluate` activity + `cel-evaluator` service)
 
@@ -723,7 +764,13 @@ library, the classifier or the estimator:
    - Every local-class probe must end in a value or an error, in-process, with no crash, panic or hang.
    - Every activity-class probe must be contained by the child, and the parent must survive.
 3. **Determinism:** 8 processes with different `PYTHONHASHSEED` values produce one result. This includes `sortedKeys` over maps built in different insertion orders.
-4. **Temporal replay:** a sandboxed workflow that evaluates the corpus, replayed in 5 fresh processes. It covers `sortedKeys` and canonical outputs.
+4. **Temporal replay:** a sandboxed workflow evaluates the corpus in-process, as `RunGraph` evaluates local CEL,
+   with the CEL modules passed through the sandbox (the runtime is a C++ extension, loaded once). Its history is
+   replayed in 5 fresh processes with different `PYTHONHASHSEED` values.
+   - The corpus is what publish accepts: gate 1's cases that compile and iterate only proven lists, `sortedKeys` over
+     maps built in either order, and map results.
+   - A comprehension over a map, which publish refuses, computes another order in another process, and its replay
+     fails: the gate's bite check.
 5. **Classifier:** a table of reject, local and activity expressions, including every reject route in §5.5 and the typed-path encoding in §5.3.
 6. **Estimator soundness:** fuzzed local-class expressions (Hypothesis, over the allow-list) evaluated on inputs at the caps.
    - Measured iterations and result sizes never exceed the stored bounds.
@@ -738,16 +785,18 @@ library, the classifier or the estimator:
        numbers is a new classifier version (§5.1).
 7. **Local cost:**
    - p99 and maximum latency per local evaluation at the caps;
-   - the adversarial workflow-task test from §5.6, with one load per work charge (§5.5). Linux is authoritative.
+   - the adversarial workflow-task test from §5.6, with one load per work charge (§5.5) and a binding load: in-process
+     (7a), and inside `RunGraph` (7b), a loop of 20 iterations 10 at a time, with every workflow activation's CPU
+     measured. Linux is authoritative.
 
    The results are recorded per profile and tune the initial thresholds.
 
 **Rollout: local evaluation is a build property, never a runtime setting.**
 - Each worker build has a constant, `LOCAL_CEL_PROFILE`: the one profile it evaluates in-process, or none.
   - The constant is part of `engine_abi`, so changing it produces a new build ID.
-  - Builds ship with none until gates 1–7 pass for that profile. Plan 2a-2 ports gates 1, 2, 3, 5, 6 and the
-    in-process half of 7; gate 4 (Temporal replay) and the workflow-task half of gate 7 need `RunGraph` and run in
-    2a-3, which is also where `LOCAL_CEL_PROFILE` can first be set.
+  - Builds ship with none until gates 1–7 pass for that profile. Plan 2a-2 ported gates 1, 2, 3, 5, 6 and the
+    in-process half of 7. Plan 2a-3c adds gate 4 and the workflow-task half of 7, and sets `LOCAL_CEL_PROFILE` to
+    `cel-cpp-0.1.3/fn-1/cls-1` with `engine_abi` 3, once gate 7b has passed on Linux (CI's `cel-gates` job).
 - **Routing is a pure function of three things:**
   - the build's `LOCAL_CEL_PROFILE`;
   - the version's profile, classes and bounds, loaded once by a local activity and so recorded;
@@ -862,7 +911,9 @@ The version (graph, classifications, bounds) is loaded by one local activity and
   - A failure handler's own failure runs none.
 - **Sub-runs.** A sub-flow's and a failure handler's runs are runs of their own (§8). Each draws on its parent's
   budget, and writes its own `runs` row with its first projection, before anything else, even its version's load.
-  So every way it can end has a row to record the end. A cancelled child returns its result, with its usage,
+  So every way it can end has a row to record the end. One an operator terminates never writes it: its parent
+  does (`failed`, `terminated`, its whole grant), writing the row too if it had none, and never over an end the
+  sub-run wrote first. A cancelled child returns its result, with its usage,
   instead of ending as cancelled: Temporal shows it as completed, while its row says `cancelled`.
 - **Cancelled work.** When an iteration fails, or its scope otherwise ends early, the steps, timers and children
   still outstanding in it are cancelled, and the run waits for each to settle. Their cancels are theirs, not the
@@ -886,9 +937,11 @@ abandons or restarts an activity or a child workflow.
     after the continue, and the run reaches quiescence sooner.
   - When the last outstanding activity or child settles, it flushes the projection and continues-as-new.
 - **A cancel meanwhile.** A continued run doesn't inherit a cancel request. So a cancel that arrives while the run
-  flushes its projection and signals before continuing ends it `cancelled` instead, once they have landed.
+  waits for its projection in flight, or flushes its rows and signals, before continuing ends it `cancelled`
+  instead, once they have landed.
 - **Thresholds.** 2,000 and 4,000 are run inputs with those defaults, so tests can reach them early: Temporal's
-  test server never suggests continue-as-new.
+  test server never suggests continue-as-new. A test on Temporal's dev server, configured to suggest it at 100
+  events, shows that a suggestion drains the run.
 - **Headroom.** With the in-flight cap of 100, and a bounded number of events per activity or child completion,
   draining adds at most about 1,000 events. That keeps runs far below Temporal's 10,240-event warning and
   51,200-event limit. The draining run itself adds almost no history while it waits. Measured in 2a-3b, with the
@@ -906,7 +959,8 @@ abandons or restarts an activity or a child workflow.
   - the ready, collect and batch queues, and timer wake times;
   - the iteration counter (below), with its reservations and waiting needs, the run's start time and the deadline.
 
-  The projection is flushed first, so no rows are carried. Settled iteration scopes are pruned once collected, so
+  The continued run's input also carries the iterations used so far, outside the snapshot: a run whose snapshot
+  a build can't read still reports them. The projection is flushed first, so no rows are carried. Settled iteration scopes are pruned once collected, so
   the snapshot holds only open work. The yield accumulator isn't carried: it resets every workflow task.
 - **Pinning.** A run never changes build, even across continue-as-new (parent §6.3, §7).
 - **Threshold tests.** Drain mode is entered while loop-batch children, a sub-flow, activities and a timer are
@@ -937,6 +991,10 @@ abandons or restarts an activity or a child workflow.
   - **The cap.** Only when the budget is exhausted **and** no outstanding child holds anything unused has the run
     truly reached its cap. The waiting requests then fail with `iteration_cap_exceeded`, "This run reached its limit
     of 100,000 loop iterations", and the loop's error policy applies.
+  - **After a refusal.** A child whose parent refused its ask refuses the needs that waited. A later need asks
+    again: budget may have come back meanwhile.
+  - **At the run's end,** the needs its loops still wait with leave the budget: nothing opens after the end, and a
+    failure handler starts with its grant.
   - **Continue-as-new.** An outstanding grant request counts as outstanding work, so it never spans a continue-as-new.
     A parent only continues-as-new with no children outstanding, so grant signals always reach the run that issued the grant.
 - **Settlement.**
@@ -996,10 +1054,31 @@ cancel while the version loads cancels the run.
     - Their histories must show that every **engine** task of an N-1 run executed on N-1: workflow tasks and
       `dewpoint-engine` activities, in the run itself, its children and its continued runs.
     - `cel.evaluate` is deliberately excluded. Instead, the test asserts that each CEL task ran on a worker serving the version's profile (§5.7).
+    - It runs on Temporal's dev server: the test server refuses Worker Versioning. An activity's history events name
+      no version, so each build's worker has an identity of its own.
+  - **Promoting a build.** New runs start on the deployment's current version, and a build becomes current only when
+    an operator makes it so (`dewpoint deployment set-current`, once its workers run). The old build's workers stop
+    once Temporal reports its version drained. A worker never promotes itself, except where one build runs at a
+    time, as in Compose (`DEWPOINT_WORKER_SET_CURRENT`).
+  - **A version runs only on a build of its `engine_abi`.** A version's commands depend on the ABI it was published
+    under. Once a build with a new ABI is current, the old ABI's versions can't start runs until each workflow is
+    published again with it; runs already pinned to the old build finish there.
+    - Admission compares the version's closure with the deployment's current build, where a new run starts, and not
+      with the admitting process's build: during a rollout, both builds' processes start runs (§4.5). Before the
+      promotion, the new ABI's versions are refused; after it, the old one's; with no build current, all.
+    - Dispatch (2b) checks a queued request's frozen version the same way. One the current build can't run is
+      cancelled explicitly (`engine_abi_changed`, §4.5).
+    - Publishing refuses a draft that would pin a version of another ABI, so a parent is published again only after
+      its sub-flows and failure handler.
+    - The version loader refuses one too, so a run that reaches a build of another ABI anyway (a promotion that
+      raced its start or its dispatch) fails with `version_unusable` before any step runs. This refusal is the one
+      load error whose text a run shows: fixed text that names only the two ABIs and what to do (§8).
+    - Activation and enabling don't check: they start no run, and can't know which build will be current then.
 - **Compose (2a):** adds `temporal`, `worker` and `cel-evaluator` (§5.7). The worker waits for a healthy evaluator
-  before it polls a CEL queue.
+  before it polls a CEL queue. `temporal` is Temporal's dev server (the CLI image, its state in SQLite on a
+  volume), for evaluation: production runs a Temporal cluster.
 - **Golden histories:** every build adds recorded histories to `tests/engine/replay/<build>/`, starting with
-  2a-3a at `engine_abi` 1; 2a-3b's children and continue-as-new make it 2. A scenario records every execution it
+  2a-3a at `engine_abi` 1; 2a-3b's children and continue-as-new make it 2, and 2a-3c's local CEL 3. A scenario records every execution it
   ran, its children and continued runs as `<name>--<n>.json`. A history is recorded once and never rewritten; the
   recorder replaces the worker identity
   and stack traces. They cover:
@@ -1009,7 +1088,10 @@ cancel while the version loads cancels the run.
   - the deadline and continue-as-new;
   - local and activity CEL, including the routing on runtime caps;
   - the yield-point timer.
-- **Replay gate:** CI replays each history against **its own** build.
+- **Replay gate:** the suite replays every history of this build's `engine_abi`, so a new version that keeps the
+  ABI replays the previous version's too. CI checks that no recorded history is changed or removed, and that new
+  ones go only into this build's directory. A history recorded through a bug can't replay against the code without
+  it, so `internal_error` has none.
 - **Upgrade paths:** snapshot-compatibility tests (N-1 → N) run only where an upgrade path is declared.
 - **`engine_abi`:** one value per build. Publishing stamps and hashes a version with it (`workflow_versions`), and
   the build ID names it, so a version and its runs' histories name the same ABI. It increments on any change that
@@ -1030,7 +1112,8 @@ cancel while the version loads cancels the run.
     What Postgres can't store (NUL, lone surrogates) is stored as U+FFFD, and a number JSON can't hold as its name.
     The workflow queues each row, and the run's error, already in that form, so a projection is sized by what it
     sends. A row the database still refuses for its data (SQLSTATE class 22 or 23) is logged and skipped, so its run
-    still ends.
+    still ends; a sub-run's own row too. A cancelled attempt of an `ambiguous` node is `outcome_unknown`: its
+    request may have been sent.
     `step_id` is the graph node's id, and `iteration_key` names the scope (`loop2:7/loop5:3`, empty in the root).
   - Control nodes are projected at each scheduler await.
   - The worker writes through the worker DB role inside `tenant_scope`. A sub-run writes its own `runs` row with
@@ -1044,11 +1127,14 @@ cancel while the version loads cancels the run.
   validation errors give the location only as far as the schema declares it (map keys, numeric or not, show as `*`)
   and the rule's code, if pydantic defines it (`custom_error` otherwise); an output instance, checked as emitted
   against the declared output schema, names the schema keyword. Unexpected exceptions, unusable versions and
-  interpreter errors name only their type.
+  interpreter errors name only their type. One refusal is shown whole, deliberately: the version loader's refusal of
+  a version of another `engine_abi` (§7), whose fixed text names only the two ABIs and what to do. Any other failure
+  to load or compile a version names only its type.
 - **Run error codes** add `workflow_failed` (a `fail` node), `start_failed`, `version_unusable`, `internal_error`,
-  `deadline_exceeded`, `cancelled` and
+  `deadline_exceeded`, `cancelled`, `terminated` (a sub-run an operator terminated: its parent records the end, and
+  its step or loop fails with it) and
   `node_type_unavailable` (no worker of the build runs the node type).
-- **Read API:** `GET /runs` (top-level runs) and `GET /runs/{id}` (with steps, and the sub-runs it started). The UI
+- **Read API:** `GET /runs` (top-level runs, newest first, paged by the last run's start time and id, given together as `before` and `before_id`: half of it is refused) and `GET /runs/{id}` (with steps, and the sub-runs it started). The UI
   never reads Temporal history.
 
 ## 9. Starting runs in 2a
@@ -1090,6 +1176,10 @@ cancel while the version loads cancels the run.
 - **Lifecycle:**
   - activating a superseded version (rollback);
   - a queued request dispatches on its frozen version after a newer publish;
+  - after a promotion across an ABI change, and after a rollback across one, a queued request whose frozen version
+    the current build can't run is cancelled at dispatch (`engine_abi_changed`), audited and shown in the run list,
+    while one of the current build's ABI dispatches; the defensive check's metric stays at zero; a promotion between
+    dispatch's check and the start fails the run with `version_unusable`, showing the loader's ABI text;
   - closure propagation: a parent becomes non-executable through a retired node type in a pinned sub-flow;
   - the forced-retirement preview lists parents that reach an entry only through a sub-flow;
   - the explicit, audited cancellation of queued requests;
@@ -1105,8 +1195,9 @@ cancel while the version loads cancels the run.
   - **no premature rejection:** with 10 child slots and one busy child, that child can use nearly the whole budget;
   - requests wait while other children hold unused grants, and are refused only at the exact cap;
   - grants in drain mode;
-  - settlement of failed and terminated children (the test server never reports a termination to the parent, so
-    a child that fails as a workflow stands in for it);
+  - settlement of failed and terminated children: a child that fails as a workflow on the test server, and a
+    terminated sub-flow, batch and failure handler on Temporal's dev server, which reports a termination to the
+    parent;
   - no fresh cap after continue-as-new.
 - **Continue-as-new:**
   - the quiescent-checkpoint tests in §6;
@@ -1138,14 +1229,16 @@ cancel while the version loads cancels the run.
 
    The yield policy in particular is tuned by the adversarial test in §5.6.
 3. **Local evaluation is a build constant** (`LOCAL_CEL_PROFILE`, part of `engine_abi`), set to none until all
-   seven CEL gates pass. Enabling it never changes an open run.
+   seven CEL gates passed; plan 2a-3c sets it, with `engine_abi` 3. Enabling it never changes an open run.
 4. **CEL runs in a separate, secretless evaluator** with no egress, reached over bounded IPC. It is routed by the
    version's `cel_profile` and fails closed. Its concurrency comes from its cgroup memory and CPU limits.
 5. **Scopes are the root or loop iterations only.** Branches resolve edges as live or dead, and joins wait for every incoming edge to resolve.
 6. **Version lifecycle.** Three questions are kept separate:
    - **Activatable:** executable. This allows rollback.
-   - **Admissible:** the active version.
-   - **Dispatchable:** the frozen version is still executable. Queued requests keep their version.
+   - **Admissible:** the active version, whose closure is of the current build's `engine_abi`.
+   - **Dispatchable:** the frozen version is still executable, and of the current build's `engine_abi`. Queued
+     requests keep their version; after an ABI change, dispatch cancels one the current build can't run explicitly
+     (`engine_abi_changed`), with an audit entry.
 
    Every check covers the pinned closure. Retirement is blocked by active and queued references; forcing it
    cancels queued requests explicitly, with an audit entry. A running run holds only its build (node types) or its
@@ -1170,6 +1263,12 @@ cancel while the version loads cancels the run.
     with rows written before they can end; the failure handler runs for `failed` and `deadline_exceeded` runs,
     which stay non-terminal until it has ended; grants are exact; drain mode starts nothing new; a cancelled child returns its
     result; the projection is flushed before continue-as-new.
+16. **Deployment from plan 2a-3c** (the owner chose Temporal's dev server for the versioning tests and in Compose,
+    and the replay gate): each build is a pinned version of one deployment, promoted by an operator; a workflow
+    task's CEL work is bounded by one budget, binding included; local CEL is on from `engine_abi` 3, after gate 7b
+    passed on Linux. A version runs only on a build of its `engine_abi` (the owner's rule): a start is refused when
+    the deployment's current build runs another, until the workflow is published again, and runs already pinned to
+    an older build finish there.
 
 ## 12. Follow-up sub-projects
 
