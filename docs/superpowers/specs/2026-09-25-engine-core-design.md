@@ -1,6 +1,6 @@
 # Dewpoint — Engine Core Design (sub-project 2a)
 
-- **Status:** Accepted as the basis for implementation, revision 5.4 (2026-09-27).
+- **Status:** Accepted as the basis for implementation, revision 5.5 (2026-09-27).
   - Revision 2 addressed join scopes, the local-CEL switch, evaluator isolation, profile routing and retirement.
   - Revision 3 addresses the version lifecycle (activation, queued requests, closure), nested loops, evaluator
     aggregate memory, and Temporal membership.
@@ -50,6 +50,22 @@
     - from the final review: only failures a step's activity maps count as the node's; the run's end write is
       shielded from a late cancel; projections are bounded batches that never hold what Postgres refuses; waits out
       of range fail their step (§6, §8).
+  - Revision 5.5 folds in plan 2a-3b (scale):
+    - a loop's batches run one at a time, each child running its items with the loop's own concurrency; a batch
+      reads only the outside results its body reads;
+    - sub-flows and failure handlers are runs of their own, with a `runs` row that points at their parent, written
+      before anything can end them;
+    - the failure handler runs for a run that ends `failed` or `deadline_exceeded`, with its own deadline, after
+      the run's end is decided, keeping the run non-terminal until the handler has ended; its iterations count,
+      and a cancel while it runs doesn't change the end;
+    - the grant protocol is exact: a child asks only when its whole subtree is short, and a child that never
+      reports is debited its whole grant;
+    - quiescence also needs no grant traffic in flight; drain mode starts nothing new, control nodes included, and
+      begins at the first workflow task past its threshold; a plugin step between attempts is outstanding; the
+      projection is flushed before continuing;
+    - the headroom test shows the cap saturated when draining begins, and bounds bytes as well as events;
+    - the snapshot's contents, and the thresholds as run inputs;
+    - golden histories record every execution, and `engine_abi` becomes 2 (§6, §7, §8).
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
   This spec **narrows parent §6.4** (where CEL runs) and resolves the CEL item in parent §15.
 - **Evidence:** CEL spike, branch `spike/cel-evaluation`, commits `d6a8162` and `13a62e1`. See
@@ -813,10 +829,10 @@ The version (graph, classifications, bounds) is loaded by one local activity and
 |---|---|---|
 | Control | `if`, `switch` (cases in declared order, first match), `set_variables`, `stop`, `fail` | values via §5 (local or `cel.evaluate`) |
 | Time | `delay`, `wait_until` | durable timers. Static waits beyond `max_run_duration` are rejected at publish. Dynamic waits past the deadline end the run with `deadline_exceeded` when the deadline is reached. `wait_until` takes RFC 3339 with an offset: a time without a zone fails the step (`type_mismatch`). A value resolved at run time is checked too: `delay` takes 0 to 30 days, and `wait_until` an instant from year 1 to 9999 in UTC; anything else fails the step (`type_mismatch`) |
-| Loop | `loop` (`items`: a list value; `concurrency` 1–10, default 1; item cap default 10,000) | ≤ 100 items run inline; more run as child workflows in batches of 100 within the parent's concurrency |
+| Loop | `loop` (`items`: a list value; `concurrency` 1–10, default 1; item cap default 10,000) | ≤ 100 items run inline. More run in batches of 100, one child workflow at a time; each child runs its items with the loop's own `concurrency` and `on_item_error`, with the inline iteration keys, and writes its rows into the loop's run. A batch reads only the outside results its body and `collect` read. A `fail` or `stop` node inside a batch ends the whole run |
 | Filter | `filter` (`items`, per-item predicate) | ≤ 1,000 items: predicate per item, inline (local class) or batched `cel.evaluate` calls; each item is its own evaluation with its own 10,000 budget. Larger lists are batched through `cel.evaluate` in chunks of 1,000 |
 | Transform | `flow.transform` | each output field is a separate value (§4.3) with its own class |
-| Sub-flow | `run_workflow` | a child workflow pinned to `subflow_version_id`; depth ≤ 5; cycles rejected at publish; shares the deadline |
+| Sub-flow | `run_workflow` | a child run pinned to `subflow_version_id`; depth ≤ 5 (checked again at run time); cycles rejected at publish; shares the deadline. Its trigger is the step's `input` (an object); its outputs are the step's output, and its failure fails the step with its code and message |
 | Side effect | plugin nodes | activity `type.vN`; retry and timeout from the manifest, overridable per node |
 
 **Errors (parent §6.6):**
@@ -830,31 +846,59 @@ The version (graph, classifications, bounds) is loaded by one local activity and
   `ambiguous` node, an attempt that timed out, lost its worker or failed any other way may have sent its request, so
   it records `outcome_unknown` and is never repeated. A stopping worker lets running attempts finish for a grace
   period first.
-- An optional workflow failure handler (a pinned sub-flow) runs once with the error summary.
+- An optional workflow failure handler (a pinned version) runs once, as a child run, when a run ends `failed` or
+  `deadline_exceeded`. An explicit cancel isn't a failure, so a cancelled run runs none.
+  - Its trigger is `{run_id, workflow_id, version_id, error: {code, message}}`. It has its own deadline, and it
+    draws on the run's budget.
+  - The run's end is decided first, but its row stays non-terminal until the handler has ended. So a non-terminal
+    run holds the handler's closure throughout, and with it the CEL profiles the handler pins (§4.5). The end is
+    then recorded, counting the handler's iterations, and the run's result counts them too.
+  - The handler's end doesn't change the run's. Nor does a cancel while it runs: the run's end is already decided,
+    so the cancel cancels the handler, which reports back, and the run records the end it had.
+  - A failure handler's own failure runs none.
+- **Sub-runs.** A sub-flow's and a failure handler's runs are runs of their own (§8). Each draws on its parent's
+  budget, and writes its own `runs` row with its first projection, before anything else, even its version's load.
+  So every way it can end has a row to record the end. A cancelled child returns its result, with its usage,
+  instead of ending as cancelled: Temporal shows it as completed, while its row says `cancelled`.
 
 **Continue-as-new only at a quiescent checkpoint.** Temporal doesn't carry child workflows into the continued run.
 Closing the run would also apply the children's parent-close policy. So continue-as-new **never** cancels,
 abandons or restarts an activity or a child workflow.
-- **Quiescent** means: no activity and no child workflow is outstanding. Pending timers don't count: a timer has no
-  side effect, so its absolute wake time goes into the snapshot and the continued run re-arms it.
+- **Quiescent** means:
+  - no activity and no child workflow is outstanding, and a plugin step waiting between attempts counts as
+    outstanding;
+  - no grant request is in flight, either way, and no signal waits to be served.
+
+  Pending timers don't count: a timer has no side effect, so its absolute wake time goes into the snapshot and the
+  continued run re-arms it.
 - **Opportunistic checkpoint.** Once history passes 2,000 events, the scheduler continues-as-new at the next point
   that is already quiescent, for example between loop batches.
 - **Drain mode.** The scheduler enters drain mode at 4,000 events, or when Temporal suggests continue-as-new, whichever comes first.
-  - It starts no new activity or child workflow. Ready nodes stay queued in the snapshot.
-  - Local work (control nodes, local CEL) continues.
-  - When the last outstanding activity or child settles, it continues-as-new.
+  - It begins at the first workflow task past the threshold, not only when some work ends.
+  - It starts nothing new: ready nodes, control nodes included, stay queued in the snapshot. They're cheap to run
+    after the continue, and the run reaches quiescence sooner.
+  - When the last outstanding activity or child settles, it flushes the projection and continues-as-new.
+- **Thresholds.** 2,000 and 4,000 are run inputs with those defaults, so tests can reach them early: Temporal's
+  test server never suggests continue-as-new.
 - **Headroom.** With the in-flight cap of 100, and a bounded number of events per activity or child completion,
   draining adds at most about 1,000 events. That keeps runs far below Temporal's 10,240-event warning and
-  51,200-event limit. The draining run itself adds almost no history while it waits.
+  51,200-event limit. The draining run itself adds almost no history while it waits. Measured in 2a-3b, with the
+  in-flight cap saturated when draining began: 405–501 events and 98–131 KB. The headroom test also bounds the bytes
+  its workload's drain adds, at 512 KiB. That bounds the measured workload only, not every payload: payload sizes
+  aren't enforced until 2b's claim check.
 - **Cost.** A long child, for example a sub-flow in a long `delay`, holds the checkpoint back, and parallel branches
   wait until it settles. That only delays them; it never changes the result. The validator warns when a graph can
   run a long wait in parallel with other work.
 - **Snapshot** (`snapshot_format: 1`):
-  - variables;
+  - variables and the learned sensitive values;
   - completed outputs (values now, handles after 2b);
-  - edge and node states per open scope, and loop cursors;
-  - the ready queue and timer wake times;
-  - the yield accumulator, the iteration counter (below) and the deadline.
+  - edge and node states per open scope, and loop cursors, with each loop's collected values, failures and running
+    batch;
+  - the ready, collect and batch queues, and timer wake times;
+  - the iteration counter (below), with its reservations and waiting needs, the run's start time and the deadline.
+
+  The projection is flushed first, so no rows are carried. Settled iteration scopes are pruned once collected, so
+  the snapshot holds only open work. The yield accumulator isn't carried: it resets every workflow task.
 - **Pinning.** A run never changes build, even across continue-as-new (parent §6.3, §7).
 - **Threshold tests.** Drain mode is entered while loop-batch children, a sub-flow, activities and a timer are
   outstanding. No child is terminated or restarted, each activity completes once, the timer fires at its original
@@ -863,17 +907,20 @@ abandons or restarts an activity or a child workflow.
 **One iteration counter per logical run.**
 - **Where it lives.** The root `RunGraph` execution owns the counter for the whole logical run. The snapshot
   carries the used and reserved totals through every continue-as-new, so a continued run never gets a fresh cap.
-- **What counts.** An inline iteration or filter item is debited when it starts.
+- **What counts.** An inline iteration or filter item is debited when it starts. One that can't be debited waits
+  for budget; its loop fails only when the need is refused.
 - **Children draw grants on demand.** The cap is exact: no child is ever refused while budget is unused elsewhere.
   - **Initial grant.** When a child starts (a loop batch or a sub-flow), the parent reserves an initial grant from
     its unreserved budget: the batch's own item count, or 1,000 for a sub-flow. The grant is recorded in the child's input.
-  - **More on demand.** When a child has used up its grant, it asks its parent for more: a signal to the parent,
-    answered by a signal back, in chunks of 1,000.
+  - **More on demand.** When a child can't meet a need from its own unreserved budget, and none of its other
+    outstanding children can still release any, it asks its parent for its shortfall: a signal to the parent,
+    answered by a signal back. It asks for at least 1,000, so it asks rarely.
     - The parent grants from its unreserved budget, in the order the requests appear in its history.
     - A child's own children ask it the same way, and it asks up the chain when its budget runs short.
     - Drain mode still answers grant requests, because answering one isn't new work.
   - **Waiting, not refusing.** If the unreserved budget can't cover a request, the request waits while any other
-    outstanding child still holds an unused grant. That child returns it when it settles.
+    outstanding child that isn't itself asking may still hold an unused grant. That child returns it when it
+    settles.
   - **The cap.** Only when the budget is exhausted **and** no outstanding child holds anything unused has the run
     truly reached its cap. The waiting requests then fail with `iteration_cap_exceeded`, "This run reached its limit
     of 100,000 loop iterations", and the loop's error policy applies.
@@ -881,8 +928,9 @@ abandons or restarts an activity or a child workflow.
     A parent only continues-as-new with no children outstanding, so grant signals always reach the run that issued the grant.
 - **Settlement.**
   - A completed child returns `iterations_used`; the parent debits that amount and releases the rest.
-  - A failed or cancelled child reports its usage in its failure details.
-  - A child that ends without reporting (terminated) is debited its whole grant. That's conservative, and it happens only on abnormal termination.
+  - A failed or cancelled child run returns its result, with its usage. A batch returns its usage with its
+    outcome.
+  - A child that ends without reporting (terminated, or failed as a workflow) is debited its whole grant. That's conservative, and it happens only on abnormal termination.
 - **Why it's deterministic.** Grants, requests, answers, results and totals are all recorded workflow data.
 - The run summary shows the iterations used.
 
@@ -932,7 +980,9 @@ cancel while the version loads cancels the run.
 - **Compose (2a):** adds `temporal`, `worker` and `cel-evaluator` (§5.7). The worker waits for a healthy evaluator
   before it polls a CEL queue.
 - **Golden histories:** every build adds recorded histories to `tests/engine/replay/<build>/`, starting with
-  2a-3a at `engine_abi` 1. A history is recorded once and never rewritten; the recorder replaces the worker identity
+  2a-3a at `engine_abi` 1; 2a-3b's children and continue-as-new make it 2. A scenario records every execution it
+  ran, its children and continued runs as `<name>--<n>.json`. A history is recorded once and never rewritten; the
+  recorder replaces the worker identity
   and stack traces. They cover:
   - branches, joins, dead paths and switch;
   - inline and batched loops, filter and transform;
@@ -946,7 +996,8 @@ cancel while the version loads cancels the run.
 
 ## 8. Run and step projection
 
-- **`runs`:** id, tenant_id, workflow_version_id, status (`running`, `succeeded`, `failed`, `cancelled`,
+- **`runs`:** id, tenant_id, workflow_version_id, kind (`run`, `subflow`, `failure_handler`), the parent run, step
+  and iteration of a sub-run, status (`running`, `succeeded`, `failed`, `cancelled`,
   `deadline_exceeded`), started_at, ended_at, error summary.
 - **`run_steps`:** run_id, step_id, `iteration_key`, `attempt`, status, timestamps, redacted input and output
   previews (≤ 8 KiB each), error code and sanitized message, `outcome` (`applied`, `simulated`, `outcome_unknown`),
@@ -961,7 +1012,8 @@ cancel while the version loads cancels the run.
     still ends.
     `step_id` is the graph node's id, and `iteration_key` names the scope (`loop2:7/loop5:3`, empty in the root).
   - Control nodes are projected at each scheduler await.
-  - The worker writes through the worker DB role inside `tenant_scope`.
+  - The worker writes through the worker DB role inside `tenant_scope`. A sub-run writes its own `runs` row with
+    its first projection, idempotently; a loop batch writes into its loop's run.
 - **Redaction:** `x-sensitive` fields become `"[redacted]"`, and oversize previews become `"[truncated]"`.
   Redaction follows local `$ref`s, every branch of `anyOf`, `oneOf` and `allOf`, every `patternProperties` schema of
   an object (for every key, declared ones included) and each tuple position (`prefixItems`); a map whose keys are
@@ -973,9 +1025,10 @@ cancel while the version loads cancels the run.
   against the declared output schema, names the schema keyword. Unexpected exceptions, unusable versions and
   interpreter errors name only their type.
 - **Run error codes** add `workflow_failed` (a `fail` node), `start_failed`, `version_unusable`, `internal_error`,
-  `deadline_exceeded`, `cancelled`, `not_supported` (loop batches and sub-flows, until plan 2a-3b) and
+  `deadline_exceeded`, `cancelled` and
   `node_type_unavailable` (no worker of the build runs the node type).
-- **Read API:** `GET /runs` and `GET /runs/{id}` (with steps). The UI never reads Temporal history.
+- **Read API:** `GET /runs` (top-level runs) and `GET /runs/{id}` (with steps, and the sub-runs it started). The UI
+  never reads Temporal history.
 
 ## 9. Starting runs in 2a
 
@@ -1031,13 +1084,16 @@ cancel while the version loads cancels the run.
   - **no premature rejection:** with 10 child slots and one busy child, that child can use nearly the whole budget;
   - requests wait while other children hold unused grants, and are refused only at the exact cap;
   - grants in drain mode;
-  - settlement of failed and terminated children;
+  - settlement of failed and terminated children (the test server never reports a termination to the parent, so
+    a child that fails as a workflow stands in for it);
   - no fresh cap after continue-as-new.
 - **Continue-as-new:**
   - the quiescent-checkpoint tests in §6;
   - a **measured** headroom test: drain with the in-flight cap saturated (100 activities and children), including
-    activity retries, failures, heartbeats and grant traffic. It records the actual events and bytes added while
-    draining, and asserts they stay within the stated headroom. The initial numbers are adjusted from this result.
+    activity retries, failures, heartbeats and grant traffic. It shows that the cap was saturated when draining
+    began, and that the retries, heartbeats and grants happened while it drained. It records the actual events and
+    bytes added while draining, and asserts they stay within the stated headroom. The initial numbers are adjusted
+    from this result.
 - **Evaluator limits:** *N* derived from the cgroup limits; refusal to start without a memory limit.
 - **Projection:** idempotent upserts under retries, redaction, and RLS (missing or mismatched tenant).
 - **API:** draft CAS conflicts, publish diagnostics, activation, and the permission matrix for the new routes.
@@ -1088,6 +1144,11 @@ cancel while the version loads cancels the run.
     every run's end is recorded; the workflow decides every retry, never repeating an ambiguous request; only the
     projection writes; learned sensitive values are masked; a start fails only on a confirmed refusal; `wait_until`
     needs a time zone; waits out of range fail their step; projections are bounded and never stop a run.
+15. **Run-time behaviour from plan 2a-3b** (the owner ruled on the first, third, fifth and sixth): a loop's
+    batches run one at a time with the loop's concurrency; sub-flows and failure handlers are runs of their own,
+    with rows written before they can end; the failure handler runs for `failed` and `deadline_exceeded` runs,
+    which stay non-terminal until it has ended; grants are exact; drain mode starts nothing new; a cancelled child returns its
+    result; the projection is flushed before continue-as-new.
 
 ## 12. Follow-up sub-projects
 
