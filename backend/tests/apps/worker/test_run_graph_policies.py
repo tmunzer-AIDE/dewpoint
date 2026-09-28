@@ -16,6 +16,7 @@ from temporalio.worker import UnsandboxedWorkflowRunner
 from dewpoint.engine.canonical import canonical_json
 from dewpoint.engine.graph.validate import SubflowInfo
 from dewpoint.engine.runtime import nodes
+from dewpoint.engine.runtime import workflow as run_graph
 from dewpoint.engine.runtime.activities import CEL_EVALUATE, ENGINE_QUEUE, PROJECT, ProjectInput, RunInput
 from dewpoint.engine.runtime.workflow import PROJECT_BYTES, RunGraph
 from tests.apps.worker.harness import TENANT, MemoryStore, run, start, workers
@@ -107,6 +108,21 @@ async def test_sub_flows_are_not_supported_yet(env: WorkflowEnvironment) -> None
     g.node("r", "flow.run_workflow@1", {"workflow_id": str(child)}, on_error="continue")
     async with workers(env.client, store):
         assert (await run(env.client, store, g, TRIGGER)).outputs == {"code": "not_supported"}
+
+
+async def test_a_loop_past_the_runs_iteration_cap_fails(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The run's cap (spec §6): the iteration past it is refused and its loop fails. The run doesn't wait for budget
+    nothing could release."""
+    monkeypatch.setattr(run_graph, "ITERATION_CAP", 2)
+    store = MemoryStore()
+    g = graph(code=ref("steps.l.error.code", default="none"))
+    g.node("l", LOOP, {"items": [1, 2, 3]}, on_error="continue")
+    g.node("x", ECHO).edge("l", "x", "body")
+    async with workers(env.client, store, runner=UnsandboxedWorkflowRunner()):
+        result = await asyncio.wait_for(run(env.client, store, g, TRIGGER), 60)
+    assert (result.outputs, result.iterations) == ({"code": "iteration_cap_exceeded"}, 2)
 
 
 async def test_a_failing_collect_fails_its_iteration(env: WorkflowEnvironment) -> None:

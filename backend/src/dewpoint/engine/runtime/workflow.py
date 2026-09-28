@@ -43,6 +43,7 @@ with workflow.unsafe.imports_passed_through():
         cel_queue,
         step_activity,
     )
+    from dewpoint.engine.runtime.budget import Budget
     from dewpoint.engine.runtime.program import Step, compile_program
     from dewpoint.engine.runtime.projection import (
         Secrets,
@@ -54,6 +55,7 @@ with workflow.unsafe.imports_passed_through():
         storable,
     )
     from dewpoint.engine.runtime.scheduler import (
+        ITERATION_CAP,
         ITERATION_CAP_EXCEEDED,
         Collect,
         Failure,
@@ -167,7 +169,7 @@ class RunGraph:
             workflow.logger.error("run_version_unusable", exc_info=True)
             message = f"This build can't run the version ({type(e).__name__}); the worker's log has the details."
             return await self._end_early(RunEnd("failed", Failure(VERSION_UNUSABLE, message)))
-        self.sched = Scheduler(self.program)
+        self.sched = Scheduler(self.program, budget=Budget(ITERATION_CAP, root=True))
         deadline = self.started_at + timedelta(seconds=start.max_run_duration_s)
         outputs: dict[str, Any] | None = None
         try:
@@ -204,6 +206,7 @@ class RunGraph:
         clock = asyncio.create_task(asyncio.sleep(max(0.0, (deadline - workflow.now()).total_seconds())))
         try:
             while self.sched.ended is None:
+                self.sched.answer_budget()  # no children yet: a need past the cap is refused, and its loop fails
                 waiting += [("step", i) for i in self.sched.take_ready()]
                 waiting += [("collect", c) for c in self.sched.take_collects()]
                 for inst in self.sched.take_cancels():
@@ -328,11 +331,10 @@ class RunGraph:
     def _queue_settled(self) -> None:
         """Control steps that settled since the last call. Plugin steps queue their own attempts (`_activity`)."""
         now = workflow.now().isoformat()
-        for inst in self.sched.take_settled():
+        for inst, result in self.sched.take_settled():
             step = self.sched.step(inst)
             if not step.control:
                 continue
-            result = self.sched.scopes[inst.scope].results.get(step.key, {})
             error = result.get("error")
             self._queue(
                 StepRow(
@@ -453,7 +455,7 @@ class RunGraph:
         )
 
     async def _filter(self, inst: Instance, step: Step, items: list[Any]) -> _Effect:
-        if not self.sched.debit(len(items)):
+        if not self.sched.budget.take(len(items)):
             return _Effect(failure=Failure(ITERATION_CAP_EXCEEDED, "This run reached its limit of loop iterations."))
         record = self.program.record(step.id, "/predicate")
         views = [self._view(inst.scope, item=(item, i)) for i, item in enumerate(items)]

@@ -3,6 +3,7 @@
 
 from typing import Any
 
+from dewpoint.engine.runtime.budget import Budget
 from dewpoint.engine.runtime.scheduler import Failure, NodeState, RunEnd, Scheduler
 from tests.engine.runtime.support import name, program
 from tests.support.graphs import G
@@ -232,10 +233,12 @@ def test_an_empty_loop_completes_at_once() -> None:
 
 
 def test_the_iteration_cap_fails_the_loop() -> None:
-    s = Scheduler(program(loop_graph()), iteration_cap=2)
+    s = Scheduler(program(loop_graph()), budget=Budget(2, root=True))
     s.start()
     [loop] = s.take_ready()
     s.open_loop(loop, [1, 2, 3], concurrency=3, stop_on_error=True)
+    assert s.ended is None  # the third iteration waits for budget
+    s.answer_budget()  # nothing can release any: it's refused, and the loop fails
     assert s.ended is not None and s.ended.failure is not None
     assert s.ended.failure.code == "iteration_cap_exceeded"
 
@@ -245,10 +248,11 @@ def test_the_iteration_cap_ends_the_loops_queued_iterations_too() -> None:
     the steps after the loop ran beside them, and the run could end with a child unsettled."""
     g = loop_graph()
     g.nodes[0]["options"]["on_error"] = "continue"
-    s = Scheduler(program(g), iteration_cap=2)
+    s = Scheduler(program(g), budget=Budget(2, root=True))
     s.start()
     [loop] = s.take_ready()
-    s.open_loop(loop, [1, 2, 3], concurrency=3, stop_on_error=True)  # opens 0 and 1, then the third hits the cap
+    s.open_loop(loop, [1, 2, 3], concurrency=3, stop_on_error=True)  # opens 0 and 1; the third waits for budget
+    s.answer_budget()  # refused: the cap
     assert ready(s) == ["after"]  # the queued iterations never start
     assert s.take_cancels() == [] and s.scopes[()].results["l"]["error"]["code"] == "iteration_cap_exceeded"
 
@@ -256,7 +260,7 @@ def test_the_iteration_cap_ends_the_loops_queued_iterations_too() -> None:
 def test_the_iteration_cap_cancels_the_loops_running_iterations() -> None:
     g = loop_graph()
     g.nodes[0]["options"]["on_error"] = "continue"
-    s = Scheduler(program(g), iteration_cap=2)
+    s = Scheduler(program(g), budget=Budget(2, root=True))
     s.start()
     [loop] = s.take_ready()
     s.open_loop(loop, [1, 2, 3], concurrency=2, stop_on_error=True)
@@ -265,11 +269,12 @@ def test_the_iteration_cap_cancels_the_loops_running_iterations() -> None:
     [y0] = s.take_ready()
     s.succeed(y0, {})
     [collect] = s.take_collects()
-    s.collected(collect.loop, collect.index, "first")  # the third iteration hits the cap while l:1 still runs
+    s.collected(collect.loop, collect.index, "first")  # the third iteration waits for budget while l:1 still runs
+    s.answer_budget()  # refused: the cap
     assert [name(s, i) for i in s.take_cancels()] == ["l:1/x"]
     assert ready(s) == ["after"]
     s.succeed(x1, {})  # the cancelled iteration's late result counts for nothing
-    assert s.take_ready() == [] and "y" not in s.scopes[(("l", 1),)].results
+    assert s.take_ready() == [] and (("l", 1),) not in s.scopes  # and its scope is gone
 
 
 def test_a_stop_ends_the_run_and_cancels_running_work() -> None:
