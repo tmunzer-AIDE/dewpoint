@@ -3915,10 +3915,12 @@ async def test_a_cancelled_run_runs_no_failure_handler(env: WorkflowEnvironment)
 - [ ] **Step 2: Run them and watch them fail**
 
 Run: `cd backend && uv run pytest -q tests/apps/worker/test_main.py tests/apps/worker/test_run_graph_children.py tests/apps/worker/test_run_graph_policies.py tests/engine/runtime/test_nodes.py`
-Expected: four collection errors:
-- `ImportError: cannot import name 'SubflowStart' from 'dewpoint.engine.runtime.nodes'`;
-- `ImportError: cannot import name 'LoopBatch' from 'dewpoint.engine.runtime.workflow'`, three times (through the
-  harness).
+Expected: four collection errors, one per file, each for a name this task adds:
+- `test_main.py`: `ImportError: cannot import name 'LoopBatch' from 'dewpoint.engine.runtime.workflow'`;
+- `test_run_graph_children.py`: `ImportError: cannot import name 'execution' from 'dewpoint.engine.runtime'`;
+- `test_run_graph_policies.py`, through the harness: `ImportError: cannot import name 'RunStart' from
+  'dewpoint.engine.runtime.activities'`;
+- `test_nodes.py`: `ImportError: cannot import name 'SubflowStart' from 'dewpoint.engine.runtime.nodes'`.
 
 - [ ] **Step 3: The contracts and the decisions**
 
