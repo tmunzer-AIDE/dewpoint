@@ -6648,6 +6648,7 @@ cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy
   && uv run pytest -q tests/engine tests/apps/worker \
   && git add src/dewpoint/engine/runtime/activities.py src/dewpoint/engine/runtime/execution.py \
        src/dewpoint/engine/runtime/workflow.py tests/apps/worker/test_run_graph_continue.py \
+       tests/support/plugins/testkit.py \
   && git commit -m "feat(engine): continue-as-new at a quiescent point, with drain mode and a snapshot" \
        -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
