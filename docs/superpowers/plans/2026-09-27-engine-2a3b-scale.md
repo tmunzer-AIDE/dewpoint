@@ -54,13 +54,13 @@ Its "Handoff to 2a-3b" section lists what this plan consumes. The owner chose on
 1. **Go/no-go experiments ran first** (next section), on the locked temporalio 1.33.0 and its time-skipping server.
 2. **Every module was prototyped** in a scratch copy of `backend/` at `main` (`3012f3f`) until it passed its tests,
    `ruff`, `ruff format`, `mypy --strict` (134 source files) and `lint-imports` (10 contracts). The prototype's full
-   suite gives 991 passed and 8 skipped (the Linux-only evaluator tests), against `main`'s 902 passed.
+   suite gives 994 passed and 8 skipped (the Linux-only evaluator tests), against `main`'s 902 passed.
 3. **The code blocks below are those files, verbatim.** Diffs to existing files were generated from the prototype.
    Two files change too much for a readable diff, so their tasks give them whole ("Replace … with"):
    - `scheduler.py` in Task 2;
    - `workflow.py` in Task 5.
 4. **Each task was staged and checked on its own.** Stage *N* is `main` plus Tasks 1..*N*.
-   - Every stage passed the static checks and the **whole** suite: 918, 927, 929, 931, 957, 958, 963 and 991
+   - Every stage passed the static checks and the **whole** suite: 919, 928, 930, 932, 960, 961, 966 and 994
      passed, each with 8 skipped. Two first runs failed, and both re-runs passed:
      - one hit a timing flake in `tests/core/audit/test_anchor.py`, which fails about one run in three on `main` too;
      - one hit a cross-process test while I was rebuilding its stage directory.
@@ -136,6 +136,16 @@ Its "Handoff to 2a-3b" section lists what this plan consumes. The owner chose on
     - Four unit tests pin the rule (Task 1), and an end-to-end test pins it through a sub-flow (Task 5).
     - Task 5's budget signal carries `held`.
     - The golden histories were recorded again, because the signal's arguments changed.
+
+    The re-review found the same refusal one level down. An asking child reported only its own unreserved budget,
+    not what its asking children held. So with 10 in all, the root refused its 8 while its asking child's asking
+    leaf held 6. The report is now the whole subtree's (decision 10). A nested unit test, a strengthened property
+    and a nested end-to-end test pin it.
+
+    That end-to-end test, run against the old budget, also found a hang in Task 5's interpreter. A run that ended
+    waited for its cancelled sub-flow to report back, and a cancel of the run meanwhile cancelled the sub-flow a
+    second time. Temporal refused the duplicate, and the run's workflow task could never complete. That wait is now
+    shielded like the end's write (decision 18), and a deterministic test pins it (Task 5).
 
 The stage counts above are on the plan's base, `3012f3f`. `main` later gained 2 tests with PR #10 (an audit fix
 that shares no file with this plan), so a branch from today's `main` counts 2 more.
@@ -306,7 +316,7 @@ Decisions 3, 8, 14 and 19 chose between readings of the spec. The owner ruled on
     - `asking` and `refused`.
 
     A need names its requester (`LOCAL` or a child's workflow id), a key, `need` (at least) and `want` (up to). A
-    child's need also carries `held`: what the child holds unused while it asks.
+    child's need also carries `held`: what the child's subtree holds unused while it asks.
     - `take(n)` serves this execution's own need at once, when nothing waits ahead of it and it fits.
     - `start_child` reserves `min(initial, unreserved)`, or 0 when a need is waiting, so nothing jumps the queue.
     - `settle_child(used | None)` debits what the child used (at most its grant), or the whole grant when the child
@@ -315,7 +325,9 @@ Decisions 3, 8, 14 and 19 chose between readings of the spec. The owner ruled on
       - a need that fits is granted, and a child gets up to its `want`;
       - otherwise it waits while another outstanding child, one that isn't itself asking, may still release budget;
       - otherwise a child execution asks its parent for its shortfall (`want = max(1,000, shortfall)`), one ask at
-        a time, and reports what it holds unused (`held`);
+        a time. It reports what its subtree holds unused (`held`): its own unreserved budget, and what each of its
+        asking children reported. It asks only once every other child is asking, and it answers nothing while it
+        asks, so that's all it would release if it were refused and ended;
       - otherwise (at the root, or once refused), if other children that are asking hold enough to cover it, their
         asks are refused, latest first, until what they hold does. A child that asks releases what it holds only
         once it's answered and ends, so the need waits for them;
@@ -326,8 +338,10 @@ Decisions 3, 8, 14 and 19 chose between readings of the spec. The owner ruled on
     and liveness.
 
     Execution's checkpoint 1 found the fourth rule missing. The root refused its own filter of 8 while a child held
-    6 unused and asked for 5 more, and then refused the child too. Four unit tests pin the rule, and one end-to-end
-    test pins it through a sub-flow (Task 5).
+    6 unused and asked for 5 more, and then refused the child too. Its re-review found the same refusal one level
+    down: an asking child reported only its own unreserved budget, not what its asking child held. Five unit
+    tests pin the rule, and the larger-needs property checks that the root refuses a need of its own only when the
+    whole tree holds less unused. Two end-to-end tests pin it through sub-flows (Task 5).
 11. **Grant signals.**
     - The child sends `request_budget(child, key, need, want, held)` to its parent.
     - The parent answers with `budget(key, granted)`.
@@ -412,6 +426,9 @@ Decisions 3, 8, 14 and 19 chose between readings of the spec. The owner ruled on
     - A batch that can't load its version fails as a workflow (a non-retryable `ApplicationError`), so its parent
       fails the loop instead of waiting forever.
     - A sub-run's row exists before anything can end it (decision 9).
+    - An execution that ends waits for its cancelled children to report back. A cancel of the execution meanwhile
+      doesn't reach them again: Temporal refuses a second cancel of the same child, and the workflow task could
+      then never complete. The end already decided stands. (Found by checkpoint 1's re-review test.)
     - A failure handler never changes its run's end, and a cancel during it doesn't either (decision 8).
 19. **A cancelled child returns its result** (the owner's ruling). Cancelling a run cancels its children, through
     `REQUEST_CANCEL` and `WAIT_CANCELLATION_COMPLETED`.
@@ -600,8 +617,9 @@ settled.
 - Produces (`dewpoint.engine.runtime.budget`):
   - `CHUNK = 1_000` and `LOCAL = ""` (the requester of an execution's own needs);
   - `Need(requester: str, key: str, need: int, want: int, held: int = 0)`, `Answer(need: Need, granted: int)`
-    and `Ask(need: int, want: int, held: int = 0)`, all frozen dataclasses. `held` is what an asking child holds
-    unused, which it reports with its ask;
+    and `Ask(need: int, want: int, held: int = 0)`, all frozen dataclasses. `held` is what an asking child's
+    subtree holds unused, which it reports with its ask: its own unreserved budget and what its asking children
+    reported;
   - `Budget(total: int, root: bool, used=0, reserved: dict[str, int]={}, waiting: list[Need]=[], asking=False, refused=False)`,
     with:
     - the property `unreserved -> int`;
@@ -751,12 +769,43 @@ def test_a_refused_child_refuses_its_own_asking_children_before_its_own_need() -
     mid.start_child("leaf", 6)
     mid.request(local("filter", 8))
     mid.request(Need("leaf", "r1", 5, CHUNK, held=6))
-    assert mid.decide() == ([], Ask(4, CHUNK, 4))  # its subtree looks short: it asks its parent first
+    assert mid.decide() == ([], Ask(4, CHUNK, 10))  # it asks its parent first, holding its 4 and its leaf's 6
     mid.answered(0)
     answers, _ = mid.decide()
     assert [(x.need.requester, x.granted) for x in answers] == [("leaf", 0)]  # the leaf's 6 can cover the filter
     mid.settle_child("leaf", 1)
     assert mid.decide() == ([Answer(local("filter", 8), 8)], None)
+
+
+def test_an_asking_child_reports_what_its_asking_children_hold_too() -> None:
+    """Checkpoint-1 re-review: the root has 10 and grants 6 to `mid`, which grants all 6 to `leaf`. The root needs 8,
+    `mid` 7 and `leaf` 8. `leaf` asks, holding 6. `mid` holds nothing itself, but its asking leaf's 6 is released if
+    they're both refused, so it reports 6. The root refuses `mid`'s ask, and its 8 waits; the nested needs are then
+    refused, all 10 come back, and the root's 8 is granted. Before, `mid` reported 0, and the root refused its 8 while
+    the whole tree held 10 unused."""
+    root, mid, leaf = Budget(10, root=True), Budget(6, root=False), Budget(6, root=False)
+    assert root.start_child("mid", 6) == 6 and mid.start_child("leaf", 6) == 6
+    leaf.request(local("filter", 8))
+    answers, leaf_ask = leaf.decide()
+    assert (answers, leaf_ask) == ([], Ask(2, CHUNK, 6))
+    assert leaf_ask is not None
+    mid.request(local("filter", 7))
+    mid.request(Need("leaf", "1", leaf_ask.need, leaf_ask.want, leaf_ask.held))
+    answers, mid_ask = mid.decide()
+    assert (answers, mid_ask) == ([], Ask(7, CHUNK, 6))  # nothing of its own, but its asking leaf holds 6
+    assert mid_ask is not None
+    root.request(local("filter", 8))
+    root.request(Need("mid", "1", mid_ask.need, mid_ask.want, mid_ask.held))
+    answers, _ = root.decide()
+    assert [(a.need.requester, a.granted) for a in answers] == [("mid", 0)]  # the root's 8 waits for mid's subtree
+    mid.answered(0)
+    answers, _ = mid.decide()
+    assert [(a.need.requester, a.granted) for a in answers] == [(LOCAL, 0), ("leaf", 0)]  # 7 can't come from 6
+    leaf.answered(0)
+    assert leaf.decide() == ([Answer(local("filter", 8), 0)], None)
+    mid.settle_child("leaf", leaf.used)  # the leaf ends, having used nothing
+    root.settle_child("mid", mid.used)  # and so does mid
+    assert root.decide() == ([Answer(local("filter", 8), 8)], None)
 
 
 def test_no_premature_rejection_one_busy_child_among_ten_takes_nearly_everything() -> None:
@@ -808,6 +857,7 @@ class Tree:
     everyone: list[Execution]
     mail: list[tuple[str, Execution, object]] = field(default_factory=list)  # (kind, to, payload)
     refusals: list[tuple[int, int]] = field(default_factory=list)  # (need, unused anywhere at that moment)
+    root_refusals: list[tuple[int, int]] = field(default_factory=list)  # the root's own, likewise
 
     def served(self) -> int:
         return sum(e.served for e in self.everyone)
@@ -821,6 +871,8 @@ class Tree:
                     e.served += n
                 else:
                     self.refusals.append((n, self.cap - self.served()))
+                    if e.parent is None:
+                        self.root_refusals.append((n, self.cap - self.served()))
             else:
                 child = next(c for c in e.children if c.name == a.need.requester)
                 self.mail.append(("answer", child, a.granted))
@@ -919,8 +971,13 @@ def test_one_at_a_time_needs_are_refused_only_when_nothing_is_left(data: st.Data
 @settings(max_examples=300, deadline=None)
 @given(st.data())
 def test_larger_needs_never_pass_the_cap_and_never_wait_forever(data: st.DataObject) -> None:
+    """Needs of any size: all or nothing, so two needs can compete for the same budget, and one is refused while
+    the other holds it. But the root refuses a need of its own only when the whole tree holds less unused: what
+    asking children hold, all the way down, counts (checkpoint-1 re-review)."""
     tree = run(data, cap=data.draw(st.integers(5, 200)), unit=False)
     finish(tree)
+    for need, unused in tree.root_refusals:
+        assert unused < need, f"the root refused a need of {need} with {unused} unused in the tree"
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
@@ -942,10 +999,11 @@ iteration, a filter's items) and its children's requests.
 
 A need the unreserved budget can't cover waits while another outstanding child may still release budget: a child
 that isn't itself asking. Only then does a child execution ask its parent, for its shortfall (and up to a chunk of
-1,000, so it asks rarely), reporting what it holds unused meanwhile. So a child asks only when its whole subtree is
-short. A child that asks holds its unused budget until it's answered and ends: when what asking children hold would
-cover a need, their asks are refused first, latest first, and the need waits for them to release it. A need is
-refused only when nothing unused is left that could cover it: the cap is exact.
+1,000, so it asks rarely), reporting what its subtree holds unused meanwhile: its own unreserved budget and what
+its asking children reported. So a child asks only when its whole subtree is short. A child that asks holds its
+unused budget until it's answered and ends: when what asking children hold would cover a need, their asks are
+refused first, latest first, and the need waits for them to release it. A need is refused only when nothing unused
+is left that could cover it: the cap is exact.
 
 It is pure and deterministic, and its state is plain data, carried through continue-as-new."""
 
@@ -962,7 +1020,7 @@ class Need:
     key: str  # the requester's own name for it: a child's request id, or the scheduler's unit
     need: int  # at least this much, or nothing
     want: int  # up to this much: a child's chunk; a local need wants exactly `need`
-    held: int = 0  # what a child holds unused while it asks: it releases it if it's refused and ends
+    held: int = 0  # what a child's subtree holds unused while it asks: released if it's refused and ends
 
 
 @dataclass(frozen=True)
@@ -1049,7 +1107,7 @@ class Budget:
                     break
                 self.asking = True
                 shortfall = head.need - max(free, 0)
-                return answers, Ask(shortfall, max(CHUNK, shortfall), max(free, 0))
+                return answers, Ask(shortfall, max(CHUNK, shortfall), self._held())
             if self._refuse_asking(head, free, answers):
                 break  # children that were asking hold enough: refused, they end and release it; wait for them
             answers.append(Answer(head, 0))
@@ -1073,6 +1131,12 @@ class Budget:
         answers.extend(Answer(n, 0) for n in self.waiting if n.requester in chosen)
         self.waiting = [n for n in self.waiting if n.requester not in chosen]
         return True
+
+    def _held(self) -> int:
+        """What this execution's subtree holds unused as it asks: its own unreserved budget, and what each of its
+        asking children reported. It asks only once every other child is asking (see `_may_release`), and it
+        answers nothing while it asks, so that's all it would release if it were refused and ended."""
+        return max(self.unreserved, 0) + sum(n.held for n in self.waiting if n.requester != LOCAL)
 
     def _may_release(self, head: Need) -> bool:
         """Whether an outstanding child other than the requester may still release budget: one that isn't asking."""
@@ -1109,7 +1173,7 @@ __all__ = ["CHUNK", "LOCAL", "Answer", "Ask", "Budget", "Need"]
 - [ ] **Step 4: Run the tests**
 
 Run: `cd backend && uv run pytest -q tests/engine/runtime/test_budget.py`
-Expected: 16 passed.
+Expected: 17 passed.
 
 - [ ] **Step 5: Checks and commit**
 
@@ -2910,8 +2974,12 @@ Several other files change with this:
   sub-flow pins, so tests can run sub-flows. It records the rows sub-runs write, and runs both workflow types. A
   version it doesn't have fails to load without retrying, as the database store's does.
 - **Tests.** `test_run_graph_children.py` covers batches, sub-flows, the failure handler and grants. It includes the
-  five Review Focus tests, one from execution's checkpoint 1 (a need that waits for an asking sub-flow holding
-  enough), and seven from the owner's reviews of this plan:
+  five Review Focus tests and three from execution's checkpoint 1:
+  - a need that waits for an asking sub-flow holding enough;
+  - a need that waits for what an asking sub-flow's own sub-flow holds;
+  - a cancel while the run waits for a cancelled sub-flow to report back.
+
+  It also has seven from the owner's reviews of this plan:
   - a child's row at its boundaries: a version that doesn't load, and a cancel while it loads;
   - the failure handler:
     - a cancel while it runs, and the usage it returns;
@@ -3487,6 +3555,77 @@ async def test_a_need_waits_for_an_asking_sub_flow_that_holds_enough(
         result = await asyncio.wait_for(handle.result(), 60)
     assert (result.status, result.outputs) == ("succeeded", {"kept": 8, "code": "iteration_cap_exceeded"})
     assert result.iterations == 8
+
+
+async def test_a_need_waits_for_what_an_asking_sub_flows_own_sub_flow_holds(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checkpoint-1 re-review, end to end: with a cap of 10, the run grants 6 to `mid`, which grants all 6 to its own
+    sub-flow `leaf`. The run's filter needs 8, `mid`'s 7 and `leaf`'s 8. `leaf` asks holding 6, and `mid` asks
+    holding nothing itself but reporting its leaf's 6. The run refuses `mid`, whose subtree ends having used nothing,
+    and the run's filter gets its 8. Before, `mid` reported 0 and the run refused its filter too."""
+    monkeypatch.setattr(run_graph, "ITERATION_CAP", 10)
+    monkeypatch.setattr(execution, "SUBFLOW_GRANT", 6)
+    store = MemoryStore()
+    leaf = graph(n=ref("steps.k.output.count"))
+    leaf.node("s", "testkit.slow@1", {"seconds": 2})  # it asks once both filters above it are waiting
+    leaf.node("k", FILTER, {"items": ref("trigger.items"), "predicate": cel("true")}).edge("s", "k")
+    leaf_id = store.publish(leaf)
+    mid = graph(n=ref("steps.k.output.count"))
+    mid.node("r", RUN, {"workflow_id": str(leaf_id), "input": {"items": ref("trigger.items")}}, on_error="continue")
+    mid.node("s", "testkit.slow@1", {"seconds": 1}).node(
+        "k", FILTER, {"items": list(range(7)), "predicate": cel("true")}
+    )
+    mid.edge("s", "k")
+    mid_id = store.publish(mid)
+    g = graph(kept=ref("steps.f.output.count"), code=ref("steps.r.error.code", default="none"))
+    g.node("r", RUN, {"workflow_id": str(mid_id), "input": {"items": list(range(8))}}, on_error="continue")
+    g.node("s", "testkit.slow@1", {"seconds": 1}).node("f", FILTER, {"items": list(range(8)), "predicate": cel("true")})
+    g.edge("s", "f")
+    async with workers(env.client, store, runner=UnsandboxedWorkflowRunner()):
+        handle = await start(env.client, store, g, {})
+        result = await asyncio.wait_for(handle.result(), 60)
+    assert (result.status, result.outputs) == ("succeeded", {"kept": 8, "code": "iteration_cap_exceeded"})
+    assert result.iterations == 8
+
+
+@dataclasses.dataclass
+class SlowEnds(MemoryStore):
+    """A run's end takes a while to write: a sub-run that's cancelled takes that long to report back."""
+
+    async def project(self, data: ProjectInput) -> None:
+        if data.run is not None:
+            await asyncio.sleep(1)
+        await super().project(data)
+
+
+async def test_a_cancel_while_the_run_waits_for_a_cancelled_sub_flow_to_report_back(env: WorkflowEnvironment) -> None:
+    """Found in checkpoint 1's end-to-end test: the run fails, which cancels its running sub-flow, and waits for it to
+    report back. A cancel of the run meanwhile reached that wait and cancelled the sub-flow a second time: Temporal
+    refused the duplicate request, so the run's workflow task could never complete, and the run hung. The run's
+    failure stands, and the sub-flow is cancelled once."""
+    store = SlowEnds()
+    g = graph(code=ref("steps.r.error.code", default="none"))
+    g.node("r", RUN, {"workflow_id": str(store.publish(sleeper()))}, on_error="continue")
+    g.node("s", "testkit.slow@1", {"seconds": 1}).node("f", FAIL, {"message": "it went wrong"}).edge("s", "f")
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {})
+        for _ in range(200):  # until the run has cancelled its sub-flow
+            if await child_cancels(handle):
+                break
+            await asyncio.sleep(0.05)
+        await handle.cancel()  # while the sub-flow is still writing its end
+        result = await asyncio.wait_for(handle.result(), 30)
+    assert (result.status, result.error["code"]) == ("failed", "workflow_failed")
+    assert await child_cancels(handle) == 1
+
+
+async def child_cancels(handle: Any) -> int:
+    """How many times the run has asked Temporal to cancel a child."""
+    history = await handle.fetch_history()
+    return sum(
+        e.HasField("request_cancel_external_workflow_execution_initiated_event_attributes") for e in history.events
+    )
 
 
 async def test_the_cap_holds_across_children(env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4295,7 +4434,10 @@ class Execution:
             for key, task in tasks.items():
                 if key[0] not in ("project", "cancelled"):
                     task.cancel()
-            await asyncio.gather(*tasks.values(), return_exceptions=True)
+            # Each outstanding unit reports back first, a cancelled child included. A cancel of this execution meanwhile
+            # mustn't reach them again: Temporal refuses a second cancel of the same child, and then this workflow
+            # task could never complete. An end already decided stands.
+            await _landed(asyncio.gather(*tasks.values(), return_exceptions=True))
 
     @staticmethod
     def _in_flight(tasks: Mapping[tuple[Any, ...], asyncio.Task[Any]]) -> int:
@@ -5360,7 +5502,7 @@ diff --git a/backend/src/dewpoint/apps/worker/main.py b/backend/src/dewpoint/app
 - [ ] **Step 6: Run the tests**
 
 Run: `cd backend && uv run pytest -q tests/apps/worker/test_main.py tests/apps/worker/test_run_graph.py tests/apps/worker/test_run_graph_children.py tests/apps/worker/test_run_graph_policies.py tests/engine/runtime/test_nodes.py`
-Expected: 110 passed (2 + 14 + 24 + 32 + 38). Keep this path order, which is the suite's: `test_run_graph_policies.py` run before
+Expected: 112 passed (2 + 14 + 26 + 32 + 38). Keep this path order, which is the suite's: `test_run_graph_policies.py` run before
 `test_run_graph.py` hangs one of 2a-3a's timer tests.
 
 - [ ] **Step 7: Checks and commit**
@@ -6117,10 +6259,10 @@ diff --git a/backend/src/dewpoint/engine/runtime/execution.py b/backend/src/dewp
                  )
                  done, _ = await workflow.wait([*tasks.values(), clock, wake], return_when=asyncio.FIRST_COMPLETED)
                  wake.cancel()
-@@ -289,6 +334,49 @@
-                 if key[0] not in ("project", "cancelled"):
-                     task.cancel()
-             await asyncio.gather(*tasks.values(), return_exceptions=True)
+@@ -292,6 +337,49 @@
+             # mustn't reach them again: Temporal refuses a second cancel of the same child, and then this workflow
+             # task could never complete. An end already decided stands.
+             await _landed(asyncio.gather(*tasks.values(), return_exceptions=True))
 +        return None
 +
 +    def _drain_due(self) -> bool:
@@ -6167,7 +6309,7 @@ diff --git a/backend/src/dewpoint/engine/runtime/execution.py b/backend/src/dewp
 
      @staticmethod
      def _in_flight(tasks: Mapping[tuple[Any, ...], asyncio.Task[Any]]) -> int:
-@@ -607,10 +695,13 @@
+@@ -610,10 +698,13 @@
              return await self._filter(inst, step, decision.filter_items)
          if decision.subflow is not None:
              return await self._subflow(inst, step, decision.subflow, cel_mode)
@@ -6185,7 +6327,7 @@ diff --git a/backend/src/dewpoint/engine/runtime/execution.py b/backend/src/dewp
          return _Effect(
              output=decision.output,
              ports=decision.ports,
-@@ -618,6 +709,13 @@
+@@ -621,6 +712,13 @@
              end=decision.end,
              cel_mode=cel_mode,
          )
@@ -6199,7 +6341,7 @@ diff --git a/backend/src/dewpoint/engine/runtime/execution.py b/backend/src/dewp
 
      async def _filter(self, inst: Instance, step: Step, items: list[Any]) -> _Effect:
          if not await self._take_budget(f"filter:{iteration_key(inst.scope)}:{step.key}", len(items)):
-@@ -684,6 +782,8 @@
+@@ -687,6 +785,8 @@
              self.cel_schedule_to_start_s,
              parent=parent,
              workflow_id=start.workflow_id,
@@ -6208,7 +6350,7 @@ diff --git a/backend/src/dewpoint/engine/runtime/execution.py b/backend/src/dewp
          )
          used: int | None = None
          try:
-@@ -752,6 +852,8 @@
+@@ -755,6 +855,8 @@
              parent=parent,
              mode=self.mode,
              cel_schedule_to_start_s=self.cel_schedule_to_start_s,
@@ -6217,7 +6359,7 @@ diff --git a/backend/src/dewpoint/engine/runtime/execution.py b/backend/src/dewp
          )
          used: int | None = None
          try:
-@@ -878,9 +980,55 @@
+@@ -881,9 +983,55 @@
          )
          return failure, outcome, retryable
 
@@ -6892,7 +7034,7 @@ diff --git a/docs/operations/runs.md b/docs/operations/runs.md
 - [ ] **Step 6: The whole suite, checks and commit**
 
 Run: `cd backend && uv run pytest -q`
-Expected: every test passes, with 8 skipped (the Linux-only evaluator tests). Planning's prototype gave 991
+Expected: every test passes, with 8 skipped (the Linux-only evaluator tests). Planning's prototype gave 994
 passed.
 
 ```bash

@@ -920,9 +920,9 @@ abandons or restarts an activity or a child workflow.
     - Drain mode still answers grant requests, because answering one isn't new work.
   - **Waiting, not refusing.** If the unreserved budget can't cover a request, the request waits while any other
     outstanding child that isn't itself asking may still hold an unused grant. That child returns it when it
-    settles. A child that is asking reports what it holds unused, and releases it only once it's answered and
-    ends. So when what asking children hold would cover a request, their requests are refused first, latest first,
-    and the request waits for them.
+    settles. A child that is asking reports what its subtree holds unused (its own unreserved budget, and what its
+    asking children reported), and releases it only once it's answered and ends. So when what asking children hold
+    would cover a request, their requests are refused first, latest first, and the request waits for them.
   - **The cap.** Only when the budget is exhausted **and** no outstanding child holds anything unused has the run
     truly reached its cap. The waiting requests then fail with `iteration_cap_exceeded`, "This run reached its limit
     of 100,000 loop iterations", and the loop's error policy applies.
@@ -940,7 +940,9 @@ abandons or restarts an activity or a child workflow.
 `running` in the projection. So a version the build can't load or compile fails the run with `version_unusable`
 before any step runs, and any other exception in workflow code fails it with `internal_error`. The workflow's
 outputs are evaluated under the same handlers and deadline as its steps. A cancel that arrives while the run's end
-is being written comes too late to unmake it: the write is shielded from the cancel, and the run's result stands. A
+is being written comes too late to unmake it: the write is shielded from the cancel, and the run's result stands.
+Likewise, an ending run waits for the children it cancelled to report back, and a cancel meanwhile doesn't reach
+them again: Temporal refuses a second cancel of the same child, and the workflow task could never complete. A
 cancel while the version loads cancels the run.
 
 **Workflow-code rules:**
