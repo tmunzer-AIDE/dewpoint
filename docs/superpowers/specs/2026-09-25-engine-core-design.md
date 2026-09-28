@@ -65,7 +65,8 @@
       projection is flushed before continuing;
     - the headroom test shows the cap saturated when draining begins, and bounds bytes as well as events;
     - the snapshot's contents, and the thresholds as run inputs;
-    - golden histories record every execution, and `engine_abi` becomes 2 (§6, §7, §8).
+    - golden histories record every execution, and `engine_abi` becomes 2: one value, which publishing stamps and
+      the build ID names (§6, §7, §8).
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
   This spec **narrows parent §6.4** (where CEL runs) and resolves the CEL item in parent §15.
 - **Evidence:** CEL spike, branch `spike/cel-evaluation`, commits `d6a8162` and `13a62e1`. See
@@ -998,7 +999,9 @@ cancel while the version loads cancels the run.
   - the yield-point timer.
 - **Replay gate:** CI replays each history against **its own** build.
 - **Upgrade paths:** snapshot-compatibility tests (N-1 → N) run only where an upgrade path is declared.
-- **`engine_abi`:** increments on any change that can alter the command sequence. A change that doesn't increment it must pass the previous build's golden replays.
+- **`engine_abi`:** one value per build. Publishing stamps and hashes a version with it (`workflow_versions`), and
+  the build ID names it, so a version and its runs' histories name the same ABI. It increments on any change that
+  can alter the command sequence. A change that doesn't increment it must pass the previous build's golden replays.
 
 ## 8. Run and step projection
 

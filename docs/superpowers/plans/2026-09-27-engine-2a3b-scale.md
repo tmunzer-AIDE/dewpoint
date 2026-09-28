@@ -54,13 +54,13 @@ Its "Handoff to 2a-3b" section lists what this plan consumes. The owner chose on
 1. **Go/no-go experiments ran first** (next section), on the locked temporalio 1.33.0 and its time-skipping server.
 2. **Every module was prototyped** in a scratch copy of `backend/` at `main` (`3012f3f`) until it passed its tests,
    `ruff`, `ruff format`, `mypy --strict` (134 source files) and `lint-imports` (10 contracts). The prototype's full
-   suite gives 996 passed and 8 skipped (the Linux-only evaluator tests), against `main`'s 902 passed.
+   suite gives 997 passed and 8 skipped (the Linux-only evaluator tests), against `main`'s 902 passed.
 3. **The code blocks below are those files, verbatim.** Diffs to existing files were generated from the prototype.
    Two files change too much for a readable diff, so their tasks give them whole ("Replace … with"):
    - `scheduler.py` in Task 2;
    - `workflow.py` in Task 5.
 4. **Each task was staged and checked on its own.** Stage *N* is `main` plus Tasks 1..*N*.
-   - Every stage passed the static checks and the **whole** suite: 919, 928, 930, 932, 962, 963, 968 and 996
+   - Every stage passed the static checks and the **whole** suite: 919, 928, 930, 932, 962, 963, 968 and 997
      passed, each with 8 skipped. Two first runs failed, and both re-runs passed:
      - one hit a timing flake in `tests/core/audit/test_anchor.py`, which fails about one run in three on `main` too;
      - one hit a cross-process test while I was rebuilding its stage directory.
@@ -461,6 +461,11 @@ Decisions 3, 8, 14 and 19 chose between readings of the spec. The owner ruled on
     The recorder now records every execution a scenario ran, breadth first: children and continued runs become
     `<name>--<n>.json`. The abi1 histories stay in the repo, and only their own build replays them (§7's gate). They
     also replay against this build (go/no-go 10).
+
+    `ENGINE_ABI` is one constant, in `dewpoint.engine`. 2a-3a's `build.py` kept a copy of its own: bumping only that
+    one would publish new versions stamped and hashed with ABI 1 while the build records and replays ABI 2. Task 8
+    has `build.py` read `dewpoint.engine`'s, and a publishing test checks that a new version's `engine_abi` and
+    `version_hash` use the ABI that the build id names.
 21. **Payload limits.** Each of these travels as a Temporal payload, limited to 2 MiB until 2b's claim check:
     - a batch's input: its items, and the outside results the body reads;
     - a sub-flow's input;
@@ -509,7 +514,7 @@ Decisions 3, 8, 14 and 19 chose between readings of the spec. The owner ruled on
     - draining adds at most about 1,000 events (`HEADROOM_EVENTS` in the test). The test also bounds the bytes its
       workload's drain adds at 512 KiB (`HEADROOM_BYTES`): a bound for that workload, not a guarantee for every
       payload, whose size isn't enforced until 2b's claim check (decision 21).
-  - `snapshot_format` 1 (`SNAPSHOT_FORMAT`, new); `ENGINE_ABI = 2` (Task 8).
+  - `snapshot_format` 1 (`SNAPSHOT_FORMAT`, new); `ENGINE_ABI = 2`, in `dewpoint.engine` only (Task 8).
 - **Names:**
   - workflow types `RunGraph` and `LoopBatch`, both on `dewpoint-engine`;
   - signals `request_budget` and `budget`;
@@ -575,7 +580,8 @@ backend/src/dewpoint/engine/runtime/
   nodes.py         batched LoopStart, SubflowStart; not_supported removed                              Task 5
   execution.py     Execution: the drive loop, units, children, budget signals, projection (Task 5);
                    continue-as-new (Task 7)                                                            Tasks 5 (new), 7
-  build.py         ENGINE_ABI = 2                                                                      Task 8
+  build.py         the build id reads dewpoint.engine's ENGINE_ABI                                     Task 8
+backend/src/dewpoint/engine/__init__.py       ENGINE_ABI = 2, the one constant                        Task 8
 backend/migrations/versions/0009_subruns.py   runs.kind and parent columns, checks, index, worker INSERT  Task 4 (new)
 backend/src/dewpoint/core/models/runs.py      RUN_KINDS and the columns                               Task 4
 backend/src/dewpoint/core/runs/service.py     ensure_run, children; list_runs lists top-level runs    Task 4
@@ -590,6 +596,8 @@ backend/tests/apps/worker/        test_run_graph_policies.py (Tasks 2, 5); harne
                                   test_run_graph_continue.py (new, Task 7)
 backend/tests/support/plugins/testkit.py      (modify) `testkit.slow` records its heartbeats' times      Task 7
 backend/tests/engine/replay/      scenarios, recorder, replay test, dewpoint-0.1.0+abi2/ histories    Task 8
+backend/tests/engine/cel/test_profile.py      the tripwire expects ABI 2                              Task 8
+backend/tests/apps/test_workflow_ops.py       a published version carries the build's ABI             Task 8
 docs/operations/runs.md                                                                               Task 8
 (spec revision 5.5 lands with this plan in the docs PR, before Task 1)
 ```
@@ -6662,6 +6670,10 @@ refused with `not_supported`. So `ENGINE_ABI` becomes 2, and a new directory of 
 (decision 20). It gets six new scenarios: `batches`, `subflows`, `failure_handler`, `grants`, `continue_as_new`
 and `drain`.
 
+`ENGINE_ABI` is one constant, in `dewpoint.engine`: publishing stamps and hashes a version with it, and the build id
+names it. 2a-3a's `build.py` kept its own copy, so this task has it read `dewpoint.engine`'s instead, and a
+publishing test ties the two together.
+
 A scenario that runs sub-flows publishes them through the recorder's store first, so a scenario's graph can be a
 function of the store. The recorder records every execution a scenario ran: the runs it continued as, then its
 children's executions, breadth first. The replay test replays each one against both workflow types.
@@ -6677,9 +6689,10 @@ The runs guide gains:
 - the new limits.
 
 **Files:**
-- Modify: `backend/src/dewpoint/engine/runtime/build.py`
+- Modify: `backend/src/dewpoint/engine/__init__.py`, `backend/src/dewpoint/engine/runtime/build.py`
 - Modify: `backend/tests/engine/replay/scenarios.py`, `backend/tests/engine/replay/record.py`,
   `backend/tests/engine/replay/test_replay.py`
+- Modify: `backend/tests/engine/cel/test_profile.py`, `backend/tests/apps/test_workflow_ops.py`
 - Create: `backend/tests/engine/replay/dewpoint-0.1.0+abi2/*.json` (recorded, not written by hand)
 - Modify: `docs/operations/runs.md`
 
@@ -6688,7 +6701,8 @@ The runs guide gains:
   - from Task 5, `MemoryStore.publish`, `LoopBatch`, and the harness's `start(client, store, g, trigger, **options)`;
   - from Task 7, `RunInput.checkpoint_events` and `drain_events`.
 - Produces:
-  - `ENGINE_ABI = 2`, so the build id is `dewpoint-0.1.0+abi2`;
+  - `dewpoint.engine.ENGINE_ABI = 2`, the only one: new versions are published with it, and `build.py` reads it,
+    so the build id is `dewpoint-0.1.0+abi2`;
   - `Scenario.graph: G | Callable[[MemoryStore], G]` and `Scenario.build(store) -> G`;
   - `record.executions(client, workflow_id, run_id) -> list[WorkflowHistory]`;
   - the history files `<name>.json` and `<name>--<n>.json`.
@@ -6831,7 +6845,7 @@ diff --git a/backend/tests/engine/replay/record.py b/backend/tests/engine/replay
 
  Only scenarios the build's directory lacks are recorded; a recorded history is never rewritten. A change that alters
 -the command sequence increments ENGINE_ABI (engine/runtime/build.py), which starts a new directory."""
-+the command sequence increments ENGINE_ABI (engine/runtime/build.py), which starts a new directory.
++the command sequence increments ENGINE_ABI (`dewpoint.engine`), which starts a new directory.
 +
 +A scenario records every execution it ran: `<name>.json` is the run's first execution, and `<name>--<n>.json` each
 +other one, in the order they're found: the runs it continued as, then its children's, and theirs."""
@@ -6932,29 +6946,128 @@ diff --git a/backend/tests/engine/replay/test_replay.py b/backend/tests/engine/r
 +    await Replayer(workflows=[RunGraph, LoopBatch]).replay_workflow(history)
 ```
 
+The profile's tripwire expects the new ABI. In `backend/tests/engine/cel/test_profile.py`:
+
+```diff
+diff --git a/backend/tests/engine/cel/test_profile.py b/backend/tests/engine/cel/test_profile.py
+--- a/backend/tests/engine/cel/test_profile.py
++++ b/backend/tests/engine/cel/test_profile.py
+@@ -13,4 +13,4 @@
+ def test_local_evaluation_is_a_build_constant_tied_to_the_engine_abi() -> None:
+     """Tripwire (spec §5.9 rollout): LOCAL_CEL_PROFILE is part of engine_abi. Changing it without bumping ENGINE_ABI
+     would let an open run replay on a build that routes its CEL differently. Update both, then this pair."""
+-    assert (ENGINE_ABI, profile.LOCAL_CEL_PROFILE) == (1, None)
++    assert (ENGINE_ABI, profile.LOCAL_CEL_PROFILE) == (2, None)
+```
+
+A published version carries the ABI that the build id names, in its row and in its hash. In
+`backend/tests/apps/test_workflow_ops.py`:
+
+```diff
+diff --git a/backend/tests/apps/test_workflow_ops.py b/backend/tests/apps/test_workflow_ops.py
+--- a/backend/tests/apps/test_workflow_ops.py
++++ b/backend/tests/apps/test_workflow_ops.py
+@@ -6,6 +6,7 @@
+ import pytest
+ from sqlalchemy import text
+
++import dewpoint
+ from dewpoint.apps import workflow_ops
+ from dewpoint.core.auth.users import create_user
+ from dewpoint.core.db import tenant_scope
+@@ -15,6 +16,8 @@
+ from dewpoint.core.workflows import service
+ from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
+ from dewpoint.engine.cel.record import ExpressionRecord
++from dewpoint.engine.graph.model import version_hash
++from dewpoint.engine.runtime.build import build_id
+ from tests.apps.api.helpers import PW
+ from tests.support.graphs import G, cel, nid, ref
+ from tests.support.registry import sync_test_plugins
+@@ -101,6 +104,27 @@
+         await tenant_scope(s, ctx.tenant_id)
+         wf = await service.get_workflow(s, ctx.tenant_id, wf_id)
+         assert wf is not None and wf.active_version_id == v.id
++
++
++async def test_a_published_version_carries_the_abi_of_this_build(
++    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
++) -> None:
++    """Spec §7: a version is stamped and hashed with the ABI this build's id names, the one its runs' histories are
++    recorded and replayed under."""
++    await sync_test_plugins(admin_sessionmaker)
++    ctx = await actor(owner_sessionmaker)
++    wf_id = await create(api_sessionmaker, ctx, ECHO_GRAPH)
++    v = (await publish(api_sessionmaker, ctx, wf_id, api_settings)).version
++    assert v is not None
++    abi = int(build_id(dewpoint.__version__).rpartition("+abi")[2])
++    assert v.engine_abi == abi
++    assert v.version_hash == version_hash(
++        graph_hash=v.graph_hash,
++        subflow_pins={},
++        failure_handler_version_id=None,
++        cel_profile=v.cel_profile,
++        engine_abi=abi,
++    )
+
+
+ async def test_publish_refuses_invalid_graphs_and_stale_revisions(
+```
+
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `cd backend && uv run pytest -q tests/engine/replay`
-Expected: 1 failed, 9 passed. `test_every_scenario_is_recorded_for_this_build` fails with "run `uv run python -m
-tests.engine.replay.record`": the abi1 directory lacks the six new scenarios. The 8 abi1 histories still replay.
+Run: `cd backend && uv run pytest -q tests/engine/replay tests/engine/cel/test_profile.py tests/apps/test_workflow_ops.py`
+Expected: 2 failed, 24 passed.
+- `test_every_scenario_is_recorded_for_this_build` fails with "run `uv run python -m tests.engine.replay.record`":
+  the abi1 directory lacks the six new scenarios. The 8 abi1 histories still replay.
+- `test_local_evaluation_is_a_build_constant_tied_to_the_engine_abi` fails: `(1, None) == (2, None)`.
+- `test_a_published_version_carries_the_abi_of_this_build` passes: publishing and the build id both still say 1.
+  It fails if only one of them is bumped.
 
 - [ ] **Step 3: Bump the ABI and record**
 
-In `backend/src/dewpoint/engine/runtime/build.py`:
+`ENGINE_ABI` becomes 2 in `dewpoint.engine`. In `backend/src/dewpoint/engine/__init__.py`:
+
+```diff
+diff --git a/backend/src/dewpoint/engine/__init__.py b/backend/src/dewpoint/engine/__init__.py
+--- a/backend/src/dewpoint/engine/__init__.py
++++ b/backend/src/dewpoint/engine/__init__.py
+@@ -1,4 +1,7 @@
+ # SPDX-License-Identifier: Apache-2.0
+ """Pure engine code: graph model, validator, registry checks. No DB, no network, no clock."""
+
+-ENGINE_ABI = 1  # bump on any change that can alter a run's command sequence (spec §7)
++# The one engine ABI (spec §7): publishing stamps and hashes a version with it, and the build id names it. Bump it on
++# any change that can alter a run's command sequence. 2: 2a-3b's loop batches, sub-flows, the failure handler and
++# continue-as-new.
++ENGINE_ABI = 2
+```
+
+`build.py` reads it instead of keeping its own. In `backend/src/dewpoint/engine/runtime/build.py`:
 
 ```diff
 diff --git a/backend/src/dewpoint/engine/runtime/build.py b/backend/src/dewpoint/engine/runtime/build.py
 --- a/backend/src/dewpoint/engine/runtime/build.py
 +++ b/backend/src/dewpoint/engine/runtime/build.py
-@@ -4,7 +4,7 @@
- ENGINE_ABI increments on any change that can alter `RunGraph`'s command sequence; its golden histories live in
- `tests/engine/replay/<build id>/`. A change that leaves it alone must still replay that directory."""
+@@ -1,14 +1,14 @@
+ # SPDX-License-Identifier: Apache-2.0
+ """The engine's build id (spec §7): `dewpoint-<version>+abi<ENGINE_ABI>`.
+
+-ENGINE_ABI increments on any change that can alter `RunGraph`'s command sequence; its golden histories live in
+-`tests/engine/replay/<build id>/`. A change that leaves it alone must still replay that directory."""
++ENGINE_ABI (`dewpoint.engine`) increments on any change that can alter `RunGraph`'s command sequence; its golden
++histories live in `tests/engine/replay/<build id>/`. A change that leaves it alone must still replay that directory."""
 
 -ENGINE_ABI = 1
-+ENGINE_ABI = 2  # 2a-3b: loop batches, sub-flows, the failure handler and continue-as-new
++from dewpoint.engine import ENGINE_ABI
 
 
  def build_id(version: str) -> str:
+     return f"dewpoint-{version}+abi{ENGINE_ABI}"
+
+
+-__all__ = ["ENGINE_ABI", "build_id"]
++__all__ = ["build_id"]
 ```
 
 Run: `cd backend && uv run python -m tests.engine.replay.record`
@@ -6978,8 +7091,8 @@ recordings. Planning saw 36 and 37 files. Every recording replays.
 
 - [ ] **Step 4: Run the replays**
 
-Run: `cd backend && uv run pytest -q tests/engine/replay`
-Expected: every test passes: one per history file, plus 2 (38 passed with planning's 36 files).
+Run: `cd backend && uv run pytest -q tests/engine/replay tests/engine/cel/test_profile.py tests/apps/test_workflow_ops.py`
+Expected: every test passes: one per history file, plus 18 (54 passed with planning's 36 files).
 
 Check that the replay gate bites. Make a batch's workflow id differ from what was recorded:
 
@@ -7089,13 +7202,14 @@ diff --git a/docs/operations/runs.md b/docs/operations/runs.md
 - [ ] **Step 6: The whole suite, checks and commit**
 
 Run: `cd backend && uv run pytest -q`
-Expected: every test passes, with 8 skipped (the Linux-only evaluator tests). Planning's prototype gave 996
+Expected: every test passes, with 8 skipped (the Linux-only evaluator tests). Planning's prototype gave 997
 passed.
 
 ```bash
 cd backend && uv run ruff check . && uv run ruff format --check . && uv run mypy src && uv run lint-imports \
   && uv run pytest -q tests/engine \
-  && git add src/dewpoint/engine/runtime/build.py tests/engine/replay ../docs/operations/runs.md \
+  && git add src/dewpoint/engine/__init__.py src/dewpoint/engine/runtime/build.py tests/engine/replay \
+       tests/engine/cel/test_profile.py tests/apps/test_workflow_ops.py ../docs/operations/runs.md \
   && git commit -m "test(engine): ENGINE_ABI 2 and golden histories of every execution; the runs guide covers scale" \
        -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
