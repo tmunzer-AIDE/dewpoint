@@ -10,8 +10,9 @@ that isn't itself asking. Only then does a child execution ask its parent, for i
 1,000, so it asks rarely), reporting what its subtree holds unused meanwhile: its own unreserved budget and what
 its asking children reported. So a child asks only when its whole subtree is short. A child that asks holds its
 unused budget until it's answered and ends: when what asking children hold would cover a need, their asks are
-refused first, latest first, and the need waits for them to release it. A need is refused only when nothing unused
-is left that could cover it: the cap is exact.
+refused first, latest first, and the need waits for them. What they hold may come back, not must: a refused child
+can still spend some before it ends. The need is decided again once they have settled. A need is refused only when
+nothing unused is left that could cover it: the cap is exact.
 
 It is pure and deterministic, and its state is plain data, carried through continue-as-new."""
 
@@ -28,7 +29,7 @@ class Need:
     key: str  # the requester's own name for it: a child's request id, or the scheduler's unit
     need: int  # at least this much, or nothing
     want: int  # up to this much: a child's chunk; a local need wants exactly `need`
-    held: int = 0  # what a child's subtree holds unused while it asks: released if it's refused and ends
+    held: int = 0  # what a child's subtree holds unused while it asks: it may come back if the ask is refused
 
 
 @dataclass(frozen=True)
@@ -39,8 +40,8 @@ class Answer:
 
 @dataclass(frozen=True)
 class Ask:
-    """What this execution asks its parent for: its shortfall, up to a chunk. `held` is what it holds unused meanwhile,
-    which its parent can have if it refuses the ask."""
+    """What this execution asks its parent for: its shortfall, up to a chunk. `held` is what its subtree holds unused
+    meanwhile, which may come back to its parent if the ask is refused: it can still spend some before it ends."""
 
     need: int
     want: int
@@ -124,8 +125,9 @@ class Budget:
 
     def _refuse_asking(self, head: Need, free: int, answers: list[Answer]) -> bool:
         """Other children that are asking hold what they report (`held`) until they end, and they end only once
-        answered. When what they hold would cover the head, refuse their needs, latest first, until it does: they
-        release it when they end, and the head waits for them. Otherwise refuse none, and the head is refused."""
+        answered. When what they hold would cover the head, refuse their needs, latest first, until it does, and the
+        head waits for them. What they hold may come back when they end, or they may spend some first: the head is
+        decided again once they have settled. Otherwise refuse none, and the head is refused."""
         chosen: list[str] = []
         held = 0
         for n in reversed(self.waiting):
@@ -143,7 +145,8 @@ class Budget:
     def _held(self) -> int:
         """What this execution's subtree holds unused as it asks: its own unreserved budget, and what each of its
         asking children reported. It asks only once every other child is asking (see `_may_release`), and it
-        answers nothing while it asks, so that's all it would release if it were refused and ended."""
+        answers nothing while it asks, so that's what may come back if its ask is refused. It may not all come back:
+        once refused, it can still spend some before it ends."""
         return max(self.unreserved, 0) + sum(n.held for n in self.waiting if n.requester != LOCAL)
 
     def _may_release(self, head: Need) -> bool:
