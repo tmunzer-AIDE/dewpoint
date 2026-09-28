@@ -325,7 +325,10 @@ class Execution:
                     )
                     break
                 for key in sorted((k for k, t in tasks.items() if t in done), key=self._rank):
-                    effect = tasks.pop(key).result()
+                    task = tasks.pop(key)
+                    if key[0] == "cancelled" and task.cancelled():
+                        continue  # a unit we cancelled ended so: its cancel isn't this execution's
+                    effect = task.result()
                     if effect is not None and key[0] != "cancelled":
                         self._apply(key, effect)
         finally:

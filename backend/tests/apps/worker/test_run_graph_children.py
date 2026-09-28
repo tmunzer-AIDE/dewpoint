@@ -6,6 +6,7 @@ its iterations from one budget per logical run."""
 import asyncio
 import dataclasses
 import json
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -98,6 +99,22 @@ async def test_a_failed_item_in_a_batch_follows_the_loops_policy(
         assert [f["index"] for f in result.outputs["failures"]] == [120]  # in the second batch, by its own index
     else:
         assert result.error["code"] == "testkit.rejected"
+
+
+async def test_an_item_that_fails_in_a_batch_while_a_sibling_runs_cancels_only_that_sibling(
+    env: WorkflowEnvironment,
+) -> None:
+    store = MemoryStore()
+    g = graph(failures=ref("steps.l.output.failures"))
+    g.node("l", LOOP, {"items": list(range(150)), "on_item_error": "continue", "concurrency": 10})
+    g.node("f", "testkit.ambiguous_send@1", {"outcome": cel("item == 120 ? 'rejected' : 'sent'")})
+    g.node("d", "flow.delay@1", {"duration_s": cel("item == 120 ? 3600 : 0")})
+    g.edge("l", "f", "body").edge("l", "d", "body")
+    handle, result = await finished(env, store, g, {})
+    assert (result.status, result.iterations) == ("succeeded", 150)
+    assert [f["index"] for f in result.outputs["failures"]] == [120]
+    info = await handle.describe()
+    assert info.close_time and info.close_time - info.start_time < timedelta(hours=1)  # the delay was cancelled
 
 
 async def test_a_fail_node_inside_a_batch_ends_the_whole_run(env: WorkflowEnvironment) -> None:

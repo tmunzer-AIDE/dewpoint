@@ -85,6 +85,23 @@ async def test_continue_records_failed_items_and_stop_fails_the_loop(env: Workfl
     assert stopped.status == "failed" and stopped.error and stopped.error["code"] == "testkit.rejected"
 
 
+async def test_an_iteration_that_fails_while_a_sibling_runs_cancels_only_that_sibling(env: WorkflowEnvironment) -> None:
+    """The failed iteration's other step is cancelled, and the loop carries on under `continue`: the run isn't."""
+    store = MemoryStore()
+    g = graph(out=ref("steps.l.output"))
+    g.node("l", LOOP, {"items": [0, 1, 2], "on_item_error": "continue", "collect": ref("item")})
+    g.node("f", "testkit.ambiguous_send@1", {"outcome": cel("item == 0 ? 'rejected' : 'sent'")})
+    g.node("d", "flow.delay@1", {"duration_s": cel("item == 0 ? 3600 : 0")})
+    g.edge("l", "f", "body").edge("l", "d", "body")
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, TRIGGER)
+        result = await asyncio.wait_for(handle.result(), 60)
+        info = await handle.describe()
+    assert (result.status, result.iterations) == ("succeeded", 3)
+    assert [f["index"] for f in result.outputs["out"]["failures"]] == [0]
+    assert info.close_time and info.close_time - info.start_time < timedelta(hours=1)  # the delay was cancelled
+
+
 async def test_the_item_cap_fails_the_loop(env: WorkflowEnvironment) -> None:
     store = MemoryStore()
     g = graph(code=ref("steps.l.error.code", default="none"))
