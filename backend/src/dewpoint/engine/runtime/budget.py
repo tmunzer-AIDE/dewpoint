@@ -7,8 +7,10 @@ iteration, a filter's items) and its children's requests.
 
 A need the unreserved budget can't cover waits while another outstanding child may still release budget: a child
 that isn't itself asking. Only then does a child execution ask its parent, for its shortfall (and up to a chunk of
-1,000, so it asks rarely). So a child asks only when its whole subtree is short, and a need is refused only when
-nothing unused is left anywhere: the cap is exact.
+1,000, so it asks rarely), reporting what it holds unused meanwhile. So a child asks only when its whole subtree is
+short. A child that asks holds its unused budget until it's answered and ends: when what asking children hold would
+cover a need, their asks are refused first, latest first, and the need waits for them to release it. A need is
+refused only when nothing unused is left that could cover it: the cap is exact.
 
 It is pure and deterministic, and its state is plain data, carried through continue-as-new."""
 
@@ -25,6 +27,7 @@ class Need:
     key: str  # the requester's own name for it: a child's request id, or the scheduler's unit
     need: int  # at least this much, or nothing
     want: int  # up to this much: a child's chunk; a local need wants exactly `need`
+    held: int = 0  # what a child holds unused while it asks: it releases it if it's refused and ends
 
 
 @dataclass(frozen=True)
@@ -35,10 +38,12 @@ class Answer:
 
 @dataclass(frozen=True)
 class Ask:
-    """What this execution asks its parent for: its shortfall, up to a chunk."""
+    """What this execution asks its parent for: its shortfall, up to a chunk. `held` is what it holds unused meanwhile,
+    which its parent can have if it refuses the ask."""
 
     need: int
     want: int
+    held: int = 0
 
 
 @dataclass
@@ -109,10 +114,30 @@ class Budget:
                     break
                 self.asking = True
                 shortfall = head.need - max(free, 0)
-                return answers, Ask(shortfall, max(CHUNK, shortfall))
+                return answers, Ask(shortfall, max(CHUNK, shortfall), max(free, 0))
+            if self._refuse_asking(head, free, answers):
+                break  # children that were asking hold enough: refused, they end and release it; wait for them
             answers.append(Answer(head, 0))
             self.waiting.pop(0)
         return answers, None
+
+    def _refuse_asking(self, head: Need, free: int, answers: list[Answer]) -> bool:
+        """Other children that are asking hold what they report (`held`) until they end, and they end only once
+        answered. When what they hold would cover the head, refuse their needs, latest first, until it does: they
+        release it when they end, and the head waits for them. Otherwise refuse none, and the head is refused."""
+        chosen: list[str] = []
+        held = 0
+        for n in reversed(self.waiting):
+            if free + held >= head.need:
+                break
+            if n.requester not in (LOCAL, head.requester) and n.requester not in chosen and n.held > 0:
+                chosen.append(n.requester)
+                held += n.held
+        if free + held < head.need:
+            return False
+        answers.extend(Answer(n, 0) for n in self.waiting if n.requester in chosen)
+        self.waiting = [n for n in self.waiting if n.requester not in chosen]
+        return True
 
     def _may_release(self, head: Need) -> bool:
         """Whether an outstanding child other than the requester may still release budget: one that isn't asking."""
@@ -125,7 +150,7 @@ class Budget:
             "root": self.root,
             "used": self.used,
             "reserved": dict(self.reserved),
-            "waiting": [[n.requester, n.key, n.need, n.want] for n in self.waiting],
+            "waiting": [[n.requester, n.key, n.need, n.want, n.held] for n in self.waiting],
             "asking": self.asking,
             "refused": self.refused,
         }
@@ -137,7 +162,7 @@ class Budget:
             root=bool(data["root"]),
             used=int(data["used"]),
             reserved={str(k): int(v) for k, v in data["reserved"].items()},
-            waiting=[Need(str(r), str(k), int(n), int(w)) for r, k, n, w in data["waiting"]],
+            waiting=[Need(str(r), str(k), int(n), int(w), int(h)) for r, k, n, w, h in data["waiting"]],
             asking=bool(data["asking"]),
             refused=bool(data["refused"]),
         )

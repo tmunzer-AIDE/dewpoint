@@ -90,6 +90,55 @@ def test_a_refused_child_waits_for_its_own_children_and_never_asks_again() -> No
     assert [a.granted for a in answers] == [0, 0] and ask is None and mid.refused
 
 
+def test_a_feasible_need_waits_for_an_asking_child_that_holds_enough_and_is_refused_first() -> None:
+    """Checkpoint-1 review: the root's filter needs 8 and has 4. Child `a` holds 6 unused and asks for 5 more. The
+    filter could have 8 once `a` releases its 6, which it does only once it's answered and ends. So `a` is refused,
+    and the filter waits for it. Before, both were refused."""
+    root = Budget(10, root=True)
+    assert root.start_child("a", 6) == 6
+    root.request(local("filter", 8))
+    root.request(Need("a", "r1", 5, CHUNK, held=6))
+    assert root.decide() == ([Answer(Need("a", "r1", 5, CHUNK, held=6), 0)], None)
+    root.settle_child("a", 0)  # refused, `a` ends without using its grant
+    assert root.decide() == ([Answer(local("filter", 8), 8)], None) and root.used == 8
+
+
+def test_an_asking_child_that_holds_nothing_is_not_waited_for() -> None:
+    root = Budget(10, root=True)
+    root.start_child("a", 6)
+    root.request(local("filter", 8))
+    root.request(Need("a", "r1", 5, CHUNK, held=0))  # `a` used its 6
+    answers, _ = root.decide()
+    assert [(x.need.requester, x.granted) for x in answers] == [(LOCAL, 0), ("a", 0)]  # nothing could cover either
+
+
+def test_only_as_many_asking_children_are_refused_as_the_need_takes_latest_first() -> None:
+    root = Budget(20, root=True)
+    root.start_child("a", 6)
+    root.start_child("b", 6)
+    root.request(local("filter", 12))  # 8 free
+    root.request(Need("a", "r1", 5, CHUNK, held=6))
+    root.request(Need("b", "r1", 5, CHUNK, held=6))
+    answers, _ = root.decide()
+    assert [(x.need.requester, x.granted) for x in answers] == [("b", 0)]  # `b`'s 6 is enough, and it asked last
+    root.settle_child("b", 0)
+    answers, _ = root.decide()
+    assert [(x.need.requester, x.granted) for x in answers] == [(LOCAL, 12), ("a", 0)]
+
+
+def test_a_refused_child_refuses_its_own_asking_children_before_its_own_need() -> None:
+    mid = Budget(10, root=False)
+    mid.start_child("leaf", 6)
+    mid.request(local("filter", 8))
+    mid.request(Need("leaf", "r1", 5, CHUNK, held=6))
+    assert mid.decide() == ([], Ask(4, CHUNK, 4))  # its subtree looks short: it asks its parent first
+    mid.answered(0)
+    answers, _ = mid.decide()
+    assert [(x.need.requester, x.granted) for x in answers] == [("leaf", 0)]  # the leaf's 6 can cover the filter
+    mid.settle_child("leaf", 1)
+    assert mid.decide() == ([Answer(local("filter", 8), 8)], None)
+
+
 def test_no_premature_rejection_one_busy_child_among_ten_takes_nearly_everything() -> None:
     """Spec §10: with 10 child slots and one busy child, that child can use nearly the whole budget."""
     cap = 100_000
@@ -112,7 +161,7 @@ def test_no_premature_rejection_one_busy_child_among_ten_takes_nearly_everything
 
 
 def test_the_state_round_trips_through_json() -> None:
-    b = Budget(100, root=False, used=3, reserved={"c": 4}, waiting=[Need("c", "r", 1, CHUNK)], asking=True)
+    b = Budget(100, root=False, used=3, reserved={"c": 4}, waiting=[Need("c", "r", 1, CHUNK, held=2)], asking=True)
     assert Budget.from_json(b.to_json()) == b
 
 
@@ -157,7 +206,7 @@ class Tree:
                 self.mail.append(("answer", child, a.granted))
         if ask is not None and e.parent is not None:
             e.counter += 1
-            self.mail.append(("ask", e.parent, Need(e.name, str(e.counter), ask.need, ask.want)))
+            self.mail.append(("ask", e.parent, Need(e.name, str(e.counter), ask.need, ask.want, ask.held)))
 
     def deliver(self, i: int) -> None:
         kind, to, payload = self.mail.pop(i)
