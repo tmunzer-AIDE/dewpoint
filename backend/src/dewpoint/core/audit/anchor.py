@@ -93,9 +93,14 @@ async def verify_anchors(
             problems.append(f"{scope}:{seq}: hash mismatch with external anchor")
         else:
             anchored[scope] = max(anchored.get(scope, 0), seq)
-    cutoff = (now or datetime.now(UTC)) - max_lag
+    # audit_append stamps created_at with the database's clock, so "now" defaults to that clock, not this host's:
+    # any skew between the two would move the window (a just-written row would dodge max_lag=0)
     old_rows = await s.execute(
-        text("select scope, max(seq) from audit_log where created_at <= :c group by scope"), {"c": cutoff}
+        text(
+            "select scope, max(seq) from audit_log where created_at"
+            " <= coalesce(cast(:now as timestamptz), statement_timestamp()) - cast(:lag as interval) group by scope"
+        ),
+        {"now": now, "lag": max_lag},
     )
     for scope, max_seq in old_rows.all():
         if anchored.get(scope, 0) < max_seq:
@@ -105,15 +110,17 @@ async def verify_anchors(
 
 async def anchor_freshness(s: AsyncSession, max_age: timedelta, now: datetime | None = None) -> list[str]:
     """Liveness, not integrity: scopes whose rows older than max_age have no anchor recorded at or after them.
-    Reads the audit_anchors table the anchor job maintains; `audit verify` checks the signed external copy."""
-    cutoff = (now or datetime.now(UTC)) - max_age
+    Reads the audit_anchors table the anchor job maintains; `audit verify` checks the signed external copy.
+    Ages are measured on the database's clock, the one audit_append stamps created_at with, unless `now` is given."""
     rows = await s.execute(
         text(
             "select l.scope, max(l.seq) as due,"
             " (select max(a.seq) from audit_anchors a where a.scope = l.scope) as anchored"
-            " from audit_log l where l.created_at <= :cutoff group by l.scope order by l.scope"
+            " from audit_log l"
+            " where l.created_at <= coalesce(cast(:now as timestamptz), statement_timestamp()) - cast(:lag as interval)"
+            " group by l.scope order by l.scope"
         ),
-        {"cutoff": cutoff},
+        {"now": now, "lag": max_age},
     )
     return [
         f"{scope}: rows up to seq {due} older than {max_age} have no anchor (latest anchored seq: {anchored or 'none'})"

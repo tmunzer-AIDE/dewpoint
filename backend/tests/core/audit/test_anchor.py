@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 import uuid
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 
+import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import text
 
-from dewpoint.core.audit.anchor import FileAnchorSink, anchor_all, verify_anchors
+from dewpoint.core.audit.anchor import FileAnchorSink, anchor_all, anchor_freshness, verify_anchors
 from dewpoint.core.audit.service import record, verify_chain
 from dewpoint.core.db import tenant_scope
 
@@ -58,6 +59,38 @@ async def test_verification_fails_closed(tmp_path, api_sessionmaker, auditor_ses
         assert await verify_anchors(s, sink.entries(), key.public_key()) == []  # within max_lag: fine
         lagging = await verify_anchors(s, sink.entries(), key.public_key(), max_lag=timedelta(0))
     assert any("not anchored" in p for p in lagging)
+
+
+@pytest.mark.parametrize("skew", [timedelta(hours=-2), timedelta(hours=2)])
+async def test_lag_is_judged_on_the_database_clock(
+    skew: timedelta, monkeypatch: pytest.MonkeyPatch, tmp_path, api_sessionmaker, auditor_sessionmaker
+) -> None:
+    # created_at comes from the database's clock, so the verifier's own clock must not move the window:
+    # a database clock only milliseconds ahead of the verifier's used to hide a just-written row at max_lag=0
+    class SkewedClock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> "SkewedClock":
+            return super().now(tz) + skew
+
+    monkeypatch.setattr("dewpoint.core.audit.anchor.datetime", SkewedClock)
+    key, t = Ed25519PrivateKey.generate(), uuid.uuid4()
+    sink = FileAnchorSink(tmp_path / "anchors.jsonl", key)
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, t)
+        await record(s, tenant_id=t, actor_id=None, action="member.add")
+    async with auditor_sessionmaker() as s, s.begin():
+        await anchor_all(s, sink)
+    async with api_sessionmaker() as s, s.begin():  # a new row after the last anchor
+        await tenant_scope(s, t)
+        await record(s, tenant_id=t, actor_id=None, action="member.remove")
+    async with auditor_sessionmaker() as s:
+        lagging = await verify_anchors(s, sink.entries(), key.public_key(), max_lag=timedelta(0))
+        assert any("not anchored" in p for p in lagging)
+        assert await verify_anchors(s, sink.entries(), key.public_key(), max_lag=timedelta(hours=1)) == []
+        assert len(await anchor_freshness(s, timedelta(0))) == 1
+        assert await anchor_freshness(s, timedelta(hours=1)) == []
+        # an explicit `now` still overrides the database's clock: as of 2000, nothing is due yet
+        assert await anchor_freshness(s, timedelta(0), now=datetime(2000, 1, 1, tzinfo=UTC)) == []
 
 
 async def test_auditor_role_is_narrow(auditor_sessionmaker) -> None:
