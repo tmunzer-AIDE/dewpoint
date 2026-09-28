@@ -7,10 +7,11 @@ iteration, a filter's items) and its children's requests.
 
 A need the unreserved budget can't cover waits while another outstanding child may still release budget: a child
 that isn't itself asking. Only then does a child execution ask its parent, for its shortfall (and up to a chunk of
-1,000, so it asks rarely), reporting what it holds unused meanwhile. So a child asks only when its whole subtree is
-short. A child that asks holds its unused budget until it's answered and ends: when what asking children hold would
-cover a need, their asks are refused first, latest first, and the need waits for them to release it. A need is
-refused only when nothing unused is left that could cover it: the cap is exact.
+1,000, so it asks rarely), reporting what its subtree holds unused meanwhile: its own unreserved budget and what
+its asking children reported. So a child asks only when its whole subtree is short. A child that asks holds its
+unused budget until it's answered and ends: when what asking children hold would cover a need, their asks are
+refused first, latest first, and the need waits for them to release it. A need is refused only when nothing unused
+is left that could cover it: the cap is exact.
 
 It is pure and deterministic, and its state is plain data, carried through continue-as-new."""
 
@@ -27,7 +28,7 @@ class Need:
     key: str  # the requester's own name for it: a child's request id, or the scheduler's unit
     need: int  # at least this much, or nothing
     want: int  # up to this much: a child's chunk; a local need wants exactly `need`
-    held: int = 0  # what a child holds unused while it asks: it releases it if it's refused and ends
+    held: int = 0  # what a child's subtree holds unused while it asks: released if it's refused and ends
 
 
 @dataclass(frozen=True)
@@ -114,7 +115,7 @@ class Budget:
                     break
                 self.asking = True
                 shortfall = head.need - max(free, 0)
-                return answers, Ask(shortfall, max(CHUNK, shortfall), max(free, 0))
+                return answers, Ask(shortfall, max(CHUNK, shortfall), self._held())
             if self._refuse_asking(head, free, answers):
                 break  # children that were asking hold enough: refused, they end and release it; wait for them
             answers.append(Answer(head, 0))
@@ -138,6 +139,12 @@ class Budget:
         answers.extend(Answer(n, 0) for n in self.waiting if n.requester in chosen)
         self.waiting = [n for n in self.waiting if n.requester not in chosen]
         return True
+
+    def _held(self) -> int:
+        """What this execution's subtree holds unused as it asks: its own unreserved budget, and what each of its
+        asking children reported. It asks only once every other child is asking (see `_may_release`), and it
+        answers nothing while it asks, so that's all it would release if it were refused and ended."""
+        return max(self.unreserved, 0) + sum(n.held for n in self.waiting if n.requester != LOCAL)
 
     def _may_release(self, head: Need) -> bool:
         """Whether an outstanding child other than the requester may still release budget: one that isn't asking."""

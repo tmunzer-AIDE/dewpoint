@@ -131,12 +131,43 @@ def test_a_refused_child_refuses_its_own_asking_children_before_its_own_need() -
     mid.start_child("leaf", 6)
     mid.request(local("filter", 8))
     mid.request(Need("leaf", "r1", 5, CHUNK, held=6))
-    assert mid.decide() == ([], Ask(4, CHUNK, 4))  # its subtree looks short: it asks its parent first
+    assert mid.decide() == ([], Ask(4, CHUNK, 10))  # it asks its parent first, holding its 4 and its leaf's 6
     mid.answered(0)
     answers, _ = mid.decide()
     assert [(x.need.requester, x.granted) for x in answers] == [("leaf", 0)]  # the leaf's 6 can cover the filter
     mid.settle_child("leaf", 1)
     assert mid.decide() == ([Answer(local("filter", 8), 8)], None)
+
+
+def test_an_asking_child_reports_what_its_asking_children_hold_too() -> None:
+    """Checkpoint-1 re-review: the root has 10 and grants 6 to `mid`, which grants all 6 to `leaf`. The root needs 8,
+    `mid` 7 and `leaf` 8. `leaf` asks, holding 6. `mid` holds nothing itself, but its asking leaf's 6 is released if
+    they're both refused, so it reports 6. The root refuses `mid`'s ask, and its 8 waits; the nested needs are then
+    refused, all 10 come back, and the root's 8 is granted. Before, `mid` reported 0, and the root refused its 8 while
+    the whole tree held 10 unused."""
+    root, mid, leaf = Budget(10, root=True), Budget(6, root=False), Budget(6, root=False)
+    assert root.start_child("mid", 6) == 6 and mid.start_child("leaf", 6) == 6
+    leaf.request(local("filter", 8))
+    answers, leaf_ask = leaf.decide()
+    assert (answers, leaf_ask) == ([], Ask(2, CHUNK, 6))
+    assert leaf_ask is not None
+    mid.request(local("filter", 7))
+    mid.request(Need("leaf", "1", leaf_ask.need, leaf_ask.want, leaf_ask.held))
+    answers, mid_ask = mid.decide()
+    assert (answers, mid_ask) == ([], Ask(7, CHUNK, 6))  # nothing of its own, but its asking leaf holds 6
+    assert mid_ask is not None
+    root.request(local("filter", 8))
+    root.request(Need("mid", "1", mid_ask.need, mid_ask.want, mid_ask.held))
+    answers, _ = root.decide()
+    assert [(a.need.requester, a.granted) for a in answers] == [("mid", 0)]  # the root's 8 waits for mid's subtree
+    mid.answered(0)
+    answers, _ = mid.decide()
+    assert [(a.need.requester, a.granted) for a in answers] == [(LOCAL, 0), ("leaf", 0)]  # 7 can't come from 6
+    leaf.answered(0)
+    assert leaf.decide() == ([Answer(local("filter", 8), 0)], None)
+    mid.settle_child("leaf", leaf.used)  # the leaf ends, having used nothing
+    root.settle_child("mid", mid.used)  # and so does mid
+    assert root.decide() == ([Answer(local("filter", 8), 8)], None)
 
 
 def test_no_premature_rejection_one_busy_child_among_ten_takes_nearly_everything() -> None:
@@ -188,6 +219,7 @@ class Tree:
     everyone: list[Execution]
     mail: list[tuple[str, Execution, object]] = field(default_factory=list)  # (kind, to, payload)
     refusals: list[tuple[int, int]] = field(default_factory=list)  # (need, unused anywhere at that moment)
+    root_refusals: list[tuple[int, int]] = field(default_factory=list)  # the root's own, likewise
 
     def served(self) -> int:
         return sum(e.served for e in self.everyone)
@@ -201,6 +233,8 @@ class Tree:
                     e.served += n
                 else:
                     self.refusals.append((n, self.cap - self.served()))
+                    if e.parent is None:
+                        self.root_refusals.append((n, self.cap - self.served()))
             else:
                 child = next(c for c in e.children if c.name == a.need.requester)
                 self.mail.append(("answer", child, a.granted))
@@ -299,5 +333,10 @@ def test_one_at_a_time_needs_are_refused_only_when_nothing_is_left(data: st.Data
 @settings(max_examples=300, deadline=None)
 @given(st.data())
 def test_larger_needs_never_pass_the_cap_and_never_wait_forever(data: st.DataObject) -> None:
+    """Needs of any size: all or nothing, so two needs can compete for the same budget, and one is refused while
+    the other holds it. But the root refuses a need of its own only when the whole tree holds less unused: what
+    asking children hold, all the way down, counts (checkpoint-1 re-review)."""
     tree = run(data, cap=data.draw(st.integers(5, 200)), unit=False)
     finish(tree)
+    for need, unused in tree.root_refusals:
+        assert unused < need, f"the root refused a need of {need} with {unused} unused in the tree"
