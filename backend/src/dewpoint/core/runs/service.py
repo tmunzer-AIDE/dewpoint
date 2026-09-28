@@ -81,6 +81,38 @@ async def insert_run(
     return run
 
 
+async def ensure_run(
+    s: AsyncSession,
+    *,
+    run_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    workflow_id: uuid.UUID,
+    version_id: uuid.UUID,
+    mode: str,
+    kind: str,
+    parent_run_id: uuid.UUID,
+    parent_step_id: uuid.UUID | None,
+    parent_iteration_key: str,
+    started_at: datetime,
+) -> None:
+    """A sub-run's own row, written by its first projection: a retried write changes nothing."""
+    statement = insert(Run).values(
+        id=run_id,
+        tenant_id=tenant_id,
+        workflow_id=workflow_id,
+        workflow_version_id=version_id,
+        mode=mode,
+        status="running",
+        started_at=started_at,
+        iterations=0,
+        kind=kind,
+        parent_run_id=parent_run_id,
+        parent_step_id=parent_step_id,
+        parent_iteration_key=parent_iteration_key,
+    )
+    await s.execute(statement.on_conflict_do_nothing(index_elements=["id"]))
+
+
 async def finish_run(
     s: AsyncSession,
     run_id: uuid.UUID,
@@ -136,12 +168,18 @@ async def get_run(s: AsyncSession, run_id: uuid.UUID) -> Run | None:
 async def list_runs(
     s: AsyncSession, *, workflow_id: uuid.UUID | None = None, before: datetime | None = None, limit: int = 50
 ) -> list[Run]:
-    """Newest first; `before` pages through older runs."""
-    q = select(Run).order_by(Run.started_at.desc(), Run.id.desc()).limit(limit)
+    """Top-level runs, newest first; `before` pages through older runs. Sub-runs are listed with their parent."""
+    q = select(Run).where(Run.parent_run_id.is_(None)).order_by(Run.started_at.desc(), Run.id.desc()).limit(limit)
     if workflow_id is not None:
         q = q.where(Run.workflow_id == workflow_id)
     if before is not None:
         q = q.where(Run.started_at < before)
+    return list((await s.execute(q)).scalars())
+
+
+async def children(s: AsyncSession, run_id: uuid.UUID) -> list[Run]:
+    """The sub-runs a run started, in the order they started."""
+    q = select(Run).where(Run.parent_run_id == run_id).order_by(Run.started_at, Run.id)
     return list((await s.execute(q)).scalars())
 
 
