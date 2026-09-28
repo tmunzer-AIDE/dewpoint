@@ -54,13 +54,13 @@ Its "Handoff to 2a-3b" section lists what this plan consumes. The owner chose on
 1. **Go/no-go experiments ran first** (next section), on the locked temporalio 1.33.0 and its time-skipping server.
 2. **Every module was prototyped** in a scratch copy of `backend/` at `main` (`3012f3f`) until it passed its tests,
    `ruff`, `ruff format`, `mypy --strict` (134 source files) and `lint-imports` (10 contracts). The prototype's full
-   suite gives 994 passed and 8 skipped (the Linux-only evaluator tests), against `main`'s 902 passed.
+   suite gives 996 passed and 8 skipped (the Linux-only evaluator tests), against `main`'s 902 passed.
 3. **The code blocks below are those files, verbatim.** Diffs to existing files were generated from the prototype.
    Two files change too much for a readable diff, so their tasks give them whole ("Replace … with"):
    - `scheduler.py` in Task 2;
    - `workflow.py` in Task 5.
 4. **Each task was staged and checked on its own.** Stage *N* is `main` plus Tasks 1..*N*.
-   - Every stage passed the static checks and the **whole** suite: 919, 928, 930, 932, 960, 961, 966 and 994
+   - Every stage passed the static checks and the **whole** suite: 919, 928, 930, 932, 962, 963, 968 and 996
      passed, each with 8 skipped. Two first runs failed, and both re-runs passed:
      - one hit a timing flake in `tests/core/audit/test_anchor.py`, which fails about one run in three on `main` too;
      - one hit a cross-process test while I was rebuilding its stage directory.
@@ -146,6 +146,12 @@ Its "Handoff to 2a-3b" section lists what this plan consumes. The owner chose on
     waited for its cancelled sub-flow to report back, and a cancel of the run meanwhile cancelled the sub-flow a
     second time. Temporal refused the duplicate, and the run's workflow task could never complete. That wait is now
     shielded like the end's write (decision 18), and a deterministic test pins it (Task 5).
+
+11. **Execution's checkpoint 2 (2026-09-28) found a child that waited for a grant failing as stuck.** A loop
+    waiting for budget isn't a running unit. So a child execution whose only work was a loop waiting for its
+    parent's answer had nothing running, and the drive loop failed it with `internal_error`. It now waits while an
+    answer is outstanding, and still fails a run that has nothing running and nothing to wait for (decision 12).
+    An end-to-end test and a guard test pin both (Task 5).
 
 The stage counts above are on the plan's base, `3012f3f`. `main` later gained 2 tests with PR #10 (an audit fix
 that shares no file with this plan), so a branch from today's `main` counts 2 more.
@@ -354,7 +360,11 @@ Decisions 3, 8, 14 and 19 chose between readings of the spec. The owner ruled on
 12. **Local needs: loop iterations and filters.**
     - An inline iteration takes 1 when it opens. If it can't, its loop waits (`LoopRun.waiting`) with a local need.
       The loop opens the iteration when the need is granted. When it's refused, the loop fails with
-      `iteration_cap_exceeded`, after ending its in-flight iterations, as in 2a-3a.
+      `iteration_cap_exceeded`, after ending its in-flight iterations, as in 2a-3a. A waiting loop isn't a running
+      unit, so a child execution may have nothing running while it waits for its parent's answer. The drive loop
+      waits for that answer (and for the deadline). It still fails a run with nothing running and no answer
+      outstanding as `internal_error`, because that run is stuck. (Execution's checkpoint 2 found the wait
+      missing: a sub-flow with no initial grant failed as stuck.)
     - A filter takes all its items at once (`need = want = n`). If it can't, its unit waits for the answer.
       A filter's need is all or nothing, so one larger than any single release waits for several children to
       settle. It's still refused only at the exact cap.
@@ -2983,6 +2993,10 @@ Several other files change with this:
   - a need that waits for what an asking sub-flow's own sub-flow holds;
   - a cancel while the run waits for a cancelled sub-flow to report back.
 
+  Execution's checkpoint 2 added two more:
+  - a sub-flow that waits for its first grant gets it;
+  - a run with nothing running and no answer to wait for still fails.
+
   It also has seven from the owner's reviews of this plan:
   - a child's row at its boundaries: a version that doesn't load, and a cancel while it loads;
   - the failure handler:
@@ -3352,6 +3366,7 @@ from temporalio.worker import UnsandboxedWorkflowRunner
 from dewpoint.engine.runtime import execution
 from dewpoint.engine.runtime import workflow as run_graph
 from dewpoint.engine.runtime.activities import ProjectInput, VersionData
+from dewpoint.engine.runtime.scheduler import Scheduler
 from tests.apps.worker.harness import MemoryStore, start, workers
 from tests.support.graphs import G, cel, ref
 
@@ -3630,6 +3645,39 @@ async def child_cancels(handle: Any) -> int:
     return sum(
         e.HasField("request_cancel_external_workflow_execution_initiated_event_attributes") for e in history.events
     )
+
+
+async def test_a_sub_flow_that_waits_for_its_first_grant_gets_it(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checkpoint-2 review: with no initial grant (its parent had nothing unreserved), a sub-flow's loop can't open
+    its first iteration, and nothing else runs while the sub-flow asks its parent. That's a wait, not a stuck run:
+    the parent's grant opens the iteration. Before, the sub-flow failed with `internal_error`."""
+    monkeypatch.setattr(execution, "SUBFLOW_GRANT", 0)
+    store = MemoryStore()
+    sub = graph(n=ref("steps.l.output.count"))
+    sub.node("l", LOOP, {"items": [1]}).node("x", ECHO, {"value": ref("item")}).edge("l", "x", "body")
+    sub_id = store.publish(sub)
+    g = graph(n=ref("steps.r.output.n", default=None), code=ref("steps.r.error.code", default="none"))
+    g.node("r", RUN, {"workflow_id": str(sub_id), "input": {"items": []}}, on_error="continue")
+    async with workers(env.client, store, runner=UnsandboxedWorkflowRunner()):
+        handle = await start(env.client, store, g, {})
+        result = await asyncio.wait_for(handle.result(), 60)
+    assert (result.status, result.outputs, result.iterations) == ("succeeded", {"n": 1, "code": "none"}, 1)
+
+
+async def test_a_run_with_nothing_running_and_no_answer_to_wait_for_still_fails(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checkpoint-2 review: waiting for a grant isn't stuck, but a run with nothing running and no answer to wait for
+    is, and it still ends `internal_error` instead of hanging. The bug here: ready steps are never handed out."""
+    monkeypatch.setattr(Scheduler, "take_ready", lambda self: [])
+    store = MemoryStore()
+    g = graph().node("a", ECHO, {"value": 1})
+    async with workers(env.client, store, runner=UnsandboxedWorkflowRunner()):
+        handle = await start(env.client, store, g, {"items": []})
+        result = await asyncio.wait_for(handle.result(), 30)
+    assert (result.status, result.error["code"]) == ("failed", "internal_error")
 
 
 async def test_the_cap_holds_across_children(env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4418,7 +4466,7 @@ class Execution:
                 if self._rows and not any(key[0] == "project" for key in tasks):  # one at a time: rows wait for it
                     self._projects += 1
                     tasks[("project", self._projects)] = asyncio.create_task(self._project(self._take_rows()))
-                if not tasks:
+                if not tasks and self._ask is None:  # waiting for our parent's answer isn't stuck: nothing else is
                     raise RuntimeError("nothing is running and the run hasn't ended")
                 wake = asyncio.create_task(
                     workflow.wait_condition(lambda: bool(self._mail or self._answers or self._dirty))
@@ -5508,7 +5556,7 @@ diff --git a/backend/src/dewpoint/apps/worker/main.py b/backend/src/dewpoint/app
 - [ ] **Step 6: Run the tests**
 
 Run: `cd backend && uv run pytest -q tests/apps/worker/test_main.py tests/apps/worker/test_run_graph.py tests/apps/worker/test_run_graph_children.py tests/apps/worker/test_run_graph_policies.py tests/engine/runtime/test_nodes.py`
-Expected: 112 passed (2 + 14 + 26 + 32 + 38). Keep this path order, which is the suite's: `test_run_graph_policies.py` run before
+Expected: 114 passed (2 + 14 + 28 + 32 + 38). Keep this path order, which is the suite's: `test_run_graph_policies.py` run before
 `test_run_graph.py` hangs one of 2a-3a's timer tests.
 
 - [ ] **Step 7: Checks and commit**
@@ -6252,7 +6300,7 @@ diff --git a/backend/src/dewpoint/engine/runtime/execution.py b/backend/src/dewp
                      tasks[unit] = asyncio.create_task(self._unit(unit))
                  if self._rows and not any(key[0] == "project" for key in tasks):  # one at a time: rows wait for it
 @@ -269,7 +309,12 @@
-                 if not tasks:
+                 if not tasks and self._ask is None:  # waiting for our parent's answer isn't stuck: nothing else is
                      raise RuntimeError("nothing is running and the run hasn't ended")
                  wake = asyncio.create_task(
 -                    workflow.wait_condition(lambda: bool(self._mail or self._answers or self._dirty))
@@ -7040,7 +7088,7 @@ diff --git a/docs/operations/runs.md b/docs/operations/runs.md
 - [ ] **Step 6: The whole suite, checks and commit**
 
 Run: `cd backend && uv run pytest -q`
-Expected: every test passes, with 8 skipped (the Linux-only evaluator tests). Planning's prototype gave 994
+Expected: every test passes, with 8 skipped (the Linux-only evaluator tests). Planning's prototype gave 996
 passed.
 
 ```bash
