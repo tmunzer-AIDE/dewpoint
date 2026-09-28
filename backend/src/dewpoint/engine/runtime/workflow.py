@@ -5,10 +5,11 @@
   draws its iterations from its parent.
 - `LoopBatch` runs a slice of a loop over more than 100 items, as a child of the execution that holds the loop.
 
-Both drive the shared `Execution` loop."""
+Both drive the shared `Execution` loop, and both may continue-as-new at a quiescent point, carrying a snapshot."""
 
 import asyncio
 import uuid
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -35,6 +36,7 @@ with workflow.unsafe.imports_passed_through():
     from dewpoint.engine.runtime.execution import (
         CANCELLED,
         CEL_BATCH,
+        CONTINUE,
         DEADLINE_EXCEEDED,
         IN_FLIGHT_CAP,
         INTERNAL_ERROR,
@@ -50,6 +52,7 @@ with workflow.unsafe.imports_passed_through():
     from dewpoint.engine.runtime.projection import mask
     from dewpoint.engine.runtime.scheduler import (
         ITERATION_CAP,
+        SNAPSHOT_FORMAT,
         Failure,
         OuterScope,
         RunEnd,
@@ -80,8 +83,14 @@ class RunGraph(Execution):
         non-terminal until the handler has ended, so something non-terminal always holds the handler's closure,
         and with it the CEL profiles it pins (spec §4.5). The end is recorded once, counting the handler's
         iterations."""
-        started = workflow.info().start_time
-        if start.parent is not None and start.parent.kind != FAILURE_HANDLER:
+        snapshot = start.snapshot
+        unreadable = snapshot is not None and snapshot.get("snapshot_format") != SNAPSHOT_FORMAT
+        if unreadable:
+            snapshot = None  # nothing of it is read: the run ends below
+        started = datetime.fromisoformat(snapshot["run_started_at"]) if snapshot else workflow.info().start_time
+        if snapshot is not None:
+            deadline = datetime.fromisoformat(snapshot["deadline"])
+        elif start.parent is not None and start.parent.kind != FAILURE_HANDLER:
             deadline = datetime.fromisoformat(start.parent.deadline)
         else:
             deadline = started + timedelta(seconds=start.max_run_duration_s)
@@ -96,9 +105,14 @@ class RunGraph(Execution):
             parent=start.parent,
             run_started_at=started,
             deadline=deadline,
+            checkpoint_events=start.checkpoint_events,
+            drain_events=start.drain_events,
         )
         self.input = start
-        if start.parent is not None:  # its row first: whatever ends it now has a row to end
+        if unreadable:  # a snapshot this build can't read: the run ends, it never hangs (spec §6)
+            message = "This build can't read the run's continue-as-new snapshot."
+            return await self._end_early(RunEnd("failed", Failure(INTERNAL_ERROR, message)))
+        if start.parent is not None and snapshot is None:  # its row first: whatever ends it now has a row to end
             if await self._shielded([], None, self._start_row(start.parent, start.workflow_id, started)):
                 return await self._cancelled_early()  # cancelled while the row was written
         try:
@@ -131,8 +145,13 @@ class RunGraph(Execution):
             return await self._end_early(RunEnd("failed", Failure(VERSION_UNUSABLE, message)))
         outputs: dict[str, Any] | None = None
         try:
-            self._fresh(program)
-            await self._drive()
+            if snapshot is not None:
+                self._restore(program, snapshot)
+            else:
+                self._fresh(program)
+            if await self._drive() == CONTINUE:
+                await self._flush()
+                workflow.continue_as_new(replace(start, snapshot=self._snapshot()))
             end = self.sched.ended or RunEnd("failed", Failure("error", "The run ended without a result."))
             if end.status == "succeeded":
                 end, outputs = await self._outputs_by(end)
@@ -299,6 +318,8 @@ class RunGraph(Execution):
             self.cel_schedule_to_start_s,
             parent=parent,
             workflow_id=workflow_id,
+            checkpoint_events=self.checkpoint_events,
+            drain_events=self.drain_events,
         )
         handler = asyncio.create_task(self._handler(run, child))
         while not handler.done():  # it draws its iterations from this run: answer as it asks
@@ -333,6 +354,11 @@ class LoopBatch(Execution):
         they would inline, with the loop's concurrency and error policy, over read-only copies of the scopes around
         the loop; their rows go into the parent's run. It returns what they collected, the failures, and how many
         iterations it used. A fail or stop node, or the deadline, ends the run: the batch reports it as `end`."""
+        snapshot = start.snapshot
+        if snapshot is not None and snapshot.get("snapshot_format") != SNAPSHOT_FORMAT:  # it can't carry on: fail
+            message = "This build can't read the batch's continue-as-new snapshot."  # its loop (decision 4)
+            raise ApplicationError(message, type=INTERNAL_ERROR, non_retryable=True)
+        deadline = snapshot["deadline"] if snapshot else start.parent.deadline
         self._context(
             tenant_id=start.tenant_id,
             run_id=start.run_id,
@@ -343,7 +369,9 @@ class LoopBatch(Execution):
             max_run_duration_s=0,
             parent=start.parent,
             run_started_at=datetime.fromisoformat(start.run_started_at),
-            deadline=datetime.fromisoformat(start.parent.deadline),
+            deadline=datetime.fromisoformat(deadline),
+            checkpoint_events=start.checkpoint_events,
+            drain_events=start.drain_events,
         )
         try:
             data = await workflow.execute_local_activity(
@@ -369,22 +397,27 @@ class LoopBatch(Execution):
             message = f"This build can't run the version ({type(e).__name__}); the worker's log has the details."
             raise ApplicationError(message, type=VERSION_UNUSABLE, non_retryable=True) from None
         try:
-            self.program = program
-            self.sched = Scheduler(program, budget=Budget(start.parent.grant, root=False))
-            self.vars = dict(start.variables)
-            outer = [
-                OuterScope(tuple((str(k), int(i)) for k, i in o["key"]), o["results"], o["item"], o["index"])
-                for o in start.outer
-            ]
-            self.sched.start_batch(
-                uuid.UUID(start.loop_step),
-                outer,
-                start.items,
-                offset=start.offset,
-                concurrency=start.concurrency,
-                stop_on_error=start.stop_on_error,
-            )
-            await self._drive()
+            if snapshot is not None:
+                self._restore(program, snapshot)
+            else:
+                self.program = program
+                self.sched = Scheduler(program, budget=Budget(start.parent.grant, root=False))
+                self.vars = dict(start.variables)
+                outer = [
+                    OuterScope(tuple((str(k), int(i)) for k, i in o["key"]), o["results"], o["item"], o["index"])
+                    for o in start.outer
+                ]
+                self.sched.start_batch(
+                    uuid.UUID(start.loop_step),
+                    outer,
+                    start.items,
+                    offset=start.offset,
+                    concurrency=start.concurrency,
+                    stop_on_error=start.stop_on_error,
+                )
+            if await self._drive() == CONTINUE:
+                await self._flush()
+                workflow.continue_as_new(replace(start, snapshot=self._snapshot()))
         except asyncio.CancelledError:
             self.sched.end(RunEnd("cancelled", CANCELLED))
             await self._project_end(None)

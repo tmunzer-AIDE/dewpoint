@@ -20,6 +20,8 @@ REQUEST_BUDGET, BUDGET = (
     "request_budget",
     "budget",
 )  # child -> parent (child, key, need, want, held); parent -> child (key, granted)
+CHECKPOINT_EVENTS = 2_000  # continue-as-new at the next quiescent point after this many events (spec §6)
+DRAIN_EVENTS = 4_000  # drain mode from this many events, or when Temporal suggests it
 # In a plugin step's failure details: the activity's own mapping made this failure. `RunGraph` trusts no other failure
 # as the node's: the SDK makes its own (a worker shutting down, an exception nothing caught), and those say nothing
 # of whether the request went out.
@@ -62,6 +64,9 @@ class RunInput:
     cel_schedule_to_start_s: float = 600  # no evaluator for the profile after this: cel_profile_unavailable
     parent: Parent | None = None  # a sub-flow or a failure handler; None for a run the dispatcher started
     workflow_id: str = ""  # a sub-run's workflow: it writes its own row with it, before its version loads
+    snapshot: dict[str, Any] | None = None  # a continued run: where it carries on (spec §6, `snapshot_format` 1)
+    checkpoint_events: int = CHECKPOINT_EVENTS
+    drain_events: int = DRAIN_EVENTS
 
 
 @dataclass(frozen=True)
@@ -93,6 +98,9 @@ class BatchInput:
     parent: Parent
     mode: str = LIVE
     cel_schedule_to_start_s: float = 600
+    snapshot: dict[str, Any] | None = None
+    checkpoint_events: int = CHECKPOINT_EVENTS
+    drain_events: int = DRAIN_EVENTS
 
 
 @dataclass(frozen=True)

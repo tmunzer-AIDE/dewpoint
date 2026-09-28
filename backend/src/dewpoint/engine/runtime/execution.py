@@ -6,9 +6,13 @@ At most IN_FLIGHT_CAP futures are outstanding, plus one projection; completions 
 order, so a replay applies them the same way. Nothing else creates concurrency.
 
 Children draw their iterations from their parent's budget (spec §6): a child signals `request_budget` to its parent,
-which answers `budget` in the order the requests reach its history."""
+which answers `budget` in the order the requests reach its history. An execution continues-as-new at a quiescent
+point (no activity and no child outstanding): opportunistically past `checkpoint_events`, or after draining past
+`drain_events` (or when Temporal suggests it), when it starts nothing new and waits for what's outstanding. A timer
+isn't outstanding: its wake time goes into the snapshot, and the continued run re-arms it."""
 
 import asyncio
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -25,6 +29,7 @@ with workflow.unsafe.imports_passed_through():
     from dewpoint.engine.cel.profile import LOCAL_CEL_PROFILE
     from dewpoint.engine.cel.route import YieldBudget
     from dewpoint.engine.graph.values import CelValue, RefValue, TemplateValue
+    from dewpoint.engine.registry import control
     from dewpoint.engine.runtime import nodes, resolve
     from dewpoint.engine.runtime.activities import (
         BATCH,
@@ -66,6 +71,7 @@ with workflow.unsafe.imports_passed_through():
     from dewpoint.engine.runtime.scheduler import (
         CAP_MESSAGE,
         ITERATION_CAP_EXCEEDED,
+        SNAPSHOT_FORMAT,
         Batch,
         BatchOutcome,
         Collect,
@@ -88,6 +94,7 @@ INTERNAL_ERROR = "internal_error"  # an exception in workflow code: a bug
 NODE_TYPE_UNAVAILABLE = "node_type_unavailable"  # the registry has it, but this build's workers don't run it
 CANCELLED = Failure("cancelled", "The run was cancelled.")
 AMBIGUOUS = "ambiguous"  # a manifest's side_effect: the request may have been sent
+CONTINUE = "continue"  # `_drive`'s answer when the execution continues-as-new
 
 
 @dataclass(frozen=True)
@@ -185,6 +192,8 @@ class Execution:
         self._started: dict[Instance, str] = {}
         self._cel_modes: dict[Instance, str] = {}
         self._projects = 0
+        self._timers: dict[Instance, datetime] = {}  # a timer step asleep -> its wake time
+        self._resume: list[Instance] = []  # timer steps a snapshot carried over: they re-arm first
         self._mail: list[Need] = []  # children's budget requests, as their signals arrived
         self._answers: list[tuple[str, int]] = []  # our parent's answers
         self._ask: str | None = None  # the request we sent our parent, unanswered
@@ -196,6 +205,8 @@ class Execution:
         self._batches: dict[
             tuple[Instance, int], Batch
         ] = {}  # a batch unit's key -> the batch (its items aren't hashable)
+        self._drained: dict[str, Any] = {}  # what draining waited for, and added: history events and bytes
+        self._draining = False  # drain mode: nothing new starts until the execution continues-as-new
 
     # --- the budget signals ----------------------------------------------------------------------------------------
 
@@ -222,6 +233,8 @@ class Execution:
         parent: Parent | None,
         run_started_at: datetime,
         deadline: datetime,
+        checkpoint_events: int,
+        drain_events: int,
     ) -> None:
         self.tenant_id, self.run_id, self.version_id, self.mode = tenant_id, run_id, version_id, mode
         self.trigger = trigger
@@ -230,26 +243,32 @@ class Execution:
         self.parent = parent
         self.depth = parent.depth if parent is not None else 0
         self.run_started_at, self.deadline = run_started_at, deadline
+        self.checkpoint_events, self.drain_events = checkpoint_events, drain_events
         self.vars: dict[str, Any] = {}
         if parent is not None:
             self._secrets = remember((), tuple(parent.secrets))
 
     # --- the scheduler loop ----------------------------------------------------------------------------------------
 
-    async def _drive(self) -> None:
-        """Drive the scheduler until the execution ends."""
+    async def _drive(self) -> str | None:
+        """Drive the scheduler until the execution ends (None), or until it continues-as-new (CONTINUE)."""
         tasks: dict[tuple[Any, ...], asyncio.Task[_Effect | None]] = {}
         waiting: list[tuple[Any, ...]] = []
+        for inst in self._resume:
+            tasks[("step", inst)] = asyncio.create_task(self._timer(inst, self._timers[inst]))
+        self._resume = []
         clock = asyncio.create_task(asyncio.sleep(max(0.0, (self.deadline - workflow.now()).total_seconds())))
         try:
             while self.sched.ended is None:
                 self._serve_budget()
-                waiting += [("step", i) for i in self.sched.take_ready()]
-                waiting += [("collect", c) for c in self.sched.take_collects()]
-                for b in self.sched.take_batches():
-                    self._batches[(b.loop, b.start)] = b
-                    waiting.append(("batch", b.loop, b.start))
+                if not self._draining:
+                    waiting += [("step", i) for i in self.sched.take_ready()]
+                    waiting += [("collect", c) for c in self.sched.take_collects()]
+                    for b in self.sched.take_batches():
+                        self._batches[(b.loop, b.start)] = b
+                        waiting.append(("batch", b.loop, b.start))
                 for inst in self.sched.take_cancels():
+                    self._timers.pop(inst, None)
                     for key in [k for k in tasks if k[0] in ("step", "batch") and self._owner(k) == inst]:
                         task = tasks.pop(key)
                         task.cancel()  # a child reports back first: the unit stays outstanding until it does
@@ -260,7 +279,28 @@ class Execution:
                 self._queue_settled()
                 if self.sched.ended is not None:
                     break
-                while waiting and self._in_flight(tasks) < IN_FLIGHT_CAP:
+                # Before anything new starts: is this a point where continue-as-new may happen (spec §6)?
+                length = workflow.info().get_current_history_length()
+                if not self._draining and self._drain_due():
+                    self._draining = True  # start nothing new; continue-as-new once what's outstanding settles
+                    self._drained = {
+                        "at": workflow.now().isoformat(),
+                        "events": [length],
+                        "bytes": [workflow.info().get_current_history_size()],
+                        "units": self._units(tasks),  # what the drain waits for
+                    }
+                if (self._draining or length >= self.checkpoint_events) and self._quiescent(tasks):
+                    if self._draining:  # measured, for the headroom (spec §6): what draining added
+                        self._drained["events"].append(length)
+                        self._drained["bytes"].append(workflow.info().get_current_history_size())
+                    await self._settle_for_continue(tasks)
+                    self.sched.give_back(
+                        [w[1] for w in waiting if w[0] == "step"],
+                        [w[1] for w in waiting if w[0] == "collect"],
+                        [self._batches.pop((w[1], w[2])) for w in waiting if w[0] == "batch"],
+                    )
+                    return CONTINUE
+                while not self._draining and waiting and self._in_flight(tasks) < IN_FLIGHT_CAP:
                     unit = waiting.pop(0)
                     tasks[unit] = asyncio.create_task(self._unit(unit))
                 if self._rows and not any(key[0] == "project" for key in tasks):  # one at a time: rows wait for it
@@ -269,7 +309,12 @@ class Execution:
                 if not tasks and self._ask is None:  # waiting for our parent's answer isn't stuck: nothing else is
                     raise RuntimeError("nothing is running and the run hasn't ended")
                 wake = asyncio.create_task(
-                    workflow.wait_condition(lambda: bool(self._mail or self._answers or self._dirty))
+                    workflow.wait_condition(
+                        lambda: (
+                            bool(self._mail or self._answers or self._dirty)
+                            or (not self._draining and self._drain_due())
+                        )
+                    )
                 )
                 done, _ = await workflow.wait([*tasks.values(), clock, wake], return_when=asyncio.FIRST_COMPLETED)
                 wake.cancel()
@@ -292,6 +337,49 @@ class Execution:
             # mustn't reach them again: Temporal refuses a second cancel of the same child, and then this workflow
             # task could never complete. An end already decided stands.
             await _landed(asyncio.gather(*tasks.values(), return_exceptions=True))
+        return None
+
+    def _drain_due(self) -> bool:
+        """Past `drain_events`, or Temporal suggests continuing. The drive loop wakes for it too, so a drain begins at
+        the first workflow task past the threshold, not at the next unit's end."""
+        info = workflow.info()
+        return info.get_current_history_length() >= self.drain_events or info.is_continue_as_new_suggested()
+
+    def _units(self, tasks: Mapping[tuple[Any, ...], asyncio.Task[Any]]) -> dict[str, int]:
+        """What's outstanding, by kind: activities, children, timers, values (CEL, filters), collects, the
+        projection, cancelled units."""
+        kinds: dict[str, int] = {}
+        for key in tasks:
+            kind = self._kind(key)
+            kinds[kind] = kinds.get(kind, 0) + 1
+        return dict(sorted(kinds.items()))
+
+    def _kind(self, key: tuple[Any, ...]) -> str:
+        if key[0] == "batch":
+            return "children"
+        if key[0] != "step":
+            return str(key[0])
+        if key[1] in self._timers:
+            return "timers"
+        step = self.sched.step(key[1])
+        if not step.control:
+            return "activities"
+        return "children" if step.ref == control.RUN_WORKFLOW else "values"
+
+    def _quiescent(self, tasks: Mapping[tuple[Any, ...], asyncio.Task[Any]]) -> bool:
+        """No activity and no child outstanding, and no request to or from a parent or child: a sleeping timer step
+        doesn't count, nor a projection (it's written before the run continues)."""
+        idle = all(k[0] == "project" or (k[0] == "step" and k[1] in self._timers) for k in tasks)
+        return idle and not self.sched.budget.asking and not self._mail and not self._answers
+
+    async def _settle_for_continue(self, tasks: dict[tuple[Any, ...], asyncio.Task[Any]]) -> None:
+        """Continue-as-new: the sleeping timer steps stop here (their wake times go into the snapshot), and the
+        projection in flight lands."""
+        for key, task in tasks.items():
+            if key[0] == "step":
+                task.cancel()
+        await asyncio.gather(*tasks.values(), return_exceptions=True)
+        tasks.clear()
 
     @staticmethod
     def _in_flight(tasks: Mapping[tuple[Any, ...], asyncio.Task[Any]]) -> int:
@@ -610,10 +698,13 @@ class Execution:
             return await self._filter(inst, step, decision.filter_items)
         if decision.subflow is not None:
             return await self._subflow(inst, step, decision.subflow, cel_mode)
-        if decision.wait_s is not None:
-            await asyncio.sleep(decision.wait_s)
-        if decision.wait_until is not None:
-            await asyncio.sleep(max(0.0, (decision.wait_until - workflow.now()).total_seconds()))
+        wake = (
+            workflow.now() + timedelta(seconds=decision.wait_s) if decision.wait_s is not None else decision.wait_until
+        )
+        if wake is not None:
+            if cel_mode is not None:
+                self._cel_modes[inst] = cel_mode
+            return await self._timer(inst, wake)
         return _Effect(
             output=decision.output,
             ports=decision.ports,
@@ -621,6 +712,13 @@ class Execution:
             end=decision.end,
             cel_mode=cel_mode,
         )
+
+    async def _timer(self, inst: Instance, wake: datetime) -> _Effect:
+        """A timer step asleep until `wake`. It isn't outstanding work: a continue-as-new carries its wake time."""
+        self._timers[inst] = wake
+        await asyncio.sleep(max(0.0, (wake - workflow.now()).total_seconds()))
+        del self._timers[inst]
+        return _Effect(output={}, cel_mode=self._cel_modes.get(inst))
 
     async def _filter(self, inst: Instance, step: Step, items: list[Any]) -> _Effect:
         if not await self._take_budget(f"filter:{iteration_key(inst.scope)}:{step.key}", len(items)):
@@ -687,6 +785,8 @@ class Execution:
             self.cel_schedule_to_start_s,
             parent=parent,
             workflow_id=start.workflow_id,
+            checkpoint_events=self.checkpoint_events,
+            drain_events=self.drain_events,
         )
         used: int | None = None
         try:
@@ -755,6 +855,8 @@ class Execution:
             parent=parent,
             mode=self.mode,
             cel_schedule_to_start_s=self.cel_schedule_to_start_s,
+            checkpoint_events=self.checkpoint_events,
+            drain_events=self.drain_events,
         )
         used: int | None = None
         try:
@@ -881,9 +983,55 @@ class Execution:
         )
         return failure, outcome, retryable
 
+    # --- continue-as-new ------------------------------------------------------------------------------------------
+
+    def _snapshot(self) -> dict[str, Any]:
+        """Where a continued run carries on (spec §6, `snapshot_format` 1). The projection is written first, so no
+        row is carried; timers carry their wake times."""
+        return {
+            "snapshot_format": SNAPSHOT_FORMAT,
+            "scheduler": self.sched.to_json(),
+            "variables": self.vars,
+            "secrets": list(self._secrets),
+            "run_started_at": self.run_started_at.isoformat(),
+            "deadline": self.deadline.isoformat(),
+            "drained": self._drained,
+            "timers": [
+                [
+                    [[k, n] for k, n in i.scope],
+                    str(i.step),
+                    wake.isoformat(),
+                    self._started.get(i),
+                    self._cel_modes.get(i),
+                ]
+                for i, wake in self._timers.items()
+            ],
+        }
+
+    def _restore(self, program: Program, snapshot: dict[str, Any]) -> None:
+        if snapshot.get("snapshot_format") != SNAPSHOT_FORMAT:
+            raise ValueError(f"unknown snapshot format {snapshot.get('snapshot_format')!r}")
+        self.program = program
+        self.sched = Scheduler.from_json(program, snapshot["scheduler"])
+        self.vars = dict(snapshot["variables"])
+        self._secrets = remember((), tuple(snapshot["secrets"]))
+        for key, step, wake, started, mode in snapshot["timers"]:
+            inst = Instance(tuple((str(k), int(n)) for k, n in key), uuid.UUID(step))
+            self._timers[inst] = datetime.fromisoformat(wake)
+            if started:
+                self._started[inst] = started
+            if mode:
+                self._cel_modes[inst] = mode
+            self._resume.append(inst)
+
+    async def _flush(self) -> None:
+        """Before continuing as new: every queued row written, and every signal sent."""
+        await self._project_end(None)
+
 
 __all__ = [
     "CEL_BATCH",
+    "CONTINUE",
     "DEADLINE_EXCEEDED",
     "INTERNAL_ERROR",
     "IN_FLIGHT_CAP",
