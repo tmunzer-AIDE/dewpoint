@@ -54,13 +54,13 @@ Its "Handoff to 2a-3b" section lists what this plan consumes. The owner chose on
 1. **Go/no-go experiments ran first** (next section), on the locked temporalio 1.33.0 and its time-skipping server.
 2. **Every module was prototyped** in a scratch copy of `backend/` at `main` (`3012f3f`) until it passed its tests,
    `ruff`, `ruff format`, `mypy --strict` (134 source files) and `lint-imports` (10 contracts). The prototype's full
-   suite gives 997 passed and 8 skipped (the Linux-only evaluator tests), against `main`'s 902 passed.
+   suite gives 1,003 passed and 8 skipped (the Linux-only evaluator tests), against `main`'s 902 passed.
 3. **The code blocks below are those files, verbatim.** Diffs to existing files were generated from the prototype.
    Two files change too much for a readable diff, so their tasks give them whole ("Replace … with"):
    - `scheduler.py` in Task 2;
    - `workflow.py` in Task 5.
 4. **Each task was staged and checked on its own.** Stage *N* is `main` plus Tasks 1..*N*.
-   - Every stage passed the static checks and the **whole** suite: 919, 928, 930, 932, 962, 963, 968 and 997
+   - Every stage passed the static checks and the **whole** suite: 920, 929, 931, 933, 967, 968, 974 and 1,003
      passed, each with 8 skipped. Two first runs failed, and both re-runs passed:
      - one hit a timing flake in `tests/core/audit/test_anchor.py`, which fails about one run in three on `main` too;
      - one hit a cross-process test while I was rebuilding its stage directory.
@@ -325,8 +325,12 @@ Decisions 3, 8, 14 and 19 chose between readings of the spec. The owner ruled on
     child's need also carries `held`: what the child's subtree holds unused while it asks.
     - `take(n)` serves this execution's own need at once, when nothing waits ahead of it and it fits.
     - `start_child` reserves `min(initial, unreserved)`, or 0 when a need is waiting, so nothing jumps the queue.
+    - `request(need)` queues a need. A child's request can arrive after the child has settled: it's dropped, since
+      nothing reads the answer, and a grant would stay reserved for a child that can't release it (the final
+      review).
     - `settle_child(used | None)` debits what the child used (at most its grant), or the whole grant when the child
-      didn't say. It releases the rest and drops the child's waiting needs.
+      didn't say. It releases the rest and drops the child's waiting needs. A child cancelled before its start went
+      out (the SDK resolves its start as cancelled) never ran: it's settled with 0 (the final review).
     - `decide()` serves the waiting needs in order:
       - a need that fits is granted, and a child gets up to its `want`;
       - otherwise it waits while another outstanding child, one that isn't itself asking, may still release budget;
@@ -391,7 +395,9 @@ Decisions 3, 8, 14 and 19 chose between readings of the spec. The owner ruled on
     way, and its parent waits on the chain.
 15. **How.**
     1. Sleeping timers stop; their wake times go into the snapshot.
-    2. The projection in flight lands. Then every queued row, and every pending signal, is sent (`_flush`).
+    2. The projection in flight lands. Then every queued row, and every pending signal, is sent (`_flush`). A cancel
+       that arrives meanwhile ends the execution `cancelled` instead, once they have landed: a continued run
+       wouldn't inherit it (the final review).
     3. Queued units go back to the scheduler (`give_back`).
     4. The run calls `workflow.continue_as_new(replace(start, snapshot=…))`.
 
@@ -448,7 +454,9 @@ Decisions 3, 8, 14 and 19 chose between readings of the spec. The owner ruled on
       `runs.md` says so. A test cancels a run while its failure handler waits after doing 30 iterations of work. It
       asserts that the handler's result, the run's result and the run's row all count those 30.
     - A root re-raises, and ends `cancelled`.
-    - A cancelled unit stays outstanding (`("cancelled", n)`) until its child reports.
+    - A cancelled unit stays outstanding (`("cancelled", n)`) until its child reports. One that ends by its cancel
+      (an activity, a timer, a value) reports nothing, and its `CancelledError` isn't the execution's (the final
+      review: reading it ended the run `cancelled`).
 20. **`ENGINE_ABI` 2 and golden histories.** Task 8 bumps `ENGINE_ABI`, because batches, sub-flows and continue-as-new
     change the command sequence for graphs that used to fail with `not_supported`. It adds these scenarios:
     - `batches`;
@@ -625,7 +633,7 @@ As in 2a-3a:
 One execution's share of the run's iteration cap (decision 10). It's pure: no Temporal and no I/O. The scheduler
 (Task 2) and the interpreter (Task 5) drive it. The property tests check that the cap is exact: a need is refused
 only when nothing unused is left anywhere. They also check liveness: no need waits forever once every child has
-settled.
+settled, a child that ends while its own ask is on its way included.
 
 **Files:**
 - Create: `backend/src/dewpoint/engine/runtime/budget.py`
@@ -848,6 +856,19 @@ def test_no_premature_rejection_one_busy_child_among_ten_takes_nearly_everything
     assert busy == cap - 9
 
 
+def test_a_request_from_a_child_that_has_ended_is_dropped() -> None:
+    """A child's request can arrive after its end (reviewed): nothing would read the answer, and a grant would stay
+    reserved for good, so later needs would wait for a child that can't release anything."""
+    b = Budget(1500, root=False)
+    b.start_child("c", 1000)
+    b.settle_child("c", 1000)
+    b.request(Need("c", "1", 5, CHUNK))
+    b.request(local("own", 1))
+    answers, ask = b.decide()
+    assert [(a.need.requester, a.granted) for a in answers] == [(LOCAL, 1)] and ask is None
+    assert b.reserved == {} and b.waiting == []
+
+
 def test_the_state_round_trips_through_json() -> None:
     b = Budget(100, root=False, used=3, reserved={"c": 4}, waiting=[Need("c", "r", 1, CHUNK, held=2)], asking=True)
     assert Budget.from_json(b.to_json()) == b
@@ -901,6 +922,8 @@ class Tree:
 
     def deliver(self, i: int) -> None:
         kind, to, payload = self.mail.pop(i)
+        if to.done:  # it ended meanwhile: nothing reads what was sent to it
+            return
         if kind == "ask":
             assert isinstance(payload, Need)
             to.budget.request(payload)
@@ -919,7 +942,7 @@ def run(data: st.DataObject, cap: int, unit: bool) -> Tree:
     tree = Tree(cap, root, [root])
     for _ in range(data.draw(st.integers(10, 120))):
         live = [e for e in tree.everyone if not e.done]
-        moves = ["need", "child", "finish"] + (["mail"] if tree.mail else [])
+        moves = ["need", "child", "finish", "abandon"] + (["mail"] if tree.mail else [])
         move = data.draw(st.sampled_from(moves))
         if move == "mail":
             tree.deliver(data.draw(st.integers(0, len(tree.mail) - 1)))
@@ -946,6 +969,19 @@ def run(data: st.DataObject, cap: int, unit: bool) -> Tree:
                 e.done = True
                 assert e.parent is not None
                 tree.mail.append(("ended", e.parent, (e.name, e.budget.used)))
+        elif (
+            move == "abandon"
+            and e is not root
+            and (e.pending or e.budget.asking)
+            and all(c.done for c in e.children)
+            and not any(m[0] == "ended" and m[1] is e for m in tree.mail)  # its children have all reported back
+        ):
+            # It ends while a need of its own waits (it failed, was cancelled, passed its deadline): its ask may still
+            # be on its way to its parent, and arrive after its end.
+            e.done = True
+            e.pending.clear()
+            assert e.parent is not None
+            tree.mail.append(("ended", e.parent, (e.name, e.budget.used)))
         assert tree.served() <= cap, "the cap was exceeded"
     return tree
 
@@ -1081,6 +1117,10 @@ class Budget:
         return True
 
     def request(self, need: Need) -> None:
+        """A need of this execution's own, or a child's. A child's request can arrive after it ended: it's dropped,
+        since nothing reads the answer, and a grant would stay reserved for a child that can't release it."""
+        if need.requester != LOCAL and need.requester not in self.reserved:
+            return
         self.waiting.append(need)
 
     def start_child(self, child: str, initial: int) -> int:
@@ -1195,7 +1235,7 @@ __all__ = ["CHUNK", "LOCAL", "Answer", "Ask", "Budget", "Need"]
 - [ ] **Step 4: Run the tests**
 
 Run: `cd backend && uv run pytest -q tests/engine/runtime/test_budget.py`
-Expected: 17 passed.
+Expected: 18 passed.
 
 - [ ] **Step 5: Checks and commit**
 
@@ -3281,7 +3321,7 @@ diff --git a/backend/tests/apps/worker/test_run_graph_policies.py b/backend/test
  from dewpoint.engine.runtime import nodes
  from dewpoint.engine.runtime import workflow as run_graph
  from dewpoint.engine.runtime.activities import CEL_EVALUATE, ENGINE_QUEUE, PROJECT, ProjectInput, RunInput
-@@ -86,28 +85,13 @@
+@@ -86,28 +85,30 @@
      assert stopped.status == "failed" and stopped.error and stopped.error["code"] == "testkit.rejected"
 
 
@@ -3295,6 +3335,23 @@ diff --git a/backend/tests/apps/worker/test_run_graph_policies.py b/backend/test
 -async def test_loop_limits_fail_the_loop(env: WorkflowEnvironment, config: dict[str, Any], code: str) -> None:
 -    store = MemoryStore()
 -    g = graph(code=ref("steps.l.error.code", default="none")).node("l", LOOP, config, on_error="continue")
++async def test_an_iteration_that_fails_while_a_sibling_runs_cancels_only_that_sibling(env: WorkflowEnvironment) -> None:
++    """The failed iteration's other step is cancelled, and the loop carries on under `continue`: the run isn't."""
++    store = MemoryStore()
++    g = graph(out=ref("steps.l.output"))
++    g.node("l", LOOP, {"items": [0, 1, 2], "on_item_error": "continue", "collect": ref("item")})
++    g.node("f", "testkit.ambiguous_send@1", {"outcome": cel("item == 0 ? 'rejected' : 'sent'")})
++    g.node("d", "flow.delay@1", {"duration_s": cel("item == 0 ? 3600 : 0")})
++    g.edge("l", "f", "body").edge("l", "d", "body")
++    async with workers(env.client, store):
++        handle = await start(env.client, store, g, TRIGGER)
++        result = await asyncio.wait_for(handle.result(), 60)
++        info = await handle.describe()
++    assert (result.status, result.iterations) == ("succeeded", 3)
++    assert [f["index"] for f in result.outputs["out"]["failures"]] == [0]
++    assert info.close_time and info.close_time - info.start_time < timedelta(hours=1)  # the delay was cancelled
++
++
 +async def test_the_item_cap_fails_the_loop(env: WorkflowEnvironment) -> None:
 +    store = MemoryStore()
 +    g = graph(code=ref("steps.l.error.code", default="none"))
@@ -3315,7 +3372,7 @@ diff --git a/backend/tests/apps/worker/test_run_graph_policies.py b/backend/test
 
 
  async def test_a_loop_past_the_runs_iteration_cap_fails(
-@@ -207,6 +191,34 @@
+@@ -207,6 +208,34 @@
              outstanding.discard(event.activity_task_completed_event_attributes.scheduled_event_id)
      assert most == 1
      assert sorted(r.node_key for r in store.steps(handle.id)) == sorted(f"{k}{i}" for k in "et" for i in range(4))
@@ -3363,6 +3420,7 @@ its iterations from one budget per logical run."""
 import asyncio
 import dataclasses
 import json
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -3455,6 +3513,22 @@ async def test_a_failed_item_in_a_batch_follows_the_loops_policy(
         assert [f["index"] for f in result.outputs["failures"]] == [120]  # in the second batch, by its own index
     else:
         assert result.error["code"] == "testkit.rejected"
+
+
+async def test_an_item_that_fails_in_a_batch_while_a_sibling_runs_cancels_only_that_sibling(
+    env: WorkflowEnvironment,
+) -> None:
+    store = MemoryStore()
+    g = graph(failures=ref("steps.l.output.failures"))
+    g.node("l", LOOP, {"items": list(range(150)), "on_item_error": "continue", "concurrency": 10})
+    g.node("f", "testkit.ambiguous_send@1", {"outcome": cel("item == 120 ? 'rejected' : 'sent'")})
+    g.node("d", "flow.delay@1", {"duration_s": cel("item == 120 ? 3600 : 0")})
+    g.edge("l", "f", "body").edge("l", "d", "body")
+    handle, result = await finished(env, store, g, {})
+    assert (result.status, result.iterations) == ("succeeded", 150)
+    assert [f["index"] for f in result.outputs["failures"]] == [120]
+    info = await handle.describe()
+    assert info.close_time and info.close_time - info.start_time < timedelta(hours=1)  # the delay was cancelled
 
 
 async def test_a_fail_node_inside_a_batch_ends_the_whole_run(env: WorkflowEnvironment) -> None:
@@ -3786,6 +3860,27 @@ async def test_a_batch_that_fails_as_a_workflow_fails_its_loop_and_its_whole_gra
     g.edge("l", "x", "body")
     _, result = await finished(env, store, g, {})
     assert (result.status, result.outputs, result.iterations) == ("succeeded", {"code": "version_unusable"}, 100)
+
+
+async def test_a_sub_flow_the_run_ends_before_it_starts_uses_nothing(env: WorkflowEnvironment) -> None:
+    """The run fails in the turn that would start its sub-flow: the start never goes out, and the sub-flow's grant
+    comes back whole (reviewed: it was counted as used)."""
+    store = MemoryStore()
+    g = graph()
+    g.node("r", RUN, {"workflow_id": str(store.publish(sleeper()))}).node("f", FAIL, {"message": "at once"})
+    handle, result = await finished(env, store, g, {})
+    assert (result.status, result.iterations, store.runs[handle.id].iterations) == ("failed", 0, 0)
+    assert await children_started(handle) == 0
+
+
+async def test_a_batch_the_run_ends_before_it_starts_uses_nothing(env: WorkflowEnvironment) -> None:
+    store = MemoryStore()
+    g = graph()
+    g.node("l", LOOP, {"items": list(range(150))}).node("x", ECHO).edge("l", "x", "body")
+    g.node("t", "flow.transform@1", {"fields": {"n": 1}}).node("f", FAIL, {"message": "at once"}).edge("t", "f")
+    handle, result = await finished(env, store, g, {})  # `f` fails the run in the turn the first batch would start
+    assert (result.status, result.iterations, store.runs[handle.id].iterations) == ("failed", 0, 0)
+    assert await children_started(handle) == 0
 
 
 async def test_a_sub_flow_of_a_sub_flow_asks_up_the_chain(env: WorkflowEnvironment) -> None:
@@ -4488,7 +4583,10 @@ class Execution:
                     )
                     break
                 for key in sorted((k for k, t in tasks.items() if t in done), key=self._rank):
-                    effect = tasks.pop(key).result()
+                    task = tasks.pop(key)
+                    if key[0] == "cancelled" and task.cancelled():
+                        continue  # a unit we cancelled ended so: its cancel isn't this execution's
+                    effect = task.result()
                     if effect is not None and key[0] != "cancelled":
                         self._apply(key, effect)
         finally:
@@ -4896,11 +4994,16 @@ class Execution:
             parent=parent,
             workflow_id=start.workflow_id,
         )
-        used: int | None = None
+        used: int | None = None  # until it reports, all it was granted counts: it may have run
         try:
-            result = await workflow.execute_child_workflow(
-                "RunGraph", run, result_type=RunResult, **child_options(child)
-            )
+            try:
+                handle = await workflow.start_child_workflow(
+                    "RunGraph", run, result_type=RunResult, **child_options(child)
+                )
+            except ChildWorkflowError:  # cancelled before its start went out, as the SDK reports it: it never ran
+                used = 0
+                raise asyncio.CancelledError from None
+            result = await handle
             used = result.iterations
         except ChildWorkflowError as e:  # it failed as a workflow, which a run never does: a bug, or terminated
             message = f"The sub-flow ended without a result ({type(e.cause).__name__})."
@@ -4964,11 +5067,16 @@ class Execution:
             mode=self.mode,
             cel_schedule_to_start_s=self.cel_schedule_to_start_s,
         )
-        used: int | None = None
+        used: int | None = None  # until it reports, all it was granted counts: it may have run
         try:
-            result = await workflow.execute_child_workflow(
-                "LoopBatch", batch, result_type=BatchResult, **child_options(child)
-            )
+            try:
+                handle = await workflow.start_child_workflow(
+                    "LoopBatch", batch, result_type=BatchResult, **child_options(child)
+                )
+            except ChildWorkflowError:  # cancelled before its start went out, as the SDK reports it: it never ran
+                used = 0
+                raise asyncio.CancelledError from None
+            result = await handle
             used = result.iterations
         except ChildWorkflowError as e:  # its version didn't load or compile, a bug, or it was terminated
             cause = e.cause
@@ -5564,7 +5672,7 @@ diff --git a/backend/src/dewpoint/apps/worker/main.py b/backend/src/dewpoint/app
 - [ ] **Step 6: Run the tests**
 
 Run: `cd backend && uv run pytest -q tests/apps/worker/test_main.py tests/apps/worker/test_run_graph.py tests/apps/worker/test_run_graph_children.py tests/apps/worker/test_run_graph_policies.py tests/engine/runtime/test_nodes.py`
-Expected: 114 passed (2 + 14 + 28 + 32 + 38). Keep this path order, which is the suite's: `test_run_graph_policies.py` run before
+Expected: 118 passed (2 + 14 + 31 + 33 + 38). Keep this path order, which is the suite's: `test_run_graph_policies.py` run before
 `test_run_graph.py` hangs one of 2a-3a's timer tests.
 
 - [ ] **Step 7: Checks and commit**
@@ -5927,6 +6035,7 @@ draining past `drain_events`. Nothing outstanding is cancelled, abandoned or res
 the budget carries over; and draining adds a bounded number of events (the measured headroom test)."""
 
 import asyncio
+import dataclasses
 import json
 import uuid
 from datetime import datetime, timedelta
@@ -5938,7 +6047,7 @@ from temporalio.client import Client, WorkflowFailureError, WorkflowHistory
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
 
-from dewpoint.engine.runtime.activities import BATCH, BUDGET, ENGINE_QUEUE, BatchInput, Parent
+from dewpoint.engine.runtime.activities import BATCH, BUDGET, ENGINE_QUEUE, BatchInput, Parent, ProjectInput
 from dewpoint.engine.runtime.workflow import LoopBatch
 from tests.apps.worker.harness import TENANT, MemoryStore, start, workers
 from tests.support.graphs import G, cel, ref
@@ -5995,6 +6104,34 @@ async def test_a_long_run_continues_as_new_and_ends_as_it_would_have(env: Workfl
     assert result.iterations == 40  # the budget carried over: no fresh cap after continue-as-new
     rows = [r for r in store.steps(handle.id) if r.node_key == "x"]
     assert len(rows) == 40 and {(r.attempt, r.status) for r in rows} == {(1, "succeeded")}
+
+
+@dataclasses.dataclass
+class SlowFlush(MemoryStore):
+    """The rows the run writes just before it continues as new take a while to land: `a`'s last row goes then."""
+
+    flushing: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
+
+    async def project(self, data: ProjectInput) -> None:
+        if any(r.node_key == "a" and r.status == "succeeded" for r in data.steps):
+            self.flushing.set()
+            await asyncio.sleep(1)
+        await super().project(data)
+
+
+async def test_a_cancel_while_the_run_gets_ready_to_continue_as_new_ends_it_cancelled(env: WorkflowEnvironment) -> None:
+    """A continued run wouldn't inherit the cancel, and would carry on: the run ends cancelled instead."""
+    store = SlowFlush()
+    g = graph().node("a", ECHO, {"value": 1}).node("b", ECHO, {"value": 2}).edge("a", "b")
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {}, checkpoint_events=10)  # past it once `a` has run
+        await asyncio.wait_for(store.flushing.wait(), 30)
+        await handle.cancel()
+        with pytest.raises(WorkflowFailureError):
+            await asyncio.wait_for(handle.result(), 30)
+        runs = await chain(env.client, handle.id, handle.first_execution_run_id or "")
+    assert len(runs) == 1 and store.runs[handle.id].status == "cancelled"
+    assert [(r.node_key, r.status) for r in store.steps(handle.id)] == [("a", "succeeded")]  # `b` never started
 
 
 def doubler() -> G:
@@ -6121,7 +6258,7 @@ async def test_a_batch_with_a_snapshot_of_another_format_fails_as_a_workflow(env
 - [ ] **Step 2: Run them and watch them fail**
 
 Run: `cd backend && uv run pytest -q tests/apps/worker/test_run_graph_continue.py`
-Expected: 5 failed, each with a `TypeError`: `RunInput.__init__()` or `BatchInput.__init__()` got an unexpected
+Expected: 6 failed, each with a `TypeError`: `RunInput.__init__()` or `BatchInput.__init__()` got an unexpected
 keyword argument (`'checkpoint_events'`, `'drain_events'` or `'snapshot'`).
 
 - [ ] **Step 3: The thresholds and the snapshot field**
@@ -6321,7 +6458,7 @@ diff --git a/backend/src/dewpoint/engine/runtime/execution.py b/backend/src/dewp
                  )
                  done, _ = await workflow.wait([*tasks.values(), clock, wake], return_when=asyncio.FIRST_COMPLETED)
                  wake.cancel()
-@@ -292,6 +337,49 @@
+@@ -295,6 +340,49 @@
              # mustn't reach them again: Temporal refuses a second cancel of the same child, and then this workflow
              # task could never complete. An end already decided stands.
              await _landed(asyncio.gather(*tasks.values(), return_exceptions=True))
@@ -6371,7 +6508,7 @@ diff --git a/backend/src/dewpoint/engine/runtime/execution.py b/backend/src/dewp
 
      @staticmethod
      def _in_flight(tasks: Mapping[tuple[Any, ...], asyncio.Task[Any]]) -> int:
-@@ -610,10 +698,13 @@
+@@ -613,10 +701,13 @@
              return await self._filter(inst, step, decision.filter_items)
          if decision.subflow is not None:
              return await self._subflow(inst, step, decision.subflow, cel_mode)
@@ -6389,7 +6526,7 @@ diff --git a/backend/src/dewpoint/engine/runtime/execution.py b/backend/src/dewp
          return _Effect(
              output=decision.output,
              ports=decision.ports,
-@@ -621,6 +712,13 @@
+@@ -624,6 +715,13 @@
              end=decision.end,
              cel_mode=cel_mode,
          )
@@ -6403,25 +6540,25 @@ diff --git a/backend/src/dewpoint/engine/runtime/execution.py b/backend/src/dewp
 
      async def _filter(self, inst: Instance, step: Step, items: list[Any]) -> _Effect:
          if not await self._take_budget(f"filter:{iteration_key(inst.scope)}:{step.key}", len(items)):
-@@ -687,6 +785,8 @@
+@@ -690,6 +788,8 @@
              self.cel_schedule_to_start_s,
              parent=parent,
              workflow_id=start.workflow_id,
 +            checkpoint_events=self.checkpoint_events,
 +            drain_events=self.drain_events,
          )
-         used: int | None = None
+         used: int | None = None  # until it reports, all it was granted counts: it may have run
          try:
-@@ -755,6 +855,8 @@
+@@ -763,6 +863,8 @@
              parent=parent,
              mode=self.mode,
              cel_schedule_to_start_s=self.cel_schedule_to_start_s,
 +            checkpoint_events=self.checkpoint_events,
 +            drain_events=self.drain_events,
          )
-         used: int | None = None
+         used: int | None = None  # until it reports, all it was granted counts: it may have run
          try:
-@@ -881,9 +983,55 @@
+@@ -894,9 +996,57 @@
          )
          return failure, outcome, retryable
 
@@ -6467,8 +6604,10 @@ diff --git a/backend/src/dewpoint/engine/runtime/execution.py b/backend/src/dewp
 +            self._resume.append(inst)
 +
 +    async def _flush(self) -> None:
-+        """Before continuing as new: every queued row written, and every signal sent."""
-+        await self._project_end(None)
++        """Before continuing as new: every queued row written, and every signal sent. A cancel that arrived meanwhile
++        ends the execution instead (raised once they have landed): a continued run wouldn't inherit it."""
++        if await self._project_end(None):
++            raise asyncio.CancelledError
 +
 
  __all__ = [
@@ -6644,7 +6783,7 @@ diff --git a/backend/src/dewpoint/engine/runtime/workflow.py b/backend/src/dewpo
 - [ ] **Step 5: Run the tests**
 
 Run: `cd backend && uv run pytest -q -s tests/apps/worker/test_run_graph_continue.py`
-Expected: 5 passed. The headroom test prints what draining added (planning saw, for example, `draining added 501
+Expected: 6 passed. The headroom test prints what draining added (planning saw, for example, `draining added 501
 events and 110059 bytes`); note the numbers in the task's ledger line.
 
 - [ ] **Step 6: Checks and commit**
@@ -7202,7 +7341,7 @@ diff --git a/docs/operations/runs.md b/docs/operations/runs.md
 - [ ] **Step 6: The whole suite, checks and commit**
 
 Run: `cd backend && uv run pytest -q`
-Expected: every test passes, with 8 skipped (the Linux-only evaluator tests). Planning's prototype gave 997
+Expected: every test passes, with 8 skipped (the Linux-only evaluator tests). Planning's prototype gave 1,003
 passed.
 
 ```bash

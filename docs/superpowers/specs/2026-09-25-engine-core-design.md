@@ -65,6 +65,9 @@
       projection is flushed before continuing;
     - the headroom test shows the cap saturated when draining begins, and bounds bytes as well as events;
     - the snapshot's contents, and the thresholds as run inputs;
+    - from the final review: a step or timer cancelled mid-run doesn't cancel its run; a cancel while the run gets
+      ready to continue-as-new ends it `cancelled`; a request from a child that has ended is dropped; a child
+      cancelled before its start went out is debited nothing;
     - golden histories record every execution, and `engine_abi` becomes 2: one value, which publishing stamps and
       the build ID names (§6, §7, §8).
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
@@ -861,6 +864,9 @@ The version (graph, classifications, bounds) is loaded by one local activity and
   budget, and writes its own `runs` row with its first projection, before anything else, even its version's load.
   So every way it can end has a row to record the end. A cancelled child returns its result, with its usage,
   instead of ending as cancelled: Temporal shows it as completed, while its row says `cancelled`.
+- **Cancelled work.** When an iteration fails, or its scope otherwise ends early, the steps, timers and children
+  still outstanding in it are cancelled, and the run waits for each to settle. Their cancels are theirs, not the
+  run's: the run carries on under the loop's error policy.
 
 **Continue-as-new only at a quiescent checkpoint.** Temporal doesn't carry child workflows into the continued run.
 Closing the run would also apply the children's parent-close policy. So continue-as-new **never** cancels,
@@ -879,6 +885,8 @@ abandons or restarts an activity or a child workflow.
   - It starts nothing new: ready nodes, control nodes included, stay queued in the snapshot. They're cheap to run
     after the continue, and the run reaches quiescence sooner.
   - When the last outstanding activity or child settles, it flushes the projection and continues-as-new.
+- **A cancel meanwhile.** A continued run doesn't inherit a cancel request. So a cancel that arrives while the run
+  flushes its projection and signals before continuing ends it `cancelled` instead, once they have landed.
 - **Thresholds.** 2,000 and 4,000 are run inputs with those defaults, so tests can reach them early: Temporal's
   test server never suggests continue-as-new.
 - **Headroom.** With the in-flight cap of 100, and a bounded number of events per activity or child completion,
@@ -936,6 +944,10 @@ abandons or restarts an activity or a child workflow.
   - A failed or cancelled child run returns its result, with its usage. A batch returns its usage with its
     outcome.
   - A child that ends without reporting (terminated, or failed as a workflow) is debited its whole grant. That's conservative, and it happens only on abnormal termination.
+  - A child cancelled before its start went out never ran, and is debited nothing. A cancel after the start went
+    out keeps the whole grant until the child reports, because it may have run.
+  - A request from a child that has already settled is dropped: nothing reads the answer, and a grant would stay
+    reserved for a child that can't release it.
 - **Why it's deterministic.** Grants, requests, answers, results and totals are all recorded workflow data.
 - The run summary shows the iterations used.
 
