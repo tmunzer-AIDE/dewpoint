@@ -2,7 +2,7 @@
 """Record this build's golden histories: `uv run python -m tests.engine.replay.record`.
 
 Only scenarios the build's directory lacks are recorded; a recorded history is never rewritten. A change that alters
-the command sequence increments ENGINE_ABI (engine/runtime/build.py), which starts a new directory.
+the command sequence increments ENGINE_ABI (`dewpoint.engine`), which starts a new directory.
 
 A scenario records every execution it ran: `<name>.json` is the run's first execution, and `<name>--<n>.json` each
 other one, in the order they're found: the runs it continued as, then its children's, and theirs."""
