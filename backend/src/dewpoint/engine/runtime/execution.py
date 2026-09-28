@@ -791,11 +791,16 @@ class Execution:
             checkpoint_events=self.checkpoint_events,
             drain_events=self.drain_events,
         )
-        used: int | None = None
+        used: int | None = None  # until it reports, all it was granted counts: it may have run
         try:
-            result = await workflow.execute_child_workflow(
-                "RunGraph", run, result_type=RunResult, **child_options(child)
-            )
+            try:
+                handle = await workflow.start_child_workflow(
+                    "RunGraph", run, result_type=RunResult, **child_options(child)
+                )
+            except ChildWorkflowError:  # cancelled before its start went out, as the SDK reports it: it never ran
+                used = 0
+                raise asyncio.CancelledError from None
+            result = await handle
             used = result.iterations
         except ChildWorkflowError as e:  # it failed as a workflow, which a run never does: a bug, or terminated
             message = f"The sub-flow ended without a result ({type(e.cause).__name__})."
@@ -861,11 +866,16 @@ class Execution:
             checkpoint_events=self.checkpoint_events,
             drain_events=self.drain_events,
         )
-        used: int | None = None
+        used: int | None = None  # until it reports, all it was granted counts: it may have run
         try:
-            result = await workflow.execute_child_workflow(
-                "LoopBatch", batch, result_type=BatchResult, **child_options(child)
-            )
+            try:
+                handle = await workflow.start_child_workflow(
+                    "LoopBatch", batch, result_type=BatchResult, **child_options(child)
+                )
+            except ChildWorkflowError:  # cancelled before its start went out, as the SDK reports it: it never ran
+                used = 0
+                raise asyncio.CancelledError from None
+            result = await handle
             used = result.iterations
         except ChildWorkflowError as e:  # its version didn't load or compile, a bug, or it was terminated
             cause = e.cause

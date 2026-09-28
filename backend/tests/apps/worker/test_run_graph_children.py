@@ -448,6 +448,27 @@ async def test_a_batch_that_fails_as_a_workflow_fails_its_loop_and_its_whole_gra
     assert (result.status, result.outputs, result.iterations) == ("succeeded", {"code": "version_unusable"}, 100)
 
 
+async def test_a_sub_flow_the_run_ends_before_it_starts_uses_nothing(env: WorkflowEnvironment) -> None:
+    """The run fails in the turn that would start its sub-flow: the start never goes out, and the sub-flow's grant
+    comes back whole (reviewed: it was counted as used)."""
+    store = MemoryStore()
+    g = graph()
+    g.node("r", RUN, {"workflow_id": str(store.publish(sleeper()))}).node("f", FAIL, {"message": "at once"})
+    handle, result = await finished(env, store, g, {})
+    assert (result.status, result.iterations, store.runs[handle.id].iterations) == ("failed", 0, 0)
+    assert await children_started(handle) == 0
+
+
+async def test_a_batch_the_run_ends_before_it_starts_uses_nothing(env: WorkflowEnvironment) -> None:
+    store = MemoryStore()
+    g = graph()
+    g.node("l", LOOP, {"items": list(range(150))}).node("x", ECHO).edge("l", "x", "body")
+    g.node("t", "flow.transform@1", {"fields": {"n": 1}}).node("f", FAIL, {"message": "at once"}).edge("t", "f")
+    handle, result = await finished(env, store, g, {})  # `f` fails the run in the turn the first batch would start
+    assert (result.status, result.iterations, store.runs[handle.id].iterations) == ("failed", 0, 0)
+    assert await children_started(handle) == 0
+
+
 async def test_a_sub_flow_of_a_sub_flow_asks_up_the_chain(env: WorkflowEnvironment) -> None:
     """The inner sub-flow's filter needs more than both grants: it asks its parent, which asks the root."""
     store = MemoryStore()
