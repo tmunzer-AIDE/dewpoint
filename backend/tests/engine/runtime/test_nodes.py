@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from dewpoint.engine.runtime.nodes import MAX_DELAY_S, Decision, LoopStart, decide
+from dewpoint.engine.runtime.nodes import MAX_DELAY_S, Decision, LoopStart, SubflowStart, decide
 from dewpoint.engine.runtime.scheduler import Failure, RunEnd
 from tests.engine.runtime.support import MANIFESTS
 
@@ -48,6 +48,13 @@ from tests.engine.runtime.support import MANIFESTS
             Decision(loop=LoopStart([1, 2], 2, stop_on_error=False)),
         ),
         ("flow.loop@1", {"items": []}, Decision(loop=LoopStart([], 1, stop_on_error=True))),
+        (
+            "flow.loop@1",
+            {"items": list(range(101)), "concurrency": 3},
+            Decision(loop=LoopStart(list(range(101)), 3, stop_on_error=True, batch=100)),  # batches of child workflows
+        ),
+        ("flow.run_workflow@1", {"workflow_id": "w", "input": {"n": 1}}, Decision(subflow=SubflowStart({"n": 1}, "w"))),
+        ("flow.run_workflow@1", {"workflow_id": "w"}, Decision(subflow=SubflowStart({}, "w"))),
         ("flow.filter@1", {"items": ["a"]}, Decision(filter_items=["a"])),
     ],
 )
@@ -75,8 +82,7 @@ def test_a_control_node_decides(ref: str, config: dict[str, Any], decision: Deci
         ("flow.loop@1", {"items": {"a": 1}}, "type_mismatch"),
         ("flow.filter@1", {"items": "abc"}, "type_mismatch"),
         ("flow.loop@1", {"items": [1, 2, 3], "item_cap": 2}, "item_cap_exceeded"),
-        ("flow.loop@1", {"items": list(range(101))}, "not_supported"),  # batches arrive with 2a-3b
-        ("flow.run_workflow@1", {"workflow_id": "w"}, "not_supported"),  # sub-flows arrive with 2a-3b
+        ("flow.run_workflow@1", {"workflow_id": "w", "input": ["not", "an", "object"]}, "type_mismatch"),
     ],
 )
 def test_a_control_node_refuses(ref: str, config: dict[str, Any], code: str) -> None:
@@ -89,7 +95,8 @@ def test_a_delay_is_bounded_as_the_node_declares() -> None:
 
 
 def test_a_loop_of_exactly_a_hundred_items_runs_inline() -> None:
-    assert decide("flow.loop@1", {"items": list(range(100))}).loop is not None
+    loop = decide("flow.loop@1", {"items": list(range(100))}).loop
+    assert loop is not None and loop.batch == 0
 
 
 def test_only_control_nodes_are_decided() -> None:

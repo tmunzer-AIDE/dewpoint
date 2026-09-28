@@ -18,7 +18,7 @@ from dewpoint.apps.worker.store import DbRunStore
 from dewpoint.core.config import Settings
 from dewpoint.core.db import make_engine, make_sessionmaker
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, cel_queue
-from dewpoint.engine.runtime.workflow import RunGraph
+from dewpoint.engine.runtime.workflow import LoopBatch, RunGraph
 from dewpoint.sdk import Plugin
 
 log = structlog.get_logger("dewpoint.worker")
@@ -40,7 +40,7 @@ def engine_worker(client: Client, store: RunStore, plugins: Iterable[Plugin], se
     return Worker(
         client,
         task_queue=ENGINE_QUEUE,
-        workflows=[RunGraph],
+        workflows=[RunGraph, LoopBatch],
         activities=engine_activities(store, plugins),
         graceful_shutdown_timeout=timedelta(seconds=settings.worker_shutdown_grace_s),
     )

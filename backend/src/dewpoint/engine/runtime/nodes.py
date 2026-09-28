@@ -11,10 +11,9 @@ from dewpoint.engine.cel.evaluate import TYPE_MISMATCH
 from dewpoint.engine.registry import control
 from dewpoint.engine.runtime.scheduler import Failure, RunEnd
 
-INLINE_ITEMS = 100  # larger loops run as batches of child workflows (2a-3b)
+INLINE_ITEMS = 100  # larger loops run in batches of this many items, one child workflow per batch (spec §6)
 MAX_DELAY_S = 30 * 86_400  # flow.delay's own bound: a value resolved at run time isn't checked by its schema
 ITEM_CAP_EXCEEDED = "item_cap_exceeded"
-NOT_SUPPORTED = "not_supported"  # until 2a-3b: sub-flows, loops over more than INLINE_ITEMS items
 WORKFLOW_FAILED = "workflow_failed"  # a fail node ended the run
 
 
@@ -23,6 +22,16 @@ class LoopStart:
     items: list[Any]
     concurrency: int
     stop_on_error: bool
+    batch: int = 0  # > 0: the items run in child workflows of this many
+
+
+@dataclass(frozen=True)
+class SubflowStart:
+    """A `run_workflow` step: its pinned version runs as a child with this input. `workflow_id` is the sub-flow's
+    workflow, which the child's own row names before its version loads."""
+
+    input: dict[str, Any]
+    workflow_id: str
 
 
 @dataclass(frozen=True)
@@ -35,6 +44,7 @@ class Decision:
     wait_until: datetime | None = None  # UTC
     loop: LoopStart | None = None
     filter_items: list[Any] | None = None  # a filter: evaluate its predicate per item
+    subflow: SubflowStart | None = None
     failure: Failure | None = None
 
 
@@ -91,21 +101,19 @@ def decide(ref: str, config: Mapping[str, Any]) -> Decision:
         cap = int(config.get("item_cap", 10_000))
         if len(items) > cap:
             return Decision(failure=Failure(ITEM_CAP_EXCEEDED, f"{len(items)} items exceed this loop's cap of {cap}."))
-        if len(items) > INLINE_ITEMS:
-            return Decision(
-                failure=Failure(
-                    NOT_SUPPORTED, f"Loops over more than {INLINE_ITEMS} items run in batches, which this build lacks."
-                )
-            )
-        start = LoopStart(items, int(config.get("concurrency", 1)), config.get("on_item_error", "stop") == "stop")
-        return Decision(loop=start)
+        batch = INLINE_ITEMS if len(items) > INLINE_ITEMS else 0
+        stop = config.get("on_item_error", "stop") == "stop"
+        return Decision(loop=LoopStart(items, int(config.get("concurrency", 1)), stop, batch))
     if ref == control.FILTER:
         items = config.get("items")
         if not isinstance(items, list):
             return _mismatch("`items` must be a list.")
         return Decision(filter_items=items)
     if ref == control.RUN_WORKFLOW:
-        return Decision(failure=Failure(NOT_SUPPORTED, "Sub-flows need a build that runs them."))
+        data = config.get("input", {})
+        if not isinstance(data, dict):
+            return _mismatch("`input` must be an object.")
+        return Decision(subflow=SubflowStart(dict(data), str(config.get("workflow_id", ""))))
     raise ValueError(f"{ref} isn't a control node")
 
 
@@ -113,9 +121,9 @@ __all__ = [
     "INLINE_ITEMS",
     "MAX_DELAY_S",
     "ITEM_CAP_EXCEEDED",
-    "NOT_SUPPORTED",
     "WORKFLOW_FAILED",
     "Decision",
     "LoopStart",
+    "SubflowStart",
     "decide",
 ]
