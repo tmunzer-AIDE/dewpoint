@@ -26,13 +26,24 @@ loader, the projection, and one activity per installed plugin node type. It need
 - `DEWPOINT_WORKER_SHUTDOWN_GRACE_S` (default 30): a stopping worker lets running attempts finish this long, then
   cancels them. A cancelled attempt ends as on a lost worker: `outcome_unknown` for an `ambiguous` node. Give the
   process manager a stop timeout longer than this.
+- `DEWPOINT_WORKER_SET_CURRENT` (default off): the worker makes its own build the one new runs start on. Only where
+  one build runs at a time, as in Docker Compose; elsewhere, promote builds with `dewpoint deployment set-current`
+  ([`deployment.md`](deployment.md)).
+
+This build evaluates CEL of its own profile in the workflow: an expression that publish classified as inline, on
+values within the caps (64 KiB, 200 list elements or map entries, 16 KiB strings), runs in-process, and its step's
+`cel_mode` says `local`. Everything else goes to the evaluator (`cel_mode` `activity`): what publish classified as
+"Runs as a separate step", values past the caps, and a filter over more than 1,000 items (in requests of 1,000). A
+workflow task does a bounded amount of CEL work, binding included; past it, the run yields to the next task with a 1 ms
+timer, so no task runs long enough to time out.
 
 Without an evaluator, CEL expressions that can't run inline wait `DEWPOINT_CEL_SCHEDULE_TO_START_S` (default 600
 seconds) and then fail the step with `cel_profile_unavailable`. In 2a every CEL expression runs through the evaluator:
 inline evaluation is switched on by plan 2a-3c, together with the build's `ENGINE_ABI`.
 
-Docker Compose gains `temporal` and `worker` services, and the worker and dispatch logins, in plan 2a-3c. Until then,
-point the worker at any Temporal server.
+The engine worker is its build's version of the `dewpoint-engine` Worker Deployment, and a run finishes on the build it
+started on. Rolling out a build, and what Docker Compose runs (Temporal's dev server and one worker):
+[`deployment.md`](deployment.md).
 
 ## Starting a development run
 

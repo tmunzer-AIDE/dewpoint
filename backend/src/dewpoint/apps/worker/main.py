@@ -15,7 +15,7 @@ from temporalio.worker import Worker
 from dewpoint.apps import cel_client
 from dewpoint.apps.plugin_loader import installed_plugins
 from dewpoint.apps.worker.activities import RunStore, cel_activity, engine_activities, remote_evaluator
-from dewpoint.apps.worker.deployment import deployment_config, this_build
+from dewpoint.apps.worker.deployment import deployment_config, set_current, this_build
 from dewpoint.apps.worker.store import DbRunStore
 from dewpoint.core.config import Settings
 from dewpoint.core.db import make_engine, make_sessionmaker
@@ -68,6 +68,12 @@ def cel_worker(client: Client, socket_path: str, profile: str, *, max_concurrent
     )
 
 
+async def promote(client: Client) -> None:
+    """This build becomes current once its version exists: as soon as the engine worker polls."""
+    await set_current(client, this_build(), wait_s=120)
+    log.info("deployment_current", build=this_build())
+
+
 async def run(settings: Settings) -> None:
     client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
     engine = make_engine(settings.database_url)
@@ -77,6 +83,9 @@ async def run(settings: Settings) -> None:
             profile = await evaluator_profile(settings.cel_socket)
             log.info("cel_queue", profile=profile)
             workers.append(cel_worker(client, settings.cel_socket, profile, max_concurrent=settings.cel_max_concurrent))
-        await asyncio.gather(*(w.run() for w in workers))
+        tasks = [w.run() for w in workers]
+        if settings.worker_set_current:
+            tasks.append(promote(client))
+        await asyncio.gather(*tasks)
     finally:
         await engine.dispose()

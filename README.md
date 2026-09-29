@@ -48,7 +48,9 @@ CEL expressions that can't run inline go to the `cel-evaluator` service: no secr
 
 Until sub-project 2b brings triggers, runs start only from `dewpoint dev run` and the tests; `dewpoint worker` executes
 them on Temporal. Settings, how a run ends, and this build's limits:
-[`docs/operations/runs.md`](docs/operations/runs.md).
+[`docs/operations/runs.md`](docs/operations/runs.md). Compose runs Temporal's dev server (Web UI at
+<http://127.0.0.1:8233>) and one worker; rolling out a new build, and upgrading Compose:
+[`docs/operations/deployment.md`](docs/operations/deployment.md).
 
 ## Audit integrity
 

@@ -4,6 +4,7 @@ A run is pinned to the build it started on, with its children and its continued 
 deployment's current build."""
 
 import asyncio
+import contextlib
 import uuid
 from dataclasses import dataclass
 
@@ -14,8 +15,9 @@ from temporalio.service import RPCError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
+from dewpoint.apps.worker import main
 from dewpoint.apps.worker.activities import cel_activity
-from dewpoint.apps.worker.deployment import describe, set_current
+from dewpoint.apps.worker.deployment import describe, set_current, this_build
 from dewpoint.apps.worker.main import engine_worker
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, cel_queue
@@ -128,3 +130,32 @@ async def test_a_run_stays_on_the_build_it_started_on_with_its_children_and_cont
             ran = placement(history)
             assert ran.builds == {expected} and ran.engine <= {expected}, (history.workflow_id, ran)
             assert ran.behaviours == {VersioningBehavior.VERSIONING_BEHAVIOR_PINNED}
+
+
+async def test_a_worker_set_to_makes_its_build_current_once_it_polls(
+    dev_env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Compose runs one build at a time: its worker (DEWPOINT_WORKER_SET_CURRENT) promotes its own build, so new runs
+    start on it. Here the database and the plugins are stand-ins: no run starts."""
+
+    class Engine:
+        async def dispose(self) -> None: ...
+
+    async def connect(*args: object, **kwargs: object) -> Client:
+        return dev_env.client
+
+    monkeypatch.setattr(main.Client, "connect", connect)
+    monkeypatch.setattr(main, "make_engine", lambda url: Engine())
+    monkeypatch.setattr(main, "make_sessionmaker", lambda engine: None)
+    monkeypatch.setattr(main, "installed_plugins", lambda: [TESTKIT])
+    worker = asyncio.create_task(main.run(settings(worker_set_current=True, worker_shutdown_grace_s=0.1)))
+    try:
+        for _ in range(60):
+            if (await describe(dev_env.client)).current == this_build():
+                break
+            await asyncio.sleep(0.5)
+        assert (await describe(dev_env.client)).current == this_build()
+    finally:
+        worker.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await worker

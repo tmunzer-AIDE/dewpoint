@@ -71,6 +71,8 @@ jobs:
             echo "DEWPOINT_API_DB_PASSWORD=$(openssl rand -hex 16)"
             echo "DEWPOINT_ADMIN_DB_PASSWORD=$(openssl rand -hex 16)"
             echo "DEWPOINT_AUDITOR_DB_PASSWORD=$(openssl rand -hex 16)"
+            echo "DEWPOINT_WORKER_DB_PASSWORD=$(openssl rand -hex 16)"
+            echo "DEWPOINT_DISPATCH_DB_PASSWORD=$(openssl rand -hex 16)"
             echo "DEWPOINT_KEK_B64=$(openssl rand -base64 32)"
             echo "DEWPOINT_AUDIT_SIGNING_KEY_B64=$(openssl rand -base64 32)"
           } > .env
@@ -81,6 +83,15 @@ jobs:
           docker compose run --rm -e DEWPOINT_INIT_PASSWORD=violet-otter-canyon-42 \
             -e DEWPOINT_DATABASE_URL="postgresql+asyncpg://dewpoint_api_login:${DEWPOINT_API_DB_PASSWORD}@postgres/dewpoint" \
             api dewpoint admin init --email admin@example.com
+      - name: The worker's build is current
+        working-directory: deploy/compose
+        run: |
+          for _ in $(seq 60); do
+            docker compose exec -T worker dewpoint deployment status | tee status.txt
+            grep -q '^current: dewpoint-' status.txt && exit 0
+            sleep 2
+          done
+          exit 1
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4  (version comes from package.json "packageManager")
         with: { package_json_file: frontend/package.json }
       - uses: actions/setup-node@v4
