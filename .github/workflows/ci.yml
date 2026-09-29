@@ -7,6 +7,7 @@ jobs:
     defaults: { run: { working-directory: backend } }
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }  # the replay gate compares with the base
       - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
       - run: uv sync --locked
       - run: uv run ruff check .
@@ -14,6 +15,13 @@ jobs:
       - run: uv run mypy src
       - run: uv run lint-imports
       - run: uv run pytest -q
+      # The replay gate (spec §7): the suite replays this ABI's histories; this checks none was changed or removed,
+      # and that new ones went into this build's directory.
+      - name: Recorded histories are never rewritten
+        env: { BASE: "${{ github.event.pull_request.base.sha || github.event.before }}" }
+        run: |
+          case "$BASE" in ""|0000000000000000000000000000000000000000) BASE=origin/main ;; esac
+          uv run python -m tests.engine.replay.gate "$BASE"
       - run: uv run pip-licenses --fail-on="GPL;AGPL;LGPL;SSPL;BUSL" --partial-match
   cel-gates:
     # The CEL gates (spec §5.9) in a pinned Linux container: rlimits, fork and cgroup behaviour are Linux's. The
