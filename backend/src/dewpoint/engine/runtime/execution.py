@@ -20,13 +20,14 @@ from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError, ApplicationError, ChildWorkflowError, TimeoutError
+from temporalio.exceptions import ActivityError, ApplicationError, ChildWorkflowError, TerminatedError, TimeoutError
 from temporalio.exceptions import CancelledError as ActivityCancelled
 
 with workflow.unsafe.imports_passed_through():
     from dewpoint.engine.canonical import canonical_json
     from dewpoint.engine.cel import evaluate as cel
     from dewpoint.engine.cel.profile import LOCAL_CEL_PROFILE
+    from dewpoint.engine.cel.record import ExpressionRecord
     from dewpoint.engine.cel.route import YieldBudget
     from dewpoint.engine.graph.values import CelValue, RefValue, TemplateValue
     from dewpoint.engine.registry import control
@@ -86,11 +87,13 @@ with workflow.unsafe.imports_passed_through():
 IN_FLIGHT_CAP = 100  # activities and child workflows outstanding per execution (spec §6)
 PROJECT_BYTES = 256 * 1024  # a projection's rows at most, as JSON: far below Temporal's 2 MiB payload limit
 CEL_BATCH = 1_000  # binding sets per cel.evaluate request
+FILTER_INLINE = 1_000  # a filter's items the workflow may evaluate itself; a larger list goes to cel.evaluate (spec §6)
 SUBFLOW_GRANT = 1_000  # a sub-flow's initial grant (spec §6)
 MAX_DEPTH = 5  # sub-flows nest at most this deep (spec §6; publish checks it too)
 DEADLINE_EXCEEDED = "deadline_exceeded"
 VERSION_UNUSABLE = "version_unusable"  # this build can't load or compile the version
 INTERNAL_ERROR = "internal_error"  # an exception in workflow code: a bug
+TERMINATED = "terminated"  # a child ended by an operator, outside Dewpoint: it never reported
 NODE_TYPE_UNAVAILABLE = "node_type_unavailable"  # the registry has it, but this build's workers don't run it
 CANCELLED = Failure("cancelled", "The run was cancelled.")
 AMBIGUOUS = "ambiguous"  # a manifest's side_effect: the request may have been sent
@@ -147,6 +150,16 @@ def _cancelled(e: BaseException) -> bool:
     )
 
 
+def _unloadable(e: BaseException) -> str:
+    """What a run whose version didn't load says. The loader's own refusal (`version_unusable`: a version of another
+    engine ABI) is written for users; any other error's text may quote the version, so the projection names only its
+    type, and the worker's log has the rest."""
+    refusal = e.cause if isinstance(e, ActivityError) else e  # a local activity's failure comes unwrapped
+    if isinstance(refusal, ApplicationError) and refusal.type == VERSION_UNUSABLE:
+        return refusal.message
+    return f"This build can't run the version ({type(e).__name__}); the worker's log has the details."
+
+
 def _backoff(retry: Mapping[str, Any], attempt: int) -> float:
     """Seconds before attempt `attempt + 1`, from the manifest's retry settings."""
     delay = float(retry["initial_interval_s"]) * float(retry["backoff"]) ** (attempt - 1)
@@ -186,7 +199,10 @@ class Execution:
     sched: Scheduler
 
     def __init__(self) -> None:
-        self._yield = YieldBudget()
+        self._yield = YieldBudget()  # the local evaluations of the current workflow task (spec §5.6)
+        self._yield_task = -1  # the history length that workflow task started with
+        self._startup_task = workflow.info().get_current_history_length()  # this execution's first: it starts it
+        self._yield_timer: asyncio.Task[None] | None = None  # the one yield point every waiter shares
         self._rows: dict[tuple[str, str, int], StepRow] = {}  # queued for the next projection, per attempt
         self._secrets: Secrets = ()  # sensitive values seen so far: masked in everything projected
         self._started: dict[Instance, str] = {}
@@ -318,7 +334,6 @@ class Execution:
                 )
                 done, _ = await workflow.wait([*tasks.values(), clock, wake], return_when=asyncio.FIRST_COMPLETED)
                 wake.cancel()
-                self._yield.reset()
                 if clock in done:
                     self.sched.end(
                         RunEnd(DEADLINE_EXCEEDED, Failure(DEADLINE_EXCEEDED, "The run passed its deadline."))
@@ -377,12 +392,15 @@ class Execution:
 
     async def _settle_for_continue(self, tasks: dict[tuple[Any, ...], asyncio.Task[Any]]) -> None:
         """Continue-as-new: the sleeping timer steps stop here (their wake times go into the snapshot), and the
-        projection in flight lands."""
+        projection in flight lands, whatever cancels arrive meanwhile. A cancel then ends the execution instead
+        (raised once it has landed): a continued run wouldn't inherit it."""
         for key, task in tasks.items():
             if key[0] == "step":
                 task.cancel()
-        await asyncio.gather(*tasks.values(), return_exceptions=True)
+        cancelled = await _landed(asyncio.gather(*tasks.values(), return_exceptions=True))
         tasks.clear()
+        if cancelled:
+            raise asyncio.CancelledError
 
     @staticmethod
     def _in_flight(tasks: Mapping[tuple[Any, ...], asyncio.Task[Any]]) -> int:
@@ -636,9 +654,7 @@ class Execution:
                 values[pointer] = resolve.template(v, value)
             elif isinstance(value, CelValue):
                 record = self.program.record(owner.id if owner is not None else None, pointer)
-                task = resolve.cel_task(
-                    record, [v], local_profile=LOCAL_CEL_PROFILE, version_profile=self.program.cel_profile
-                )
+                task = await self._cel_task(record, [v])
                 [outcome] = await self._evaluate(task)
                 values[pointer] = resolve.outcome_value(outcome)
                 mode = "activity" if mode == "activity" or not task.local else "local"
@@ -646,13 +662,27 @@ class Execution:
                 values[pointer] = value.value
         return values, mode
 
+    async def _cel_task(
+        self, record: ExpressionRecord, views: Sequence[Any], *, inline: bool = True
+    ) -> resolve.CelTask:
+        """Bind each view within the workflow task's budget (spec §5.6). Binding converts every value it binds, so
+        it's charged as they are (`Measure.nodes`), whether the expression then runs here or in `cel.evaluate`.
+        `inline` False: it goes to `cel.evaluate`, whatever its class."""
+        bound: list[resolve.Bound] = []
+        for v in views:
+            await self._yield_point(None)
+            b = resolve.bind_view(record, v)
+            self._yield.charge(nodes=b.measured.nodes)
+            bound.append(b)
+        local_profile = LOCAL_CEL_PROFILE if inline else None
+        return resolve.cel_task(record, bound, local_profile=local_profile, version_profile=self.program.cel_profile)
+
     async def _evaluate(self, task: resolve.CelTask) -> list[cel.Outcome]:
         if task.local:
-            if self._yield.must_yield(task.record):
-                await asyncio.sleep(0.001)  # a durable timer: the workflow task ends here (spec §5.6)
-                self._yield.reset()
-            outcomes = task.run_local()
-            for _ in outcomes:
+            outcomes = []
+            for bindings in task.bindings:  # a filter's items one at a time: each is an evaluation
+                await self._yield_point(task.record)
+                outcomes.append(task.run_one(bindings))
                 self._yield.charge(task.record)
             return outcomes
         out: list[cel.Outcome] = []
@@ -676,6 +706,23 @@ class Execution:
                 return [cel.Outcome(error=cel.PROFILE_UNAVAILABLE, message=message)] * len(task.bindings)
             out += [cel.Outcome.from_json(o) for o in result.outcomes]
         return out
+
+    async def _yield_point(self, record: ExpressionRecord | None) -> None:
+        """Before binding a view (`record` None) or evaluating `record` locally: when the current workflow task's budget
+        is spent, await a 1 ms durable timer, which ends the task (spec §5.6). The budget belongs to one workflow task:
+        it starts afresh when the history length changes, which happens only between tasks, in a replay too. The
+        execution's first task gets a tenth of it: that task also starts the execution. Concurrent units share the
+        budget and one timer, and each checks again once it fires."""
+        while True:
+            length = workflow.info().get_current_history_length()
+            if length != self._yield_task:
+                self._yield_task = length
+                self._yield.reset(startup=length == self._startup_task)
+            if not self._yield.must_yield(record):
+                return
+            if self._yield_timer is None or self._yield_timer.done():
+                self._yield_timer = asyncio.create_task(asyncio.sleep(0.001))
+            await asyncio.shield(self._yield_timer)
 
     # --- steps -----------------------------------------------------------------------------------------------------
 
@@ -729,9 +776,7 @@ class Execution:
         record = self.program.record(step.id, "/predicate")
         views = [self._view(inst.scope, item=(item, i)) for i, item in enumerate(items)]
         try:
-            task = resolve.cel_task(
-                record, views, local_profile=LOCAL_CEL_PROFILE, version_profile=self.program.cel_profile
-            )
+            task = await self._cel_task(record, views, inline=len(items) <= FILTER_INLINE)
         except resolve.ValueFailure as e:
             return _Effect(failure=e.failure)
         kept: list[Any] = []
@@ -792,6 +837,7 @@ class Execution:
             drain_events=self.drain_events,
         )
         used: int | None = None  # until it reports, all it was granted counts: it may have run
+        started = workflow.now().isoformat()
         try:
             try:
                 handle = await workflow.start_child_workflow(
@@ -803,8 +849,9 @@ class Execution:
             result = await handle
             used = result.iterations
         except ChildWorkflowError as e:  # it failed as a workflow, which a run never does: a bug, or terminated
-            message = f"The sub-flow ended without a result ({type(e.cause).__name__})."
-            return _Effect(failure=Failure(INTERNAL_ERROR, message), cel_mode=cel_mode)
+            failure = self._lost("sub-flow", e)
+            await self._lost_end(run, started, failure)
+            return _Effect(failure=failure, cel_mode=cel_mode)
         finally:
             self.sched.budget.settle_child(child, used)
             self._dirty = True
@@ -813,6 +860,22 @@ class Execution:
             return _Effect(output=dict(result.outputs or {}), cel_mode=cel_mode)
         error = result.error or {"code": result.status, "message": f"The sub-flow ended {result.status}."}
         return _Effect(failure=Failure(str(error["code"]), str(error["message"])), cel_mode=cel_mode)
+
+    @staticmethod
+    def _lost(kind: str, e: ChildWorkflowError) -> Failure:
+        """A child that ended without a result: terminated from outside Dewpoint, or failed as a workflow (a bug)."""
+        if isinstance(e.cause, TerminatedError):
+            return Failure(TERMINATED, f"The {kind} was terminated outside Dewpoint.")
+        return Failure(INTERNAL_ERROR, f"The {kind} ended without a result ({type(e.cause).__name__}).")
+
+    async def _lost_end(self, run: RunInput, started_at: str, failure: Failure) -> None:
+        """A sub-run that ended without a result never wrote its end: its row would stay `running`, holding its
+        references (spec §4.5). Its parent writes it, unless it has one, with its whole grant as counted here: its
+        first grant and every one it asked for since, which the parent debits as it settles the child. It writes the
+        row too, in case the child was ended before its own: a start written later changes nothing."""
+        whole = self.sched.budget.reserved.get(run.run_id, 0)  # read before the child is settled
+        end = RunSummary(run.run_id, "failed", workflow.now().isoformat(), failure.code, failure.message, whole, True)
+        await self._shielded([], end, RunStart.of(run, started_at))
 
     def _outer(self, loop: Instance) -> list[dict[str, Any]]:
         """The loop's enclosing scopes as its batch reads them, outermost first: the results its body can
@@ -881,7 +944,7 @@ class Execution:
             cause = e.cause
             if isinstance(cause, ApplicationError) and cause.type in (VERSION_UNUSABLE, INTERNAL_ERROR):
                 return _Effect(failure=Failure(cause.type, cause.message))
-            return _Effect(failure=Failure(INTERNAL_ERROR, "The batch ended without a result."))
+            return _Effect(failure=self._lost("batch", e))
         finally:
             self.sched.budget.settle_child(child, used)
             self._dirty = True
@@ -947,7 +1010,8 @@ class Execution:
                     attempt += 1
                     continue
                 # The run or the scope ended: the SDK reports our own cancel as an ActivityError. Never retry it.
-                self._queue(replace(row, status="cancelled", ended_at=workflow.now().isoformat()))
+                outcome = OUTCOME_UNKNOWN if ambiguous else None  # its request may have been sent
+                self._queue(replace(row, status="cancelled", ended_at=workflow.now().isoformat(), outcome=outcome))
                 raise asyncio.CancelledError from None
             self._learn(result.output, manifest["output_schema"])
             self._queue(

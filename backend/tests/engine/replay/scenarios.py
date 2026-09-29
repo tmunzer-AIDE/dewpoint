@@ -3,15 +3,18 @@
 
 2a-3a records what it can run: branches, joins, dead paths and switch; inline loops, filter and transform; every
 error policy; variables and timers; stop, fail, simulation and the deadline; CEL through `cel.evaluate`. 2a-3b adds
-batched loops, sub-flows, the failure handler, grants, continue-as-new and drain mode; 2a-3c adds local CEL and the
-yield-point timer. A scenario that runs sub-flows builds its graph against the recorder's store, which publishes
-them first."""
+batched loops, sub-flows, the failure handler, grants, continue-as-new and drain mode. 2a-3c turns local CEL on:
+expressions run in the workflow, with the yield-point timer, and the rest go to `cel.evaluate`. It also records a
+cancelled run and a version this build can't compile. A scenario that runs sub-flows builds its graph against the
+recorder's store, which publishes them first."""
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from tests.apps.worker.harness import MemoryStore
+from dewpoint.engine.graph.validate import ValidationContext, validate
+from tests.apps.worker.harness import CATALOG, EVALUATOR_ONLY, MemoryStore
+from tests.engine.cel.test_gate_cost import ADVERSARIAL
 from tests.support.graphs import G, cel, ref
 
 ECHO, IF, SWITCH, LOOP = "testkit.echo@1", "flow.if@1", "flow.switch@1", "flow.loop@1"
@@ -28,6 +31,8 @@ class Scenario:
     graph: G | Callable[[MemoryStore], G]  # a callable publishes the sub-flows it runs, then builds the graph
     trigger: dict[str, Any] = field(default_factory=lambda: dict(TRIGGER))
     options: dict[str, Any] = field(default_factory=dict)  # RunInput fields
+    cancel: bool = False  # the recorder cancels the run once its delay is running
+    unusable: bool = False  # when a run loads its version, the manifests are gone: this build can't compile it
 
     def build(self, store: MemoryStore) -> G:
         return self.graph(store) if callable(self.graph) else self.graph
@@ -154,6 +159,55 @@ def _drained(store: MemoryStore) -> G:
     return g.node("d", "flow.delay@1", {"duration_s": 3_600})
 
 
+TEXT = {
+    "type": "object",
+    "properties": {
+        "s": {"type": "string"},
+        "needle": {"type": "string"},
+        "xs": {"type": "array", "items": {"type": "integer"}},
+    },
+    "required": ["s", "needle", "xs"],
+}
+TEXT_TRIGGER: dict[str, Any] = {"s": "a" * 16_384, "needle": "a" * 8_191 + "b", "xs": list(range(1_500))}
+
+
+def _text(**outputs: Any) -> G:
+    g = G()
+    g.settings = {"input_schema": TEXT, "outputs": outputs}
+    return g
+
+
+def _heaviest_search() -> str:
+    """The heaviest substring search that still publishes local: about three quarters of a workflow task's work
+    budget."""
+    best = ""
+    for n in range(1, 60):
+        expr = ADVERSARIAL["search"](n)
+        result = validate(
+            _text().node("x", "flow.transform@1", {"fields": {"r": cel(expr)}}).build(),
+            ValidationContext(catalog=CATALOG, subflows={}),
+        )
+        if any(d.severity == "error" for d in result.diagnostics) or result.expressions[0].mode != "local":
+            break
+        best = expr
+    return best
+
+
+def _local_cel() -> G:
+    """Six heavy local evaluations, three at a time: a workflow task runs one, then the yield timer."""
+    g = _text(found=ref("steps.l.output.items"), short=ref("steps.f.output.count"))
+    g.node("l", LOOP, {"items": list(range(6)), "concurrency": 3, "collect": cel("steps.x.output.r")})
+    g.node("x", "flow.transform@1", {"fields": {"r": cel(_heaviest_search())}}).edge("l", "x", "body")
+    g.node("f", "flow.filter@1", {"items": [1, 2, 3, 4], "predicate": cel("item < 3")})
+    return g.edge("l", "f", "done")
+
+
+def _evaluator() -> G:
+    """A filter over 1,500 items goes to `cel.evaluate` in chunks of 1,000; so does what only the evaluator runs."""
+    g = _text(kept=ref("steps.f.output.count"), hour=cel(EVALUATOR_ONLY))
+    return g.node("f", "flow.filter@1", {"items": cel("trigger.xs"), "predicate": cel("item % 2 == 0")})
+
+
 def scenarios() -> dict[str, Scenario]:
     return {
         "branches": Scenario(_branches()),
@@ -174,4 +228,8 @@ def scenarios() -> dict[str, Scenario]:
         "grants": Scenario(_grants),
         "continue_as_new": Scenario(_continued(), options={"checkpoint_events": 60}),
         "drain": Scenario(_drained, options={"drain_events": 40}),
+        "local_cel": Scenario(_local_cel(), trigger=dict(TEXT_TRIGGER)),
+        "evaluator": Scenario(_evaluator(), trigger=dict(TEXT_TRIGGER)),
+        "cancelled": Scenario(_graph().node("d", "flow.delay@1", {"duration_s": 3_600}), cancel=True),
+        "version_unusable": Scenario(_graph().node("a", ECHO, {"value": 1}), unusable=True),
     }

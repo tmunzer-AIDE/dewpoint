@@ -11,4 +11,10 @@ def build_id(version: str) -> str:
     return f"dewpoint-{version}+abi{ENGINE_ABI}"
 
 
-__all__ = ["build_id"]
+def abi_of(build: str) -> int | None:
+    """The engine ABI a Dewpoint build ID names; None for an ID that isn't one."""
+    name, plus, abi = build.rpartition("+abi")
+    return int(abi) if plus and name.startswith("dewpoint-") and abi.isdecimal() else None
+
+
+__all__ = ["abi_of", "build_id"]

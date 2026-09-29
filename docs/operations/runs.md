@@ -26,13 +26,23 @@ loader, the projection, and one activity per installed plugin node type. It need
 - `DEWPOINT_WORKER_SHUTDOWN_GRACE_S` (default 30): a stopping worker lets running attempts finish this long, then
   cancels them. A cancelled attempt ends as on a lost worker: `outcome_unknown` for an `ambiguous` node. Give the
   process manager a stop timeout longer than this.
+- `DEWPOINT_WORKER_SET_CURRENT` (default off): the worker makes its own build the one new runs start on. Only where
+  one build runs at a time, as in Docker Compose; elsewhere, promote builds with `dewpoint deployment set-current`
+  ([`deployment.md`](deployment.md)).
+
+This build evaluates CEL of its own profile in the workflow: an expression that publish classified as inline, on
+values within the caps (64 KiB, 200 list elements or map entries, 16 KiB strings), runs in-process, and its step's
+`cel_mode` says `local`. Everything else goes to the evaluator (`cel_mode` `activity`): what publish classified as
+"Runs as a separate step", values past the caps, and a filter over more than 1,000 items (in requests of 1,000). A
+workflow task does a bounded amount of CEL work, binding included; past it, the run yields to the next task with a 1 ms
+timer, so no task runs long enough to time out.
 
 Without an evaluator, CEL expressions that can't run inline wait `DEWPOINT_CEL_SCHEDULE_TO_START_S` (default 600
-seconds) and then fail the step with `cel_profile_unavailable`. In 2a every CEL expression runs through the evaluator:
-inline evaluation is switched on by plan 2a-3c, together with the build's `ENGINE_ABI`.
+seconds) and then fail the step with `cel_profile_unavailable`.
 
-Docker Compose gains `temporal` and `worker` services, and the worker and dispatch logins, in plan 2a-3c. Until then,
-point the worker at any Temporal server.
+The engine worker is its build's version of the `dewpoint-engine` Worker Deployment, and a run finishes on the build it
+started on. Rolling out a build, and what Docker Compose runs (Temporal's dev server and one worker):
+[`deployment.md`](deployment.md).
 
 ## Starting a development run
 
@@ -40,7 +50,9 @@ point the worker at any Temporal server.
 dewpoint dev run <version-id> --tenant <tenant-id> --input trigger.json
 ```
 
-- The version must be the **active** version of an **enabled** workflow, and nothing it uses may be retired.
+- The version must be the **active** version of an **enabled** workflow, and nothing it uses may be retired. It,
+  and the sub-flows and failure handler it runs, must have been published for the engine ABI of the deployment's
+  current build, where the run starts ([`deployment.md`](deployment.md)).
 - `--simulate` calls each plugin node's `simulate()` instead of `run()`: nothing is sent anywhere. A node without a
   simulation fails its step with `simulation_unavailable`. Timers still wait, as they would in a live run.
 - By default the command waits and prints the result. `--no-wait` prints the run id and returns.
@@ -128,13 +140,15 @@ Temporal's own history still holds the values in full until 2b's payload encrypt
 | `failed` | `start_failed` | Temporal refused to start it. |
 | `failed` | `version_unusable` | This build can't load or run the version, for example a node type it lacks. Nothing ran. |
 | `failed` | `internal_error` | A bug in the interpreter. The message names the exception's type, and the worker's log has the details; please report it. |
+| `failed` | `terminated` | A sub-run that an operator terminated in Temporal. It couldn't record its end, so its parent did, and the step or loop that started it failed with the same code. |
 | `deadline_exceeded` | `deadline_exceeded` | The run passed `DEWPOINT_MAX_RUN_DURATION_DAYS` (default 30). Running steps were cancelled. |
 | `cancelled` | `cancelled` | The run was cancelled in Temporal. A cancel that arrives while the run's end is being written leaves that end. |
 
 Step error codes include the plugin's own codes and `config_invalid`, `output_schema_violation`, `unexpected_error`,
 `evaluation_error`, `type_mismatch`, `timeout`, `cel_profile_unavailable`, `item_cap_exceeded`,
 `iteration_cap_exceeded` and `node_type_unavailable` (the registry lists the node type, but no worker of this build
-runs it: install its plugin on the workers). A sub-flow step fails with its sub-flow's code.
+runs it: install its plugin on the workers). A sub-flow step fails with its sub-flow's code, and with `terminated`
+when an operator terminated the sub-flow; a loop fails with `terminated` when one of its batches was.
 
 ## Attempts and retries
 

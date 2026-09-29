@@ -265,6 +265,20 @@ async def active_versions(
     return {workflow_id: version for workflow_id, version in rows}
 
 
+async def other_abi(s: AsyncSession, version_ids: Iterable[uuid.UUID], abi: int) -> list[tuple[uuid.UUID, int]]:
+    """The versions among `version_ids` published for an engine ABI other than `abi`, each with its own. A version
+    runs only on a build of its ABI (spec §7)."""
+    ids = sorted(set(version_ids), key=str)
+    if not ids:
+        return []
+    rows = await s.execute(
+        select(WorkflowVersion.id, WorkflowVersion.engine_abi)
+        .where(WorkflowVersion.id.in_(ids), WorkflowVersion.engine_abi != abi)
+        .order_by(WorkflowVersion.id)
+    )
+    return [(version_id, version_abi) for version_id, version_abi in rows]
+
+
 async def blocked_by(s: AsyncSession, version: WorkflowVersion) -> list[str]:
     """Lifecycle entries in the version's closure that stop it from running (retired or missing)."""
     current = await lifecycle.states(s, lifecycle.entries_for(version.closure_node_refs, version.closure_cel_profiles))

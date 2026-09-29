@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Starting runs (spec §9). `start_run` is 2a's admission, and 2b's dispatcher reuses `admit`: the workflow is
-enabled, the version is its active one, and nothing in the version's closure is retired. All three are checked in the
-transaction that inserts the run (§4.5), under locks the other side takes too:
+enabled, the version is its active one, every version in its closure was published for the engine ABI of the
+deployment's current build (a version runs only on a build of its ABI, and a new run starts on the current build,
+§7), and nothing in the closure is retired. They're checked in the transaction that inserts the run (§4.5), under
+locks the other side takes too:
 - the workflow is read under its admission lock (shared), so a disable, publish or activation either commits before
   the read or waits until the run exists;
 - the closure is read under the lifecycle locks (shared), so a retirement either sees the run or the run sees the
@@ -23,17 +25,23 @@ from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
+from dewpoint.apps.worker.deployment import current_abi
+from dewpoint.apps.workflow_ops import abi_reasons
 from dewpoint.core.config import Settings
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.runs import Run
 from dewpoint.core.models.workflows import WorkflowVersion
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.runs import service as runs
-from dewpoint.core.workflows.service import lock_for_admission
+from dewpoint.core.workflows.service import lock_for_admission, other_abi
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, LIVE, RunInput
 from dewpoint.engine.runtime.workflow import RunGraph
 
 START_FAILED = "start_failed"
+NO_CURRENT_BUILD = (
+    "No Dewpoint build is current in the `dewpoint-engine` deployment, so no worker would run it: make one current "
+    "with `dewpoint deployment set-current`."
+)
 START_RETRY_S = (0.5, 2.0)  # the waits between three attempts to start a run
 # Temporal refused the request itself, so it started nothing. Any other failure may follow an accepted start.
 _REFUSED = frozenset(
@@ -78,10 +86,13 @@ async def admit(
     *,
     tenant_id: uuid.UUID,
     version_id: uuid.UUID,
+    abi: int | None,
     mode: str = LIVE,
     started_by: uuid.UUID | None = None,
 ) -> Run:
-    """Insert the run, or raise NotAdmissibleError. Call it inside a READ COMMITTED transaction."""
+    """Insert the run, or raise NotAdmissibleError. Call it inside a READ COMMITTED transaction. `abi` is the engine
+    ABI of the deployment's current build, where the run will start (`current_abi`; None: no build is current). The
+    admitting process's own build doesn't matter: during a rollout, both builds' processes admit runs."""
     await tenant_scope(s, tenant_id)
     version = await s.get(WorkflowVersion, version_id)
     if version is None:
@@ -91,6 +102,11 @@ async def admit(
         raise NotAdmissibleError(["The workflow is disabled."])
     if workflow.active_version_id != version.id:
         raise NotAdmissibleError(["Only the workflow's active version can start runs."])
+    if abi is None:
+        raise NotAdmissibleError([NO_CURRENT_BUILD])
+    stale = await other_abi(s, version.closure_version_ids, abi)  # versions never change: no lock needed
+    if stale:
+        raise NotAdmissibleError(abi_reasons(version.id, stale, abi))
     entries = lifecycle.entries_for(version.closure_node_refs, version.closure_cel_profiles)
     await lifecycle.lock_shared(s, entries)
     await _admission_locked()
@@ -120,9 +136,11 @@ async def start_run(
     started_by: uuid.UUID | None = None,
 ) -> uuid.UUID:
     """Admit the run and start it. Raises NotAdmissibleError, StartRefusedError (the run is recorded as failed) or
-    StartUncertainError (the run stays `running`: it may be executing)."""
+    StartUncertainError (the run stays `running`: it may be executing). A promotion between the admission and the
+    start is caught when the run loads its version (§7)."""
+    abi = await current_abi(client)  # before the transaction: no lock is held across a call to Temporal
     async with sessionmaker() as s, s.begin():
-        run = await admit(s, tenant_id=tenant_id, version_id=version_id, mode=mode, started_by=started_by)
+        run = await admit(s, tenant_id=tenant_id, version_id=version_id, abi=abi, mode=mode, started_by=started_by)
     start = RunInput(
         tenant_id=str(tenant_id),
         run_id=str(run.id),
@@ -175,6 +193,7 @@ async def _start(client: Client, start: RunInput, run_id: uuid.UUID) -> None:
 
 __all__ = [
     "START_FAILED",
+    "NO_CURRENT_BUILD",
     "START_RETRY_S",
     "NotAdmissibleError",
     "StartRefusedError",

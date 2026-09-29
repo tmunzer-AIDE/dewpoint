@@ -9,20 +9,40 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
+from temporalio.api.workflowservice.v1 import DescribeWorkerDeploymentRequest, DescribeWorkerDeploymentResponse
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from dewpoint.apps import runs as run_ops
 from dewpoint.apps import workflow_ops
-from dewpoint.apps.runs import START_FAILED, NotAdmissibleError, StartRefusedError, StartUncertainError, start_run
+from dewpoint.apps.runs import (
+    NO_CURRENT_BUILD,
+    START_FAILED,
+    NotAdmissibleError,
+    StartRefusedError,
+    StartUncertainError,
+    start_run,
+)
+from dewpoint.apps.worker.deployment import this_build
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.runs import service
 from dewpoint.core.workflows import service as workflows
+from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, SIMULATE, RunInput
 from tests.apps.test_lifecycle_races import until_someone_waits_for_a_lock
-from tests.apps.test_workflow_ops import ECHO, ECHO_GRAPH, actor, create, publish, save, update
+from tests.apps.test_workflow_ops import (
+    ECHO,
+    ECHO_GRAPH,
+    actor,
+    create,
+    publish,
+    published_by_the_previous_build,
+    runs,
+    save,
+    update,
+)
 from tests.support.registry import sync_test_plugins
 
 
@@ -37,11 +57,29 @@ def rpc(status: RPCStatusCode) -> RPCError:
     return RPCError(status.name.lower(), status, b"")
 
 
+class FakeDeployment:
+    """Temporal's `dewpoint-engine` deployment, as admission reads it: its current build (None: there's none)."""
+
+    def __init__(self, current: str | None) -> None:
+        self.current = current
+
+    async def describe_worker_deployment(self, _request: DescribeWorkerDeploymentRequest) -> Any:
+        if self.current is None:
+            raise rpc(RPCStatusCode.NOT_FOUND)  # no worker has joined it
+        response = DescribeWorkerDeploymentResponse()
+        response.worker_deployment_info.routing_config.current_deployment_version.build_id = self.current
+        return response
+
+
 class FakeClient:
     """Temporal's start, as start_run sees it. Each call takes the next answer: None accepts, an exception refuses,
-    and a LostAck accepts but raises. Like the server, it refuses a workflow id it already accepted."""
+    and a LostAck accepts but raises. Like the server, it refuses a workflow id it already accepted. Its deployment's
+    current build is this one unless a test says otherwise."""
 
-    def __init__(self, *answers: BaseException | LostAck | None) -> None:
+    namespace = "default"
+
+    def __init__(self, *answers: BaseException | LostAck | None, current: str | None = this_build()) -> None:
+        self.workflow_service = FakeDeployment(current)
         self.answers = list(answers)
         self.started: list[tuple[RunInput, str, str]] = []
         self.calls: list[tuple[str, WorkflowIDReusePolicy]] = []
@@ -114,6 +152,92 @@ async def test_only_the_active_version_of_an_enabled_workflow_is_admitted(
             dispatch_sessionmaker, FakeClient(), api_settings,  # type: ignore[arg-type]
             tenant_id=ctx.tenant_id, version_id=first, trigger={},
         )  # fmt: skip
+
+
+async def test_a_version_of_another_abi_is_refused_until_its_workflows_are_published_again(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings, monkeypatch
+) -> None:
+    """Spec §7: a version runs only on a build of its engine ABI. Once a build with a new ABI is current, a version the
+    build before published is refused, and so is one that runs such a version as a sub-flow, until each workflow is
+    published again: the sub-flow first, since publishing refuses a parent that pins an older ABI's version."""
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    child = await create(api_sessionmaker, ctx, ECHO_GRAPH, name="child")
+    parent = await create(api_sessionmaker, ctx, runs(child), name="parent")
+    old_child = await published_by_the_previous_build(api_sessionmaker, ctx, child, api_settings, monkeypatch)
+    old_parent = await published_by_the_previous_build(api_sessionmaker, ctx, parent, api_settings, monkeypatch)
+
+    async def started(version_id: uuid.UUID) -> uuid.UUID:
+        return await start_run(
+            dispatch_sessionmaker, FakeClient(), api_settings,  # type: ignore[arg-type]
+            tenant_id=ctx.tenant_id, version_id=version_id, trigger={},
+        )  # fmt: skip
+
+    with pytest.raises(NotAdmissibleError) as refused:
+        await started(old_parent.id)
+    old = ENGINE_ABI - 1
+    assert sorted(refused.value.reasons) == sorted(
+        [
+            f"This version was published for engine ABI {old}, and the current build runs ABI {ENGINE_ABI}: publish "
+            f"the workflow again with a build of ABI {ENGINE_ABI}.",
+            f"Version {old_child.id}, a sub-flow or failure handler it runs, was published for engine ABI {old}, and "
+            f"the current build runs ABI {ENGINE_ABI}: publish that workflow again with a build of ABI {ENGINE_ABI}, "
+            "then this one.",
+        ]
+    )
+    await save(api_sessionmaker, ctx, parent, runs(child))
+    assert [d.code for d in (await publish(api_sessionmaker, ctx, parent, api_settings)).errors] == [
+        "subflow.engine_abi"
+    ]  # the parent alone can't be published again
+    await save(api_sessionmaker, ctx, child, ECHO_GRAPH)
+    assert (await publish(api_sessionmaker, ctx, child, api_settings)).version is not None
+    new_parent = (await publish(api_sessionmaker, ctx, parent, api_settings)).version
+    assert new_parent is not None
+    run_id = await started(new_parent.id)
+    assert (await run_row(owner_sessionmaker, ctx.tenant_id, run_id)).status == "running"
+
+
+async def test_admission_compares_with_the_current_build_not_the_admitting_one(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings, monkeypatch
+) -> None:
+    """During a rollout, both builds' processes admit runs, and a run starts on the deployment's current build. Before
+    this build is promoted, the build before it is current: this process admits that build's versions, and refuses
+    its own, which the current build can't run (and the reverse after the promotion)."""
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    old_wf = await create(api_sessionmaker, ctx, ECHO_GRAPH, name="old")
+    new_wf = await create(api_sessionmaker, ctx, ECHO_GRAPH, name="new")
+    old = await published_by_the_previous_build(api_sessionmaker, ctx, old_wf, api_settings, monkeypatch)
+    new = (await publish(api_sessionmaker, ctx, new_wf, api_settings)).version
+    assert new is not None
+    previous = f"dewpoint-0.1.0+abi{ENGINE_ABI - 1}"  # current: this build isn't promoted yet
+    run_id = await start_run(
+        dispatch_sessionmaker, FakeClient(current=previous), api_settings,  # type: ignore[arg-type]
+        tenant_id=ctx.tenant_id, version_id=old.id, trigger={},
+    )  # fmt: skip
+    assert (await run_row(owner_sessionmaker, ctx.tenant_id, run_id)).workflow_version_id == old.id
+    with pytest.raises(NotAdmissibleError) as refused:
+        await start_run(
+            dispatch_sessionmaker, FakeClient(current=previous), api_settings,  # type: ignore[arg-type]
+            tenant_id=ctx.tenant_id, version_id=new.id, trigger={},
+        )  # fmt: skip
+    assert refused.value.reasons == [
+        f"This version was published for engine ABI {ENGINE_ABI}, and the current build runs ABI {ENGINE_ABI - 1}: "
+        f"make a build of ABI {ENGINE_ABI} current first."
+    ]
+
+
+async def test_nothing_is_admitted_while_no_build_is_current(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    ctx, _, version = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings)
+    client = FakeClient(current=None)
+    with pytest.raises(NotAdmissibleError) as refused:
+        await start_run(
+            dispatch_sessionmaker, client, api_settings,  # type: ignore[arg-type]
+            tenant_id=ctx.tenant_id, version_id=version, trigger={},
+        )  # fmt: skip
+    assert refused.value.reasons == [NO_CURRENT_BUILD] and client.started == []
 
 
 async def only_run(owner: Any, tenant: uuid.UUID) -> Any:
@@ -376,4 +500,4 @@ async def test_admission_reads_the_workflow_afresh_in_a_session_that_loaded_it(
         assert held is not None and held.enabled and held.active_version_id == version
         await change_committed(api_sessionmaker, ctx, wf, change)
         with pytest.raises(NotAdmissibleError, match=REFUSED[how]):
-            await run_ops.admit(s, tenant_id=ctx.tenant_id, version_id=version)
+            await run_ops.admit(s, tenant_id=ctx.tenant_id, version_id=version, abi=ENGINE_ABI)

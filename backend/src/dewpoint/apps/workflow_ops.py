@@ -115,6 +115,41 @@ def _lifecycle_errors(current: Mapping[lifecycle.Entry, str], *, refuse_deprecat
     return out
 
 
+def abi_reasons(version_id: uuid.UUID, stale: list[tuple[uuid.UUID, int]], current: int) -> list[str]:
+    """Why `version_id` can't start runs on the current build, of engine ABI `current`: it, or a version it runs, was
+    published for another. A version runs only on a build of its ABI (spec §7): an older one is published again with
+    the current build, and a newer one waits for its own build to be made current."""
+
+    def remedy(abi: int, what: str) -> str:
+        if abi > current:
+            return f"make a build of ABI {abi} current first"
+        return f"publish {what} again with a build of ABI {current}"
+
+    return [
+        f"This version was published for engine ABI {abi}, and the current build runs ABI {current}: "
+        f"{remedy(abi, 'the workflow')}."
+        if other == version_id
+        else f"Version {other}, a sub-flow or failure handler it runs, was published for engine ABI {abi}, and the "
+        f"current build runs ABI {current}: {remedy(abi, 'that workflow')}, then this one."
+        for other, abi in stale
+    ]
+
+
+async def _pin_abi_errors(s: AsyncSession, pins: list[WorkflowVersion]) -> list[Diagnostic]:
+    """Every version a new one would run must be of the ABI it's published for, this build's (spec §7): so a parent is
+    published again only after its sub-flows and failure handler."""
+    stale = await service.other_abi(s, [i for v in pins for i in v.closure_version_ids], ENGINE_ABI)
+    return [
+        Diagnostic(
+            code="subflow.engine_abi",
+            message=f"Version {other}, a sub-flow or failure handler this workflow would run, was published for engine "
+            f"ABI {abi}, and this build publishes ABI {ENGINE_ABI}.",
+            fix="Publish that workflow again first.",
+        )
+        for other, abi in stale
+    ]
+
+
 async def publish(
     s: AsyncSession, ctx: TenantContext, wf: Workflow, *, expected_revision: int, settings: Settings
 ) -> Published:
@@ -130,6 +165,9 @@ async def publish(
     if errors:
         return Published(None, errors, warnings)
     pins = list(checked.pins.values())
+    errors = await _pin_abi_errors(s, pins)
+    if errors:
+        return Published(None, errors, warnings)
     closure_node_refs = sorted({*checked.result.node_refs, *(r for v in pins for r in v.closure_node_refs)})
     closure_cel_profiles = sorted({CURRENT_CEL_PROFILE, *(p for v in pins for p in v.closure_cel_profiles)})
     entries = lifecycle.entries_for(closure_node_refs, closure_cel_profiles)

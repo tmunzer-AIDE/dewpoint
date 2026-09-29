@@ -10,7 +10,7 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -122,11 +122,15 @@ async def finish_run(
     error_code: str | None = None,
     error_message: str | None = None,
     iterations: int = 0,
+    if_running: bool = False,
 ) -> None:
+    """A run's end. `if_running`: only if it has none yet, as when a parent writes the end of a child that was
+    terminated before it could write its own."""
+    query = update(Run).where(Run.id == run_id)
+    if if_running:
+        query = query.where(Run.status == "running")
     await s.execute(
-        update(Run)
-        .where(Run.id == run_id)
-        .values(
+        query.values(
             status=status,
             ended_at=ended_at,
             error_code=sanitize(error_code),
@@ -166,14 +170,19 @@ async def get_run(s: AsyncSession, run_id: uuid.UUID) -> Run | None:
 
 
 async def list_runs(
-    s: AsyncSession, *, workflow_id: uuid.UUID | None = None, before: datetime | None = None, limit: int = 50
+    s: AsyncSession,
+    *,
+    workflow_id: uuid.UUID | None = None,
+    before: tuple[datetime, uuid.UUID] | None = None,
+    limit: int = 50,
 ) -> list[Run]:
-    """Top-level runs, newest first; `before` pages through older runs. Sub-runs are listed with their parent."""
+    """Top-level runs, newest first. The next page starts after the last run of this one: `before` is its start time
+    and its id, since runs can start in the same instant. Sub-runs are listed with their parent."""
     q = select(Run).where(Run.parent_run_id.is_(None)).order_by(Run.started_at.desc(), Run.id.desc()).limit(limit)
     if workflow_id is not None:
         q = q.where(Run.workflow_id == workflow_id)
     if before is not None:
-        q = q.where(Run.started_at < before)
+        q = q.where(tuple_(Run.started_at, Run.id) < tuple_(*before))
     return list((await s.execute(q)).scalars())
 
 

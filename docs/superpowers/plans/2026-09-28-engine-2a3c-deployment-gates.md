@@ -110,6 +110,22 @@ agree before implementation starts.
 
 Not run during planning: CI, so gate 7b hasn't run on Linux yet.
 
+## During execution
+
+Execution's second checkpoint (2026-09-29) changed Tasks 1, 2 and 7 after they ran. The task sections below show
+their code as first planned; these commits carry the changes:
+- **CI's CEL gate job** ran `tests/engine/cel` first, where Task 2's gate 4 starts a Temporal worker, before the
+  evaluator's fork tests, which refuse to run beside its threads. The job now runs `tests/apps/cel_evaluator` first
+  (`f2e6c14`).
+- **The replay gate's base** (Task 7) was a push's previous commit, so a history rewritten by an earlier push of a
+  branch passed once any later commit followed. CI now compares a pull request with its base, a push to `main` with
+  the commit before it, and any other push with its merge base with `main` (`gate.base_for`, `5aa1914`; decision
+  12).
+- **Gate 7b on Linux** (Task 1) took three loads past 1 s, up to 1.12 s, each in a run's first workflow task, which
+  also loads and compiles the version. The owner chose both fixes (`7d6ee2a`; decisions 1 to 3): an execution's first
+  task gets a tenth of each threshold (`STARTUP_SHARE`), and the thresholds are a third lower. Task 11's prerequisite
+  is a Linux `cel-gates` run of this code with every load at or under 1 s.
+
 ## Go/no-go: deployment and gates (run 2026-09-28)
 
 | # | Question | Result |
@@ -154,7 +170,7 @@ admission compare with the deployment's current build (decision 16). The others 
    over values at the caps) costs about 77 ms per evaluation to bind, measure and convert. Its stored bounds are
    tiny, so nothing charged it. `Measure.nodes` counts every value a binding set holds. `_cel_task` binds each view
    under the budget and charges its nodes, whether the expression then runs locally or in `cel.evaluate`. A
-   workflow task also yields at 100,000 bound values (`YIELD_NODES`, new).
+   workflow task also yields at 100,000 bound values (`YIELD_NODES`, new; 65,000 since checkpoint 2).
    - Cost: a run that binds more than 100,000 values in one task gains a timer. That changes its command sequence,
      so it needs a new `ENGINE_ABI`. Task 11 bumps it for local CEL, and no build ships in between.
 3. **Gate 7b measures what a worker pays.** Every workflow activation runs through a `ThreadPoolExecutor` subclass
@@ -165,6 +181,12 @@ admission compare with the deployment's current build (decision 16). The others 
    task at 0.44 s (the regular-expression load, macOS), the run's first task included. That's evidence for the
    plan, not the gate: the in-process gate ran about twice as slow on Linux, so Task 11 waits for CI's Linux result
    (decision 15).
+   - Execution's checkpoint 2: CI's first Linux run took conversion, equality and binding past 1 s (1.12, 1.11 and
+     1.02 s), each in a run's first workflow task, which also starts the run. So that task gets a tenth of each
+     threshold (`STARTUP_SHARE`): a view's first binding and light evaluations still run in it, and a heavier
+     evaluation waits for the next task. The thresholds are a third lower too: 13,000 iterations, 5.5 MiB,
+     2,700,000 work units, 130 evaluations and 65,000 bound values. The worst task is now 0.22 s on macOS and
+     0.46 s on Linux (CI's `cel-gates`, commit `7d6ee2a`).
 
 ### CEL gate 4 (Task 2)
 
@@ -230,7 +252,9 @@ admission compare with the deployment's current build (decision 16). The others 
     - a recorded history is never changed or removed (a rename is both);
     - new histories go only into this build's directory, so a new directory appears only with a new build ID.
 
-    The recorder, the scenarios and the tests may change.
+    The recorder, the scenarios and the tests may change. The base (`gate.base_for`, execution's checkpoint 2): a
+    pull request's base, `main`'s previous commit for a push to `main`, and for any other push its merge base with
+    `main`, so a rewrite stays visible on every later push of its branch.
 
 ### The deferred minors (Tasks 8, 9)
 
@@ -243,7 +267,9 @@ admission compare with the deployment's current build (decision 16). The others 
     - M5: a sub-run's start row that the database refused for its data was retried forever, holding up the
       projection. It's logged and skipped, like any refused row.
     - M6: a run whose snapshot another build can't read reported 0 iterations. The continued run's input now
-      carries the iterations used so far, outside the snapshot.
+      carries the iterations used so far, outside the snapshot. Checkpoint 3 found the other ends before a restore
+      still reported 0 (a version that doesn't load or compile, a cancel while it loads), so a sub-flow's parent
+      released budget it had spent: every one reports them now (`860d332`).
     - M7: `test_the_cap_holds_across_children` asserted `<= 100` iterations. It asserts exactly 0: the filter's 150
       items are all or nothing, so none ran.
     - M8: a cancel while the run waited for its projection in flight, before continuing, cancelled that projection.
@@ -315,8 +341,10 @@ admission compare with the deployment's current build (decision 16). The others 
   - waits use `asyncio.sleep` (a durable timer), `workflow.wait` or `workflow.wait_condition`;
   - never iterate a set, and build every dict and list that reaches a command or the snapshot in a fixed order.
 - **Limits.** Values are copied from spec §5.6 and §6; new constants are marked "new".
-  - The yield thresholds per workflow task: 20,000 iterations, 8 MiB, 4,000,000 work units, 200 evaluations, and
-    100,000 bound values (`YIELD_NODES`, new).
+  - The yield thresholds per workflow task: 13,000 iterations, 5.5 MiB, 2,700,000 work units, 130 evaluations, and
+    65,000 bound values (`YIELD_NODES`, new), and a tenth of each in an execution's first workflow task
+    (`STARTUP_SHARE`, new). Execution's checkpoint 2 set them; the plan first had 20,000, 8 MiB, 4,000,000, 200 and
+    100,000.
   - The CPU target per workflow task: 1 s (`TASK_CPU_TARGET_S`), against Temporal's 10 s workflow-task timeout.
   - A filter runs inline up to 1,000 items (`FILTER_INLINE`, new); larger ones go to `cel.evaluate` in chunks of
     1,000 binding sets.
@@ -5852,7 +5880,8 @@ Versions published before this task are ABI 2, so after this build is promoted t
 
 **Prerequisite: gate 7b passes on Linux.** Linux is authoritative for gate 7 (spec §5.9), and planning measured gate
 7b on macOS only (0.44 s worst). Local CEL goes on only once the CI job `cel-gates` has passed on this branch with
-Task 1's code, `tests/apps/worker/test_gate_task_cost.py` included. CI runs on push, and only the owner pushes:
+Task 1's code as execution's checkpoint 2 changed it (`7d6ee2a`), `tests/apps/worker/test_gate_task_cost.py`
+included. CI runs on push, and only the owner pushes:
 1. Before Step 1, stop and ask the owner for the `cel-gates` result of a push of this branch. Checkpoint 1 is the
    natural time for that push, so the result is usually already in hand.
 2. Read the job's `cel-gate-results` artifact, and record in the ledger each load's `worst_cpu_s` from

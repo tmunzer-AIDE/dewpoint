@@ -26,6 +26,8 @@ services:
       DEWPOINT_API_DB_PASSWORD: ${DEWPOINT_API_DB_PASSWORD:?set in .env}
       DEWPOINT_ADMIN_DB_PASSWORD: ${DEWPOINT_ADMIN_DB_PASSWORD:?set in .env}
       DEWPOINT_AUDITOR_DB_PASSWORD: ${DEWPOINT_AUDITOR_DB_PASSWORD:?set in .env}
+      DEWPOINT_WORKER_DB_PASSWORD: ${DEWPOINT_WORKER_DB_PASSWORD:?set in .env}
+      DEWPOINT_DISPATCH_DB_PASSWORD: ${DEWPOINT_DISPATCH_DB_PASSWORD:?set in .env}
     volumes: [pgdata:/var/lib/postgresql/data, ./initdb:/docker-entrypoint-initdb.d:ro]
     healthcheck: { test: ["CMD-SHELL", "pg_isready -U dewpoint_owner -d dewpoint"], interval: 5s, retries: 20 }
 
@@ -73,11 +75,45 @@ services:
     volumes: [anchors:/anchors]
     depends_on: { migrate: { condition: service_completed_successfully } }
 
+  temporal:
+    # Temporal's dev server: one container, its state in SQLite on a volume. For evaluation: production runs a
+    # Temporal cluster (docs/operations/deployment.md). Its Web UI is on this host only.
+    image: temporalio/temporal:1.9.1
+    command: ["server", "start-dev", "--ip", "0.0.0.0", "--ui-ip", "0.0.0.0", "--db-filename", "/home/temporal/temporal.db"]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    volumes: [temporal-data:/home/temporal]  # the image's user owns its home: the new volume takes that ownership
+    ports: ["127.0.0.1:8233:8233"]
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "127.0.0.1:7233"]
+      interval: 5s
+      retries: 30
+
+  worker:
+    <<: *app
+    command: ["dewpoint", "worker"]
+    environment:
+      <<: *appenv
+      DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_worker_login:${DEWPOINT_WORKER_DB_PASSWORD}@postgres/dewpoint
+      DEWPOINT_TEMPORAL_ADDRESS: temporal:7233
+      DEWPOINT_CEL_SOCKET: /run/dewpoint-cel/cel.sock
+      DEWPOINT_CEL_MAX_CONCURRENT: "2"  # the evaluator's slots at 2 CPUs (docs/operations/cel-evaluator.md)
+      # Compose runs one build at a time: the worker makes its build current (docs/operations/deployment.md).
+      DEWPOINT_WORKER_SET_CURRENT: "true"
+    volumes: [cel-socket:/run/dewpoint-cel]
+    stop_grace_period: 45s  # longer than DEWPOINT_WORKER_SHUTDOWN_GRACE_S (30 s): running attempts finish
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      temporal: { condition: service_healthy }
+      cel-evaluator: { condition: service_healthy }
+
   cel-evaluator:
     image: ${DEWPOINT_CEL_EVALUATOR_IMAGE:-dewpoint-cel-evaluator:dev}
     build: { context: ../.., dockerfile: deploy/docker/cel-evaluator.Dockerfile }
-    # Secretless and egress-free (spec §5.7): no network at all, no environment beyond its own settings. The CEL
-    # activity worker (2a-3) reaches it through the socket on the `cel-socket` volume, which only the two mount.
+    # Secretless and egress-free (spec §5.7): no network at all, no environment beyond its own settings. The worker
+    # reaches it through the socket on the `cel-socket` volume, which only the two mount.
     network_mode: none
     read_only: true
     tmpfs: [/tmp]
@@ -105,4 +141,4 @@ services:
       DEWPOINT_TRUSTED_PROXIES: ${DEWPOINT_TRUSTED_PROXIES:-}
     depends_on: { api: { condition: service_healthy } }
 
-volumes: { pgdata: {}, anchors: {}, cel-socket: {} }
+volumes: { pgdata: {}, anchors: {}, cel-socket: {}, temporal-data: {} }

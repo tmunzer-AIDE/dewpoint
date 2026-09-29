@@ -64,6 +64,7 @@ class DbRunStore:
                 manifests={t.ref: t.manifest for t in types},
                 subflow_version_ids=dict(sorted(v.subflow_version_ids.items())),
                 failure_handler_version_id=str(v.failure_handler_version_id) if v.failure_handler_version_id else None,
+                engine_abi=v.engine_abi,
             )
 
     async def project(self, data: ProjectInput) -> None:
@@ -85,7 +86,14 @@ class DbRunStore:
         async with self.sessionmaker() as s, s.begin():
             await tenant_scope(s, tenant)
             if data.start is not None:
-                await _start(s, tenant, data.start)
+                try:
+                    async with s.begin_nested():
+                        await _start(s, tenant, data.start)
+                except DBAPIError as e:
+                    state = _refused(e)
+                    if state is None:
+                        raise
+                    _log.warning("projection_start_refused", run_id=data.start.run_id, sqlstate=state)
             for row in data.steps:
                 try:
                     async with s.begin_nested():
@@ -138,4 +146,5 @@ async def _finish(s: AsyncSession, run: RunSummary) -> None:
         error_code=run.error_code,
         error_message=run.error_message,
         iterations=run.iterations,
+        if_running=run.if_running,
     )

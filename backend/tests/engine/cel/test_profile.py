@@ -13,4 +13,4 @@ def test_the_profile_names_the_installed_runtime() -> None:
 def test_local_evaluation_is_a_build_constant_tied_to_the_engine_abi() -> None:
     """Tripwire (spec §5.9 rollout): LOCAL_CEL_PROFILE is part of engine_abi. Changing it without bumping ENGINE_ABI
     would let an open run replay on a build that routes its CEL differently. Update both, then this pair."""
-    assert (ENGINE_ABI, profile.LOCAL_CEL_PROFILE) == (2, None)
+    assert (ENGINE_ABI, profile.LOCAL_CEL_PROFILE) == (3, profile.CURRENT_CEL_PROFILE)

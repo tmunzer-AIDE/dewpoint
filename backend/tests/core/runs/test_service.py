@@ -116,8 +116,28 @@ async def test_runs_list_newest_first_and_page(owner_sessionmaker, dispatch_sess
     async with owner_sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant)
         first = await service.list_runs(s, limit=2)
-        rest = await service.list_runs(s, before=first[-1].started_at, limit=2)
+        rest = await service.list_runs(s, before=(first[-1].started_at, first[-1].id), limit=2)
     assert [r.id for r in first + rest] == ids[::-1]
+
+
+async def test_runs_that_started_in_the_same_instant_are_paged_by_id_too(
+    owner_sessionmaker, dispatch_sessionmaker
+) -> None:
+    """2a-3a's final review, M5: paging by the start time alone skipped runs that started in the same instant as the
+    last one of a page. The cursor is (start time, id)."""
+    tenant, wf, version = await seed_workflow(owner_sessionmaker)
+    async with dispatch_sessionmaker() as s, s.begin():  # one transaction: now() is one instant
+        await tenant_scope(s, tenant)
+        for _ in range(3):
+            await service.insert_run(
+                s, run_id=uuid.uuid4(), tenant_id=tenant, workflow_id=wf, version_id=version, mode="live"
+            )
+    async with owner_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        first = await service.list_runs(s, limit=2)
+        rest = await service.list_runs(s, before=(first[-1].started_at, first[-1].id), limit=2)
+    assert len({r.started_at for r in first + rest}) == 1
+    assert len({r.id for r in first + rest}) == 3
 
 
 async def test_previews_and_messages_hold_nothing_the_database_refuses(
@@ -237,3 +257,40 @@ async def test_a_sub_run_needs_a_parent(owner_sessionmaker, dispatch_sessionmake
                 s, run_id=uuid.uuid4(), tenant_id=tenant, workflow_id=wf, version_id=version, mode="live"
             )
             await s.execute(text("update runs set kind = 'subflow'"))
+
+
+async def test_a_parents_write_of_a_childs_end_never_replaces_one(
+    owner_sessionmaker, dispatch_sessionmaker, worker_sessionmaker
+) -> None:
+    """2a-3c (M4): a parent writes the end of a child that ended without one (terminated). It lands only on a run
+    still `running`: an end the child wrote first stands."""
+    tenant, running = await seeded_run(owner_sessionmaker, dispatch_sessionmaker)
+    async with dispatch_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        first = await service.get_run(s, running)
+        assert first is not None
+        ended = (
+            await service.insert_run(
+                s,
+                run_id=uuid.uuid4(),
+                tenant_id=tenant,
+                workflow_id=first.workflow_id,
+                version_id=first.workflow_version_id,
+                mode="live",
+            )
+        ).id
+    now = datetime.now(UTC)
+    async with worker_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        await service.finish_run(s, ended, status="succeeded", ended_at=now, iterations=3)
+    for run_id in (running, ended):
+        async with worker_sessionmaker() as s, s.begin():
+            await tenant_scope(s, tenant)
+            await service.finish_run(
+                s, run_id, status="failed", ended_at=now, error_code="terminated", iterations=1000, if_running=True
+            )
+    async with owner_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        first, second = await service.get_run(s, running), await service.get_run(s, ended)
+    assert first is not None and (first.status, first.error_code, first.iterations) == ("failed", "terminated", 1000)
+    assert second is not None and (second.status, second.iterations) == ("succeeded", 3)

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from dewpoint.engine.cel import evaluate
-from dewpoint.engine.cel.bind import BindingError, ScopeView, bind, measure
+from dewpoint.engine.cel.bind import BindingError, Measure, ScopeView, bind, measure
 from dewpoint.engine.cel.ipc import EvaluateRequest
 from dewpoint.engine.cel.record import ExpressionRecord
 from dewpoint.engine.cel.route import route
@@ -143,26 +143,36 @@ class CelTask:
     def request(self, profile: str) -> dict[str, Any]:
         return EvaluateRequest(profile, self.record.expr, dict(self.record.declarations), self.bindings).to_json()
 
-    def run_local(self) -> list[evaluate.Outcome]:
-        program = evaluate.compiled(self.record.expr, self.record.declarations)
-        return [evaluate.run(program, b) for b in self.bindings]
+    def run_one(self, bindings: Mapping[str, Any]) -> evaluate.Outcome:
+        """One binding set, in-process."""
+        return evaluate.run(evaluate.compiled(self.record.expr, self.record.declarations), bindings)
+
+
+@dataclass(frozen=True)
+class Bound:
+    """One view's binding set, measured: routing reads the caps, the yield budget the values bound."""
+
+    bindings: Mapping[str, Any]
+    measured: Measure
+
+
+def bind_view(record: ExpressionRecord, view: ScopeView) -> Bound:
+    try:
+        b = bind(record, view)
+    except BindingError as e:
+        raise ValueFailure(evaluate.TYPE_MISMATCH, str(e)) from None
+    return Bound(b, measure(b))
 
 
 def cel_task(
-    record: ExpressionRecord, views: Sequence[ScopeView], *, local_profile: str | None, version_profile: str
+    record: ExpressionRecord, bound: Sequence[Bound], *, local_profile: str | None, version_profile: str
 ) -> CelTask:
-    """Bind every view; inline only when every binding set is within the caps and the profile runs here."""
-    bindings: list[Mapping[str, Any]] = []
-    local = True
-    for v in views:
-        try:
-            b = bind(record, v)
-        except BindingError as e:
-            raise ValueFailure(evaluate.TYPE_MISMATCH, str(e)) from None
-        bindings.append(b)
-        mode = route(record, measure(b), local_profile=local_profile, version_profile=version_profile)
-        local = local and mode == "local"
-    return CelTask(record, tuple(bindings), local)
+    """Inline only when every binding set is within the caps and the profile runs here."""
+    local = all(
+        route(record, b.measured, local_profile=local_profile, version_profile=version_profile) == "local"
+        for b in bound
+    )
+    return CelTask(record, tuple(b.bindings for b in bound), local)
 
 
 def outcome_value(outcome: evaluate.Outcome) -> Any:

@@ -67,6 +67,7 @@ class RunInput:
     snapshot: dict[str, Any] | None = None  # a continued run: where it carries on (spec §6, `snapshot_format` 1)
     checkpoint_events: int = CHECKPOINT_EVENTS
     drain_events: int = DRAIN_EVENTS
+    iterations: int = 0  # a continued run: what it had used, readable even when its snapshot isn't
 
 
 @dataclass(frozen=True)
@@ -101,6 +102,7 @@ class BatchInput:
     snapshot: dict[str, Any] | None = None
     checkpoint_events: int = CHECKPOINT_EVENTS
     drain_events: int = DRAIN_EVENTS
+    iterations: int = 0  # a continued batch: what it had used, readable even when its snapshot isn't
 
 
 @dataclass(frozen=True)
@@ -129,6 +131,7 @@ class VersionData:
     manifests: dict[str, dict[str, Any]]  # type@version -> manifest, for every node type in the graph
     subflow_version_ids: dict[str, str] = field(default_factory=dict)  # run_workflow node id -> pinned version id
     failure_handler_version_id: str | None = None
+    engine_abi: int | None = None  # the ABI it was published for; None only in histories recorded before 2a-3c
 
 
 @dataclass(frozen=True)
@@ -188,6 +191,7 @@ class RunSummary:
     error_code: str | None = None
     error_message: str | None = None
     iterations: int = 0
+    if_running: bool = False  # a parent writing the end of a child that ended without one: never over the child's own
 
 
 @dataclass(frozen=True)
@@ -203,6 +207,24 @@ class RunStart:
     parent_iteration_key: str
     kind: str  # subflow | failure_handler
     started_at: str
+
+    @classmethod
+    def of(cls, run: "RunInput", started_at: str) -> "RunStart":
+        """A sub-run's row, from its input: what its own first projection writes, and what its parent writes for it
+        when it ended before writing one."""
+        if run.parent is None or not run.workflow_id:
+            raise ValueError("a root run has no sub-run row")
+        return cls(
+            run_id=run.run_id,
+            workflow_id=run.workflow_id,
+            version_id=run.version_id,
+            mode=run.mode,
+            parent_run_id=run.parent.run_id,
+            parent_step_id=run.parent.step_id or None,
+            parent_iteration_key=run.parent.iteration_key,
+            kind=run.parent.kind,
+            started_at=started_at,
+        )
 
 
 @dataclass(frozen=True)

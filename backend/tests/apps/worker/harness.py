@@ -2,6 +2,7 @@
 """Run test graphs through `RunGraph` on Temporal's time-skipping test server, with the real step activities, an
 in-memory store and an in-process CEL evaluator (the real one needs Linux and its own container)."""
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
@@ -14,6 +15,7 @@ from temporalio.worker import Worker, WorkflowRunner
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
 from dewpoint.apps.worker.activities import Evaluate, RunStore, cel_activity, engine_activities
+from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.cel import ipc
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.graph.validate import SubflowInfo, ValidationContext, validate
@@ -38,6 +40,12 @@ from tests.support.plugins.testkit import TESTKIT
 TENANT = str(uuid.UUID(int=1))
 
 
+RESULT_TIMEOUT_S = 60  # the harness's runs are time-skipped: a minute is far more than any needs
+# CEL only the evaluator runs, whatever the build (a named time zone, spec §5.5): 1, Paris's hour at 00:00 UTC
+# on 1 January. The tests of the `cel.evaluate` path use it now that this build evaluates the rest in-process.
+EVALUATOR_ONLY = "timestamp('2026-01-01T00:00:00Z').getHours('Europe/Paris')"
+
+
 @dataclass
 class MemoryStore:
     versions: dict[str, VersionData] = field(default_factory=dict)
@@ -47,8 +55,9 @@ class MemoryStore:
     starts: dict[str, RunStart] = field(default_factory=dict)  # sub-runs' own rows
     schemas: dict[str, dict[str, Any]] = field(default_factory=dict)  # version -> its output schema
 
-    def add(self, g: G, workflow_id: uuid.UUID | None = None) -> str:
-        """Publish `g` as a version, pinned to the sub-flows it runs (as `publish` registered them)."""
+    def add(self, g: G, workflow_id: uuid.UUID | None = None, *, engine_abi: int = ENGINE_ABI) -> str:
+        """Publish `g` as a version, pinned to the sub-flows it runs (as `publish` registered them). `engine_abi`:
+        the build that published it, this one unless a test says otherwise."""
         result = validate(g.build(), ValidationContext(catalog=CATALOG, subflows=self.subflows))
         errors = [d.to_json() for d in result.diagnostics if d.severity == "error"]
         assert not errors, errors
@@ -64,14 +73,16 @@ class MemoryStore:
             manifests={r: MANIFESTS[r] for r in sorted(refs)},
             subflow_version_ids=dict(result.subflow_pins),
             failure_handler_version_id=str(handler) if handler else None,
+            engine_abi=engine_abi,
         )
         self.schemas[version_id] = dict(result.output_schema)
         return version_id
 
-    def publish(self, g: G) -> uuid.UUID:
-        """A workflow other graphs can run as a sub-flow or a failure handler: its id."""
-        workflow_id = uuid.uuid4()
-        version_id = self.add(g, workflow_id)
+    def publish(self, g: G, workflow_id: uuid.UUID | None = None, *, engine_abi: int = ENGINE_ABI) -> uuid.UUID:
+        """A workflow other graphs can run as a sub-flow or a failure handler: its id. With `workflow_id`, a new
+        version of that workflow, which graphs published from now on pin."""
+        workflow_id = workflow_id or uuid.uuid4()
+        version_id = self.add(g, workflow_id, engine_abi=engine_abi)
         input_schema = g.settings.get("input_schema", {"type": "object"})
         self.subflows[workflow_id] = SubflowInfo(
             workflow_id, uuid.UUID(version_id), input_schema, self.schemas[version_id]
@@ -88,7 +99,7 @@ class MemoryStore:
             self.starts.setdefault(data.start.run_id, data.start)
         for row in data.steps:
             self.rows[(row.run_id, row.step_id, row.iteration_key, row.attempt)] = row
-        if data.run is not None:
+        if data.run is not None and not (data.run.if_running and data.run.run_id in self.runs):
             self.runs[data.run.run_id] = data.run
 
     def steps(self, run_id: str) -> list[StepRow]:
@@ -134,13 +145,21 @@ async def workers(
 async def start(
     client: Client, store: MemoryStore, g: G, trigger: dict[str, Any] | None = None, **options: Any
 ) -> WorkflowHandle[Any, RunResult]:
+    return await start_version(client, store.add(g), trigger, **options)
+
+
+async def start_version(
+    client: Client, version_id: str, trigger: dict[str, Any] | None = None, **options: Any
+) -> WorkflowHandle[Any, RunResult]:
+    """A run of a version the store already has."""
     run_id = str(uuid.uuid4())
-    run = RunInput(TENANT, run_id, store.add(g), trigger or {}, options.pop("mode", LIVE), **options)
+    run = RunInput(TENANT, run_id, version_id, trigger or {}, options.pop("mode", LIVE), **options)
     return await client.start_workflow(RunGraph.run, run, id=run_id, task_queue=ENGINE_QUEUE)
 
 
 async def run(
     client: Client, store: MemoryStore, g: G, trigger: dict[str, Any] | None = None, **options: Any
 ) -> RunResult:
+    """A run to its end: a run that hangs fails its test instead of stalling the suite (2a-3a's final review, M6)."""
     handle = await start(client, store, g, trigger, **options)
-    return await handle.result()
+    return await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)

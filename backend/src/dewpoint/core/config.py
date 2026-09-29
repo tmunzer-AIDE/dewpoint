@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     cel_max_concurrent: int = 2  # the evaluator's N (docs/operations/cel-evaluator.md)
     cel_schedule_to_start_s: float = 600  # spec §5.7: no evaluator for a profile after this: cel_profile_unavailable
     worker_shutdown_grace_s: float = 30  # a stopping worker lets running attempts finish this long, then cancels them
+    # One build at a time (Compose): the worker makes its build the one new runs start on, once it polls. Leave it off
+    # where builds overlap, and promote each with `dewpoint deployment set-current` (docs/operations/deployment.md).
+    worker_set_current: bool = False
     audit_signing_key_b64: str | None = None  # Ed25519 private key (raw 32 bytes, base64)
     audit_anchor_path: str | None = None
 
