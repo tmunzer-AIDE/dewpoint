@@ -313,7 +313,7 @@ class RunGraph(Execution):
             checkpoint_events=self.checkpoint_events,
             drain_events=self.drain_events,
         )
-        handler = asyncio.create_task(self._handler(run, child, grant))
+        handler = asyncio.create_task(self._handler(run, child))
         while not handler.done():  # it draws its iterations from this run: answer as it asks
             wake = asyncio.create_task(workflow.wait_condition(lambda: bool(self._mail or self._answers)))
             try:
@@ -326,7 +326,7 @@ class RunGraph(Execution):
         self.sched.budget.settle_child(child, None if handler.cancelled() else handler.result())
         await self._send_signals()
 
-    async def _handler(self, run: RunInput, child: str, grant: int) -> int | None:
+    async def _handler(self, run: RunInput, child: str) -> int | None:
         """The failure handler's run: the iterations it used, or None when it ended without saying (its end is then
         written here, as a sub-flow's is)."""
         started = workflow.now().isoformat()
@@ -336,7 +336,7 @@ class RunGraph(Execution):
             )
         except ChildWorkflowError as e:
             workflow.logger.warning("failure_handler_failed", exc_info=True)
-            await self._lost_end(run, started, self._lost("failure handler", e), grant)
+            await self._lost_end(run, started, self._lost("failure handler", e))
             return None
         return result.iterations
 

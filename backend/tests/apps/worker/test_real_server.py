@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
+import pytest
 from temporalio.api.enums.v1 import EventType
 from temporalio.client import Client, WorkflowHandle
 from temporalio.testing import WorkflowEnvironment
@@ -105,6 +106,45 @@ async def test_a_terminated_failure_handler_records_its_end_and_the_runs_stands(
     assert store.starts[handler].kind == "failure_handler"
     assert (store.runs[handler].status, store.runs[handler].error_code) == ("failed", "terminated")
     assert store.runs[handle.id].status == "failed"
+
+
+def asks_for_more() -> G:
+    """A filter over 1,500 items, more than its first grant of 1,000 iterations, so it asks for more; then a delay."""
+    g = graph().node("f", "flow.filter@1", {"items": list(range(1_500)), "predicate": cel("item % 2 == 0")})
+    return g.node("d", "flow.delay@1", {"duration_s": 3600}).edge("f", "d")
+
+
+async def filtered(store: MemoryStore, run_id: str) -> None:
+    """Until the run's filter has ended, so it has been granted more (its row lands in real time)."""
+    for _ in range(200):
+        if any(r.node_key == "f" and r.status == "succeeded" for r in store.steps(run_id)):
+            return
+        await asyncio.sleep(0.1)
+    raise AssertionError(f"{run_id}'s filter never ended")
+
+
+@pytest.mark.parametrize("kind", ["subflow", "failure_handler"])
+async def test_a_terminated_sub_run_that_asked_for_more_records_its_whole_grant(
+    dev_env: WorkflowEnvironment, kind: str
+) -> None:
+    """The final review: the row a parent writes for a terminated sub-run recorded its first grant, not all it had
+    been granted, which the parent debits (spec §6)."""
+    client, store = dev_env.client, MemoryStore()
+    child_workflow = str(store.publish(asks_for_more()))
+    if kind == "subflow":
+        g = graph().node("r", "flow.run_workflow@1", {"workflow_id": child_workflow}, on_error="continue")
+    else:
+        g = graph().node("x", "flow.fail@1", {"message": "it went wrong"})
+        g.settings["failure_handler"] = child_workflow
+    async with serving(client, store):
+        handle = await start(client, store, g, {})
+        child = await child_started(handle)
+        await filtered(store, child)
+        await client.get_workflow_handle(child).terminate("an operator")
+        result = await asyncio.wait_for(handle.result(), 60)
+    assert store.starts[child].kind == kind
+    assert result.iterations > SUBFLOW_GRANT  # it had been granted more, and the parent debits all of it
+    assert (store.runs[child].error_code, store.runs[child].iterations) == ("terminated", result.iterations)
 
 
 async def test_temporal_suggesting_continue_as_new_drains_the_run() -> None:

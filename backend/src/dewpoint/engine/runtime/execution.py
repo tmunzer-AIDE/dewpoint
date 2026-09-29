@@ -850,7 +850,7 @@ class Execution:
             used = result.iterations
         except ChildWorkflowError as e:  # it failed as a workflow, which a run never does: a bug, or terminated
             failure = self._lost("sub-flow", e)
-            await self._lost_end(run, started, failure, grant)
+            await self._lost_end(run, started, failure)
             return _Effect(failure=failure, cel_mode=cel_mode)
         finally:
             self.sched.budget.settle_child(child, used)
@@ -868,11 +868,13 @@ class Execution:
             return Failure(TERMINATED, f"The {kind} was terminated outside Dewpoint.")
         return Failure(INTERNAL_ERROR, f"The {kind} ended without a result ({type(e.cause).__name__}).")
 
-    async def _lost_end(self, run: RunInput, started_at: str, failure: Failure, grant: int) -> None:
+    async def _lost_end(self, run: RunInput, started_at: str, failure: Failure) -> None:
         """A sub-run that ended without a result never wrote its end: its row would stay `running`, holding its
-        references (spec §4.5). Its parent writes it, unless it has one, with its whole grant, as counted here. It
-        writes the row too, in case the child was ended before its own: a start written later changes nothing."""
-        end = RunSummary(run.run_id, "failed", workflow.now().isoformat(), failure.code, failure.message, grant, True)
+        references (spec §4.5). Its parent writes it, unless it has one, with its whole grant as counted here: its
+        first grant and every one it asked for since, which the parent debits as it settles the child. It writes the
+        row too, in case the child was ended before its own: a start written later changes nothing."""
+        whole = self.sched.budget.reserved.get(run.run_id, 0)  # read before the child is settled
+        end = RunSummary(run.run_id, "failed", workflow.now().isoformat(), failure.code, failure.message, whole, True)
         await self._shielded([], end, RunStart.of(run, started_at))
 
     def _outer(self, loop: Instance) -> list[dict[str, Any]]:
