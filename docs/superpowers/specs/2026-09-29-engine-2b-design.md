@@ -19,6 +19,8 @@
     format, a rebuilt ready queue and an open-iteration cap with a reservation for one dependency chain (bounded by
     `OPEN_SCOPES_CAP + D`), provisional until its own dev-server go/no-go, with parallel sibling loops, before
     2b-1b.
+  - Revision 3 also renumbers 2b's ABIs: issue #15's fix takes `ENGINE_ABI` 4, so 2b-1a raises it to 5 and 2b-1b to 6
+    (§1, §6.6, §12, §13), provided #15 lands first.
 - **Parent specs:**
   - `2026-09-24-dewpoint-architecture-design.md` (§5, §6.1, §6.5, §6.8, §12, §15). This spec **changes** its
     workflow-id contract (§6.1), replaces its `outbox` table (§6.1), details its claim check (§6.5) and settles the
@@ -38,10 +40,10 @@
 1. **#15's request-size guard**, as its own change.
 2. **2b-1a — codec, ids and size:** the deployment environment and the production gate (off), enforced at the
    existing start boundary; server-built workflow ids; `TenantCodec` and its key cache; worker capability
-   registration; the outgoing-payload guard with spilling; the per-task byte budget. `ENGINE_ABI` 4.
+   registration; the outgoing-payload guard with spilling; the per-task byte budget. `ENGINE_ABI` 5.
 3. **2b-1b — claims and taint:** the claim tables, handles and grants, the activity boundary, the secret index,
    taint analysis and `declassify`, the tainted-filter activity, the live-state budget and snapshots, the refusal
-   of sensitive literals. `ENGINE_ABI` 5.
+   of sensitive literals. `ENGINE_ABI` 6.
 4. **2b-2 — admission:** `run_requests`, the dispatcher, slots, the reconciler, the run API and form metadata; the
    dev CLI moves onto admission.
 5. **2b-3 — triggers:** CSV input, schedules, webhook ingress.
@@ -51,9 +53,11 @@
 Protection comes first so admission and triggers adopt the final handle and payload contracts instead of being
 retrofitted. The gate lifts only at the end of 2b-4.
 
-**Each merged ABI has its own golden histories and replay gate.** 2b-1a records and tests the abi4 histories; 2b-1b
-records and tests abi5. Neither defers the other's. Nothing runs in production before the gate lifts, so publishing
-every workflow again after each ABI change costs only that.
+**Each merged ABI has its own golden histories and replay gate.** 2b-1a records and tests the abi5 histories; 2b-1b
+records and tests abi6. Neither defers the other's. **These numbers depend on issue #15's fix landing first:** it
+raises `ENGINE_ABI` to 4 (`docs/superpowers/plans/2026-09-29-cel-request-size.md`). If the order changes, 2b-1a and
+2b-1b take the next free numbers instead, and this spec is revised. Nothing runs in production before the gate
+lifts, so publishing every workflow again after each ABI change costs only that.
 
 ## 2. Environment and the production gate
 
@@ -502,12 +506,14 @@ results, transform outputs, variable values — are spilled one at a time when t
 5. Cancel its running runs, and wait until they're terminal.
 6. Delete its keys — only once nothing is left that could decode, so no live run is left unable to read its history.
 
-### 6.6 ABI 4 and draining
+### 6.6 ABI 5 and draining
 
-- 2b-1a raises `ENGINE_ABI` to 4 (ids, codec); 2b-1b to 5 (handles, claims).
+- 2b-1a raises `ENGINE_ABI` to 5 (ids, codec); 2b-1b to 6 (handles, claims). Issue #15's fix takes 4 first (§1); these
+  numbers depend on it landing before 2b-1a.
 - An older build drains its pinned runs on its own build. No newer component sends it payloads: dispatch requires
   the new capabilities of the current build (§2.7).
-- ABI-3 histories stay in plain text until the namespace's retention ends; under 2a's rule they hold only test data.
+- Histories of builds before 2b-1a — ABI 4 and older — stay in plain text until the namespace's retention ends;
+  under 2a's rule they hold only test data.
 - Queued requests of an older ABI are cancelled with `engine_abi_changed` (engine-core §4.5).
 
 ### 6.7 Without a codec server
@@ -916,7 +922,7 @@ Beyond each task's own tests:
   the splitter (nothing plain at sensitive or undeclared positions; nesting follows the claiming order); forged
   handles refused.
 - **Codec fail-closed:** no context, the wrong tenant, mismatched metadata, key rotation, replay with fixture keys.
-- **Golden histories** per merged ABI (abi4, abi5), recorded encrypted with fixture keys, replayed by the replay
+- **Golden histories** per merged ABI (abi5, abi6), recorded encrypted with fixture keys, replayed by the replay
   gate; `ScheduleTick`'s replay test.
 - **Fault injection:** admission and dispatch races, the gate-off race, erasure, uncertain starts, duplicate-id
   verification, the reconciler's outcome mapping on the dev server, matching interrupted by a crash.
@@ -945,8 +951,8 @@ Each plan updates the older specs as it lands, as the engine-core 5.x revisions 
   5 concurrent root runs per tenant, 30 days of tenant retention, 7 days of Temporal retention (at most 30).
 - **Engine-core spec:** the "hard rule until 2b ships" (lifted by §10.6); §9 (starting runs: admission and the
   dispatcher); §8 (the new codes, the cutoff on read paths, the `(queued_at, id)` ordering); §4.5 (dispatch as §7.3
-  describes it); §5.6 (the per-task byte budget); §6 (claims, handles, the live-state budget, snapshots in `snapshot_format` 2, the open-iteration cap); §7 (ABI 4
-  and 5, ids).
+  describes it); §5.6 (the per-task byte budget); §6 (claims, handles, the live-state budget, snapshots in
+  `snapshot_format` 2, the open-iteration cap); §7 (ABI 5 and 6, ids).
 
 ## 14. Roles, tables and permissions (summary)
 
