@@ -713,6 +713,10 @@ not inside a worker that holds credentials.
   expression, its declarations and 1 to 1,000 binding sets; each set is its own evaluation with its own budget (the
   `filter` batches of §6). The evaluator re-checks the declared types and the order rule before evaluating.
 - **Request size ≤ 4 MiB.** The activity checks the size before sending. A larger request is the evaluation outcome `input_too_large`.
+- **Temporal's payload limit.** The workflow cuts each request by its JSON bytes as well as by 1,000 binding sets, so
+  its payload stays within `CEL_REQUEST_BYTES` (1.75 MiB), a margin under Temporal's 2 MiB limit, which the SDK checks
+  after any codec. Requests that fit are cut every 1,000 sets, as before. A binding set that alone passes it is the
+  outcome `input_too_large`, and no request is sent for it (issue #15).
 - **Responses ≤ 256 KiB** plus the envelope. A malformed or oversized frame closes the connection.
 - **Aggregate limits.** The evaluator container has cgroup limits: memory (Compose `mem_limit`; initially 2 GiB),
   CPU, and pids.
@@ -892,7 +896,7 @@ The version (graph, classifications, bounds) is loaded by one local activity and
 | Control | `if`, `switch` (cases in declared order, first match), `set_variables`, `stop`, `fail` | values via §5 (local or `cel.evaluate`) |
 | Time | `delay`, `wait_until` | durable timers. Static waits beyond `max_run_duration` are rejected at publish. Dynamic waits past the deadline end the run with `deadline_exceeded` when the deadline is reached. `wait_until` takes RFC 3339 with an offset: a time without a zone fails the step (`type_mismatch`). A value resolved at run time is checked too: `delay` takes 0 to 30 days, and `wait_until` an instant from year 1 to 9999 in UTC; anything else fails the step (`type_mismatch`) |
 | Loop | `loop` (`items`: a list value; `concurrency` 1–10, default 1; item cap default 10,000) | ≤ 100 items run inline. More run in batches of 100, one child workflow at a time; each child runs its items with the loop's own `concurrency` and `on_item_error`, with the inline iteration keys, and writes its rows into the loop's run. A batch reads only the outside results its body and `collect` read. A `fail` or `stop` node inside a batch ends the whole run |
-| Filter | `filter` (`items`, per-item predicate) | ≤ 1,000 items: predicate per item, inline (local class) or batched `cel.evaluate` calls; each item is its own evaluation with its own 10,000 budget. Larger lists are batched through `cel.evaluate` in chunks of 1,000 |
+| Filter | `filter` (`items`, per-item predicate) | ≤ 1,000 items: predicate per item, inline (local class) or batched `cel.evaluate` calls; each item is its own evaluation with its own 10,000 budget. Larger lists are batched through `cel.evaluate` in chunks of 1,000, fewer when their bytes would pass 1.75 MiB (§5.7) |
 | Transform | `flow.transform` | each output field is a separate value (§4.3) with its own class |
 | Sub-flow | `run_workflow` | a child run pinned to `subflow_version_id`; depth ≤ 5 (checked again at run time); cycles rejected at publish; shares the deadline. Its trigger is the step's `input` (an object); its outputs are the step's output, and its failure fails the step with its code and message |
 | Side effect | plugin nodes | activity `type.vN`; retry and timeout from the manifest, overridable per node |

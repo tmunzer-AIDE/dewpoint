@@ -87,6 +87,8 @@ with workflow.unsafe.imports_passed_through():
 IN_FLIGHT_CAP = 100  # activities and child workflows outstanding per execution (spec §6)
 PROJECT_BYTES = 256 * 1024  # a projection's rows at most, as JSON: far below Temporal's 2 MiB payload limit
 CEL_BATCH = 1_000  # binding sets per cel.evaluate request
+CEL_REQUEST_BYTES = 1_835_008  # a cel.evaluate request's JSON bytes, a margin under Temporal's 2 MiB limit (#15)
+REQUEST_TOO_LARGE = "The values this expression reads are too large to send to the CEL evaluator (over 1.75 MiB)."
 FILTER_INLINE = 1_000  # a filter's items the workflow may evaluate itself; a larger list goes to cel.evaluate (spec §6)
 SUBFLOW_GRANT = 1_000  # a sub-flow's initial grant (spec §6)
 MAX_DEPTH = 5  # sub-flows nest at most this deep (spec §6; publish checks it too)
@@ -190,6 +192,12 @@ def child_options(child_id: str) -> dict[str, Any]:
         "cancellation_type": workflow.ChildWorkflowCancellationType.WAIT_CANCELLATION_COMPLETED,
         "retry_policy": RetryPolicy(maximum_attempts=1),
     }
+
+
+def _json_bytes(value: Any) -> int:
+    """The JSON bytes Temporal's payload converter writes for `value`: what the SDK checks against its payload limit,
+    before any codec (#15)."""
+    return len(workflow.payload_converter().to_payloads([value])[0].data)
 
 
 class Execution:
@@ -687,8 +695,22 @@ class Execution:
             return outcomes
         out: list[cel.Outcome] = []
         profile = self.program.cel_profile
-        for i in range(0, len(task.bindings), CEL_BATCH):
-            chunk = resolve.CelTask(task.record, task.bindings[i : i + CEL_BATCH], False)
+        envelope = _json_bytes(CelInput(resolve.CelTask(task.record, (), False).request(profile)))
+        start, count = 0, len(task.bindings)
+        while start < count:
+            end, _ = resolve.request_end(
+                start,
+                count,
+                lambda i: _json_bytes(task.bindings[i]),
+                envelope=envelope,
+                batch=CEL_BATCH,
+                limit=CEL_REQUEST_BYTES,
+            )
+            if end == start:  # this binding set alone would pass Temporal's payload limit: it's never sent (#15)
+                out.append(cel.Outcome(error=cel.INPUT_TOO_LARGE, message=REQUEST_TOO_LARGE))
+                start += 1
+                continue
+            chunk = resolve.CelTask(task.record, task.bindings[start:end], False)
             try:
                 result = await workflow.execute_activity(
                     CEL_EVALUATE,
@@ -705,6 +727,7 @@ class Execution:
                 message = f"No evaluator served `{profile}` ({type(e.cause or e).__name__})."
                 return [cel.Outcome(error=cel.PROFILE_UNAVAILABLE, message=message)] * len(task.bindings)
             out += [cel.Outcome.from_json(o) for o in result.outcomes]
+            start = end
         return out
 
     async def _yield_point(self, record: ExpressionRecord | None) -> None:
@@ -1110,6 +1133,7 @@ class Execution:
 
 __all__ = [
     "CEL_BATCH",
+    "CEL_REQUEST_BYTES",
     "CONTINUE",
     "DEADLINE_EXCEEDED",
     "INTERNAL_ERROR",

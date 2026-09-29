@@ -161,3 +161,55 @@ async def test_temporal_suggesting_continue_as_new_drains_the_run() -> None:
         chain = await executions(env.client, handle.id, handle.first_execution_run_id or "")
     assert (result.status, result.outputs, result.iterations) == ("succeeded", {"items": list(range(40))}, 40)
     assert len(chain) >= 2 and all(len(h.events) < 2_000 for h in chain)
+
+
+def strings(*names: str) -> dict[str, Any]:
+    return {"type": "object", "properties": {n: {"type": "string"} for n in names}, "required": list(names)}
+
+
+async def task_failures(handle: WorkflowHandle[Any, Any]) -> list[int]:
+    """The causes of every failed workflow task: none, when nothing retried a command Temporal refused."""
+    out = []
+    async for e in handle.fetch_history_events():
+        if e.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED:
+            out.append(e.workflow_task_failed_event_attributes.cause)
+    return out
+
+
+async def cel_requests(handle: WorkflowHandle[Any, Any]) -> list[int]:
+    out = []
+    async for e in handle.fetch_history_events():
+        a = e.activity_task_scheduled_event_attributes
+        if e.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED and a.activity_type.name == "cel.evaluate":
+            out.append(a.workflow_task_completed_event_id)
+    return out
+
+
+async def test_issue_15s_filter_splits_its_request_and_keeps_every_item(dev_env: WorkflowEnvironment) -> None:
+    """#15's reproduction: 1,500 items each binding a 3,000-character string made a 3 MB request, whose workflow task
+    retried until the run's deadline, or forever. It's split, and every item is evaluated."""
+    client, store = dev_env.client, MemoryStore()
+    g = G()
+    g.settings = {"input_schema": strings("s"), "outputs": {"kept": cel("steps.f.output.count")}}
+    g.node("f", "flow.filter@1", {"items": list(range(1_500)), "predicate": cel("size(trigger.s) > item")})
+    async with serving(client, store):
+        handle = await start(client, store, g, {"s": "x" * 3_000})
+        result = await asyncio.wait_for(handle.result(), 60)
+    assert (result.status, result.outputs) == ("succeeded", {"kept": 1_500})
+    assert len(await cel_requests(handle)) >= 3
+    assert await task_failures(handle) == []
+
+
+async def test_a_binding_set_over_the_request_limit_fails_its_step(dev_env: WorkflowEnvironment) -> None:
+    """Two 900 KiB strings in one binding set pass 1.75 MiB: the step fails with `input_too_large`; nothing is sent."""
+    client, store = dev_env.client, MemoryStore()
+    half = 900 * 1024
+    g = G()
+    g.settings = {"input_schema": strings("a", "b"), "outputs": {"code": ref("steps.t.error.code", default="none")}}
+    g.node("t", "flow.transform@1", {"fields": {"n": cel("size(trigger.a) + size(trigger.b)")}}, on_error="continue")
+    async with serving(client, store):
+        handle = await start(client, store, g, {"a": "x" * half, "b": "y" * half})
+        result = await asyncio.wait_for(handle.result(), 60)
+    assert (result.status, result.outputs) == ("succeeded", {"code": "input_too_large"})
+    assert await cel_requests(handle) == []
+    assert await task_failures(handle) == []

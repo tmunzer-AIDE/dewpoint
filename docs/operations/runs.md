@@ -145,7 +145,7 @@ Temporal's own history still holds the values in full until 2b's payload encrypt
 | `cancelled` | `cancelled` | The run was cancelled in Temporal. A cancel that arrives while the run's end is being written leaves that end. |
 
 Step error codes include the plugin's own codes and `config_invalid`, `output_schema_violation`, `unexpected_error`,
-`evaluation_error`, `type_mismatch`, `timeout`, `cel_profile_unavailable`, `item_cap_exceeded`,
+`evaluation_error`, `type_mismatch`, `timeout`, `cel_profile_unavailable`, `input_too_large`, `item_cap_exceeded`,
 `iteration_cap_exceeded` and `node_type_unavailable` (the registry lists the node type, but no worker of this build
 runs it: install its plugin on the workers). A sub-flow step fails with its sub-flow's code, and with `terminated`
 when an operator terminated the sub-flow; a loop fails with `terminated` when one of its batches was.

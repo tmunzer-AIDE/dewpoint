@@ -62,3 +62,6 @@ Every evaluation ends in a value or a recorded outcome, never a retry: `timeout`
 `iteration_budget_exceeded`, `type_mismatch`, `evaluation_error`, `non_json_value`, `output_too_large`,
 `input_too_large` or `evaluation_crashed`. Only infrastructure failures are retried: the socket is unreachable, the
 connection drops, the answer is `busy`, or a reply breaks the protocol (it is never recorded as an outcome).
+
+A binding set too large to send within Temporal's payload limit (1.75 MiB, with a margin) is `input_too_large` too:
+the workflow never sends it.
