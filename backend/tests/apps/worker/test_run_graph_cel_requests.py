@@ -12,6 +12,7 @@ from temporalio.api.enums.v1 import EventType
 from temporalio.client import WorkflowHandle
 from temporalio.testing import WorkflowEnvironment
 
+from dewpoint.engine.cel import route
 from dewpoint.engine.runtime import execution
 from tests.apps.worker.harness import MemoryStore, start, workers
 from tests.support.graphs import G, cel, ref
@@ -101,3 +102,20 @@ async def test_one_oversized_item_fails_the_filter_after_the_items_before_it(
     handle, result = await finished(env, store, g, {"s": ""})
     assert (result.status, result.outputs) == ("succeeded", {"code": "input_too_large"})
     assert len(await requests(handle)) >= 1
+
+
+@pytest.mark.parametrize("cache", [1000, 0], ids=["cached", "replaying every task"])
+async def test_a_workflow_task_sends_at_most_its_request_bytes(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch, cache: int
+) -> None:
+    """Three steps ready together each send a request of about 700 bytes; with 1,000 bytes a task, each goes out in
+    its own workflow task. Replaying every task decides the same way (review focus 3)."""
+    monkeypatch.setattr(route, "YIELD_SEND_BYTES", 1_000)
+    store = MemoryStore()
+    g = graph(**{f"n{k}": ref(f"steps.t{k}.output.n") for k in range(3)})
+    for k in range(3):
+        g.node(f"t{k}", "flow.transform@1", {"fields": {"n": cel(f"size(trigger.s) + {k}")}})
+    handle, result = await finished(env, store, g, {"s": "x" * 600}, cache=cache)
+    assert (result.status, result.outputs) == ("succeeded", {"n0": 600, "n1": 601, "n2": 602})
+    tasks = await requests(handle)
+    assert len(tasks) == 3 and len(set(tasks)) == 3

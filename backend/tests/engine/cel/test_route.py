@@ -80,3 +80,19 @@ def test_an_executions_first_workflow_task_gets_a_tenth_of_each_threshold() -> N
     budget.reset()
     budget.charge(nodes=10)
     assert not budget.must_yield(heavy) and not budget.must_yield()
+
+
+def test_a_workflow_task_sends_at_most_its_request_bytes() -> None:
+    """#15: the requests one workflow task sends stay under Temporal's gRPC message limit together. The first always
+    goes; sending isn't evaluating, so it spends none of the evaluation budget; the startup share doesn't apply."""
+    budget = route.YieldBudget()
+    big = route.YIELD_SEND_BYTES - 10
+    assert not budget.must_yield(send=big)
+    budget.charge(sent=big)
+    assert not budget.must_yield(send=10)
+    assert budget.must_yield(send=11)
+    assert not budget.must_yield(None)  # binding a view isn't held back by requests sent
+    budget.reset(startup=True)
+    assert not budget.must_yield(send=big)
+    budget.charge(sent=big)
+    assert budget.must_yield(send=11)

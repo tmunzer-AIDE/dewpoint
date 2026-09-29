@@ -18,6 +18,8 @@ YIELD_WORK = (
 YIELD_EVALUATIONS = 130
 YIELD_NODES = 65_000  # the values the evaluations bind: converting them costs CPU their stored bounds don't count
 STARTUP_SHARE = 10  # an execution's first workflow task gets this fraction of each threshold: it also starts it
+YIELD_SEND_BYTES = 3 * 1024 * 1024  # cel.evaluate request bytes one workflow task sends: under Temporal's 4 MiB gRPC
+# message limit, which terminates the workflow when a task's completion passes it (#15)
 
 
 def route(
@@ -32,19 +34,24 @@ def route(
 
 @dataclass
 class YieldBudget:
-    """One workflow task's local evaluations: their stored bounds, and the values they bound (`Measure.nodes`)."""
+    """One workflow task's local evaluations, the values they bound (`Measure.nodes`), and the cel.evaluate requests it
+    sends."""
 
     iterations: int = 0
     bytes: int = 0
     work: int = 0
     evaluations: int = 0
     nodes: int = 0
+    sent: int = 0
     share: int = 1  # each threshold is divided by it: STARTUP_SHARE in an execution's first workflow task
 
-    def must_yield(self, record: ExpressionRecord | None = None) -> bool:
-        """True when the interpreter must await a 1 ms durable timer before binding a view (`record` None), or before
-        evaluating `record` locally. The first thing a workflow task does always runs; a view is always bound first,
-        so an evaluation whose bounds pass an execution's first task's share waits for the next task."""
+    def must_yield(self, record: ExpressionRecord | None = None, *, send: int = 0) -> bool:
+        """True when the interpreter must await a 1 ms durable timer before binding a view (`record` None), before
+        evaluating `record` locally, or before sending a request of `send` bytes. The first thing a workflow task does
+        always runs; a view is always bound first, so an evaluation whose bounds pass an execution's first task's share
+        waits for the next task. Sending has its own limit, Temporal's, with no startup share."""
+        if send:
+            return self.sent > 0 and self.sent + send > YIELD_SEND_BYTES
         if self.evaluations == 0 and self.nodes == 0:
             return False
         if self.evaluations >= YIELD_EVALUATIONS // self.share or self.nodes >= YIELD_NODES // self.share:
@@ -55,9 +62,10 @@ class YieldBudget:
             or self.work + (record.work or 0) > YIELD_WORK // self.share
         )
 
-    def charge(self, record: ExpressionRecord | None = None, *, nodes: int = 0) -> None:
-        """A view bound (`nodes`: the values it bound), or `record` evaluated locally."""
+    def charge(self, record: ExpressionRecord | None = None, *, nodes: int = 0, sent: int = 0) -> None:
+        """A view bound (`nodes`: the values it bound), `record` evaluated locally, or a request of `sent` bytes."""
         self.nodes += nodes
+        self.sent += sent
         if record is not None:
             self.iterations += record.iterations or 0
             self.bytes += record.bytes or 0
@@ -67,5 +75,5 @@ class YieldBudget:
     def reset(self, *, startup: bool = False) -> None:
         """A new workflow task starts a fresh budget: a tenth of it (`STARTUP_SHARE`) in an execution's first task,
         which also loads and compiles the version, or restores a snapshot."""
-        self.iterations = self.bytes = self.work = self.evaluations = self.nodes = 0
+        self.iterations = self.bytes = self.work = self.evaluations = self.nodes = self.sent = 0
         self.share = STARTUP_SHARE if startup else 1

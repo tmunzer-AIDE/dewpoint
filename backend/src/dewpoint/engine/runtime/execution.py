@@ -698,7 +698,7 @@ class Execution:
         envelope = _json_bytes(CelInput(resolve.CelTask(task.record, (), False).request(profile)))
         start, count = 0, len(task.bindings)
         while start < count:
-            end, _ = resolve.request_end(
+            end, size = resolve.request_end(
                 start,
                 count,
                 lambda i: _json_bytes(task.bindings[i]),
@@ -711,6 +711,8 @@ class Execution:
                 start += 1
                 continue
             chunk = resolve.CelTask(task.record, task.bindings[start:end], False)
+            await self._yield_point(None, send=size)
+            self._yield.charge(sent=size)
             try:
                 result = await workflow.execute_activity(
                     CEL_EVALUATE,
@@ -730,18 +732,19 @@ class Execution:
             start = end
         return out
 
-    async def _yield_point(self, record: ExpressionRecord | None) -> None:
+    async def _yield_point(self, record: ExpressionRecord | None, *, send: int = 0) -> None:
         """Before binding a view (`record` None) or evaluating `record` locally: when the current workflow task's budget
         is spent, await a 1 ms durable timer, which ends the task (spec §5.6). The budget belongs to one workflow task:
         it starts afresh when the history length changes, which happens only between tasks, in a replay too. The
         execution's first task gets a tenth of it: that task also starts the execution. Concurrent units share the
-        budget and one timer, and each checks again once it fires."""
+        budget and one timer, and each checks again once it fires. Before sending a cel.evaluate request (`send` its
+        bytes), the same wait keeps a task's requests under Temporal's gRPC message limit (#15)."""
         while True:
             length = workflow.info().get_current_history_length()
             if length != self._yield_task:
                 self._yield_task = length
                 self._yield.reset(startup=length == self._startup_task)
-            if not self._yield.must_yield(record):
+            if not self._yield.must_yield(record, send=send):
                 return
             if self._yield_timer is None or self._yield_timer.done():
                 self._yield_timer = asyncio.create_task(asyncio.sleep(0.001))

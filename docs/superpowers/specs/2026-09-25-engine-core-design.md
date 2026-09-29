@@ -650,6 +650,8 @@ result is recorded in history. This is the parent's `eval` activity (§6.5).
   - Thresholds: 13,000 iterations, 5.5 MiB, 2,700,000 work units or 65,000 bound values (§5.5), a third below the
     first ones (20,000, 8 MiB, 4,000,000, 200 evaluations and 100,000), which took three of gate 7b's loads past 1 s
     on Linux.
+  - Apart from them, the cel.evaluate requests a task sends: at most 3 MiB (§5.7). It has no startup share, since that
+    limit is Temporal's, not CPU.
   - The decision uses only stored bounds and a count, so it replays identically. The timer events count toward the continue-as-new threshold.
   - **This is a policy to measure, not a proven CPU bound.** A p99 latency says nothing about the worst case.
     Before local evaluation is enabled, the plan must run an adversarial test: expressions that max out the
@@ -716,7 +718,10 @@ not inside a worker that holds credentials.
 - **Temporal's payload limit.** The workflow cuts each request by its JSON bytes as well as by 1,000 binding sets, so
   its payload stays within `CEL_REQUEST_BYTES` (1.75 MiB), a margin under Temporal's 2 MiB limit, which the SDK checks
   after any codec. Requests that fit are cut every 1,000 sets, as before. A binding set that alone passes it is the
-  outcome `input_too_large`, and no request is sent for it (issue #15).
+  outcome `input_too_large`, and no request is sent for it (issue #15). A workflow task sends at most 3 MiB of these
+  requests (`YIELD_SEND_BYTES`); the next one waits for the next task, so CEL requests alone can't push a task's
+  completion past Temporal's 4 MiB gRPC message limit, past which Temporal terminates the workflow. Other commands in
+  the same task aren't counted: the invariant over every command is sub-project 2b's.
 - **Responses ≤ 256 KiB** plus the envelope. A malformed or oversized frame closes the connection.
 - **Aggregate limits.** The evaluator container has cgroup limits: memory (Compose `mem_limit`; initially 2 GiB),
   CPU, and pids.

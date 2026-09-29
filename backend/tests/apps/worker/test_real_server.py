@@ -213,3 +213,24 @@ async def test_a_binding_set_over_the_request_limit_fails_its_step(dev_env: Work
     assert (result.status, result.outputs) == ("succeeded", {"code": "input_too_large"})
     assert await cel_requests(handle) == []
     assert await task_failures(handle) == []
+
+
+async def test_three_large_requests_are_paced_under_temporals_message_limit(dev_env: WorkflowEnvironment) -> None:
+    """Three steps ready together each send about 1.6 MiB. In one workflow task that passes Temporal's 4 MiB gRPC
+    message limit, and Temporal terminates the run; paced, they go out in separate tasks (review focus 4)."""
+    client, store = dev_env.client, MemoryStore()
+    part = 800 * 1024
+    g = G()
+    g.settings = {
+        "input_schema": strings("a", "b"),
+        "outputs": {f"n{k}": ref(f"steps.t{k}.output.n") for k in range(3)},
+    }
+    for k in range(3):
+        g.node(f"t{k}", "flow.transform@1", {"fields": {"n": cel(f"size(trigger.a) + size(trigger.b) + {k}")}})
+    async with serving(client, store):
+        handle = await start(client, store, g, {"a": "x" * part, "b": "y" * part})
+        result = await asyncio.wait_for(handle.result(), 60)
+    assert (result.status, result.outputs) == ("succeeded", {f"n{k}": 2 * part + k for k in range(3)})
+    tasks = await cel_requests(handle)
+    assert len(tasks) == 3 and len(set(tasks)) == 3
+    assert await task_failures(handle) == []
