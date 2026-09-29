@@ -4,8 +4,12 @@
 
 **Goal:** A `cel.evaluate` request never passes Temporal's payload limit: the workflow cuts requests by their bytes as
 well as by 1,000 binding sets, refuses a binding set that alone is too large with `input_too_large`, and paces the
-`cel.evaluate` requests one workflow task sends — a step result, never a retried or terminated workflow task. The pacing
-counts CEL requests only; the invariant over every command a task sends is 2b-1a's.
+`cel.evaluate` requests one workflow task sends — on the request path, a step result, never a retried or terminated
+workflow task. The pacing counts CEL requests only; the invariant over every command a task sends is 2b-1a's.
+**Limitation:** this doesn't guarantee that every oversized filter ends in a step result. Before any request is built,
+binding each view is charged by its node count, not its bytes, so a filter of about 1,000 views each binding a large
+value can still outlast the SDK's deadlock timeout while binding, and its workflow task retries. That is a separate
+issue (binding cost), not #15's request-scheduling failure; see the Handoff.
 
 **Architecture:** One pure function in the deterministic core (`resolve.request_end`) decides where each request ends,
 from each binding set's JSON size, measured one set at a time with the workflow's own payload converter. `RunGraph`'s
@@ -30,8 +34,9 @@ completion over the gRPC limit gets the workflow terminated; 2b-1a generalizes t
 - `ENGINE_ABI` becomes 4 (Task 4): this change can alter a run's command sequence (engine-core §7). The abi3 histories
   stay as recorded and immutable (the replay gate); runs already started drain on their pinned ABI-3 build; versions are
   published again for ABI 4 before new runs start (`docs/operations/deployment.md`).
-- A failure is a step result (`input_too_large`, an existing CEL outcome code), never a retried or terminated workflow
-  task. Its message is fixed and never quotes a value.
+- On the request path, a failure is a step result (`input_too_large`, an existing CEL outcome code), never a retried or
+  terminated workflow task. Its message is fixed and never quotes a value. Binding views before the request path is
+  not covered (the Goal's limitation).
 - `CEL_REQUEST_BYTES = 1_835_008` (1.75 MiB): a request's JSON bytes, a margin under Temporal's 2 MiB (2,097,152)
   payload limit, which the SDK checks after any codec (measured: 2b spec §11.1).
 - `YIELD_SEND_BYTES = 3 * 1024 * 1024`: the `cel.evaluate` request bytes one workflow task sends, under Temporal's
@@ -769,6 +774,10 @@ git commit -m "feat(engine): ENGINE_ABI 4, and its golden histories (#15)"
   `CEL_REQUEST_BYTES` against the encoded size, and registers the capability `cel_request_size_guard`.
 - **Not covered here:** other commands in the same workflow task (plugin configs, projections, children) still count
   toward Temporal's gRPC limit unpaced; oversized continue-as-new snapshots are issue #16.
+- **Not covered here, a separate issue: binding cost.** `bind.measure` serializes every bound value of every view to
+  canonical JSON, but the yield budget charges binding by node count, so views that each bind a large value are bound
+  in one workflow task whatever their bytes. A filter of about 1,000 items each binding a 1.8 MiB value can outlast the
+  SDK's 2 s deadlock timeout while binding, before any request is built; its workflow task retries.
 - **Rolling out ABI 4:** start the new build's workers and make it current (`dewpoint deployment set-current`); runs
   already started finish on their pinned ABI-3 build, which is stopped once it reports `drained`; every workflow is
   published again for ABI 4, children first, before new runs start (`docs/operations/deployment.md`).
