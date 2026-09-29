@@ -4,7 +4,8 @@ Spec: `docs/superpowers/specs/2026-09-25-engine-core-design.md` §7.
 
 A run is **pinned** to the build it started on. Its sub-flows, its loop batches and the runs it continues as finish
 on that build too, even after a newer build takes over. That's what lets a new build change how runs execute without
-breaking the runs already going.
+breaking the runs already going. Runs of a build from before versioning aren't pinned: see
+[the first versioned build](#upgrading-from-a-build-without-versioning).
 
 ## Builds and versions
 
@@ -49,7 +50,8 @@ old build's runs that still use it finish on the old build's workers, which stil
 A build ID ends with its engine ABI (`+abi3`), which changes whenever a build could execute a workflow differently. A
 version runs only on a build of the ABI it was published for. So when a new build changes it:
 
-- Runs already started finish on the old build, pinned to it, with their sub-flows and failure handlers.
+- Runs already started on the old build finish there, pinned to it, with their sub-flows and failure handlers. (A
+  build from before versioning doesn't pin them: see below.)
 - A new run starts on the deployment's current build, so that's the build admission compares versions with,
   whichever build's process admits the run. While the old build is current, the new build's versions are refused
   ("make a build of ABI 3 current first"). Once the new build is current, the old build's versions are refused
@@ -61,11 +63,23 @@ version runs only on a build of the ABI it was published for. So when a new buil
 - A promotion that happens between a run's admission and its start is caught when the run loads its version: it fails
   with `version_unusable` before any step runs, with the same explanation. Start it again.
 
-Builds from before 2a-3c aren't in the deployment, and their processes don't check the ABI when they admit a run.
-Such a run starts on the current build, whose loader refuses a version of another ABI. Until a 2a-3c build is
-current, 2a-3c's processes admit nothing: no build is current.
-
 Rolling back across an ABI change means publishing again with the old build, too.
+
+## Upgrading from a build without versioning
+
+A build from before Worker Versioning doesn't join the `dewpoint-engine` deployment: `dewpoint deployment status`
+lists no version for it. Its runs aren't pinned. Once a versioned build is current, Temporal moves each of them to that
+build at its next workflow task. The new build can't replay what the old one recorded, so the task fails as
+nondeterministic and is retried forever, and the run stays `running`.
+
+So for the first versioned build:
+1. Stop starting runs with the old build, and let every run it started end, or cancel it. Temporal's Web UI lists the
+   running workflows.
+2. Start the new build's workers, make it current, and publish every workflow again with it (above).
+
+Until a versioned build is current, the new build admits nothing: no build is current. The old build's processes
+don't check the ABI when they admit a run, but a run they start after the promotion starts on the new build, whose
+loader refuses a version of another ABI.
 
 ## Docker Compose (evaluation)
 
