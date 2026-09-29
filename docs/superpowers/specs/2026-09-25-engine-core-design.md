@@ -90,6 +90,9 @@
     - from execution's second checkpoint: gate 7b's first Linux run took three loads past 1 s, each in a run's first
       workflow task, so an execution's first task gets a tenth of the CEL budget and the thresholds are a third lower
       (§5.6, §5.9); CI compares a branch's pushes with its merge base with `main` (§7).
+  - Revision 5.6.1 (issue #15): a `cel.evaluate` request is cut by its JSON bytes as well as by 1,000 binding sets,
+    a binding set that alone passes 1.75 MiB is `input_too_large`, and a workflow task sends at most 3 MiB of CEL
+    requests (§5.6, §5.7). A run's commands can change, so `engine_abi` becomes 4, with its own golden histories.
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
   This spec **narrows parent §6.4** (where CEL runs) and resolves the CEL item in parent §15.
 - **Evidence:** CEL spike, branch `spike/cel-evaluation`, commits `d6a8162` and `13a62e1`. See
