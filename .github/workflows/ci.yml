@@ -17,11 +17,14 @@ jobs:
       - run: uv run pytest -q
       # The replay gate (spec §7): the suite replays this ABI's histories; this checks none was changed or removed,
       # and that new ones went into this build's directory.
+      # The base: a pull request's base, main's previous commit, or a branch's merge base with main (gate.base_for).
       - name: Recorded histories are never rewritten
-        env: { BASE: "${{ github.event.pull_request.base.sha || github.event.before }}" }
-        run: |
-          case "$BASE" in ""|0000000000000000000000000000000000000000) BASE=origin/main ;; esac
-          uv run python -m tests.engine.replay.gate "$BASE"
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: uv run python -m tests.engine.replay.gate --event "$EVENT" --ref "$REF" --pr-base "$PR_BASE" --before "$BEFORE"
       - run: uv run pip-licenses --fail-on="GPL;AGPL;LGPL;SSPL;BUSL" --partial-match
   cel-gates:
     # The CEL gates (spec §5.9) in a pinned Linux container: rlimits, fork and cgroup behaviour are Linux's. The
