@@ -116,7 +116,7 @@ class RunGraph(Execution):
             return await self._end_early(RunEnd("failed", Failure(INTERNAL_ERROR, message)), start.iterations)
         if start.parent is not None and snapshot is None:  # its row first: whatever ends it now has a row to end
             if await self._shielded([], None, RunStart.of(start, started.isoformat())):
-                return await self._cancelled_early()  # cancelled while the row was written
+                return await self._cancelled_early(start.iterations)  # cancelled while the row was written
         try:
             data = await workflow.execute_local_activity(
                 LOAD_VERSION,
@@ -125,12 +125,12 @@ class RunGraph(Execution):
                 start_to_close_timeout=timedelta(seconds=30),
             )
         except asyncio.CancelledError:
-            return await self._cancelled_early()
+            return await self._cancelled_early(start.iterations)
         except Exception as e:
             if _cancelled(e):
-                return await self._cancelled_early()
+                return await self._cancelled_early(start.iterations)
             workflow.logger.error("run_version_unusable", exc_info=True)
-            return await self._end_early(RunEnd("failed", Failure(VERSION_UNUSABLE, _unloadable(e))))
+            return await self._end_early(RunEnd("failed", Failure(VERSION_UNUSABLE, _unloadable(e))), start.iterations)
         try:
             program = compile_program(
                 data.graph,
@@ -143,7 +143,7 @@ class RunGraph(Execution):
         except Exception as e:
             workflow.logger.error("run_version_unusable", exc_info=True)
             message = f"This build can't run the version ({type(e).__name__}); the worker's log has the details."
-            return await self._end_early(RunEnd("failed", Failure(VERSION_UNUSABLE, message)))
+            return await self._end_early(RunEnd("failed", Failure(VERSION_UNUSABLE, message)), start.iterations)
         outputs: dict[str, Any] | None = None
         try:
             if snapshot is not None:
@@ -243,7 +243,7 @@ class RunGraph(Execution):
             error["message"] = mask(error["message"], self._secrets)
         return self._stored(error)
 
-    async def _end_early(self, end: RunEnd, iterations: int = 0) -> RunResult:
+    async def _end_early(self, end: RunEnd, iterations: int) -> RunResult:
         """The run ends before it has a program: nothing ran in this execution, so only the run is projected, with
         what it used before continuing as new (`iterations`)."""
         error = self._stored(end.failure.to_json() if end.failure is not None else None)
@@ -258,8 +258,10 @@ class RunGraph(Execution):
         await self._shielded([], summary)
         return RunResult(status=end.status, error=error, iterations=iterations)
 
-    async def _cancelled_early(self) -> RunResult:
-        result = await self._end_early(RunEnd("cancelled", CANCELLED))
+    async def _cancelled_early(self, iterations: int) -> RunResult:
+        """Cancelled before the run restored its snapshot or started: it reports what it used before continuing as new
+        (`iterations`), as `_end_early` does."""
+        result = await self._end_early(RunEnd("cancelled", CANCELLED), iterations)
         if self.parent is None:
             raise asyncio.CancelledError
         return result
@@ -382,10 +384,10 @@ class LoopBatch(Execution):
                 data.failure_handler_version_id,
             )
         except asyncio.CancelledError:
-            return BatchResult([], [], end=RunEnd("cancelled", CANCELLED).to_json())
+            return BatchResult([], [], end=RunEnd("cancelled", CANCELLED).to_json(), iterations=start.iterations)
         except Exception as e:
             if _cancelled(e):
-                return BatchResult([], [], end=RunEnd("cancelled", CANCELLED).to_json())
+                return BatchResult([], [], end=RunEnd("cancelled", CANCELLED).to_json(), iterations=start.iterations)
             workflow.logger.error("batch_version_unusable", exc_info=True)
             message = f"This build can't run the version ({type(e).__name__}); the worker's log has the details."
             raise ApplicationError(message, type=VERSION_UNUSABLE, non_retryable=True) from None

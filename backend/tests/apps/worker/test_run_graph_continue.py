@@ -16,7 +16,15 @@ from temporalio.client import Client, WorkflowFailureError, WorkflowHistory
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
 
-from dewpoint.engine.runtime.activities import BATCH, BUDGET, ENGINE_QUEUE, BatchInput, Parent, ProjectInput
+from dewpoint.engine.runtime.activities import (
+    BATCH,
+    BUDGET,
+    ENGINE_QUEUE,
+    BatchInput,
+    Parent,
+    ProjectInput,
+    VersionData,
+)
 from dewpoint.engine.runtime.workflow import LoopBatch
 from tests.apps.worker.harness import TENANT, MemoryStore, start, workers
 from tests.support.graphs import G, cel, ref
@@ -279,3 +287,48 @@ async def test_a_batch_with_a_snapshot_of_another_format_fails_as_a_workflow(env
         with pytest.raises(WorkflowFailureError) as failed:
             await asyncio.wait_for(handle.result(), 30)
     assert isinstance(failed.value.cause, ApplicationError) and failed.value.cause.type == "internal_error"
+
+
+@dataclasses.dataclass
+class LosesTheSubFlow(MemoryStore):
+    """The sub-flow's version loads once: its continued run finds it gone, or unable to compile."""
+
+    sub_version: str = ""
+    lose: str = "load"
+    loads: int = 0
+
+    async def version(self, tenant_id: str, version_id: str) -> VersionData:
+        data = await super().version(tenant_id, version_id)
+        if version_id != self.sub_version:
+            return data
+        self.loads += 1
+        if self.loads == 1:
+            return data
+        if self.lose == "load":
+            raise ApplicationError(f"version {version_id} not found", type="version_not_found", non_retryable=True)
+        return dataclasses.replace(data, manifests={})  # this build can't compile it
+
+
+@pytest.mark.parametrize("lose", ["load", "compile"])
+async def test_a_continued_sub_flow_that_cant_load_its_version_reports_what_it_used(
+    env: WorkflowEnvironment, lose: str
+) -> None:
+    """Checkpoint 3's review: a continued run that ended before restoring its snapshot (its version didn't load or
+    compile, or a cancel came while it loaded) reported 0 iterations, so its parent released budget it had spent."""
+    store = LosesTheSubFlow(lose=lose)
+    sub = graph(items=ref("steps.l.output.items"))
+    sub.node("l", LOOP, {"items": list(range(40)), "collect": ref("steps.x.output.value")})
+    sub.node("x", ECHO, {"value": ref("item")}).edge("l", "x", "body")
+    sub_id = store.publish(sub)
+    store.sub_version = str(store.subflows[sub_id].version_id)
+    g = graph().node("r", RUN, {"workflow_id": str(sub_id), "input": {}})
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {}, checkpoint_events=120)
+        result = await asyncio.wait_for(handle.result(), 60)
+        [child] = [run_id for run_id, row in store.starts.items() if row.kind == "subflow"]
+        started = (await env.client.get_workflow_handle(child).fetch_history()).events[0]
+    carried = json.loads(started.workflow_execution_started_event_attributes.input.payloads[0].data)["iterations"]
+    assert store.loads == 2 and carried > 0  # it continued as new, then couldn't run its version
+    assert (store.runs[child].error_code, store.runs[child].iterations) == ("version_unusable", carried)
+    assert result.error is not None
+    assert (result.status, result.error["code"], result.iterations) == ("failed", "version_unusable", carried)
