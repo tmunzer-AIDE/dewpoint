@@ -6,8 +6,10 @@ from typing import Any
 
 from temporalio.testing import WorkflowEnvironment
 
+import dewpoint
 from dewpoint.apps.worker.main import engine_worker
 from dewpoint.core.config import Settings
+from dewpoint.engine.runtime.build import build_id
 from dewpoint.engine.runtime.workflow import LoopBatch, RunGraph
 from tests.apps.worker.harness import MemoryStore
 from tests.support.plugins.testkit import TESTKIT
@@ -35,3 +37,14 @@ async def test_the_engine_worker_runs_runs_and_loop_batches(own_env: WorkflowEnv
     """2a-3b: a loop batch is a workflow type of its own, on the same queue as the runs that start it."""
     worker = engine_worker(own_env.client, MemoryStore(), [TESTKIT], settings())
     assert worker.config()["workflows"] == [RunGraph, LoopBatch]
+
+
+async def test_the_engine_worker_serves_this_builds_version_of_the_deployment(own_env: WorkflowEnvironment) -> None:
+    """Spec §7: one Worker Deployment, `dewpoint-engine`; this build's version is its build id. The CEL worker isn't
+    in it: its queues are routed by profile."""
+    config = engine_worker(own_env.client, MemoryStore(), [TESTKIT], settings()).config()["deployment_config"]
+    assert config.use_worker_versioning
+    assert (config.version.deployment_name, config.version.build_id) == (
+        "dewpoint-engine",
+        build_id(dewpoint.__version__),
+    )

@@ -17,6 +17,7 @@ from temporalio.client import Client
 
 from dewpoint.apps.plugin_loader import PluginLoadError, installed_plugins, prepare
 from dewpoint.apps.runs import NotAdmissibleError, StartRefusedError, StartUncertainError, start_run
+from dewpoint.apps.worker.deployment import Deployment, describe, set_current, this_build
 from dewpoint.apps.worker.main import run as run_worker
 from dewpoint.core.audit.anchor import FileAnchorSink, anchor_all, anchor_freshness, verify_anchors
 from dewpoint.core.auth.users import PasswordPolicyError, create_user
@@ -52,6 +53,8 @@ lifecycle_cli = typer.Typer(no_args_is_help=True)
 app.add_typer(lifecycle_cli, name="lifecycle")
 dev_cli = typer.Typer(no_args_is_help=True)
 app.add_typer(dev_cli, name="dev")
+deployment_cli = typer.Typer(no_args_is_help=True)
+app.add_typer(deployment_cli, name="deployment")
 
 
 async def _init(email: str, password: str) -> None:
@@ -325,6 +328,39 @@ def lifecycle_retire(
 def worker() -> None:
     """Run the Temporal worker: RunGraph and its activities, and cel.evaluate when DEWPOINT_CEL_SOCKET is set."""
     asyncio.run(run_worker(get_settings()))
+
+
+async def _temporal() -> Client:
+    settings = get_settings()
+    return await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
+
+
+@deployment_cli.command("set-current")
+def deployment_set_current(
+    build: str | None = typer.Option(None, "--build-id", help="the build new runs start on (default: this one)"),
+    wait: float = typer.Option(60.0, "--wait", help="seconds to wait for that build's workers to poll"),
+) -> None:
+    """Make a build the one new runs start on (spec §7). A run already started stays on its build until it ends."""
+    target = build or this_build()
+
+    async def _go() -> None:
+        await set_current(await _temporal(), target, wait_s=wait)
+
+    asyncio.run(_go())
+    typer.echo(f"current: {target}")
+
+
+@deployment_cli.command("status")
+def deployment_status() -> None:
+    """The build new runs start on, and every version with its status: a draining one still serves its runs."""
+
+    async def _go() -> Deployment:
+        return await describe(await _temporal())
+
+    deployment = asyncio.run(_go())
+    typer.echo(f"current: {deployment.current or 'none'}")
+    for v in deployment.versions:
+        typer.echo(f"{v.build_id}  {v.status}")
 
 
 async def dev_run_version(

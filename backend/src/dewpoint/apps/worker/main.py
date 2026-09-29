@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """`dewpoint worker` (spec §6, §7): `RunGraph` and the engine activities on `dewpoint-engine`. When an evaluator is
 configured, it also serves `cel.evaluate`, only on the queue of the profile the evaluator reports: it waits for the
-evaluator, then asks its identity. Worker Versioning (the pinned deployment) comes with plan 2a-3c."""
+evaluator, then asks its identity. The engine worker serves this build's version of the `dewpoint-engine` Worker
+Deployment (deployment.py); the CEL worker is outside it, routed by profile."""
 
 import asyncio
 from collections.abc import Iterable
@@ -14,6 +15,7 @@ from temporalio.worker import Worker
 from dewpoint.apps import cel_client
 from dewpoint.apps.plugin_loader import installed_plugins
 from dewpoint.apps.worker.activities import RunStore, cel_activity, engine_activities, remote_evaluator
+from dewpoint.apps.worker.deployment import deployment_config, this_build
 from dewpoint.apps.worker.store import DbRunStore
 from dewpoint.core.config import Settings
 from dewpoint.core.db import make_engine, make_sessionmaker
@@ -34,15 +36,26 @@ async def evaluator_profile(socket_path: str, *, wait_s: float = 2.0) -> str:
             await asyncio.sleep(wait_s)
 
 
-def engine_worker(client: Client, store: RunStore, plugins: Iterable[Plugin], settings: Settings) -> Worker:
-    """A stopping worker lets running attempts finish for `worker_shutdown_grace_s`: one it cancels ends as it would
-    on a lost worker, `outcome_unknown` for an ambiguous node."""
+def engine_worker(
+    client: Client,
+    store: RunStore,
+    plugins: Iterable[Plugin],
+    settings: Settings,
+    *,
+    build: str | None = None,
+    identity: str | None = None,
+) -> Worker:
+    """This build's version of the engine deployment (`build`: another's, in the two-build test). A stopping worker
+    lets running attempts finish for `worker_shutdown_grace_s`: one it cancels ends as it would on a lost worker,
+    `outcome_unknown` for an ambiguous node."""
     return Worker(
         client,
         task_queue=ENGINE_QUEUE,
         workflows=[RunGraph, LoopBatch],
         activities=engine_activities(store, plugins),
         graceful_shutdown_timeout=timedelta(seconds=settings.worker_shutdown_grace_s),
+        deployment_config=deployment_config(build or this_build()),
+        identity=identity,
     )
 
 

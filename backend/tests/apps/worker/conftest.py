@@ -19,3 +19,11 @@ async def own_env() -> AsyncIterator[WorkflowEnvironment]:
     outstanding: every later timer on a shared server would wait in real time."""
     async with await WorkflowEnvironment.start_time_skipping() as environment:
         yield environment
+
+
+@pytest.fixture(scope="session")
+async def dev_env() -> AsyncIterator[WorkflowEnvironment]:
+    """Temporal's CLI dev server (downloaded once by the SDK), for what the test server can't do: Worker Versioning,
+    a terminated child reaching its parent, and Temporal suggesting continue-as-new. Time runs for real on it."""
+    async with await WorkflowEnvironment.start_local() as environment:
+        yield environment

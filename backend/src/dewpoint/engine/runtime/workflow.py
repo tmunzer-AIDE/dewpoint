@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from temporalio import workflow
+from temporalio.common import VersioningBehavior
 from temporalio.exceptions import ApplicationError, ChildWorkflowError
 
 with workflow.unsafe.imports_passed_through():
@@ -63,7 +64,7 @@ with workflow.unsafe.imports_passed_through():
 HANDLED = ("failed", DEADLINE_EXCEEDED)  # the ends that run a failure handler (a cancel is no failure)
 
 
-@workflow.defn(name="RunGraph")
+@workflow.defn(name="RunGraph", versioning_behavior=VersioningBehavior.PINNED)  # spec §7
 class RunGraph(Execution):
     @workflow.run
     async def run(self, start: RunInput) -> RunResult:
@@ -346,7 +347,7 @@ class RunGraph(Execution):
         return result.iterations
 
 
-@workflow.defn(name="LoopBatch")
+@workflow.defn(name="LoopBatch", versioning_behavior=VersioningBehavior.PINNED)
 class LoopBatch(Execution):
     @workflow.run
     async def run(self, start: BatchInput) -> BatchResult:
