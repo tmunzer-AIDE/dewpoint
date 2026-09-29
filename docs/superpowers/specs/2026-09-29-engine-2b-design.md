@@ -16,7 +16,8 @@
     after the codec; a task's completion over the gRPC limit gets the workflow terminated, so the per-task byte
     budget is a hard invariant (§5.2); an operator's termination stays `terminated` (§7.6); Dewpoint never uses a
     schedule's trigger-now (§8.2). Structure dominates wide loop bodies, so §5.3 proposes an index-based snapshot
-    format, a rebuilt ready queue and an open-iteration cap — a design whose own dev-server go/no-go comes before
+    format, a rebuilt ready queue and an open-iteration cap with a reservation for one dependency chain (bounded by
+    `OPEN_SCOPES_CAP + D`), provisional until its own dev-server go/no-go, with parallel sibling loops, before
     2b-1b.
 - **Parent specs:**
   - `2026-09-24-dewpoint-architecture-design.md` (§5, §6.1, §6.5, §6.8, §12, §15). This spec **changes** its
@@ -395,17 +396,28 @@ locally stays inline; anything larger is a handle, evaluated by handle in an act
   rebuilds it from the node and edge states in a canonical order (scope order, then node order), which changes the
   scheduling order and so comes with its ABI bump. On the measured snapshot: 665 KB → 72 KB with indexes, 36 KB with
   the ready queue rebuilt.
-- **Open iterations are capped per execution — also proposed.** Today only each loop's concurrency (at most 10)
-  bounds its open iterations, nesting multiplies them, and `IN_FLIGHT_CAP` counts only activities and children, so
-  structure has no bound. A per-execution cap on open iteration scopes (`OPEN_SCOPES_CAP`, initially 100) bounds it
-  by construction, with a progress guarantee: a loop with no open iteration may always open one, even at the cap (so
-  the count stays within the cap plus the nesting depth), and among waiting loops, inner ones open before outer ones.
-  An outer iteration waiting for an inner loop is therefore never starved by the cap.
+- **Open iterations are capped per execution — also proposed, and provisional until the prototype proves it.**
+  Today only each loop's concurrency (at most 10) bounds its open iterations, nesting multiplies them, and
+  `IN_FLIGHT_CAP` counts only activities and children, so structure has no bound. The proposal:
+  - **The general cap:** a loop opens an iteration only while the execution has fewer than `OPEN_SCOPES_CAP`
+    (initially 100) open iteration scopes.
+  - **A reservation for one dependency chain:** `D` more scopes are reserved, where `D` is the version's deepest loop
+    nesting, computed at publish. Only the **progress chain** may use them: the loops nested, level by level, inside
+    the oldest open iteration that is waiting for an inner loop to open an iteration ("oldest" by opening order, so
+    it's deterministic across replay). On that chain, a loop may open one iteration at a time from the reservation.
+    Sibling loops elsewhere — unrelated loops ready in parallel, however many — use only the general cap.
+  - **The bound:** open iteration scopes never exceed `OPEN_SCOPES_CAP + D`.
+  - **Progress:** the oldest waiting iteration can always open one iteration at each level beneath it, down to a body
+    with no loop, whose steps run under `IN_FLIGHT_CAP` (activities and children always end or time out). So the
+    oldest waiting iteration always completes and frees its scopes, and the next oldest becomes the chain. An outer
+    iteration waiting for an inner loop is never starved.
 - **The go/no-go for this design** is a real dev-server test of a prototype, run before the 2b-1b plan's tasks. It
   must show: encoded snapshots within `SNAPSHOT_MAX` at the limits (bodies up to the node limit, nested loops,
-  10,000-item collections, 100,000 iterations); repeated continues restoring identically; deterministic ordering
-  across replay; and nested and wide loops always making progress under the cap, with no deadlock. Until it passes,
-  the spec promises only that continuing is guarded against size (§5.2), not a size bound.
+  parallel sibling loops, 10,000-item collections, 100,000 iterations); repeated continues restoring identically;
+  deterministic ordering across replay; open scopes never above `OPEN_SCOPES_CAP + D`; and nested loops, parallel
+  sibling loops and wide bodies — together and at the cap — always making progress, with no deadlock. Until it
+  passes, the spec promises only that continuing is guarded against size (§5.2), not a size bound, and the progress
+  rule above stays provisional.
 - **The snapshot is one payload.** Before continuing as new, after compaction, the workflow checks that the encoded
   snapshot is within `SNAPSHOT_MAX` (initially 1.5 MiB — well below the history size at which Temporal suggests
   continuing, so a restored run doesn't immediately continue again), and that the old run's history keeps headroom
