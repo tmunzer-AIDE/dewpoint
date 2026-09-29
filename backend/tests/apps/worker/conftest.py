@@ -24,6 +24,12 @@ async def own_env() -> AsyncIterator[WorkflowEnvironment]:
 @pytest.fixture(scope="session")
 async def dev_env() -> AsyncIterator[WorkflowEnvironment]:
     """Temporal's CLI dev server (downloaded once by the SDK), for what the test server can't do: Worker Versioning,
-    a terminated child reaching its parent, and Temporal suggesting continue-as-new. Time runs for real on it."""
-    async with await WorkflowEnvironment.start_local() as environment:
+    a terminated child reaching its parent, and Temporal suggesting continue-as-new. Time runs for real on it. A
+    version that no run is pinned to reports itself drained within about a second (the default checks every 3 min)."""
+    drainage = [
+        "matching.wv.VersionDrainageStatusVisibilityGracePeriod",
+        "matching.wv.VersionDrainageStatusRefreshInterval",
+    ]
+    args = [a for key in drainage for a in ("--dynamic-config-value", f'{key}="1s"')]
+    async with await WorkflowEnvironment.start_local(dev_server_extra_args=args) as environment:
         yield environment
