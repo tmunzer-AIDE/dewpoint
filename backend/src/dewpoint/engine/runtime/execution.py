@@ -149,6 +149,16 @@ def _cancelled(e: BaseException) -> bool:
     )
 
 
+def _unloadable(e: BaseException) -> str:
+    """What a run whose version didn't load says. The loader's own refusal (`version_unusable`: a version of another
+    engine ABI) is written for users; any other error's text may quote the version, so the projection names only its
+    type, and the worker's log has the rest."""
+    refusal = e.cause if isinstance(e, ActivityError) else e  # a local activity's failure comes unwrapped
+    if isinstance(refusal, ApplicationError) and refusal.type == VERSION_UNUSABLE:
+        return refusal.message
+    return f"This build can't run the version ({type(e).__name__}); the worker's log has the details."
+
+
 def _backoff(retry: Mapping[str, Any], attempt: int) -> float:
     """Seconds before attempt `attempt + 1`, from the manifest's retry settings."""
     delay = float(retry["initial_interval_s"]) * float(retry["backoff"]) ** (attempt - 1)

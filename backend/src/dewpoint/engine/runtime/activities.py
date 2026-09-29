@@ -131,6 +131,7 @@ class VersionData:
     manifests: dict[str, dict[str, Any]]  # type@version -> manifest, for every node type in the graph
     subflow_version_ids: dict[str, str] = field(default_factory=dict)  # run_workflow node id -> pinned version id
     failure_handler_version_id: str | None = None
+    engine_abi: int | None = None  # the ABI it was published for; None only in histories recorded before 2a-3c
 
 
 @dataclass(frozen=True)

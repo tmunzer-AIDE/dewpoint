@@ -34,6 +34,7 @@ from temporalio.exceptions import ApplicationError
 
 from dewpoint.apps.cel_client import EvaluatorUnavailable, evaluate_remote
 from dewpoint.apps.worker.context import context
+from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.cel import ipc
 from dewpoint.engine.runtime.activities import (
     APPLIED,
@@ -53,6 +54,7 @@ from dewpoint.engine.runtime.activities import (
     VersionData,
     step_activity,
 )
+from dewpoint.engine.runtime.execution import VERSION_UNUSABLE
 from dewpoint.engine.runtime.projection import location
 from dewpoint.sdk import (
     FatalError,
@@ -201,12 +203,28 @@ def step_activity_for(node: type[Node]) -> Callable[[StepInput], Awaitable[StepR
     return run_step
 
 
-def engine_activities(store: RunStore, plugins: Iterable[Plugin]) -> list[Callable[..., Any]]:
-    """Everything the engine queue serves: the version loader, the projection, and one activity per action node."""
+def engine_activities(store: RunStore, plugins: Iterable[Plugin], *, abi: int = ENGINE_ABI) -> list[Callable[..., Any]]:
+    """Everything the engine queue serves: the version loader, the projection, and one activity per action node.
+    `abi` is the engine ABI this build runs (another build's in the two-build tests): a version runs only on a build
+    of its ABI (spec §7). Admission already compares with the current build's; the loader refuses any other too, for
+    a run that reached this build anyway (a promotion that raced its start), a sub-flow or a failure handler."""
 
     @activity.defn(name=LOAD_VERSION)
     async def load_version(data: LoadVersionInput) -> VersionData:
-        return await store.version(data.tenant_id, data.version_id)
+        version = await store.version(data.tenant_id, data.version_id)
+        if version.engine_abi != abi:  # the run fails `version_unusable`, with this message
+            remedy = (
+                f"start the run again once a build of ABI {version.engine_abi} is current"
+                if version.engine_abi is not None and version.engine_abi > abi
+                else f"publish the workflow again with a build of ABI {abi}"
+            )
+            raise ApplicationError(
+                f"This version was published for engine ABI {version.engine_abi}, and this build runs ABI {abi}: "
+                f"{remedy}.",
+                type=VERSION_UNUSABLE,
+                non_retryable=True,
+            )
+        return version
 
     @activity.defn(name=PROJECT)
     async def project(data: ProjectInput) -> None:

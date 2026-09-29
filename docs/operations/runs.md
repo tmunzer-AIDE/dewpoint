@@ -51,7 +51,9 @@ started on. Rolling out a build, and what Docker Compose runs (Temporal's dev se
 dewpoint dev run <version-id> --tenant <tenant-id> --input trigger.json
 ```
 
-- The version must be the **active** version of an **enabled** workflow, and nothing it uses may be retired.
+- The version must be the **active** version of an **enabled** workflow, and nothing it uses may be retired. It,
+  and the sub-flows and failure handler it runs, must have been published for the engine ABI of the deployment's
+  current build, where the run starts ([`deployment.md`](deployment.md)).
 - `--simulate` calls each plugin node's `simulate()` instead of `run()`: nothing is sent anywhere. A node without a
   simulation fails its step with `simulation_unavailable`. Timers still wait, as they would in a live run.
 - By default the command waits and prints the result. `--no-wait` prints the run id and returns.

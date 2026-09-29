@@ -18,7 +18,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import WorkerDeploymentConfig
 
 import dewpoint
-from dewpoint.engine.runtime.build import build_id
+from dewpoint.engine.runtime.build import abi_of, build_id
 
 DEPLOYMENT = "dewpoint-engine"
 IDENTITY = "dewpoint-deployment"  # who changed the routing, as Temporal records it
@@ -80,3 +80,15 @@ async def describe(client: Client) -> Deployment:
         for v in info.version_summaries
     ]
     return Deployment(current, sorted(versions, key=lambda v: v.build_id))
+
+
+async def current_abi(client: Client) -> int | None:
+    """The engine ABI of the deployment's current build: new runs start on it, so admission compares versions with it
+    (§7). None when no Dewpoint build is current, or no worker has ever joined the deployment."""
+    try:
+        current = (await describe(client)).current
+    except RPCError as e:
+        if e.status == RPCStatusCode.NOT_FOUND:
+            return None
+        raise
+    return abi_of(current) if current else None

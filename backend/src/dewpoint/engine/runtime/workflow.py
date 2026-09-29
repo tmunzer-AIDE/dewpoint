@@ -47,6 +47,7 @@ with workflow.unsafe.imports_passed_through():
         VERSION_UNUSABLE,
         Execution,
         _cancelled,
+        _unloadable,
         child_options,
     )
     from dewpoint.engine.runtime.program import Program, compile_program
@@ -125,12 +126,11 @@ class RunGraph(Execution):
             )
         except asyncio.CancelledError:
             return await self._cancelled_early()
-        except Exception as e:  # its text may quote the version: the log has it, the projection names the type
+        except Exception as e:
             if _cancelled(e):
                 return await self._cancelled_early()
             workflow.logger.error("run_version_unusable", exc_info=True)
-            message = f"This build can't run the version ({type(e).__name__}); the worker's log has the details."
-            return await self._end_early(RunEnd("failed", Failure(VERSION_UNUSABLE, message)))
+            return await self._end_early(RunEnd("failed", Failure(VERSION_UNUSABLE, _unloadable(e))))
         try:
             program = compile_program(
                 data.graph,

@@ -19,6 +19,7 @@ from dewpoint.apps.worker.deployment import deployment_config, set_current, this
 from dewpoint.apps.worker.store import DbRunStore
 from dewpoint.core.config import Settings
 from dewpoint.core.db import make_engine, make_sessionmaker
+from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, cel_queue
 from dewpoint.engine.runtime.workflow import LoopBatch, RunGraph
 from dewpoint.sdk import Plugin
@@ -44,15 +45,17 @@ def engine_worker(
     *,
     build: str | None = None,
     identity: str | None = None,
+    abi: int = ENGINE_ABI,
 ) -> Worker:
-    """This build's version of the engine deployment (`build`: another's, in the two-build test). A stopping worker
-    lets running attempts finish for `worker_shutdown_grace_s`: one it cancels ends as it would on a lost worker,
-    `outcome_unknown` for an ambiguous node."""
+    """This build's version of the engine deployment, running versions of this build's engine ABI (`build` and `abi`:
+    another build's, in the two-build tests). A stopping worker lets running attempts finish for
+    `worker_shutdown_grace_s`: one it cancels ends as it would on a lost worker, `outcome_unknown` for an ambiguous
+    node."""
     return Worker(
         client,
         task_queue=ENGINE_QUEUE,
         workflows=[RunGraph, LoopBatch],
-        activities=engine_activities(store, plugins),
+        activities=engine_activities(store, plugins, abi=abi),
         graceful_shutdown_timeout=timedelta(seconds=settings.worker_shutdown_grace_s),
         deployment_config=deployment_config(build or this_build()),
         identity=identity,

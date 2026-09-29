@@ -3,6 +3,7 @@
 
 from typing import Any
 
+import pytest
 from temporalio.testing import WorkflowEnvironment
 
 from dewpoint.apps.cli.main import dev_run_version
@@ -12,6 +13,8 @@ from tests.apps.worker.harness import workers
 from tests.conftest import _url_for
 from tests.support.graphs import G, cel, ref
 from tests.support.registry import sync_test_plugins
+
+pytestmark = pytest.mark.usefixtures("this_build_is_current")  # its run starts on the time-skipping server
 
 
 def graph() -> dict[str, Any]:

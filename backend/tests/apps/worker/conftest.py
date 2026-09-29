@@ -2,7 +2,11 @@
 from collections.abc import AsyncIterator
 
 import pytest
+from temporalio.client import Client
 from temporalio.testing import WorkflowEnvironment
+
+from dewpoint.apps import runs as run_ops
+from dewpoint.engine import ENGINE_ABI
 
 
 @pytest.fixture(scope="session")
@@ -33,3 +37,15 @@ async def dev_env() -> AsyncIterator[WorkflowEnvironment]:
     args = [a for key in drainage for a in ("--dynamic-config-value", f'{key}="1s"')]
     async with await WorkflowEnvironment.start_local(dev_server_extra_args=args) as environment:
         yield environment
+
+
+@pytest.fixture
+def this_build_is_current(monkeypatch: pytest.MonkeyPatch) -> None:
+    """For tests that start runs through admission on the time-skipping server, which has no Worker Deployments:
+    admission takes this build as the deployment's current one. The deployment's own answer is tested on the dev
+    server (test_admission_abi.py)."""
+
+    async def current_abi(_client: Client) -> int:
+        return ENGINE_ABI
+
+    monkeypatch.setattr(run_ops, "current_abi", current_abi)

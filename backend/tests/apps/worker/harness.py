@@ -15,6 +15,7 @@ from temporalio.worker import Worker, WorkflowRunner
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
 from dewpoint.apps.worker.activities import Evaluate, RunStore, cel_activity, engine_activities
+from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.cel import ipc
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.graph.validate import SubflowInfo, ValidationContext, validate
@@ -51,8 +52,9 @@ class MemoryStore:
     starts: dict[str, RunStart] = field(default_factory=dict)  # sub-runs' own rows
     schemas: dict[str, dict[str, Any]] = field(default_factory=dict)  # version -> its output schema
 
-    def add(self, g: G, workflow_id: uuid.UUID | None = None) -> str:
-        """Publish `g` as a version, pinned to the sub-flows it runs (as `publish` registered them)."""
+    def add(self, g: G, workflow_id: uuid.UUID | None = None, *, engine_abi: int = ENGINE_ABI) -> str:
+        """Publish `g` as a version, pinned to the sub-flows it runs (as `publish` registered them). `engine_abi`:
+        the build that published it, this one unless a test says otherwise."""
         result = validate(g.build(), ValidationContext(catalog=CATALOG, subflows=self.subflows))
         errors = [d.to_json() for d in result.diagnostics if d.severity == "error"]
         assert not errors, errors
@@ -68,14 +70,16 @@ class MemoryStore:
             manifests={r: MANIFESTS[r] for r in sorted(refs)},
             subflow_version_ids=dict(result.subflow_pins),
             failure_handler_version_id=str(handler) if handler else None,
+            engine_abi=engine_abi,
         )
         self.schemas[version_id] = dict(result.output_schema)
         return version_id
 
-    def publish(self, g: G) -> uuid.UUID:
-        """A workflow other graphs can run as a sub-flow or a failure handler: its id."""
-        workflow_id = uuid.uuid4()
-        version_id = self.add(g, workflow_id)
+    def publish(self, g: G, workflow_id: uuid.UUID | None = None, *, engine_abi: int = ENGINE_ABI) -> uuid.UUID:
+        """A workflow other graphs can run as a sub-flow or a failure handler: its id. With `workflow_id`, a new
+        version of that workflow, which graphs published from now on pin."""
+        workflow_id = workflow_id or uuid.uuid4()
+        version_id = self.add(g, workflow_id, engine_abi=engine_abi)
         input_schema = g.settings.get("input_schema", {"type": "object"})
         self.subflows[workflow_id] = SubflowInfo(
             workflow_id, uuid.UUID(version_id), input_schema, self.schemas[version_id]
@@ -138,8 +142,15 @@ async def workers(
 async def start(
     client: Client, store: MemoryStore, g: G, trigger: dict[str, Any] | None = None, **options: Any
 ) -> WorkflowHandle[Any, RunResult]:
+    return await start_version(client, store.add(g), trigger, **options)
+
+
+async def start_version(
+    client: Client, version_id: str, trigger: dict[str, Any] | None = None, **options: Any
+) -> WorkflowHandle[Any, RunResult]:
+    """A run of a version the store already has."""
     run_id = str(uuid.uuid4())
-    run = RunInput(TENANT, run_id, store.add(g), trigger or {}, options.pop("mode", LIVE), **options)
+    run = RunInput(TENANT, run_id, version_id, trigger or {}, options.pop("mode", LIVE), **options)
     return await client.start_workflow(RunGraph.run, run, id=run_id, task_queue=ENGINE_QUEUE)
 
 

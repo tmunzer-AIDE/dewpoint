@@ -44,6 +44,29 @@ To roll back, make the old build current again while its workers still run: `dew
 A node type the new build no longer ships must be retired first ([`plugin-lifecycle.md`](plugin-lifecycle.md)). The
 old build's runs that still use it finish on the old build's workers, which still have it.
 
+## A build with a new engine ABI
+
+A build ID ends with its engine ABI (`+abi3`), which changes whenever a build could execute a workflow differently. A
+version runs only on a build of the ABI it was published for. So when a new build changes it:
+
+- Runs already started finish on the old build, pinned to it, with their sub-flows and failure handlers.
+- A new run starts on the deployment's current build, so that's the build admission compares versions with,
+  whichever build's process admits the run. While the old build is current, the new build's versions are refused
+  ("make a build of ABI 3 current first"). Once the new build is current, the old build's versions are refused
+  ("publish the workflow again"), and `dewpoint dev run` prints which ones. A sub-flow or failure handler of the other
+  ABI refuses its parent's runs the same way.
+- Publish each workflow again with the new build once it's current. Start with the workflows that others run as
+  sub-flows or failure handlers, then publish those that run them. Publishing refuses a workflow that would run a
+  version of another ABI (`subflow.engine_abi`).
+- A promotion that happens between a run's admission and its start is caught when the run loads its version: it fails
+  with `version_unusable` before any step runs, with the same explanation. Start it again.
+
+Builds from before 2a-3c aren't in the deployment, and their processes don't check the ABI when they admit a run.
+Such a run starts on the current build, whose loader refuses a version of another ABI. Until a 2a-3c build is
+current, 2a-3c's processes admit nothing: no build is current.
+
+Rolling back across an ABI change means publishing again with the old build, too.
+
 ## Docker Compose (evaluation)
 
 Compose runs Temporal's dev server (the `temporal` service: its state in SQLite on the `temporal-data` volume, its Web
@@ -51,8 +74,9 @@ UI at <http://127.0.0.1:8233>) and one `worker`. Production uses a Temporal clus
 
 Compose runs one build at a time, so its worker makes its own build current as it starts
 (`DEWPOINT_WORKER_SET_CURRENT=true`). Replacing the `worker` container with a new image removes the old build's only
-worker: **let runs end before upgrading**, or their build's worker must come back for them to finish. Leave the setting
-off wherever builds overlap.
+worker: **let runs end before upgrading**, or their build's worker must come back for them to finish. When the new
+image has a new engine ABI, publish every workflow again after upgrading (above). Leave the setting off wherever builds
+overlap.
 
 The worker and `dewpoint dev run` log in as `dewpoint_worker_login` and `dewpoint_dispatch_login`
 (`DEWPOINT_WORKER_DB_PASSWORD`, `DEWPOINT_DISPATCH_DB_PASSWORD`). A fresh install creates both. An install whose

@@ -14,6 +14,7 @@ from dewpoint.core.http import TenantContext
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.plugins.lifecycle import Entry
 from dewpoint.core.workflows import service
+from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.cel.record import ExpressionRecord
 from dewpoint.engine.graph.model import version_hash
@@ -222,6 +223,49 @@ async def test_rollback_to_a_superseded_version(
     with pytest.raises(workflow_ops.NotActivatableError) as e:
         await activate(api_sessionmaker, ctx, wf, v1.id)
     assert [d.code for d in e.value.errors] == ["lifecycle.retired"]
+
+
+async def published_by_the_previous_build(
+    api_sessionmaker: Any, ctx: TenantContext, wf_id: uuid.UUID, settings: Any, monkeypatch: pytest.MonkeyPatch
+) -> Any:
+    """A version as the build before this one published it: stamped with the ABI before this build's."""
+    with monkeypatch.context() as m:
+        m.setattr(workflow_ops, "ENGINE_ABI", ENGINE_ABI - 1)
+        version = (await publish(api_sessionmaker, ctx, wf_id, settings)).version
+    assert version is not None and version.engine_abi == ENGINE_ABI - 1
+    return version
+
+
+async def test_publish_refuses_to_pin_a_sub_flow_or_failure_handler_of_another_abi(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, monkeypatch
+) -> None:
+    """Spec §7: a version runs only on a build of its engine ABI. Publishing a parent again on its own, while a
+    workflow it runs still has an older ABI's version, would leave it running that version: refused, until that
+    workflow is published again."""
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    child = await create(api_sessionmaker, ctx, ECHO_GRAPH, name="child")
+    old = await published_by_the_previous_build(api_sessionmaker, ctx, child, api_settings, monkeypatch)
+    handled = G().node("a", "testkit.echo@1", {"value": 1})
+    handled.settings["failure_handler"] = str(child)
+    reason = (
+        f"Version {old.id}, a sub-flow or failure handler this workflow would run, was published for engine ABI "
+        f"{ENGINE_ABI - 1}, and this build publishes ABI {ENGINE_ABI}."
+    )
+    parents = [
+        await create(api_sessionmaker, ctx, draft, name=name)
+        for name, draft in (("runs it", runs(child)), ("handles with it", handled.data()))
+    ]
+    for parent in parents:
+        out = await publish(api_sessionmaker, ctx, parent, api_settings)
+        assert out.version is None
+        assert [(d.code, d.message, d.fix) for d in out.errors] == [
+            ("subflow.engine_abi", reason, "Publish that workflow again first.")
+        ]
+    await save(api_sessionmaker, ctx, child, ECHO_GRAPH)
+    assert (await publish(api_sessionmaker, ctx, child, api_settings)).version is not None  # the child, again
+    for parent in parents:
+        assert (await publish(api_sessionmaker, ctx, parent, api_settings)).version is not None
 
 
 async def test_retiring_a_subflow_type_blocks_its_parents(
