@@ -1,7 +1,7 @@
 # Dewpoint — Engine 2b Design (payload protection, admission, triggers, retention)
 
-- **Status:** approved by the owner, revision 2 (2026-09-29). Every section was approved in conversation
-  before it was written here; this document is their written form.
+- **Status:** approved by the owner, revision 3 (2026-09-29). Every section was approved
+  in conversation before it was written here; this document is their written form.
   - Revision 2 folds in the owner's review of revision 1: a claim is owned by the run that produced it, with the
     root run id kept for retention and the secret index (§3.4); passing a secret-index bound is a fixed,
     non-retryable error, and matching work is bounded (§3.7); an idempotency retry is compared under its stored
@@ -12,6 +12,12 @@
     execution exists (even closed) without overwriting a terminal row or recreating a slot; `runs.started_at`
     becomes nullable (§14); a leaked slot is released only when the logical run's latest execution is terminal
     (§7.6).
+  - Revision 3 records the go/no-go results (§11.1): codec context and schedule time passed; the SDK checks size
+    after the codec; a task's completion over the gRPC limit gets the workflow terminated, so the per-task byte
+    budget is a hard invariant (§5.2); an operator's termination stays `terminated` (§7.6); Dewpoint never uses a
+    schedule's trigger-now (§8.2). Structure dominates wide loop bodies, so §5.3 proposes an index-based snapshot
+    format, a rebuilt ready queue and an open-iteration cap — a design whose own dev-server go/no-go comes before
+    2b-1b.
 - **Parent specs:**
   - `2026-09-24-dewpoint-architecture-design.md` (§5, §6.1, §6.5, §6.8, §12, §15). This spec **changes** its
     workflow-id contract (§6.1), replaces its `outbox` table (§6.1), details its claim check (§6.5) and settles the
@@ -348,8 +354,8 @@ locally stays inline; anything larger is a handle, evaluated by handle in an act
 ### 5.2 The outgoing-payload guard
 
 - Before every command, the workflow measures each payload: its JSON bytes plus a fixed codec-overhead bound that a
-  test proves is an upper bound. The limit is a margin below Temporal's 2 MiB (initially 1.75 MiB; the margin is
-  confirmed by experiment 2, §11).
+  test proves is an upper bound. The limit is a margin below Temporal's 2 MiB (initially 1.75 MiB). Experiment 2
+  (§11) showed that the SDK checks the payload **after** the codec, so the guard must count the codec's overhead.
 - **Splittable paths split:** `cel.evaluate` requests (as #15 does) and batch items, by bytes as well as count.
   The projection is already bounded (256 KiB). Grant signals are bounded by construction, with an assertion.
 - **Spill before failing:** a payload that can't be split — a plugin step's config, a sub-flow's input, a run's
@@ -360,9 +366,13 @@ locally stays inline; anything larger is a handle, evaluated by handle in an act
 - **Only then fail:** an envelope that still doesn't fit after spilling, or a declared limit (a node's field count),
   fails the step or the run with `payload_too_large`, checked against the encoded-size bound — a result, never a
   retried workflow task.
-- **Per workflow task:** the yield budget (engine-core §5.6) gains a dimension for outgoing command bytes. A task
-  that has queued enough (initially 3 MiB, confirmed by experiment 2) yields before adding more, keeping its
-  completion under Temporal's gRPC message limit.
+- **Per workflow task, a hard invariant:** the encoded bytes of every command one workflow task sends stay below
+  Temporal's gRPC message limit (4 MiB on the tested server), with margin. Experiment 2 showed what happens
+  otherwise: the SDK fails the task with the non-retryable `GrpcMessageTooLarge`, and Temporal **terminates** the
+  workflow — no end write, no failure handler. So the yield budget (engine-core §5.6) gains a dimension for outgoing
+  command bytes (initially 3 MiB): a command that would pass it waits for the next workflow task, and no single
+  command exceeds the per-payload limit, so every completion fits. It's an invariant with its own tests, not a
+  tuning value.
 - **#15's guard** is verified again against the payload Temporal schedules after the codec (2b-1a).
 
 ### 5.3 Live state and snapshots
@@ -376,7 +386,26 @@ locally stays inline; anything larger is a handle, evaluated by handle in an act
 - **Collections compact.** A loop's collected list — up to its `item_cap` (at most 10,000) items, and batch results
   merging into it — is a list of immutable **segment** claims plus a short tail; once the tail passes a segment size
   it's spilled as one claim. Failure lists compact the same way. Thousands of handles become a few segment handles.
-- **Pending work is cursors,** never materialized queues: a loop's items (a handle or a list) plus its next index.
+- **Pending work is cursors,** never materialized queues: a loop's items (a handle or a list) plus its next index,
+  and no stored ready queue (below).
+- **Structure is encoded compactly — a proposed design, not yet a proven bound.** Experiment 3 found structure, not
+  values, dominating wide loop bodies: 665 KB, of which 5.7 KB were values (a ready queue of 4,549 units, and node
+  and edge states keyed by id). The proposed `snapshot_format` 2 stores each scope's node and edge states as one code
+  per node and per edge in region order, uses indexes instead of ids, and doesn't store the ready queue: restoring
+  rebuilds it from the node and edge states in a canonical order (scope order, then node order), which changes the
+  scheduling order and so comes with its ABI bump. On the measured snapshot: 665 KB → 72 KB with indexes, 36 KB with
+  the ready queue rebuilt.
+- **Open iterations are capped per execution — also proposed.** Today only each loop's concurrency (at most 10)
+  bounds its open iterations, nesting multiplies them, and `IN_FLIGHT_CAP` counts only activities and children, so
+  structure has no bound. A per-execution cap on open iteration scopes (`OPEN_SCOPES_CAP`, initially 100) bounds it
+  by construction, with a progress guarantee: a loop with no open iteration may always open one, even at the cap (so
+  the count stays within the cap plus the nesting depth), and among waiting loops, inner ones open before outer ones.
+  An outer iteration waiting for an inner loop is therefore never starved by the cap.
+- **The go/no-go for this design** is a real dev-server test of a prototype, run before the 2b-1b plan's tasks. It
+  must show: encoded snapshots within `SNAPSHOT_MAX` at the limits (bodies up to the node limit, nested loops,
+  10,000-item collections, 100,000 iterations); repeated continues restoring identically; deterministic ordering
+  across replay; and nested and wide loops always making progress under the cap, with no deadlock. Until it passes,
+  the spec promises only that continuing is guarded against size (§5.2), not a size bound.
 - **The snapshot is one payload.** Before continuing as new, after compaction, the workflow checks that the encoded
   snapshot is within `SNAPSHOT_MAX` (initially 1.5 MiB — well below the history size at which Temporal suggests
   continuing, so a restored run doesn't immediately continue again), and that the old run's history keeps headroom
@@ -386,7 +415,8 @@ locally stays inline; anything larger is a handle, evaluated by handle in an act
   retried activity writes the same row; a row that already exists must match the content hash the activity
   computed, or the activity fails without writing.
 - **Restoring** reads the snapshot's cursors and segment handles deterministically, across repeated continues.
-- **The bounds are measured, not hoped for:** experiment 3 and the plan's tests establish them at the real limits —
+- **The bounds are measured, not hoped for:** experiment 3 (§11) and the go/no-go above establish them at the real
+  limits —
   `item_cap` up to 10,000 with collection, the logical run's 100,000 iterations, handle counts, nested loops, batch
   merges, structural growth with no result merge, and repeated continues. The spec states the measured values when
   2b-1b lands; until then it says continuing is guarded against size, not that it never fails.
@@ -576,7 +606,10 @@ Inside the dispatcher, with one leader chosen through an advisory lock:
   execution and records the outcome Temporal reports, releasing the slot in the same transaction:
   - `COMPLETED` → the decoded `RunResult` (the run's own end, which its end write should already have recorded);
   - `CANCELED` → `cancelled`;
-  - `TERMINATED` → `failed` with `terminated` — only for a termination;
+  - `TERMINATED` → `failed` with `terminated`. An operator's termination stays `terminated`. A run Temporal itself
+    terminated because a task's completion was too large (§5.2) is recorded as `internal_error` instead only if the
+    server records a reliably distinguishable cause — for example the last failed workflow task's
+    `GRPC_MESSAGE_TOO_LARGE` cause before the termination — and a test proves it; otherwise it stays `terminated`;
   - `FAILED`, or `TIMED_OUT` (Dewpoint sets no execution timeout, so it's unexpected) → `failed` with
     `internal_error`, and an alert.
 - The synchronization that disabling the gate (§2.4) and erasing a tenant (§6.5) wait for.
@@ -664,9 +697,13 @@ transition out of `starting` says what happens to both, in the same transaction 
   compatible.
 - **The tick key** is `sched:<schedule_id>:<nominal time>`: the schedule's nominal time
   (`TemporalScheduledStartTime`, never the actual start or jitter), normalized to UTC at the precision Temporal
-  reports. `ScheduleTick` reads it once, deterministically, and passes it to its activity; retries reuse it; each
+  reports — whole seconds (experiment 1), unique per schedule because intervals are at least 60 s and cron is
+  minute-granular. `ScheduleTick` reads it once, deterministically, and passes it to its activity; retries reuse it; each
   caught-up time is its own tick. Experiment 1 must prove the attribute is deterministically available; if it isn't,
   the key is redesigned, never replaced by the actual start time.
+- **Dewpoint never uses a schedule's trigger-now action.** Experiment 1 showed that triggers within the same second
+  share a nominal time and a workflow id, so the tick key would collapse them. "Run now" is a manual admission
+  (§7.7).
 - **No tick is silently dropped.** Every tick calls `admit_request`, which records the request even while the gate
   is off. A disabled workflow or a paused schedule (a tick fired before the pause synced) produces a `refused`
   request with its reason. A tenant that's `erasing` produces an audited skip.
@@ -815,6 +852,49 @@ recorded, before 2b-1a ships.**
 4. **Claim-routing cost:** the delay a tainted expression adds by going through an activity. A measurement, not a
    gate.
 
+### 11.1 Results (2026-09-29)
+
+Temporal Python SDK 1.33.0; Temporal CLI dev server 1.9.1 (server 1.32.0); the time-skipping test server for the
+larger engine runs. Two tenants ran side by side throughout.
+
+1. **Codec context — passed.** 339 codec calls, in the original runs and again through `Replayer`, all had a context
+   whose workflow id named the right tenant, and every decode's metadata matched it: client start and result, and a
+   workflow failure reaching the client; workflow ↔ activity on both sides, local activities (marked local) and
+   heartbeats; activity and child failures with encoded attributes; child start and result; signals both ways;
+   continue-as-new; a batch-style child id; schedule create, describe and fire.
+   **Schedule time — passed, to the second.** `TemporalScheduledStartTime` is available to the schedule's workflow
+   and identical under replay, for interval firings, backfills, and a real catch-up after 130 s of server downtime
+   (the missed firings ran at restart with their own nominal times). Temporal truncates it to whole seconds, and
+   schedule workflow ids use seconds too: three triggers within one second shared both (§8.2's rule). A backfill over
+   an already-fired time produced a second execution with the same nominal time, which the tick key collapses.
+2. **Size — the guard's premises hold.** The SDK checks each command's payloads **after** the codec: a payload of
+   2,097,118 bytes before encoding passed the 2,097,152-byte limit once encrypted, and its workflow task then failed
+   and retried about 23 times a second. The experiment codec's overhead was 103–105 bytes. The SDK warns above
+   512 KiB. A workflow task whose completion passed the gRPC limit (4,194,304 bytes; three commands of 1.5 MiB, or
+   five of 900 KiB) failed with the non-retryable `GrpcMessageTooLarge`, and Temporal **terminated** the workflow;
+   two of 1.5 MiB completed (§5.2's invariant).
+3. **Live state (today's engine, 2a) — measured; the bound is not yet proven.**
+
+   | Scenario | Worst snapshot | What dominates |
+   |---|---|---|
+   | 100 pending timers | 24 KB | timers (12 KB) |
+   | nested loops 100 × 100, activity bodies | 70 KB | collections (30 KB) |
+   | a 10,000-item loop collecting integers | 99 KB | the items and collected lists (49 KB each) |
+   | a 10,000-item loop collecting 60-byte values (a handle's size) | 713 KB | collected (663 KB) |
+   | 10 loops of 10,000 in a row (100,000 iterations, 1,030 continues) | 540 KB | finished loops' outputs (440 KB) |
+   | 100 open iterations of a 48-step parallel body | 665 KB | ready queue (269 KB), node states (245 KB), edge states (126 KB); values 5.7 KB |
+   | the same with a 200-step body | over 2 MiB | the continue-as-new command failed its workflow task, which retried |
+
+   On the saved 48-step snapshot, the index-based encoding of §5.3 gives 72 KB, and 36 KB with the ready queue
+   rebuilt. §5.3's go/no-go still has to prove the bound on a prototype.
+4. **Claim-routing cost.** Per evaluation, sequential, on the dev server with the codec: about 0 ms in the workflow,
+   about 0.6 ms in a local activity, about 50 ms (p95 54 ms) in an activity. A loop of 10,000 iterations with one
+   tainted expression each spends roughly 50 s in routing at concurrency 10. The editor explains this cost where it
+   explains routing (§4.1).
+
+These results become committed regression checks, with the versions above recorded, before 2b-1a ships: context on
+every path, schedule time under replay and catch-up, the size check after the codec, and the per-task invariant.
+
 ## 12. Testing
 
 Beyond each task's own tests:
@@ -837,6 +917,9 @@ Beyond each task's own tests:
   its own outcome, and no slot held.
 - **Triggers:** CSV parser fuzzing; ingress authentication, replay tolerance, quotas and sealing; ingress load tests
   (parent §12).
+- **Size invariants:** no workflow task's commands pass the per-task byte budget, at the largest configs, fan-outs
+  and spills; an outgoing payload over the limit is spilled or fails its step, never a retried task; if the
+  `TERMINATED` classification of §7.6 is adopted, a test proves it on the dev server.
 - **Retention:** cutoffs on every read path, the SLO pause, audit pruning's checkpoint.
 - **RLS and roles:** the RLS matrix over the new tables and roles; the authorization matrix over `run.start`,
   `run.cancel`, `trigger.manage` and `workflow.declassify`.
@@ -850,7 +933,7 @@ Each plan updates the older specs as it lands, as the engine-core 5.x revisions 
   5 concurrent root runs per tenant, 30 days of tenant retention, 7 days of Temporal retention (at most 30).
 - **Engine-core spec:** the "hard rule until 2b ships" (lifted by §10.6); §9 (starting runs: admission and the
   dispatcher); §8 (the new codes, the cutoff on read paths, the `(queued_at, id)` ordering); §4.5 (dispatch as §7.3
-  describes it); §5.6 (the per-task byte budget); §6 (claims, handles, the live-state budget and snapshots); §7 (ABI 4
+  describes it); §5.6 (the per-task byte budget); §6 (claims, handles, the live-state budget, snapshots in `snapshot_format` 2, the open-iteration cap); §7 (ABI 4
   and 5, ids).
 
 ## 14. Roles, tables and permissions (summary)
@@ -875,7 +958,8 @@ Each plan updates the older specs as it lands, as the engine-core 5.x revisions 
 These numbers are starting points. Each stays provisional until the go/no-go experiments (§11) or the owning plan's
 measurements establish it; the spec is revised with the measured value when that plan lands.
 - **Measured before they're final:** the outgoing-payload limit (1.75 MiB) and the codec-overhead bound (§5.2); the
-  per-task outgoing-byte budget (3 MiB, §5.2); the live-state budget (1 MiB) and `SNAPSHOT_MAX` (1.5 MiB, §5.3); the
+  per-task outgoing-byte budget (3 MiB under a 4 MiB gRPC limit, §5.2); the live-state budget (1 MiB), `SNAPSHOT_MAX`
+  (1.5 MiB) and `OPEN_SCOPES_CAP` (100, §5.3); the
   spill floor (1 KiB, §5.4); the secret-index bounds (100,000 strings or 8 MiB, §3.7).
 - **Operational intervals:** worker health every 30 s, live for 90 s (§2.7); dispatcher and reconciler reports
   within 5 minutes (§10.6); the retention SLO's 24 hours (§10.3).
