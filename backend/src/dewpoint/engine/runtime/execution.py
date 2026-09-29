@@ -706,10 +706,13 @@ class Execution:
                 batch=CEL_BATCH,
                 limit=CEL_REQUEST_BYTES,
             )
-            if end == start:  # this binding set alone would pass Temporal's payload limit: it's never sent (#15)
-                out.append(cel.Outcome(error=cel.INPUT_TOO_LARGE, message=REQUEST_TOO_LARGE))
-                start += 1
-                continue
+            if end == start:
+                # This binding set alone would pass Temporal's payload limit: it's never sent (#15). The sets after it
+                # can't change the result (a filter fails at its first failing item, and the sets before it were sent
+                # already), so they're neither measured nor sent: measuring every oversized set in one workflow task
+                # could outlast the SDK's deadlock timeout.
+                refused = cel.Outcome(error=cel.INPUT_TOO_LARGE, message=REQUEST_TOO_LARGE)
+                return out + [refused] * (count - start)
             chunk = resolve.CelTask(task.record, task.bindings[start:end], False)
             await self._yield_point(None, send=size)
             self._yield.charge(sent=size)

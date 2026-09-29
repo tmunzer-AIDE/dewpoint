@@ -749,6 +749,19 @@ git commit -m "feat(engine): ENGINE_ABI 4, and its golden histories (#15)"
 
 ---
 
+## During execution
+
+- **The final review** found that a refused binding set didn't end the evaluation: every set after it was measured in
+  the same workflow task, and a filter of a few hundred items each binding about 1.8 MiB outlasted the SDK's 2 s
+  deadlock timeout and retried forever — #15's symptom. `_evaluate` now stops at the first refused set and reports the
+  rest `input_too_large` too; they can't change the result. Tests:
+  `test_no_binding_set_after_a_refused_one_is_measured_or_sent` and
+  `test_the_sets_before_a_refused_one_are_sent_and_none_after_it`. It lands before ABI 4 ships, so it needs no
+  further ABI.
+- **abi4's recorded histories differ in shape from abi3's** (for example `continue_as_new`: 6 executions against 7).
+  Recordings vary from run to run on the same code: a real-time race between each execution's projection and its
+  next step decides where each continue falls. Cross-replay passes both ways, and the final outcomes are identical.
+
 ## Handoff
 
 - **2b-1a** generalizes both rules to every outgoing command, measured after its codec (2b spec §5.2): the payload

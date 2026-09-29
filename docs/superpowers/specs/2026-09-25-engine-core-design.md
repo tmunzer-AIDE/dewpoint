@@ -721,7 +721,8 @@ not inside a worker that holds credentials.
 - **Temporal's payload limit.** The workflow cuts each request by its JSON bytes as well as by 1,000 binding sets, so
   its payload stays within `CEL_REQUEST_BYTES` (1.75 MiB), a margin under Temporal's 2 MiB limit, which the SDK checks
   after any codec. Requests that fit are cut every 1,000 sets, as before. A binding set that alone passes it is the
-  outcome `input_too_large`, and no request is sent for it (issue #15). A workflow task sends at most 3 MiB of these
+  outcome `input_too_large`, and no request is sent for it (issue #15); nor for the sets after it, which can't change
+  the result (a filter fails at its first failing item), so a workflow task never measures more than one refused set. A workflow task sends at most 3 MiB of these
   requests (`YIELD_SEND_BYTES`); the next one waits for the next task, so CEL requests alone can't push a task's
   completion past Temporal's 4 MiB gRPC message limit, past which Temporal terminates the workflow. Other commands in
   the same task aren't counted: the invariant over every command is sub-project 2b's.

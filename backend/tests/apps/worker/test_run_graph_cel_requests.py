@@ -5,6 +5,7 @@ well as by 1,000 binding sets, and a binding set that alone passes the limit fai
 test_real_server.py shows it at the real one."""
 
 import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -24,6 +25,16 @@ def graph(**outputs: Any) -> G:
     g = G()
     g.settings = {"input_schema": SCHEMA, "outputs": outputs}
     return g
+
+
+async def sent_sets(handle: WorkflowHandle[Any, Any]) -> list[int]:
+    """How many binding sets each `cel.evaluate` request carried, in order."""
+    out = []
+    async for e in handle.fetch_history_events():
+        a = e.activity_task_scheduled_event_attributes
+        if e.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED and a.activity_type.name == "cel.evaluate":
+            out.append(len(json.loads(a.input.payloads[0].data)["request"]["bindings"]))
+    return out
 
 
 async def requests(handle: WorkflowHandle[Any, Any]) -> list[int]:
@@ -119,3 +130,46 @@ async def test_a_workflow_task_sends_at_most_its_request_bytes(
     assert (result.status, result.outputs) == ("succeeded", {"n0": 600, "n1": 601, "n2": 602})
     tasks = await requests(handle)
     assert len(tasks) == 3 and len(set(tasks)) == 3
+
+
+async def test_no_binding_set_after_a_refused_one_is_measured_or_sent(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The final review: a refused set ends the evaluation. The sets after it can't change the result (a filter fails
+    at its first failing item, and the sets before it were sent already), so they're neither measured nor sent.
+    Measuring every oversized set in one workflow task could outlast the SDK's deadlock timeout, and the task would
+    retry forever — #15's symptom."""
+    monkeypatch.setattr(execution, "CEL_REQUEST_BYTES", 4_000)
+    measured: list[int] = []
+    real = execution._json_bytes
+
+    def counting(value: Any) -> int:
+        measured.append(1)
+        return real(value)
+
+    monkeypatch.setattr(execution, "_json_bytes", counting)
+    store = MemoryStore()
+    g = graph(code=ref("steps.f.error.code", default="none"))
+    g.node(
+        "f",
+        "flow.filter@1",
+        {"items": list(range(50)), "predicate": cel("size(trigger.s) > item")},
+        on_error="continue",
+    )
+    handle, result = await finished(env, store, g, {"s": "x" * 5_000})
+    assert (result.status, result.outputs) == ("succeeded", {"code": "input_too_large"})
+    assert await requests(handle) == []
+    assert len(measured) == 2  # the envelope and the first set, not the 49 after it
+
+
+async def test_the_sets_before_a_refused_one_are_sent_and_none_after_it(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(execution, "CEL_REQUEST_BYTES", 4_000)
+    store = MemoryStore()
+    g = graph(code=ref("steps.f.error.code", default="none"))
+    items = ["a", "b", "x" * 5_000, "c", "d"]
+    g.node("f", "flow.filter@1", {"items": items, "predicate": cel("size(item) > 0")}, on_error="continue")
+    handle, result = await finished(env, store, g, {"s": ""})
+    assert (result.status, result.outputs) == ("succeeded", {"code": "input_too_large"})
+    assert await sent_sets(handle) == [2]  # "a" and "b"; nothing after the refused one
