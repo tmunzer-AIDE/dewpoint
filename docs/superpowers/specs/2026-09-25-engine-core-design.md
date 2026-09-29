@@ -968,8 +968,9 @@ abandons or restarts an activity or a child workflow.
   - the ready, collect and batch queues, and timer wake times;
   - the iteration counter (below), with its reservations and waiting needs, the run's start time and the deadline.
 
-  The continued run's input also carries the iterations used so far, outside the snapshot: a run whose snapshot
-  a build can't read still reports them. The projection is flushed first, so no rows are carried. Settled iteration scopes are pruned once collected, so
+  The continued run's input also carries the iterations used so far, outside the snapshot: a run that ends
+  before restoring its snapshot still reports them, whether the snapshot is one a build can't read, its version
+  doesn't load or compile, or a cancel comes while it loads. The projection is flushed first, so no rows are carried. Settled iteration scopes are pruned once collected, so
   the snapshot holds only open work. The yield accumulator isn't carried: it resets every workflow task.
 - **Pinning.** A run never changes build, even across continue-as-new (parent §6.3, §7).
 - **Threshold tests.** Drain mode is entered while loop-batch children, a sub-flow, activities and a timer are

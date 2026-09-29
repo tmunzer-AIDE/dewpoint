@@ -267,7 +267,9 @@ admission compare with the deployment's current build (decision 16). The others 
     - M5: a sub-run's start row that the database refused for its data was retried forever, holding up the
       projection. It's logged and skipped, like any refused row.
     - M6: a run whose snapshot another build can't read reported 0 iterations. The continued run's input now
-      carries the iterations used so far, outside the snapshot.
+      carries the iterations used so far, outside the snapshot. Checkpoint 3 found the other ends before a restore
+      still reported 0 (a version that doesn't load or compile, a cancel while it loads), so a sub-flow's parent
+      released budget it had spent: every one reports them now (`860d332`).
     - M7: `test_the_cap_holds_across_children` asserted `<= 100` iterations. It asserts exactly 0: the filter's 150
       items are all or nothing, so none ran.
     - M8: a cancel while the run waited for its projection in flight, before continuing, cancelled that projection.
