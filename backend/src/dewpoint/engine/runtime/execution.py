@@ -995,7 +995,8 @@ class Execution:
                     attempt += 1
                     continue
                 # The run or the scope ended: the SDK reports our own cancel as an ActivityError. Never retry it.
-                self._queue(replace(row, status="cancelled", ended_at=workflow.now().isoformat()))
+                outcome = OUTCOME_UNKNOWN if ambiguous else None  # its request may have been sent
+                self._queue(replace(row, status="cancelled", ended_at=workflow.now().isoformat(), outcome=outcome))
                 raise asyncio.CancelledError from None
             self._learn(result.output, manifest["output_schema"])
             self._queue(

@@ -2,6 +2,7 @@
 """Run test graphs through `RunGraph` on Temporal's time-skipping test server, with the real step activities, an
 in-memory store and an in-process CEL evaluator (the real one needs Linux and its own container)."""
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
@@ -36,6 +37,9 @@ from tests.support.graphs import G
 from tests.support.plugins.testkit import TESTKIT
 
 TENANT = str(uuid.UUID(int=1))
+
+
+RESULT_TIMEOUT_S = 60  # the harness's runs are time-skipped: a minute is far more than any needs
 
 
 @dataclass
@@ -142,5 +146,6 @@ async def start(
 async def run(
     client: Client, store: MemoryStore, g: G, trigger: dict[str, Any] | None = None, **options: Any
 ) -> RunResult:
+    """A run to its end: a run that hangs fails its test instead of stalling the suite (2a-3a's final review, M6)."""
     handle = await start(client, store, g, trigger, **options)
-    return await handle.result()
+    return await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)

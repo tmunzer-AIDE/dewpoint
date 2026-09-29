@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """`RunGraph` end to end on the time-skipping test server (spec §6, §10 interpreter tests)."""
 
+import asyncio
 from typing import Any
 
 from temporalio.client import WorkflowHistory
@@ -9,7 +10,7 @@ from temporalio.worker import Replayer
 
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.runtime.workflow import RunGraph
-from tests.apps.worker.harness import MemoryStore, run, start, workers
+from tests.apps.worker.harness import RESULT_TIMEOUT_S, MemoryStore, run, start, workers
 from tests.support.graphs import G, cel, ref, template
 
 ECHO, IF, LOOP, FILTER = "testkit.echo@1", "flow.if@1", "flow.loop@1", "flow.filter@1"
@@ -46,7 +47,7 @@ async def test_a_cel_branch_runs_one_side_and_projects_control_steps(env: Workfl
     g.edge("c", "yes", "true").edge("c", "no", "false")
     async with workers(env.client, store):
         handle = await start(env.client, store, g, TRIGGER)
-        result = await handle.result()
+        result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     assert (result.status, result.outputs) == ("succeeded", {"side": "yes"})
     rows = {r.node_key: r for r in store.steps(handle.id)}
     assert rows["c"].status == "succeeded" and rows["c"].cel_mode == "activity"  # LOCAL_CEL_PROFILE is None
@@ -61,7 +62,7 @@ async def test_a_loop_collects_per_item_and_a_filter_keeps_matches(env: Workflow
     g.edge("l", "x", "body").edge("l", "f", "done")
     async with workers(env.client, store):
         handle = await start(env.client, store, g, TRIGGER)
-        result = await handle.result()
+        result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     assert result.outputs == {"doubled": [2, 4, 6], "aps": ["ap-1", "ap-2"]}
     assert result.iterations == 3 + 3  # three iterations, three filter items
     rows = [(r.node_key, r.iteration_key, r.status) for r in store.steps(handle.id)]
@@ -89,7 +90,7 @@ async def test_retries_follow_the_manifest_and_each_attempt_is_projected(env: Wo
     g = graph().node("f", "testkit.fail_n@1", {"failures": 2})
     async with workers(env.client, store):
         handle = await start(env.client, store, g, TRIGGER)
-        assert (await handle.result()).status == "succeeded"
+        assert (await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)).status == "succeeded"
     assert [(r.attempt, r.status, r.error_code) for r in store.steps(handle.id)] == [
         (1, "failed", "testkit.transient"),
         (2, "failed", "testkit.transient"),
@@ -112,7 +113,7 @@ async def test_an_unknown_outcome_is_never_retried_and_fails_the_run(env: Workfl
     g = graph().node("a", "testkit.ambiguous_send@1", {"outcome": "unknown"})
     async with workers(env.client, store):
         handle = await start(env.client, store, g, TRIGGER)
-        result = await handle.result()
+        result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     assert result.status == "failed" and result.error == {
         "code": "testkit.timeout_after_send",
         "message": "the request may have been delivered",
@@ -156,7 +157,7 @@ async def test_simulation_calls_simulate_and_records_it(env: WorkflowEnvironment
     g = graph(outputs={"v": ref("steps.a.output.value")}).node("a", ECHO, {"value": 5})
     async with workers(env.client, store):
         handle = await start(env.client, store, g, TRIGGER, mode="simulate")
-        result = await handle.result()
+        result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     assert result.outputs == {"v": {"simulated": 5}}
     assert [r.outcome for r in store.steps(handle.id)] == ["simulated"]
 
@@ -177,7 +178,7 @@ async def test_sensitive_outputs_are_redacted_in_the_projection(env: WorkflowEnv
     g = graph().node("s", "testkit.sensitive@1")
     async with workers(env.client, store):
         handle = await start(env.client, store, g, TRIGGER)
-        await handle.result()
+        await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     [row] = store.steps(handle.id)
     assert row.output_preview == {
         "public": "visible",
@@ -193,6 +194,6 @@ async def test_a_recorded_history_replays(env: WorkflowEnvironment) -> None:
     g.node("x", ECHO, {"value": ref("item")}).edge("c", "l", "true").edge("l", "x", "body")
     async with workers(env.client, store):
         handle = await start(env.client, store, g, TRIGGER)
-        await handle.result()
+        await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
         history = await handle.fetch_history()
     await Replayer(workflows=[RunGraph]).replay_workflow(WorkflowHistory.from_json(handle.id, history.to_json()))

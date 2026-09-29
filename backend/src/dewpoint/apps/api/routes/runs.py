@@ -66,11 +66,18 @@ def _step(r: RunStep) -> dict[str, object]:
 async def list_runs(
     workflow_id: uuid.UUID | None = None,
     before: datetime | None = None,
+    before_id: uuid.UUID | None = None,
     limit: int = Query(50, ge=1, le=200),
     ctx: TenantContext = Depends(require(P.RUN_VIEW)),
     db: AsyncSession = Depends(get_db, scope="function"),
 ) -> list[dict[str, object]]:
-    return [_run(r) for r in await service.list_runs(db, workflow_id=workflow_id, before=before, limit=limit)]
+    """Newest first. The next page: `before` and `before_id`, the last run's `started_at` and `id`, always together:
+    runs can start in the same instant, so the time alone would skip some."""
+    if (before is None) != (before_id is None):
+        raise HTTPException(422, detail={"error": "invalid_cursor", "message": "Give before and before_id together."})
+    cursor = (before, before_id) if before is not None and before_id is not None else None
+    runs = await service.list_runs(db, workflow_id=workflow_id, before=cursor, limit=limit)
+    return [_run(r) for r in runs]
 
 
 @router.get("/t/{tenant_id}/runs/{run_id}")

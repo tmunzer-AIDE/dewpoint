@@ -96,3 +96,20 @@ def test_a_start_temporal_refused_or_never_confirmed(
     _answer(monkeypatch, error, {})
     result = CliRunner().invoke(cli.app, ["dev", "run", str(uuid.uuid4()), "--tenant", str(uuid.uuid4())])
     assert result.exit_code == code and said in result.output
+
+
+@pytest.mark.usefixtures("cli_env")
+@pytest.mark.parametrize("payload", ["[1, 2]", '"text"', "3"])
+def test_an_input_that_isnt_a_json_object_is_refused_before_anything_starts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, payload: str
+) -> None:
+    """2a-3a's final review, M4: a trigger that isn't an object (a list, a string) left the run failing its first
+    workflow task forever, so it hung. The CLI refuses it."""
+    seen: dict[str, Any] = {}
+    _answer(monkeypatch, RunResult("succeeded", {}), seen)
+    trigger = tmp_path / "trigger.json"
+    trigger.write_text(payload)
+    result = CliRunner().invoke(
+        cli.app, ["dev", "run", str(uuid.uuid4()), "--tenant", str(uuid.uuid4()), "--input", str(trigger)]
+    )
+    assert (result.exit_code, result.output) == (2, "ERROR: --input must hold a JSON object\n") and seen == {}

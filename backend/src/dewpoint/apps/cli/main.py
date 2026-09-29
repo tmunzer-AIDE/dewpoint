@@ -401,6 +401,9 @@ def dev_run(
 ) -> None:
     """Start a run of a workflow's active version. Development only: 2b brings admission and triggers."""
     trigger = json.loads(Path(input_file).read_text()) if input_file else {}
+    if not isinstance(trigger, dict):  # a run's trigger is an object: anything else could never start
+        typer.echo("ERROR: --input must hold a JSON object")
+        raise typer.Exit(2)
 
     async def _go() -> tuple[uuid.UUID, RunResult | None]:
         settings = get_settings()

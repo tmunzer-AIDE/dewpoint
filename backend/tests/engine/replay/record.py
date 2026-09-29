@@ -64,7 +64,7 @@ async def record() -> list[str]:
     async with await WorkflowEnvironment.start_time_skipping() as env, workers(env.client, store):
         for name, scenario in sorted(missing.items()):
             handle = await start(env.client, store, scenario.build(store), scenario.trigger, **scenario.options)
-            await handle.result()
+            await asyncio.wait_for(handle.result(), 120)
             histories = await executions(env.client, handle.id, handle.first_execution_run_id or "")
             for n, history in enumerate(histories):
                 data = scrub(json.loads(history.to_json()))

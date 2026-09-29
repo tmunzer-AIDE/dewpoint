@@ -116,8 +116,28 @@ async def test_runs_list_newest_first_and_page(owner_sessionmaker, dispatch_sess
     async with owner_sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant)
         first = await service.list_runs(s, limit=2)
-        rest = await service.list_runs(s, before=first[-1].started_at, limit=2)
+        rest = await service.list_runs(s, before=(first[-1].started_at, first[-1].id), limit=2)
     assert [r.id for r in first + rest] == ids[::-1]
+
+
+async def test_runs_that_started_in_the_same_instant_are_paged_by_id_too(
+    owner_sessionmaker, dispatch_sessionmaker
+) -> None:
+    """2a-3a's final review, M5: paging by the start time alone skipped runs that started in the same instant as the
+    last one of a page. The cursor is (start time, id)."""
+    tenant, wf, version = await seed_workflow(owner_sessionmaker)
+    async with dispatch_sessionmaker() as s, s.begin():  # one transaction: now() is one instant
+        await tenant_scope(s, tenant)
+        for _ in range(3):
+            await service.insert_run(
+                s, run_id=uuid.uuid4(), tenant_id=tenant, workflow_id=wf, version_id=version, mode="live"
+            )
+    async with owner_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        first = await service.list_runs(s, limit=2)
+        rest = await service.list_runs(s, before=(first[-1].started_at, first[-1].id), limit=2)
+    assert len({r.started_at for r in first + rest}) == 1
+    assert len({r.id for r in first + rest}) == 3
 
 
 async def test_previews_and_messages_hold_nothing_the_database_refuses(
