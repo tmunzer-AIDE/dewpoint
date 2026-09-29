@@ -8,11 +8,16 @@ from typing import Literal
 from dewpoint.engine.cel.bind import Measure
 from dewpoint.engine.cel.record import ExpressionRecord
 
-YIELD_ITERATIONS = 20_000
-YIELD_BYTES = 8 * 1024 * 1024
-YIELD_WORK = 4_000_000  # not in the spec's list: iterations don't bound CPU on their own (estimate.py)
-YIELD_EVALUATIONS = 200
-YIELD_NODES = 100_000  # the values the evaluations bind: converting them costs CPU their stored bounds don't count
+# A third below the first values (20,000, 8 MiB, 4,000,000, 200, 100,000), which took three of gate 7b's loads past
+# 1 s per workflow task on Linux.
+YIELD_ITERATIONS = 13_000
+YIELD_BYTES = 11 * 512 * 1024  # 5.5 MiB
+YIELD_WORK = (
+    2_700_000  # iterations don't bound CPU on their own (estimate.py); one local evaluation does at most 2,000,000
+)
+YIELD_EVALUATIONS = 130
+YIELD_NODES = 65_000  # the values the evaluations bind: converting them costs CPU their stored bounds don't count
+STARTUP_SHARE = 10  # an execution's first workflow task gets this fraction of each threshold: it also starts it
 
 
 def route(
@@ -34,18 +39,20 @@ class YieldBudget:
     work: int = 0
     evaluations: int = 0
     nodes: int = 0
+    share: int = 1  # each threshold is divided by it: STARTUP_SHARE in an execution's first workflow task
 
     def must_yield(self, record: ExpressionRecord | None = None) -> bool:
         """True when the interpreter must await a 1 ms durable timer before binding a view (`record` None), or before
-        evaluating `record` locally. The first thing a workflow task does always runs."""
+        evaluating `record` locally. The first thing a workflow task does always runs; a view is always bound first,
+        so an evaluation whose bounds pass an execution's first task's share waits for the next task."""
         if self.evaluations == 0 and self.nodes == 0:
             return False
-        if self.evaluations >= YIELD_EVALUATIONS or self.nodes >= YIELD_NODES:
+        if self.evaluations >= YIELD_EVALUATIONS // self.share or self.nodes >= YIELD_NODES // self.share:
             return True
         return record is not None and (
-            self.iterations + (record.iterations or 0) > YIELD_ITERATIONS
-            or self.bytes + (record.bytes or 0) > YIELD_BYTES
-            or self.work + (record.work or 0) > YIELD_WORK
+            self.iterations + (record.iterations or 0) > YIELD_ITERATIONS // self.share
+            or self.bytes + (record.bytes or 0) > YIELD_BYTES // self.share
+            or self.work + (record.work or 0) > YIELD_WORK // self.share
         )
 
     def charge(self, record: ExpressionRecord | None = None, *, nodes: int = 0) -> None:
@@ -57,6 +64,8 @@ class YieldBudget:
             self.work += record.work or 0
             self.evaluations += 1
 
-    def reset(self) -> None:
-        """A new workflow task starts a fresh budget."""
+    def reset(self, *, startup: bool = False) -> None:
+        """A new workflow task starts a fresh budget: a tenth of it (`STARTUP_SHARE`) in an execution's first task,
+        which also loads and compiles the version, or restores a snapshot."""
         self.iterations = self.bytes = self.work = self.evaluations = self.nodes = 0
+        self.share = STARTUP_SHARE if startup else 1

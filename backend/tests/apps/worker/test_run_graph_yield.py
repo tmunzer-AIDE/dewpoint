@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """The yield policy inside RunGraph (spec §5.6): one budget per workflow task, however many units share it. A view's
 binding is charged as the values it binds, whether the expression then runs here or in `cel.evaluate`; a local
-evaluation is charged its stored bounds. When the budget is spent, the work waits for a 1 ms durable timer."""
+evaluation is charged its stored bounds. When the budget is spent, the work waits for a 1 ms durable timer. An
+execution's first workflow task also starts it, so it gets a tenth of the budget."""
 
 import asyncio
 from collections import defaultdict
@@ -110,7 +111,7 @@ async def test_concurrent_evaluations_share_one_budget_per_workflow_task(
 async def test_a_local_filter_evaluates_its_items_within_the_budget(
     env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch, recorded: dict[int, list[tuple[str, int]]]
 ) -> None:
-    """A filter's 450 items are 450 evaluations: at most 200 in one workflow task (they used to run all at once)."""
+    """A filter's 450 items are 450 evaluations: at most 130 in one workflow task (they used to run all at once)."""
     local_cel(monkeypatch)
     store = MemoryStore()
     g = graph(kept=cel("steps.f.output.count"))
@@ -126,7 +127,8 @@ async def test_binding_is_charged_when_the_evaluator_runs_the_expression(
     env: WorkflowEnvironment, recorded: dict[int, list[tuple[str, int]]]
 ) -> None:
     """No local CEL: each of the filter's 20 views still binds `trigger.c1` (16,081 values) in the workflow. A
-    workflow task binds up to the budget, and the next view waits for the next task."""
+    workflow task binds up to the budget, and the next view waits for the next task. The run's first task binds one:
+    it gets a tenth of the budget, and its first binding always runs."""
     store = MemoryStore()
     g = graph(kept=cel("steps.f.output.count"))
     g.node("f", "flow.filter@1", {"items": list(range(20)), "predicate": cel("size(trigger.c1) > item")})
@@ -135,5 +137,25 @@ async def test_binding_is_charged_when_the_evaluator_runs_the_expression(
     assert [r.cel_mode for r in store.steps(handle.id) if r.node_key == "f"] == ["activity"]
     binding = [[n for kind, n in t if kind == "bind" and n > 16_000] for t in recorded.values()]  # the 20 views
     binding = [nodes for nodes in binding if nodes]
-    assert sum(len(nodes) for nodes in binding) == 20 and len(binding) == 3  # 7, 7 and 6: 6 fit, the 7th passes it
+    assert [len(nodes) for nodes in binding] == [1, 5, 5, 5, 4]  # 4 fit in 65,000 values, the 5th passes it
     assert all(sum(nodes[:-1]) < route.YIELD_NODES for nodes in binding)  # the last one may pass it: then it yields
+
+
+async def test_an_executions_first_workflow_task_leaves_heavy_cel_to_the_next_one(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch, recorded: dict[int, list[tuple[str, int]]]
+) -> None:
+    """The first workflow task also loads and compiles the version, so it gets a tenth of the budget (spec §5.6): a
+    light evaluation runs in it at once, with no timer, and a heavy one waits for the next task."""
+    local_cel(monkeypatch)
+    store = MemoryStore()
+    g = graph(light=cel("steps.a.output.r"), heavy=cel("steps.b.output.r"))
+    g.node("a", "flow.transform@1", {"fields": {"r": cel("size(trigger.needle)")}})
+    g.node("b", "flow.transform@1", {"fields": {"r": cel(heaviest_search())}})
+    handle, result = await finished(env, store, g)
+    assert result.status == "succeeded"
+    assert {r.cel_mode for r in store.steps(handle.id)} == {"local"}
+    first, *later = [[w for kind, w in recorded[length] if kind == "eval"] for length in sorted(recorded)]
+    assert len(first) == 1  # the light one: the heavy one waited
+    tenth = route.YIELD_WORK // route.STARTUP_SHARE
+    assert first[0] <= tenth
+    assert [w for works in later for w in works if w > tenth]  # the heavy one, in a later task

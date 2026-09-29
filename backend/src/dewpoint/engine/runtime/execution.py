@@ -190,6 +190,7 @@ class Execution:
     def __init__(self) -> None:
         self._yield = YieldBudget()  # the local evaluations of the current workflow task (spec §5.6)
         self._yield_task = -1  # the history length that workflow task started with
+        self._startup_task = workflow.info().get_current_history_length()  # this execution's first: it starts it
         self._yield_timer: asyncio.Task[None] | None = None  # the one yield point every waiter shares
         self._rows: dict[tuple[str, str, int], StepRow] = {}  # queued for the next projection, per attempt
         self._secrets: Secrets = ()  # sensitive values seen so far: masked in everything projected
@@ -693,13 +694,14 @@ class Execution:
     async def _yield_point(self, record: ExpressionRecord | None) -> None:
         """Before binding a view (`record` None) or evaluating `record` locally: when the current workflow task's budget
         is spent, await a 1 ms durable timer, which ends the task (spec §5.6). The budget belongs to one workflow task:
-        it starts afresh when the history length changes, which happens only between tasks, in a replay too.
-        Concurrent units share the budget and one timer, and each checks again once it fires."""
+        it starts afresh when the history length changes, which happens only between tasks, in a replay too. The
+        execution's first task gets a tenth of it: that task also starts the execution. Concurrent units share the
+        budget and one timer, and each checks again once it fires."""
         while True:
             length = workflow.info().get_current_history_length()
             if length != self._yield_task:
                 self._yield_task = length
-                self._yield.reset()
+                self._yield.reset(startup=length == self._startup_task)
             if not self._yield.must_yield(record):
                 return
             if self._yield_timer is None or self._yield_timer.done():
