@@ -122,11 +122,15 @@ async def finish_run(
     error_code: str | None = None,
     error_message: str | None = None,
     iterations: int = 0,
+    if_running: bool = False,
 ) -> None:
+    """A run's end. `if_running`: only if it has none yet, as when a parent writes the end of a child that was
+    terminated before it could write its own."""
+    query = update(Run).where(Run.id == run_id)
+    if if_running:
+        query = query.where(Run.status == "running")
     await s.execute(
-        update(Run)
-        .where(Run.id == run_id)
-        .values(
+        query.values(
             status=status,
             ended_at=ended_at,
             error_code=sanitize(error_code),

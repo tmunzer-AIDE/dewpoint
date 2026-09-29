@@ -20,7 +20,7 @@ from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError, ApplicationError, ChildWorkflowError, TimeoutError
+from temporalio.exceptions import ActivityError, ApplicationError, ChildWorkflowError, TerminatedError, TimeoutError
 from temporalio.exceptions import CancelledError as ActivityCancelled
 
 with workflow.unsafe.imports_passed_through():
@@ -92,6 +92,7 @@ MAX_DEPTH = 5  # sub-flows nest at most this deep (spec §6; publish checks it t
 DEADLINE_EXCEEDED = "deadline_exceeded"
 VERSION_UNUSABLE = "version_unusable"  # this build can't load or compile the version
 INTERNAL_ERROR = "internal_error"  # an exception in workflow code: a bug
+TERMINATED = "terminated"  # a child ended by an operator, outside Dewpoint: it never reported
 NODE_TYPE_UNAVAILABLE = "node_type_unavailable"  # the registry has it, but this build's workers don't run it
 CANCELLED = Failure("cancelled", "The run was cancelled.")
 AMBIGUOUS = "ambiguous"  # a manifest's side_effect: the request may have been sent
@@ -818,6 +819,7 @@ class Execution:
             drain_events=self.drain_events,
         )
         used: int | None = None  # until it reports, all it was granted counts: it may have run
+        started = workflow.now().isoformat()
         try:
             try:
                 handle = await workflow.start_child_workflow(
@@ -829,8 +831,9 @@ class Execution:
             result = await handle
             used = result.iterations
         except ChildWorkflowError as e:  # it failed as a workflow, which a run never does: a bug, or terminated
-            message = f"The sub-flow ended without a result ({type(e.cause).__name__})."
-            return _Effect(failure=Failure(INTERNAL_ERROR, message), cel_mode=cel_mode)
+            failure = self._lost("sub-flow", e)
+            await self._lost_end(run, started, failure, grant)
+            return _Effect(failure=failure, cel_mode=cel_mode)
         finally:
             self.sched.budget.settle_child(child, used)
             self._dirty = True
@@ -839,6 +842,20 @@ class Execution:
             return _Effect(output=dict(result.outputs or {}), cel_mode=cel_mode)
         error = result.error or {"code": result.status, "message": f"The sub-flow ended {result.status}."}
         return _Effect(failure=Failure(str(error["code"]), str(error["message"])), cel_mode=cel_mode)
+
+    @staticmethod
+    def _lost(kind: str, e: ChildWorkflowError) -> Failure:
+        """A child that ended without a result: terminated from outside Dewpoint, or failed as a workflow (a bug)."""
+        if isinstance(e.cause, TerminatedError):
+            return Failure(TERMINATED, f"The {kind} was terminated outside Dewpoint.")
+        return Failure(INTERNAL_ERROR, f"The {kind} ended without a result ({type(e.cause).__name__}).")
+
+    async def _lost_end(self, run: RunInput, started_at: str, failure: Failure, grant: int) -> None:
+        """A sub-run that ended without a result never wrote its end: its row would stay `running`, holding its
+        references (spec §4.5). Its parent writes it, unless it has one, with its whole grant, as counted here. It
+        writes the row too, in case the child was ended before its own: a start written later changes nothing."""
+        end = RunSummary(run.run_id, "failed", workflow.now().isoformat(), failure.code, failure.message, grant, True)
+        await self._shielded([], end, RunStart.of(run, started_at))
 
     def _outer(self, loop: Instance) -> list[dict[str, Any]]:
         """The loop's enclosing scopes as its batch reads them, outermost first: the results its body can
@@ -907,7 +924,7 @@ class Execution:
             cause = e.cause
             if isinstance(cause, ApplicationError) and cause.type in (VERSION_UNUSABLE, INTERNAL_ERROR):
                 return _Effect(failure=Failure(cause.type, cause.message))
-            return _Effect(failure=Failure(INTERNAL_ERROR, "The batch ended without a result."))
+            return _Effect(failure=self._lost("batch", e))
         finally:
             self.sched.budget.settle_child(child, used)
             self._dirty = True

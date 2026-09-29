@@ -138,4 +138,5 @@ async def _finish(s: AsyncSession, run: RunSummary) -> None:
         error_code=run.error_code,
         error_message=run.error_message,
         iterations=run.iterations,
+        if_running=run.if_running,
     )

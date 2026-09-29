@@ -237,3 +237,40 @@ async def test_a_sub_run_needs_a_parent(owner_sessionmaker, dispatch_sessionmake
                 s, run_id=uuid.uuid4(), tenant_id=tenant, workflow_id=wf, version_id=version, mode="live"
             )
             await s.execute(text("update runs set kind = 'subflow'"))
+
+
+async def test_a_parents_write_of_a_childs_end_never_replaces_one(
+    owner_sessionmaker, dispatch_sessionmaker, worker_sessionmaker
+) -> None:
+    """2a-3c (M4): a parent writes the end of a child that ended without one (terminated). It lands only on a run
+    still `running`: an end the child wrote first stands."""
+    tenant, running = await seeded_run(owner_sessionmaker, dispatch_sessionmaker)
+    async with dispatch_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        first = await service.get_run(s, running)
+        assert first is not None
+        ended = (
+            await service.insert_run(
+                s,
+                run_id=uuid.uuid4(),
+                tenant_id=tenant,
+                workflow_id=first.workflow_id,
+                version_id=first.workflow_version_id,
+                mode="live",
+            )
+        ).id
+    now = datetime.now(UTC)
+    async with worker_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        await service.finish_run(s, ended, status="succeeded", ended_at=now, iterations=3)
+    for run_id in (running, ended):
+        async with worker_sessionmaker() as s, s.begin():
+            await tenant_scope(s, tenant)
+            await service.finish_run(
+                s, run_id, status="failed", ended_at=now, error_code="terminated", iterations=1000, if_running=True
+            )
+    async with owner_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        first, second = await service.get_run(s, running), await service.get_run(s, ended)
+    assert first is not None and (first.status, first.error_code, first.iterations) == ("failed", "terminated", 1000)
+    assert second is not None and (second.status, second.iterations) == ("succeeded", 3)

@@ -114,7 +114,7 @@ class RunGraph(Execution):
             message = "This build can't read the run's continue-as-new snapshot."
             return await self._end_early(RunEnd("failed", Failure(INTERNAL_ERROR, message)))
         if start.parent is not None and snapshot is None:  # its row first: whatever ends it now has a row to end
-            if await self._shielded([], None, self._start_row(start.parent, start.workflow_id, started)):
+            if await self._shielded([], None, RunStart.of(start, started.isoformat())):
                 return await self._cancelled_early()  # cancelled while the row was written
         try:
             data = await workflow.execute_local_activity(
@@ -186,19 +186,6 @@ class RunGraph(Execution):
         schema = program.graph.settings.vars_schema
         self.vars = {k: p.get("default") for k, p in sorted(schema.get("properties", {}).items())}
         self.sched.start()
-
-    def _start_row(self, parent: Parent, workflow_id: str, started: datetime) -> RunStart:
-        return RunStart(
-            run_id=self.run_id,
-            workflow_id=workflow_id,
-            version_id=self.version_id,
-            mode=self.mode,
-            parent_run_id=parent.run_id,
-            parent_step_id=parent.step_id or None,
-            parent_iteration_key=parent.iteration_key,
-            kind=parent.kind,
-            started_at=started.isoformat(),
-        )
 
     async def _outputs_by(self, end: RunEnd) -> tuple[RunEnd, dict[str, Any] | None]:
         """The workflow's outputs, within the run's deadline. Past it, their evaluation is cancelled and the run ends
@@ -322,7 +309,7 @@ class RunGraph(Execution):
             checkpoint_events=self.checkpoint_events,
             drain_events=self.drain_events,
         )
-        handler = asyncio.create_task(self._handler(run, child))
+        handler = asyncio.create_task(self._handler(run, child, grant))
         while not handler.done():  # it draws its iterations from this run: answer as it asks
             wake = asyncio.create_task(workflow.wait_condition(lambda: bool(self._mail or self._answers)))
             try:
@@ -335,14 +322,17 @@ class RunGraph(Execution):
         self.sched.budget.settle_child(child, None if handler.cancelled() else handler.result())
         await self._send_signals()
 
-    async def _handler(self, run: RunInput, child: str) -> int | None:
-        """The failure handler's run: the iterations it used, or None when it ended without saying."""
+    async def _handler(self, run: RunInput, child: str, grant: int) -> int | None:
+        """The failure handler's run: the iterations it used, or None when it ended without saying (its end is then
+        written here, as a sub-flow's is)."""
+        started = workflow.now().isoformat()
         try:
             result: RunResult = await workflow.execute_child_workflow(
                 "RunGraph", run, result_type=RunResult, **child_options(child)
             )
-        except ChildWorkflowError:
+        except ChildWorkflowError as e:
             workflow.logger.warning("failure_handler_failed", exc_info=True)
+            await self._lost_end(run, started, self._lost("failure handler", e), grant)
             return None
         return result.iterations
 

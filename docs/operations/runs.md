@@ -128,13 +128,15 @@ Temporal's own history still holds the values in full until 2b's payload encrypt
 | `failed` | `start_failed` | Temporal refused to start it. |
 | `failed` | `version_unusable` | This build can't load or run the version, for example a node type it lacks. Nothing ran. |
 | `failed` | `internal_error` | A bug in the interpreter. The message names the exception's type, and the worker's log has the details; please report it. |
+| `failed` | `terminated` | A sub-run that an operator terminated in Temporal. It couldn't record its end, so its parent did, and the step or loop that started it failed with the same code. |
 | `deadline_exceeded` | `deadline_exceeded` | The run passed `DEWPOINT_MAX_RUN_DURATION_DAYS` (default 30). Running steps were cancelled. |
 | `cancelled` | `cancelled` | The run was cancelled in Temporal. A cancel that arrives while the run's end is being written leaves that end. |
 
 Step error codes include the plugin's own codes and `config_invalid`, `output_schema_violation`, `unexpected_error`,
 `evaluation_error`, `type_mismatch`, `timeout`, `cel_profile_unavailable`, `item_cap_exceeded`,
 `iteration_cap_exceeded` and `node_type_unavailable` (the registry lists the node type, but no worker of this build
-runs it: install its plugin on the workers). A sub-flow step fails with its sub-flow's code.
+runs it: install its plugin on the workers). A sub-flow step fails with its sub-flow's code, and with `terminated`
+when an operator terminated the sub-flow; a loop fails with `terminated` when one of its batches was.
 
 ## Attempts and retries
 

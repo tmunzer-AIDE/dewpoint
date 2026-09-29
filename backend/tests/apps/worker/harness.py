@@ -88,7 +88,7 @@ class MemoryStore:
             self.starts.setdefault(data.start.run_id, data.start)
         for row in data.steps:
             self.rows[(row.run_id, row.step_id, row.iteration_key, row.attempt)] = row
-        if data.run is not None:
+        if data.run is not None and not (data.run.if_running and data.run.run_id in self.runs):
             self.runs[data.run.run_id] = data.run
 
     def steps(self, run_id: str) -> list[StepRow]:
