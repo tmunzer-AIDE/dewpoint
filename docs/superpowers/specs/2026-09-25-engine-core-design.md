@@ -86,7 +86,10 @@
       and dispatch with the deployment's current build, so after an ABI change each workflow is published again,
       children first, and a queued request the current build can't run is cancelled explicitly (§4.5, §7); the
       loader's ABI refusal is the one version-load error whose text is shown (§8); the runs cursor is the pair, never
-      half of it (§8); local CEL waits for gate 7b's Linux result (§5.9).
+      half of it (§8); local CEL waits for gate 7b's Linux result (§5.9);
+    - from execution's second checkpoint: gate 7b's first Linux run took three loads past 1 s, each in a run's first
+      workflow task, so an execution's first task gets a tenth of the CEL budget and the thresholds are a third lower
+      (§5.6, §5.9); CI compares a branch's pushes with its merge base with `main` (§7).
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
   This spec **narrows parent §6.4** (where CEL runs) and resolves the CEL item in parent §15.
 - **Evidence:** CEL spike, branch `spike/cel-evaluation`, commits `d6a8162` and `13a62e1`. See
@@ -636,12 +639,17 @@ result is recorded in history. This is the parent's `eval` activity (§6.5).
   evaluation is charged its **stored static bounds** (iterations, intermediate bytes, work). Binding a view is
   charged the values it converts (their count, `nodes`), whether the expression then runs locally or in
   `cel.evaluate`: a cheap expression over the largest inputs costs its binding. Before binding or evaluating past the
-  budget, the interpreter awaits a 1 ms durable timer, which ends the workflow task. It also yields after 200
+  budget, the interpreter awaits a 1 ms durable timer, which ends the workflow task. It also yields after 130
   evaluations, whatever their bounds.
   - The budget belongs to one workflow task, however many units run in it: it starts afresh when the history length
     changes, which happens only between tasks, in a replay too. Waiting units share one timer, and each checks again
     once it fires. A filter's items are checked one by one.
-  - Initial thresholds: 20,000 iterations, 8 MiB, 4,000,000 work units or 100,000 bound values (§5.5).
+  - An execution's first workflow task also starts it: it loads and compiles the version, or restores a snapshot. So
+    it gets a tenth of each threshold. A view's first binding still runs in it, and so does a light evaluation, but
+    one whose stored bounds pass a tenth waits for the next task. Light runs gain no timer.
+  - Thresholds: 13,000 iterations, 5.5 MiB, 2,700,000 work units or 65,000 bound values (§5.5), a third below the
+    first ones (20,000, 8 MiB, 4,000,000, 200 evaluations and 100,000), which took three of gate 7b's loads past 1 s
+    on Linux.
   - The decision uses only stored bounds and a count, so it replays identically. The timer events count toward the continue-as-new threshold.
   - **This is a policy to measure, not a proven CPU bound.** A p99 latency says nothing about the worst case.
     Before local evaluation is enabled, the plan must run an adversarial test: expressions that max out the
@@ -654,8 +662,9 @@ result is recorded in history. This is the parent's `eval` activity (§6.5).
       `ubuntu-latest`, three runs). Removing any charge, or the work threshold, takes a load past 1 s.
     - A binding load runs too: a cheap expression over the most values the caps allow.
     - Inside `RunGraph` (gate 7b), where a loop's iterations share workflow tasks, the worst task took 1.83 s before
-      the budget belonged to the task and charged binding, and takes 0.44 s since (macOS), the run's first task
-      included.
+      the budget belonged to the task and charged binding, and 0.44 s after (macOS), the run's first task included.
+      On Linux, three loads still passed 1 s, up to 1.12 s, each in a run's first task, which also starts the run.
+      With that task's tenth and the lower thresholds, the worst task takes 0.22 s on macOS and 0.46 s on Linux.
 
 ### 5.7 Isolated evaluation (`cel.evaluate` activity + `cel-evaluator` service)
 
@@ -1090,8 +1099,10 @@ cancel while the version loads cancels the run.
   - the yield-point timer.
 - **Replay gate:** the suite replays every history of this build's `engine_abi`, so a new version that keeps the
   ABI replays the previous version's too. CI checks that no recorded history is changed or removed, and that new
-  ones go only into this build's directory. A history recorded through a bug can't replay against the code without
-  it, so `internal_error` has none.
+  ones go only into this build's directory. It compares a pull request with its base, a push to `main` with the
+  commit before it, and any other push with its merge base with `main`, so a rewrite stays visible on every later
+  push of its branch. A history recorded through a bug can't replay against the code without it, so
+  `internal_error` has none.
 - **Upgrade paths:** snapshot-compatibility tests (N-1 → N) run only where an upgrade path is declared.
 - **`engine_abi`:** one value per build. Publishing stamps and hashes a version with it (`workflow_versions`), and
   the build ID names it, so a version and its runs' histories name the same ABI. It increments on any change that
