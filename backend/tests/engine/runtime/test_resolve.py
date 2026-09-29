@@ -4,13 +4,16 @@
 from typing import Any
 
 import pytest
+from temporalio.converter import DataConverter
 
 from dewpoint.engine.cel.bind import ScopeView
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.graph.values import ENVELOPE, Value, iter_values
 from dewpoint.engine.runtime import resolve
+from dewpoint.engine.runtime.activities import CelInput
 from dewpoint.engine.runtime.resolve import ValueFailure
 from dewpoint.engine.runtime.scheduler import Scheduler
+from tests.engine.cel.support import make_record
 from tests.engine.runtime.support import program
 from tests.support.graphs import G, cel, ref, template
 
@@ -124,3 +127,44 @@ def test_cel_runs_inline_only_when_this_build_runs_the_profile() -> None:
     with pytest.raises(ValueFailure) as bad:  # a typed list path (spec §5.3) is checked as it's bound
         resolve.bind_view(count, scope_view(trigger={"x": 1, "names": "ap-1"}))
     assert bad.value.failure.code == "type_mismatch"
+
+
+def test_requests_that_fit_are_cut_every_batch() -> None:
+    """#15: as before, when their bytes fit, requests hold `batch` binding sets, the last one the rest."""
+    sizes = [10] * 25
+    assert resolve.request_end(0, 25, sizes.__getitem__, envelope=100, batch=10, limit=10_000) == (10, 100 + 100 + 9)
+    assert resolve.request_end(20, 25, sizes.__getitem__, envelope=100, batch=10, limit=10_000) == (25, 100 + 50 + 4)
+
+
+def test_a_request_ends_where_its_bytes_would_pass_the_limit() -> None:
+    sizes = [100] * 10
+    # 50 + 100 = 150; + 1 + 100 = 251; + 1 + 100 = 352 > 300
+    assert resolve.request_end(0, 10, sizes.__getitem__, envelope=50, batch=1_000, limit=300) == (2, 251)
+    assert resolve.request_end(2, 10, sizes.__getitem__, envelope=50, batch=1_000, limit=300) == (4, 251)
+
+
+def test_a_binding_set_that_alone_passes_the_limit_ends_its_request_where_it_starts() -> None:
+    sizes = [10, 500, 10]
+    assert resolve.request_end(0, 3, sizes.__getitem__, envelope=50, batch=1_000, limit=300) == (1, 60)
+    assert resolve.request_end(1, 3, sizes.__getitem__, envelope=50, batch=1_000, limit=300) == (1, 50)
+    assert resolve.request_end(2, 3, sizes.__getitem__, envelope=50, batch=1_000, limit=300) == (3, 60)
+
+
+def test_a_requests_bytes_are_its_envelope_plus_its_sets_and_the_commas_between() -> None:
+    """The workflow sizes a request from its parts, one binding set at a time: that must equal what Temporal's JSON
+    converter writes for the whole request — non-ASCII text, escapes, floats, nulls and nesting included."""
+    conv = DataConverter.default.payload_converter
+    record = make_record("size(trigger.s) > 0")
+    sets: tuple[dict[str, Any], ...] = (
+        {"trigger": {"s": 'é€😀\n"\\', "f": 1.5, "n": None}},
+        {"item": [1, {"b": True}], "trigger": {"s": "x" * 50}},
+        {"item": 0},
+    )
+
+    def size(v: Any) -> int:
+        return len(conv.to_payloads([v])[0].data)
+
+    whole = size(CelInput(resolve.CelTask(record, sets, False).request(CURRENT_CEL_PROFILE)))
+    envelope = size(CelInput(resolve.CelTask(record, (), False).request(CURRENT_CEL_PROFILE)))
+    measured = resolve.request_end(0, 3, lambda i: size(sets[i]), envelope=envelope, batch=1_000, limit=10**9)
+    assert measured == (3, whole)

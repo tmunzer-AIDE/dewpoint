@@ -10,7 +10,7 @@ A value that can't be computed fails the step (`evaluation_error`, or the CEL ou
 error policy applies."""
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -146,6 +146,23 @@ class CelTask:
     def run_one(self, bindings: Mapping[str, Any]) -> evaluate.Outcome:
         """One binding set, in-process."""
         return evaluate.run(evaluate.compiled(self.record.expr, self.record.declarations), bindings)
+
+
+def request_end(
+    start: int, count: int, size_of: Callable[[int], int], *, envelope: int, batch: int, limit: int
+) -> tuple[int, int]:
+    """Where the `cel.evaluate` request that starts at binding set `start` ends (exclusive), and its JSON bytes: as
+    many sets as fit in `limit`, at most `batch` (#15). A request's JSON is its envelope (no sets) plus each set's JSON
+    and a comma between sets, so `size_of(i)` measures one set at a time. Requests that fit are cut every `batch` sets,
+    as before. An end equal to `start` means set `start` alone passes the limit."""
+    end, size = start, envelope
+    while end < min(start + batch, count):
+        extra = size_of(end) + (1 if end > start else 0)
+        if size + extra > limit:
+            break
+        size += extra
+        end += 1
+    return end, size
 
 
 @dataclass(frozen=True)
