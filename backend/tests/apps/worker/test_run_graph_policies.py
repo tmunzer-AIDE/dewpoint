@@ -25,7 +25,7 @@ from dewpoint.engine.runtime.activities import (
     RunInput,
 )
 from dewpoint.engine.runtime.workflow import PROJECT_BYTES, RunGraph
-from tests.apps.worker.harness import RESULT_TIMEOUT_S, TENANT, MemoryStore, run, start, workers
+from tests.apps.worker.harness import EVALUATOR_ONLY, RESULT_TIMEOUT_S, TENANT, MemoryStore, run, start, workers
 from tests.support.graphs import G, cel, ref, template
 from tests.support.plugins.testkit import SlowSend
 
@@ -551,7 +551,7 @@ async def test_a_cancel_while_the_outputs_are_evaluated_projects_cancelled(env: 
     """Checkpoint-2 finding: the outputs were evaluated outside the run's cancellation handler, so a cancel then
     closed the workflow with nothing projected: the run stayed `running`."""
     store = MemoryStore()
-    g = graph(n=cel("trigger.x + 1")).node("a", ECHO)
+    g = graph(n=cel(f"trigger.x + {EVALUATOR_ONLY}")).node("a", ECHO)
     async with workers(env.client, store, evaluate=None):  # no evaluator: the output's CEL waits for one
         handle = await start(env.client, store, g, TRIGGER, cel_schedule_to_start_s=60)
         await asyncio.wait_for(output_evaluation_started(handle), 10)
@@ -564,7 +564,7 @@ async def test_a_cancel_while_the_outputs_are_evaluated_projects_cancelled(env: 
 async def test_the_deadline_holds_while_the_outputs_are_evaluated(env: WorkflowEnvironment) -> None:
     """Checkpoint-2 finding: past the deadline, a run waited on its outputs' evaluator and ended as its failure."""
     store = MemoryStore()
-    g = graph(n=cel("trigger.x + 1")).node("a", ECHO)
+    g = graph(n=cel(f"trigger.x + {EVALUATOR_ONLY}")).node("a", ECHO)
     async with workers(env.client, store, evaluate=None):
         handle = await start(env.client, store, g, TRIGGER, max_run_duration_s=1, cel_schedule_to_start_s=5)
         result = await asyncio.wait_for(handle.result(), 10)

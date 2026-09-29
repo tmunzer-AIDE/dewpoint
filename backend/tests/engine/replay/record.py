@@ -8,17 +8,23 @@ A scenario records every execution it ran: `<name>.json` is the run's first exec
 other one, in the order they're found: the runs it continued as, then its children's, and theirs."""
 
 import asyncio
+import contextlib
+import dataclasses
 import json
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
-from temporalio.client import Client, WorkflowHistory
+from temporalio.api.enums.v1 import EventType
+from temporalio.client import Client, WorkflowFailureError, WorkflowHandle, WorkflowHistory
 from temporalio.testing import WorkflowEnvironment
 
 import dewpoint
+from dewpoint.engine.runtime.activities import ENGINE_QUEUE, RunInput, VersionData
 from dewpoint.engine.runtime.build import build_id
-from tests.apps.worker.harness import MemoryStore, start, workers
+from dewpoint.engine.runtime.workflow import RunGraph
+from tests.apps.worker.harness import TENANT, MemoryStore, workers
 from tests.engine.replay.scenarios import scenarios
 
 HERE = Path(__file__).parent
@@ -31,6 +37,27 @@ def scrub(value: Any) -> Any:
     if isinstance(value, list):
         return [scrub(v) for v in value]
     return value
+
+
+@dataclasses.dataclass
+class RecorderStore(MemoryStore):
+    """The versions in `unusable` lose their manifests when a run loads them: this build can't compile them."""
+
+    unusable: set[str] = dataclasses.field(default_factory=set)
+
+    async def version(self, tenant_id: str, version_id: str) -> VersionData:
+        data = await super().version(tenant_id, version_id)
+        return dataclasses.replace(data, manifests={}) if version_id in self.unusable else data
+
+
+async def delaying(handle: WorkflowHandle[Any, Any]) -> None:
+    """Until the run's delay is running: its second timer (the deadline's is the first)."""
+    for _ in range(200):
+        history = await handle.fetch_history()
+        if sum(e.event_type == EventType.EVENT_TYPE_TIMER_STARTED for e in history.events) >= 2:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("the run never started its delay")
 
 
 def build_dir() -> Path:
@@ -60,11 +87,19 @@ async def record() -> list[str]:
     if not missing:
         return []
     target.mkdir(exist_ok=True)
-    store = MemoryStore()
+    store = RecorderStore()
     async with await WorkflowEnvironment.start_time_skipping() as env, workers(env.client, store):
         for name, scenario in sorted(missing.items()):
-            handle = await start(env.client, store, scenario.build(store), scenario.trigger, **scenario.options)
-            await asyncio.wait_for(handle.result(), 120)
+            version, run_id = store.add(scenario.build(store)), str(uuid.uuid4())
+            if scenario.unusable:
+                store.unusable.add(version)
+            run = RunInput(TENANT, run_id, version, scenario.trigger, **scenario.options)
+            handle = await env.client.start_workflow(RunGraph.run, run, id=run_id, task_queue=ENGINE_QUEUE)
+            if scenario.cancel:
+                await delaying(handle)
+                await handle.cancel()
+            with contextlib.suppress(WorkflowFailureError):  # a cancelled run's result is its cancel
+                await asyncio.wait_for(handle.result(), 120)
             histories = await executions(env.client, handle.id, handle.first_execution_run_id or "")
             for n, history in enumerate(histories):
                 data = scrub(json.loads(history.to_json()))

@@ -7,8 +7,8 @@ the editor). It holds no secrets and has no network: the CEL activity worker rea
 volume that only the two of them mount.
 
 Publish sends it the expressions too costly to run inline. At run time, any expression whose inputs exceed the inline
-caps comes here too: a list or map over 200 entries, a string over 16 KiB, or more than 64 KiB of JSON. The list and
-map caps are low because the CEL runtime's memory for `map` and `filter` grows with the square of the list's length
+caps comes here too: a list or map over 200 entries, a string over 16 KiB, or more than 64 KiB of JSON. So does a
+`filter` over more than 1,000 items, 1,000 at a time. The list and map caps are low because the CEL runtime's memory for `map` and `filter` grows with the square of the list's length
 (spec §5.5). Workflows over large lists therefore depend on the evaluator: size its slots for them.
 
 **Docker Compose only, for now.** That socket only works between containers on one host. In Kubernetes the evaluator

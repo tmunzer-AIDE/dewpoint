@@ -23,7 +23,7 @@ from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.runtime.activities import cel_queue
 from dewpoint.sdk import Plugin
-from tests.apps.worker.harness import MemoryStore, in_process, start, start_version
+from tests.apps.worker.harness import EVALUATOR_ONLY, MemoryStore, in_process, start, start_version
 from tests.apps.worker.test_deployment import build, placement
 from tests.apps.worker.test_main import settings
 from tests.engine.replay.record import executions
@@ -46,13 +46,13 @@ def graphs() -> tuple[MemoryStore, G, G]:
     old.settings = {"input_schema": {"type": "object"}, "outputs": {"double": ref("steps.r.output.double")}}
     old.node("s", "testkit.slow@1", {"seconds": 3})
     old.node("r", "flow.run_workflow@1", {"workflow_id": str(store.publish(sub)), "input": {"n": 21}})
-    old.node("l", "flow.loop@1", {"items": list(range(101)), "collect": cel("item * 2")})
+    old.node("l", "flow.loop@1", {"items": list(range(101)), "collect": cel(f"item + {EVALUATOR_ONLY}")})
     old.node("x", "testkit.echo@1", {"value": ref("item")})
     old.edge("s", "r").edge("r", "l").edge("l", "x", "body")
     new = G()  # N's: nothing retired
     new.settings = {
         "input_schema": {"type": "object"},
-        "outputs": {"n": cel("steps.e.output.value + 1")},
+        "outputs": {"n": cel(f"steps.e.output.value + {EVALUATOR_ONLY}")},
     }
     new.node("e", "testkit.echo@1", {"value": 41})
     return store, old, new

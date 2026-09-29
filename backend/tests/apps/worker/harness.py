@@ -41,6 +41,9 @@ TENANT = str(uuid.UUID(int=1))
 
 
 RESULT_TIMEOUT_S = 60  # the harness's runs are time-skipped: a minute is far more than any needs
+# CEL only the evaluator runs, whatever the build (a named time zone, spec §5.5): 1, Paris's hour at 00:00 UTC
+# on 1 January. The tests of the `cel.evaluate` path use it now that this build evaluates the rest in-process.
+EVALUATOR_ONLY = "timestamp('2026-01-01T00:00:00Z').getHours('Europe/Paris')"
 
 
 @dataclass

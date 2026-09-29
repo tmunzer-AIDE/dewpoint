@@ -15,7 +15,7 @@ CURRENT_CEL_PROFILE = f"cel-cpp-{RUNTIME_VERSION}/{FUNCTION_LIBRARY}/{CLASSIFIER
 # The one profile this worker build evaluates in-process, or None (spec §5.9 rollout). A build constant, never a
 # setting: it is part of engine_abi, so changing it requires bumping ENGINE_ABI (tests/engine/cel/test_profile.py).
 # Stays None until gates 1-7 pass, including the workflow-task gates that 2a-3 adds.
-LOCAL_CEL_PROFILE: str | None = None
+LOCAL_CEL_PROFILE: str | None = CURRENT_CEL_PROFILE
 
 
 def profile_of(runtime_version: str) -> str:

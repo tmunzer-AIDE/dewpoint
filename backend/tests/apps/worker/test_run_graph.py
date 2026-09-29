@@ -10,7 +10,7 @@ from temporalio.worker import Replayer
 
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.runtime.workflow import RunGraph
-from tests.apps.worker.harness import RESULT_TIMEOUT_S, MemoryStore, run, start, workers
+from tests.apps.worker.harness import EVALUATOR_ONLY, RESULT_TIMEOUT_S, MemoryStore, run, start, workers
 from tests.support.graphs import G, cel, ref, template
 
 ECHO, IF, LOOP, FILTER = "testkit.echo@1", "flow.if@1", "flow.loop@1", "flow.filter@1"
@@ -50,7 +50,7 @@ async def test_a_cel_branch_runs_one_side_and_projects_control_steps(env: Workfl
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     assert (result.status, result.outputs) == ("succeeded", {"side": "yes"})
     rows = {r.node_key: r for r in store.steps(handle.id)}
-    assert rows["c"].status == "succeeded" and rows["c"].cel_mode == "activity"  # LOCAL_CEL_PROFILE is None
+    assert rows["c"].status == "succeeded" and rows["c"].cel_mode == "local"  # this build runs its profile in-process
     assert "no" not in rows and store.runs[handle.id].status == "succeeded"
 
 
@@ -164,7 +164,7 @@ async def test_simulation_calls_simulate_and_records_it(env: WorkflowEnvironment
 
 async def test_without_an_evaluator_cel_fails_as_profile_unavailable(env: WorkflowEnvironment) -> None:
     store = MemoryStore()
-    g = graph().node("t", TRANSFORM, {"fields": {"y": cel("trigger.x * 2")}}, on_error="continue")
+    g = graph().node("t", TRANSFORM, {"fields": {"y": cel(f"trigger.x * {EVALUATOR_ONLY}")}}, on_error="continue")
     g.settings["outputs"] = {"error": ref("steps.t.error", default="none")}
     async with workers(env.client, store, evaluate=None):
         # the test server doesn't skip schedule-to-start time: a real 2 s stands in for the 10 minutes

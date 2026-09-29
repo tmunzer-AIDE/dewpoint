@@ -69,7 +69,8 @@ def graph(**outputs: Any) -> G:
 
 
 def heaviest_search() -> str:
-    """The heaviest substring search that still publishes local: about half the work budget per evaluation."""
+    """The heaviest substring search that still publishes local: about three quarters of a workflow task's work
+    budget per evaluation."""
     best = ""
     for n in range(1, 60):
         g = graph().node("x", "flow.transform@1", {"fields": {"r": cel(ADVERSARIAL["search"](n))}})
@@ -91,9 +92,9 @@ async def finished(env: WorkflowEnvironment, store: MemoryStore, g: G, *, cache:
 async def test_concurrent_evaluations_share_one_budget_per_workflow_task(
     env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch, recorded: dict[int, list[tuple[str, int]]], cache: int
 ) -> None:
-    """Ten iterations run at once, each evaluating about half the work budget: each workflow task evaluates two at
-    most. Waiting units share one timer and check again once it fires. With no worker cache, every workflow task
-    replays the run's history: the budget, keyed on the history length, decides the same way."""
+    """Ten iterations run at once, each evaluating about three quarters of the work budget: each workflow task
+    evaluates one. Waiting units share one timer and check again once it fires. With no worker cache, every workflow
+    task replays the run's history: the budget, keyed on the history length, decides the same way."""
     local_cel(monkeypatch)
     store = MemoryStore()
     g = graph(count=cel("size(steps.l.output.items)"))
@@ -124,11 +125,12 @@ async def test_a_local_filter_evaluates_its_items_within_the_budget(
 
 
 async def test_binding_is_charged_when_the_evaluator_runs_the_expression(
-    env: WorkflowEnvironment, recorded: dict[int, list[tuple[str, int]]]
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch, recorded: dict[int, list[tuple[str, int]]]
 ) -> None:
-    """No local CEL: each of the filter's 20 views still binds `trigger.c1` (16,081 values) in the workflow. A
-    workflow task binds up to the budget, and the next view waits for the next task. The run's first task binds one:
-    it gets a tenth of the budget, and its first binding always runs."""
+    """A build without local CEL: each of the filter's 20 views still binds `trigger.c1` (16,081 values) in the
+    workflow. A workflow task binds up to the budget, and the next view waits for the next task. The run's first task
+    binds one: it gets a tenth of the budget, and its first binding always runs."""
+    monkeypatch.setattr(execution, "LOCAL_CEL_PROFILE", None)
     store = MemoryStore()
     g = graph(kept=cel("steps.f.output.count"))
     g.node("f", "flow.filter@1", {"items": list(range(20)), "predicate": cel("size(trigger.c1) > item")})

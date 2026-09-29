@@ -66,7 +66,7 @@ async def test_a_run_is_projected_and_readable_through_the_api(
     assert [(r["id"], r["status"], r["iterations"]) for r in listed] == [(str(run_id), "succeeded", 2)]
     detail = (await viewer.get(f"/api/v1/t/{ctx.tenant_id}/runs/{run_id}")).json()
     steps = {(s["key"], s["iteration_key"]): s for s in detail["steps"]}
-    assert steps[("a", "")]["output"] == {"value": 2} and steps[("a", "")]["cel_mode"] == "activity"
+    assert steps[("a", "")]["output"] == {"value": 2} and steps[("a", "")]["cel_mode"] == "local"
     assert steps[("a", "")]["outcome"] == "applied"
     assert {k for k in steps if k[0] == "x"} == {("x", "l:0"), ("x", "l:1")}
     assert steps[("l", "")]["output"] == {"items": [10, 20], "failures": [], "count": 2}

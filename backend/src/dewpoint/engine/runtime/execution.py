@@ -87,6 +87,7 @@ with workflow.unsafe.imports_passed_through():
 IN_FLIGHT_CAP = 100  # activities and child workflows outstanding per execution (spec §6)
 PROJECT_BYTES = 256 * 1024  # a projection's rows at most, as JSON: far below Temporal's 2 MiB payload limit
 CEL_BATCH = 1_000  # binding sets per cel.evaluate request
+FILTER_INLINE = 1_000  # a filter's items the workflow may evaluate itself; a larger list goes to cel.evaluate (spec §6)
 SUBFLOW_GRANT = 1_000  # a sub-flow's initial grant (spec §6)
 MAX_DEPTH = 5  # sub-flows nest at most this deep (spec §6; publish checks it too)
 DEADLINE_EXCEEDED = "deadline_exceeded"
@@ -661,18 +662,20 @@ class Execution:
                 values[pointer] = value.value
         return values, mode
 
-    async def _cel_task(self, record: ExpressionRecord, views: Sequence[Any]) -> resolve.CelTask:
+    async def _cel_task(
+        self, record: ExpressionRecord, views: Sequence[Any], *, inline: bool = True
+    ) -> resolve.CelTask:
         """Bind each view within the workflow task's budget (spec §5.6). Binding converts every value it binds, so
-        it's charged as they are (`Measure.nodes`), whether the expression then runs here or in `cel.evaluate`."""
+        it's charged as they are (`Measure.nodes`), whether the expression then runs here or in `cel.evaluate`.
+        `inline` False: it goes to `cel.evaluate`, whatever its class."""
         bound: list[resolve.Bound] = []
         for v in views:
             await self._yield_point(None)
             b = resolve.bind_view(record, v)
             self._yield.charge(nodes=b.measured.nodes)
             bound.append(b)
-        return resolve.cel_task(
-            record, bound, local_profile=LOCAL_CEL_PROFILE, version_profile=self.program.cel_profile
-        )
+        local_profile = LOCAL_CEL_PROFILE if inline else None
+        return resolve.cel_task(record, bound, local_profile=local_profile, version_profile=self.program.cel_profile)
 
     async def _evaluate(self, task: resolve.CelTask) -> list[cel.Outcome]:
         if task.local:
@@ -773,7 +776,7 @@ class Execution:
         record = self.program.record(step.id, "/predicate")
         views = [self._view(inst.scope, item=(item, i)) for i, item in enumerate(items)]
         try:
-            task = await self._cel_task(record, views)
+            task = await self._cel_task(record, views, inline=len(items) <= FILTER_INLINE)
         except resolve.ValueFailure as e:
             return _Effect(failure=e.failure)
         kept: list[Any] = []
