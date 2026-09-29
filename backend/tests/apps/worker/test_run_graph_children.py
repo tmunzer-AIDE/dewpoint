@@ -348,6 +348,31 @@ async def test_a_run_with_nothing_running_and_no_answer_to_wait_for_still_fails(
     assert (result.status, result.error["code"]) == ("failed", "internal_error")
 
 
+async def test_a_batch_that_fails_on_a_bug_writes_its_rows_first(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2a-3b's final review, M3: a batch that fails with `internal_error` wrote nothing it had queued, and its steps'
+    rows stayed `running`. It writes them before it fails, as a run does. The bug here: collecting item 50."""
+    collected = Scheduler.collected
+
+    def broken(self: Scheduler, loop: Any, index: int, value: Any) -> None:
+        if index == 50:
+            raise RuntimeError("a bug")
+        collected(self, loop, index, value)
+
+    monkeypatch.setattr(Scheduler, "collected", broken)
+    store = MemoryStore()
+    g = graph(code=ref("steps.l.error.code", default="none"))
+    g.node("l", LOOP, {"items": list(range(150)), "collect": ref("item")}, on_error="continue")
+    g.node("x", ECHO, {"value": ref("item")}).edge("l", "x", "body")
+    async with workers(env.client, store, runner=UnsandboxedWorkflowRunner()):
+        handle = await start(env.client, store, g, {})
+        result = await asyncio.wait_for(handle.result(), 60)
+    assert (result.status, result.outputs) == ("succeeded", {"code": "internal_error"})
+    rows = [r for r in store.steps(handle.id) if r.node_key == "x"]
+    assert len(rows) >= 50 and "running" not in {r.status for r in rows}
+
+
 async def test_the_cap_holds_across_children(env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch) -> None:
     """One cap for the logical run: past it, the child that can't be served fails with `iteration_cap_exceeded`."""
     monkeypatch.setattr(run_graph, "ITERATION_CAP", 100)
@@ -361,7 +386,7 @@ async def test_the_cap_holds_across_children(env: WorkflowEnvironment, monkeypat
         handle = await start(env.client, store, g, {})
         result = await asyncio.wait_for(handle.result(), 120)
     assert (result.status, result.outputs) == ("succeeded", {"code": "iteration_cap_exceeded"})
-    assert result.iterations <= 100
+    assert result.iterations == 0  # the filter's 150 items are all or nothing: none ran (2a-3b's final review, M7)
 
 
 # --- the plan's Review Focus: inputs a user meets that nothing above covers -------------------------------------

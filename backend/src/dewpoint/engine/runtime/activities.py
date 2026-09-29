@@ -67,6 +67,7 @@ class RunInput:
     snapshot: dict[str, Any] | None = None  # a continued run: where it carries on (spec §6, `snapshot_format` 1)
     checkpoint_events: int = CHECKPOINT_EVENTS
     drain_events: int = DRAIN_EVENTS
+    iterations: int = 0  # a continued run: what it had used, readable even when its snapshot isn't
 
 
 @dataclass(frozen=True)
@@ -101,6 +102,7 @@ class BatchInput:
     snapshot: dict[str, Any] | None = None
     checkpoint_events: int = CHECKPOINT_EVENTS
     drain_events: int = DRAIN_EVENTS
+    iterations: int = 0  # a continued batch: what it had used, readable even when its snapshot isn't
 
 
 @dataclass(frozen=True)

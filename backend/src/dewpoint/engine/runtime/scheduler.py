@@ -364,6 +364,8 @@ class Scheduler:
                     self._cancels.append(Instance(scope.key, node_id))
         self._ready = []
         self._batches = []
+        self.budget.drop_local()  # a loop waiting for its next iteration opens none now
+        self._budget_waits.clear()
 
     def answer_budget(self) -> tuple[list[Answer], Ask | None]:
         """Serve the budget's waiting needs. The loops' own answers are applied here: a granted iteration opens, a

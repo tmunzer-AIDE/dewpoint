@@ -13,7 +13,7 @@ from dewpoint.apps.runs import start_run
 from dewpoint.apps.worker.store import DbRunStore
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.runs import service as runs
-from dewpoint.engine.runtime.activities import ProjectInput, RunSummary, StepRow
+from dewpoint.engine.runtime.activities import ProjectInput, RunStart, RunSummary, StepRow
 from dewpoint.engine.runtime.workflow import RunGraph
 from tests.apps.api.helpers import member_client
 from tests.apps.test_workflow_ops import actor, create, publish
@@ -139,6 +139,35 @@ async def test_a_character_the_database_refuses_never_keeps_its_run_open(
     assert run is not None
     assert (run.status, run.error_code, run.error_message) == ("failed", "workflow_failed", "bad \ufffd note")
     assert [r.node_key for r in steps] == ["f"]
+
+
+async def test_a_sub_run_row_the_database_refuses_never_holds_up_its_projection(
+    owner_sessionmaker, dispatch_sessionmaker, worker_sessionmaker
+) -> None:
+    """2a-3b's final review, M5: a sub-run's row the database refuses (here its parent doesn't exist) was retried
+    forever, and the sub-run couldn't even be cancelled: its first write is shielded. It's logged and skipped, as a
+    refused step row is."""
+    tenant, run_id = await seeded_run(owner_sessionmaker, dispatch_sessionmaker)
+    async with owner_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        seeded = await runs.get_run(s, run_id)
+    assert seeded is not None
+    child = uuid.uuid4()
+    start = RunStart(
+        run_id=str(child),
+        workflow_id=str(seeded.workflow_id),
+        version_id=str(seeded.workflow_version_id),
+        mode="live",
+        parent_run_id=str(uuid.uuid4()),  # no such run
+        parent_step_id=None,
+        parent_iteration_key="",
+        kind="subflow",
+        started_at=datetime.now(UTC).isoformat(),
+    )
+    await DbRunStore(worker_sessionmaker).project(ProjectInput(str(tenant), [], None, start))
+    async with owner_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        assert await runs.get_run(s, child) is None
 
 
 async def test_a_sub_flow_is_projected_as_a_run_of_its_own(

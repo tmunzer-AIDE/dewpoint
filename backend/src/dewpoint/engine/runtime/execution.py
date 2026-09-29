@@ -381,12 +381,15 @@ class Execution:
 
     async def _settle_for_continue(self, tasks: dict[tuple[Any, ...], asyncio.Task[Any]]) -> None:
         """Continue-as-new: the sleeping timer steps stop here (their wake times go into the snapshot), and the
-        projection in flight lands."""
+        projection in flight lands, whatever cancels arrive meanwhile. A cancel then ends the execution instead
+        (raised once it has landed): a continued run wouldn't inherit it."""
         for key, task in tasks.items():
             if key[0] == "step":
                 task.cancel()
-        await asyncio.gather(*tasks.values(), return_exceptions=True)
+        cancelled = await _landed(asyncio.gather(*tasks.values(), return_exceptions=True))
         tasks.clear()
+        if cancelled:
+            raise asyncio.CancelledError
 
     @staticmethod
     def _in_flight(tasks: Mapping[tuple[Any, ...], asyncio.Task[Any]]) -> int:

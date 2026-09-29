@@ -112,7 +112,7 @@ class RunGraph(Execution):
         self.input = start
         if unreadable:  # a snapshot this build can't read: the run ends, it never hangs (spec §6)
             message = "This build can't read the run's continue-as-new snapshot."
-            return await self._end_early(RunEnd("failed", Failure(INTERNAL_ERROR, message)))
+            return await self._end_early(RunEnd("failed", Failure(INTERNAL_ERROR, message)), start.iterations)
         if start.parent is not None and snapshot is None:  # its row first: whatever ends it now has a row to end
             if await self._shielded([], None, RunStart.of(start, started.isoformat())):
                 return await self._cancelled_early()  # cancelled while the row was written
@@ -152,7 +152,7 @@ class RunGraph(Execution):
                 self._fresh(program)
             if await self._drive() == CONTINUE:
                 await self._flush()
-                workflow.continue_as_new(replace(start, snapshot=self._snapshot()))
+                workflow.continue_as_new(replace(start, snapshot=self._snapshot(), iterations=self.sched.iterations))
             end = self.sched.ended or RunEnd("failed", Failure("error", "The run ended without a result."))
             if end.status == "succeeded":
                 end, outputs = await self._outputs_by(end)
@@ -243,8 +243,9 @@ class RunGraph(Execution):
             error["message"] = mask(error["message"], self._secrets)
         return self._stored(error)
 
-    async def _end_early(self, end: RunEnd) -> RunResult:
-        """The run ends before it has a program: nothing ran, so only the run is projected."""
+    async def _end_early(self, end: RunEnd, iterations: int = 0) -> RunResult:
+        """The run ends before it has a program: nothing ran in this execution, so only the run is projected, with
+        what it used before continuing as new (`iterations`)."""
         error = self._stored(end.failure.to_json() if end.failure is not None else None)
         summary = RunSummary(
             run_id=self.run_id,
@@ -252,9 +253,10 @@ class RunGraph(Execution):
             ended_at=workflow.now().isoformat(),
             error_code=error["code"] if error else None,
             error_message=error["message"] if error else None,
+            iterations=iterations,
         )
         await self._shielded([], summary)
-        return RunResult(status=end.status, error=error)
+        return RunResult(status=end.status, error=error, iterations=iterations)
 
     async def _cancelled_early(self) -> RunResult:
         result = await self._end_early(RunEnd("cancelled", CANCELLED))
@@ -408,13 +410,14 @@ class LoopBatch(Execution):
                 )
             if await self._drive() == CONTINUE:
                 await self._flush()
-                workflow.continue_as_new(replace(start, snapshot=self._snapshot()))
+                workflow.continue_as_new(replace(start, snapshot=self._snapshot(), iterations=self.sched.iterations))
         except asyncio.CancelledError:
             self.sched.end(RunEnd("cancelled", CANCELLED))
             await self._project_end(None)
             return self._result(RunEnd("cancelled", CANCELLED))
         except Exception as e:
             workflow.logger.error("batch_internal_error", exc_info=True)
+            await self._project_end(None)  # its steps' rows land first, as a run's do
             message = f"The batch failed ({type(e).__name__}); the worker's log has the details."
             raise ApplicationError(message, type=INTERNAL_ERROR, non_retryable=True) from None
         await self._project_end(None)

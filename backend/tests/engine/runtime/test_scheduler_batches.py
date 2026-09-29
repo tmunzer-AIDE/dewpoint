@@ -140,6 +140,22 @@ def test_an_iteration_waits_for_budget_in_a_child_and_the_grant_opens_it() -> No
     assert [name(s, i) for i in s.take_ready()] == ["l:1/x"]
 
 
+def test_the_runs_end_drops_what_its_loops_wait_for() -> None:
+    """A loop waiting for its next iteration's budget when the run ends opens nothing, and its need leaves the queue:
+    a failure handler started now gets its grant (2a-3b's final review, M2)."""
+    p = program(loop_graph())
+    s = Scheduler(p, budget=Budget(1, root=False))
+    s.start_batch(p.by_key["l"], [OuterScope((), {})], [0, 1], offset=0, concurrency=2, stop_on_error=True)
+    assert [name(s, i) for i in s.take_ready()] == ["l:0/x"]
+    s.answer_budget()  # the second iteration waits: it asks the parent
+    s.end(RunEnd("failed", Failure("workflow_failed", "it went wrong")))
+    assert s.budget.waiting == []
+    s.budget.answered(1_000)
+    s.answer_budget()
+    assert s.take_ready() == [] and s.iterations == 1  # nothing opened, nothing debited
+    assert s.budget.start_child("handler", 1_000) == 1_000
+
+
 def test_a_batched_loop_survives_a_snapshot() -> None:
     s, loop = parent_at_loop(150)
     [b] = s.take_batches()

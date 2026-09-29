@@ -56,7 +56,7 @@ class Budget:
     reserved: dict[str, int] = field(default_factory=dict)  # outstanding child -> what it was granted so far
     waiting: list[Need] = field(default_factory=list)
     asking: bool = False  # an Ask is out and unanswered
-    refused: bool = False  # the parent refused: only this execution's own children can help now
+    refused: bool = False  # the parent refused: only this execution's own children can help its waiting needs
 
     @property
     def unreserved(self) -> int:
@@ -89,6 +89,11 @@ class Budget:
         granted = self.reserved.pop(child, 0)
         self.used += granted if used is None else min(max(used, 0), granted)
         self.waiting = [n for n in self.waiting if n.requester != child]
+
+    def drop_local(self) -> None:
+        """The execution ended: its own needs still waiting will never run. They leave the queue, so a child started
+        now (a failure handler) gets its grant, and nothing is debited for them."""
+        self.waiting = [n for n in self.waiting if n.requester != LOCAL]
 
     def answered(self, granted: int) -> None:
         """The parent answered this execution's Ask."""
@@ -125,6 +130,8 @@ class Budget:
                 break  # children that were asking hold enough: refused, they end and release it; wait for them
             answers.append(Answer(head, 0))
             self.waiting.pop(0)
+        if not self.waiting:
+            self.refused = False  # the needs it was refused for are answered: a later one may ask again
         return answers, None
 
     def _refuse_asking(self, head: Need, free: int, answers: list[Answer]) -> bool:

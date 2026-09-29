@@ -78,7 +78,9 @@ def test_a_need_is_refused_only_when_no_other_child_can_release_anything() -> No
     assert [(a.need.requester, a.granted) for a in answers] == [("b", 0)]
 
 
-def test_a_refused_child_waits_for_its_own_children_and_never_asks_again() -> None:
+def test_a_refused_child_refuses_its_waiting_needs_and_asks_again_for_a_later_one() -> None:
+    """A refusal answers the needs that were waiting. A later need asks again: budget may have come back meanwhile
+    (the final review of 2a-3b, M1)."""
     mid = Budget(10, root=False)
     mid.start_child("leaf", 10)
     mid.request(local("loop", 1))
@@ -87,7 +89,10 @@ def test_a_refused_child_waits_for_its_own_children_and_never_asks_again() -> No
     assert mid.decide() == ([], Ask(1, CHUNK))
     mid.answered(0)
     answers, ask = mid.decide()
-    assert [a.granted for a in answers] == [0, 0] and ask is None and mid.refused
+    assert [a.granted for a in answers] == [0, 0] and ask is None and not mid.refused
+    mid.settle_child("leaf", 10)  # it spent all it had
+    mid.request(local("later", 1))
+    assert mid.decide() == ([], Ask(1, CHUNK))  # before: refused on the spot, whatever the parent had since
 
 
 def test_a_feasible_need_waits_for_an_asking_child_that_holds_enough_and_is_refused_first() -> None:

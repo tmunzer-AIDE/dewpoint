@@ -85,7 +85,14 @@ class DbRunStore:
         async with self.sessionmaker() as s, s.begin():
             await tenant_scope(s, tenant)
             if data.start is not None:
-                await _start(s, tenant, data.start)
+                try:
+                    async with s.begin_nested():
+                        await _start(s, tenant, data.start)
+                except DBAPIError as e:
+                    state = _refused(e)
+                    if state is None:
+                        raise
+                    _log.warning("projection_start_refused", run_id=data.start.run_id, sqlstate=state)
             for row in data.steps:
                 try:
                     async with s.begin_nested():
