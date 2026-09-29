@@ -1,7 +1,7 @@
 # Dewpoint — Engine 2b Design (payload protection, admission, triggers, retention)
 
-- **Status:** approved by the owner, revision 3 (2026-09-29). Every section was approved
-  in conversation before it was written here; this document is their written form.
+- **Status:** revision 4, **pending the owner's approval** (2026-09-30). Revisions 1–3 were approved by the owner;
+  every section was approved in conversation before it was written here, and this document is their written form.
   - Revision 2 folds in the owner's review of revision 1: a claim is owned by the run that produced it, with the
     root run id kept for retention and the secret index (§3.4); passing a secret-index bound is a fixed,
     non-retryable error, and matching work is bounded (§3.7); an idempotency retry is compared under its stored
@@ -21,6 +21,21 @@
     2b-1b.
   - Revision 3 also renumbers 2b's ABIs: issue #15's fix takes `ENGINE_ABI` 4, so 2b-1a raises it to 5 and 2b-1b to 6
     (§1, §6.6, §12, §13), provided #15 lands first.
+  - Revision 4 folds in the owner's decisions for 2b-1a's plan, and what its prototype settled. Spilling moves to
+    2b-1b with the claims it needs (§1): until then a payload too large to send fails with a fixed, bounded error and
+    is never sent, a batch is cut by bytes and an item that can't fit fails its loop, and results are guarded where
+    they're produced, as well as commands before they're sent (§5.2). 2b-1a promises only a clean
+    `snapshot_too_large` for continue-as-new (§5.3). The environment is recorded by `dewpoint platform
+    init-environment`, in Compose's migrate step (§2.1). A worker's self-check is its KEK's, and a database outage
+    isn't a failed check (§2.7). The tenant cross-check is made where the payload is used (§6.1, §6.2). A local
+    activity's bookkeeping is visible (§4.6). The committed checks of §11.1 are named.
+  - Revision 4 also answers the owner's review of the 2b-1a plan. The sensitive values a run carries are bounded,
+    so every result without outputs fits, and every final result is checked before it's recorded (§5.2). A worker's
+    self-check proves what `payload_codec` needs of the instance — its KEK, and its role's access to data keys — and
+    tells a missing grant from an outage; lifting the gate additionally requires every stored key to unwrap, and the
+    workers' own path to read each tenant's key (§2.7, §10.6). A key version is retired only after a conservative
+    floor that bounds its last use for payloads,
+    since nothing records that use (§6.4). Size claims start with 2b-1b (§5.1).
 - **Parent specs:**
   - `2026-09-24-dewpoint-architecture-design.md` (§5, §6.1, §6.5, §6.8, §12, §15). This spec **changes** its
     workflow-id contract (§6.1), replaces its `outbox` table (§6.1), details its claim check (§6.5) and settles the
@@ -40,10 +55,10 @@
 1. **#15's request-size guard**, as its own change.
 2. **2b-1a — codec, ids and size:** the deployment environment and the production gate (off), enforced at the
    existing start boundary; server-built workflow ids; `TenantCodec` and its key cache; worker capability
-   registration; the outgoing-payload guard with spilling; the per-task byte budget. `ENGINE_ABI` 5.
+   registration; the outgoing-payload guard, without spilling (§5.2); the per-task byte budget. `ENGINE_ABI` 5.
 3. **2b-1b — claims and taint:** the claim tables, handles and grants, the activity boundary, the secret index,
-   taint analysis and `declassify`, the tainted-filter activity, the live-state budget and snapshots, the refusal
-   of sensitive literals. `ENGINE_ABI` 6.
+   taint analysis and `declassify`, the tainted-filter activity, spilling into size claims (§5.2), the live-state
+   budget and snapshots, the refusal of sensitive literals. `ENGINE_ABI` 6.
 4. **2b-2 — admission:** `run_requests`, the dispatcher, slots, the reconciler, the run API and form metadata; the
    dev CLI moves onto admission.
 5. **2b-3 — triggers:** CSV input, schedules, webhook ingress.
@@ -63,13 +78,17 @@ lifts, so publishing every workflow again after each ABI change costs only that.
 
 ### 2.1 The deployment environment
 
-- `dewpoint admin init --environment production|development` records the environment once, in the single
-  `platform_settings` row, with the Temporal namespace the deployment uses. Default: `production`. It can't change
-  after init.
+- `dewpoint platform init-environment --environment production|development --temporal-namespace <ns>` records the
+  environment once, in the single `platform_settings` row, with the Temporal namespace the deployment uses. Its
+  defaults are `DEWPOINT_ENVIRONMENT` (else `production`) and `DEWPOINT_TEMPORAL_NAMESPACE`. Compose's migrate step
+  runs it after the schema's migrations, so an existing deployment gets its record on its next upgrade. Running it
+  again with the same values changes nothing; neither value can change, and the database refuses to (a trigger).
 - **Development takes an explicit setup:** `--environment development --temporal-namespace <ns>` on a database
-  created for it. Every Dewpoint process compares its configured namespace with the recorded one at startup and
-  refuses to run on a mismatch, so a development database can't drive a namespace it wasn't set up for, and a
-  production database can't either.
+  created for it. Every process that talks to Temporal (the worker, the CLI's Temporal commands and, from 2b-2, the
+  dispatcher) compares its configured namespace with the recorded one before it connects, and refuses to run (exit 2)
+  on a mismatch or with no record, so a development database can't drive a namespace it wasn't set up for, and a
+  production database can't either. The API talks to no Temporal namespace in 2b-1a; its admission path refuses runs
+  while nothing is recorded.
 - A `development` label proves nothing about the data. Keeping development's database and namespace apart from
   production's, with synthetic fixtures only, is the operator's documented responsibility.
 - Ordinary Compose is `production`, and gated. CI and local development opt in through their own Compose override,
@@ -136,9 +155,18 @@ Per-tenant rollout of production runs may be added later, only on top of the glo
 - Each engine worker **instance** records `(instance_id, build_id, capabilities, healthy, checked_at)` in
   `worker_instances`. The capabilities are compiled into the build: `payload_codec` (2b-1a), `cel_request_size_guard`
   (#15), `claim_check` (2b-1b).
-- At startup and every 30 seconds, an instance proves what it records: its keyring wraps and unwraps, and (from 2b-1b)
-  its claim store answers. An instance that fails **stops polling** and records itself unhealthy; it never keeps
-  taking tasks.
+- At startup and every 30 seconds, an instance proves what it records. For `payload_codec`: its keyring wraps and
+  unwraps a fresh key with the current KEK, and its database role may read data keys (read from the catalog, so the
+  answer doesn't depend on a tenant); from 2b-1b, its claim store answers. An instance that fails **stops polling**
+  (running attempts get the shutdown grace), records itself unhealthy and exits (code 3); it never keeps taking
+  tasks. One that can't prove itself at startup never polls.
+- **A database that doesn't answer proves nothing either way:** it's an outage, which the engine rides out. The
+  instance keeps polling and records nothing, and its row goes stale; a record it can't write is logged the same
+  way. A stale row isn't a live instance.
+- **What the check doesn't claim.** The probe checks a grant, not that the role's RLS-scoped reads return a tenant's
+  key; the KEK check wraps and unwraps a fresh key, not the stored ones. A wrong KEK configured under the right id
+  passes both, while no worker can decrypt existing payloads — and `dewpoint keys status` doesn't catch it either,
+  since it compares KEK ids. 2b-1a keeps this lightweight check; lifting the gate requires §10.6's stored-key checks.
 - The dispatcher and the readiness checks read the deployment's **current build** from Temporal and require every
   live instance of that build (`checked_at` within the last 90 seconds) to be healthy and to hold every required capability, and at
   least one to exist. One fresh healthy row can't hide another live instance that lacks the codec or key access.
@@ -347,38 +375,61 @@ namespace's retention period, whatever the tenant's retention (§10.2):
 - error codes — fixed and sanitized, never derived from a sensitive value or plugin-supplied free text — and
   already-masked messages;
 - untainted data, including values up to 64 KiB;
-- payload sizes.
+- payload sizes;
+- a local activity's bookkeeping, which the SDK's core records beside its (encrypted) result, outside any codec: its
+  sequence number, attempt, activity id and type, and times.
 
 ## 5. Sizes and snapshots
 
 ### 5.1 The size threshold
 
-A value larger than **64 KiB** (the local-CEL per-value cap) is a size claim. Anything the workflow could evaluate
-locally stays inline; anything larger is a handle, evaluated by handle in an activity.
+**From 2b-1b**, a value larger than **64 KiB** (the local-CEL per-value cap) is a size claim. Anything the workflow
+could evaluate locally stays inline; anything larger is a handle, evaluated by handle in an activity. In 2b-1a every
+value still travels inline, within §5.2's limits.
 
 ### 5.2 The outgoing-payload guard
 
-- Before every command, the workflow measures each payload: its JSON bytes plus a fixed codec-overhead bound that a
-  test proves is an upper bound. The limit is a margin below Temporal's 2 MiB (initially 1.75 MiB). Experiment 2
-  (§11) showed that the SDK checks the payload **after** the codec, so the guard must count the codec's overhead.
-- **Splittable paths split:** `cel.evaluate` requests (as #15 does) and batch items, by bytes as well as count.
-  The projection is already bounded (256 KiB). Grant signals are bounded by construction, with an assertion.
-- **Spill before failing:** a payload that can't be split — a plugin step's config, a sub-flow's input, a run's
-  outputs — spills eligible values into size claims first, largest first, through a `spill` activity in chunks under
-  the limit (every inline value is at most 64 KiB, so a chunk always fits). The receiving path accepts the handles:
-  plugin activities resolve them, sub-flows receive them with grants, a parent reads a sub-flow's outputs through its
-  grant.
-- **Only then fail:** an envelope that still doesn't fit after spilling, or a declared limit (a node's field count),
-  fails the step or the run with `payload_too_large`, checked against the encoded-size bound — a result, never a
-  retried workflow task.
+- **Measured before it goes.** Each payload is measured where it's produced: its JSON, as the SDK's payload
+  converter writes it, plus `CODEC_OVERHEAD` (256 bytes), a bound on what `TenantCodec` adds that a test proves. The
+  limit is a margin below Temporal's 2 MiB (initially 1.75 MiB). Experiment 2 (§11) showed that the SDK checks the
+  payload **after** the codec, so the guard counts the codec's share.
+- **Commands, before they're sent:** a client's start (`start_run` refuses it before admission, with a fixed reason,
+  and leaves no row); a plugin step's input (the step fails, and nothing is sent); a sub-flow's start (the step
+  fails) and a failure handler's (its row records the failure); continue-as-new (§5.3). `cel.evaluate` requests (as
+  #15 does) and a loop's batch split, by bytes as well as count. The projection is already bounded (256 KiB); grant
+  signals are bounded by construction.
+- **Results, where they're produced:** a workflow-side check can't rescue a result Temporal has already refused to
+  record. A plugin step's output is checked in its activity (the step fails once, keeping its outcome: the node ran);
+  the version loader's result in its activity (`version_unusable`); a run's result in the run (it fails, with no
+  outputs); a batch's in the batch (its loop fails, and it still reports the iterations it used). `cel.evaluate`
+  results are bounded by the evaluator (256 KiB).
+- **Fail with a fixed, bounded error; spill only from 2b-1b.** In 2b-1a a payload that can't be split fails its
+  step, its loop or its run with `payload_too_large` — a result, never a retried workflow task — and is never sent. A
+  batch item that can't fit, with what its batch reads, fails its loop after the items before it: it's never dropped.
+  2b-1b adds spilling before failing: eligible values go into size claims, largest first, through a `spill` activity
+  in chunks under the limit (every inline value is at most 64 KiB, so a chunk always fits), and the receiving paths
+  accept the handles — plugin activities resolve them, sub-flows receive them with grants, a parent reads a
+  sub-flow's outputs through its grant. Only then does an envelope that still doesn't fit, or a declared limit (a
+  node's field count), fail.
+- **The sensitive values a run carries are bounded:** its result, its children's starts and its snapshot carry the
+  values it learned, so that they're masked there too. Until claims (2b-1b), they travel inline, bounded by
+  `SECRETS_BYTES` (initially 256 KiB, measured as they grow). A value that would pass the bound fails the step, the
+  child's step or the run that would add it, with `payload_too_large`, and whatever carried it is never used, so
+  nothing unmasked goes on. What's carried is never dropped: a parent always masks everything its children tell it.
+- **Every final result is checked** before it's recorded: a success's, a failure's, a cancel's,
+  `snapshot_too_large`'s, a stopped batch's. Without outputs or collected items a result carries only an error (a
+  stored message, at most 500 characters) and the bounded sensitive values, so it fits; outputs and collected items
+  are checked where they're made. A result past the limit anyway is a bug: the run ends `internal_error` (a batch
+  fails its loop), with no outputs, so nothing it returns needs masking, and no workflow task retries.
 - **Per workflow task, a hard invariant:** the encoded bytes of every command one workflow task sends stay below
   Temporal's gRPC message limit (4 MiB on the tested server), with margin. Experiment 2 showed what happens
   otherwise: the SDK fails the task with the non-retryable `GrpcMessageTooLarge`, and Temporal **terminates** the
   workflow — no end write, no failure handler. So the yield budget (engine-core §5.6) gains a dimension for outgoing
   command bytes (initially 3 MiB): a command that would pass it waits for the next workflow task, and no single
-  command exceeds the per-payload limit, so every completion fits. It's an invariant with its own tests, not a
-  tuning value.
-- **#15's guard** is verified again against the payload Temporal schedules after the codec (2b-1a).
+  command exceeds the per-payload limit, so every completion fits. It counts every payload a task sends: each
+  command's, the execution's result, and a local activity's result, whose marker goes out with the task's
+  completion. It's an invariant with its own tests, not a tuning value.
+- **#15's guard** is verified again after the codec: its 1.75 MiB of JSON plus `CODEC_OVERHEAD` stays under 2 MiB.
 
 ### 5.3 Live state and snapshots
 
@@ -427,6 +478,9 @@ locally stays inline; anything larger is a handle, evaluated by handle in an act
   continuing, so a restored run doesn't immediately continue again), and that the old run's history keeps headroom
   (the drain thresholds reserve room for the snapshot). If either fails, the run fails with `snapshot_too_large`. A
   structure that can't be compacted fails the run before history headroom is exhausted.
+- **2b-1a promises only the check:** a continued run's input, snapshot and all, past `SNAPSHOT_MAX` once encoded
+  fails the run cleanly with `snapshot_too_large` (a batch fails its loop). Compaction, segment claims, the live-state
+  budget and a proven bound are 2b-1b's.
 - **Writes are idempotent and hash-checked.** A spill's claim id is derived by the workflow, deterministically, so a
   retried activity writes the same row; a row that already exists must match the content hash the activity
   computed, or the activity fails without writing.
@@ -455,6 +509,10 @@ results, transform outputs, variable values — are spilled one at a time when t
 - **Idempotency:** a root's run id is its request's id, and the start uses `REJECT_DUPLICATE` (§7.4).
 - **Lookup** is always by (tenant, run id), with the id rebuilt on the server. A workflow id supplied from outside is
   never parsed.
+- **Checked where it's used.** The codec reads the tenant from the id's strict grammar (a full match: nothing may
+  follow). `RunGraph` and `LoopBatch` refuse a start whose id doesn't name the start's tenant and run, and every
+  activity that touches the store refuses an input of another tenant — `internal_error`, never the node's failure.
+  An id that names no tenant never reaches Temporal: the client's codec has no key to encrypt its start with.
 - This replaces the parent spec's `run:{run_request_id}` (§13).
 
 ### 6.2 `TenantCodec`
@@ -465,7 +523,8 @@ results, transform outputs, variable values — are spilled one at a time when t
 - **Encoding:** AES-256-GCM with the tenant's active data key. The payload metadata records the encoding, the tenant
   and the key version; the tenant and key version are also bound into the associated data.
 - **Decoding:** the tenant in the metadata must equal the context's tenant; the version selects the key. Where a
-  decoded payload contains a `tenant_id` field, it must match too.
+  decoded payload carries a `tenant_id`, the code that uses it checks it against the workflow id (§6.1): the codec
+  never reads a payload's content.
 - **Failures:** every client and worker uses `DefaultFailureConverterWithEncodedAttributes`, so failure messages and
   stack traces are encrypted too (they're already masked).
 - Dewpoint never uses memo or search attributes; the codec never sees them.
@@ -475,18 +534,28 @@ results, transform outputs, variable values — are spilled one at a time when t
 ### 6.3 Keys
 
 - The codec uses the keyring's per-tenant data keys through an in-process cache of unwrapped keys, bounded in size
-  and time and never persisted. The codec never creates a key; a tenant gets its key when it's created.
-- **Who has keys:** the worker (including the `cel.evaluate` activity) and 2b-2's dispatcher, whose role gains
-  `SELECT` on `data_keys`. The API and the dev CLI send Temporal no payloads (the CLI enqueues, and `--wait` reads
-  the database). Ingress has none (§8.3).
+  and time (initially 1,024 keys for 5 minutes, so a rotation reaches every process within 5 minutes) and never
+  persisted. The codec never creates a key, and a missing key isn't cached. A tenant gets its key when it's created;
+  `dewpoint keys ensure-tenants` gives one to older tenants, as the database owner, in Compose's migrate step.
+- **Who has keys:** the worker (including the `cel.evaluate` activity) and the dispatch role, which gains `SELECT` on
+  `data_keys` in 2b-1a: until 2b-2, the dev CLI still starts runs directly, through that role, and encrypts the
+  start. From 2b-2 the API and the dev CLI send Temporal no payloads (the CLI enqueues, and `--wait` reads the
+  database), and the dispatcher encrypts every start. Ingress has none (§8.3).
 
 ### 6.4 Key rotation and retirement
 
 - Rotating a tenant's key keeps every older version able to decrypt. The codec records the version on every
-  payload, and the keyring records when each version was last used to encrypt.
+  payload.
+- **A version's last use for payloads is bounded, not recorded.** Every process caches a tenant's active key for at
+  most the key cache's TTL (5 minutes, `KeyringKeys`), so none encrypts with a version later than its successor's
+  creation plus that TTL.
+  An execution holding such a payload closes within twice the maximum run duration (a run, then its failure handler),
+  and Temporal deletes it after the namespace's retention. So the **payload floor** is: the successor's creation +
+  the cache's TTL + 2 × the longest maximum run duration ever configured + the namespace's retention. (Durable
+  last-use tracking would shorten it; it isn't needed to retire safely.)
 - **An old version is retired only when nothing needs it:**
-  - no non-terminal run whose build encrypted with it is left, and the namespace's retention has passed since its
-    last use for payloads;
+  - the payload floor has passed, and no execution that could hold such a payload is still open: a run stalled past
+    its deadline (its build's workers gone) keeps its history, and its payloads, until it closes;
   - every record Dewpoint stores under it — `run_inputs`, `step_outputs`, `run_secret_index`, pending
     `run_requests` and `inbound_events` material, `csv_uploads`, schedule inputs and Temporal schedule actions — has
     been re-encrypted under the current version by `dewpoint keys reencrypt` (schedules by updating them), or deleted
@@ -850,6 +919,12 @@ dead-letter it.
 - every live worker instance of the current build is healthy and holds `payload_codec`, `claim_check` and
   `cel_request_size_guard` (§2.7);
 - the KEK and keyring wrap and unwrap;
+- **every stored data key unwraps:** as the key-admin role, every version of every tenant's data key, and the platform
+  key, is unwrapped with the configured KEKs. Comparing KEK ids (`dewpoint keys status`) isn't enough: a wrong KEK
+  under the right id passes it;
+- **the workers' path reads a tenant's key:** with the workers' own configuration (their database role and KEKs), for
+  every tenant with a key, scoped to that tenant under RLS, its active data key is read and unwrapped — the codec's
+  own path (`KeyringKeys`). The tenants come from the key-admin pass above, since the worker role can't list them;
 - the dispatcher and reconciler have reported within the last 5 minutes;
 - retention: a successful sweep within 24 hours with lag under 24 hours, and its defaults set.
 
@@ -912,12 +987,15 @@ larger engine runs. Two tenants ran side by side throughout.
 
 These results become committed regression checks, with the versions above recorded, before 2b-1a ships: context on
 every path, schedule time under replay and catch-up, the size check after the codec, and the per-task invariant.
+2b-1a commits them in `backend/tests/apps/worker/test_temporal_contract.py`, on the CLI dev server; a test there fails
+on any other SDK or server version, so an upgrade verifies them again.
 
 ## 12. Testing
 
 Beyond each task's own tests:
 - **Canary secrets** — the main end-to-end proof: runs seeded with known secrets have their entire decoded history,
-  projections and logs scanned; no secret may appear.
+  projections and logs scanned; no secret may appear. 2b-1a's part: no execution of a canary run (its sub-flow, its
+  batches, its `cel.evaluate` requests and local activities) holds the canary in its raw history.
 - **Properties:** the taint analysis (no tainted path is routed locally; plain output appears only at listed sites);
   the splitter (nothing plain at sensitive or undeclared positions; nesting follows the claiming order); forged
   handles refused.
@@ -936,7 +1014,8 @@ Beyond each task's own tests:
 - **Triggers:** CSV parser fuzzing; ingress authentication, replay tolerance, quotas and sealing; ingress load tests
   (parent §12).
 - **Size invariants:** no workflow task's commands pass the per-task byte budget, at the largest configs, fan-outs
-  and spills; an outgoing payload over the limit is spilled or fails its step, never a retried task; if the
+  and spills; an outgoing payload over the limit fails its step, loop or run (2b-1a) or is spilled (2b-1b), never a
+  retried task; a result over the limit fails where it's produced; if the
   `TERMINATED` classification of §7.6 is adopted, a test proves it on the dev server.
 - **Retention:** cutoffs on every read path, the SLO pause, audit pruning's checkpoint.
 - **RLS and roles:** the RLS matrix over the new tables and roles; the authorization matrix over `run.start`,
@@ -975,7 +1054,9 @@ Each plan updates the older specs as it lands, as the engine-core 5.x revisions 
 
 These numbers are starting points. Each stays provisional until the go/no-go experiments (§11) or the owning plan's
 measurements establish it; the spec is revised with the measured value when that plan lands.
-- **Measured before they're final:** the outgoing-payload limit (1.75 MiB) and the codec-overhead bound (§5.2); the
+- **Measured before they're final:** the outgoing-payload limit (1.75 MiB) and the codec-overhead bound (§5.2: 256
+  bytes, which a test proves for `TenantCodec`; the experiment's codec added 103–105); the bound on carried sensitive
+  values (256 KiB, §5.2); the key cache's TTL (5 minutes, §6.4); the
   per-task outgoing-byte budget (3 MiB under a 4 MiB gRPC limit, §5.2); the live-state budget (1 MiB), `SNAPSHOT_MAX`
   (1.5 MiB) and `OPEN_SCOPES_CAP` (100, §5.3); the
   spill floor (1 KiB, §5.4); the secret-index bounds (100,000 strings or 8 MiB, §3.7).
