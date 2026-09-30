@@ -30,7 +30,7 @@ with workflow.unsafe.imports_passed_through():
     from dewpoint.engine.cel import evaluate as cel
     from dewpoint.engine.cel.profile import LOCAL_CEL_PROFILE
     from dewpoint.engine.cel.record import ExpressionRecord
-    from dewpoint.engine.cel.route import YieldBudget
+    from dewpoint.engine.cel.route import YIELD_STRUCTURE, YieldBudget
     from dewpoint.engine.graph.values import CelValue, RefValue, TemplateValue
     from dewpoint.engine.registry import control
     from dewpoint.engine.runtime import nodes, probe, resolve
@@ -76,7 +76,10 @@ with workflow.unsafe.imports_passed_through():
         CAP_MESSAGE,
         ITERATION_CAP_EXCEEDED,
         SNAPSHOT_FORMAT,
+        STEP_WEIGHT,
         STRUCTURE_STEP,
+        TAKE_WEIGHT,
+        VIEW_WEIGHT,
         Batch,
         BatchOutcome,
         Collect,
@@ -251,6 +254,7 @@ class Execution:
         self._draining = False  # drain mode: nothing new starts until the execution continues-as-new
         self._spill_later: list[tuple[tuple[Any, ...], str, _Effect]] = []  # proto: results to spill before merging
         self._spill_units: dict[tuple[Instance, int, str], Spill] = {}  # proto: spill units queued or running
+        self._view_sizes: dict[Any, int] = {}  # proto: the steps a step's view reads, by region
 
     # --- the budget signals ----------------------------------------------------------------------------------------
 
@@ -317,7 +321,8 @@ class Execution:
                 self._spill_later = []
                 if not self._draining:
                     t0 = probe.clock()
-                    waiting += [("step", i) for i in self.sched.take_ready()]
+                    waiting += [("step", i) for i in self.sched.take_ready(self._take_limit())]
+                    self._task_budget().charge(structure=TAKE_WEIGHT * self.sched.taken_last)
                     probe.took(wid, "take", t0)
                     waiting += [("collect", c) for c in self.sched.take_collects()]
                     for b in self.sched.take_batches():
@@ -363,7 +368,9 @@ class Execution:
                 if self._rows and not any(key[0] == "project" for key in tasks):  # one at a time: rows wait for it
                     self._projects += 1
                     tasks[("project", self._projects)] = asyncio.create_task(self._project(self._take_rows()))
-                if not tasks and self._ask is None and self.sched.budget.waiting:
+                if not tasks and self._ask is None and self.sched.queued_left():
+                    pass  # proto: the rest of a cut-short take waits for the next workflow task
+                elif not tasks and self._ask is None and self.sched.budget.waiting:
                     self._dirty = True  # proto: a need left undecided (asked while answering): decide it, then continue
                 elif not tasks and self._ask is None:  # waiting for our parent's answer isn't stuck: nothing else is
                     raise RuntimeError("nothing is running and the run hasn't ended")
@@ -375,7 +382,14 @@ class Execution:
                         )
                     )
                 )
-                done, _ = await workflow.wait([*tasks.values(), clock, wake], return_when=asyncio.FIRST_COMPLETED)
+                cut: list[asyncio.Task[Any]] = []
+                if self.sched.queued_left():  # proto: the take was cut short: the rest in the next workflow task
+                    if self._yield_timer is None or self._yield_timer.done():
+                        self._yield_timer = asyncio.create_task(asyncio.sleep(0.001))
+                    cut.append(self._yield_timer)
+                done, _ = await workflow.wait(
+                    [*tasks.values(), clock, wake, *cut], return_when=asyncio.FIRST_COMPLETED
+                )
                 wake.cancel()
                 if clock in done:
                     self.sched.end(
@@ -873,6 +887,22 @@ class Execution:
             self._yield.reset(startup=length == self._startup_task)
         return self._yield
 
+    def _step_units(self, inst: Instance) -> int:
+        """Proto: a step unit's structural units: its own work, and the view it reads (the steps of its region and the
+        regions around it). A count from the version, so a replay charges the same."""
+        region = self.program.steps[inst.step].region
+        size = self._view_sizes.get(region)
+        if size is None:
+            size = sum(len(self.program.regions[r].members) for r in self.program.chain(region))
+            self._view_sizes[region] = size
+        return STEP_WEIGHT + VIEW_WEIGHT * size
+
+    def _take_limit(self) -> int:
+        """Proto: how many ready steps this workflow task may still take (at least one, so the run moves on)."""
+        budget = self._task_budget()
+        left = YIELD_STRUCTURE // budget.share - budget.structure
+        return max(1, left // TAKE_WEIGHT)
+
     async def _stepwise[T](self, steps: Generator[int, None, T]) -> T:
         """Proto (engine 2b spec §5.3): a snapshot or a restore, part by part. Each part's units are charged to the
         workflow task; once its share is spent, the next part waits for the next task (the 1 ms durable timer, as
@@ -922,6 +952,9 @@ class Execution:
         step = self.sched.step(inst)
         skip = ("/collect",) if step.ref == "flow.loop@1" else ("/predicate",) if step.ref == "flow.filter@1" else ()
         pairs = [(p, v) for p, v in step.values if not any(p == s or p.startswith(s + "/") for s in skip)]
+        units = self._step_units(inst)  # proto (§5.3): its work in this workflow task, charged before it starts
+        await self._yield_point(None, structure=units)
+        self._task_budget().charge(structure=units)
         captured = self.sched.consume_capture(inst)  # proto (§5.3): a loop step's variables, as when it became ready
         try:
             values, cel_mode = await self._values(step, pairs, inst.scope, captured)
@@ -1408,6 +1441,21 @@ __all__ = [
     "Execution",
     "child_options",
 ]
+
+
+def root_iteration_cap(default: int) -> int:
+    """Proto: a root run's iteration cap, which a probe may lower. Read here, in a module the sandbox passes through:
+    `workflow.py`'s own view of the probe module is a copy the probe's harness never writes."""
+    return probe.ROOT_BUDGET[0] if probe.ROOT_BUDGET else default
+
+
+def phase_clock() -> float:
+    """Proto: a probe's phase timer, recorded where the harness reads it (see `root_iteration_cap`)."""
+    return probe.clock()
+
+
+def phase_took(workflow_id: str, phase: str, started: float) -> None:
+    probe.took(workflow_id, phase, started)
 
 
 def quiescent(

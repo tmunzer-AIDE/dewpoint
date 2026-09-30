@@ -19,7 +19,7 @@ from temporalio.exceptions import ApplicationError, ChildWorkflowError
 
 with workflow.unsafe.imports_passed_through():
     from dewpoint.engine.graph.values import iter_values, pointer_str
-    from dewpoint.engine.runtime import probe, resolve
+    from dewpoint.engine.runtime import resolve
     from dewpoint.engine.runtime.activities import (
         FAILURE_HANDLER,
         LOAD_VERSION,
@@ -49,6 +49,9 @@ with workflow.unsafe.imports_passed_through():
         _cancelled,
         _unloadable,
         child_options,
+        phase_clock,
+        phase_took,
+        root_iteration_cap,
     )
     from dewpoint.engine.runtime.ids import run_of, run_workflow_id, tenant_of
     from dewpoint.engine.runtime.program import Program, compile_program
@@ -159,7 +162,7 @@ class RunGraph(Execution):
             return await self._end_early(RunEnd("failed", Failure(VERSION_UNUSABLE, _unloadable(e))), start.iterations)
         self._charge_sent(data)  # its marker goes out with this workflow task's commands (engine 2b spec §5.2)
         try:
-            t0 = probe.clock()
+            t0 = phase_clock()
             program = compile_program(
                 data.graph,
                 data.manifests,
@@ -170,7 +173,7 @@ class RunGraph(Execution):
                 data.open_scopes_cap,
                 data.loop_depth,
             )
-            probe.took(workflow.info().workflow_id, "compile", t0)
+            phase_took(workflow.info().workflow_id, "compile", t0)
         except Exception as e:
             workflow.logger.error("run_version_unusable", exc_info=True)
             message = f"This build can't run the version ({type(e).__name__}); the worker's log has the details."
@@ -178,19 +181,19 @@ class RunGraph(Execution):
         outputs: dict[str, Any] | None = None
         try:
             if snapshot is not None:
-                t0 = probe.clock()
+                t0 = phase_clock()
                 await self._restore(program, snapshot)
-                probe.took(workflow.info().workflow_id, "restore", t0)
+                phase_took(workflow.info().workflow_id, "restore", t0)
             elif not self._fresh(program):  # its trigger, or a literal, holds more sensitive values than a run carries
                 self.sched.end(RunEnd("failed", Failure(PAYLOAD_TOO_LARGE, SECRETS_TOO_LARGE)))
             if await self._drive() == CONTINUE:
                 await self._flush()
-                t0 = probe.clock()
+                t0 = phase_clock()
                 continued = replace(start, snapshot=await self._snapshot(), iterations=self.sched.iterations)
-                probe.took(workflow.info().workflow_id, "snapshot", t0)
-                t0 = probe.clock()
+                phase_took(workflow.info().workflow_id, "snapshot", t0)
+                t0 = phase_clock()
                 fits = snapshot_fits(continued, workflow.payload_converter())
-                probe.took(workflow.info().workflow_id, "fits", t0)
+                phase_took(workflow.info().workflow_id, "fits", t0)
                 if fits:
                     await self._send(continued)
                     workflow.continue_as_new(continued)
@@ -222,7 +225,7 @@ class RunGraph(Execution):
         already, and its variables. False when those values are more than a run carries (engine 2b spec §5.2)."""
         self.program = program
         parent = self.parent
-        cap = probe.ROOT_BUDGET[0] if probe.ROOT_BUDGET else ITERATION_CAP  # proto: the harness may lower it
+        cap = root_iteration_cap(ITERATION_CAP)  # proto: the probe may lower it, as a test may
         budget = Budget(cap, root=True) if parent is None else Budget(parent.grant, root=False)
         self.sched = Scheduler(program, budget=budget)
         learned = self._learn(self.trigger, program.graph.settings.input_schema)
@@ -448,7 +451,7 @@ class LoopBatch(Execution):
                 result_type=VersionData,
                 start_to_close_timeout=timedelta(seconds=30),
             )
-            t0 = probe.clock()
+            t0 = phase_clock()
             program = compile_program(
                 data.graph,
                 data.manifests,
@@ -459,7 +462,7 @@ class LoopBatch(Execution):
                 data.open_scopes_cap,
                 data.loop_depth,
             )
-            probe.took(workflow.info().workflow_id, "compile", t0)
+            phase_took(workflow.info().workflow_id, "compile", t0)
         except asyncio.CancelledError:
             return BatchResult([], [], end=RunEnd("cancelled", CANCELLED).to_json(), iterations=start.iterations)
         except Exception as e:
@@ -471,9 +474,9 @@ class LoopBatch(Execution):
         self._charge_sent(data)  # its marker goes out with this workflow task's commands (engine 2b spec §5.2)
         try:
             if snapshot is not None:
-                t0 = probe.clock()
+                t0 = phase_clock()
                 await self._restore(program, snapshot)
-                probe.took(workflow.info().workflow_id, "restore", t0)
+                phase_took(workflow.info().workflow_id, "restore", t0)
             else:
                 self.program = program
                 self.sched = Scheduler(program, budget=Budget(start.parent.grant, root=False))
@@ -501,12 +504,12 @@ class LoopBatch(Execution):
             if await self._drive() == CONTINUE:
                 await self._flush()
                 # proto (§5.3): each value travels once; the snapshot holds the slice, outer scopes and variables
-                t0 = probe.clock()
+                t0 = phase_clock()
                 continued = replace(
                     start, snapshot=await self._snapshot(), iterations=self.sched.iterations,
                     items=[], items_handle=None, outer=[], variables={},
                 )  # fmt: skip
-                probe.took(workflow.info().workflow_id, "snapshot", t0)
+                phase_took(workflow.info().workflow_id, "snapshot", t0)
                 if snapshot_fits(continued, workflow.payload_converter()):
                     await self._send(continued)
                     workflow.continue_as_new(continued)

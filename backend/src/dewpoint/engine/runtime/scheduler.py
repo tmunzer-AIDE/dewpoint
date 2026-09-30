@@ -92,6 +92,9 @@ STRUCTURE_STEP = 2_000  # proto (§5.3): a snapshot or a restore yields its work
 # cost against it, so a task's share of units is a share of time, counted deterministically
 REBUILD_WEIGHT = 6  # a queued step rebuilt from the node states (a scan and a sort)
 DEFER_WEIGHT = 2  # a queued loop step deferred, in bulk
+TAKE_WEIGHT = 10  # a ready step taken: deferred one by one, or handed out
+STEP_WEIGHT = 1_000  # a step unit's own work in the workflow (its decision, its settle, its row)
+VIEW_WEIGHT = 4  # per step its view reads (every step of its region and the regions around it)
 
 
 def run_steps[T](steps: Generator[int, None, T]) -> T:
@@ -441,6 +444,7 @@ class Scheduler:
         self.prefix = ""  # proto: the execution's own workflow id, for the collections it names
         self._live = P.size(self._vars)  # proto: see `live`; the variables count from the start
         self._rebuild = False
+        self.taken_last = 0  # proto: how many ready steps the last take took
         self._spills: list[Spill] = []
         self._spills_out: set[tuple[Instance, str, int]] = set()
         self.probe = {"peak_open": 0, "peak_reserved": 0, "cap_waits": 0, "reserved_opens": 0}
@@ -486,15 +490,19 @@ class Scheduler:
         self._maybe_seal(loop)
         self._advance(loop)
 
-    def take_ready(self) -> list[Instance]:
-        """Ready steps, in (scope, topological) order. They are running from now on."""
+    def take_ready(self, limit: int | None = None) -> list[Instance]:
+        """Ready steps, in (scope, topological) order. They are running from now on. Proto (§5.3): with `limit`, at
+        most that many of the queue are taken (in queue order, so a replay takes the same); the rest wait for the
+        next take, which the execution makes in its next workflow task."""
         ready = []
-        for inst in self._ready:
+        taking = self._ready if limit is None else self._ready[:limit]
+        for inst in taking:
             if self._iter_loop(inst):  # proto (§5.3): it starts only when its loop can open an iteration at once
                 self._defer(inst)
             else:
                 ready.append(inst)
-        self._ready = []
+        self._ready = [] if limit is None else self._ready[limit:]
+        self.taken_last = len(taking)
         ready += self._start_deferred()
         if self._deferred:  # proto: what stays queued after the take
             self.probe["deferred_peak"] = max(self.probe.get("deferred_peak", 0), len(self._deferred))
@@ -503,6 +511,10 @@ class Scheduler:
             self.scopes[inst.scope].nodes[inst.step] = NodeState.RUNNING
         self._handed.update(ready)
         return ready
+
+    def queued_left(self) -> bool:
+        """Proto: a cut-short take left ready steps for the next one."""
+        return bool(self._ready)
 
     def take_collects(self) -> list[Collect]:
         out, self._collects = self._collects, []
@@ -989,6 +1001,7 @@ class Scheduler:
                 continue
             loop.waiting = False
             if not a.granted:
+                self.probe["cap_refused"] = self.probe.get("cap_refused", 0) + 1  # proto: the probe sees exhaustion
                 self._abort(loop, Failure(ITERATION_CAP_EXCEEDED, CAP_MESSAGE))
                 continue
             room = self._room(loop)
