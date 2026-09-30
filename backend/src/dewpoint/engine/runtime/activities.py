@@ -109,12 +109,16 @@ class BatchInput:
     checkpoint_events: int = CHECKPOINT_EVENTS
     drain_events: int = DRAIN_EVENTS
     iterations: int = 0  # a continued batch: what it had used, readable even when its snapshot isn't
+    items_handle: dict[str, Any] | None = None  # proto: the slice, as a handle-backed list (then `items` is empty)
+    collect_base: str = ""  # proto: the loop's collection, whose segments the batch writes
 
 
 @dataclass(frozen=True)
 class BatchResult:
     collected: list[Any]
     failures: list[dict[str, Any]]
+    collection: dict[str, Any] | None = None  # proto: what it collected, as a collection (then `collected` is empty)
+    failure_collection: dict[str, Any] | None = None  # proto: its failures, as a collection (then `failures` is empty)
     stopped: dict[str, Any] | None = None  # the failure that stopped the slice (`on_item_error: stop`)
     end: dict[str, Any] | None = None  # the run ended inside the batch (a fail or stop node, the deadline)
     iterations: int = 0
@@ -151,6 +155,8 @@ class StepInput:
     config: dict[str, Any]
     mode: str = LIVE
     attempt: int = 1  # RunGraph counts attempts: each one is its own activity execution
+    inline_limit: int | None = None  # proto: an output larger than this is spilled, and its handle returned
+    spill_id: str = ""  # proto: where
 
 
 @dataclass(frozen=True)

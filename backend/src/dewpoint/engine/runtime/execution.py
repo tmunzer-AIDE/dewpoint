@@ -82,6 +82,7 @@ with workflow.unsafe.imports_passed_through():
         RunEnd,
         Scheduler,
         ScopeKey,
+        Spill,
         iteration_key,
     )
     from dewpoint.engine.runtime.size import (
@@ -245,6 +246,7 @@ class Execution:
         ] = {}  # a batch unit's key -> the batch (its items aren't hashable)
         self._drained: dict[str, Any] = {}  # what draining waited for, and added: history events and bytes
         self._draining = False  # drain mode: nothing new starts until the execution continues-as-new
+        self._spill_later: list[tuple[tuple[Any, ...], str, _Effect]] = []  # proto: results to spill before merging
 
     # --- the budget signals ----------------------------------------------------------------------------------------
 
@@ -296,10 +298,16 @@ class Execution:
             tasks[("step", inst)] = asyncio.create_task(self._timer(inst, self._timers[inst]))
         self._resume = []
         clock = asyncio.create_task(asyncio.sleep(max(0.0, (self.deadline - workflow.now()).total_seconds())))
+        self.sched.prefix = workflow.info().workflow_id
         try:
             while self.sched.ended is None:
                 probe.note(workflow.info().workflow_id, self.sched.probe)
                 self._serve_budget()
+                for sp in self.sched.take_spills():  # proto: bounded, and awaited before any continue
+                    tasks[("spill", sp.loop, sp.first, sp.which)] = asyncio.create_task(self._spill(sp))
+                for key, sid, later in self._spill_later:
+                    tasks[key] = asyncio.create_task(self._spill_result(sid, later))
+                self._spill_later = []
                 if not self._draining:
                     waiting += [("step", i) for i in self.sched.take_ready()]
                     waiting += [("collect", c) for c in self.sched.take_collects()]
@@ -308,7 +316,7 @@ class Execution:
                         waiting.append(("batch", b.loop, b.start))
                 for inst in self.sched.take_cancels():
                     self._timers.pop(inst, None)
-                    for key in [k for k in tasks if k[0] in ("step", "batch") and self._owner(k) == inst]:
+                    for key in [k for k in tasks if k[0] in ("step", "batch", "spillres") and self._owner(k) == inst]:
                         task = tasks.pop(key)
                         task.cancel()  # a child reports back first: the unit stays outstanding until it does
                         self._cancelled += 1
@@ -397,6 +405,8 @@ class Execution:
         return dict(sorted(kinds.items()))
 
     def _kind(self, key: tuple[Any, ...]) -> str:
+        if key[0] in ("spill", "spillres"):
+            return "spills"
         if key[0] == "batch":
             return "children"
         if key[0] != "step":
@@ -443,6 +453,10 @@ class Execution:
             return (self.sched.order(Instance(c.scope, c.loop.step)), 1)
         if key[0] == "batch":
             return (self.sched.order(key[1]), 2, key[2])
+        if key[0] == "spillres":
+            return (self.sched.order(key[1]), 0)
+        if key[0] == "spill":
+            return (self.sched.order(key[1]), 4, key[2])
         return ((), 3, key[1])
 
     def _gone(self, unit: tuple[Any, ...]) -> bool:
@@ -460,6 +474,15 @@ class Execution:
         return await self._collect(key[1])
 
     def _apply(self, key: tuple[Any, ...], effect: _Effect) -> None:
+        if key[0] == "spill":
+            self.sched.spilled(key[1], key[3], key[2], int(effect.output))
+            return
+        if key[0] == "step" and effect.output is not None and effect.loop is None and effect.end is None:
+            n = probe.size(effect.output)  # proto (§5.3): the merge is authoritative
+            if n > probe.FLOOR and self.sched.live + n > probe.LIVE_BUDGET:
+                sid = f"{workflow.info().workflow_id}/r/{iteration_key(key[1].scope)}/{self.sched.step(key[1]).topo}"
+                self._spill_later.append((("spillres", key[1]), sid, effect))
+                return
         if key[0] == "collect":
             c: Collect = key[1]
             if effect.failure is not None:
@@ -495,6 +518,25 @@ class Execution:
             if effect.variables:
                 self.vars.update(effect.variables)
             self.sched.succeed(inst, effect.output, effect.ports)
+
+    async def _spill(self, sp: Spill) -> _Effect:
+        """Proto: a collection's sealed values into their segment."""
+        data = probe.SpillInput(f"{sp.base}/{sp.first}", sp.pairs)
+        await self._send(data)
+        size = await workflow.execute_activity(
+            probe.SPILL, data, result_type=int, start_to_close_timeout=timedelta(seconds=120)
+        )
+        return _Effect(output=size)
+
+    async def _spill_result(self, sid: str, effect: _Effect) -> _Effect:
+        """Proto: a result that would pass the live-state budget goes into a segment, and only its handle merges."""
+        data = probe.SpillInput(sid, effect.output)
+        await self._send(data)
+        await workflow.execute_activity(
+            probe.SPILL, data, result_type=int, start_to_close_timeout=timedelta(seconds=120)
+        )
+        self.sched.probe["result_spills"] = self.sched.probe.get("result_spills", 0) + 1
+        return replace(effect, output={probe.KIND: probe.VALUE, "id": sid, "bytes": probe.size(effect.output)})
 
     # --- the budget ------------------------------------------------------------------------------------------------
 
@@ -998,8 +1040,8 @@ class Execution:
             f"{run_workflow_id(self.tenant_id, self.run_id)}/{step.id}/{iteration_key(b.loop.scope)}/batch:{b.start}"
         )
         converter = workflow.payload_converter()
-        draft = self._batch_input(b, len(b.items))
-        if not fits(draft, converter):  # engine 2b spec §5.2: as many of its items as fit, in order; the rest follow
+        draft = self._batch_input(b, probe.count(b.items))
+        if isinstance(b.items, list) and not fits(draft, converter):  # engine 2b spec §5.2: as many as fit
             items = b.items
             envelope = encoded_bytes(replace(draft, items=[]), converter)
             fit, _ = resolve.request_end(
@@ -1014,7 +1056,7 @@ class Execution:
                 return _Effect(failure=Failure(PAYLOAD_TOO_LARGE, BATCH_ITEM_TOO_LARGE))
             self.sched.cut_batch(b.loop, b.start, b.start + fit)
             b = replace(b, items=items[:fit])
-        grant = self.sched.budget.start_child(child, len(b.items))
+        grant = self.sched.budget.start_child(child, probe.count(b.items))
         batch = self._batch_input(b, grant)
         used: int | None = None  # until it reports, all it was granted counts: it may have run
         try:
@@ -1048,7 +1090,15 @@ class Execution:
                 return _Effect(failure=CANCELLED)
             return _Effect(end=end)
         stopped = Failure.from_json(result.stopped) if result.stopped else None
-        return _Effect(batch=BatchOutcome(list(result.collected), list(result.failures), stopped))
+        return _Effect(
+            batch=BatchOutcome(
+                list(result.collected),
+                list(result.failures),
+                stopped,
+                collection=result.collection,
+                failure_collection=result.failure_collection,
+            )
+        )
 
     def _batch_input(self, b: Batch, grant: int) -> BatchInput:
         step = self.sched.step(b.loop)
@@ -1070,7 +1120,9 @@ class Execution:
             version_id=self.version_id,
             loop_step=str(step.id),
             outer=self._outer(b.loop),
-            items=b.items,
+            items=b.items if isinstance(b.items, list) else [],
+            items_handle=None if isinstance(b.items, list) else b.items,
+            collect_base=loop.coll.base if loop.coll is not None else "",
             offset=b.start,
             concurrency=loop.concurrency,
             stop_on_error=loop.stop_on_error,
@@ -1123,6 +1175,8 @@ class Execution:
                 config=config,
                 mode=self.mode,
                 attempt=attempt,
+                inline_limit=probe.INLINE_LIMIT if self.sched.live <= probe.LIVE_BUDGET else probe.FLOOR,
+                spill_id=f"{workflow.info().workflow_id}/o/{iteration_key(inst.scope)}/{step.topo}/{attempt}",
             )
             if not fits(sent, workflow.payload_converter()):  # engine 2b spec §5.2: never sent, so it never ran
                 failure = Failure(PAYLOAD_TOO_LARGE, STEP_INPUT_TOO_LARGE, attempt)

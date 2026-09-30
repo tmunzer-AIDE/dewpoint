@@ -21,6 +21,7 @@ tenant-readable, so a message never quotes input: a validation error names each 
 unexpected exception names only its type. Its text goes to the worker's log."""
 
 import asyncio
+import dataclasses
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any, Protocol, get_args
 
@@ -34,10 +35,11 @@ from temporalio.converter import DataConverter
 from temporalio.exceptions import ApplicationError
 
 from dewpoint.apps.cel_client import EvaluatorUnavailable, evaluate_remote
+from dewpoint.apps.worker import probe_store
 from dewpoint.apps.worker.context import context
 from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.cel import ipc
-from dewpoint.engine.runtime import size
+from dewpoint.engine.runtime import probe, size
 from dewpoint.engine.runtime.activities import (
     APPLIED,
     CEL_EVALUATE,
@@ -201,12 +203,20 @@ def step_activity_for(node: type[Node]) -> Callable[[StepInput], Awaitable[StepR
     @activity.defn(name=step_activity(ref))
     async def run_step(step: StepInput) -> StepResult:
         _same_tenant(step.tenant_id)
+        store = probe_store.STORE
+        if store is not None:  # proto: the activity boundary reads the handles its input carries
+            step = dataclasses.replace(step, config=await store.resolve(step.config))
         try:
             result, outcome = await _call(node, step, config_schema)
         except _StepFailed as f:
             raise f.mapped() from None
         try:  # the node ran: whatever fails from here, its effect happened, so nothing is retried
             done = StepResult(output_of(result), outcome)
+            if store is not None and step.inline_limit is not None:  # proto: past the inline limit, a handle
+                n = probe.size(done.output)
+                if n > step.inline_limit and n <= probe_store.SEGMENT_MAX:
+                    await store.put(step.spill_id, done.output)
+                    done = StepResult({probe.KIND: probe.VALUE, "id": step.spill_id, "bytes": n}, outcome)
             if not size.fits(done, JSON):  # Temporal would refuse to record it (engine 2b spec §5.2)
                 raise _StepFailed(size.PAYLOAD_TOO_LARGE, size.STEP_OUTPUT_TOO_LARGE, retryable=False, outcome=outcome)
             return done
@@ -255,7 +265,7 @@ def engine_activities(store: RunStore, plugins: Iterable[Plugin], *, abi: int = 
         await store.project(data)
 
     steps = [step_activity_for(node) for plugin in plugins for node in plugin.nodes if node.kind == NodeKind.ACTION]
-    return [load_version, project, *steps]
+    return [load_version, project, probe_store.spill, *steps]
 
 
 Evaluate = Callable[[dict[str, Any]], Awaitable[list[dict[str, Any]]]]

@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from dewpoint.engine.runtime import probe as P
 from dewpoint.engine.runtime.budget import LOCAL, Answer, Ask, Budget, Need
 from dewpoint.engine.runtime.program import BODY, DONE, ERROR_PORT, Program, Step
 
@@ -116,12 +117,94 @@ class Scope:
 
 
 @dataclass
+class Collection:
+    """Proto (§5.3): a loop's collected values, as immutable segments and an inline tail, by absolute index. Positions
+    with no value (a failed iteration, or one not yet collected) read as null."""
+
+    base: str
+    n: int
+    offset: int
+    segs: list[list[int]] = field(default_factory=list)  # [first, count, bytes], spilled
+    tail: dict[int, Any] = field(default_factory=dict)
+    sealing: dict[int, list[list[Any]]] = field(default_factory=dict)  # first -> pairs being spilled
+    tail_bytes: int = 0  # the tail's values as the live state counts them (P.size + 8 each)
+    sealing_bytes: int = 0
+
+    def put(self, index: int, value: Any) -> int:
+        self.tail[index] = value
+        added = P.size(value) + 8
+        self.tail_bytes += added
+        return added
+
+    def merge(self, other: dict[str, Any]) -> int:
+        self.segs.extend([list(s) for s in other["segs"]])
+        return sum(self.put(int(i), v) for i, v in other["tail"])
+
+    def seal(self) -> tuple[int, list[list[Any]]] | None:
+        if not self.tail:
+            return None
+        pairs = [[i, self.tail[i]] for i in sorted(self.tail)]
+        self.tail = {}
+        self.sealing[pairs[0][0]] = pairs
+        self.sealing_bytes += self.tail_bytes
+        self.tail_bytes = 0
+        return pairs[0][0], pairs
+
+    def sealed(self, first: int, size: int) -> int:
+        pairs = self.sealing.pop(first)
+        freed = sum(P.size(v) + 8 for _, v in pairs)
+        self.sealing_bytes -= freed
+        self.segs.append([first, len(pairs), size])
+        return freed
+
+    def output(self) -> Any:
+        """The loop's `items`: a plain list while nothing was spilled, else the collection's handle."""
+        if not self.segs and not self.sealing:
+            return [self.tail.get(self.offset + p) for p in range(self.n)]
+        return {P.KIND: P.COLL, **self.to_json()}
+
+    def entries(self) -> Any:
+        """The loop's `failures`: its entries in index order while nothing was spilled, else the handle."""
+        if not self.segs and not self.sealing:
+            return [{"index": i, **self.tail[i]} for i in sorted(self.tail)]
+        return {P.KIND: P.COLL, **self.to_json()}
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "base": self.base, "n": self.n, "offset": self.offset, "segs": self.segs,
+            "tail": [[i, self.tail[i]] for i in sorted(self.tail)],
+            "sealing": [[f, pairs] for f, pairs in sorted(self.sealing.items())],
+        }  # fmt: skip
+
+    @classmethod
+    def from_json(cls, raw: dict[str, Any]) -> "Collection":
+        tail = {int(i): v for i, v in raw["tail"]}
+        sealing = {int(f): pairs for f, pairs in raw.get("sealing", [])}
+        return cls(
+            str(raw["base"]), int(raw["n"]), int(raw["offset"]), [list(s) for s in raw["segs"]], tail, sealing,
+            sum(P.size(v) + 8 for v in tail.values()),
+            sum(P.size(v) + 8 for pairs in sealing.values() for _, v in pairs),
+        )  # fmt: skip
+
+
+@dataclass(frozen=True)
+class Spill:
+    """Proto: a collection's sealed values, for the `probe.spill` activity, as segment `base/first`."""
+
+    loop: Instance
+    base: str
+    first: int
+    pairs: list[list[Any]]
+    which: str = "c"  # the loop's collected values (c) or its failures (f)
+
+
+@dataclass
 class LoopRun:
     """A loop node's iterations: opened in order, at most `concurrency` at a time. `offset` is the index of
     `items[0]` (a batch child runs a slice). With `batch`, the items run in children of that many, one at a time."""
 
     instance: Instance
-    items: list[Any]
+    items: Any  # a list, or (proto) a handle-backed list
     concurrency: int
     stop_on_error: bool
     offset: int = 0
@@ -129,8 +212,8 @@ class LoopRun:
     next: int = 0  # the next item to open, as a position in `items`
     open: list[int] = field(default_factory=list)  # open iterations, by absolute index
     collecting: set[int] = field(default_factory=set)  # settled iterations whose `collect` is being evaluated
-    collected: list[Any] = field(default_factory=list)  # per item of `items`
-    failures: list[dict[str, Any]] = field(default_factory=list)
+    coll: Collection | None = None  # proto: what it collected, by absolute index
+    fails: Collection | None = None  # proto: its failed iterations, by absolute index
     running_batch: int | None = None  # the start of the batch a child is running
     waiting: bool = False  # the next iteration waits for budget
 
@@ -150,7 +233,7 @@ class Batch:
 
     loop: Instance
     start: int
-    items: list[Any]
+    items: Any  # a list, or (proto) a handle-backed slice
 
 
 @dataclass(frozen=True)
@@ -161,6 +244,8 @@ class BatchOutcome:
     collected: list[Any]
     failures: list[dict[str, Any]]
     stopped: Failure | None = None
+    collection: dict[str, Any] | None = None  # proto: a batch child's collection (its parent's segments)
+    failure_collection: dict[str, Any] | None = None  # proto: and its failures, the same way
 
 
 @dataclass(frozen=True)
@@ -225,6 +310,10 @@ class Scheduler:
         self._handed: set[Instance] = set()  # steps handed over (take_ready) and not settled
         self._collects_out: set[tuple[Instance, int]] = set()
         self._batches_out: set[tuple[Instance, int]] = set()
+        self.prefix = ""  # proto: the execution's own workflow id, for the collections it names
+        self._live = 0  # proto: see `live`
+        self._spills: list[Spill] = []
+        self._spills_out: set[tuple[Instance, str, int]] = set()
         self.probe = {"peak_open": 0, "peak_reserved": 0, "cap_waits": 0, "reserved_opens": 0}
 
     @property
@@ -241,11 +330,12 @@ class Scheduler:
         self,
         loop_step: uuid.UUID,
         outer: list[OuterScope],
-        items: list[Any],
+        items: Any,
         *,
         offset: int,
         concurrency: int,
         stop_on_error: bool,
+        base: str = "",
     ) -> None:
         """A batch child: rebuild the loop's enclosing scopes read-only, outermost first, and run items `offset` ..
         `offset + len(items)` of it. The loop's own scope is the last one."""
@@ -253,9 +343,14 @@ class Scheduler:
         for depth, o in enumerate(outer):
             region = chain[len(outer) - 1 - depth]
             self.scopes[o.key] = Scope(o.key, region, {}, {}, dict(o.results), o.item, o.index, frozen=True)
+            self._live += self._scope_bytes(self.scopes[o.key])
         loop_inst = Instance(outer[-1].key, loop_step)
         self.batch_loop = loop_inst
-        loop = LoopRun(loop_inst, list(items), concurrency, stop_on_error, offset=offset, collected=[None] * len(items))
+        items = items if P.is_kind(items, P.LIST) else list(items)
+        coll = Collection(base, P.count(items), offset)
+        fails = Collection(base + "!f", P.count(items), offset)
+        loop = LoopRun(loop_inst, items, concurrency, stop_on_error, offset=offset, coll=coll, fails=fails)
+        self._live += P.size(items) if isinstance(items, list) else 0
         self.loops[loop_inst] = loop
         self._advance(loop)
 
@@ -272,6 +367,66 @@ class Scheduler:
         out, self._collects = self._collects, []
         self._collects_out.update((c.loop, c.index) for c in out)
         return out
+
+    def take_spills(self) -> list[Spill]:
+        out, self._spills = self._spills, []
+        self._spills_out.update((s.loop, s.which, s.first) for s in out)
+        return out
+
+    @staticmethod
+    def _colls(loop: LoopRun) -> list[tuple[str, Collection]]:
+        return [(w, c) for w, c in (("c", loop.coll), ("f", loop.fails)) if c is not None]
+
+    @_then_wake
+    def spilled(self, loop_inst: Instance, which: str, first: int, size: int) -> None:
+        """Proto: a sealed part of a collection is in its segment now."""
+        self._spills_out.discard((loop_inst, which, first))
+        loop = self.loops.get(loop_inst)
+        coll = dict(self._colls(loop)).get(which) if loop is not None else None
+        if loop is None or coll is None or first not in coll.sealing:
+            return
+        self._live -= coll.sealed(first, size)
+        self._advance(loop)
+
+    @property
+    def live(self) -> int:
+        """Proto (§5.3): the values the snapshot holds, as JSON: results and items of open scopes, loops' inline item
+        lists, and collections' inline parts. Kept as they change; `_recount` is the same sum, from scratch."""
+        return self._live
+
+    def _recount(self) -> int:
+        total = sum(self._scope_bytes(sc) for sc in self.scopes.values())
+        for loop in self.loops.values():
+            total += P.size(loop.items) if isinstance(loop.items, list) else 0
+            total += sum(c.tail_bytes + c.sealing_bytes for _, c in self._colls(loop))
+        return total
+
+    @staticmethod
+    def _scope_bytes(sc: Scope) -> int:
+        return sum(P.size(r) for r in sc.results.values()) + (P.size(sc.item) if sc.item is not None else 0)
+
+    def _seal(self, loop: LoopRun, which: str, coll: Collection) -> None:
+        sealed = coll.seal()
+        if sealed is not None:
+            self.probe["spills"] = self.probe.get("spills", 0) + 1
+            self._spills.append(Spill(loop.instance, coll.base, sealed[0], sealed[1], which))
+
+    def _maybe_seal(self, loop: LoopRun) -> None:
+        """A tail past a segment's size is spilled; so is the largest one while the live state is past its budget."""
+        for which, coll in self._colls(loop):
+            if coll.tail_bytes >= P.SEG_BYTES:
+                self._seal(loop, which, coll)
+        while self.live > P.LIVE_BUDGET:
+            tails = [
+                (c.tail_bytes, self.order(lp.instance), w, lp, c)
+                for lp in self.loops.values()
+                for w, c in self._colls(lp)
+                if c.tail_bytes > P.FLOOR
+            ]
+            if not tails:
+                break
+            _, _, w, lp, c = max(tails, key=lambda t: (t[0], t[1], t[2]))
+            self._seal(lp, w, c)
 
     def take_batches(self) -> list[Batch]:
         out, self._batches = self._batches, []
@@ -309,6 +464,7 @@ class Scheduler:
             return
         scope.nodes[step.id] = NodeState.DONE
         scope.results[step.key] = {"output": output}
+        self._live += P.size(scope.results[step.key])
         self._settled.append((inst, scope.results[step.key]))
         live = set(step.ports if ports is None else ports)
         self._resolve(scope, step, {p for p in step.ports if p in live} - {BODY})
@@ -327,9 +483,11 @@ class Scheduler:
         self._settled.append((inst, {"error": failure.to_json()}))
         if step.on_error == "port":
             scope.results[step.key] = {"error": failure.to_json()}
+            self._live += P.size(scope.results[step.key])
             self._resolve(scope, step, {ERROR_PORT})
         elif step.on_error == "continue":
             scope.results[step.key] = {"error": failure.to_json()}
+            self._live += P.size(scope.results[step.key])
             self._resolve(scope, step, set(step.ports) - {BODY})
         else:
             self._fail_scope(scope, failure)
@@ -345,7 +503,11 @@ class Scheduler:
         scope, step = self._running(inst)
         if scope is None:
             return
-        loop = LoopRun(inst, list(items), concurrency, stop_on_error, batch=batch, collected=[None] * len(items))
+        items = items if P.is_kind(items, P.LIST) else list(items)
+        base = f"{self.prefix}/c/{iteration_key(inst.scope)}/{step.topo}"
+        coll, fails = Collection(base, P.count(items), 0), Collection(base + "!f", P.count(items), 0)
+        loop = LoopRun(inst, items, concurrency, stop_on_error, batch=batch, coll=coll, fails=fails)
+        self._live += P.size(items) if isinstance(items, list) else 0
         self.loops[inst] = loop
         self._advance(loop)
 
@@ -357,8 +519,9 @@ class Scheduler:
             return
         loop.open.remove(index)
         loop.collecting.discard(index)
-        loop.collected[index - loop.offset] = value
+        self._live += loop.coll.put(index, value)  # type: ignore[union-attr]
         self._prune(self._iteration_scope(loop, index))
+        self._maybe_seal(loop)
         self._advance(loop)
 
     @_then_wake
@@ -379,11 +542,20 @@ class Scheduler:
         if loop is None or loop.running_batch != start:
             return
         loop.running_batch = None
-        loop.collected[start : start + len(outcome.collected)] = outcome.collected
-        loop.failures.extend(outcome.failures)
+        if outcome.collection is not None:
+            self._live += loop.coll.merge(outcome.collection)  # type: ignore[union-attr]
+        else:
+            for n, value in enumerate(outcome.collected):
+                self._live += loop.coll.put(start + n, value)  # type: ignore[union-attr]
+        if outcome.failure_collection is not None:
+            self._live += loop.fails.merge(outcome.failure_collection)  # type: ignore[union-attr]
+        else:
+            for f in outcome.failures:
+                self._live += loop.fails.put(int(f["index"]), {"code": f["code"], "message": f["message"]})  # type: ignore[union-attr]
         if outcome.stopped is not None:
             self._abort(loop, outcome.stopped)
             return
+        self._maybe_seal(loop)
         self._advance(loop)
 
     def cut_batch(self, loop_inst: Instance, start: int, end: int) -> None:
@@ -416,6 +588,7 @@ class Scheduler:
         else:
             scope.nodes[step.id] = NodeState.FAILED
             scope.results[step.key] = {"error": end.failure.to_json()}
+        self._live += P.size(scope.results[step.key])
         self._settled.append((inst, scope.results[step.key]))
         self.end(end)
 
@@ -432,6 +605,7 @@ class Scheduler:
         self._ready = []
         self._batches = []
         self.budget.drop_local()  # a loop waiting for its next iteration opens none now
+        self._spills = []
         self._budget_waits.clear()
 
     @_then_wake
@@ -503,6 +677,7 @@ class Scheduler:
                 # an edge from this region's own loop node is its body edge: live for every iteration
                 edges[e] = EdgeState.LIVE if source not in member_set and source == region else EdgeState.PENDING
         scope = Scope(key, region, dict.fromkeys(members, NodeState.WAITING), edges, {}, item, index, reserved=reserved)
+        self._live += self._scope_bytes(scope)
         if key:
             self._seq += 1
             scope.seq = self._seq
@@ -525,6 +700,7 @@ class Scheduler:
             if k and not self.scopes[k].frozen:
                 self._n_open -= 1
                 self._freed = True
+            self._live -= self._scope_bytes(self.scopes[k])
             del self.scopes[k]
 
     def _resolve(self, scope: Scope, step: Step, live_ports: set[str]) -> None:
@@ -587,10 +763,13 @@ class Scheduler:
         """The loop ends: nothing it waits for is still wanted."""
         del self.loops[loop.instance]
         self._capped.discard(loop.instance)
+        self._live -= P.size(loop.items) if isinstance(loop.items, list) else 0
+        self._live -= sum(c.tail_bytes + c.sealing_bytes for _, c in self._colls(loop))
         for key in [k for k, inst in self._budget_waits.items() if inst == loop.instance]:
             del self._budget_waits[key]
             self.budget.waiting = [n for n in self.budget.waiting if not (n.requester == LOCAL and n.key == key)]
         self._batches = [b for b in self._batches if b.loop != loop.instance]
+        self._spills = [sp for sp in self._spills if sp.loop != loop.instance]
 
     def _after_settle(self, scope: Scope) -> None:
         if scope.frozen:
@@ -622,7 +801,8 @@ class Scheduler:
         if loop.stop_on_error:
             self._abort(loop, failure)
             return
-        loop.failures.append({"index": index, "code": failure.code, "message": failure.message})
+        self._live += loop.fails.put(index, {"code": failure.code, "message": failure.message})  # type: ignore[union-attr]
+        self._maybe_seal(loop)
         self._advance(loop)
 
     def _abort(self, loop: LoopRun, failure: Failure) -> None:
@@ -643,12 +823,14 @@ class Scheduler:
 
     def _batch_over(self, loop: LoopRun, stopped: Failure | None) -> None:
         if self.ended is None:
-            self.outcome = BatchOutcome(list(loop.collected), list(loop.failures), stopped)
+            coll = loop.coll.to_json() if loop.coll is not None else None
+            fails = loop.fails.to_json() if loop.fails is not None else None
+            self.outcome = BatchOutcome([], [], stopped, collection=coll, failure_collection=fails)
             self.ended = RunEnd("succeeded")
 
     def _open_next(self, loop: LoopRun, *, reserved: bool = False) -> None:
         index = loop.offset + loop.next
-        item = loop.items[loop.next]
+        item = P.item_at(loop.items, loop.next)
         loop.next += 1
         loop.open.append(index)
         self._open_scope(
@@ -659,14 +841,14 @@ class Scheduler:
         """Open iterations up to the concurrency (or hand out the next batch), or complete the loop when every item
         is done."""
         if loop.batch:
-            if loop.running_batch is None and loop.next < len(loop.items):
+            if loop.running_batch is None and loop.next < P.count(loop.items):
                 start = loop.next
-                loop.next = min(start + loop.batch, len(loop.items))
+                loop.next = min(start + loop.batch, P.count(loop.items))
                 loop.running_batch = start
-                self._batches.append(Batch(loop.instance, start, loop.items[start : loop.next]))
+                self._batches.append(Batch(loop.instance, start, P.sliced(loop.items, start, loop.next)))
                 return
         else:
-            while loop.next < len(loop.items) and len(loop.open) < loop.concurrency and not loop.waiting:
+            while loop.next < P.count(loop.items) and len(loop.open) < loop.concurrency and not loop.waiting:
                 room = self._room(loop)
                 if room is None:  # the cap: it opens once scopes are freed (_settle_wakes)
                     if loop.instance not in self._capped:
@@ -683,12 +865,23 @@ class Scheduler:
                 self._open_next(loop, reserved=room)
                 if loop.instance not in self.loops:  # the iteration failed at once and stopped the loop
                     return
-        if not loop.open and loop.next >= len(loop.items) and loop.running_batch is None and not loop.waiting:
+        done = not loop.open and loop.next >= P.count(loop.items) and loop.running_batch is None and not loop.waiting
+        if done:
+            for which, coll in self._colls(loop):  # proto (§5.1): past 64 KiB, or already spilled, it ends as a handle
+                if (
+                    not coll.sealing
+                    and coll.tail_bytes > P.FLOOR
+                    and (coll.segs or coll.tail_bytes > P.INLINE_LIMIT or self.live > P.LIVE_BUDGET)
+                ):
+                    self._seal(loop, which, coll)
+        if done and not any(c.sealing for _, c in self._colls(loop)):
             self._drop_loop(loop)
             if loop.instance == self.batch_loop:
                 self._batch_over(loop, None)
                 return
-            output = {"items": loop.collected, "failures": loop.failures, "count": len(loop.items)}
+            items = loop.coll.output() if loop.coll is not None else []
+            failures = loop.fails.entries() if loop.fails is not None else []
+            output = {"items": items, "failures": failures, "count": P.count(loop.items)}
             scope = self.scopes.get(loop.instance.scope)
             if scope is not None and scope.failure is None and self.ended is None:
                 self.succeed(loop.instance, output, (DONE,))
@@ -767,6 +960,9 @@ class Scheduler:
             "batches_out": [
                 [self._i(i), n] for i, n in sorted(self._batches_out, key=lambda b: (self.order(b[0]), b[1]))
             ],
+            "spills_out": [
+                [self._i(i), w, n] for i, w, n in sorted(self._spills_out, key=lambda b: (self.order(b[0]), b[1], b[2]))
+            ],
             "budget": self.budget.to_json(),
             "budget_waits": [[k, self._i(i)] for k, i in self._budget_waits.items()],
             "batch_loop": self._i(self.batch_loop) if self.batch_loop else None,
@@ -789,15 +985,27 @@ class Scheduler:
         s._handed = {s._if(i) for i in data["handed"]} | set(s.loops)
         s._collects_out = {(s._if(i), int(n)) for i, n in data["collects_out"]}
         s._batches_out = {(s._if(i), int(n)) for i, n in data["batches_out"]}
+        s._spills_out = {(s._if(i), str(w), int(n)) for i, w, n in data["spills_out"]}
         s._budget_waits = {str(k): s._if(i) for k, i in data["budget_waits"]}
         s.batch_loop = s._if(data["batch_loop"]) if data["batch_loop"] else None
         s._seq = int(data["seq"])
         s.probe = dict(data["probe"])
         s._ready, s._collects, s._batches = s._rebuilt()
+        s._live = s._recount()
+        s._spills = [
+            Spill(loop.instance, coll.base, f, pairs, which)
+            for loop in s.loops.values()
+            for which, coll in s._colls(loop)
+            for f, pairs in sorted(coll.sealing.items())
+            if (loop.instance, which, f) not in s._spills_out
+        ]
         s._capped = {
             inst
             for inst, loop in s.loops.items()
-            if not loop.batch and not loop.waiting and loop.next < len(loop.items) and len(loop.open) < loop.concurrency
+            if not loop.batch
+            and not loop.waiting
+            and loop.next < P.count(loop.items)
+            and len(loop.open) < loop.concurrency
         }
         return s
 
@@ -829,22 +1037,24 @@ class Scheduler:
             if (loop.instance, i) not in self._collects_out
         ]
         batches = [
-            Batch(loop.instance, loop.running_batch, loop.items[loop.running_batch : loop.next])
+            Batch(loop.instance, loop.running_batch, P.sliced(loop.items, loop.running_batch, loop.next))
             for loop in self.loops.values()
             if loop.running_batch is not None and (loop.instance, loop.running_batch) not in self._batches_out
         ]
         return ready, collects, batches
 
     def _check_queues(self) -> None:
-        """Proto: restoring rebuilds exactly what's queued now."""
+        """Proto: restoring rebuilds exactly what's queued now, and counts the live state the same."""
+        if self._live != self._recount():
+            raise AssertionError(f"proto: live {self._live} != recount {self._recount()}")
         self._handed |= set(self.loops)  # a loop step is handed over for as long as its loop runs
         ready, collects, batches = self._rebuilt()
         if set(ready) != set(self._ready):
             raise AssertionError(f"proto: rebuilt ready {len(ready)} != queued {len(self._ready)}")
         if {(c.loop, c.index, c.scope) for c in collects} != {(c.loop, c.index, c.scope) for c in self._collects}:
             raise AssertionError("proto: rebuilt collects differ")
-        if {(b.loop, b.start, len(b.items)) for b in batches} != {
-            (b.loop, b.start, len(b.items)) for b in self._batches
+        if {(b.loop, b.start, P.count(b.items)) for b in batches} != {
+            (b.loop, b.start, P.count(b.items)) for b in self._batches
         }:
             raise AssertionError("proto: rebuilt batches differ")
 
@@ -920,97 +1130,19 @@ class Scheduler:
     def _loop2(self, loop: LoopRun) -> list[Any]:
         return [
             self._i(loop.instance), loop.items, loop.concurrency, int(loop.stop_on_error), loop.offset, loop.batch,
-            loop.next, list(loop.open), sorted(loop.collecting), loop.collected, loop.failures, loop.running_batch,
-            int(loop.waiting),
+            loop.next, list(loop.open), sorted(loop.collecting), loop.coll.to_json() if loop.coll else None,
+            loop.fails.to_json() if loop.fails else None, loop.running_batch, int(loop.waiting),
         ]  # fmt: skip
 
     def _loop2_from(self, raw: list[Any]) -> LoopRun:
         return LoopRun(
-            instance=self._if(raw[0]), items=list(raw[1]), concurrency=int(raw[2]), stop_on_error=bool(raw[3]),
-            offset=int(raw[4]), batch=int(raw[5]), next=int(raw[6]), open=[int(i) for i in raw[7]],
-            collecting={int(i) for i in raw[8]}, collected=list(raw[9]), failures=list(raw[10]),
+            instance=self._if(raw[0]), items=raw[1] if P.is_kind(raw[1], P.LIST) else list(raw[1]),
+            concurrency=int(raw[2]), stop_on_error=bool(raw[3]), offset=int(raw[4]), batch=int(raw[5]),
+            next=int(raw[6]), open=[int(i) for i in raw[7]], collecting={int(i) for i in raw[8]},
+            coll=Collection.from_json(raw[9]) if raw[9] else None,
+            fails=Collection.from_json(raw[10]) if raw[10] else None,
             running_batch=raw[11], waiting=bool(raw[12]),
         )  # fmt: skip
-
-
-def _key_json(key: ScopeKey) -> list[list[Any]]:
-    return [[loop, index] for loop, index in key]
-
-
-def _key_from(raw: list[list[Any]]) -> ScopeKey:
-    return tuple((str(loop), int(index)) for loop, index in raw)
-
-
-def _inst_json(inst: Instance) -> list[Any]:
-    return [_key_json(inst.scope), str(inst.step)]
-
-
-def _inst_from(raw: list[Any]) -> Instance:
-    return Instance(_key_from(raw[0]), uuid.UUID(raw[1]))
-
-
-def _scope_json(s: Scope) -> dict[str, Any]:
-    return {
-        "key": _key_json(s.key),
-        "region": str(s.region) if s.region else None,
-        "nodes": [[str(n), state.value] for n, state in s.nodes.items()],
-        "edges": [[e, state.value] for e, state in s.edges.items()],
-        "results": s.results,
-        "item": s.item,
-        "index": s.index,
-        "failure": s.failure.to_json() if s.failure else None,
-        "frozen": s.frozen,
-    }
-
-
-def _scope_from(raw: dict[str, Any]) -> Scope:
-    return Scope(
-        key=_key_from(raw["key"]),
-        region=uuid.UUID(raw["region"]) if raw["region"] else None,
-        nodes={uuid.UUID(n): NodeState(state) for n, state in raw["nodes"]},
-        edges={int(e): EdgeState(state) for e, state in raw["edges"]},
-        results=dict(raw["results"]),
-        item=raw["item"],
-        index=raw["index"],
-        failure=Failure.from_json(raw["failure"]) if raw["failure"] else None,
-        frozen=bool(raw["frozen"]),
-    )
-
-
-def _loop_json(loop: LoopRun) -> dict[str, Any]:
-    return {
-        "instance": _inst_json(loop.instance),
-        "items": loop.items,
-        "concurrency": loop.concurrency,
-        "stop_on_error": loop.stop_on_error,
-        "offset": loop.offset,
-        "batch": loop.batch,
-        "next": loop.next,
-        "open": list(loop.open),
-        "collecting": sorted(loop.collecting),
-        "collected": loop.collected,
-        "failures": loop.failures,
-        "running_batch": loop.running_batch,
-        "waiting": loop.waiting,
-    }
-
-
-def _loop_from(raw: dict[str, Any]) -> LoopRun:
-    return LoopRun(
-        instance=_inst_from(raw["instance"]),
-        items=list(raw["items"]),
-        concurrency=int(raw["concurrency"]),
-        stop_on_error=bool(raw["stop_on_error"]),
-        offset=int(raw["offset"]),
-        batch=int(raw["batch"]),
-        next=int(raw["next"]),
-        open=[int(i) for i in raw["open"]],
-        collecting={int(i) for i in raw["collecting"]},
-        collected=list(raw["collected"]),
-        failures=list(raw["failures"]),
-        running_batch=raw["running_batch"],
-        waiting=bool(raw["waiting"]),
-    )
 
 
 __all__ = [

@@ -467,10 +467,11 @@ class LoopBatch(Execution):
                 self.sched.start_batch(
                     uuid.UUID(start.loop_step),
                     outer,
-                    start.items,
+                    start.items_handle or start.items,
                     offset=start.offset,
                     concurrency=start.concurrency,
                     stop_on_error=start.stop_on_error,
+                    base=start.collect_base,
                 )
             if await self._drive() == CONTINUE:
                 await self._flush()
@@ -508,6 +509,8 @@ class LoopBatch(Execution):
         result = BatchResult(
             collected=outcome.collected,
             failures=outcome.failures,
+            collection=outcome.collection,
+            failure_collection=outcome.failure_collection,
             stopped=outcome.stopped.to_json() if outcome.stopped else None,
             iterations=self.sched.iterations,
             secrets=list(self._secrets),
