@@ -15,6 +15,8 @@ x-app: &app
     DEWPOINT_KEK_PREVIOUS_ID: ${DEWPOINT_KEK_PREVIOUS_ID:-}
     DEWPOINT_PUBLIC_ORIGIN: ${DEWPOINT_PUBLIC_ORIGIN:-http://localhost:8080}
     DEWPOINT_RP_ID: ${DEWPOINT_RP_ID:-localhost}
+    # Recorded once by the migrate step, and checked by every process that talks to Temporal (engine 2b spec §2.1).
+    DEWPOINT_TEMPORAL_NAMESPACE: ${DEWPOINT_TEMPORAL_NAMESPACE:-default}
 
 services:
   postgres:
@@ -35,11 +37,18 @@ services:
     <<: *app
     # The schema, then what this deployment is, recorded once (engine 2b spec §2.1): production and gated unless a
     # development setup opts in with its own database and Temporal namespace. Every later run checks the same values.
-    # Then a data key for any tenant without one (created before 2b-1a): the payload codec only reads keys (§6.3).
-    command: ["sh", "-c", "set -e; alembic upgrade head; dewpoint platform init-environment; dewpoint keys ensure-tenants"]
+    # Then a data key for any tenant without one (created before 2b-1a): the payload codec only reads keys (§6.3). The
+    # key admin lists every tenant under row-level security (migration 0013), so it needs no role that bypasses it.
+    command:
+      - sh
+      - -c
+      - >-
+        set -e; alembic upgrade head; dewpoint platform init-environment;
+        DEWPOINT_DATABASE_URL=$$DEWPOINT_ADMIN_DATABASE_URL dewpoint keys ensure-tenants
     environment:
       <<: *appenv
       DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_owner:${POSTGRES_PASSWORD}@postgres/dewpoint
+      DEWPOINT_ADMIN_DATABASE_URL: postgresql+asyncpg://dewpoint_admin_login:${DEWPOINT_ADMIN_DB_PASSWORD}@postgres/dewpoint
       DEWPOINT_ENVIRONMENT: ${DEWPOINT_ENVIRONMENT:-production}
     depends_on: { postgres: { condition: service_healthy } }
     restart: "no"
