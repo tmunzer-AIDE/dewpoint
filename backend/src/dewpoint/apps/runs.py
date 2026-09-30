@@ -11,8 +11,9 @@ locks the other side takes too:
 
 Then `RunGraph` starts, with the run's id as its workflow id. A lost acknowledgement looks like a failure, so an
 uncertain start is repeated with the same id: Temporal refuses a duplicate id (`REJECT_DUPLICATE`, which also covers
-a run that has already finished), and that refusal confirms the first start. Only a confirmed refusal records the run
-as failed (`start_failed`)."""
+a run that has already finished), and that refusal confirms the first start. Only a confirmed refusal, or a start
+never sent, records the run as failed (`start_failed`). The client encrypts a start before sending it, so a start the
+codec refuses was never sent (`CodecRefusedError`)."""
 
 import asyncio
 import uuid
@@ -26,6 +27,7 @@ from temporalio.converter import WorkflowSerializationContext
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
+from dewpoint.apps.codec import CodecRefusedError
 from dewpoint.apps.worker.deployment import current_abi
 from dewpoint.apps.workflow_ops import abi_reasons
 from dewpoint.core.config import Settings
@@ -178,13 +180,17 @@ async def start_run(
     return run.id
 
 
+def _unencrypted(e: BaseException) -> str:
+    return f"The run's start couldn't be encrypted ({type(e.__cause__ or e).__name__})."
+
+
 async def _start(client: Client, start: RunInput, run_id: uuid.UUID) -> None:
     workflow_id = run_workflow_id(start.tenant_id, str(run_id))
     context = WorkflowSerializationContext(namespace=client.namespace, workflow_id=workflow_id)
     try:  # encrypted with its tenant's key first (engine 2b spec §6.2): a start that can't be was never sent
         await client.data_converter.with_context(context).encode([start])
     except Exception as e:
-        raise StartRefusedError(f"The run's start couldn't be encrypted ({type(e).__name__}).") from e
+        raise StartRefusedError(_unencrypted(e)) from e
     uncertain = False
     last: BaseException | None = None
     for wait in (*START_RETRY_S, None):
@@ -199,6 +205,10 @@ async def _start(client: Client, start: RunInput, run_id: uuid.UUID) -> None:
             return
         except WorkflowAlreadyStartedError:
             return  # an earlier attempt was accepted; its answer was lost
+        except CodecRefusedError as e:  # the client encrypts the start again, and failed: this attempt wasn't sent
+            if not uncertain:
+                raise StartRefusedError(_unencrypted(e)) from e
+            last = e  # an earlier attempt was sent, and may have been accepted
         except RPCError as e:
             if e.status in _REFUSED and not uncertain:
                 raise StartRefusedError(f"Temporal refused the run ({e.status.name}).") from e

@@ -6,10 +6,16 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from temporalio.api.workflowservice.v1 import DescribeWorkerDeploymentRequest, DescribeWorkerDeploymentResponse
+from temporalio.api.workflowservice.v1 import (
+    DescribeWorkerDeploymentRequest,
+    DescribeWorkerDeploymentResponse,
+    StartWorkflowExecutionResponse,
+)
+from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.converter import DataConverter
 from temporalio.exceptions import WorkflowAlreadyStartedError
@@ -108,6 +114,42 @@ class FakeClient:
         self.started.append((arg, id, task_queue))
         if isinstance(answer, LostAck):
             raise answer.error
+
+
+class FakeService(FakeDeployment):
+    """Temporal's service under the SDK's own client, which builds and encrypts each start before sending it here.
+    Each start sent takes the next answer: None accepts, an exception fails the call."""
+
+    def __init__(self, *answers: BaseException | None) -> None:
+        super().__init__(this_build())
+        self.answers = list(answers)
+        self.sent: list[str] = []
+
+    async def start_workflow_execution(self, request: Any, **_: Any) -> StartWorkflowExecutionResponse:
+        self.sent.append(request.workflow_id)
+        answer = self.answers.pop(0) if self.answers else None
+        if answer is not None:
+            raise answer
+        return StartWorkflowExecutionResponse(run_id=str(uuid.uuid4()))
+
+
+def sdk_client(service: FakeService, keys: FixtureKeys) -> Client:
+    service_client = SimpleNamespace(workflow_service=service, config=SimpleNamespace(identity="test"))
+    return Client(service_client, namespace="default", data_converter=data_converter(keys))  # type: ignore[arg-type]
+
+
+@dataclass
+class KeysThatGoAway(FixtureKeys):
+    """Keys read `readable` times, then the database is gone. asyncpg's refusal is a `ConnectionError`, as a lost
+    connection to Temporal can be."""
+
+    readable: int = 1
+
+    async def active(self, tenant_id: str) -> tuple[int, Any]:
+        if self.readable == 0:
+            raise ConnectionRefusedError("the database is down")
+        self.readable -= 1
+        return await super().active(tenant_id)
 
 
 @pytest.fixture(autouse=True)
@@ -318,6 +360,42 @@ async def test_a_start_that_stays_uncertain_leaves_the_run_running(
         )  # fmt: skip
     row = await only_run(owner_sessionmaker, ctx.tenant_id)
     assert (row.status, row.error_code, len(client.calls), e.value.run_id) == ("running", None, 3, row.id)
+
+
+async def test_a_start_the_client_cant_encrypt_after_its_check_is_refused_and_its_run_failed(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """Owner's review (Task 6): the check encrypts the start, then the client encrypts it again before sending it. When
+    that second encryption fails, nothing was sent: the start is refused and the run failed, never left `running`."""
+    ctx, _, version = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings)
+    service = FakeService()
+    with pytest.raises(StartRefusedError, match=r"couldn't be encrypted \(ConnectionRefusedError\)"):
+        await start_run(
+            dispatch_sessionmaker, sdk_client(service, KeysThatGoAway(readable=1)), api_settings,
+            tenant_id=ctx.tenant_id, version_id=version, trigger={},
+        )  # fmt: skip
+    row = await only_run(owner_sessionmaker, ctx.tenant_id)
+    assert (row.status, row.error_code, service.sent) == ("failed", START_FAILED, [])
+
+
+async def test_a_start_that_cant_be_encrypted_after_an_uncertain_attempt_stays_uncertain(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """The first attempt was sent and its answer lost, so the run may be executing: the attempts after it that can't
+    be encrypted don't make the start refused."""
+    ctx, _, version = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings)
+    service = FakeService(rpc(RPCStatusCode.UNAVAILABLE))
+    with pytest.raises(StartUncertainError):
+        await start_run(
+            dispatch_sessionmaker, sdk_client(service, KeysThatGoAway(readable=2)), api_settings,
+            tenant_id=ctx.tenant_id, version_id=version, trigger={},
+        )  # fmt: skip
+    row = await only_run(owner_sessionmaker, ctx.tenant_id)
+    assert (row.status, row.error_code, service.sent) == (
+        "running",
+        None,
+        [run_workflow_id(str(ctx.tenant_id), str(row.id))],
+    )
 
 
 async def test_retirement_first_makes_admission_refuse(

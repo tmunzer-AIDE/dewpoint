@@ -42,7 +42,11 @@ CODEC_OVERHEAD = 256
 
 
 class CodecRefusedError(Exception):
-    """A payload the codec won't encode or decode. The messages are fixed: they never quote a payload."""
+    """A payload the codec won't encode or decode. The messages are fixed: they never quote a payload.
+
+    Encoding raises nothing else: whatever stops it (no tenant, a key that can't be read, a database that doesn't
+    answer) is this error, with its cause chained. A client encodes before it sends, so when a call fails with it,
+    nothing was sent (`apps.runs`)."""
 
 
 class KeySource(Protocol):
@@ -77,13 +81,16 @@ class TenantCodec(PayloadCodec, WithSerializationContext):
 
     async def encode(self, payloads: Sequence[Payload]) -> list[Payload]:
         tenant = self._tenant()
-        version, key = await self._keys.active(tenant)
-        out = []
-        for p in payloads:
-            nonce = os.urandom(NONCE_BYTES)
-            metadata = {"encoding": ENCODING, TENANT: tenant.encode(), KEY_VERSION: str(version).encode()}
-            data = nonce + key.encrypt(nonce, p.SerializeToString(), _aad(tenant, version))
-            out.append(Payload(metadata=metadata, data=data))
+        try:
+            version, key = await self._keys.active(tenant)
+            out = []
+            for p in payloads:
+                nonce = os.urandom(NONCE_BYTES)
+                metadata = {"encoding": ENCODING, TENANT: tenant.encode(), KEY_VERSION: str(version).encode()}
+                data = nonce + key.encrypt(nonce, p.SerializeToString(), _aad(tenant, version))
+                out.append(Payload(metadata=metadata, data=data))
+        except Exception as e:
+            raise CodecRefusedError(f"The payload couldn't be encrypted ({type(e).__name__}).") from e
         return out
 
     async def decode(self, payloads: Sequence[Payload]) -> list[Payload]:
