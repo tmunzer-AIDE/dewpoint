@@ -40,9 +40,14 @@
     answer, so the rotation and retirement bounds stay exact and a long database outage fails the payloads that need
     the key (§2.7, §6.3); `dewpoint keys ensure-tenants` runs as the key admin, which lists tenants under row-level
     security (§6.3).
-  - Revision 5 (pending the owner's approval) records the 2b-1b go/no-go probe in §11.2: promising, not yet a go.
-    It lists the measured passes, five design additions, and the conditions still to be proven, with two
-    counterexamples: a near-limit trigger, and loops waiting on the cap.
+  - Revision 5 records the 2b-1b go/no-go probe in §11.2, approved by the owner as an experiment record: promising,
+    not yet a go. It lists the measured passes, five design additions, and the conditions still to be proven, with
+    two counterexamples: a near-limit trigger, and loops waiting on the cap. It also revises §5.3, pending the owner's
+    approval: the bound applies to the whole continued input. Each component (the envelope, the trigger, learned
+    sensitive values, the structure, the live values) has an accounting rule and a worst-case maximum, and the
+    live-state budget is what the others leave. §3.5 bounds the trigger envelope, a loop step inside an iteration
+    starts only when its loop can open an iteration, and §4.5 refuses the parallel variable writer that would make
+    such a deferred start read differently.
 - **Parent specs:**
   - `2026-09-24-dewpoint-architecture-design.md` (§5, §6.1, §6.5, §6.8, §12, §15). This spec **changes** its
     workflow-id contract (§6.1), replaces its `outbox` table (§6.1), details its claim check (§6.5) and settles the
@@ -246,6 +251,10 @@ One function in `apps` validates a trigger against the version's input schema, t
   nested handle, never an untainted view of a sensitive value.
 - **Reappearing text:** an untainted field that contains a string (4 characters or more) from one of the trigger's
   own sensitive fields is claimed with taint.
+- **Then the envelope:** while the trigger envelope passes `TRIGGER_INLINE` (initially 64 KiB), its largest remaining
+  subtree is claimed without taint. Ties are broken by pointer. The root is claimed last, and the envelope is then one
+  handle. Every continued input carries the envelope again, so it has to stay small (§5.3). A sub-flow's input is split
+  the same way when its parent starts it.
 - The result is the trigger envelope, with handles in place of claims. In 2b-1 the caller is `admit`/`start_run`; in
   2b-2, `admit_request`.
 
@@ -369,6 +378,9 @@ Only these sites may turn tainted input into plain output:
 - A tainted value passed into a sub-flow's input field that the child doesn't mark `x-sensitive`, so each version's
   own analysis stays true.
 - Sensitive literals and defaults (§3.8).
+- A variable read inside a loop body when a branch that can run beside that loop writes the variable
+  (`var.parallel_write`). A loop step inside an iteration may start later than it became ready (§5.3); this keeps what
+  it reads the same.
 
 ### 4.6 Visible metadata
 
@@ -441,69 +453,157 @@ value still travels inline, within §5.2's limits.
 
 ### 5.3 Live state and snapshots
 
-- **One budget for the whole snapshot.** The workflow keeps the encoded size of its entire snapshot — the
-  scheduler's structure and ready queues, scope results, variables, loop collections, failure lists, every handle —
-  within a **live-state budget** (initially 1 MiB), maintained as state changes.
-- **Enforced where results merge.** The inline threshold an activity sees (§5.4) is advisory; the merge is
-  authoritative. A result that would push the total past the budget is spilled into a claim, and only its handle is
-  merged. Merges happen one at a time, so concurrent activities can't all spend the same headroom.
-- **Collections compact.** A loop's collected list — up to its `item_cap` (at most 10,000) items, and batch results
-  merging into it — is a list of immutable **segment** claims plus a short tail; once the tail passes a segment size
-  it's spilled as one claim. Failure lists compact the same way. Thousands of handles become a few segment handles.
-- **Pending work is cursors,** never materialized queues: a loop's items (a handle or a list) plus its next index,
-  and no stored ready queue (below).
-- **Structure is encoded compactly — a proposed design, not yet a proven bound.** Experiment 3 found structure, not
-  values, dominating wide loop bodies: 665 KB, of which 5.7 KB were values (a ready queue of 4,549 units, and node
-  and edge states keyed by id). The proposed `snapshot_format` 2 stores each scope's node and edge states as one code
-  per node and per edge in region order, uses indexes instead of ids, and doesn't store the ready queue: restoring
-  rebuilds it from the node and edge states in a canonical order (scope order, then node order), which changes the
-  scheduling order and so comes with its ABI bump. On the measured snapshot: 665 KB → 72 KB with indexes, 36 KB with
-  the ready queue rebuilt.
-- **Open iterations are capped per execution — also proposed, and provisional until the prototype proves it.**
-  Today only each loop's concurrency (at most 10) bounds its open iterations, nesting multiplies them, and
-  `IN_FLIGHT_CAP` counts only activities and children, so structure has no bound. The proposal:
+**The bound is on the whole continued input** — what an execution sends when it continues as new: its run or batch
+input with the snapshot, encoded as Temporal holds it. It must fit within `SNAPSHOT_MAX` (initially 1.5 MiB). The
+input has five components, each with an accounting rule and a worst-case maximum. The live-state budget is one of
+them, and it is what the others leave:
+
+`LIVE_BUDGET = SNAPSHOT_MAX − ENVELOPE_MAX − TRIGGER_MAX − STRUCTURE_MAX − CODEC_OVERHEAD`
+
+So the bound holds by construction. Each maximum is computed by a test that builds the largest encoding the limits
+allow, and a test fails if `LIVE_BUDGET` would fall below its floor (initially 1 MiB). If it does, a constant changes
+(`OPEN_SCOPES_CAP`, `TRIGGER_INLINE`), never the bound. Continuing still measures the encoded input (the check 2b-1a
+added): past `SNAPSHOT_MAX` is then a bug, and the run fails with `snapshot_too_large` rather than retry a workflow
+task.
+
+1. **The envelope:** identifiers, settings, counters and deadlines, a child's `Parent`, and the snapshot's own header.
+   - Its fields are fixed and its ids follow a fixed grammar (§6.1), so `ENVELOPE_MAX` is a constant: the longest
+     batch workflow id at the deepest nesting, with every field at its widest.
+   - From 2b-1b it holds no learned sensitive values (component 3).
+   - Accounting: none at run time.
+2. **The trigger:** the inline trigger envelope, which every continued input carries again.
+   - §3.5 bounds it: after the claims, the envelope's largest subtrees are claimed until it's within `TRIGGER_INLINE`
+     (initially 64 KiB), down to claiming the whole trigger.
+   - `TRIGGER_MAX = TRIGGER_INLINE + HANDLE_MAX`, and the trigger never changes during a run.
+   - A start may carry up to the payload limit (1.75 MiB), so a trigger near it still starts, and its continuations
+     carry at most `TRIGGER_MAX` (§11.2, condition 1).
+3. **Learned sensitive values:** none.
+   - From 2b-1b they leave history for the run's secret index (§3.7).
+   - `SECRETS_BYTES` and the inline list retire with ABI 6.
+4. **The structure:** what isn't a value.
+   - **What it covers:**
+     - scopes: their keys, and one code per node and per edge of their region;
+     - started loops: their counters, their open and collecting indexes, and their collections' headers;
+     - units handed out: sleeping timers, spills in flight;
+     - the iteration budget and its waits.
+   - **Scopes:** at most `OPEN_SCOPES_CAP + D` iteration scopes, the root, and a batch's frozen scopes (at most
+     `MAX_LOOP_DEPTH` of them, which hold no codes). Each scope's codes number at most its region's nodes plus edges.
+   - **Loops:**
+     - A loop step inside an iteration scope starts only when its loop can open an iteration at once. That means room
+       under the cap and an iteration's budget, or its level's reserved scope on the progress path. Until then the step
+       stays queued, one state code. When it reads its values is below.
+     - A started loop takes the scope its own finished iteration frees, before anything else does, so it holds a
+       scope until it finishes.
+     - A loop waiting for iteration budget holds none, but no loop starts while the budget is exhausted.
+     - So started loops in iteration scopes number at most `OPEN_SCOPES_CAP + D`, and root-region loops at most the
+       root region's loop steps.
+     - A loop's metadata is bounded: at most 10 open and 10 collecting indexes, the concurrency limit. Its items and
+       its collections' contents are values (component 5).
+   - **Units:** at most `IN_FLIGHT_CAP` units are handed out at once, spills included, so the timers and handed-out
+     records a snapshot keeps are bounded by it.
+   - `STRUCTURE_MAX` is the sum of three terms:
+     - `(OPEN_SCOPES_CAP + D_MAX + 1 + MAX_LOOP_DEPTH) × SCOPE_MAX`;
+     - `(OPEN_SCOPES_CAP + D_MAX + ROOT_LOOPS_MAX) × LOOP_MAX`;
+     - `IN_FLIGHT_CAP × UNIT_MAX`, plus the budget's fixed part.
+
+     `SCOPE_MAX` is the codes and fields of the largest region the graph limits allow (500 nodes, 2,000 edges), and
+     `LOOP_MAX` and `UNIT_MAX` are fixed by the encoding.
+   - Accounting: the cap and the deferred start enforce it. The counts are checked as scopes open and loops start.
+5. **Live values, within `LIVE_BUDGET`:** every value the snapshot holds inline except the trigger.
+   - **What it covers:**
+     - settled steps' results in open scopes, and scopes' items;
+     - loops' inline item lists;
+     - collections' tails, the values being sealed, and their segment lists;
+     - the variables;
+     - a batch's frozen outer results.
+   - **Accounting rule:** each value is counted at its exact encoded size (compact JSON, as the payload converter
+     writes it, with its fixed framing in the snapshot) when it enters the state, and uncounted when it leaves. The
+     counter isn't stored: restoring counts it again from the snapshot, and a test asserts the two agree at every
+     snapshot.
+   - **Enforcement:** it runs after every change: a merge, a result, a scope opening, a loop starting, a spill written.
+     - While the counter passes `LIVE_BUDGET`, the largest spillable container is claimed and replaced by its handle,
+       ties broken by scheduling order.
+     - Values on their way to a claim still count until they're written, and the choice discounts them.
+     - The containers:
+       - a collection's tail, and its segment list, claimed as an index segment;
+       - a loop's inline item list: the loop waits for its segments, then carries on over them as a cursor;
+       - a scope's whole result set, and its item;
+       - the variables;
+       - a frozen scope's result set.
+     - A container is spillable when it's larger than `HANDLE_MAX`. A reference into a claimed container reads by
+       handle, in an activity (§3.3), as any claim.
+   - **Bound:**
+     - With every spillable container claimed, the live state is at most `HANDLE_MAX` per container, and component 4's
+       counts bound the containers.
+     - `LIVE_BUDGET` must be above that minimum, and a test proves it. The budget then holds at every continue:
+       continuing happens only when nothing is in flight, spills included.
+
+**A loop step started later reads what it would have read.**
+- A step's values are resolved when it starts, not when it becomes ready, and the in-flight cap can already start a
+  ready step later (engine-core §6). A loop step inside an iteration, deferred by the cap, reads the same values:
+  - the trigger, the results it references, `item`, `index` and `loops.*` don't change once it's ready;
+  - inside a loop body, outer `vars` are read-only (engine-core §4.3). From 2b-1b the validator also rejects a
+    variable read inside a loop body when a branch that can run beside that loop writes the variable (§4.5). So a
+    deferred read sees the value it would have seen when the step became ready.
+- `run.now` is the one exception, by definition: it reads the time the step starts, as for any step the in-flight cap
+  holds back.
+- A root-region loop step isn't deferred.
+- Tests:
+  - the same run, with the cap and with a cap large enough never to defer, reads the same values;
+  - publish refuses the parallel writer.
+
+**The rest of the design:**
+- **Merges are authoritative.** The inline threshold an activity sees (§5.4) is advisory. A result that would pass the
+  budget is claimed before it merges, and merges happen one at a time, so concurrent activities can't all spend the
+  same headroom.
+- **Collections compact.** A loop's collected values and its failure list are each immutable **segment** claims plus
+  a short tail. The tail is claimed as one segment once it passes `SEGMENT_BYTES` (initially 256 KiB), or earlier when
+  the budget requires. The segment list is a container itself (component 5), so a collection's inline part stays
+  bounded however many segments it has.
+- **Pending work is cursors:** a loop's items (a handle, or an inline list, which is a container) and its next index.
+- **`snapshot_format` 2** (measured in §11.2): one code per node and per edge in region order, indexes instead of
+  ids, and no stored queue. Restoring rebuilds what's queued from the node, edge and loop states. The snapshot records
+  only the units already handed out: in practice, sleeping timers.
+- **Open iterations are capped per execution:**
   - **The general cap:** a loop opens an iteration only while the execution has fewer than `OPEN_SCOPES_CAP`
     (initially 100) open iteration scopes.
-  - **A reservation for one dependency chain:** `D` more scopes are reserved, where `D` is the version's deepest loop
-    nesting, computed at publish. Only the **progress chain** may use them: the loops nested, level by level, inside
-    the oldest open iteration that is waiting for an inner loop to open an iteration ("oldest" by opening order, so
-    it's deterministic across replay). On that chain, a loop may open one iteration at a time from the reservation.
-    Sibling loops elsewhere — unrelated loops ready in parallel, however many — use only the general cap.
+  - **The reservation, one scope per nesting level,** `D` in all, where `D` is the version's deepest loop nesting,
+    computed at publish.
+    - The **progress path** runs from the execution's root (a batch's loop scope) through the oldest open iteration
+      at each level, "oldest" by opening order, so it's deterministic across replay.
+    - A loop on that path may open one iteration from its level's reserved scope while that scope is free.
+    - A shared pool of `D` scopes isn't enough: sibling loops on one level can exhaust it, and the next level
+      deadlocks (§11.2).
   - **The bound:** open iteration scopes never exceed `OPEN_SCOPES_CAP + D`.
-  - **Progress:** the oldest waiting iteration can always open one iteration at each level beneath it, down to a body
-    with no loop, whose steps run under `IN_FLIGHT_CAP` (activities and children always end or time out). So the
-    oldest waiting iteration always completes and frees its scopes, and the next oldest becomes the chain. An outer
-    iteration waiting for an inner loop is never starved.
-- **The go/no-go for this design** is a real dev-server test of a prototype, run before the 2b-1b plan's tasks. It
-  must show: encoded snapshots within `SNAPSHOT_MAX` at the limits (bodies up to the node limit, nested loops,
-  parallel sibling loops, 10,000-item collections, 100,000 iterations); repeated continues restoring identically;
-  deterministic ordering across replay; open scopes never above `OPEN_SCOPES_CAP + D`; and nested loops, parallel
-  sibling loops and wide bodies — together and at the cap — always making progress, with no deadlock. Until it
-  passes, the spec promises only that continuing is guarded against size (§5.2), not a size bound, and the progress
-  rule above stays provisional. The first probe is recorded in §11.2: promising, not yet a go.
-- **The snapshot is one payload.** Before continuing as new, after compaction, the workflow checks that the encoded
-  snapshot is within `SNAPSHOT_MAX` (initially 1.5 MiB — well below the history size at which Temporal suggests
-  continuing, so a restored run doesn't immediately continue again), and that the old run's history keeps headroom
-  (the drain thresholds reserve room for the snapshot). If either fails, the run fails with `snapshot_too_large`. A
-  structure that can't be compacted fails the run before history headroom is exhausted.
-- **2b-1a promises only the check:** a continued run's input, snapshot and all, past `SNAPSHOT_MAX` once encoded
-  fails the run cleanly with `snapshot_too_large` (a batch fails its loop). Compaction, segment claims, the live-state
-  budget and a proven bound are 2b-1b's.
+  - **Progress:** the deepest scope on the path can always open an iteration of its own loop, from its level's
+    reserved scope. Steps without loops run under `IN_FLIGHT_CAP`, and activities and children always end or time out.
+    So the path's deepest iteration completes and frees its scopes, and the path moves on. An outer iteration waiting
+    for an inner loop is never starved.
+- **The go/no-go.** The first probe (§11.2) measured the tested workloads: promising, not yet a go. The gate passes on
+  a focused follow-up that tests these rules at their limits:
+  - a near-limit trigger;
+  - every container of component 5 together: the variables, a batch's frozen results, and collections whose segment
+    indexes grow;
+  - many sibling loops under the cap.
+
+  For each, it measures every component against its maximum, and the whole encoded continued input against
+  `SNAPSHOT_MAX`. It also checks the deferred loop step's reads. Until the gate passes, the spec promises only that
+  continuing is guarded against size (§5.2), and the rules above stay provisional.
+- **2b-1a promises only the check:** a continued run's input past `SNAPSHOT_MAX` once encoded fails the run cleanly
+  with `snapshot_too_large` (a batch fails its loop). The components above and a proven bound are 2b-1b's.
+- **History headroom:** the drain thresholds reserve room in the old run's history for the snapshot, so a structure
+  that can't be compacted fails the run before history headroom is exhausted.
 - **Writes are idempotent and hash-checked.** A spill's claim id is derived by the workflow, deterministically, so a
-  retried activity writes the same row; a row that already exists must match the content hash the activity
-  computed, or the activity fails without writing.
+  retried activity writes the same row. A row that already exists must match the content hash the activity computed,
+  or the activity fails without writing.
 - **Restoring** reads the snapshot's cursors and segment handles deterministically, across repeated continues.
-- **The bounds are measured, not hoped for:** experiment 3 (§11) and the go/no-go above establish them at the real
-  limits —
-  `item_cap` up to 10,000 with collection, the logical run's 100,000 iterations, handle counts, nested loops, batch
-  merges, structural growth with no result merge, and repeated continues. The spec states the measured values when
-  2b-1b lands; until then it says continuing is guarded against size, not that it never fails.
 
 ### 5.4 Values the workflow makes
 
 Activity inputs carry the current inline threshold, derived deterministically from workflow state: above the
-budget, activities claim outputs larger than a small floor (1 KiB). Values the workflow makes itself — local CEL
-results, transform outputs, variable values — are spilled one at a time when the budget requires.
+budget, activities claim outputs larger than a small floor (1 KiB). Values the workflow makes itself (local CEL
+results, transform outputs, variable values) enter the live state like any value. §5.3's enforcement claims the
+largest container when the budget requires.
 
 ## 6. Codec, keys and workflow ids
 
@@ -1103,7 +1203,8 @@ For every continued run, the probe recorded:
 - many sibling loops under the cap.
 
 The alternative is a revision that offloads these fields. Either way, the proof must show that the encoded whole
-continued input fits `SNAPSHOT_MAX`. The 2b-1b task plan waits for it.
+continued input fits `SNAPSHOT_MAX`. The 2b-1b task plan waits for it. Revision 5's §5.3 gives each condition a rule
+and a worst-case maximum, and the follow-up tests those rules.
 
 **Also measured.**
 - **History cost:** a value that returns inline, and then leaves again as part of a collection's spill, crosses history
@@ -1185,8 +1286,9 @@ measurements establish it; the spec is revised with the measured value when that
 - **Measured before they're final:** the outgoing-payload limit (1.75 MiB) and the codec-overhead bound (§5.2: 256
   bytes, which a test proves for `TenantCodec`; the experiment's codec added 103–105); the bound on carried sensitive
   values (256 KiB, §5.2); the key cache's TTL (5 minutes, §6.4); the
-  per-task outgoing-byte budget (3 MiB under a 4 MiB gRPC limit, §5.2); the live-state budget (1 MiB), `SNAPSHOT_MAX`
-  (1.5 MiB) and `OPEN_SCOPES_CAP` (100, §5.3); the
+  per-task outgoing-byte budget (3 MiB under a 4 MiB gRPC limit, §5.2); `SNAPSHOT_MAX` (1.5 MiB), `OPEN_SCOPES_CAP`
+  (100), `TRIGGER_INLINE` (64 KiB) and `SEGMENT_BYTES` (256 KiB), with the live-state budget derived from them and
+  floored at 1 MiB (§5.3); the
   spill floor (1 KiB, §5.4); the secret-index bounds (100,000 strings or 8 MiB, §3.7).
 - **Operational intervals:** worker health every 30 s, live for 90 s (§2.7); dispatcher and reconciler reports
   within 5 minutes (§10.6); the retention SLO's 24 hours (§10.3).
