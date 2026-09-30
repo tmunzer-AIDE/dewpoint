@@ -54,6 +54,9 @@
     - Queued loop steps share the execution's one budget request, so the budget's waiting needs have a maximum.
     - A loop step inside an iteration starts only when its loop can open an iteration, or when its budget is refused.
       It reads the variables as they were when it became ready, captured as a shared version number.
+  - Revision 5 also records the §5.3 follow-up in §11.3: promising, not yet a go (the owner's ruling). Its checks
+    passed on every workload; the at-continue budget term is accepted in principle, once enforced as an invariant,
+    and a workflow task's CPU at the structural maximum blocks the gate until it's bounded.
 - **Parent specs:**
   - `2026-09-24-dewpoint-architecture-design.md` (§5, §6.1, §6.5, §6.8, §12, §15). This spec **changes** its
     workflow-id contract (§6.1), replaces its `outbox` table (§6.1), details its claim check (§6.5) and settles the
@@ -1309,6 +1312,99 @@ and a worst-case maximum, and the follow-up tests those rules.
 - **Not prototyped, implementation work:** real claim permissions (RLS, owners, grants, taint), and the consumers of
   handles (CEL over a handle-backed item, references into a spilled collection or result). The workloads read only
   counts and handles.
+
+### 11.3 The §5.3 follow-up: results (2026-09-30) — promising, not yet a go
+
+**Outcome: promising, not yet a §5.3 go** (the owner's ruling). A focused prototype of revision 5's §5.3 passed every
+check below, on every workload, on both servers. Two conditions remain before the gate passes (below): the
+at-continue budget term must be an enforced invariant, and a workflow task's CPU must stay within engine-core's 1 s
+target at the structural maximum. The 2b-1b plan follows once both pass.
+
+**How it was measured.** A throwaway prototype of revision 5's §5.3 (local branch `proto/2b1b-bound`, from §11.2's
+`proto/2b1b-snapshot`, never merged), with §11.2's stub claim store and versions.
+- Publish computes each version's cap and `D`, and pins them in the version. Each maximum is built as the largest
+  encoding its component can have, with the prototype's own encoders.
+- At every continue of every execution, the probe checked:
+  - each component against its maximum: the envelope, the trigger, no learned sensitive values, the structure;
+  - the live values: within `LIVE_BUDGET`, and the counter equal to a recount;
+  - the whole encoded continued input against `SNAPSHOT_MAX`;
+  - open scopes and started loops within the cap plus `D`;
+  - the budget's waiting needs and grants;
+  - that no failed scope was kept.
+- Every snapshot restored and encoded again identically, every history replayed, and every run completed with the
+  values its outputs read.
+
+**Computed maxima.** `ID_MAX` 265 B, `HANDLE_MAX` 336 B, `ENVELOPE_MAX` 1,837 B, `TRIGGER_MAX` 65,872 B. The largest
+graphs the limits allow (500 nodes, 2,000 edges, loops 3 deep, 63-character keys):
+
+| Largest graph | `D` | Root loops | `ITER_SCOPE_MAX` | `LOOP_MAX` | Cap, revision 5's budget term | Cap, at-continue term |
+|---|---|---|---|---|---|---|
+| One loop, a 499-step body, 1,999 edges | 1 | 1 | 2,580 B | 524 B | 71 | 100 |
+| Loops 3 deep, a 497-step body, 2,000 edges | 3 | 1 | 2,591 B | 550 B | 68 | 100 |
+| 249 loop steps in one body | 2 | 1 | 1,078 B | 540 B | 100 | 100 |
+| 250 root loops (a loop needs a body) | 1 | 250 | 88 B | 528 B | **none: 15,801 B over at cap 1** | 100 |
+| 494 root `set_variables` steps | 2 | 1 | 91 B | 536 B | 100 | 100 |
+
+With every container claimed, the live state needs at most 660,576 B (250 root loops at cap 100): under `LIVE_BUDGET`.
+
+**Workloads.** Every run succeeded with the values expected, with no check failed.
+
+| Workload | Continues (time-skipping / dev) | Worst encoded input | Longest workflow task (dev) |
+|---|---|---|---|
+| A 1.69 MB trigger, claimed to its envelope before the start (141 B travelled) | 20 / 20 | 4 KB | — |
+| Every container of component 5: variables claimed, collected values, 416-436 results claimed at merge | 38 / 33 | 1.05 MB | — |
+| A batch's frozen results claimed | 1 / 1 | 332 KB | — |
+| Scope items claimed, and read through their handles | 3 / 3 | 1.04 MB | — |
+| Segment lists claimed as index segments (6 loops of 10,000, 1 KiB segments as a stress) | 612 / 743 | 1.02 MB | 1,022 ms |
+| 240 sibling loops in nested 10 × 10 loops (§11.2's counterexample 4) | 433 / 387 | 109 KB | 741 ms |
+| Root `set_variables` steps settling while 18,000 loop steps wait | 363 / 324 | 93 KB | 623 ms |
+| An exhausted budget (root capped at 610) with 21,600 queued loop steps | 653 / 586 | 110 KB | 1,148 ms |
+| The same as a sub-flow, asking its parent (144 budget signals) | 652 / 589 | 110 KB | 861 ms |
+| A batch slice of 0.97 MB inline, and one claimed by its parent | 1 / 1 | 36 KB | — |
+| References through 400 characters of keys (a derived claim), chained handles, a spilled collection | 21 / 21 | 33 KB | — |
+
+- Started loops inside iterations stayed at most 100; §11.2 measured 21,611.
+- Queued loop steps read the variables they became ready under. Under a cap of 3 and of 100 they read the same;
+  17,993 of them would have read otherwise at start.
+- No queued loop step started while the budget waited, and every one started or settled.
+- Driven alone at 24,010 loop steps, the scheduler's worst snapshot was 105 KB; §11.2 measured 4.5 MB.
+
+**What the follow-up established.** §5.3 needs each of these to hold:
+1. **A capture is two characters per loop step, by position in its scope's record.** A list of captures cost
+   432 KB at 21,600 queued steps.
+2. **Kept versions are one undo record per write:** what the write replaced. A version needs the records after it.
+   A delta per version grows quadratically.
+3. **A batch-mode loop inside an iteration holds its slot until it finishes.** It opens no scope, so otherwise
+   started loops aren't bounded by the cap.
+4. **Merges being authoritative, containers are claimed on other growth:** variables, collected values, items,
+   opened scopes. Results passing the budget are claimed at the merge instead.
+5. **A size claim may hold up to the payload limit.** A trigger's claimed subtree reached 1.68 MB.
+6. **A batch slice near 1.75 MiB can't arise.** The parent's budget claims an inline item list before any batch is
+   cut. The follow-up ran the reachable edges instead.
+
+**Before the gate passes (the owner's rulings).**
+1. **The at-continue budget term is accepted in principle.** A snapshot taken only after child grants and pending
+   needs have cleared needn't count them.
+   - Revision 5's term counts `2 × IN_FLIGHT_CAP` needs and `IN_FLIGHT_CAP` grants. Under it, 250 root loops get no
+     cap.
+   - Measured zero isn't the invariant. The quiescence check must require that the budget hold no waiting need and
+     no child's grant. The snapshot must refuse otherwise, and a regression must fail if either survives.
+   - Only then do they leave the continued-input formula. The budget's fixed counters and `Parent.grant` stay
+     counted.
+2. **A workflow task's CPU blocks the gate.** The longest task took 1,148 ms at 21,600 queued loop steps, past
+   engine-core's 1 s target (§5.6 there). The SDK's deadlock detector (2 s) fired once in a replay, under four
+   concurrent probes.
+   - Snapshot, restore and the first take after a restore need deterministic chunking or yield points.
+   - The 21,600-queued-step workload then runs again on the dev server and on Linux, under representative
+     concurrency.
+
+**Not prototyped, implementation work:**
+- a loop over a claimed list that isn't handle-backed;
+- CEL and templates over handles;
+- defaults through a handle;
+- a frozen scope telling a missing result from a claimed one;
+- the undo record's claim (records stayed under `HANDLE_MAX`);
+- claim permissions.
 
 ## 12. Testing
 
