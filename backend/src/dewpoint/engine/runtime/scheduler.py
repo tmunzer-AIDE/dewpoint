@@ -330,6 +330,13 @@ class Scheduler:
             return
         self._advance(loop)
 
+    def cut_batch(self, loop_inst: Instance, start: int, end: int) -> None:
+        """The running batch that starts at `start` ends at `end` instead: the items after it didn't fit in one payload
+        with it (engine 2b spec §5.2). They go in the loop's next batch."""
+        loop = self.loops.get(loop_inst)
+        if loop is not None and loop.running_batch == start and start < end < loop.next:
+            loop.next = end
+
     def batch_failed(self, loop_inst: Instance, start: int, failure: Failure) -> None:
         """A batch child failed as a whole (not one of its iterations): the loop fails with it."""
         loop = self.loops.get(loop_inst)

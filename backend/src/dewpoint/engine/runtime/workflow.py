@@ -61,7 +61,17 @@ with workflow.unsafe.imports_passed_through():
         RunEnd,
         Scheduler,
     )
-    from dewpoint.engine.runtime.size import BATCH_RESULTS_TOO_LARGE, OUTPUTS_TOO_LARGE, PAYLOAD_TOO_LARGE, fits
+    from dewpoint.engine.runtime.size import (
+        BATCH_RESULTS_TOO_LARGE,
+        BATCH_SNAPSHOT_TOO_LARGE,
+        HANDLER_INPUT_TOO_LARGE,
+        OUTPUTS_TOO_LARGE,
+        PAYLOAD_TOO_LARGE,
+        RUN_SNAPSHOT_TOO_LARGE,
+        SNAPSHOT_TOO_LARGE,
+        fits,
+        snapshot_fits,
+    )
 
 
 HANDLED = ("failed", DEADLINE_EXCEEDED)  # the ends that run a failure handler (a cancel is no failure)
@@ -166,7 +176,11 @@ class RunGraph(Execution):
                 self._fresh(program)
             if await self._drive() == CONTINUE:
                 await self._flush()
-                workflow.continue_as_new(replace(start, snapshot=self._snapshot(), iterations=self.sched.iterations))
+                continued = replace(start, snapshot=self._snapshot(), iterations=self.sched.iterations)
+                if snapshot_fits(continued, workflow.payload_converter()):
+                    workflow.continue_as_new(continued)
+                # engine 2b spec §5.3: too large to carry on, the run ends here, cleanly (2b-1b bounds the state)
+                self.sched.end(RunEnd("failed", Failure(SNAPSHOT_TOO_LARGE, RUN_SNAPSHOT_TOO_LARGE)))
             end = self.sched.ended or RunEnd("failed", Failure("error", "The run ended without a result."))
             if end.status == "succeeded":
                 end, outputs = await self._outputs_by(end)
@@ -336,6 +350,12 @@ class RunGraph(Execution):
             checkpoint_events=self.checkpoint_events,
             drain_events=self.drain_events,
         )
+        if not fits(run, workflow.payload_converter()):  # engine 2b spec §5.2: never sent; its row says why
+            self.sched.budget.settle_child(child, 0)
+            failure = Failure(PAYLOAD_TOO_LARGE, HANDLER_INPUT_TOO_LARGE)
+            await self._lost_end(run, workflow.now().isoformat(), failure)
+            await self._send_signals()
+            return
         handler = asyncio.create_task(self._handler(run, child))
         while not handler.done():  # it draws its iterations from this run: answer as it asks
             wake = asyncio.create_task(workflow.wait_condition(lambda: bool(self._mail or self._answers)))
@@ -436,7 +456,12 @@ class LoopBatch(Execution):
                 )
             if await self._drive() == CONTINUE:
                 await self._flush()
-                workflow.continue_as_new(replace(start, snapshot=self._snapshot(), iterations=self.sched.iterations))
+                continued = replace(start, snapshot=self._snapshot(), iterations=self.sched.iterations)
+                if snapshot_fits(continued, workflow.payload_converter()):
+                    workflow.continue_as_new(continued)
+                # engine 2b spec §5.3: too large to carry on, the batch ends here and its loop fails
+                stopped = Failure(SNAPSHOT_TOO_LARGE, BATCH_SNAPSHOT_TOO_LARGE).to_json()
+                return BatchResult([], [], stopped, iterations=self.sched.iterations, secrets=list(self._secrets))
         except asyncio.CancelledError:
             self.sched.end(RunEnd("cancelled", CANCELLED))
             await self._project_end(None)

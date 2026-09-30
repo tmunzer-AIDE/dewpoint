@@ -38,8 +38,10 @@ from dewpoint.core.plugins import lifecycle
 from dewpoint.core.runs import service
 from dewpoint.core.workflows import service as workflows
 from dewpoint.engine import ENGINE_ABI
+from dewpoint.engine.runtime import size
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, SIMULATE, RunInput
 from dewpoint.engine.runtime.ids import run_workflow_id
+from dewpoint.engine.runtime.size import RUN_INPUT_TOO_LARGE
 from tests.apps.test_lifecycle_races import until_someone_waits_for_a_lock
 from tests.apps.test_workflow_ops import (
     ECHO,
@@ -610,3 +612,23 @@ async def test_a_start_that_cant_be_encrypted_is_refused_and_its_run_failed(
     assert client.calls == []  # never sent
     row = await only_run(owner_sessionmaker, ctx.tenant_id)
     assert (row.status, row.error_code) == ("failed", START_FAILED)
+
+
+async def test_a_run_whose_input_is_too_large_to_start_is_refused_before_admission(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings, monkeypatch
+) -> None:
+    """Engine 2b spec §5.2: the client checks the start it would send, before the run is admitted: no row, no start,
+    and a fixed reason, never Temporal's refusal."""
+    monkeypatch.setattr(size, "PAYLOAD_BYTES", 10_000)
+    ctx, _, version = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings)
+    client = FakeClient()
+    with pytest.raises(NotAdmissibleError) as refused:
+        await start_run(
+            dispatch_sessionmaker, client, api_settings,  # type: ignore[arg-type]
+            tenant_id=ctx.tenant_id, version_id=version, trigger={"x": "y" * 10_000},
+        )  # fmt: skip
+    assert refused.value.reasons == [RUN_INPUT_TOO_LARGE]
+    async with owner_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        assert await service.list_runs(s) == []
+    assert client.started == []

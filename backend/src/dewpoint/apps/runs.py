@@ -23,7 +23,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
-from temporalio.converter import WorkflowSerializationContext
+from temporalio.converter import DataConverter, WorkflowSerializationContext
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
@@ -38,6 +38,7 @@ from dewpoint.core.platform.service import NOT_RECORDED, PRODUCTION, recorded
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.runs import service as runs
 from dewpoint.core.workflows.service import lock_for_admission, other_abi
+from dewpoint.engine.runtime import size
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, LIVE, RunInput
 from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.engine.runtime.workflow import RunGraph
@@ -155,19 +156,26 @@ async def start_run(
 ) -> uuid.UUID:
     """Admit the run and start it. Raises NotAdmissibleError, StartRefusedError (the run is recorded as failed) or
     StartUncertainError (the run stays `running`: it may be executing). A promotion between the admission and the
-    start is caught when the run loads its version (§7)."""
+    start is caught when the run loads its version (§7). A start too large to send is refused before admission, so
+    it leaves no row (engine 2b spec §5.2)."""
+
+    def start_of(run_id: uuid.UUID) -> RunInput:
+        return RunInput(
+            tenant_id=str(tenant_id),
+            run_id=str(run_id),
+            version_id=str(version_id),
+            trigger=trigger,
+            mode=mode,
+            max_run_duration_s=settings.max_run_duration_days * 86_400,
+            cel_schedule_to_start_s=settings.cel_schedule_to_start_s,
+        )
+
+    if not size.fits(start_of(uuid.UUID(int=0)), DataConverter.default.payload_converter):  # a run id's length
+        raise NotAdmissibleError([size.RUN_INPUT_TOO_LARGE])
     abi = await current_abi(client)  # before the transaction: no lock is held across a call to Temporal
     async with sessionmaker() as s, s.begin():
         run = await admit(s, tenant_id=tenant_id, version_id=version_id, abi=abi, mode=mode, started_by=started_by)
-    start = RunInput(
-        tenant_id=str(tenant_id),
-        run_id=str(run.id),
-        version_id=str(version_id),
-        trigger=trigger,
-        mode=mode,
-        max_run_duration_s=settings.max_run_duration_days * 86_400,
-        cel_schedule_to_start_s=settings.cel_schedule_to_start_s,
-    )
+    start = start_of(run.id)
     try:
         await _start(client, start, run.id)
     except StartRefusedError as e:

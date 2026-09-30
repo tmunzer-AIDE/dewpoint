@@ -15,7 +15,16 @@ from temporalio.converter import PayloadConverter
 
 CODEC_OVERHEAD = 256  # bytes the tenant codec adds to a payload, at most: its metadata, the nonce and the tag
 PAYLOAD_BYTES = 1_835_008  # 1.75 MiB, encoded: a margin under Temporal's 2 MiB (2,097,152) payload limit
+SNAPSHOT_BYTES = 1_572_864  # 1.5 MiB, encoded: a continued run's input (spec §5.3's SNAPSHOT_MAX)
 PAYLOAD_TOO_LARGE = "payload_too_large"
+SNAPSHOT_TOO_LARGE = "snapshot_too_large"
+RUN_INPUT_TOO_LARGE = "The run's input is too large to start (over 1.75 MiB)."
+STEP_INPUT_TOO_LARGE = "The step's input is too large to send (over 1.75 MiB)."
+SUBFLOW_INPUT_TOO_LARGE = "The sub-flow's input is too large to send (over 1.75 MiB)."
+HANDLER_INPUT_TOO_LARGE = "The failure handler's input is too large to send (over 1.75 MiB)."
+BATCH_ITEM_TOO_LARGE = "An item of this loop, with what its batch reads, is too large to send (over 1.75 MiB)."
+RUN_SNAPSHOT_TOO_LARGE = "The run's state is too large to carry on (over 1.5 MiB)."
+BATCH_SNAPSHOT_TOO_LARGE = "A batch of this loop has too much state to carry on (over 1.5 MiB)."
 STEP_OUTPUT_TOO_LARGE = "The step's output is too large to record (over 1.75 MiB)."
 VERSION_TOO_LARGE = "The version is too large to load (over 1.75 MiB)."
 OUTPUTS_TOO_LARGE = "The run's outputs are too large to return (over 1.75 MiB)."
@@ -27,5 +36,15 @@ def encoded_bytes(value: Any, converter: PayloadConverter) -> int:
     return len(converter.to_payloads([value])[0].data) + CODEC_OVERHEAD
 
 
+def payload_bytes() -> int:
+    """PAYLOAD_BYTES, read when it's called."""
+    return PAYLOAD_BYTES
+
+
 def fits(value: Any, converter: PayloadConverter) -> bool:
     return encoded_bytes(value, converter) <= PAYLOAD_BYTES
+
+
+def snapshot_fits(value: Any, converter: PayloadConverter) -> bool:
+    """A continued run's input, snapshot and all, within SNAPSHOT_BYTES."""
+    return encoded_bytes(value, converter) <= SNAPSHOT_BYTES

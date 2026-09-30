@@ -84,6 +84,15 @@ with workflow.unsafe.imports_passed_through():
         ScopeKey,
         iteration_key,
     )
+    from dewpoint.engine.runtime.size import (
+        BATCH_ITEM_TOO_LARGE,
+        PAYLOAD_TOO_LARGE,
+        STEP_INPUT_TOO_LARGE,
+        SUBFLOW_INPUT_TOO_LARGE,
+        encoded_bytes,
+        fits,
+        payload_bytes,
+    )
 
 IN_FLIGHT_CAP = 100  # activities and child workflows outstanding per execution (spec §6)
 PROJECT_BYTES = 256 * 1024  # a projection's rows at most, as JSON: far below Temporal's 2 MiB payload limit
@@ -867,6 +876,10 @@ class Execution:
             checkpoint_events=self.checkpoint_events,
             drain_events=self.drain_events,
         )
+        if not fits(run, workflow.payload_converter()):  # engine 2b spec §5.2: never sent, so it never ran
+            self.sched.budget.settle_child(child, 0)
+            self._dirty = True
+            return _Effect(failure=Failure(PAYLOAD_TOO_LARGE, SUBFLOW_INPUT_TOO_LARGE), cel_mode=cel_mode)
         used: int | None = None  # until it reports, all it was granted counts: it may have run
         started = workflow.now().isoformat()
         try:
@@ -925,43 +938,30 @@ class Execution:
         """A batch of a loop's items, as a child `LoopBatch`. It writes its iterations' rows into this run, and
         returns what they collected."""
         step = self.sched.step(b.loop)
-        loop = self.sched.loops[b.loop]
         # from the input, not the workflow id: a replay of this history sees the same id (the run id names the logical
         # run, the loop step and its scope name the loop, the start names the batch)
         child = (
             f"{run_workflow_id(self.tenant_id, self.run_id)}/{step.id}/{iteration_key(b.loop.scope)}/batch:{b.start}"
         )
+        converter = workflow.payload_converter()
+        draft = self._batch_input(b, len(b.items))
+        if not fits(draft, converter):  # engine 2b spec §5.2: as many of its items as fit, in order; the rest follow
+            items = b.items
+            envelope = encoded_bytes(replace(draft, items=[]), converter)
+            fit, _ = resolve.request_end(
+                0,
+                len(items),
+                lambda i: len(converter.to_payloads([items[i]])[0].data),
+                envelope=envelope,
+                batch=len(items),
+                limit=payload_bytes(),
+            )
+            if fit == 0:  # its first item alone doesn't fit: the loop fails there, and nothing is dropped
+                return _Effect(failure=Failure(PAYLOAD_TOO_LARGE, BATCH_ITEM_TOO_LARGE))
+            self.sched.cut_batch(b.loop, b.start, b.start + fit)
+            b = replace(b, items=items[:fit])
         grant = self.sched.budget.start_child(child, len(b.items))
-        parent = Parent(
-            workflow_id=workflow.info().workflow_id,
-            run_id=self.run_id,
-            step_id=str(step.id),
-            iteration_key=iteration_key(b.loop.scope),
-            kind=BATCH,
-            deadline=self.deadline.isoformat(),
-            grant=grant,
-            depth=self.depth,
-            secrets=list(self._secrets),
-        )
-        batch = BatchInput(
-            tenant_id=self.tenant_id,
-            run_id=self.run_id,
-            version_id=self.version_id,
-            loop_step=str(step.id),
-            outer=self._outer(b.loop),
-            items=b.items,
-            offset=b.start,
-            concurrency=loop.concurrency,
-            stop_on_error=loop.stop_on_error,
-            trigger=self.trigger,
-            variables=dict(self.vars),
-            run_started_at=self.run_started_at.isoformat(),
-            parent=parent,
-            mode=self.mode,
-            cel_schedule_to_start_s=self.cel_schedule_to_start_s,
-            checkpoint_events=self.checkpoint_events,
-            drain_events=self.drain_events,
-        )
+        batch = self._batch_input(b, grant)
         used: int | None = None  # until it reports, all it was granted counts: it may have run
         try:
             try:
@@ -990,6 +990,40 @@ class Execution:
         stopped = Failure.from_json(result.stopped) if result.stopped else None
         return _Effect(batch=BatchOutcome(list(result.collected), list(result.failures), stopped))
 
+    def _batch_input(self, b: Batch, grant: int) -> BatchInput:
+        step = self.sched.step(b.loop)
+        loop = self.sched.loops[b.loop]
+        parent = Parent(
+            workflow_id=workflow.info().workflow_id,
+            run_id=self.run_id,
+            step_id=str(step.id),
+            iteration_key=iteration_key(b.loop.scope),
+            kind=BATCH,
+            deadline=self.deadline.isoformat(),
+            grant=grant,
+            depth=self.depth,
+            secrets=list(self._secrets),
+        )
+        return BatchInput(
+            tenant_id=self.tenant_id,
+            run_id=self.run_id,
+            version_id=self.version_id,
+            loop_step=str(step.id),
+            outer=self._outer(b.loop),
+            items=b.items,
+            offset=b.start,
+            concurrency=loop.concurrency,
+            stop_on_error=loop.stop_on_error,
+            trigger=self.trigger,
+            variables=dict(self.vars),
+            run_started_at=self.run_started_at.isoformat(),
+            parent=parent,
+            mode=self.mode,
+            cel_schedule_to_start_s=self.cel_schedule_to_start_s,
+            checkpoint_events=self.checkpoint_events,
+            drain_events=self.drain_events,
+        )
+
     # --- plugin steps ---------------------------------------------------------------------------------------------
 
     async def _activity(self, inst: Instance, step: Step, config: Any, cel_mode: str | None) -> _Effect:
@@ -1016,20 +1050,30 @@ class Execution:
                 cel_mode=cel_mode,
             )
             self._queue(row)
+            sent = StepInput(
+                tenant_id=self.tenant_id,
+                run_id=self.run_id,
+                step_id=str(step.id),
+                node_key=step.key,
+                iteration_key=iteration_key(inst.scope),
+                ref=step.ref,
+                config=config,
+                mode=self.mode,
+                attempt=attempt,
+            )
+            if not fits(sent, workflow.payload_converter()):  # engine 2b spec §5.2: never sent, so it never ran
+                failure = Failure(PAYLOAD_TOO_LARGE, STEP_INPUT_TOO_LARGE, attempt)
+                ended = workflow.now().isoformat()
+                self._queue(
+                    replace(
+                        row, status="failed", ended_at=ended, error_code=failure.code, error_message=failure.message
+                    )
+                )
+                return _Effect(failure=failure, cel_mode=cel_mode)
             try:
                 result = await workflow.execute_activity(
                     step_activity(step.ref),
-                    StepInput(
-                        tenant_id=self.tenant_id,
-                        run_id=self.run_id,
-                        step_id=str(step.id),
-                        node_key=step.key,
-                        iteration_key=iteration_key(inst.scope),
-                        ref=step.ref,
-                        config=config,
-                        mode=self.mode,
-                        attempt=attempt,
-                    ),
+                    sent,
                     result_type=StepResult,
                     start_to_close_timeout=timeout,
                     retry_policy=RetryPolicy(maximum_attempts=1),
