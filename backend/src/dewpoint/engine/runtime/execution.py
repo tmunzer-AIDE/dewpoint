@@ -60,7 +60,7 @@ with workflow.unsafe.imports_passed_through():
         cel_queue,
         step_activity,
     )
-    from dewpoint.engine.runtime.budget import LOCAL, Need
+    from dewpoint.engine.runtime.budget import LOCAL, Budget, Need
     from dewpoint.engine.runtime.ids import run_workflow_id
     from dewpoint.engine.runtime.program import Program, Step
     from dewpoint.engine.runtime.projection import (
@@ -304,7 +304,9 @@ class Execution:
         try:
             while self.sched.ended is None:
                 probe.note(workflow.info().workflow_id, self.sched.probe)
+                wid, t0 = workflow.info().workflow_id, probe.clock()
                 self._serve_budget()
+                probe.took(wid, "serve_budget", t0)
                 if not self._draining:  # proto (§5.3): spills are units under the in-flight cap
                     for sp in self.sched.take_spills():
                         self._spill_units[(sp.loop, sp.first, sp.which)] = sp
@@ -313,7 +315,9 @@ class Execution:
                     tasks[key] = asyncio.create_task(self._spill_result(sid, later))
                 self._spill_later = []
                 if not self._draining:
+                    t0 = probe.clock()
                     waiting += [("step", i) for i in self.sched.take_ready()]
+                    probe.took(wid, "take", t0)
                     waiting += [("collect", c) for c in self.sched.take_collects()]
                     for b in self.sched.take_batches():
                         self._batches[(b.loop, b.start)] = b
@@ -358,7 +362,9 @@ class Execution:
                 if self._rows and not any(key[0] == "project" for key in tasks):  # one at a time: rows wait for it
                     self._projects += 1
                     tasks[("project", self._projects)] = asyncio.create_task(self._project(self._take_rows()))
-                if not tasks and self._ask is None:  # waiting for our parent's answer isn't stuck: nothing else is
+                if not tasks and self._ask is None and self.sched.budget.waiting:
+                    self._dirty = True  # proto: a need left undecided (asked while answering): decide it, then continue
+                elif not tasks and self._ask is None:  # waiting for our parent's answer isn't stuck: nothing else is
                     raise RuntimeError("nothing is running and the run hasn't ended")
                 wake = asyncio.create_task(
                     workflow.wait_condition(
@@ -375,6 +381,7 @@ class Execution:
                         RunEnd(DEADLINE_EXCEEDED, Failure(DEADLINE_EXCEEDED, "The run passed its deadline."))
                     )
                     break
+                t0 = probe.clock()
                 for key in sorted((k for k, t in tasks.items() if t in done), key=self._rank):
                     task = tasks.pop(key)
                     if key[0] == "cancelled" and task.cancelled():
@@ -382,6 +389,7 @@ class Execution:
                     effect = task.result()
                     if effect is not None and key[0] != "cancelled":
                         self._apply(key, effect)
+                probe.took(wid, "apply", t0)
         finally:
             probe.note(workflow.info().workflow_id, self.sched.probe)
             clock.cancel()
@@ -424,10 +432,7 @@ class Execution:
         return "children" if step.ref == control.RUN_WORKFLOW else "values"
 
     def _quiescent(self, tasks: Mapping[tuple[Any, ...], asyncio.Task[Any]]) -> bool:
-        """No activity and no child outstanding, and no request to or from a parent or child: a sleeping timer step
-        doesn't count, nor a projection (it's written before the run continues)."""
-        idle = all(k[0] == "project" or (k[0] == "step" and k[1] in self._timers) for k in tasks)
-        return idle and not self.sched.budget.asking and not self._mail and not self._answers
+        return quiescent(tasks, self._timers, self.sched.budget, self._mail, self._answers)
 
     async def _settle_for_continue(self, tasks: dict[tuple[Any, ...], asyncio.Task[Any]]) -> None:
         """Continue-as-new: the sleeping timer steps stop here (their wake times go into the snapshot), and the
@@ -1388,6 +1393,20 @@ __all__ = [
     "Execution",
     "child_options",
 ]
+
+
+def quiescent(
+    tasks: Mapping[tuple[Any, ...], Any],
+    timers: Mapping[Instance, Any],
+    budget: Budget,
+    mail: list[Any],
+    answers: list[Any],
+) -> bool:
+    """No activity and no child outstanding, and no request to or from a parent or child: a sleeping timer step
+    doesn't count, nor a projection (it's written before the run continues). Proto (engine 2b spec §5.3): nor may
+    the iteration budget hold a waiting need or a child's grant, so a continued input carries neither."""
+    idle = all(k[0] == "project" or (k[0] == "step" and k[1] in timers) for k in tasks)
+    return idle and not budget.asking and not budget.waiting and not budget.reserved and not mail and not answers
 
 
 def _digest(value: Any) -> str:

@@ -11,12 +11,32 @@ Handles are dicts under the reserved key `$probe`:
   `base/first` ([first, count, bytes] each, sparse [[index, value], ...] pairs) and an inline tail of pairs."""
 
 import json
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from temporalio import workflow
+
 PEAKS: dict[str, dict[str, int]] = {}
-ROOT_BUDGET: list[int] = []  # proto: the harness may lower a root run's iteration cap (the module passes the sandbox)
+ROOT_BUDGET: list[int] = []
+TIMES: dict[
+    str, dict[str, float]
+] = {}  # proto: workflow id -> phase -> its longest run, ms (measured, never decided on)
+
+
+def clock() -> float:
+    with workflow.unsafe.sandbox_unrestricted():  # measured only: nothing decides on it, so replay is unaffected
+        return time.perf_counter()
+
+
+def took(workflow_id: str, phase: str, started: float) -> None:
+    ms = (clock() - started) * 1000
+    times = TIMES.setdefault(workflow_id, {})
+    times[phase] = max(
+        times.get(phase, 0.0), ms
+    )  # proto: the harness may lower a root run's iteration cap (the module passes the sandbox)
+
 
 KIND = "$probe"
 LIST, ITEM, VALUE, COLL = "list", "item", "value", "coll"

@@ -159,6 +159,7 @@ class RunGraph(Execution):
             return await self._end_early(RunEnd("failed", Failure(VERSION_UNUSABLE, _unloadable(e))), start.iterations)
         self._charge_sent(data)  # its marker goes out with this workflow task's commands (engine 2b spec §5.2)
         try:
+            t0 = probe.clock()
             program = compile_program(
                 data.graph,
                 data.manifests,
@@ -169,6 +170,7 @@ class RunGraph(Execution):
                 data.open_scopes_cap,
                 data.loop_depth,
             )
+            probe.took(workflow.info().workflow_id, "compile", t0)
         except Exception as e:
             workflow.logger.error("run_version_unusable", exc_info=True)
             message = f"This build can't run the version ({type(e).__name__}); the worker's log has the details."
@@ -176,13 +178,20 @@ class RunGraph(Execution):
         outputs: dict[str, Any] | None = None
         try:
             if snapshot is not None:
+                t0 = probe.clock()
                 self._restore(program, snapshot)
+                probe.took(workflow.info().workflow_id, "restore", t0)
             elif not self._fresh(program):  # its trigger, or a literal, holds more sensitive values than a run carries
                 self.sched.end(RunEnd("failed", Failure(PAYLOAD_TOO_LARGE, SECRETS_TOO_LARGE)))
             if await self._drive() == CONTINUE:
                 await self._flush()
+                t0 = probe.clock()
                 continued = replace(start, snapshot=self._snapshot(), iterations=self.sched.iterations)
-                if snapshot_fits(continued, workflow.payload_converter()):
+                probe.took(workflow.info().workflow_id, "snapshot", t0)
+                t0 = probe.clock()
+                fits = snapshot_fits(continued, workflow.payload_converter())
+                probe.took(workflow.info().workflow_id, "fits", t0)
+                if fits:
                     await self._send(continued)
                     workflow.continue_as_new(continued)
                 # engine 2b spec §5.3: too large to carry on, the run ends here, cleanly (2b-1b bounds the state)
@@ -439,6 +448,7 @@ class LoopBatch(Execution):
                 result_type=VersionData,
                 start_to_close_timeout=timedelta(seconds=30),
             )
+            t0 = probe.clock()
             program = compile_program(
                 data.graph,
                 data.manifests,
@@ -449,6 +459,7 @@ class LoopBatch(Execution):
                 data.open_scopes_cap,
                 data.loop_depth,
             )
+            probe.took(workflow.info().workflow_id, "compile", t0)
         except asyncio.CancelledError:
             return BatchResult([], [], end=RunEnd("cancelled", CANCELLED).to_json(), iterations=start.iterations)
         except Exception as e:
@@ -460,7 +471,9 @@ class LoopBatch(Execution):
         self._charge_sent(data)  # its marker goes out with this workflow task's commands (engine 2b spec §5.2)
         try:
             if snapshot is not None:
+                t0 = probe.clock()
                 self._restore(program, snapshot)
+                probe.took(workflow.info().workflow_id, "restore", t0)
             else:
                 self.program = program
                 self.sched = Scheduler(program, budget=Budget(start.parent.grant, root=False))
@@ -488,10 +501,12 @@ class LoopBatch(Execution):
             if await self._drive() == CONTINUE:
                 await self._flush()
                 # proto (§5.3): each value travels once; the snapshot holds the slice, outer scopes and variables
+                t0 = probe.clock()
                 continued = replace(
                     start, snapshot=self._snapshot(), iterations=self.sched.iterations,
                     items=[], items_handle=None, outer=[], variables={},
                 )  # fmt: skip
+                probe.took(workflow.info().workflow_id, "snapshot", t0)
                 if snapshot_fits(continued, workflow.payload_converter()):
                     await self._send(continued)
                     workflow.continue_as_new(continued)

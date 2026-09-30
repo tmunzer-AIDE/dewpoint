@@ -125,9 +125,18 @@ class Box:
     sealing: Any = None
     head: dict[str, Any] | None = None
     claims: int = 0
+    sealing_size: int = field(default=0, repr=False, compare=False)  # the part's size, measured once
+
+    def __post_init__(self) -> None:
+        self.sealing = self.sealing
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        object.__setattr__(self, name, value)
+        if name == "sealing":
+            object.__setattr__(self, "sealing_size", P.size(value) if value is not None else 0)
 
     def bytes(self) -> int:
-        return (P.size(self.sealing) if self.sealing is not None else 0) + (P.size(self.head) if self.head else 0)
+        return self.sealing_size + (P.size(self.head) if self.head else 0)
 
     def to_json(self) -> list[Any]:
         return [self.sealing, self.head, self.claims]
@@ -396,6 +405,7 @@ class Scheduler:
         )  # every name a variable can have: the schema's, and what the version's writes assign
         self._captures: dict[Instance, int] = {}  # queued loop step -> the version it became ready under
         self._released: dict[Instance, int] = {}  # handed out, its unit not yet started
+        self._vrefs: dict[int, int] = {}  # captured version -> the queued or released loop steps that name it
         self._starting: dict[Instance, bool] = {}  # released loop step -> it took a reserved scope
         self._held: dict[Instance, bool] = {}  # a batch-mode loop inside an iteration: it holds its slot to the end
         # queued loop steps inside iterations, not started: by scope in scheduling order, and all in one heap
@@ -602,7 +612,7 @@ class Scheduler:
         item list), until what's already on its way out brings it back under."""
         if self.ended is not None:
             return
-        while self.live - self._relief() > P.LIVE_BUDGET:
+        while self.live > P.LIVE_BUDGET and self.live - self._relief() > P.LIVE_BUDGET:
             candidates = self._containers()
             if not candidates:
                 break
@@ -711,16 +721,14 @@ class Scheduler:
         out = 0
         for lp in self.loops.values():
             for _, c in self._colls(lp):
-                out += c.sealing_bytes + (P.size(c.ibox.sealing) if c.ibox.sealing is not None else 0)
+                out += c.sealing_bytes + c.ibox.sealing_size
             if lp.items_pending and isinstance(lp.items, list):
                 out += P.size(lp.items)
         for sc in self.scopes.values():
-            if sc.rbox.sealing is not None:
-                out += P.size(sc.rbox.sealing)
+            out += sc.rbox.sealing_size
             if sc.item_sealing:
                 out += P.size(sc.item)
-        if self.vbox.sealing is not None:
-            out += P.size(self.vbox.sealing)
+        out += self.vbox.sealing_size
         out += sum(P.size(u.vals) for u in self.undo.values() if u.sealing)
         return out
 
@@ -926,11 +934,12 @@ class Scheduler:
         if self.ended is not None:
             return
         self.ended = end
-        queued = set(self._ready) | self._deferred
+        ready = set(self._ready)
         for scope in self.scopes.values():
             for node_id, state in scope.nodes.items():
-                if state == NodeState.RUNNING and Instance(scope.key, node_id) not in queued:
-                    self._cancels.append(Instance(scope.key, node_id))
+                inst = Instance(scope.key, node_id)
+                if state == NodeState.RUNNING and inst not in ready and inst not in self._deferred:
+                    self._cancels.append(inst)
         self._ready = []
         self._clear_deferred(())
         self._batches = []
@@ -938,6 +947,7 @@ class Scheduler:
         self._held.clear()
         self._captures.clear()
         self._released.clear()
+        self._vrefs.clear()
         self._gc_versions()
         self.budget.drop_local()  # a loop waiting for its next iteration opens none now
         self._spills = []
@@ -1072,6 +1082,7 @@ class Scheduler:
             self._ready.append(inst)
             if self.batch_loop is None and self._iter_loop(inst):  # proto (§5.3): its variables, as of now
                 self._captures[inst] = self.vars_version
+                self._vrefs[self.vars_version] = self._vrefs.get(self.vars_version, 0) + 1
             return None
         scope.nodes[node_id] = NodeState.DEAD
         return step
@@ -1080,20 +1091,20 @@ class Scheduler:
         """An unhandled failure ends its scope: waiting steps die, running ones are cancelled, and so is every scope
         nested inside it. `report`: tell the loop the iteration failed (not when the loop itself is stopping it)."""
         scope.failure = failure
-        queued = set(self._ready) | self._deferred
+        self._drop_captures(scope.key)
+        ready = set(self._ready)
         for key in [k for k in self.scopes if k[: len(scope.key)] == scope.key]:
             inner = self.scopes[key]
             if key != scope.key and inner.failure is None:
                 inner.failure = failure
             for node_id, state in inner.nodes.items():
                 inst = Instance(key, node_id)
-                if state == NodeState.RUNNING and inst not in queued:
+                if state == NodeState.RUNNING and inst not in ready and inst not in self._deferred:
                     self._cancels.append(inst)
                 if state in (NodeState.RUNNING, NodeState.WAITING):
                     inner.nodes[node_id] = NodeState.DEAD
         self._ready = [r for r in self._ready if r.scope[: len(scope.key)] != scope.key]
         self._clear_deferred(scope.key)
-        self._drop_captures(scope.key)
         for inst in [i for i in self._starting if i.scope[: len(scope.key)] == scope.key]:
             del self._starting[inst]
             self._freed = True
@@ -1315,9 +1326,23 @@ class Scheduler:
             self._deferred -= set(self._deferred_by_scope.pop(k))
 
     def _drop_captures(self, key: ScopeKey) -> None:
-        for inst in [i for i in self._captures if i.scope[: len(key)] == key]:
-            del self._captures[inst]
+        """The captures of the queued loop steps in scope `key` and inside it. A captured step is queued: in its
+        scope's deferred list, or in the ready list not yet taken; so they're found there, without a scan of every
+        capture (proto: that scan made every pruned iteration cost the whole queue)."""
+        steps = [i for k, q in self._deferred_by_scope.items() if k[: len(key)] == key for i in q]
+        steps += [i for i in self._ready if i.scope[: len(key)] == key]
+        for inst in steps:
+            version = self._captures.pop(inst, None)
+            if version is not None:
+                self._unref(version)
         self._gc_versions()
+
+    def _unref(self, version: int) -> None:
+        n = self._vrefs[version] - 1
+        if n:
+            self._vrefs[version] = n
+        else:
+            del self._vrefs[version]
 
     # --- proto (§5.3): variables, their versions and captures ---------------------------------------------------------
 
@@ -1380,6 +1405,7 @@ class Scheduler:
         if inst not in self._released:
             return None
         version = self._released.pop(inst)
+        self._unref(version)
         if version != self.vars_version:  # proto: a read at start would have seen a later write
             self.probe["stale_vs_start"] = self.probe.get("stale_vs_start", 0) + 1
         variables = self.vars_at(version)
@@ -1388,8 +1414,9 @@ class Scheduler:
 
     def _gc_versions(self) -> None:
         """Undo records no captured version needs any more are dropped."""
-        refs = set(self._captures.values()) | set(self._released.values())
-        oldest = min(refs) if refs else self.vars_version
+        if not self.undo:
+            return
+        oldest = min(self._vrefs) if self._vrefs else self.vars_version
         for k in [k for k in self.undo if k < oldest and not self.undo[k].sealing]:
             self._live -= self.undo.pop(k).bytes()
 
@@ -1441,6 +1468,8 @@ class Scheduler:
         states on restore. Taken between units: nothing settled or cancelled is left to hand over."""
         if self._settled or self._cancels or self.ended is not None:
             raise ValueError("a snapshot is taken only between units, and never after the run ended")
+        if self.budget.waiting or self.budget.reserved or self._budget_waits:  # proto (§5.3): the at-continue term
+            raise ValueError("a snapshot is taken only when the iteration budget holds no waiting need or child grant")
         self._check_queues()
         by_scope: dict[ScopeKey, dict[uuid.UUID, int]] = {}
         for inst, version in self._captures.items():
@@ -1498,6 +1527,8 @@ class Scheduler:
         s.vars_version = int(data["vars_version"])
         s.undo = {int(k): Undo(int(t), v, h, bool(g)) for k, t, v, h, g in data["undo"]}
         s._released = {s._if(i): int(v) for i, v in data["released"]}
+        for version in s._released.values():
+            s._vrefs[version] = s._vrefs.get(version, 0) + 1
         s._starting = {s._if(i): bool(r) for i, r in data["starting"]}
         s._held = {s._if(i): bool(r) for i, r in data["held"]}
         s._seq = int(data["seq"])
@@ -1678,7 +1709,9 @@ class Scheduler:
         for n, m in enumerate(self._loop_members[region] if raw[11] else ()):
             code = raw[11][2 * n : 2 * n + 2]
             if code != NO_CAPTURE:
-                self._captures[Instance(key, m)] = _capture_from(code)
+                version = _capture_from(code)
+                self._captures[Instance(key, m)] = version
+                self._vrefs[version] = self._vrefs.get(version, 0) + 1
         scope = Scope(key, region, nodes, edges, results, raw[5], raw[6], failure, frozen, int(raw[9]), bool(raw[10]))
         scope.rbox, scope.item_sealing = Box.from_json(raw[12]), bool(raw[13])
         return scope
