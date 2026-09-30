@@ -16,6 +16,7 @@ from dewpoint.apps.worker.main import engine_worker
 from dewpoint.apps.worker.store import DbRunStore
 from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.runtime.build import abi_of
+from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.engine.runtime.workflow import RunGraph
 from tests.apps.test_workflow_ops import ECHO_GRAPH, actor, create, publish, published_by_the_previous_build
 from tests.apps.worker.test_deployment import placement
@@ -61,6 +62,9 @@ async def test_admission_follows_the_current_build_through_a_promotion(
     new = (await publish(api_sessionmaker, ctx, new_wf, api_settings)).version
     assert new is not None
 
+    def workflow_id(run_id: uuid.UUID) -> str:
+        return run_workflow_id(str(ctx.tenant_id), str(run_id))
+
     async def started(version_id: uuid.UUID) -> uuid.UUID:
         return await start_run(
             dispatch_sessionmaker, client, api_settings, tenant_id=ctx.tenant_id, version_id=version_id, trigger={}
@@ -77,14 +81,14 @@ async def test_admission_follows_the_current_build_through_a_promotion(
             on_old = await started(old.id)
             # it ends before the promotion: a run whose first task hadn't run yet would start on N, and fail as it
             # loads its version (the loader's backstop, for a promotion that races a start)
-            results = [await client.get_workflow_handle_for(RunGraph.run, str(on_old)).result()]
+            results = [await client.get_workflow_handle_for(RunGraph.run, workflow_id(on_old)).result()]
             await set_current(client, n)
             assert await current_abi(client) == NEW
             with pytest.raises(NotAdmissibleError) as late:
                 await started(old.id)
             on_new = await started(new.id)
-            results.append(await client.get_workflow_handle_for(RunGraph.run, str(on_new)).result())
-            chains = [await executions(client, str(r), "") for r in (on_old, on_new)]
+            results.append(await client.get_workflow_handle_for(RunGraph.run, workflow_id(on_new)).result())
+            chains = [await executions(client, workflow_id(r), "") for r in (on_old, on_new)]
     assert early.value.reasons == [
         f"This version was published for engine ABI {NEW}, and the current build runs ABI {OLD}: make a build of ABI "
         f"{NEW} current first."

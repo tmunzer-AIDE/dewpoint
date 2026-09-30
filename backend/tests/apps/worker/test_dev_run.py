@@ -8,6 +8,7 @@ from temporalio.testing import WorkflowEnvironment
 
 from dewpoint.apps.cli.main import dev_run_version
 from dewpoint.apps.worker.store import DbRunStore
+from dewpoint.engine.runtime.ids import run_workflow_id
 from tests.apps.test_workflow_ops import actor, create, publish
 from tests.apps.worker.harness import workers
 from tests.conftest import _url_for
@@ -46,7 +47,7 @@ async def test_dev_run_starts_the_active_version(
         _, waited = await dev_run_version(settings, env.client, **common)
         _, simulated = await dev_run_version(settings, env.client, simulate=True, **common)
         started, nothing = await dev_run_version(settings, env.client, wait=False, **common)
-        await env.client.get_workflow_handle(str(started)).result()
+        await env.client.get_workflow_handle(run_workflow_id(str(ctx.tenant_id), str(started))).result()
     assert waited is not None and (waited.status, waited.outputs) == ("succeeded", {"v": 2})
     assert simulated is not None and simulated.outputs == {"v": {"simulated": 2}}
     assert nothing is None

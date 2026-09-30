@@ -54,7 +54,8 @@ from dewpoint.engine.runtime.activities import (
     VersionData,
     step_activity,
 )
-from dewpoint.engine.runtime.execution import VERSION_UNUSABLE
+from dewpoint.engine.runtime.execution import INTERNAL_ERROR, VERSION_UNUSABLE
+from dewpoint.engine.runtime.ids import tenant_of
 from dewpoint.engine.runtime.projection import location
 from dewpoint.sdk import (
     FatalError,
@@ -160,6 +161,16 @@ async def _call(node: type[Node], step: StepInput, schema: Mapping[str, Any]) ->
         raise _StepFailed(UNEXPECTED_ERROR, message, retryable=True) from None
 
 
+def _same_tenant(tenant_id: str) -> None:
+    """The input's tenant is the one this activity's server-built workflow id names (engine 2b spec §6.1): the store
+    scopes every read and write by it. Only a bug, or a workflow started outside Dewpoint, gets here; the failure isn't
+    the node's (`MAPPED`), so `RunGraph` doesn't take it for one."""
+    if tenant_of(activity.info().workflow_id or "") != tenant_id:
+        raise ApplicationError(
+            "This activity's input doesn't name its workflow's tenant.", type=INTERNAL_ERROR, non_retryable=True
+        )
+
+
 def step_activity_for(node: type[Node]) -> Callable[[StepInput], Awaitable[StepResult]]:
     ref = f"{node.type}@{node.version}"
     config_schema = node.Config.model_json_schema(mode="validation")
@@ -184,6 +195,7 @@ def step_activity_for(node: type[Node]) -> Callable[[StepInput], Awaitable[StepR
 
     @activity.defn(name=step_activity(ref))
     async def run_step(step: StepInput) -> StepResult:
+        _same_tenant(step.tenant_id)
         try:
             result, outcome = await _call(node, step, config_schema)
         except _StepFailed as f:
@@ -211,6 +223,7 @@ def engine_activities(store: RunStore, plugins: Iterable[Plugin], *, abi: int = 
 
     @activity.defn(name=LOAD_VERSION)
     async def load_version(data: LoadVersionInput) -> VersionData:
+        _same_tenant(data.tenant_id)
         version = await store.version(data.tenant_id, data.version_id)
         if version.engine_abi != abi:  # the run fails `version_unusable`, with this message
             remedy = (
@@ -228,6 +241,7 @@ def engine_activities(store: RunStore, plugins: Iterable[Plugin], *, abi: int = 
 
     @activity.defn(name=PROJECT)
     async def project(data: ProjectInput) -> None:
+        _same_tenant(data.tenant_id)
         await store.project(data)
 
     steps = [step_activity_for(node) for plugin in plugins for node in plugin.nodes if node.kind == NodeKind.ACTION]

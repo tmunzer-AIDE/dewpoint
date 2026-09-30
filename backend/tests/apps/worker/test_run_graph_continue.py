@@ -25,8 +25,9 @@ from dewpoint.engine.runtime.activities import (
     ProjectInput,
     VersionData,
 )
+from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.engine.runtime.workflow import LoopBatch
-from tests.apps.worker.harness import TENANT, MemoryStore, start, workers
+from tests.apps.worker.harness import TENANT, MemoryStore, run_id_of, start, workers
 from tests.support.graphs import G, cel, ref
 from tests.support.plugins.testkit import Slow, SlowSend
 
@@ -83,7 +84,7 @@ async def test_a_long_run_continues_as_new_and_ends_as_it_would_have(env: Workfl
         runs[0].events[-1].workflow_execution_continued_as_new_event_attributes.input.payloads[0].data
     )
     assert continued["iterations"] == continued["snapshot"]["scheduler"]["budget"]["used"] > 0  # outside it too (M6)
-    rows = [r for r in store.steps(handle.id) if r.node_key == "x"]
+    rows = [r for r in store.steps(run_id_of(handle)) if r.node_key == "x"]
     assert len(rows) == 40 and {(r.attempt, r.status) for r in rows} == {(1, "succeeded")}
 
 
@@ -111,8 +112,8 @@ async def test_a_cancel_while_the_run_gets_ready_to_continue_as_new_ends_it_canc
         with pytest.raises(WorkflowFailureError):
             await asyncio.wait_for(handle.result(), 30)
         runs = await chain(env.client, handle.id, handle.first_execution_run_id or "")
-    assert len(runs) == 1 and store.runs[handle.id].status == "cancelled"
-    assert [(r.node_key, r.status) for r in store.steps(handle.id)] == [("a", "succeeded")]  # `b` never started
+    assert len(runs) == 1 and store.runs[run_id_of(handle)].status == "cancelled"
+    assert [(r.node_key, r.status) for r in store.steps(run_id_of(handle))] == [("a", "succeeded")]  # `b` never started
 
 
 @dataclasses.dataclass
@@ -161,8 +162,8 @@ async def test_a_cancel_while_the_run_settles_for_continue_as_new_lets_its_proje
             await asyncio.wait_for(handle.result(), 30)
         history = await first.fetch_history()
     requested = [e for e in history.events if e.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_CANCEL_REQUESTED]
-    assert requested == [] and store.runs[handle.id].status == "cancelled"
-    assert sorted(r.node_key for r in store.steps(handle.id)) == ["a", "c"]  # `b` never started
+    assert requested == [] and store.runs[run_id_of(handle)].status == "cancelled"
+    assert sorted(r.node_key for r in store.steps(run_id_of(handle))) == ["a", "c"]  # `b` never started
 
 
 def doubler() -> G:
@@ -195,13 +196,13 @@ async def test_draining_settles_what_is_outstanding_and_a_timer_keeps_its_wake_t
         runs = await chain(own_env.client, handle.id, handle.first_execution_run_id or "")
     assert (result.status, result.outputs) == ("succeeded", {"double": 42, "count": 150})
     assert len(runs) >= 2, "it never drained"
-    assert SlowSend.sent.count(handle.id) == 5  # each ambiguous send once
+    assert SlowSend.sent.count(run_id_of(handle)) == 5  # each ambiguous send once
     started = count(runs, EventType.EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_STARTED)
     assert started == 3  # two batches and the sub-flow, none restarted
     assert count(runs, EventType.EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_TERMINATED) == 0
     carried = [s for s in (snapshot(h) for h in runs[:-1]) if s["timers"]]
     assert carried, "the timer never went into a snapshot"
-    [delay] = [r for r in store.steps(handle.id) if r.node_key == "d"]
+    [delay] = [r for r in store.steps(run_id_of(handle)) if r.node_key == "d"]
     assert delay.started_at and delay.ended_at
     took = datetime.fromisoformat(delay.ended_at) - datetime.fromisoformat(delay.started_at)
     assert timedelta(seconds=3599) <= took <= timedelta(seconds=3601), took  # its original wake time
@@ -252,7 +253,7 @@ async def test_the_headroom_draining_adds_is_measured_and_bounded(own_env: Workf
         and e.signal_external_workflow_execution_initiated_event_attributes.signal_name == BUDGET
     ]
     assert (len(retried), len(granted)) == (10, 10)  # every retry and every grant happened while draining
-    beats = [at for run, at in Slow.beats if run == handle.id]
+    beats = [at for run, at in Slow.beats if run == run_id_of(handle)]
     assert len(beats) == 80 * 3 and min(beats) > datetime.fromisoformat(drained["at"])  # and every heartbeat
     events, added = continued - began, size_continued - size_began
     print(f"draining added {events} events and {added} bytes")  # the measurement the headroom is set from
@@ -269,7 +270,7 @@ async def test_a_snapshot_of_another_format_fails_the_run(env: WorkflowEnvironme
         handle = await start(env.client, store, g, {}, snapshot={"snapshot_format": 99}, iterations=37)
         result = await asyncio.wait_for(handle.result(), 30)
     assert (result.status, result.error["code"], result.iterations) == ("failed", "internal_error", 37)
-    assert store.runs[handle.id].iterations == 37
+    assert store.runs[run_id_of(handle)].iterations == 37
 
 
 async def test_a_batch_with_a_snapshot_of_another_format_fails_as_a_workflow(env: WorkflowEnvironment) -> None:
@@ -283,10 +284,12 @@ async def test_a_batch_with_a_snapshot_of_another_format_fails_as_a_workflow(env
         snapshot={"snapshot_format": 99},
     )  # fmt: skip
     async with workers(env.client, store):
-        handle = await env.client.start_workflow(LoopBatch.run, batch, id=str(uuid.uuid4()), task_queue=ENGINE_QUEUE)
+        batch_id = f"{run_workflow_id(TENANT, parent.run_id)}/{uuid.uuid4()}/l:0/batch:0"
+        handle = await env.client.start_workflow(LoopBatch.run, batch, id=batch_id, task_queue=ENGINE_QUEUE)
         with pytest.raises(WorkflowFailureError) as failed:
             await asyncio.wait_for(handle.result(), 30)
     assert isinstance(failed.value.cause, ApplicationError) and failed.value.cause.type == "internal_error"
+    assert failed.value.cause.message == "This build can't read the batch's continue-as-new snapshot."
 
 
 @dataclasses.dataclass
@@ -326,7 +329,7 @@ async def test_a_continued_sub_flow_that_cant_load_its_version_reports_what_it_u
         handle = await start(env.client, store, g, {}, checkpoint_events=120)
         result = await asyncio.wait_for(handle.result(), 60)
         [child] = [run_id for run_id, row in store.starts.items() if row.kind == "subflow"]
-        started = (await env.client.get_workflow_handle(child).fetch_history()).events[0]
+        started = (await env.client.get_workflow_handle(run_workflow_id(TENANT, child)).fetch_history()).events[0]
     carried = json.loads(started.workflow_execution_started_event_attributes.input.payloads[0].data)["iterations"]
     assert store.loads == 2 and carried > 0  # it continued as new, then couldn't run its version
     assert (store.runs[child].error_code, store.runs[child].iterations) == ("version_unusable", carried)

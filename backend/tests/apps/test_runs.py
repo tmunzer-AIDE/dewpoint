@@ -31,6 +31,7 @@ from dewpoint.core.runs import service
 from dewpoint.core.workflows import service as workflows
 from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, SIMULATE, RunInput
+from dewpoint.engine.runtime.ids import run_workflow_id
 from tests.apps.test_lifecycle_races import until_someone_waits_for_a_lock
 from tests.apps.test_workflow_ops import (
     ECHO,
@@ -120,7 +121,7 @@ async def run_row(sm: Any, tenant: uuid.UUID, run_id: uuid.UUID) -> Any:
         return await service.get_run(s, run_id)
 
 
-async def test_the_active_version_starts_with_its_run_id_as_the_workflow_id(
+async def test_the_active_version_starts_under_a_workflow_id_built_from_its_tenant_and_run(
     owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
 ) -> None:
     ctx, _, version = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings)
@@ -130,7 +131,8 @@ async def test_the_active_version_starts_with_its_run_id_as_the_workflow_id(
         tenant_id=ctx.tenant_id, version_id=version, trigger={"x": 1}, mode=SIMULATE,
     )  # fmt: skip
     [(arg, workflow_id, queue)] = client.started
-    assert (workflow_id, queue) == (str(run_id), ENGINE_QUEUE)
+    assert (workflow_id, queue) == (run_workflow_id(str(ctx.tenant_id), str(run_id)), ENGINE_QUEUE)  # 2b spec §6.1
+    assert (arg.tenant_id, arg.run_id) == (str(ctx.tenant_id), str(run_id))
     assert (arg.version_id, arg.trigger, arg.mode) == (str(version), {"x": 1}, SIMULATE)
     assert arg.max_run_duration_s == api_settings.max_run_duration_days * 86_400
     row = await run_row(owner_sessionmaker, ctx.tenant_id, run_id)
@@ -288,7 +290,8 @@ async def test_a_lost_acknowledgement_is_reconciled_by_the_workflow_id(
         tenant_id=ctx.tenant_id, version_id=version, trigger={},
     )  # fmt: skip
     assert len(client.started) == 1  # started once, not twice
-    assert client.calls == [(str(run_id), WorkflowIDReusePolicy.REJECT_DUPLICATE)] * 2
+    workflow_id = run_workflow_id(str(ctx.tenant_id), str(run_id))
+    assert client.calls == [(workflow_id, WorkflowIDReusePolicy.REJECT_DUPLICATE)] * 2
     assert (await only_run(owner_sessionmaker, ctx.tenant_id)).status == "running"
 
 

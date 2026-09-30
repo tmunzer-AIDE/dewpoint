@@ -27,6 +27,7 @@ from dewpoint.engine.cel import ipc
 from dewpoint.engine.cel import types as T
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.runtime.activities import MAPPED, CelInput, CelResult, StepInput, StepResult
+from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.sdk import Node, SideEffect, StepContext, sensitive
 from tests.support.plugins.testkit import AmbiguousSend, Echo, FailN, Reconcile, Sensitive, Slow
 
@@ -230,8 +231,15 @@ def step(ref: str, config: dict[str, Any] | None = None, **extra: Any) -> StepIn
     return StepInput(**IDS, node_key="s", iteration_key="l:0", ref=ref, config=config or {}, **extra)
 
 
+def activity_env() -> ActivityEnvironment:
+    """An activity of IDS's run: its workflow id names the tenant (engine 2b spec §6.1)."""
+    env = ActivityEnvironment()
+    env.info = dataclasses.replace(env.info, workflow_id=run_workflow_id(IDS["tenant_id"], IDS["run_id"]))
+    return env
+
+
 async def call(fn: Callable[[StepInput], Awaitable[StepResult]], data: StepInput) -> StepResult:
-    return await ActivityEnvironment().run(fn, data)
+    return await activity_env().run(fn, data)
 
 
 async def failure(fn: Callable[[StepInput], Awaitable[StepResult]], data: StepInput) -> Any:
@@ -344,7 +352,7 @@ async def test_simulation_calls_simulate_or_says_it_cannot() -> None:
 
 
 async def test_a_cancelled_step_stops() -> None:
-    env = ActivityEnvironment()
+    env = activity_env()
     task = asyncio.create_task(env.run(step_activity_for(Slow), step("testkit.slow@1", {"seconds": 30})))
     await asyncio.sleep(0.1)
     env.cancel()
@@ -438,3 +446,11 @@ async def test_a_field_serializer_emits_what_the_output_schema_declares() -> Non
     assert await call(step_activity_for(Serialized), step("testkit.serialized@1")) == StepResult(
         {"id": "id-3"}, "applied"
     )
+
+
+async def test_an_activity_refuses_an_input_of_another_tenant() -> None:
+    """Engine 2b spec §6.1: the store scopes every write by the input's tenant, so it must be the one the workflow id
+    names. The failure isn't the node's: it isn't `MAPPED`."""
+    other = dataclasses.replace(step("testkit.echo@1", {"value": 1}), tenant_id=str(uuid.UUID(int=9)))
+    refused = await failure(step_activity_for(Echo), other)
+    assert (refused.type, refused.non_retryable, refused.details) == ("internal_error", True, ())

@@ -15,7 +15,7 @@ from temporalio.testing import WorkflowEnvironment
 
 from dewpoint.engine.cel import route
 from dewpoint.engine.runtime import execution
-from tests.apps.worker.harness import MemoryStore, start, workers
+from tests.apps.worker.harness import MemoryStore, run_id_of, start, workers
 from tests.support.graphs import G, cel, ref
 
 SCHEMA: dict[str, Any] = {"type": "object", "properties": {"s": {"type": "string"}}, "required": ["s"]}
@@ -97,7 +97,7 @@ async def test_a_binding_set_over_the_limit_fails_its_step_with_input_too_large(
     handle, result = await finished(env, store, g, {"s": "x" * 5_000})
     assert (result.status, result.outputs) == ("succeeded", {"code": "input_too_large"})
     assert await requests(handle) == []  # nothing was sent
-    [row] = [r for r in store.steps(handle.id) if r.node_key == "t" and r.status == "failed"]
+    [row] = [r for r in store.steps(run_id_of(handle)) if r.node_key == "t" and r.status == "failed"]
     assert row.error_message == execution.REQUEST_TOO_LARGE  # fixed: it never quotes a value
 
 

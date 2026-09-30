@@ -15,6 +15,7 @@ from dewpoint.apps.worker.store import DbRunStore
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.runs import service as runs
 from dewpoint.engine.runtime.activities import ProjectInput, RunStart, RunSummary, StepRow
+from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.engine.runtime.workflow import RunGraph
 from tests.apps.api.helpers import member_client
 from tests.apps.test_workflow_ops import actor, create, publish
@@ -59,7 +60,8 @@ async def test_a_run_is_projected_and_readable_through_the_api(
             dispatch_sessionmaker, env.client, api_settings,
             tenant_id=ctx.tenant_id, version_id=out.version.id, trigger={"x": 1},
         )  # fmt: skip
-        result = await env.client.get_workflow_handle_for(RunGraph.run, str(run_id)).result()
+        handle = env.client.get_workflow_handle_for(RunGraph.run, run_workflow_id(str(ctx.tenant_id), str(run_id)))
+        result = await handle.result()
     assert (result.status, result.outputs) == ("succeeded", {"items": [10, 20]})
 
     viewer, _ = await member_client(app, owner_sessionmaker, api_settings, ctx.tenant_id, "viewer")
@@ -132,7 +134,7 @@ async def test_a_character_the_database_refuses_never_keeps_its_run_open(
             dispatch_sessionmaker, env.client, api_settings,
             tenant_id=ctx.tenant_id, version_id=out.version.id, trigger={"note": "bad \ud800 note"},
         )  # fmt: skip
-        handle = env.client.get_workflow_handle_for(RunGraph.run, str(run_id))
+        handle = env.client.get_workflow_handle_for(RunGraph.run, run_workflow_id(str(ctx.tenant_id), str(run_id)))
         result = await asyncio.wait_for(handle.result(), 30)
     assert result.status == "failed" and result.error is not None
     assert (result.error["code"], result.error["message"]) == ("workflow_failed", "bad \ufffd note")
@@ -206,7 +208,8 @@ async def test_a_sub_flow_is_projected_as_a_run_of_its_own(
             dispatch_sessionmaker, env.client, api_settings,
             tenant_id=ctx.tenant_id, version_id=out.version.id, trigger={},
         )  # fmt: skip
-        result = await asyncio.wait_for(env.client.get_workflow_handle_for(RunGraph.run, str(run_id)).result(), 60)
+        handle = env.client.get_workflow_handle_for(RunGraph.run, run_workflow_id(str(ctx.tenant_id), str(run_id)))
+        result = await asyncio.wait_for(handle.result(), 60)
     assert (result.status, result.outputs) == ("succeeded", {"double": 42})
     viewer, _ = await member_client(app, owner_sessionmaker, api_settings, ctx.tenant_id, "viewer")
     listed = (await viewer.get(f"/api/v1/t/{ctx.tenant_id}/runs")).json()

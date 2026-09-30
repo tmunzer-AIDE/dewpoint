@@ -23,7 +23,7 @@ from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.runtime.activities import cel_queue
 from dewpoint.sdk import Plugin
-from tests.apps.worker.harness import EVALUATOR_ONLY, MemoryStore, in_process, start, start_version
+from tests.apps.worker.harness import EVALUATOR_ONLY, MemoryStore, in_process, run_id_of, start, start_version
 from tests.apps.worker.test_deployment import build, placement
 from tests.apps.worker.test_main import settings
 from tests.engine.replay.record import executions
@@ -80,7 +80,7 @@ async def test_the_old_build_drains_while_the_new_one_serves_new_runs(dev_env: W
         chains = [await executions(client, h.id, h.first_execution_run_id or "") for h in (old, new)]
     assert [(r.status, r.outputs) for r in done] == [("succeeded", {"double": 42}), ("succeeded", {"n": 42})]
     assert (statuses[n1], statuses[n]) == ("drained", "current")
-    slow = [r for r in store.steps(old.id) if r.node_key == "s"]
+    slow = [r for r in store.steps(run_id_of(old)) if r.node_key == "s"]
     assert [(r.status, r.attempt) for r in slow] == [("succeeded", 1)]  # the retired type ran on N-1, once
     for chain, expected in ((chains[0], n1), (chains[1], n)):
         assert len(chain) >= (4 if expected == n1 else 1)
@@ -146,6 +146,6 @@ async def test_after_a_new_abi_is_promoted_old_versions_wait_to_be_published_aga
         ("succeeded", None, {"v": 1}),
     ]
     assert (done[1].error or {}).get("message") == refusal
-    [sub_run] = [c for c, row in store.starts.items() if row.parent_run_id == parent_only.id]
+    [sub_run] = [c for c, row in store.starts.items() if row.parent_run_id == run_id_of(parent_only)]
     assert (store.runs[sub_run].error_code, store.runs[sub_run].error_message) == ("version_unusable", refusal)
     assert len(chain) == 2 and all(placement(h).builds == {n1} for h in chain)  # the run and its sub-flow, on N-1

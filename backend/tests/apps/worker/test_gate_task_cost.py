@@ -24,7 +24,7 @@ from dewpoint.engine.graph.validate import ValidationContext, validate
 from dewpoint.engine.runtime import execution
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, cel_queue
 from dewpoint.engine.runtime.workflow import LoopBatch, RunGraph
-from tests.apps.worker.harness import CATALOG, TESTKIT, MemoryStore, in_process, start
+from tests.apps.worker.harness import CATALOG, TESTKIT, MemoryStore, in_process, run_id_of, start
 from tests.engine.cel.test_gate_cost import ADVERSARIAL, AT_CAPS, BINDING, TASK_CPU_TARGET_S, WORST
 from tests.support.graphs import G, cel
 
@@ -137,7 +137,7 @@ async def test_no_workflow_task_passes_the_cpu_target(name: str, monkeypatch: py
                 handle = await start(env.client, store, g, AT_CAPS)
                 result = await asyncio.wait_for(handle.result(), 300)
     assert result.status == "succeeded"
-    assert {r.cel_mode for r in store.steps(handle.id) if r.node_key == "x"} == {"local"}
+    assert {r.cel_mode for r in store.steps(run_id_of(handle)) if r.node_key == "x"} == {"local"}
     worst = max(executor.cpu)
     REPORT["loads"][name] = {"expr_chars": len(expr), "tasks": len(executor.cpu), "worst_cpu_s": worst}
     assert worst <= TASK_CPU_TARGET_S, (name, sorted(executor.cpu, reverse=True)[:5])

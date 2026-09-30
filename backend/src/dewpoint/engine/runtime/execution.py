@@ -59,6 +59,7 @@ with workflow.unsafe.imports_passed_through():
         step_activity,
     )
     from dewpoint.engine.runtime.budget import LOCAL, Need
+    from dewpoint.engine.runtime.ids import run_workflow_id
     from dewpoint.engine.runtime.program import Program, Step
     from dewpoint.engine.runtime.projection import (
         Secrets,
@@ -839,7 +840,8 @@ class Execution:
         if version is None or self.depth >= MAX_DEPTH:
             reason = "no pinned version" if version is None else f"more than {MAX_DEPTH} sub-flows deep"
             return _Effect(failure=Failure(VERSION_UNUSABLE, f"`{step.key}` can't run its sub-flow: {reason}."))
-        child = str(workflow.uuid4())
+        child_run = str(workflow.uuid4())
+        child = run_workflow_id(self.tenant_id, child_run)  # its workflow id, and its key in this budget
         grant = self.sched.budget.start_child(child, SUBFLOW_GRANT)
         parent = Parent(
             workflow_id=workflow.info().workflow_id,
@@ -854,7 +856,7 @@ class Execution:
         )
         run = RunInput(
             self.tenant_id,
-            child,
+            child_run,
             version,
             start.input,
             self.mode,
@@ -902,7 +904,7 @@ class Execution:
         references (spec §4.5). Its parent writes it, unless it has one, with its whole grant as counted here: its
         first grant and every one it asked for since, which the parent debits as it settles the child. It writes the
         row too, in case the child was ended before its own: a start written later changes nothing."""
-        whole = self.sched.budget.reserved.get(run.run_id, 0)  # read before the child is settled
+        whole = self.sched.budget.reserved.get(run_workflow_id(run.tenant_id, run.run_id), 0)  # before it's settled
         end = RunSummary(run.run_id, "failed", workflow.now().isoformat(), failure.code, failure.message, whole, True)
         await self._shielded([], end, RunStart.of(run, started_at))
 
@@ -926,7 +928,9 @@ class Execution:
         loop = self.sched.loops[b.loop]
         # from the input, not the workflow id: a replay of this history sees the same id (the run id names the logical
         # run, the loop step and its scope name the loop, the start names the batch)
-        child = f"{self.run_id}/{step.id}/{iteration_key(b.loop.scope)}/batch:{b.start}"
+        child = (
+            f"{run_workflow_id(self.tenant_id, self.run_id)}/{step.id}/{iteration_key(b.loop.scope)}/batch:{b.start}"
+        )
         grant = self.sched.budget.start_child(child, len(b.items))
         parent = Parent(
             workflow_id=workflow.info().workflow_id,

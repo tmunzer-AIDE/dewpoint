@@ -4,6 +4,7 @@ scenario ran, its continued runs and its children included. A build that keeps t
 the previous build's histories too. The Replayer needs no server."""
 
 import asyncio
+import json
 import re
 from pathlib import Path
 
@@ -35,5 +36,6 @@ def test_recorded_histories_carry_no_host_data() -> None:
     "path", HISTORIES, ids=lambda p: p.stem if p.parent == build_dir() else f"{p.parent.name}/{p.stem}"
 )
 async def test_a_golden_history_replays(path: Path) -> None:
-    history = WorkflowHistory.from_json(path.stem, await asyncio.to_thread(path.read_text))
+    data = json.loads(await asyncio.to_thread(path.read_text))
+    history = WorkflowHistory.from_json(data.pop("workflowId"), data)  # the id it ran under (see `record`)
     await Replayer(workflows=[RunGraph, LoopBatch]).replay_workflow(history)

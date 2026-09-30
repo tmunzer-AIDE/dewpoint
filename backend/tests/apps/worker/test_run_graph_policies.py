@@ -24,8 +24,18 @@ from dewpoint.engine.runtime.activities import (
     ProjectInput,
     RunInput,
 )
+from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.engine.runtime.workflow import PROJECT_BYTES, RunGraph
-from tests.apps.worker.harness import EVALUATOR_ONLY, RESULT_TIMEOUT_S, TENANT, MemoryStore, run, start, workers
+from tests.apps.worker.harness import (
+    EVALUATOR_ONLY,
+    RESULT_TIMEOUT_S,
+    TENANT,
+    MemoryStore,
+    run,
+    run_id_of,
+    start,
+    workers,
+)
 from tests.support.graphs import G, cel, ref, template
 from tests.support.plugins.testkit import SlowSend
 
@@ -154,7 +164,7 @@ async def test_a_default_covers_a_missing_value_and_a_failed_expression_fails_th
         handle = await start(env.client, store, g, TRIGGER)
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     assert result.outputs == {"a": "fallback", "b": "evaluation_error"}
-    rows = {r.node_key: r for r in store.steps(handle.id)}  # b never reached its activity, and still has its row
+    rows = {r.node_key: r for r in store.steps(run_id_of(handle))}  # b never reached its activity: it has its row
     assert (rows["b"].attempt, rows["b"].status, rows["b"].error_code) == (1, "failed", "evaluation_error")
 
 
@@ -214,7 +224,8 @@ async def test_one_projection_is_outstanding_at_a_time(env: WorkflowEnvironment)
         elif event.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_COMPLETED:
             outstanding.discard(event.activity_task_completed_event_attributes.scheduled_event_id)
     assert most == 1
-    assert sorted(r.node_key for r in store.steps(handle.id)) == sorted(f"{k}{i}" for k in "et" for i in range(4))
+    keys = sorted(r.node_key for r in store.steps(run_id_of(handle)))
+    assert keys == sorted(f"{k}{i}" for k in "et" for i in range(4))
 
 
 async def test_a_projection_in_flight_takes_no_units_slot(env: WorkflowEnvironment) -> None:
@@ -252,9 +263,9 @@ async def test_the_deadline_cancels_running_work(own_env: WorkflowEnvironment) -
         handle = await start(own_env.client, store, g, TRIGGER, max_run_duration_s=2)
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     assert result.status == "deadline_exceeded"
-    [row] = store.steps(handle.id)
+    [row] = store.steps(run_id_of(handle))
     assert row.status == "cancelled"
-    assert store.runs[handle.id].status == "deadline_exceeded"
+    assert store.runs[run_id_of(handle)].status == "deadline_exceeded"
 
 
 async def test_a_cancelled_run_projects_its_end(env: WorkflowEnvironment) -> None:
@@ -266,7 +277,7 @@ async def test_a_cancelled_run_projects_its_end(env: WorkflowEnvironment) -> Non
         await handle.cancel()
         with pytest.raises(WorkflowFailureError):
             await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
-    assert store.runs[handle.id].status == "cancelled"
+    assert store.runs[run_id_of(handle)].status == "cancelled"
 
 
 async def test_a_version_this_build_cannot_run_fails_the_run(env: WorkflowEnvironment) -> None:
@@ -277,7 +288,10 @@ async def test_a_version_this_build_cannot_run_fails_the_run(env: WorkflowEnviro
     run_id = str(uuid.uuid4())
     async with workers(env.client, store):
         handle = await env.client.start_workflow(
-            RunGraph.run, RunInput(TENANT, run_id, version_id, TRIGGER), id=run_id, task_queue=ENGINE_QUEUE
+            RunGraph.run,
+            RunInput(TENANT, run_id, version_id, TRIGGER),
+            id=run_workflow_id(TENANT, run_id),
+            task_queue=ENGINE_QUEUE,
         )
         result = await asyncio.wait_for(handle.result(), 10)
     assert result.status == "failed" and result.error and result.error["code"] == "version_unusable"
@@ -304,7 +318,8 @@ async def test_a_bug_fails_the_run_instead_of_leaving_it_running(
         result = await asyncio.wait_for(handle.result(), 10)
     message = "The interpreter failed (RuntimeError); the worker's log has the details."  # never the raw text
     assert result.error == {"code": "internal_error", "message": message, "attempt": 1}
-    assert store.runs[handle.id].status == "failed" and [r.status for r in store.steps(handle.id)] == ["succeeded"]
+    run_id = run_id_of(handle)
+    assert store.runs[run_id].status == "failed" and [r.status for r in store.steps(run_id)] == ["succeeded"]
 
 
 async def test_a_trigger_that_breaks_its_schema_fails_a_step_not_the_workflow(env: WorkflowEnvironment) -> None:
@@ -352,9 +367,9 @@ async def test_a_timeout_after_an_ambiguous_send_is_never_retried(own_env: Workf
     async with workers(own_env.client, store):
         handle = await start(own_env.client, store, g, TRIGGER)
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
-    assert SlowSend.sent.count(handle.id) == 1
+    assert SlowSend.sent.count(run_id_of(handle)) == 1
     assert result.status == "failed" and result.error and result.error["code"] == "timeout"
-    [row] = store.steps(handle.id)
+    [row] = store.steps(run_id_of(handle))
     assert (row.attempt, row.status, row.error_code, row.outcome) == (1, "failed", "timeout", "outcome_unknown")
 
 
@@ -374,11 +389,11 @@ async def test_a_worker_lost_during_an_ambiguous_attempt_never_repeats_it(own_en
     g.nodes[0]["options"].update(max_attempts=3)
     async with workers(own_env.client, store, cache=0):  # no sticky queue: the next worker takes over at once
         handle = await start(own_env.client, store, g, TRIGGER)
-        await sent(handle.id)
+        await sent(run_id_of(handle))
     async with workers(own_env.client, store):  # another worker carries the run on
         result = await asyncio.wait_for(handle.result(), 30)
-    assert SlowSend.sent.count(handle.id) == 1
-    [row] = store.steps(handle.id)
+    assert SlowSend.sent.count(run_id_of(handle)) == 1
+    [row] = store.steps(run_id_of(handle))
     assert (row.attempt, row.status, row.error_code, row.outcome) == (1, "failed", "error", "outcome_unknown")
     assert result.status == "failed"
 
@@ -390,11 +405,11 @@ async def test_a_cancelled_ambiguous_attempt_says_its_outcome_is_unknown(own_env
     g = graph().node("s", "testkit.slow_send@1", {"seconds": 5})
     async with workers(own_env.client, store):
         handle = await start(own_env.client, store, g, TRIGGER)
-        await sent(handle.id)  # the attempt has sent its request (its history says so only once it ends)
+        await sent(run_id_of(handle))  # the attempt has sent its request (its history says so only once it ends)
         await handle.cancel()
         with pytest.raises(WorkflowFailureError):
             await asyncio.wait_for(handle.result(), 30)
-    [row] = [r for r in store.steps(handle.id) if r.node_key == "s"]
+    [row] = [r for r in store.steps(run_id_of(handle)) if r.node_key == "s"]
     assert (row.status, row.outcome) == ("cancelled", OUTCOME_UNKNOWN)
 
 
@@ -405,7 +420,7 @@ async def test_a_timeout_is_retried_when_repeating_is_safe(own_env: WorkflowEnvi
     async with workers(own_env.client, store):
         handle = await start(own_env.client, store, g, TRIGGER)
         await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
-    assert [(r.attempt, r.status, r.error_code, r.outcome) for r in store.steps(handle.id)] == [
+    assert [(r.attempt, r.status, r.error_code, r.outcome) for r in store.steps(run_id_of(handle))] == [
         (1, "failed", "timeout", None),
         (2, "failed", "timeout", None),
     ]
@@ -432,9 +447,9 @@ async def test_a_database_outage_never_repeats_an_effect_and_the_rows_catch_up(e
     async with workers(env.client, store):
         handle = await start(env.client, store, g, TRIGGER)
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
-    assert result.status == "succeeded" and SlowSend.sent.count(handle.id) == 1 and store.down == 0
-    assert [(r.node_key, r.status) for r in store.steps(handle.id)] == [("s", "succeeded"), ("t", "succeeded")]
-    assert store.runs[handle.id].status == "succeeded"
+    assert result.status == "succeeded" and SlowSend.sent.count(run_id_of(handle)) == 1 and store.down == 0
+    assert [(r.node_key, r.status) for r in store.steps(run_id_of(handle))] == [("s", "succeeded"), ("t", "succeeded")]
+    assert store.runs[run_id_of(handle)].status == "succeeded"
 
 
 class BatchStore(FlakyStore):
@@ -460,7 +475,7 @@ async def test_a_backlog_is_projected_in_bounded_batches(env: WorkflowEnvironmen
         result = await asyncio.wait_for(handle.result(), 60)
     assert result.status == "succeeded" and store.down == 0
     assert max(store.sizes) <= PROJECT_BYTES < sum(store.sizes)  # the backlog took more than one batch
-    assert sorted(r.iteration_key for r in store.steps(handle.id) if r.node_key == "e") == sorted(
+    assert sorted(r.iteration_key for r in store.steps(run_id_of(handle)) if r.node_key == "e") == sorted(
         f"l:{i}" for i in range(40)
     )
 
@@ -483,7 +498,7 @@ async def test_sensitive_values_never_reach_the_projection(env: WorkflowEnvironm
     async with workers(env.client, store):
         handle = await start(env.client, store, g, TRIGGER)
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
-    rows = {r.node_key: r for r in store.steps(handle.id)}
+    rows = {r.node_key: r for r in store.steps(run_id_of(handle))}
     assert rows["s"].output_preview == {
         "public": "visible",
         "secret_value": "[redacted]",
@@ -494,7 +509,7 @@ async def test_sensitive_values_never_reach_the_projection(env: WorkflowEnvironm
     assert rows["p"].error_message == "the receiver rejected the request: [redacted]"
     assert rows["f"].error_message == "gave up on [redacted]"
     assert rows["k"].error_message == 'NOT_FOUND: Key not found in map : "[redacted]"'
-    assert store.runs[handle.id].error_message == "gave up on [redacted]"
+    assert store.runs[run_id_of(handle)].error_message == "gave up on [redacted]"
     assert result.error and result.error["message"] == "gave up on [redacted]"
     dump = repr(store.rows) + repr(store.runs)
     assert "s3cr3t-value" not in dump and "pa55word" not in dump
@@ -512,7 +527,7 @@ async def test_a_sensitive_trigger_field_is_masked_where_it_is_copied(env: Workf
     async with workers(env.client, store):
         handle = await start(env.client, store, g, {"api_key": "k3y-k3y-k3y"})
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
-    [row] = store.steps(handle.id)
+    [row] = store.steps(run_id_of(handle))
     assert (row.input_preview, row.output_preview) == ({"value": "Bearer [redacted]"}, {"value": "Bearer [redacted]"})
     assert result.outputs == {"key": "k3y-k3y-k3y"}  # the workflow's own outputs are its contract, not a preview
 
@@ -530,7 +545,7 @@ async def test_a_sensitive_config_value_is_masked_where_it_is_copied_or_echoed(e
     async with workers(env.client, store):
         handle = await start(env.client, store, g, {"x": 7, "open": {"tok": passed}})
         await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
-    rows = {r.node_key: r for r in store.steps(handle.id)}
+    rows = {r.node_key: r for r in store.steps(run_id_of(handle))}
     assert rows["t"].output_preview == {"copy": "[redacted]"}  # projected before `p` ran
     assert rows["p"].input_preview == {"outcome": "rejected", "token": "[redacted]"}
     assert rows["p"].error_message == rows["q"].error_message == "the receiver rejected the request for [redacted]"
@@ -558,7 +573,7 @@ async def test_a_cancel_while_the_outputs_are_evaluated_projects_cancelled(env: 
         await handle.cancel()
         with pytest.raises(WorkflowFailureError):
             await asyncio.wait_for(handle.result(), 10)
-    assert store.runs[handle.id].status == "cancelled"
+    assert store.runs[run_id_of(handle)].status == "cancelled"
 
 
 async def test_the_deadline_holds_while_the_outputs_are_evaluated(env: WorkflowEnvironment) -> None:
@@ -569,7 +584,7 @@ async def test_the_deadline_holds_while_the_outputs_are_evaluated(env: WorkflowE
         handle = await start(env.client, store, g, TRIGGER, max_run_duration_s=1, cel_schedule_to_start_s=5)
         result = await asyncio.wait_for(handle.result(), 10)
     assert (result.status, result.error and result.error["code"]) == ("deadline_exceeded", "deadline_exceeded")
-    assert store.runs[handle.id].status == "deadline_exceeded"
+    assert store.runs[run_id_of(handle)].status == "deadline_exceeded"
 
 
 async def test_a_damaged_output_fails_the_run_as_unusable(env: WorkflowEnvironment) -> None:
@@ -581,7 +596,10 @@ async def test_a_damaged_output_fails_the_run_as_unusable(env: WorkflowEnvironme
     run_id = str(uuid.uuid4())
     async with workers(env.client, store):
         handle = await env.client.start_workflow(
-            RunGraph.run, RunInput(TENANT, run_id, version_id, TRIGGER), id=run_id, task_queue=ENGINE_QUEUE
+            RunGraph.run,
+            RunInput(TENANT, run_id, version_id, TRIGGER),
+            id=run_workflow_id(TENANT, run_id),
+            task_queue=ENGINE_QUEUE,
         )
         result = await asyncio.wait_for(handle.result(), 10)
     assert result.error and result.error["code"] == "version_unusable" and store.steps(run_id) == []
@@ -612,7 +630,7 @@ async def test_a_cancel_after_the_run_concluded_leaves_its_outcome(env: Workflow
         await handle.cancel()
         store.release.set()
         result = await asyncio.wait_for(handle.result(), 10)
-    assert (result.status, result.outputs, store.runs[handle.id].status) == ("succeeded", {"v": 1}, "succeeded")
+    assert (result.status, result.outputs, store.runs[run_id_of(handle)].status) == ("succeeded", {"v": 1}, "succeeded")
 
 
 async def cancel_acted_on(handle: Any) -> None:
@@ -640,7 +658,7 @@ async def test_a_cancel_acted_on_before_the_end_is_written_still_leaves_its_outc
         await cancel_acted_on(handle)  # the held write outlives the cancel's activation
         store.release.set()
         result = await asyncio.wait_for(handle.result(), 10)
-    assert (result.status, result.outputs, store.runs[handle.id].status) == ("succeeded", {"v": 1}, "succeeded")
+    assert (result.status, result.outputs, store.runs[run_id_of(handle)].status) == ("succeeded", {"v": 1}, "succeeded")
 
 
 class LoadingStore(MemoryStore):
@@ -667,4 +685,5 @@ async def test_a_cancel_while_the_version_loads_cancels_the_run(env: WorkflowEnv
         with pytest.raises(WorkflowFailureError):
             await asyncio.wait_for(handle.result(), 10)
         store.release.set()
-    assert (store.runs[handle.id].status, store.runs[handle.id].error_code) == ("cancelled", "cancelled")
+    summary = store.runs[run_id_of(handle)]
+    assert (summary.status, summary.error_code) == ("cancelled", "cancelled")

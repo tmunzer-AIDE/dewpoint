@@ -16,7 +16,7 @@ from dewpoint.engine.cel import route
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.graph.validate import ValidationContext, validate
 from dewpoint.engine.runtime import execution
-from tests.apps.worker.harness import CATALOG, MemoryStore, start, workers
+from tests.apps.worker.harness import CATALOG, MemoryStore, run_id_of, start, workers
 from tests.engine.cel.test_gate_cost import ADVERSARIAL, AT_CAPS
 from tests.support.graphs import G, cel
 
@@ -102,7 +102,7 @@ async def test_concurrent_evaluations_share_one_budget_per_workflow_task(
     g.node("x", "flow.transform@1", {"fields": {"r": cel(heaviest_search())}}).edge("l", "x", "body")
     handle, result = await finished(env, store, g, cache=cache)
     assert (result.status, result.outputs) == ("succeeded", {"count": 20})
-    assert {r.cel_mode for r in store.steps(handle.id) if r.node_key == "x"} == {"local"}
+    assert {r.cel_mode for r in store.steps(run_id_of(handle)) if r.node_key == "x"} == {"local"}
     evaluating = [[w for kind, w in t if kind == "eval"] for t in recorded.values()]
     evaluating = [works for works in evaluating if works]
     assert sum(len(works) for works in evaluating) >= 20 and len(evaluating) >= 10  # the budget split them
@@ -119,7 +119,7 @@ async def test_a_local_filter_evaluates_its_items_within_the_budget(
     g.node("f", "flow.filter@1", {"items": cel("trigger.xs"), "predicate": cel("item % 3 == 0")})
     handle, result = await finished(env, store, g)
     assert (result.status, result.outputs) == ("succeeded", {"kept": 150})
-    assert [r.cel_mode for r in store.steps(handle.id) if r.node_key == "f"] == ["local"]
+    assert [r.cel_mode for r in store.steps(run_id_of(handle)) if r.node_key == "f"] == ["local"]
     counts = [sum(kind == "eval" for kind, _ in t) for t in recorded.values()]
     assert max(counts) <= route.YIELD_EVALUATIONS and sum(counts) >= 450
 
@@ -136,7 +136,7 @@ async def test_binding_is_charged_when_the_evaluator_runs_the_expression(
     g.node("f", "flow.filter@1", {"items": list(range(20)), "predicate": cel("size(trigger.c1) > item")})
     handle, result = await finished(env, store, g)
     assert (result.status, result.outputs) == ("succeeded", {"kept": 20})
-    assert [r.cel_mode for r in store.steps(handle.id) if r.node_key == "f"] == ["activity"]
+    assert [r.cel_mode for r in store.steps(run_id_of(handle)) if r.node_key == "f"] == ["activity"]
     binding = [[n for kind, n in t if kind == "bind" and n > 16_000] for t in recorded.values()]  # the 20 views
     binding = [nodes for nodes in binding if nodes]
     assert [len(nodes) for nodes in binding] == [1, 5, 5, 5, 4]  # 4 fit in 65,000 values, the 5th passes it
@@ -155,7 +155,7 @@ async def test_an_executions_first_workflow_task_leaves_heavy_cel_to_the_next_on
     g.node("b", "flow.transform@1", {"fields": {"r": cel(heaviest_search())}})
     handle, result = await finished(env, store, g)
     assert result.status == "succeeded"
-    assert {r.cel_mode for r in store.steps(handle.id)} == {"local"}
+    assert {r.cel_mode for r in store.steps(run_id_of(handle))} == {"local"}
     first, *later = [[w for kind, w in recorded[length] if kind == "eval"] for length in sorted(recorded)]
     assert len(first) == 1  # the light one: the heavy one waited
     tenth = route.YIELD_WORK // route.STARTUP_SHARE

@@ -10,7 +10,7 @@ from temporalio.client import WorkflowHistory
 from temporalio.testing import WorkflowEnvironment
 
 from dewpoint.engine.runtime.activities import CEL_EVALUATE
-from tests.apps.worker.harness import EVALUATOR_ONLY, RESULT_TIMEOUT_S, MemoryStore, start, workers
+from tests.apps.worker.harness import EVALUATOR_ONLY, RESULT_TIMEOUT_S, MemoryStore, run_id_of, start, workers
 from tests.support.graphs import G, cel, ref
 
 ITEMS = {"type": "object", "properties": {"xs": {"type": "array", "items": {"type": "integer"}}}, "required": ["xs"]}
@@ -28,7 +28,7 @@ async def finished(env: WorkflowEnvironment, g: G, xs: list[int]) -> tuple[Memor
         handle = await start(env.client, store, g, {"xs": xs})
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
         history = await handle.fetch_history()
-    return store, handle.id, result, history
+    return store, run_id_of(handle), result, history
 
 
 def evaluations(history: WorkflowHistory) -> int:

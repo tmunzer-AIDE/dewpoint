@@ -5,7 +5,9 @@ Only scenarios the build's directory lacks are recorded; a recorded history is n
 the command sequence increments ENGINE_ABI (`dewpoint.engine`), which starts a new directory.
 
 A scenario records every execution it ran: `<name>.json` is the run's first execution, and `<name>--<n>.json` each
-other one, in the order they're found: the runs it continued as, then its children's, and theirs."""
+other one, in the order they're found: the runs it continued as, then its children's, and theirs. Each file keeps its
+execution's workflow id beside the events (`workflowId`): the workflows check that it names their tenant and run
+(engine 2b spec §6.1), so a replay needs the one they ran under."""
 
 import asyncio
 import contextlib
@@ -23,6 +25,7 @@ from temporalio.testing import WorkflowEnvironment
 import dewpoint
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, RunInput, VersionData
 from dewpoint.engine.runtime.build import build_id
+from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.engine.runtime.workflow import RunGraph
 from tests.apps.worker.harness import TENANT, MemoryStore, workers
 from tests.engine.replay.scenarios import scenarios
@@ -94,7 +97,9 @@ async def record() -> list[str]:
             if scenario.unusable:
                 store.unusable.add(version)
             run = RunInput(TENANT, run_id, version, scenario.trigger, **scenario.options)
-            handle = await env.client.start_workflow(RunGraph.run, run, id=run_id, task_queue=ENGINE_QUEUE)
+            handle = await env.client.start_workflow(
+                RunGraph.run, run, id=run_workflow_id(TENANT, run_id), task_queue=ENGINE_QUEUE
+            )
             if scenario.cancel:
                 await delaying(handle)
                 await handle.cancel()
@@ -102,7 +107,7 @@ async def record() -> list[str]:
                 await asyncio.wait_for(handle.result(), 120)
             histories = await executions(env.client, handle.id, handle.first_execution_run_id or "")
             for n, history in enumerate(histories):
-                data = scrub(json.loads(history.to_json()))
+                data = {**scrub(json.loads(history.to_json())), "workflowId": history.workflow_id}
                 path = target / (f"{name}.json" if n == 0 else f"{name}--{n}.json")
                 path.write_text(json.dumps(data, indent=1, sort_keys=True) + "\n")
     return sorted(missing)

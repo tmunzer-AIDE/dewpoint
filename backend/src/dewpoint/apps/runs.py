@@ -36,6 +36,7 @@ from dewpoint.core.plugins import lifecycle
 from dewpoint.core.runs import service as runs
 from dewpoint.core.workflows.service import lock_for_admission, other_abi
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, LIVE, RunInput
+from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.engine.runtime.workflow import RunGraph
 
 START_FAILED = "start_failed"
@@ -184,7 +185,7 @@ async def _start(client: Client, start: RunInput, run_id: uuid.UUID) -> None:
             await client.start_workflow(
                 RunGraph.run,
                 start,
-                id=str(run_id),
+                id=run_workflow_id(start.tenant_id, str(run_id)),
                 task_queue=ENGINE_QUEUE,
                 id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
             )

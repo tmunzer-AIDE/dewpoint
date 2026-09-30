@@ -39,6 +39,7 @@ from dewpoint.core.plugins.registry import (
 )
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.runtime.activities import LIVE, SIMULATE, RunResult
+from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.engine.runtime.workflow import RunGraph
 from dewpoint.sdk import ManifestError
 
@@ -437,7 +438,9 @@ async def dev_run_version(
         await engine.dispose()
     if not wait:
         return run_id, None
-    return run_id, await client.get_workflow_handle_for(RunGraph.run, str(run_id)).result()
+    return run_id, await client.get_workflow_handle_for(
+        RunGraph.run, run_workflow_id(str(tenant_id), str(run_id))
+    ).result()
 
 
 @dev_cli.command("run")

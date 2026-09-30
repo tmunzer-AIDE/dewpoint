@@ -10,7 +10,7 @@ from temporalio.worker import Replayer
 
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.runtime.workflow import RunGraph
-from tests.apps.worker.harness import EVALUATOR_ONLY, RESULT_TIMEOUT_S, MemoryStore, run, start, workers
+from tests.apps.worker.harness import EVALUATOR_ONLY, RESULT_TIMEOUT_S, MemoryStore, run, run_id_of, start, workers
 from tests.support.graphs import G, cel, ref, template
 
 ECHO, IF, LOOP, FILTER = "testkit.echo@1", "flow.if@1", "flow.loop@1", "flow.filter@1"
@@ -49,9 +49,9 @@ async def test_a_cel_branch_runs_one_side_and_projects_control_steps(env: Workfl
         handle = await start(env.client, store, g, TRIGGER)
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     assert (result.status, result.outputs) == ("succeeded", {"side": "yes"})
-    rows = {r.node_key: r for r in store.steps(handle.id)}
+    rows = {r.node_key: r for r in store.steps(run_id_of(handle))}
     assert rows["c"].status == "succeeded" and rows["c"].cel_mode == "local"  # this build runs its profile in-process
-    assert "no" not in rows and store.runs[handle.id].status == "succeeded"
+    assert "no" not in rows and store.runs[run_id_of(handle)].status == "succeeded"
 
 
 async def test_a_loop_collects_per_item_and_a_filter_keeps_matches(env: WorkflowEnvironment) -> None:
@@ -65,7 +65,7 @@ async def test_a_loop_collects_per_item_and_a_filter_keeps_matches(env: Workflow
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     assert result.outputs == {"doubled": [2, 4, 6], "aps": ["ap-1", "ap-2"]}
     assert result.iterations == 3 + 3  # three iterations, three filter items
-    rows = [(r.node_key, r.iteration_key, r.status) for r in store.steps(handle.id)]
+    rows = [(r.node_key, r.iteration_key, r.status) for r in store.steps(run_id_of(handle))]
     assert sorted(rows) == [
         ("f", "", "succeeded"),
         ("l", "", "succeeded"),
@@ -91,7 +91,7 @@ async def test_retries_follow_the_manifest_and_each_attempt_is_projected(env: Wo
     async with workers(env.client, store):
         handle = await start(env.client, store, g, TRIGGER)
         assert (await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)).status == "succeeded"
-    assert [(r.attempt, r.status, r.error_code) for r in store.steps(handle.id)] == [
+    assert [(r.attempt, r.status, r.error_code) for r in store.steps(run_id_of(handle))] == [
         (1, "failed", "testkit.transient"),
         (2, "failed", "testkit.transient"),
         (3, "succeeded", None),
@@ -119,7 +119,7 @@ async def test_an_unknown_outcome_is_never_retried_and_fails_the_run(env: Workfl
         "message": "the request may have been delivered",
         "attempt": 1,
     }
-    [row] = store.steps(handle.id)
+    [row] = store.steps(run_id_of(handle))
     assert (row.attempt, row.outcome) == (1, "outcome_unknown")
 
 
@@ -159,7 +159,7 @@ async def test_simulation_calls_simulate_and_records_it(env: WorkflowEnvironment
         handle = await start(env.client, store, g, TRIGGER, mode="simulate")
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     assert result.outputs == {"v": {"simulated": 5}}
-    assert [r.outcome for r in store.steps(handle.id)] == ["simulated"]
+    assert [r.outcome for r in store.steps(run_id_of(handle))] == ["simulated"]
 
 
 async def test_without_an_evaluator_cel_fails_as_profile_unavailable(env: WorkflowEnvironment) -> None:
@@ -179,7 +179,7 @@ async def test_sensitive_outputs_are_redacted_in_the_projection(env: WorkflowEnv
     async with workers(env.client, store):
         handle = await start(env.client, store, g, TRIGGER)
         await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
-    [row] = store.steps(handle.id)
+    [row] = store.steps(run_id_of(handle))
     assert row.output_preview == {
         "public": "visible",
         "secret_value": "[redacted]",

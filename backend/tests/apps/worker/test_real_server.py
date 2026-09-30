@@ -20,7 +20,7 @@ from dewpoint.apps.worker.main import engine_worker
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.runtime.activities import cel_queue
 from dewpoint.engine.runtime.execution import SUBFLOW_GRANT
-from tests.apps.worker.harness import MemoryStore, in_process, start
+from tests.apps.worker.harness import MemoryStore, in_process, run_id_of, start
 from tests.apps.worker.test_deployment import build
 from tests.apps.worker.test_main import settings
 from tests.engine.replay.record import executions
@@ -71,8 +71,8 @@ async def test_a_terminated_sub_flow_fails_its_step_and_its_row_records_the_end(
         await client.get_workflow_handle(child).terminate("an operator")
         result = await asyncio.wait_for(handle.result(), 60)
     assert (result.status, result.outputs, result.iterations) == ("succeeded", {"code": "terminated"}, SUBFLOW_GRANT)
-    assert store.starts[child].kind == "subflow"
-    end = store.runs[child]
+    assert store.starts[run_id_of(child)].kind == "subflow"
+    end = store.runs[run_id_of(child)]
     assert (end.status, end.error_code, end.iterations) == ("failed", "terminated", SUBFLOW_GRANT)
 
 
@@ -103,9 +103,10 @@ async def test_a_terminated_failure_handler_records_its_end_and_the_runs_stands(
         result = await asyncio.wait_for(handle.result(), 60)
     assert (result.status, result.error["code"] if result.error else None) == ("failed", "workflow_failed")
     assert result.iterations == SUBFLOW_GRANT  # the handler's whole grant: it never reported
-    assert store.starts[handler].kind == "failure_handler"
-    assert (store.runs[handler].status, store.runs[handler].error_code) == ("failed", "terminated")
-    assert store.runs[handle.id].status == "failed"
+    summary = store.runs[run_id_of(handler)]
+    assert store.starts[run_id_of(handler)].kind == "failure_handler"
+    assert (summary.status, summary.error_code) == ("failed", "terminated")
+    assert store.runs[run_id_of(handle)].status == "failed"
 
 
 def asks_for_more() -> G:
@@ -139,12 +140,13 @@ async def test_a_terminated_sub_run_that_asked_for_more_records_its_whole_grant(
     async with serving(client, store):
         handle = await start(client, store, g, {})
         child = await child_started(handle)
-        await filtered(store, child)
+        await filtered(store, run_id_of(child))
         await client.get_workflow_handle(child).terminate("an operator")
         result = await asyncio.wait_for(handle.result(), 60)
-    assert store.starts[child].kind == kind
+    sub = run_id_of(child)
+    assert store.starts[sub].kind == kind
     assert result.iterations > SUBFLOW_GRANT  # it had been granted more, and the parent debits all of it
-    assert (store.runs[child].error_code, store.runs[child].iterations) == ("terminated", result.iterations)
+    assert (store.runs[sub].error_code, store.runs[sub].iterations) == ("terminated", result.iterations)
 
 
 async def test_temporal_suggesting_continue_as_new_drains_the_run() -> None:

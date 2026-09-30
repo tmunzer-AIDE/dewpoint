@@ -50,6 +50,7 @@ with workflow.unsafe.imports_passed_through():
         _unloadable,
         child_options,
     )
+    from dewpoint.engine.runtime.ids import run_of, run_workflow_id, tenant_of
     from dewpoint.engine.runtime.program import Program, compile_program
     from dewpoint.engine.runtime.projection import mask
     from dewpoint.engine.runtime.scheduler import (
@@ -63,6 +64,17 @@ with workflow.unsafe.imports_passed_through():
 
 
 HANDLED = ("failed", DEADLINE_EXCEEDED)  # the ends that run a failure handler (a cancel is no failure)
+
+
+def _same_run(tenant_id: str, run_id: str) -> None:
+    """The start's tenant and run are the ones its server-built workflow id names (engine 2b spec §6.1). Every store
+    write is scoped by the start's tenant, so a start that disagrees is refused before anything runs: only a bug, or a
+    start built outside Dewpoint, gets here."""
+    workflow_id = workflow.info().workflow_id
+    if tenant_of(workflow_id) != tenant_id or run_of(workflow_id) != run_id:
+        raise ApplicationError(
+            "This run's workflow id doesn't name its tenant and run.", type=INTERNAL_ERROR, non_retryable=True
+        )
 
 
 @workflow.defn(name="RunGraph", versioning_behavior=VersioningBehavior.PINNED)  # spec §7
@@ -85,6 +97,7 @@ class RunGraph(Execution):
         non-terminal until the handler has ended, so something non-terminal always holds the handler's closure,
         and with it the CEL profiles it pins (spec §4.5). The end is recorded once, counting the handler's
         iterations."""
+        _same_run(start.tenant_id, start.run_id)
         snapshot = start.snapshot
         unreadable = snapshot is not None and snapshot.get("snapshot_format") != SNAPSHOT_FORMAT
         if unreadable:
@@ -281,7 +294,8 @@ class RunGraph(Execution):
         This run's end is already decided: a cancel meanwhile comes too late to change it. It cancels the handler,
         which reports back first, so its iterations still count."""
         version, workflow_id = pin
-        child = str(workflow.uuid4())
+        child_run = str(workflow.uuid4())
+        child = run_workflow_id(self.tenant_id, child_run)  # its workflow id, and its key in this budget
         grant = self.sched.budget.start_child(child, SUBFLOW_GRANT)
         parent = Parent(
             workflow_id=workflow.info().workflow_id,
@@ -302,7 +316,7 @@ class RunGraph(Execution):
         }
         run = RunInput(
             self.tenant_id,
-            child,
+            child_run,
             version,
             trigger,
             self.mode,
@@ -349,6 +363,7 @@ class LoopBatch(Execution):
         they would inline, with the loop's concurrency and error policy, over read-only copies of the scopes around
         the loop; their rows go into the parent's run. It returns what they collected, the failures, and how many
         iterations it used. A fail or stop node, or the deadline, ends the run: the batch reports it as `end`."""
+        _same_run(start.tenant_id, start.run_id)
         snapshot = start.snapshot
         if snapshot is not None and snapshot.get("snapshot_format") != SNAPSHOT_FORMAT:  # it can't carry on: fail
             message = "This build can't read the batch's continue-as-new snapshot."  # its loop (decision 4)
