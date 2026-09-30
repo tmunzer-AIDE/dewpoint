@@ -1358,15 +1358,21 @@ With every container claimed, the live state needs at most 660,576 B (250 root l
 | Segment lists claimed as index segments (6 loops of 10,000, 1 KiB segments as a stress) | 612 / 743 | 1.02 MB | 1,022 ms |
 | 240 sibling loops in nested 10 × 10 loops (§11.2's counterexample 4) | 433 / 387 | 109 KB | 741 ms |
 | Root `set_variables` steps settling while 18,000 loop steps wait | 363 / 324 | 93 KB | 623 ms |
-| An exhausted budget (root capped at 610) with 21,600 queued loop steps | 653 / 586 | 110 KB | 1,148 ms |
-| The same as a sub-flow, asking its parent (144 budget signals) | 652 / 589 | 110 KB | 861 ms |
+| 240 sibling loops of 3 items, `on_error: continue` (see the correction below) | 653 / 586 | 110 KB | 1,148 ms |
+| The same as a sub-flow (see the correction below) | 652 / 589 | 110 KB | 861 ms |
 | A batch slice of 0.97 MB inline, and one claimed by its parent | 1 / 1 | 36 KB | — |
 | References through 400 characters of keys (a derived claim), chained handles, a spilled collection | 21 / 21 | 33 KB | — |
 
 - Started loops inside iterations stayed at most 100; §11.2 measured 21,611.
 - Queued loop steps read the variables they became ready under. Under a cap of 3 and of 100 they read the same;
   17,993 of them would have read otherwise at start.
-- No queued loop step started while the budget waited, and every one started or settled.
+- No queued loop step started while the budget waited, and every one started or settled: measured on the scheduler
+  alone, with the root's budget at 610 and a child's at 0 (19,032 loops refused at their first iteration).
+- **Correction (2026-10-01).** The two rows above were meant to exhaust the budget on Temporal, but didn't. The
+  probe lowered the root's cap through its own module, and `workflow.py` reads a copy of that module inside the
+  sandbox, so these runs had the normal cap. Once the cap reached the run (through a module the sandbox passes
+  through), an exhausted budget drained 21,600 queued loop steps in one workflow task, and the SDK's deadlock
+  detector stopped it at 2 s. That is the CPU condition below.
 - Driven alone at 24,010 loop steps, the scheduler's worst snapshot was 105 KB; §11.2 measured 4.5 MB.
 
 **What the follow-up established.** §5.3 needs each of these to hold:
