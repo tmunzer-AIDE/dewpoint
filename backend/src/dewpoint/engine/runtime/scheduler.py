@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from dewpoint.engine.registry.control import SET_VARIABLES
 from dewpoint.engine.runtime import probe as P
 from dewpoint.engine.runtime.budget import LOCAL, Answer, Ask, Budget, Need
 from dewpoint.engine.runtime.program import BODY, DONE, ERROR_PORT, Program, Step
@@ -112,6 +113,45 @@ class Failure:
         return cls(str(data["code"]), str(data["message"]), int(data.get("attempt", 1)))
 
 
+NIL = uuid.UUID(int=0)  # proto: the owner of a container that isn't a loop's (a scope's, the variables')
+
+
+@dataclass
+class Box:
+    """Proto (§5.3): a spillable container's claims. The container's inline part is its owner's; `sealing` is the
+    part being claimed (it still counts, and is still read inline, until it's written); `head` is the newest claim's
+    handle, a chain claim `{"$chain": part, "prev": the previous head}`, so one handle reaches every part claimed."""
+
+    sealing: Any = None
+    head: dict[str, Any] | None = None
+    claims: int = 0
+
+    def bytes(self) -> int:
+        return (P.size(self.sealing) if self.sealing is not None else 0) + (P.size(self.head) if self.head else 0)
+
+    def to_json(self) -> list[Any]:
+        return [self.sealing, self.head, self.claims]
+
+    @classmethod
+    def from_json(cls, raw: list[Any] | None) -> "Box":
+        return cls(raw[0], raw[1], int(raw[2])) if raw else cls()
+
+
+@dataclass
+class Undo:
+    """Proto (§5.3): what one root `set_variables` write replaced, kept while a queued loop step captured a version
+    before it. `vals` inline ({name: [old]}, [] when absent), or `head` once claimed; `step` names the write, whose
+    assignment names are static."""
+
+    step: int
+    vals: dict[str, Any] | None
+    head: dict[str, Any] | None = None
+    sealing: bool = False
+
+    def bytes(self) -> int:
+        return P.size(self.vals) if self.vals is not None else P.size(self.head)
+
+
 @dataclass
 class Scope:
     key: ScopeKey
@@ -125,6 +165,8 @@ class Scope:
     frozen: bool = False  # an enclosing scope a batch child reads, and never runs
     seq: int = 0  # proto: its opening order; the oldest open iterations make the progress chain (§5.3)
     reserved: bool = False  # proto: opened from the progress chain's reservation
+    rbox: Box = field(default_factory=Box)  # proto: its results' claims
+    item_sealing: bool = False  # proto: its item is being claimed
 
     @property
     def settled(self) -> bool:
@@ -139,11 +181,23 @@ class Collection:
     base: str
     n: int
     offset: int
-    segs: list[list[int]] = field(default_factory=list)  # [first, count, bytes], spilled
+    segs: list[Any] = field(default_factory=list)  # [first, count, bytes], spilled; or a batch index head
     tail: dict[int, Any] = field(default_factory=dict)
     sealing: dict[int, list[list[Any]]] = field(default_factory=dict)  # first -> pairs being spilled
     tail_bytes: int = 0  # the tail's values as the live state counts them (P.size + 8 each)
     sealing_bytes: int = 0
+    ibox: Box = field(default_factory=Box)  # proto: the segment list's claims (index segments)
+
+    def live_bytes(self) -> int:
+        return self.tail_bytes + self.sealing_bytes + P.size(self.segs) + self.ibox.bytes()
+
+    @property
+    def spilled(self) -> bool:
+        return bool(self.segs or self.sealing or self.ibox.head or self.ibox.sealing)
+
+    @property
+    def busy(self) -> bool:
+        return bool(self.sealing or self.ibox.sealing is not None)
 
     def put(self, index: int, value: Any) -> int:
         self.tail[index] = value
@@ -151,9 +205,15 @@ class Collection:
         self.tail_bytes += added
         return added
 
-    def merge(self, other: dict[str, Any]) -> int:
-        self.segs.extend([list(s) for s in other["segs"]])
-        return sum(self.put(int(i), v) for i, v in other["tail"])
+    def merge(self, other: dict[str, Any]) -> None:
+        """A batch child's collection: its segments, and its index's head as one entry (the parent's live state is
+        counted again by the caller)."""
+        self.segs.extend([s if isinstance(s, dict) else list(s) for s in other["segs"]])
+        head = Box.from_json(other.get("index")).head
+        if head is not None:
+            self.segs.append(head)
+        for i, v in other["tail"]:
+            self.put(int(i), v)
 
     def seal(self) -> tuple[int, list[list[Any]]] | None:
         if not self.tail:
@@ -165,22 +225,20 @@ class Collection:
         self.tail_bytes = 0
         return pairs[0][0], pairs
 
-    def sealed(self, first: int, size: int) -> int:
+    def sealed(self, first: int, size: int) -> None:
         pairs = self.sealing.pop(first)
-        freed = sum(P.size(v) + 8 for _, v in pairs)
-        self.sealing_bytes -= freed
+        self.sealing_bytes -= sum(P.size(v) + 8 for _, v in pairs)
         self.segs.append([first, len(pairs), size])
-        return freed
 
     def output(self) -> Any:
         """The loop's `items`: a plain list while nothing was spilled, else the collection's handle."""
-        if not self.segs and not self.sealing:
+        if not self.spilled:
             return [self.tail.get(self.offset + p) for p in range(self.n)]
         return {P.KIND: P.COLL, **self.to_json()}
 
     def entries(self) -> Any:
         """The loop's `failures`: its entries in index order while nothing was spilled, else the handle."""
-        if not self.segs and not self.sealing:
+        if not self.spilled:
             return [{"index": i, **self.tail[i]} for i in sorted(self.tail)]
         return {P.KIND: P.COLL, **self.to_json()}
 
@@ -188,7 +246,7 @@ class Collection:
         return {
             "base": self.base, "n": self.n, "offset": self.offset, "segs": self.segs,
             "tail": [[i, self.tail[i]] for i in sorted(self.tail)],
-            "sealing": [[f, pairs] for f, pairs in sorted(self.sealing.items())],
+            "sealing": [[f, pairs] for f, pairs in sorted(self.sealing.items())], "index": self.ibox.to_json(),
         }  # fmt: skip
 
     @classmethod
@@ -196,9 +254,10 @@ class Collection:
         tail = {int(i): v for i, v in raw["tail"]}
         sealing = {int(f): pairs for f, pairs in raw.get("sealing", [])}
         return cls(
-            str(raw["base"]), int(raw["n"]), int(raw["offset"]), [list(s) for s in raw["segs"]], tail, sealing,
+            str(raw["base"]), int(raw["n"]), int(raw["offset"]),
+            [s if isinstance(s, dict) else list(s) for s in raw["segs"]], tail, sealing,
             sum(P.size(v) + 8 for v in tail.values()),
-            sum(P.size(v) + 8 for pairs in sealing.values() for _, v in pairs),
+            sum(P.size(v) + 8 for pairs in sealing.values() for _, v in pairs), Box.from_json(raw.get("index")),
         )  # fmt: skip
 
 
@@ -209,8 +268,8 @@ class Spill:
     loop: Instance
     base: str
     first: int
-    pairs: list[list[Any]]
-    which: str = "c"  # the loop's collected values (c) or its failures (f)
+    pairs: Any  # a collection's pairs, an item list's slice, or (proto) a container's part
+    which: str = "c"  # c, f: collected values, failures; i: items; xc, xf: their indexes; r, t, v, u: containers
 
 
 @dataclass
@@ -274,6 +333,7 @@ class OuterScope:
     results: dict[str, dict[str, Any]]
     item: Any = None
     index: int | None = None
+    chain: dict[str, Any] | None = None  # proto: the head of its claimed results, if any were claimed
 
 
 @dataclass(frozen=True)
@@ -326,9 +386,14 @@ class Scheduler:
         self.reserve = program.loop_depth if program.loop_depth is not None else computed  # D, pinned in the version
         self.cap = program.open_scopes_cap or OPEN_SCOPES_CAP  # the version's cap, pinned in it
         # proto (§5.3): the variables, their versions, and the captures of queued loop steps inside iterations
-        self.vars: dict[str, Any] = {}
+        self._vars: dict[str, Any] = {}  # the current variables' inline part
+        self.vbox = Box()  # and their claims
         self.vars_version = 0
-        self.var_deltas: dict[int, dict[str, Any]] = {}  # an older version: the values that differ from the current
+        self.undo: dict[int, Undo] = {}  # write k (version k -> k + 1): what it replaced, while a capture needs it
+        self._var_names = sorted(
+            set(program.graph.settings.vars_schema.get("properties", {}))
+            | {n for st in program.steps.values() if st.ref == SET_VARIABLES for n in st.config.get("assignments", {})}
+        )  # every name a variable can have: the schema's, and what the version's writes assign
         self._captures: dict[Instance, int] = {}  # queued loop step -> the version it became ready under
         self._released: dict[Instance, int] = {}  # handed out, its unit not yet started
         self._starting: dict[Instance, bool] = {}  # released loop step -> it took a reserved scope
@@ -346,7 +411,8 @@ class Scheduler:
         self._collects_out: set[tuple[Instance, int]] = set()
         self._batches_out: set[tuple[Instance, int]] = set()
         self.prefix = ""  # proto: the execution's own workflow id, for the collections it names
-        self._live = P.size(self.vars)  # proto: see `live`; the variables count from the start
+        self._live = P.size(self._vars)  # proto: see `live`; the variables count from the start
+        self._rebuild = False
         self._spills: list[Spill] = []
         self._spills_out: set[tuple[Instance, str, int]] = set()
         self.probe = {"peak_open": 0, "peak_reserved": 0, "cap_waits": 0, "reserved_opens": 0}
@@ -378,6 +444,7 @@ class Scheduler:
         for depth, o in enumerate(outer):
             region = chain[len(outer) - 1 - depth]
             self.scopes[o.key] = Scope(o.key, region, {}, {}, dict(o.results), o.item, o.index, frozen=True)
+            self.scopes[o.key].rbox.head = o.chain
             self._live += self._scope_bytes(self.scopes[o.key])
         loop_inst = Instance(outer[-1].key, loop_step)
         self.batch_loop = loop_inst
@@ -387,6 +454,7 @@ class Scheduler:
         loop = LoopRun(loop_inst, items, concurrency, stop_on_error, offset=offset, coll=coll, fails=fails)
         self._live += P.size(items) if isinstance(items, list) else 0
         self.loops[loop_inst] = loop
+        self._live += sum(c.live_bytes() for _, c in self._colls(loop))  # proto: their (empty) segment lists
         self._maybe_seal(loop)
         self._advance(loop)
 
@@ -414,6 +482,9 @@ class Scheduler:
         return out
 
     def take_spills(self) -> list[Spill]:
+        if self._rebuild:  # proto: after a restore, once the prefix the claim ids use is known
+            self._spills += self._pending_containers()
+            self._rebuild = False
         out, self._spills = self._spills, []
         self._spills_out.update((s.loop, s.which, s.first) for s in out)
         return out
@@ -424,9 +495,23 @@ class Scheduler:
 
     @_then_wake
     def spilled(self, loop_inst: Instance, which: str, first: int, size: int) -> None:
-        """Proto: a sealed part of a collection is in its segment now."""
+        """Proto: a container's part is in its claim now."""
         self._spills_out.discard((loop_inst, which, first))
+        if which in ("r", "t", "v", "u"):
+            self._container_spilled(loop_inst, which, first)
+            return
         loop = self.loops.get(loop_inst)
+        if which in ("xc", "xf"):
+            coll = dict(self._colls(loop)).get(which[1]) if loop is not None else None
+            if loop is None or coll is None or coll.ibox.sealing is None:
+                return
+            before = coll.live_bytes()
+            coll.ibox.sealing = None
+            coll.ibox.head = P.handle(f"{P.claim_id(coll.base + '/x')}/{first}")
+            coll.ibox.claims = first + 1
+            self._live += coll.live_bytes() - before
+            self._advance(loop)
+            return
         if which == "i":
             if loop is None or first not in loop.items_pending:
                 return
@@ -440,8 +525,42 @@ class Scheduler:
         coll = dict(self._colls(loop)).get(which) if loop is not None else None
         if loop is None or coll is None or first not in coll.sealing:
             return
-        self._live -= coll.sealed(first, size)
+        before = coll.live_bytes()
+        coll.sealed(first, size)
+        self._live += coll.live_bytes() - before
         self._advance(loop)
+
+    def _container_spilled(self, owner: Instance, which: str, first: int) -> None:
+        if which == "v":
+            if self.vbox.sealing is None:
+                return
+            before = self.vbox.bytes()
+            self.vbox.sealing = None
+            self.vbox.head = P.handle(f"{self._vars_base()}/{first}")
+            self.vbox.claims = first + 1
+            self._live += self.vbox.bytes() - before
+            return
+        if which == "u":
+            rec = self.undo.get(first)
+            if rec is None or not rec.sealing:
+                return
+            before = rec.bytes()
+            rec.vals, rec.head, rec.sealing = None, P.handle(f"{self._undo_base()}/{first}"), False
+            self._live += rec.bytes() - before
+            return
+        sc = self.scopes.get(owner.scope)
+        if sc is None:
+            return
+        if which == "r" and sc.rbox.sealing is not None:
+            before = sc.rbox.bytes()
+            sc.rbox.sealing = None
+            sc.rbox.head = P.handle(f"{self._scope_base(sc, 'r')}/{first}")
+            sc.rbox.claims = first + 1
+            self._live += sc.rbox.bytes() - before
+        elif which == "t" and sc.item_sealing:
+            self._live -= P.size(sc.item)
+            sc.item, sc.item_sealing = P.handle(f"{self._scope_base(sc, 't')}/0"), False
+            self._live += P.size(sc.item)
 
     @property
     def live(self) -> int:
@@ -451,15 +570,19 @@ class Scheduler:
 
     def _recount(self) -> int:
         total = sum(self._scope_bytes(sc) for sc in self.scopes.values())
-        total += P.size(self.vars) + sum(P.size(d) for d in self.var_deltas.values())
+        total += P.size(self._vars) + self.vbox.bytes() + sum(u.bytes() for u in self.undo.values())
         for loop in self.loops.values():
             total += P.size(loop.items) if isinstance(loop.items, list) else 0
-            total += sum(c.tail_bytes + c.sealing_bytes for _, c in self._colls(loop))
+            total += sum(c.live_bytes() for _, c in self._colls(loop))
         return total
 
     @staticmethod
     def _scope_bytes(sc: Scope) -> int:
-        return sum(P.size(r) for r in sc.results.values()) + (P.size(sc.item) if sc.item is not None else 0)
+        return (
+            sum(P.size(r) for r in sc.results.values())
+            + (P.size(sc.item) if sc.item is not None else 0)
+            + sc.rbox.bytes()
+        )
 
     def _seal(self, loop: LoopRun, which: str, coll: Collection) -> None:
         sealed = coll.seal()
@@ -480,36 +603,130 @@ class Scheduler:
         if self.ended is not None:
             return
         while self.live - self._relief() > P.LIVE_BUDGET:
-            candidates: list[tuple[int, Any, str, LoopRun, Collection | None]] = [
-                (c.tail_bytes, self.order(lp.instance), w, lp, c)
-                for lp in self.loops.values()
-                for w, c in self._colls(lp)
-                if c.tail_bytes > P.FLOOR
-            ]
-            candidates += [
-                (P.size(lp.items), self.order(lp.instance), "i", lp, None)
-                for lp in self.loops.values()
-                if isinstance(lp.items, list) and not lp.items_pending and P.size(lp.items) > P.FLOOR
-            ]
+            candidates = self._containers()
             if not candidates:
                 break
-            _, _, w, lp, c = max(candidates, key=lambda t: (t[0], t[1], t[2]))
-            if c is None:
-                self._spill_items(lp)
-            else:
-                self._seal(lp, w, c)
+            _, _, w, target = max(candidates, key=lambda t: (t[0], t[1], t[2]))
+            self._spill_container(w, target)
+
+    def _containers(self) -> list[tuple[int, Any, str, Any]]:
+        """Proto (§5.3): the spillable containers (larger than HANDLE_MAX), with nothing of theirs being claimed:
+        (bytes, scheduling order, kind, target)."""
+        out: list[tuple[int, Any, str, Any]] = []
+        for lp in self.loops.values():
+            order = self.order(lp.instance)
+            for w, c in self._colls(lp):
+                if c.tail_bytes > P.HANDLE_MAX:
+                    out.append((c.tail_bytes, order, w, (lp, c)))
+                n = P.size(c.segs)
+                if n > P.HANDLE_MAX and c.ibox.sealing is None:
+                    out.append((n, order, "x" + w, (lp, c)))
+            if isinstance(lp.items, list) and not lp.items_pending:
+                n = P.size(lp.items)
+                if n > P.HANDLE_MAX:
+                    out.append((n, order, "i", (lp, None)))
+        for sc in self.scopes.values():
+            order = self.order(Instance(sc.key, NIL))
+            n = sum(P.size(r) for r in sc.results.values())
+            if n > P.HANDLE_MAX and sc.rbox.sealing is None:
+                out.append((n, order, "r", sc))
+            if sc.item is not None and not sc.item_sealing and not P.is_handle(sc.item):
+                n = P.size(sc.item)
+                if n > P.HANDLE_MAX:
+                    out.append((n, order, "t", sc))
+        root = self.order(Instance((), NIL))
+        n = P.size(self._vars)
+        if n > P.HANDLE_MAX and self.vbox.sealing is None:
+            out.append((n, root, "v", None))
+        for k, rec in self.undo.items():
+            if rec.vals is not None and not rec.sealing and rec.bytes() > P.HANDLE_MAX:
+                out.append((rec.bytes(), root, f"u{k:08d}", k))
+        return out
+
+    def _spill_container(self, which: str, target: Any) -> None:
+        self.probe["container_spills"] = self.probe.get("container_spills", 0) + 1
+        if which in ("c", "f"):
+            self._seal(target[0], which, target[1])
+        elif which == "i":
+            self._spill_items(target[0])
+        elif which in ("xc", "xf"):
+            lp, c = target
+            before = c.live_bytes()
+            c.ibox.sealing, c.segs = c.segs, []
+            self._live += c.live_bytes() - before
+            content = {P.CHAIN: c.ibox.sealing, "prev": c.ibox.head}
+            self._spills.append(Spill(lp.instance, P.claim_id(c.base + "/x"), c.ibox.claims, content, which))
+            self.probe["index_spills"] = self.probe.get("index_spills", 0) + 1
+        elif which == "r":
+            sc = target
+            before = self._scope_bytes(sc)
+            sc.rbox.sealing, sc.results = sc.results, {}
+            self._live += self._scope_bytes(sc) - before
+            content = {P.CHAIN: sc.rbox.sealing, "prev": sc.rbox.head}
+            self._spills.append(Spill(Instance(sc.key, NIL), self._scope_base(sc, "r"), sc.rbox.claims, content, "r"))
+            self.probe["result_set_spills"] = self.probe.get("result_set_spills", 0) + 1
+        elif which == "t":
+            sc = target
+            sc.item_sealing = True
+            self._spills.append(Spill(Instance(sc.key, NIL), self._scope_base(sc, "t"), 0, sc.item, "t"))
+            self.probe["item_spills_scope"] = self.probe.get("item_spills_scope", 0) + 1
+        elif which == "v":
+            before = P.size(self._vars) + self.vbox.bytes()
+            self.vbox.sealing, self._vars = self._vars, {}
+            self._live += P.size(self._vars) + self.vbox.bytes() - before
+            content = {P.CHAIN: self.vbox.sealing, "prev": self.vbox.head}
+            self._spills.append(Spill(Instance((), NIL), self._vars_base(), self.vbox.claims, content, "v"))
+            self.probe["vars_spills"] = self.probe.get("vars_spills", 0) + 1
+        else:  # an undo record
+            k = int(target)
+            rec = self.undo[k]
+            rec.sealing = True
+            self._spills.append(Spill(Instance((), NIL), self._undo_base(), k, rec.vals, "u"))
+            self.probe["undo_spills"] = self.probe.get("undo_spills", 0) + 1
+
+    def _scope_base(self, sc: Scope, which: str) -> str:
+        return P.claim_id(f"{self.prefix}/{which}/{iteration_key(sc.key)}/{sc.seq}")
+
+    def _vars_base(self) -> str:
+        return P.claim_id(f"{self.prefix}/v")
+
+    def _undo_base(self) -> str:
+        return P.claim_id(f"{self.prefix}/u")
+
+    def result_of(self, sc: Scope, name: str) -> Any:
+        """Proto: a step's result as its scope holds it: inline, being claimed, or a handle into the scope's claimed
+        results (a settled step's; a frozen scope's reader can't tell, and the resolution says what's missing)."""
+        r = sc.results.get(name)
+        if r is not None:
+            return r
+        if sc.rbox.sealing is not None and name in sc.rbox.sealing:
+            return sc.rbox.sealing[name]
+        if sc.rbox.head is not None:
+            if sc.frozen or sc.nodes.get(self.program.by_key[name]) in (NodeState.DONE, NodeState.FAILED):
+                return P.extend(sc.rbox.head, name)
+        return {}
 
     def _relief(self) -> int:
         """What the spills in flight will take out of the live state."""
         out = 0
         for lp in self.loops.values():
-            out += sum(c.sealing_bytes for _, c in self._colls(lp))
+            for _, c in self._colls(lp):
+                out += c.sealing_bytes + (P.size(c.ibox.sealing) if c.ibox.sealing is not None else 0)
             if lp.items_pending and isinstance(lp.items, list):
                 out += P.size(lp.items)
+        for sc in self.scopes.values():
+            if sc.rbox.sealing is not None:
+                out += P.size(sc.rbox.sealing)
+            if sc.item_sealing:
+                out += P.size(sc.item)
+        if self.vbox.sealing is not None:
+            out += P.size(self.vbox.sealing)
+        out += sum(P.size(u.vals) for u in self.undo.values() if u.sealing)
         return out
 
     def _items_base(self, loop: LoopRun) -> str:
-        return f"{self.prefix}/i/{iteration_key(loop.instance.scope)}/{self.program.steps[loop.instance.step].topo}"
+        topo = self.program.steps[loop.instance.step].topo
+        return P.claim_id(f"{self.prefix}/i/{iteration_key(loop.instance.scope)}/{topo}")
 
     def _spill_items(self, loop: LoopRun) -> None:
         """Proto: an inline item list goes into segments of about SEG_BYTES; the loop waits for them, then carries on
@@ -613,6 +830,7 @@ class Scheduler:
         loop = LoopRun(inst, items, concurrency, stop_on_error, batch=batch, coll=coll, fails=fails)
         self._live += P.size(items) if isinstance(items, list) else 0
         self.loops[inst] = loop
+        self._live += sum(c.live_bytes() for _, c in self._colls(loop))  # proto: their (empty) segment lists
         if batch and self._iter_loop(inst):  # proto (§5.3): it opens no scope, so it holds its slot until it ends
             self._held[inst] = self._starting.pop(inst, False)
         self._maybe_seal(loop)
@@ -650,12 +868,16 @@ class Scheduler:
             return
         loop.running_batch = None
         if outcome.collection is not None:
-            self._live += loop.coll.merge(outcome.collection)  # type: ignore[union-attr]
+            before = loop.coll.live_bytes()  # type: ignore[union-attr]
+            loop.coll.merge(outcome.collection)  # type: ignore[union-attr]
+            self._live += loop.coll.live_bytes() - before  # type: ignore[union-attr]
         else:
             for n, value in enumerate(outcome.collected):
                 self._live += loop.coll.put(start + n, value)  # type: ignore[union-attr]
         if outcome.failure_collection is not None:
-            self._live += loop.fails.merge(outcome.failure_collection)  # type: ignore[union-attr]
+            before = loop.fails.live_bytes()  # type: ignore[union-attr]
+            loop.fails.merge(outcome.failure_collection)  # type: ignore[union-attr]
+            self._live += loop.fails.live_bytes() - before  # type: ignore[union-attr]
         else:
             for f in outcome.failures:
                 self._live += loop.fails.put(int(f["index"]), {"code": f["code"], "message": f["message"]})  # type: ignore[union-attr]
@@ -760,7 +982,8 @@ class Scheduler:
 
     def order(self, inst: Instance) -> tuple[Any, ...]:
         """The ready queue's order: scope (by its loops' topological index, then item index), then the step's."""
-        return (tuple((self._topo_of_key[loop], i) for loop, i in inst.scope), self.program.steps[inst.step].topo)
+        step = self.program.steps.get(inst.step)
+        return (tuple((self._topo_of_key[loop], i) for loop, i in inst.scope), step.topo if step else -1)
 
     def _running(self, inst: Instance) -> tuple[Scope | None, Step]:
         """The instance's scope, or None when its result no longer counts (the scope failed, the run ended)."""
@@ -888,7 +1111,7 @@ class Scheduler:
         if self._starting.pop(loop.instance, None) is not None or self._held.pop(loop.instance, None) is not None:
             self._freed = True  # its slot is free
         self._live -= P.size(loop.items) if isinstance(loop.items, list) else 0
-        self._live -= sum(c.tail_bytes + c.sealing_bytes for _, c in self._colls(loop))
+        self._live -= sum(c.live_bytes() for _, c in self._colls(loop))
         for key in [k for k, inst in self._budget_waits.items() if inst == loop.instance]:
             del self._budget_waits[key]
             self.budget.waiting = [n for n in self.budget.waiting if not (n.requester == LOCAL and n.key == key)]
@@ -997,10 +1220,10 @@ class Scheduler:
                 if (
                     not coll.sealing
                     and coll.tail_bytes > P.FLOOR
-                    and (coll.segs or coll.tail_bytes > P.INLINE_LIMIT or self.live > P.LIVE_BUDGET)
+                    and (coll.spilled or coll.tail_bytes > P.INLINE_LIMIT or self.live > P.LIVE_BUDGET)
                 ):
                     self._seal(loop, which, coll)
-        if done and not any(c.sealing for _, c in self._colls(loop)):
+        if done and not any(c.busy for _, c in self._colls(loop)):
             self._drop_loop(loop)
             if loop.instance == self.batch_loop:
                 self._batch_over(loop, None)
@@ -1099,38 +1322,56 @@ class Scheduler:
     # --- proto (§5.3): variables, their versions and captures ---------------------------------------------------------
 
     def init_vars(self, values: dict[str, Any]) -> None:
-        self._live -= P.size(self.vars)
-        self.vars = dict(values)
-        self._live += P.size(self.vars)
+        self._live -= P.size(self._vars)
+        self._vars = dict(values)
+        self._live += P.size(self._vars)
 
-    def set_variables(self, values: Any) -> None:
-        """A root `set_variables` settled: a new version. Each older version a queued loop step still names keeps the
-        values this write replaces."""
-        refs = set(self._captures.values()) | set(self._released.values())
-        if self.vars_version in refs and self.vars_version not in self.var_deltas:
-            self.var_deltas[self.vars_version] = {}
-            self._live += P.size({})
-        for delta in self.var_deltas.values():
-            before = P.size(delta)
-            for name in values:
-                if name not in delta:
-                    delta[name] = [self.vars[name]] if name in self.vars else []
-            self._live += P.size(delta) - before
-        before = P.size(self.vars)
-        self.vars.update(values)
-        self._live += P.size(self.vars) - before
+    @property
+    def vars(self) -> dict[str, Any]:
+        """The current variables: inline, being claimed, or a handle into their claims."""
+        out: dict[str, Any] = {}
+        if self.vbox.head is not None:
+            out = {name: P.extend(self.vbox.head, name) for name in self._var_names}
+        if self.vbox.sealing is not None:
+            out.update(self.vbox.sealing)
+        out.update(self._vars)
+        return out
+
+    def set_variables(self, values: Any, step: Instance | None = None) -> None:
+        """A root `set_variables` settled: a new version. While a queued loop step captured an older one, this write
+        keeps what it replaces, as an undo record."""
+        if self._captures or self._released:
+            current = self.vars
+            vals = {name: [current[name]] if name in current else [] for name in values}
+            topo = self.program.steps[step.step].topo if step is not None else -1
+            self.undo[self.vars_version] = Undo(topo, vals)
+            self._live += self.undo[self.vars_version].bytes()
+        before = P.size(self._vars)
+        self._vars.update(values)
+        self._live += P.size(self._vars) - before
         self.vars_version += 1
         self.probe["var_versions"] = max(self.probe.get("var_versions", 0), self.vars_version)
+        self.probe["undo_peak"] = max(self.probe.get("undo_peak", 0), len(self.undo))
 
     def vars_at(self, version: int | None) -> dict[str, Any]:
+        """The variables as they were at `version`: each name from the oldest write after it that replaced it."""
+        out = self.vars
         if version is None or version == self.vars_version:
-            return dict(self.vars)
-        out = dict(self.vars)
-        for name, old in self.var_deltas.get(version, {}).items():
-            if old:
-                out[name] = old[0]
+            return out
+        for k in range(self.vars_version - 1, version - 1, -1):
+            rec = self.undo[k]
+            if rec.vals is not None:
+                for name, old in rec.vals.items():
+                    if old:
+                        out[name] = old[0]
+                    else:
+                        out.pop(name, None)
             else:
-                out.pop(name, None)
+                if rec.head is None:
+                    raise AssertionError("proto: an undo record with neither values nor a claim")
+                assign = self.program.steps[self._by_topo[rec.step]].config.get("assignments", {})
+                for name in assign:
+                    out[name] = P.extend(P.extend(rec.head, name), 0)
         return out
 
     def consume_capture(self, inst: Instance) -> dict[str, Any] | None:
@@ -1143,9 +1384,11 @@ class Scheduler:
         return variables
 
     def _gc_versions(self) -> None:
+        """Undo records no captured version needs any more are dropped."""
         refs = set(self._captures.values()) | set(self._released.values())
-        for version in [v for v in self.var_deltas if v not in refs]:
-            self._live -= P.size(self.var_deltas.pop(version))
+        oldest = min(refs) if refs else self.vars_version
+        for k in [k for k in self.undo if k < oldest and not self.undo[k].sealing]:
+            self._live -= self.undo.pop(k).bytes()
 
     def _path(self) -> set[ScopeKey]:
         """The progress chain: from the execution's own root (a batch child's loop scope), the oldest open iteration
@@ -1216,9 +1459,10 @@ class Scheduler:
             "budget": self.budget.to_json(),
             "budget_waits": [[k, self._i(i)] for k, i in self._budget_waits.items()],
             "batch_loop": self._i(self.batch_loop) if self.batch_loop else None,
-            "vars": self.vars,
+            "vars": self._vars,
+            "vbox": self.vbox.to_json(),
             "vars_version": self.vars_version,
-            "var_deltas": [[v, d] for v, d in sorted(self.var_deltas.items())],
+            "undo": [[k, u.step, u.vals, u.head, int(u.sealing)] for k, u in sorted(self.undo.items())],
             "released": [[self._i(i), v] for i, v in sorted(self._released.items(), key=lambda c: self.order(c[0]))],
             "starting": [
                 [self._i(i), int(r)] for i, r in sorted(self._starting.items(), key=lambda c: self.order(c[0]))
@@ -1246,9 +1490,10 @@ class Scheduler:
         s._spills_out = {(s._if(i), str(w), int(n)) for i, w, n in data["spills_out"]}
         s._budget_waits = {str(k): s._if(i) for k, i in data["budget_waits"]}
         s.batch_loop = s._if(data["batch_loop"]) if data["batch_loop"] else None
-        s.vars = dict(data["vars"])
+        s._vars = dict(data["vars"])
+        s.vbox = Box.from_json(data["vbox"])
         s.vars_version = int(data["vars_version"])
-        s.var_deltas = {int(v): dict(d) for v, d in data["var_deltas"]}
+        s.undo = {int(k): Undo(int(t), v, h, bool(g)) for k, t, v, h, g in data["undo"]}
         s._released = {s._if(i): int(v) for i, v in data["released"]}
         s._starting = {s._if(i): bool(r) for i, r in data["starting"]}
         s._held = {s._if(i): bool(r) for i, r in data["held"]}
@@ -1269,6 +1514,7 @@ class Scheduler:
             for k in loop.items_pending
             if (loop.instance, "i", k) not in s._spills_out
         ]
+        s._rebuild = True  # the containers' claims in flight are rebuilt on the first take
         s._capped = {
             inst
             for inst, loop in s.loops.items()
@@ -1278,6 +1524,30 @@ class Scheduler:
             and len(loop.open) < loop.concurrency
         }
         return s
+
+    def _pending_containers(self) -> list[Spill]:
+        """Proto: the containers' parts being claimed and not handed out, rebuilt as spills from the state."""
+        out = []
+        for loop in self.loops.values():
+            for w, c in self._colls(loop):
+                if c.ibox.sealing is not None and (loop.instance, "x" + w, c.ibox.claims) not in self._spills_out:
+                    content = {P.CHAIN: c.ibox.sealing, "prev": c.ibox.head}
+                    out.append(Spill(loop.instance, P.claim_id(c.base + "/x"), c.ibox.claims, content, "x" + w))
+        for sc in self.scopes.values():
+            owner = Instance(sc.key, NIL)
+            if sc.rbox.sealing is not None and (owner, "r", sc.rbox.claims) not in self._spills_out:
+                content = {P.CHAIN: sc.rbox.sealing, "prev": sc.rbox.head}
+                out.append(Spill(owner, self._scope_base(sc, "r"), sc.rbox.claims, content, "r"))
+            if sc.item_sealing and (owner, "t", 0) not in self._spills_out:
+                out.append(Spill(owner, self._scope_base(sc, "t"), 0, sc.item, "t"))
+        root = Instance((), NIL)
+        if self.vbox.sealing is not None and (root, "v", self.vbox.claims) not in self._spills_out:
+            content = {P.CHAIN: self.vbox.sealing, "prev": self.vbox.head}
+            out.append(Spill(root, self._vars_base(), self.vbox.claims, content, "v"))
+        for k, u in sorted(self.undo.items()):
+            if u.sealing and (root, "u", k) not in self._spills_out:
+                out.append(Spill(root, self._undo_base(), k, u.vals, "u"))
+        return out
 
     def _handed_now(self) -> set[Instance]:
         """Steps handed over and still running, loop steps aside (their loop says they run)."""
@@ -1338,10 +1608,10 @@ class Scheduler:
         return tuple((self.program.steps[self._by_topo[raw[j]]].key, int(raw[j + 1])) for j in range(0, len(raw), 2))
 
     def _i(self, inst: Instance) -> list[Any]:
-        return [self._k(inst.scope), self.program.steps[inst.step].topo]
+        return [self._k(inst.scope), self.program.steps[inst.step].topo if inst.step != NIL else -1]
 
     def _if(self, raw: list[Any]) -> Instance:
-        return Instance(self._kf(raw[0]), self._by_topo[int(raw[1])])
+        return Instance(self._kf(raw[0]), self._by_topo[int(raw[1])] if int(raw[1]) >= 0 else NIL)
 
     def _edge_order(self, region: uuid.UUID | None) -> list[int]:
         """A region's edges in the order `_open_scope` lays them out."""
@@ -1383,6 +1653,8 @@ class Scheduler:
             "".join(_capture_code(captures[m]) if m in captures else NO_CAPTURE for m in self._loop_members[sc.region])
             if captures
             else "",
+            sc.rbox.to_json() if sc.rbox.head or sc.rbox.sealing is not None else None,
+            int(sc.item_sealing),
         ]
 
     def _scope2_from(self, raw: list[Any]) -> Scope:
@@ -1404,7 +1676,9 @@ class Scheduler:
             code = raw[11][2 * n : 2 * n + 2]
             if code != NO_CAPTURE:
                 self._captures[Instance(key, m)] = _capture_from(code)
-        return Scope(key, region, nodes, edges, results, raw[5], raw[6], failure, frozen, int(raw[9]), bool(raw[10]))
+        scope = Scope(key, region, nodes, edges, results, raw[5], raw[6], failure, frozen, int(raw[9]), bool(raw[10]))
+        scope.rbox, scope.item_sealing = Box.from_json(raw[12]), bool(raw[13])
+        return scope
 
     def _loop2(self, loop: LoopRun) -> list[Any]:
         return [

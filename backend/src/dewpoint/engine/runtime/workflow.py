@@ -19,7 +19,7 @@ from temporalio.exceptions import ApplicationError, ChildWorkflowError
 
 with workflow.unsafe.imports_passed_through():
     from dewpoint.engine.graph.values import iter_values, pointer_str
-    from dewpoint.engine.runtime import resolve
+    from dewpoint.engine.runtime import probe, resolve
     from dewpoint.engine.runtime.activities import (
         FAILURE_HANDLER,
         LOAD_VERSION,
@@ -213,7 +213,8 @@ class RunGraph(Execution):
         already, and its variables. False when those values are more than a run carries (engine 2b spec §5.2)."""
         self.program = program
         parent = self.parent
-        budget = Budget(ITERATION_CAP, root=True) if parent is None else Budget(parent.grant, root=False)
+        cap = probe.ROOT_BUDGET[0] if probe.ROOT_BUDGET else ITERATION_CAP  # proto: the harness may lower it
+        budget = Budget(cap, root=True) if parent is None else Budget(parent.grant, root=False)
         self.sched = Scheduler(program, budget=budget)
         learned = self._learn(self.trigger, program.graph.settings.input_schema)
         for step in program.steps.values():  # sensitive literals in plugin configs: masked from the start
@@ -465,7 +466,13 @@ class LoopBatch(Execution):
                 self.sched = Scheduler(program, budget=Budget(start.parent.grant, root=False))
                 self.sched.init_vars(dict(start.variables))
                 outer = [
-                    OuterScope(tuple((str(k), int(i)) for k, i in o["key"]), o["results"], o["item"], o["index"])
+                    OuterScope(
+                        tuple((str(k), int(i)) for k, i in o["key"]),
+                        o["results"],
+                        o["item"],
+                        o["index"],
+                        o.get("chain"),
+                    )
                     for o in start.outer
                 ]
                 self.sched.prefix = workflow.info().workflow_id  # proto: before the loop can spill anything

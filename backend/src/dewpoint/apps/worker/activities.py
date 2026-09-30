@@ -205,7 +205,10 @@ def step_activity_for(node: type[Node]) -> Callable[[StepInput], Awaitable[StepR
         _same_tenant(step.tenant_id)
         store = probe_store.STORE
         if store is not None:  # proto: the activity boundary reads the handles its input carries
-            step = dataclasses.replace(step, config=await store.resolve(step.config))
+            try:
+                step = dataclasses.replace(step, config=await store.resolve(step.config))
+            except LookupError as e:
+                raise _StepFailed("evaluation_error", str(e), retryable=False).mapped() from None
         try:
             result, outcome = await _call(node, step, config_schema)
         except _StepFailed as f:
@@ -265,7 +268,7 @@ def engine_activities(store: RunStore, plugins: Iterable[Plugin], *, abi: int = 
         await store.project(data)
 
     steps = [step_activity_for(node) for plugin in plugins for node in plugin.nodes if node.kind == NodeKind.ACTION]
-    return [load_version, project, probe_store.spill, *steps]
+    return [load_version, project, probe_store.spill, probe_store.derive, probe_store.claim_input, *steps]
 
 
 Evaluate = Callable[[dict[str, Any]], Awaitable[list[dict[str, Any]]]]

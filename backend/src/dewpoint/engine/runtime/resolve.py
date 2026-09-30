@@ -20,6 +20,7 @@ from dewpoint.engine.cel.ipc import EvaluateRequest
 from dewpoint.engine.cel.record import ExpressionRecord
 from dewpoint.engine.cel.route import route
 from dewpoint.engine.graph.values import ENVELOPE, Pointer, RefPath, RefValue, TemplateValue, pointer_str
+from dewpoint.engine.runtime import probe as P
 from dewpoint.engine.runtime.scheduler import Failure, Scheduler, ScopeKey
 
 MISSING: Any = object()
@@ -51,7 +52,7 @@ def view(
         current = scheduler.scopes[at]
         for member in program.regions[region].members:
             name = program.steps[member].key
-            steps[name] = current.results.get(name, {})
+            steps[name] = scheduler.result_of(current, name)  # proto: or a handle into its claimed results
         if at:
             loops[at[-1][0]] = {"item": current.item, "index": current.index}
             at = at[:-1]
@@ -69,6 +70,8 @@ def _base(v: ScopeView, path: RefPath) -> Any:
         return v.trigger
     if path.root == "steps":
         entry = v.steps.get(str(path.name), MISSING)
+        if P.is_handle(entry):  # proto: a claimed result, read by handle
+            return P.extend(entry, str(path.section))
         return entry.get(str(path.section), MISSING) if isinstance(entry, Mapping) else MISSING
     if path.root == "vars":
         return v.vars.get(str(path.name), MISSING)
@@ -86,6 +89,9 @@ def read(v: ScopeView, path: RefPath) -> Any:
     """The value at `path`, or MISSING."""
     value = _base(v, path)
     for seg in path.rest:
+        if P.is_handle(value):  # proto (§3.3): the workflow never reads a claim; the pointer grows instead
+            value = P.extend(value, seg)
+            continue
         if isinstance(seg, int):
             value = value[seg] if isinstance(value, list) and 0 <= seg < len(value) else MISSING
         else:
@@ -128,6 +134,8 @@ def template(v: ScopeView, value: TemplateValue) -> str:
             if found is MISSING:
                 raise ValueFailure(evaluate.EVALUATION_ERROR, f"`{part.path.text}` has no value here.")
             continue  # null, no default: nothing
+        if P.is_handle(found):
+            raise ValueFailure(evaluate.TYPE_MISMATCH, f"proto: `{part.path.text}` is claimed; not prototyped here.")
         out.append(_text(found, part.path))
     return "".join(out)
 

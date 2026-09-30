@@ -12,6 +12,8 @@ point (no activity and no child outstanding): opportunistically past `checkpoint
 isn't outstanding: its wake time goes into the snapshot, and the continued run re-arms it."""
 
 import asyncio
+import hashlib
+import json
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
@@ -485,7 +487,9 @@ class Execution:
         if key[0] == "step" and effect.output is not None and effect.loop is None and effect.end is None:
             n = probe.size(effect.output)  # proto (§5.3): the merge is authoritative
             if n > probe.FLOOR and self.sched.live + n > probe.LIVE_BUDGET:
-                sid = f"{workflow.info().workflow_id}/r/{iteration_key(key[1].scope)}/{self.sched.step(key[1]).topo}"
+                sid = probe.claim_id(
+                    f"{workflow.info().workflow_id}/r/{iteration_key(key[1].scope)}/{self.sched.step(key[1]).topo}"
+                )
                 self._spill_later.append((("spillres", key[1]), sid, effect))
                 return
         if key[0] == "collect":
@@ -521,7 +525,7 @@ class Execution:
             self.sched.fail(inst, effect.failure)
         else:
             if effect.variables:
-                self.sched.set_variables(effect.variables)  # proto (§5.3): a new variable version
+                self.sched.set_variables(effect.variables, inst)  # proto (§5.3): a new variable version
             self.sched.succeed(inst, effect.output, effect.ports)
 
     async def _spill(self, sp: Spill) -> _Effect:
@@ -765,7 +769,29 @@ class Execution:
                 mode = "activity" if mode == "activity" or not task.local else "local"
             else:
                 values[pointer] = value.value
+        for pointer in values:  # proto (§3.2): a handle whose pointer passed POINTER_MAX becomes a derived claim's
+            values[pointer] = await self._bounded(values[pointer])
         return values, mode
+
+    async def _bounded(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            if probe.is_handle(value):
+                if value.get(probe.KIND) == probe.AT:
+                    value = {**value, "of": await self._bounded(value["of"])}
+                if not probe.long_pointer(value):
+                    return value
+                claim = probe.claim_id(f"{workflow.info().workflow_id}/d/{probe.size(value)}/{_digest(value)}")
+                data = probe.DeriveInput(claim, value)
+                await self._send(data)
+                await workflow.execute_activity(
+                    probe.DERIVE, data, result_type=int, start_to_close_timeout=timedelta(seconds=120)
+                )
+                self.sched.probe["derived"] = self.sched.probe.get("derived", 0) + 1
+                return probe.handle(claim)
+            return {k: await self._bounded(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [await self._bounded(v) for v in value]
+        return value
 
     async def _cel_task(
         self, record: ExpressionRecord, views: Sequence[Any], *, inline: bool = True
@@ -960,6 +986,14 @@ class Execution:
             return _Effect(failure=Failure(VERSION_UNUSABLE, f"`{step.key}` can't run its sub-flow: {reason}."))
         child_run = str(workflow.uuid4())
         child = run_workflow_id(self.tenant_id, child_run)  # its workflow id, and its key in this budget
+        payload = start.input
+        if probe.size(payload) > probe.TRIGGER_INLINE:  # proto (§3.5): its input is split before it starts
+            data = probe.ClaimInput(f"{child}/input", payload)
+            await self._send(data)
+            payload = await workflow.execute_activity(
+                probe.CLAIM_INPUT, data, result_type=dict, start_to_close_timeout=timedelta(seconds=120)
+            )
+            self.sched.probe["input_claims"] = self.sched.probe.get("input_claims", 0) + 1
         grant = self.sched.budget.start_child(child, SUBFLOW_GRANT)
         parent = Parent(
             workflow_id=workflow.info().workflow_id,
@@ -976,7 +1010,7 @@ class Execution:
             self.tenant_id,
             child_run,
             version,
-            start.input,
+            payload,
             self.mode,
             self.max_run_duration_s,
             self.cel_schedule_to_start_s,
@@ -1043,9 +1077,16 @@ class Execution:
         out = []
         for depth in range(len(loop.scope) + 1):
             scope = self.sched.scopes[loop.scope[:depth]]
-            results = {k: v for k, v in scope.results.items() if reads is None or k in reads}
+            inline = {**(scope.rbox.sealing or {}), **scope.results}  # proto: and the head of what's claimed
+            results = {k: v for k, v in inline.items() if reads is None or k in reads}
             out.append(
-                {"key": [[k, i] for k, i in scope.key], "results": results, "item": scope.item, "index": scope.index}
+                {
+                    "key": [[k, i] for k, i in scope.key],
+                    "results": results,
+                    "item": scope.item,
+                    "index": scope.index,
+                    "chain": scope.rbox.head,
+                }
             )
         return out
 
@@ -1195,7 +1236,9 @@ class Execution:
                 mode=self.mode,
                 attempt=attempt,
                 inline_limit=probe.INLINE_LIMIT if self.sched.live <= probe.LIVE_BUDGET else probe.FLOOR,
-                spill_id=f"{workflow.info().workflow_id}/o/{iteration_key(inst.scope)}/{step.topo}/{attempt}",
+                spill_id=probe.claim_id(
+                    f"{workflow.info().workflow_id}/o/{iteration_key(inst.scope)}/{step.topo}/{attempt}"
+                ),
             )
             if not fits(sent, workflow.payload_converter()):  # engine 2b spec §5.2: never sent, so it never ran
                 failure = Failure(PAYLOAD_TOO_LARGE, STEP_INPUT_TOO_LARGE, attempt)
@@ -1345,3 +1388,8 @@ __all__ = [
     "Execution",
     "child_options",
 ]
+
+
+def _digest(value: Any) -> str:
+    """Proto: a derived claim's id part, from the reference it replaces."""
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:32]
