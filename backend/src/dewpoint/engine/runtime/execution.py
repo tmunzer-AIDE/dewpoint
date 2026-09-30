@@ -15,7 +15,7 @@ import asyncio
 import hashlib
 import json
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Generator, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -76,6 +76,7 @@ with workflow.unsafe.imports_passed_through():
         CAP_MESSAGE,
         ITERATION_CAP_EXCEEDED,
         SNAPSHOT_FORMAT,
+        STRUCTURE_STEP,
         Batch,
         BatchOutcome,
         Collect,
@@ -872,13 +873,26 @@ class Execution:
             self._yield.reset(startup=length == self._startup_task)
         return self._yield
 
-    async def _yield_point(self, record: ExpressionRecord | None, *, send: int = 0) -> None:
+    async def _stepwise[T](self, steps: Generator[int, None, T]) -> T:
+        """Proto (engine 2b spec §5.3): a snapshot or a restore, part by part. Each part's units are charged to the
+        workflow task; once its share is spent, the next part waits for the next task (the 1 ms durable timer, as
+        §5.6's interpreter does). The units are counts of what's encoded, so a replay yields at the same points."""
+        while True:
+            try:
+                units = next(steps)
+            except StopIteration as done:
+                value: T = done.value
+                return value
+            self._task_budget().charge(structure=units)
+            await self._yield_point(None, structure=STRUCTURE_STEP)
+
+    async def _yield_point(self, record: ExpressionRecord | None, *, send: int = 0, structure: int = 0) -> None:
         """Before binding a view (`record` None) or evaluating `record` locally: when the current workflow task's budget
         is spent, await a 1 ms durable timer, which ends the task (spec §5.6). Concurrent units share the budget and
         one timer, and each checks again once it fires. Before sending a payload (`send` its bytes), the same wait
         keeps a task's commands under Temporal's gRPC message limit (#15, engine 2b spec §5.2)."""
         while True:
-            if not self._task_budget().must_yield(record, send=send):
+            if not self._task_budget().must_yield(record, send=send, structure=structure):
                 return
             if self._yield_timer is None or self._yield_timer.done():
                 self._yield_timer = asyncio.create_task(asyncio.sleep(0.001))
@@ -1334,12 +1348,12 @@ class Execution:
 
     # --- continue-as-new ------------------------------------------------------------------------------------------
 
-    def _snapshot(self) -> dict[str, Any]:
+    async def _snapshot(self) -> dict[str, Any]:
         """Where a continued run carries on (spec §6, `snapshot_format` 1). The projection is written first, so no
         row is carried; timers carry their wake times."""
         return {
             "snapshot_format": SNAPSHOT_FORMAT,
-            "scheduler": self.sched.to_json(),
+            "scheduler": await self._stepwise(self.sched.encoding(check=False)),
             "secrets": list(self._secrets),
             "run_started_at": self.run_started_at.isoformat(),
             "deadline": self.deadline.isoformat(),
@@ -1356,11 +1370,12 @@ class Execution:
             ],
         }
 
-    def _restore(self, program: Program, snapshot: dict[str, Any]) -> None:
+    async def _restore(self, program: Program, snapshot: dict[str, Any]) -> None:
         if snapshot.get("snapshot_format") != SNAPSHOT_FORMAT:
             raise ValueError(f"unknown snapshot format {snapshot.get('snapshot_format')!r}")
         self.program = program
-        self.sched = Scheduler.from_json(program, snapshot["scheduler"])
+        self.sched = Scheduler.restoring(program, snapshot["scheduler"])
+        await self._stepwise(self.sched.decoding(snapshot["scheduler"]))
         self._carry(remember((), tuple(snapshot["secrets"])))
         for key, step, wake, started, mode in snapshot["timers"]:
             inst = Instance(tuple((str(k), int(n)) for k, n in key), uuid.UUID(step))

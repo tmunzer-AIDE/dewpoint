@@ -18,6 +18,7 @@ once its loop has taken its result: only open scopes stay, which keeps a continu
 import bisect
 import heapq
 import uuid
+from collections.abc import Generator
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -84,6 +85,23 @@ def _then_wake(fn: Any) -> Any:
         return out
 
     return wrapper
+
+
+STRUCTURE_STEP = 2_000  # proto (§5.3): a snapshot or a restore yields its work after about this many units
+# a unit is a node or edge code decoded (0.45 us on the probe's machine); the other parts are weighted by their measured
+# cost against it, so a task's share of units is a share of time, counted deterministically
+REBUILD_WEIGHT = 6  # a queued step rebuilt from the node states (a scan and a sort)
+DEFER_WEIGHT = 2  # a queued loop step deferred, in bulk
+
+
+def run_steps[T](steps: Generator[int, None, T]) -> T:
+    """Run stepwise work to its end, at once."""
+    while True:
+        try:
+            next(steps)
+        except StopIteration as done:
+            value: T = done.value
+            return value
 
 
 def iteration_key(scope: ScopeKey) -> str:
@@ -1462,21 +1480,38 @@ class Scheduler:
 
     # --- continue-as-new ---------------------------------------------------------------------------------------------
 
-    def to_json(self) -> dict[str, Any]:
+    def to_json(self, *, check: bool = True) -> dict[str, Any]:
         """The scheduler's state for a continue-as-new snapshot (proto `snapshot_format` 2): steps, edges and loops by
         index, node and edge states as one code each in region order, and no queue: what's queued is rebuilt from the
         states on restore. Taken between units: nothing settled or cancelled is left to hand over."""
+        return run_steps(self.encoding(check=check))
+
+    def encoding(self, *, check: bool = True) -> Generator[int, None, dict[str, Any]]:
+        """`to_json` in steps (proto §5.3): after each part, it yields the structural work done (codes and captures
+        encoded), so the execution can spread a large snapshot over workflow tasks. Nothing changes the state between
+        steps: a snapshot is taken only when nothing runs. `check` (tests and probes): the queues rebuild exactly."""
         if self._settled or self._cancels or self.ended is not None:
             raise ValueError("a snapshot is taken only between units, and never after the run ended")
         if self.budget.waiting or self.budget.reserved or self._budget_waits:  # proto (§5.3): the at-continue term
             raise ValueError("a snapshot is taken only when the iteration budget holds no waiting need or child grant")
-        self._check_queues()
+        if check:
+            self._check_queues()
         by_scope: dict[ScopeKey, dict[uuid.UUID, int]] = {}
         for inst, version in self._captures.items():
             by_scope.setdefault(inst.scope, {})[inst.step] = version
+        yield len(self._captures)
+        scopes, units = [], 0
+        for sc in self.scopes.values():
+            captured = by_scope.get(sc.key, {})
+            scopes.append(self._scope2(sc, captured))
+            units += 1 + len(sc.nodes) + len(sc.edges) + len(captured)
+            if units >= STRUCTURE_STEP:
+                yield units
+                units = 0
+        yield units + len(self.loops)
         return {
             "snapshot_format": SNAPSHOT_FORMAT,
-            "scopes": [self._scope2(sc, by_scope.get(sc.key, {})) for sc in self.scopes.values()],
+            "scopes": scopes,
             "loops": [self._loop2(loop) for loop in self.loops.values()],
             "handed": [self._i(i) for i in sorted(self._handed_now(), key=self.order)],
             "collects_out": [
@@ -1506,12 +1541,29 @@ class Scheduler:
 
     @classmethod
     def from_json(cls, program: Program, data: dict[str, Any]) -> "Scheduler":
+        s = cls.restoring(program, data)
+        run_steps(s.decoding(data))
+        return s
+
+    @classmethod
+    def restoring(cls, program: Program, data: dict[str, Any]) -> "Scheduler":
+        """An empty scheduler for `data`, which `decoding` then fills."""
         if data.get("snapshot_format") != SNAPSHOT_FORMAT:
             raise ValueError(f"unknown snapshot format {data.get('snapshot_format')!r}")
-        s = cls(program, budget=Budget.from_json(data["budget"]))
+        return cls(program, budget=Budget.from_json(data["budget"]))
+
+    def decoding(self, data: dict[str, Any]) -> Generator[int, None, None]:
+        """`from_json` in steps (proto §5.3): after each part, it yields the structural work done (codes decoded,
+        queued steps rebuilt and deferred), so the execution can spread a large restore over workflow tasks. The
+        queued loop steps inside iterations are deferred here, so the first take after a restore has only the rest."""
+        s, units = self, 0
         for raw in data["scopes"]:
             scope = s._scope2_from(raw)
             s.scopes[scope.key] = scope
+            units += 1 + len(scope.nodes) + len(scope.edges)
+            if units >= STRUCTURE_STEP:
+                yield units
+                units = 0
         s._n_open = sum(1 for sc in s.scopes.values() if sc.key and not sc.frozen)
         for raw in data["loops"]:
             loop = s._loop2_from(raw)
@@ -1533,7 +1585,23 @@ class Scheduler:
         s._held = {s._if(i): bool(r) for i, r in data["held"]}
         s._seq = int(data["seq"])
         s.probe = dict(data["probe"])
-        s._ready, s._collects, s._batches = s._rebuilt()
+        yield units + len(data["loops"])
+        ready, s._collects, s._batches = s._rebuilt()
+        yield sum(len(sc.nodes) for sc in s.scopes.values()) + REBUILD_WEIGHT * len(ready)
+        # the queued loop steps inside iterations, deferred in bulk: `ready` is in scheduling order, so each scope's
+        # list is built sorted, and the heap, built in that order, is already a heap
+        s._ready, units = [], 0
+        for inst in ready:
+            if s._iter_loop(inst):
+                s._deferred.add(inst)
+                s._deferred_by_scope.setdefault(inst.scope, []).append(inst)
+                s._deferred_heap.append((s.order(inst), inst))
+                units += DEFER_WEIGHT
+                if units >= STRUCTURE_STEP:
+                    yield units
+                    units = 0
+            else:
+                s._ready.append(inst)
         s._live = s._recount()
         s._spills = [
             Spill(loop.instance, coll.base, f, pairs, which)
@@ -1557,7 +1625,7 @@ class Scheduler:
             and loop.next < P.count(loop.items)
             and len(loop.open) < loop.concurrency
         }
-        return s
+        yield units + len(s.scopes)
 
     def _pending_containers(self) -> list[Spill]:
         """Proto: the containers' parts being claimed and not handed out, rebuilt as spills from the state."""

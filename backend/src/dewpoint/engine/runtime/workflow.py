@@ -179,14 +179,14 @@ class RunGraph(Execution):
         try:
             if snapshot is not None:
                 t0 = probe.clock()
-                self._restore(program, snapshot)
+                await self._restore(program, snapshot)
                 probe.took(workflow.info().workflow_id, "restore", t0)
             elif not self._fresh(program):  # its trigger, or a literal, holds more sensitive values than a run carries
                 self.sched.end(RunEnd("failed", Failure(PAYLOAD_TOO_LARGE, SECRETS_TOO_LARGE)))
             if await self._drive() == CONTINUE:
                 await self._flush()
                 t0 = probe.clock()
-                continued = replace(start, snapshot=self._snapshot(), iterations=self.sched.iterations)
+                continued = replace(start, snapshot=await self._snapshot(), iterations=self.sched.iterations)
                 probe.took(workflow.info().workflow_id, "snapshot", t0)
                 t0 = probe.clock()
                 fits = snapshot_fits(continued, workflow.payload_converter())
@@ -472,7 +472,7 @@ class LoopBatch(Execution):
         try:
             if snapshot is not None:
                 t0 = probe.clock()
-                self._restore(program, snapshot)
+                await self._restore(program, snapshot)
                 probe.took(workflow.info().workflow_id, "restore", t0)
             else:
                 self.program = program
@@ -503,7 +503,7 @@ class LoopBatch(Execution):
                 # proto (§5.3): each value travels once; the snapshot holds the slice, outer scopes and variables
                 t0 = probe.clock()
                 continued = replace(
-                    start, snapshot=self._snapshot(), iterations=self.sched.iterations,
+                    start, snapshot=await self._snapshot(), iterations=self.sched.iterations,
                     items=[], items_handle=None, outer=[], variables={},
                 )  # fmt: skip
                 probe.took(workflow.info().workflow_id, "snapshot", t0)
