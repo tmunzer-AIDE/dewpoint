@@ -1,7 +1,7 @@
 # Dewpoint — Engine 2b Design (payload protection, admission, triggers, retention)
 
-- **Status:** revision 4, **pending the owner's approval** (2026-09-30). Revisions 1–3 were approved by the owner;
-  every section was approved in conversation before it was written here, and this document is their written form.
+- **Status:** approved by the owner, revision 4 (2026-09-30). Every section was approved in conversation before it was
+  written here; this document is their written form.
   - Revision 2 folds in the owner's review of revision 1: a claim is owned by the run that produced it, with the
     root run id kept for retention and the secret index (§3.4); passing a secret-index bound is a fixed,
     non-retryable error, and matching work is bounded (§3.7); an idempotency retry is compared under its stored
