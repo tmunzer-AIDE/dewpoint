@@ -98,7 +98,8 @@
     Temporal or returns is checked where it's produced, and fails with `payload_too_large` or
     `snapshot_too_large` rather than retry a workflow task; the sensitive values a run carries are bounded (256 KiB),
     so every result without outputs fits; a workflow task's byte budget covers every command it sends (§5.6, §5.7).
-    `engine_abi` becomes 5, with its own golden histories, recorded encrypted.
+    `engine_abi` becomes 5, with its own golden histories, recorded encrypted. A start the client can't encrypt was
+    never sent, so it fails with `start_failed` (§9).
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
   This spec **narrows parent §6.4** (where CEL runs) and resolves the CEL item in parent §15.
 - **Evidence:** CEL spike, branch `spike/cel-evaluation`, commits `d6a8162` and `13a62e1`. See
@@ -1174,10 +1175,10 @@ cancel while the version loads cancels the run.
 - **No public run API in 2a.** Admission, idempotency keys and tenant slots arrive in 2b.
 - **Payloads are test data in 2a.** 2b validates them against the input schema. Until then a payload that breaks its
   schema fails the step that reads the bad value.
-- **A start is failed only when Temporal refused it.** The workflow id is `t:<tenant>:run:<run id>` (2b spec §6.1),
-  with `REJECT_DUPLICATE`. An
-  unanswered start is retried with the same id, and a duplicate refusal confirms it. `start_failed` is recorded only
-  for a confirmed refusal; a start that stays unanswered leaves the run `running`.
+- **A start is failed only when it certainly never began.** The workflow id is `t:<tenant>:run:<run id>` (2b spec
+  §6.1), with `REJECT_DUPLICATE`. An unanswered start is retried with the same id, and a duplicate refusal confirms it.
+  `start_failed` is recorded for a confirmed refusal, or for a start the client couldn't encrypt, which it never sent
+  (2b spec §6.2); a start that stays unanswered leaves the run `running`.
 
 ## 10. Testing strategy
 

@@ -61,9 +61,10 @@ dewpoint dev run <version-id> --tenant <tenant-id> --input trigger.json
 - `--simulate` calls each plugin node's `simulate()` instead of `run()`: nothing is sent anywhere. A node without a
   simulation fails its step with `simulation_unavailable`. Timers still wait, as they would in a live run.
 - By default the command waits and prints the result. `--no-wait` prints the run id and returns.
-- Exit codes: 0 when the run succeeded; 1 when it ended otherwise, or Temporal refused to start it; 2 when it wasn't
-  admitted (each reason is printed: in a `production` deployment, "Production runs are off in this deployment"; a
-  trigger too large to send, over 1.75 MiB); 3 when Temporal never confirmed the start (see below).
+- Exit codes: 0 when the run succeeded; 1 when it ended otherwise, or its start was refused (by Temporal, or because
+  it couldn't be encrypted); 2 when it wasn't admitted (each reason is printed: in a `production` deployment,
+  "Production runs are off in this deployment"; a trigger too large to send, over 1.75 MiB); 3 when Temporal never
+  confirmed the start (see below).
 - It needs `DEWPOINT_DATABASE_URL` with a login in the `dewpoint_dispatch` role, the Temporal settings above, and the
   KEK: it encrypts the start with the tenant's data key.
 
@@ -71,9 +72,10 @@ The trigger file is test data: 2a doesn't validate it against the workflow's inp
 value that breaks the schema fails the step that reads it.
 
 **An unconfirmed start.** A start whose answer is lost looks like a failure, so it's retried with the same workflow id
-(`t:<tenant>:run:<run id>`), which Temporal refuses as a duplicate if the first attempt went through. Only a confirmed refusal
-records the run as failed (`start_failed`). If no attempt is answered at all, the run may be executing: it stays
-`running`, and the command exits 3.
+(`t:<tenant>:run:<run id>`), which Temporal refuses as a duplicate if the first attempt went through. A run is recorded
+as failed (`start_failed`) only when its start certainly never began: Temporal refused it, or the start couldn't be
+encrypted, so it was never sent (for example, the tenant has no data key: `dewpoint keys ensure-tenants` gives it
+one). If no attempt is answered at all, the run may be executing: it stays `running`, and the command exits 3.
 
 ## Reading runs
 
@@ -146,7 +148,7 @@ workflow id is `t:<tenant>:run:<run id>`, a sub-flow's and a failure handler's t
 | `succeeded` | | Every path finished, or a `stop` node ended the run. |
 | `failed` | the step's code | A step failed with `on_error: fail` (the default) outside any loop. |
 | `failed` | `workflow_failed` | A `fail` node ended the run. |
-| `failed` | `start_failed` | Temporal refused to start it. |
+| `failed` | `start_failed` | It never started: Temporal refused it, or its start couldn't be encrypted and was never sent. |
 | `failed` | `version_unusable` | This build can't load or run the version, for example a node type it lacks. Nothing ran. |
 | `failed` | `internal_error` | A bug in the interpreter. The message names the exception's type, and the worker's log has the details, or says the result was too large to return; please report it. |
 | `failed` | `payload_too_large` | The run's outputs were too large to return (over 1.75 MiB once encrypted). A step or a loop fails with the same code, below. |
