@@ -9,6 +9,8 @@ Also the contracts between executions (2a-3b): a child's input and result (a sub
 from dataclasses import dataclass, field
 from typing import Any
 
+from dewpoint.engine import ENGINE_ABI
+
 ENGINE_QUEUE = "dewpoint-engine"
 LOAD_VERSION = "dewpoint.load_version"
 PROJECT = "dewpoint.project"
@@ -35,7 +37,11 @@ def step_activity(ref: str) -> str:
 
 
 def cel_queue(profile: str) -> str:
-    return f"dewpoint-cel.{profile}"
+    """The queue of `cel.evaluate` for a profile, and for this build's engine ABI. CEL queues are outside the engine
+    deployment, so the ABI keeps each build's requests to CEL workers that can read them: from ABI 5 on a request is
+    encrypted, which a build before it can't read (engine 2b spec §6.6). Builds before ABI 5 poll
+    `dewpoint-cel.<profile>`."""
+    return f"dewpoint-cel.abi{ENGINE_ABI}.{profile}"
 
 
 @dataclass(frozen=True)

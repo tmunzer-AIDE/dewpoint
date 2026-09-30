@@ -10,9 +10,14 @@ A new engine ABI adds a rule: a version runs only on a build of its ABI. After t
 the old build published, or of one pinning such a sub-flow, fails until each workflow is published again."""
 
 import asyncio
+import dataclasses
+from collections.abc import Sequence
 from typing import Any
 
-from temporalio.client import WorkflowHandle
+from temporalio.api.common.v1 import Payload
+from temporalio.api.enums.v1 import EventType
+from temporalio.client import Client, WorkflowHandle
+from temporalio.converter import DataConverter, PayloadCodec
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
@@ -21,7 +26,7 @@ from dewpoint.apps.worker.deployment import describe, set_current
 from dewpoint.apps.worker.main import engine_worker
 from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
-from dewpoint.engine.runtime.activities import cel_queue
+from dewpoint.engine.runtime.activities import CEL_EVALUATE, cel_queue
 from dewpoint.sdk import Plugin
 from tests.apps.worker.harness import EVALUATOR_ONLY, MemoryStore, in_process, run_id_of, start, start_version
 from tests.apps.worker.test_deployment import build, placement
@@ -90,6 +95,63 @@ async def test_the_old_build_drains_while_the_new_one_serves_new_runs(dev_env: W
             assert ran.builds == {expected} and ran.engine <= {expected}, (history.workflow_id, ran)
             cel_tasks |= ran.cel
         assert cel_tasks == {(cel_queue(CURRENT_CEL_PROFILE), CEL)}  # on the version's profile, and only there
+
+
+LEGACY_CEL_QUEUE = f"dewpoint-cel.{CURRENT_CEL_PROFILE}"  # the CEL queue every build before ABI 5 polls
+
+
+class PlainCodec(PayloadCodec):
+    """A build before ABI 5 has no codec. This one counts each payload it's given; it can't read an encrypted one."""
+
+    def __init__(self) -> None:
+        self.decoded = 0
+
+    async def encode(self, payloads: Sequence[Payload]) -> list[Payload]:
+        return list(payloads)
+
+    async def decode(self, payloads: Sequence[Payload]) -> list[Payload]:
+        self.decoded += len(payloads)
+        return list(payloads)
+
+
+async def scheduled(handle: WorkflowHandle[Any, Any], activity_type: str) -> None:
+    """Until the run has scheduled an activity of that type."""
+    for _ in range(100):
+        async for e in handle.fetch_history_events():
+            attributes = e.activity_task_scheduled_event_attributes
+            if (
+                e.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED
+                and attributes.activity_type.name == activity_type
+            ):
+                return
+        await asyncio.sleep(0.1)
+    raise AssertionError(f"{handle.id} never scheduled {activity_type}")
+
+
+async def test_a_cel_worker_of_an_older_abi_never_receives_this_builds_requests(dev_env: WorkflowEnvironment) -> None:
+    """Review finding (2b-1a): `cel.evaluate` queues are outside the deployment, and from ABI 5 on a request is
+    encrypted, which a build before it can't read (nor can this build read that one's plain requests). Each ABI's
+    requests go to a queue of its own, so an older build's CEL worker, still serving its draining runs, never gets
+    this build's (2b spec §6.6). Here only the older queue is served until the request has waited; then this build's
+    CEL worker serves it."""
+    client, n = dev_env.client, build("cel-n")
+    store, _, new_graph = graphs()
+    older = PlainCodec()
+    old_client = Client(
+        client.service_client,
+        namespace=client.namespace,
+        data_converter=dataclasses.replace(DataConverter.default, payload_codec=older),
+    )
+    old_cel = Worker(old_client, task_queue=LEGACY_CEL_QUEUE, activities=[cel_activity(in_process)])
+    async with old_cel, engine_worker(client, store, [TESTKIT], settings(), build=n, identity=n):
+        await set_current(client, n)
+        run = await start(client, store, new_graph, {})
+        await scheduled(run, CEL_EVALUATE)
+        await asyncio.sleep(2)  # the older build's CEL worker polls all along
+        assert older.decoded == 0
+        async with Worker(client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(in_process)]):
+            result = await asyncio.wait_for(run.result(), 60)
+    assert (result.status, result.outputs) == ("succeeded", {"n": 42})
 
 
 async def pinned(handle: WorkflowHandle[Any, Any]) -> None:
