@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     max_run_duration_days: int = 30  # spec §6: whole logical run, including continue-as-new and waits
     temporal_address: str = "localhost:7233"
     temporal_namespace: str = "default"
+    # What `dewpoint platform init-environment` records, once (engine 2b spec §2.1): production unless a development
+    # setup says otherwise. Every process that talks to Temporal checks its namespace against the record.
+    environment: str = "production"
     cel_socket: str | None = None  # the cel-evaluator's socket; a worker without one serves no CEL queue
     cel_max_concurrent: int = 2  # the evaluator's N (docs/operations/cel-evaluator.md)
     cel_schedule_to_start_s: float = 600  # spec §5.7: no evaluator for a profile after this: cel_profile_unavailable

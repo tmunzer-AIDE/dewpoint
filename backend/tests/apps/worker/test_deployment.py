@@ -132,6 +132,10 @@ async def test_a_run_stays_on_the_build_it_started_on_with_its_children_and_cont
             assert ran.behaviours == {VersioningBehavior.VERSIONING_BEHAVIOR_PINNED}
 
 
+async def recorded(*args: object) -> None:
+    """A deployment whose record matches the worker's namespace (engine 2b spec §2.1)."""
+
+
 async def test_a_worker_set_to_makes_its_build_current_once_it_polls(
     dev_env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -147,6 +151,7 @@ async def test_a_worker_set_to_makes_its_build_current_once_it_polls(
     monkeypatch.setattr(main.Client, "connect", connect)
     monkeypatch.setattr(main, "make_engine", lambda url: Engine())
     monkeypatch.setattr(main, "make_sessionmaker", lambda engine: None)
+    monkeypatch.setattr(main, "verify_environment", recorded)  # the check itself: tests/apps/test_environment.py
     monkeypatch.setattr(main, "installed_plugins", lambda: [TESTKIT])
     worker = asyncio.create_task(main.run(settings(worker_set_current=True, worker_shutdown_grace_s=0.1)))
     try:

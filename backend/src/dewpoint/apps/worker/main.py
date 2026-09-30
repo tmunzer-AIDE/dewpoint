@@ -13,6 +13,7 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 from dewpoint.apps import cel_client
+from dewpoint.apps.environment import verify_environment
 from dewpoint.apps.plugin_loader import installed_plugins
 from dewpoint.apps.worker.activities import RunStore, cel_activity, engine_activities, remote_evaluator
 from dewpoint.apps.worker.deployment import deployment_config, set_current, this_build
@@ -78,9 +79,12 @@ async def promote(client: Client) -> None:
 
 
 async def run(settings: Settings) -> None:
-    client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
+    """Raises EnvironmentNotRecordedError or EnvironmentMismatchError before connecting to Temporal: a worker never
+    serves a namespace its database wasn't recorded with (engine 2b spec §2.1)."""
     engine = make_engine(settings.database_url)
     try:
+        await verify_environment(make_sessionmaker(engine), settings)
+        client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
         workers = [engine_worker(client, DbRunStore(make_sessionmaker(engine)), installed_plugins(), settings)]
         if settings.cel_socket:
             profile = await evaluator_profile(settings.cel_socket)

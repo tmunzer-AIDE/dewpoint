@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import Client
 
+from dewpoint.apps.environment import verify_environment
 from dewpoint.apps.plugin_loader import PluginLoadError, installed_plugins, prepare
 from dewpoint.apps.runs import NotAdmissibleError, StartRefusedError, StartUncertainError, start_run
 from dewpoint.apps.worker.deployment import Deployment, describe, set_current, this_build
@@ -26,6 +27,7 @@ from dewpoint.core.crypto.kek import KekSet, UnknownKekError
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.db import make_engine, make_sessionmaker
 from dewpoint.core.models.identity import User
+from dewpoint.core.platform.service import EnvironmentMismatchError, EnvironmentNotRecordedError, record_environment
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.plugins.lifecycle import Entry
 from dewpoint.core.plugins.registry import (
@@ -55,6 +57,8 @@ dev_cli = typer.Typer(no_args_is_help=True)
 app.add_typer(dev_cli, name="dev")
 deployment_cli = typer.Typer(no_args_is_help=True)
 app.add_typer(deployment_cli, name="deployment")
+platform_cli = typer.Typer(no_args_is_help=True)
+app.add_typer(platform_cli, name="platform")
 
 
 async def _init(email: str, password: str) -> None:
@@ -327,12 +331,57 @@ def lifecycle_retire(
 @app.command("worker")
 def worker() -> None:
     """Run the Temporal worker: RunGraph and its activities, and cel.evaluate when DEWPOINT_CEL_SOCKET is set."""
-    asyncio.run(run_worker(get_settings()))
+    try:
+        asyncio.run(run_worker(get_settings()))
+    except (EnvironmentNotRecordedError, EnvironmentMismatchError) as e:
+        typer.echo(f"ERROR: {e}")
+        raise typer.Exit(2) from None
 
 
 async def _temporal() -> Client:
+    """A Temporal client, once this process's namespace is the one this deployment recorded (engine 2b spec §2.1)."""
     settings = get_settings()
+    engine = make_engine(settings.database_url)
+    try:
+        await verify_environment(make_sessionmaker(engine), settings)
+    except (EnvironmentNotRecordedError, EnvironmentMismatchError) as e:
+        typer.echo(f"ERROR: {e}")
+        raise typer.Exit(2) from None
+    finally:
+        await engine.dispose()
     return await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
+
+
+@platform_cli.command("init-environment")
+def platform_init_environment(
+    environment: str | None = typer.Option(
+        None, "--environment", help="production or development (default: DEWPOINT_ENVIRONMENT, else production)"
+    ),
+    namespace: str | None = typer.Option(
+        None, "--temporal-namespace", help="the Temporal namespace (default: DEWPOINT_TEMPORAL_NAMESPACE)"
+    ),
+) -> None:
+    """Record, once, whether this deployment is production or development and which Temporal namespace it uses
+    (engine 2b spec §2.1). The same values again change nothing; other values are refused. A development setup needs
+    its own database and namespace: the label proves nothing about the data."""
+    settings = get_settings()
+    env = environment or settings.environment
+    ns = namespace or settings.temporal_namespace
+
+    async def _go() -> None:
+        engine = make_engine(settings.database_url)
+        try:
+            async with make_sessionmaker(engine)() as s, s.begin():
+                await record_environment(s, environment=env, namespace=ns)
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(_go())
+    except (ValueError, EnvironmentMismatchError) as e:
+        typer.echo(f"ERROR: {e}")
+        raise typer.Exit(2) from None
+    typer.echo(f"this deployment is {env}, with the Temporal namespace `{ns}`")
 
 
 @deployment_cli.command("set-current")
@@ -407,7 +456,7 @@ def dev_run(
 
     async def _go() -> tuple[uuid.UUID, RunResult | None]:
         settings = get_settings()
-        client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
+        client = await _temporal()
         return await dev_run_version(
             settings,
             client,

@@ -33,10 +33,13 @@ services:
 
   migrate:
     <<: *app
-    command: ["alembic", "upgrade", "head"]
+    # The schema, then what this deployment is, recorded once (engine 2b spec §2.1): production and gated unless a
+    # development setup opts in with its own database and Temporal namespace. Every later run checks the same values.
+    command: ["sh", "-c", "set -e; alembic upgrade head; dewpoint platform init-environment"]
     environment:
       <<: *appenv
       DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_owner:${POSTGRES_PASSWORD}@postgres/dewpoint
+      DEWPOINT_ENVIRONMENT: ${DEWPOINT_ENVIRONMENT:-production}
     depends_on: { postgres: { condition: service_healthy } }
     restart: "no"
 

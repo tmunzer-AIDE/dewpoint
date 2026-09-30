@@ -32,7 +32,12 @@ def cli_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DEWPOINT_KEK_B64", base64.b64encode(b"k" * 32).decode())
     monkeypatch.setenv("DEWPOINT_PUBLIC_ORIGIN", "https://dewpoint.test")
     monkeypatch.setattr(cli, "Client", _Client)
+    monkeypatch.setattr(cli, "verify_environment", _recorded)  # the check itself: tests/apps/test_environment.py
     get_settings.cache_clear()
+
+
+async def _recorded(*args: Any) -> None:
+    """A deployment whose record matches: the CLI's Temporal commands check it before connecting (2b spec §2.1)."""
 
 
 def _answer(monkeypatch: pytest.MonkeyPatch, outcome: RunResult | Exception, seen: dict[str, Any]) -> None:
