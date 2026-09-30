@@ -25,7 +25,8 @@ loader, the projection, and one activity per installed plugin node type. It need
 - The KEK (`DEWPOINT_KEK_B64`, `DEWPOINT_KEK_ID`): every payload it exchanges with Temporal is encrypted with its
   tenant's data key. It checks its KEK at startup and every 30 seconds, and exits 3 when the check fails.
 - `DEWPOINT_CEL_SOCKET` when a `cel-evaluator` runs next to it. The worker then waits for the evaluator, asks which
-  CEL profile it serves, and serves `cel.evaluate` on that profile's queue (`dewpoint-cel.<profile>`) with
+  CEL profile it serves, and serves `cel.evaluate` on that profile's queue for its build's engine ABI
+  (`dewpoint-cel.abi<engine ABI>.<profile>`) with
   `DEWPOINT_CEL_MAX_CONCURRENT` activities at a time (default 2; match the evaluator's slots,
   [`cel-evaluator.md`](cel-evaluator.md)).
 - `DEWPOINT_WORKER_SHUTDOWN_GRACE_S` (default 30): a stopping worker lets running attempts finish this long, then
@@ -63,8 +64,9 @@ dewpoint dev run <version-id> --tenant <tenant-id> --input trigger.json
 - By default the command waits and prints the result. `--no-wait` prints the run id and returns.
 - Exit codes: 0 when the run succeeded; 1 when it ended otherwise, or its start was refused (by Temporal, or because
   it couldn't be encrypted); 2 when it wasn't admitted (each reason is printed: in a `production` deployment,
-  "Production runs are off in this deployment"; a trigger too large to send, over 1.75 MiB); 3 when Temporal never
-  confirmed the start (see below).
+  "Production runs are off in this deployment"; a trigger too large to send, over 1.75 MiB; a `dewpoint` of another
+  engine ABI than the current build's, [`deployment.md`](deployment.md)); 3 when Temporal never confirmed the start
+  (see below).
 - It needs `DEWPOINT_DATABASE_URL` with a login in the `dewpoint_dispatch` role, the Temporal settings above, and the
   KEK: it encrypts the start with the tenant's data key.
 

@@ -15,8 +15,10 @@ breaking the runs already going. Runs of a build from before versioning aren't p
 - Every engine worker joins one Temporal **Worker Deployment**, `dewpoint-engine`, as its build's version.
 - New runs start on the deployment's **current** version. Nothing becomes current by itself: making a build current
   is the step that switches new runs to it.
-- The `cel.evaluate` queues (`dewpoint-cel.<profile>`) are outside the deployment: an expression goes to an evaluator
-  serving its version's CEL profile, whatever the build ([`cel-evaluator.md`](cel-evaluator.md)).
+- The `cel.evaluate` queues are outside the deployment: an expression goes to an evaluator serving its version's CEL
+  profile ([`cel-evaluator.md`](cel-evaluator.md)), on a worker of its build's engine ABI. A queue names both,
+  `dewpoint-cel.abi<engine ABI>.<profile>` (builds before ABI 5: `dewpoint-cel.<profile>`), since each ABI's requests
+  are written for it: from ABI 5 on they're encrypted, which an older build can't read.
 
 `dewpoint deployment status` shows the current build and every version Temporal knows:
 
@@ -53,11 +55,13 @@ version runs only on a build of the ABI it was published for. So when a new buil
 
 - Runs already started on the old build finish there, pinned to it, with their sub-flows and failure handlers. (A
   build from before versioning doesn't pin them: see below.)
-- A new run starts on the deployment's current build, so that's the build admission compares versions with,
-  whichever build's process admits the run. While the old build is current, the new build's versions are refused
-  ("make a build of ABI 5 current first"). Once the new build is current, the old build's versions are refused
-  ("publish the workflow again"), and `dewpoint dev run` prints which ones. A sub-flow or failure handler of the other
-  ABI refuses its parent's runs the same way.
+- A new run starts on the deployment's current build, so that's the build admission compares versions with. The
+  process that starts it must be a build of the same ABI, since a start is written for its own: until the promotion,
+  start runs with the old build's `dewpoint`, and after it with the new build's. The new build's refuses to start any
+  run while the old build is current ("start runs from a process of the current build"). A build of ABI 4 or older
+  doesn't check this: once a newer ABI is current, don't start runs with it, or they never begin.
+- Once the new build is current, the old build's versions are refused ("publish the workflow again"), and `dewpoint
+  dev run` prints which ones. A sub-flow or failure handler of the other ABI refuses its parent's runs the same way.
 - Publish each workflow again with the new build once it's current. Start with the workflows that others run as
   sub-flows or failure handlers, then publish those that run them. Publishing refuses a workflow that would run a
   version of another ABI (`subflow.engine_abi`).

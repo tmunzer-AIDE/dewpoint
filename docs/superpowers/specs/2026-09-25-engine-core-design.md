@@ -99,7 +99,9 @@
     `snapshot_too_large` rather than retry a workflow task; the sensitive values a run carries are bounded (256 KiB),
     so every result without outputs fits; a workflow task's byte budget covers every command it sends (§5.6, §5.7).
     `engine_abi` becomes 5, with its own golden histories, recorded encrypted. A start the client can't encrypt was
-    never sent, so it fails with `start_failed` (§9).
+    never sent, so it fails with `start_failed` (§9). Since requests are encrypted from ABI 5 on, a `cel.evaluate`
+    queue names its ABI as well as its profile (§5.7, §7), and only a build of the current build's ABI starts runs
+    (§7).
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
   This spec **narrows parent §6.4** (where CEL runs) and resolves the CEL item in parent §15.
 - **Evidence:** CEL spike, branch `spike/cel-evaluation`, commits `d6a8162` and `13a62e1`. See
@@ -752,7 +754,8 @@ not inside a worker that holds credentials.
 
 **Profile routing (fail closed):**
 - **One task queue per profile:** `RunGraph` schedules `cel.evaluate` on `dewpoint-cel.<profile>`, using the
-  **version's** profile. It never relies on the workflow's build to choose the runtime.
+  **version's** profile. It never relies on the workflow's build to choose the runtime. Since revision 5.7 the queue
+  also names the build's ABI, `dewpoint-cel.abi<ABI>.<profile>` (§7).
 - **Identity check at startup.** The evaluator computes its identity from its installed runtime distribution
   (`importlib.metadata`), its function library version and its classifier version. The activity worker polls a
   profile's queue only if the evaluator's identity equals that profile.
@@ -1075,7 +1078,9 @@ cancel while the version loads cancels the run.
   - **Continue-as-new** stays on `dewpoint-engine` without upgrade-on-continue-as-new, so it inherits the version.
   - **CEL queues** (`dewpoint-cel.<profile>`) are deliberately **not** part of the engine deployment. They're served
     by the CEL activity workers whatever the engine build. Correctness comes from profile routing (§5.7), not from
-    inheritance.
+    inheritance. Since revision 5.7 (ABI 5) a queue names the ABI too, `dewpoint-cel.abi<ABI>.<profile>`: a request is
+    encrypted from ABI 5 on, which a build before it can't read (nor can ABI 5 read that build's plain requests), so
+    each ABI's requests reach only CEL workers of its builds (2b spec §6.6).
     - The request schema is versioned (`cel.evaluate.v1`).
     - A CEL worker serves every schema version that any undrained engine build uses.
   - A build registers every `type@version` that isn't `retired` (§4.5). Old builds run until Temporal reports them drained.
@@ -1093,9 +1098,12 @@ cancel while the version loads cancels the run.
   - **A version runs only on a build of its `engine_abi`.** A version's commands depend on the ABI it was published
     under. Once a build with a new ABI is current, the old ABI's versions can't start runs until each workflow is
     published again with it; runs already pinned to the old build finish there.
-    - Admission compares the version's closure with the deployment's current build, where a new run starts, and not
-      with the admitting process's build: during a rollout, both builds' processes start runs (§4.5). Before the
-      promotion, the new ABI's versions are refused; after it, the old one's; with no build current, all.
+    - Admission compares the version's closure with the deployment's current build, where a new run starts. Since
+      revision 5.7 the process that starts the run must be a build of that ABI too: a start is written for its own
+      ABI (from ABI 5 on, encrypted under a `t:` workflow id), which a build of another ABI can't read (2b spec
+      §6.6). So during a rollout the old build's processes start runs until the promotion, and the new build's after
+      it (§4.5). Before the promotion, the new ABI's versions are refused; after it, the old one's; with no build
+      current, all.
     - Dispatch (2b) checks a queued request's frozen version the same way. One the current build can't run is
       cancelled explicitly (`engine_abi_changed`, §4.5).
     - Publishing refuses a draft that would pin a version of another ABI, so a parent is published again only after
