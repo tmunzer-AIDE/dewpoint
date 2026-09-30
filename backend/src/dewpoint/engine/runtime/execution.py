@@ -13,7 +13,7 @@ isn't outstanding: its wake time goes into the snapshot, and the continued run r
 
 import asyncio
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -87,11 +87,14 @@ with workflow.unsafe.imports_passed_through():
     from dewpoint.engine.runtime.size import (
         BATCH_ITEM_TOO_LARGE,
         PAYLOAD_TOO_LARGE,
+        SECRETS_TOO_LARGE,
         STEP_INPUT_TOO_LARGE,
         SUBFLOW_INPUT_TOO_LARGE,
         encoded_bytes,
         fits,
         payload_bytes,
+        secret_bytes,
+        secrets_limit,
     )
 
 IN_FLIGHT_CAP = 100  # activities and child workflows outstanding per execution (spec §6)
@@ -223,6 +226,7 @@ class Execution:
         self._yield_timer: asyncio.Task[None] | None = None  # the one yield point every waiter shares
         self._rows: dict[tuple[str, str, int], StepRow] = {}  # queued for the next projection, per attempt
         self._secrets: Secrets = ()  # sensitive values seen so far: masked in everything projected
+        self._secrets_json = 0  # their JSON bytes, without the list's brackets and commas (`_learned`)
         self._started: dict[Instance, str] = {}
         self._cel_modes: dict[Instance, str] = {}
         self._projects = 0
@@ -280,7 +284,7 @@ class Execution:
         self.checkpoint_events, self.drain_events = checkpoint_events, drain_events
         self.vars: dict[str, Any] = {}
         if parent is not None:
-            self._secrets = remember((), tuple(parent.secrets))
+            self._carry(remember((), tuple(parent.secrets)))
 
     # --- the scheduler loop ----------------------------------------------------------------------------------------
 
@@ -571,8 +575,27 @@ class Execution:
             size += row_size
         return taken
 
-    def _learn(self, value: Any, schema: Mapping[str, Any] | None) -> None:
-        self._secrets = remember(self._secrets, sensitive_values(value, schema))
+    def _carry(self, secrets: Secrets) -> None:
+        """What a parent or a snapshot hands over: within the bound already."""
+        self._secrets, self._secrets_json = secrets, sum(secret_bytes(v) for v in secrets)
+
+    def _learned(self, values: Iterable[str]) -> bool:
+        """Remember `values` as sensitive, unless carrying them would pass SECRETS_BYTES: the execution carries what it
+        learned in its result, its children's starts and its snapshot, so that they're masked there too (engine 2b
+        spec §5.2). Past the bound nothing is remembered, and False tells the caller to fail what taught them, and
+        never use it. What's carried is never dropped: a parent masks everything its children tell it. Measured as it
+        grows, since binding and learning happen in one workflow task (#18)."""
+        grown = remember(self._secrets, values)
+        if grown is self._secrets:
+            return True
+        json_bytes = self._secrets_json + sum(secret_bytes(v) for v in set(grown).difference(self._secrets))
+        if 2 + json_bytes + len(grown) - 1 > secrets_limit():
+            return False
+        self._secrets, self._secrets_json = grown, json_bytes
+        return True
+
+    def _learn(self, value: Any, schema: Mapping[str, Any] | None) -> bool:
+        return self._learned(sensitive_values(value, schema))
 
     def _preview(self, value: Any, schema: Mapping[str, Any] | None = None) -> Any:
         return preview(value, schema, self._secrets)
@@ -927,7 +950,8 @@ class Execution:
         finally:
             self.sched.budget.settle_child(child, used)
             self._dirty = True
-        self._secrets = remember(self._secrets, tuple(result.secrets))
+        if not self._learned(result.secrets):  # its outputs go unused, so nothing here needs them masked
+            return _Effect(failure=Failure(PAYLOAD_TOO_LARGE, SECRETS_TOO_LARGE), cel_mode=cel_mode)
         if result.status == "succeeded":
             return _Effect(output=dict(result.outputs or {}), cel_mode=cel_mode)
         error = result.error or {"code": result.status, "message": f"The sub-flow ended {result.status}."}
@@ -1014,7 +1038,8 @@ class Execution:
         finally:
             self.sched.budget.settle_child(child, used)
             self._dirty = True
-        self._secrets = remember(self._secrets, tuple(result.secrets))
+        if not self._learned(result.secrets):  # what it collected goes unused: its loop fails
+            return _Effect(failure=Failure(PAYLOAD_TOO_LARGE, SECRETS_TOO_LARGE))
         if result.end is not None:
             end = RunEnd.from_json(result.end)
             if end.status == "cancelled":
@@ -1068,7 +1093,10 @@ class Execution:
         attempts = step.max_attempts or int(retry["max_attempts"])
         timeout = timedelta(seconds=step.timeout_s or float(manifest["timeout_s"]))
         ambiguous = manifest["side_effect"] == AMBIGUOUS
-        self._learn(config, manifest["config_schema"])  # a resolved sensitive value, before anything can echo it
+        if not self._learn(config, manifest["config_schema"]):  # a resolved sensitive value, before anything echoes it
+            failure = Failure(PAYLOAD_TOO_LARGE, SECRETS_TOO_LARGE)
+            self._queue_unstarted(inst, step, failure)  # never sent
+            return _Effect(failure=failure, cel_mode=cel_mode)
         attempt = 1
         while True:
             row = StepRow(
@@ -1128,7 +1156,13 @@ class Execution:
                 outcome = OUTCOME_UNKNOWN if ambiguous else None  # its request may have been sent
                 self._queue(replace(row, status="cancelled", ended_at=workflow.now().isoformat(), outcome=outcome))
                 raise asyncio.CancelledError from None
-            self._learn(result.output, manifest["output_schema"])
+            if not self._learn(result.output, manifest["output_schema"]):
+                # the node ran, so its outcome stands; its output goes nowhere
+                failure = Failure(PAYLOAD_TOO_LARGE, SECRETS_TOO_LARGE, attempt)
+                ended = workflow.now().isoformat()
+                failed = replace(row, status="failed", ended_at=ended, error_code=failure.code, outcome=result.outcome)
+                self._queue(replace(failed, error_message=failure.message))
+                return _Effect(failure=failure, cel_mode=cel_mode)
             self._queue(
                 replace(
                     row,
@@ -1206,7 +1240,7 @@ class Execution:
         self.program = program
         self.sched = Scheduler.from_json(program, snapshot["scheduler"])
         self.vars = dict(snapshot["variables"])
-        self._secrets = remember((), tuple(snapshot["secrets"]))
+        self._carry(remember((), tuple(snapshot["secrets"])))
         for key, step, wake, started, mode in snapshot["timers"]:
             inst = Instance(tuple((str(k), int(n)) for k, n in key), uuid.UUID(step))
             self._timers[inst] = datetime.fromisoformat(wake)

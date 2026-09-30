@@ -67,7 +67,9 @@ with workflow.unsafe.imports_passed_through():
         HANDLER_INPUT_TOO_LARGE,
         OUTPUTS_TOO_LARGE,
         PAYLOAD_TOO_LARGE,
+        RESULT_TOO_LARGE,
         RUN_SNAPSHOT_TOO_LARGE,
+        SECRETS_TOO_LARGE,
         SNAPSHOT_TOO_LARGE,
         fits,
         snapshot_fits,
@@ -173,8 +175,8 @@ class RunGraph(Execution):
         try:
             if snapshot is not None:
                 self._restore(program, snapshot)
-            else:
-                self._fresh(program)
+            elif not self._fresh(program):  # its trigger, or a literal, holds more sensitive values than a run carries
+                self.sched.end(RunEnd("failed", Failure(PAYLOAD_TOO_LARGE, SECRETS_TOO_LARGE)))
             if await self._drive() == CONTINUE:
                 await self._flush()
                 continued = replace(start, snapshot=self._snapshot(), iterations=self.sched.iterations)
@@ -204,20 +206,21 @@ class RunGraph(Execution):
             await self._failure_handler(pin, data, self._end_error(end))  # (a cancel meanwhile: no handler)
         return await self._finish(end, outputs, ended)
 
-    def _fresh(self, program: Program) -> None:
+    def _fresh(self, program: Program) -> bool:
         """A new run's state: its budget (the cap, or what its parent granted), the sensitive values it can see
-        already, and its variables."""
+        already, and its variables. False when those values are more than a run carries (engine 2b spec §5.2)."""
         self.program = program
         parent = self.parent
         budget = Budget(ITERATION_CAP, root=True) if parent is None else Budget(parent.grant, root=False)
         self.sched = Scheduler(program, budget=budget)
-        self._learn(self.trigger, program.graph.settings.input_schema)
+        learned = self._learn(self.trigger, program.graph.settings.input_schema)
         for step in program.steps.values():  # sensitive literals in plugin configs: masked from the start
-            if not step.control:
-                self._learn(resolve.assemble(step.config, {}), program.manifests[step.ref]["config_schema"])
+            if learned and not step.control:
+                learned = self._learn(resolve.assemble(step.config, {}), program.manifests[step.ref]["config_schema"])
         schema = program.graph.settings.vars_schema
         self.vars = {k: p.get("default") for k, p in sorted(schema.get("properties", {}).items())}
         self.sched.start()
+        return learned
 
     async def _outputs_by(self, end: RunEnd) -> tuple[RunEnd, dict[str, Any] | None]:
         """The workflow's outputs, within the run's deadline. Past it, their evaluation is cancelled and the run ends
@@ -256,25 +259,31 @@ class RunGraph(Execution):
     async def _finish(
         self, end: RunEnd, outputs: dict[str, Any] | None = None, ended: datetime | None = None
     ) -> RunResult:
-        error = self._end_error(end)
+        end, result = self._final(end, outputs, self.sched.iterations, list(self._secrets))
         summary = RunSummary(
             run_id=self.run_id,
             status=end.status,
             ended_at=(ended or workflow.now()).isoformat(),
-            error_code=error["code"] if error else None,
-            error_message=error["message"] if error else None,
+            error_code=result.error["code"] if result.error else None,
+            error_message=result.error["message"] if result.error else None,
             iterations=self.sched.iterations,
         )
         await self._project_end(summary)
-        return await self._returned(
-            RunResult(
-                status=end.status,
-                outputs=outputs,
-                error=error,
-                iterations=self.sched.iterations,
-                secrets=list(self._secrets),
-            )
-        )
+        return await self._returned(result)
+
+    def _final(
+        self, end: RunEnd, outputs: dict[str, Any] | None, iterations: int, secrets: list[str]
+    ) -> tuple[RunEnd, RunResult]:
+        """The run's end and its result, checked before either is recorded: every way a run ends returns through
+        here (engine 2b spec §5.2). Outputs were checked where they were made, and everything else a result carries
+        is bounded (a stored message, SECRETS_BYTES), so a result past the limit anyway is a bug: the run ends as one,
+        with no outputs, so nothing it returns needs masking by its parent, and its workflow task never retries."""
+        result = RunResult(end.status, outputs, self._end_error(end), iterations, secrets)
+        if fits(result, workflow.payload_converter()):
+            return end, result
+        workflow.logger.error("run_result_too_large")
+        end = RunEnd("failed", Failure(INTERNAL_ERROR, RESULT_TOO_LARGE))
+        return end, RunResult(end.status, None, self._end_error(end), iterations, [])
 
     def _end_error(self, end: RunEnd) -> dict[str, Any] | None:
         """The run's error as it's stored: its summary, its result and its failure handler's trigger all say this."""
@@ -286,17 +295,17 @@ class RunGraph(Execution):
     async def _end_early(self, end: RunEnd, iterations: int) -> RunResult:
         """The run ends before it has a program: nothing ran in this execution, so only the run is projected, with
         what it used before continuing as new (`iterations`)."""
-        error = self._stored(end.failure.to_json() if end.failure is not None else None)
+        end, result = self._final(end, None, iterations, [])
         summary = RunSummary(
             run_id=self.run_id,
             status=end.status,
             ended_at=workflow.now().isoformat(),
-            error_code=error["code"] if error else None,
-            error_message=error["message"] if error else None,
+            error_code=result.error["code"] if result.error else None,
+            error_message=result.error["message"] if result.error else None,
             iterations=iterations,
         )
         await self._shielded([], summary)
-        return await self._returned(RunResult(status=end.status, error=error, iterations=iterations))
+        return await self._returned(result)
 
     async def _cancelled_early(self, iterations: int) -> RunResult:
         """Cancelled before the run restored its snapshot or started: it reports what it used before continuing as new
@@ -472,7 +481,9 @@ class LoopBatch(Execution):
                 # engine 2b spec §5.3: too large to carry on, the batch ends here and its loop fails
                 stopped = Failure(SNAPSHOT_TOO_LARGE, BATCH_SNAPSHOT_TOO_LARGE).to_json()
                 return await self._returned(
-                    BatchResult([], [], stopped, iterations=self.sched.iterations, secrets=list(self._secrets))
+                    self._checked(
+                        BatchResult([], [], stopped, iterations=self.sched.iterations, secrets=list(self._secrets))
+                    )
                 )
         except asyncio.CancelledError:
             self.sched.end(RunEnd("cancelled", CANCELLED))
@@ -490,7 +501,10 @@ class LoopBatch(Execution):
         outcome = self.sched.outcome
         if outcome is None:  # the run ended inside the batch
             end = end or RunEnd("failed", Failure("error", "The batch ended without a result."))
-            return BatchResult([], [], end=end.to_json(), iterations=self.sched.iterations, secrets=list(self._secrets))
+            ended = BatchResult(
+                [], [], end=end.to_json(), iterations=self.sched.iterations, secrets=list(self._secrets)
+            )
+            return self._checked(ended)
         result = BatchResult(
             collected=outcome.collected,
             failures=outcome.failures,
@@ -503,7 +517,19 @@ class LoopBatch(Execution):
         # Temporal would refuse to record it (engine 2b spec §5.2): the loop fails instead, and no collected item is
         # dropped silently. The iterations it used still reach the parent.
         stopped = Failure(PAYLOAD_TOO_LARGE, BATCH_RESULTS_TOO_LARGE)
-        return BatchResult([], [], stopped.to_json(), iterations=self.sched.iterations, secrets=list(self._secrets))
+        return self._checked(
+            BatchResult([], [], stopped.to_json(), iterations=self.sched.iterations, secrets=list(self._secrets))
+        )
+
+    def _checked(self, result: BatchResult) -> BatchResult:
+        """A result with nothing collected carries only an error and the bounded sensitive values, so past the limit
+        anyway is a bug (engine 2b spec §5.2): the batch fails its loop as one, with nothing its parent would need to
+        mask, and its workflow task never retries."""
+        if fits(result, workflow.payload_converter()):
+            return result
+        workflow.logger.error("batch_result_too_large")
+        stopped = Failure(INTERNAL_ERROR, RESULT_TOO_LARGE).to_json()
+        return BatchResult([], [], stopped, iterations=result.iterations, secrets=[])
 
 
 __all__ = [
