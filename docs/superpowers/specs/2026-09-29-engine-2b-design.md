@@ -40,6 +40,9 @@
     answer, so the rotation and retirement bounds stay exact and a long database outage fails the payloads that need
     the key (§2.7, §6.3); `dewpoint keys ensure-tenants` runs as the key admin, which lists tenants under row-level
     security (§6.3).
+  - Revision 5 (pending the owner's approval) records the 2b-1b go/no-go probe in §11.2: promising, not yet a go.
+    It lists the measured passes, five design additions, and the conditions still to be proven, with two
+    counterexamples: a near-limit trigger, and loops waiting on the cap.
 - **Parent specs:**
   - `2026-09-24-dewpoint-architecture-design.md` (§5, §6.1, §6.5, §6.8, §12, §15). This spec **changes** its
     workflow-id contract (§6.1), replaces its `outbox` table (§6.1), details its claim check (§6.5) and settles the
@@ -477,7 +480,7 @@ value still travels inline, within §5.2's limits.
   deterministic ordering across replay; open scopes never above `OPEN_SCOPES_CAP + D`; and nested loops, parallel
   sibling loops and wide bodies — together and at the cap — always making progress, with no deadlock. Until it
   passes, the spec promises only that continuing is guarded against size (§5.2), not a size bound, and the progress
-  rule above stays provisional.
+  rule above stays provisional. The first probe is recorded in §11.2: promising, not yet a go.
 - **The snapshot is one payload.** Before continuing as new, after compaction, the workflow checks that the encoded
   snapshot is within `SNAPSHOT_MAX` (initially 1.5 MiB — well below the history size at which Temporal suggests
   continuing, so a restored run doesn't immediately continue again), and that the old run's history keeps headroom
@@ -999,6 +1002,121 @@ These results become committed regression checks, with the versions above record
 every path, schedule time under replay and catch-up, the size check after the codec, and the per-task invariant.
 2b-1a commits them in `backend/tests/apps/worker/test_temporal_contract.py`, on the CLI dev server; a test there fails
 on any other SDK or server version, so an upgrade verifies them again.
+
+### 11.2 The 2b-1b go/no-go (§5.3): results (2026-09-30) — promising, not yet a go
+
+**Outcome: promising, not yet a §5.3 go.** A prototype passed every criterion of §5.3 on the workloads below. That
+covers the workloads tested, not the bound §5.3 promises for every continued run that can occur. Five conditions
+remain unproven, and two of them are counterexamples (below). The gate passes only once the encoded **whole**
+continued-run input is proven to fit, by a focused follow-up or by a revision that offloads what doesn't fit.
+
+**How it was measured.** A throwaway prototype of §5.3 (local branch `proto/2b1b-snapshot`, never merged): snapshot
+format 2, the open-scope cap with its reservation, handle-backed loop items, compacted collections and failure lists,
+and the live-state budget. Claims were a stub store on `postgres:16-alpine`. It gave the spill path the properties
+it relies on: segments durable across worker restarts, immutable, idempotent (a second write must carry the same
+content hash), and size-checked. It had no RLS, owners, grants or taint: those are implementation work. Versions:
+Temporal Python SDK 1.33.0; the CLI dev server 1.9.1 (server 1.32.0) and the time-skipping test server; Python 3.12.
+Every workload is a valid published graph (at most 500 nodes in the whole graph), run with low continue thresholds so
+that it continues many times.
+
+For every continued run, the probe recorded:
+- the encoded continued-run input, as Temporal holds the payload, and its parts decrypted;
+- the peak of open iteration scopes;
+- whether each snapshot's scheduler, restored, encodes again identically;
+- whether every history replays through the `Replayer`;
+- whether the run completes within a fixed timeout: 900 s on the time-skipping server, 2,400 s on the dev server, and
+  1,800 s for the value workloads on the time-skipping server.
+
+**Measured passes (the workloads tested).**
+
+| §5.3 criterion | Result on the tested workloads |
+|---|---|
+| Encoded snapshots within `SNAPSHOT_MAX` (1.5 MiB) | Worst encoded continued-run input 1.10 MB: a live state at the budget (1.05 MB), plus 57 KB of structure. Structural worst: 148 KB. |
+| Repeated continues restoring identically | 3,424 continues. Each snapshot, restored, encoded again byte for byte, rebuilt the same queued work, and counted the same live state. |
+| Deterministic ordering across replay | 5,404 histories replayed without nondeterminism. |
+| Open scopes never above `OPEN_SCOPES_CAP + D` | Peaks of 100–102, with `D` of 2 or 3. The scheduler checks the bound on every open. |
+| Progress, no deadlock | Every run completed within its timeout. Driven alone in an adversarial order (every loop opens before any step runs), the scheduler deadlocks at 100 open scopes without the reservation, and completes with it (peak 101 of 103). |
+
+| Workload | Server | Continues | Worst encoded input | Peak open |
+|---|---|---|---|---|
+| A loop body at the node limit (498 nodes) | time-skipping | 205 | 30 KB | 10 |
+| A 480-step body under nested 10 × 10 loops (483 nodes) | time-skipping | 197 | 148 KB | 100 |
+| Loops nested 3 deep, 100 × 10 × 10 | time-skipping / dev | 51 / 48 | 42 / 41 KB | 101 |
+| 20 sibling loops, each with an inner loop | time-skipping / dev | 97 / 74 | 51 / 52 KB | 102 |
+| Combined structural case (342 nodes) | time-skipping / dev | 142 / 136 | 99 / 100 KB | 101 |
+| A 10,000-item loop collecting integers | time-skipping | 103 | 167 KB | 10 |
+| 10,000 handle-backed items of 60 bytes, collected | time-skipping / dev | 103 / 103 | 225 / 225 KB | 10 |
+| 10,000 failing iterations with ~485-character messages | time-skipping / dev | 3 / 3 | 104 / 211 KB | 10 |
+| 10,000 handle-backed items of 64 KiB, workers restarted mid-run | time-skipping / dev | 295 / 204 | 856 / 857 KB | 10 |
+| 10 loops of 10,000 in a row (100,000 iterations) | time-skipping | 1,030 | 167 KB | 10 |
+| Loops nested 3 deep, the innermost reading a 50 KB inline list | time-skipping / dev | 61 / 58 | 1.10 / 1.10 MB | 101 |
+| Combined value case (233 nodes) | time-skipping / dev | 257 / 254 | 791 / 856 KB | 101 |
+
+**Design additions the probe established.** §5.3 needs each of these to hold:
+1. **Inline item lists spill under the budget.** A loop's list becomes segments, and the loop carries on over them as
+   a cursor. Without this, the nested loops above hold one 50 KB list per open outer iteration, and the run fails
+   `snapshot_too_large` at its first continue.
+2. **The budget is enforced after every change,** not only where results merge. A step's result and a newly opened
+   scope's item raise the live state too.
+3. **Failure lists compact like collected values.** Without this, 10,000 failures hold about 5 MB inline.
+4. **Snapshot format 2 records the units already handed out** (in practice, sleeping timers), and rebuilds what's
+   queued from the node, edge and loop states. Storing the queues isn't needed.
+5. **The reservation is one scope per nesting level, along the path of oldest open iterations.** From the execution's
+   root, the path follows the oldest open iteration at each level. A loop on that path may open one iteration from its
+   level's reserved scope. A shared pool of `D` scopes isn't enough: sibling loops on one level can exhaust it, and the
+   next level deadlocks.
+
+**Unproven conditions: before the gate passes.**
+1. **The trigger, a counterexample.** A start may carry nearly 1.75 MiB of trigger (the 2b-1a payload limit), and
+   every continued-run input carries it again, while that input must fit within 1.5 MiB. No compaction makes that
+   continuation fit: today such a run fails `snapshot_too_large` at its first continue. The trigger needs a bound
+   within the continued input, or it must be offloaded: claimed before the run starts (§3.5), with the continued input
+   carrying only its handle.
+2. **The fields outside the live-state budget** travel in every continued input, and nothing bounds their sum with
+   the budget:
+   - variables;
+   - carried sensitive values (`SECRETS_BYTES`, 256 KiB, until claims);
+   - a batch's outer scopes and item slice.
+
+   Each needs a bound or a spill path, measured together with the budget.
+3. **Segment-handle lists grow without a bound.** A compacted collection keeps about 20 bytes per segment outside the
+   budget (about 50 KB at most in the workloads above). Nothing bounds it: small segments spilled under budget
+   pressure can number in the tens of thousands. The proposed remedy, index segments (a list of segments spilled as a
+   segment of its own), was not prototyped.
+4. **Loops waiting on the cap, a second counterexample.** `OPEN_SCOPES_CAP` bounds iteration scopes, not loops. A
+   loop step that has started holds its loop's state (about 200–400 bytes, its collections included) even while the
+   cap keeps it from opening an iteration. Measured on the scheduler alone: 240 sibling loops in the body of nested
+   10 × 10 loops (482 nodes) made 21,611 loops, 21,601 of them waiting on the cap, holding 4.5 MB of loop state.
+   Either loops count toward the cap, or a loop step doesn't start until its loop could open an iteration; a waiting
+   loop step then costs one state code.
+5. **The whole input, encoded.** The bound to prove is on the entire encoded continued-run input:
+   - the live-state budget;
+   - the structure: at most `OPEN_SCOPES_CAP + D` scopes of node and edge codes, and the loop state that condition 4
+     bounds;
+   - every field in conditions 1–3;
+   - the codec's overhead.
+
+**Follow-up before the gate passes.** A focused probe with four workloads:
+- a near-limit trigger;
+- the fields outside the budget, combined;
+- segment indexes that grow;
+- many sibling loops under the cap.
+
+The alternative is a revision that offloads these fields. Either way, the proof must show that the encoded whole
+continued input fits `SNAPSHOT_MAX`. The 2b-1b task plan waits for it.
+
+**Also measured.**
+- **History cost:** a value that returns inline, and then leaves again as part of a collection's spill, crosses history
+  twice. For 10,000 items of 64 KiB, that made 1.6–1.7 GB of history, of which 656 MB were spill inputs. The store
+  held 1.3 GB (the items, then the outputs). Claiming outputs at the activity when the loop collects them would avoid
+  the second pass.
+- **Time:** 100,000 iterations took 576 s on the time-skipping server.
+- **Numbers the tested workloads support:** `SNAPSHOT_MAX` 1.5 MiB, a 1 MiB live-state budget, `OPEN_SCOPES_CAP` 100,
+  256 KiB segments, a 1 KiB floor, and a 64 KiB inline limit. They stay provisional until the conditions above are
+  proven (§15).
+- **Not prototyped, implementation work:** real claim permissions (RLS, owners, grants, taint), and the consumers of
+  handles (CEL over a handle-backed item, references into a spilled collection or result). The workloads read only
+  counts and handles.
 
 ## 12. Testing
 
