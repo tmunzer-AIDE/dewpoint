@@ -14,7 +14,8 @@ from tests.conftest import _url_for
 from tests.support.graphs import G, cel, ref
 from tests.support.registry import sync_test_plugins
 
-pytestmark = pytest.mark.usefixtures("this_build_is_current")  # its run starts on the time-skipping server
+# its run starts on the time-skipping server, in a development deployment (engine 2b spec §2.3)
+pytestmark = pytest.mark.usefixtures("this_build_is_current", "development_deployment")
 
 
 def graph() -> dict[str, Any]:

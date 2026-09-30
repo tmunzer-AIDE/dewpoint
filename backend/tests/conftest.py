@@ -14,6 +14,7 @@ from testcontainers.community.postgres import PostgresContainer
 from dewpoint.apps.api.main import create_app
 from dewpoint.core.config import Settings
 from dewpoint.core.db import make_engine, make_sessionmaker
+from dewpoint.core.platform.service import DEVELOPMENT, record_environment
 
 BACKEND = Path(__file__).resolve().parents[1]
 TEST_ROLES = [
@@ -138,3 +139,11 @@ async def client(app):  # type: ignore[no-untyped-def]
         transport=httpx.ASGITransport(app=app), base_url="https://testserver", headers={"X-Dewpoint-Client": "web"}
     ) as c:
         yield c
+
+
+@pytest.fixture
+async def development_deployment(owner_sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    """A development deployment on the default namespace: runs are admitted with no gate (engine 2b spec §2.1). The
+    record goes with the other rows after each test."""
+    async with owner_sessionmaker() as s, s.begin():
+        await record_environment(s, environment=DEVELOPMENT, namespace="default")

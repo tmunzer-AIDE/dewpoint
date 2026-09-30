@@ -45,6 +45,8 @@ from tests.apps.test_workflow_ops import (
 )
 from tests.support.registry import sync_test_plugins
 
+pytestmark = pytest.mark.usefixtures("development_deployment")  # runs are admitted: engine 2b spec §2.3
+
 
 @dataclass(frozen=True)
 class LostAck:

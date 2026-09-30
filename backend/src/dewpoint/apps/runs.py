@@ -31,6 +31,7 @@ from dewpoint.core.config import Settings
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.runs import Run
 from dewpoint.core.models.workflows import WorkflowVersion
+from dewpoint.core.platform.service import NOT_RECORDED, PRODUCTION, recorded
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.runs import service as runs
 from dewpoint.core.workflows.service import lock_for_admission, other_abi
@@ -38,6 +39,11 @@ from dewpoint.engine.runtime.activities import ENGINE_QUEUE, LIVE, RunInput
 from dewpoint.engine.runtime.workflow import RunGraph
 
 START_FAILED = "start_failed"
+PRODUCTION_RUNS_DISABLED = (
+    "Production runs are off in this deployment: no run starts in a production deployment until its gate lifts "
+    "(engine 2b spec §2). A development deployment, on its own database and Temporal namespace, runs synthetic "
+    "fixtures."
+)
 NO_CURRENT_BUILD = (
     "No Dewpoint build is current in the `dewpoint-engine` deployment, so no worker would run it: make one current "
     "with `dewpoint deployment set-current`."
@@ -92,7 +98,15 @@ async def admit(
 ) -> Run:
     """Insert the run, or raise NotAdmissibleError. Call it inside a READ COMMITTED transaction. `abi` is the engine
     ABI of the deployment's current build, where the run will start (`current_abi`; None: no build is current). The
-    admitting process's own build doesn't matter: during a rollout, both builds' processes admit runs."""
+    admitting process's own build doesn't matter: during a rollout, both builds' processes admit runs.
+
+    First, what this deployment is (engine 2b spec §2.3): with no record, or in production while the gate is off, it
+    admits nothing — every start path comes through here, the dev CLI included."""
+    platform = await recorded(s)
+    if platform is None:
+        raise NotAdmissibleError([NOT_RECORDED])
+    if platform.environment == PRODUCTION and not platform.production_runs:
+        raise NotAdmissibleError([PRODUCTION_RUNS_DISABLED])
     await tenant_scope(s, tenant_id)
     version = await s.get(WorkflowVersion, version_id)
     if version is None:
@@ -193,6 +207,7 @@ async def _start(client: Client, start: RunInput, run_id: uuid.UUID) -> None:
 
 __all__ = [
     "START_FAILED",
+    "PRODUCTION_RUNS_DISABLED",
     "NO_CURRENT_BUILD",
     "START_RETRY_S",
     "NotAdmissibleError",

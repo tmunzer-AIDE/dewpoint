@@ -24,6 +24,8 @@ from tests.engine.replay.record import executions
 from tests.support.plugins.testkit import TESTKIT
 from tests.support.registry import sync_test_plugins
 
+pytestmark = pytest.mark.usefixtures("development_deployment")  # runs are admitted: engine 2b spec §2.3
+
 OLD, NEW = ENGINE_ABI - 1, ENGINE_ABI  # the build before this one, and this one
 
 

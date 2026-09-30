@@ -23,7 +23,8 @@ from tests.core.runs.test_service import seeded_run
 from tests.support.graphs import G, cel, ref
 from tests.support.registry import sync_test_plugins
 
-pytestmark = pytest.mark.usefixtures("this_build_is_current")  # its runs start on the time-skipping server
+# its runs start on the time-skipping server, in a development deployment (engine 2b spec §2.3)
+pytestmark = pytest.mark.usefixtures("this_build_is_current", "development_deployment")
 
 
 def graph() -> dict[str, Any]:
