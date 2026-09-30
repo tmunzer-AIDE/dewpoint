@@ -1379,7 +1379,10 @@ class Scheduler:
         may be dropped. None: it captured none, and reads the current ones."""
         if inst not in self._released:
             return None
-        variables = self.vars_at(self._released.pop(inst))
+        version = self._released.pop(inst)
+        if version != self.vars_version:  # proto: a read at start would have seen a later write
+            self.probe["stale_vs_start"] = self.probe.get("stale_vs_start", 0) + 1
+        variables = self.vars_at(version)
         self._gc_versions()
         return variables
 
