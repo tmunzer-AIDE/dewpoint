@@ -17,6 +17,10 @@ FORMAT_V1 = b"\x01"
 type AnyKey = DataKey | PlatformKey
 
 
+class NoKeyError(LookupError):
+    """A tenant has no data key of that version, or none at all (or RLS hides it): nothing reads creates one."""
+
+
 def _scope(tenant_id: uuid.UUID | None) -> str:
     return str(tenant_id) if tenant_id else "platform"
 
@@ -91,6 +95,20 @@ class Keyring:
         if row is None:  # missing, or invisible under RLS: indistinguishable from a bad tag on purpose
             raise InvalidTag()
         return self._dek(row).decrypt(blob[5:17], blob[17:], _aad(_scope(tenant_id), purpose, context))
+
+    async def ensure_key(self, s: AsyncSession, tenant_id: uuid.UUID) -> int:
+        """The tenant's active key version, created if it has none. Tenant creation calls it, so a tenant has a key
+        before anything encrypts for it (engine 2b spec §6.3)."""
+        return (await self._active(s, tenant_id)).version
+
+    async def read_dek(self, s: AsyncSession, tenant_id: uuid.UUID, version: int | None = None) -> tuple[int, bytes]:
+        """A tenant's data key, unwrapped: its active one, or `version`. Read-only, with no lock and no creation: the
+        payload codec's cache reads it (engine 2b spec §6.3), under the tenant's RLS scope."""
+        which = DataKey.active.is_(True) if version is None else DataKey.version == version
+        row = (await s.execute(select(DataKey).where(DataKey.tenant_id == tenant_id, which))).scalar_one_or_none()
+        if row is None:
+            raise NoKeyError(f"tenant {tenant_id} has no data key" + ("" if version is None else f" {version}"))
+        return row.version, self._keks.get(row.kek_id).unwrap(row.wrapped_key, _dek_aad(row))
 
     async def rotate(self, s: AsyncSession, tenant_id: uuid.UUID | None) -> int:
         current = await self._active(s, tenant_id)
