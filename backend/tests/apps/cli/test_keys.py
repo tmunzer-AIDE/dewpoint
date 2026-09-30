@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 from dewpoint.apps.cli.main import app
 from dewpoint.core.config import get_settings
 from dewpoint.core.db import make_engine
+from tests.conftest import _url_for
 
 OLD, NEW = base64.b64encode(os.urandom(32)).decode(), base64.b64encode(os.urandom(32)).decode()
 
@@ -74,8 +75,9 @@ def test_key_commands_work_as_the_admin_role(pg_url, _test_users, monkeypatch) -
     assert r.invoke(app, ["keys", "rotate-dek", "--tenant", "not-a-uuid"]).exit_code == 2
 
 
-def test_ensure_tenants_gives_every_tenant_without_a_key_one(pg_url, monkeypatch) -> None:
-    """Engine 2b spec §6.3: tenants created before 2b-1a. Compose's migrate step runs it as the database owner."""
+def test_ensure_tenants_gives_every_tenant_without_a_key_one(pg_url, _test_users, monkeypatch) -> None:
+    """Engine 2b spec §6.3: tenants created before 2b-1a. It runs as the key admin, under row-level security, as
+    Compose's migrate step runs it; another role is refused (review, 2b-1a)."""
 
     async def add() -> None:
         engine = make_engine(pg_url)
@@ -88,7 +90,13 @@ def test_ensure_tenants_gives_every_tenant_without_a_key_one(pg_url, monkeypatch
 
     asyncio.run(add())
     r = CliRunner()
-    _env(monkeypatch, pg_url, DEWPOINT_KEK_B64=OLD, DEWPOINT_KEK_ID="old")
+    _env(monkeypatch, _url_for(pg_url, "dewpoint_api"), DEWPOINT_KEK_B64=OLD, DEWPOINT_KEK_ID="old")
+    refused = r.invoke(app, ["keys", "ensure-tenants"])
+    assert (refused.exit_code, refused.output) == (
+        2,
+        "ERROR: run it as a dewpoint_admin login: it lists every tenant under row-level security.\n",
+    )
+    _env(monkeypatch, _url_for(pg_url, "dewpoint_admin"), DEWPOINT_KEK_B64=OLD, DEWPOINT_KEK_ID="old")
     first = r.invoke(app, ["keys", "ensure-tenants"])
     assert (first.exit_code, first.output) == (0, "created a data key for 2 tenant(s)\n")
     again = r.invoke(app, ["keys", "ensure-tenants"])
