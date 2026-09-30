@@ -65,6 +65,7 @@ def _then_wake(fn: Any) -> Any:
     def wrapper(self: "Scheduler", *args: Any, **kwargs: Any) -> Any:
         out = fn(self, *args, **kwargs)
         self._settle_wakes()
+        self._enforce_budget()  # proto (§5.3): whatever changed, the live state goes back under its budget
         return out
 
     return wrapper
@@ -216,6 +217,9 @@ class LoopRun:
     fails: Collection | None = None  # proto: its failed iterations, by absolute index
     running_batch: int | None = None  # the start of the batch a child is running
     waiting: bool = False  # the next iteration waits for budget
+    items_pending: list[int] = field(default_factory=list)  # proto: segments of `items` being spilled
+    items_per: int = 0  # proto: items per segment, once they spill
+    items_base: str = ""  # proto: their segments, `items_base/k`
 
 
 @dataclass(frozen=True)
@@ -352,6 +356,7 @@ class Scheduler:
         loop = LoopRun(loop_inst, items, concurrency, stop_on_error, offset=offset, coll=coll, fails=fails)
         self._live += P.size(items) if isinstance(items, list) else 0
         self.loops[loop_inst] = loop
+        self._maybe_seal(loop)
         self._advance(loop)
 
     def take_ready(self) -> list[Instance]:
@@ -382,6 +387,16 @@ class Scheduler:
         """Proto: a sealed part of a collection is in its segment now."""
         self._spills_out.discard((loop_inst, which, first))
         loop = self.loops.get(loop_inst)
+        if which == "i":
+            if loop is None or first not in loop.items_pending:
+                return
+            loop.items_pending.remove(first)
+            if not loop.items_pending:  # every segment is written: the loop carries on over them
+                self._live -= P.size(loop.items)
+                n = len(loop.items)
+                loop.items = {P.KIND: P.LIST, "id": loop.items_base, "n": n, "per": loop.items_per}
+            self._advance(loop)
+            return
         coll = dict(self._colls(loop)).get(which) if loop is not None else None
         if loop is None or coll is None or first not in coll.sealing:
             return
@@ -416,17 +431,56 @@ class Scheduler:
         for which, coll in self._colls(loop):
             if coll.tail_bytes >= P.SEG_BYTES:
                 self._seal(loop, which, coll)
-        while self.live > P.LIVE_BUDGET:
-            tails = [
+        self._enforce_budget()
+
+    def _enforce_budget(self) -> None:
+        """Past the live-state budget, the largest spillable value goes out first (a collection's tail or an inline
+        item list), until what's already on its way out brings it back under."""
+        if self.ended is not None:
+            return
+        while self.live - self._relief() > P.LIVE_BUDGET:
+            candidates: list[tuple[int, Any, str, LoopRun, Collection | None]] = [
                 (c.tail_bytes, self.order(lp.instance), w, lp, c)
                 for lp in self.loops.values()
                 for w, c in self._colls(lp)
                 if c.tail_bytes > P.FLOOR
             ]
-            if not tails:
+            candidates += [
+                (P.size(lp.items), self.order(lp.instance), "i", lp, None)
+                for lp in self.loops.values()
+                if isinstance(lp.items, list) and not lp.items_pending and P.size(lp.items) > P.FLOOR
+            ]
+            if not candidates:
                 break
-            _, _, w, lp, c = max(tails, key=lambda t: (t[0], t[1], t[2]))
-            self._seal(lp, w, c)
+            _, _, w, lp, c = max(candidates, key=lambda t: (t[0], t[1], t[2]))
+            if c is None:
+                self._spill_items(lp)
+            else:
+                self._seal(lp, w, c)
+
+    def _relief(self) -> int:
+        """What the spills in flight will take out of the live state."""
+        out = 0
+        for lp in self.loops.values():
+            out += sum(c.sealing_bytes for _, c in self._colls(lp))
+            if lp.items_pending and isinstance(lp.items, list):
+                out += P.size(lp.items)
+        return out
+
+    def _items_base(self, loop: LoopRun) -> str:
+        return f"{self.prefix}/i/{iteration_key(loop.instance.scope)}/{self.program.steps[loop.instance.step].topo}"
+
+    def _spill_items(self, loop: LoopRun) -> None:
+        """Proto: an inline item list goes into segments of about SEG_BYTES; the loop waits for them, then carries on
+        over the handle, so its next iterations hold item handles, not items."""
+        items = loop.items
+        per = max(1, len(items) * P.SEG_BYTES // max(1, P.size(items)))
+        loop.items_per = per
+        base = loop.items_base = self._items_base(loop)
+        for k in range((len(items) + per - 1) // per):
+            loop.items_pending.append(k)
+            self._spills.append(Spill(loop.instance, base, k, items[k * per : (k + 1) * per], "i"))
+        self.probe["item_spills"] = self.probe.get("item_spills", 0) + 1
 
     def take_batches(self) -> list[Batch]:
         out, self._batches = self._batches, []
@@ -509,6 +563,7 @@ class Scheduler:
         loop = LoopRun(inst, items, concurrency, stop_on_error, batch=batch, coll=coll, fails=fails)
         self._live += P.size(items) if isinstance(items, list) else 0
         self.loops[inst] = loop
+        self._maybe_seal(loop)
         self._advance(loop)
 
     @_then_wake
@@ -840,6 +895,8 @@ class Scheduler:
     def _advance(self, loop: LoopRun) -> None:
         """Open iterations up to the concurrency (or hand out the next batch), or complete the loop when every item
         is done."""
+        if loop.items_pending:  # proto: its items are being spilled; it carries on once they are written
+            return
         if loop.batch:
             if loop.running_batch is None and loop.next < P.count(loop.items):
                 start = loop.next
@@ -999,6 +1056,12 @@ class Scheduler:
             for f, pairs in sorted(coll.sealing.items())
             if (loop.instance, which, f) not in s._spills_out
         ]
+        s._spills += [
+            Spill(loop.instance, loop.items_base, k, loop.items[k * loop.items_per : (k + 1) * loop.items_per], "i")
+            for loop in s.loops.values()
+            for k in loop.items_pending
+            if (loop.instance, "i", k) not in s._spills_out
+        ]
         s._capped = {
             inst
             for inst, loop in s.loops.items()
@@ -1132,6 +1195,7 @@ class Scheduler:
             self._i(loop.instance), loop.items, loop.concurrency, int(loop.stop_on_error), loop.offset, loop.batch,
             loop.next, list(loop.open), sorted(loop.collecting), loop.coll.to_json() if loop.coll else None,
             loop.fails.to_json() if loop.fails else None, loop.running_batch, int(loop.waiting),
+            loop.items_pending, loop.items_per, loop.items_base,
         ]  # fmt: skip
 
     def _loop2_from(self, raw: list[Any]) -> LoopRun:
@@ -1141,6 +1205,7 @@ class Scheduler:
             next=int(raw[6]), open=[int(i) for i in raw[7]], collecting={int(i) for i in raw[8]},
             coll=Collection.from_json(raw[9]) if raw[9] else None,
             fails=Collection.from_json(raw[10]) if raw[10] else None,
+            items_pending=[int(k) for k in raw[13]], items_per=int(raw[14]), items_base=str(raw[15]),
             running_batch=raw[11], waiting=bool(raw[12]),
         )  # fmt: skip
 

@@ -464,6 +464,7 @@ class LoopBatch(Execution):
                     OuterScope(tuple((str(k), int(i)) for k, i in o["key"]), o["results"], o["item"], o["index"])
                     for o in start.outer
                 ]
+                self.sched.prefix = workflow.info().workflow_id  # proto: before the loop can spill anything
                 self.sched.start_batch(
                     uuid.UUID(start.loop_step),
                     outer,
