@@ -34,12 +34,15 @@ async def with_key(owner_sessionmaker: async_sessionmaker[AsyncSession], tenant:
         return await KEYRING.ensure_key(s, tenant)
 
 
-async def test_the_worker_reads_a_tenants_key_and_the_codec_uses_it(owner_sessionmaker, worker_sessionmaker) -> None:
+async def test_the_worker_and_dispatch_read_a_tenants_key_for_the_codec(
+    owner_sessionmaker, worker_sessionmaker, dispatch_sessionmaker
+) -> None:
+    """The worker, and the dev CLI's start through the dispatch role (engine 2b spec §6.3)."""
     tenant = uuid.uuid4()
     await with_key(owner_sessionmaker, tenant)
-    keys = KeyringKeys(worker_sessionmaker, KEYRING)
-    c = TenantCodec(keys).with_context(workflow(str(tenant)))
-    assert await c.decode(await c.encode([payload({"x": 1})])) == [payload({"x": 1})]
+    for role in (worker_sessionmaker, dispatch_sessionmaker):
+        c = TenantCodec(KeyringKeys(role, KEYRING)).with_context(workflow(str(tenant)))
+        assert await c.decode(await c.encode([payload({"x": 1})])) == [payload({"x": 1})]
 
 
 async def test_a_key_is_read_once_until_its_time_is_up(owner_sessionmaker, worker_sessionmaker) -> None:

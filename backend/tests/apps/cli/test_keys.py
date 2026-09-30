@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
+import asyncio
 import base64
 import os
 import uuid
 
+from sqlalchemy import text
 from typer.testing import CliRunner
 
 from dewpoint.apps.cli.main import app
 from dewpoint.core.config import get_settings
+from dewpoint.core.db import make_engine
 
 OLD, NEW = base64.b64encode(os.urandom(32)).decode(), base64.b64encode(os.urandom(32)).decode()
 
@@ -69,3 +72,25 @@ def test_key_commands_work_as_the_admin_role(pg_url, _test_users, monkeypatch) -
     assert "rewrapped 6" in r.invoke(app, ["keys", "rewrap", "--batch-size", "4"]).output
     assert r.invoke(app, ["keys", "status"]).output.strip() == "new=6"
     assert r.invoke(app, ["keys", "rotate-dek", "--tenant", "not-a-uuid"]).exit_code == 2
+
+
+def test_ensure_tenants_gives_every_tenant_without_a_key_one(pg_url, monkeypatch) -> None:
+    """Engine 2b spec §6.3: tenants created before 2b-1a. Compose's migrate step runs it as the database owner."""
+
+    async def add() -> None:
+        engine = make_engine(pg_url)
+        async with engine.begin() as c:
+            for n in range(2):
+                await c.execute(
+                    text("insert into tenants(id,name,slug) values (:t,'T',:s)"), {"t": uuid.uuid4(), "s": f"t{n}"}
+                )
+        await engine.dispose()
+
+    asyncio.run(add())
+    r = CliRunner()
+    _env(monkeypatch, pg_url, DEWPOINT_KEK_B64=OLD, DEWPOINT_KEK_ID="old")
+    first = r.invoke(app, ["keys", "ensure-tenants"])
+    assert (first.exit_code, first.output) == (0, "created a data key for 2 tenant(s)\n")
+    again = r.invoke(app, ["keys", "ensure-tenants"])
+    assert (again.exit_code, again.output) == (0, "created a data key for 0 tenant(s)\n")
+    assert "old=2" in r.invoke(app, ["keys", "status"]).output

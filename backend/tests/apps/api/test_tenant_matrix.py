@@ -57,6 +57,8 @@ async def test_platform_admin_creates_tenant_and_last_owner_protected(app, owner
         r = await c.post("/api/v1/tenants", json={"name": "Acme Retail", "slug": "acme-retail"})
         assert r.status_code == 201
         tid = r.json()["id"]
+        async with owner_sessionmaker() as s, s.begin():  # engine 2b spec §6.3: its data key comes with it
+            assert (await app.state.keyring.read_dek(s, uuid.UUID(tid)))[0] == 1
         mine = (await c.get("/api/v1/tenants")).json()
         assert [(t["slug"], t["role"]) for t in mine] == [("acme-retail", "owner")]
         me = (await c.get("/api/v1/auth/session")).json()["user"]["id"]
