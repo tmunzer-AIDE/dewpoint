@@ -96,6 +96,13 @@ class Keyring:
             raise InvalidTag()
         return self._dek(row).decrypt(blob[5:17], blob[17:], _aad(_scope(tenant_id), purpose, context))
 
+    def self_check(self) -> None:
+        """Wraps a fresh key with the current KEK and unwraps it, or raises: what an engine worker instance proves at
+        startup and every 30 seconds (engine 2b spec §2.7)."""
+        dek, aad, kek = AESGCM.generate_key(256), b"dek|self-check|0", self._keks.current
+        if kek.unwrap(kek.wrap(dek, aad), aad) != dek:
+            raise ValueError("the current KEK doesn't unwrap what it wraps")
+
     async def ensure_key(self, s: AsyncSession, tenant_id: uuid.UUID) -> int:
         """The tenant's active key version, created if it has none. Tenant creation calls it, so a tenant has a key
         before anything encrypts for it (engine 2b spec §6.3)."""

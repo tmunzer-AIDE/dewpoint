@@ -5,6 +5,7 @@ evaluator, then asks its identity. The engine worker serves this build's version
 Deployment (deployment.py); the CEL worker is outside it, routed by profile."""
 
 import asyncio
+import uuid
 from collections.abc import Iterable
 from datetime import timedelta
 
@@ -18,6 +19,7 @@ from dewpoint.apps.environment import verify_environment
 from dewpoint.apps.plugin_loader import installed_plugins
 from dewpoint.apps.worker.activities import RunStore, cel_activity, engine_activities, remote_evaluator
 from dewpoint.apps.worker.deployment import deployment_config, set_current, this_build
+from dewpoint.apps.worker.health import reporter, self_check, start_healthy, watch
 from dewpoint.apps.worker.store import DbRunStore
 from dewpoint.core.config import Settings
 from dewpoint.core.crypto.kek import KekSet
@@ -84,21 +86,32 @@ async def promote(client: Client) -> None:
 async def run(settings: Settings) -> None:
     """Raises EnvironmentNotRecordedError or EnvironmentMismatchError before connecting to Temporal: a worker never
     serves a namespace its database wasn't recorded with (engine 2b spec §2.1). Every payload it sends or reads is
-    encrypted with its tenant's key, read through the worker's role (§6.2–6.3)."""
+    encrypted with its tenant's key, read through the worker's role (§6.2–6.3). It records itself as an instance of
+    its build, with its capabilities, and raises WorkerUnhealthyError once a self-check fails, at startup before it
+    polls or later after its workers stop polling (§2.7)."""
     engine = make_engine(settings.database_url)
     try:
         sessionmaker = make_sessionmaker(engine)
         await verify_environment(sessionmaker, settings)
-        keys = KeyringKeys(sessionmaker, Keyring(KekSet.from_settings(settings)))
+        keyring = Keyring(KekSet.from_settings(settings))
+        report = reporter(sessionmaker, uuid.uuid4(), this_build())
+        await start_healthy(lambda: self_check(keyring, sessionmaker), report)
         client = await Client.connect(
-            settings.temporal_address, namespace=settings.temporal_namespace, data_converter=data_converter(keys)
+            settings.temporal_address,
+            namespace=settings.temporal_namespace,
+            data_converter=data_converter(KeyringKeys(sessionmaker, keyring)),
         )
         workers = [engine_worker(client, DbRunStore(sessionmaker), installed_plugins(), settings)]
         if settings.cel_socket:
             profile = await evaluator_profile(settings.cel_socket)
             log.info("cel_queue", profile=profile)
             workers.append(cel_worker(client, settings.cel_socket, profile, max_concurrent=settings.cel_max_concurrent))
+
+        async def stop() -> None:
+            await asyncio.gather(*(w.shutdown() for w in workers))
+
         tasks = [w.run() for w in workers]
+        tasks.append(watch(lambda: self_check(keyring, sessionmaker), report, stop))
         if settings.worker_set_current:
             tasks.append(promote(client))
         await asyncio.gather(*tasks)

@@ -80,3 +80,12 @@ async def test_reading_a_data_key_never_creates_one(owner_sessionmaker) -> None:
         assert await kr.read_dek(s, t, 1) == first  # an older version stays readable
         with pytest.raises(NoKeyError):
             await kr.read_dek(s, t, 3)
+
+
+def test_the_self_check_proves_the_current_kek_wraps_and_unwraps(monkeypatch) -> None:
+    """Engine 2b spec §2.7: what a worker instance proves every 30 seconds."""
+    kr = Keyring(KekSet(_kek()))
+    kr.self_check()
+    monkeypatch.setattr(Kek, "unwrap", lambda self, blob, aad: b"not the key")
+    with pytest.raises(ValueError, match="doesn't unwrap"):
+        kr.self_check()

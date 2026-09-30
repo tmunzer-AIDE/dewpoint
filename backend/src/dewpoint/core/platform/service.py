@@ -3,11 +3,16 @@
 recorded once. A process that talks to Temporal checks its configured namespace against the record before it starts,
 so a development database can't drive a namespace it wasn't set up for, and a production database can't either. The
 label proves nothing about the data: keeping development's database and namespace apart from production's is the
-operator's job."""
+operator's job. Its engine worker instances record what they can do (§2.7)."""
 
+import uuid
+from collections.abc import Sequence
+
+from sqlalchemy import func
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dewpoint.core.models.platform import PlatformSettings
+from dewpoint.core.models.platform import PlatformSettings, WorkerInstance
 
 PRODUCTION = "production"
 DEVELOPMENT = "development"
@@ -63,3 +68,14 @@ async def check_namespace(s: AsyncSession, configured: str) -> PlatformSettings:
             f"for `{configured}` (DEWPOINT_TEMPORAL_NAMESPACE). It won't start."
         )
     return row
+
+
+async def record_worker(
+    s: AsyncSession, *, instance_id: uuid.UUID, build_id: str, capabilities: Sequence[str], healthy: bool
+) -> None:
+    """An engine worker instance's row, written at startup and after each self-check (engine 2b spec §2.7)."""
+    values = {"build_id": build_id, "capabilities": list(capabilities), "healthy": healthy}
+    statement = insert(WorkerInstance).values(instance_id=instance_id, **values)
+    await s.execute(
+        statement.on_conflict_do_update(index_elements=["instance_id"], set_={**values, "checked_at": func.now()})
+    )

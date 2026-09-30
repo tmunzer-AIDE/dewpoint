@@ -11,6 +11,7 @@ from temporalio.testing import WorkflowEnvironment
 import dewpoint
 from dewpoint.apps.codec import TenantCodec
 from dewpoint.apps.worker import main
+from dewpoint.apps.worker.health import WorkerUnhealthyError
 from dewpoint.apps.worker.main import engine_worker
 from dewpoint.core.config import Settings
 from dewpoint.engine.runtime.build import build_id
@@ -74,8 +75,49 @@ async def test_the_worker_connects_with_the_tenant_codec(monkeypatch: pytest.Mon
     monkeypatch.setattr(main, "make_engine", lambda url: Engine())
     monkeypatch.setattr(main, "make_sessionmaker", lambda engine: None)
     monkeypatch.setattr(main, "verify_environment", recorded)
+    monkeypatch.setattr(main, "reporter", lambda *args: unrecorded)
+    monkeypatch.setattr(main, "self_check", proven)
     with pytest.raises(Connected):
         await main.run(settings())
     converter = connected["data_converter"]
     assert isinstance(converter.payload_codec, TenantCodec)
     assert converter.failure_converter_class is DefaultFailureConverterWithEncodedAttributes
+
+
+async def unrecorded(healthy: bool) -> None:
+    """Where a test's worker records its health: nowhere (the record itself: tests/core/platform/test_workers.py)."""
+
+
+async def proven(*args: object) -> bool:
+    """A test worker's self-check, with its stand-in database: passed (the check itself: test_health.py)."""
+    return True
+
+
+async def failed(*args: object) -> bool:
+    return False
+
+
+async def test_a_worker_that_fails_its_self_check_never_polls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Engine 2b spec §2.7: it records itself unhealthy and exits before connecting to Temporal."""
+    reports: list[bool] = []
+
+    class Engine:
+        async def dispose(self) -> None: ...
+
+    async def recorded(*args: object) -> None: ...
+
+    async def report(healthy: bool) -> None:
+        reports.append(healthy)
+
+    async def connect(*args: object, **kwargs: Any) -> None:
+        raise AssertionError("it connected")
+
+    monkeypatch.setattr(main.Client, "connect", connect)
+    monkeypatch.setattr(main, "make_engine", lambda url: Engine())
+    monkeypatch.setattr(main, "make_sessionmaker", lambda engine: None)
+    monkeypatch.setattr(main, "verify_environment", recorded)
+    monkeypatch.setattr(main, "reporter", lambda *args: report)
+    monkeypatch.setattr(main, "self_check", failed)
+    with pytest.raises(WorkerUnhealthyError):
+        await main.run(settings())
+    assert reports == [False]

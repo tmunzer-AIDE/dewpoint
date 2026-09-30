@@ -21,6 +21,7 @@ from dewpoint.apps.environment import verify_environment
 from dewpoint.apps.plugin_loader import PluginLoadError, installed_plugins, prepare
 from dewpoint.apps.runs import NotAdmissibleError, StartRefusedError, StartUncertainError, start_run
 from dewpoint.apps.worker.deployment import Deployment, describe, set_current, this_build
+from dewpoint.apps.worker.health import WorkerUnhealthyError
 from dewpoint.apps.worker.main import run as run_worker
 from dewpoint.core.audit.anchor import FileAnchorSink, anchor_all, anchor_freshness, verify_anchors
 from dewpoint.core.auth.users import PasswordPolicyError, create_user
@@ -353,6 +354,9 @@ def worker() -> None:
     except (EnvironmentNotRecordedError, EnvironmentMismatchError) as e:
         typer.echo(f"ERROR: {e}")
         raise typer.Exit(2) from None
+    except WorkerUnhealthyError as e:  # its orchestrator restarts it (engine 2b spec §2.7)
+        typer.echo(f"ERROR: {e}")
+        raise typer.Exit(3) from None
 
 
 @asynccontextmanager

@@ -22,7 +22,7 @@ from dewpoint.apps.worker.main import engine_worker
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, cel_queue
 from tests.apps.worker.harness import MemoryStore, in_process, start
-from tests.apps.worker.test_main import settings
+from tests.apps.worker.test_main import proven, settings, unrecorded
 from tests.engine.replay.record import executions
 from tests.support.graphs import G, cel, ref
 from tests.support.plugins.testkit import TESTKIT
@@ -152,6 +152,8 @@ async def test_a_worker_set_to_makes_its_build_current_once_it_polls(
     monkeypatch.setattr(main, "make_engine", lambda url: Engine())
     monkeypatch.setattr(main, "make_sessionmaker", lambda engine: None)
     monkeypatch.setattr(main, "verify_environment", recorded)  # the check itself: tests/apps/test_environment.py
+    monkeypatch.setattr(main, "reporter", lambda *args: unrecorded)  # the record itself: tests/core/platform
+    monkeypatch.setattr(main, "self_check", proven)  # the check itself: test_health.py
     monkeypatch.setattr(main, "installed_plugins", lambda: [TESTKIT])
     worker = asyncio.create_task(main.run(settings(worker_set_current=True, worker_shutdown_grace_s=0.1)))
     try:
