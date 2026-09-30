@@ -178,6 +178,9 @@ retry settings (`max_attempts` and `timeout_s` can be overridden per step), and 
 - A config or output check that fails with something other than a validation error (a validator's bug) fails the
   step as `config_invalid` or `output_schema_violation`, never retried.
 - A `reconcilable` node checks with `reconcile()` before each retry.
+- A database outage longer than 5 minutes fails attempts too. A worker can't read a tenant's data key once its cached
+  copy is 5 minutes old, so an attempt that starts or ends then fails as above: retried, or `outcome_unknown` for an
+  `ambiguous` node ([`deployment.md`](deployment.md#encrypted-payloads)).
 
 ## Limits in this build
 

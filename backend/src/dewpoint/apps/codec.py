@@ -123,7 +123,10 @@ def data_converter(keys: KeySource) -> DataConverter:
 class KeyringKeys:
     """Tenants' data keys from the keyring, read-only, cached unwrapped in this process and nowhere else: at most
     `size` of them, each for at most `ttl_s` seconds, so a rotation takes effect within `ttl_s`. A missing key is
-    never cached: a tenant created after this process started is served at once (spec §6.3)."""
+    never cached: a tenant created after this process started is served at once (spec §6.3).
+
+    An expired key is never used, even while the database doesn't answer (the owner's ruling, 2b-1a's review): the
+    rotation bound and the retirement floor (§6.4) stay exact, and a payload whose key can't be read again fails."""
 
     def __init__(
         self,

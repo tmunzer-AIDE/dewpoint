@@ -115,9 +115,18 @@ for a loop's batch. Temporal's Web UI shows ciphertext; what stays readable ther
 types, task queues, timestamps, and a local activity's own bookkeeping (its type and times).
 
 - The worker and `dewpoint dev run` need the KEK (`DEWPOINT_KEK_B64`, `DEWPOINT_KEK_ID`) and read tenants' data keys
-  through their database roles; they cache them for at most 5 minutes.
-- A tenant gets its data key when it's created. `dewpoint keys ensure-tenants`, run as the database owner, gives one
-  to every tenant that has none (tenants created before this build); Compose's migrate step runs it.
+  through their database roles; they cache them for at most 5 minutes, and never longer, so a rotation reaches every
+  process within 5 minutes ([`key-rotation.md`](key-rotation.md)).
+- **Runs don't ride out a long database outage.** A key whose 5 minutes are up is read again, and while the database
+  doesn't answer, it can't be: that tenant's payloads stop. An activity that starts or finishes then fails its
+  attempt, like any failure the activity didn't describe itself ([`runs.md`](runs.md#attempts-and-retries)). A plugin
+  step uses up its attempts, or records `outcome_unknown` if its node is `ambiguous`, and a `cel.evaluate` fails its
+  step with `cel_profile_unavailable` after 3 attempts. Workflow tasks fail and are retried until the database
+  answers. Expect failed steps after an outage longer than 5 minutes, and rerun their runs.
+- A tenant gets its data key when it's created. `dewpoint keys ensure-tenants`, run as a `dewpoint_admin` login, gives
+  one to every tenant that has none (tenants created before this build); Compose's migrate step runs it. It lists the
+  tenants under row-level security, as the key admin, so it needs no role that bypasses it, and refuses (exit 2) a
+  role that isn't the key admin, which would see none of them.
 - A run of an older build (ABI 4 and before) keeps its plain-text payloads and its old workflow id; it finishes on its
   own build, as any pinned run does.
 
@@ -141,8 +150,10 @@ and reads each tenant's key the way the workers do, first.
 Compose runs Temporal's dev server (the `temporal` service: its state in SQLite on the `temporal-data` volume, its Web
 UI at <http://127.0.0.1:8233>) and one `worker`. Production uses a Temporal cluster instead.
 
-Its `migrate` service upgrades the schema, records the environment (`DEWPOINT_ENVIRONMENT`, `production` unless set),
-and gives every tenant a data key. Ordinary Compose is `production`, so no run starts; CI and local development set
+Its `migrate` service upgrades the schema, records the environment (`DEWPOINT_ENVIRONMENT`, `production` unless set)
+with the Temporal namespace (`DEWPOINT_TEMPORAL_NAMESPACE`, `default` unless set), and gives every tenant a data key as
+`dewpoint_admin_login`. Set the namespace in `.env`: every service takes it from there, and the worker exits 2 unless
+its own matches the record. Ordinary Compose is `production`, so no run starts; CI and local development set
 `DEWPOINT_ENVIRONMENT=development` through their own override, on a database of their own.
 
 Compose runs one build at a time, so its worker makes its own build current as it starts

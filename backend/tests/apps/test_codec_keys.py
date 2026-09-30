@@ -29,6 +29,18 @@ class Counted:
         return self.inner()
 
 
+class Down:
+    """A sessionmaker whose database stops answering once `down` is set."""
+
+    def __init__(self, inner: async_sessionmaker[AsyncSession]) -> None:
+        self.inner, self.down = inner, False
+
+    def __call__(self) -> Any:
+        if self.down:
+            raise ConnectionRefusedError("the database is down")
+        return self.inner()
+
+
 async def with_key(owner_sessionmaker: async_sessionmaker[AsyncSession], tenant: uuid.UUID) -> int:
     async with owner_sessionmaker() as s, s.begin():
         return await KEYRING.ensure_key(s, tenant)
@@ -90,3 +102,23 @@ async def test_another_tenants_key_is_invisible_to_the_worker(owner_sessionmaker
         await tenant_scope(s, b)
         with pytest.raises(NoKeyError):
             await KEYRING.read_dek(s, a)
+
+
+async def test_an_expired_key_is_never_used_while_the_database_doesnt_answer(
+    owner_sessionmaker, worker_sessionmaker
+) -> None:
+    """The owner's ruling (2b-1a review): a key is kept at most `ttl_s`, even when it can't be read again, so a rotation
+    always reaches every process within it (spec §6.3) and §6.4's retirement floor holds. While the database doesn't
+    answer, a payload whose key has expired fails: encoding and decoding alike."""
+    tenant = uuid.uuid4()
+    await with_key(owner_sessionmaker, tenant)
+    now, database = [0.0], Down(worker_sessionmaker)
+    keys = KeyringKeys(database, KEYRING, ttl_s=60, clock=lambda: now[0])  # type: ignore[arg-type]
+    assert (await keys.active(str(tenant)))[0] == 1
+    database.down = True
+    assert (await keys.active(str(tenant)))[0] == 1  # still within its time
+    now[0] = 61
+    with pytest.raises(ConnectionRefusedError):
+        await keys.active(str(tenant))
+    with pytest.raises(ConnectionRefusedError):
+        await keys.get(str(tenant), 1)

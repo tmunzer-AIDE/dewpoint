@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """A worker instance proves what it records (engine 2b spec §2.7): its KEK wraps and unwraps, and its role may read
 data keys. A failed check stops it polling, at startup or later; a database that doesn't answer (an outage, which
-the engine rides out) proves nothing either way, and neither does a record it can't write."""
+the worker keeps running through) proves nothing either way, and neither does a record it can't write."""
 
 import pytest
 
