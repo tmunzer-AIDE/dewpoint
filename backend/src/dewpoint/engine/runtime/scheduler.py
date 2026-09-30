@@ -15,6 +15,8 @@ Every iteration and filter item is debited from the execution's `Budget` (spec �
 iteration that can't be debited waits for budget, or ends the loop at the cap. A settled iteration's scope is pruned
 once its loop has taken its result: only open scopes stay, which keeps a continue-as-new snapshot small."""
 
+import bisect
+import heapq
 import uuid
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -57,6 +59,18 @@ _NODE_CODE = {
 _NODE_FROM = {c: n for n, c in _NODE_CODE.items()}
 _EDGE_CODE = {EdgeState.PENDING: "p", EdgeState.LIVE: "l", EdgeState.DEAD: "x"}
 _EDGE_FROM = {c: e for e, c in _EDGE_CODE.items()}
+_B62 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+NO_CAPTURE = ".."  # proto (§5.3): a scope's captures are two characters per loop step of its region, in region order
+
+
+def _capture_code(version: int) -> str:
+    if not 0 <= version < len(_B62) ** 2:
+        raise ValueError(f"proto: variable version {version} past the capture encoding")
+    return _B62[version // len(_B62)] + _B62[version % len(_B62)]
+
+
+def _capture_from(code: str) -> int:
+    return _B62.index(code[0]) * len(_B62) + _B62.index(code[1])
 
 
 def _then_wake(fn: Any) -> Any:
@@ -300,12 +314,29 @@ class Scheduler:
         self._members: dict[uuid.UUID | None, tuple[uuid.UUID, ...]] = {
             region: r.members for region, r in program.regions.items()
         }
+        self._loop_members = {
+            region: tuple(m for m in members if m in program.regions) for region, members in self._members.items()
+        }  # proto: the loop steps of each region, in region order, for the captures' codes
         # proto (2b-1b go/no-go): snapshot_format 2 and the open-scope cap
         self._by_topo = {s.topo: s.id for s in program.steps.values()}
         self._edge_orders: dict[uuid.UUID | None, list[int]] = {}
-        self.reserve = max(
+        computed = max(
             (len(program.chain(program.steps[r].region)) for r in program.regions if r is not None), default=0
-        )  # D: the version's deepest loop nesting
+        )
+        self.reserve = program.loop_depth if program.loop_depth is not None else computed  # D, pinned in the version
+        self.cap = program.open_scopes_cap or OPEN_SCOPES_CAP  # the version's cap, pinned in it
+        # proto (§5.3): the variables, their versions, and the captures of queued loop steps inside iterations
+        self.vars: dict[str, Any] = {}
+        self.vars_version = 0
+        self.var_deltas: dict[int, dict[str, Any]] = {}  # an older version: the values that differ from the current
+        self._captures: dict[Instance, int] = {}  # queued loop step -> the version it became ready under
+        self._released: dict[Instance, int] = {}  # handed out, its unit not yet started
+        self._starting: dict[Instance, bool] = {}  # released loop step -> it took a reserved scope
+        self._held: dict[Instance, bool] = {}  # a batch-mode loop inside an iteration: it holds its slot to the end
+        # queued loop steps inside iterations, not started: by scope in scheduling order, and all in one heap
+        self._deferred: set[Instance] = set()
+        self._deferred_by_scope: dict[ScopeKey, list[Instance]] = {}
+        self._deferred_heap: list[tuple[tuple[Any, ...], Instance]] = []
         self._seq = 0
         self._n_open = 0  # open iteration scopes, frozen ones aside
         self._capped: set[Instance] = set()  # loops the cap holds back
@@ -315,7 +346,7 @@ class Scheduler:
         self._collects_out: set[tuple[Instance, int]] = set()
         self._batches_out: set[tuple[Instance, int]] = set()
         self.prefix = ""  # proto: the execution's own workflow id, for the collections it names
-        self._live = 0  # proto: see `live`
+        self._live = P.size(self.vars)  # proto: see `live`; the variables count from the start
         self._spills: list[Spill] = []
         self._spills_out: set[tuple[Instance, str, int]] = set()
         self.probe = {"peak_open": 0, "peak_reserved": 0, "cap_waits": 0, "reserved_opens": 0}
@@ -361,8 +392,17 @@ class Scheduler:
 
     def take_ready(self) -> list[Instance]:
         """Ready steps, in (scope, topological) order. They are running from now on."""
-        ready = sorted(self._ready, key=self.order)
+        ready = []
+        for inst in self._ready:
+            if self._iter_loop(inst):  # proto (§5.3): it starts only when its loop can open an iteration at once
+                self._defer(inst)
+            else:
+                ready.append(inst)
         self._ready = []
+        ready += self._start_deferred()
+        if self._deferred:  # proto: what stays queued after the take
+            self.probe["deferred_peak"] = max(self.probe.get("deferred_peak", 0), len(self._deferred))
+        ready.sort(key=self.order)
         for inst in ready:
             self.scopes[inst.scope].nodes[inst.step] = NodeState.RUNNING
         self._handed.update(ready)
@@ -411,6 +451,7 @@ class Scheduler:
 
     def _recount(self) -> int:
         total = sum(self._scope_bytes(sc) for sc in self.scopes.values())
+        total += P.size(self.vars) + sum(P.size(d) for d in self.var_deltas.values())
         for loop in self.loops.values():
             total += P.size(loop.items) if isinstance(loop.items, list) else 0
             total += sum(c.tail_bytes + c.sealing_bytes for _, c in self._colls(loop))
@@ -499,15 +540,23 @@ class Scheduler:
         out, self._cancels = sorted(self._cancels, key=self.order), []
         return out
 
-    def give_back(self, steps: list[Instance], collects: list[Collect], batches: list[Batch]) -> None:
+    def give_back(
+        self, steps: list[Instance], collects: list[Collect], batches: list[Batch], spills: list["Spill"] | None = None
+    ) -> None:
         """Work handed over but never started (drain mode, the in-flight cap): it waits in the queues again, first,
         for the continued run."""
         self._ready = steps + self._ready
         self._collects = collects + self._collects
         self._batches = batches + self._batches
         self._handed -= set(steps)
+        for inst in steps:  # proto: a loop step handed out and not started waits again, with its capture
+            self._starting.pop(inst, None)
+            if inst in self._released:
+                self._captures[inst] = self._released.pop(inst)
         self._collects_out -= {(c.loop, c.index) for c in collects}
         self._batches_out -= {(b.loop, b.start) for b in batches}
+        self._spills = list(spills or []) + self._spills
+        self._spills_out -= {(sp.loop, sp.which, sp.first) for sp in spills or []}
 
     @_then_wake
     def succeed(self, inst: Instance, output: Any, ports: tuple[str, ...] | None = None) -> None:
@@ -530,6 +579,7 @@ class Scheduler:
         `fail` ends the scope: the run in the root, the iteration in a loop body. Either handled way, the step has an
         error and no output, so `has(steps.x.output)` is false (spec §5.3) and a reference's default applies."""
         self._handed.discard(inst)
+        self._starting.pop(inst, None)
         scope, step = self._running(inst)
         if scope is None:
             return
@@ -563,6 +613,8 @@ class Scheduler:
         loop = LoopRun(inst, items, concurrency, stop_on_error, batch=batch, coll=coll, fails=fails)
         self._live += P.size(items) if isinstance(items, list) else 0
         self.loops[inst] = loop
+        if batch and self._iter_loop(inst):  # proto (§5.3): it opens no scope, so it holds its slot until it ends
+            self._held[inst] = self._starting.pop(inst, False)
         self._maybe_seal(loop)
         self._advance(loop)
 
@@ -652,13 +704,19 @@ class Scheduler:
         if self.ended is not None:
             return
         self.ended = end
-        queued = set(self._ready)
+        queued = set(self._ready) | self._deferred
         for scope in self.scopes.values():
             for node_id, state in scope.nodes.items():
                 if state == NodeState.RUNNING and Instance(scope.key, node_id) not in queued:
                     self._cancels.append(Instance(scope.key, node_id))
         self._ready = []
+        self._clear_deferred(())
         self._batches = []
+        self._starting.clear()
+        self._held.clear()
+        self._captures.clear()
+        self._released.clear()
+        self._gc_versions()
         self.budget.drop_local()  # a loop waiting for its next iteration opens none now
         self._spills = []
         self._budget_waits.clear()
@@ -742,8 +800,8 @@ class Scheduler:
                 self.probe["reserved_opens"] += 1
                 held = 1 + sum(1 for s in self.scopes.values() if s.reserved)
                 self.probe["peak_reserved"] = max(self.probe["peak_reserved"], held)
-            if self._n_open > OPEN_SCOPES_CAP + self.reserve:
-                raise AssertionError(f"proto: {self._n_open} open scopes, past {OPEN_SCOPES_CAP} + {self.reserve}")
+            if self._n_open > self.cap + self.reserve:
+                raise AssertionError(f"proto: {self._n_open} open scopes, past {self.cap} + {self.reserve}")
         self.scopes[key] = scope
         for node_id in members:
             self._check_ready(scope, node_id)
@@ -751,6 +809,7 @@ class Scheduler:
 
     def _prune(self, key: ScopeKey) -> None:
         """Forget a settled iteration's scope and every scope nested in it: its loop has what it needs."""
+        self._drop_captures(key)
         for k in [k for k in self.scopes if k[: len(key)] == key]:
             if k and not self.scopes[k].frozen:
                 self._n_open -= 1
@@ -786,7 +845,10 @@ class Scheduler:
             return None
         if not states or any(s == EdgeState.LIVE for s in states):
             scope.nodes[node_id] = NodeState.RUNNING  # queued; take_ready() hands it over
-            self._ready.append(Instance(scope.key, node_id))
+            inst = Instance(scope.key, node_id)
+            self._ready.append(inst)
+            if self.batch_loop is None and self._iter_loop(inst):  # proto (§5.3): its variables, as of now
+                self._captures[inst] = self.vars_version
             return None
         scope.nodes[node_id] = NodeState.DEAD
         return step
@@ -795,7 +857,7 @@ class Scheduler:
         """An unhandled failure ends its scope: waiting steps die, running ones are cancelled, and so is every scope
         nested inside it. `report`: tell the loop the iteration failed (not when the loop itself is stopping it)."""
         scope.failure = failure
-        queued = set(self._ready)
+        queued = set(self._ready) | self._deferred
         for key in [k for k in self.scopes if k[: len(scope.key)] == scope.key]:
             inner = self.scopes[key]
             if key != scope.key and inner.failure is None:
@@ -807,6 +869,11 @@ class Scheduler:
                 if state in (NodeState.RUNNING, NodeState.WAITING):
                     inner.nodes[node_id] = NodeState.DEAD
         self._ready = [r for r in self._ready if r.scope[: len(scope.key)] != scope.key]
+        self._clear_deferred(scope.key)
+        self._drop_captures(scope.key)
+        for inst in [i for i in self._starting if i.scope[: len(scope.key)] == scope.key]:
+            del self._starting[inst]
+            self._freed = True
         for inst in [i for i in self.loops if i.scope[: len(scope.key)] == scope.key]:
             self._drop_loop(self.loops[inst])
         if scope.key == ():
@@ -818,6 +885,8 @@ class Scheduler:
         """The loop ends: nothing it waits for is still wanted."""
         del self.loops[loop.instance]
         self._capped.discard(loop.instance)
+        if self._starting.pop(loop.instance, None) is not None or self._held.pop(loop.instance, None) is not None:
+            self._freed = True  # its slot is free
         self._live -= P.size(loop.items) if isinstance(loop.items, list) else 0
         self._live -= sum(c.tail_bytes + c.sealing_bytes for _, c in self._colls(loop))
         for key in [k for k, inst in self._budget_waits.items() if inst == loop.instance]:
@@ -948,14 +1017,135 @@ class Scheduler:
     def _room(self, loop: LoopRun) -> bool | None:
         """Whether `loop` may open an iteration now: False from the general cap, True from the reservation, None
         not at all. The reservation holds one scope per nesting level, for the progress chain only."""
-        if self._n_open < OPEN_SCOPES_CAP:
+        if loop.instance in self._starting:  # the slot it took when it was released
+            return self._starting.pop(loop.instance)
+        taken = self._taken()
+        if taken < self.cap:
             return False
-        if self._n_open >= OPEN_SCOPES_CAP + self.reserve:
+        if taken >= self.cap + self.reserve:
             return None
         level = len(loop.instance.scope) + 1
-        if any(s.reserved and len(s.key) == level for s in self.scopes.values()):
+        if self._reserved_at(level):
             return None
         return True if loop.instance.scope in self._path() else None
+
+    def _taken(self) -> int:
+        return self._n_open + len(self._starting) + len(self._held)
+
+    def _root_key(self) -> ScopeKey:
+        return self.batch_loop.scope if self.batch_loop is not None else ()
+
+    def _iter_loop(self, inst: Instance) -> bool:
+        """A loop step inside an iteration scope: the only step the open-scope cap defers."""
+        return inst.step in self.program.regions and inst.scope != self._root_key()
+
+    def _defer(self, inst: Instance) -> None:
+        self._deferred.add(inst)
+        bisect.insort(self._deferred_by_scope.setdefault(inst.scope, []), inst, key=self.order)
+        heapq.heappush(self._deferred_heap, (self.order(inst), inst))
+
+    def _undefer(self, inst: Instance) -> None:
+        self._deferred.discard(inst)
+        queue = self._deferred_by_scope[inst.scope]
+        queue.remove(inst)
+        if not queue:
+            del self._deferred_by_scope[inst.scope]
+
+    def _start_deferred(self) -> list[Instance]:
+        """Queued loop steps that may start now: their loop must be able to open an iteration at once, and the
+        iteration budget must not be waiting (queued loop steps share its one request). Under the cap, in scheduling
+        order; past it, one per level on the progress path, from that level's reserved scope."""
+        out: list[Instance] = []
+        if not self._deferred or self.budget.waiting or self.budget.asking:
+            return out
+        while self._taken() < self.cap and self._deferred:
+            _, inst = heapq.heappop(self._deferred_heap)
+            if inst in self._deferred:  # else it left the queue meanwhile
+                self._undefer(inst)
+                self._release(inst, False)
+                out.append(inst)
+        if self._deferred and self._taken() >= self.cap:
+            for key in sorted(self._path(), key=len):
+                if self._taken() >= self.cap + self.reserve:
+                    break
+                queue = self._deferred_by_scope.get(key)
+                if queue and not self._reserved_at(len(key) + 1):
+                    inst = queue[0]
+                    self._undefer(inst)
+                    self._release(inst, True)
+                    out.append(inst)
+        return out
+
+    def _release(self, inst: Instance, reserved: bool) -> None:
+        self._starting[inst] = reserved
+        if inst in self._captures:
+            self._released[inst] = self._captures.pop(inst)
+
+    def _reserved_at(self, level: int) -> bool:
+        if any(s.reserved and len(s.key) == level for s in self.scopes.values()):
+            return True
+        held = list(self._starting.items()) + list(self._held.items())
+        return any(r and len(i.scope) + 1 == level for i, r in held)
+
+    def _clear_deferred(self, key: ScopeKey) -> None:
+        for k in [k for k in self._deferred_by_scope if k[: len(key)] == key]:
+            self._deferred -= set(self._deferred_by_scope.pop(k))
+
+    def _drop_captures(self, key: ScopeKey) -> None:
+        for inst in [i for i in self._captures if i.scope[: len(key)] == key]:
+            del self._captures[inst]
+        self._gc_versions()
+
+    # --- proto (§5.3): variables, their versions and captures ---------------------------------------------------------
+
+    def init_vars(self, values: dict[str, Any]) -> None:
+        self._live -= P.size(self.vars)
+        self.vars = dict(values)
+        self._live += P.size(self.vars)
+
+    def set_variables(self, values: Any) -> None:
+        """A root `set_variables` settled: a new version. Each older version a queued loop step still names keeps the
+        values this write replaces."""
+        refs = set(self._captures.values()) | set(self._released.values())
+        if self.vars_version in refs and self.vars_version not in self.var_deltas:
+            self.var_deltas[self.vars_version] = {}
+            self._live += P.size({})
+        for delta in self.var_deltas.values():
+            before = P.size(delta)
+            for name in values:
+                if name not in delta:
+                    delta[name] = [self.vars[name]] if name in self.vars else []
+            self._live += P.size(delta) - before
+        before = P.size(self.vars)
+        self.vars.update(values)
+        self._live += P.size(self.vars) - before
+        self.vars_version += 1
+        self.probe["var_versions"] = max(self.probe.get("var_versions", 0), self.vars_version)
+
+    def vars_at(self, version: int | None) -> dict[str, Any]:
+        if version is None or version == self.vars_version:
+            return dict(self.vars)
+        out = dict(self.vars)
+        for name, old in self.var_deltas.get(version, {}).items():
+            if old:
+                out[name] = old[0]
+            else:
+                out.pop(name, None)
+        return out
+
+    def consume_capture(self, inst: Instance) -> dict[str, Any] | None:
+        """A released loop step's unit starts: the variables of the version it captured, read before that version
+        may be dropped. None: it captured none, and reads the current ones."""
+        if inst not in self._released:
+            return None
+        variables = self.vars_at(self._released.pop(inst))
+        self._gc_versions()
+        return variables
+
+    def _gc_versions(self) -> None:
+        refs = set(self._captures.values()) | set(self._released.values())
+        for version in [v for v in self.var_deltas if v not in refs]:
+            self._live -= P.size(self.var_deltas.pop(version))
 
     def _path(self) -> set[ScopeKey]:
         """The progress chain: from the execution's own root (a batch child's loop scope), the oldest open iteration
@@ -1006,9 +1196,12 @@ class Scheduler:
         if self._settled or self._cancels or self.ended is not None:
             raise ValueError("a snapshot is taken only between units, and never after the run ended")
         self._check_queues()
+        by_scope: dict[ScopeKey, dict[uuid.UUID, int]] = {}
+        for inst, version in self._captures.items():
+            by_scope.setdefault(inst.scope, {})[inst.step] = version
         return {
             "snapshot_format": SNAPSHOT_FORMAT,
-            "scopes": [self._scope2(sc) for sc in self.scopes.values()],
+            "scopes": [self._scope2(sc, by_scope.get(sc.key, {})) for sc in self.scopes.values()],
             "loops": [self._loop2(loop) for loop in self.loops.values()],
             "handed": [self._i(i) for i in sorted(self._handed_now(), key=self.order)],
             "collects_out": [
@@ -1023,6 +1216,14 @@ class Scheduler:
             "budget": self.budget.to_json(),
             "budget_waits": [[k, self._i(i)] for k, i in self._budget_waits.items()],
             "batch_loop": self._i(self.batch_loop) if self.batch_loop else None,
+            "vars": self.vars,
+            "vars_version": self.vars_version,
+            "var_deltas": [[v, d] for v, d in sorted(self.var_deltas.items())],
+            "released": [[self._i(i), v] for i, v in sorted(self._released.items(), key=lambda c: self.order(c[0]))],
+            "starting": [
+                [self._i(i), int(r)] for i, r in sorted(self._starting.items(), key=lambda c: self.order(c[0]))
+            ],
+            "held": [[self._i(i), int(r)] for i, r in sorted(self._held.items(), key=lambda c: self.order(c[0]))],
             "seq": self._seq,
             "probe": dict(self.probe),
         }
@@ -1045,6 +1246,12 @@ class Scheduler:
         s._spills_out = {(s._if(i), str(w), int(n)) for i, w, n in data["spills_out"]}
         s._budget_waits = {str(k): s._if(i) for k, i in data["budget_waits"]}
         s.batch_loop = s._if(data["batch_loop"]) if data["batch_loop"] else None
+        s.vars = dict(data["vars"])
+        s.vars_version = int(data["vars_version"])
+        s.var_deltas = {int(v): dict(d) for v, d in data["var_deltas"]}
+        s._released = {s._if(i): int(v) for i, v in data["released"]}
+        s._starting = {s._if(i): bool(r) for i, r in data["starting"]}
+        s._held = {s._if(i): bool(r) for i, r in data["held"]}
         s._seq = int(data["seq"])
         s.probe = dict(data["probe"])
         s._ready, s._collects, s._batches = s._rebuilt()
@@ -1112,8 +1319,10 @@ class Scheduler:
             raise AssertionError(f"proto: live {self._live} != recount {self._recount()}")
         self._handed |= set(self.loops)  # a loop step is handed over for as long as its loop runs
         ready, collects, batches = self._rebuilt()
-        if set(ready) != set(self._ready):
-            raise AssertionError(f"proto: rebuilt ready {len(ready)} != queued {len(self._ready)}")
+        if set(ready) != set(self._ready) | self._deferred:
+            raise AssertionError(
+                f"proto: rebuilt ready {len(ready)} != queued {len(self._ready) + len(self._deferred)}"
+            )
         if {(c.loop, c.index, c.scope) for c in collects} != {(c.loop, c.index, c.scope) for c in self._collects}:
             raise AssertionError("proto: rebuilt collects differ")
         if {(b.loop, b.start, P.count(b.items)) for b in batches} != {
@@ -1142,7 +1351,7 @@ class Scheduler:
             self._edge_orders[region] = order
         return order
 
-    def _scope2(self, sc: Scope) -> list[Any]:
+    def _scope2(self, sc: Scope, captures: dict[uuid.UUID, int]) -> list[Any]:
         if sc.frozen:
             nodes = edges = ""
         else:
@@ -1171,6 +1380,9 @@ class Scheduler:
             int(sc.frozen),
             sc.seq,
             int(sc.reserved),
+            "".join(_capture_code(captures[m]) if m in captures else NO_CAPTURE for m in self._loop_members[sc.region])
+            if captures
+            else "",
         ]
 
     def _scope2_from(self, raw: list[Any]) -> Scope:
@@ -1188,6 +1400,10 @@ class Scheduler:
                 {"output": r[2]} if r[1] == 0 else {"error": r[2]} if r[1] == 1 else {"output": r[2], "error": r[3]}
             )
         failure = Failure.from_json(raw[7]) if raw[7] else None
+        for n, m in enumerate(self._loop_members[region] if raw[11] else ()):
+            code = raw[11][2 * n : 2 * n + 2]
+            if code != NO_CAPTURE:
+                self._captures[Instance(key, m)] = _capture_from(code)
         return Scope(key, region, nodes, edges, results, raw[5], raw[6], failure, frozen, int(raw[9]), bool(raw[10]))
 
     def _loop2(self, loop: LoopRun) -> list[Any]:

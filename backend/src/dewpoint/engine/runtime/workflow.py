@@ -166,6 +166,8 @@ class RunGraph(Execution):
                 data.cel_profile,
                 data.subflow_version_ids,
                 data.failure_handler_version_id,
+                data.open_scopes_cap,
+                data.loop_depth,
             )
         except Exception as e:
             workflow.logger.error("run_version_unusable", exc_info=True)
@@ -218,7 +220,7 @@ class RunGraph(Execution):
             if learned and not step.control:
                 learned = self._learn(resolve.assemble(step.config, {}), program.manifests[step.ref]["config_schema"])
         schema = program.graph.settings.vars_schema
-        self.vars = {k: p.get("default") for k, p in sorted(schema.get("properties", {}).items())}
+        self.sched.init_vars({k: p.get("default") for k, p in sorted(schema.get("properties", {}).items())})
         self.sched.start()
         return learned
 
@@ -443,6 +445,8 @@ class LoopBatch(Execution):
                 data.cel_profile,
                 data.subflow_version_ids,
                 data.failure_handler_version_id,
+                data.open_scopes_cap,
+                data.loop_depth,
             )
         except asyncio.CancelledError:
             return BatchResult([], [], end=RunEnd("cancelled", CANCELLED).to_json(), iterations=start.iterations)
@@ -459,7 +463,7 @@ class LoopBatch(Execution):
             else:
                 self.program = program
                 self.sched = Scheduler(program, budget=Budget(start.parent.grant, root=False))
-                self.vars = dict(start.variables)
+                self.sched.init_vars(dict(start.variables))
                 outer = [
                     OuterScope(tuple((str(k), int(i)) for k, i in o["key"]), o["results"], o["item"], o["index"])
                     for o in start.outer
@@ -476,7 +480,11 @@ class LoopBatch(Execution):
                 )
             if await self._drive() == CONTINUE:
                 await self._flush()
-                continued = replace(start, snapshot=self._snapshot(), iterations=self.sched.iterations)
+                # proto (§5.3): each value travels once; the snapshot holds the slice, outer scopes and variables
+                continued = replace(
+                    start, snapshot=self._snapshot(), iterations=self.sched.iterations,
+                    items=[], items_handle=None, outer=[], variables={},
+                )  # fmt: skip
                 if snapshot_fits(continued, workflow.payload_converter()):
                     await self._send(continued)
                     workflow.continue_as_new(continued)

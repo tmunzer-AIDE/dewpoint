@@ -247,6 +247,7 @@ class Execution:
         self._drained: dict[str, Any] = {}  # what draining waited for, and added: history events and bytes
         self._draining = False  # drain mode: nothing new starts until the execution continues-as-new
         self._spill_later: list[tuple[tuple[Any, ...], str, _Effect]] = []  # proto: results to spill before merging
+        self._spill_units: dict[tuple[Instance, int, str], Spill] = {}  # proto: spill units queued or running
 
     # --- the budget signals ----------------------------------------------------------------------------------------
 
@@ -284,7 +285,6 @@ class Execution:
         self.depth = parent.depth if parent is not None else 0
         self.run_started_at, self.deadline = run_started_at, deadline
         self.checkpoint_events, self.drain_events = checkpoint_events, drain_events
-        self.vars: dict[str, Any] = {}
         if parent is not None:
             self._carry(remember((), tuple(parent.secrets)))
 
@@ -303,8 +303,10 @@ class Execution:
             while self.sched.ended is None:
                 probe.note(workflow.info().workflow_id, self.sched.probe)
                 self._serve_budget()
-                for sp in self.sched.take_spills():  # proto: bounded, and awaited before any continue
-                    tasks[("spill", sp.loop, sp.first, sp.which)] = asyncio.create_task(self._spill(sp))
+                if not self._draining:  # proto (§5.3): spills are units under the in-flight cap
+                    for sp in self.sched.take_spills():
+                        self._spill_units[(sp.loop, sp.first, sp.which)] = sp
+                        waiting.append(("spill", sp.loop, sp.first, sp.which))
                 for key, sid, later in self._spill_later:
                     tasks[key] = asyncio.create_task(self._spill_result(sid, later))
                 self._spill_later = []
@@ -345,6 +347,7 @@ class Execution:
                         [w[1] for w in waiting if w[0] == "step"],
                         [w[1] for w in waiting if w[0] == "collect"],
                         [self._batches.pop((w[1], w[2])) for w in waiting if w[0] == "batch"],
+                        [self._spill_units.pop((w[1], w[2], w[3])) for w in waiting if w[0] == "spill"],
                     )
                     return CONTINUE
                 while not self._draining and waiting and self._in_flight(tasks) < IN_FLIGHT_CAP:
@@ -471,6 +474,8 @@ class Execution:
             return await self._step(key[1])
         if key[0] == "batch":
             return await self._batch(self._batches.pop((key[1], key[2])))
+        if key[0] == "spill":
+            return await self._spill(self._spill_units.pop((key[1], key[2], key[3])))
         return await self._collect(key[1])
 
     def _apply(self, key: tuple[Any, ...], effect: _Effect) -> None:
@@ -516,7 +521,7 @@ class Execution:
             self.sched.fail(inst, effect.failure)
         else:
             if effect.variables:
-                self.vars.update(effect.variables)
+                self.sched.set_variables(effect.variables)  # proto (§5.3): a new variable version
             self.sched.succeed(inst, effect.output, effect.ports)
 
     async def _spill(self, sp: Spill) -> _Effect:
@@ -719,21 +724,34 @@ class Execution:
 
     # --- values ----------------------------------------------------------------------------------------------------
 
-    def _view(self, scope: ScopeKey, item: tuple[Any, int] | None = None) -> Any:
+    @property
+    def vars(self) -> dict[str, Any]:
+        """The current variables (proto: the scheduler keeps them, with the versions queued loop steps captured)."""
+        return self.sched.vars
+
+    def _view(
+        self, scope: ScopeKey, item: tuple[Any, int] | None = None, variables: dict[str, Any] | None = None
+    ) -> Any:
         run = {
             "id": self.run_id,
             "started_at": self.run_started_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
             "now": workflow.now().astimezone(UTC).isoformat().replace("+00:00", "Z"),
         }
-        return resolve.view(self.sched, scope, trigger=self.trigger, variables=dict(self.vars), run=run, item=item)
+        variables = dict(self.vars) if variables is None else variables
+        return resolve.view(self.sched, scope, trigger=self.trigger, variables=variables, run=run, item=item)
 
     async def _values(
-        self, owner: Step | None, pairs: list[tuple[str, Any]], scope: ScopeKey
+        self,
+        owner: Step | None,
+        pairs: list[tuple[str, Any]],
+        scope: ScopeKey,
+        variables: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], str | None]:
-        """Every envelope's value, by JSON pointer, and the CEL mode used (activity wins over local)."""
+        """Every envelope's value, by JSON pointer, and the CEL mode used (activity wins over local). `version`: the
+        variables: those a loop step inside an iteration captured when it became ready (proto, §5.3)."""
         values: dict[str, Any] = {}
         mode: str | None = None
-        v = self._view(scope)
+        v = self._view(scope, variables=variables)
         for pointer, value in pairs:
             if isinstance(value, RefValue):
                 values[pointer] = resolve.ref(v, value)
@@ -859,8 +877,9 @@ class Execution:
         step = self.sched.step(inst)
         skip = ("/collect",) if step.ref == "flow.loop@1" else ("/predicate",) if step.ref == "flow.filter@1" else ()
         pairs = [(p, v) for p, v in step.values if not any(p == s or p.startswith(s + "/") for s in skip)]
+        captured = self.sched.consume_capture(inst)  # proto (§5.3): a loop step's variables, as when it became ready
         try:
-            values, cel_mode = await self._values(step, pairs, inst.scope)
+            values, cel_mode = await self._values(step, pairs, inst.scope, captured)
         except resolve.ValueFailure as e:
             if not step.control:  # it never reached an attempt: its one row says why
                 self._queue_unstarted(inst, step, e.failure)
@@ -1273,7 +1292,6 @@ class Execution:
         return {
             "snapshot_format": SNAPSHOT_FORMAT,
             "scheduler": self.sched.to_json(),
-            "variables": self.vars,
             "secrets": list(self._secrets),
             "run_started_at": self.run_started_at.isoformat(),
             "deadline": self.deadline.isoformat(),
@@ -1295,7 +1313,6 @@ class Execution:
             raise ValueError(f"unknown snapshot format {snapshot.get('snapshot_format')!r}")
         self.program = program
         self.sched = Scheduler.from_json(program, snapshot["scheduler"])
-        self.vars = dict(snapshot["variables"])
         self._carry(remember((), tuple(snapshot["secrets"])))
         for key, step, wake, started, mode in snapshot["timers"]:
             inst = Instance(tuple((str(k), int(n)) for k, n in key), uuid.UUID(step))
