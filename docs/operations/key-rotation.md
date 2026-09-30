@@ -2,7 +2,9 @@
 
 Dewpoint uses envelope encryption:
 
-- **Data keys** (one per tenant, plus one platform key for user TOTP secrets) encrypt secrets such as Mist API tokens.
+- **Data keys** (one per tenant, plus one platform key for user TOTP secrets) encrypt secrets such as Mist API tokens,
+  and every payload a tenant's runs exchange with Temporal. A tenant gets its key when it's created; `dewpoint keys
+  ensure-tenants`, as the database owner, gives one to tenants created before (Compose's migrate step runs it).
 - The **key-encryption key (KEK)** wraps every data key. It is supplied through `DEWPOINT_KEK_B64` (with its id in
   `DEWPOINT_KEK_ID`) and is never stored in the database.
 
@@ -47,7 +49,18 @@ dewpoint keys rotate-dek --platform
 ```
 
 Existing ciphertext stays readable (old data-key versions are kept); new encryptions use the new version. This is
-independent of KEK rotation.
+independent of KEK rotation. Workers and the CLI cache a tenant's key for up to 5 minutes, so their Temporal payloads
+switch to the new version within that time.
+
+Never delete an older version before Temporal can hold no payload encrypted with it. Nothing records a version's last
+use for payloads; its bound is:
+
+> the new version's creation + 5 minutes (the cache) + twice `DEWPOINT_MAX_RUN_DURATION_DAYS` (a run, then its
+> failure handler, with the longest duration ever configured) + the Temporal namespace's retention.
+
+No run that could hold such a payload may still be open either: a run stalled past its deadline (its build's workers
+gone) keeps its history until it closes. Dewpoint has no command that deletes a data key version yet; the one that retires
+versions (sub-project 2b-4) enforces this, and the spec's other conditions for records stored under the version.
 
 ## Backups
 

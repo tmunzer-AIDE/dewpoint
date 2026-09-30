@@ -16,9 +16,14 @@ public run API arrive with sub-project 2b, and so do admission control and idemp
 `dewpoint worker` polls the `dewpoint-engine` task queue: the `RunGraph` and `LoopBatch` workflows, the version
 loader, the projection, and one activity per installed plugin node type. It needs:
 
-- `DEWPOINT_DATABASE_URL` with a login in the `dewpoint_worker` role. That role reads versions and writes `runs` and
-  `run_steps`, inside the run's tenant only (row-level security).
-- `DEWPOINT_TEMPORAL_ADDRESS` (default `localhost:7233`) and `DEWPOINT_TEMPORAL_NAMESPACE` (default `default`).
+- `DEWPOINT_DATABASE_URL` with a login in the `dewpoint_worker` role. That role reads versions and the tenant's data
+  keys, and writes `runs` and `run_steps`, inside the run's tenant only (row-level security); it also records the
+  instance in `worker_instances`.
+- `DEWPOINT_TEMPORAL_ADDRESS` (default `localhost:7233`) and `DEWPOINT_TEMPORAL_NAMESPACE` (default `default`), the
+  namespace this deployment recorded ([`deployment.md`](deployment.md)): on any other, or with none recorded, the worker
+  exits 2 before it connects.
+- The KEK (`DEWPOINT_KEK_B64`, `DEWPOINT_KEK_ID`): every payload it exchanges with Temporal is encrypted with its
+  tenant's data key. It checks its KEK at startup and every 30 seconds, and exits 3 when the check fails.
 - `DEWPOINT_CEL_SOCKET` when a `cel-evaluator` runs next to it. The worker then waits for the evaluator, asks which
   CEL profile it serves, and serves `cel.evaluate` on that profile's queue (`dewpoint-cel.<profile>`) with
   `DEWPOINT_CEL_MAX_CONCURRENT` activities at a time (default 2; match the evaluator's slots,
@@ -57,14 +62,16 @@ dewpoint dev run <version-id> --tenant <tenant-id> --input trigger.json
   simulation fails its step with `simulation_unavailable`. Timers still wait, as they would in a live run.
 - By default the command waits and prints the result. `--no-wait` prints the run id and returns.
 - Exit codes: 0 when the run succeeded; 1 when it ended otherwise, or Temporal refused to start it; 2 when it wasn't
-  admitted (each reason is printed); 3 when Temporal never confirmed the start (see below).
-- It needs `DEWPOINT_DATABASE_URL` with a login in the `dewpoint_dispatch` role, and the Temporal settings above.
+  admitted (each reason is printed: in a `production` deployment, "Production runs are off in this deployment"; a
+  trigger too large to send, over 1.75 MiB); 3 when Temporal never confirmed the start (see below).
+- It needs `DEWPOINT_DATABASE_URL` with a login in the `dewpoint_dispatch` role, the Temporal settings above, and the
+  KEK: it encrypts the start with the tenant's data key.
 
 The trigger file is test data: 2a doesn't validate it against the workflow's input schema (2b's triggers will). A
 value that breaks the schema fails the step that reads it.
 
 **An unconfirmed start.** A start whose answer is lost looks like a failure, so it's retried with the same workflow id
-(the run's id), which Temporal refuses as a duplicate if the first attempt went through. Only a confirmed refusal
+(`t:<tenant>:run:<run id>`), which Temporal refuses as a duplicate if the first attempt went through. Only a confirmed refusal
 records the run as failed (`start_failed`). If no attempt is answered at all, the run may be executing: it stays
 `running`, and the command exits 3.
 
@@ -128,7 +135,9 @@ Anyone who can view runs can read the projection, so it keeps secrets out:
 - Characters Postgres can't store (NUL, lone surrogates) show as U+FFFD, and a number JSON can't hold (NaN,
   infinity) as its name.
 
-Temporal's own history still holds the values in full until 2b's payload encryption: restrict access to Temporal.
+Temporal's own history holds every payload encrypted with the tenant's data key: its Web UI shows ciphertext. A run's
+workflow id is `t:<tenant>:run:<run id>`, a sub-flow's and a failure handler's too
+([`deployment.md`](deployment.md#encrypted-payloads)).
 
 ## How a run ends
 
@@ -139,15 +148,17 @@ Temporal's own history still holds the values in full until 2b's payload encrypt
 | `failed` | `workflow_failed` | A `fail` node ended the run. |
 | `failed` | `start_failed` | Temporal refused to start it. |
 | `failed` | `version_unusable` | This build can't load or run the version, for example a node type it lacks. Nothing ran. |
-| `failed` | `internal_error` | A bug in the interpreter. The message names the exception's type, and the worker's log has the details; please report it. |
+| `failed` | `internal_error` | A bug in the interpreter. The message names the exception's type, and the worker's log has the details, or says the result was too large to return; please report it. |
+| `failed` | `payload_too_large` | The run's outputs were too large to return (over 1.75 MiB once encrypted). A step or a loop fails with the same code, below. |
+| `failed` | `snapshot_too_large` | The run's state was too large to carry on as a new Temporal execution (over 1.5 MiB). |
 | `failed` | `terminated` | A sub-run that an operator terminated in Temporal. It couldn't record its end, so its parent did, and the step or loop that started it failed with the same code. |
 | `deadline_exceeded` | `deadline_exceeded` | The run passed `DEWPOINT_MAX_RUN_DURATION_DAYS` (default 30). Running steps were cancelled. |
 | `cancelled` | `cancelled` | The run was cancelled in Temporal. A cancel that arrives while the run's end is being written leaves that end. |
 
 Step error codes include the plugin's own codes and `config_invalid`, `output_schema_violation`, `unexpected_error`,
 `evaluation_error`, `type_mismatch`, `timeout`, `cel_profile_unavailable`, `input_too_large`, `item_cap_exceeded`,
-`iteration_cap_exceeded` and `node_type_unavailable` (the registry lists the node type, but no worker of this build
-runs it: install its plugin on the workers). A sub-flow step fails with its sub-flow's code, and with `terminated`
+`iteration_cap_exceeded`, `node_type_unavailable` (the registry lists the node type, but no worker of this build
+runs it: install its plugin on the workers) and `payload_too_large`. A sub-flow step fails with its sub-flow's code, and with `terminated`
 when an operator terminated the sub-flow; a loop fails with `terminated` when one of its batches was.
 
 ## Attempts and retries
@@ -168,9 +179,19 @@ retry settings (`max_attempts` and `timeout_s` can be overridden per step), and 
 
 - At most 100 steps, batches and sub-flows run at once per run (and per child).
 - A run counts at most 100,000 loop iterations and filter items, its children's included (`iteration_cap_exceeded`).
-- A batch's or a sub-flow's input, and a run's continue-as-new snapshot, travel through Temporal, whose payloads are
-  limited to 2 MiB: a loop body that reads very large outside values, or a very large loop, can pass it until 2b's
-  claim check.
+- Everything a run sends Temporal, or returns, is checked where it's produced, against 1.75 MiB once encrypted
+  (Temporal's limit is 2 MiB): too large fails the step, the loop or the run with `payload_too_large`, never a stuck
+  run. That covers a step's input (nothing is sent) and its output (the step ran once: its row says `applied`), a
+  sub-flow's input and its outputs, a failure handler's input (its row records the failure), and the run's outputs.
+  A loop's batch is cut by bytes as well as by count; an item that doesn't fit in a batch with what the batch reads
+  fails the loop after the items before it. Large values move by reference with 2b-1b's claim check.
+- A run continues as a new Temporal execution when its history grows long; its state must stay within 1.5 MiB, or it
+  fails with `snapshot_too_large` (a batch fails its loop).
+- A run carries the sensitive values it has learned (to mask them in its result, its sub-runs and its batches) up to
+  256 KiB: the step, sub-flow or batch that would add more fails with `payload_too_large` ("The sensitive values this
+  run would have to carry are too many"), and a trigger that holds more fails the run before any step.
+- A workflow task sends at most 3 MiB of payloads, so its completion stays under Temporal's 4 MiB message limit: more
+  wait for the next task.
 - `flow.delay` waits 0 to 30 days, and `wait_until` takes instants from year 1 to 9999 in UTC. A value outside that,
   resolved at run time, fails the step with `type_mismatch`.
 
