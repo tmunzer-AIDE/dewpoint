@@ -155,6 +155,7 @@ class RunGraph(Execution):
                 return await self._cancelled_early(start.iterations)
             workflow.logger.error("run_version_unusable", exc_info=True)
             return await self._end_early(RunEnd("failed", Failure(VERSION_UNUSABLE, _unloadable(e))), start.iterations)
+        self._charge_sent(data)  # its marker goes out with this workflow task's commands (engine 2b spec §5.2)
         try:
             program = compile_program(
                 data.graph,
@@ -178,6 +179,7 @@ class RunGraph(Execution):
                 await self._flush()
                 continued = replace(start, snapshot=self._snapshot(), iterations=self.sched.iterations)
                 if snapshot_fits(continued, workflow.payload_converter()):
+                    await self._send(continued)
                     workflow.continue_as_new(continued)
                 # engine 2b spec §5.3: too large to carry on, the run ends here, cleanly (2b-1b bounds the state)
                 self.sched.end(RunEnd("failed", Failure(SNAPSHOT_TOO_LARGE, RUN_SNAPSHOT_TOO_LARGE)))
@@ -264,12 +266,14 @@ class RunGraph(Execution):
             iterations=self.sched.iterations,
         )
         await self._project_end(summary)
-        return RunResult(
-            status=end.status,
-            outputs=outputs,
-            error=error,
-            iterations=self.sched.iterations,
-            secrets=list(self._secrets),
+        return await self._returned(
+            RunResult(
+                status=end.status,
+                outputs=outputs,
+                error=error,
+                iterations=self.sched.iterations,
+                secrets=list(self._secrets),
+            )
         )
 
     def _end_error(self, end: RunEnd) -> dict[str, Any] | None:
@@ -292,7 +296,7 @@ class RunGraph(Execution):
             iterations=iterations,
         )
         await self._shielded([], summary)
-        return RunResult(status=end.status, error=error, iterations=iterations)
+        return await self._returned(RunResult(status=end.status, error=error, iterations=iterations))
 
     async def _cancelled_early(self, iterations: int) -> RunResult:
         """Cancelled before the run restored its snapshot or started: it reports what it used before continuing as new
@@ -374,6 +378,10 @@ class RunGraph(Execution):
         written here, as a sub-flow's is)."""
         started = workflow.now().isoformat()
         try:
+            await self._send(run)
+        except asyncio.CancelledError:  # cancelled before it was sent: it never ran
+            return 0
+        try:
             result: RunResult = await workflow.execute_child_workflow(
                 "RunGraph", run, result_type=RunResult, **child_options(child)
             )
@@ -435,6 +443,7 @@ class LoopBatch(Execution):
             workflow.logger.error("batch_version_unusable", exc_info=True)
             message = f"This build can't run the version ({type(e).__name__}); the worker's log has the details."
             raise ApplicationError(message, type=VERSION_UNUSABLE, non_retryable=True) from None
+        self._charge_sent(data)  # its marker goes out with this workflow task's commands (engine 2b spec §5.2)
         try:
             if snapshot is not None:
                 self._restore(program, snapshot)
@@ -458,21 +467,24 @@ class LoopBatch(Execution):
                 await self._flush()
                 continued = replace(start, snapshot=self._snapshot(), iterations=self.sched.iterations)
                 if snapshot_fits(continued, workflow.payload_converter()):
+                    await self._send(continued)
                     workflow.continue_as_new(continued)
                 # engine 2b spec §5.3: too large to carry on, the batch ends here and its loop fails
                 stopped = Failure(SNAPSHOT_TOO_LARGE, BATCH_SNAPSHOT_TOO_LARGE).to_json()
-                return BatchResult([], [], stopped, iterations=self.sched.iterations, secrets=list(self._secrets))
+                return await self._returned(
+                    BatchResult([], [], stopped, iterations=self.sched.iterations, secrets=list(self._secrets))
+                )
         except asyncio.CancelledError:
             self.sched.end(RunEnd("cancelled", CANCELLED))
             await self._project_end(None)
-            return self._result(RunEnd("cancelled", CANCELLED))
+            return await self._returned(self._result(RunEnd("cancelled", CANCELLED)))
         except Exception as e:
             workflow.logger.error("batch_internal_error", exc_info=True)
             await self._project_end(None)  # its steps' rows land first, as a run's do
             message = f"The batch failed ({type(e).__name__}); the worker's log has the details."
             raise ApplicationError(message, type=INTERNAL_ERROR, non_retryable=True) from None
         await self._project_end(None)
-        return self._result(self.sched.ended)
+        return await self._returned(self._result(self.sched.ended))
 
     def _result(self, end: RunEnd | None) -> BatchResult:
         outcome = self.sched.outcome

@@ -219,6 +219,32 @@ async def test_a_binding_set_over_the_request_limit_fails_its_step(dev_env: Work
     assert await task_failures(handle) == []
 
 
+async def test_large_step_and_sub_flow_inputs_are_paced_under_temporals_message_limit(
+    dev_env: WorkflowEnvironment,
+) -> None:
+    """Engine 2b spec §5.2's per-task invariant at the real limits: three step inputs and two sub-flow inputs of about
+    1.6 MiB each become ready together. Sent in one workflow task, they'd pass Temporal's 4 MiB gRPC message limit,
+    and Temporal would terminate the run (test_temporal_contract.py); they go out in separate tasks."""
+    client, store = dev_env.client, MemoryStore()
+    big = 1_600_000
+    sub = G()
+    sub.settings = {"input_schema": strings("v"), "outputs": {"n": cel("size(trigger.v)")}}
+    sub.node("e", "testkit.echo@1", {"value": 1})
+    sub_id = str(store.publish(sub))
+    g = graph(**{k: ref(f"steps.{k}.output.n") for k in ("r", "s")})
+    g.node("b", "testkit.blob@1", {"size": big})
+    for k in ("x", "y", "z"):
+        g.node(k, "testkit.echo@1", {"value": ref("steps.b.output.value")}).edge("b", k)
+    for k in ("r", "s"):
+        g.node(k, "flow.run_workflow@1", {"workflow_id": sub_id, "input": {"v": ref("steps.b.output.value")}})
+        g.edge("b", k)
+    async with serving(client, store):
+        handle = await start(client, store, g, {})
+        result = await asyncio.wait_for(handle.result(), 120)
+    assert (result.status, result.outputs) == ("succeeded", {"r": big, "s": big})
+    assert await task_failures(handle) == []
+
+
 async def test_three_large_requests_are_paced_under_temporals_message_limit(dev_env: WorkflowEnvironment) -> None:
     """Three steps ready together each send about 1.6 MiB. In one workflow task that passes Temporal's 4 MiB gRPC
     message limit, and Temporal terminates the run; paced, they go out in separate tasks (review focus 4)."""

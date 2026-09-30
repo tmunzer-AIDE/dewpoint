@@ -605,9 +605,11 @@ class Execution:
     async def _project(
         self, rows: list[StepRow], summary: RunSummary | None = None, start: RunStart | None = None
     ) -> None:
+        data = ProjectInput(self.tenant_id, rows, summary, start)
+        await self._send(data)
         await workflow.execute_activity(
             PROJECT,
-            ProjectInput(self.tenant_id, rows, summary, start),
+            data,
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=RetryPolicy(maximum_interval=timedelta(seconds=30)),
         )
@@ -745,23 +747,44 @@ class Execution:
             start = end
         return out
 
+    def _task_budget(self) -> YieldBudget:
+        """The current workflow task's budget: it starts afresh when the history length changes, which happens only
+        between tasks, in a replay too. The execution's first task gets a tenth of it: that task also starts it."""
+        length = workflow.info().get_current_history_length()
+        if length != self._yield_task:
+            self._yield_task = length
+            self._yield.reset(startup=length == self._startup_task)
+        return self._yield
+
     async def _yield_point(self, record: ExpressionRecord | None, *, send: int = 0) -> None:
         """Before binding a view (`record` None) or evaluating `record` locally: when the current workflow task's budget
-        is spent, await a 1 ms durable timer, which ends the task (spec §5.6). The budget belongs to one workflow task:
-        it starts afresh when the history length changes, which happens only between tasks, in a replay too. The
-        execution's first task gets a tenth of it: that task also starts the execution. Concurrent units share the
-        budget and one timer, and each checks again once it fires. Before sending a cel.evaluate request (`send` its
-        bytes), the same wait keeps a task's requests under Temporal's gRPC message limit (#15)."""
+        is spent, await a 1 ms durable timer, which ends the task (spec §5.6). Concurrent units share the budget and
+        one timer, and each checks again once it fires. Before sending a payload (`send` its bytes), the same wait
+        keeps a task's commands under Temporal's gRPC message limit (#15, engine 2b spec §5.2)."""
         while True:
-            length = workflow.info().get_current_history_length()
-            if length != self._yield_task:
-                self._yield_task = length
-                self._yield.reset(startup=length == self._startup_task)
-            if not self._yield.must_yield(record, send=send):
+            if not self._task_budget().must_yield(record, send=send):
                 return
             if self._yield_timer is None or self._yield_timer.done():
                 self._yield_timer = asyncio.create_task(asyncio.sleep(0.001))
             await asyncio.shield(self._yield_timer)
+
+    async def _send(self, value: Any) -> None:
+        """Before a command carries `value`'s payload: wait for the next workflow task once this one has sent its
+        bytes (YIELD_SEND_BYTES), then count them. Every payload the engine sends goes through here — a step's input,
+        a request, a projection, a child's start, a continued run's input, the result — and each is at most
+        PAYLOAD_BYTES, so a task's completion stays under Temporal's gRPC message limit (engine 2b spec §5.2)."""
+        n = encoded_bytes(value, workflow.payload_converter())
+        await self._yield_point(None, send=n)
+        self._yield.charge(sent=n)
+
+    async def _returned[R](self, result: R) -> R:
+        """The execution's result, paced as a command is: it goes out with its workflow task's completion."""
+        await self._send(result)
+        return result
+
+    def _charge_sent(self, value: Any) -> None:
+        """A payload this workflow task records without sending it as a command: a local activity's result."""
+        self._task_budget().charge(sent=encoded_bytes(value, workflow.payload_converter()))
 
     # --- steps -----------------------------------------------------------------------------------------------------
 
@@ -884,6 +907,11 @@ class Execution:
         started = workflow.now().isoformat()
         try:
             try:
+                await self._send(run)
+            except asyncio.CancelledError:  # cancelled before it was sent: it never ran
+                used = 0
+                raise
+            try:
                 handle = await workflow.start_child_workflow(
                     "RunGraph", run, result_type=RunResult, **child_options(child)
                 )
@@ -964,6 +992,11 @@ class Execution:
         batch = self._batch_input(b, grant)
         used: int | None = None  # until it reports, all it was granted counts: it may have run
         try:
+            try:
+                await self._send(batch)
+            except asyncio.CancelledError:  # cancelled before it was sent: it never ran
+                used = 0
+                raise
             try:
                 handle = await workflow.start_child_workflow(
                     "LoopBatch", batch, result_type=BatchResult, **child_options(child)
@@ -1070,6 +1103,11 @@ class Execution:
                     )
                 )
                 return _Effect(failure=failure, cel_mode=cel_mode)
+            try:
+                await self._send(sent)
+            except asyncio.CancelledError:  # the run or the scope ended before it was sent: nothing ran
+                self._queue(replace(row, status="cancelled", ended_at=workflow.now().isoformat()))
+                raise
             try:
                 result = await workflow.execute_activity(
                     step_activity(step.ref),

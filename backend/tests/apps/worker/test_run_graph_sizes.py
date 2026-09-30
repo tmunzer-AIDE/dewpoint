@@ -12,6 +12,7 @@ from temporalio.api.enums.v1 import EventType
 from temporalio.client import WorkflowHandle
 from temporalio.testing import WorkflowEnvironment
 
+from dewpoint.engine.cel import route
 from dewpoint.engine.runtime import size
 from dewpoint.engine.runtime.activities import RunResult
 from dewpoint.engine.runtime.size import (
@@ -22,7 +23,7 @@ from dewpoint.engine.runtime.size import (
     STEP_INPUT_TOO_LARGE,
 )
 from tests.apps.worker.harness import MemoryStore, run_id_of, start, workers
-from tests.support.graphs import G, ref
+from tests.support.graphs import G, cel, ref
 
 LIMIT = 50_000
 ITEMS = {"type": "object", "properties": {"items": {"type": "array"}}, "required": ["items"]}
@@ -236,3 +237,33 @@ async def test_a_failure_handler_whose_input_is_too_large_never_starts_and_says_
     assert (store.runs[child].status, store.runs[child].error_code) == ("failed", PAYLOAD_TOO_LARGE)
     assert store.runs[run_id_of(handle)].status == "failed"
     assert await children_started(handle) == 0  # it was never sent
+
+
+async def scheduled_in(handle: WorkflowHandle[Any, Any], name: str) -> list[int]:
+    """The workflow task that scheduled each `name` activity, in order."""
+    return [
+        e.activity_task_scheduled_event_attributes.workflow_task_completed_event_id
+        for e in (await handle.fetch_history()).events
+        if e.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED
+        and e.activity_task_scheduled_event_attributes.activity_type.name == name
+    ]
+
+
+@pytest.mark.parametrize("cache", [1000, 0], ids=["cached", "replaying every task"])
+async def test_a_workflow_task_sends_at_most_its_bytes_of_every_command(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch, cache: int
+) -> None:
+    """Engine 2b spec §5.2's per-task invariant, with the budget lowered: three step inputs of about 30 KB, ready
+    together, pass a 70 KB budget, so the third waits for the next workflow task; replay decides the same."""
+    monkeypatch.setattr(route, "YIELD_SEND_BYTES", 70_000)
+    store = MemoryStore()
+    g = graph(**{k: cel(f"size(steps.{k}.output.value)") for k in "xyz"})
+    g.node("b", BLOB, {"size": 30_000})
+    for k in "xyz":
+        g.node(k, ECHO, {"value": ref("steps.b.output.value")}).edge("b", k)
+    async with workers(env.client, store, cache=cache):
+        handle = await start(env.client, store, g, {})
+        result = await asyncio.wait_for(handle.result(), 60)
+    assert (result.status, result.outputs) == ("succeeded", {k: 30_000 for k in "xyz"})
+    tasks = await scheduled_in(handle, "testkit.echo.v1")
+    assert len(tasks) == 3 and len(set(tasks)) == 2
