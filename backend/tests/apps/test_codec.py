@@ -13,7 +13,6 @@ from temporalio.converter import (
 )
 
 from dewpoint.apps.codec import (
-    CODEC_OVERHEAD,
     ENCODING,
     KEY_VERSION,
     TENANT,
@@ -21,6 +20,7 @@ from dewpoint.apps.codec import (
     TenantCodec,
 )
 from dewpoint.engine.runtime.ids import run_workflow_id
+from dewpoint.engine.runtime.size import CODEC_OVERHEAD
 from tests.support.keys import FixtureKeys
 
 A, B = str(uuid.UUID(int=1)), str(uuid.UUID(int=2))

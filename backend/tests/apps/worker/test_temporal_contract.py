@@ -44,8 +44,9 @@ from temporalio.exceptions import ActivityError, ApplicationError, ChildWorkflow
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer, UnsandboxedWorkflowRunner, Worker
 
-from dewpoint.apps.codec import CODEC_OVERHEAD, TENANT, KeySource, TenantCodec, data_converter
+from dewpoint.apps.codec import TENANT, KeySource, TenantCodec, data_converter
 from dewpoint.engine.runtime.ids import run_workflow_id, tenant_of
+from dewpoint.engine.runtime.size import CODEC_OVERHEAD
 from tests.support.keys import FixtureKeys, opened
 
 SDK, SERVER = "1.33.0", "1.32.0"  # what §11.1 measured

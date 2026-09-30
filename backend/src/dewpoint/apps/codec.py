@@ -36,9 +36,6 @@ ENCODING = b"binary/dewpoint-tenant-v1"
 TENANT = "dewpoint-tenant"
 KEY_VERSION = "dewpoint-key-version"
 NONCE_BYTES = 12
-# What encoding adds to a payload's serialized size, at most: the metadata above, the nonce, the tag and the inner
-# payload's own framing. The outgoing-payload guard adds it to a payload's JSON bytes (spec §5.2); a test proves it.
-CODEC_OVERHEAD = 256
 
 
 class CodecRefusedError(Exception):

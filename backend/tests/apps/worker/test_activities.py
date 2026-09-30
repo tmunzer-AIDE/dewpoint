@@ -21,15 +21,33 @@ from pydantic_core import PydanticCustomError
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
-from dewpoint.apps.worker.activities import CHECKED_FORMATS, cel_activity, remote_evaluator, step_activity_for
+from dewpoint.apps.worker.activities import (
+    CHECKED_FORMATS,
+    cel_activity,
+    engine_activities,
+    remote_evaluator,
+    step_activity_for,
+)
 from dewpoint.apps.worker.context import idempotency_key
+from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.cel import ipc
 from dewpoint.engine.cel import types as T
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
-from dewpoint.engine.runtime.activities import MAPPED, CelInput, CelResult, StepInput, StepResult
+from dewpoint.engine.runtime import size
+from dewpoint.engine.runtime.activities import (
+    MAPPED,
+    CelInput,
+    CelResult,
+    LoadVersionInput,
+    StepInput,
+    StepResult,
+    VersionData,
+)
+from dewpoint.engine.runtime.execution import VERSION_UNUSABLE
 from dewpoint.engine.runtime.ids import run_workflow_id
+from dewpoint.engine.runtime.size import PAYLOAD_TOO_LARGE, STEP_OUTPUT_TOO_LARGE, VERSION_TOO_LARGE
 from dewpoint.sdk import Node, SideEffect, StepContext, sensitive
-from tests.support.plugins.testkit import AmbiguousSend, Echo, FailN, Reconcile, Sensitive, Slow
+from tests.support.plugins.testkit import AmbiguousSend, Blob, Echo, FailN, Reconcile, Sensitive, Slow
 
 IDS = {"tenant_id": str(uuid.UUID(int=1)), "run_id": str(uuid.UUID(int=2)), "step_id": str(uuid.UUID(int=3))}
 SECRET = "hunter22"
@@ -454,3 +472,40 @@ async def test_an_activity_refuses_an_input_of_another_tenant() -> None:
     other = dataclasses.replace(step("testkit.echo@1", {"value": 1}), tenant_id=str(uuid.UUID(int=9)))
     refused = await failure(step_activity_for(Echo), other)
     assert (refused.type, refused.non_retryable, refused.details) == ("internal_error", True, ())
+
+
+async def test_an_output_too_large_to_record_fails_the_step_without_a_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Engine 2b spec §5.2: guarded where it's produced. Temporal would refuse to record the result, and the step
+    would hang in retries; the node ran, so its outcome stands, and nothing repeats it."""
+    monkeypatch.setattr(size, "PAYLOAD_BYTES", 10_000)
+    assert await call(step_activity_for(Blob), step("testkit.blob@1", {"size": 9_000}))  # fits, with the codec's share
+    refused = await failure(step_activity_for(Blob), step("testkit.blob@1", {"size": 10_000}))
+    assert (refused.type, refused.message, refused.non_retryable) == (PAYLOAD_TOO_LARGE, STEP_OUTPUT_TOO_LARGE, True)
+    assert refused.details == ({"outcome": "applied", MAPPED: True},)
+
+
+async def test_a_version_too_large_to_load_is_unusable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Its result would pass Temporal's payload limit: the run fails `version_unusable`, with a fixed message."""
+    monkeypatch.setattr(size, "PAYLOAD_BYTES", 10_000)
+    big = VersionData(
+        version_id=str(uuid.uuid4()),
+        workflow_id=str(uuid.uuid4()),
+        graph={"note": "x" * 10_000},
+        expressions=[],
+        cel_profile="",
+        manifests={},
+        subflow_version_ids={},
+        failure_handler_version_id=None,
+        engine_abi=ENGINE_ABI,
+    )
+
+    class Store:
+        async def version(self, tenant_id: str, version_id: str) -> VersionData:
+            return big
+
+        async def project(self, data: Any) -> None: ...
+
+    [load] = [a for a in engine_activities(Store(), []) if a.__name__ == "load_version"]
+    with pytest.raises(ApplicationError) as e:
+        await activity_env().run(load, LoadVersionInput(IDS["tenant_id"], big.version_id))
+    assert (e.value.type, e.value.message, e.value.non_retryable) == (VERSION_UNUSABLE, VERSION_TOO_LARGE, True)

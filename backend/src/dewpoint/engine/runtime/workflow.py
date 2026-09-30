@@ -61,6 +61,7 @@ with workflow.unsafe.imports_passed_through():
         RunEnd,
         Scheduler,
     )
+    from dewpoint.engine.runtime.size import BATCH_RESULTS_TOO_LARGE, OUTPUTS_TOO_LARGE, PAYLOAD_TOO_LARGE, fits
 
 
 HANDLED = ("failed", DEADLINE_EXCEEDED)  # the ends that run a failure handler (a cancel is no failure)
@@ -169,6 +170,8 @@ class RunGraph(Execution):
             end = self.sched.ended or RunEnd("failed", Failure("error", "The run ended without a result."))
             if end.status == "succeeded":
                 end, outputs = await self._outputs_by(end)
+            if outputs is not None and not self._returnable(outputs):  # checked here, where the result is made
+                end, outputs = RunEnd("failed", Failure(PAYLOAD_TOO_LARGE, OUTPUTS_TOO_LARGE)), None
         except asyncio.CancelledError:
             self.sched.end(RunEnd("cancelled", CANCELLED))
             result = await self._finish(RunEnd("cancelled", CANCELLED))
@@ -220,6 +223,12 @@ class RunGraph(Execution):
             return end, task.result()
         except resolve.ValueFailure as e:
             return RunEnd("failed", e.failure), None
+
+    def _returnable(self, outputs: dict[str, Any]) -> bool:
+        """The run's result, with these outputs, within Temporal's payload limit (engine 2b spec §5.2). Past it,
+        Temporal would refuse to record the result, and the workflow task would retry until the deadline."""
+        result = RunResult("succeeded", outputs, None, self.sched.iterations, list(self._secrets))
+        return fits(result, workflow.payload_converter())
 
     async def _outputs(self) -> dict[str, Any]:
         settings_outputs = self.program.graph.settings.outputs
@@ -445,13 +454,19 @@ class LoopBatch(Execution):
         if outcome is None:  # the run ended inside the batch
             end = end or RunEnd("failed", Failure("error", "The batch ended without a result."))
             return BatchResult([], [], end=end.to_json(), iterations=self.sched.iterations, secrets=list(self._secrets))
-        return BatchResult(
+        result = BatchResult(
             collected=outcome.collected,
             failures=outcome.failures,
             stopped=outcome.stopped.to_json() if outcome.stopped else None,
             iterations=self.sched.iterations,
             secrets=list(self._secrets),
         )
+        if fits(result, workflow.payload_converter()):
+            return result
+        # Temporal would refuse to record it (engine 2b spec §5.2): the loop fails instead, and no collected item is
+        # dropped silently. The iterations it used still reach the parent.
+        stopped = Failure(PAYLOAD_TOO_LARGE, BATCH_RESULTS_TOO_LARGE)
+        return BatchResult([], [], stopped.to_json(), iterations=self.sched.iterations, secrets=list(self._secrets))
 
 
 __all__ = [

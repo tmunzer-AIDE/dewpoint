@@ -169,6 +169,27 @@ class Reconcile(Node):
         return ReconcileOutput(found=True)
 
 
+class BlobConfig(BaseModel):
+    size: int = Field(ge=0, le=4 * 1024 * 1024)
+
+
+class Blob(Node):
+    """An output of `size` characters from a small config: what a step returns can pass Temporal's payload limit
+    when what it was sent doesn't (engine 2b spec §5.2)."""
+
+    type = "testkit.blob"
+    version = 1
+    title = "Blob"
+    Config = BlobConfig
+    Output = EchoOutput
+
+    async def run(self, ctx: StepContext, config: BlobConfig) -> EchoOutput:
+        return EchoOutput(value="x" * config.size)
+
+    async def simulate(self, ctx: StepContext, config: BlobConfig) -> EchoOutput:
+        return EchoOutput(value="x" * config.size)
+
+
 TESTKIT = Plugin(
-    name="testkit", version="0.0.0", nodes=(Echo, FailN, Slow, Sensitive, AmbiguousSend, SlowSend, Reconcile)
+    name="testkit", version="0.0.0", nodes=(Echo, FailN, Slow, Sensitive, AmbiguousSend, SlowSend, Reconcile, Blob)
 )

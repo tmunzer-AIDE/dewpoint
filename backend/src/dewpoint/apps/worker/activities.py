@@ -30,12 +30,14 @@ from pydantic import BaseModel, ValidationError
 from pydantic_core import PydanticSerializationError
 from pydantic_core.core_schema import ErrorType
 from temporalio import activity
+from temporalio.converter import DataConverter
 from temporalio.exceptions import ApplicationError
 
 from dewpoint.apps.cel_client import EvaluatorUnavailable, evaluate_remote
 from dewpoint.apps.worker.context import context
 from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.cel import ipc
+from dewpoint.engine.runtime import size
 from dewpoint.engine.runtime.activities import (
     APPLIED,
     CEL_EVALUATE,
@@ -81,6 +83,9 @@ _PYDANTIC_CODES = frozenset(get_args(ErrorType))  # every built-in validation er
 # without the optional library `time` is checked as `HH:MM:SS`, refusing fractions and zones. Listing them keeps the
 # check from changing when an optional format library happens to be installed.
 CHECKED_FORMATS = ("date", "uuid", "email", "ipv4", "ipv6", "regex")
+
+
+JSON = DataConverter.default.payload_converter  # what the SDK encodes a result with, before the codec
 
 
 class RunStore(Protocol):
@@ -201,7 +206,10 @@ def step_activity_for(node: type[Node]) -> Callable[[StepInput], Awaitable[StepR
         except _StepFailed as f:
             raise f.mapped() from None
         try:  # the node ran: whatever fails from here, its effect happened, so nothing is retried
-            return StepResult(output_of(result), outcome)
+            done = StepResult(output_of(result), outcome)
+            if not size.fits(done, JSON):  # Temporal would refuse to record it (engine 2b spec §5.2)
+                raise _StepFailed(size.PAYLOAD_TOO_LARGE, size.STEP_OUTPUT_TOO_LARGE, retryable=False, outcome=outcome)
+            return done
         except _StepFailed as f:
             raise f.mapped() from None
         except PydanticSerializationError:
@@ -237,6 +245,8 @@ def engine_activities(store: RunStore, plugins: Iterable[Plugin], *, abi: int = 
                 type=VERSION_UNUSABLE,
                 non_retryable=True,
             )
+        if not size.fits(version, JSON):  # its result would pass Temporal's payload limit (engine 2b spec §5.2)
+            raise ApplicationError(size.VERSION_TOO_LARGE, type=VERSION_UNUSABLE, non_retryable=True)
         return version
 
     @activity.defn(name=PROJECT)
