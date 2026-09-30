@@ -46,7 +46,10 @@
     approval: the bound applies to the whole continued input.
     - Each component has an accounting rule and a worst-case maximum: the envelope (from the exact id grammar of
       §6.1), the trigger (§3.5 bounds its envelope), learned sensitive values, the structure, and the live values.
-    - The live-state budget is fixed, and each version's open-scope cap is derived so that the whole fits.
+    - The live-state budget is fixed. Each version's open-scope cap is derived so that the whole fits, and pinned in
+      the version.
+    - A continued batch carries each value once: it drops its original items, outer scopes and variables.
+    - A handle is bounded (§3.2): a longer pointer derives a new claim.
     - A loop step inside an iteration starts only when its loop can open an iteration, or when its budget is refused.
       It reads the variables as they were when it became ready, captured as a shared version number.
 - **Parent specs:**
@@ -207,6 +210,13 @@ depth for what does enter history.
 - A handle is the internal engine type `ClaimRef(id, pointer)`, serialized under a reserved marker key. It carries
   **no taint bit** and asserts nothing: authority comes only from the stored row.
 - A pointer addresses part of a claimed value: `item` over a claimed list is `ClaimRef(X, "/7")`.
+- **A handle is bounded.** Its pointer is at most `POINTER_MAX` (initially 256 bytes, encoded).
+  - A reference that would make a longer one instead derives a new claim of the value it addresses. That happens
+    through long keys, or by extending a handle that already carries a pointer (a chain of transforms, say).
+  - An activity copies that value into a claim with a deterministic id, written like any claim (idempotent and
+    hash-checked), with the source row's taint for that part.
+  - The reference yields the new claim's handle, with an empty pointer.
+  - So a handle's encoding is at most `HANDLE_MAX`: the marker, a claim id and a `POINTER_MAX` pointer.
 - **Forged handles are refused.** Data from outside never crosses into a run as a handle: admission rejects a
   trigger containing the marker, and the activity boundary rejects plugin output containing it.
 
@@ -461,11 +471,23 @@ The input has five components, each with an accounting rule and a worst-case max
 `CODEC_OVERHEAD + ENVELOPE_MAX + TRIGGER_MAX + STRUCTURE_MAX_v(cap) + LIVE_BUDGET ≤ SNAPSHOT_MAX`
 
 So the bound holds by construction for every version:
-- The cap is computed from the version's program. Publish computes it too, and refuses a version for which not even a
-  cap of 1 fits (`version.state_too_large`). A test shows that the graph limits make this unreachable.
-- The constant maxima are computed by tests that build the largest encoding each can have.
+- **The cap is part of the pinned version.** Publish computes `OPEN_SCOPES_CAP_v`, and the version's loop depth `D_v`,
+  and stores them in the version. Runs pin the version (engine-core §7), so a later change of a constant can't change
+  how a pinned run schedules, on replay or after it continues.
+- **The maxima are computed by tests** that build the largest encoding each can have.
+- **Nothing is refused on an assumption.** The follow-up must show that a cap of at least 1 fits the largest graphs
+  the limits allow (§11.2). No publish refusal is added on the assumption that it does. If it doesn't, the limits or
+  constants change before 2b-1b's plan.
 - Continuing still measures the encoded input (the check 2b-1a added). Past `SNAPSHOT_MAX` is then a bug: the run
   fails with `snapshot_too_large` rather than retry a workflow task.
+
+**Each value travels once.** A continued input carries its envelope and its trigger beside the snapshot, and nothing
+else. Everything else is restored from the snapshot alone:
+- A continued `LoopBatch` drops `items`, `outer` and `variables` from its original `BatchInput`. The snapshot holds
+  them as the loop's item list, the frozen scopes' results and the variables, counted in components 4 and 5.
+- A continued `RunGraph` carries its variables only in the snapshot, as today.
+- So an item slice that fit the 1.75 MiB start limit is a container like any other. The budget claims it on the
+  batch's first workflow task, long before any continue.
 
 1. **The envelope:** identifiers, settings, counters and deadlines, a child's `Parent`, and the snapshot's own header.
    - Its ids are server-built, to the exact grammar of §6.1, whose longest form is `ID_MAX`.
@@ -549,8 +571,8 @@ So the bound holds by construction for every version:
        - a scope's whole result set, and its item;
        - the variables, and each older variable version kept;
        - a frozen scope's result set.
-     - A container is spillable when it's larger than `HANDLE_MAX`. A reference into a claimed container reads by
-       handle, in an activity (§3.3), as any claim.
+     - A container is spillable when it's larger than `HANDLE_MAX`. The handle that replaces it has an empty pointer
+       (§3.2). A reference into a claimed container reads by handle, in an activity (§3.3), as any claim.
    - **Bound:**
      - With every spillable container claimed, the live state is at most `HANDLE_MAX` per container.
      - The containers number at most two per scope, five per started loop, one per kept version (at most the root
@@ -620,12 +642,15 @@ So the bound holds by construction for every version:
     indexes grow;
   - many sibling loops under the cap;
   - root `set_variables` steps settling while loop steps are queued;
-  - an exhausted iteration budget.
+  - an exhausted iteration budget;
+  - a batch whose item slice is near the 1.75 MiB start limit;
+  - references through long keys, and through chained handles.
 
   For each, it measures every component against its maximum, and the whole encoded continued input against
   `SNAPSHOT_MAX`. It also checks the queued loop steps' reads, and that each one starts or settles. It reports the
-  computed maxima and the cap they leave for the largest graphs. Until the gate passes, the spec promises only that
-  continuing is guarded against size (§5.2), and the rules above stay provisional.
+  computed maxima and the cap they leave for the largest graphs, and it shows that a cap of at least 1 fits them.
+  Until the gate passes, the spec promises only that continuing is guarded against size (§5.2), and the rules above
+  stay provisional.
 - **2b-1a promises only the check:** a continued run's input past `SNAPSHOT_MAX` once encoded fails the run cleanly
   with `snapshot_too_large` (a batch fails its loop). The components above and a proven bound are 2b-1b's.
 - **History headroom:** the drain thresholds reserve room in the old run's history for the snapshot, so a structure
@@ -1332,7 +1357,7 @@ measurements establish it; the spec is revised with the measured value when that
   values (256 KiB, §5.2); the key cache's TTL (5 minutes, §6.4); the
   per-task outgoing-byte budget (3 MiB under a 4 MiB gRPC limit, §5.2); `SNAPSHOT_MAX` (1.5 MiB), the live-state
   budget (1 MiB), `TRIGGER_INLINE` (64 KiB), `SEGMENT_BYTES` (256 KiB) and `OPEN_SCOPES_CAP` (100, the most a
-  version's derived cap may be, §5.3); the
+  version's derived cap may be, §5.3); a handle's `POINTER_MAX` (256 bytes, §3.2); the
   spill floor (1 KiB, §5.4); the secret-index bounds (100,000 strings or 8 MiB, §3.7).
 - **Operational intervals:** worker health every 30 s, live for 90 s (§2.7); dispatcher and reconciler reports
   within 5 minutes (§10.6); the retention SLO's 24 hours (§10.3).
