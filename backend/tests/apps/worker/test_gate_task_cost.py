@@ -27,6 +27,7 @@ from dewpoint.engine.runtime.workflow import LoopBatch, RunGraph
 from tests.apps.worker.harness import CATALOG, TESTKIT, MemoryStore, in_process, run_id_of, start
 from tests.engine.cel.test_gate_cost import ADVERSARIAL, AT_CAPS, BINDING, TASK_CPU_TARGET_S, WORST
 from tests.support.graphs import G, cel
+from tests.support.keys import FIXTURE_CONVERTER
 
 S = {"type": "string"}
 INTS = {"type": "array", "items": {"type": "integer"}}
@@ -121,7 +122,7 @@ async def test_no_workflow_task_passes_the_cpu_target(name: str, monkeypatch: py
     g = graph().node("l", "flow.loop@1", {"items": list(range(20)), "concurrency": 10})
     g.node("x", "flow.transform@1", {"fields": {"r": cel(expr)}}).edge("l", "x", "body")
     with Timed() as executor:
-        async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with await WorkflowEnvironment.start_time_skipping(data_converter=FIXTURE_CONVERTER) as env:
             engine = Worker(
                 env.client,
                 task_queue=ENGINE_QUEUE,

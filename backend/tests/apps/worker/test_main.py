@@ -4,9 +4,13 @@
 from datetime import timedelta
 from typing import Any
 
+import pytest
+from temporalio.converter import DefaultFailureConverterWithEncodedAttributes
 from temporalio.testing import WorkflowEnvironment
 
 import dewpoint
+from dewpoint.apps.codec import TenantCodec
+from dewpoint.apps.worker import main
 from dewpoint.apps.worker.main import engine_worker
 from dewpoint.core.config import Settings
 from dewpoint.engine.runtime.build import build_id
@@ -48,3 +52,30 @@ async def test_the_engine_worker_serves_this_builds_version_of_the_deployment(ow
         "dewpoint-engine",
         build_id(dewpoint.__version__),
     )
+
+
+async def test_the_worker_connects_with_the_tenant_codec(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Engine 2b spec §6.2: every payload a worker sends or reads goes through the codec, failures too."""
+    connected: dict[str, Any] = {}
+
+    class Connected(Exception):
+        """Where the test stops the worker: nothing else of it runs."""
+
+    class Engine:
+        async def dispose(self) -> None: ...
+
+    async def recorded(*args: object) -> None: ...
+
+    async def connect(*args: object, **kwargs: Any) -> None:
+        connected.update(kwargs)
+        raise Connected
+
+    monkeypatch.setattr(main.Client, "connect", connect)
+    monkeypatch.setattr(main, "make_engine", lambda url: Engine())
+    monkeypatch.setattr(main, "make_sessionmaker", lambda engine: None)
+    monkeypatch.setattr(main, "verify_environment", recorded)
+    with pytest.raises(Connected):
+        await main.run(settings())
+    converter = connected["data_converter"]
+    assert isinstance(converter.payload_codec, TenantCodec)
+    assert converter.failure_converter_class is DefaultFailureConverterWithEncodedAttributes

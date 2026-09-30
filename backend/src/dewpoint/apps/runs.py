@@ -22,6 +22,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
+from temporalio.converter import WorkflowSerializationContext
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
@@ -178,6 +179,12 @@ async def start_run(
 
 
 async def _start(client: Client, start: RunInput, run_id: uuid.UUID) -> None:
+    workflow_id = run_workflow_id(start.tenant_id, str(run_id))
+    context = WorkflowSerializationContext(namespace=client.namespace, workflow_id=workflow_id)
+    try:  # encrypted with its tenant's key first (engine 2b spec §6.2): a start that can't be was never sent
+        await client.data_converter.with_context(context).encode([start])
+    except Exception as e:
+        raise StartRefusedError(f"The run's start couldn't be encrypted ({type(e).__name__}).") from e
     uncertain = False
     last: BaseException | None = None
     for wait in (*START_RETRY_S, None):
@@ -185,7 +192,7 @@ async def _start(client: Client, start: RunInput, run_id: uuid.UUID) -> None:
             await client.start_workflow(
                 RunGraph.run,
                 start,
-                id=run_workflow_id(start.tenant_id, str(run_id)),
+                id=workflow_id,
                 task_queue=ENGINE_QUEUE,
                 id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
             )

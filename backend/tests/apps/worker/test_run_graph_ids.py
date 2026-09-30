@@ -10,8 +10,10 @@ from typing import Any
 import pytest
 from temporalio.client import WorkflowFailureError
 from temporalio.exceptions import ApplicationError
+from temporalio.service import RPCError
 from temporalio.testing import WorkflowEnvironment
 
+from dewpoint.apps.codec import CodecRefusedError
 from dewpoint.engine.runtime.activities import BATCH, ENGINE_QUEUE, BatchInput, Parent, RunInput
 from dewpoint.engine.runtime.execution import INTERNAL_ERROR
 from dewpoint.engine.runtime.ids import run_workflow_id
@@ -37,8 +39,9 @@ async def refused(handle: Any) -> ApplicationError:
 
 
 def ids(run_id: str) -> list[str]:
-    """Workflow ids that don't name TENANT's run `run_id`."""
-    return [run_workflow_id(OTHER, run_id), run_workflow_id(TENANT, OTHER), run_id]
+    """Workflow ids that don't name TENANT's run `run_id`. One that names no tenant never gets this far: the client's
+    codec refuses to encode its input (test_a_workflow_id_that_names_no_tenant_is_never_started)."""
+    return [run_workflow_id(OTHER, run_id), run_workflow_id(TENANT, OTHER)]
 
 
 async def test_a_run_refuses_a_workflow_id_of_another_tenant_or_run(env: WorkflowEnvironment) -> None:
@@ -69,3 +72,15 @@ async def test_a_batch_refuses_a_workflow_id_of_another_tenant_or_run(env: Workf
             failure = await refused(handle)
             assert (failure.type, failure.message, failure.non_retryable) == (INTERNAL_ERROR, REFUSED, True)
     assert (store.starts, store.runs, store.rows) == ({}, {}, {})
+
+
+async def test_a_workflow_id_that_names_no_tenant_is_never_started(env: WorkflowEnvironment) -> None:
+    """An id from before 2b-1a, or any other: the client's codec has no key to encrypt the start with (spec §6.2)."""
+    store = MemoryStore()
+    version = store.add(graph().node("a", "testkit.echo@1", {"value": 1}))
+    run_id = str(uuid.uuid4())
+    start = RunInput(TENANT, run_id, version, {})
+    with pytest.raises(CodecRefusedError, match="No tenant"):
+        await env.client.start_workflow(RunGraph.run, start, id=run_id, task_queue=ENGINE_QUEUE)
+    with pytest.raises(RPCError, match="not found"):  # nothing reached Temporal
+        await env.client.get_workflow_handle(run_id).describe()

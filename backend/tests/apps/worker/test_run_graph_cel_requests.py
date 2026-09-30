@@ -5,7 +5,6 @@ well as by 1,000 binding sets, and a binding set that alone passes the limit fai
 test_real_server.py shows it at the real one."""
 
 import asyncio
-import json
 from typing import Any
 
 import pytest
@@ -17,6 +16,7 @@ from dewpoint.engine.cel import route
 from dewpoint.engine.runtime import execution
 from tests.apps.worker.harness import MemoryStore, run_id_of, start, workers
 from tests.support.graphs import G, cel, ref
+from tests.support.keys import opened
 
 SCHEMA: dict[str, Any] = {"type": "object", "properties": {"s": {"type": "string"}}, "required": ["s"]}
 
@@ -33,7 +33,7 @@ async def sent_sets(handle: WorkflowHandle[Any, Any]) -> list[int]:
     async for e in handle.fetch_history_events():
         a = e.activity_task_scheduled_event_attributes
         if e.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED and a.activity_type.name == "cel.evaluate":
-            out.append(len(json.loads(a.input.payloads[0].data)["request"]["bindings"]))
+            out.append(len((await opened(a.input.payloads[0]))["request"]["bindings"]))
     return out
 
 

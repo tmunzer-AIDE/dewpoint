@@ -25,6 +25,7 @@ from tests.apps.worker.test_deployment import build
 from tests.apps.worker.test_main import settings
 from tests.engine.replay.record import executions
 from tests.support.graphs import G, cel, ref
+from tests.support.keys import FIXTURE_CONVERTER
 from tests.support.plugins.testkit import TESTKIT
 
 
@@ -157,7 +158,8 @@ async def test_temporal_suggesting_continue_as_new_drains_the_run() -> None:
     g = graph(items=ref("steps.l.output.items"))
     g.node("l", "flow.loop@1", {"items": list(range(40)), "collect": cel("steps.x.output.value")})
     g.node("x", "testkit.echo@1", {"value": ref("item")}).edge("l", "x", "body")
-    async with await WorkflowEnvironment.start_local(dev_server_extra_args=args) as env, serving(env.client, store):
+    local = WorkflowEnvironment.start_local(data_converter=FIXTURE_CONVERTER, dev_server_extra_args=args)
+    async with await local as env, serving(env.client, store):
         handle = await start(env.client, store, g, {})
         result = await asyncio.wait_for(handle.result(), 120)
         chain = await executions(env.client, handle.id, handle.first_execution_run_id or "")

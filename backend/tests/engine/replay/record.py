@@ -7,7 +7,8 @@ the command sequence increments ENGINE_ABI (`dewpoint.engine`), which starts a n
 A scenario records every execution it ran: `<name>.json` is the run's first execution, and `<name>--<n>.json` each
 other one, in the order they're found: the runs it continued as, then its children's, and theirs. Each file keeps its
 execution's workflow id beside the events (`workflowId`): the workflows check that it names their tenant and run
-(engine 2b spec §6.1), so a replay needs the one they ran under."""
+(engine 2b spec §6.1), so a replay needs the one they ran under. Payloads are recorded encrypted, with fixture keys
+(`tests.support.keys`), and replay decrypts them with the same (§12)."""
 
 import asyncio
 import contextlib
@@ -29,6 +30,7 @@ from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.engine.runtime.workflow import RunGraph
 from tests.apps.worker.harness import TENANT, MemoryStore, workers
 from tests.engine.replay.scenarios import scenarios
+from tests.support.keys import FIXTURE_CONVERTER
 
 HERE = Path(__file__).parent
 SCRUBBED = {"identity": "replay-recorder", "stackTrace": ""}  # host names and local paths stay out of the repo
@@ -91,7 +93,10 @@ async def record() -> list[str]:
         return []
     target.mkdir(exist_ok=True)
     store = RecorderStore()
-    async with await WorkflowEnvironment.start_time_skipping() as env, workers(env.client, store):
+    async with (
+        await WorkflowEnvironment.start_time_skipping(data_converter=FIXTURE_CONVERTER) as env,
+        workers(env.client, store),
+    ):
         for name, scenario in sorted(missing.items()):
             version, run_id = store.add(scenario.build(store)), str(uuid.uuid4())
             if scenario.unusable:

@@ -12,6 +12,7 @@ from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.runtime.workflow import RunGraph
 from tests.apps.worker.harness import EVALUATOR_ONLY, RESULT_TIMEOUT_S, MemoryStore, run, run_id_of, start, workers
 from tests.support.graphs import G, cel, ref, template
+from tests.support.keys import FIXTURE_CONVERTER
 
 ECHO, IF, LOOP, FILTER = "testkit.echo@1", "flow.if@1", "flow.loop@1", "flow.filter@1"
 SET, DELAY, STOP, FAIL = "flow.set_variables@1", "flow.delay@1", "flow.stop@1", "flow.fail@1"
@@ -196,4 +197,5 @@ async def test_a_recorded_history_replays(env: WorkflowEnvironment) -> None:
         handle = await start(env.client, store, g, TRIGGER)
         await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
         history = await handle.fetch_history()
-    await Replayer(workflows=[RunGraph]).replay_workflow(WorkflowHistory.from_json(handle.id, history.to_json()))
+    replayer = Replayer(workflows=[RunGraph], data_converter=FIXTURE_CONVERTER)
+    await replayer.replay_workflow(WorkflowHistory.from_json(handle.id, history.to_json()))

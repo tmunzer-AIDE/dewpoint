@@ -4,7 +4,8 @@ import base64
 import json
 import os
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
@@ -15,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import Client
 
+from dewpoint.apps.codec import KeyringKeys, data_converter
 from dewpoint.apps.environment import verify_environment
 from dewpoint.apps.plugin_loader import PluginLoadError, installed_plugins, prepare
 from dewpoint.apps.runs import NotAdmissibleError, StartRefusedError, StartUncertainError, start_run
@@ -353,18 +355,25 @@ def worker() -> None:
         raise typer.Exit(2) from None
 
 
-async def _temporal() -> Client:
-    """A Temporal client, once this process's namespace is the one this deployment recorded (engine 2b spec §2.1)."""
+@asynccontextmanager
+async def _temporal() -> AsyncIterator[Client]:
+    """A Temporal client, once this process's namespace is the one this deployment recorded (engine 2b spec §2.1).
+    Its payloads are encrypted with each tenant's key, read through this process's database role (§6.2–6.3)."""
     settings = get_settings()
     engine = make_engine(settings.database_url)
     try:
-        await verify_environment(make_sessionmaker(engine), settings)
-    except (EnvironmentNotRecordedError, EnvironmentMismatchError) as e:
-        typer.echo(f"ERROR: {e}")
-        raise typer.Exit(2) from None
+        sessionmaker = make_sessionmaker(engine)
+        try:
+            await verify_environment(sessionmaker, settings)
+        except (EnvironmentNotRecordedError, EnvironmentMismatchError) as e:
+            typer.echo(f"ERROR: {e}")
+            raise typer.Exit(2) from None
+        keys = KeyringKeys(sessionmaker, Keyring(KekSet.from_settings(settings)))
+        yield await Client.connect(
+            settings.temporal_address, namespace=settings.temporal_namespace, data_converter=data_converter(keys)
+        )
     finally:
         await engine.dispose()
-    return await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
 
 
 @platform_cli.command("init-environment")
@@ -408,7 +417,8 @@ def deployment_set_current(
     target = build or this_build()
 
     async def _go() -> None:
-        await set_current(await _temporal(), target, wait_s=wait)
+        async with _temporal() as client:
+            await set_current(client, target, wait_s=wait)
 
     asyncio.run(_go())
     typer.echo(f"current: {target}")
@@ -419,7 +429,8 @@ def deployment_status() -> None:
     """The build new runs start on, and every version with its status: a draining one still serves its runs."""
 
     async def _go() -> Deployment:
-        return await describe(await _temporal())
+        async with _temporal() as client:
+            return await describe(client)
 
     deployment = asyncio.run(_go())
     typer.echo(f"current: {deployment.current or 'none'}")
@@ -472,17 +483,16 @@ def dev_run(
         raise typer.Exit(2)
 
     async def _go() -> tuple[uuid.UUID, RunResult | None]:
-        settings = get_settings()
-        client = await _temporal()
-        return await dev_run_version(
-            settings,
-            client,
-            tenant_id=uuid.UUID(tenant),
-            version_id=version_id,
-            trigger=trigger,
-            simulate=simulate,
-            wait=wait,
-        )
+        async with _temporal() as client:
+            return await dev_run_version(
+                get_settings(),
+                client,
+                tenant_id=uuid.UUID(tenant),
+                version_id=version_id,
+                trigger=trigger,
+                simulate=simulate,
+                wait=wait,
+            )
 
     try:
         run_id, result = asyncio.run(_go())

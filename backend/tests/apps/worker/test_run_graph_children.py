@@ -21,6 +21,7 @@ from dewpoint.engine.runtime.activities import ProjectInput, VersionData
 from dewpoint.engine.runtime.scheduler import Scheduler
 from tests.apps.worker.harness import MemoryStore, run_id_of, start, workers
 from tests.support.graphs import G, cel, ref
+from tests.support.keys import opened
 
 ECHO, LOOP, FILTER, RUN, FAIL = "testkit.echo@1", "flow.loop@1", "flow.filter@1", "flow.run_workflow@1", "flow.fail@1"
 LISTS = {"type": "object", "properties": {"items": {"type": "array"}}, "required": ["items"]}
@@ -61,7 +62,7 @@ async def test_a_loop_over_more_than_a_hundred_items_runs_in_batches_and_collect
     assert {(r.status, r.output_preview["value"]) for r in rows} == {("succeeded", "from outside")}
     history = await handle.fetch_history()
     batches = [
-        json.loads(e.start_child_workflow_execution_initiated_event_attributes.input.payloads[0].data)
+        await opened(e.start_child_workflow_execution_initiated_event_attributes.input.payloads[0])
         for e in history.events
         if e.HasField("start_child_workflow_execution_initiated_event_attributes")
     ]

@@ -11,11 +11,13 @@ from typing import Any
 import pytest
 from temporalio.api.workflowservice.v1 import DescribeWorkerDeploymentRequest, DescribeWorkerDeploymentResponse
 from temporalio.common import WorkflowIDReusePolicy
+from temporalio.converter import DataConverter
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from dewpoint.apps import runs as run_ops
 from dewpoint.apps import workflow_ops
+from dewpoint.apps.codec import data_converter
 from dewpoint.apps.runs import (
     NO_CURRENT_BUILD,
     START_FAILED,
@@ -44,6 +46,7 @@ from tests.apps.test_workflow_ops import (
     save,
     update,
 )
+from tests.support.keys import FIXTURE_CONVERTER, FixtureKeys
 from tests.support.registry import sync_test_plugins
 
 pytestmark = pytest.mark.usefixtures("development_deployment")  # runs are admitted: engine 2b spec §2.3
@@ -81,8 +84,14 @@ class FakeClient:
 
     namespace = "default"
 
-    def __init__(self, *answers: BaseException | LostAck | None, current: str | None = this_build()) -> None:
+    def __init__(
+        self,
+        *answers: BaseException | LostAck | None,
+        current: str | None = this_build(),
+        data_converter: DataConverter = FIXTURE_CONVERTER,
+    ) -> None:
         self.workflow_service = FakeDeployment(current)
+        self.data_converter = data_converter  # what the client encrypts starts with
         self.answers = list(answers)
         self.started: list[tuple[RunInput, str, str]] = []
         self.calls: list[tuple[str, WorkflowIDReusePolicy]] = []
@@ -506,3 +515,20 @@ async def test_admission_reads_the_workflow_afresh_in_a_session_that_loaded_it(
         await change_committed(api_sessionmaker, ctx, wf, change)
         with pytest.raises(NotAdmissibleError, match=REFUSED[how]):
             await run_ops.admit(s, tenant_id=ctx.tenant_id, version_id=version, abi=ENGINE_ABI)
+
+
+async def test_a_start_that_cant_be_encrypted_is_refused_and_its_run_failed(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """Engine 2b spec §6.2–6.3: a tenant whose data key can't be read (one created before 2b-1a, not yet given a key):
+    nothing reached Temporal, so the start is refused and the run recorded as failed, never left `running`."""
+    ctx, _, version = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings)
+    client = FakeClient(data_converter=data_converter(FixtureKeys(missing={str(ctx.tenant_id)})))
+    with pytest.raises(StartRefusedError, match="couldn't be encrypted"):
+        await start_run(
+            dispatch_sessionmaker, client, api_settings,  # type: ignore[arg-type]
+            tenant_id=ctx.tenant_id, version_id=version, trigger={},
+        )  # fmt: skip
+    assert client.calls == []  # never sent
+    row = await only_run(owner_sessionmaker, ctx.tenant_id)
+    assert (row.status, row.error_code) == ("failed", START_FAILED)

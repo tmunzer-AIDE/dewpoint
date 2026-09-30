@@ -13,12 +13,15 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 from dewpoint.apps import cel_client
+from dewpoint.apps.codec import KeyringKeys, data_converter
 from dewpoint.apps.environment import verify_environment
 from dewpoint.apps.plugin_loader import installed_plugins
 from dewpoint.apps.worker.activities import RunStore, cel_activity, engine_activities, remote_evaluator
 from dewpoint.apps.worker.deployment import deployment_config, set_current, this_build
 from dewpoint.apps.worker.store import DbRunStore
 from dewpoint.core.config import Settings
+from dewpoint.core.crypto.kek import KekSet
+from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.db import make_engine, make_sessionmaker
 from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, cel_queue
@@ -80,12 +83,17 @@ async def promote(client: Client) -> None:
 
 async def run(settings: Settings) -> None:
     """Raises EnvironmentNotRecordedError or EnvironmentMismatchError before connecting to Temporal: a worker never
-    serves a namespace its database wasn't recorded with (engine 2b spec §2.1)."""
+    serves a namespace its database wasn't recorded with (engine 2b spec §2.1). Every payload it sends or reads is
+    encrypted with its tenant's key, read through the worker's role (§6.2–6.3)."""
     engine = make_engine(settings.database_url)
     try:
-        await verify_environment(make_sessionmaker(engine), settings)
-        client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
-        workers = [engine_worker(client, DbRunStore(make_sessionmaker(engine)), installed_plugins(), settings)]
+        sessionmaker = make_sessionmaker(engine)
+        await verify_environment(sessionmaker, settings)
+        keys = KeyringKeys(sessionmaker, Keyring(KekSet.from_settings(settings)))
+        client = await Client.connect(
+            settings.temporal_address, namespace=settings.temporal_namespace, data_converter=data_converter(keys)
+        )
+        workers = [engine_worker(client, DbRunStore(sessionmaker), installed_plugins(), settings)]
         if settings.cel_socket:
             profile = await evaluator_profile(settings.cel_socket)
             log.info("cel_queue", profile=profile)
