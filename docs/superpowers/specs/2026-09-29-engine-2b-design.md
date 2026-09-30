@@ -50,6 +50,7 @@
       the version.
     - A continued batch carries each value once: it drops its original items, outer scopes and variables.
     - A handle is bounded (§3.2): a longer pointer derives a new claim.
+    - Queued loop steps share the execution's one budget request, so the budget's waiting needs have a maximum.
     - A loop step inside an iteration starts only when its loop can open an iteration, or when its budget is refused.
       It reads the variables as they were when it became ready, captured as a shared version number.
 - **Parent specs:**
@@ -509,10 +510,9 @@ else. Everything else is restored from the snapshot alone:
    - **What it covers:**
      - scopes: their keys, and one code per node and per edge of their region;
      - the variable versions that queued loop steps captured (below);
-     - started loops: their counters, their open and collecting indexes, their collections' headers, and their
-       budget waits;
-     - units handed out (sleeping timers, spills in flight), and the iteration budget, whose entries per child are
-       keyed by server-built ids.
+     - started loops: their counters, their open and collecting indexes, and their collections' headers;
+     - units handed out: sleeping timers, spills in flight;
+     - the iteration budget: its waiting needs, its children's grants, and its one request to its parent.
    - **Scopes:** at most `OPEN_SCOPES_CAP_v + D` iteration scopes, the root, and a batch's frozen scopes (at most
      `MAX_LOOP_DEPTH` of them, which hold no codes). Each scope's codes number at most its region's nodes plus edges.
    - **Captures:** each loop step queued in an iteration scope (ready, and not started) holds one entry. The entry
@@ -521,9 +521,13 @@ else. Everything else is restored from the snapshot alone:
    - **Loops:**
      - A loop step inside an iteration scope starts only when its loop can open an iteration at once. That means room
        under the cap, or its level's reserved scope on the progress path.
-     - It also waits while the execution's iteration budget waits for its parent's answer. When the answer comes, a
-       grant lets it start. A refusal starts it too: its loop fails `iteration_cap_exceeded` at once, and the step
-       settles under its `on_error`. The root's budget always answers at once.
+     - **Queued loop steps share one request.** A queued loop step never adds a need of its own to the budget.
+       - While the execution's one request to its parent is unanswered, every queued loop step waits on it. A budget
+         asks its parent at most once at a time.
+       - When the answer comes, a grant lets queued steps start, in scheduling order, while budget remains.
+       - A refusal starts them too, at most `IN_FLIGHT_CAP` at a time as any step. Each loop fails
+         `iteration_cap_exceeded` at its first iteration, and the step settles under its `on_error`.
+       - The root's budget always answers at once.
      - So a queued loop step always starts or settles: the progress path frees scopes, and every budget request is
        answered. It's never left queued.
      - A started loop takes the scope its own finished iteration frees, before anything else does, so it holds a
@@ -531,14 +535,23 @@ else. Everything else is restored from the snapshot alone:
      - A loop waiting for more iteration budget holds none, but no loop starts while the budget is waiting.
      - So started loops in iteration scopes number at most `OPEN_SCOPES_CAP_v + D`, and root-region loops at most the
        root region's loop steps. Root-region loop steps are never deferred.
-   - **Units:** at most `IN_FLIGHT_CAP` units are handed out at once, spills included, so the timers, handed-out
-     records and children's budget entries a snapshot keeps are bounded by it.
+   - **Units:** at most `IN_FLIGHT_CAP` units are handed out at once, spills included, so the timers and handed-out
+     records a snapshot keeps are bounded by it.
+   - **The iteration budget:**
+     - Its waiting needs are at most one per started loop, one per running filter and one per child. Queued loop steps
+       add none, and filters and children are units, so there are at most
+       `STARTED_LOOPS_v + 2 × IN_FLIGHT_CAP` of them, where `STARTED_LOOPS_v = OPEN_SCOPES_CAP_v + D_v + ROOT_LOOPS_v`.
+     - Its grants are at most one per child, so at most `IN_FLIGHT_CAP`.
+     - It has at most one request to its parent.
+     - A need is at most `NEED_MAX` and a grant at most `GRANT_MAX`, both fixed by `ID_MAX` (a child's id, a loop's
+       iteration key).
    - `STRUCTURE_MAX_v(cap)` is the sum of five terms:
      - `(cap + D_v) × (ITER_SCOPE_MAX_v + LOOP_MAX)`;
      - `ROOT_SCOPE_MAX_v + ROOT_LOOPS_v × LOOP_MAX`;
      - `FROZEN_MAX`;
      - `IN_FLIGHT_CAP × UNIT_MAX`;
-     - the budget's fixed part.
+     - `BUDGET_MAX_v(cap) = (cap + D_v + ROOT_LOOPS_v + 2 × IN_FLIGHT_CAP) × NEED_MAX + IN_FLIGHT_CAP × GRANT_MAX`,
+       plus the budget's fixed fields.
 
      The version-dependent terms:
      - `ITER_SCOPE_MAX_v`: the largest, over the version's loop regions, of the region's node and edge codes plus its
@@ -547,8 +560,8 @@ else. Everything else is restored from the snapshot alone:
      - `ROOT_LOOPS_v`: the root region's loop steps.
 
      `LOOP_MAX` and `UNIT_MAX` are fixed by the encoding and by `ID_MAX`.
-   - Accounting: the cap, the deferred start and the in-flight cap enforce it. The counts are checked as scopes open,
-     loops start and units are handed out.
+   - Accounting: the cap, the deferred start, the shared request and the in-flight cap enforce it. The counts are
+     checked as scopes open, loops start, units are handed out and needs are queued.
 5. **Live values, within `LIVE_BUDGET`:** every value the snapshot holds inline except the trigger.
    - **What it covers:**
      - settled steps' results in open scopes, and scopes' items;
@@ -605,7 +618,8 @@ else. Everything else is restored from the snapshot alone:
   - a root `set_variables` that settles while a loop step is queued isn't seen by it;
   - the same run, with the cap and with a cap large enough never to defer, reads the same values;
   - root-region loop steps and other steps still read at start;
-  - a refused iteration budget settles every queued loop step.
+  - with many queued sibling loop steps, at the scale of §11.2's counterexample, an exhausted iteration budget starts
+    or settles every one, and the budget's waiting needs stay within their maximum at every snapshot.
 
 **The rest of the design:**
 - **Merges are authoritative.** The inline threshold an activity sees (§5.4) is advisory. A result that would pass the
@@ -642,7 +656,7 @@ else. Everything else is restored from the snapshot alone:
     indexes grow;
   - many sibling loops under the cap;
   - root `set_variables` steps settling while loop steps are queued;
-  - an exhausted iteration budget;
+  - an exhausted iteration budget, with many queued sibling loop steps;
   - a batch whose item slice is near the 1.75 MiB start limit;
   - references through long keys, and through chained handles.
 
