@@ -169,6 +169,55 @@ class Reconcile(Node):
         return ReconcileOutput(found=True)
 
 
+class BlobConfig(BaseModel):
+    size: int = Field(ge=0, le=4 * 1024 * 1024)
+
+
+class Blob(Node):
+    """An output of `size` characters from a small config: what a step returns can pass Temporal's payload limit
+    when what it was sent doesn't (engine 2b spec §5.2)."""
+
+    type = "testkit.blob"
+    version = 1
+    title = "Blob"
+    Config = BlobConfig
+    Output = EchoOutput
+
+    async def run(self, ctx: StepContext, config: BlobConfig) -> EchoOutput:
+        return EchoOutput(value="x" * config.size)
+
+    async def simulate(self, ctx: StepContext, config: BlobConfig) -> EchoOutput:
+        return EchoOutput(value="x" * config.size)
+
+
+class SecretBlobConfig(BaseModel):
+    seed: str
+    size: int = Field(ge=0, le=4 * 1024 * 1024)
+
+
+class SecretBlobOutput(BaseModel):
+    token: str = sensitive()
+
+
+class SecretBlob(Node):
+    """A sensitive output of `size` characters, starting with `seed` so each step's is its own: the run learns it,
+    and carries it to be masked wherever it reappears (engine 2b spec §5.2)."""
+
+    type = "testkit.secret_blob"
+    version = 1
+    title = "Secret blob"
+    Config = SecretBlobConfig
+    Output = SecretBlobOutput
+
+    async def run(self, ctx: StepContext, config: SecretBlobConfig) -> SecretBlobOutput:
+        return SecretBlobOutput(token=(config.seed + "s" * config.size)[: config.size])
+
+    async def simulate(self, ctx: StepContext, config: SecretBlobConfig) -> SecretBlobOutput:
+        return await self.run(ctx, config)
+
+
 TESTKIT = Plugin(
-    name="testkit", version="0.0.0", nodes=(Echo, FailN, Slow, Sensitive, AmbiguousSend, SlowSend, Reconcile)
+    name="testkit",
+    version="0.0.0",
+    nodes=(Echo, FailN, Slow, Sensitive, AmbiguousSend, SlowSend, Reconcile, Blob, SecretBlob),
 )

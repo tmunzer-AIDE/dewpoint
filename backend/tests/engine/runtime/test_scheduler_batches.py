@@ -164,3 +164,31 @@ def test_a_batched_loop_survives_a_snapshot() -> None:
     s.batch_done(loop, b.start, BatchOutcome(list(b.items), []))
     [b2] = s.take_batches()
     assert b2 == Batch(loop, 100, list(range(100, 150)))
+
+
+def test_a_batch_cut_short_hands_its_remaining_items_to_the_next_one() -> None:
+    """Engine 2b spec §5.2: a batch whose items don't all fit in one payload is cut as it starts; the rest go in the
+    next batch, in order."""
+    s, loop = parent_at_loop(250)
+    [b] = s.take_batches()
+    s.cut_batch(loop, b.start, 40)
+    s.batch_done(loop, 0, BatchOutcome([i * 10 for i in range(40)], []))
+    [following] = s.take_batches()
+    assert (following.start, len(following.items), following.items[0]) == (40, 100, 40)
+    s.batch_done(loop, 40, BatchOutcome([i * 10 for i in range(40, 140)], []))
+    [last] = s.take_batches()
+    s.batch_done(loop, 140, BatchOutcome([i * 10 for i in range(140, 240)], []))
+    [tail] = s.take_batches()
+    s.batch_done(loop, 240, BatchOutcome([i * 10 for i in range(240, 250)], []))
+    assert (last.start, tail.start, len(tail.items)) == (140, 240, 10)
+    assert s.scopes[()].results["l"]["output"]["items"] == [i * 10 for i in range(250)]
+
+
+def test_a_cut_that_isnt_shorter_changes_nothing() -> None:
+    s, loop = parent_at_loop(250)
+    [b] = s.take_batches()
+    s.cut_batch(loop, b.start, 100)  # the whole batch fits
+    s.cut_batch(loop, 100, 150)  # not the batch that's running
+    s.batch_done(loop, 0, BatchOutcome(list(range(100)), []))
+    [following] = s.take_batches()
+    assert following.start == 100

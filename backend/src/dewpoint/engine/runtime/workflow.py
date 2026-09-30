@@ -50,6 +50,7 @@ with workflow.unsafe.imports_passed_through():
         _unloadable,
         child_options,
     )
+    from dewpoint.engine.runtime.ids import run_of, run_workflow_id, tenant_of
     from dewpoint.engine.runtime.program import Program, compile_program
     from dewpoint.engine.runtime.projection import mask
     from dewpoint.engine.runtime.scheduler import (
@@ -60,9 +61,33 @@ with workflow.unsafe.imports_passed_through():
         RunEnd,
         Scheduler,
     )
+    from dewpoint.engine.runtime.size import (
+        BATCH_RESULTS_TOO_LARGE,
+        BATCH_SNAPSHOT_TOO_LARGE,
+        HANDLER_INPUT_TOO_LARGE,
+        OUTPUTS_TOO_LARGE,
+        PAYLOAD_TOO_LARGE,
+        RESULT_TOO_LARGE,
+        RUN_SNAPSHOT_TOO_LARGE,
+        SECRETS_TOO_LARGE,
+        SNAPSHOT_TOO_LARGE,
+        fits,
+        snapshot_fits,
+    )
 
 
 HANDLED = ("failed", DEADLINE_EXCEEDED)  # the ends that run a failure handler (a cancel is no failure)
+
+
+def _same_run(tenant_id: str, run_id: str) -> None:
+    """The start's tenant and run are the ones its server-built workflow id names (engine 2b spec §6.1). Every store
+    write is scoped by the start's tenant, so a start that disagrees is refused before anything runs: only a bug, or a
+    start built outside Dewpoint, gets here."""
+    workflow_id = workflow.info().workflow_id
+    if tenant_of(workflow_id) != tenant_id or run_of(workflow_id) != run_id:
+        raise ApplicationError(
+            "This run's workflow id doesn't name its tenant and run.", type=INTERNAL_ERROR, non_retryable=True
+        )
 
 
 @workflow.defn(name="RunGraph", versioning_behavior=VersioningBehavior.PINNED)  # spec §7
@@ -85,6 +110,7 @@ class RunGraph(Execution):
         non-terminal until the handler has ended, so something non-terminal always holds the handler's closure,
         and with it the CEL profiles it pins (spec §4.5). The end is recorded once, counting the handler's
         iterations."""
+        _same_run(start.tenant_id, start.run_id)
         snapshot = start.snapshot
         unreadable = snapshot is not None and snapshot.get("snapshot_format") != SNAPSHOT_FORMAT
         if unreadable:
@@ -131,6 +157,7 @@ class RunGraph(Execution):
                 return await self._cancelled_early(start.iterations)
             workflow.logger.error("run_version_unusable", exc_info=True)
             return await self._end_early(RunEnd("failed", Failure(VERSION_UNUSABLE, _unloadable(e))), start.iterations)
+        self._charge_sent(data)  # its marker goes out with this workflow task's commands (engine 2b spec §5.2)
         try:
             program = compile_program(
                 data.graph,
@@ -148,14 +175,21 @@ class RunGraph(Execution):
         try:
             if snapshot is not None:
                 self._restore(program, snapshot)
-            else:
-                self._fresh(program)
+            elif not self._fresh(program):  # its trigger, or a literal, holds more sensitive values than a run carries
+                self.sched.end(RunEnd("failed", Failure(PAYLOAD_TOO_LARGE, SECRETS_TOO_LARGE)))
             if await self._drive() == CONTINUE:
                 await self._flush()
-                workflow.continue_as_new(replace(start, snapshot=self._snapshot(), iterations=self.sched.iterations))
+                continued = replace(start, snapshot=self._snapshot(), iterations=self.sched.iterations)
+                if snapshot_fits(continued, workflow.payload_converter()):
+                    await self._send(continued)
+                    workflow.continue_as_new(continued)
+                # engine 2b spec §5.3: too large to carry on, the run ends here, cleanly (2b-1b bounds the state)
+                self.sched.end(RunEnd("failed", Failure(SNAPSHOT_TOO_LARGE, RUN_SNAPSHOT_TOO_LARGE)))
             end = self.sched.ended or RunEnd("failed", Failure("error", "The run ended without a result."))
             if end.status == "succeeded":
                 end, outputs = await self._outputs_by(end)
+            if outputs is not None and not self._returnable(outputs):  # checked here, where the result is made
+                end, outputs = RunEnd("failed", Failure(PAYLOAD_TOO_LARGE, OUTPUTS_TOO_LARGE)), None
         except asyncio.CancelledError:
             self.sched.end(RunEnd("cancelled", CANCELLED))
             result = await self._finish(RunEnd("cancelled", CANCELLED))
@@ -172,20 +206,21 @@ class RunGraph(Execution):
             await self._failure_handler(pin, data, self._end_error(end))  # (a cancel meanwhile: no handler)
         return await self._finish(end, outputs, ended)
 
-    def _fresh(self, program: Program) -> None:
+    def _fresh(self, program: Program) -> bool:
         """A new run's state: its budget (the cap, or what its parent granted), the sensitive values it can see
-        already, and its variables."""
+        already, and its variables. False when those values are more than a run carries (engine 2b spec §5.2)."""
         self.program = program
         parent = self.parent
         budget = Budget(ITERATION_CAP, root=True) if parent is None else Budget(parent.grant, root=False)
         self.sched = Scheduler(program, budget=budget)
-        self._learn(self.trigger, program.graph.settings.input_schema)
+        learned = self._learn(self.trigger, program.graph.settings.input_schema)
         for step in program.steps.values():  # sensitive literals in plugin configs: masked from the start
-            if not step.control:
-                self._learn(resolve.assemble(step.config, {}), program.manifests[step.ref]["config_schema"])
+            if learned and not step.control:
+                learned = self._learn(resolve.assemble(step.config, {}), program.manifests[step.ref]["config_schema"])
         schema = program.graph.settings.vars_schema
         self.vars = {k: p.get("default") for k, p in sorted(schema.get("properties", {}).items())}
         self.sched.start()
+        return learned
 
     async def _outputs_by(self, end: RunEnd) -> tuple[RunEnd, dict[str, Any] | None]:
         """The workflow's outputs, within the run's deadline. Past it, their evaluation is cancelled and the run ends
@@ -208,6 +243,12 @@ class RunGraph(Execution):
         except resolve.ValueFailure as e:
             return RunEnd("failed", e.failure), None
 
+    def _returnable(self, outputs: dict[str, Any]) -> bool:
+        """The run's result, with these outputs, within Temporal's payload limit (engine 2b spec §5.2). Past it,
+        Temporal would refuse to record the result, and the workflow task would retry until the deadline."""
+        result = RunResult("succeeded", outputs, None, self.sched.iterations, list(self._secrets))
+        return fits(result, workflow.payload_converter())
+
     async def _outputs(self) -> dict[str, Any]:
         settings_outputs = self.program.graph.settings.outputs
         pairs = [(pointer_str(p), v) for p, v in iter_values(settings_outputs, ("settings", "outputs"))]
@@ -218,23 +259,31 @@ class RunGraph(Execution):
     async def _finish(
         self, end: RunEnd, outputs: dict[str, Any] | None = None, ended: datetime | None = None
     ) -> RunResult:
-        error = self._end_error(end)
+        end, result = self._final(end, outputs, self.sched.iterations, list(self._secrets))
         summary = RunSummary(
             run_id=self.run_id,
             status=end.status,
             ended_at=(ended or workflow.now()).isoformat(),
-            error_code=error["code"] if error else None,
-            error_message=error["message"] if error else None,
+            error_code=result.error["code"] if result.error else None,
+            error_message=result.error["message"] if result.error else None,
             iterations=self.sched.iterations,
         )
         await self._project_end(summary)
-        return RunResult(
-            status=end.status,
-            outputs=outputs,
-            error=error,
-            iterations=self.sched.iterations,
-            secrets=list(self._secrets),
-        )
+        return await self._returned(result)
+
+    def _final(
+        self, end: RunEnd, outputs: dict[str, Any] | None, iterations: int, secrets: list[str]
+    ) -> tuple[RunEnd, RunResult]:
+        """The run's end and its result, checked before either is recorded: every way a run ends returns through
+        here (engine 2b spec §5.2). Outputs were checked where they were made, and everything else a result carries
+        is bounded (a stored message, SECRETS_BYTES), so a result past the limit anyway is a bug: the run ends as one,
+        with no outputs, so nothing it returns needs masking by its parent, and its workflow task never retries."""
+        result = RunResult(end.status, outputs, self._end_error(end), iterations, secrets)
+        if fits(result, workflow.payload_converter()):
+            return end, result
+        workflow.logger.error("run_result_too_large")
+        end = RunEnd("failed", Failure(INTERNAL_ERROR, RESULT_TOO_LARGE))
+        return end, RunResult(end.status, None, self._end_error(end), iterations, [])
 
     def _end_error(self, end: RunEnd) -> dict[str, Any] | None:
         """The run's error as it's stored: its summary, its result and its failure handler's trigger all say this."""
@@ -246,17 +295,17 @@ class RunGraph(Execution):
     async def _end_early(self, end: RunEnd, iterations: int) -> RunResult:
         """The run ends before it has a program: nothing ran in this execution, so only the run is projected, with
         what it used before continuing as new (`iterations`)."""
-        error = self._stored(end.failure.to_json() if end.failure is not None else None)
+        end, result = self._final(end, None, iterations, [])
         summary = RunSummary(
             run_id=self.run_id,
             status=end.status,
             ended_at=workflow.now().isoformat(),
-            error_code=error["code"] if error else None,
-            error_message=error["message"] if error else None,
+            error_code=result.error["code"] if result.error else None,
+            error_message=result.error["message"] if result.error else None,
             iterations=iterations,
         )
         await self._shielded([], summary)
-        return RunResult(status=end.status, error=error, iterations=iterations)
+        return await self._returned(result)
 
     async def _cancelled_early(self, iterations: int) -> RunResult:
         """Cancelled before the run restored its snapshot or started: it reports what it used before continuing as new
@@ -281,7 +330,8 @@ class RunGraph(Execution):
         This run's end is already decided: a cancel meanwhile comes too late to change it. It cancels the handler,
         which reports back first, so its iterations still count."""
         version, workflow_id = pin
-        child = str(workflow.uuid4())
+        child_run = str(workflow.uuid4())
+        child = run_workflow_id(self.tenant_id, child_run)  # its workflow id, and its key in this budget
         grant = self.sched.budget.start_child(child, SUBFLOW_GRANT)
         parent = Parent(
             workflow_id=workflow.info().workflow_id,
@@ -302,7 +352,7 @@ class RunGraph(Execution):
         }
         run = RunInput(
             self.tenant_id,
-            child,
+            child_run,
             version,
             trigger,
             self.mode,
@@ -313,6 +363,12 @@ class RunGraph(Execution):
             checkpoint_events=self.checkpoint_events,
             drain_events=self.drain_events,
         )
+        if not fits(run, workflow.payload_converter()):  # engine 2b spec §5.2: never sent; its row says why
+            self.sched.budget.settle_child(child, 0)
+            failure = Failure(PAYLOAD_TOO_LARGE, HANDLER_INPUT_TOO_LARGE)
+            await self._lost_end(run, workflow.now().isoformat(), failure)
+            await self._send_signals()
+            return
         handler = asyncio.create_task(self._handler(run, child))
         while not handler.done():  # it draws its iterations from this run: answer as it asks
             wake = asyncio.create_task(workflow.wait_condition(lambda: bool(self._mail or self._answers)))
@@ -330,6 +386,10 @@ class RunGraph(Execution):
         """The failure handler's run: the iterations it used, or None when it ended without saying (its end is then
         written here, as a sub-flow's is)."""
         started = workflow.now().isoformat()
+        try:
+            await self._send(run)
+        except asyncio.CancelledError:  # cancelled before it was sent: it never ran
+            return 0
         try:
             result: RunResult = await workflow.execute_child_workflow(
                 "RunGraph", run, result_type=RunResult, **child_options(child)
@@ -349,6 +409,7 @@ class LoopBatch(Execution):
         they would inline, with the loop's concurrency and error policy, over read-only copies of the scopes around
         the loop; their rows go into the parent's run. It returns what they collected, the failures, and how many
         iterations it used. A fail or stop node, or the deadline, ends the run: the batch reports it as `end`."""
+        _same_run(start.tenant_id, start.run_id)
         snapshot = start.snapshot
         if snapshot is not None and snapshot.get("snapshot_format") != SNAPSHOT_FORMAT:  # it can't carry on: fail
             message = "This build can't read the batch's continue-as-new snapshot."  # its loop (decision 4)
@@ -391,6 +452,7 @@ class LoopBatch(Execution):
             workflow.logger.error("batch_version_unusable", exc_info=True)
             message = f"This build can't run the version ({type(e).__name__}); the worker's log has the details."
             raise ApplicationError(message, type=VERSION_UNUSABLE, non_retryable=True) from None
+        self._charge_sent(data)  # its marker goes out with this workflow task's commands (engine 2b spec §5.2)
         try:
             if snapshot is not None:
                 self._restore(program, snapshot)
@@ -412,31 +474,62 @@ class LoopBatch(Execution):
                 )
             if await self._drive() == CONTINUE:
                 await self._flush()
-                workflow.continue_as_new(replace(start, snapshot=self._snapshot(), iterations=self.sched.iterations))
+                continued = replace(start, snapshot=self._snapshot(), iterations=self.sched.iterations)
+                if snapshot_fits(continued, workflow.payload_converter()):
+                    await self._send(continued)
+                    workflow.continue_as_new(continued)
+                # engine 2b spec §5.3: too large to carry on, the batch ends here and its loop fails
+                stopped = Failure(SNAPSHOT_TOO_LARGE, BATCH_SNAPSHOT_TOO_LARGE).to_json()
+                return await self._returned(
+                    self._checked(
+                        BatchResult([], [], stopped, iterations=self.sched.iterations, secrets=list(self._secrets))
+                    )
+                )
         except asyncio.CancelledError:
             self.sched.end(RunEnd("cancelled", CANCELLED))
             await self._project_end(None)
-            return self._result(RunEnd("cancelled", CANCELLED))
+            return await self._returned(self._result(RunEnd("cancelled", CANCELLED)))
         except Exception as e:
             workflow.logger.error("batch_internal_error", exc_info=True)
             await self._project_end(None)  # its steps' rows land first, as a run's do
             message = f"The batch failed ({type(e).__name__}); the worker's log has the details."
             raise ApplicationError(message, type=INTERNAL_ERROR, non_retryable=True) from None
         await self._project_end(None)
-        return self._result(self.sched.ended)
+        return await self._returned(self._result(self.sched.ended))
 
     def _result(self, end: RunEnd | None) -> BatchResult:
         outcome = self.sched.outcome
         if outcome is None:  # the run ended inside the batch
             end = end or RunEnd("failed", Failure("error", "The batch ended without a result."))
-            return BatchResult([], [], end=end.to_json(), iterations=self.sched.iterations, secrets=list(self._secrets))
-        return BatchResult(
+            ended = BatchResult(
+                [], [], end=end.to_json(), iterations=self.sched.iterations, secrets=list(self._secrets)
+            )
+            return self._checked(ended)
+        result = BatchResult(
             collected=outcome.collected,
             failures=outcome.failures,
             stopped=outcome.stopped.to_json() if outcome.stopped else None,
             iterations=self.sched.iterations,
             secrets=list(self._secrets),
         )
+        if fits(result, workflow.payload_converter()):
+            return result
+        # Temporal would refuse to record it (engine 2b spec §5.2): the loop fails instead, and no collected item is
+        # dropped silently. The iterations it used still reach the parent.
+        stopped = Failure(PAYLOAD_TOO_LARGE, BATCH_RESULTS_TOO_LARGE)
+        return self._checked(
+            BatchResult([], [], stopped.to_json(), iterations=self.sched.iterations, secrets=list(self._secrets))
+        )
+
+    def _checked(self, result: BatchResult) -> BatchResult:
+        """A result with nothing collected carries only an error and the bounded sensitive values, so past the limit
+        anyway is a bug (engine 2b spec §5.2): the batch fails its loop as one, with nothing its parent would need to
+        mask, and its workflow task never retries."""
+        if fits(result, workflow.payload_converter()):
+            return result
+        workflow.logger.error("batch_result_too_large")
+        stopped = Failure(INTERNAL_ERROR, RESULT_TOO_LARGE).to_json()
+        return BatchResult([], [], stopped, iterations=result.iterations, secrets=[])
 
 
 __all__ = [

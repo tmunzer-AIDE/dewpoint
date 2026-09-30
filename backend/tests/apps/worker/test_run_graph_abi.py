@@ -11,7 +11,7 @@ from typing import Any
 from temporalio.testing import WorkflowEnvironment
 
 from dewpoint.engine import ENGINE_ABI
-from tests.apps.worker.harness import RESULT_TIMEOUT_S, MemoryStore, start, start_version, workers
+from tests.apps.worker.harness import RESULT_TIMEOUT_S, MemoryStore, run_id_of, start, start_version, workers
 from tests.support.graphs import G
 
 OLD = ENGINE_ABI - 1  # the build before this one
@@ -36,7 +36,7 @@ async def test_a_version_of_another_abi_fails_before_any_step_runs(env: Workflow
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     assert result.error is not None
     assert (result.status, result.error["code"], result.error["message"]) == ("failed", "version_unusable", REFUSED)
-    assert store.steps(handle.id) == []
+    assert store.steps(run_id_of(handle)) == []
 
 
 async def test_a_sub_flow_or_failure_handler_of_another_abi_fails_where_it_starts(env: WorkflowEnvironment) -> None:

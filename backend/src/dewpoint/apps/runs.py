@@ -11,8 +11,9 @@ locks the other side takes too:
 
 Then `RunGraph` starts, with the run's id as its workflow id. A lost acknowledgement looks like a failure, so an
 uncertain start is repeated with the same id: Temporal refuses a duplicate id (`REJECT_DUPLICATE`, which also covers
-a run that has already finished), and that refusal confirms the first start. Only a confirmed refusal records the run
-as failed (`start_failed`)."""
+a run that has already finished), and that refusal confirms the first start. Only a confirmed refusal, or a start
+never sent, records the run as failed (`start_failed`). The client encrypts a start before sending it, so a start the
+codec refuses was never sent (`CodecRefusedError`)."""
 
 import asyncio
 import uuid
@@ -22,22 +23,33 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
+from temporalio.converter import DataConverter, WorkflowSerializationContext
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
+from dewpoint.apps.codec import CodecRefusedError
 from dewpoint.apps.worker.deployment import current_abi
 from dewpoint.apps.workflow_ops import abi_reasons
 from dewpoint.core.config import Settings
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.runs import Run
 from dewpoint.core.models.workflows import WorkflowVersion
+from dewpoint.core.platform.service import NOT_RECORDED, PRODUCTION, recorded
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.runs import service as runs
 from dewpoint.core.workflows.service import lock_for_admission, other_abi
+from dewpoint.engine import ENGINE_ABI
+from dewpoint.engine.runtime import size
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, LIVE, RunInput
+from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.engine.runtime.workflow import RunGraph
 
 START_FAILED = "start_failed"
+PRODUCTION_RUNS_DISABLED = (
+    "Production runs are off in this deployment: no run starts in a production deployment until its gate lifts "
+    "(engine 2b spec §2). A development deployment, on its own database and Temporal namespace, runs synthetic "
+    "fixtures."
+)
 NO_CURRENT_BUILD = (
     "No Dewpoint build is current in the `dewpoint-engine` deployment, so no worker would run it: make one current "
     "with `dewpoint deployment set-current`."
@@ -92,7 +104,15 @@ async def admit(
 ) -> Run:
     """Insert the run, or raise NotAdmissibleError. Call it inside a READ COMMITTED transaction. `abi` is the engine
     ABI of the deployment's current build, where the run will start (`current_abi`; None: no build is current). The
-    admitting process's own build doesn't matter: during a rollout, both builds' processes admit runs."""
+    process that starts the run must be a build of that ABI, since the start is written for its own (`start_run`).
+
+    First, what this deployment is (engine 2b spec §2.3): with no record, or in production while the gate is off, it
+    admits nothing — every start path comes through here, the dev CLI included."""
+    platform = await recorded(s)
+    if platform is None:
+        raise NotAdmissibleError([NOT_RECORDED])
+    if platform.environment == PRODUCTION and not platform.production_runs:
+        raise NotAdmissibleError([PRODUCTION_RUNS_DISABLED])
     await tenant_scope(s, tenant_id)
     version = await s.get(WorkflowVersion, version_id)
     if version is None:
@@ -124,6 +144,14 @@ async def admit(
     )
 
 
+def other_build(abi: int) -> str:
+    return (
+        f"The current build runs engine ABI {abi}, and this process is a build of ABI {ENGINE_ABI}, whose starts it "
+        f"can't read: start runs from a process of the current build, or make a build of ABI {ENGINE_ABI} current "
+        "first."
+    )
+
+
 async def start_run(
     sessionmaker: async_sessionmaker[AsyncSession],
     client: Client,
@@ -136,20 +164,30 @@ async def start_run(
     started_by: uuid.UUID | None = None,
 ) -> uuid.UUID:
     """Admit the run and start it. Raises NotAdmissibleError, StartRefusedError (the run is recorded as failed) or
-    StartUncertainError (the run stays `running`: it may be executing). A promotion between the admission and the
-    start is caught when the run loads its version (§7)."""
+    StartUncertainError (the run stays `running`: it may be executing). Only a build of the current build's ABI starts
+    runs: a start is written for its own ABI (engine 2b spec §6.6). A promotion between the admission and the start is
+    caught when the run loads its version (§7). A start too large to send is refused before admission, so
+    it leaves no row (engine 2b spec §5.2)."""
+
+    def start_of(run_id: uuid.UUID) -> RunInput:
+        return RunInput(
+            tenant_id=str(tenant_id),
+            run_id=str(run_id),
+            version_id=str(version_id),
+            trigger=trigger,
+            mode=mode,
+            max_run_duration_s=settings.max_run_duration_days * 86_400,
+            cel_schedule_to_start_s=settings.cel_schedule_to_start_s,
+        )
+
+    if not size.fits(start_of(uuid.UUID(int=0)), DataConverter.default.payload_converter):  # a run id's length
+        raise NotAdmissibleError([size.RUN_INPUT_TOO_LARGE])
     abi = await current_abi(client)  # before the transaction: no lock is held across a call to Temporal
+    if abi is not None and abi != ENGINE_ABI:  # its start is written for this build's ABI, which that build can't read
+        raise NotAdmissibleError([other_build(abi)])
     async with sessionmaker() as s, s.begin():
         run = await admit(s, tenant_id=tenant_id, version_id=version_id, abi=abi, mode=mode, started_by=started_by)
-    start = RunInput(
-        tenant_id=str(tenant_id),
-        run_id=str(run.id),
-        version_id=str(version_id),
-        trigger=trigger,
-        mode=mode,
-        max_run_duration_s=settings.max_run_duration_days * 86_400,
-        cel_schedule_to_start_s=settings.cel_schedule_to_start_s,
-    )
+    start = start_of(run.id)
     try:
         await _start(client, start, run.id)
     except StartRefusedError as e:
@@ -162,7 +200,17 @@ async def start_run(
     return run.id
 
 
+def _unencrypted(e: BaseException) -> str:
+    return f"The run's start couldn't be encrypted ({type(e.__cause__ or e).__name__})."
+
+
 async def _start(client: Client, start: RunInput, run_id: uuid.UUID) -> None:
+    workflow_id = run_workflow_id(start.tenant_id, str(run_id))
+    context = WorkflowSerializationContext(namespace=client.namespace, workflow_id=workflow_id)
+    try:  # encrypted with its tenant's key first (engine 2b spec §6.2): a start that can't be was never sent
+        await client.data_converter.with_context(context).encode([start])
+    except Exception as e:
+        raise StartRefusedError(_unencrypted(e)) from e
     uncertain = False
     last: BaseException | None = None
     for wait in (*START_RETRY_S, None):
@@ -170,13 +218,17 @@ async def _start(client: Client, start: RunInput, run_id: uuid.UUID) -> None:
             await client.start_workflow(
                 RunGraph.run,
                 start,
-                id=str(run_id),
+                id=workflow_id,
                 task_queue=ENGINE_QUEUE,
                 id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
             )
             return
         except WorkflowAlreadyStartedError:
             return  # an earlier attempt was accepted; its answer was lost
+        except CodecRefusedError as e:  # the client encrypts the start again, and failed: this attempt wasn't sent
+            if not uncertain:
+                raise StartRefusedError(_unencrypted(e)) from e
+            last = e  # an earlier attempt was sent, and may have been accepted
         except RPCError as e:
             if e.status in _REFUSED and not uncertain:
                 raise StartRefusedError(f"Temporal refused the run ({e.status.name}).") from e
@@ -193,6 +245,7 @@ async def _start(client: Client, start: RunInput, run_id: uuid.UUID) -> None:
 
 __all__ = [
     "START_FAILED",
+    "PRODUCTION_RUNS_DISABLED",
     "NO_CURRENT_BUILD",
     "START_RETRY_S",
     "NotAdmissibleError",

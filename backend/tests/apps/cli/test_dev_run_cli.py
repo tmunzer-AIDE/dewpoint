@@ -10,9 +10,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from temporalio.converter import DefaultFailureConverterWithEncodedAttributes
 from typer.testing import CliRunner
 
 from dewpoint.apps.cli import main as cli
+from dewpoint.apps.codec import TenantCodec
 from dewpoint.apps.runs import NotAdmissibleError, StartRefusedError, StartUncertainError
 from dewpoint.core.config import get_settings
 from dewpoint.engine.runtime.activities import RunResult
@@ -32,7 +34,12 @@ def cli_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DEWPOINT_KEK_B64", base64.b64encode(b"k" * 32).decode())
     monkeypatch.setenv("DEWPOINT_PUBLIC_ORIGIN", "https://dewpoint.test")
     monkeypatch.setattr(cli, "Client", _Client)
+    monkeypatch.setattr(cli, "verify_environment", _recorded)  # the check itself: tests/apps/test_environment.py
     get_settings.cache_clear()
+
+
+async def _recorded(*args: Any) -> None:
+    """A deployment whose record matches: the CLI's Temporal commands check it before connecting (2b spec §2.1)."""
 
 
 def _answer(monkeypatch: pytest.MonkeyPatch, outcome: RunResult | Exception, seen: dict[str, Any]) -> None:
@@ -113,3 +120,23 @@ def test_an_input_that_isnt_a_json_object_is_refused_before_anything_starts(
         cli.app, ["dev", "run", str(uuid.uuid4()), "--tenant", str(uuid.uuid4()), "--input", str(trigger)]
     )
     assert (result.exit_code, result.output) == (2, "ERROR: --input must hold a JSON object\n") and seen == {}
+
+
+@pytest.mark.usefixtures("cli_env")
+def test_the_cli_connects_with_the_tenant_codec(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Engine 2b spec §6.2: the dev CLI's start and its result go through the codec, failures too."""
+    connected: dict[str, Any] = {}
+
+    class Recording(_Client):
+        @staticmethod
+        async def connect(*args: Any, **kwargs: Any) -> "_Client":
+            connected.update(kwargs)
+            return _Client()
+
+    monkeypatch.setattr(cli, "Client", Recording)
+    _answer(monkeypatch, RunResult("succeeded", {}), {})
+    result = CliRunner().invoke(cli.app, ["dev", "run", str(uuid.uuid4()), "--tenant", str(uuid.uuid4())])
+    assert result.exit_code == 0, result.output
+    converter = connected["data_converter"]
+    assert isinstance(converter.payload_codec, TenantCodec)
+    assert converter.failure_converter_class is DefaultFailureConverterWithEncodedAttributes

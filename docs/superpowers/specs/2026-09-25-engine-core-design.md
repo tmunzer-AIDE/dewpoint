@@ -93,6 +93,15 @@
   - Revision 5.6.1 (issue #15): a `cel.evaluate` request is cut by its JSON bytes as well as by 1,000 binding sets,
     a binding set that alone passes 1.75 MiB is `input_too_large`, and a workflow task sends at most 3 MiB of CEL
     requests (§5.6, §5.7). A run's commands can change, so `engine_abi` becomes 4, with its own golden histories.
+  - Revision 5.7 (sub-project 2b-1a, from `2026-09-29-engine-2b-design.md` §5.2 and §6): every run's workflow id is
+    built from its tenant and its run, a sub-flow's and a failure handler's too (§9); every payload a run sends
+    Temporal or returns is checked where it's produced, and fails with `payload_too_large` or
+    `snapshot_too_large` rather than retry a workflow task; the sensitive values a run carries are bounded (256 KiB),
+    so every result without outputs fits; a workflow task's byte budget covers every command it sends (§5.6, §5.7).
+    `engine_abi` becomes 5, with its own golden histories, recorded encrypted. A start the client can't encrypt was
+    never sent, so it fails with `start_failed` (§9). Since requests are encrypted from ABI 5 on, a `cel.evaluate`
+    queue names its ABI as well as its profile (§5.7, §7), and only a build of the current build's ABI starts runs
+    (§7).
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
   This spec **narrows parent §6.4** (where CEL runs) and resolves the CEL item in parent §15.
 - **Evidence:** CEL spike, branch `spike/cel-evaluation`, commits `d6a8162` and `13a62e1`. See
@@ -653,8 +662,8 @@ result is recorded in history. This is the parent's `eval` activity (§6.5).
   - Thresholds: 13,000 iterations, 5.5 MiB, 2,700,000 work units or 65,000 bound values (§5.5), a third below the
     first ones (20,000, 8 MiB, 4,000,000, 200 evaluations and 100,000), which took three of gate 7b's loads past 1 s
     on Linux.
-  - Apart from them, the cel.evaluate requests a task sends: at most 3 MiB (§5.7). It has no startup share, since that
-    limit is Temporal's, not CPU.
+  - Apart from them, the payloads a task sends: at most 3 MiB, every command's, its result's and a local activity's
+    marker (§5.7; 2b spec §5.2). It has no startup share, since that limit is Temporal's, not CPU.
   - The decision uses only stored bounds and a count, so it replays identically. The timer events count toward the continue-as-new threshold.
   - **This is a policy to measure, not a proven CPU bound.** A p99 latency says nothing about the worst case.
     Before local evaluation is enabled, the plan must run an adversarial test: expressions that max out the
@@ -724,8 +733,8 @@ not inside a worker that holds credentials.
   outcome `input_too_large`, and no request is sent for it (issue #15); nor for the sets after it, which can't change
   the result (a filter fails at its first failing item), so a workflow task never measures more than one refused set. A workflow task sends at most 3 MiB of these
   requests (`YIELD_SEND_BYTES`); the next one waits for the next task, so CEL requests alone can't push a task's
-  completion past Temporal's 4 MiB gRPC message limit, past which Temporal terminates the workflow. Other commands in
-  the same task aren't counted: the invariant over every command is sub-project 2b's.
+  completion past Temporal's 4 MiB gRPC message limit, past which Temporal terminates the workflow. Since revision
+  5.7 the budget counts every command a task sends, each payload at most 1.75 MiB once encoded (2b spec §5.2).
 - **Responses ≤ 256 KiB** plus the envelope. A malformed or oversized frame closes the connection.
 - **Aggregate limits.** The evaluator container has cgroup limits: memory (Compose `mem_limit`; initially 2 GiB),
   CPU, and pids.
@@ -745,7 +754,8 @@ not inside a worker that holds credentials.
 
 **Profile routing (fail closed):**
 - **One task queue per profile:** `RunGraph` schedules `cel.evaluate` on `dewpoint-cel.<profile>`, using the
-  **version's** profile. It never relies on the workflow's build to choose the runtime.
+  **version's** profile. It never relies on the workflow's build to choose the runtime. Since revision 5.7 the queue
+  also names the build's ABI, `dewpoint-cel.abi<ABI>.<profile>` (§7).
 - **Identity check at startup.** The evaluator computes its identity from its installed runtime distribution
   (`importlib.metadata`), its function library version and its classifier version. The activity worker polls a
   profile's queue only if the evaluator's identity equals that profile.
@@ -1068,7 +1078,9 @@ cancel while the version loads cancels the run.
   - **Continue-as-new** stays on `dewpoint-engine` without upgrade-on-continue-as-new, so it inherits the version.
   - **CEL queues** (`dewpoint-cel.<profile>`) are deliberately **not** part of the engine deployment. They're served
     by the CEL activity workers whatever the engine build. Correctness comes from profile routing (§5.7), not from
-    inheritance.
+    inheritance. Since revision 5.7 (ABI 5) a queue names the ABI too, `dewpoint-cel.abi<ABI>.<profile>`: a request is
+    encrypted from ABI 5 on, which a build before it can't read (nor can ABI 5 read that build's plain requests), so
+    each ABI's requests reach only CEL workers of its builds (2b spec §6.6).
     - The request schema is versioned (`cel.evaluate.v1`).
     - A CEL worker serves every schema version that any undrained engine build uses.
   - A build registers every `type@version` that isn't `retired` (§4.5). Old builds run until Temporal reports them drained.
@@ -1086,9 +1098,12 @@ cancel while the version loads cancels the run.
   - **A version runs only on a build of its `engine_abi`.** A version's commands depend on the ABI it was published
     under. Once a build with a new ABI is current, the old ABI's versions can't start runs until each workflow is
     published again with it; runs already pinned to the old build finish there.
-    - Admission compares the version's closure with the deployment's current build, where a new run starts, and not
-      with the admitting process's build: during a rollout, both builds' processes start runs (§4.5). Before the
-      promotion, the new ABI's versions are refused; after it, the old one's; with no build current, all.
+    - Admission compares the version's closure with the deployment's current build, where a new run starts. Since
+      revision 5.7 the process that starts the run must be a build of that ABI too: a start is written for its own
+      ABI (from ABI 5 on, encrypted under a `t:` workflow id), which a build of another ABI can't read (2b spec
+      §6.6). So during a rollout the old build's processes start runs until the promotion, and the new build's after
+      it (§4.5). Before the promotion, the new ABI's versions are refused; after it, the old one's; with no build
+      current, all.
     - Dispatch (2b) checks a queued request's frozen version the same way. One the current build can't run is
       cancelled explicitly (`engine_abi_changed`, §4.5).
     - Publishing refuses a draft that would pin a version of another ABI, so a parent is published again only after
@@ -1168,9 +1183,10 @@ cancel while the version loads cancels the run.
 - **No public run API in 2a.** Admission, idempotency keys and tenant slots arrive in 2b.
 - **Payloads are test data in 2a.** 2b validates them against the input schema. Until then a payload that breaks its
   schema fails the step that reads the bad value.
-- **A start is failed only when Temporal refused it.** The workflow id is the run id, with `REJECT_DUPLICATE`. An
-  unanswered start is retried with the same id, and a duplicate refusal confirms it. `start_failed` is recorded only
-  for a confirmed refusal; a start that stays unanswered leaves the run `running`.
+- **A start is failed only when it certainly never began.** The workflow id is `t:<tenant>:run:<run id>` (2b spec
+  §6.1), with `REJECT_DUPLICATE`. An unanswered start is retried with the same id, and a duplicate refusal confirms it.
+  `start_failed` is recorded for a confirmed refusal, or for a start the client couldn't encrypt, which it never sent
+  (2b spec §6.2); a start that stays unanswered leaves the run `running`.
 
 ## 10. Testing strategy
 

@@ -4,8 +4,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dewpoint.apps.api.deps import get_keyring
 from dewpoint.core.audit.service import record
 from dewpoint.core.authz.permissions import P
+from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.http import TenantContext, current_user, get_db, require, require_platform_admin
 from dewpoint.core.models.identity import User
 from dewpoint.core.models.tenancy import Tenant
@@ -48,10 +50,13 @@ async def my_tenants(
 
 @router.post("/tenants", status_code=201)
 async def create(
-    body: TenantIn, admin: User = Depends(require_platform_admin), db: AsyncSession = Depends(get_db, scope="function")
+    body: TenantIn,
+    admin: User = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db, scope="function"),
+    keyring: Keyring = Depends(get_keyring),
 ) -> dict[str, object]:
     try:
-        t = await service.create_tenant(db, name=body.name, slug=body.slug, owner_id=admin.id)
+        t = await service.create_tenant(db, keyring, name=body.name, slug=body.slug, owner_id=admin.id)
     except IntegrityError:
         raise HTTPException(409, detail={"error": "slug_taken"}) from None
     await record(

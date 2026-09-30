@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.auth.users import get_user_by_email
 from dewpoint.core.authz.permissions import ROLE_PERMISSIONS, P
+from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.db import tenant_scope, user_scope
+from dewpoint.core.models.keys import DataKey
 from dewpoint.core.models.tenancy import Membership, Tenant
 
 
@@ -23,7 +25,8 @@ class ActorNotAuthorizedError(Exception):
     """The acting user no longer holds a role allowing this change (re-checked under the tenant lock)."""
 
 
-async def create_tenant(s: AsyncSession, *, name: str, slug: str, owner_id: uuid.UUID) -> Tenant:
+async def create_tenant(s: AsyncSession, keyring: Keyring, *, name: str, slug: str, owner_id: uuid.UUID) -> Tenant:
+    """A tenant, its owner, and its data key: the payload codec only reads keys (engine 2b spec §6.3)."""
     tid = uuid.uuid4()
     await tenant_scope(s, tid)
     tenant = Tenant(id=tid, name=name, slug=slug)
@@ -31,7 +34,26 @@ async def create_tenant(s: AsyncSession, *, name: str, slug: str, owner_id: uuid
     await s.flush()
     s.add(Membership(tenant_id=tid, user_id=owner_id, role="owner"))
     await s.flush()
+    await keyring.ensure_key(s, tid)
     return tenant
+
+
+class NotKeyAdminError(PermissionError):
+    """`ensure_tenant_keys` in a session whose role can't list every tenant."""
+
+
+async def ensure_tenant_keys(s: AsyncSession, keyring: Keyring) -> list[uuid.UUID]:
+    """A data key for every tenant that has none — tenants created before 2b-1a — and which ones got one. It runs as
+    the key admin (`dewpoint_admin`), which lists every tenant under row-level security (migration 0013), as Compose's
+    migrate step does. Any other role sees only the tenants it's scoped to, so it's refused rather than find none."""
+    if not (await s.execute(text("SELECT pg_has_role(current_user, 'dewpoint_admin', 'USAGE')"))).scalar_one():
+        raise NotKeyAdminError("run it as a dewpoint_admin login: it lists every tenant under row-level security.")
+    keyed = select(DataKey.id).where(DataKey.tenant_id == Tenant.id).exists()
+    created = list((await s.execute(select(Tenant.id).where(~keyed).order_by(Tenant.id))).scalars())
+    for tid in created:
+        await tenant_scope(s, tid)
+        await keyring.ensure_key(s, tid)
+    return created
 
 
 async def list_user_tenants(s: AsyncSession, user_id: uuid.UUID) -> list[tuple[Tenant, str]]:

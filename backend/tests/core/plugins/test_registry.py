@@ -15,14 +15,16 @@ from dewpoint.plugins.flow import PLUGIN
 from dewpoint.sdk import Node, NodeKind, Plugin
 from tests.support.plugins.testkit import TESTKIT
 
+NODES = len(PLUGIN.nodes) + len(TESTKIT.nodes)
+
 
 async def test_sync_registers_and_is_idempotent(admin_sessionmaker) -> None:
     async with admin_sessionmaker() as s, s.begin():
         report = await sync_installed(s, [PLUGIN, TESTKIT])
-    assert len(report.added) == 18 and report.unchanged == []
+    assert len(report.added) == NODES and report.unchanged == []
     async with admin_sessionmaker() as s, s.begin():
         report = await sync_installed(s, [PLUGIN, TESTKIT])
-    assert report.added == [] and len(report.unchanged) == 18
+    assert report.added == [] and len(report.unchanged) == NODES
     async with admin_sessionmaker() as s:
         refs = {r.ref for r in await registry.list_node_types(s)}
         state = (

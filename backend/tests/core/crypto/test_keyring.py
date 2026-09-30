@@ -6,7 +6,7 @@ import pytest
 from cryptography.exceptions import InvalidTag
 
 from dewpoint.core.crypto.kek import Kek, KekSet, UnknownKekError
-from dewpoint.core.crypto.keyring import Keyring
+from dewpoint.core.crypto.keyring import Keyring, NoKeyError
 
 
 def _kek(kid: str = "k1") -> Kek:
@@ -61,3 +61,31 @@ async def test_kek_rollout_phases(owner_sessionmaker) -> None:
         # phase D: the old KEK can be removed from configuration
         assert await only_new.decrypt(s, tenant_id=t1, purpose="p", context="x", blob=b1) == b"one"
         assert await only_new.decrypt(s, tenant_id=t2, purpose="p", context="x", blob=b2) == b"two"
+
+
+async def test_reading_a_data_key_never_creates_one(owner_sessionmaker) -> None:
+    """Engine 2b spec §6.3: the codec reads keys; only tenant creation (`ensure_key`) makes one."""
+    kr, t = Keyring(KekSet(_kek())), uuid.uuid4()
+    async with owner_sessionmaker() as s, s.begin():
+        with pytest.raises(NoKeyError):
+            await kr.read_dek(s, t)
+        with pytest.raises(NoKeyError):
+            await kr.read_dek(s, t)  # still none: the failed read created nothing
+        assert await kr.ensure_key(s, t) == 1
+        assert await kr.ensure_key(s, t) == 1  # once
+        first = await kr.read_dek(s, t)
+        assert first[0] == 1 and len(first[1]) == 32
+        assert await kr.rotate(s, t) == 2
+        assert (await kr.read_dek(s, t))[0] == 2
+        assert await kr.read_dek(s, t, 1) == first  # an older version stays readable
+        with pytest.raises(NoKeyError):
+            await kr.read_dek(s, t, 3)
+
+
+def test_the_self_check_proves_the_current_kek_wraps_and_unwraps(monkeypatch) -> None:
+    """Engine 2b spec §2.7: what a worker instance proves every 30 seconds."""
+    kr = Keyring(KekSet(_kek()))
+    kr.self_check()
+    monkeypatch.setattr(Kek, "unwrap", lambda self, blob, aad: b"not the key")
+    with pytest.raises(ValueError, match="doesn't unwrap"):
+        kr.self_check()

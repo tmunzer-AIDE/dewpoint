@@ -154,7 +154,8 @@ def request_end(
     """Where the `cel.evaluate` request that starts at binding set `start` ends (exclusive), and its JSON bytes: as
     many sets as fit in `limit`, at most `batch` (#15). A request's JSON is its envelope (no sets) plus each set's JSON
     and a comma between sets, so `size_of(i)` measures one set at a time. Requests that fit are cut every `batch` sets,
-    as before. An end equal to `start` means set `start` alone passes the limit."""
+    as before. An end equal to `start` means set `start` alone passes the limit. A loop's batch is cut the same way,
+    its items in place of the sets (engine 2b spec §5.2)."""
     end, size = start, envelope
     while end < min(start + batch, count):
         extra = size_of(end) + (1 if end > start else 0)

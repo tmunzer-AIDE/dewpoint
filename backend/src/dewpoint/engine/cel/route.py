@@ -18,8 +18,8 @@ YIELD_WORK = (
 YIELD_EVALUATIONS = 130
 YIELD_NODES = 65_000  # the values the evaluations bind: converting them costs CPU their stored bounds don't count
 STARTUP_SHARE = 10  # an execution's first workflow task gets this fraction of each threshold: it also starts it
-YIELD_SEND_BYTES = 3 * 1024 * 1024  # cel.evaluate request bytes one workflow task sends: under Temporal's 4 MiB gRPC
-# message limit, which terminates the workflow when a task's completion passes it (#15)
+YIELD_SEND_BYTES = 3 * 1024 * 1024  # the payload bytes one workflow task sends, every command's (#15, engine 2b spec
+# §5.2): under Temporal's 4 MiB gRPC message limit, which terminates the workflow when a task's completion passes it
 
 
 def route(
@@ -34,8 +34,7 @@ def route(
 
 @dataclass
 class YieldBudget:
-    """One workflow task's local evaluations, the values they bound (`Measure.nodes`), and the cel.evaluate requests it
-    sends."""
+    """One workflow task's local evaluations, the values they bound (`Measure.nodes`), and the payloads it sends."""
 
     iterations: int = 0
     bytes: int = 0
@@ -47,7 +46,7 @@ class YieldBudget:
 
     def must_yield(self, record: ExpressionRecord | None = None, *, send: int = 0) -> bool:
         """True when the interpreter must await a 1 ms durable timer before binding a view (`record` None), before
-        evaluating `record` locally, or before sending a request of `send` bytes. The first thing a workflow task does
+        evaluating `record` locally, or before sending a payload of `send` bytes. The first thing a workflow task does
         always runs; a view is always bound first, so an evaluation whose bounds pass an execution's first task's share
         waits for the next task. Sending has its own limit, Temporal's, with no startup share."""
         if send:
@@ -63,7 +62,7 @@ class YieldBudget:
         )
 
     def charge(self, record: ExpressionRecord | None = None, *, nodes: int = 0, sent: int = 0) -> None:
-        """A view bound (`nodes`: the values it bound), `record` evaluated locally, or a request of `sent` bytes."""
+        """A view bound (`nodes`: the values it bound), `record` evaluated locally, or a payload of `sent` bytes."""
         self.nodes += nodes
         self.sent += sent
         if record is not None:

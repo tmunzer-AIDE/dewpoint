@@ -20,11 +20,12 @@ from dewpoint.apps.worker.main import engine_worker
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.runtime.activities import cel_queue
 from dewpoint.engine.runtime.execution import SUBFLOW_GRANT
-from tests.apps.worker.harness import MemoryStore, in_process, start
+from tests.apps.worker.harness import MemoryStore, in_process, run_id_of, start
 from tests.apps.worker.test_deployment import build
 from tests.apps.worker.test_main import settings
 from tests.engine.replay.record import executions
 from tests.support.graphs import G, cel, ref
+from tests.support.keys import FIXTURE_CONVERTER
 from tests.support.plugins.testkit import TESTKIT
 
 
@@ -71,8 +72,8 @@ async def test_a_terminated_sub_flow_fails_its_step_and_its_row_records_the_end(
         await client.get_workflow_handle(child).terminate("an operator")
         result = await asyncio.wait_for(handle.result(), 60)
     assert (result.status, result.outputs, result.iterations) == ("succeeded", {"code": "terminated"}, SUBFLOW_GRANT)
-    assert store.starts[child].kind == "subflow"
-    end = store.runs[child]
+    assert store.starts[run_id_of(child)].kind == "subflow"
+    end = store.runs[run_id_of(child)]
     assert (end.status, end.error_code, end.iterations) == ("failed", "terminated", SUBFLOW_GRANT)
 
 
@@ -103,9 +104,10 @@ async def test_a_terminated_failure_handler_records_its_end_and_the_runs_stands(
         result = await asyncio.wait_for(handle.result(), 60)
     assert (result.status, result.error["code"] if result.error else None) == ("failed", "workflow_failed")
     assert result.iterations == SUBFLOW_GRANT  # the handler's whole grant: it never reported
-    assert store.starts[handler].kind == "failure_handler"
-    assert (store.runs[handler].status, store.runs[handler].error_code) == ("failed", "terminated")
-    assert store.runs[handle.id].status == "failed"
+    summary = store.runs[run_id_of(handler)]
+    assert store.starts[run_id_of(handler)].kind == "failure_handler"
+    assert (summary.status, summary.error_code) == ("failed", "terminated")
+    assert store.runs[run_id_of(handle)].status == "failed"
 
 
 def asks_for_more() -> G:
@@ -139,12 +141,13 @@ async def test_a_terminated_sub_run_that_asked_for_more_records_its_whole_grant(
     async with serving(client, store):
         handle = await start(client, store, g, {})
         child = await child_started(handle)
-        await filtered(store, child)
+        await filtered(store, run_id_of(child))
         await client.get_workflow_handle(child).terminate("an operator")
         result = await asyncio.wait_for(handle.result(), 60)
-    assert store.starts[child].kind == kind
+    sub = run_id_of(child)
+    assert store.starts[sub].kind == kind
     assert result.iterations > SUBFLOW_GRANT  # it had been granted more, and the parent debits all of it
-    assert (store.runs[child].error_code, store.runs[child].iterations) == ("terminated", result.iterations)
+    assert (store.runs[sub].error_code, store.runs[sub].iterations) == ("terminated", result.iterations)
 
 
 async def test_temporal_suggesting_continue_as_new_drains_the_run() -> None:
@@ -155,7 +158,8 @@ async def test_temporal_suggesting_continue_as_new_drains_the_run() -> None:
     g = graph(items=ref("steps.l.output.items"))
     g.node("l", "flow.loop@1", {"items": list(range(40)), "collect": cel("steps.x.output.value")})
     g.node("x", "testkit.echo@1", {"value": ref("item")}).edge("l", "x", "body")
-    async with await WorkflowEnvironment.start_local(dev_server_extra_args=args) as env, serving(env.client, store):
+    local = WorkflowEnvironment.start_local(data_converter=FIXTURE_CONVERTER, dev_server_extra_args=args)
+    async with await local as env, serving(env.client, store):
         handle = await start(env.client, store, g, {})
         result = await asyncio.wait_for(handle.result(), 120)
         chain = await executions(env.client, handle.id, handle.first_execution_run_id or "")
@@ -212,6 +216,32 @@ async def test_a_binding_set_over_the_request_limit_fails_its_step(dev_env: Work
         result = await asyncio.wait_for(handle.result(), 60)
     assert (result.status, result.outputs) == ("succeeded", {"code": "input_too_large"})
     assert await cel_requests(handle) == []
+    assert await task_failures(handle) == []
+
+
+async def test_large_step_and_sub_flow_inputs_are_paced_under_temporals_message_limit(
+    dev_env: WorkflowEnvironment,
+) -> None:
+    """Engine 2b spec §5.2's per-task invariant at the real limits: three step inputs and two sub-flow inputs of about
+    1.6 MiB each become ready together. Sent in one workflow task, they'd pass Temporal's 4 MiB gRPC message limit,
+    and Temporal would terminate the run (test_temporal_contract.py); they go out in separate tasks."""
+    client, store = dev_env.client, MemoryStore()
+    big = 1_600_000
+    sub = G()
+    sub.settings = {"input_schema": strings("v"), "outputs": {"n": cel("size(trigger.v)")}}
+    sub.node("e", "testkit.echo@1", {"value": 1})
+    sub_id = str(store.publish(sub))
+    g = graph(**{k: ref(f"steps.{k}.output.n") for k in ("r", "s")})
+    g.node("b", "testkit.blob@1", {"size": big})
+    for k in ("x", "y", "z"):
+        g.node(k, "testkit.echo@1", {"value": ref("steps.b.output.value")}).edge("b", k)
+    for k in ("r", "s"):
+        g.node(k, "flow.run_workflow@1", {"workflow_id": sub_id, "input": {"v": ref("steps.b.output.value")}})
+        g.edge("b", k)
+    async with serving(client, store):
+        handle = await start(client, store, g, {})
+        result = await asyncio.wait_for(handle.result(), 120)
+    assert (result.status, result.outputs) == ("succeeded", {"r": big, "s": big})
     assert await task_failures(handle) == []
 
 

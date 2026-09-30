@@ -31,6 +31,7 @@ from dewpoint.engine.runtime.activities import (
     VersionData,
     cel_queue,
 )
+from dewpoint.engine.runtime.ids import run_of, run_workflow_id
 from dewpoint.engine.runtime.workflow import LoopBatch, RunGraph
 from dewpoint.sdk import Plugin
 from tests.engine.runtime.support import CATALOG, MANIFESTS
@@ -154,7 +155,16 @@ async def start_version(
     """A run of a version the store already has."""
     run_id = str(uuid.uuid4())
     run = RunInput(TENANT, run_id, version_id, trigger or {}, options.pop("mode", LIVE), **options)
-    return await client.start_workflow(RunGraph.run, run, id=run_id, task_queue=ENGINE_QUEUE)
+    return await client.start_workflow(RunGraph.run, run, id=run_workflow_id(TENANT, run_id), task_queue=ENGINE_QUEUE)
+
+
+def run_id_of(workflow: WorkflowHandle[Any, Any] | str) -> str:
+    """The run a run's handle or workflow id names, a sub-run's too: its id is built from the tenant and the run
+    (engine 2b spec §6.1)."""
+    workflow_id = workflow if isinstance(workflow, str) else workflow.id
+    run_id = run_of(workflow_id)
+    assert run_id is not None, workflow_id
+    return run_id
 
 
 async def run(

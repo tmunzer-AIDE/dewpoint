@@ -13,7 +13,7 @@ isn't outstanding: its wake time goes into the snapshot, and the continued run r
 
 import asyncio
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -59,6 +59,7 @@ with workflow.unsafe.imports_passed_through():
         step_activity,
     )
     from dewpoint.engine.runtime.budget import LOCAL, Need
+    from dewpoint.engine.runtime.ids import run_workflow_id
     from dewpoint.engine.runtime.program import Program, Step
     from dewpoint.engine.runtime.projection import (
         Secrets,
@@ -82,6 +83,18 @@ with workflow.unsafe.imports_passed_through():
         Scheduler,
         ScopeKey,
         iteration_key,
+    )
+    from dewpoint.engine.runtime.size import (
+        BATCH_ITEM_TOO_LARGE,
+        PAYLOAD_TOO_LARGE,
+        SECRETS_TOO_LARGE,
+        STEP_INPUT_TOO_LARGE,
+        SUBFLOW_INPUT_TOO_LARGE,
+        encoded_bytes,
+        fits,
+        payload_bytes,
+        secret_bytes,
+        secrets_limit,
     )
 
 IN_FLIGHT_CAP = 100  # activities and child workflows outstanding per execution (spec §6)
@@ -213,6 +226,7 @@ class Execution:
         self._yield_timer: asyncio.Task[None] | None = None  # the one yield point every waiter shares
         self._rows: dict[tuple[str, str, int], StepRow] = {}  # queued for the next projection, per attempt
         self._secrets: Secrets = ()  # sensitive values seen so far: masked in everything projected
+        self._secrets_json = 0  # their JSON bytes, without the list's brackets and commas (`_learned`)
         self._started: dict[Instance, str] = {}
         self._cel_modes: dict[Instance, str] = {}
         self._projects = 0
@@ -270,7 +284,7 @@ class Execution:
         self.checkpoint_events, self.drain_events = checkpoint_events, drain_events
         self.vars: dict[str, Any] = {}
         if parent is not None:
-            self._secrets = remember((), tuple(parent.secrets))
+            self._carry(remember((), tuple(parent.secrets)))
 
     # --- the scheduler loop ----------------------------------------------------------------------------------------
 
@@ -561,8 +575,27 @@ class Execution:
             size += row_size
         return taken
 
-    def _learn(self, value: Any, schema: Mapping[str, Any] | None) -> None:
-        self._secrets = remember(self._secrets, sensitive_values(value, schema))
+    def _carry(self, secrets: Secrets) -> None:
+        """What a parent or a snapshot hands over: within the bound already."""
+        self._secrets, self._secrets_json = secrets, sum(secret_bytes(v) for v in secrets)
+
+    def _learned(self, values: Iterable[str]) -> bool:
+        """Remember `values` as sensitive, unless carrying them would pass SECRETS_BYTES: the execution carries what it
+        learned in its result, its children's starts and its snapshot, so that they're masked there too (engine 2b
+        spec §5.2). Past the bound nothing is remembered, and False tells the caller to fail what taught them, and
+        never use it. What's carried is never dropped: a parent masks everything its children tell it. Measured as it
+        grows, since binding and learning happen in one workflow task (#18)."""
+        grown = remember(self._secrets, values)
+        if grown is self._secrets:
+            return True
+        json_bytes = self._secrets_json + sum(secret_bytes(v) for v in set(grown).difference(self._secrets))
+        if 2 + json_bytes + len(grown) - 1 > secrets_limit():
+            return False
+        self._secrets, self._secrets_json = grown, json_bytes
+        return True
+
+    def _learn(self, value: Any, schema: Mapping[str, Any] | None) -> bool:
+        return self._learned(sensitive_values(value, schema))
 
     def _preview(self, value: Any, schema: Mapping[str, Any] | None = None) -> Any:
         return preview(value, schema, self._secrets)
@@ -595,9 +628,11 @@ class Execution:
     async def _project(
         self, rows: list[StepRow], summary: RunSummary | None = None, start: RunStart | None = None
     ) -> None:
+        data = ProjectInput(self.tenant_id, rows, summary, start)
+        await self._send(data)
         await workflow.execute_activity(
             PROJECT,
-            ProjectInput(self.tenant_id, rows, summary, start),
+            data,
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=RetryPolicy(maximum_interval=timedelta(seconds=30)),
         )
@@ -735,23 +770,44 @@ class Execution:
             start = end
         return out
 
+    def _task_budget(self) -> YieldBudget:
+        """The current workflow task's budget: it starts afresh when the history length changes, which happens only
+        between tasks, in a replay too. The execution's first task gets a tenth of it: that task also starts it."""
+        length = workflow.info().get_current_history_length()
+        if length != self._yield_task:
+            self._yield_task = length
+            self._yield.reset(startup=length == self._startup_task)
+        return self._yield
+
     async def _yield_point(self, record: ExpressionRecord | None, *, send: int = 0) -> None:
         """Before binding a view (`record` None) or evaluating `record` locally: when the current workflow task's budget
-        is spent, await a 1 ms durable timer, which ends the task (spec §5.6). The budget belongs to one workflow task:
-        it starts afresh when the history length changes, which happens only between tasks, in a replay too. The
-        execution's first task gets a tenth of it: that task also starts the execution. Concurrent units share the
-        budget and one timer, and each checks again once it fires. Before sending a cel.evaluate request (`send` its
-        bytes), the same wait keeps a task's requests under Temporal's gRPC message limit (#15)."""
+        is spent, await a 1 ms durable timer, which ends the task (spec §5.6). Concurrent units share the budget and
+        one timer, and each checks again once it fires. Before sending a payload (`send` its bytes), the same wait
+        keeps a task's commands under Temporal's gRPC message limit (#15, engine 2b spec §5.2)."""
         while True:
-            length = workflow.info().get_current_history_length()
-            if length != self._yield_task:
-                self._yield_task = length
-                self._yield.reset(startup=length == self._startup_task)
-            if not self._yield.must_yield(record, send=send):
+            if not self._task_budget().must_yield(record, send=send):
                 return
             if self._yield_timer is None or self._yield_timer.done():
                 self._yield_timer = asyncio.create_task(asyncio.sleep(0.001))
             await asyncio.shield(self._yield_timer)
+
+    async def _send(self, value: Any) -> None:
+        """Before a command carries `value`'s payload: wait for the next workflow task once this one has sent its
+        bytes (YIELD_SEND_BYTES), then count them. Every payload the engine sends goes through here — a step's input,
+        a request, a projection, a child's start, a continued run's input, the result — and each is at most
+        PAYLOAD_BYTES, so a task's completion stays under Temporal's gRPC message limit (engine 2b spec §5.2)."""
+        n = encoded_bytes(value, workflow.payload_converter())
+        await self._yield_point(None, send=n)
+        self._yield.charge(sent=n)
+
+    async def _returned[R](self, result: R) -> R:
+        """The execution's result, paced as a command is: it goes out with its workflow task's completion."""
+        await self._send(result)
+        return result
+
+    def _charge_sent(self, value: Any) -> None:
+        """A payload this workflow task records without sending it as a command: a local activity's result."""
+        self._task_budget().charge(sent=encoded_bytes(value, workflow.payload_converter()))
 
     # --- steps -----------------------------------------------------------------------------------------------------
 
@@ -839,7 +895,8 @@ class Execution:
         if version is None or self.depth >= MAX_DEPTH:
             reason = "no pinned version" if version is None else f"more than {MAX_DEPTH} sub-flows deep"
             return _Effect(failure=Failure(VERSION_UNUSABLE, f"`{step.key}` can't run its sub-flow: {reason}."))
-        child = str(workflow.uuid4())
+        child_run = str(workflow.uuid4())
+        child = run_workflow_id(self.tenant_id, child_run)  # its workflow id, and its key in this budget
         grant = self.sched.budget.start_child(child, SUBFLOW_GRANT)
         parent = Parent(
             workflow_id=workflow.info().workflow_id,
@@ -854,7 +911,7 @@ class Execution:
         )
         run = RunInput(
             self.tenant_id,
-            child,
+            child_run,
             version,
             start.input,
             self.mode,
@@ -865,9 +922,18 @@ class Execution:
             checkpoint_events=self.checkpoint_events,
             drain_events=self.drain_events,
         )
+        if not fits(run, workflow.payload_converter()):  # engine 2b spec §5.2: never sent, so it never ran
+            self.sched.budget.settle_child(child, 0)
+            self._dirty = True
+            return _Effect(failure=Failure(PAYLOAD_TOO_LARGE, SUBFLOW_INPUT_TOO_LARGE), cel_mode=cel_mode)
         used: int | None = None  # until it reports, all it was granted counts: it may have run
         started = workflow.now().isoformat()
         try:
+            try:
+                await self._send(run)
+            except asyncio.CancelledError:  # cancelled before it was sent: it never ran
+                used = 0
+                raise
             try:
                 handle = await workflow.start_child_workflow(
                     "RunGraph", run, result_type=RunResult, **child_options(child)
@@ -884,7 +950,8 @@ class Execution:
         finally:
             self.sched.budget.settle_child(child, used)
             self._dirty = True
-        self._secrets = remember(self._secrets, tuple(result.secrets))
+        if not self._learned(result.secrets):  # its outputs go unused, so nothing here needs them masked
+            return _Effect(failure=Failure(PAYLOAD_TOO_LARGE, SECRETS_TOO_LARGE), cel_mode=cel_mode)
         if result.status == "succeeded":
             return _Effect(output=dict(result.outputs or {}), cel_mode=cel_mode)
         error = result.error or {"code": result.status, "message": f"The sub-flow ended {result.status}."}
@@ -902,7 +969,7 @@ class Execution:
         references (spec §4.5). Its parent writes it, unless it has one, with its whole grant as counted here: its
         first grant and every one it asked for since, which the parent debits as it settles the child. It writes the
         row too, in case the child was ended before its own: a start written later changes nothing."""
-        whole = self.sched.budget.reserved.get(run.run_id, 0)  # read before the child is settled
+        whole = self.sched.budget.reserved.get(run_workflow_id(run.tenant_id, run.run_id), 0)  # before it's settled
         end = RunSummary(run.run_id, "failed", workflow.now().isoformat(), failure.code, failure.message, whole, True)
         await self._shielded([], end, RunStart.of(run, started_at))
 
@@ -923,11 +990,67 @@ class Execution:
         """A batch of a loop's items, as a child `LoopBatch`. It writes its iterations' rows into this run, and
         returns what they collected."""
         step = self.sched.step(b.loop)
-        loop = self.sched.loops[b.loop]
         # from the input, not the workflow id: a replay of this history sees the same id (the run id names the logical
         # run, the loop step and its scope name the loop, the start names the batch)
-        child = f"{self.run_id}/{step.id}/{iteration_key(b.loop.scope)}/batch:{b.start}"
+        child = (
+            f"{run_workflow_id(self.tenant_id, self.run_id)}/{step.id}/{iteration_key(b.loop.scope)}/batch:{b.start}"
+        )
+        converter = workflow.payload_converter()
+        draft = self._batch_input(b, len(b.items))
+        if not fits(draft, converter):  # engine 2b spec §5.2: as many of its items as fit, in order; the rest follow
+            items = b.items
+            envelope = encoded_bytes(replace(draft, items=[]), converter)
+            fit, _ = resolve.request_end(
+                0,
+                len(items),
+                lambda i: len(converter.to_payloads([items[i]])[0].data),
+                envelope=envelope,
+                batch=len(items),
+                limit=payload_bytes(),
+            )
+            if fit == 0:  # its first item alone doesn't fit: the loop fails there, and nothing is dropped
+                return _Effect(failure=Failure(PAYLOAD_TOO_LARGE, BATCH_ITEM_TOO_LARGE))
+            self.sched.cut_batch(b.loop, b.start, b.start + fit)
+            b = replace(b, items=items[:fit])
         grant = self.sched.budget.start_child(child, len(b.items))
+        batch = self._batch_input(b, grant)
+        used: int | None = None  # until it reports, all it was granted counts: it may have run
+        try:
+            try:
+                await self._send(batch)
+            except asyncio.CancelledError:  # cancelled before it was sent: it never ran
+                used = 0
+                raise
+            try:
+                handle = await workflow.start_child_workflow(
+                    "LoopBatch", batch, result_type=BatchResult, **child_options(child)
+                )
+            except ChildWorkflowError:  # cancelled before its start went out, as the SDK reports it: it never ran
+                used = 0
+                raise asyncio.CancelledError from None
+            result = await handle
+            used = result.iterations
+        except ChildWorkflowError as e:  # its version didn't load or compile, a bug, or it was terminated
+            cause = e.cause
+            if isinstance(cause, ApplicationError) and cause.type in (VERSION_UNUSABLE, INTERNAL_ERROR):
+                return _Effect(failure=Failure(cause.type, cause.message))
+            return _Effect(failure=self._lost("batch", e))
+        finally:
+            self.sched.budget.settle_child(child, used)
+            self._dirty = True
+        if not self._learned(result.secrets):  # what it collected goes unused: its loop fails
+            return _Effect(failure=Failure(PAYLOAD_TOO_LARGE, SECRETS_TOO_LARGE))
+        if result.end is not None:
+            end = RunEnd.from_json(result.end)
+            if end.status == "cancelled":
+                return _Effect(failure=CANCELLED)
+            return _Effect(end=end)
+        stopped = Failure.from_json(result.stopped) if result.stopped else None
+        return _Effect(batch=BatchOutcome(list(result.collected), list(result.failures), stopped))
+
+    def _batch_input(self, b: Batch, grant: int) -> BatchInput:
+        step = self.sched.step(b.loop)
+        loop = self.sched.loops[b.loop]
         parent = Parent(
             workflow_id=workflow.info().workflow_id,
             run_id=self.run_id,
@@ -939,7 +1062,7 @@ class Execution:
             depth=self.depth,
             secrets=list(self._secrets),
         )
-        batch = BatchInput(
+        return BatchInput(
             tenant_id=self.tenant_id,
             run_id=self.run_id,
             version_id=self.version_id,
@@ -958,33 +1081,6 @@ class Execution:
             checkpoint_events=self.checkpoint_events,
             drain_events=self.drain_events,
         )
-        used: int | None = None  # until it reports, all it was granted counts: it may have run
-        try:
-            try:
-                handle = await workflow.start_child_workflow(
-                    "LoopBatch", batch, result_type=BatchResult, **child_options(child)
-                )
-            except ChildWorkflowError:  # cancelled before its start went out, as the SDK reports it: it never ran
-                used = 0
-                raise asyncio.CancelledError from None
-            result = await handle
-            used = result.iterations
-        except ChildWorkflowError as e:  # its version didn't load or compile, a bug, or it was terminated
-            cause = e.cause
-            if isinstance(cause, ApplicationError) and cause.type in (VERSION_UNUSABLE, INTERNAL_ERROR):
-                return _Effect(failure=Failure(cause.type, cause.message))
-            return _Effect(failure=self._lost("batch", e))
-        finally:
-            self.sched.budget.settle_child(child, used)
-            self._dirty = True
-        self._secrets = remember(self._secrets, tuple(result.secrets))
-        if result.end is not None:
-            end = RunEnd.from_json(result.end)
-            if end.status == "cancelled":
-                return _Effect(failure=CANCELLED)
-            return _Effect(end=end)
-        stopped = Failure.from_json(result.stopped) if result.stopped else None
-        return _Effect(batch=BatchOutcome(list(result.collected), list(result.failures), stopped))
 
     # --- plugin steps ---------------------------------------------------------------------------------------------
 
@@ -997,7 +1093,10 @@ class Execution:
         attempts = step.max_attempts or int(retry["max_attempts"])
         timeout = timedelta(seconds=step.timeout_s or float(manifest["timeout_s"]))
         ambiguous = manifest["side_effect"] == AMBIGUOUS
-        self._learn(config, manifest["config_schema"])  # a resolved sensitive value, before anything can echo it
+        if not self._learn(config, manifest["config_schema"]):  # a resolved sensitive value, before anything echoes it
+            failure = Failure(PAYLOAD_TOO_LARGE, SECRETS_TOO_LARGE)
+            self._queue_unstarted(inst, step, failure)  # never sent
+            return _Effect(failure=failure, cel_mode=cel_mode)
         attempt = 1
         while True:
             row = StepRow(
@@ -1012,20 +1111,35 @@ class Execution:
                 cel_mode=cel_mode,
             )
             self._queue(row)
+            sent = StepInput(
+                tenant_id=self.tenant_id,
+                run_id=self.run_id,
+                step_id=str(step.id),
+                node_key=step.key,
+                iteration_key=iteration_key(inst.scope),
+                ref=step.ref,
+                config=config,
+                mode=self.mode,
+                attempt=attempt,
+            )
+            if not fits(sent, workflow.payload_converter()):  # engine 2b spec §5.2: never sent, so it never ran
+                failure = Failure(PAYLOAD_TOO_LARGE, STEP_INPUT_TOO_LARGE, attempt)
+                ended = workflow.now().isoformat()
+                self._queue(
+                    replace(
+                        row, status="failed", ended_at=ended, error_code=failure.code, error_message=failure.message
+                    )
+                )
+                return _Effect(failure=failure, cel_mode=cel_mode)
+            try:
+                await self._send(sent)
+            except asyncio.CancelledError:  # the run or the scope ended before it was sent: nothing ran
+                self._queue(replace(row, status="cancelled", ended_at=workflow.now().isoformat()))
+                raise
             try:
                 result = await workflow.execute_activity(
                     step_activity(step.ref),
-                    StepInput(
-                        tenant_id=self.tenant_id,
-                        run_id=self.run_id,
-                        step_id=str(step.id),
-                        node_key=step.key,
-                        iteration_key=iteration_key(inst.scope),
-                        ref=step.ref,
-                        config=config,
-                        mode=self.mode,
-                        attempt=attempt,
-                    ),
+                    sent,
                     result_type=StepResult,
                     start_to_close_timeout=timeout,
                     retry_policy=RetryPolicy(maximum_attempts=1),
@@ -1042,7 +1156,13 @@ class Execution:
                 outcome = OUTCOME_UNKNOWN if ambiguous else None  # its request may have been sent
                 self._queue(replace(row, status="cancelled", ended_at=workflow.now().isoformat(), outcome=outcome))
                 raise asyncio.CancelledError from None
-            self._learn(result.output, manifest["output_schema"])
+            if not self._learn(result.output, manifest["output_schema"]):
+                # the node ran, so its outcome stands; its output goes nowhere
+                failure = Failure(PAYLOAD_TOO_LARGE, SECRETS_TOO_LARGE, attempt)
+                ended = workflow.now().isoformat()
+                failed = replace(row, status="failed", ended_at=ended, error_code=failure.code, outcome=result.outcome)
+                self._queue(replace(failed, error_message=failure.message))
+                return _Effect(failure=failure, cel_mode=cel_mode)
             self._queue(
                 replace(
                     row,
@@ -1120,7 +1240,7 @@ class Execution:
         self.program = program
         self.sched = Scheduler.from_json(program, snapshot["scheduler"])
         self.vars = dict(snapshot["variables"])
-        self._secrets = remember((), tuple(snapshot["secrets"]))
+        self._carry(remember((), tuple(snapshot["secrets"])))
         for key, step, wake, started, mode in snapshot["timers"]:
             inst = Instance(tuple((str(k), int(n)) for k, n in key), uuid.UUID(step))
             self._timers[inst] = datetime.fromisoformat(wake)

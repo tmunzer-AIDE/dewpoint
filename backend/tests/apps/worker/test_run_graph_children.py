@@ -19,8 +19,9 @@ from dewpoint.engine.runtime import execution
 from dewpoint.engine.runtime import workflow as run_graph
 from dewpoint.engine.runtime.activities import ProjectInput, VersionData
 from dewpoint.engine.runtime.scheduler import Scheduler
-from tests.apps.worker.harness import MemoryStore, start, workers
+from tests.apps.worker.harness import MemoryStore, run_id_of, start, workers
 from tests.support.graphs import G, cel, ref
+from tests.support.keys import opened
 
 ECHO, LOOP, FILTER, RUN, FAIL = "testkit.echo@1", "flow.loop@1", "flow.filter@1", "flow.run_workflow@1", "flow.fail@1"
 LISTS = {"type": "object", "properties": {"items": {"type": "array"}}, "required": ["items"]}
@@ -56,12 +57,12 @@ async def test_a_loop_over_more_than_a_hundred_items_runs_in_batches_and_collect
     handle, result = await finished(env, store, g, {})
     assert result.status == "succeeded" and result.outputs == {"items": list(range(250)), "count": 250}
     assert result.iterations == 250 and await children_started(handle) == 3  # batches of 100, 100 and 50
-    rows = [r for r in store.steps(handle.id) if r.node_key == "x"]
+    rows = [r for r in store.steps(run_id_of(handle)) if r.node_key == "x"]
     assert sorted(r.iteration_key for r in rows) == sorted(f"l:{i}" for i in range(250))  # the inline keys
     assert {(r.status, r.output_preview["value"]) for r in rows} == {("succeeded", "from outside")}
     history = await handle.fetch_history()
     batches = [
-        json.loads(e.start_child_workflow_execution_initiated_event_attributes.input.payloads[0].data)
+        await opened(e.start_child_workflow_execution_initiated_event_attributes.input.payloads[0])
         for e in history.events
         if e.HasField("start_child_workflow_execution_initiated_event_attributes")
     ]
@@ -78,7 +79,7 @@ async def test_a_secret_a_batch_learned_is_masked_in_its_parent_too(env: Workflo
     g.edge("l", "s", "body").edge("l", "e", "done")
     handle, result = await finished(env, store, g, {})
     assert result.status == "succeeded"
-    [echoed] = [r for r in store.steps(handle.id) if r.node_key == "e"]
+    [echoed] = [r for r in store.steps(run_id_of(handle)) if r.node_key == "e"]
     assert "s3cr3t-value" not in json.dumps(echoed.output_preview) and "[redacted]" in json.dumps(echoed.output_preview)
 
 
@@ -150,7 +151,7 @@ async def test_a_sub_flow_is_a_run_of_its_own_and_its_outputs_are_the_steps_outp
     step = next(n["id"] for n in g.nodes if n["key"] == "r")
     assert (row.kind, row.parent_run_id, row.parent_step_id, row.parent_iteration_key) == (
         "subflow",
-        handle.id,
+        run_id_of(handle),
         step,
         "",
     )
@@ -180,7 +181,7 @@ async def test_a_failed_run_runs_its_failure_handler_once_with_the_error(env: Wo
     handle, result = await finished(env, store, g, {})
     assert (result.status, result.error["code"]) == ("failed", "workflow_failed")  # the handler changes nothing
     [(child, row)] = store.starts.items()
-    assert (row.kind, row.parent_run_id, row.parent_step_id) == ("failure_handler", handle.id, None)
+    assert (row.kind, row.parent_run_id, row.parent_step_id) == ("failure_handler", run_id_of(handle), None)
     assert store.runs[child].status == "succeeded"
     [echoed] = store.steps(child)
     assert echoed.output_preview == {"value": "workflow_failed"}
@@ -369,7 +370,7 @@ async def test_a_batch_that_fails_on_a_bug_writes_its_rows_first(
         handle = await start(env.client, store, g, {})
         result = await asyncio.wait_for(handle.result(), 60)
     assert (result.status, result.outputs) == ("succeeded", {"code": "internal_error"})
-    rows = [r for r in store.steps(handle.id) if r.node_key == "x"]
+    rows = [r for r in store.steps(run_id_of(handle)) if r.node_key == "x"]
     assert len(rows) >= 50 and "running" not in {r.status for r in rows}
 
 
@@ -430,7 +431,7 @@ async def test_cancelling_a_run_cancels_its_children_and_each_reports_back(env: 
         i for i, k in enumerate(kinds) if k == EventType.EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_COMPLETED
     )
     [(child, _)] = store.starts.items()
-    assert (store.runs[handle.id].status, store.runs[child].status) == ("cancelled", "cancelled")
+    assert (store.runs[run_id_of(handle)].status, store.runs[child].status) == ("cancelled", "cancelled")
 
 
 async def test_a_batched_loop_inside_a_loop_runs_its_own_batches_per_iteration(env: WorkflowEnvironment) -> None:
@@ -443,7 +444,7 @@ async def test_a_batched_loop_inside_a_loop_runs_its_own_batches_per_iteration(e
     handle, result = await finished(env, store, g, {})
     assert (result.status, result.outputs, result.iterations) == ("succeeded", {"counts": [150, 150]}, 302)
     assert await children_started(handle) == 4
-    keys = {r.iteration_key for r in store.steps(handle.id) if r.node_key == "x"}
+    keys = {r.iteration_key for r in store.steps(run_id_of(handle)) if r.node_key == "x"}
     assert keys == {f"outer:{o}/inner:{i}" for o in (0, 1) for i in range(150)}
 
 
@@ -480,7 +481,7 @@ async def test_a_sub_flow_the_run_ends_before_it_starts_uses_nothing(env: Workfl
     g = graph()
     g.node("r", RUN, {"workflow_id": str(store.publish(sleeper()))}).node("f", FAIL, {"message": "at once"})
     handle, result = await finished(env, store, g, {})
-    assert (result.status, result.iterations, store.runs[handle.id].iterations) == ("failed", 0, 0)
+    assert (result.status, result.iterations, store.runs[run_id_of(handle)].iterations) == ("failed", 0, 0)
     assert await children_started(handle) == 0
 
 
@@ -490,7 +491,7 @@ async def test_a_batch_the_run_ends_before_it_starts_uses_nothing(env: WorkflowE
     g.node("l", LOOP, {"items": list(range(150))}).node("x", ECHO).edge("l", "x", "body")
     g.node("t", "flow.transform@1", {"fields": {"n": 1}}).node("f", FAIL, {"message": "at once"}).edge("t", "f")
     handle, result = await finished(env, store, g, {})  # `f` fails the run in the turn the first batch would start
-    assert (result.status, result.iterations, store.runs[handle.id].iterations) == ("failed", 0, 0)
+    assert (result.status, result.iterations, store.runs[run_id_of(handle)].iterations) == ("failed", 0, 0)
     assert await children_started(handle) == 0
 
 
@@ -522,7 +523,7 @@ async def test_a_batched_loop_in_a_sub_flow_writes_into_the_sub_run(env: Workflo
     assert (result.status, result.outputs, result.iterations) == ("succeeded", {"n": 150}, 150)
     [(child, _)] = store.starts.items()
     assert len([r for r in store.steps(child) if r.node_key == "x"]) == 150
-    assert not [r for r in store.steps(handle.id) if r.node_key == "x"]
+    assert not [r for r in store.steps(run_id_of(handle)) if r.node_key == "x"]
 
 
 # --- the owner's plan review: every end at a child's boundary is recorded ----------------------------------------
@@ -586,7 +587,7 @@ async def test_a_cancel_while_the_failure_handler_runs_leaves_the_run_failed(env
         await handle.cancel()
         result = await asyncio.wait_for(handle.result(), 60)
     assert (result.status, result.error["code"], result.iterations) == ("failed", "workflow_failed", 30)
-    assert (store.runs[handle.id].status, store.runs[handle.id].iterations) == ("failed", 30)
+    assert (store.runs[run_id_of(handle)].status, store.runs[run_id_of(handle)].iterations) == ("failed", 30)
     assert (store.runs[child].status, store.runs[child].iterations) == ("cancelled", 30)
 
 
@@ -626,8 +627,12 @@ async def test_a_failed_run_stays_non_terminal_until_its_failure_handler_has_end
     g.node("f", FAIL, {"message": "it went wrong"})
     handle, result = await finished(env, store, g, {})
     [(child, _)] = store.starts.items()
-    assert store.log.index(("start", child)) < store.log.index(("end", child)) < store.log.index(("end", handle.id))
-    assert (result.status, store.runs[handle.id].status) == ("failed", "failed")
+    assert (
+        store.log.index(("start", child))
+        < store.log.index(("end", child))
+        < store.log.index(("end", run_id_of(handle)))
+    )
+    assert (result.status, store.runs[run_id_of(handle)].status) == ("failed", "failed")
 
 
 async def test_a_failure_handlers_iterations_count_toward_its_run(env: WorkflowEnvironment) -> None:
@@ -639,7 +644,7 @@ async def test_a_failure_handlers_iterations_count_toward_its_run(env: WorkflowE
     g.settings["failure_handler"] = str(store.publish(handler))
     g.node("f", FAIL, {"message": "it went wrong"})
     handle, result = await finished(env, store, g, {})
-    assert (result.status, result.iterations, store.runs[handle.id].iterations) == ("failed", 50, 50)
+    assert (result.status, result.iterations, store.runs[run_id_of(handle)].iterations) == ("failed", 50, 50)
 
 
 async def test_a_run_past_its_deadline_runs_its_failure_handler(env: WorkflowEnvironment) -> None:
@@ -671,4 +676,4 @@ async def test_a_cancelled_run_runs_no_failure_handler(env: WorkflowEnvironment)
         await handle.cancel()
         with pytest.raises(WorkflowFailureError):
             await asyncio.wait_for(handle.result(), 60)
-    assert (store.runs[handle.id].status, store.starts) == ("cancelled", {})
+    assert (store.runs[run_id_of(handle)].status, store.starts) == ("cancelled", {})

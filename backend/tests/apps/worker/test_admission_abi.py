@@ -10,12 +10,14 @@ from typing import Any
 import pytest
 from temporalio.testing import WorkflowEnvironment
 
+from dewpoint.apps import runs as run_ops
 from dewpoint.apps.runs import NotAdmissibleError, start_run
 from dewpoint.apps.worker.deployment import current_abi, set_current, this_build
 from dewpoint.apps.worker.main import engine_worker
 from dewpoint.apps.worker.store import DbRunStore
 from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.runtime.build import abi_of
+from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.engine.runtime.workflow import RunGraph
 from tests.apps.test_workflow_ops import ECHO_GRAPH, actor, create, publish, published_by_the_previous_build
 from tests.apps.worker.test_deployment import placement
@@ -23,6 +25,8 @@ from tests.apps.worker.test_main import settings
 from tests.engine.replay.record import executions
 from tests.support.plugins.testkit import TESTKIT
 from tests.support.registry import sync_test_plugins
+
+pytestmark = pytest.mark.usefixtures("development_deployment")  # runs are admitted: engine 2b spec §2.3
 
 OLD, NEW = ENGINE_ABI - 1, ENGINE_ABI  # the build before this one, and this one
 
@@ -47,9 +51,9 @@ async def test_admission_follows_the_current_build_through_a_promotion(
     api_settings: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """This process is build N's. Before N is promoted, N-1 is current: N-1's version is admitted and runs on N-1, and
-    N's own version is refused. After the promotion it's the other way round: N-1's version is refused, as it would be
-    from an N-1 process, and N's runs on N."""
+    """This process is build N's. Before N is promoted, N-1 is current: this process starts nothing, since N-1 couldn't
+    read its starts (2b spec §6.6), and N-1's own process starts N-1's version, which runs on N-1. After the promotion,
+    N-1's version is refused, as it would be from an N-1 process, and N's runs on N."""
     client = dev_env.client
     await sync_test_plugins(admin_sessionmaker)
     ctx = await actor(owner_sessionmaker)
@@ -58,6 +62,9 @@ async def test_admission_follows_the_current_build_through_a_promotion(
     old = await published_by_the_previous_build(api_sessionmaker, ctx, old_wf, api_settings, monkeypatch)
     new = (await publish(api_sessionmaker, ctx, new_wf, api_settings)).version
     assert new is not None
+
+    def workflow_id(run_id: uuid.UUID) -> str:
+        return run_workflow_id(str(ctx.tenant_id), str(run_id))
 
     async def started(version_id: uuid.UUID) -> uuid.UUID:
         return await start_run(
@@ -71,21 +78,23 @@ async def test_admission_follows_the_current_build_through_a_promotion(
         async with engine_worker(client, store, [TESTKIT], settings(), build=n, identity=n):
             assert await current_abi(client) == OLD
             with pytest.raises(NotAdmissibleError) as early:
-                await started(new.id)
-            on_old = await started(old.id)
+                await started(old.id)
+            with monkeypatch.context() as m:  # N-1's own process
+                m.setattr(run_ops, "ENGINE_ABI", OLD)
+                on_old = await started(old.id)
             # it ends before the promotion: a run whose first task hadn't run yet would start on N, and fail as it
             # loads its version (the loader's backstop, for a promotion that races a start)
-            results = [await client.get_workflow_handle_for(RunGraph.run, str(on_old)).result()]
+            results = [await client.get_workflow_handle_for(RunGraph.run, workflow_id(on_old)).result()]
             await set_current(client, n)
             assert await current_abi(client) == NEW
             with pytest.raises(NotAdmissibleError) as late:
                 await started(old.id)
             on_new = await started(new.id)
-            results.append(await client.get_workflow_handle_for(RunGraph.run, str(on_new)).result())
-            chains = [await executions(client, str(r), "") for r in (on_old, on_new)]
+            results.append(await client.get_workflow_handle_for(RunGraph.run, workflow_id(on_new)).result())
+            chains = [await executions(client, workflow_id(r), "") for r in (on_old, on_new)]
     assert early.value.reasons == [
-        f"This version was published for engine ABI {NEW}, and the current build runs ABI {OLD}: make a build of ABI "
-        f"{NEW} current first."
+        f"The current build runs engine ABI {OLD}, and this process is a build of ABI {NEW}, whose starts it can't "
+        f"read: start runs from a process of the current build, or make a build of ABI {NEW} current first."
     ]
     assert late.value.reasons == [
         f"This version was published for engine ABI {OLD}, and the current build runs ABI {NEW}: publish the workflow "

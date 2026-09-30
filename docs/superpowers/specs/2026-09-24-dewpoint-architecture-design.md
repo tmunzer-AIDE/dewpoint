@@ -172,7 +172,8 @@ Every run starts as a durable `run_requests` row, unique on `(tenant_id, idempot
 - **Schedule:** a Temporal Schedule fires the `ScheduleTick` workflow. Its single activity inserts a `run_requests` row keyed `sched:{schedule_id}:{scheduled_time}`. Schedules never start `RunGraph` directly.
 - **Admission:** `dispatcher` is the only component that starts `RunGraph`.
   - It reserves a per-tenant concurrency slot (`tenant_run_slots`, row lock). The request stays queued, FIFO per tenant, while the tenant is at its limit.
-  - It starts the run with workflow ID `run:{run_request_id}`, which makes the start idempotent.
+  - It starts the run with workflow ID `t:<tenant>:run:<run_id>`, the run id being its request's, which makes the
+    start idempotent (engine 2b spec §6.1).
   - The run releases its slot in a final activity. A reconciler compares slots against Temporal state to recover leaks.
   - Sub-flow child workflows and agent loops run inside the parent's slot.
 - Failure handling: backoff, then a dead-letter state visible to admins.

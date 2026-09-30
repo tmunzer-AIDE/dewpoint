@@ -36,6 +36,10 @@
     workers' own path to read each tenant's key (§2.7, §10.6). A key version is retired only after a conservative
     floor that bounds its last use for payloads,
     since nothing records that use (§6.4). Size claims start with 2b-1b (§5.1).
+  - From the owner's rulings on 2b-1a's final review: an expired key is never used, even while the database doesn't
+    answer, so the rotation and retirement bounds stay exact and a long database outage fails the payloads that need
+    the key (§2.7, §6.3); `dewpoint keys ensure-tenants` runs as the key admin, which lists tenants under row-level
+    security (§6.3).
 - **Parent specs:**
   - `2026-09-24-dewpoint-architecture-design.md` (§5, §6.1, §6.5, §6.8, §12, §15). This spec **changes** its
     workflow-id contract (§6.1), replaces its `outbox` table (§6.1), details its claim check (§6.5) and settles the
@@ -160,9 +164,10 @@ Per-tenant rollout of production runs may be added later, only on top of the glo
   answer doesn't depend on a tenant); from 2b-1b, its claim store answers. An instance that fails **stops polling**
   (running attempts get the shutdown grace), records itself unhealthy and exits (code 3); it never keeps taking
   tasks. One that can't prove itself at startup never polls.
-- **A database that doesn't answer proves nothing either way:** it's an outage, which the engine rides out. The
-  instance keeps polling and records nothing, and its row goes stale; a record it can't write is logged the same
-  way. A stale row isn't a live instance.
+- **A database that doesn't answer proves nothing either way:** it's an outage, which doesn't stop the instance.
+  It keeps polling and records nothing, and its row goes stale; a record it can't write is logged the same way. A
+  stale row isn't a live instance. Runs don't ride the outage out, though: a key that has expired from a process's
+  cache can't be read until the database answers (§6.3).
 - **What the check doesn't claim.** The probe checks a grant, not that the role's RLS-scoped reads return a tenant's
   key; the KEK check wraps and unwraps a fresh key, not the stored ones. A wrong KEK configured under the right id
   passes both, while no worker can decrypt existing payloads — and `dewpoint keys status` doesn't catch it either,
@@ -536,7 +541,12 @@ results, transform outputs, variable values — are spilled one at a time when t
 - The codec uses the keyring's per-tenant data keys through an in-process cache of unwrapped keys, bounded in size
   and time (initially 1,024 keys for 5 minutes, so a rotation reaches every process within 5 minutes) and never
   persisted. The codec never creates a key, and a missing key isn't cached. A tenant gets its key when it's created;
-  `dewpoint keys ensure-tenants` gives one to older tenants, as the database owner, in Compose's migrate step.
+  `dewpoint keys ensure-tenants` gives one to older tenants, as the key admin (`dewpoint_admin`, which lists every
+  tenant under row-level security), in Compose's migrate step.
+- **An expired key is never used**, even while the database doesn't answer: the rotation bound above and §6.4's
+  floor stay exact. The cost is that a database outage longer than a key's time fails the payloads that need it: an
+  activity's attempt fails (a plugin step's is retried or `outcome_unknown`; `cel.evaluate` ends
+  `cel_profile_unavailable`), and a workflow task fails and is retried until the database answers.
 - **Who has keys:** the worker (including the `cel.evaluate` activity) and the dispatch role, which gains `SELECT` on
   `data_keys` in 2b-1a: until 2b-2, the dev CLI still starts runs directly, through that role, and encrypts the
   start. From 2b-2 the API and the dev CLI send Temporal no payloads (the CLI enqueues, and `--wait` reads the

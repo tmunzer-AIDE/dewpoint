@@ -6,16 +6,24 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from temporalio.api.workflowservice.v1 import DescribeWorkerDeploymentRequest, DescribeWorkerDeploymentResponse
+from temporalio.api.workflowservice.v1 import (
+    DescribeWorkerDeploymentRequest,
+    DescribeWorkerDeploymentResponse,
+    StartWorkflowExecutionResponse,
+)
+from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
+from temporalio.converter import DataConverter
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from dewpoint.apps import runs as run_ops
 from dewpoint.apps import workflow_ops
+from dewpoint.apps.codec import data_converter
 from dewpoint.apps.runs import (
     NO_CURRENT_BUILD,
     START_FAILED,
@@ -30,7 +38,10 @@ from dewpoint.core.plugins import lifecycle
 from dewpoint.core.runs import service
 from dewpoint.core.workflows import service as workflows
 from dewpoint.engine import ENGINE_ABI
+from dewpoint.engine.runtime import size
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, SIMULATE, RunInput
+from dewpoint.engine.runtime.ids import run_workflow_id
+from dewpoint.engine.runtime.size import RUN_INPUT_TOO_LARGE
 from tests.apps.test_lifecycle_races import until_someone_waits_for_a_lock
 from tests.apps.test_workflow_ops import (
     ECHO,
@@ -43,7 +54,10 @@ from tests.apps.test_workflow_ops import (
     save,
     update,
 )
+from tests.support.keys import FIXTURE_CONVERTER, FixtureKeys
 from tests.support.registry import sync_test_plugins
+
+pytestmark = pytest.mark.usefixtures("development_deployment")  # runs are admitted: engine 2b spec §2.3
 
 
 @dataclass(frozen=True)
@@ -78,8 +92,14 @@ class FakeClient:
 
     namespace = "default"
 
-    def __init__(self, *answers: BaseException | LostAck | None, current: str | None = this_build()) -> None:
+    def __init__(
+        self,
+        *answers: BaseException | LostAck | None,
+        current: str | None = this_build(),
+        data_converter: DataConverter = FIXTURE_CONVERTER,
+    ) -> None:
         self.workflow_service = FakeDeployment(current)
+        self.data_converter = data_converter  # what the client encrypts starts with
         self.answers = list(answers)
         self.started: list[tuple[RunInput, str, str]] = []
         self.calls: list[tuple[str, WorkflowIDReusePolicy]] = []
@@ -96,6 +116,42 @@ class FakeClient:
         self.started.append((arg, id, task_queue))
         if isinstance(answer, LostAck):
             raise answer.error
+
+
+class FakeService(FakeDeployment):
+    """Temporal's service under the SDK's own client, which builds and encrypts each start before sending it here.
+    Each start sent takes the next answer: None accepts, an exception fails the call."""
+
+    def __init__(self, *answers: BaseException | None) -> None:
+        super().__init__(this_build())
+        self.answers = list(answers)
+        self.sent: list[str] = []
+
+    async def start_workflow_execution(self, request: Any, **_: Any) -> StartWorkflowExecutionResponse:
+        self.sent.append(request.workflow_id)
+        answer = self.answers.pop(0) if self.answers else None
+        if answer is not None:
+            raise answer
+        return StartWorkflowExecutionResponse(run_id=str(uuid.uuid4()))
+
+
+def sdk_client(service: FakeService, keys: FixtureKeys) -> Client:
+    service_client = SimpleNamespace(workflow_service=service, config=SimpleNamespace(identity="test"))
+    return Client(service_client, namespace="default", data_converter=data_converter(keys))  # type: ignore[arg-type]
+
+
+@dataclass
+class KeysThatGoAway(FixtureKeys):
+    """Keys read `readable` times, then the database is gone. asyncpg's refusal is a `ConnectionError`, as a lost
+    connection to Temporal can be."""
+
+    readable: int = 1
+
+    async def active(self, tenant_id: str) -> tuple[int, Any]:
+        if self.readable == 0:
+            raise ConnectionRefusedError("the database is down")
+        self.readable -= 1
+        return await super().active(tenant_id)
 
 
 @pytest.fixture(autouse=True)
@@ -118,7 +174,7 @@ async def run_row(sm: Any, tenant: uuid.UUID, run_id: uuid.UUID) -> Any:
         return await service.get_run(s, run_id)
 
 
-async def test_the_active_version_starts_with_its_run_id_as_the_workflow_id(
+async def test_the_active_version_starts_under_a_workflow_id_built_from_its_tenant_and_run(
     owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
 ) -> None:
     ctx, _, version = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings)
@@ -128,7 +184,8 @@ async def test_the_active_version_starts_with_its_run_id_as_the_workflow_id(
         tenant_id=ctx.tenant_id, version_id=version, trigger={"x": 1}, mode=SIMULATE,
     )  # fmt: skip
     [(arg, workflow_id, queue)] = client.started
-    assert (workflow_id, queue) == (str(run_id), ENGINE_QUEUE)
+    assert (workflow_id, queue) == (run_workflow_id(str(ctx.tenant_id), str(run_id)), ENGINE_QUEUE)  # 2b spec §6.1
+    assert (arg.tenant_id, arg.run_id) == (str(ctx.tenant_id), str(run_id))
     assert (arg.version_id, arg.trigger, arg.mode) == (str(version), {"x": 1}, SIMULATE)
     assert arg.max_run_duration_s == api_settings.max_run_duration_days * 86_400
     row = await run_row(owner_sessionmaker, ctx.tenant_id, run_id)
@@ -197,12 +254,14 @@ async def test_a_version_of_another_abi_is_refused_until_its_workflows_are_publi
     assert (await run_row(owner_sessionmaker, ctx.tenant_id, run_id)).status == "running"
 
 
-async def test_admission_compares_with_the_current_build_not_the_admitting_one(
+async def test_a_process_starts_runs_only_while_a_build_of_its_own_abi_is_current(
     owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings, monkeypatch
 ) -> None:
-    """During a rollout, both builds' processes admit runs, and a run starts on the deployment's current build. Before
-    this build is promoted, the build before it is current: this process admits that build's versions, and refuses
-    its own, which the current build can't run (and the reverse after the promotion)."""
+    """Review finding (2b-1a): a start is written for this process's engine ABI (from ABI 5 on, encrypted, under a
+    `t:` workflow id), and a build of another ABI can't read it: its run would stay `running`, no step ever starting.
+    So before this build is promoted, while the build before it is current, this process starts nothing, not even
+    that build's versions, and sends nothing (2b spec §6.6). Once it's current, a version of the older ABI waits to be
+    published again, and its own versions start."""
     await sync_test_plugins(admin_sessionmaker)
     ctx = await actor(owner_sessionmaker)
     old_wf = await create(api_sessionmaker, ctx, ECHO_GRAPH, name="old")
@@ -211,20 +270,36 @@ async def test_admission_compares_with_the_current_build_not_the_admitting_one(
     new = (await publish(api_sessionmaker, ctx, new_wf, api_settings)).version
     assert new is not None
     previous = f"dewpoint-0.1.0+abi{ENGINE_ABI - 1}"  # current: this build isn't promoted yet
-    run_id = await start_run(
-        dispatch_sessionmaker, FakeClient(current=previous), api_settings,  # type: ignore[arg-type]
-        tenant_id=ctx.tenant_id, version_id=old.id, trigger={},
-    )  # fmt: skip
-    assert (await run_row(owner_sessionmaker, ctx.tenant_id, run_id)).workflow_version_id == old.id
+    for version in (old, new):
+        client = FakeClient(current=previous)
+        with pytest.raises(NotAdmissibleError) as refused:
+            await start_run(
+                dispatch_sessionmaker, client, api_settings,  # type: ignore[arg-type]
+                tenant_id=ctx.tenant_id, version_id=version.id, trigger={},
+            )  # fmt: skip
+        assert refused.value.reasons == [
+            f"The current build runs engine ABI {ENGINE_ABI - 1}, and this process is a build of ABI {ENGINE_ABI}, "
+            f"whose starts it can't read: start runs from a process of the current build, or make a build of ABI "
+            f"{ENGINE_ABI} current first."
+        ]
+        assert client.calls == []
+    async with owner_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        assert await service.list_runs(s) == []
     with pytest.raises(NotAdmissibleError) as refused:
         await start_run(
-            dispatch_sessionmaker, FakeClient(current=previous), api_settings,  # type: ignore[arg-type]
-            tenant_id=ctx.tenant_id, version_id=new.id, trigger={},
+            dispatch_sessionmaker, FakeClient(), api_settings,  # type: ignore[arg-type]
+            tenant_id=ctx.tenant_id, version_id=old.id, trigger={},
         )  # fmt: skip
     assert refused.value.reasons == [
-        f"This version was published for engine ABI {ENGINE_ABI}, and the current build runs ABI {ENGINE_ABI - 1}: "
-        f"make a build of ABI {ENGINE_ABI} current first."
+        f"This version was published for engine ABI {ENGINE_ABI - 1}, and the current build runs ABI {ENGINE_ABI}: "
+        f"publish the workflow again with a build of ABI {ENGINE_ABI}."
     ]
+    run_id = await start_run(
+        dispatch_sessionmaker, FakeClient(), api_settings,  # type: ignore[arg-type]
+        tenant_id=ctx.tenant_id, version_id=new.id, trigger={},
+    )  # fmt: skip
+    assert (await run_row(owner_sessionmaker, ctx.tenant_id, run_id)).workflow_version_id == new.id
 
 
 async def test_nothing_is_admitted_while_no_build_is_current(
@@ -286,7 +361,8 @@ async def test_a_lost_acknowledgement_is_reconciled_by_the_workflow_id(
         tenant_id=ctx.tenant_id, version_id=version, trigger={},
     )  # fmt: skip
     assert len(client.started) == 1  # started once, not twice
-    assert client.calls == [(str(run_id), WorkflowIDReusePolicy.REJECT_DUPLICATE)] * 2
+    workflow_id = run_workflow_id(str(ctx.tenant_id), str(run_id))
+    assert client.calls == [(workflow_id, WorkflowIDReusePolicy.REJECT_DUPLICATE)] * 2
     assert (await only_run(owner_sessionmaker, ctx.tenant_id)).status == "running"
 
 
@@ -304,6 +380,42 @@ async def test_a_start_that_stays_uncertain_leaves_the_run_running(
         )  # fmt: skip
     row = await only_run(owner_sessionmaker, ctx.tenant_id)
     assert (row.status, row.error_code, len(client.calls), e.value.run_id) == ("running", None, 3, row.id)
+
+
+async def test_a_start_the_client_cant_encrypt_after_its_check_is_refused_and_its_run_failed(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """Owner's review (Task 6): the check encrypts the start, then the client encrypts it again before sending it. When
+    that second encryption fails, nothing was sent: the start is refused and the run failed, never left `running`."""
+    ctx, _, version = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings)
+    service = FakeService()
+    with pytest.raises(StartRefusedError, match=r"couldn't be encrypted \(ConnectionRefusedError\)"):
+        await start_run(
+            dispatch_sessionmaker, sdk_client(service, KeysThatGoAway(readable=1)), api_settings,
+            tenant_id=ctx.tenant_id, version_id=version, trigger={},
+        )  # fmt: skip
+    row = await only_run(owner_sessionmaker, ctx.tenant_id)
+    assert (row.status, row.error_code, service.sent) == ("failed", START_FAILED, [])
+
+
+async def test_a_start_that_cant_be_encrypted_after_an_uncertain_attempt_stays_uncertain(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """The first attempt was sent and its answer lost, so the run may be executing: the attempts after it that can't
+    be encrypted don't make the start refused."""
+    ctx, _, version = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings)
+    service = FakeService(rpc(RPCStatusCode.UNAVAILABLE))
+    with pytest.raises(StartUncertainError):
+        await start_run(
+            dispatch_sessionmaker, sdk_client(service, KeysThatGoAway(readable=2)), api_settings,
+            tenant_id=ctx.tenant_id, version_id=version, trigger={},
+        )  # fmt: skip
+    row = await only_run(owner_sessionmaker, ctx.tenant_id)
+    assert (row.status, row.error_code, service.sent) == (
+        "running",
+        None,
+        [run_workflow_id(str(ctx.tenant_id), str(row.id))],
+    )
 
 
 async def test_retirement_first_makes_admission_refuse(
@@ -501,3 +613,40 @@ async def test_admission_reads_the_workflow_afresh_in_a_session_that_loaded_it(
         await change_committed(api_sessionmaker, ctx, wf, change)
         with pytest.raises(NotAdmissibleError, match=REFUSED[how]):
             await run_ops.admit(s, tenant_id=ctx.tenant_id, version_id=version, abi=ENGINE_ABI)
+
+
+async def test_a_start_that_cant_be_encrypted_is_refused_and_its_run_failed(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """Engine 2b spec §6.2–6.3: a tenant whose data key can't be read (one created before 2b-1a, not yet given a key):
+    nothing reached Temporal, so the start is refused and the run recorded as failed, never left `running`."""
+    ctx, _, version = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings)
+    client = FakeClient(data_converter=data_converter(FixtureKeys(missing={str(ctx.tenant_id)})))
+    with pytest.raises(StartRefusedError, match="couldn't be encrypted"):
+        await start_run(
+            dispatch_sessionmaker, client, api_settings,  # type: ignore[arg-type]
+            tenant_id=ctx.tenant_id, version_id=version, trigger={},
+        )  # fmt: skip
+    assert client.calls == []  # never sent
+    row = await only_run(owner_sessionmaker, ctx.tenant_id)
+    assert (row.status, row.error_code) == ("failed", START_FAILED)
+
+
+async def test_a_run_whose_input_is_too_large_to_start_is_refused_before_admission(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings, monkeypatch
+) -> None:
+    """Engine 2b spec §5.2: the client checks the start it would send, before the run is admitted: no row, no start,
+    and a fixed reason, never Temporal's refusal."""
+    monkeypatch.setattr(size, "PAYLOAD_BYTES", 10_000)
+    ctx, _, version = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings)
+    client = FakeClient()
+    with pytest.raises(NotAdmissibleError) as refused:
+        await start_run(
+            dispatch_sessionmaker, client, api_settings,  # type: ignore[arg-type]
+            tenant_id=ctx.tenant_id, version_id=version, trigger={"x": "y" * 10_000},
+        )  # fmt: skip
+    assert refused.value.reasons == [RUN_INPUT_TOO_LARGE]
+    async with owner_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        assert await service.list_runs(s) == []
+    assert client.started == []
