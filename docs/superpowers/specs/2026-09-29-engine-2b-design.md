@@ -42,8 +42,9 @@
     security (§6.3).
   - Revision 5 records the 2b-1b go/no-go probe in §11.2, approved by the owner as an experiment record: promising,
     not yet a go. It lists the measured passes, five design additions, and the conditions still to be proven, with
-    two counterexamples: a near-limit trigger, and loops waiting on the cap. It also revises §5.3, pending the owner's
-    approval: the bound applies to the whole continued input.
+    two counterexamples: a near-limit trigger, and loops waiting on the cap. It also revises §5.3, approved by the
+    owner as the provisional design for the focused prototype. The §5.3 go/no-go stays open until the follow-up
+    proves the bounds. The bound applies to the whole continued input.
     - Each component has an accounting rule and a worst-case maximum: the envelope (from the exact id grammar of
       §6.1), the trigger (§3.5 bounds its envelope), learned sensitive values, the structure, and the live values.
     - The live-state budget is fixed. Each version's open-scope cap is derived so that the whole fits, and pinned in
@@ -522,14 +523,21 @@ else. Everything else is restored from the snapshot alone:
      - A loop step inside an iteration scope starts only when its loop can open an iteration at once. That means room
        under the cap, or its level's reserved scope on the progress path.
      - **Queued loop steps share one request.** A queued loop step never adds a need of its own to the budget.
-       - While the execution's one request to its parent is unanswered, every queued loop step waits on it. A budget
-         asks its parent at most once at a time.
-       - When the answer comes, a grant lets queued steps start, in scheduling order, while budget remains.
+       - While the budget can't decide, every queued loop step waits:
+         - a child execution waits on its one request to its parent (a budget asks its parent at most once at a
+           time);
+         - the root never asks a parent. It grants or refuses once its own waiting needs can be decided, and under
+           the exact cap that can mean waiting for an outstanding child to release unused budget.
+       - Queued loop steps stay queued through either wait. They never fail early.
+       - Once the budget decides, a grant lets queued steps start, in scheduling order, while budget remains.
        - A refusal starts them too, at most `IN_FLIGHT_CAP` at a time as any step. Each loop fails
          `iteration_cap_exceeded` at its first iteration, and the step settles under its `on_error`.
-       - The root's budget always answers at once.
-     - So a queued loop step always starts or settles: the progress path frees scopes, and every budget request is
-       answered. It's never left queued.
+     - So a queued loop step always starts or settles:
+       - the progress path frees scopes;
+       - every request to a parent is answered;
+       - the children the root waits for end, and release their unused budget as they end.
+
+       It's never left queued.
      - A started loop takes the scope its own finished iteration frees, before anything else does, so it holds a
        scope until it finishes.
      - A loop waiting for more iteration budget holds none, but no loop starts while the budget is waiting.
