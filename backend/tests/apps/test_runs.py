@@ -254,12 +254,14 @@ async def test_a_version_of_another_abi_is_refused_until_its_workflows_are_publi
     assert (await run_row(owner_sessionmaker, ctx.tenant_id, run_id)).status == "running"
 
 
-async def test_admission_compares_with_the_current_build_not_the_admitting_one(
+async def test_a_process_starts_runs_only_while_a_build_of_its_own_abi_is_current(
     owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings, monkeypatch
 ) -> None:
-    """During a rollout, both builds' processes admit runs, and a run starts on the deployment's current build. Before
-    this build is promoted, the build before it is current: this process admits that build's versions, and refuses
-    its own, which the current build can't run (and the reverse after the promotion)."""
+    """Review finding (2b-1a): a start is written for this process's engine ABI (from ABI 5 on, encrypted, under a
+    `t:` workflow id), and a build of another ABI can't read it: its run would stay `running`, no step ever starting.
+    So before this build is promoted, while the build before it is current, this process starts nothing, not even
+    that build's versions, and sends nothing (2b spec §6.6). Once it's current, a version of the older ABI waits to be
+    published again, and its own versions start."""
     await sync_test_plugins(admin_sessionmaker)
     ctx = await actor(owner_sessionmaker)
     old_wf = await create(api_sessionmaker, ctx, ECHO_GRAPH, name="old")
@@ -268,20 +270,36 @@ async def test_admission_compares_with_the_current_build_not_the_admitting_one(
     new = (await publish(api_sessionmaker, ctx, new_wf, api_settings)).version
     assert new is not None
     previous = f"dewpoint-0.1.0+abi{ENGINE_ABI - 1}"  # current: this build isn't promoted yet
-    run_id = await start_run(
-        dispatch_sessionmaker, FakeClient(current=previous), api_settings,  # type: ignore[arg-type]
-        tenant_id=ctx.tenant_id, version_id=old.id, trigger={},
-    )  # fmt: skip
-    assert (await run_row(owner_sessionmaker, ctx.tenant_id, run_id)).workflow_version_id == old.id
+    for version in (old, new):
+        client = FakeClient(current=previous)
+        with pytest.raises(NotAdmissibleError) as refused:
+            await start_run(
+                dispatch_sessionmaker, client, api_settings,  # type: ignore[arg-type]
+                tenant_id=ctx.tenant_id, version_id=version.id, trigger={},
+            )  # fmt: skip
+        assert refused.value.reasons == [
+            f"The current build runs engine ABI {ENGINE_ABI - 1}, and this process is a build of ABI {ENGINE_ABI}, "
+            f"whose starts it can't read: start runs from a process of the current build, or make a build of ABI "
+            f"{ENGINE_ABI} current first."
+        ]
+        assert client.calls == []
+    async with owner_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        assert await service.list_runs(s) == []
     with pytest.raises(NotAdmissibleError) as refused:
         await start_run(
-            dispatch_sessionmaker, FakeClient(current=previous), api_settings,  # type: ignore[arg-type]
-            tenant_id=ctx.tenant_id, version_id=new.id, trigger={},
+            dispatch_sessionmaker, FakeClient(), api_settings,  # type: ignore[arg-type]
+            tenant_id=ctx.tenant_id, version_id=old.id, trigger={},
         )  # fmt: skip
     assert refused.value.reasons == [
-        f"This version was published for engine ABI {ENGINE_ABI}, and the current build runs ABI {ENGINE_ABI - 1}: "
-        f"make a build of ABI {ENGINE_ABI} current first."
+        f"This version was published for engine ABI {ENGINE_ABI - 1}, and the current build runs ABI {ENGINE_ABI}: "
+        f"publish the workflow again with a build of ABI {ENGINE_ABI}."
     ]
+    run_id = await start_run(
+        dispatch_sessionmaker, FakeClient(), api_settings,  # type: ignore[arg-type]
+        tenant_id=ctx.tenant_id, version_id=new.id, trigger={},
+    )  # fmt: skip
+    assert (await run_row(owner_sessionmaker, ctx.tenant_id, run_id)).workflow_version_id == new.id
 
 
 async def test_nothing_is_admitted_while_no_build_is_current(

@@ -38,6 +38,7 @@ from dewpoint.core.platform.service import NOT_RECORDED, PRODUCTION, recorded
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.runs import service as runs
 from dewpoint.core.workflows.service import lock_for_admission, other_abi
+from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.runtime import size
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, LIVE, RunInput
 from dewpoint.engine.runtime.ids import run_workflow_id
@@ -103,7 +104,7 @@ async def admit(
 ) -> Run:
     """Insert the run, or raise NotAdmissibleError. Call it inside a READ COMMITTED transaction. `abi` is the engine
     ABI of the deployment's current build, where the run will start (`current_abi`; None: no build is current). The
-    admitting process's own build doesn't matter: during a rollout, both builds' processes admit runs.
+    process that starts the run must be a build of that ABI, since the start is written for its own (`start_run`).
 
     First, what this deployment is (engine 2b spec §2.3): with no record, or in production while the gate is off, it
     admits nothing — every start path comes through here, the dev CLI included."""
@@ -143,6 +144,14 @@ async def admit(
     )
 
 
+def other_build(abi: int) -> str:
+    return (
+        f"The current build runs engine ABI {abi}, and this process is a build of ABI {ENGINE_ABI}, whose starts it "
+        f"can't read: start runs from a process of the current build, or make a build of ABI {ENGINE_ABI} current "
+        "first."
+    )
+
+
 async def start_run(
     sessionmaker: async_sessionmaker[AsyncSession],
     client: Client,
@@ -155,8 +164,9 @@ async def start_run(
     started_by: uuid.UUID | None = None,
 ) -> uuid.UUID:
     """Admit the run and start it. Raises NotAdmissibleError, StartRefusedError (the run is recorded as failed) or
-    StartUncertainError (the run stays `running`: it may be executing). A promotion between the admission and the
-    start is caught when the run loads its version (§7). A start too large to send is refused before admission, so
+    StartUncertainError (the run stays `running`: it may be executing). Only a build of the current build's ABI starts
+    runs: a start is written for its own ABI (engine 2b spec §6.6). A promotion between the admission and the start is
+    caught when the run loads its version (§7). A start too large to send is refused before admission, so
     it leaves no row (engine 2b spec §5.2)."""
 
     def start_of(run_id: uuid.UUID) -> RunInput:
@@ -173,6 +183,8 @@ async def start_run(
     if not size.fits(start_of(uuid.UUID(int=0)), DataConverter.default.payload_converter):  # a run id's length
         raise NotAdmissibleError([size.RUN_INPUT_TOO_LARGE])
     abi = await current_abi(client)  # before the transaction: no lock is held across a call to Temporal
+    if abi is not None and abi != ENGINE_ABI:  # its start is written for this build's ABI, which that build can't read
+        raise NotAdmissibleError([other_build(abi)])
     async with sessionmaker() as s, s.begin():
         run = await admit(s, tenant_id=tenant_id, version_id=version_id, abi=abi, mode=mode, started_by=started_by)
     start = start_of(run.id)
