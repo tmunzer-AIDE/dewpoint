@@ -31,7 +31,7 @@ with workflow.unsafe.imports_passed_through():
     from dewpoint.engine.cel.route import YieldBudget
     from dewpoint.engine.graph.values import CelValue, RefValue, TemplateValue
     from dewpoint.engine.registry import control
-    from dewpoint.engine.runtime import nodes, resolve
+    from dewpoint.engine.runtime import nodes, probe, resolve
     from dewpoint.engine.runtime.activities import (
         BATCH,
         BUDGET,
@@ -298,6 +298,7 @@ class Execution:
         clock = asyncio.create_task(asyncio.sleep(max(0.0, (self.deadline - workflow.now()).total_seconds())))
         try:
             while self.sched.ended is None:
+                probe.note(workflow.info().workflow_id, self.sched.probe)
                 self._serve_budget()
                 if not self._draining:
                     waiting += [("step", i) for i in self.sched.take_ready()]
@@ -369,6 +370,7 @@ class Execution:
                     if effect is not None and key[0] != "cancelled":
                         self._apply(key, effect)
         finally:
+            probe.note(workflow.info().workflow_id, self.sched.probe)
             clock.cancel()
             for key, task in tasks.items():
                 if key[0] not in ("project", "cancelled"):
