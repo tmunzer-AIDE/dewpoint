@@ -9,19 +9,21 @@ import uuid
 from dataclasses import dataclass
 
 import pytest
-from temporalio.api.enums.v1 import VersioningBehavior
-from temporalio.client import Client, WorkflowHistory
+from temporalio.api.enums.v1 import EventType, VersioningBehavior
+from temporalio.client import Client, WorkflowHandle, WorkflowHistory
 from temporalio.service import RPCError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
 from dewpoint.apps.worker import main
 from dewpoint.apps.worker.activities import cel_activity
-from dewpoint.apps.worker.deployment import describe, set_current, this_build
+from dewpoint.apps.worker.deployment import deployment_config, describe, set_current, this_build
 from dewpoint.apps.worker.main import engine_worker
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, cel_queue
-from tests.apps.worker.harness import MemoryStore, in_process, start
+from dewpoint.engine.runtime.ids import run_workflow_id
+from tests.apps.worker.autocomplete_workflow import CancelsAnUnstartedActivity, echoed
+from tests.apps.worker.harness import TENANT, MemoryStore, in_process, start
 from tests.apps.worker.test_main import proven, settings, unrecorded
 from tests.engine.replay.record import executions
 from tests.support.graphs import G, cel, ref
@@ -130,6 +132,48 @@ async def test_a_run_stays_on_the_build_it_started_on_with_its_children_and_cont
             ran = placement(history)
             assert ran.builds == {expected} and ran.engine <= {expected}, (history.workflow_id, ran)
             assert ran.behaviours == {VersioningBehavior.VERSIONING_BEHAVIOR_PINNED}
+
+
+async def completed_by_itself(handle: WorkflowHandle[object, str]) -> WorkflowHistory:
+    """The history once a workflow task has completed after the cancelled activity's record."""
+    for _ in range(100):
+        history = await handle.fetch_history()
+        types = [e.event_type for e in history.events]
+        if EventType.EVENT_TYPE_ACTIVITY_TASK_CANCELED in types:
+            after = types[types.index(EventType.EVENT_TYPE_ACTIVITY_TASK_CANCELED) :]
+            if EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED in after:
+                return history
+        await asyncio.sleep(0.2)
+    raise AssertionError("no workflow task completed after the activity was cancelled")
+
+
+async def test_a_run_stays_pinned_through_a_workflow_task_the_sdk_completes_by_itself(
+    dev_env: WorkflowEnvironment,
+) -> None:
+    """A workflow task the SDK's core completes without the workflow reports the worker's default behaviour. Without
+    one it reports none: Temporal takes the run as unversioned, and each start of its next activity on the run's own
+    build begins a transition instead, with another such task, so the activity never starts and the run hangs."""
+    client, version = dev_env.client, build("autocomplete")
+    config = deployment_config(version)  # on the engine's queue: a later build is refused current without its queues
+    async with Worker(
+        client, task_queue=ENGINE_QUEUE, workflows=[CancelsAnUnstartedActivity], deployment_config=config
+    ):
+        await set_current(client, version)
+        handle = await client.start_workflow(
+            CancelsAnUnstartedActivity.run,
+            f"nobody-{uuid.uuid4().hex[:8]}",
+            id=run_workflow_id(TENANT, str(uuid.uuid4())),
+            task_queue=ENGINE_QUEUE,
+        )
+        try:
+            assert placement(await completed_by_itself(handle)).behaviours == {
+                VersioningBehavior.VERSIONING_BEHAVIOR_PINNED
+            }
+            async with Worker(client, task_queue=ENGINE_QUEUE, activities=[echoed], deployment_config=config):
+                assert await asyncio.wait_for(handle.result(), 20) == "ran"
+        finally:
+            with contextlib.suppress(RPCError):
+                await handle.terminate()  # a run that hung isn't left running on the shared server
 
 
 async def recorded(*args: object) -> None:

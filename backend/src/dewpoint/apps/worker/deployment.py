@@ -13,7 +13,7 @@ from temporalio.api.workflowservice.v1 import (
     SetWorkerDeploymentCurrentVersionRequest,
 )
 from temporalio.client import Client
-from temporalio.common import WorkerDeploymentVersion
+from temporalio.common import VersioningBehavior, WorkerDeploymentVersion
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import WorkerDeploymentConfig
 
@@ -29,8 +29,17 @@ def this_build() -> str:
 
 
 def deployment_config(build: str) -> WorkerDeploymentConfig:
-    """The engine worker's: it serves `build`'s version of the deployment. The CEL workers aren't in it (§7)."""
-    return WorkerDeploymentConfig(version=WorkerDeploymentVersion(DEPLOYMENT, build), use_worker_versioning=True)
+    """The engine worker's: it serves `build`'s version of the deployment. The CEL workers aren't in it (§7).
+
+    Pinned by default too, not only by its workflows' declarations: a workflow task with nothing new for the workflow
+    (one after an unstarted activity's cancel is recorded) the SDK's core completes by itself, reporting the worker's
+    default. Reporting none would unpin the run, and each start of its next activity would begin a transition instead,
+    so the activity would never start (2b-1b §5.3's cancellation race)."""
+    return WorkerDeploymentConfig(
+        version=WorkerDeploymentVersion(DEPLOYMENT, build),
+        use_worker_versioning=True,
+        default_versioning_behavior=VersioningBehavior.PINNED,
+    )
 
 
 @dataclass(frozen=True)
