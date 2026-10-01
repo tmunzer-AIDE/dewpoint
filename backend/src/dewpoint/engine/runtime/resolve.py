@@ -20,9 +20,8 @@ from dewpoint.engine.cel.ipc import EvaluateRequest
 from dewpoint.engine.cel.record import ExpressionRecord
 from dewpoint.engine.cel.route import route
 from dewpoint.engine.graph.values import ENVELOPE, Pointer, RefPath, RefValue, TemplateValue, pointer_str
+from dewpoint.engine.handles import MISSING
 from dewpoint.engine.runtime.scheduler import Failure, Scheduler, ScopeKey
-
-MISSING: Any = object()
 
 
 class ValueFailure(Exception):

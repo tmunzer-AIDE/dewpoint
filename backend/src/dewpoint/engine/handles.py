@@ -9,11 +9,12 @@ into a run as a handle: admission and the activity boundary refuse a value that 
 
 import json
 import uuid
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
 MARKER = "$claim"
+MISSING: Any = object()  # what a pointer that addresses nothing reads: a reference's default then applies
 POINTER = "pointer"
 POINTER_MAX = 256  # bytes, as JSON (spec §15: provisional)
 
@@ -103,3 +104,87 @@ def handles_in(value: Any, pointer: str = "") -> Iterator[tuple[str, ClaimRef]]:
         return
     for key, child in _children(value):
         yield from handles_in(child, pointer + "/" + escape(key))
+
+
+NESTING_MAX = 32  # claims nested deeper than this are refused: a claim holds handles only to claims made before it
+
+
+class NestingError(Exception):
+    """Claims nested deeper than NESTING_MAX: a bug, never a value's fault."""
+
+
+@dataclass(frozen=True)
+class StoredClaim:
+    value: Any
+    sensitive_pointers: tuple[str, ...]  # the tainted pointers inside the value; "" is all of it
+
+
+@dataclass(frozen=True)
+class Resolved:
+    value: Any  # plain: every handle inside it resolved; MISSING when the pointer addresses nothing
+    tainted: bool
+
+
+type Fetch = Callable[[str], Awaitable[StoredClaim]]
+
+
+def _step(value: Any, part: str) -> tuple[Any, bool]:
+    """One reference token further into `value`: a key, or a list index without leading zeros."""
+    if isinstance(value, dict):
+        return (value[part], True) if part in value else (MISSING, False)
+    if isinstance(value, list) and part.isdigit() and (part == "0" or not part.startswith("0")):
+        index = int(part)
+        return (value[index], True) if index < len(value) else (MISSING, False)
+    return MISSING, False
+
+
+def _overlaps(sensitive: tuple[str, ...], path: list[str]) -> bool:
+    """Whether a part at `path` lies in a sensitive pointer's subtree or holds one."""
+    for pointer in sensitive:
+        mark = tokens(pointer)
+        shorter = min(len(mark), len(path))
+        if mark[:shorter] == path[:shorter]:
+            return True
+    return False
+
+
+async def resolve(ref: ClaimRef, fetch: Fetch, depth: int = 0) -> Resolved:
+    """What `ref` addresses, read through nested claims, with every handle inside it resolved (§3.3). Tainted when
+    any part it read was: the part lies in or holds one of its claim's sensitive pointers, or a nested claim it read
+    is tainted (§3.6). `fetch` reads a whole claim, and does the checks: the tenant, and the owner or a grant."""
+    if depth > NESTING_MAX:
+        raise NestingError("Claims nested too deep.")
+    stored = await fetch(ref.id)
+    value, path = stored.value, tokens(ref.pointer)
+    for i, part in enumerate(path):
+        nested = ClaimRef.of(value)
+        if nested is not None:  # the pointer goes on inside a claim nested here
+            inner = await resolve(nested.extend(*path[i:]), fetch, depth + 1)
+            return Resolved(inner.value, inner.tainted or _overlaps(stored.sensitive_pointers, path[:i]))
+        value, found = _step(value, part)
+        if not found:
+            return Resolved(MISSING, _overlaps(stored.sensitive_pointers, path[: i + 1]))
+    plain, inner_tainted = await _plain(value, fetch, depth)
+    return Resolved(plain, inner_tainted or _overlaps(stored.sensitive_pointers, path))
+
+
+async def _plain(value: Any, fetch: Fetch, depth: int) -> tuple[Any, bool]:
+    """`value` with every handle in it resolved, and whether any of them was tainted."""
+    nested = ClaimRef.of(value)
+    if nested is not None:
+        inner = await resolve(nested, fetch, depth + 1)
+        return inner.value, inner.tainted
+    if isinstance(value, dict):
+        out, tainted = {}, False
+        for key, child in value.items():
+            out[key], t = await _plain(child, fetch, depth)
+            tainted = tainted or t
+        return out, tainted
+    if isinstance(value, list):
+        items, tainted = [], False
+        for child in value:
+            item, t = await _plain(child, fetch, depth)
+            items.append(item)
+            tainted = tainted or t
+        return items, tainted
+    return value, False
