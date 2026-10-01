@@ -1,0 +1,41 @@
+name: probe-2b1b
+# Engine 2b spec §5.3 go/no-go (§11.3): the heaviest queued-state case on the CI runner, with the intended worker
+# slot count (2) and representative concurrency (1 and 4 runs), measuring each activation's CPU and wall time and the
+# cause of every failed workflow task; the runs complete and every history replays. Throwaway branch, never merged.
+on:
+  push: { branches: [proto/2b1b-bound] }
+  workflow_dispatch: {}
+permissions: { contents: read }
+jobs:
+  cpu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    defaults: { run: { working-directory: backend } }
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_PASSWORD: probe, POSTGRES_DB: probe }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s --health-retries 30
+    env:
+      POSTGRES_URL: postgresql+asyncpg://postgres:probe@localhost:5432/probe
+      PYTHONPATH: .:probe
+      DEV: "1"  # the SDK's dev server (WorkflowEnvironment.start_local)
+      WFT_SLOTS: "2"
+      PROBE_TIMEOUT: "7200"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+      - run: uv sync --locked
+      - run: nproc && python3 -c "import platform; print(platform.platform())"
+      - name: The scheduler alone at 21,600 queued loop steps
+        run: uv run python probe/cpu_bench.py 5
+      - name: One run each, to the end; every continue checked, every history replayed
+        run: uv run python probe/probe_bound.py exhausted_root many_siblings
+      - name: Four runs at once, to the end; every history replayed
+        env: { CONCURRENT: "4", CHECK_EVERY: "10" }
+        run: uv run python probe/probe_bound.py exhausted_root many_siblings
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: probe-2b1b, path: backend/probe/results_bound.jsonl }
