@@ -1467,6 +1467,54 @@ With every container claimed, the live state needs at most 660,576 B (250 root l
   first 40 continues.
 - **The `UnhandledCommand`.** Its coincidence with the probe's cancel is verified, not assumed.
 
+**The CI runner, complete runs, and the `UnhandledCommand` (2026-10-01): promising, the gate still open.**
+- **Two more changes, from what the runs showed:**
+  - A version's program is compiled once per worker process, keyed by its id and its content. Compiling a 482-node
+    version took 0.3-0.5 s on macOS and 0.5-0.75 s on the CI runner, in the first task of every execution and every
+    continue.
+  - A step unit and a take are charged against a task's whole structural share. An execution's first task keeps its
+    tenth for a restore: with a tenth, a fresh run started only 13 of its first 100 steps before yielding.
+- **The target Linux CI runner** (GitHub's ubuntu-latest, x86_64, 2 vCPUs). The engine worker ran at 2 workflow-task
+  slots, the slot count intended. The heaviest queued-state cases ran to their end, and every history replayed. The
+  probe timed each activation's CPU (the thread's) and wall time:
+
+  | Runs at once | CPU per activation, max (p99) | Wall per activation, max | Failed tasks |
+  |---|---|---|---|
+  | One, an exhausted budget | 871 ms (174) | 872 ms | none |
+  | One, 240 sibling loops (441 executions) | 879 ms (210) | 890 ms | none |
+  | Four, an exhausted budget | 899 ms (233) | 1,529 ms | none |
+  | Four, 240 sibling loops (1,701 executions) | 907 ms (387) | 1,657 ms | none |
+
+  - Every activation stayed within engine-core's 1 s CPU target, the worst at 907 ms. With one run, a single
+    activation passed 500 ms: the version's first compile, once per worker process. The scheduler alone at 21,600
+    queued steps: a snapshot took 21 ms, a restore 221 ms over three tasks (at most 155 ms in one).
+  - Without the program cache (the commit before), four runs of 240 sibling loops reached 1,308 ms of CPU in one
+    activation, and 87 activations passed 1 s.
+- **Complete runs on macOS, every history replayed.** These ran on the dev server, at 2 slots, with the final code:
+  - 240 sibling loops: 409 executions;
+  - root writes while loop steps wait: 329;
+  - an exhausted budget: 27;
+  - the same as a sub-flow: 40.
+
+  No check failed and no task failed. CPU per activation was at most 369 ms.
+- **Overload, at 2 slots: open.** Segment indexes that grow (6 loops of 10,000 items, about 600 batch children and
+  60,000 small claims) overloaded one worker process at 2 slots: its workflows and all its activities.
+  - Claim activities timed out (53).
+  - The deadlock detector fired once.
+  - The run hadn't ended after 1 h 40 min, and was stopped.
+
+  At the SDK's default slots, the same run completed in 407 s, with every history replayed. The detector fired once
+  there too, on an activation of 306 ms CPU and 2,022 ms wall: time spent waiting for the interpreter's lock, not
+  computing. The deadlock risk follows a worker's load, its activities' included. Sizing workers is the 2b-1b plan's,
+  with this case as its test.
+- **The `UnhandledCommand`: not verified.**
+  - Its histories weren't kept.
+  - The same configuration, run three more times, produced no failed task. So did every complete run, which the probe
+    never cancels.
+  - In that workload, the probe's cancel is the only event from outside: no child, no signal, nothing outstanding at a
+    continue. That fits a cancel arriving as a task completes, but it isn't verified.
+  - The probe now records each failed task's events and the cancel's time, so a recurrence can be checked.
+
 **Not prototyped, implementation work:**
 - a loop over a claimed list that isn't handle-backed;
 - CEL and templates over handles;
