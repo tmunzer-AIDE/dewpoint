@@ -1,8 +1,8 @@
 name: probe-2b1b
-# Engine 2b spec §5.3 go/no-go (§11.3) on the CI runner, the engine worker at its intended 2 workflow-task slots:
-# segment indexes that grow (to the end, every continue checked, every history replayed), and a controlled
-# cancellation race for the UnhandledCommand. Each activation's CPU and wall time and every failed task's cause are
-# recorded. Throwaway branch, never merged.
+# Engine 2b spec §5.3 go/no-go (§11.3): the focused gate's rerun on the CI runner, the engine worker at its intended
+# 2 workflow-task slots. Each workload runs in its own process, to the end, every continue checked against the bound and
+# every history replayed; the probe asserts every acceptance condition and exits non-zero on any, so a step fails on
+# it. Every step runs whatever came before; the job fails if any did. Throwaway branch, never merged.
 on:
   push: { branches: [proto/2b1b-bound] }
   workflow_dispatch: {}
@@ -10,7 +10,7 @@ permissions: { contents: read }
 jobs:
   cpu:
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    timeout-minutes: 350
     defaults: { run: { working-directory: backend } }
     services:
       postgres:
@@ -32,12 +32,34 @@ jobs:
       - run: nproc && python3 -c "import platform; print(platform.platform())"
       - name: The scheduler alone at 21,600 queued loop steps
         run: uv run python probe/cpu_bench.py 5
-      # The queued-state cases ran in run 36834701248 (this branch, 3c76866): one and four runs, to the end.
-      - name: Segment indexes that grow, to the end; every continue checked, every history replayed (own process)
+      - name: Queued state, one run, an exhausted budget
+        if: ${{ !cancelled() }}
+        run: uv run python probe/probe_bound.py exhausted_root
+      - name: Queued state, one run, 240 sibling loops
+        if: ${{ !cancelled() }}
+        run: uv run python probe/probe_bound.py many_siblings
+      - name: Queued state, four runs at once, an exhausted budget
+        if: ${{ !cancelled() }}
+        env: { CONCURRENT: "4" }
+        run: uv run python probe/probe_bound.py exhausted_root
+      - name: Queued state, four runs at once, 240 sibling loops
+        if: ${{ !cancelled() }}
+        env: { CONCURRENT: "4" }
+        run: uv run python probe/probe_bound.py many_siblings
+      - name: Segment indexes that grow (60,000 items, one segment each)
+        if: ${{ !cancelled() }}
         run: uv run python probe/probe_bound.py index_growth
-      - name: A controlled cancellation race, and a control without cancels (own process)
+      - name: Segment indexes at a run's most (99,990 items, one segment each)
+        if: ${{ !cancelled() }}
+        run: uv run python probe/probe_bound.py index_growth_cap
+      - name: A controlled cancellation race, and a control without cancels
+        if: ${{ !cancelled() }}
         env: { RACE_RUNS: "40" }
         run: uv run python probe/probe_bound.py cancel_race
-      - if: always()
+      - if: always()  # with the history of any run still running past its wait
         uses: actions/upload-artifact@v4
-        with: { name: probe-2b1b, path: backend/probe/results_bound.jsonl }
+        with:
+          name: probe-2b1b
+          path: |
+            backend/probe/results_bound.jsonl
+            backend/probe/stuck_*.json

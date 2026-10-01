@@ -131,6 +131,20 @@ def all_containers() -> tuple[G, dict[str, Any], dict[str, Any]]:
     return g, {"blobs": blobs}, {"n": 1_000, "at": 123, "k11": "11" + "v" * 59_998}
 
 
+def index_growth_cap() -> tuple[G, dict[str, Any], dict[str, Any]]:
+    """Segment indexes at the most a run can make: a segment holds at least one collected item, and a run iterates at
+    most 100,000 times, so 10 loops of 9,999 items, each item 1 KB with 1 KiB segments (one segment per item), make
+    99,990 segments: the reachable worst case in count."""
+    g = graph(n=ref("steps.l0.output.count"), at=rd("steps.last.output.value"))
+    for j in range(10):
+        loop(g, f"l{j}", list(range(9_999)), collect=ref(f"steps.c{j}.output"))
+        g.node(f"c{j}", ECHO, {"value": {"i": ref("item"), "pad": "c" * 1_000}}).edge(f"l{j}", f"c{j}", "body")
+    g.node("last", ECHO, {"value": rd("steps.l7.output.items[7777].value.i")})
+    for j in range(10):
+        g.edge(f"l{j}", "last", "done")
+    return g, {}, {"n": 9_999, "at": 7777}
+
+
 def index_growth() -> tuple[G, dict[str, Any], dict[str, Any]]:
     """Collections whose segment lists grow past the budget: six root loops of 10,000 items collecting 1 KB each,
     with segments of 1 KiB (a stress knob: a tail claimed under pressure is that small), so each list holds
@@ -275,6 +289,7 @@ WORKLOADS: dict[str, Any] = {
     "frozen_results": lambda s: frozen_results(),
     "scope_items": lambda s: scope_items(),
     "index_growth": lambda s: index_growth(),
+    "index_growth_cap": lambda s: index_growth_cap(),
     "near_limit_trigger": lambda s: near_limit_trigger(),
     "all_containers": lambda s: all_containers(),
     "many_siblings": lambda s: many_siblings(),
@@ -286,7 +301,7 @@ WORKLOADS: dict[str, Any] = {
     "refs": lambda s: refs(),
 }
 ROOT_BUDGET = {"exhausted_root": 610, "exhausted_child": 610}
-SEG_BYTES = {"index_growth": 1_024}  # a stress knob: small segments, as tails claimed under pressure are
+SEG_BYTES = {"index_growth": 1_024, "index_growth_cap": 1_024}  # a stress knob: small segments, as tails claimed under pressure are
 
 
 # --- measurement ------------------------------------------------------------------------------------------------------
@@ -430,9 +445,107 @@ def _task_failures(histories: list[Any]) -> dict[str, int]:
             kind = a.failure.application_failure_info.type or cause
             out[kind] = out.get(kind, 0) + 1
             around = [EventType.Name(x.event_type).removeprefix("EVENT_TYPE_") for x in events[max(0, n - 3) : n + 4]]
-            FAILED_TASKS.append({"workflow": h.workflow_id[-24:], "kind": kind, "cause": cause,
+            following = EventType.Name(events[n + 1].event_type) if n + 1 < len(events) else ""
+            FAILED_TASKS.append({"workflow": h.workflow_id[-24:], "workflow_id": h.workflow_id, "kind": kind,
+                                 "cause": cause, "next": following.removeprefix("EVENT_TYPE_"),
                                  "at": e.event_time.ToJsonString(), "events": around})  # fmt: skip
     return out
+
+
+ACCEPTANCE: list[str] = []  # every acceptance condition that failed, across this process's workloads: it exits 1 on any
+
+
+def _fail(name: str, why: str) -> None:
+    ACCEPTANCE.append(f"{name}: {why}")
+    print(f"    ACCEPTANCE FAILED: {name}: {why}", flush=True)
+
+
+def _unexcused_failed_tasks(cancelled: set[str], settled: dict[str, str]) -> list[dict[str, Any]]:
+    """The failed workflow tasks the narrow cancellation exception doesn't cover (the owner's ruling, 2026-10-01). A
+    failed task is excused only when its cause is UNHANDLED_COMMAND, in a run the probe intentionally cancelled (its
+    cancel landed), whose very next history event is that run's cancel request, and which settled as cancelled."""
+    bad = []
+    for f in FAILED_TASKS:
+        wid = f["workflow_id"]
+        excused = (
+            f["cause"] == "UNHANDLED_COMMAND"
+            and wid in cancelled
+            and f["next"] == "WORKFLOW_EXECUTION_CANCEL_REQUESTED"
+            and settled.get(wid) == "CANCELED"
+        )
+        if not excused:
+            bad.append(f)
+    return bad
+
+
+def _cancel_requested(histories: list[Any]) -> set[str]:
+    """The runs whose history records a cancel request. A cancel call returning isn't enough: this server accepts a
+    cancel of a run that has already completed, and nothing is recorded."""
+    return {
+        h.workflow_id
+        for h in histories
+        if any(e.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCEL_REQUESTED for e in h.events)
+    }
+
+
+def _late_cancel(histories: list[Any], wid: str) -> bool:
+    """A cancel that came while the run's end was being written: engine-core §8 shields that write, and the run's
+    result stands. True when, after the cancel request in the run's last execution, nothing was scheduled but the end's
+    projection: no step, no child, no timer. A cancel ignored mid-run would show more."""
+    from dewpoint.engine.runtime.activities import PROJECT
+
+    for h in histories:
+        if h.workflow_id != wid:
+            continue
+        events = list(h.events)
+        idx = [i for i, e in enumerate(events) if e.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCEL_REQUESTED]
+        if not idx:
+            continue
+        if events[-1].event_type != EventType.EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED:
+            return False
+        for e in events[idx[0] + 1 :]:
+            if e.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED:
+                if e.activity_task_scheduled_event_attributes.activity_type.name != PROJECT:
+                    return False
+            elif e.event_type in (
+                EventType.EVENT_TYPE_START_CHILD_WORKFLOW_EXECUTION_INITIATED,
+                EventType.EVENT_TYPE_TIMER_STARTED,
+                EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW,
+            ):
+                return False
+        return True
+    return False
+
+
+async def _settled(client: Any, ids: list[str]) -> dict[str, str]:
+    """Each run's final status, from its latest execution."""
+    out = {}
+    for wid in ids:
+        d = await client.get_workflow_handle(wid).describe()
+        out[wid] = d.status.name if d.status is not None else "UNKNOWN"
+    return out
+
+
+def _accept(name: str, out: dict[str, Any], *, expect: dict[str, str], cancelled: set[str],
+            settled: dict[str, str], replay_total: int) -> None:  # fmt: skip
+    """The acceptance conditions, asserted: each run settled as expected, the outputs match, every check against the
+    continued-input bound passed (and some continue was checked), the replay passed, no activity timed out, and every
+    failed task is one the cancellation exception excuses."""
+    for wid, want in expect.items():
+        if settled.get(wid) != want:
+            _fail(name, f"{wid[-12:]} settled {settled.get(wid)}, expected {want}")
+    if out.get("outputs_ok") is False:
+        _fail(name, f"outputs {out.get('outputs')} != expected {out.get('expected')}")
+    if out["n_violations"]:
+        _fail(name, f"{out['n_violations']} checks failed, e.g. {out['violations'][:2]}")
+    if out["continues"] < 1:
+        _fail(name, "no continue: the continued-input bound wasn't checked")
+    if out["replayed"] != replay_total:
+        _fail(name, f"replay: {out['replayed']} (expected {replay_total} histories)")
+    if out.get("activity_timeouts"):
+        _fail(name, f"{out['activity_timeouts']} activities timed out")
+    for f in _unexcused_failed_tasks(cancelled, settled):
+        _fail(name, f"failed task not excused: {f}")
 
 
 def _activity_timeouts(histories: list[Any]) -> int:
@@ -479,11 +592,13 @@ async def run(name: str, url: str) -> dict[str, Any]:
     return await run_one(name, url)
 
 
-async def _stop_when_due(client: Any, handles: list[Any], sample_s: float) -> None:
+async def _stop_when_due(client: Any, handles: list[Any], sample_s: float) -> set[str]:
     """With STOP_AFTER, once every copy has continued that many times (its latest run id changed as often), or with
-    SAMPLE_S once that long has passed, cancel each copy's latest run by its workflow id, and say so if it fails."""
+    SAMPLE_S once that long has passed, cancel each copy's latest run by its workflow id, and say so if it fails.
+    Returns the copies whose cancel landed."""
+    landed: set[str] = set()
     if not STOP_AFTER and not sample_s:
-        return
+        return landed
     started = time.monotonic()
     runs: dict[str, set[str]] = {h.id: set() for h in handles}
     while True:
@@ -495,7 +610,7 @@ async def _stop_when_due(client: Any, handles: list[Any], sample_s: float) -> No
                 done += 1
         continued = min(len(r) - 1 for r in runs.values())
         if done == len(handles):
-            return
+            return landed
         if (STOP_AFTER and continued >= STOP_AFTER) or (sample_s and time.monotonic() - started >= sample_s):
             break
         await asyncio.sleep(2)
@@ -504,8 +619,10 @@ async def _stop_when_due(client: Any, handles: list[Any], sample_s: float) -> No
     for h in handles:
         try:
             await client.get_workflow_handle(h.id).cancel()
+            landed.add(h.id)
         except Exception as e:  # loud: a cancel that didn't land means the copy runs on
             print(f"    CANCEL FAILED for {h.id[-12:]}: {type(e).__name__}: {e}", flush=True)
+    return landed
 
 
 async def run_many(name: str, url: str, k: int, sample_s: float) -> dict[str, Any]:
@@ -530,14 +647,13 @@ async def run_many(name: str, url: str, k: int, sample_s: float) -> dict[str, An
                 handle, _admitted = await start_run(env.client, STORE, g, trigger)
                 handles.append(handle)
             print(f"    {k} runs", [h.id[-12:] for h in handles], flush=True)
-            await _stop_when_due(env.client, handles, sample_s)
+            cancelled = await _stop_when_due(env.client, handles, sample_s)
             for h in handles:
                 try:
                     statuses.append((await asyncio.wait_for(h.result(), TIMEOUT_S)).status)
-                except Exception as e:
+                except Exception as e:  # a cancelled run raises WorkflowFailureError: its status is checked below
                     statuses.append(type(e).__name__)
-            if any(s2 in ("TimeoutError",) for s2 in statuses):  # a cancelled root raises WorkflowFailureError
-                print("    RUNS DIDN'T END AS EXPECTED:", statuses, flush=True)
+            settled = await _settled(env.client, [h.id for h in handles])
             elapsed = time.monotonic() - t0
         histories = [x for h in handles for x in await executions(env.client, h.id, h.first_execution_run_id or "")]
     m = await measure(histories)
@@ -565,6 +681,17 @@ async def run_many(name: str, url: str, k: int, sample_s: float) -> dict[str, An
                   for c in ("cap_refused", "deferred_peak", "peak_open", "undo_peak")},
         "asks": 0, "container_spills_by": {"runs": {}, "batches": {}}, "worst": worst,
     }  # fmt: skip
+    cancelled &= _cancel_requested(histories)  # the probe's cancels that landed: recorded in the run's history
+    expect = {
+        h.id: ("CANCELED" if h.id in cancelled and not _late_cancel(histories, h.id) else "COMPLETED")
+        for h in handles
+    }  # a late cancel (during the end's write) lets the run's result stand, as engine-core §8 says
+    if not cancelled:
+        for h, st in zip(handles, statuses, strict=True):
+            if st != "succeeded":
+                _fail(out["workload"], f"{h.id[-12:]} ended {st}")
+    _accept(out["workload"], out, expect=expect, cancelled=cancelled, settled=settled,
+            replay_total=len(_replay_sample(histories)))  # fmt: skip
     with OUT.open("a") as f:
         f.write(json.dumps(out, default=str) + "\n")
     return out
@@ -581,6 +708,8 @@ async def run_one(name: str, url: str) -> dict[str, Any]:
     P.ROOT_BUDGET[:] = [ROOT_BUDGET[name]] if name in ROOT_BUDGET else []
     P.SEG_BYTES = SEG_BYTES.get(name, 262_144)
     g, trigger, expected = WORKLOADS[name](STORE)
+    if os.environ.get("PROBE_SELFTEST_BREAK") and expected:  # the acceptance check's own test: it must fail the process
+        expected = {**expected, next(iter(expected)): "<broken on purpose>"}
     status, error, outputs = "timeout", None, None
     t0 = time.monotonic()
     async with await R.environment() as env:
@@ -593,6 +722,7 @@ async def run_one(name: str, url: str) -> dict[str, Any]:
             except TimeoutError:
                 pass
             elapsed = time.monotonic() - t0
+            settled = await _settled(env.client, [handle.id])
         histories = await executions(env.client, handle.id, handle.first_execution_run_id or "")
     m = await measure(histories)
     run_times = {w: dict(t) for w, t in P.TIMES.items()}  # the run's own, before the replay adds its passes
@@ -638,6 +768,10 @@ async def run_one(name: str, url: str) -> dict[str, Any]:
                      for ph in sorted({ph for t in run_times.values() for ph in t})},  # fmt: skip
         "events": sum(len(h.events) for h in histories), "worst": worst,
     }  # fmt: skip
+    if status != "succeeded":
+        _fail(name, f"the run ended {status}: {error}")
+    _accept(name, out, expect={handle.id: "COMPLETED"}, cancelled=set(), settled=settled,
+            replay_total=len(_replay_sample(histories)))  # fmt: skip
     with OUT.open("a") as f:
         f.write(json.dumps(out, default=str) + "\n")
     return out
@@ -694,6 +828,12 @@ async def main() -> None:
                 print("    VIOLATION", v[:300], flush=True)
             if out["error"]:
                 print("    error:", out["error"], flush=True)
+    if ACCEPTANCE:
+        print(f"ACCEPTANCE: {len(ACCEPTANCE)} condition(s) failed:", flush=True)
+        for line in ACCEPTANCE:
+            print("  -", line[:400], flush=True)
+        sys.exit(1)
+    print("ACCEPTANCE: every condition held", flush=True)
 
 
 def continuing(n: int = 100) -> G:
@@ -703,6 +843,26 @@ def continuing(n: int = 100) -> G:
     loop(g, "l", list(range(n)))
     g.node("x", ECHO, {"value": ref("item")}).edge("l", "x", "body")
     return g
+
+
+RACE_WAIT_S = float(os.environ.get("RACE_WAIT_S", "300"))
+
+
+async def _dump_stuck(client: Any, h: Any) -> None:
+    """A run still running past the wait: its workflow's task stacks (Temporal's `__stack_trace` query) printed, and
+    its last execution's history saved beside the results, so where it waits survives the dev server's shutdown."""
+    try:
+        stack = await asyncio.wait_for(client.get_workflow_handle(h.id).query("__stack_trace"), 30)
+    except Exception as e:
+        stack = f"(no stack: {type(e).__name__}: {e})"
+    print(f"    STUCK {h.id[-12:]} stack:\n{stack}", flush=True)
+    try:
+        history = await client.get_workflow_handle(h.id).fetch_history()
+        path = OUT.with_name(f"stuck_{h.id[-12:]}.json")
+        path.write_text(history.to_json())
+        print(f"    STUCK {h.id[-12:]} history ({len(history.events)} events) -> {path.name}", flush=True)
+    except Exception as e:
+        print(f"    STUCK {h.id[-12:]}: no history ({type(e).__name__}: {e})", flush=True)
 
 
 async def cancel_race(url: str) -> None:
@@ -718,7 +878,7 @@ async def cancel_race(url: str) -> None:
     rng = random.Random(int(os.environ.get("RACE_SEED", "7")))
     probe_store.STORE = ProbeStore(url)
     out: dict[str, Any] = {}
-    for mode in ("cancelled", "control"):
+    for mode in os.environ.get("RACE_MODES", "cancelled,control").split(","):
         store = MemoryStore()
         async with await R.environment() as env:
             async with R.serve(env.client, store):
@@ -729,19 +889,58 @@ async def cancel_race(url: str) -> None:
                     wid = run_workflow_id(TENANT, run_id)
                     run = RunInput(TENANT, run_id, vid, {}, checkpoint_events=60, drain_events=120)
                     handles.append(await env.client.start_workflow(RunGraph.run, run, id=wid, task_queue=ENGINE_QUEUE))
+                landed: set[str] = set()
                 if mode == "cancelled":
                     async def cancel_later(h: Any, delay: float) -> None:
                         await asyncio.sleep(delay)
                         try:
                             await env.client.get_workflow_handle(h.id).cancel()
-                        except Exception as e:
-                            print(f"    CANCEL FAILED {h.id[-8:]}: {type(e).__name__}", flush=True)
+                            landed.add(h.id)
+                        except Exception as e:  # the run had ended: it must then have succeeded
+                            print(f"    cancel didn't land on {h.id[-8:]}: {type(e).__name__}", flush=True)
 
                     await asyncio.gather(*(cancel_later(h, rng.uniform(0.5, 12.0)) for h in handles))
+                ended: dict[str, str] = {}
                 for h in handles:
-                    with contextlib.suppress(Exception):
-                        await asyncio.wait_for(h.result(), 300)
+                    try:
+                        ended[h.id] = (await asyncio.wait_for(h.result(), RACE_WAIT_S)).status
+                    except Exception as e:  # recorded, never suppressed: a cancelled run raises; anything else fails
+                        ended[h.id] = type(e).__name__
+                        if isinstance(e, TimeoutError):  # still running: where it waits, and its history, kept
+                            await _dump_stuck(env.client, h)
+                settled = await _settled(env.client, [h.id for h in handles])
                 histories = [x for h in handles for x in await executions(env.client, h.id, h.first_execution_run_id or "")]
+        name = f"cancel_race [{mode}]"
+        landed &= _cancel_requested(histories)  # a cancel landed only when the run's history records it
+        late_cancels: list[str] = []
+        for h in handles:
+            if h.id in landed:
+                late = settled[h.id] == "COMPLETED" and ended[h.id] == "succeeded" and _late_cancel(histories, h.id)
+                if late:
+                    late_cancels.append(h.id)
+                elif settled[h.id] != "CANCELED" or ended[h.id] != "WorkflowFailureError":
+                    _fail(name, f"{h.id[-12:]} was cancelled but settled {settled[h.id]} ({ended[h.id]})")
+            elif settled[h.id] != "COMPLETED" or ended[h.id] != "succeeded":
+                _fail(name, f"{h.id[-12:]} wasn't cancelled but settled {settled[h.id]} ({ended[h.id]})")
+        if mode == "cancelled":  # where each landed cancel sits: in which execution, and how that execution closed
+            for h in histories:
+                if h.workflow_id not in landed:
+                    continue
+                types = [EventType.Name(e.event_type).removeprefix("EVENT_TYPE_") for e in h.events]
+                if "WORKFLOW_EXECUTION_CANCEL_REQUESTED" in types:
+                    i = types.index("WORKFLOW_EXECUTION_CANCEL_REQUESTED")
+                    print(f"    cancel in {h.workflow_id[-12:]} [{settled[h.workflow_id]}]: at event {i + 1} of "
+                          f"{len(types)}, then {types[i + 1 : i + 6]} ... closed by {types[-1]}", flush=True)
+        FAILED_TASKS.clear()
+        _task_failures(histories)
+        for f in _unexcused_failed_tasks(landed, settled):
+            _fail(name, f"failed task not excused: {f}")
+        try:
+            replayed: Any = await R.replay(histories)
+        except Exception as e:
+            replayed = f"FAILED: {type(e).__name__}: {str(e)[:200]}"
+        if replayed != len(histories):
+            _fail(name, f"replay: {replayed} (expected {len(histories)})")
         failures: list[dict[str, Any]] = []
         continues = 0
         for h in histories:
@@ -761,6 +960,8 @@ async def cancel_race(url: str) -> None:
                                                        for f in failures),
                      "unhandled_without": sum(f["cause"] == "UNHANDLED_COMMAND" and not f["cancel_next"]
                                               for f in failures),
+                     "cancels_landed": len(landed), "late_cancels": len(late_cancels), "replayed": replayed,
+                     "settled": {st: sum(v == st for v in settled.values()) for st in set(settled.values())},
                      "examples": failures[:3]}  # fmt: skip
         print(f"=== cancel_race [{mode}]: {out[mode]}", flush=True)
     with OUT.open("a") as f:
