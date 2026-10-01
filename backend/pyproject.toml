@@ -44,6 +44,7 @@ dev = [
   "pip-licenses>=5.0",
   "types-jsonschema>=4.23",
   "types-protobuf>=7.35",
+  "pytest-xdist>=3.6",
 ]
 
 [build-system]
