@@ -313,10 +313,11 @@ class Execution:
                 wid, t0 = workflow.info().workflow_id, probe.clock()
                 self._serve_budget()
                 probe.took(wid, "serve_budget", t0)
-                if not self._draining:  # proto (§5.3): spills are units under the in-flight cap
-                    for sp in self.sched.take_spills():
-                        self._spill_units[(sp.loop, sp.first, sp.which)] = sp
-                        waiting.append(("spill", sp.loop, sp.first, sp.which))
+                # proto (§5.3): spills are units under the in-flight cap. A drain takes and starts them too: they only
+                # shrink the state, and a continue waits until the live state is back within its budget.
+                for sp in self.sched.take_spills():
+                    self._spill_units[(sp.loop, sp.first, sp.which)] = sp
+                    waiting.append(("spill", sp.loop, sp.first, sp.which))
                 for key, sid, later in self._spill_later:
                     tasks[key] = asyncio.create_task(self._spill_result(sid, later))
                 self._spill_later = []
@@ -363,8 +364,9 @@ class Execution:
                         [self._spill_units.pop((w[1], w[2], w[3])) for w in waiting if w[0] == "spill"],
                     )
                     return CONTINUE
-                while not self._draining and waiting and self._in_flight(tasks) < IN_FLIGHT_CAP:
-                    unit = waiting.pop(0)
+                startable = [w for w in waiting if not self._draining or w[0] == "spill"]
+                for unit in startable[: max(0, IN_FLIGHT_CAP - self._in_flight(tasks))]:
+                    waiting.remove(unit)
                     tasks[unit] = asyncio.create_task(self._unit(unit))
                 if self._rows and not any(key[0] == "project" for key in tasks):  # one at a time: rows wait for it
                     self._projects += 1
@@ -446,7 +448,7 @@ class Execution:
         return "children" if step.ref == control.RUN_WORKFLOW else "values"
 
     def _quiescent(self, tasks: Mapping[tuple[Any, ...], asyncio.Task[Any]]) -> bool:
-        return quiescent(tasks, self._timers, self.sched.budget, self._mail, self._answers)
+        return quiescent(tasks, self._timers, self.sched.budget, self._mail, self._answers, live=self.sched.live)
 
     async def _settle_for_continue(self, tasks: dict[tuple[Any, ...], asyncio.Task[Any]]) -> None:
         """Continue-as-new: the sleeping timer steps stop here (their wake times go into the snapshot), and the
@@ -1494,12 +1496,16 @@ def quiescent(
     budget: Budget,
     mail: list[Any],
     answers: list[Any],
+    *,
+    live: int,
 ) -> bool:
     """No activity and no child outstanding, and no request to or from a parent or child: a sleeping timer step
     doesn't count, nor a projection (it's written before the run continues). Proto (engine 2b spec §5.3): nor may
-    the iteration budget hold a waiting need or a child's grant, so a continued input carries neither."""
+    the iteration budget hold a waiting need or a child's grant, so a continued input carries neither; and the live
+    state is within its budget, its claims landed, so a continued input carries at most LIVE_BUDGET of values."""
     idle = all(k[0] == "project" or (k[0] == "step" and k[1] in timers) for k in tasks)
-    return idle and not budget.asking and not budget.waiting and not budget.reserved and not mail and not answers
+    settled = not budget.asking and not budget.waiting and not budget.reserved and not mail and not answers
+    return idle and settled and live <= probe.LIVE_BUDGET
 
 
 def _digest(value: Any) -> str:

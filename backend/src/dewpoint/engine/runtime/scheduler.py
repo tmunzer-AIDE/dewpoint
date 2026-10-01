@@ -1507,6 +1507,8 @@ class Scheduler:
             raise ValueError("a snapshot is taken only between units, and never after the run ended")
         if self.budget.waiting or self.budget.reserved or self._budget_waits:  # proto (§5.3): the at-continue term
             raise ValueError("a snapshot is taken only when the iteration budget holds no waiting need or child grant")
+        if self._live > P.LIVE_BUDGET:  # proto (§5.3): a container being claimed is live until its claim lands
+            raise ValueError("a snapshot is taken only within the live-state budget, once its claims have landed")
         if check:
             self._check_queues()
         by_scope: dict[ScopeKey, dict[uuid.UUID, int]] = {}
