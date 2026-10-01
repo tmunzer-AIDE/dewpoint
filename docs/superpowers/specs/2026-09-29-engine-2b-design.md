@@ -57,6 +57,10 @@
   - Revision 5 also records the §5.3 follow-up in §11.3: promising, not yet a go (the owner's ruling). Its checks
     passed on every workload; the at-continue budget term is accepted in principle, once enforced as an invariant,
     and a workflow task's CPU at the structural maximum blocks the gate until it's bounded.
+  - From the owner's ruling on the conditions (2026-10-01): the at-continue budget term is approved and §5.3 counts
+    only the budget's fixed counters in a continued input, with both checks kept; the CPU work is promising, but the
+    gate stays open until the heaviest case runs on the target Linux CI runner, the long runs complete and replay,
+    and the `UnhandledCommand` is explained (§11.3).
 - **Parent specs:**
   - `2026-09-24-dewpoint-architecture-design.md` (§5, §6.1, §6.5, §6.8, §12, §15). This spec **changes** its
     workflow-id contract (§6.1), replaces its `outbox` table (§6.1), details its claim check (§6.5) and settles the
@@ -494,7 +498,8 @@ else. Everything else is restored from the snapshot alone:
 - So an item slice that fit the 1.75 MiB start limit is a container like any other. The budget claims it on the
   batch's first workflow task, long before any continue.
 
-1. **The envelope:** identifiers, settings, counters and deadlines, a child's `Parent`, and the snapshot's own header.
+1. **The envelope:** identifiers, settings, counters and deadlines, a child's `Parent` (its `grant` included), and the
+   snapshot's own header, the iteration budget's fixed counters included (component 4).
    - Its ids are server-built, to the exact grammar of §6.1, whose longest form is `ID_MAX`.
    - Its other fields are enums, and numbers and timestamps with bounded ranges.
    - So `ENVELOPE_MAX` is a constant: every field at its widest, every id at `ID_MAX`. It never depends on what a
@@ -515,8 +520,10 @@ else. Everything else is restored from the snapshot alone:
      - scopes: their keys, and one code per node and per edge of their region;
      - the variable versions that queued loop steps captured (below);
      - started loops: their counters, their open and collecting indexes, and their collections' headers;
-     - units handed out: sleeping timers, spills in flight;
-     - the iteration budget: its waiting needs, its children's grants, and its one request to its parent.
+     - units handed out: sleeping timers, spills in flight.
+
+     The iteration budget's waiting needs and its children's grants aren't in it: a continue happens only once both
+     are empty (below).
    - **Scopes:** at most `OPEN_SCOPES_CAP_v + D` iteration scopes, the root, and a batch's frozen scopes (at most
      `MAX_LOOP_DEPTH` of them, which hold no codes). Each scope's codes number at most its region's nodes plus edges.
    - **Captures:** each loop step queued in an iteration scope (ready, and not started) holds one entry. The entry
@@ -548,21 +555,26 @@ else. Everything else is restored from the snapshot alone:
        root region's loop steps. Root-region loop steps are never deferred.
    - **Units:** at most `IN_FLIGHT_CAP` units are handed out at once, spills included, so the timers and handed-out
      records a snapshot keeps are bounded by it.
-   - **The iteration budget:**
-     - Its waiting needs are at most one per started loop, one per running filter and one per child. Queued loop steps
-       add none, and filters and children are units, so there are at most
-       `STARTED_LOOPS_v + 2 × IN_FLIGHT_CAP` of them, where `STARTED_LOOPS_v = OPEN_SCOPES_CAP_v + D_v + ROOT_LOOPS_v`.
-     - Its grants are at most one per child, so at most `IN_FLIGHT_CAP`.
-     - It has at most one request to its parent.
-     - A need is at most `NEED_MAX` and a grant at most `GRANT_MAX`, both fixed by `ID_MAX` (a child's id, a loop's
-       iteration key).
-   - `STRUCTURE_MAX_v(cap)` is the sum of five terms:
+   - **The iteration budget (the at-continue term, approved by the owner):**
+     - Its waiting needs and its children's grants are transient. While the execution runs, its waiting needs are at
+       most one per started loop, one per running filter and one per child (queued loop steps add none), and its
+       grants at most one per child.
+     - **An execution continues only once its budget holds no waiting need and no child's grant.** Both are enforced,
+       and both checks stay in the implementation:
+       - the quiescence check that lets an execution continue requires both empty, besides no unit outstanding and
+         no request to or from a parent;
+       - the snapshot refuses to be taken otherwise;
+       - a regression fails if either survives to a continue.
+
+       A need still undecided when nothing else runs (asked while an answer was applied) is decided first. Under the
+       exact cap the root may wait for an outstanding child, which isn't quiescence anyway.
+     - So a continued input carries only the budget's fixed counters, in the envelope (component 1), as it carries
+       `Parent.grant`. Neither waiting needs nor grants are a term of the bound.
+   - `STRUCTURE_MAX_v(cap)` is the sum of four terms:
      - `(cap + D_v) × (ITER_SCOPE_MAX_v + LOOP_MAX)`;
      - `ROOT_SCOPE_MAX_v + ROOT_LOOPS_v × LOOP_MAX`;
      - `FROZEN_MAX`;
-     - `IN_FLIGHT_CAP × UNIT_MAX`;
-     - `BUDGET_MAX_v(cap) = (cap + D_v + ROOT_LOOPS_v + 2 × IN_FLIGHT_CAP) × NEED_MAX + IN_FLIGHT_CAP × GRANT_MAX`,
-       plus the budget's fixed fields.
+     - `IN_FLIGHT_CAP × UNIT_MAX`.
 
      The version-dependent terms:
      - `ITER_SCOPE_MAX_v`: the largest, over the version's loop regions, of the region's node and edge codes plus its
@@ -571,8 +583,9 @@ else. Everything else is restored from the snapshot alone:
      - `ROOT_LOOPS_v`: the root region's loop steps.
 
      `LOOP_MAX` and `UNIT_MAX` are fixed by the encoding and by `ID_MAX`.
-   - Accounting: the cap, the deferred start, the shared request and the in-flight cap enforce it. The counts are
-     checked as scopes open, loops start, units are handed out and needs are queued.
+   - Accounting: the cap, the deferred start, the shared request and the in-flight cap enforce it, and the
+     quiescence check and the snapshot keep the budget's needs and grants out of it. The counts are checked as
+     scopes open, loops start and units are handed out.
 5. **Live values, within `LIVE_BUDGET`:** every value the snapshot holds inline except the trigger.
    - **What it covers:**
      - settled steps' results in open scopes, and scopes' items;
@@ -1403,6 +1416,56 @@ With every container claimed, the live state needs at most 660,576 B (250 root l
    - Snapshot, restore and the first take after a restore need deterministic chunking or yield points.
    - The 21,600-queued-step workload then runs again on the dev server and on Linux, under representative
      concurrency.
+
+**The conditions, checked (2026-10-01): promising, the gate still open.**
+1. **The at-continue budget term: approved by the owner, and §5.3 revised.** The prototype enforces it at both
+   points, and both checks stay in the implementation:
+   - the quiescence check requires no waiting need and no child's grant;
+   - the snapshot refuses to be taken otherwise;
+   - a need left undecided when nothing else runs is decided before the execution continues.
+
+   Regressions fail if either check is removed (`test_proto_continue_budget.py`, watched failing first). At every
+   continue measured since, waiting needs and grants were zero. With the fixed counters in the envelope, every
+   largest graph gets cap 100; 250 root loops keep 284,707 B of headroom at cap 1.
+2. **A workflow task's CPU: much better, not yet settled.** The probe found three causes:
+   - **Scans of the whole queue.** Every pruned iteration scanned all 21,600 captures. They're now found through
+     the queues that hold their steps, versions are reference-counted, and the relief is computed only past the
+     budget.
+   - **Snapshot, restore and the first take.** They now run in parts, each part charged to the workflow task in
+     units weighted by their measured cost. Past the task's share (`YIELD_STRUCTURE`, 200,000 units, a tenth in an
+     execution's first task), the next part waits for the next task behind §5.6's 1 ms durable timer. A restore defers
+     its queued loop steps as it goes, so the first take after it does no deferral.
+   - **An exhausted budget drained every queued loop step in one task.** Each loop step started, was refused and
+     settled in the workflow, with no command to end the task, and the deadlock detector stopped it at 2 s. Each
+     step unit now charges its work and its view's size before it starts, and a take takes only what the task's
+     share allows.
+
+   Measured at 21,600 queued loop steps:
+   - The scheduler alone, on macOS and in a Linux container on the same machine: a snapshot takes 14-16 ms, a
+     restore 123-133 ms over three tasks (at most 98 ms in one), and the first take after it 0 ms.
+   - On the dev server, the longest workflow task in wall time, with no check failing:
+
+     | Runs at once on one worker | macOS | Linux container |
+     |---|---|---|
+     | One, an exhausted budget (run to its end, 19,032 loops refused) | 401 ms | 437 ms |
+     | One, 240 sibling loops | 397 ms | 500 ms |
+     | Four, an exhausted budget | 2,445 ms (5 of 5,907 tasks past 1 s) | 2,477 ms (4 of 6,161) |
+     | Four, 240 sibling loops | 2,227 ms (4 of 7,884) | 2,511 ms (5 of 8,035) |
+     | Four, the worker at 2 workflow-task slots | 1,347 ms (1 of 5,808) | 1,385 ms (1 of 5,887) |
+
+   - No workflow task failed, apart from one `UnhandledCommand` among four concurrent Linux runs that the probe
+     cancelled.
+   - A worker at 1 slot hung; that wasn't investigated.
+
+   Engine-core's 1 s target is CPU time. A task's wall time under contention isn't itself a failure, but it leaves
+   the SDK's deadlock risk open, given the earlier detector event and gate 7b's slower CI runner.
+
+**Before the gate passes (the owner's ruling, 2026-10-01).** The 2b-1b plan doesn't start until these pass:
+- **The CI runner.** The heaviest queued-state case runs on the target Linux CI runner, with the intended worker slot
+  count and representative concurrency. It measures each task's CPU time and the cause of every failed task.
+- **Complete runs.** The long runs complete, and every history replays, with the new yield logic: not only their
+  first 40 continues.
+- **The `UnhandledCommand`.** Its coincidence with the probe's cancel is verified, not assumed.
 
 **Not prototyped, implementation work:**
 - a loop over a claimed list that isn't handle-backed;
