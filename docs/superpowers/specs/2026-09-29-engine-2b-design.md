@@ -1611,7 +1611,8 @@ With every container claimed, the live state needs at most 660,576 B (250 root l
   - With the fix, on macOS, the five correctness workloads ran in parallel, to their ends, and passed. The
     99,990-item one had no violation over 1,763 continues; its worst snapshot was 1,012,698 B.
   - **The corrected run on the CI runner (run 36928968433), the owner's condition:** the 99,990-item workload alone,
-    with the fix, every acceptance condition asserted, activation CPU included. It passed in 29 minutes:
+    with the fix, every acceptance condition asserted, activation CPU included. It passed (the run 29 minutes, the
+    whole check 39):
     - the run succeeded with the expected outputs;
     - 1,999 continues checked against the bound, with no violation, the worst snapshot 1,039,069 B;
     - all 3,000 histories replayed;
