@@ -19,106 +19,44 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from dewpoint.engine.canonical import canonical_json
+from dewpoint.engine.sensitive import (
+    MIN_SECRET,
+    SENSITIVE,
+    children,
+    elements,
+    expand,
+    keys_sensitive,
+    map_values,
+    patterns,
+)
 
 PREVIEW_BYTES = 8 * 1024
 MESSAGE_LIMIT = 500  # characters of a stored code or message
 REDACTED, TRUNCATED = "[redacted]", "[truncated]"
-SENSITIVE = "x-sensitive"
-MIN_SECRET = 4  # shorter values would mask ordinary text ("1", "yes") everywhere
-_MAX_DEPTH = 64  # a schema that refers to itself ends here
+
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 _UNSTORABLE = re.compile("[\x00\ud800-\udfff]")  # Postgres takes no NUL, and a lone surrogate isn't UTF-8
 
 Secrets = tuple[str, ...]
 
 
-def _resolve(root: Mapping[str, Any], ref: str) -> Any:
-    """A local JSON pointer (`#/$defs/Name`); anything else resolves to nothing (schemas are local-only, spec §4.1)."""
-    if not ref.startswith("#/"):
-        return None
-    node: Any = root
-    for part in ref[2:].split("/"):
-        node = node.get(part.replace("~1", "/").replace("~0", "~")) if isinstance(node, Mapping) else None
-    return node
-
-
-def _branches(schema: Any, root: Mapping[str, Any], depth: int = 0) -> list[Mapping[str, Any]]:
-    """`schema` and everything it stands for: its `$ref` followed, its `anyOf`/`oneOf`/`allOf` branches expanded."""
-    if not isinstance(schema, Mapping) or depth > _MAX_DEPTH:
-        return []
-    out: list[Mapping[str, Any]] = [schema]
-    ref = schema.get("$ref")
-    if isinstance(ref, str):
-        out += _branches(_resolve(root, ref), root, depth + 1)
-    for key in ("anyOf", "oneOf", "allOf"):
-        subs = schema.get(key)
-        for sub in subs if isinstance(subs, list) else ():
-            out += _branches(sub, root, depth + 1)
-    return out
-
-
-def _patterns(branch: Mapping[str, Any]) -> list[Any]:
-    """Every `patternProperties` schema, matched or not: no regex runs on data in the workflow, so a sensitive
-    pattern redacts every key's value in its object, declared keys included (over-redaction, never a leak)."""
-    patterns = branch.get("patternProperties")
-    return list(patterns.values()) if isinstance(patterns, Mapping) else []
-
-
-def _map_values(branches: list[Mapping[str, Any]]) -> list[Any]:
-    """The schemas that may govern an undeclared key's value: `additionalProperties` and every pattern."""
-    out: list[Any] = []
-    for b in branches:
-        if isinstance(b.get("additionalProperties"), Mapping):
-            out.append(b["additionalProperties"])
-        out.extend(_patterns(b))
-    return out
-
-
-def _children(branches: list[Mapping[str, Any]], key: str) -> list[Any]:
-    """The schemas that may govern `key`'s value. JSON Schema applies a declared property and every matching pattern
-    together; `additionalProperties` only to keys neither covers."""
-    out: list[Any] = []
-    for b in branches:
-        props = b.get("properties")
-        if isinstance(props, Mapping) and key in props:
-            out += [props[key], *_patterns(b)]
-        else:
-            out += _map_values([b])
-    return out
-
-
-def _elements(branches: list[Mapping[str, Any]], index: int) -> list[Any]:
-    """The schemas that may govern a list's element `index`: its tuple position (`prefixItems`), and `items`."""
-    out: list[Any] = [b["items"] for b in branches if isinstance(b.get("items"), Mapping)]
-    for b in branches:
-        prefix = b.get("prefixItems")
-        if isinstance(prefix, list) and index < len(prefix):
-            out.append(prefix[index])
-    return out
-
-
-def _keys_sensitive(branches: list[Mapping[str, Any]], root: Mapping[str, Any]) -> bool:
-    names = [b["propertyNames"] for b in branches if isinstance(b.get("propertyNames"), Mapping)]
-    return any(n.get(SENSITIVE) is True for s in names for n in _branches(s, root))
-
-
 def _walk(value: Any, schemas: list[Any], root: Mapping[str, Any], found: list[Any] | None) -> Any:
     """The value with its sensitive parts redacted; with `found`, also collects what was redacted."""
-    branches = [b for s in schemas for b in _branches(s, root)]
+    branches = [b for s in schemas for b in expand(s, root)]
     if any(b.get(SENSITIVE) is True for b in branches):
         if found is not None:
             found.append(value)
         return REDACTED
     if isinstance(value, dict):
-        if _keys_sensitive(branches, root):  # the keys are the secret: the whole map goes, its keys are learned
+        if keys_sensitive(branches, root):  # the keys are the secret: the whole map goes, its keys are learned
             if found is not None:
                 found.extend(value)
                 for k, v in value.items():
-                    _walk(v, _children(branches, k), root, found)
+                    _walk(v, children(branches, k), root, found)
             return REDACTED
-        return {k: _walk(v, _children(branches, k), root, found) for k, v in value.items()}
+        return {k: _walk(v, children(branches, k), root, found) for k, v in value.items()}
     if isinstance(value, list):
-        return [_walk(v, _elements(branches, i), root, found) for i, v in enumerate(value)]
+        return [_walk(v, elements(branches, i), root, found) for i, v in enumerate(value)]
     return value
 
 
@@ -175,14 +113,14 @@ def location(loc: Sequence[str | int], schema: Mapping[str, Any]) -> str:
     candidates: list[Any] = [schema]
     parts: list[str] = []
     for part in loc:
-        branches = [b for c in candidates for b in _branches(c, schema)]
+        branches = [b for c in candidates for b in expand(c, schema)]
         found: list[Any] = []
         if isinstance(part, str):
             found = [
                 c
                 for b in branches
                 if isinstance(b.get("properties"), Mapping) and part in b["properties"]
-                for c in (b["properties"][part], *_patterns(b))
+                for c in (b["properties"][part], *patterns(b))
             ]
         elif isinstance(part, int):
             for b in branches:
@@ -196,7 +134,7 @@ def location(loc: Sequence[str | int], schema: Mapping[str, Any]) -> str:
             candidates = found
         else:
             parts.append("*")
-            candidates = _map_values(branches)
+            candidates = map_values(branches)
     return ".".join(parts) or "(root)"
 
 
