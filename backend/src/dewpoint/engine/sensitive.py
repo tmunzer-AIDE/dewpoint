@@ -134,3 +134,52 @@ def sensitive_positions(value: Any, schema: Mapping[str, Any] | None) -> list[st
     out: list[str] = []
     _positions(value, [schema], schema, "", out)
     return out
+
+
+def empty(value: Any) -> bool:
+    """A literal that can't hold a secret: null, or the empty string (an optional credential's usual default)."""
+    return value is None or value == ""
+
+
+def _marked(value: Any, schemas: list[Any], root: Mapping[str, Any], pointer: str, out: list[str]) -> None:
+    if empty(value):
+        return
+    branches = [b for s in schemas for b in expand(s, root)]
+    if any(b.get(SENSITIVE) is True for b in branches):
+        out.append(pointer)
+    elif isinstance(value, dict):
+        if keys_sensitive(branches, root):
+            out.append(pointer)
+            return
+        for key, child in value.items():
+            _marked(child, children(branches, key), root, pointer + "/" + escape(key), out)
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            _marked(child, elements(branches, index), root, pointer + "/" + str(index), out)
+
+
+def marked_positions(value: Any, schema: Mapping[str, Any], root: Mapping[str, Any] | None = None) -> list[str]:
+    """The pointers of `value`'s parts, other than `empty` ones, that the schema marks sensitive (`x-sensitive`, or a
+    map whose keys are), in document order. An undeclared key follows the schemas that govern it, and isn't sensitive
+    for that alone: this is what a workflow author wrote, checked at publish (§3.8). `root` resolves `$ref`s (the
+    schema by default)."""
+    out: list[str] = []
+    _marked(value, [schema], root if root is not None else schema, "", out)
+    return out
+
+
+def is_marked(schema: Mapping[str, Any], path: tuple[str | int, ...], root: Mapping[str, Any] | None = None) -> bool:
+    """Whether the position at `path` lies at or under a part the schema marks sensitive."""
+    resolve_in = root if root is not None else schema
+    schemas: list[Any] = [schema]
+    for depth in range(len(path) + 1):
+        branches = [b for s in schemas for b in expand(s, resolve_in)]
+        if any(b.get(SENSITIVE) is True for b in branches) or (
+            depth < len(path) and keys_sensitive(branches, resolve_in)
+        ):
+            return True
+        if depth == len(path):
+            return False
+        part = path[depth]
+        schemas = elements(branches, part) if isinstance(part, int) else children(branches, part)
+    return False
