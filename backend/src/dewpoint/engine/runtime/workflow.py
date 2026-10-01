@@ -51,10 +51,11 @@ with workflow.unsafe.imports_passed_through():
         child_options,
         phase_clock,
         phase_took,
+        program_of,
         root_iteration_cap,
     )
     from dewpoint.engine.runtime.ids import run_of, run_workflow_id, tenant_of
-    from dewpoint.engine.runtime.program import Program, compile_program
+    from dewpoint.engine.runtime.program import Program
     from dewpoint.engine.runtime.projection import mask
     from dewpoint.engine.runtime.scheduler import (
         ITERATION_CAP,
@@ -163,16 +164,7 @@ class RunGraph(Execution):
         self._charge_sent(data)  # its marker goes out with this workflow task's commands (engine 2b spec §5.2)
         try:
             t0 = phase_clock()
-            program = compile_program(
-                data.graph,
-                data.manifests,
-                data.expressions,
-                data.cel_profile,
-                data.subflow_version_ids,
-                data.failure_handler_version_id,
-                data.open_scopes_cap,
-                data.loop_depth,
-            )
+            program = program_of(data)  # proto: compiled once per worker process
             phase_took(workflow.info().workflow_id, "compile", t0)
         except Exception as e:
             workflow.logger.error("run_version_unusable", exc_info=True)
@@ -452,16 +444,7 @@ class LoopBatch(Execution):
                 start_to_close_timeout=timedelta(seconds=30),
             )
             t0 = phase_clock()
-            program = compile_program(
-                data.graph,
-                data.manifests,
-                data.expressions,
-                data.cel_profile,
-                data.subflow_version_ids,
-                data.failure_handler_version_id,
-                data.open_scopes_cap,
-                data.loop_depth,
-            )
+            program = program_of(data)  # proto: compiled once per worker process
             phase_took(workflow.info().workflow_id, "compile", t0)
         except asyncio.CancelledError:
             return BatchResult([], [], end=RunEnd("cancelled", CANCELLED).to_json(), iterations=start.iterations)

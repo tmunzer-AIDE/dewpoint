@@ -12,6 +12,7 @@ point (no activity and no child outstanding): opportunistically past `checkpoint
 isn't outstanding: its wake time goes into the snapshot, and the continued run re-arms it."""
 
 import asyncio
+import dataclasses
 import hashlib
 import json
 import uuid
@@ -62,7 +63,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from dewpoint.engine.runtime.budget import LOCAL, Budget, Need
     from dewpoint.engine.runtime.ids import run_workflow_id
-    from dewpoint.engine.runtime.program import Program, Step
+    from dewpoint.engine.runtime.program import Program, Step, compile_program
     from dewpoint.engine.runtime.projection import (
         Secrets,
         mask,
@@ -387,9 +388,7 @@ class Execution:
                     if self._yield_timer is None or self._yield_timer.done():
                         self._yield_timer = asyncio.create_task(asyncio.sleep(0.001))
                     cut.append(self._yield_timer)
-                done, _ = await workflow.wait(
-                    [*tasks.values(), clock, wake, *cut], return_when=asyncio.FIRST_COMPLETED
-                )
+                done, _ = await workflow.wait([*tasks.values(), clock, wake, *cut], return_when=asyncio.FIRST_COMPLETED)
                 wake.cancel()
                 if clock in done:
                     self.sched.end(
@@ -899,8 +898,7 @@ class Execution:
 
     def _take_limit(self) -> int:
         """Proto: how many ready steps this workflow task may still take (at least one, so the run moves on)."""
-        budget = self._task_budget()
-        left = YIELD_STRUCTURE // budget.share - budget.structure
+        left = YIELD_STRUCTURE - self._task_budget().structure  # the whole share, as a step's charge
         return max(1, left // TAKE_WEIGHT)
 
     async def _stepwise[T](self, steps: Generator[int, None, T]) -> T:
@@ -916,13 +914,15 @@ class Execution:
             self._task_budget().charge(structure=units)
             await self._yield_point(None, structure=STRUCTURE_STEP)
 
-    async def _yield_point(self, record: ExpressionRecord | None, *, send: int = 0, structure: int = 0) -> None:
+    async def _yield_point(
+        self, record: ExpressionRecord | None, *, send: int = 0, structure: int = 0, whole: bool = False
+    ) -> None:
         """Before binding a view (`record` None) or evaluating `record` locally: when the current workflow task's budget
         is spent, await a 1 ms durable timer, which ends the task (spec §5.6). Concurrent units share the budget and
         one timer, and each checks again once it fires. Before sending a payload (`send` its bytes), the same wait
         keeps a task's commands under Temporal's gRPC message limit (#15, engine 2b spec §5.2)."""
         while True:
-            if not self._task_budget().must_yield(record, send=send, structure=structure):
+            if not self._task_budget().must_yield(record, send=send, structure=structure, whole=whole):
                 return
             if self._yield_timer is None or self._yield_timer.done():
                 self._yield_timer = asyncio.create_task(asyncio.sleep(0.001))
@@ -953,7 +953,7 @@ class Execution:
         skip = ("/collect",) if step.ref == "flow.loop@1" else ("/predicate",) if step.ref == "flow.filter@1" else ()
         pairs = [(p, v) for p, v in step.values if not any(p == s or p.startswith(s + "/") for s in skip)]
         units = self._step_units(inst)  # proto (§5.3): its work in this workflow task, charged before it starts
-        await self._yield_point(None, structure=units)
+        await self._yield_point(None, structure=units, whole=True)  # the task's whole share: a step's work is light
         self._task_budget().charge(structure=units)
         captured = self.sched.consume_capture(inst)  # proto (§5.3): a loop step's variables, as when it became ready
         try:
@@ -1441,6 +1441,36 @@ __all__ = [
     "Execution",
     "child_options",
 ]
+
+
+PROGRAM_CACHE = 64  # proto: compiled versions a worker process keeps
+_PROGRAMS: dict[tuple[str, str], Program] = {}
+
+
+def program_of(data: Any) -> Program:
+    """Proto (engine 2b spec §5.3, workflow-task CPU): a version's program, compiled once per worker process. A
+    version is immutable, so its program is the same wherever and whenever it's compiled, and a replay gets the same
+    one; a program is never changed once compiled. Compiling a 482-node version took 0.3-0.5 s in a workflow task,
+    in the first task of every execution and every continue. A version that can't compile isn't kept: it raises
+    again. Keyed by the version's content as well as its id: a damaged version compiles again, and fails as before."""
+    content = json.dumps(dataclasses.asdict(data), sort_keys=True, separators=(",", ":"), default=str)
+    key = (data.version_id, hashlib.sha256(content.encode()).hexdigest())
+    found = _PROGRAMS.pop(key, None)
+    if found is None:
+        found = compile_program(
+            data.graph,
+            data.manifests,
+            data.expressions,
+            data.cel_profile,
+            data.subflow_version_ids,
+            data.failure_handler_version_id,
+            data.open_scopes_cap,
+            data.loop_depth,
+        )
+    _PROGRAMS[key] = found  # the most recently used last
+    while len(_PROGRAMS) > PROGRAM_CACHE:
+        del _PROGRAMS[next(iter(_PROGRAMS))]
+    return found
 
 
 def root_iteration_cap(default: int) -> int:

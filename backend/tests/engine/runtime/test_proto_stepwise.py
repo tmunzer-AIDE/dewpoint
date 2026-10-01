@@ -6,7 +6,7 @@ restored; a restore defers its queued loop steps as it goes, so the first take a
 import json
 
 from dewpoint.engine.cel.route import STARTUP_SHARE, YIELD_STRUCTURE, YieldBudget
-from dewpoint.engine.runtime.scheduler import STRUCTURE_STEP, Scheduler, run_steps
+from dewpoint.engine.runtime.scheduler import STRUCTURE_STEP, Scheduler
 from tests.engine.runtime.support import program
 from tests.support.graphs import G, ref
 
@@ -54,7 +54,9 @@ def test_a_restore_in_steps_restores_what_it_restores_at_once_and_defers_the_que
     assert len(units) > 2
     assert len(restored._deferred) > 5_000 and not any(restored._iter_loop(i) for i in restored._ready)
     assert json.dumps(restored.to_json(), sort_keys=True) == json.dumps(data, sort_keys=True)
-    assert json.dumps(Scheduler.from_json(s.program, data).to_json(), sort_keys=True) == json.dumps(data, sort_keys=True)
+    assert json.dumps(Scheduler.from_json(s.program, data).to_json(), sort_keys=True) == json.dumps(
+        data, sort_keys=True
+    )
 
 
 def test_a_workflow_task_yields_once_its_structural_share_is_spent() -> None:
@@ -64,9 +66,10 @@ def test_a_workflow_task_yields_once_its_structural_share_is_spent() -> None:
     assert not budget.must_yield(structure=STRUCTURE_STEP)
     budget.charge(structure=1)
     assert budget.must_yield(structure=STRUCTURE_STEP)
-    budget.reset(startup=True)  # an execution's first task gets a tenth: it also starts the execution
+    budget.reset(startup=True)  # an execution's first task gets a tenth for a restore: it also starts the execution
     budget.charge(structure=YIELD_STRUCTURE // STARTUP_SHARE)
     assert budget.must_yield(structure=1)
+    assert not budget.must_yield(structure=1, whole=True)  # steps get the whole share: their work is light
 
 
 def _steps(gen):  # type: ignore[no-untyped-def]

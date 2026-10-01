@@ -48,7 +48,9 @@ class YieldBudget:
     structure: int = 0  # proto: a snapshot's or a restore's units
     share: int = 1  # each threshold is divided by it: STARTUP_SHARE in an execution's first workflow task
 
-    def must_yield(self, record: ExpressionRecord | None = None, *, send: int = 0, structure: int = 0) -> bool:
+    def must_yield(
+        self, record: ExpressionRecord | None = None, *, send: int = 0, structure: int = 0, whole: bool = False
+    ) -> bool:
         """True when the interpreter must await a 1 ms durable timer before binding a view (`record` None), before
         evaluating `record` locally, or before sending a payload of `send` bytes. The first thing a workflow task does
         always runs; a view is always bound first, so an evaluation whose bounds pass an execution's first task's share
@@ -56,7 +58,8 @@ class YieldBudget:
         if send:
             return self.sent > 0 and self.sent + send > YIELD_SEND_BYTES
         if structure:  # proto: the work so far passes the task's share; the first part always runs
-            return self.structure > 0 and self.structure + structure > YIELD_STRUCTURE // self.share
+            limit = YIELD_STRUCTURE if whole else YIELD_STRUCTURE // self.share  # `whole`: steps, not a restore
+            return self.structure > 0 and self.structure + structure > limit
         if self.evaluations == 0 and self.nodes == 0:
             return False
         if self.evaluations >= YIELD_EVALUATIONS // self.share or self.nodes >= YIELD_NODES // self.share:
