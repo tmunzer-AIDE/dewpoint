@@ -1516,14 +1516,16 @@ With every container claimed, the live state needs at most 660,576 B (250 root l
   - The probe now records each failed task's events and the cancel's time, so a recurrence can be checked.
 
 **Segment indexes and the `UnhandledCommand`, again (2026-10-01): promising, the gate still open.**
-- **Is the 1 KiB stress reachable?** Yes, near enough to keep it, rather than replace it with another case.
-  - Under §5.3's rules, a collection's tail becomes a segment at `SEGMENT_BYTES` (256 KiB). Under budget pressure,
-    it becomes one earlier, when it's the largest container that can be claimed: past `HANDLE_MAX` (336 B).
-  - Under pressure, a segment is about `LIVE_BUDGET` over the number of containers that compete. 250 root loops have
-    about 700 collection tails, so segments of about 1.5 KiB; the container bound allows contrived states with up to
-    about 2,000 containers, near `HANDLE_MAX`.
-  - The stress seals every tail at 1 KiB, pressure or not. That's at least as many segments as a reachable state
-    makes, so the workload stays as it is.
+- **The 1 KiB stress, corrected (the owner's review).** An earlier version of this record said the stress makes at
+  least as many segments as any reachable state, because it seals every tail at 1 KiB. That reasoning was wrong:
+  its own estimate of about 2,000 competing containers allows segments smaller than 1 KiB, near `HANDLE_MAX`
+  (336 B).
+  - Under §5.3's rules, a collection's tail becomes a segment at `SEGMENT_BYTES` (256 KiB). Under budget pressure, it
+    becomes one earlier, when it's the largest container that can be claimed (past `HANDLE_MAX`).
+  - A segment holds at least one collected item: an empty tail isn't claimed. So a collection has at most one
+    segment per item, and a run at most 100,000, its iteration cap. Smaller segments can't outnumber the items.
+  - With items of 1 KB, the stress already makes one segment per item. What the 60,000-item workload didn't reach is
+    the number of items. A second workload does: 10 loops of 9,999 items, 99,990 segments, the most a run can make.
 - **One worker configuration completes it:** the engine worker at 2 workflow-task slots, with the SDK's default
   activity slots, in a process of its own. The workload: segment indexes that grow (6 loops of 10,000 items, about
   600 batch children, 60,000 claims). Each continue was checked against the bound, and every history replayed.
@@ -1535,7 +1537,8 @@ With every container claimed, the live state needs at most 660,576 B (250 root l
   | macOS, the same process again | 307 s | 908 | 1,509 | none | none | 445 / 467 ms |
 
   The run that crawled earlier ran fifth in one long-lived harness process, after four heavy workloads. That wasn't
-  reproduced: run alone, or twice in a process, it completed cleanly. Its cause is observed, not explained.
+  reproduced: run alone, or twice in a process, it completed cleanly. Its cause is observed, not explained. It stays a
+  worker-lifecycle risk for the 2b-1b plan, which owns worker sizing; it isn't evidence that sizing is settled.
 - **A controlled cancellation race.** 40 runs continue every second or so, each cancelled at a seeded random moment.
   40 more are never cancelled.
   - With cancels: one `UNHANDLED_COMMAND`, on the CI runner and on macOS alike. In both, the event right after the
@@ -1544,9 +1547,24 @@ With every container claimed, the live state needs at most 660,576 B (250 root l
   - So an unhandled command is a cancel arriving while a task completes with a command that closes the run. The server
     rejects that completion, and the run then sees the cancel.
   - The original one stays unattributed: its histories weren't kept.
-  - The acceptance condition could be revised, the owner's to decide: a failed task whose cause is `UNHANDLED_COMMAND`,
-    immediately followed by that run's cancel request, is a task that raced a cancel; any other failed task fails the
-    check.
+  - **The narrow cancellation exception (approved by the owner).** A failed task is permitted only in a run the probe
+    intentionally cancelled, when that run's next history event is `WORKFLOW_EXECUTION_CANCEL_REQUESTED` and the run
+    settles as cancelled. Any failed task in a run that wasn't cancelled, or one that doesn't match these conditions,
+    fails the check. The original failure stays unattributed.
+- **Acceptance is enforced, and the gate waits for one rerun (the owner's ruling).** The probe printed failed checks
+  and statuses without failing its process, and the cancellation probe swallowed errors from a run's result. Every
+  acceptance condition becomes an assertion, and the process exits non-zero on any of these:
+  - a run that doesn't settle as expected;
+  - outputs that differ;
+  - a failed check against the continued-input bound, or no continue checked;
+  - a failed replay, or an activity timeout;
+  - a failed task the exception doesn't excuse.
+
+  A cancel counts as landed only when the run's history records it: this server accepts a cancel of a run that has
+  already completed, and records nothing. A landed cancel may still end in a completed run, as engine-core §8 says,
+  when it comes while the run's end is being written: after it, nothing but the end's projection is scheduled. Any
+  other completion after a cancel fails the check. The focused gate is called a go only after a CI rerun passes
+  these assertions.
 
 **Not prototyped, implementation work:**
 - a loop over a claimed list that isn't handle-backed;
