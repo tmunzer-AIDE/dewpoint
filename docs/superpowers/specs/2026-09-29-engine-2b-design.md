@@ -1515,6 +1515,39 @@ With every container claimed, the live state needs at most 660,576 B (250 root l
     continue. That fits a cancel arriving as a task completes, but it isn't verified.
   - The probe now records each failed task's events and the cancel's time, so a recurrence can be checked.
 
+**Segment indexes and the `UnhandledCommand`, again (2026-10-01): promising, the gate still open.**
+- **Is the 1 KiB stress reachable?** Yes, near enough to keep it, rather than replace it with another case.
+  - Under §5.3's rules, a collection's tail becomes a segment at `SEGMENT_BYTES` (256 KiB). Under budget pressure,
+    it becomes one earlier, when it's the largest container that can be claimed: past `HANDLE_MAX` (336 B).
+  - Under pressure, a segment is about `LIVE_BUDGET` over the number of containers that compete. 250 root loops have
+    about 700 collection tails, so segments of about 1.5 KiB; the container bound allows contrived states with up to
+    about 2,000 containers, near `HANDLE_MAX`.
+  - The stress seals every tail at 1 KiB, pressure or not. That's at least as many segments as a reachable state
+    makes, so the workload stays as it is.
+- **One worker configuration completes it:** the engine worker at 2 workflow-task slots, with the SDK's default
+  activity slots, in a process of its own. The workload: segment indexes that grow (6 loops of 10,000 items, about
+  600 batch children, 60,000 claims). Each continue was checked against the bound, and every history replayed.
+
+  | Where | Time | Continues | Histories replayed | Failed tasks | Activity timeouts | Activation, max CPU / wall |
+  |---|---|---|---|---|---|---|
+  | The CI runner | 950 s | 1,181 | 1,782 | none | none | 833 / 833 ms |
+  | macOS, a fresh process | 308 s | 906 | 1,507 | none | none | 311 / 323 ms |
+  | macOS, the same process again | 307 s | 908 | 1,509 | none | none | 445 / 467 ms |
+
+  The run that crawled earlier ran fifth in one long-lived harness process, after four heavy workloads. That wasn't
+  reproduced: run alone, or twice in a process, it completed cleanly. Its cause is observed, not explained.
+- **A controlled cancellation race.** 40 runs continue every second or so, each cancelled at a seeded random moment.
+  40 more are never cancelled.
+  - With cancels: one `UNHANDLED_COMMAND`, on the CI runner and on macOS alike. In both, the event right after the
+    failed task is the run's cancel request.
+  - Without: no failed task, over 195 continues on the CI runner and 184 on macOS.
+  - So an unhandled command is a cancel arriving while a task completes with a command that closes the run. The server
+    rejects that completion, and the run then sees the cancel.
+  - The original one stays unattributed: its histories weren't kept.
+  - The acceptance condition could be revised, the owner's to decide: a failed task whose cause is `UNHANDLED_COMMAND`,
+    immediately followed by that run's cancel request, is a task that raced a cancel; any other failed task fails the
+    check.
+
 **Not prototyped, implementation work:**
 - a loop over a claimed list that isn't handle-backed;
 - CEL and templates over handles;
