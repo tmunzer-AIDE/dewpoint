@@ -1584,6 +1584,36 @@ With every container claimed, the live state needs at most 660,576 B (250 root l
     unpin a run, and during a rollout an unpinned run could move to another build, against §7. It's reported for a
     fix of its own.
 
+**The enforced rerun (2026-10-01): promising, the gate still open.**
+- **On the CI runner** (2 vCPUs, the engine worker at 2 workflow-task slots, every acceptance condition asserted,
+  every run to its end and every history replayed):
+
+  | Workload | Runs | Executions replayed | Activation, max CPU / wall | Failed tasks | Result |
+  |---|---|---|---|---|---|
+  | The scheduler alone, 21,282 queued loop steps | - | - | decode 174 ms per task | - | - |
+  | Queued state, an exhausted budget | 1 | 30 | 754 / 766 ms | none | passed |
+  | Queued state, 240 sibling loops | 1 | 440 | 673 / 681 ms | none | passed |
+  | Queued state, an exhausted budget | 4 at once | 108 | 768 / 1,066 ms | none | passed |
+  | Queued state, 240 sibling loops | 4 at once | 1,670 | 811 / 1,352 ms | none | passed |
+  | Segment indexes, 60,000 items | 1 | 1,640 | 647 / 650 ms | none | passed |
+  | Segment indexes, 99,990 items | 1 | 2,971 | 638 / 638 ms | none | **failed: live 1,058,838 B** |
+  | Cancellation race, 40 cancelled and 40 not | 80 | 313 | - | none | passed |
+
+  No activation took a second of CPU, and none came near the 2 s deadlock detector. In the race, 37 cancels landed:
+  36 runs settled cancelled and one completed as a late cancel; every run not cancelled completed.
+- **The 99,990-item failure was a prototype bug, now fixed.** A loop's segment index passed `LIVE_BUDGET` and its claim
+  was decided, but a drain neither took nor started claims. So the run continued with the index still live: 10.3 KB
+  over the budget on the CI runner, 5.8 KB on macOS. That's under `SNAPSHOT_MAX`, but past what §5.3 counts.
+  - The fix: a drain takes and starts claims, since they only shrink the state. An execution isn't quiescent while its
+    live state is over the budget, and a snapshot refuses that state, as it refuses a waiting need or a child's
+    grant. Two tests cover it, and they failed before the fix.
+  - With the fix, on macOS, the five correctness workloads ran in parallel, to their ends, and passed. The
+    99,990-item one had no violation over 1,763 continues; its worst snapshot was 1,012,698 B.
+  - The CI runner hasn't run the fix yet. It changes when claims start, not what a task computes.
+- **How the checks run from now on (the owner's ruling).** Correctness runs locally, in parallel. The CI runner
+  measures only what needs it, a task's CPU at the heaviest queued state, in about 10 minutes, and only on request.
+  Full runs on it are for milestones.
+
 **Not prototyped, implementation work:**
 - a loop over a claimed list that isn't handle-backed;
 - CEL and templates over handles;
