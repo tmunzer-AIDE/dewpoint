@@ -14,6 +14,7 @@ class P(StrEnum):
     WORKFLOW_VIEW = "workflow.view"
     WORKFLOW_EDIT = "workflow.edit"
     WORKFLOW_PUBLISH = "workflow.publish"
+    WORKFLOW_DECLASSIFY = "workflow.declassify"  # publishing a version that lists declassified sites (2b §4.3)
     RUN_START = "run.start"
     RUN_VIEW = "run.view"
     APPROVAL_DECIDE = "approval.decide"
@@ -23,7 +24,14 @@ class P(StrEnum):
 _VIEWER = frozenset({P.TENANT_VIEW, P.WORKFLOW_VIEW, P.RUN_VIEW, P.CONNECTION_VIEW, P.MEMBER_VIEW})
 _OPERATOR = _VIEWER | {P.RUN_START, P.APPROVAL_DECIDE}
 _EDITOR = _OPERATOR | {P.WORKFLOW_EDIT, P.WORKFLOW_PUBLISH, P.CONNECTION_USE}
-_ADMIN = _EDITOR | {P.TENANT_MANAGE, P.MEMBER_MANAGE, P.CONNECTION_MANAGE, P.AUDIT_VIEW, P.AGENT_GRANT}
+_ADMIN = _EDITOR | {
+    P.TENANT_MANAGE,
+    P.MEMBER_MANAGE,
+    P.CONNECTION_MANAGE,
+    P.AUDIT_VIEW,
+    P.AGENT_GRANT,
+    P.WORKFLOW_DECLASSIFY,
+}
 
 ROLE_PERMISSIONS: dict[str, frozenset[P]] = {
     "viewer": _VIEWER,

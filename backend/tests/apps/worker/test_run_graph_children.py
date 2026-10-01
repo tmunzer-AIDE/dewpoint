@@ -24,7 +24,12 @@ from tests.support.graphs import G, cel, ref
 from tests.support.keys import opened
 
 ECHO, LOOP, FILTER, RUN, FAIL = "testkit.echo@1", "flow.loop@1", "flow.filter@1", "flow.run_workflow@1", "flow.fail@1"
-LISTS = {"type": "object", "properties": {"items": {"type": "array"}}, "required": ["items"]}
+# Elements declared: an undeclared one counts as sensitive, and filtering it would declassify (engine 2b spec §4.1).
+LISTS = {
+    "type": "object",
+    "properties": {"items": {"type": "array", "items": {"type": "integer"}}},
+    "required": ["items"],
+}
 NUMBER = {"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]}
 
 

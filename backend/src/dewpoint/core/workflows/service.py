@@ -169,6 +169,7 @@ class NewVersion:
     connection_ids: list[uuid.UUID] = field(default_factory=list)
     tainted_sites: list[Any] = field(default_factory=list)
     output_taint: dict[str, Any] | None = None
+    declassified: list[dict[str, str]] = field(default_factory=list)  # for the audit entry only (§4.3)
 
 
 async def insert_version(s: AsyncSession, ctx: TenantContext, wf: Workflow, new: NewVersion) -> WorkflowVersion:
@@ -222,6 +223,7 @@ async def insert_version(s: AsyncSession, ctx: TenantContext, wf: Workflow, new:
             "graph_hash": new.graph_hash,
             "version_hash": new.version_hash,
             "closure_depth": new.closure_depth,
+            **({"declassify": new.declassified} if new.declassified else {}),
         },
     )
     return version

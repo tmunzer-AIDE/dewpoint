@@ -109,6 +109,7 @@ def test_collected_items_take_their_collect_taint_and_the_count_stays_plain() ->
 
 def test_a_filter_with_a_tainted_predicate_keeps_tainted_items_and_a_plain_count() -> None:
     g = G().node("f", FILTER, {"items": [1, 2, 3], "predicate": cel("size(trigger.token) > item")})
+    g.settings = {"input_schema": INPUT, "declassify": [{"node": str(nid("f")), "field": "/predicate"}]}
     g.node("a", ECHO, {"value": ref("steps.f.output.items")}).node("b", ECHO, {"value": ref("steps.f.output.count")})
     g.edge("f", "a").edge("f", "b")
     found = tainted(checked(g))

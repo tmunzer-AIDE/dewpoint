@@ -419,3 +419,43 @@ async def test_publish_stores_the_tainted_sites_and_the_output_taint_a_parent_th
     assert out.errors == [] and out.version is not None
     sites = {(site["node"], site["field"]) for site in out.version.tainted_sites}
     assert (str(nid("e")), "/value") in sites and (str(nid("p")), "/value") not in sites
+
+
+DECLASSIFYING = {
+    "input_schema": {
+        "type": "object",
+        "properties": {"token": {"type": "string", "x-sensitive": True}},
+        "required": ["token"],
+        "additionalProperties": False,
+    },
+    "declassify": [{"node": str(nid("c")), "field": "/condition"}],
+}
+
+
+def declassifying_graph() -> dict[str, Any]:
+    g = G().node("c", "flow.if@1", {"condition": cel("size(trigger.token) > 8")}).node("a", "testkit.echo@1")
+    g.node("b", "testkit.echo@1").edge("c", "a", "true").edge("c", "b", "false")
+    g.settings = DECLASSIFYING
+    return g.data()
+
+
+async def test_declassifying_needs_its_permission_and_the_audit_entry_lists_each_site(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    """Engine 2b spec §4.3: publishing a version that lists declassified sites needs `workflow.declassify` (tenant
+    admins and owners); the publish audit entry records every listed site and what it reveals."""
+    await sync_test_plugins(admin_sessionmaker)
+    editor = await actor(owner_sessionmaker)
+    wf_id = await create(api_sessionmaker, editor, declassifying_graph())
+    refused = await publish(api_sessionmaker, editor, wf_id, api_settings)
+    assert refused.version is None and [(d.code, d.field) for d in refused.errors] == [
+        ("declassify.forbidden", "/settings/declassify")
+    ]
+    admin = TenantContext(tenant_id=editor.tenant_id, user=editor.user, role="admin", session=None)  # type: ignore[arg-type]
+    published = await publish(api_sessionmaker, admin, wf_id, api_settings)
+    assert published.errors == [] and published.version is not None
+    async with owner_sessionmaker() as s:
+        details = (
+            await s.execute(text("select details from audit_log where action = 'workflow.publish'"))
+        ).scalar_one()
+    assert details["declassify"] == [{"node": str(nid("c")), "field": "/condition", "reveals": "the branch taken"}]

@@ -45,6 +45,11 @@ def one(expr: str, target_type: str = ECHO, field: str = "value", **settings: An
     return g
 
 
+def declassify(*sites: tuple[str, str]) -> list[dict[str, str]]:
+    """Entries for decisions over elements the schema leaves open: undeclared counts as tainted (2b §4.1, §4.3)."""
+    return [{"node": str(nid(key)), "field": field} for key, field in sites]
+
+
 def record(g: G) -> ExpressionRecord:
     [r] = check(g).expressions
     return r
@@ -131,7 +136,7 @@ def test_optional_fields_of_items_and_variables_need_a_guard() -> None:
     }
     loose["required"] = [*INPUT["required"], "loose"]
     body = G().node("l", LOOP, {"items": ref("trigger.loose")}).node("e", ECHO, {"value": cel("item.x")})
-    body.edge("l", "e", "body").settings = {"input_schema": loose}
+    body.edge("l", "e", "body").settings = {"input_schema": loose, "declassify": declassify(("l", "/items"))}
     assert codes(body) == ["cel.conditional_ref"]
     v = G().node("a", ECHO, {"value": cel("vars.cfg.name")})
     v.settings = {
@@ -155,7 +160,7 @@ def test_nullable_arrays_are_never_typed() -> None:
 
 def test_loop_items_through_a_reference_default_type_the_item() -> None:
     body = G().node("l", LOOP, {"items": ref("trigger.maybe", default=[])}).node("e", ECHO, {"value": cel("item")})
-    body.edge("l", "e", "body").settings = {"input_schema": INPUT}
+    body.edge("l", "e", "body").settings = {"input_schema": INPUT, "declassify": declassify(("l", "/items"))}
     assert codes(body) == [] and record(body).declarations["item"] == T.DYN
 
 
@@ -302,7 +307,7 @@ def test_item_and_index_inside_loops_and_filter_predicates() -> None:
         .node("l", LOOP, {"items": ref("trigger.events")})
         .node("e", ECHO, {"value": cel("item.mac + string(index)")})
     )
-    body.edge("l", "e", "body").settings = {"input_schema": INPUT}
+    body.edge("l", "e", "body").settings = {"input_schema": INPUT, "declassify": declassify(("l", "/items"))}
     assert codes(body) == []
     f = G().node("f", FILTER, {"items": ref("trigger.tags"), "predicate": cel("item.startsWith('a') && index < 3")})
     f.settings = {"input_schema": INPUT}
@@ -312,7 +317,7 @@ def test_item_and_index_inside_loops_and_filter_predicates() -> None:
 
 def test_result_type_is_checked_against_the_field() -> None:
     assert codes(one("1 + 1", IF, "condition")) == ["cel.type_mismatch"]
-    assert codes(one("trigger.events.size() > 0", IF, "condition")) == []
+    assert codes(one("trigger.events.size() > 0", IF, "condition", declassify=declassify(("a", "/condition")))) == []
     assert codes(one("b'x'")) == ["cel.non_json_result"]
 
 

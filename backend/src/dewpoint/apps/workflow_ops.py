@@ -10,6 +10,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dewpoint.core.authz.permissions import ROLE_PERMISSIONS, P
 from dewpoint.core.config import Settings
 from dewpoint.core.http import TenantContext
 from dewpoint.core.models.workflows import Workflow, WorkflowVersion
@@ -152,6 +153,14 @@ async def _pin_abi_errors(s: AsyncSession, pins: list[WorkflowVersion]) -> list[
     ]
 
 
+_DECLASSIFY_FORBIDDEN = Diagnostic(
+    code="declassify.forbidden",
+    field="/settings/declassify",
+    message="Publishing a workflow that declassifies sensitive data needs the workflow.declassify permission "
+    "(tenant admins and owners).",
+)
+
+
 async def publish(
     s: AsyncSession, ctx: TenantContext, wf: Workflow, *, expected_revision: int, settings: Settings
 ) -> Published:
@@ -163,6 +172,8 @@ async def publish(
     warnings = [d for d in checked.diagnostics if d.severity == "warning"]
     if checked.graph is None or checked.result is None or errors:
         return Published(None, errors, warnings)
+    if checked.graph.settings.declassify and P.WORKFLOW_DECLASSIFY not in ROLE_PERMISSIONS[ctx.role]:
+        return Published(None, [_DECLASSIFY_FORBIDDEN], warnings)
     errors = _pin_errors(wf.id, checked.pins)
     if errors:
         return Published(None, errors, warnings)
@@ -205,6 +216,9 @@ async def publish(
             expressions=[r.to_json() for r in checked.result.expressions],
             tainted_sites=[{"node": node, "field": fld} for node, fld in checked.result.tainted_sites],
             output_taint=dict(checked.result.output_taint),
+            declassified=[
+                {"node": node, "field": fld, "reveals": reveals} for node, fld, reveals in checked.result.declassified
+            ],
             graph_hash=authored,
             version_hash=version_hash(
                 graph_hash=authored,
