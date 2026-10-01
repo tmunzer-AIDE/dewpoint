@@ -55,6 +55,7 @@ class MemoryStore:
     subflows: dict[uuid.UUID, SubflowInfo] = field(default_factory=dict)  # what validation sees as published
     starts: dict[str, RunStart] = field(default_factory=dict)  # sub-runs' own rows
     schemas: dict[str, dict[str, Any]] = field(default_factory=dict)  # version -> its output schema
+    taints: dict[str, dict[str, Any]] = field(default_factory=dict)  # version -> its outputs' taint (2b spec §4.1)
 
     def add(self, g: G, workflow_id: uuid.UUID | None = None, *, engine_abi: int = ENGINE_ABI) -> str:
         """Publish `g` as a version, pinned to the sub-flows it runs (as `publish` registered them). `engine_abi`:
@@ -77,6 +78,7 @@ class MemoryStore:
             engine_abi=engine_abi,
         )
         self.schemas[version_id] = dict(result.output_schema)
+        self.taints[version_id] = dict(result.output_taint)
         return version_id
 
     def publish(self, g: G, workflow_id: uuid.UUID | None = None, *, engine_abi: int = ENGINE_ABI) -> uuid.UUID:
@@ -86,7 +88,7 @@ class MemoryStore:
         version_id = self.add(g, workflow_id, engine_abi=engine_abi)
         input_schema = g.settings.get("input_schema", {"type": "object"})
         self.subflows[workflow_id] = SubflowInfo(
-            workflow_id, uuid.UUID(version_id), input_schema, self.schemas[version_id]
+            workflow_id, uuid.UUID(version_id), input_schema, self.schemas[version_id], self.taints[version_id]
         )
         return workflow_id
 

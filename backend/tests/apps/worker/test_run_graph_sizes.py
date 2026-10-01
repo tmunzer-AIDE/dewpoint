@@ -29,7 +29,11 @@ from tests.apps.worker.harness import MemoryStore, run_id_of, start, workers
 from tests.support.graphs import G, cel, ref
 
 LIMIT = 50_000
-ITEMS = {"type": "object", "properties": {"items": {"type": "array"}}, "required": ["items"]}
+ITEMS = {
+    "type": "object",
+    "properties": {"items": {"type": "array", "items": {"type": "string"}}},
+    "required": ["items"],
+}
 BLOB, ECHO, LOOP, RUN = "testkit.blob@1", "testkit.echo@1", "flow.loop@1", "flow.run_workflow@1"
 
 

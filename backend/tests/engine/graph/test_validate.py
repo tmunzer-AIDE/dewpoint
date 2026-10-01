@@ -152,6 +152,8 @@ def test_loop_item_is_typed_from_the_items_reference() -> None:
     def g(value: Any, schema: dict[str, Any] = SITES) -> G:
         b = G().node("l", LOOP, {"items": ref("trigger.sites")}).node("leaf", ECHO, {"value": value})
         b.edge("l", "leaf", "body").settings["input_schema"] = schema
+        if schema is SITES:  # open items: undeclared fields count as tainted, so looping declassifies (2b §4.3)
+            b.settings["declassify"] = [{"node": str(nid("l")), "field": "/items"}]
         return b
 
     closed = copy.deepcopy(SITES)

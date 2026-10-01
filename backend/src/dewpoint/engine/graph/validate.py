@@ -116,6 +116,7 @@ class ValidationResult:
     failure_handler_version_id: uuid.UUID | None = None
     output_schema: Mapping[str, Any] = field(default_factory=dict)
     expressions: tuple[ExpressionRecord, ...] = ()  # every CEL value, classified (spec §5.5)
+    declassified: tuple[tuple[str, str, str], ...] = ()  # (node id, field, what it reveals): listed, and tainted
     tainted_sites: tuple[tuple[str | None, str], ...] = ()  # (node id, field) of every tainted value (2b spec §4.1)
     output_taint: Mapping[str, Any] = field(default_factory=dict)  # each workflow output's `Shape`, as JSON
 
@@ -184,6 +185,80 @@ def _regex_keywords(schema: Any) -> list[str]:
 _SENSITIVE_LITERAL = (
     "A sensitive value can't be written into the workflow: pass it in the run's input, in a field marked sensitive."
 )
+
+
+_REVEALS = {
+    C.IF: "the branch taken",
+    C.SWITCH: "the port taken",
+    C.LOOP: "the item count",
+    C.FILTER: "the input count and the kept count",
+}
+
+
+def _decision_sites(graph: Graph, s: Structure) -> dict[tuple[uuid.UUID, str], str]:
+    """The fields that may declassify (§4.3), with their node's type: a condition, a case's `when`, a loop's items,
+    a filter's items and predicate."""
+    out: dict[tuple[uuid.UUID, str], str] = {}
+    for n in graph.nodes:
+        ref = s.specs[n.id].ref
+        if ref == C.IF:
+            out[(n.id, "/condition")] = ref
+        elif ref == C.SWITCH:
+            cases = n.config.get("cases")
+            for i in range(len(cases) if isinstance(cases, list) else 0):
+                out[(n.id, f"/cases/{i}/when")] = ref
+        elif ref == C.LOOP:
+            out[(n.id, "/items")] = ref
+        elif ref == C.FILTER:
+            out[(n.id, "/items")] = ref
+            out[(n.id, "/predicate")] = ref
+    return out
+
+
+def _public_length(n: GraphNode) -> bool:
+    """A loop over `trigger.rows` itself: its length is already public (`trigger.row_count`), so it needs no entry.
+    A derived or filtered list doesn't inherit that (§4.3)."""
+    raw = n.config.get("items")
+    body = raw.get(ENVELOPE) if isinstance(raw, Mapping) and is_envelope(raw) else None
+    return isinstance(body, Mapping) and body.get("kind") == "ref" and body.get("path") == "trigger.rows"
+
+
+def _declassify(
+    graph: Graph, s: Structure, site_taint: Mapping[tuple[uuid.UUID | None, str], bool]
+) -> tuple[list[Diagnostic], tuple[tuple[str, str, str], ...]]:
+    """Every tainted decision must be listed in `settings.declassify`, and every entry must be one (§4.3)."""
+    listed = [(e.node, e.field) for e in graph.settings.declassify]
+    sites = _decision_sites(graph, s)
+    out: list[Diagnostic] = []
+    for (node, fld), ref in sites.items():
+        if not site_taint.get((node, fld)) or (node, fld) in listed:
+            continue
+        if ref == C.LOOP and _public_length(s.nodes[node]):
+            continue
+        out.append(
+            Diagnostic(
+                code="taint.undeclassified",
+                node=node,
+                field=fld,
+                message=f"This decision reads sensitive data, so {_REVEALS[ref]} becomes visible.",
+                fix="List it in the workflow's declassify settings, or decide on data that isn't sensitive.",
+            )
+        )
+    declassified: list[tuple[str, str, str]] = []
+    for i, (node, fld) in enumerate(listed):
+        kind = sites.get((node, fld))
+        if kind is None or not site_taint.get((node, fld)):
+            out.append(
+                Diagnostic(
+                    code="taint.stale_declassify",
+                    field=f"/settings/declassify/{i}",
+                    message="This entry declassifies nothing: it isn't a decision that reads sensitive data.",
+                    fix="Remove it.",
+                )
+            )
+        else:
+            declassified.append((str(node), fld, _REVEALS[kind]))
+    return out, tuple(declassified)
 
 
 def _writes_sensitive(
@@ -377,6 +452,7 @@ class _Validator:
         values = list(iter_values(n.config))
         if spec.ref in (C.LOOP, C.FILTER):  # `items` first: the predicate and `collect` read its element type
             values.sort(key=lambda pv: pv[0][:1] != ("items",))
+            self.item_taint[n.id] = CLEAN  # written in the workflow, unless an `items` value says otherwise below
         for pointer, value in values:
             where = pointer_str(pointer)
             if not pointer or ((spec.ref, pointer[0]) in _WHOLE_LITERAL and len(pointer) == 1):
@@ -392,8 +468,6 @@ class _Validator:
                 items = resolved[pointer]
                 self.item_schema[n.id] = element_schema(items.schema) if items is not None else None
                 self.item_taint[n.id] = items.taint.element() if items is not None else TAINTED
-        if spec.ref in (C.LOOP, C.FILTER) and n.id not in self.item_taint:
-            self.item_taint[n.id] = CLEAN  # written in the workflow: nothing tainted (sensitive literals are refused)
         if spec.ref == C.SET_VARIABLES:
             for pointer, r in resolved.items():
                 if pointer[:1] == ("assignments",) and len(pointer) >= 2 and r is not None and r.taint.tainted:
@@ -990,8 +1064,9 @@ def validate(graph: Graph, ctx: ValidationContext) -> ValidationResult:
         if learned == facts:
             break
         facts = learned
+    declassify, declassified = _declassify(graph, structure, v.site_taint)
     return ValidationResult(
-        diagnostics=tuple([*settings, *structural, *v.diags]),
+        diagnostics=tuple([*settings, *structural, *v.diags, *declassify]),
         node_refs=node_refs,
         subflow_pins=dict(v.pins),
         failure_handler_version_id=v.failure_handler_version_id,
@@ -1004,4 +1079,5 @@ def validate(graph: Graph, ctx: ValidationContext) -> ValidationResult:
             )
         ),
         output_taint=dict(v.output_taint),
+        declassified=declassified,
     )
