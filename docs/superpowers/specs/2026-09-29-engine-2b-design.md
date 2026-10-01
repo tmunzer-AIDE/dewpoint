@@ -1565,6 +1565,24 @@ With every container claimed, the live state needs at most 660,576 B (250 root l
   when it comes while the run's end is being written: after it, nothing but the end's projection is scheduled. Any
   other completion after a cancel fails the check. The focused gate is called a go only after a CI rerun passes
   these assertions.
+- **The enforced race found an engine bug, fixed in the prototype (2026-10-01).**
+  - Locally, the assertions failed: cancelled runs were still running at the wait. That was 2 of 24 landed cancels in
+    one race and 4 of 25 in another; two of those four ended cancelled, after 70 s and after 3 minutes.
+  - Their histories: after the cancel, the end's projection was scheduled but didn't start for minutes. Meanwhile the
+    run had hundreds of workflow tasks that recorded nothing (586 and 1,086).
+  - The cause is the worker's configuration, not §5.3. The SDK's core completes a workflow task by itself when it has
+    nothing new for the workflow, such as the task after an unstarted activity's cancel is recorded. That completion
+    reports the worker's default versioning behaviour, and the engine worker had none. Temporal then took the run as
+    unversioned. Each start of its next activity, on the run's own build, began a deployment transition instead, and
+    brought another such task. The activity started only when some other event reached the workflow.
+  - The fix: the engine worker's deployment config sets `PINNED` as its default. A dev-server regression test cancels an
+    unstarted activity and then needs another one. Without the default, a task reported no behaviour and the run hung;
+    with it, the test passes.
+  - With the fix, the local race (40 runs, 27 landed cancels): every cancelled run settled cancelled, the one
+    `UNHANDLED_COMMAND` matched the exception, and every history replayed.
+  - Main has the same configuration. There, any cancel of an unstarted activity, a run's cancel or a scope's end, can
+    unpin a run, and during a rollout an unpinned run could move to another build, against §7. It's reported for a
+    fix of its own.
 
 **Not prototyped, implementation work:**
 - a loop over a claimed list that isn't handle-backed;
