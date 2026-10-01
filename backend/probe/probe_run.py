@@ -214,6 +214,9 @@ async def versioned(client: Any, store: MemoryStore, build_id: str) -> AsyncIter
     slots = os.environ.get("WFT_SLOTS")  # the engine worker's workflow-task slots (the SDK's default when unset)
     if slots:
         extra["max_concurrent_workflow_tasks"] = int(slots)
+    act_slots = os.environ.get("ACT_SLOTS")  # its activity slots (the SDK's default when unset)
+    if act_slots:
+        extra["max_concurrent_activities"] = int(act_slots)
     worker_main.Worker = functools.partial(Worker, **extra)  # type: ignore[misc]
     evaluator = Worker(client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(in_process)])
     async with evaluator, engine_worker(client, store, [TESTKIT], settings(), build=build_id, identity=build_id):

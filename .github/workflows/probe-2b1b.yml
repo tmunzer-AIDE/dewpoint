@@ -1,7 +1,8 @@
 name: probe-2b1b
-# Engine 2b spec §5.3 go/no-go (§11.3): the heaviest queued-state case on the CI runner, with the intended worker
-# slot count (2) and representative concurrency (1 and 4 runs), measuring each activation's CPU and wall time and the
-# cause of every failed workflow task; the runs complete and every history replays. Throwaway branch, never merged.
+# Engine 2b spec §5.3 go/no-go (§11.3) on the CI runner, the engine worker at its intended 2 workflow-task slots:
+# segment indexes that grow (to the end, every continue checked, every history replayed), and a controlled
+# cancellation race for the UnhandledCommand. Each activation's CPU and wall time and every failed task's cause are
+# recorded. Throwaway branch, never merged.
 on:
   push: { branches: [proto/2b1b-bound] }
   workflow_dispatch: {}
@@ -31,11 +32,12 @@ jobs:
       - run: nproc && python3 -c "import platform; print(platform.platform())"
       - name: The scheduler alone at 21,600 queued loop steps
         run: uv run python probe/cpu_bench.py 5
-      - name: One run each, to the end; every continue checked, every history replayed
-        run: uv run python probe/probe_bound.py exhausted_root many_siblings
-      - name: Four runs at once, to the end; every history replayed
-        env: { CONCURRENT: "4", CHECK_EVERY: "10" }
-        run: uv run python probe/probe_bound.py exhausted_root many_siblings
+      # The queued-state cases ran in run 36834701248 (this branch, 3c76866): one and four runs, to the end.
+      - name: Segment indexes that grow, to the end; every continue checked, every history replayed (own process)
+        run: uv run python probe/probe_bound.py index_growth
+      - name: A controlled cancellation race, and a control without cancels (own process)
+        env: { RACE_RUNS: "40" }
+        run: uv run python probe/probe_bound.py cancel_race
       - if: always()
         uses: actions/upload-artifact@v4
         with: { name: probe-2b1b, path: backend/probe/results_bound.jsonl }

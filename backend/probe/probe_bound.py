@@ -435,6 +435,10 @@ def _task_failures(histories: list[Any]) -> dict[str, int]:
     return out
 
 
+def _activity_timeouts(histories: list[Any]) -> int:
+    return sum(e.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_TIMED_OUT for h in histories for e in h.events)
+
+
 def _count_activities(histories: list[Any], name: str) -> int:
     n = 0
     for h in histories:
@@ -553,7 +557,7 @@ async def run_many(name: str, url: str, k: int, sample_s: float) -> dict[str, An
         "executions": len(histories), "continues": len(rows), "replayed": replayed,
         "violations": m["violations"][:10], "n_violations": len(m["violations"]), "cap": None, "cap_formula": None,
         "longest_task_ms": _longest_task_ms(histories), "task_ms": _dist(_task_times(histories)),
-        "task_failures": _task_failures(histories),
+        "task_failures": _task_failures(histories), "activity_timeouts": _activity_timeouts(histories),
         "phase_ms": {ph: round(max(t.get(ph, 0.0) for t in run_times.values()), 1)
                      for ph in sorted({ph for t in run_times.values() for ph in t})},
         "activations": activations, "failed_task_context": list(FAILED_TASKS), "stopped_at": list(STOPPED),
@@ -628,7 +632,7 @@ async def run_one(name: str, url: str) -> dict[str, Any]:
         "derive_activities": _count_activities(histories, P.DERIVE),
         "longest_task_ms": _longest_task_ms(histories),
         "task_ms": _dist(_task_times(histories)),
-        "task_failures": _task_failures(histories),
+        "task_failures": _task_failures(histories), "activity_timeouts": _activity_timeouts(histories),
         "activations": activations, "failed_task_context": list(FAILED_TASKS),
         "phase_ms": {ph: round(max(t.get(ph, 0.0) for t in run_times.values()), 1)
                      for ph in sorted({ph for t in run_times.values() for ph in t})},  # fmt: skip
@@ -664,6 +668,9 @@ async def main() -> None:
             if name == "vars_invariance":
                 await invariance(url)
                 continue
+            if name == "cancel_race":
+                await cancel_race(url)
+                continue
             out = await run(name, url)
             w = out["worst"]
             print(
@@ -678,7 +685,8 @@ async def main() -> None:
             print("    probe:", {k: v for k, v in out["probe"].items() if v}, "asks:", out["asks"], flush=True)
             print("    phases (ms, longest):", out["phase_ms"], flush=True)
             print("    workflow tasks (ms):", out["task_ms"], "failed tasks:", out["task_failures"], flush=True)
-            print("    activations (ms):", out.get("activations"), flush=True)
+            print("    activations (ms):", out.get("activations"), "activity timeouts:", out.get("activity_timeouts"),
+                  flush=True)  # fmt: skip
             for f in out.get("failed_task_context") or []:
                 print("    FAILED TASK:", f, "stopped at:", out.get("stopped_at"), flush=True)
             print("    spills by:", {k: {c: n for c, n in v.items() if n} for k, v in out["container_spills_by"].items()})
@@ -686,6 +694,83 @@ async def main() -> None:
                 print("    VIOLATION", v[:300], flush=True)
             if out["error"]:
                 print("    error:", out["error"], flush=True)
+
+
+def continuing(n: int = 100) -> G:
+    """A run that continues as new every few workflow tasks (with checkpoint_events=60): a loop of 100 echo steps, run
+    inline (no batch children)."""
+    g = graph(n=ref("steps.l.output.count"))
+    loop(g, "l", list(range(n)))
+    g.node("x", ECHO, {"value": ref("item")}).edge("l", "x", "body")
+    return g
+
+
+async def cancel_race(url: str) -> None:
+    """A controlled cancellation run (the `UnhandledCommand` question): N runs that continue as new every second or
+    so, each cancelled at a random moment (seeded), and the same N never cancelled. For each failed workflow task: its
+    cause, and whether a cancel request is the event that follows it in the history (an unhandled command means an
+    event arrived while the task completed with a command that closes the run)."""
+    import random
+
+    from temporalio.api.enums.v1 import WorkflowTaskFailedCause
+
+    n = int(os.environ.get("RACE_RUNS", "40"))
+    rng = random.Random(int(os.environ.get("RACE_SEED", "7")))
+    probe_store.STORE = ProbeStore(url)
+    out: dict[str, Any] = {}
+    for mode in ("cancelled", "control"):
+        store = MemoryStore()
+        async with await R.environment() as env:
+            async with R.serve(env.client, store):
+                handles = []
+                for _ in range(n):
+                    vid = store.add(continuing())
+                    run_id = str(uuid.uuid4())
+                    wid = run_workflow_id(TENANT, run_id)
+                    run = RunInput(TENANT, run_id, vid, {}, checkpoint_events=60, drain_events=120)
+                    handles.append(await env.client.start_workflow(RunGraph.run, run, id=wid, task_queue=ENGINE_QUEUE))
+                if mode == "cancelled":
+                    async def cancel_later(h: Any, delay: float) -> None:
+                        await asyncio.sleep(delay)
+                        try:
+                            await env.client.get_workflow_handle(h.id).cancel()
+                        except Exception as e:
+                            print(f"    CANCEL FAILED {h.id[-8:]}: {type(e).__name__}", flush=True)
+
+                    await asyncio.gather(*(cancel_later(h, rng.uniform(0.5, 12.0)) for h in handles))
+                for h in handles:
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(h.result(), 300)
+                histories = [x for h in handles for x in await executions(env.client, h.id, h.first_execution_run_id or "")]
+        failures: list[dict[str, Any]] = []
+        continues = 0
+        for h in histories:
+            events = list(h.events)
+            for i, e in enumerate(events):
+                if e.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW:
+                    continues += 1
+                if e.event_type != EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED:
+                    continue
+                cause = WorkflowTaskFailedCause.Name(e.workflow_task_failed_event_attributes.cause)
+                after = [EventType.Name(x.event_type).removeprefix("EVENT_TYPE_") for x in events[i + 1 : i + 3]]
+                failures.append({"cause": cause.removeprefix("WORKFLOW_TASK_FAILED_CAUSE_"), "after": after,
+                                 "cancel_next": "WORKFLOW_EXECUTION_CANCEL_REQUESTED" in after})  # fmt: skip
+        out[mode] = {"runs": n, "executions": len(histories), "continues": continues, "failed_tasks": len(failures),
+                     "by_cause": {c: sum(f["cause"] == c for f in failures) for c in {f["cause"] for f in failures}},
+                     "unhandled_with_cancel_next": sum(f["cause"] == "UNHANDLED_COMMAND" and f["cancel_next"]
+                                                       for f in failures),
+                     "unhandled_without": sum(f["cause"] == "UNHANDLED_COMMAND" and not f["cancel_next"]
+                                              for f in failures),
+                     "examples": failures[:3]}  # fmt: skip
+        print(f"=== cancel_race [{mode}]: {out[mode]}", flush=True)
+    with OUT.open("a") as f:
+        f.write(json.dumps({"workload": "cancel_race", "server": _server(), **out}, default=str) + "\n")
+
+
+def _server() -> str:
+    if os.environ.get("TEMPORAL_ADDRESS"):
+        return "linux-dev"
+    return "dev" if os.environ.get("DEV") == "1" else "time-skipping"
 
 
 async def invariance(url: str) -> None:
