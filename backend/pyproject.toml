@@ -23,6 +23,7 @@ dependencies = [
   "cel-expr-python==0.1.3",
   "protobuf>=7.35.1,<8",
   "temporalio==1.33.0",
+  "ahocorasick-rs>=0.22",
 ]
 
 [project.scripts]
