@@ -534,16 +534,26 @@ async def test_a_sensitive_trigger_field_is_masked_where_it_is_copied(env: Workf
 
 async def test_a_sensitive_config_value_is_masked_where_it_is_copied_or_echoed(env: WorkflowEnvironment) -> None:
     """Review finding: a node's `x-sensitive` config field is redacted in its own input preview, but a control step
-    can copy the same literal, and the node can echo it in its error. Literals are learned when the run starts;
-    a value that only the config marks sensitive (here from an unmarked trigger field), before its attempt."""
+    can copy the same value, and the node can echo it in its error. A sensitive value comes in through the run's input
+    (a literal is refused at publish, engine 2b spec §3.8), and the run learns it when it starts; a value that only the
+    config marks sensitive (here from an unmarked trigger field), before its attempt."""
     store = MemoryStore()
     token, passed = "tok-hunter22", "tok-from-trigger"
-    g = graph().node("t", "flow.transform@1", {"fields": {"copy": token}})
-    g.node("p", "testkit.ambiguous_send@1", {"outcome": "rejected", "token": token}, on_error="continue")
+    g = graph().node("t", "flow.transform@1", {"fields": {"copy": ref("trigger.tok")}})
+    g.settings["input_schema"] = {
+        "type": "object",
+        "properties": {
+            **SCHEMA["properties"],
+            "tok": {"type": "string", "x-sensitive": True},
+            "open": {"type": "object"},
+        },
+        "required": ["x", "open", "tok"],
+    }
+    g.node("p", "testkit.ambiguous_send@1", {"outcome": "rejected", "token": ref("trigger.tok")}, on_error="continue")
     echo = {"outcome": "rejected", "token": ref("trigger.open.tok", default="")}
     g.node("q", "testkit.ambiguous_send@1", echo, on_error="continue").edge("t", "p").edge("t", "q")
     async with workers(env.client, store):
-        handle = await start(env.client, store, g, {"x": 7, "open": {"tok": passed}})
+        handle = await start(env.client, store, g, {"x": 7, "tok": token, "open": {"tok": passed}})
         await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     rows = {r.node_key: r for r in store.steps(run_id_of(handle))}
     assert rows["t"].output_preview == {"copy": "[redacted]"}  # projected before `p` ran

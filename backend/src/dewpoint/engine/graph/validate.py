@@ -57,6 +57,7 @@ from dewpoint.engine.graph.values import (
 from dewpoint.engine.registry import control as C
 from dewpoint.engine.registry.catalog import Catalog, NodeTypeSpec
 from dewpoint.engine.schema_refs import ref_problems, subschemas
+from dewpoint.engine.sensitive import SENSITIVE, empty, expand, is_marked, marked_positions
 from dewpoint.sdk.fields import KINDS
 
 MAX_SUBFLOW_DEPTH = 5
@@ -162,6 +163,52 @@ def _regex_keywords(schema: Any) -> list[str]:
     return sorted(found)
 
 
+_SENSITIVE_LITERAL = (
+    "A sensitive value can't be written into the workflow: pass it in the run's input, in a field marked sensitive."
+)
+
+
+def _writes_sensitive(
+    value: Value, root: Mapping[str, Any], pointer: Pointer, target: Mapping[str, Any] | None
+) -> bool:
+    """Whether a value envelope writes a literal at a sensitive position (§3.8): the literal itself, a part of it the
+    target schema marks, or a reference's or a template's default."""
+    if isinstance(value, LiteralValue):
+        if empty(value.value):
+            return False
+        return is_marked(root, pointer) or bool(target is not None and marked_positions(value.value, target))
+    if not is_marked(root, pointer):
+        return False
+    if isinstance(value, RefValue):
+        return value.has_default and not empty(value.default)
+    if isinstance(value, TemplateValue):
+        return any(isinstance(p, TemplateRef) and not empty(p.default) for p in value.parts)
+    return False
+
+
+def _sensitive_defaults(label: str, schema: Mapping[str, Any]) -> list[Diagnostic]:
+    """A `default` at a position the schema marks sensitive, or holding a part it does (engine 2b spec §3.8): a
+    secret written into the version. A null or empty default writes nothing."""
+    found: list[str] = []
+
+    def walk(node: Any, path: str, inherited: bool) -> None:
+        if not isinstance(node, Mapping):
+            return
+        branches = expand(node, schema)
+        here = inherited or any(b.get(SENSITIVE) is True for b in branches)
+        defaults = [b["default"] for b in branches if "default" in b and not empty(b["default"])]
+        if defaults and (here or any(marked_positions(d, node, schema) for d in defaults)):
+            found.append(path)
+        for suffix, sub in subschemas(node):
+            walk(sub, path + suffix, here)
+
+    walk(schema, "", False)
+    return [
+        Diagnostic(code="sensitive.default", field=f"/settings/{label}{where}", message=_SENSITIVE_LITERAL)
+        for where in found
+    ]
+
+
 def _settings(graph: Graph) -> list[Diagnostic]:
     st = graph.settings
     out: list[Diagnostic] = []
@@ -198,6 +245,9 @@ def _settings(graph: Graph) -> list[Diagnostic]:
             Diagnostic(code="settings.unresolvable_ref", field=f"/settings/{label}", message=f"{problem}.")
             for problem in ref_problems(schema)
         ]
+    for label, schema in (("input_schema", st.input_schema), ("vars_schema", st.vars_schema)):
+        if not any((d.field or "").startswith(f"/settings/{label}") for d in out):
+            out += _sensitive_defaults(label, schema)
     if any((d.field or "").startswith("/settings/vars_schema") for d in out):  # never run defaults through it
         return out
     props = st.vars_schema.get("properties", {})
@@ -213,7 +263,10 @@ def _settings(graph: Graph) -> list[Diagnostic]:
                 )
             )
         if not isinstance(schema, Mapping) or "default" not in schema:
-            out.append(Diagnostic(code="vars.no_default", field=where, message="Every variable needs a default value."))
+            if not is_marked(st.vars_schema, (name,)):  # a sensitive variable is null until a step sets it
+                out.append(
+                    Diagnostic(code="vars.no_default", field=where, message="Every variable needs a default value.")
+                )
         elif list(Draft202012Validator({**schema, "$defs": defs}).iter_errors(schema["default"])):
             out.append(
                 Diagnostic(code="vars.bad_default", field=where, message="The default value doesn't match the type.")
@@ -343,6 +396,7 @@ class _Validator:
     def _check_literals(self, n: GraphNode, spec: NodeTypeSpec) -> None:
         stripped, envelopes = strip_values(n.config)
         self._schema_errors(n.id, "", spec.config_schema, stripped, envelopes)
+        self._sensitive_literals(n, spec, stripped)
         props = spec.config_schema.get("properties")
         for name, prop in props.items() if isinstance(props, Mapping) else ():
             kinds = prop.get(KINDS) if isinstance(prop, Mapping) else None
@@ -367,6 +421,24 @@ class _Validator:
             if info is not None:
                 inner = [p[1:] for p in envelopes if p[:1] == ("input",)]
                 self._schema_errors(n.id, "/input", info.input_schema, stripped.get("input", {}), inner)
+
+    def _sensitive_literals(self, n: GraphNode, spec: NodeTypeSpec, stripped: Any) -> None:
+        """Config written as literals where a schema marks it sensitive (engine 2b spec §3.8): the node's own config,
+        a variable an assignment writes, a child's input. Envelopes are checked where they're resolved (`_value`)."""
+        own: Any = stripped
+        parts: list[tuple[str, Any, Mapping[str, Any] | None]] = []
+        if isinstance(stripped, dict) and spec.ref == C.SET_VARIABLES:
+            own = {k: v for k, v in stripped.items() if k != "assignments"}
+            parts.append(("/assignments", stripped.get("assignments"), self.vars_root))
+        elif isinstance(stripped, dict) and spec.ref == C.RUN_WORKFLOW:
+            own = {k: v for k, v in stripped.items() if k != "input"}
+            info = self._subflow(n)
+            parts.append(("/input", stripped.get("input"), info.input_schema if info else None))
+        parts.append(("", own, spec.config_schema))
+        for prefix, value, schema in parts:
+            if isinstance(schema, Mapping):
+                for where in marked_positions(value, schema):
+                    self.err("sensitive.literal", _SENSITIVE_LITERAL, node=n.id, fld=prefix + where)
 
     def _schema_errors(
         self, node: uuid.UUID, prefix: str, schema: Mapping[str, Any], instance: Any, envelopes: list[Pointer]
@@ -427,6 +499,8 @@ class _Validator:
                 fld=site.field,
             )
             return None
+        if root is not None and _writes_sensitive(value, root, pointer, target):
+            self.err("sensitive.literal", _SENSITIVE_LITERAL, node=site.node, fld=site.field)
         if isinstance(value, LiteralValue):
             self._check_instance(site, target, value.value)
             return Resolved({"type": literal_type(value.value)}, False)
