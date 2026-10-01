@@ -161,14 +161,9 @@ Checkpoints for the owner: after milestone 2 (the static half), after 3, after 4
 
 ---
 
-## Open questions for the owner
+## The owner's decisions (2026-10-02)
 
-1. **The order.** Claims infrastructure → taint at publish → run-time protection → sizes (above). The earlier idea
-   was claims → sizes → taint; sizes can't come before run-time protection, because size claims are handles and
-   every read of a handle needs milestone 3's routing.
-2. **A dependency for the secret index.** Aho–Corasick at the spec's bound (8 MiB of strings) isn't feasible in pure
-   Python (millions of trie nodes as dicts). Candidates: `pyahocorasick` (C extension, BSD-3) or `ahocorasick-rs`
-   (Rust, MIT/Apache-2.0); both ship wheels for Python 3.12 on Linux and macOS.
-3. **How the plan gives code.** 2b-1a's way: every task prototyped first on a branch from `main`, the plan written from
-   the tested diffs (about 30 tasks; a long plan), execution by cherry-pick. Or: write each task's code in the plan
-   directly, proven during execution.
+1. **The order:** claims infrastructure → taint at publish → run-time protection → sizes, as above.
+2. **The secret index's matcher:** `ahocorasick-rs` (Rust, MIT/Apache-2.0), a new runtime dependency (Task 6).
+3. **How the plan gives code:** prototype first, as 2b-1a: every task is built and tested on a branch from `main`, the
+   plan holds the tested diffs, and execution cherry-picks them.
