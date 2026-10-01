@@ -529,8 +529,8 @@ async def _settled(client: Any, ids: list[str]) -> dict[str, str]:
 def _accept(name: str, out: dict[str, Any], *, expect: dict[str, str], cancelled: set[str],
             settled: dict[str, str], replay_total: int) -> None:  # fmt: skip
     """The acceptance conditions, asserted: each run settled as expected, the outputs match, every check against the
-    continued-input bound passed (and some continue was checked), the replay passed, no activity timed out, and every
-    failed task is one the cancellation exception excuses."""
+    continued-input bound passed (and some continue was checked), the replay passed, no activity timed out, every
+    failed task is one the cancellation exception excuses, and no activation took more than CPU_LIMIT_MS of CPU."""
     for wid, want in expect.items():
         if settled.get(wid) != want:
             _fail(name, f"{wid[-12:]} settled {settled.get(wid)}, expected {want}")
@@ -546,6 +546,12 @@ def _accept(name: str, out: dict[str, Any], *, expect: dict[str, str], cancelled
         _fail(name, f"{out['activity_timeouts']} activities timed out")
     for f in _unexcused_failed_tasks(cancelled, settled):
         _fail(name, f"failed task not excused: {f}")
+    acts = out.get("activations") or {}
+    if not acts and os.environ.get("DEV") == "1":  # the dev server's workers time every activation
+        _fail(name, "no activation was timed: the CPU check didn't run")
+    elif acts and acts["cpu_max"] > CPU_LIMIT_MS:
+        _fail(name, f"an activation took {acts['cpu_max']} ms of CPU, over {CPU_LIMIT_MS} ms "
+                    f"({acts['cpu_over_1000']} over 1 s)")  # fmt: skip
 
 
 def _activity_timeouts(histories: list[Any]) -> int:
@@ -584,6 +590,7 @@ SAMPLE_S = float(os.environ.get("SAMPLE_S", "0"))  # > 0: measure that long, the
 STOP_AFTER = int(os.environ.get("STOP_AFTER", "0"))  # > 0: cancel each copy once it has continued this many times
 CHECK_EVERY = int(os.environ.get("CHECK_EVERY", "1"))  # restore-check every k-th continue (CPU runs: bounds are known)
 REPLAY_SAMPLE = int(os.environ.get("REPLAY_SAMPLE", "0"))  # > 0: replay the first, the last and this many others
+CPU_LIMIT_MS = int(os.environ.get("CPU_LIMIT_MS", "1000"))  # engine-core: a workflow task's CPU, at most
 
 
 async def run(name: str, url: str) -> dict[str, Any]:

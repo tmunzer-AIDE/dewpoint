@@ -3,12 +3,24 @@ name: probe-2b1b
 # - `cpu`, always, about 10 minutes: only what needs the target runner, a workflow task's CPU and failed-task causes at
 #   the heaviest queued state, with the engine worker at its intended 2 workflow-task slots, one run and four at once.
 #   Each copy stops after STOP_AFTER continues: the queued state is at its most from the first ones.
+# - `one`, when a workload is named: only that one, to the end, every continue checked and every history replayed (the
+#   `cpu` job is skipped): a case to confirm on the runner, such as a fix.
 # - `full`, only when asked: every workload to the end, every continue checked and every history replayed, each on a
 #   runner of its own, all at once. Day to day, correctness runs locally (exp/run_local.sh).
 # The probe asserts every acceptance condition and exits non-zero on any. Throwaway branch, never merged.
 on:
   workflow_dispatch:
     inputs:
+      workload:
+        description: Run only this workload, to the end (skips the CPU job)
+        type: choice
+        options: [none, exhausted_root, many_siblings, index_growth, index_growth_cap, cancel_race]
+        default: none
+      concurrent:
+        description: Copies of that workload started at once on one worker
+        type: choice
+        options: ["1", "4"]
+        default: "1"
       full:
         description: Also run every workload to the end, each on its own runner
         type: boolean
@@ -22,6 +34,7 @@ env:
   PROBE_TIMEOUT: "7200"
 jobs:
   cpu:
+    if: ${{ inputs.workload == 'none' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     defaults: { run: { working-directory: backend } }
@@ -54,6 +67,34 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@v4
         with: { name: probe-2b1b-cpu, path: backend/probe/results_bound.jsonl }
+  one:
+    if: ${{ inputs.workload != 'none' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    defaults: { run: { working-directory: backend } }
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_PASSWORD: probe, POSTGRES_DB: probe }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s --health-retries 30
+    name: one (${{ inputs.workload }} x${{ inputs.concurrent }})
+    env: { WORKLOAD: "${{ inputs.workload }}", CONCURRENT: "${{ inputs.concurrent }}", RACE_RUNS: "40" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+      - run: uv sync --locked
+      - run: nproc && python3 -c "import platform; print(platform.platform())"
+      - name: The workload, to the end
+        run: uv run python probe/probe_bound.py "$WORKLOAD"
+      - if: always()  # with the history of any run still running past its wait
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-2b1b-one
+          path: |
+            backend/probe/results_bound.jsonl
+            backend/probe/stuck_*.json
   full:
     if: ${{ inputs.full }}
     runs-on: ubuntu-latest
