@@ -1,16 +1,29 @@
 name: probe-2b1b
-# Engine 2b spec §5.3 go/no-go (§11.3): the focused gate's rerun on the CI runner, the engine worker at its intended
-# 2 workflow-task slots. Each workload runs in its own process, to the end, every continue checked against the bound and
-# every history replayed; the probe asserts every acceptance condition and exits non-zero on any, so a step fails on
-# it. Every step runs whatever came before; the job fails if any did. Throwaway branch, never merged.
+# Engine 2b spec §5.3 go/no-go (§11.3). Run by hand only (Actions > probe-2b1b > Run workflow): a push runs nothing.
+# - `cpu`, always, about 10 minutes: only what needs the target runner, a workflow task's CPU and failed-task causes at
+#   the heaviest queued state, with the engine worker at its intended 2 workflow-task slots, one run and four at once.
+#   Each copy stops after STOP_AFTER continues: the queued state is at its most from the first ones.
+# - `full`, only when asked: every workload to the end, every continue checked and every history replayed, each on a
+#   runner of its own, all at once. Day to day, correctness runs locally (exp/run_local.sh).
+# The probe asserts every acceptance condition and exits non-zero on any. Throwaway branch, never merged.
 on:
-  push: { branches: [proto/2b1b-bound] }
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      full:
+        description: Also run every workload to the end, each on its own runner
+        type: boolean
+        default: false
 permissions: { contents: read }
+env:
+  POSTGRES_URL: postgresql+asyncpg://postgres:probe@localhost:5432/probe
+  PYTHONPATH: .:probe
+  DEV: "1"  # the SDK's dev server (WorkflowEnvironment.start_local)
+  WFT_SLOTS: "2"
+  PROBE_TIMEOUT: "7200"
 jobs:
   cpu:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 45
     defaults: { run: { working-directory: backend } }
     services:
       postgres:
@@ -19,12 +32,7 @@ jobs:
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s --health-retries 30
-    env:
-      POSTGRES_URL: postgresql+asyncpg://postgres:probe@localhost:5432/probe
-      PYTHONPATH: .:probe
-      DEV: "1"  # the SDK's dev server (WorkflowEnvironment.start_local)
-      WFT_SLOTS: "2"
-      PROBE_TIMEOUT: "7200"
+    env: { STOP_AFTER: "40", CHECK_EVERY: "10", REPLAY_SAMPLE: "10" }
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
@@ -32,12 +40,9 @@ jobs:
       - run: nproc && python3 -c "import platform; print(platform.platform())"
       - name: The scheduler alone at 21,600 queued loop steps
         run: uv run python probe/cpu_bench.py 5
-      - name: Queued state, one run, an exhausted budget
+      - name: Queued state, one run of each
         if: ${{ !cancelled() }}
-        run: uv run python probe/probe_bound.py exhausted_root
-      - name: Queued state, one run, 240 sibling loops
-        if: ${{ !cancelled() }}
-        run: uv run python probe/probe_bound.py many_siblings
+        run: uv run python probe/probe_bound.py exhausted_root many_siblings
       - name: Queued state, four runs at once, an exhausted budget
         if: ${{ !cancelled() }}
         env: { CONCURRENT: "4" }
@@ -46,20 +51,43 @@ jobs:
         if: ${{ !cancelled() }}
         env: { CONCURRENT: "4" }
         run: uv run python probe/probe_bound.py many_siblings
-      - name: Segment indexes that grow (60,000 items, one segment each)
-        if: ${{ !cancelled() }}
-        run: uv run python probe/probe_bound.py index_growth
-      - name: Segment indexes at a run's most (99,990 items, one segment each)
-        if: ${{ !cancelled() }}
-        run: uv run python probe/probe_bound.py index_growth_cap
-      - name: A controlled cancellation race, and a control without cancels
-        if: ${{ !cancelled() }}
-        env: { RACE_RUNS: "40" }
-        run: uv run python probe/probe_bound.py cancel_race
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: probe-2b1b-cpu, path: backend/probe/results_bound.jsonl }
+  full:
+    if: ${{ inputs.full }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    defaults: { run: { working-directory: backend } }
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_PASSWORD: probe, POSTGRES_DB: probe }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s --health-retries 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { id: exhausted-1, workload: exhausted_root, concurrent: "1" }
+          - { id: siblings-1, workload: many_siblings, concurrent: "1" }
+          - { id: exhausted-4, workload: exhausted_root, concurrent: "4" }
+          - { id: siblings-4, workload: many_siblings, concurrent: "4" }
+          - { id: index-growth, workload: index_growth, concurrent: "1" }
+          - { id: index-growth-cap, workload: index_growth_cap, concurrent: "1" }
+          - { id: cancel-race, workload: cancel_race, concurrent: "1" }
+    name: full (${{ matrix.id }})
+    env: { CONCURRENT: "${{ matrix.concurrent }}", RACE_RUNS: "40" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+      - run: uv sync --locked
+      - run: uv run python probe/probe_bound.py ${{ matrix.workload }}
       - if: always()  # with the history of any run still running past its wait
         uses: actions/upload-artifact@v4
         with:
-          name: probe-2b1b
+          name: probe-2b1b-full-${{ matrix.id }}
           path: |
             backend/probe/results_bound.jsonl
             backend/probe/stuck_*.json
