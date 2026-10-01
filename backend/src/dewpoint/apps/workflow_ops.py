@@ -52,7 +52,9 @@ async def check_draft(s: AsyncSession, tenant_id: uuid.UUID, draft: Any, setting
     pins = await service.active_versions(s, tenant_id, referenced_workflows(graph))
     ctx = ValidationContext(
         catalog=catalog,
-        subflows={wid: SubflowInfo(wid, v.id, v.input_schema, v.output_schema) for wid, v in pins.items()},
+        subflows={
+            wid: SubflowInfo(wid, v.id, v.input_schema, v.output_schema, v.output_taint) for wid, v in pins.items()
+        },
         max_run_duration=timedelta(days=settings.max_run_duration_days),
     )
     result = await asyncio.to_thread(validate, graph, ctx)  # CPU-bound: keep the event loop serving others
@@ -201,6 +203,8 @@ async def publish(
             closure_cel_profiles=closure_cel_profiles,
             closure_depth=_depth(checked.pins),
             expressions=[r.to_json() for r in checked.result.expressions],
+            tainted_sites=[{"node": node, "field": fld} for node, fld in checked.result.tainted_sites],
+            output_taint=dict(checked.result.output_taint),
             graph_hash=authored,
             version_hash=version_hash(
                 graph_hash=authored,

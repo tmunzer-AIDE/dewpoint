@@ -383,3 +383,39 @@ async def test_a_writer_sees_what_was_committed_while_its_session_held_the_workf
             await workflow_ops.publish(s, ctx, wf, expected_revision=seen, settings=api_settings)
         await workflow_ops.update(s, ctx, wf, name=None, enabled=True)  # an enable, not a no-op
     assert await is_enabled(api_sessionmaker, ctx, wf_id)
+
+
+async def test_publish_stores_the_tainted_sites_and_the_output_taint_a_parent_then_reads(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    """Engine 2b spec §4.1: the version records which value sites are tainted, and its outputs' taint map; a parent's
+    analysis reads its pinned sub-flow's map."""
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    token_schema = {
+        "type": "object",
+        "properties": {"token": {"type": "string", "x-sensitive": True}},
+        "required": ["token"],
+        "additionalProperties": False,
+    }
+    child_graph = G().node("a", "testkit.echo@1", {"value": ref("trigger.token")})
+    child_graph.settings = {"input_schema": token_schema, "outputs": {"secret": ref("trigger.token"), "plain": 1}}
+    child = await create(api_sessionmaker, ctx, child_graph.data(), name="child")
+    child_v = (await publish(api_sessionmaker, ctx, child, api_settings)).version
+    assert child_v is not None
+    assert child_v.tainted_sites == [
+        {"node": None, "field": "/settings/outputs/secret"},  # the workflow's outputs first
+        {"node": str(nid("a")), "field": "/value"},
+    ]
+    assert child_v.output_taint == {"secret": True, "plain": False}
+    parent_graph = G().node(
+        "r", "flow.run_workflow@1", {"workflow_id": str(child), "input": {"token": ref("trigger.token")}}
+    )
+    parent_graph.node("e", "testkit.echo@1", {"value": ref("steps.r.output.secret")}).edge("r", "e")
+    parent_graph.node("p", "testkit.echo@1", {"value": ref("steps.r.output.plain")}).edge("r", "p")
+    parent_graph.settings = {"input_schema": token_schema}
+    parent = await create(api_sessionmaker, ctx, parent_graph.data(), name="parent")
+    out = await publish(api_sessionmaker, ctx, parent, api_settings)
+    assert out.errors == [] and out.version is not None
+    sites = {(site["node"], site["field"]) for site in out.version.tainted_sites}
+    assert (str(nid("e")), "/value") in sites and (str(nid("p")), "/value") not in sites

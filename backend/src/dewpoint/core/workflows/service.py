@@ -167,6 +167,8 @@ class NewVersion:
     version_hash: str
     expressions: list[Any] = field(default_factory=list)
     connection_ids: list[uuid.UUID] = field(default_factory=list)
+    tainted_sites: list[Any] = field(default_factory=list)
+    output_taint: dict[str, Any] | None = None
 
 
 async def insert_version(s: AsyncSession, ctx: TenantContext, wf: Workflow, new: NewVersion) -> WorkflowVersion:
@@ -191,6 +193,8 @@ async def insert_version(s: AsyncSession, ctx: TenantContext, wf: Workflow, new:
         output_schema=new.output_schema,
         vars_schema=new.vars_schema,
         expressions=new.expressions,
+        tainted_sites=new.tainted_sites,
+        output_taint=new.output_taint,
         closure_version_ids=new.closure_version_ids,
         closure_workflow_ids=new.closure_workflow_ids,
         closure_node_refs=new.closure_node_refs,
