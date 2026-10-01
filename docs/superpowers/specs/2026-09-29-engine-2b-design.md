@@ -1565,7 +1565,7 @@ With every container claimed, the live state needs at most 660,576 B (250 root l
   when it comes while the run's end is being written: after it, nothing but the end's projection is scheduled. Any
   other completion after a cancel fails the check. The focused gate is called a go only after a CI rerun passes
   these assertions.
-- **The enforced race found an engine bug, fixed in the prototype (2026-10-01).**
+- **The enforced race found an engine bug, outside §5.3, fixed in the prototype (2026-10-01).**
   - Locally, the assertions failed: cancelled runs were still running at the wait. That was 2 of 24 landed cancels in
     one race and 4 of 25 in another; two of those four ended cancelled, after 70 s and after 3 minutes.
   - Their histories: after the cancel, the end's projection was scheduled but didn't start for minutes. Meanwhile the
@@ -1581,10 +1581,11 @@ With every container claimed, the live state needs at most 660,576 B (250 root l
   - With the fix, the local race (40 runs, 27 landed cancels): every cancelled run settled cancelled, the one
     `UNHANDLED_COMMAND` matched the exception, and every history replayed.
   - Main has the same configuration. There, any cancel of an unstarted activity, a run's cancel or a scope's end, can
-    unpin a run, and during a rollout an unpinned run could move to another build, against §7. It's reported for a
-    fix of its own.
+    unpin a run, and during a rollout an unpinned run could move to another build, against §7.
+  - It's a rollout-correctness issue, not part of §5.3's size proof (the owner's ruling). It's tracked as #22 and
+    fixed from `main` by #23, which ports only the default and its regression test.
 
-**The enforced rerun (2026-10-01): promising, the gate still open.**
+**The enforced rerun (2026-10-01): every condition passed; the go is the owner's decision.**
 - **On the CI runner** (2 vCPUs, the engine worker at 2 workflow-task slots, every acceptance condition asserted,
   every run to its end and every history replayed):
 
@@ -1609,7 +1610,15 @@ With every container claimed, the live state needs at most 660,576 B (250 root l
     grant. Two tests cover it, and they failed before the fix.
   - With the fix, on macOS, the five correctness workloads ran in parallel, to their ends, and passed. The
     99,990-item one had no violation over 1,763 continues; its worst snapshot was 1,012,698 B.
-  - The CI runner hasn't run the fix yet. It changes when claims start, not what a task computes.
+  - **The corrected run on the CI runner (run 36928968433), the owner's condition:** the 99,990-item workload alone,
+    with the fix, every acceptance condition asserted, activation CPU included. It passed in 29 minutes:
+    - the run succeeded with the expected outputs;
+    - 1,999 continues checked against the bound, with no violation, the worst snapshot 1,039,069 B;
+    - all 3,000 histories replayed;
+    - no failed task and no activity timeout;
+    - activation CPU at most 757 ms, and wall time at most 760 ms, over 22,906 activations.
+
+    The earlier CI results stand for the other cases (the owner's ruling).
 - **How the checks run from now on (the owner's ruling).** Correctness runs locally, in parallel. The CI runner
   measures only what needs it, a task's CPU at the heaviest queued state, in about 10 minutes, and only on request.
   Full runs on it are for milestones.
