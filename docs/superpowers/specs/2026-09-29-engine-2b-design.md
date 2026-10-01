@@ -61,6 +61,9 @@
     only the budget's fixed counters in a continued input, with both checks kept; the CPU work is promising, but the
     gate stays open until the heaviest case runs on the target Linux CI runner, the long runs complete and replay,
     and the `UnhandledCommand` is explained (§11.3).
+  - **The owner's decision (2026-10-01): go for the focused §5.3 gate (§11.3).** Revision 5's §5.3 is approved for
+    implementation by the 2b-1b plan, not as production-ready: the plan turns the prototype's guarantees into
+    regression tests and completes what the prototype didn't. The unpinned-run fix (#22, #23) is separate.
 - **Parent specs:**
   - `2026-09-24-dewpoint-architecture-design.md` (§5, §6.1, §6.5, §6.8, §12, §15). This spec **changes** its
     workflow-id contract (§6.1), replaces its `outbox` table (§6.1), details its claim check (§6.5) and settles the
@@ -616,7 +619,8 @@ else. Everything else is restored from the snapshot alone:
        region's `set_variables` steps, plus the current one), and one per frozen scope. Component 4's counts bound
        those.
      - A test proves that `LIVE_BUDGET` is above that minimum for every cap the formula allows. The budget then holds
-       at every continue: continuing happens only when nothing is in flight, spills included.
+       at every continue: continuing happens only when nothing is in flight, spills included. A drain still starts
+       the claims it decides, and a run doesn't continue while its live state is past `LIVE_BUDGET` (§11.3).
 
 **When a loop step inside an iteration reads variables.**
 - **Today:** a step resolves all its values when it starts, and the in-flight cap can already start a ready step later
@@ -689,6 +693,8 @@ else. Everything else is restored from the snapshot alone:
   computed maxima and the cap they leave for the largest graphs, and it shows that a cap of at least 1 fits them.
   Until the gate passes, the spec promises only that continuing is guarded against size (§5.2), and the rules above
   stay provisional.
+  - **The gate passed (the owner's go, 2026-10-01, §11.3).** The rules above are approved for implementation by
+    2b-1b, whose tests prove them; the numbers stay provisional until measured (§15).
 - **2b-1a promises only the check:** a continued run's input past `SNAPSHOT_MAX` once encoded fails the run cleanly
   with `snapshot_too_large` (a batch fails its loop). The components above and a proven bound are 2b-1b's.
 - **History headroom:** the drain thresholds reserve room in the old run's history for the snapshot, so a structure
@@ -1326,12 +1332,23 @@ and a worst-case maximum, and the follow-up tests those rules.
   handles (CEL over a handle-backed item, references into a spilled collection or result). The workloads read only
   counts and handles.
 
-### 11.3 The §5.3 follow-up: results (2026-09-30) — promising, not yet a go
+### 11.3 The §5.3 follow-up: results (2026-09-30 to 2026-10-01) — go (the owner's decision, 2026-10-01)
 
-**Outcome: promising, not yet a §5.3 go** (the owner's ruling). A focused prototype of revision 5's §5.3 passed every
-check below, on every workload, on both servers. Two conditions remain before the gate passes (below): the
-at-continue budget term must be an enforced invariant, and a workflow task's CPU must stay within engine-core's 1 s
-target at the structural maximum. The 2b-1b plan follows once both pass.
+**Outcome (2026-10-01): go for the focused §5.3 gate** (the owner's decision). The corrected 99,990-item case passed
+on the target CI runner at `3215452`: all 1,999 continues met the bound, all 3,000 histories replayed, no task failed
+and no activity timed out, and an activation took 757 ms of CPU at most. The other CI results stand; no full rerun
+was needed.
+- This approves revision 5's provisional §5.3 for implementation, not production readiness. The 2b-1b plan turns the
+  prototype's guarantees into regression tests, and completes the work the prototype didn't (the end of this
+  section).
+- The unpinned-run fix (#22, #23) is separate: rollout correctness, not part of the size proof.
+
+The findings below are the record that led there, in order, each with the verdict it had then.
+
+**Earlier verdict (2026-09-30), kept as history: promising, not yet a §5.3 go** (the owner's ruling). A focused
+prototype of revision 5's §5.3 passed every check below, on every workload, on both servers. Two conditions remained
+before the gate passed: the at-continue budget term had to be an enforced invariant, and a workflow task's CPU had to
+stay within engine-core's 1 s target at the structural maximum.
 
 **How it was measured.** A throwaway prototype of revision 5's §5.3 (local branch `proto/2b1b-bound`, from §11.2's
 `proto/2b1b-snapshot`, never merged), with §11.2's stub claim store and versions.
@@ -1585,7 +1602,7 @@ With every container claimed, the live state needs at most 660,576 B (250 root l
   - It's a rollout-correctness issue, not part of §5.3's size proof (the owner's ruling). It's tracked as #22 and
     fixed from `main` by #23, which ports only the default and its regression test.
 
-**The enforced rerun (2026-10-01): every condition passed; the go is the owner's decision.**
+**The enforced rerun (2026-10-01): every condition passed, then the owner's go.**
 - **On the CI runner** (2 vCPUs, the engine worker at 2 workflow-task slots, every acceptance condition asserted,
   every run to its end and every history replayed):
 
