@@ -3,7 +3,8 @@
 Dewpoint uses envelope encryption:
 
 - **Data keys** (one per tenant, plus one platform key for user TOTP secrets) encrypt secrets such as Mist API tokens,
-  and every payload a tenant's runs exchange with Temporal. A tenant gets its key when it's created; `dewpoint keys
+  every payload a tenant's runs exchange with Temporal, and the claims and secret indexes stored for its runs
+  ([`deployment.md`](deployment.md#encrypted-payloads)). A tenant gets its key when it's created; `dewpoint keys
   ensure-tenants`, as a `dewpoint_admin` login, gives one to tenants created before (Compose's migrate step runs it).
 - The **key-encryption key (KEK)** wraps every data key. It is supplied through `DEWPOINT_KEK_B64` (with its id in
   `DEWPOINT_KEK_ID`) and is never stored in the database.
@@ -48,7 +49,9 @@ dewpoint keys rotate-dek --tenant <tenant-uuid>
 dewpoint keys rotate-dek --platform
 ```
 
-Existing ciphertext stays readable (old data-key versions are kept); new encryptions use the new version. This is
+Existing ciphertext stays readable (old data-key versions are kept); new encryptions use the new version. A claim
+keeps the version it was sealed with; a run tree's secret index is sealed again with the current version each time it
+grows. This is
 independent of KEK rotation. Workers and the CLI cache a tenant's key for up to 5 minutes, and never longer, even
 while the database doesn't answer, so their Temporal payloads switch to the new version within that time. (The cost:
 a database outage longer than that fails the steps whose payloads need the key, [`deployment.md`](deployment.md).)
@@ -61,7 +64,8 @@ use for payloads; its bound is:
 
 No run that could hold such a payload may still be open either: a run stalled past its deadline (its build's workers
 gone) keeps its history until it closes. Dewpoint has no command that deletes a data key version yet; the one that retires
-versions (sub-project 2b-4) enforces this, and the spec's other conditions for records stored under the version.
+versions (sub-project 2b-4) enforces this, and the spec's other conditions for records stored under the version:
+claims and secret indexes are such records, kept until tenant retention deletes them.
 
 ## Backups
 
