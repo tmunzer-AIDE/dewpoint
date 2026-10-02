@@ -115,9 +115,10 @@
     execution opens at most a cap of iterations computed and pinned at publish (§6). A snapshot or a restore runs part
     by part, charged in structural units, and a version's program is compiled once per worker; a take in an
     execution's first task gets its startup tenth too. The log lines the worker controls hold only text proven to be
-    code: a plugin's `ctx.log` keeps its own constants, a bug its type and place, Temporal's activity records their
-    fixed text and a validated code; a plugin's failure shows its code and message only when they're constants of its
-    code (§3, §8). `engine_abi` becomes 6.
+    code: a plugin's `ctx.log` keeps its own constants, a bug its type and place as far as they're proven to be code,
+    Temporal's activity records only their fixed text; a plugin's failure shows its code and message only when
+    they're constants of its code, and an exception's class only when it's a builtin or its module's code names it
+    (§3, §8). `engine_abi` becomes 6.
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
   This spec **narrows parent §6.4** (where CEL runs) and resolves the CEL item in parent §15.
 - **Evidence:** CEL spike, branch `spike/cel-evaluation`, commits `d6a8162` and `13a62e1`. See

@@ -8,14 +8,17 @@ code, never a run's data: that's what a log may hold.
   own source (or a boolean or null): a computed event is withheld (`step_event_withheld`), a computed field name
   dropped (`fields_withheld` counts them), and any other value redacted, a number included (a PIN is one). A field
   whose name looks secret is redacted even then.
-- A bug in a node is logged by its type and where it was raised; its text only when that's such a constant.
+- A bug in a node is logged by its type and where it was raised; its text only when that's such a constant. A class
+  name is text too: it's shown when the class is a builtin or its module's code declares that name, else as UNNAMED;
+  a frame is named only when its code was compiled from its module's source (a function renamed at run time isn't).
 - Temporal's worker logs a failed attempt with its exception, and some of its messages quote an error, heartbeat
-  details or an activity's info: its activity records keep only the exact text of one of the SDK's fixed messages and
-  a validated code, never what follows the text, nor an exception.
+  details or an activity's info: its activity records keep only the exact text of one of the SDK's fixed messages,
+  never what follows it, nor an error's code or class, nor an exception.
 
 These are the log paths the worker controls: `ctx.log`, its own logs and Temporal's activity records. A plugin that
 logs through Python's `logging` or `print`, or a library it calls that logs, is outside them."""
 
+import builtins
 import functools
 import logging
 import os
@@ -27,7 +30,6 @@ from collections.abc import Iterable, Iterator
 from typing import Any
 
 import structlog
-from temporalio.exceptions import ApplicationError
 
 REDACTED = "[redacted]"
 WITHHELD = "step_event_withheld"
@@ -50,13 +52,21 @@ def _constants(items: Iterable[object]) -> Iterator[object]:
             yield c
 
 
+def _codes(code: types.CodeType) -> Iterator[types.CodeType]:
+    yield code
+    for c in code.co_consts:
+        if isinstance(c, types.CodeType):
+            yield from _codes(c)
+
+
 @functools.cache
-def literals(module: str) -> Literals:
-    """Every string and number written in the source of `module`'s package, as (type, value): read from its modules'
-    code objects (a keyword's name is one too), once per package. What a module's loader can't give as code adds
-    nothing, so it's withheld."""
+def _package(module: str) -> tuple[Literals, frozenset[tuple[str, str, int]]]:
+    """What the source of `module`'s package holds, read from its modules' code objects once per package: every string
+    and number written in it, as (type, value) (a keyword's or a class's name is one too), and every function's code
+    as (file, name, first line). What a module's loader can't give as code adds nothing, so it's withheld."""
     package = module.rpartition(".")[0] or module
-    out: set[tuple[type, object]] = set()
+    found: set[tuple[type, object]] = set()
+    functions: set[tuple[str, str, int]] = set()
     for name in sorted(n for n in list(sys.modules) if n == package or n.startswith(package + ".")):
         loader = getattr(getattr(sys.modules.get(name), "__spec__", None), "loader", None)
         get_code = getattr(loader, "get_code", None)
@@ -65,8 +75,14 @@ def literals(module: str) -> Literals:
         except Exception:  # noqa: S112 - a module whose code can't be read proves nothing
             continue
         if code is not None:
-            out |= {(type(c), c) for c in _constants([code]) if type(c) in (str, int, float)}
-    return frozenset(out)
+            found |= {(type(c), c) for c in _constants([code]) if type(c) in (str, int, float)}
+            functions |= {(c.co_filename, c.co_name, c.co_firstlineno) for c in _codes(code)}
+    return frozenset(found), frozenset(functions)
+
+
+def literals(module: str) -> Literals:
+    """Every string and number written in the source of `module`'s package, as (type, value)."""
+    return _package(module)[0]
 
 
 def safe_code(code: object) -> bool:
@@ -108,12 +124,36 @@ class StepLog:
         self._log.warning(name, **kept)
 
 
+UNNAMED = "an exception whose class name isn't shown"
+UNNAMED_FRAME = "withheld"
+
+
+def error_class(e: BaseException) -> str:
+    """The class's name when it's proven to be code: a builtin's, or a name its module's code declares (a class made
+    at run time can be named with anything, a fresh token included); UNNAMED otherwise."""
+    cls, name = type(e), type(e).__name__
+    if not (isinstance(name, str) and len(name) <= CODE_MAX and _CLASS.fullmatch(name)):
+        return UNNAMED
+    if cls.__module__ == "builtins":
+        return name if getattr(builtins, name, None) is cls else UNNAMED
+    module = cls.__module__
+    return name if isinstance(module, str) and (str, name) in literals(module) else UNNAMED
+
+
+def _frame(frame: types.FrameType, line: int | None) -> str:
+    """A frame's file, function and line, when its code was compiled from its module's source; else UNNAMED_FRAME."""
+    code, module = frame.f_code, frame.f_globals.get("__name__")
+    if isinstance(module, str) and (code.co_filename, code.co_name, code.co_firstlineno) in _package(module)[1]:
+        return f"{os.path.basename(code.co_filename)}:{code.co_name}:{line}"
+    return UNNAMED_FRAME
+
+
 def bug(e: BaseException, known: Literals) -> dict[str, Any]:
-    """A bug's log fields: its type and where it was raised; its text only when it's one of the plugin's constants."""
-    frames = traceback.StackSummary.extract(traceback.walk_tb(e.__traceback__), lookup_lines=False)
+    """A bug's log fields: its type and where it was raised, as far as they're proven to be code; its text only when
+    it's one of the plugin's constants."""
     out: dict[str, Any] = {
-        "error_type": type(e).__name__,
-        "where": [f"{os.path.basename(f.filename)}:{f.name}:{f.lineno}" for f in frames][-WHERE_FRAMES:],
+        "error_type": error_class(e),
+        "where": [_frame(f, line) for f, line in traceback.walk_tb(e.__traceback__)][-WHERE_FRAMES:],
     }
     if str(e) and proven(str(e), known):
         out["error"] = str(e)
@@ -148,15 +188,13 @@ WITHHELD_RECORD = "Activity record withheld"
 
 
 class _Withheld(logging.Filter):
+    """Only the exact fixed text: no code (its shape proves nothing about where it came from: a lowercase identifier
+    made at run time looks like any other), no class, no exception. The step's code is in its projection."""
+
     def filter(self, record: logging.LogRecord) -> bool:
         written = str(record.msg)
-        text = next((f for f in _FIXED if written.startswith(f)), WITHHELD_RECORD)
-        error = record.exc_info[1] if record.exc_info else None
-        if error is not None:
-            code = error.type if isinstance(error, ApplicationError) else type(error).__name__
-            valid = safe_code(code) or (isinstance(code, str) and len(code) <= CODE_MAX and _CLASS.fullmatch(code))
-            text += f" [{code}]" if valid else " [error]"
-        record.msg, record.args, record.exc_info, record.exc_text = text, None, None, None
+        record.msg = next((f for f in _FIXED if written.startswith(f)), WITHHELD_RECORD)
+        record.args, record.exc_info, record.exc_text = None, None, None
         return True
 
 
@@ -172,11 +210,14 @@ def withhold_activity_errors() -> None:
 
 
 __all__ = [
+    "UNNAMED",
+    "UNNAMED_FRAME",
     "REDACTED",
     "WITHHELD",
     "WITHHELD_RECORD",
     "StepLog",
     "bug",
+    "error_class",
     "literals",
     "proven",
     "safe_code",

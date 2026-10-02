@@ -249,7 +249,7 @@ class SlowEcho(Node):
 class LeakyConfig(BaseModel):
     seed: str
     size: int = Field(ge=1, le=1024)
-    how: Literal["log", "crash", "fail", "fail_code"] = "log"
+    how: Literal["log", "crash", "crash_class", "fail", "fail_code"] = "log"
 
 
 class LeakyOutput(BaseModel):
@@ -260,7 +260,8 @@ class Leaky(Node):
     """Makes a secret of `size` characters from `seed`, as an API issues a token, and leaks it before it's returned
     at a sensitive position, as a careless plugin would (engine 2b spec §12): before it's claimed, no index knows it.
     `log` logs it in an event, a neutral field, a nested value and a field's name; `crash` raises an unexpected error
-    quoting it; `fail` fails quoting it in its message, `fail_code` in its code."""
+    quoting it, `crash_class` one whose class it names; `fail` fails quoting it in its message, `fail_code` in its
+    code. The last two use it as a valid identifier (`-` made `_`): shaped like a safe name, made at run time."""
 
     type = "testkit.leaky"
     version = 1
@@ -270,12 +271,15 @@ class Leaky(Node):
 
     async def run(self, ctx: StepContext, config: LeakyConfig) -> LeakyOutput:
         token = (config.seed + "t" * config.size)[: config.size]
+        ident = token.replace("-", "_")
         if config.how == "crash":
             raise RuntimeError(f"crashed holding {token}")
+        if config.how == "crash_class":
+            raise type(ident, (Exception,), {})("crashed")
         if config.how == "fail":
             raise FatalError("leaky_failed", f"failed holding {token}")
         if config.how == "fail_code":
-            raise FatalError(f"leaky.{token}", "the token was refused")
+            raise FatalError(ident, "the token was refused")
         ctx.log.info(f"issued {token}", detail=token, nested={"token": token}, ok=True, **{token: 1})
         ctx.log.warning("token_issued", detail=token, ok=True, size=config.size, kind="bearer")
         return LeakyOutput(token=token)

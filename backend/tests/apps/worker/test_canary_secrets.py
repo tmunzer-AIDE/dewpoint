@@ -20,6 +20,7 @@ import structlog
 from temporalio.testing import WorkflowEnvironment
 
 from dewpoint.apps.worker.activities import MESSAGE_WITHHELD, NODE_FAILED
+from dewpoint.apps.worker.logs import UNNAMED
 from dewpoint.engine.handles import resolve_value
 from dewpoint.engine.runtime import size
 from tests.apps.worker.harness import (
@@ -44,6 +45,7 @@ ECHO, SLOW_ECHO, BLOB = "testkit.echo@1", "testkit.slow_echo@1", "testkit.blob@1
 LIMIT, INLINE, BLOBS, EACH = 50_000, 10_000, 6, 9_000  # six blobs: together past the lowered payload limit
 LEAKY_SEED = "canary-leaky-"  # a literal of the graph; the plugin's token isn't, nor one of its code
 TOKEN = (LEAKY_SEED + "t" * 24)[:24]  # what testkit.leaky makes from it
+IDENT = TOKEN.replace("-", "_")  # the same, as a valid identifier: a class name, a code
 
 
 @pytest.fixture(autouse=True)
@@ -221,24 +223,37 @@ async def test_a_crash_quoting_a_secret_never_claimed_logs_its_type_and_place_on
         assert TOKEN not in where
 
 
+async def test_a_crash_whose_class_a_plugin_named_with_a_secret_never_shows_that_name(
+    env: WorkflowEnvironment, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A plugin raises an exception of a class it made at run time, named with its fresh token as an identifier. A
+    class name is text too: it's shown only when it's proven to be code (a builtin, or a name its module's code
+    declares), so the step says "an exception" and the log withholds the type."""
+    seen = await observed(env, caplog, leaky("crash_class", said=ref("steps.k.error.message", default="")))
+    assert seen.result.outputs == {"said": f"The node raised {UNNAMED}."}
+    assert entry(seen, "step_unexpected_error")["error_type"] == UNNAMED
+    for where in (seen.plain, seen.rows, seen.logs):
+        assert IDENT not in where
+
+
 @pytest.mark.parametrize(
     ("how", "code", "message"),
     [
         ("fail", "leaky_failed", MESSAGE_WITHHELD),  # a computed message: the generic one instead, its code kept
-        ("fail_code", NODE_FAILED, "the token was refused"),  # a computed code: the generic one, its message kept
+        ("fail_code", NODE_FAILED, "the token was refused"),  # a computed code, a valid identifier: the generic one
     ],
 )
 async def test_a_failure_quoting_a_secret_never_claimed_shows_only_the_plugins_constants(
     env: WorkflowEnvironment, caplog: pytest.LogCaptureFixture, how: str, code: str, message: str
 ) -> None:
-    """A plugin fails quoting a token it made and never returned, in its message or its code. No index knows the
-    token, so masking proves nothing: a failure's code is shown only when it's a safe identifier its plugin's code
-    declares, its message only when it's a constant of that code, and a generic one stands for either otherwise. The
-    retry behavior stays its error class's. Temporal's record of the failed attempt keeps its fixed text and the
-    validated code. The token reaches no history, row or log."""
+    """A plugin fails quoting a token it made and never returned, in its message, or as its code shaped as a valid
+    identifier. No index knows the token, so masking proves nothing: a failure's code is shown only when it's a safe
+    identifier its plugin's code declares, its message only when it's a constant of that code, and a generic one stands
+    for either otherwise. The retry behavior stays its error class's. Temporal's record of the failed attempt keeps
+    only its fixed text. The token reaches no history, row or log."""
     seen = await observed(env, caplog, leaky(how, code=ref("steps.k.error.code", default=""),
                                              said=ref("steps.k.error.message", default="")))  # fmt: skip
     assert seen.result.outputs == {"code": code, "said": message}
-    assert f"Completing activity as failed [{code}]" in seen.logs
+    assert "Completing activity as failed" in seen.logs
     for where in (seen.plain, seen.rows, seen.logs):
-        assert TOKEN not in where
+        assert TOKEN not in where and IDENT not in where

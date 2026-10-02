@@ -204,10 +204,13 @@ API has just issued, is in no secret index until the step's output is claimed, s
   `f"refreshed {token}"`.
 - A bug in a node (an unexpected exception, a validator's or the claim store's failure) is logged with its type and
   where it was raised (`where`: file, function and line), and with its text only when that's a constant of the
-  plugin.
-- Temporal's records of activities keep only the exact text of the SDK's fixed messages (never what follows it, such
-  as an activity's details or an error's text) and a validated code; the rest are logged as `Activity record
-  withheld`.
+  plugin. A class name is text too, and a plugin can name a class at run time: it's shown only when the class is a
+  builtin or its module's code declares that name, else as "an exception whose class name isn't shown", in the log
+  and in the step's message alike. A frame is named only when its code was compiled from its module's source, else
+  `withheld`.
+- Temporal's records of activities keep only the exact text of the SDK's fixed messages: never what follows it (an
+  activity's details, an error's text), nor an error's code or class. The rest are logged as `Activity record
+  withheld`. The step's code is in its row.
 
 Outside these paths nothing is promised: a plugin that logs through Python's `logging` or `print`, or calls a library
 that logs, writes what it writes. Plugins log through `ctx.log`.

@@ -190,7 +190,7 @@ async def _call(node: type[Node], step: StepInput, schema: Mapping[str, Any]) ->
         raise _StepFailed(CONFIG_INVALID, message, retryable=False) from None
     except Exception as e:  # a validator's bug: it raised something pydantic doesn't turn into a validation error
         _bug("step_config_check_failed", step, e, node)
-        message = f"The config doesn't match `{step.ref}`: checking it raised {type(e).__name__}."
+        message = f"The config doesn't match `{step.ref}`: checking it raised {logs.error_class(e)}."
         raise _StepFailed(CONFIG_INVALID, message, retryable=False) from None
     try:
         known = logs.literals(node.__module__)  # what its log may hold (engine 2b spec §6.7)
@@ -215,7 +215,7 @@ async def _call(node: type[Node], step: StepInput, schema: Mapping[str, Any]) ->
         if isinstance(e, NotImplementedError) and step.mode == SIMULATE:
             raise _StepFailed(SIMULATION_UNAVAILABLE, f"`{step.ref}` can't be simulated.", retryable=False) from None
         _bug("step_unexpected_error", step, e, node)
-        message = f"The node raised {type(e).__name__}."
+        message = f"The node raised {logs.error_class(e)}."
         if node.side_effect == SideEffect.AMBIGUOUS:
             raise _StepFailed(OUTCOME_UNKNOWN, message, retryable=False, outcome=OUTCOME_UNKNOWN) from None
         raise _StepFailed(UNEXPECTED_ERROR, message, retryable=True) from None
@@ -320,7 +320,7 @@ def step_activity_for(node: type[Node], store: ClaimStore) -> Callable[[StepInpu
             raise violation(_fields(e, output_schema)).mapped() from None
         except Exception as e:  # a validator's bug: it raised something pydantic doesn't turn into a validation error
             _bug("step_output_check_failed", step, e, node)
-            raise violation(f"checking it raised {type(e).__name__}.").mapped() from None
+            raise violation(f"checking it raised {logs.error_class(e)}.").mapped() from None
 
     return run_step
 
