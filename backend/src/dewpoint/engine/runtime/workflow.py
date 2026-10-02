@@ -51,9 +51,10 @@ with workflow.unsafe.imports_passed_through():
         _cancelled,
         _unloadable,
         child_options,
+        program_of,
     )
     from dewpoint.engine.runtime.ids import run_of, run_workflow_id, tenant_of
-    from dewpoint.engine.runtime.program import Program, compile_program
+    from dewpoint.engine.runtime.program import Program
     from dewpoint.engine.runtime.scheduler import (
         ITERATION_CAP,
         SNAPSHOT_FORMAT,
@@ -162,16 +163,7 @@ class RunGraph(Execution):
             return await self._end_early(RunEnd("failed", Failure(VERSION_UNUSABLE, _unloadable(e))), start.iterations)
         self._charge_sent(data)  # its marker goes out with this workflow task's commands (engine 2b spec §5.2)
         try:
-            program = compile_program(
-                data.graph,
-                data.manifests,
-                data.expressions,
-                data.cel_profile,
-                data.subflow_version_ids,
-                data.failure_handler_version_id,
-                data.open_scopes_cap,  # pinned at publish (engine 2b spec §5.3)
-                data.loop_depth,
-            )
+            program = program_of(data)  # compiled once per worker process (engine 2b spec §5.3)
         except Exception as e:
             workflow.logger.error("run_version_unusable", exc_info=True)
             message = f"This build can't run the version ({type(e).__name__}); the worker's log has the details."
@@ -179,12 +171,12 @@ class RunGraph(Execution):
         outputs: dict[str, Any] | None = None
         try:
             if snapshot is not None:
-                self._restore(program, snapshot)
+                await self._restore(program, snapshot)
             else:
                 self._fresh(program)
             if await self._drive() == CONTINUE:
                 await self._flush()
-                continued = replace(start, snapshot=self._snapshot(), iterations=self.sched.iterations)
+                continued = replace(start, snapshot=await self._snapshot(), iterations=self.sched.iterations)
                 if snapshot_fits(continued, workflow.payload_converter()):
                     await self._send(continued)
                     workflow.continue_as_new(continued)
@@ -444,16 +436,7 @@ class LoopBatch(Execution):
                 result_type=VersionData,
                 start_to_close_timeout=timedelta(seconds=30),
             )
-            program = compile_program(
-                data.graph,
-                data.manifests,
-                data.expressions,
-                data.cel_profile,
-                data.subflow_version_ids,
-                data.failure_handler_version_id,
-                data.open_scopes_cap,  # pinned at publish (engine 2b spec §5.3)
-                data.loop_depth,
-            )
+            program = program_of(data)  # compiled once per worker process (engine 2b spec §5.3)
         except asyncio.CancelledError:
             return BatchResult([], [], end=RunEnd("cancelled", CANCELLED).to_json(), iterations=start.iterations)
         except Exception as e:
@@ -465,7 +448,7 @@ class LoopBatch(Execution):
         self._charge_sent(data)  # its marker goes out with this workflow task's commands (engine 2b spec §5.2)
         try:
             if snapshot is not None:
-                self._restore(program, snapshot)
+                await self._restore(program, snapshot)
             else:
                 self.program = program
                 self.sched = Scheduler(
@@ -498,7 +481,7 @@ class LoopBatch(Execution):
                 # the variables, so the continued input carries none of them again
                 continued = replace(
                     start,
-                    snapshot=self._snapshot(),
+                    snapshot=await self._snapshot(),
                     iterations=self.sched.iterations,
                     items=[],
                     items_ref=None,
