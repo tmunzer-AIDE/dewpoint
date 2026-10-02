@@ -70,6 +70,14 @@
     its code and message only when they're constants of its code; a secret a plugin makes and leaks before it's
     claimed is a canary of its own (§3.7, §6.7, §12). From the owner's whole-branch review: an input's refusal names
     a key the data supplied as `*` (§3.5). The 2b-1b plan's measured values go into §15.
+    From the fresh whole-branch review of `feat/engine-2b1b`, fixed in the owner's one fix pass (2026-10-02):
+    - a map holding a key its schema doesn't declare is claimed whole, and the key joins the index (§3.5);
+    - a declassified decision comes back plain only as a boolean or a loop's count (§4.3);
+    - `secret_index_limit` fails a step on every path, and a store that doesn't answer before a plugin's node runs
+      fails the attempt with `secret_index_unavailable`, retryable (§3.7);
+    - secrets that overlap are masked as one span (§3.7);
+    - a plugin's heartbeat sends no details (§3.6);
+    - the workflow logs its own bugs by type and place (§6.7).
 - **Parent specs:**
   - `2026-09-24-dewpoint-architecture-design.md` (§5, §6.1, §6.5, §6.8, §12, §15). This spec **changes** its
     workflow-id contract (§6.1), replaces its `outbox` table (§6.1), details its claim check (§6.5) and settles the
@@ -278,6 +286,10 @@ secret and a sub-flow's refusal is an activity result, in history.
 - **Sensitive first:** every value at an `x-sensitive` position, and every value at a position the schema doesn't
   declare (`additionalProperties`, pattern properties, a union where any branch is sensitive), is claimed with
   taint. Unknown counts as sensitive.
+- **Then keys:** a handle keeps its map's keys, and a key the data supplied is data too. So a map holding a key its
+  schema doesn't declare is claimed whole, without taint (its undeclared values are handles already), and each such
+  key of 4 characters or more joins the secret index (§3.7). A reference to a declared field reads it through the
+  claim; the handles nested in it stay the run's.
 - **Then size:** a value larger than 64 KiB is claimed without taint. A size claim is made after its sensitive
   descendants were claimed, so it holds handles where they were: a pointer into a size claim reaches plain data or a
   nested handle, never an untainted view of a sensitive value.
@@ -301,6 +313,8 @@ secret and a sub-flow's refusal is an activity result, in history.
 - **Results of claims:** an activity's result is tainted if any claim it resolved was tainted, nested claims
   included. Evaluating an expression over a size claim that holds tainted handles can't return an untainted
   result.
+- **Heartbeats carry nothing:** a plugin's `heartbeat()` sends no details. Temporal keeps an attempt's last ones and
+  writes them into history when the attempt times out, and they're the plugin's own data.
 
 ### 3.7 The secret index
 
@@ -311,7 +325,8 @@ secret and a sub-flow's refusal is an activity result, in history.
   - an untainted part of the output that contains an indexed string is claimed with taint — the data kept intact,
     only moved. This covers a later plugin that fetches the same token from outside and returns it in an untainted
     field;
-  - every error message leaving the activity is masked against it. A plugin's own failure (`FatalError` and the
+  - every error message leaving the activity is masked against it: every match counts, so secrets that overlap
+    are masked as one span, and no part of either shows. A plugin's own failure (`FatalError` and the
     like) is shown only as far as it's code (§6.7): its code when it's a constant of the plugin's code and a dotted
     lowercase identifier, else `node_failed`; its message when it's a constant of that code, else a generic one. A
     secret the node made and quoted before its output was claimed is in no index, so masking can't catch it there.
@@ -321,14 +336,22 @@ secret and a sub-flow's refusal is an activity result, in history.
   unchecked to concurrent activities.
 - **Bounds on the index:** at most 100,000 strings or 8 MiB per root run (provisional, §15). Passing a bound is
   permanent for that run, so it's never retried: at admission the request is refused with `secret_index_limit`
-  (422 for an interactive source, a `refused` request for a durable one); in an activity, the step fails with
-  `secret_index_limit`, a fixed non-retryable code, under its error policy.
+  (422 for an interactive source, a `refused` request for a durable one); in an activity (a plugin step,
+  `cel.evaluate`, a filter, a sub-flow's input), the step fails with `secret_index_limit`, a fixed non-retryable code,
+  under its error policy.
 - **Bounds on matching work:** the boundary matches with an automaton (Aho–Corasick) built once per index version
   and cached with it, so building costs at most the index's bound; each scan is linear in the bytes it scans, which
   §5.2 bounds, and a value is claimed at its first match. Work per boundary is therefore bounded by the index bound
   plus the output bound, never by their product.
-- **Unavailability is transient:** if the index can't be read, the activity is retried a bounded number of times,
-  then fails its step with `secret_index_unavailable`. It never returns output unchecked.
+- **Unavailability is transient, and nothing returns unchecked:**
+  - A plugin step whose claim store doesn't answer before its node runs (reading the index or the claims its config
+    holds, or indexing its config's secrets) sent nothing: the attempt fails with `secret_index_unavailable`,
+    retryable, and the step's retry policy bounds it. Once the node ran, a failure to read the index again masks its
+    message with the version read before the attempt, and the failure stays the node's.
+  - The claims activities (`cel.evaluate`, a filter, a crossing, a derived reference) are retried up to three times,
+    then fail with the code their site gives any failure: `cel_profile_unavailable` for CEL, `internal_error` for
+    the others.
+  - Claims nested deeper than `NESTING_MAX` (32) are refused as any unreadable claim is, `claim_unavailable`.
 - **The guarantee** covers the secrets recorded when a boundary checks. A secret learned concurrently can't
   retroactively change an earlier result.
 - The learned-secret lists (`secrets` in `Parent`, `RunResult`, `BatchResult` and the snapshot) leave history.
@@ -391,6 +414,8 @@ Only these sites may turn tainted input into plain output:
   unlisted tainted decision, and a listed site that isn't tainted (a stale entry).
 - Publishing a version whose `declassify` list is non-empty requires the permission `workflow.declassify` (tenant
   admins and owners by default). The publish audit entry records every listed site and what it reveals.
+- **A decision comes back plain only as a decision:** a boolean for a condition or a case, a whole number for a
+  loop's count. Any other result fails the site with `type_mismatch` and reveals nothing.
 - **The one exception:** a loop whose `items` is a direct reference to a list whose length publish can prove is
   already public — `trigger.rows`, whose length is `trigger.row_count` — needs no entry. A derived or filtered
   sensitive list doesn't inherit the exception.
@@ -847,6 +872,8 @@ log line safe. So:
   came from. Any other record is withheld whole, and no record keeps an exception or its traceback.
 - A plugin's failure, its step's error, follows the same rule (§3.7): its code and message are shown only when they're
   constants of its code.
+- The workflow's own bugs are logged by their type and where they were raised, never their text, which may quote the
+  run's data. No plugin code runs in the workflow, so both are code.
 
 Nothing is promised outside these paths: a plugin that logs through Python's `logging` or `print`, or calls a library
 that logs, writes what it writes. The SDK says so, and plugins log through `ctx.log`.
@@ -1692,8 +1719,9 @@ Beyond each task's own tests:
   log line; and a secret a plugin makes and leaks before it's claimed appears in none of them either: in its `ctx.log`
   event, field names and values (no log line), in a crash's text, its class's name or its traceback's line (no
   history, row or log line),
-  and in a failure's message or code, shaped as a valid identifier included (no history, row or log line) (§3.7,
-  §6.7).
+  and in a failure's message or code, shaped as a valid identifier included (no history, row or log line), and in
+  its heartbeat's details (no history) (§3.6, §3.7, §6.7). So are a secret map key (no history, row or log line)
+  and a workflow bug quoting the run's data (no log line).
 - **Properties:** the taint analysis (no tainted path is routed locally; plain output appears only at listed sites);
   the splitter (nothing plain at sensitive or undeclared positions; nesting follows the claiming order); forged
   handles refused.

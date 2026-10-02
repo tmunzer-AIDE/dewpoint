@@ -130,29 +130,36 @@ values travel the same way. A handle tells nothing but the claim's id: a run's o
 claims are.
 
 - **What's claimed.** A run's input when it's admitted, a sub-flow's input before it starts, and a plugin step's output
-  before it leaves the step's activity: every value at a position the schema marks `x-sensitive`, and every position
-  it doesn't declare (unknown counts as sensitive: `additionalProperties`, pattern properties, a key one branch of a
-  union leaves open); text that repeats a secret the run already knows; and any value over 64 KiB, claimed for its
-  size. What CEL or a template returns from `cel.evaluate` is claimed when it read sensitive data, when it repeats a
-  known secret, or when it's over 64 KiB.
+  before it leaves the step's activity: every value at a position the schema marks `x-sensitive`, and every position it
+  doesn't declare (unknown counts as sensitive: `additionalProperties`, pattern properties, a key one branch of a union
+  leaves open); a map that holds a key its schema doesn't declare, whole, since a key the data supplied is data too (a
+  reference to one of its declared fields still reads that field); text that repeats a secret the run already knows; and
+  any value over 64 KiB, claimed for its size. What CEL or a template returns from `cel.evaluate` is claimed when it
+  read sensitive data, when it repeats a known secret, or when it's over 64 KiB.
 - **Where a claim is read.** Only in an activity, by the run that owns it or was granted it. A plugin step gets its
   input with every handle resolved. CEL or a template that reads a handle runs in the evaluator (`cel_mode`
   `activity`), and so does CEL that indexes trigger or step data by a computed key or position. A reference further
   into a handle extends its pointer without reading the claim.
-- **Decisions.** Where sensitive data decides something the run can see — a `flow.if` condition, a switch case's
-  `when`, a loop's items (their count) or a filter's items or predicate — the workflow lists the site in
+- **Decisions.** Where sensitive data decides something the run can see — a `flow.if` condition, a switch case's `when`,
+  a loop's items (their count) or a filter's items or predicate — the workflow lists the site in
   `graph.settings.declassify`, and the decision is made where the claim is read. Publishing such a workflow needs the
-  `workflow.declassify` permission (tenant admins and owners), and its audit entry lists what each site reveals. A loop
-  over a list itself (`trigger.rows`) needs no entry: a list's length isn't secret. A loop over a list held as a handle
-  gets each item as a handle into it. A filter over sensitive data runs whole in one
+  `workflow.declassify` permission (tenant admins and owners), and its audit entry lists what each site reveals. A
+  decision comes back plain only as a decision, `true` or `false` for a condition or a case and a whole number for a
+  loop's count: anything else fails the step with `type_mismatch`, revealing nothing. A loop over a list itself
+  (`trigger.rows`) needs no entry: a list's length isn't secret. A loop over a list held as a handle (a reference's, or
+  CEL's that comes back claimed) gets each item as a handle into it. A filter over sensitive data runs whole in one
   activity: the run sees the kept items' handle and the two counts, never a decision per item.
 - **Sub-flows and failure handlers.** A sub-flow's input is checked against the child's input schema
   (`input_invalid` when it doesn't match) and claimed as a trigger is, and the child is granted the parent's claims it
   holds; a sub-flow grants its parent the claims in its outputs. A failure handler is granted what its trigger holds.
 - **The secret index.** Every string of 4 characters or more in a sensitive claim joins its run tree's index (the run,
-  its sub-runs and its batches share one), stored encrypted. Every message leaving an activity (a step's error, a CEL
-  error, a `fail` node's message) and every row the projection writes is masked against it. It holds at most 100,000
-  strings or 8 MiB: the admission or step that would pass that fails with `secret_index_limit`.
+  its sub-runs and its batches share one), stored encrypted, and so does a map key claimed with its map. Every
+  message leaving an activity (a step's error, a CEL error, a `fail` node's message) and every row the projection
+  writes is masked against it; secrets that overlap are masked as one span. It holds at most 100,000 strings or
+  8 MiB: the admission, step, CEL evaluation, filter or sub-flow input that would pass that fails with
+  `secret_index_limit`.
+- **Heartbeats.** A plugin's `ctx.heartbeat()` tells Temporal the attempt is alive, and nothing else: details it
+  passes aren't sent, since Temporal writes an attempt's last ones into the run's history when it times out.
 - **What masking can't see.** A secret that CEL has transformed (encoded, sliced) is no longer the same text. A CEL
   result the workflow computes from plain data is history like any plain value, and isn't checked against the index;
   whatever leaves an activity is.
@@ -208,6 +215,8 @@ API has just issued, is in no secret index until the step's output is claimed, s
   builtin or its module's code declares that name, else as "an exception whose class name isn't shown", in the log
   and in the step's message alike. A frame is named only when its code was compiled from its module's source, else
   `withheld`, and its line only when that compiled function has it (a traceback a plugin built can carry any number).
+- A bug in the workflow itself is logged with its type and where it was raised (`error_type`, `where`), never its
+  text.
 - Temporal's records of activities keep only the exact text of the SDK's fixed messages: never what follows it (an
   activity's details, an error's text), nor an error's code or class. The rest are logged as `Activity record
   withheld`. The step's code is in its row.
@@ -227,10 +236,11 @@ its error class's either way.
 |---|---|---|
 | `succeeded` | | Every path finished, or a `stop` node ended the run. |
 | `failed` | the step's code | A step failed with `on_error: fail` (the default) outside any loop. |
+| `failed` | the output's code | One of the workflow's outputs couldn't be computed: an expression that failed (`evaluation_error`, `type_mismatch`), or a claim it can't read (`claim_unavailable`). |
 | `failed` | `workflow_failed` | A `fail` node ended the run. |
 | `failed` | `start_failed` | It never started: Temporal refused it, or its start couldn't be encrypted and was never sent. |
 | `failed` | `version_unusable` | This build can't load or run the version, for example a node type it lacks. Nothing ran. |
-| `failed` | `internal_error` | A bug in the interpreter. The message names the exception's type, and the worker's log has the details, or says the result was too large to return; please report it. |
+| `failed` | `internal_error` | A bug in the interpreter. The message names the exception's type, and the worker's log names where it was raised, or says the result was too large to return; please report it. |
 | `failed` | `payload_too_large` | The run's outputs were too large to return (over 1.75 MiB once encrypted). A step or a loop fails with the same code, below. |
 | `failed` | `snapshot_too_large` | The run's state was too large to carry on as a new Temporal execution (over 1.5 MiB). |
 | `failed` | `terminated` | A sub-run that an operator terminated in Temporal. It couldn't record its end, so its parent did, and the step or loop that started it failed with the same code. |
@@ -241,8 +251,10 @@ Step error codes include the plugin's own codes and `config_invalid`, `output_sc
 key `$claim` too), `unexpected_error`, `evaluation_error`, `type_mismatch`, `timeout`, `cel_profile_unavailable`,
 `input_too_large`, `item_cap_exceeded`, `iteration_cap_exceeded`, `node_type_unavailable` (the registry lists the node
 type, but no worker of this build runs it: install its plugin on the workers), `payload_too_large`,
-`claim_unavailable` (a claim the run may not read or that isn't there, or the step's output couldn't be stored as
-claims after the node ran: its effect happened, and its row says so), `secret_index_limit`, `input_invalid` (a
+`claim_unavailable` (a claim the run may not read, that isn't there or that's nested deeper than 32 claims, or the
+step's output couldn't be stored as claims after the node ran: its effect happened, and its row says so),
+`secret_index_limit`, `secret_index_unavailable` (the claim store didn't answer before a plugin's node ran: nothing
+was sent, and the attempt is retried under the step's retry policy), `input_invalid` (a
 sub-flow's input that doesn't match the child's input schema: each place and rule, a map's key shown as `*`) and `node_failed` (a plugin's failure whose own code
 wasn't a constant identifier of its code, [above](#what-the-workers-log-shows)). A sub-flow step fails with its sub-flow's code, and with `terminated`
 when an operator terminated the sub-flow; a loop fails with `terminated` when one of its batches was.
