@@ -171,7 +171,18 @@ def opaque_reads(root: Expr) -> list[int]:
     condition choosing it, dyn(), or a comprehension carrying it. Publish checks references and guards along chains,
     so a read through such a wrapper would skip them. An element of a chain (by index or iteration) is data, read
     freely, and so is anything built from elements."""
+    return _reads(root)[0]
+
+
+def dynamic_reads(root: Expr) -> list[int]:
+    """Ids of indexes, by a key or position computed at run time, into a chain or an element of one: they address a
+    path publish can't name (engine 2b spec §4.1). A constant key or index is a named path."""
+    return _reads(root)[1]
+
+
+def _reads(root: Expr) -> tuple[list[int], list[int]]:
     found: set[int] = set()
+    dynamic: set[int] = set()
 
     def read(e: Expr, operand: int) -> int:
         if operand == _OPAQUE:
@@ -207,6 +218,8 @@ def opaque_reads(root: Expr) -> list[int]:
             args = [origin(x, scope) for x in operands(e)]
             function = e.call_expr.function
             if function == INDEX and len(args) == 2:
+                if args[0] in (_ELEMENT, _CHAIN) and e.call_expr.args[1].WhichOneof("expr_kind") != "const_expr":
+                    dynamic.add(e.id)
                 return read(e, args[0])
             if function == "_?_:_" and len(args) == 3:
                 return max(wrap(args[1]), wrap(args[2]))
@@ -232,7 +245,7 @@ def opaque_reads(root: Expr) -> list[int]:
         return _NONE
 
     origin(root, {})
-    return sorted(found)
+    return sorted(found), sorted(dynamic)
 
 
 def global_idents(root: Expr) -> list[str]:

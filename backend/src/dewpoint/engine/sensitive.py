@@ -4,10 +4,11 @@
 `patternProperties` schema of its object (no regex runs: over-marking, never a leak), at a tuple's position
 (`prefixItems`); a map whose keys are sensitive (`propertyNames`) is sensitive whole.
 
-The projection redacts with it (`engine.runtime.projection`). Claiming (engine 2b spec §3.5) goes further: a value at a
-position the schema doesn't declare is sensitive too, since unknown counts as sensitive (`sensitive_positions`)."""
+The projection redacts with it (`engine.runtime.projection`), and publish checks literals with it (§3.8). Taint and
+claiming (engine 2b spec §3.5, §4.1) go further: a position the schema doesn't declare is sensitive too, since unknown
+counts as sensitive (`engine.taint`)."""
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from typing import Any
 
 from dewpoint.engine.handles import escape
@@ -17,7 +18,7 @@ MIN_SECRET = 4  # a secret's characters, at least: shorter values would match or
 _MAX_DEPTH = 64  # a schema that refers to itself ends here
 
 
-def _resolve(root: Mapping[str, Any], ref: str) -> Any:
+def resolve(root: Mapping[str, Any], ref: str) -> Any:
     """A local JSON pointer (`#/$defs/Name`); anything else resolves to nothing (schemas are local-only, spec §4.1)."""
     if not ref.startswith("#/"):
         return None
@@ -34,7 +35,7 @@ def expand(schema: Any, root: Mapping[str, Any], depth: int = 0) -> list[Mapping
     out: list[Mapping[str, Any]] = [schema]
     ref = schema.get("$ref")
     if isinstance(ref, str):
-        out += expand(_resolve(root, ref), root, depth + 1)
+        out += expand(resolve(root, ref), root, depth + 1)
     for key in ("anyOf", "oneOf", "allOf"):
         subs = schema.get(key)
         for sub in subs if isinstance(subs, list) else ():
@@ -87,84 +88,44 @@ def keys_sensitive(branches: list[Mapping[str, Any]], root: Mapping[str, Any]) -
     return any(n.get(SENSITIVE) is True for s in names for n in expand(s, root))
 
 
-def _declares(branches: list[Mapping[str, Any]], key: str) -> bool:
-    return any(isinstance(b.get("properties"), Mapping) and key in b["properties"] for b in branches)
-
-
-def _declares_element(branches: list[Mapping[str, Any]], index: int) -> bool:
-    for b in branches:
-        prefix = b.get("prefixItems")
-        if isinstance(prefix, list) and index < len(prefix):
-            return True
-        if isinstance(b.get("items"), Mapping):
-            return True
+def _holes_only(value: Any, pointer: str, holes: Collection[str]) -> bool:
+    """Whether everything at `pointer` stands in for a hole: nothing there is written as a literal."""
+    if pointer in holes:
+        return True
+    if isinstance(value, dict) and value:
+        return all(_holes_only(v, pointer + "/" + escape(k), holes) for k, v in value.items())
+    if isinstance(value, list) and value:
+        return all(_holes_only(v, pointer + "/" + str(i), holes) for i, v in enumerate(value))
     return False
 
 
-def _positions(value: Any, schemas: list[Any], root: Mapping[str, Any], pointer: str, out: list[str]) -> None:
-    branches = [b for s in schemas for b in expand(s, root)]
-    if not branches or any(b.get(SENSITIVE) is True for b in branches):
-        out.append(pointer)
+def _marked(
+    value: Any, schemas: list[Any], root: Mapping[str, Any], pointer: str, out: list[str], holes: Collection[str]
+) -> None:
+    if pointer in holes:
         return
-    if isinstance(value, dict):
-        if keys_sensitive(branches, root):
+    branches = [b for s in schemas for b in expand(s, root)]
+    if any(b.get(SENSITIVE) is True for b in branches) or (isinstance(value, dict) and keys_sensitive(branches, root)):
+        if not _holes_only(value, pointer, holes):
             out.append(pointer)
-            return
-        for key, child in value.items():
-            at = pointer + "/" + escape(key)
-            if _declares(branches, key):
-                _positions(child, children(branches, key), root, at, out)
-            else:
-                out.append(at)  # additionalProperties, a pattern, or nothing: not declared
-    elif isinstance(value, list):
-        for index, child in enumerate(value):
-            at = pointer + "/" + str(index)
-            if _declares_element(branches, index):
-                _positions(child, elements(branches, index), root, at, out)
-            else:
-                out.append(at)
-
-
-def sensitive_positions(value: Any, schema: Mapping[str, Any] | None) -> list[str]:
-    """The pointers of `value`'s largest sensitive parts, in document order: at an `x-sensitive` position, or one the
-    schema doesn't declare (an undeclared key, a list element no `items` or `prefixItems` covers), or under a map whose
-    keys are sensitive. Without a schema, the whole value is ("")."""
-    if schema is None:
-        return [""]
-    out: list[str] = []
-    _positions(value, [schema], schema, "", out)
-    return out
-
-
-def empty(value: Any) -> bool:
-    """A literal that can't hold a secret: null, or the empty string (an optional credential's usual default)."""
-    return value is None or value == ""
-
-
-def _marked(value: Any, schemas: list[Any], root: Mapping[str, Any], pointer: str, out: list[str]) -> None:
-    if empty(value):
-        return
-    branches = [b for s in schemas for b in expand(s, root)]
-    if any(b.get(SENSITIVE) is True for b in branches):
-        out.append(pointer)
     elif isinstance(value, dict):
-        if keys_sensitive(branches, root):
-            out.append(pointer)
-            return
         for key, child in value.items():
-            _marked(child, children(branches, key), root, pointer + "/" + escape(key), out)
+            _marked(child, children(branches, key), root, pointer + "/" + escape(key), out, holes)
     elif isinstance(value, list):
         for index, child in enumerate(value):
-            _marked(child, elements(branches, index), root, pointer + "/" + str(index), out)
+            _marked(child, elements(branches, index), root, pointer + "/" + str(index), out, holes)
 
 
-def marked_positions(value: Any, schema: Mapping[str, Any], root: Mapping[str, Any] | None = None) -> list[str]:
-    """The pointers of `value`'s parts, other than `empty` ones, that the schema marks sensitive (`x-sensitive`, or a
-    map whose keys are), in document order. An undeclared key follows the schemas that govern it, and isn't sensitive
-    for that alone: this is what a workflow author wrote, checked at publish (§3.8). `root` resolves `$ref`s (the
-    schema by default)."""
+def marked_positions(
+    value: Any, schema: Mapping[str, Any], root: Mapping[str, Any] | None = None, holes: Collection[str] = ()
+) -> list[str]:
+    """The pointers of `value`'s parts, null and empty ones included, that the schema marks sensitive (`x-sensitive`,
+    or a map whose keys are), in document order. An undeclared key follows the schemas that govern it, and isn't
+    sensitive for that alone: this is what a workflow author wrote, checked at publish (§3.8). `root` resolves `$ref`s
+    (the schema by default). `holes`: pointers where no literal stands (a value envelope, checked where it's
+    resolved), skipped, and so is a marked part made only of them."""
     out: list[str] = []
-    _marked(value, [schema], root if root is not None else schema, "", out)
+    _marked(value, [schema], root if root is not None else schema, "", out, holes)
     return out
 
 

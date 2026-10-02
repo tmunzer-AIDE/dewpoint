@@ -79,10 +79,10 @@ def test_cel_and_templates_are_tainted_when_anything_they_read_is() -> None:
 
 
 def test_a_variable_is_tainted_by_its_schema_or_by_any_assignment_even_a_later_one() -> None:
-    g = echoes(a=ref("vars.plain"), b=ref("vars.marked"))
+    g = echoes(a=ref("vars.plain"), b=ref("vars.marked", default=""))  # null until set: a plain place may default
     g.node("set", SET, {"assignments": {"plain": ref("trigger.token")}}).edge("a", "set").edge("b", "set")
     g.settings = {"input_schema": INPUT, "vars_schema": {"type": "object", "properties": {
-        "plain": {"type": "string", "default": ""}, "marked": SECRET}}}  # fmt: skip
+        "plain": {"type": "string", "default": ""}, "marked": {**SECRET, "type": ["string", "null"]}}}}  # fmt: skip
     assert {("a", "/value"), ("b", "/value")} <= tainted(checked(g))
     g2 = echoes(a=ref("vars.plain"))
     g2.settings = {"input_schema": INPUT, "vars_schema": {"type": "object", "properties": {
@@ -154,3 +154,32 @@ def test_the_workflows_outputs_record_their_taint() -> None:
                                                      "count": cel("size(trigger.rows)")}}  # fmt: skip
     result = checked(g)
     assert result.output_taint == {"secret": True, "plain": False, "count": True}
+
+
+PLAIN_MAP = {"type": "object", "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}},
+             "required": ["a", "b"], "additionalProperties": False}  # fmt: skip
+DECLARED = {
+    "type": "object",
+    "properties": {"name": {"type": "string"}, "m": PLAIN_MAP, "ids": {"type": "array", "items": {"type": "integer"}},
+                   "ms": {"type": "array", "items": PLAIN_MAP}},
+    "required": ["name", "m", "ids", "ms"],
+    "additionalProperties": False,
+}  # fmt: skip
+
+
+def test_a_dynamically_addressed_read_is_tainted_even_into_plain_data() -> None:
+    """§4.1: a computed key or index addresses a path publish can't name, so it counts as sensitive, even where every
+    field is declared plain. Constant keys and indexes, and whole reads, are named paths."""
+    g = echoes(
+        a=cel("sortedKeys(trigger.m).map(k, trigger.m[k] * 2)"),
+        b=cel("trigger.ids[size(trigger.ids) - 1]"),
+        c=cel("trigger.ms.map(x, x[trigger.name])"),
+        d=cel("trigger.m['a'] + trigger.ids[0]"),
+        e=cel("sortedKeys(trigger.m).map(k, size(k) * 2)"),
+        f=cel("trigger.ms.map(x, x.a)"),
+    )
+    g.settings = {"input_schema": DECLARED}
+    result = checked(g)
+    assert tainted(result) == {("a", "/value"), ("b", "/value"), ("c", "/value")}
+    modes = {r.node: r.mode for r in result.expressions}
+    assert [modes[str(nid(k))] for k in "abcdef"] == ["activity"] * 3 + ["local"] * 3

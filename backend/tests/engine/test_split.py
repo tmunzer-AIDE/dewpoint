@@ -15,8 +15,8 @@ from hypothesis import strategies as st
 
 from dewpoint.engine.handles import ClaimRef, contains_marker, handles_in
 from dewpoint.engine.matcher import Matcher
-from dewpoint.engine.sensitive import sensitive_positions
 from dewpoint.engine.split import TRIGGER_INLINE, ForgedHandleError, split
+from dewpoint.engine.taint import from_schema, tainted_positions
 
 SECRET = {"type": "string", "x-sensitive": True}
 
@@ -34,6 +34,11 @@ def obj(**props: Any) -> dict[str, Any]:
     return {"type": "object", "properties": props, "additionalProperties": False}
 
 
+def positions(value: Any, schema: Any) -> list[str]:
+    """What splitting claims with taint: where publish's taint (`from_schema`) is whole."""
+    return tainted_positions(value, from_schema(schema))
+
+
 # --- where the sensitive values are ---------------------------------------------------------------------------------
 
 
@@ -46,18 +51,23 @@ def obj(**props: Any) -> dict[str, Any]:
         ({"$defs": {"P": SECRET}, **obj(p={"$ref": "#/$defs/P"})}, {"p": "x"}, ["/p"]),
         (obj(u={"anyOf": [{"type": "string"}, SECRET]}), {"u": "x"}, ["/u"]),  # any branch sensitive
         ({"type": "object", "properties": {"a": {"type": "string"}}}, {"a": "x", "extra": 1}, ["/extra"]),
-        ({"type": "object", "additionalProperties": {"type": "string"}}, {"k": "v"}, ["/k"]),
-        ({"type": "object", "patternProperties": {"^x": {"type": "string"}}}, {"xa": "v"}, ["/xa"]),
+        ({"type": "object", "additionalProperties": {"type": "string"}}, {"k": "v"}, [""]),  # whole, keys too
+        ({"type": "object", "patternProperties": {"^x": {"type": "string"}}}, {"xa": "v"}, [""]),
         (obj(rows={"type": "array"}), {"rows": [1, 2]}, ["/rows/0", "/rows/1"]),  # elements not declared
         (obj(rows={"type": "array", "items": {"type": "integer"}}), {"rows": [1, 2]}, []),
-        (obj(t={"type": "array", "prefixItems": [{"type": "integer"}]}), {"t": [1, 2]}, ["/t/1"]),
+        (obj(t={"type": "array", "prefixItems": [{"type": "integer"}]}), {"t": [1, 2]}, ["/t/0", "/t/1"]),  # one taint
+        (obj(u={"anyOf": [obj(token={"type": "string"}), {"type": "object"}]}), {"u": {"token": "t"}}, ["/u"]),
+        ({**obj(a={"type": "string"}), "patternProperties": {"^x": {"type": "string"}}}, {"a": "x", "xa": "v"},
+         ["/xa"]),
+        ({**obj(a={"type": "string"}), "anyOf": [{"required": ["a"]}, {"type": "object"}]}, {"a": "x"}, []),
         (obj(m={"type": "object", "propertyNames": {"x-sensitive": True}}), {"m": {"a": 1}}, ["/m"]),
-        ({}, {"a": 1}, ["/a"]),
+        ({}, {"a": 1}, [""]),
         (None, {"a": 1}, [""]),  # no schema at all: the whole value
     ],
 )  # fmt: skip
 def test_sensitive_positions(schema: Any, value: Any, expected: list[str]) -> None:
-    assert sensitive_positions(value, schema) == expected
+    """The largest wholly tainted parts: a value no part of which is declared is claimed whole, its keys with it."""
+    assert positions(value, schema) == expected
 
 
 # --- the matcher ----------------------------------------------------------------------------------------------------
@@ -146,7 +156,7 @@ SCHEMA = {
 def test_nothing_plain_is_left_at_a_sensitive_or_undeclared_position(value: dict[str, Any]) -> None:
     done = split(value, SCHEMA, ids())
     by_id = {c.id: c for c in done.claims}
-    for pointer in sensitive_positions(value, SCHEMA):
+    for pointer in positions(value, SCHEMA):
         # walk the envelope down the pointer: a handle to a tainted claim stands at or above it
         node, parts = done.envelope, [p for p in pointer.split("/")[1:]]
         while ClaimRef.of(node) is None:

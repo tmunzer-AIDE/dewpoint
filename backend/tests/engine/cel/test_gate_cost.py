@@ -37,7 +37,7 @@ AT_CAPS: dict[str, Any] = {
 }
 WORST = [
     "trigger.events.filter(e, e.type == 'AP_DISCONNECTED').map(e, e.mac)",
-    "sortedKeys(trigger.m).map(k, trigger.m[k] * 2)",
+    "sortedKeys(trigger.m).map(k, size(k) * 2)",  # static paths: a computed key runs in the evaluator (2b §4.1)
     "trigger.events.exists(e, e.mac.matches('^5c5b35[0-9a-f]{6}$')) && trigger.s.matches('^a+$')",
     "trigger.events.map(e, macOui(e.mac))",
 ]
