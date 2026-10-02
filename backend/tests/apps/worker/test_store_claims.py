@@ -9,7 +9,6 @@ import pytest
 
 from dewpoint.apps.worker.store import DbRunStore
 from dewpoint.core.claims import service
-from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.engine import handles
 from dewpoint.engine.handles import StoredClaim
 from tests.core.claims.test_service import a_tenant
@@ -20,7 +19,7 @@ async def test_a_claim_is_read_back_by_its_run_and_refused_to_any_other(
     owner_sessionmaker: Any, worker_sessionmaker: Any
 ) -> None:
     tenant, run, other = await a_tenant(owner_sessionmaker), uuid.uuid4(), uuid.uuid4()
-    store = DbRunStore(worker_sessionmaker, ClaimCipher(FixtureKeys()))
+    store = DbRunStore(worker_sessionmaker, FixtureKeys())
     new = service.NewClaim(uuid.uuid4(), {"token": "s3cr3t"}, ("/token",), run, run)
     await store.write(str(tenant), [new], kind="cel", step_id=str(uuid.uuid4()), iteration_key="")
     await store.write(str(tenant), [new], kind="cel", step_id=None, iteration_key=None)  # a retry: the same row

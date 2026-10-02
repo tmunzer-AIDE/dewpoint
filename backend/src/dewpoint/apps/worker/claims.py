@@ -19,12 +19,23 @@ from dewpoint.engine.cel import evaluate as cel
 from dewpoint.engine.cel import types as T
 from dewpoint.engine.cel.bind import BindingError, check_json
 from dewpoint.engine.handles import MISSING, ClaimRef, Fetch, StoredClaim, contains_marker, part, resolve_value
-from dewpoint.engine.runtime.activities import Claiming, DeriveInput, DeriveResult
+from dewpoint.engine.matcher import Matcher
+from dewpoint.engine.runtime.activities import Claiming, DeriveInput, DeriveResult, StepInput
 from dewpoint.engine.runtime.execution import INTERNAL_ERROR
 from dewpoint.engine.runtime.ids import run_of, tenant_of
+from dewpoint.engine.runtime.projection import REDACTED
 from dewpoint.engine.runtime.resolve import Part, ValueFailure, join
+from dewpoint.engine.sensitive import MIN_SECRET
+from dewpoint.engine.split import split
+from dewpoint.engine.taint import from_schema, tainted_positions
 
 UNAVAILABLE = "A claim this run may not read, or that doesn't exist."
+_OUTPUTS = uuid.uuid5(uuid.NAMESPACE_URL, "dewpoint:claims:output")  # a step output's claim ids are derived under it
+
+
+class LeftPlainError(Exception):
+    """A split left plain data at a sensitive or undeclared position: a bug, never returned (§3.6)."""
+
 
 Evaluate = Callable[[dict[str, Any]], Awaitable[list[dict[str, Any]]]]
 
@@ -44,6 +55,14 @@ class ClaimStore(Protocol):
         iteration_key: str | None,
     ) -> None:
         """Claims made during a run (`step_outputs`), written once: a retry writes the same rows."""
+        ...
+
+    async def secrets(self, tenant_id: str, root_run_id: str) -> tuple[str, ...]:
+        """The run tree's secret index (§3.7): every string of MIN_SECRET characters or more in its tainted claims."""
+        ...
+
+    async def remember(self, tenant_id: str, root_run_id: str, strings: Sequence[str]) -> None:
+        """Strings of new tainted claims, added to the tree's index. Raises SecretIndexLimitError past its bounds."""
         ...
 
 
@@ -101,7 +120,29 @@ async def _claimed(
         for i, value in results
     ]
     await store.write(tenant, rows, kind="cel", step_id=claims.step_id, iteration_key=claims.iteration_key)
+    await store.remember(tenant, claims.root_run_id, sorted({t for _, v in results for t in _strings(v)}))
     return {i: {"ok": ClaimRef(str(row.id)).to_json()} for (i, _), row in zip(results, rows, strict=True)}
+
+
+def _strings(value: Any) -> list[str]:
+    """The strings of a claimed value the index takes (MIN_SECRET characters or more), keys included."""
+    if isinstance(value, str):
+        return [value] if len(value) >= MIN_SECRET else []
+    if isinstance(value, dict):
+        return [t for k, v in value.items() for t in (*_strings(k), *_strings(v))]
+    if isinstance(value, list):
+        return [t for v in value for t in _strings(v)]
+    return []
+
+
+async def _masked(outcomes: list[dict[str, Any]], store: ClaimStore, tenant: str, root: str) -> list[dict[str, Any]]:
+    """Every error message masked against the run tree's secrets before it leaves the activity (§3.7)."""
+    if not any("error" in o for o in outcomes):
+        return outcomes
+    secrets = Matcher(await store.secrets(tenant, root))
+    return [
+        {**o, "message": secrets.mask(str(o.get("message", "")), REDACTED)} if "error" in o else o for o in outcomes
+    ]
 
 
 async def evaluate_claimed(
@@ -131,12 +172,11 @@ async def evaluate_claimed(
         for (i, _), outcome in zip(ready, answered, strict=True):
             outcomes[i] = outcome
     done = [o if o is not None else {"error": cel.EVALUATION_ERROR, "message": UNAVAILABLE} for o in outcomes]
-    if claims.decision:  # a declassified decision comes back plain (§4.3)
-        return done
-    results = [(i, o["ok"]) for i, o in enumerate(done) if "ok" in o and tainted[i]]
-    for i, outcome in (await _claimed(store, tenant, run, claims, results)).items():
-        done[i] = outcome
-    return done
+    if not claims.decision:  # a declassified decision comes back plain (§4.3)
+        results = [(i, o["ok"]) for i, o in enumerate(done) if "ok" in o and tainted[i]]
+        for i, outcome in (await _claimed(store, tenant, run, claims, results)).items():
+            done[i] = outcome
+    return await _masked(done, store, tenant, claims.root_run_id)
 
 
 async def join_claimed(parts: list[Any], claims: Claiming, store: ClaimStore) -> dict[str, Any]:
@@ -162,7 +202,10 @@ async def join_claimed(parts: list[Any], claims: Claiming, store: ClaimStore) ->
     try:
         text = join(read)
     except ValueFailure as e:
-        return {"error": e.failure.code, "message": e.failure.message}
+        [failed] = await _masked(
+            [{"error": e.failure.code, "message": e.failure.message}], store, tenant, claims.root_run_id
+        )
+        return failed
     if not tainted:
         return {"ok": text}
     return (await _claimed(store, tenant, run, claims, [(0, text)]))[0]
@@ -189,3 +232,38 @@ async def derive(data: DeriveInput, store: ClaimStore) -> DeriveResult:
                    uuid.UUID(data.root_run_id))  # fmt: skip
     await store.write(tenant, [new], kind="derived", step_id=data.step_id, iteration_key=data.iteration_key)
     return DeriveResult(ClaimRef(data.claim_id).to_json())
+
+
+# --- the step boundary (§3.6) --------------------------------------------------------------------------------------
+
+
+async def resolved_config(config: dict[str, Any], store: ClaimStore) -> dict[str, Any]:
+    """A step's config with its handles resolved, for the run the activity's workflow id names (§3.3). Raises
+    ClaimUnavailableError."""
+    if not contains_marker(config):
+        return config
+    tenant, run = caller()
+    found = await resolve_value(config, _fetcher(store, tenant, run))
+    return dict(found.value)
+
+
+async def claim_output(
+    output: Any, schema: Mapping[str, Any], step: StepInput, store: ClaimStore, known: Sequence[str]
+) -> Any:
+    """A step's output as it may leave the activity: split by the node's output schema, what's sensitive or
+    undeclared, and text that repeats a secret the run knows (`known`), claimed; their strings join the index. The
+    claims' ids come from the attempt and their place, so writing them again writes the same rows."""
+    tenant, run = caller()
+    root = step.root_run_id or run
+    seed = uuid.uuid5(_OUTPUTS, f"{run}/{step.step_id}/{step.iteration_key}/{step.attempt}")
+    done = split(output, schema, lambda pointer: str(uuid.uuid5(seed, pointer)), known=known, sizes=False)
+    rows = [
+        NewClaim(uuid.UUID(c.id), c.value, ("",) if c.tainted else (), uuid.UUID(run), uuid.UUID(root))
+        for c in done.claims
+    ]
+    await store.remember(tenant, root, done.secrets)  # first: past the index's bounds, nothing is written
+    if rows:
+        await store.write(tenant, rows, kind="output", step_id=step.step_id, iteration_key=step.iteration_key)
+    if tainted_positions(done.envelope, from_schema(schema)):
+        raise LeftPlainError("A step's output kept plain data at a sensitive position.")
+    return done.envelope

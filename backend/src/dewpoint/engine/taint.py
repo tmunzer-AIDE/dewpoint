@@ -16,7 +16,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from dewpoint.engine.handles import escape
+from dewpoint.engine.handles import ClaimRef, escape
 from dewpoint.engine.sensitive import SENSITIVE, keys_sensitive, patterns, resolve
 
 _DEPTH = 32  # deeper than this, a schema is taken as tainted: recursive `$ref`s end here, on the safe side
@@ -87,12 +87,11 @@ TAINTED = Shape(all=True)
 
 def make(fields: Sequence[tuple[str, Shape]] = (), other: "Shape | None" = None, items: "Shape | None" = None) -> Shape:
     """A shape in its one normal form, so equal taint compares equal: a clean rule is None, and a clean field is
-    dropped unless other keys are tainted (there, it's what keeps that field clean)."""
+    dropped unless other keys are tainted (there, it's what keeps that field clean). Only a source makes a shape
+    TAINTED: one whose every key is tainted still leaves a scalar or a list in its place plain."""
     other = other if other is not None and other.tainted else None
     items = items if items is not None and items.tainted else None
     kept = tuple(sorted((n, f) for n, f in fields if f.tainted or other is not None))
-    if other is not None and other.all and all(f.all for _, f in kept):
-        return TAINTED
     return Shape(fields=kept, other=other, items=items)
 
 
@@ -264,6 +263,8 @@ def from_schema(schema: Mapping[str, Any] | None, root: Mapping[str, Any] | None
 
 
 def _walk(value: Any, shape: Shape, pointer: str, out: list[str]) -> None:
+    if ClaimRef.of(value) is not None:
+        return  # claimed already
     if shape.all:
         out.append(pointer)
     elif shape.tainted and isinstance(value, dict):
@@ -276,7 +277,8 @@ def _walk(value: Any, shape: Shape, pointer: str, out: list[str]) -> None:
 
 def tainted_positions(value: Any, shape: Shape) -> list[str]:
     """The pointers of `value`'s largest wholly tainted parts, in document order: what claiming takes with taint
-    (§3.5). It walks the shape publish reads, so a position publish finds plain never holds a claim."""
+    (§3.5). It walks the shape publish reads, so a position publish finds plain never holds a claim. A handle is
+    claimed already: nothing under it is listed, so what a split left must list nothing (§3.6)."""
     out: list[str] = []
     _walk(value, shape, "", out)
     return out

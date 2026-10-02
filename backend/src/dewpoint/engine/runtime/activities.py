@@ -153,6 +153,7 @@ class StepInput:
     config: dict[str, Any]
     mode: str = LIVE
     attempt: int = 1  # RunGraph counts attempts: each one is its own activity execution
+    root_run_id: str = ""  # the run tree's root: its claims record it, and its secret index masks (engine 2b §3.7)
 
 
 @dataclass(frozen=True)
@@ -280,3 +281,4 @@ class ProjectInput:
     steps: list[StepRow] = field(default_factory=list)
     run: RunSummary | None = None
     start: RunStart | None = None
+    root_run_id: str = ""  # the run tree's root: its secret index masks every row (engine 2b spec §3.7)

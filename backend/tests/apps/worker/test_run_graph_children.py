@@ -15,6 +15,7 @@ from temporalio.client import WorkflowFailureError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner
 
+from dewpoint.engine.handles import ClaimRef
 from dewpoint.engine.runtime import execution
 from dewpoint.engine.runtime import workflow as run_graph
 from dewpoint.engine.runtime.activities import ProjectInput, VersionData
@@ -74,9 +75,9 @@ async def test_a_loop_over_more_than_a_hundred_items_runs_in_batches_and_collect
     assert all(set(b["outer"][0]["results"]) == {"a"} for b in batches)  # only what the body reads goes along
 
 
-async def test_a_secret_a_batch_learned_is_masked_in_its_parent_too(env: WorkflowEnvironment) -> None:
-    """A batch returns the sensitive values it learned: the parent masks them where they reappear, as it would have
-    learned them inline."""
+async def test_what_a_batch_collects_reaches_its_parent_as_handles(env: WorkflowEnvironment) -> None:
+    """A batch's collected sensitive values are handles (engine 2b spec §3.6): the parent never holds them, and a step
+    that reads them gets them resolved in its activity, its output claimed again."""
     store = MemoryStore()
     g = graph()
     g.node("l", LOOP, {"items": list(range(101)), "collect": ref("steps.s.output.secret_value")})
@@ -85,7 +86,8 @@ async def test_a_secret_a_batch_learned_is_masked_in_its_parent_too(env: Workflo
     handle, result = await finished(env, store, g, {})
     assert result.status == "succeeded"
     [echoed] = [r for r in store.steps(run_id_of(handle)) if r.node_key == "e"]
-    assert "s3cr3t-value" not in json.dumps(echoed.output_preview) and "[redacted]" in json.dumps(echoed.output_preview)
+    assert "s3cr3t-value" not in json.dumps(echoed.output_preview)
+    assert all(ClaimRef.of(v) is not None for v in echoed.output_preview["value"])
 
 
 @pytest.mark.parametrize(("policy", "status"), [("continue", "succeeded"), ("stop", "failed")])
