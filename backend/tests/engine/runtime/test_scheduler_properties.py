@@ -112,6 +112,7 @@ def test_random_runs_keep_the_scheduling_invariants(g: G, data: st.DataObject) -
     handed: dict[Instance, int] = {}
     while s.ended is None:
         assert s.open_scopes <= s.cap + s.reserve, "open iteration scopes passed the cap and the reservation"
+        assert s.live == s.recount(), "the live-state counter drifted from what the state holds"
         cancelled = set(s.take_cancels())
         running = [r for r in running if r not in cancelled]
         batches = [b for b in batches if b.loop not in cancelled]

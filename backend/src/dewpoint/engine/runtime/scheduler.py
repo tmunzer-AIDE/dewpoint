@@ -27,12 +27,18 @@ A loop step inside an iteration captures the version it became ready under, and 
 long the cap deferred it; every other step reads the current ones. While a queued step names an older version, each
 write since keeps what it replaced (an undo record), and the snapshot keeps them too.
 
+The live state (engine 2b spec §5.3, component 5) is every value a snapshot holds inline, the trigger aside: results
+and items of open scopes, loops' item lists and what they collected, the variables and their undo records. Each is
+counted at its compact JSON size as it enters and uncounted as it leaves (`live`); a restore counts again
+(`recount`), and the two agree.
+
 A snapshot (`snapshot_format` 2, engine 2b spec §5.3) holds states, not queues: one code per node and per edge in
 region order, steps and loops by their topological index. Restoring rebuilds what's queued from those states, minus
 what was handed out before the snapshot and is still running."""
 
 import bisect
 import heapq
+import json
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -99,6 +105,11 @@ def _then_wake[**P, T](fn: Callable[P, T]) -> Callable[P, T]:
         return out
 
     return wrapper
+
+
+def size(value: Any) -> int:
+    """What a value adds to the live state: its compact JSON, as the payload converter writes it."""
+    return len(json.dumps(value, separators=(",", ":")))
 
 
 def iteration_key(scope: ScopeKey) -> str:
@@ -273,6 +284,7 @@ class Scheduler:
         self._captures: dict[Instance, int] = {}  # a queued loop step -> the version it became ready under
         self._released: dict[Instance, int] = {}  # handed out, its unit not yet started
         self._vrefs: dict[int, int] = {}  # a captured version -> the queued or released loop steps that name it
+        self._live = size(self._vars)  # see `live`
 
     @property
     def iterations(self) -> int:
@@ -300,10 +312,12 @@ class Scheduler:
         for depth, o in enumerate(outer):
             region = chain[len(outer) - 1 - depth]
             self.scopes[o.key] = Scope(o.key, region, {}, {}, dict(o.results), o.item, o.index, frozen=True)
+            self._live += self._scope_bytes(self.scopes[o.key])
         loop_inst = Instance(outer[-1].key, loop_step)
         self.batch_loop = loop_inst
         loop = LoopRun(loop_inst, list(items), concurrency, stop_on_error, offset=offset, collected=[None] * len(items))
         self.loops[loop_inst] = loop
+        self._live += self._loop_bytes(loop)
         self._advance(loop)
 
     def take_ready(self) -> list[Instance]:
@@ -368,6 +382,7 @@ class Scheduler:
             return
         scope.nodes[step.id] = NodeState.DONE
         scope.results[step.key] = {"output": output}
+        self._live += size(scope.results[step.key])
         self._settled.append((inst, scope.results[step.key]))
         live = set(step.ports if ports is None else ports)
         self._resolve(scope, step, {p for p in step.ports if p in live} - {BODY})
@@ -388,9 +403,11 @@ class Scheduler:
         self._settled.append((inst, {"error": failure.to_json()}))
         if step.on_error == "port":
             scope.results[step.key] = {"error": failure.to_json()}
+            self._live += size(scope.results[step.key])
             self._resolve(scope, step, {ERROR_PORT})
         elif step.on_error == "continue":
             scope.results[step.key] = {"error": failure.to_json()}
+            self._live += size(scope.results[step.key])
             self._resolve(scope, step, set(step.ports) - {BODY})
         else:
             self._fail_scope(scope, failure)
@@ -408,6 +425,7 @@ class Scheduler:
             return
         loop = LoopRun(inst, list(items), concurrency, stop_on_error, batch=batch, collected=[None] * len(items))
         self.loops[inst] = loop
+        self._live += self._loop_bytes(loop)
         if batch and self._iter_loop(inst):  # it opens no scope: it holds its slot until it ends (§5.3)
             self._held[inst] = self._starting.pop(inst, False)
         self._advance(loop)
@@ -420,6 +438,7 @@ class Scheduler:
             return
         loop.open.remove(index)
         loop.collecting.discard(index)
+        self._live += size(value) - size(loop.collected[index - loop.offset])
         loop.collected[index - loop.offset] = value
         self._prune(self._iteration_scope(loop, index))
         self._advance(loop)
@@ -442,8 +461,11 @@ class Scheduler:
         if loop is None or loop.running_batch != start:
             return
         loop.running_batch = None
-        loop.collected[start : start + len(outcome.collected)] = outcome.collected
-        loop.failures.extend(outcome.failures)
+        for n, value in enumerate(outcome.collected):
+            self._live += size(value) - size(loop.collected[start + n])
+            loop.collected[start + n] = value
+        for f in outcome.failures:
+            self._fail_entry(loop, f)
         if outcome.stopped is not None:
             self._abort(loop, outcome.stopped)
             return
@@ -479,6 +501,7 @@ class Scheduler:
         else:
             scope.nodes[step.id] = NodeState.FAILED
             scope.results[step.key] = {"error": end.failure.to_json()}
+        self._live += size(scope.results[step.key])
         self._settled.append((inst, scope.results[step.key]))
         self.end(end)
 
@@ -579,6 +602,7 @@ class Scheduler:
             scope.seq = self._seq
             self._n_open += 1
         self.scopes[key] = scope
+        self._live += self._scope_bytes(scope)
         for node_id in members:
             self._check_ready(scope, node_id)
         self._after_settle(scope)
@@ -590,6 +614,7 @@ class Scheduler:
             if k and not self.scopes[k].frozen:
                 self._n_open -= 1
                 self._freed = True
+            self._live -= self._scope_bytes(self.scopes[k])
             del self.scopes[k]
 
     def _resolve(self, scope: Scope, step: Step, live_ports: set[str]) -> None:
@@ -661,6 +686,7 @@ class Scheduler:
     def _drop_loop(self, loop: LoopRun) -> None:
         """The loop ends: nothing it waits for is still wanted."""
         del self.loops[loop.instance]
+        self._live -= self._loop_bytes(loop)
         self._capped.discard(loop.instance)
         if self._starting.pop(loop.instance, None) is not None or self._held.pop(loop.instance, None) is not None:
             self._freed = True  # its slot is free
@@ -699,7 +725,7 @@ class Scheduler:
         if loop.stop_on_error:
             self._abort(loop, failure)
             return
-        loop.failures.append({"index": index, "code": failure.code, "message": failure.message})
+        self._fail_entry(loop, {"index": index, "code": failure.code, "message": failure.message})
         self._advance(loop)
 
     def _abort(self, loop: LoopRun, failure: Failure) -> None:
@@ -766,6 +792,33 @@ class Scheduler:
             scope = self.scopes.get(loop.instance.scope)
             if scope is not None and scope.failure is None and self.ended is None:
                 self.succeed(loop.instance, output, (DONE,))
+
+    # --- the live state (engine 2b spec §5.3, component 5) -----------------------------------------------------------
+
+    @property
+    def live(self) -> int:
+        """The values the snapshot holds inline, the trigger aside, as JSON: kept as they enter and leave."""
+        return self._live
+
+    def recount(self) -> int:
+        """The same sum, counted from scratch: what a restore starts from, and what `live` must equal."""
+        total = size(self._vars) + sum(size(u) for u in self.undo.values())
+        total += sum(self._scope_bytes(sc) for sc in self.scopes.values())
+        return total + sum(self._loop_bytes(loop) for loop in self.loops.values())
+
+    @staticmethod
+    def _scope_bytes(sc: Scope) -> int:
+        return sum(size(r) for r in sc.results.values()) + (size(sc.item) if sc.item is not None else 0)
+
+    @staticmethod
+    def _loop_bytes(loop: LoopRun) -> int:
+        return size(loop.items) + size(loop.collected) + size(loop.failures)
+
+    def _fail_entry(self, loop: LoopRun, entry: dict[str, Any]) -> None:
+        """A failed iteration, listed in the loop's failures: the list grows by the entry, and a comma after the
+        first."""
+        self._live += size(entry) + (1 if loop.failures else 0)
+        loop.failures.append(entry)
 
     # --- the open-iteration cap (engine 2b spec §5.3) --------------------------------------------------------------
 
@@ -892,7 +945,9 @@ class Scheduler:
 
     def init_vars(self, values: dict[str, Any]) -> None:
         """Version 0: the defaults, or a batch's variables (which never change)."""
+        self._live -= size(self._vars)
         self._vars = dict(values)
+        self._live += size(self._vars)
 
     @property
     def vars(self) -> dict[str, Any]:
@@ -904,7 +959,10 @@ class Scheduler:
         keeps what it replaced."""
         if self._captures or self._released:
             self.undo[self.vars_version] = {name: [self._vars[name]] if name in self._vars else [] for name in values}
+            self._live += size(self.undo[self.vars_version])
+        self._live -= size(self._vars)
         self._vars.update(values)
+        self._live += size(self._vars)
         self.vars_version += 1
 
     def vars_at(self, version: int) -> dict[str, Any]:
@@ -954,7 +1012,7 @@ class Scheduler:
         if self.undo:
             oldest = min(self._vrefs) if self._vrefs else self.vars_version
             for k in [k for k in self.undo if k < oldest]:
-                del self.undo[k]
+                self._live -= size(self.undo.pop(k))
 
     # --- continue-as-new ---------------------------------------------------------------------------------------------
 
@@ -1028,6 +1086,7 @@ class Scheduler:
         for version in s._released.values():
             s._vrefs[version] = s._vrefs.get(version, 0) + 1
         s._n_open = sum(1 for sc in s.scopes.values() if sc.key and not sc.frozen)
+        s._live = s.recount()
         ready, s._collects, s._batches = s._rebuilt()
         for inst in ready:  # queued loop steps inside iterations wait deferred, the rest ready
             if s._iter_loop(inst):
@@ -1076,7 +1135,9 @@ class Scheduler:
         return ready, collects, batches
 
     def _check_queues(self) -> None:
-        """Restoring rebuilds exactly what's queued now."""
+        """Restoring rebuilds exactly what's queued now, and counts the live state the same."""
+        if self._live != self.recount():
+            raise AssertionError(f"the live state is counted {self._live}, but holds {self.recount()}")
         handed = self._handed | set(self.loops)
         saved, self._handed = self._handed, handed
         try:
