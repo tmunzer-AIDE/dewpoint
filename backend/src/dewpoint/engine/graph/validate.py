@@ -55,6 +55,7 @@ from dewpoint.engine.graph.values import (
     pointer_str,
     strip_values,
 )
+from dewpoint.engine.handles import RESERVED, contains_marker
 from dewpoint.engine.registry import control as C
 from dewpoint.engine.registry.catalog import Catalog, NodeTypeSpec
 from dewpoint.engine.schema_refs import ref_problems, subschemas
@@ -191,6 +192,7 @@ _TIMER = "A wait's duration is visible in the run's history, so it can't come fr
 _FAIL_MESSAGE = "A failure's message is recorded as it is, so it can't hold sensitive data."
 _SUBFLOW_INPUT = "This passes sensitive data into a field the sub-flow doesn't mark sensitive."
 TAINTED_REASON = "reads sensitive data"  # why a tainted CEL value runs in the isolated evaluator (§4.2)
+_RESERVED_FIX = "Rename the key: a run's data never holds `$claim`."
 
 
 def _covered(shape: Shape, schema: Mapping[str, Any], path: Pointer) -> bool:
@@ -379,6 +381,11 @@ def _settings(graph: Graph) -> list[Diagnostic]:
             out.append(
                 Diagnostic(code="vars.bad_default", field=where, message="The default value doesn't match the type.")
             )
+    places = [(f"/settings/outputs/{k}", v) for k, v in st.outputs.items()]
+    places += [("/settings/input_schema", st.input_schema), ("/settings/vars_schema", st.vars_schema)]
+    for where, value in places:  # the handle marker is Dewpoint's (engine 2b spec §3.2)
+        if contains_marker(value):
+            out.append(Diagnostic(code="value.reserved_key", field=where, message=RESERVED, fix=_RESERVED_FIX))
     for name in st.outputs:
         if not IDENT.match(name):
             out.append(
@@ -587,6 +594,9 @@ class _Validator:
         return spec.config_schema, pointer
 
     def _check_literals(self, n: GraphNode, spec: NodeTypeSpec) -> None:
+        for key, value in n.config.items():  # the handle marker is Dewpoint's (engine 2b spec §3.2)
+            if contains_marker(value):
+                self.err("value.reserved_key", RESERVED, node=n.id, fld=pointer_str((key,)), fix=_RESERVED_FIX)
         stripped, envelopes = strip_values(n.config)
         self._schema_errors(n.id, "", spec.config_schema, stripped, envelopes)
         self._sensitive_literals(n, spec, stripped, envelopes)

@@ -15,6 +15,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from dewpoint.apps.inputs import FORGED, reasons
+from dewpoint.core.claims.secret_index import Index
 from dewpoint.core.claims.service import CLAIM_UNAVAILABLE, ClaimUnavailableError, NewClaim
 from dewpoint.engine.cel import evaluate as cel
 from dewpoint.engine.cel import types as T
@@ -22,6 +23,7 @@ from dewpoint.engine.cel.bind import BindingError, bind_item, check_json
 from dewpoint.engine.cel.record import ExpressionRecord
 from dewpoint.engine.handles import (
     MISSING,
+    RESERVED,
     ClaimRef,
     Fetch,
     StoredClaim,
@@ -94,13 +96,26 @@ class ClaimStore(Protocol):
         such version."""
         ...
 
-    async def secrets(self, tenant_id: str, root_run_id: str) -> tuple[str, ...]:
-        """The run tree's secret index (§3.7): every string of MIN_SECRET characters or more in its tainted claims."""
+    async def index(self, tenant_id: str, root_run_id: str) -> Index:
+        """The run tree's secret index (§3.7): every string of MIN_SECRET characters or more in its tainted claims,
+        and its version, which every extension changes."""
         ...
 
-    async def remember(self, tenant_id: str, root_run_id: str, strings: Sequence[str]) -> None:
-        """Strings of new tainted claims, added to the tree's index. Raises SecretIndexLimitError past its bounds."""
+    async def index_version(self, tenant_id: str, root_run_id: str) -> int:
+        """The index's version alone: whether a copy read earlier is stale."""
         ...
+
+    async def remember(self, tenant_id: str, root_run_id: str, strings: Sequence[str]) -> Index:
+        """Strings of new tainted claims, added to the tree's index: the index as it is then, with every extension
+        before this one (they're serialized). Raises SecretIndexLimitError past its bounds, changing nothing."""
+        ...
+
+
+async def current(store: ClaimStore, tenant: str, root: str, seen: Index) -> Index:
+    """The tree's index as it is now (§3.7): `seen` again, unless another activity extended it since."""
+    if await store.index_version(tenant, root) == seen.version:
+        return seen
+    return await store.index(tenant, root)
 
 
 def caller() -> tuple[str, str]:
@@ -176,10 +191,17 @@ async def _masked(outcomes: list[dict[str, Any]], store: ClaimStore, tenant: str
     """Every error message masked against the run tree's secrets before it leaves the activity (§3.7)."""
     if not any("error" in o for o in outcomes):
         return outcomes
-    secrets = Matcher(await store.secrets(tenant, root))
+    secrets = Matcher((await store.index(tenant, root)).strings)
     return [
         {**o, "message": secrets.mask(str(o.get("message", "")), REDACTED)} if "error" in o else o for o in outcomes
     ]
+
+
+def unforged(outcomes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The evaluator's outcomes, a value that holds the marker refused: CEL can build such a map, and it's no handle
+    (§3.2)."""
+    return [{"error": cel.EVALUATION_ERROR, "message": RESERVED} if "ok" in o and contains_marker(o["ok"]) else o
+            for o in outcomes]  # fmt: skip
 
 
 async def evaluate_claimed(
@@ -205,7 +227,7 @@ async def evaluate_claimed(
         tainted[i] = tainted[i] or read_tainted
         ready.append((i, plain))
     if ready:
-        answered = await evaluate({**request, "bindings": [b for _, b in ready]})
+        answered = unforged(await evaluate({**request, "bindings": [b for _, b in ready]}))
         for (i, _), outcome in zip(ready, answered, strict=True):
             outcomes[i] = outcome
     done = [o if o is not None else {"error": cel.EVALUATION_ERROR, "message": UNAVAILABLE} for o in outcomes]
@@ -297,21 +319,26 @@ def config_secrets(config: Any, schema: Mapping[str, Any]) -> list[str]:
     return sorted(set(out))
 
 
-async def claim_output(
-    output: Any, schema: Mapping[str, Any], step: StepInput, store: ClaimStore, known: Sequence[str]
-) -> Any:
+async def claim_output(output: Any, schema: Mapping[str, Any], step: StepInput, store: ClaimStore, seen: Index) -> Any:
     """A step's output as it may leave the activity: split by the node's output schema, what's sensitive or
-    undeclared, and text that repeats a secret the run knows (`known`), claimed; their strings join the index. The
-    claims' ids come from the attempt and their place, so writing them again writes the same rows."""
+    undeclared, and text that repeats a secret the run knows, claimed; their strings join the index. What the run
+    knows is the index at this boundary, not the copy read before the attempt (`seen`, §3.7): another activity may
+    have extended it meanwhile, or does while this one splits, which the extension that follows shows. The claims'
+    ids come from the attempt and their place, so writing them again writes the same rows."""
     tenant, run = caller()
     root = step.root_run_id or run
     seed = uuid.uuid5(_OUTPUTS, f"{run}/{step.step_id}/{step.iteration_key}/{step.attempt}")
-    done = split(output, schema, lambda pointer: str(uuid.uuid5(seed, pointer)), known=known, sizes=False)
+    known = set((await current(store, tenant, root, seen)).strings)
+    while True:  # past the index's bounds, nothing is written: the extension comes first
+        done = split(output, schema, lambda pointer: str(uuid.uuid5(seed, pointer)), known=known, sizes=False)
+        merged = await store.remember(tenant, root, done.secrets)
+        if set(merged.strings) <= known | set(done.secrets):
+            break
+        known = set(merged.strings)  # indexed since: split again against it
     rows = [
         NewClaim(uuid.UUID(c.id), c.value, ("",) if c.tainted else (), uuid.UUID(run), uuid.UUID(root))
         for c in done.claims
     ]
-    await store.remember(tenant, root, done.secrets)  # first: past the index's bounds, nothing is written
     if rows:
         await store.write(tenant, rows, kind="output", step_id=step.step_id, iteration_key=step.iteration_key)
     if tainted_positions(done.envelope, from_schema(schema)):
@@ -427,7 +454,7 @@ async def child_input(data: ChildInput, store: ClaimStore) -> ChildInputResult:
             data.value,
             schema,
             lambda pointer: str(uuid.uuid5(seed, pointer)),
-            known=await store.secrets(tenant, data.root_run_id),
+            known=(await store.index(tenant, data.root_run_id)).strings,
             handles=True,
         )
     except ForgedHandleError:

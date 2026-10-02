@@ -15,6 +15,7 @@ from typing import Any
 
 MARKER = "$claim"
 CLAIM_UNAVAILABLE = "claim_unavailable"  # every refusal to read a claim (§3.3): as core.claims.service's
+RESERVED = "A value holds the key `$claim`, which only Dewpoint writes: it marks a handle."
 MISSING: Any = object()  # what a pointer that addresses nothing reads: a reference's default then applies
 POINTER = "pointer"
 POINTER_MAX = 256  # bytes, as JSON (spec §15: provisional)

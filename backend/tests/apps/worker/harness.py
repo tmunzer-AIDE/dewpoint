@@ -75,7 +75,8 @@ class MemoryStore:
     taints: dict[str, dict[str, Any]] = field(default_factory=dict)  # version -> its outputs' taint (2b spec §4.1)
     claims: dict[str, HeldClaim] = field(default_factory=dict)
     grants: set[tuple[str, str]] = field(default_factory=set)  # (claim, run) (2b spec §3.4)
-    index: dict[str, set[str]] = field(default_factory=dict)  # root run -> its secret index (2b spec §3.7)
+    index_of: dict[str, set[str]] = field(default_factory=dict)  # root run -> its secret index (2b spec §3.7)
+    versions_of: dict[str, int] = field(default_factory=dict)  # root run -> its index's version
 
     def add(self, g: G, workflow_id: uuid.UUID | None = None, *, engine_abi: int = ENGINE_ABI) -> str:
         """Publish `g` as a version, pinned to the sub-flows it runs (as `publish` registered them). `engine_abi`:
@@ -168,13 +169,21 @@ class MemoryStore:
         version = self.versions.get(version_id)
         return None if version is None else version.graph.get("settings", {}).get("input_schema", {"type": "object"})
 
-    async def secrets(self, tenant_id: str, root_run_id: str) -> tuple[str, ...]:
-        return tuple(sorted(self.index.get(root_run_id, set())))
+    async def index(self, tenant_id: str, root_run_id: str) -> secret_index.Index:
+        strings = tuple(sorted(self.index_of.get(root_run_id, set())))
+        return secret_index.Index(self.versions_of.get(root_run_id, 0), strings)
 
-    async def remember(self, tenant_id: str, root_run_id: str, strings: Any) -> None:
-        merged = self.index.get(root_run_id, set()) | {s for s in strings if len(s) >= MIN_SECRET}
+    async def index_version(self, tenant_id: str, root_run_id: str) -> int:
+        return self.versions_of.get(root_run_id, 0)
+
+    async def remember(self, tenant_id: str, root_run_id: str, strings: Any) -> secret_index.Index:
+        current = self.index_of.get(root_run_id, set())
+        merged = current | {s for s in strings if len(s) >= MIN_SECRET}
         secret_index.check(sorted(merged))  # past its bounds, nothing changes (2b spec §3.7)
-        self.index[root_run_id] = merged
+        if merged != current:
+            self.index_of[root_run_id] = merged
+            self.versions_of[root_run_id] = self.versions_of.get(root_run_id, 0) + 1
+        return await self.index(tenant_id, root_run_id)
 
     def claim(self, value: Any, *, owner: str, tainted: bool) -> dict[str, Any]:
         """A claim made outside any run, for a test to hand one: its handle."""
@@ -188,7 +197,9 @@ class MemoryStore:
         for c in done.claims:
             sensitive = ("",) if c.tainted else ()
             self.claims[c.id] = HeldClaim(TENANT, run_id, run_id, c.value, sensitive, "input")
-        self.index.setdefault(run_id, set()).update(done.secrets)  # admission seeds the index
+        if done.secrets:  # admission seeds the index
+            self.index_of.setdefault(run_id, set()).update(done.secrets)
+            self.versions_of[run_id] = self.versions_of.get(run_id, 0) + 1
         return done.envelope
 
 
