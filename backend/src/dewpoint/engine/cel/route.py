@@ -88,6 +88,12 @@ class YieldBudget:
             self.work += record.work or 0
             self.evaluations += 1
 
+    def takes_left(self, weight: int) -> int:
+        """How many queued steps a take may still take, at `weight` units each: at least one, so the run moves on. An
+        execution's first task gets the startup tenth here too, since it also compiles and starts the execution (the
+        owner's M4 CPU review: a whole share's take shared that task with the first compile on the target runner)."""
+        return max(1, (YIELD_STRUCTURE // self.share - self.structure) // weight)
+
     def reset(self, *, startup: bool = False) -> None:
         """A new workflow task starts a fresh budget: a tenth of it (`STARTUP_SHARE`) in an execution's first task,
         which also loads and compiles the version, or restores a snapshot."""

@@ -1,7 +1,7 @@
 # Runs: the worker, development runs and the runs API
 
 Spec: `docs/superpowers/specs/2026-09-25-engine-core-design.md` §6 (the interpreter), §8 (projection), §9 (starting
-runs).
+runs), and `2026-09-29-engine-2b-design.md` §3–§5 (claims, taint, sizes).
 
 A run executes one published version of a workflow on Temporal. `RunGraph`, the interpreter, walks the graph: control
 nodes (`if`, `switch`, `loop`, …) run inside the workflow, and each attempt of a plugin step runs as an activity.
@@ -17,13 +17,15 @@ public run API arrive with sub-project 2b, and so do admission control and idemp
 loader, the projection, and one activity per installed plugin node type. It needs:
 
 - `DEWPOINT_DATABASE_URL` with a login in the `dewpoint_worker` role. That role reads versions and the tenant's data
-  keys, and writes `runs` and `run_steps`, inside the run's tenant only (row-level security); it also records the
+  keys, writes `runs` and `run_steps`, and reads and writes claims (`run_inputs`, `step_outputs`, `claim_grants`) and
+  the secret index (`run_secret_index`), inside the run's tenant only (row-level security); it also records the
   instance in `worker_instances`.
 - `DEWPOINT_TEMPORAL_ADDRESS` (default `localhost:7233`) and `DEWPOINT_TEMPORAL_NAMESPACE` (default `default`), the
   namespace this deployment recorded ([`deployment.md`](deployment.md)): on any other, or with none recorded, the worker
   exits 2 before it connects.
-- The KEK (`DEWPOINT_KEK_B64`, `DEWPOINT_KEK_ID`): every payload it exchanges with Temporal is encrypted with its
-  tenant's data key. It checks its KEK at startup and every 30 seconds, and exits 3 when the check fails.
+- The KEK (`DEWPOINT_KEK_B64`, `DEWPOINT_KEK_ID`): every payload it exchanges with Temporal, and every claim it
+  stores, is encrypted with its tenant's data key. It checks its KEK and its role's grants at startup and every 30
+  seconds, and exits 3 when the check fails ([`deployment.md`](deployment.md#worker-health)).
 - `DEWPOINT_CEL_SOCKET` when a `cel-evaluator` runs next to it. The worker then waits for the evaluator, asks which
   CEL profile it serves, and serves `cel.evaluate` on that profile's queue for its build's engine ABI
   (`dewpoint-cel.abi<engine ABI>.<profile>`) with
@@ -64,14 +66,16 @@ dewpoint dev run <version-id> --tenant <tenant-id> --input trigger.json
 - By default the command waits and prints the result. `--no-wait` prints the run id and returns.
 - Exit codes: 0 when the run succeeded; 1 when it ended otherwise, or its start was refused (by Temporal, or because
   it couldn't be encrypted); 2 when it wasn't admitted (each reason is printed: in a `production` deployment,
-  "Production runs are off in this deployment"; a trigger too large to send, over 1.75 MiB; a `dewpoint` of another
-  engine ABI than the current build's, [`deployment.md`](deployment.md)); 3 when Temporal never confirmed the start
-  (see below).
+  "Production runs are off in this deployment"; a trigger that doesn't match the workflow's input schema, each place
+  and rule it breaks, never a value; a trigger that holds the key `$claim`; a `dewpoint` of another engine ABI than
+  the current build's, [`deployment.md`](deployment.md)); 3 when Temporal never confirmed the start (see below).
 - It needs `DEWPOINT_DATABASE_URL` with a login in the `dewpoint_dispatch` role, the Temporal settings above, and the
-  KEK: it encrypts the start with the tenant's data key.
+  KEK: it encrypts the trigger's claims and the start with the tenant's data key.
 
-The trigger file is test data: 2a doesn't validate it against the workflow's input schema (2b's triggers will). A
-value that breaks the schema fails the step that reads it.
+The trigger is checked against the version's input schema when the run is admitted, then claimed
+([below](#sensitive-and-large-values-claims)): its sensitive values, the positions its schema doesn't declare, and any
+value over 64 KiB are stored encrypted in `run_inputs`, and the run starts with handles in their place. A refused
+trigger leaves no run.
 
 **An unconfirmed start.** A start whose answer is lost looks like a failure, so it's retried with the same workflow id
 (`t:<tenant>:run:<run id>`), which Temporal refuses as a duplicate if the first attempt went through. A run is recorded
@@ -107,9 +111,51 @@ ending as cancelled.
 - **A loop over more than 100 items** runs in batches of 100, each a child workflow, one batch at a time; inside a
   batch, the items run with the loop's own concurrency. Its iterations' rows, keys and results are the same as if
   they had run inline, and its `on_item_error` works across batches.
+- **A loop's output.** `failures` lists the failed iterations in index order (before ABI 6, in the order they failed).
+  A loop whose collected values outgrew the run's live state, or that collected more than 64 KiB, outputs them as one
+  claim: `steps.<loop>.output.items` is its handle, and `items[3]` reads into it as into any list.
+- **Nested loops wait for room.** An execution opens at most 100 loop iterations at once (fewer when publish computed a
+  smaller bound for a large workflow), plus one per nesting level kept for the oldest. A loop inside an iteration
+  starts once it can open an iteration, and reads the variables as they were when it became ready.
 - **One budget per run.** The 100,000 loop iterations and filter items a run may use are shared by everything it
   starts: its batches, its sub-flows (and theirs), and its failure handler. A child that needs more asks its parent;
   a request waits while another child may still give budget back, and is refused only when nothing is left anywhere.
+
+## Sensitive and large values: claims
+
+A sensitive value never enters a run's workflow, nor Temporal's history. It's a **claim**: a row stored encrypted with
+the tenant's data key (`run_inputs` for what a run is given, `step_outputs` for what it produces), and the run holds a
+**handle** in its place, `{"$claim": "<claim id>"}`, with a `pointer` when it addresses a part of the value. Large
+values travel the same way. A handle tells nothing but the claim's id: a run's outputs and its rows show handles where
+claims are.
+
+- **What's claimed.** A run's input when it's admitted, a sub-flow's input before it starts, and a plugin step's output
+  before it leaves the step's activity: every value at a position the schema marks `x-sensitive`, and every position
+  it doesn't declare (unknown counts as sensitive: `additionalProperties`, pattern properties, a key one branch of a
+  union leaves open); text that repeats a secret the run already knows; and any value over 64 KiB, claimed for its
+  size. What CEL or a template returns from `cel.evaluate` is claimed when it read sensitive data, when it repeats a
+  known secret, or when it's over 64 KiB.
+- **Where a claim is read.** Only in an activity, by the run that owns it or was granted it. A plugin step gets its
+  input with every handle resolved. CEL or a template that reads a handle runs in the evaluator (`cel_mode`
+  `activity`), and so does CEL that indexes trigger or step data by a computed key or position. A reference further
+  into a handle extends its pointer without reading the claim.
+- **Decisions.** Where sensitive data decides something the run can see — a `flow.if` condition, a switch case's
+  `when`, a loop's items (their count) or a filter's items or predicate — the workflow lists the site in
+  `graph.settings.declassify`, and the decision is made where the claim is read. Publishing such a workflow needs the
+  `workflow.declassify` permission (tenant admins and owners), and its audit entry lists what each site reveals. A loop
+  over a list itself (`trigger.rows`) needs no entry: a list's length isn't secret. A loop over a list held as a handle
+  gets each item as a handle into it. A filter over sensitive data runs whole in one
+  activity: the run sees the kept items' handle and the two counts, never a decision per item.
+- **Sub-flows and failure handlers.** A sub-flow's input is checked against the child's input schema
+  (`input_invalid` when it doesn't match) and claimed as a trigger is, and the child is granted the parent's claims it
+  holds; a sub-flow grants its parent the claims in its outputs. A failure handler is granted what its trigger holds.
+- **The secret index.** Every string of 4 characters or more in a sensitive claim joins its run tree's index (the run,
+  its sub-runs and its batches share one), stored encrypted. Every message leaving an activity (a step's error, a CEL
+  error, a `fail` node's message) and every row the projection writes is masked against it. It holds at most 100,000
+  strings or 8 MiB: the admission or step that would pass that fails with `secret_index_limit`.
+- **What masking can't see.** A secret that CEL has transformed (encoded, sliced) is no longer the same text. A CEL
+  result the workflow computes from plain data is history like any plain value, and isn't checked against the index;
+  whatever leaves an activity is.
 
 ## Long runs
 
@@ -124,17 +170,18 @@ Anyone who can view runs can read the projection, so it keeps secrets out:
 
 - A field the node's schema marks sensitive shows as `[redacted]`, however deep: nested models, lists and optional
   values included.
-- A sensitive value the run has seen is masked wherever it reappears: copied by a transform, embedded in a template,
-  passed to another step, echoed in an error message, a CEL error or a `fail` node's message. The run learns them from
-  every field marked sensitive: in nodes' outputs, in nodes' configs (a literal from the start of the run, any other
-  value before the step's first attempt), and in the workflow's input schema. Values under 4 characters aren't
-  masked, and neither is a secret that CEL has transformed (encoded, sliced): only copies are recognized.
+- A sensitive value shows as its handle. Text that repeats a secret of the run tree's index is masked as
+  `[redacted]` wherever it reappears: copied by a transform, embedded in a template, passed to another step, echoed in
+  an error message, a CEL error or a `fail` node's message. The index learns from every sensitive claim (the input's,
+  the outputs') and from nodes' configs, whose sensitive fields are indexed before the step's attempt. Values under 4
+  characters aren't masked, and neither is a secret that CEL has transformed (encoded, sliced): only copies are
+  recognized.
 - Messages never quote input: a config or output that doesn't validate names each field and its rule's code
   (`token (value_error)`). A location shows only what the node's schema declares at each place: a field name where
   that field is declared, a position in a list. A map key, numeric or not, and an unknown key show as `*`
   (`headers.* (int_parsing)`). The rule's code is one Pydantic defines; a validator's own error type shows as
   `custom_error`. An unexpected exception, a version this build can't run and an interpreter error name only the
-  error's type. The full text goes to the worker's log.
+  error's type. The full text goes to the worker's log, masked against the run tree's secret index.
 - Previews hold at most 8 KiB of JSON each; a larger one shows as `[truncated]`.
 - Characters Postgres can't store (NUL, lone surrogates) show as U+FFFD, and a number JSON can't hold (NaN,
   infinity) as its name.
@@ -159,10 +206,13 @@ workflow id is `t:<tenant>:run:<run id>`, a sub-flow's and a failure handler's t
 | `deadline_exceeded` | `deadline_exceeded` | The run passed `DEWPOINT_MAX_RUN_DURATION_DAYS` (default 30). Running steps were cancelled. |
 | `cancelled` | `cancelled` | The run was cancelled in Temporal. A cancel that arrives while the run's end is being written leaves that end. |
 
-Step error codes include the plugin's own codes and `config_invalid`, `output_schema_violation`, `unexpected_error`,
-`evaluation_error`, `type_mismatch`, `timeout`, `cel_profile_unavailable`, `input_too_large`, `item_cap_exceeded`,
-`iteration_cap_exceeded`, `node_type_unavailable` (the registry lists the node type, but no worker of this build
-runs it: install its plugin on the workers) and `payload_too_large`. A sub-flow step fails with its sub-flow's code, and with `terminated`
+Step error codes include the plugin's own codes and `config_invalid`, `output_schema_violation` (an output holding the
+key `$claim` too), `unexpected_error`, `evaluation_error`, `type_mismatch`, `timeout`, `cel_profile_unavailable`,
+`input_too_large`, `item_cap_exceeded`, `iteration_cap_exceeded`, `node_type_unavailable` (the registry lists the node
+type, but no worker of this build runs it: install its plugin on the workers), `payload_too_large`,
+`claim_unavailable` (a claim the run may not read or that isn't there, or the step's output couldn't be stored as
+claims after the node ran: its effect happened, and its row says so), `secret_index_limit` and `input_invalid` (a
+sub-flow's input that doesn't match the child's input schema). A sub-flow step fails with its sub-flow's code, and with `terminated`
 when an operator terminated the sub-flow; a loop fails with `terminated` when one of its batches was.
 
 ## Attempts and retries
@@ -187,16 +237,17 @@ retry settings (`max_attempts` and `timeout_s` can be overridden per step), and 
 - At most 100 steps, batches and sub-flows run at once per run (and per child).
 - A run counts at most 100,000 loop iterations and filter items, its children's included (`iteration_cap_exceeded`).
 - Everything a run sends Temporal, or returns, is checked where it's produced, against 1.75 MiB once encrypted
-  (Temporal's limit is 2 MiB): too large fails the step, the loop or the run with `payload_too_large`, never a stuck
-  run. That covers a step's input (nothing is sent) and its output (the step ran once: its row says `applied`), a
-  sub-flow's input and its outputs, a failure handler's input (its row records the failure), and the run's outputs.
-  A loop's batch is cut by bytes as well as by count; an item that doesn't fit in a batch with what the batch reads
-  fails the loop after the items before it. Large values move by reference with 2b-1b's claim check.
-- A run continues as a new Temporal execution when its history grows long; its state must stay within 1.5 MiB, or it
-  fails with `snapshot_too_large` (a batch fails its loop).
-- A run carries the sensitive values it has learned (to mask them in its result, its sub-runs and its batches) up to
-  256 KiB: the step, sub-flow or batch that would add more fails with `payload_too_large` ("The sensitive values this
-  run would have to carry are too many"), and a trigger that holds more fails the run before any step.
+  (Temporal's limit is 2 MiB), never a stuck run. A step's input, a sub-flow's input, a failure handler's trigger and
+  a batch's item that wouldn't fit have their largest values spilled into claims first, and the receiver reads them
+  whole; what still doesn't fit fails with `payload_too_large`. A step's output over 64 KiB is claimed at its
+  boundary. The run's outputs aren't spilled: too large fails the run with `payload_too_large`.
+- An execution keeps at most 1 MiB of values in its own state (results, items, collected values, failures, variables).
+  Past that, the largest go to claims, read back by handle, and a step is sent at most 1 KiB of its input inline, the
+  rest as handles it resolves. A claim the run can't write fails the run.
+- A run continues as a new Temporal execution when its history grows long. Publish computes each version's bound on
+  open iterations so that its state fits 1.5 MiB (`version.unbounded` refuses one that can't), and `snapshot_too_large`
+  remains the guard (a batch fails its loop).
+- A run tree's secret index holds at most 100,000 strings or 8 MiB (`secret_index_limit`).
 - A workflow task sends at most 3 MiB of payloads, so its completion stays under Temporal's 4 MiB message limit: more
   wait for the next task.
 - `flow.delay` waits 0 to 30 days, and `wait_until` takes instants from year 1 to 9999 in UTC. A value outside that,

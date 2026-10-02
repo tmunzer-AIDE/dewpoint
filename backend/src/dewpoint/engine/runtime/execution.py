@@ -32,7 +32,7 @@ with workflow.unsafe.imports_passed_through():
     from dewpoint.engine.cel.ipc import EvaluateRequest
     from dewpoint.engine.cel.profile import LOCAL_CEL_PROFILE
     from dewpoint.engine.cel.record import ExpressionRecord
-    from dewpoint.engine.cel.route import YIELD_STRUCTURE, YieldBudget
+    from dewpoint.engine.cel.route import YieldBudget
     from dewpoint.engine.graph.values import CelValue, RefValue, TemplateValue
     from dewpoint.engine.handles import CLAIM_UNAVAILABLE, MISSING, RESERVED, ClaimRef, contains_marker
     from dewpoint.engine.registry import control
@@ -1039,9 +1039,8 @@ class Execution:
         return STEP_WEIGHT + VIEW_WEIGHT * size
 
     def _take_limit(self) -> int:
-        """How many ready steps this workflow task may still take: at least one, so the run moves on."""
-        left = YIELD_STRUCTURE - self._task_budget().structure  # the whole share: a take's work is light
-        return max(1, left // TAKE_WEIGHT)
+        """How many ready steps this workflow task may still take (engine 2b spec §5.3)."""
+        return self._task_budget().takes_left(TAKE_WEIGHT)
 
     async def _stepwise[T](self, steps: Generator[int, None, T]) -> T:
         """A snapshot or a restore, part by part (engine 2b spec §5.3): each part's units are charged to the workflow
