@@ -5,9 +5,12 @@ is past it, a step is sent the 1 KiB floor, so its activity claims what's larger
 values show it. Every run ends with the values its outputs read."""
 
 import asyncio
+import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from temporalio.api.enums.v1 import EventType
 from temporalio.client import WorkflowHandle
 from temporalio.testing import WorkflowEnvironment
 
@@ -15,6 +18,7 @@ from dewpoint.engine.handles import ClaimRef, resolve_value
 from dewpoint.engine.runtime import scheduler, size
 from dewpoint.engine.runtime.activities import RunResult
 from tests.apps.worker.harness import TENANT, MemoryStore, run_id_of, start, workers
+from tests.apps.worker.test_run_graph_boundary import decoded
 from tests.support.graphs import G, cel, ref
 
 BLOB, ECHO, LOOP = "testkit.blob@1", "testkit.echo@1", "flow.loop@1"
@@ -185,3 +189,31 @@ async def test_an_inline_loop_whose_values_and_failures_spill_reads_them_back(
     assert got["items"] == [None if i in failed else "x" * 150 for i in range(40)]
     assert [f["index"] for f in got["failures"]] == failed and got["count"] == 40
     assert [c for c in store.claims.values() if c.kind == "segment"]
+
+
+async def test_a_continued_batch_carries_its_items_outer_scopes_and_variables_only_in_its_snapshot(
+    env: WorkflowEnvironment,
+) -> None:
+    """Each value travels once (engine 2b spec §5.3): a continued `LoopBatch` drops `items`, `outer` and `variables`
+    from its original input; its snapshot holds them, and it carries on."""
+    store = MemoryStore()
+    g = graph(items=ref("steps.l.output.items"))
+    g.settings["vars_schema"] = {"type": "object", "properties": {"v": {"type": "string", "default": "var" * 50}}}
+    g.node("a", BLOB, {"size": 300}).node("l", LOOP, {"items": list(range(150)), "collect": ref("item")})
+    g.node("x", ECHO, {"value": ref("steps.a.output.value")}).edge("a", "l").edge("l", "x", "body")
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {}, checkpoint_events=150)
+        result = await asyncio.wait_for(handle.result(), 60)
+    assert (result.status, result.outputs) == ("succeeded", {"items": list(range(150))}), result.error
+    continued = []
+    for event in (await handle.fetch_history()).events:
+        if event.event_type == EventType.EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_STARTED:
+            child = event.child_workflow_execution_started_event_attributes.workflow_execution
+            history = await env.client.get_workflow_handle(child.workflow_id, run_id=child.run_id).fetch_history()
+            for e in history.events:
+                if e.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW:
+                    continued.append(json.loads(await decoded([SimpleNamespace(events=[e])])))
+    assert continued  # the first batch continued as new
+    for batch in continued:
+        assert (batch["items"], batch["items_ref"], batch["outer"], batch["variables"]) == ([], None, [], {})
+        assert batch["snapshot"] is not None
