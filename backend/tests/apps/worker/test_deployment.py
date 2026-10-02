@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import pytest
 from temporalio.api.enums.v1 import EventType, VersioningBehavior
 from temporalio.client import Client, WorkflowHandle, WorkflowHistory
-from temporalio.service import RPCError
+from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
@@ -87,6 +87,17 @@ async def test_set_current_waits_for_the_builds_workers(dev_env: WorkflowEnviron
         await asyncio.wait_for(promote, 30)
         deployment = await describe(client)
     assert deployment.current == first and ("current" in {v.status for v in deployment.versions if v.build_id == first})
+
+
+async def current_build(client: Client) -> str | None:
+    """The build new runs start on; None until the deployment exists, which is once one of its workers has polled (a
+    test that runs first in its process asks before then)."""
+    try:
+        return (await describe(client)).current
+    except RPCError as e:
+        if e.status == RPCStatusCode.NOT_FOUND:
+            return None
+        raise
 
 
 def graph() -> tuple[MemoryStore, G]:
@@ -202,10 +213,10 @@ async def test_a_worker_set_to_makes_its_build_current_once_it_polls(
     worker = asyncio.create_task(main.run(settings(worker_set_current=True, worker_shutdown_grace_s=0.1)))
     try:
         for _ in range(60):
-            if (await describe(dev_env.client)).current == this_build():
+            if await current_build(dev_env.client) == this_build():
                 break
             await asyncio.sleep(0.5)
-        assert (await describe(dev_env.client)).current == this_build()
+        assert await current_build(dev_env.client) == this_build()
     finally:
         worker.cancel()
         with contextlib.suppress(asyncio.CancelledError):
