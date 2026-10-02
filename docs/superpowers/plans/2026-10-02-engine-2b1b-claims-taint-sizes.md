@@ -44,11 +44,11 @@ and §6.6 (ids, ABI 6), §6.7 (worker logs), §9 (codes), §11.2–11.3 (the pro
 **Workflow**
 - Implementation goes on one branch, `feat/engine-2b1b`, cut from `main` once this plan and the spec's revision 6
   have landed. Nothing is pushed until the owner says so; the owner merges.
-- Execution is inline, from the prototype's tested commits, with the owner's checkpoints after Task 11, Task 24 and
-  Task 39, and a whole-branch review after Task 47 (see "Executing this plan").
-- Test first: every test fails before its implementation, for the stated reason. Three tasks have no red step: Task
-  20 removes a mechanism whose job earlier tasks took over, so its tests pass before and after; Task 29 fixes a test
-  whose race shows only in some orders; Task 41 is documentation.
+- Execution applies the prototype's 47 commits in order, with the owner's checkpoints after Task 11, Task 24 and Task
+  39, and a fresh reviewer after Task 47 (see "Executing this plan", the owner's procedure of 2026-10-02).
+- The prototype was built test first, and each task's record says how its tests failed before its implementation.
+  Three have no red step: Task 20 removes a mechanism whose job earlier tasks took over, so its tests pass before and
+  after; Task 29 fixes a test whose race shows only in some orders; Task 41 is documentation.
 - Commits end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Scratch files go in the session
   scratchpad, never `/tmp`.
 - Docker: `postgres:16-alpine` and ryuk (testcontainers). The dev server comes from the SDK
@@ -68,8 +68,9 @@ and §6.6 (ids, ABI 6), §6.7 (worker logs), §9 (codes), §11.2–11.3 (the pro
   version's computed cap may be (measured: the largest shapes get 100, Task 37).
 - The secret index: strings of `MIN_SECRET = 4` characters or more; at most `MAX_STRINGS = 100_000` or `MAX_BYTES =
   8 MiB`.
-- A workflow task's CPU: `YIELD_STRUCTURE = 200_000` units, a tenth in an execution's first task, takes included
-  (measured on the target runner: worst activation 371.6 ms, Task 42).
+- A workflow task's CPU: `YIELD_STRUCTURE = 200_000` units, a tenth in an execution's first task, takes included.
+  Measured on the target runner: worst activation 371.6 ms with the final code (Task 42, run 37016438529); 943 ms
+  before Task 42 (historical, run 37011815773).
 - Removed: 2b-1a's `SECRETS_BYTES` and its `secrets_too_large` message (Task 20).
 - New step codes: `claim_unavailable`, `secret_index_limit`, `input_invalid`, `node_failed`. New publish codes:
   `sensitive.literal`, `sensitive.default`, `taint.undeclassified`, `taint.stale_declassify`, `taint.timer`,
@@ -97,14 +98,21 @@ and §6.6 (ids, ABI 6), §6.7 (worker logs), §9 (codes), §11.2–11.3 (the pro
 - Lint with `uv run ruff check --no-cache src tests migrations` and `uv run ruff format --no-cache --check src tests
   migrations`.
 
-**Checks after each task**
-- The whole suite, in the two commands above. Expected: together, the task's count passed and 8 skipped (the
-  Linux-only evaluator tests and one more), as each task states.
-- Types and layers: `uv run mypy src` (no issues) and `uv run lint-imports` (10 contracts kept).
+**Checks** (the owner's procedure)
+- After each task: its commit applies without a conflict.
+- At each checkpoint (after Tasks 11, 24 and 39): the milestone's focused tests, as the checkpoint gives them.
+- Once, after Task 47: the whole suite in the two commands above, and the static checks. Expected (final): 1,532
+  passed and 8 skipped (the Linux-only evaluator tests and one more); ruff and its formatter clean; `uv run mypy src`:
+  no issues; `uv run lint-imports`: 10 contracts kept. Another run only if a concrete failure or a code change
+  warrants it.
+- The size probes and the target-runner CPU check are not run again for this unchanged prototype.
+- Figures: a task's counts and outputs are historical, recorded at its commit when the plan was written; the final
+  figures are the ones above and in Task 47.
 
 ## Review Focus
 
-The inputs and failure modes the spec implies that no task's tests pin; the final reviewer checks each deliberately.
+The inputs and failure modes the spec implies that no task's tests pin. They stay documented here for later rollout
+decisions (the owner, 2026-10-02); the final reviewer checks each deliberately.
 1. **A secret index near its bound.** Every plugin step and `cel.evaluate` boundary builds an Aho-Corasick matcher
    from the run tree's whole index. Its tests lower the bound to a few strings; at 100,000 strings or 8 MiB, each
    boundary's build cost is unmeasured. A person expects a large run's steps to stay within their timeouts.
@@ -317,36 +325,39 @@ The inputs and failure modes the spec implies that no task's tests pin; the fina
 
 ## How the steps give code
 
-Each task's code is given as unified diffs against the tree the previous task left. The diffs are a prototype's
-commits, and each was replayed onto that tree as its step says: its tests failed as stated, then passed with the
-change. New files appear whole, as `new file mode` diffs.
+Each task's code is given as unified diffs against the tree the previous task left, in the task's record. The diffs
+are a prototype's commits, and each was replayed onto that tree: its tests alone first, which failed as the record
+says, then the rest, after which they passed. New files appear whole, as `new file mode` diffs.
 
 The prototype is the local branch `proto/2b1b-v1`, cut from `main` at `d4185e0`, with one commit per task, the owner's
 whole-branch review signed off (2026-10-02): Task 1 `02ccb16`, Task 2 `2a5dc4d`, Task 3 `ba3eb72`, Task 4 `2226437`, Task 5 `7e5ca2e`, Task 6 `e5d598b`, Task 7 `b359348`, Task 8 `6750164`, Task 9 `63d7381`, Task 10 `efab162`, Task 11 `f24d0b6`, Task 12 `4bb9676`, Task 13 `7c044a6`, Task 14 `8dbed2d`, Task 15 `f21ce7f`, Task 16 `58cc8ec`, Task 17 `b1eba7d`, Task 18 `0a364e7`, Task 19 `7a4a6c3`, Task 20 `3a945de`, Task 21 `6afedc7`, Task 22 `38216d7`, Task 23 `64690af`, Task 24 `2fd984c`, Task 25 `af9f8c4`, Task 26 `cb35431`, Task 27 `9f7d249`, Task 28 `499000f`, Task 29 `9563439`, Task 30 `99fdac4`, Task 31 `3b49c82`, Task 32 `201d9f0`, Task 33 `487afc3`, Task 34 `d8a58e4`, Task 35 `bce3047`, Task 36 `5cdf069`, Task 37 `81154e9`, Task 38 `0e56c77`, Task 39 `c0d8668`, Task 40 `d1d5c06`, Task 41 `71728a5`, Task 42 `6c6ceff`, Task 43 `e9a13bc`, Task 44 `0bf5cdd`, Task 45 `2cf09e6`, Task 46 `7ce55cc`, Task 47 `856eb22`.
 
 Each commit was verified this way:
 - its tree was reproduced exactly by the replay;
-- it passed the whole suite, ruff (without its cache), mypy and import-linter, when it was made.
+- it passed the whole suite, ruff (without its cache), mypy and import-linter, when it was made;
+- at each checkpoint, the milestone's focused tests passed at its commit (the counts the checkpoints give).
 
 The golden histories are recorded, not diffed: they come with the commits that record them. The replay ran each
-task's tests with `-n auto`; its outputs are quoted as they came, shortened.
+task's tests with `-n auto`; its outputs are quoted as they came, shortened. One red run waited forever on the old
+code (Task 22): the replay stopped it after 8 minutes and names the test.
 
 ## Executing this plan
 
-Inline, in one session, from the prototype's commits: the diffs aren't typed again. For each task, in order, on
-`feat/engine-2b1b`:
-1. Read the task. Its RED step was run by the replay, and its output is quoted: it isn't repeated.
-2. Run `git cherry-pick --no-commit <the task's commit>`. The commit list is above.
-3. Run the task's verification steps, every step after its code, and compare each output with its `Expected:` line.
-   A golden recording step is already done: its files come with the commit.
-4. Commit with the task's own message.
+Inline, in one session, from the prototype's commits: the diffs aren't typed again. On `feat/engine-2b1b`, for each
+task in order:
+1. Read the task.
+2. Run `git cherry-pick --no-commit <the task's commit>`, and check that nothing conflicts.
+3. Commit with `git commit -C <the task's commit>`, which keeps the prototype's message.
 
-**Checkpoints:** stop for the owner's review after Task 11 (taint at publish), after Task 24 (run-time protection,
-ABI 6) and after Task 39 (sizes and §5.3). After Task 47, a fresh reviewer reviews the whole branch.
+The task's record (its tests, how they failed and passed, its diffs, the suite's count at its commit) is historical:
+it isn't run again per task.
 
-A mismatch is a finding: stop and report it, and don't patch around it. The diffs below remain the plan's record of
-every change.
+**Checkpoints:** after Task 11 (taint at publish), Task 24 (run-time protection, ABI 6) and Task 39 (sizes and §5.3),
+run the milestone's focused tests, then stop for the owner's review. After Task 47, run the whole suite and the static
+checks once, then a fresh reviewer reviews the whole branch.
 
+A conflict, a failing focused test or a failing final check is a finding: stop and report it, and don't patch around
+it. The diffs below remain the plan's record of every change.
 
 ## Milestone 1 — Claims infrastructure
 
@@ -374,7 +385,21 @@ grants, resolves and extends the index; no other role reaches them. The tests ar
 and roles: forced RLS, a row seen only within its tenant, another tenant's row refused, and each role's exact
 privileges.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 02ccb165e24f`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 02ccb165e24f
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/core/claims/__init__.py b/backend/tests/core/claims/__init__.py
@@ -499,11 +524,7 @@ index 0000000..1676913
 +                assert granted == (op in ALLOWED.get((role, table), set())), (role, table, op)
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/core/claims/test_rls_claims.py`
-
-Expected: FAIL. The claim tables don't exist yet, so every insert and privilege check finds no relation. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/core/claims/test_rls_claims.py`): they failed, as expected: the claim tables don't exist yet, so every insert and privilege check finds no relation. The replay showed:
 
 ````text
 E   sqlalchemy.exc.NoResultFound: No row was found when one was required
@@ -524,7 +545,7 @@ E                   sqlalchemy.dialects.postgresql.asyncpg.AsyncAdapt_asyncpg_db
 16 failed in 19.25s
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/migrations/versions/0014_claims.py b/backend/migrations/versions/0014_claims.py
@@ -727,27 +748,13 @@ index 0000000..697056c
 +    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/core/claims/test_rls_claims.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/core/claims/test_rls_claims.py`): they passed. The replay showed:
 
 ````text
 16 passed in 17.95s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,229 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(claims): the claim tables, their grants and the secret index, under forced row-level security (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,229 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -774,7 +781,21 @@ opens what it seals. It reads keys through the codec's cache, never `Keyring.enc
 role, which may only read data keys, and no seal takes the keyring's per-tenant lock. `KeySource` and `KeyringKeys`
 move to `core.crypto.keys` (the codec re-exports them), so the core claim store can use them.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 2a5dc4d190d5`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 2a5dc4d190d5
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/core/claims/test_cipher.py b/backend/tests/core/claims/test_cipher.py
@@ -854,11 +875,7 @@ index 0000000..7ee639f
 +            assert await KEYRING.decrypt(s, tenant_id=tenant, purpose="claim", context=claim, blob=blob) == VALUE
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/core/claims/test_cipher.py`
-
-Expected: FAIL. `dewpoint.core.claims` doesn't exist yet. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/core/claims/test_cipher.py`): they failed, as expected: `dewpoint.core.claims` doesn't exist yet. The replay showed:
 
 ````text
 E   ModuleNotFoundError: No module named 'dewpoint.core.claims'
@@ -866,7 +883,7 @@ ERROR tests/core/claims/test_cipher.py - ImportError while importing test mod...
 1 error in 6.66s
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/apps/codec.py b/backend/src/dewpoint/apps/codec.py
@@ -1104,27 +1121,13 @@ index 0000000..32f0343
 +        return found, entry[2]
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/core/claims/test_cipher.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/core/claims/test_cipher.py`): they passed. The replay showed:
 
 ````text
 6 passed in 16.51s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,235 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(claims): a claim's value encrypted with its tenant's key, bound to its id, through the read-only key cache (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,235 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -1148,7 +1151,21 @@ never reads the claim; past `POINTER_MAX` (256 bytes) it reports itself too long
 claim instead. `contains_marker` finds the marker anywhere, so data from outside holding a forged or malformed handle
 can be refused; `handles_in` lists every handle in a value with its position.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit ba3eb724bd4c`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C ba3eb724bd4c
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/engine/test_handles.py b/backend/tests/engine/test_handles.py
@@ -1255,11 +1272,7 @@ index 0000000..c53460e
 +    assert not contains_marker({"$claims": 1, "marker": MARKER})  # only the key is the marker
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/test_handles.py`
-
-Expected: FAIL. `dewpoint.engine.handles` doesn't exist yet. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/test_handles.py`): they failed, as expected: `dewpoint.engine.handles` doesn't exist yet. The replay showed:
 
 ````text
 E   ModuleNotFoundError: No module named 'dewpoint.engine.handles'
@@ -1267,7 +1280,7 @@ ERROR tests/engine/test_handles.py - ImportError while importing test module ...
 1 error in 9.01s
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/engine/handles.py b/backend/src/dewpoint/engine/handles.py
@@ -1383,27 +1396,13 @@ index 0000000..589ea81
 +        yield from handles_in(child, pointer + "/" + escape(key))
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/test_handles.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/test_handles.py`): they passed. The replay showed:
 
 ````text
 14 passed in 9.68s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,249 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(engine): handles, `ClaimRef(id, pointer)` under a reserved marker, bounded by POINTER_MAX (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,249 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -1435,7 +1434,21 @@ result, and marks it tainted when a part it read lies in or holds a sensitive po
 pointer that addresses nothing reads `MISSING`, the sentinel references already use, so a reference's default still
 applies over a handle. Claims nested past 32 are refused.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 2226437c28e0`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 2226437c28e0
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/core/claims/test_service.py b/backend/tests/core/claims/test_service.py
@@ -1645,11 +1658,7 @@ index 0000000..224e746
 +        await resolve(ClaimRef(A), fetch)
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/core/claims/test_service.py tests/engine/test_resolution.py`
-
-Expected: FAIL. The claim store and the resolver don't exist yet. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/core/claims/test_service.py tests/engine/test_resolution.py`): they failed, as expected: the claim store and the resolver don't exist yet. The replay showed:
 
 ````text
 E   ImportError: cannot import name 'service' from 'dewpoint.core.claims'
@@ -1659,7 +1668,7 @@ ERROR tests/engine/test_resolution.py - ImportError while importing test modu...
 2 errors in 8.39s
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/core/claims/service.py b/backend/src/dewpoint/core/claims/service.py
@@ -1950,27 +1959,13 @@ index abe4d77..0dc31ff 100644
      def __init__(self, code: str, message: str) -> None:
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/core/claims/test_service.py tests/engine/test_resolution.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/core/claims/test_service.py tests/engine/test_resolution.py`): they passed. The replay showed:
 
 ````text
 11 passed in 18.49s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,260 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(claims): the claim store, owners and grants; resolving a handle through nested claims, with its taint (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,260 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -2012,7 +2007,21 @@ The schema walker moves from the projection into `engine.sensitive`, which adds 
 counts as sensitive). `engine.matcher` finds and masks secrets with one Aho-Corasick automaton (`ahocorasick-rs`,
 the new dependency the owner approved); it stays out of the workflow sandbox.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 7e5ca2e22c93`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 7e5ca2e22c93
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/engine/test_split.py b/backend/tests/engine/test_split.py
@@ -2191,11 +2200,7 @@ index 0000000..03f4466
 +    return value
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/test_split.py`
-
-Expected: FAIL. The splitter and its matcher don't exist yet. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/test_split.py`): they failed, as expected: the splitter and its matcher don't exist yet. The replay showed:
 
 ````text
 E   ModuleNotFoundError: No module named 'dewpoint.engine.matcher'
@@ -2203,7 +2208,7 @@ ERROR tests/engine/test_split.py - ImportError while importing test module '/...
 1 error in 7.79s
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/pyproject.toml b/backend/pyproject.toml
@@ -2789,27 +2794,13 @@ index 9e4ba24..8e5282b 100644
      { name = "asyncpg", specifier = ">=0.30" },
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/test_split.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/test_split.py`): they passed. The replay showed:
 
 ````text
 22 passed in 6.75s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,282 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(engine): splitting a run's input into claims: sensitive, reappearing, large, then the envelope (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,282 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -2834,7 +2825,21 @@ can tell a stale copy; adding nothing new writes nothing. Extensions are seriali
 activities never lose one another's strings. Past 100,000 strings or 8 MiB an extension is refused for good
 (`secret_index_limit`) and nothing changes. The cipher takes a purpose, so the index is sealed as `secret_index`.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit e5d598b09d55`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C e5d598b09d55
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/core/claims/test_secret_index.py b/backend/tests/core/claims/test_secret_index.py
@@ -2932,11 +2937,7 @@ index 0000000..846b0f0
 +    assert secret_index.MIN_SECRET == MIN_SECRET
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/core/claims/test_secret_index.py`
-
-Expected: FAIL. `secret_index` doesn't exist yet. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/core/claims/test_secret_index.py`): they failed, as expected: `secret_index` doesn't exist yet. The replay showed:
 
 ````text
 E   ImportError: cannot import name 'secret_index' from 'dewpoint.core.claims'
@@ -2944,7 +2945,7 @@ ERROR tests/core/claims/test_secret_index.py - ImportError while importing te...
 1 error in 6.64s
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/core/claims/cipher.py b/backend/src/dewpoint/core/claims/cipher.py
@@ -3112,27 +3113,13 @@ index 0000000..ee1b1ab
 +    return Index(row.version + 1, tuple(merged))
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/core/claims/test_secret_index.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/core/claims/test_secret_index.py`): they passed. The replay showed:
 
 ````text
 6 passed in 12.97s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,288 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(claims): a run tree's secret index, encrypted, versioned and bounded (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,288 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -3161,7 +3148,21 @@ run's input instead. Publishing again a version with one fails the same way. Tas
 task first wrote (the owner's milestone-2 rulings): null and `""` are refused too, and a sensitive variable has no
 default.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit b3593482b344`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C b3593482b344
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/worker/test_run_graph_policies.py b/backend/tests/apps/worker/test_run_graph_policies.py
@@ -3299,11 +3300,7 @@ index 0000000..df96485
 +    assert nid("s")  # the node exists: only the variable is at fault
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_policies.py tests/engine/graph/test_validate_sensitive.py`
-
-Expected: FAIL. Publish accepts sensitive literals and defaults. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_policies.py tests/engine/graph/test_validate_sensitive.py`): they failed, as expected: publish accepts sensitive literals and defaults. The replay showed:
 
 ````text
 E       AssertionError: assert ('sensitive.literal', '/token') in []
@@ -3324,7 +3321,7 @@ E        +  where [] = diagnostics(<tests.support.graphs.G object at 0x10f5e5f30
 10 failed, 36 passed in 27.59s
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/engine/graph/validate.py b/backend/src/dewpoint/engine/graph/validate.py
@@ -3515,27 +3512,13 @@ index e63c120..f3620fb 100644
 +    return False
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_policies.py tests/engine/graph/test_validate_sensitive.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_policies.py tests/engine/graph/test_validate_sensitive.py`): they passed. The replay showed:
 
 ````text
 46 passed in 29.08s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,300 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(publish): sensitive literals and defaults are refused (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,300 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -3576,7 +3559,21 @@ tainted: all, none, or field by field with a rule for other keys and list elemen
 Migration 0015 stores each version's tainted sites and its outputs' taint map (null for versions published before:
 unknown, so tainted to a parent). Runs don't use them yet.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 675016466b69`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 675016466b69
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/test_workflow_ops.py b/backend/tests/apps/test_workflow_ops.py
@@ -3855,11 +3852,7 @@ index 0000000..b49e340
 +    assert CLEAN.to_json() is False and TAINTED.to_json() is True
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_workflow_ops.py tests/engine/graph/test_validate_taint.py tests/engine/test_taint.py`
-
-Expected: FAIL. `dewpoint.engine.taint` doesn't exist yet, and versions record no taint. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_workflow_ops.py tests/engine/graph/test_validate_taint.py tests/engine/test_taint.py`): they failed, as expected: `dewpoint.engine.taint` doesn't exist yet, and versions record no taint. The replay showed:
 
 ````text
 E   ModuleNotFoundError: No module named 'dewpoint.engine.taint'
@@ -3880,7 +3873,7 @@ FAILED tests/engine/graph/test_validate_taint.py::test_item_takes_its_loops_elem
 10 failed, 15 passed, 1 error in 20.00s
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/migrations/versions/0015_version_taint.py b/backend/migrations/versions/0015_version_taint.py
@@ -4473,27 +4466,13 @@ index 0000000..c190fca
 +    return _shape([schema], root if root is not None else schema, 0)
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_workflow_ops.py tests/engine/graph/test_validate_taint.py tests/engine/test_taint.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_workflow_ops.py tests/engine/graph/test_validate_taint.py tests/engine/test_taint.py`): they passed. The replay showed:
 
 ````text
 35 passed in 13.93s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,320 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(publish): the taint analysis, per path, recorded on the version (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,320 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -4529,7 +4508,21 @@ Publish refuses an unlisted tainted decision (`taint.undeclassified`) and an ent
 entries needs `workflow.declassify` (tenant admins and owners), and its publish audit entry lists each site and what it
 reveals. A filter's entry names the field that makes it a decision, `/items` or `/predicate`.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 63d73813e40c`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 63d73813e40c
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/test_workflow_ops.py b/backend/tests/apps/test_workflow_ops.py
@@ -4830,11 +4823,7 @@ index 70aa097..098fb62 100644
      found = tainted(checked(g))
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_workflow_ops.py tests/apps/worker/test_run_graph_children.py tests/apps/worker/test_run_graph_continue.py tests/apps/worker/test_run_graph_sizes.py tests/engine/graph/test_validate.py tests/engine/graph/test_validate_cel.py tests/engine/graph/test_validate_declassify.py tests/engine/graph/test_validate_taint.py`
-
-Expected: FAIL. `graph.settings.declassify` isn't part of the graph's format yet, and tainted decisions publish unlisted. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_workflow_ops.py tests/apps/worker/test_run_graph_children.py tests/apps/worker/test_run_graph_continue.py tests/apps/worker/test_run_graph_sizes.py tests/engine/graph/test_validate.py tests/engine/graph/test_validate_cel.py tests/engine/graph/test_validate_declassify.py tests/engine/graph/test_validate_taint.py`): they failed, as expected: `graph.settings.declassify` isn't part of the graph's format yet, and tainted decisions publish unlisted. The replay showed:
 
 ````text
 E       AssertionError: assert (None is None and [('graph.form.../declassify')] == [('declassify.../declassify')]
@@ -4855,7 +4844,7 @@ FAILED tests/engine/graph/test_validate_declassify.py::test_a_filter_lists_each_
 12 failed, 152 passed in 30.33s
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/apps/workflow_ops.py b/backend/src/dewpoint/apps/workflow_ops.py
@@ -5105,27 +5094,13 @@ index 6d712a7..eb05f87 100644
      )
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_workflow_ops.py tests/apps/worker/test_run_graph_children.py tests/apps/worker/test_run_graph_continue.py tests/apps/worker/test_run_graph_sizes.py tests/engine/graph/test_validate.py tests/engine/graph/test_validate_cel.py tests/engine/graph/test_validate_declassify.py tests/engine/graph/test_validate_taint.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_workflow_ops.py tests/apps/worker/test_run_graph_children.py tests/apps/worker/test_run_graph_continue.py tests/apps/worker/test_run_graph_sizes.py tests/engine/graph/test_validate.py tests/engine/graph/test_validate_cel.py tests/engine/graph/test_validate_declassify.py tests/engine/graph/test_validate_taint.py`): they passed. The replay showed:
 
 ````text
 164 passed in 31.70s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,326 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(publish): declassification is listed, checked, permitted and audited (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,326 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -5154,7 +5129,21 @@ and a tainted value passed into a sub-flow input the child doesn't mark sensitiv
 by part) are refused at publish. A tainted CEL expression is recorded to run in the evaluator, with the reason "reads
 sensitive data". The draft check returns the tainted sites and what each declassified site reveals.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit efab162649a5`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C efab162649a5
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/api/test_workflows.py b/backend/tests/apps/api/test_workflows.py
@@ -5469,11 +5458,7 @@ index 84df468..34798a2 100644
  class SecretBlobConfig(BaseModel):
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/api/test_workflows.py tests/apps/worker/test_gate_task_cost.py tests/apps/worker/test_run_graph_policies.py tests/engine/graph/test_validate.py tests/engine/graph/test_validate_cel.py tests/engine/graph/test_validate_refused_taint.py`
-
-Expected: FAIL. A tainted CEL value still publishes as local, and the §4.5 refusals don't exist. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/api/test_workflows.py tests/apps/worker/test_gate_task_cost.py tests/apps/worker/test_run_graph_policies.py tests/engine/graph/test_validate.py tests/engine/graph/test_validate_cel.py tests/engine/graph/test_validate_refused_taint.py`): they failed, as expected: a tainted CEL value still publishes as local, and the §4.5 refusals don't exist. The replay showed:
 
 ````text
 E       AssertionError: assert [{'node': '6f...eason': None}] == [{'node': '6f...sitive data'}]
@@ -5494,7 +5479,7 @@ E         Right contains one more item: ('taint.subflow_input', '/input/login')
 7 failed, 131 passed in 75.12s (0:01:15)
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/apps/api/routes/workflows.py b/backend/src/dewpoint/apps/api/routes/workflows.py
@@ -5602,27 +5587,13 @@ index eb05f87..20a6edc 100644
      def _root_tainted(self, site: _Site, root: str) -> bool:
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/api/test_workflows.py tests/apps/worker/test_gate_task_cost.py tests/apps/worker/test_run_graph_policies.py tests/engine/graph/test_validate.py tests/engine/graph/test_validate_cel.py tests/engine/graph/test_validate_refused_taint.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/api/test_workflows.py tests/apps/worker/test_gate_task_cost.py tests/apps/worker/test_run_graph_policies.py tests/engine/graph/test_validate.py tests/engine/graph/test_validate_cel.py tests/engine/graph/test_validate_refused_taint.py`): they passed. The replay showed:
 
 ````text
 138 passed in 73.98s (0:01:13)
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,332 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(publish): refused at publish (§4.5) and the editor's explanations (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,332 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -5663,7 +5634,21 @@ From the owner's milestone-2 checkpoint:
 - A CEL index by a computed key or position into a chain, or an element of one, is tainted even into plain data, and
   runs in the evaluator.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit f24d0b61a838`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C f24d0b61a838
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/worker/test_gate_task_cost.py b/backend/tests/apps/worker/test_gate_task_cost.py
@@ -6000,11 +5985,7 @@ index b49e340..279bc8f 100644
 +    assert from_schema(marking).at(("k",)) == TAINTED
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_gate_task_cost.py tests/apps/worker/test_run_graph_policies.py tests/engine/cel/test_gate_cost.py tests/engine/graph/test_validate_sensitive.py tests/engine/graph/test_validate_taint.py tests/engine/test_split.py tests/engine/test_taint.py`
-
-Expected: FAIL. Empty sensitive defaults still publish, `vars.unassigned` isn't raised, and `tainted_positions` doesn't exist. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_gate_task_cost.py tests/apps/worker/test_run_graph_policies.py tests/engine/cel/test_gate_cost.py tests/engine/graph/test_validate_sensitive.py tests/engine/graph/test_validate_taint.py tests/engine/test_split.py tests/engine/test_taint.py`): they failed, as expected: empty sensitive defaults still publish, `vars.unassigned` isn't raised, and `tainted_positions` doesn't exist. The replay showed:
 
 ````text
 E   ImportError: cannot import name 'tainted_positions' from 'dewpoint.engine.taint'
@@ -6025,7 +6006,7 @@ E       AssertionError: assert set() == {('a', '/valu...c', '/value')}
 ERROR tests/engine/test_split.py - ImportError while importing test module '/...
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/engine/cel/ast.py b/backend/src/dewpoint/engine/cel/ast.py
@@ -6692,29 +6673,21 @@ index c190fca..6fe1d99 100644
 +    return out
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_gate_task_cost.py tests/apps/worker/test_run_graph_policies.py tests/engine/cel/test_gate_cost.py tests/engine/graph/test_validate_sensitive.py tests/engine/graph/test_validate_taint.py tests/engine/test_split.py tests/engine/test_taint.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_gate_task_cost.py tests/apps/worker/test_run_graph_policies.py tests/engine/cel/test_gate_cost.py tests/engine/graph/test_validate_sensitive.py tests/engine/graph/test_validate_taint.py tests/engine/test_split.py tests/engine/test_taint.py`): they passed. The replay showed:
 
 ````text
 120 passed in 77.97s (0:01:17)
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
+*The whole suite at this commit*, as recorded when it was made: 1,353 passed and 8 skipped, ruff, mypy and import-linter clean.
 
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
+**Checkpoint:** run this milestone's focused tests, then stop for the owner's review of milestone 2 (taint at publish).
 
-Expected: together, 1,353 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
+- [ ] **Step 3: The milestone's focused tests**
 
-- [ ] **Step 6: Commit**
+Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/api/test_workflows.py tests/apps/test_workflow_ops.py tests/apps/worker/test_gate_task_cost.py tests/apps/worker/test_run_graph_children.py tests/apps/worker/test_run_graph_continue.py tests/apps/worker/test_run_graph_policies.py tests/apps/worker/test_run_graph_sizes.py tests/core/claims/test_cipher.py tests/core/claims/test_rls_claims.py tests/core/claims/test_secret_index.py tests/core/claims/test_service.py tests/engine/cel/test_gate_cost.py tests/engine/graph/test_validate.py tests/engine/graph/test_validate_cel.py tests/engine/graph/test_validate_declassify.py tests/engine/graph/test_validate_refused_taint.py tests/engine/graph/test_validate_sensitive.py tests/engine/graph/test_validate_taint.py tests/engine/test_handles.py tests/engine/test_resolution.py tests/engine/test_split.py tests/engine/test_taint.py`
 
-```bash
-git add -A backend docs && git commit -m "fix(publish): the owner's milestone-2 rulings: literals, nullable variables, unions, dynamic reads (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
-
-**Checkpoint:** stop here for the owner's review of milestone 2 (taint at publish).
+Expected: 346 passed (the replay, at this commit).
 
 ---
 
@@ -6733,7 +6706,7 @@ git add -A backend docs && git commit -m "fix(publish): the owner's milestone-2 
 - Modify: `backend/tests/engine/cel/test_profile.py`
 - Modify: `backend/tests/engine/replay/scenarios.py`
 - Modify: `backend/tests/engine/runtime/test_ids.py`
-- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (recorded, below)
+- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (with the commit)
 
 **Interfaces:**
 - Produces: `ENGINE_ABI = 6`; `dewpoint.engine.runtime.ids`: `KEY`, `MAX_LOOP_DEPTH`, `ITEM_CAP_MAX`, `ID_MAX`,
@@ -6746,7 +6719,21 @@ longest form, `ID_MAX`; `batch_workflow_id` builds it. The ids module keeps its 
 loop depth and the item cap, pinned by tests. `ENGINE_ABI` becomes 6, with its golden histories, which later tasks
 record again as they change commands.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 4bb96762b651`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 4bb96762b651
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/test_codec.py b/backend/tests/apps/test_codec.py
@@ -6890,11 +6877,7 @@ index 0d0c4d2..213a90b 100644
 +    assert caps == [ids.ITEM_CAP_MAX]
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_codec.py tests/apps/worker/test_temporal_contract.py tests/engine/cel/test_profile.py tests/engine/runtime/test_ids.py`
-
-Expected: FAIL. The ids module has no `ID_MAX` or batch grammar yet, and `ENGINE_ABI` is still 5. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_codec.py tests/apps/worker/test_temporal_contract.py tests/engine/cel/test_profile.py tests/engine/runtime/test_ids.py`): they failed, as expected: the ids module has no `ID_MAX` or batch grammar yet, and `ENGINE_ABI` is still 5. The replay showed:
 
 ````text
 E   ImportError: cannot import name 'ID_MAX' from 'dewpoint.engine.runtime.ids'
@@ -6907,7 +6890,7 @@ ERROR tests/engine/runtime/test_ids.py - ImportError while importing test mod...
 1 failed, 22 passed, 1 error in 43.50s
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/engine/__init__.py b/backend/src/dewpoint/engine/__init__.py
@@ -6998,33 +6981,15 @@ index d35ebe1..64e3f34 100644
      m = _RUN.fullmatch(workflow_id) or _SCHEDULE.fullmatch(workflow_id)
 ````
 
-- [ ] **Step 4: Record the abi6 golden histories**
+*The golden histories:* recorded again with this commit (the prototype's recording comes with it). To record them anew: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`; their count varies from recording to recording (continue-as-new falls where a race puts it), and every one must replay.
 
-Run: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`
-
-Expected: `dewpoint-0.1.0+abi6: recorded batches, branches, cancelled, continue_as_new, deadline, drain, errors, evaluator, failed, failure_handler, grants, local_cel, loops, simulate, stop, subflows, variables_and_timers, version_unusable`. The version-unusable scenario logs a `ProgramError` traceback: that's the scenario. The files' count varies from recording to recording (continue-as-new falls where a race puts it); every one must replay. The commit carries the prototype's recording.
-
-- [ ] **Step 5: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_codec.py tests/apps/worker/test_temporal_contract.py tests/engine/cel/test_profile.py tests/engine/runtime/test_ids.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_codec.py tests/apps/worker/test_temporal_contract.py tests/engine/cel/test_profile.py tests/engine/runtime/test_ids.py`): they passed. The replay showed:
 
 ````text
 57 passed in 34.98s
 ````
 
-- [ ] **Step 6: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,374 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(engine): the exact workflow-id grammar and ENGINE_ABI 6 (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,374 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -7076,7 +7041,21 @@ store reads and writes claims under the claim cipher; the harness store does the
 trigger as admission will. A run knows its tree's root (`Parent.root_run_id`). `has(steps.k.output)` and
 `has(steps.k.error)` read the run's shape, not data.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 7c044a6f141f`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 7c044a6f141f
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/worker/harness.py b/backend/tests/apps/worker/harness.py
@@ -7632,11 +7611,7 @@ index 224e746..8bdbeb4 100644
 +    assert await part(ClaimRef(A, "/absent"), fetch) is None
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_real_server.py tests/apps/worker/test_run_graph_handles.py tests/apps/worker/test_run_graph_sizes.py tests/apps/worker/test_store_claims.py tests/apps/worker/test_two_builds.py tests/engine/graph/test_validate_refused_taint.py tests/engine/graph/test_validate_taint.py tests/engine/runtime/test_resolve_handles.py tests/engine/test_resolution.py`
-
-Expected: FAIL. Nothing reads handles yet: `handles.part`, the claim-aware `cel_activity` and store, a read that stops at a handle. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_real_server.py tests/apps/worker/test_run_graph_handles.py tests/apps/worker/test_run_graph_sizes.py tests/apps/worker/test_store_claims.py tests/apps/worker/test_two_builds.py tests/engine/graph/test_validate_refused_taint.py tests/engine/graph/test_validate_taint.py tests/engine/runtime/test_resolve_handles.py tests/engine/test_resolution.py`): they failed, as expected: nothing reads handles yet: `handles.part`, the claim-aware `cel_activity` and store, a read that stops at a handle. The replay showed:
 
 ````text
 E   ImportError: cannot import name 'part' from 'dewpoint.engine.handles'
@@ -7657,7 +7632,7 @@ E
 FAILED tests/apps/worker/test_run_graph_sizes.py::test_a_workflow_task_sends_at_most_its_bytes_of_every_command[cached]
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/apps/worker/activities.py b/backend/src/dewpoint/apps/worker/activities.py
@@ -8801,27 +8776,13 @@ index 756b7ae..b1954d5 100644
              "run_id": self.run_id,
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_real_server.py tests/apps/worker/test_run_graph_handles.py tests/apps/worker/test_run_graph_sizes.py tests/apps/worker/test_store_claims.py tests/apps/worker/test_two_builds.py tests/engine/graph/test_validate_refused_taint.py tests/engine/graph/test_validate_taint.py tests/engine/runtime/test_resolve_handles.py tests/engine/test_resolution.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_real_server.py tests/apps/worker/test_run_graph_handles.py tests/apps/worker/test_run_graph_sizes.py tests/apps/worker/test_store_claims.py tests/apps/worker/test_two_builds.py tests/engine/graph/test_validate_refused_taint.py tests/engine/graph/test_validate_taint.py tests/engine/runtime/test_resolve_handles.py tests/engine/test_resolution.py`): they passed. The replay showed:
 
 ````text
 66 passed in 56.82s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,390 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(engine): reading handles: never in the workflow, always in an activity (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,390 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -8868,7 +8829,21 @@ node ran fails the step `claim_unavailable` with its outcome. Every message leav
 activities is masked against the index, and the project activity masks every row before writing it. The workflow
 checks what arrives: plain data at a sensitive position fails the run `internal_error`.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 8dbed2d10779`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 8dbed2d10779
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/worker/harness.py b/backend/tests/apps/worker/harness.py
@@ -9685,11 +9660,7 @@ index 7364248..4599526 100644
 +    assert Matcher([long]).found("x" + long + "x") == {long}
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_activities.py tests/apps/worker/test_admission_abi.py tests/apps/worker/test_dev_run.py tests/apps/worker/test_run_graph.py tests/apps/worker/test_run_graph_boundary.py tests/apps/worker/test_run_graph_children.py tests/apps/worker/test_run_graph_policies.py tests/apps/worker/test_run_graph_sizes.py tests/apps/worker/test_store_claims.py tests/apps/worker/test_worker_db.py tests/engine/test_split.py`
-
-Expected: FAIL. A step's activity takes no claim store, and its output and messages leave it unsplit and unmasked. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_activities.py tests/apps/worker/test_admission_abi.py tests/apps/worker/test_dev_run.py tests/apps/worker/test_run_graph.py tests/apps/worker/test_run_graph_boundary.py tests/apps/worker/test_run_graph_children.py tests/apps/worker/test_run_graph_policies.py tests/apps/worker/test_run_graph_sizes.py tests/apps/worker/test_store_claims.py tests/apps/worker/test_worker_db.py tests/engine/test_split.py`): they failed, as expected: a step's activity takes no claim store, and its output and messages leave it unsplit and unmasked. The replay showed:
 
 ````text
 E       TypeError: step_activity_for() takes 1 positional argument but 2 were given
@@ -9710,7 +9681,7 @@ E       AssertionError: assert {'code': 'none'} == {'code': 'out...ma_violation'
 FAILED tests/apps/worker/test_activities.py::test_simulation_calls_simulate_or_says_it_cannot
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/apps/worker/activities.py b/backend/src/dewpoint/apps/worker/activities.py
@@ -10357,27 +10328,13 @@ index 6fe1d99..a8a0c86 100644
      return out
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_activities.py tests/apps/worker/test_admission_abi.py tests/apps/worker/test_dev_run.py tests/apps/worker/test_run_graph.py tests/apps/worker/test_run_graph_boundary.py tests/apps/worker/test_run_graph_children.py tests/apps/worker/test_run_graph_policies.py tests/apps/worker/test_run_graph_sizes.py tests/apps/worker/test_store_claims.py tests/apps/worker/test_worker_db.py tests/engine/test_split.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_activities.py tests/apps/worker/test_admission_abi.py tests/apps/worker/test_dev_run.py tests/apps/worker/test_run_graph.py tests/apps/worker/test_run_graph_boundary.py tests/apps/worker/test_run_graph_children.py tests/apps/worker/test_run_graph_policies.py tests/apps/worker/test_run_graph_sizes.py tests/apps/worker/test_store_claims.py tests/apps/worker/test_worker_db.py tests/engine/test_split.py`): they passed. The replay showed:
 
 ````text
 163 passed in 33.53s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,401 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(worker): the activity boundary, the secret index at it, masking in activities (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,401 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -10404,7 +10361,21 @@ leaves nothing, and returns the envelope the start carries. `start_run` seals wi
 role by default. The check of the raw trigger's size goes: the envelope is bounded by `TRIGGER_INLINE`, so a start
 always fits. (Task 47 changes how a refusal names a place the data supplied.)
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit f21ce7f7641e`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C f21ce7f7641e
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/test_runs.py b/backend/tests/apps/test_runs.py
@@ -10590,11 +10561,7 @@ index 7f53cd2..4a1eb9f 100644
 +    assert contains_marker(arg.trigger) and len(json.dumps(arg.trigger)) <= TRIGGER_INLINE
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_runs.py`
-
-Expected: FAIL. Admission doesn't validate or claim the trigger yet (`runs.keyring_keys` doesn't exist). The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_runs.py`): they failed, as expected: admission doesn't validate or claim the trigger yet (`runs.keyring_keys` doesn't exist). The replay showed:
 
 ````text
 E       AttributeError: <module 'dewpoint.apps.runs' from 'backend/src/dewpoint/apps/runs.py'> h
@@ -10615,7 +10582,7 @@ ERROR tests/apps/test_runs.py::test_admission_first_holds_a_workflow_change_unti
 28 errors in 19.85s
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/apps/inputs.py b/backend/src/dewpoint/apps/inputs.py
@@ -10871,27 +10838,13 @@ index 036aae7..6ffc8f9 100644
      "StartUncertainError",
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_runs.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_runs.py`): they passed. The replay showed:
 
 ````text
 28 passed in 21.68s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,405 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(admission): the trigger is validated, claimed and indexed before the run starts (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,405 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -10911,7 +10864,21 @@ A branch's condition or a switch case's `when` that reads a handle goes to `cel.
 decision: the activity resolves it against its row, checks it's a boolean, and gives back the plain decision, the only
 thing the listed site reveals. CEL at those sites already came back plain; references now do too.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 58cc8ecc2059`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 58cc8ecc2059
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/worker/test_run_graph_handles.py b/backend/tests/apps/worker/test_run_graph_handles.py
@@ -10959,11 +10926,7 @@ index 60115f6..936b126 100644
 +    assert {"y", "d"} <= ran and not {"n", "g"} & ran
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_handles.py`
-
-Expected: FAIL. A branch over a handle still reads it in the workflow, which finds no boolean there. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_handles.py`): they failed, as expected: a branch over a handle still reads it in the workflow, which finds no boolean there. The replay showed:
 
 ````text
 E       AssertionError: {'attempt': 1, 'code': 'type_mismatch', 'message': '`condition` must be true or false.'}
@@ -10975,7 +10938,7 @@ FAILED tests/apps/worker/test_run_graph_handles.py::test_a_reference_to_a_sensit
 1 failed, 6 passed in 15.09s
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/engine/runtime/execution.py b/backend/src/dewpoint/engine/runtime/execution.py
@@ -11036,27 +10999,13 @@ index 79a7136..71d88cd 100644
          return Claiming(
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_handles.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_handles.py`): they passed. The replay showed:
 
 ````text
 7 passed in 17.28s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,406 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(engine): a listed decision over a handle is made where the claim is read (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,406 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -11078,7 +11027,21 @@ the list, `ClaimRef(X, "/n")`. Batches carry item handles; a body step reads its
 handle too long to extend is derived first; a count past the largest item cap is cut there, and the loop fails its cap
 as before.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit b1eba7d05b64`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C b1eba7d05b64
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/worker/test_run_graph_handles.py b/backend/tests/apps/worker/test_run_graph_handles.py
@@ -11142,11 +11105,7 @@ index 936b126..76abc5d 100644
 +    return claim.value, claim.sensitive_pointers == ("",)
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_handles.py`
-
-Expected: FAIL. A loop over a handle still reads it in the workflow, which finds no list there. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_handles.py`): they failed, as expected: a loop over a handle still reads it in the workflow, which finds no list there. The replay showed:
 
 ````text
 E       AssertionError: {'attempt': 1, 'code': 'type_mismatch', 'message': '`items` must be a list.'}
@@ -11159,7 +11118,7 @@ FAILED tests/apps/worker/test_run_graph_handles.py::test_a_loop_over_a_sensitive
 2 failed, 7 passed in 15.88s
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/engine/runtime/execution.py b/backend/src/dewpoint/engine/runtime/execution.py
@@ -11210,27 +11169,13 @@ index 71d88cd..5805935 100644
          profile = self.program.cel_profile
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_handles.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_handles.py`): they passed. The replay showed:
 
 ````text
 9 passed in 16.14s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,408 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(engine): a loop over a handle: its count from an activity, its items handles (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,408 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -11259,7 +11204,21 @@ batches of 1,000, and stores the kept items as one claim, tainted when the items
 gets the kept items' handle, the kept count and the input count, never a per-item decision, and charges the budget the
 input count. The binder can leave a filter's item and index out (`bind(skip=)`) and bind them later (`bind_item`).
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 0a364e701f7a`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 0a364e701f7a
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/worker/test_run_graph_handles.py b/backend/tests/apps/worker/test_run_graph_handles.py
@@ -11306,11 +11265,7 @@ index 76abc5d..8e9df9b 100644
 +    assert held(store, result.outputs["kept"]) == (["k3y-a", "k3y-c"], True)
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_handles.py`
-
-Expected: FAIL. A filter over a handle, or with a tainted predicate, still runs in the workflow. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_handles.py`): they failed, as expected: a filter over a handle, or with a tainted predicate, still runs in the workflow. The replay showed:
 
 ````text
 E       AssertionError: {'attempt': 1, 'code': 'type_mismatch', 'message': '`predicate` must give true or false.'}
@@ -11324,7 +11279,7 @@ FAILED tests/apps/worker/test_run_graph_handles.py::test_a_filter_over_a_sensiti
 2 failed, 9 passed in 17.27s
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/apps/worker/activities.py b/backend/src/dewpoint/apps/worker/activities.py
@@ -11563,27 +11518,13 @@ index 902d8fc..33f66b4 100644
      "holds_handle",
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_handles.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_handles.py`): they passed. The replay showed:
 
 ````text
 11 passed in 18.63s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,410 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(engine): the tainted filter runs whole in one activity (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,410 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -11604,7 +11545,7 @@ git add -A backend docs && git commit -m "feat(engine): the tainted filter runs 
 - Modify: `backend/tests/apps/worker/test_real_server.py`
 - Modify: `backend/tests/apps/worker/test_run_graph_handles.py`
 - Modify: `backend/tests/apps/worker/test_run_graph_sizes.py`
-- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (recorded, below)
+- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (with the commit)
 
 **Interfaces:**
 - Produces: `dewpoint.apps.worker.claims`: `grant`, `child_input`; `dewpoint.engine.runtime.activities`:
@@ -11619,7 +11560,21 @@ returns, it grants its parent the handles in its outputs (`claims.grant`). A fai
 data. Binding sets are checked for handles one by one, and `cel.evaluate` refuses a request whose bindings hold
 handles without claims.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 7a4a6c35fa1a`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 7a4a6c35fa1a
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/worker/harness.py b/backend/tests/apps/worker/harness.py
@@ -11771,11 +11726,7 @@ index 09b35a6..dab5c19 100644
      g.node(
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_activities.py tests/apps/worker/test_real_server.py tests/apps/worker/test_run_graph_handles.py tests/apps/worker/test_run_graph_sizes.py`
-
-Expected: FAIL. A sub-flow gets its parent's handles without grants, so it may not read them, and nothing splits its input. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_activities.py tests/apps/worker/test_real_server.py tests/apps/worker/test_run_graph_handles.py tests/apps/worker/test_run_graph_sizes.py`): they failed, as expected: a sub-flow gets its parent's handles without grants, so it may not read them, and nothing splits its input. The replay showed:
 
 ````text
 E       AssertionError: evaluated
@@ -11796,7 +11747,7 @@ FAILED tests/apps/worker/test_run_graph_handles.py::test_a_sensitive_value_cross
 4 failed, 58 passed in 25.23s
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/apps/worker/activities.py b/backend/src/dewpoint/apps/worker/activities.py
@@ -12295,33 +12246,15 @@ index 4d592d8..f579832 100644
      for pointer in tainted_positions(value, from_schema(schema)):
 ````
 
-- [ ] **Step 4: Record the abi6 golden histories again**
+*The golden histories:* recorded again with this commit (the prototype's recording comes with it). To record them anew: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`; their count varies from recording to recording (continue-as-new falls where a race puts it), and every one must replay.
 
-Run: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`
-
-Expected: `dewpoint-0.1.0+abi6: recorded batches, branches, cancelled, continue_as_new, deadline, drain, errors, evaluator, failed, failure_handler, grants, local_cel, loops, simulate, stop, subflows, variables_and_timers, version_unusable`. The version-unusable scenario logs a `ProgramError` traceback: that's the scenario. The files' count varies from recording to recording (continue-as-new falls where a race puts it); every one must replay. The commit carries the prototype's recording.
-
-- [ ] **Step 5: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_activities.py tests/apps/worker/test_real_server.py tests/apps/worker/test_run_graph_handles.py tests/apps/worker/test_run_graph_sizes.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_activities.py tests/apps/worker/test_real_server.py tests/apps/worker/test_run_graph_handles.py tests/apps/worker/test_run_graph_sizes.py`): they passed. The replay showed:
 
 ````text
 62 passed in 25.77s
 ````
 
-- [ ] **Step 6: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,414 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(engine): claims cross between parent and child runs only through grants (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,414 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -12358,7 +12291,21 @@ Its tests pass before and after: it removes the workflow's own masking, whose jo
 project activity already do (Tasks 14 and 19). They move to claimed triggers, so they keep exercising the path that
 remains, and the bound on a run's secrets becomes the index's.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 3a945de02204`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 3a945de02204
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/test_runs.py b/backend/tests/apps/test_runs.py
@@ -12666,7 +12613,7 @@ index fe67c66..fbe5827 100644
      assert all(size.encoded_bytes(r, JSON) <= size.PAYLOAD_BYTES // 4 for r in results)
 ````
 
-- [ ] **Step 2: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/apps/worker/activities.py b/backend/src/dewpoint/apps/worker/activities.py
@@ -13335,27 +13282,13 @@ index 9b7c57a..ab10b37 100644
  __all__ = [
 ````
 
-- [ ] **Step 3: Run them: each passes**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_runs.py tests/apps/worker/test_run_graph_policies.py tests/apps/worker/test_run_graph_sizes.py tests/engine/runtime/test_projection.py tests/engine/runtime/test_size.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_runs.py tests/apps/worker/test_run_graph_policies.py tests/apps/worker/test_run_graph_sizes.py tests/engine/runtime/test_projection.py tests/engine/runtime/test_size.py`): they passed before it too. The replay showed:
 
 ````text
 91 passed in 28.59s
 ````
 
-- [ ] **Step 4: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,413 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(engine): learned secrets leave the workflow; SECRETS_BYTES retires (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,413 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -13366,7 +13299,7 @@ git add -A backend docs && git commit -m "feat(engine): learned secrets leave th
 **Files:**
 - Modify: `backend/src/dewpoint/apps/worker/health.py`
 - Modify: `backend/tests/apps/worker/test_health.py`
-- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (recorded, below)
+- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (with the commit)
 
 **Interfaces:**
 - Produces: `CAPABILITIES = ("cel_request_size_guard", "claim_check", "payload_codec")`, `CLAIM_PRIVILEGES`.
@@ -13377,7 +13310,21 @@ role may read and write claims, grants and the secret index, read from the catal
 tenant. A role that can't fails the check, definitely; a database that doesn't answer proves nothing, as for
 `payload_codec`. The abi6 goldens are recorded again: results and snapshots carry no secrets.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 6afedc75322b`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 6afedc75322b
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/worker/test_health.py b/backend/tests/apps/worker/test_health.py
@@ -13412,11 +13359,7 @@ index 0ad9c22..64a2f58 100644
 +        await dispatch.dispose()
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_health.py`
-
-Expected: FAIL. `claim_check` isn't a capability yet, and the self-check doesn't prove the claim grants. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_health.py`): they failed, as expected: `claim_check` isn't a capability yet, and the self-check doesn't prove the claim grants. The replay showed:
 
 ````text
 E       AssertionError: assert 'claim_check' in ('cel_request_size_guard', 'payload_codec')
@@ -13424,7 +13367,7 @@ FAILED tests/apps/worker/test_health.py::test_the_check_proves_the_claim_store_a
 1 failed, 7 passed in 13.12s
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/apps/worker/health.py b/backend/src/dewpoint/apps/worker/health.py
@@ -13487,33 +13430,15 @@ index f453305..9a93105 100644
  def reporter(
 ````
 
-- [ ] **Step 4: Record the abi6 golden histories again**
+*The golden histories:* recorded again with this commit (the prototype's recording comes with it). To record them anew: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`; their count varies from recording to recording (continue-as-new falls where a race puts it), and every one must replay.
 
-Run: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`
-
-Expected: `dewpoint-0.1.0+abi6: recorded batches, branches, cancelled, continue_as_new, deadline, drain, errors, evaluator, failed, failure_handler, grants, local_cel, loops, simulate, stop, subflows, variables_and_timers, version_unusable`. The version-unusable scenario logs a `ProgramError` traceback: that's the scenario. The files' count varies from recording to recording (continue-as-new falls where a race puts it); every one must replay. The commit carries the prototype's recording.
-
-- [ ] **Step 5: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_health.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_health.py`): they passed. The replay showed:
 
 ````text
 8 passed in 13.62s
 ````
 
-- [ ] **Step 6: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,414 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(worker): claim_check, proven by the self-check (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,414 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -13547,7 +13472,21 @@ the index it read before the attempt: at its output and error exits it checks th
 if another activity extended it; claiming the output extends the index, which the extensions before it serialize, and
 splits again when that shows strings it didn't use.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 38216d768527`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 38216d768527
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/worker/harness.py b/backend/tests/apps/worker/harness.py
@@ -13779,11 +13718,7 @@ index 34798a2..46451af 100644
  )
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_boundary.py tests/apps/worker/test_run_graph_handles.py tests/apps/worker/test_run_graph_sizes.py tests/engine/graph/test_validate_reserved.py`
-
-Expected: FAIL. The harness's store versions the index, which the old boundary never reads again, and the marker isn't reserved: the boundary and handle tests fail, and the tripwire test waits forever on the old code (the replay stopped it after 8 minutes). The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_boundary.py tests/apps/worker/test_run_graph_handles.py tests/apps/worker/test_run_graph_sizes.py tests/engine/graph/test_validate_reserved.py`): they failed, as expected: the harness's store versions the index, which the old boundary never reads again, and the marker isn't reserved: the boundary and handle tests fail, and the tripwire test waits forever on the old code (the replay stopped it after 8 minutes). The replay showed:
 
 ````text
 STOPPED after 480s: these tests never ended:
@@ -13804,7 +13739,7 @@ FAILED tests/apps/worker/test_run_graph_sizes.py::test_a_step_output_too_large_t
 FAILED tests/apps/worker/test_run_graph_sizes.py::test_a_step_whose_secrets_would_pass_the_index_bound_fails
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/apps/worker/activities.py b/backend/src/dewpoint/apps/worker/activities.py
@@ -14156,27 +14091,13 @@ index c1abe21..aa2762a 100644
          out: list[cel.Outcome] = []
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_boundary.py tests/apps/worker/test_run_graph_handles.py tests/apps/worker/test_run_graph_sizes.py tests/engine/graph/test_validate_reserved.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_boundary.py tests/apps/worker/test_run_graph_handles.py tests/apps/worker/test_run_graph_sizes.py tests/engine/graph/test_validate_reserved.py`): they passed. The replay showed:
 
 ````text
 37 passed in 21.95s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,418 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "fix(engine): the marker is reserved, and the secret index is read fresh at the boundary (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,418 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -14208,7 +14129,21 @@ From the owner's milestone-3 checkpoint.
   starting it would send it unsplit into the child's history.
 - A filter the budget refuses after its activity returns has no output.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 64690afe5717`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 64690afe5717
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/worker/test_run_graph_boundary.py b/backend/tests/apps/worker/test_run_graph_boundary.py
@@ -14411,11 +14346,7 @@ index de0a233..30d7f10 100644
 +    )
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_boundary.py tests/apps/worker/test_run_graph_children.py tests/apps/worker/test_run_graph_handles.py`
-
-Expected: FAIL. A size claim crossing into a child's sensitive field isn't reclassified, a lost child version starts the child anyway, and a failure's message isn't masked. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_boundary.py tests/apps/worker/test_run_graph_children.py tests/apps/worker/test_run_graph_handles.py`): they failed, as expected: a size claim crossing into a child's sensitive field isn't reclassified, a lost child version starts the child anyway, and a failure's message isn't masked. The replay showed:
 
 ````text
 FAILED tests/apps/worker/test_run_graph_children.py::test_a_sub_flow_whose_version_is_gone_fails_its_step_and_starts_nothing 
@@ -14436,7 +14367,7 @@ E       AssertionError: n0tes-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ======================== 3 failed, 52 passed in 27.84s =========================
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/apps/worker/activities.py b/backend/src/dewpoint/apps/worker/activities.py
@@ -14780,27 +14711,13 @@ index aa2762a..5d55160 100644
          (engine 2b spec §3.4, §3.5): the envelope its start carries."""
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_boundary.py tests/apps/worker/test_run_graph_children.py tests/apps/worker/test_run_graph_handles.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_boundary.py tests/apps/worker/test_run_graph_children.py tests/apps/worker/test_run_graph_handles.py`): they passed. The replay showed:
 
 ````text
 55 passed in 26.36s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,421 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "fix(engine): claims are reclassified at a crossing, a failure's message is masked, a lost child version fails in the parent (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,421 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -14816,7 +14733,7 @@ git add -A backend docs && git commit -m "fix(engine): claims are reclassified a
 - Modify: `backend/tests/apps/worker/test_run_graph_boundary.py`
 - Modify: `backend/tests/apps/worker/test_run_graph_children.py`
 - Modify: `backend/tests/apps/worker/test_two_builds.py`
-- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (recorded, below)
+- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (with the commit)
 
 **Interfaces:**
 - Produces: no new public names.
@@ -14830,7 +14747,21 @@ A local CEL error is evaluated again remotely and its masked error is kept. A su
 matched against the index: §3.7 matches at activity and projection boundaries, and §4.6 lets untainted data into
 history. Every `flow.fail` now takes one activity.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 2fd984cae874`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 2fd984cae874
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/worker/test_deployment.py b/backend/tests/apps/worker/test_deployment.py
@@ -15008,11 +14939,7 @@ index c48ecaa..2dab4b5 100644
      assert (result.status, result.outputs) == ("succeeded", {"n": 42})
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_deployment.py tests/apps/worker/test_gate_task_cost.py tests/apps/worker/test_run_graph_boundary.py tests/apps/worker/test_run_graph_children.py tests/apps/worker/test_two_builds.py`
-
-Expected: FAIL. A literal `flow.fail` message and a remote CEL error that repeat a secret reach the run's result unmasked. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_deployment.py tests/apps/worker/test_gate_task_cost.py tests/apps/worker/test_run_graph_boundary.py tests/apps/worker/test_run_graph_children.py tests/apps/worker/test_two_builds.py`): they failed, as expected: a literal `flow.fail` message and a remote CEL error that repeat a secret reach the run's result unmasked. The replay showed:
 
 ````text
 FAILED tests/apps/worker/test_run_graph_boundary.py::test_a_literal_failure_message_is_masked_too 
@@ -15033,7 +14960,7 @@ E       assert ({'attempt': 1, 'code': 'workflow_failed', 'message': "The workfl
 =================== 3 failed, 56 passed in 99.37s (0:01:39) ====================
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/apps/worker/claims.py b/backend/src/dewpoint/apps/worker/claims.py
@@ -15147,35 +15074,23 @@ index 5d55160..bce9f50 100644
          """A sub-flow's input, split for the child as a trigger is, this run's handles in it granted to the child
 ````
 
-- [ ] **Step 4: Record the abi6 golden histories again**
+*The golden histories:* recorded again with this commit (the prototype's recording comes with it). To record them anew: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`; their count varies from recording to recording (continue-as-new falls where a race puts it), and every one must replay.
 
-Run: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`
-
-Expected: `dewpoint-0.1.0+abi6: recorded batches, branches, cancelled, continue_as_new, deadline, drain, errors, evaluator, failed, failure_handler, grants, local_cel, loops, simulate, stop, subflows, variables_and_timers, version_unusable`. The version-unusable scenario logs a `ProgramError` traceback: that's the scenario. The files' count varies from recording to recording (continue-as-new falls where a race puts it); every one must replay. The commit carries the prototype's recording.
-
-- [ ] **Step 5: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_deployment.py tests/apps/worker/test_gate_task_cost.py tests/apps/worker/test_run_graph_boundary.py tests/apps/worker/test_run_graph_children.py tests/apps/worker/test_two_builds.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_deployment.py tests/apps/worker/test_gate_task_cost.py tests/apps/worker/test_run_graph_boundary.py tests/apps/worker/test_run_graph_children.py tests/apps/worker/test_two_builds.py`): they passed. The replay showed:
 
 ````text
 59 passed in 97.86s (0:01:37)
 ````
 
-- [ ] **Step 6: The whole suite, lint, types and layers**
+*The whole suite at this commit*, as recorded when it was made: 1,424 passed and 8 skipped, ruff, mypy and import-linter clean.
 
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
+**Checkpoint:** run this milestone's focused tests, then stop for the owner's review of milestone 3 (run-time protection).
 
-Expected: together, 1,424 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
+- [ ] **Step 3: The milestone's focused tests**
 
-- [ ] **Step 7: Commit**
+Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_codec.py tests/apps/test_runs.py tests/apps/worker/test_activities.py tests/apps/worker/test_admission_abi.py tests/apps/worker/test_deployment.py tests/apps/worker/test_dev_run.py tests/apps/worker/test_gate_task_cost.py tests/apps/worker/test_health.py tests/apps/worker/test_real_server.py tests/apps/worker/test_run_graph.py tests/apps/worker/test_run_graph_boundary.py tests/apps/worker/test_run_graph_children.py tests/apps/worker/test_run_graph_handles.py tests/apps/worker/test_run_graph_policies.py tests/apps/worker/test_run_graph_sizes.py tests/apps/worker/test_store_claims.py tests/apps/worker/test_temporal_contract.py tests/apps/worker/test_two_builds.py tests/apps/worker/test_worker_db.py tests/engine/cel/test_profile.py tests/engine/graph/test_validate_refused_taint.py tests/engine/graph/test_validate_reserved.py tests/engine/graph/test_validate_taint.py tests/engine/runtime/test_ids.py tests/engine/runtime/test_projection.py tests/engine/runtime/test_resolve_handles.py tests/engine/runtime/test_size.py tests/engine/test_resolution.py tests/engine/test_split.py`
 
-```bash
-git add -A backend docs && git commit -m "fix(engine): failure messages and remote CEL results cross the secret index (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
-
-**Checkpoint:** stop here for the owner's review of milestone 3 (run-time protection).
+Expected: 350 passed (the replay, at this commit).
 
 ---
 
@@ -15191,7 +15106,7 @@ git add -A backend docs && git commit -m "fix(engine): failure messages and remo
 - Modify: `backend/src/dewpoint/engine/runtime/scheduler.py`
 - Modify: `backend/tests/engine/runtime/test_scheduler_batches.py`
 - Modify: `backend/tests/engine/runtime/test_scheduler_properties.py`
-- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (recorded, below)
+- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (with the commit)
 
 **Interfaces:**
 - Produces: `SNAPSHOT_FORMAT = 2`; the scheduler's handed-out sets (`_handed`, `_collects_out`, `_batches_out`).
@@ -15202,7 +15117,21 @@ index, and no queue. Restoring rebuilds the ready steps, the collects and the ba
 handed out before the snapshot and still runs (a sleeping timer, a collect, a batch child). The property test's
 random snapshots are each checked to rebuild exactly what's queued.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit af9f8c452b9f`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C af9f8c452b9f
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/engine/runtime/test_scheduler_batches.py b/backend/tests/engine/runtime/test_scheduler_batches.py
@@ -15346,11 +15275,7 @@ index 0000000..9056890
 +    assert (b.loop, b.start, b.items) == (loop, 0, list(range(100)))
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/runtime/test_scheduler_batches.py tests/engine/runtime/test_scheduler_properties.py tests/engine/runtime/test_snapshot_format.py`
-
-Expected: FAIL. The snapshot still holds the queues and names steps by id, and hands out again what was out before it. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/runtime/test_scheduler_batches.py tests/engine/runtime/test_scheduler_properties.py tests/engine/runtime/test_snapshot_format.py`): they failed, as expected: the snapshot still holds the queues and names steps by id, and hands out again what was out before it. The replay showed:
 
 ````text
 FAILED tests/engine/runtime/test_snapshot_format.py::test_a_step_handed_out_before_the_snapshot_is_not_handed_out_again 
@@ -15371,7 +15296,7 @@ E                   g=<tests.support.graphs.G object at 0x111fbf350>,
 ======================== 10 failed, 10 passed in 7.12s =========================
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/engine/runtime/execution.py b/backend/src/dewpoint/engine/runtime/execution.py
@@ -15808,33 +15733,15 @@ index 7448ef1..7a73017 100644
  __all__ = [
 ````
 
-- [ ] **Step 4: Record the abi6 golden histories again**
+*The golden histories:* recorded again with this commit (the prototype's recording comes with it). To record them anew: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`; their count varies from recording to recording (continue-as-new falls where a race puts it), and every one must replay.
 
-Run: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`
-
-Expected: `dewpoint-0.1.0+abi6: recorded batches, branches, cancelled, continue_as_new, deadline, drain, errors, evaluator, failed, failure_handler, grants, local_cel, loops, simulate, stop, subflows, variables_and_timers, version_unusable`. The version-unusable scenario logs a `ProgramError` traceback: that's the scenario. The files' count varies from recording to recording (continue-as-new falls where a race puts it); every one must replay. The commit carries the prototype's recording.
-
-- [ ] **Step 5: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/runtime/test_scheduler_batches.py tests/engine/runtime/test_scheduler_properties.py tests/engine/runtime/test_snapshot_format.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/runtime/test_scheduler_batches.py tests/engine/runtime/test_scheduler_properties.py tests/engine/runtime/test_snapshot_format.py`): they passed. The replay showed:
 
 ````text
 20 passed in 7.01s
 ````
 
-- [ ] **Step 6: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,433 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(engine): snapshot_format 2, states without queues (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,433 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -15847,7 +15754,7 @@ git add -A backend docs && git commit -m "feat(engine): snapshot_format 2, state
 - Modify: `backend/src/dewpoint/engine/runtime/program.py`
 - Modify: `backend/src/dewpoint/engine/runtime/scheduler.py`
 - Modify: `backend/tests/engine/runtime/test_scheduler_properties.py`
-- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (recorded, below)
+- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (with the commit)
 
 **Interfaces:**
 - Produces: `OPEN_SCOPES_CAP = 100`; `Program.depth`.
@@ -15861,7 +15768,21 @@ its end. Loops the cap holds back open once scopes are freed. The snapshot carri
 reservation, released loop steps and held slots; a restore defers queued loop steps again. §11.2's counterexample (24
 sibling loops in nested loops) is a test: a shared pool of D scopes gets stuck there.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit cb35431dd052`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C cb35431dd052
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/engine/runtime/test_scheduler_cap.py b/backend/tests/engine/runtime/test_scheduler_cap.py
@@ -16043,11 +15964,7 @@ index ebc4ac9..1352ae9 100644
          batches = [b for b in batches if b.loop not in cancelled]
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/runtime/test_scheduler_cap.py tests/engine/runtime/test_scheduler_properties.py`
-
-Expected: FAIL. Nothing caps the open iterations, so sibling loops in nested iterations open past the cap. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/runtime/test_scheduler_cap.py tests/engine/runtime/test_scheduler_properties.py`): they failed, as expected: nothing caps the open iterations, so sibling loops in nested iterations open past the cap. The replay showed:
 
 ````text
 FAILED tests/engine/runtime/test_scheduler_cap.py::test_the_bound_holds_across_snapshots 
@@ -16068,7 +15985,7 @@ FAILED tests/engine/runtime/test_scheduler_cap.py::test_the_bound_holds_across_s
 ============================== 7 failed in 9.12s ===============================
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/engine/runtime/program.py b/backend/src/dewpoint/engine/runtime/program.py
@@ -16614,33 +16531,15 @@ index 7a73017..bde5abe 100644
          return [
 ````
 
-- [ ] **Step 4: Record the abi6 golden histories again**
+*The golden histories:* recorded again with this commit (the prototype's recording comes with it). To record them anew: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`; their count varies from recording to recording (continue-as-new falls where a race puts it), and every one must replay.
 
-Run: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`
-
-Expected: `dewpoint-0.1.0+abi6: recorded batches, branches, cancelled, continue_as_new, deadline, drain, errors, evaluator, failed, failure_handler, grants, local_cel, loops, simulate, stop, subflows, variables_and_timers, version_unusable`. The version-unusable scenario logs a `ProgramError` traceback: that's the scenario. The files' count varies from recording to recording (continue-as-new falls where a race puts it); every one must replay. The commit carries the prototype's recording.
-
-- [ ] **Step 5: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/runtime/test_scheduler_cap.py tests/engine/runtime/test_scheduler_properties.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/runtime/test_scheduler_cap.py tests/engine/runtime/test_scheduler_properties.py`): they passed. The replay showed:
 
 ````text
 7 passed in 6.74s
 ````
 
-- [ ] **Step 6: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,439 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(engine): the open-iteration cap and the progress path's reservation (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,439 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -16653,7 +16552,7 @@ git add -A backend docs && git commit -m "feat(engine): the open-iteration cap a
 - Modify: `backend/src/dewpoint/engine/runtime/execution.py`
 - Modify: `backend/src/dewpoint/engine/runtime/scheduler.py`
 - Modify: `backend/src/dewpoint/engine/runtime/workflow.py`
-- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (recorded, below)
+- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (with the commit)
 
 **Interfaces:**
 - Produces: `NO_CAPTURE`; `Scheduler.consume_capture(inst)`.
@@ -16667,7 +16566,21 @@ it replaced, one undo record per write; versions no step names are dropped as th
 captures as two characters per loop step in the scope record, and the variables, their version, the undo records and
 the released steps' captures.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 9f7d249e1408`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 9f7d249e1408
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/engine/runtime/test_scheduler_captures.py b/backend/tests/engine/runtime/test_scheduler_captures.py
@@ -16825,11 +16738,7 @@ index 0000000..93c1130
 +    assert s.consume_capture(inner(s, 1)) == {"x": 0}
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/runtime/test_scheduler_captures.py`
-
-Expected: FAIL. A deferred loop step reads the variables as they are when it starts, not as they were when it became ready. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/runtime/test_scheduler_captures.py`): they failed, as expected: a deferred loop step reads the variables as they are when it starts, not as they were when it became ready. The replay showed:
 
 ````text
 FAILED tests/engine/runtime/test_scheduler_captures.py::test_a_released_loop_step_given_back_keeps_its_capture 
@@ -16850,7 +16759,7 @@ FAILED tests/engine/runtime/test_scheduler_captures.py::test_captures_and_versio
 ============================== 8 failed in 6.30s ===============================
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/engine/runtime/execution.py b/backend/src/dewpoint/engine/runtime/execution.py
@@ -17260,33 +17169,15 @@ index ab10b37..3a2f844 100644
                      for o in start.outer
 ````
 
-- [ ] **Step 4: Record the abi6 golden histories again**
+*The golden histories:* recorded again with this commit (the prototype's recording comes with it). To record them anew: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`; their count varies from recording to recording (continue-as-new falls where a race puts it), and every one must replay.
 
-Run: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`
-
-Expected: `dewpoint-0.1.0+abi6: recorded batches, branches, cancelled, continue_as_new, deadline, drain, errors, evaluator, failed, failure_handler, grants, local_cel, loops, simulate, stop, subflows, variables_and_timers, version_unusable`. The version-unusable scenario logs a `ProgramError` traceback: that's the scenario. The files' count varies from recording to recording (continue-as-new falls where a race puts it); every one must replay. The commit carries the prototype's recording.
-
-- [ ] **Step 5: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/runtime/test_scheduler_captures.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/runtime/test_scheduler_captures.py`): they passed. The replay showed:
 
 ````text
 8 passed in 5.94s
 ````
 
-- [ ] **Step 6: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,446 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(engine): a deferred loop step reads the variables it became ready under (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,446 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -17298,7 +17189,7 @@ git add -A backend docs && git commit -m "feat(engine): a deferred loop step rea
 - Create: `backend/tests/engine/runtime/test_continue_budget.py`
 - Modify: `backend/src/dewpoint/engine/runtime/execution.py`
 - Modify: `backend/src/dewpoint/engine/runtime/scheduler.py`
-- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (recorded, below)
+- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (with the commit)
 
 **Interfaces:**
 - Produces: `dewpoint.engine.runtime.execution.quiescent(...)`.
@@ -17311,7 +17202,21 @@ quiescent only once its budget holds no waiting need and no child's grant (`quie
 taken otherwise. A need asked while an answer was being applied, with nothing else running, is decided before anything
 else instead of looking stuck.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 499000fd009f`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 499000fd009f
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/engine/runtime/test_continue_budget.py b/backend/tests/engine/runtime/test_continue_budget.py
@@ -17454,11 +17359,7 @@ index 0000000..c258058
 +    assert s.ended is not None and outcome["refused"] > 0
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/runtime/test_continue_budget.py`
-
-Expected: FAIL. `execution.quiescent` doesn't exist yet. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/runtime/test_continue_budget.py`): they failed, as expected: `execution.quiescent` doesn't exist yet. The replay showed:
 
 ````text
 E   ImportError: cannot import name 'quiescent' from 'dewpoint.engine.runtime.execution'
@@ -17466,7 +17367,7 @@ ERROR tests/engine/runtime/test_continue_budget.py - ImportError while import...
 =============================== 1 error in 6.35s ===============================
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/engine/runtime/execution.py b/backend/src/dewpoint/engine/runtime/execution.py
@@ -17563,33 +17464,15 @@ index 11e018d..f0dcea9 100644
          loops = set(self.loops)
 ````
 
-- [ ] **Step 4: Record the abi6 golden histories again**
+*The golden histories:* recorded again with this commit (the prototype's recording comes with it). To record them anew: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`; their count varies from recording to recording (continue-as-new falls where a race puts it), and every one must replay.
 
-Run: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`
-
-Expected: `dewpoint-0.1.0+abi6: recorded batches, branches, cancelled, continue_as_new, deadline, drain, errors, evaluator, failed, failure_handler, grants, local_cel, loops, simulate, stop, subflows, variables_and_timers, version_unusable`. The version-unusable scenario logs a `ProgramError` traceback: that's the scenario. The files' count varies from recording to recording (continue-as-new falls where a race puts it); every one must replay. The commit carries the prototype's recording.
-
-- [ ] **Step 5: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/runtime/test_continue_budget.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/runtime/test_continue_budget.py`): they passed. The replay showed:
 
 ````text
 7 passed in 6.11s
 ````
 
-- [ ] **Step 6: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,453 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(engine): queued loop steps share one budget request; a continue carries no need or grant (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,453 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -17610,7 +17493,21 @@ had made the deployment, so it failed whenever xdist ran it first in its worker,
 yet" until the deployment exists. (`main` has the same test.) It has no red step: the race shows only in some
 orders, and the replay's run of the test alone on the previous commit happened to pass.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 9563439d0bbd`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 9563439d0bbd
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/worker/test_deployment.py b/backend/tests/apps/worker/test_deployment.py
@@ -17659,27 +17556,13 @@ index 7f545c4..c025c31 100644
          with contextlib.suppress(asyncio.CancelledError):
 ````
 
-- [ ] **Step 2: Run them: each passes**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_deployment.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_deployment.py`): they passed before it too. The replay showed:
 
 ````text
 4 passed in 33.40s
 ````
 
-- [ ] **Step 3: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,453 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add -A backend docs && git commit -m "test(worker): the build-current test waits for the deployment to exist" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,453 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -17707,7 +17590,21 @@ than 64 KiB is claimed untainted, and the envelope down to the inline limit the 
 joined template, larger than 64 KiB is claimed the same way. The workflow holds handles; a step that reads one gets the
 whole value at its own boundary.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 99fdac4e1cd4`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 99fdac4e1cd4
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/worker/test_activities.py b/backend/tests/apps/worker/test_activities.py
@@ -17846,11 +17743,7 @@ index 4599526..0786a5f 100644
 +    assert [c.pointer for c in done.claims] == ["/a"]
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_activities.py tests/apps/worker/test_run_graph_size_claims.py tests/engine/test_split.py`
-
-Expected: FAIL. A plugin's output past 64 KiB comes back inline, and the splitter has no envelope limit. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_activities.py tests/apps/worker/test_run_graph_size_claims.py tests/engine/test_split.py`): they failed, as expected: a plugin's output past 64 KiB comes back inline, and the splitter has no envelope limit. The replay showed:
 
 ````text
 FAILED tests/engine/test_split.py::test_an_envelope_limit_claims_down_to_it 
@@ -17871,7 +17764,7 @@ E           [
 ======================== 6 failed, 53 passed in 17.64s =========================
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/apps/worker/claims.py b/backend/src/dewpoint/apps/worker/claims.py
@@ -18068,27 +17961,13 @@ index f579832..b29826c 100644
      return Split(s.doc, tuple(s.claims), tuple(sorted(secrets)))
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_activities.py tests/apps/worker/test_run_graph_size_claims.py tests/engine/test_split.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_activities.py tests/apps/worker/test_run_graph_size_claims.py tests/engine/test_split.py`): they passed. The replay showed:
 
 ````text
 59 passed in 16.62s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,458 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(engine): a value past 64 KiB is a size claim where it's produced (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,458 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -18122,7 +18001,21 @@ spilled, so a retry writes the same rows, hash-checked; they're untainted and ow
 them: a plugin step resolves them at its boundary, a sub-flow gets grants from `child_input`, a failure handler gets
 them granted. What one spill can't hold still fails, and the run's own outputs still fail when too large (§5.2).
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 3b49c82a154b`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 3b49c82a154b
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/worker/test_run_graph_sizes.py b/backend/tests/apps/worker/test_run_graph_sizes.py
@@ -18454,11 +18347,7 @@ index 0786a5f..6f60a2b 100644
 +    assert (done.envelope, done.claims) == ({"a": "x" * 100}, ())
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_sizes.py tests/apps/worker/test_run_graph_spills.py tests/engine/test_split.py`
-
-Expected: FAIL. `claims.spill` and `split.sized` don't exist yet. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_sizes.py tests/apps/worker/test_run_graph_spills.py tests/engine/test_split.py`): they failed, as expected: `claims.spill` and `split.sized` don't exist yet. The replay showed:
 
 ````text
 E   ImportError: cannot import name 'CLAIMS_SPILL' from 'dewpoint.engine.runtime.activities'
@@ -18468,7 +18357,7 @@ ERROR tests/engine/test_split.py - ImportError while importing test module '/...
 ======================== 12 passed, 2 errors in 17.70s =========================
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/apps/worker/activities.py b/backend/src/dewpoint/apps/worker/activities.py
@@ -18895,27 +18784,13 @@ index b29826c..1b015b3 100644
      schema: Mapping[str, Any] | None,
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_sizes.py tests/apps/worker/test_run_graph_spills.py tests/engine/test_split.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_sizes.py tests/apps/worker/test_run_graph_spills.py tests/engine/test_split.py`): they passed. The replay showed:
 
 ````text
 51 passed in 15.19s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,461 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(engine): a command spills its largest values before it fails (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,461 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -18938,7 +18813,21 @@ their failures, the variables and their undo records). The counter isn't stored:
 and the snapshot's self-check requires the two to agree. The property test checks the counter against a recount after
 every change of every random run.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 201d9f0c7fad`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 201d9f0c7fad
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/engine/runtime/test_live_state.py b/backend/tests/engine/runtime/test_live_state.py
@@ -19028,11 +18917,7 @@ index 1352ae9..7fc49b2 100644
          batches = [b for b in batches if b.loop not in cancelled]
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/runtime/test_live_state.py tests/engine/runtime/test_scheduler_properties.py`
-
-Expected: FAIL. The scheduler doesn't count its live state yet (`Scheduler.live`). The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/runtime/test_live_state.py tests/engine/runtime/test_scheduler_properties.py`): they failed, as expected: the scheduler doesn't count its live state yet (`Scheduler.live`). The replay showed:
 
 ````text
 FAILED tests/engine/runtime/test_live_state.py::test_the_live_state_counts_values_as_they_enter_and_leave 
@@ -19051,7 +18936,7 @@ FAILED tests/engine/runtime/test_scheduler_properties.py::test_random_runs_keep_
 ============================== 3 failed in 7.25s ===============================
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/engine/runtime/scheduler.py b/backend/src/dewpoint/engine/runtime/scheduler.py
@@ -19286,27 +19171,13 @@ index f0dcea9..34afa1c 100644
          try:
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/runtime/test_live_state.py tests/engine/runtime/test_scheduler_properties.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/engine/runtime/test_live_state.py tests/engine/runtime/test_scheduler_properties.py`): they passed. The replay showed:
 
 ````text
 3 passed in 6.63s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,463 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(engine): the live-state counter (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,463 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -19325,7 +19196,7 @@ git add -A backend docs && git commit -m "feat(engine): the live-state counter (
 - Modify: `backend/src/dewpoint/engine/runtime/workflow.py`
 - Modify: `backend/tests/engine/runtime/test_scheduler_captures.py`
 - Modify: `backend/tests/engine/runtime/test_scheduler_properties.py`
-- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (recorded, below)
+- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (with the commit)
 
 **Interfaces:**
 - Produces: `LIVE_BUDGET = 1_048_576`, `INLINE_FLOOR = 1_024`, `NIL`, `CLAIMS`; spill and merge units;
@@ -19345,7 +19216,21 @@ part in two hops at most.
 - Past the budget, a step is sent the 1 KiB floor (§5.4). An execution isn't quiescent, and the snapshot refuses,
   while the live state is past the budget. A claim the run can't write fails the run.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 487afc3c40d1`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 487afc3c40d1
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/worker/test_run_graph_containers.py b/backend/tests/apps/worker/test_run_graph_containers.py
@@ -19836,11 +19721,7 @@ index 7fc49b2..866d3c8 100644
          for node_id, state in scope.nodes.items():
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_containers.py tests/engine/runtime/test_containers.py tests/engine/runtime/test_scheduler_captures.py tests/engine/runtime/test_scheduler_properties.py`
-
-Expected: FAIL. Nothing bounds the live state: results stay inline past the budget, and no step is sent the floor. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_containers.py tests/engine/runtime/test_containers.py tests/engine/runtime/test_scheduler_captures.py tests/engine/runtime/test_scheduler_properties.py`): they failed, as expected: nothing bounds the live state: results stay inline past the budget, and no step is sent the floor. The replay showed:
 
 ````text
 FAILED tests/engine/runtime/test_scheduler_captures.py::test_a_write_keeps_what_it_replaced_only_while_a_queued_step_needs_it 
@@ -19861,7 +19742,7 @@ E       AttributeError: <module 'dewpoint.engine.runtime.scheduler' from 'backen
 ==================== 6 failed, 7 passed, 1 error in 11.69s =====================
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/apps/worker/claims.py b/backend/src/dewpoint/apps/worker/claims.py
@@ -20861,33 +20742,15 @@ index 0ea13d0..be8ffd3 100644
                  self.sched.start_batch(
 ````
 
-- [ ] **Step 4: Record the abi6 golden histories again**
+*The golden histories:* recorded again with this commit (the prototype's recording comes with it). To record them anew: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`; their count varies from recording to recording (continue-as-new falls where a race puts it), and every one must replay.
 
-Run: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`
-
-Expected: `dewpoint-0.1.0+abi6: recorded batches, branches, cancelled, continue_as_new, deadline, drain, errors, evaluator, failed, failure_handler, grants, local_cel, loops, simulate, stop, subflows, variables_and_timers, version_unusable`. The version-unusable scenario logs a `ProgramError` traceback: that's the scenario. The files' count varies from recording to recording (continue-as-new falls where a race puts it); every one must replay. The commit carries the prototype's recording.
-
-- [ ] **Step 5: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_containers.py tests/engine/runtime/test_containers.py tests/engine/runtime/test_scheduler_captures.py tests/engine/runtime/test_scheduler_properties.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_containers.py tests/engine/runtime/test_containers.py tests/engine/runtime/test_scheduler_captures.py tests/engine/runtime/test_scheduler_properties.py`): they passed. The replay showed:
 
 ````text
 24 passed in 13.18s
 ````
 
-- [ ] **Step 6: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,478 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(engine): the live-state budget claims containers, read back by handle (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,478 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -20904,7 +20767,7 @@ git add -A backend docs && git commit -m "feat(engine): the live-state budget cl
 - Modify: `backend/src/dewpoint/engine/runtime/workflow.py`
 - Modify: `backend/tests/apps/worker/test_run_graph_containers.py`
 - Modify: `backend/tests/engine/runtime/test_containers.py`
-- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (recorded, below)
+- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (with the commit)
 
 **Interfaces:**
 - Produces: `ItemsRef(handle, n, first)`, `count`, `item_at`, `sliced`; `BatchInput.items_ref`.
@@ -20918,7 +20781,21 @@ over it by handle. A list past one spill's payload is written in parts, then joi
 addresses each item by position. An `ItemsRef` is the workflow's own object, never a JSON shape a plugin could
 return.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit d8a58e4c12e1`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C d8a58e4c12e1
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/worker/test_run_graph_containers.py b/backend/tests/apps/worker/test_run_graph_containers.py
@@ -21046,11 +20923,7 @@ index 9892625..33ea950 100644
      g.settings["vars_schema"] = {
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_containers.py tests/engine/runtime/test_containers.py`
-
-Expected: FAIL. A loop's items are a list, never a cursor, and an inline list past the budget is never claimed. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_containers.py tests/engine/runtime/test_containers.py`): they failed, as expected: a loop's items are a list, never a cursor, and an inline list past the budget is never claimed. The replay showed:
 
 ````text
 FAILED tests/engine/runtime/test_containers.py::test_an_inline_item_list_is_claimed_and_the_loop_carries_on_over_it 
@@ -21070,7 +20943,7 @@ FAILED tests/apps/worker/test_run_graph_containers.py::test_a_list_past_one_spil
 ======================== 4 failed, 15 passed in 14.76s =========================
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/apps/worker/claims.py b/backend/src/dewpoint/apps/worker/claims.py
@@ -21603,33 +21476,15 @@ index be8ffd3..33991df 100644
                      stop_on_error=start.stop_on_error,
 ````
 
-- [ ] **Step 4: Record the abi6 golden histories again**
+*The golden histories:* recorded again with this commit (the prototype's recording comes with it). To record them anew: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`; their count varies from recording to recording (continue-as-new falls where a race puts it), and every one must replay.
 
-Run: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`
-
-Expected: `dewpoint-0.1.0+abi6: recorded batches, branches, cancelled, continue_as_new, deadline, drain, errors, evaluator, failed, failure_handler, grants, local_cel, loops, simulate, stop, subflows, variables_and_timers, version_unusable`. The version-unusable scenario logs a `ProgramError` traceback: that's the scenario. The files' count varies from recording to recording (continue-as-new falls where a race puts it); every one must replay. The commit carries the prototype's recording.
-
-- [ ] **Step 5: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_containers.py tests/engine/runtime/test_containers.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_containers.py tests/engine/runtime/test_containers.py`): they passed. The replay showed:
 
 ````text
 19 passed in 14.91s
 ````
 
-- [ ] **Step 6: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,482 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(engine): a loop's items are a cursor, and an inline list a container (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,482 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -21647,7 +21502,7 @@ git add -A backend docs && git commit -m "feat(engine): a loop's items are a cur
 - Modify: `backend/tests/apps/worker/test_run_graph_containers.py`
 - Modify: `backend/tests/apps/worker/test_run_graph_sizes.py`
 - Modify: `backend/tests/engine/runtime/test_live_state.py`
-- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (recorded, below)
+- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (with the commit)
 
 **Interfaces:**
 - Produces: `SEGMENT_BYTES = 262_144`, `segment_id(base, first)`, `async assembled(spec, fetch)`, `Collection`;
@@ -21663,7 +21518,21 @@ position; one that never spilled ends with a plain list, as before. Failures rea
 change: they used to be in completion order). A batch child writes its segments where its parent's loop names them
 (`BatchInput.collect_base`) and, once they've landed, returns its collection; the parent merges it.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit bce3047b8968`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C bce3047b8968
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/worker/test_run_graph_containers.py b/backend/tests/apps/worker/test_run_graph_containers.py
@@ -22004,11 +21873,7 @@ index cfddab7..377a1c2 100644
      s.succeed(x, {"v": 1})
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_containers.py tests/apps/worker/test_run_graph_sizes.py tests/engine/runtime/test_collections.py tests/engine/runtime/test_live_state.py`
-
-Expected: FAIL. Collections don't exist yet: a loop's collected values stay a list, however large. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_containers.py tests/apps/worker/test_run_graph_sizes.py tests/engine/runtime/test_collections.py tests/engine/runtime/test_live_state.py`): they failed, as expected: collections don't exist yet: a loop's collected values stay a list, however large. The replay showed:
 
 ````text
 FAILED tests/apps/worker/test_run_graph_containers.py::test_an_inline_loop_whose_values_and_failures_spill_reads_them_back 
@@ -22029,7 +21894,7 @@ E         ...Full output truncated (11 lines hidden), use '-vv' to show
 =================== 3 failed, 17 passed, 2 errors in 19.43s ====================
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/apps/worker/claims.py b/backend/src/dewpoint/apps/worker/claims.py
@@ -22691,33 +22556,15 @@ index 33991df..01de49a 100644
          )
 ````
 
-- [ ] **Step 4: Record the abi6 golden histories again**
+*The golden histories:* recorded again with this commit (the prototype's recording comes with it). To record them anew: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`; their count varies from recording to recording (continue-as-new falls where a race puts it), and every one must replay.
 
-Run: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`
-
-Expected: `dewpoint-0.1.0+abi6: recorded batches, branches, cancelled, continue_as_new, deadline, drain, errors, evaluator, failed, failure_handler, grants, local_cel, loops, simulate, stop, subflows, variables_and_timers, version_unusable`. The version-unusable scenario logs a `ProgramError` traceback: that's the scenario. The files' count varies from recording to recording (continue-as-new falls where a race puts it); every one must replay. The commit carries the prototype's recording.
-
-- [ ] **Step 5: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_containers.py tests/apps/worker/test_run_graph_sizes.py tests/engine/runtime/test_collections.py tests/engine/runtime/test_live_state.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_containers.py tests/apps/worker/test_run_graph_sizes.py tests/engine/runtime/test_collections.py tests/engine/runtime/test_live_state.py`): they passed. The replay showed:
 
 ````text
 29 passed in 16.62s
 ````
 
-- [ ] **Step 6: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,491 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(engine): collections compact into segments, and a loop ends with one claim (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,491 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -22728,7 +22575,7 @@ git add -A backend docs && git commit -m "feat(engine): collections compact into
 **Files:**
 - Modify: `backend/src/dewpoint/engine/runtime/workflow.py`
 - Modify: `backend/tests/apps/worker/test_run_graph_containers.py`
-- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (recorded, below)
+- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (with the commit)
 
 **Interfaces:**
 - Produces: no new public names.
@@ -22739,7 +22586,21 @@ input's `items` (or `items_ref`), `outer` and `variables` are dropped, since the
 list, the frozen scopes' results and the variables. A continued `RunGraph` already carried its variables only in the
 snapshot.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 5cdf06963f18`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 5cdf06963f18
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/worker/test_run_graph_containers.py b/backend/tests/apps/worker/test_run_graph_containers.py
@@ -22801,11 +22662,7 @@ index 6285254..8bf05f6 100644
 +        assert batch["snapshot"] is not None
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_containers.py`
-
-Expected: FAIL. A continued batch still carries its items, outer scopes and variables beside its snapshot. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_containers.py`): they failed, as expected: a continued batch still carries its items, outer scopes and variables beside its snapshot. The replay showed:
 
 ````text
 FAILED tests/apps/worker/test_run_graph_containers.py::test_a_continued_batch_carries_its_items_outer_scopes_and_variables_only_in_its_snapshot 
@@ -22821,7 +22678,7 @@ FAILED tests/apps/worker/test_run_graph_containers.py::test_a_continued_batch_ca
 ========================= 1 failed, 8 passed in 17.14s =========================
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/engine/runtime/workflow.py b/backend/src/dewpoint/engine/runtime/workflow.py
@@ -22849,33 +22706,15 @@ index 01de49a..f7df385 100644
                      workflow.continue_as_new(continued)
 ````
 
-- [ ] **Step 4: Record the abi6 golden histories again**
+*The golden histories:* recorded again with this commit (the prototype's recording comes with it). To record them anew: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`; their count varies from recording to recording (continue-as-new falls where a race puts it), and every one must replay.
 
-Run: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`
-
-Expected: `dewpoint-0.1.0+abi6: recorded batches, branches, cancelled, continue_as_new, deadline, drain, errors, evaluator, failed, failure_handler, grants, local_cel, loops, simulate, stop, subflows, variables_and_timers, version_unusable`. The version-unusable scenario logs a `ProgramError` traceback: that's the scenario. The files' count varies from recording to recording (continue-as-new falls where a race puts it); every one must replay. The commit carries the prototype's recording.
-
-- [ ] **Step 5: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_containers.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_containers.py`): they passed. The replay showed:
 
 ````text
 9 passed in 16.35s
 ````
 
-- [ ] **Step 6: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,492 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(engine): each value travels once: a continued batch drops what its snapshot holds (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,492 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -22898,7 +22737,7 @@ git add -A backend docs && git commit -m "feat(engine): each value travels once:
 - Modify: `backend/tests/apps/test_workflow_ops.py`
 - Modify: `backend/tests/apps/worker/harness.py`
 - Modify: `backend/tests/apps/worker/test_worker_db.py`
-- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (recorded, below)
+- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (with the commit)
 
 **Interfaces:**
 - Produces: `dewpoint.engine.runtime.bounds`: `SNAPSHOT_MAX`, `Maxima`, `maxima(program)`, `pinned(program) ->
@@ -22917,7 +22756,21 @@ are empty: `LIVE_BUDGET` counts them. Measured: `ENVELOPE_MAX` 2,037 B, a unit 3
 largest graphs §11.3 names each get cap 100, with `LIVE_BUDGET` above the all-claimed minimum (at most 621,256 B, 250
 root loops).
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 81154e9ff872`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 81154e9ff872
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/test_workflow_ops.py b/backend/tests/apps/test_workflow_ops.py
@@ -23140,11 +22993,7 @@ index 0000000..b2846cf
 +    assert tight.cap() == 0
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_workflow_ops.py tests/apps/worker/test_worker_db.py tests/engine/runtime/test_bounds.py`
-
-Expected: FAIL. `dewpoint.engine.runtime.bounds` doesn't exist yet, and a version pins no cap. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_workflow_ops.py tests/apps/worker/test_worker_db.py tests/engine/runtime/test_bounds.py`): they failed, as expected: `dewpoint.engine.runtime.bounds` doesn't exist yet, and a version pins no cap. The replay showed:
 
 ````text
 FAILED tests/apps/test_workflow_ops.py::test_a_published_version_pins_its_open_iteration_cap_and_its_loop_depth 
@@ -23157,7 +23006,7 @@ ERROR tests/engine/runtime/test_bounds.py - ImportError while importing test ...
 =================== 1 failed, 17 passed, 2 errors in 17.86s ====================
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/migrations/versions/0016_version_bound.py b/backend/migrations/versions/0016_version_bound.py
@@ -23603,33 +23452,15 @@ index f7df385..73b8ef3 100644
              return BatchResult([], [], end=RunEnd("cancelled", CANCELLED).to_json(), iterations=start.iterations)
 ````
 
-- [ ] **Step 4: Record the abi6 golden histories again**
+*The golden histories:* recorded again with this commit (the prototype's recording comes with it). To record them anew: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`; their count varies from recording to recording (continue-as-new falls where a race puts it), and every one must replay.
 
-Run: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`
-
-Expected: `dewpoint-0.1.0+abi6: recorded batches, branches, cancelled, continue_as_new, deadline, drain, errors, evaluator, failed, failure_handler, grants, local_cel, loops, simulate, stop, subflows, variables_and_timers, version_unusable`. The version-unusable scenario logs a `ProgramError` traceback: that's the scenario. The files' count varies from recording to recording (continue-as-new falls where a race puts it); every one must replay. The commit carries the prototype's recording.
-
-- [ ] **Step 5: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_workflow_ops.py tests/apps/worker/test_worker_db.py tests/engine/runtime/test_bounds.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_workflow_ops.py tests/apps/worker/test_worker_db.py tests/engine/runtime/test_bounds.py`): they passed. The replay showed:
 
 ````text
 32 passed in 18.31s
 ````
 
-- [ ] **Step 6: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,503 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(engine): the cap and the maxima computed at publish, pinned in the version (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,503 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -23645,7 +23476,7 @@ git add -A backend docs && git commit -m "feat(engine): the cap and the maxima c
 - Modify: `backend/src/dewpoint/engine/runtime/workflow.py`
 - Modify: `backend/tests/apps/worker/test_run_graph_yield.py`
 - Modify: `backend/tests/engine/runtime/test_program.py`
-- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (recorded, below)
+- Record: `backend/tests/engine/replay/dewpoint-0.1.0+abi6/` (with the commit)
 
 **Interfaces:**
 - Produces: `YIELD_STRUCTURE`; `STRUCTURE_STEP`, `REBUILD_WEIGHT`, `DEFER_WEIGHT`, `TAKE_WEIGHT`, `STEP_WEIGHT`,
@@ -23661,7 +23492,21 @@ view's size before it starts, and a take takes only what the task's share allows
 task. A version's program is compiled once per worker process, keyed by its id and its content. Units count work
 deterministically: a replay yields at the same points.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 0e56c77adc62`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 0e56c77adc62
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/worker/test_run_graph_yield.py b/backend/tests/apps/worker/test_run_graph_yield.py
@@ -23857,11 +23702,7 @@ index 0000000..639de91
 +    assert not budget.must_yield(structure=1, whole=True)  # steps get the whole share: their work is light
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_yield.py tests/engine/runtime/test_program.py tests/engine/runtime/test_stepwise.py`
-
-Expected: FAIL. Snapshots and restores run at once, steps and takes aren't charged, and a version compiles in every execution. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_yield.py tests/engine/runtime/test_program.py tests/engine/runtime/test_stepwise.py`): they failed, as expected: snapshots and restores run at once, steps and takes aren't charged, and a version compiles in every execution. The replay showed:
 
 ````text
 FAILED tests/apps/worker/test_run_graph_yield.py::test_ready_steps_spread_over_workflow_tasks_by_their_structural_units 
@@ -23882,7 +23723,7 @@ FAILED tests/apps/worker/test_run_graph_yield.py::test_a_local_filter_evaluates_
 =================== 6 failed, 2 errors in 134.70s (0:02:14) ====================
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/engine/cel/route.py b/backend/src/dewpoint/engine/cel/route.py
@@ -24460,33 +24301,15 @@ index 73b8ef3..0d1cf6f 100644
                      items_ref=None,
 ````
 
-- [ ] **Step 4: Record the abi6 golden histories again**
+*The golden histories:* recorded again with this commit (the prototype's recording comes with it). To record them anew: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`; their count varies from recording to recording (continue-as-new falls where a race puts it), and every one must replay.
 
-Run: `cd backend && rm -rf tests/engine/replay/dewpoint-0.1.0+abi6 && uv run python -m tests.engine.replay.record`
-
-Expected: `dewpoint-0.1.0+abi6: recorded batches, branches, cancelled, continue_as_new, deadline, drain, errors, evaluator, failed, failure_handler, grants, local_cel, loops, simulate, stop, subflows, variables_and_timers, version_unusable`. The version-unusable scenario logs a `ProgramError` traceback: that's the scenario. The files' count varies from recording to recording (continue-as-new falls where a race puts it); every one must replay. The commit carries the prototype's recording.
-
-- [ ] **Step 5: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_yield.py tests/engine/runtime/test_program.py tests/engine/runtime/test_stepwise.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_yield.py tests/engine/runtime/test_program.py tests/engine/runtime/test_stepwise.py`): they passed. The replay showed:
 
 ````text
 16 passed in 24.95s
 ````
 
-- [ ] **Step 6: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,509 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add -A backend docs && git commit -m "feat(engine): a workflow task's CPU: stepwise snapshots, charged steps, one compile per worker (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,509 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -24512,7 +24335,21 @@ Now `pinned` raises `BoundError`, and publish refuses the version (`version.unbo
 doesn't compile, and a scheduler refuses such a cap, so no run ever schedules as if it had the default. The tests
 tighten the bound deliberately.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit c0d86684dfbc`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C c0d86684dfbc
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/test_workflow_ops.py b/backend/tests/apps/test_workflow_ops.py
@@ -24597,11 +24434,7 @@ index b2846cf..4548beb 100644
 +        S.Scheduler(dataclasses.replace(program(g), open_scopes_cap=0))
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_workflow_ops.py tests/engine/runtime/test_bounds.py`
-
-Expected: FAIL. `bounds.BoundError` doesn't exist, and a program accepts a cap of 0. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_workflow_ops.py tests/engine/runtime/test_bounds.py`): they failed, as expected: `bounds.BoundError` doesn't exist, and a program accepts a cap of 0. The replay showed:
 
 ````text
 FAILED tests/engine/runtime/test_bounds.py::test_a_version_no_cap_fits_fails_bound_establishment 
@@ -24617,7 +24450,7 @@ FAILED tests/apps/test_workflow_ops.py::test_publish_refuses_a_version_whose_con
 ======================== 3 failed, 26 passed in 14.60s =========================
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/apps/workflow_ops.py b/backend/src/dewpoint/apps/workflow_ops.py
@@ -24720,29 +24553,21 @@ index e33f5e1..e6c6279 100644
          self._n_open = 0  # open iteration scopes, frozen ones aside
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_workflow_ops.py tests/engine/runtime/test_bounds.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_workflow_ops.py tests/engine/runtime/test_bounds.py`): they passed. The replay showed:
 
 ````text
 29 passed in 15.15s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
+*The whole suite at this commit*, as recorded when it was made: 1,512 passed and 8 skipped, ruff, mypy and import-linter clean.
 
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
+**Checkpoint:** run this milestone's focused tests, then stop for the owner's review of milestone 4 (sizes and §5.3).
 
-Expected: together, 1,512 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
+- [ ] **Step 3: The milestone's focused tests**
 
-- [ ] **Step 6: Commit**
+Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_workflow_ops.py tests/apps/worker/test_activities.py tests/apps/worker/test_deployment.py tests/apps/worker/test_run_graph_containers.py tests/apps/worker/test_run_graph_size_claims.py tests/apps/worker/test_run_graph_sizes.py tests/apps/worker/test_run_graph_spills.py tests/apps/worker/test_run_graph_yield.py tests/apps/worker/test_worker_db.py tests/engine/runtime/test_bounds.py tests/engine/runtime/test_collections.py tests/engine/runtime/test_containers.py tests/engine/runtime/test_continue_budget.py tests/engine/runtime/test_live_state.py tests/engine/runtime/test_program.py tests/engine/runtime/test_scheduler_batches.py tests/engine/runtime/test_scheduler_cap.py tests/engine/runtime/test_scheduler_captures.py tests/engine/runtime/test_scheduler_properties.py tests/engine/runtime/test_snapshot_format.py tests/engine/runtime/test_stepwise.py tests/engine/test_split.py`
 
-```bash
-git add -A backend docs && git commit -m "fix(engine): a version no open-iteration cap fits fails to establish its bound (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
-
-**Checkpoint:** stop here for the owner's review of milestone 4 (sizes and §5.3).
+Expected: 204 passed (the replay, at this commit).
 
 ---
 
@@ -24772,7 +24597,21 @@ claims and grants. The test found one leak, fixed here: a plugin's unexpected ex
 it's masked against the index now (Task 43 replaces masking with "proven to be code"). `decoded` (every history
 payload, decrypted) moves to the harness. The RLS matrix over the claim tables and roles is Task 1's.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit d1d5c0687a2e`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C d1d5c0687a2e
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/worker/harness.py b/backend/tests/apps/worker/harness.py
@@ -25089,11 +24928,7 @@ index 46451af..edd57a4 100644
          return EchoOutput(value=config.value)
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_canary_secrets.py tests/apps/worker/test_run_graph_boundary.py`
-
-Expected: FAIL. A plugin's crash quoting its secret puts it in the worker's log. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_canary_secrets.py tests/apps/worker/test_run_graph_boundary.py`): they failed, as expected: a plugin's crash quoting its secret puts it in the worker's log. The replay showed:
 
 ````text
 FAILED tests/apps/worker/test_canary_secrets.py::test_no_history_projection_or_log_of_a_canary_run_holds_its_secrets 
@@ -25108,7 +24943,7 @@ FAILED tests/apps/worker/test_canary_secrets.py::test_no_history_projection_or_l
 ========================= 1 failed, 9 passed in 18.58s =========================
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/apps/worker/activities.py b/backend/src/dewpoint/apps/worker/activities.py
@@ -25192,27 +25027,13 @@ index 72aa29f..a52cd35 100644
      return run_step
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_canary_secrets.py tests/apps/worker/test_run_graph_boundary.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_canary_secrets.py tests/apps/worker/test_run_graph_boundary.py`): they passed. The replay showed:
 
 ````text
 10 passed in 18.19s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,513 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "test(engine): the canary secrets end to end; a bug's logged error is masked (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,513 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -25241,7 +25062,21 @@ git add -A backend docs && git commit -m "test(engine): the canary secrets end t
 - Engine-core revision 5.8; the architecture spec's §6.5.
 Tasks 43–47 add to these guides as they change behavior.
 
-- [ ] **Step 1: Write the documentation**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 71728a5e4dbb`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 71728a5e4dbb
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The documentation:*
 
 ````diff
 diff --git a/docs/operations/deployment.md b/docs/operations/deployment.md
@@ -25700,17 +25535,7 @@ index 3c13fe9..50b1fa6 100644
    `start_failed` is recorded for a confirmed refusal, or for a start the client couldn't encrypt, which it never sent
 ````
 
-- [ ] **Step 2: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,513 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add -A backend docs && git commit -m "docs: 2b-1b in the operations guides, engine-core revision 5.8, the architecture spec's claim check" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,513 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -25735,7 +25560,21 @@ everything else in it does: a tenth in an execution's first task (`YieldBudget.t
 whole share. Measured after it, on the target runner (run 37016438529): the worst activation 371.6 ms, no failed
 workflow task. The goldens replay unchanged.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 6c6ceff535b9`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 6c6ceff535b9
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/worker/test_run_graph_yield.py b/backend/tests/apps/worker/test_run_graph_yield.py
@@ -25782,11 +25621,7 @@ index 639de91..bfcfb55 100644
 +    assert budget.takes_left(TAKE_WEIGHT) == 1
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_yield.py tests/engine/runtime/test_stepwise.py`
-
-Expected: FAIL. `YieldBudget.takes_left` doesn't exist yet. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_yield.py tests/engine/runtime/test_stepwise.py`): they failed, as expected: `YieldBudget.takes_left` doesn't exist yet. The replay showed:
 
 ````text
 FAILED tests/engine/runtime/test_stepwise.py::test_a_take_in_an_executions_first_task_gets_the_startup_tenth 
@@ -25795,7 +25630,7 @@ FAILED tests/engine/runtime/test_stepwise.py::test_a_take_in_an_executions_first
 ======================== 1 failed, 10 passed in 24.86s =========================
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/engine/cel/route.py b/backend/src/dewpoint/engine/cel/route.py
@@ -25842,27 +25677,13 @@ index cd0cfb3..fb58c7a 100644
          """A snapshot or a restore, part by part (engine 2b spec §5.3): each part's units are charged to the workflow
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_yield.py tests/engine/runtime/test_stepwise.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_run_graph_yield.py tests/engine/runtime/test_stepwise.py`): they passed. The replay showed:
 
 ````text
 11 passed in 24.48s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,514 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "fix(engine): a take in an execution's first task gets the startup tenth (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,514 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -25898,7 +25719,21 @@ plugin could log it in a neutral field or the event, or crash or fail quoting it
 - A filter on Temporal's activity loggers drops every exception and traceback (Tasks 44–45 make it exact).
 Canaries leak a fresh secret each way with `testkit.leaky` before it's claimed.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit e9a13bc80dd5`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C e9a13bc80dd5
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/worker/test_canary_secrets.py b/backend/tests/apps/worker/test_canary_secrets.py
@@ -26163,11 +25998,7 @@ index edd57a4..11d7984 100644
  )
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_canary_secrets.py tests/apps/worker/test_logs.py`
-
-Expected: FAIL. `apps.worker.logs` doesn't exist yet, and a plugin's log, crash and failure put its fresh secret in the log. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_canary_secrets.py tests/apps/worker/test_logs.py`): they failed, as expected: `apps.worker.logs` doesn't exist yet, and a plugin's log, crash and failure put its fresh secret in the log. The replay showed:
 
 ````text
 FAILED tests/apps/worker/test_canary_secrets.py::test_a_crash_quoting_a_secret_never_claimed_logs_its_type_and_place_only 
@@ -26188,7 +26019,7 @@ E       ValueError: not enough values to unpack (expected 1, got 0)
 ==================== 3 failed, 1 passed, 1 error in 14.67s =====================
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/apps/worker/activities.py b/backend/src/dewpoint/apps/worker/activities.py
@@ -26618,27 +26449,13 @@ index 50b1fa6..e43f547 100644
    against the declared output schema, names the schema keyword. Unexpected exceptions, unusable versions and
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_canary_secrets.py tests/apps/worker/test_logs.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_canary_secrets.py tests/apps/worker/test_logs.py`): they passed. The replay showed:
 
 ````text
 10 passed in 15.80s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,523 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "fix(worker): logs hold only text proven to be code (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,523 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -26676,7 +26493,21 @@ From the owner's second milestone-5 review.
 The failure canary checks history, rows and logs. Four tests that expected a plugin's computed message, masked, now
 expect the generic one.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 0bf5cddb9f25`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 0bf5cddb9f25
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/worker/test_canary_secrets.py b/backend/tests/apps/worker/test_canary_secrets.py
@@ -26884,11 +26715,7 @@ index 11d7984..40b9459 100644
          return LeakyOutput(token=token)
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_canary_secrets.py tests/apps/worker/test_logs.py tests/apps/worker/test_run_graph_boundary.py tests/apps/worker/test_run_graph_policies.py`
-
-Expected: FAIL. A plugin's computed message and code reach the step's error, and Temporal's records keep what follows their text. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_canary_secrets.py tests/apps/worker/test_logs.py tests/apps/worker/test_run_graph_boundary.py tests/apps/worker/test_run_graph_policies.py`): they failed, as expected: a plugin's computed message and code reach the step's error, and Temporal's records keep what follows their text. The replay showed:
 
 ````text
 FAILED tests/apps/worker/test_logs.py::test_temporals_activity_records_keep_their_fixed_messages_and_no_error_text 
@@ -26908,7 +26735,7 @@ ERROR tests/apps/worker/test_run_graph_policies.py - ImportError while import...
 ==================== 1 failed, 5 passed, 3 errors in 13.85s ====================
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/apps/worker/activities.py b/backend/src/dewpoint/apps/worker/activities.py
@@ -27230,27 +27057,13 @@ index e43f547..604f3c1 100644
    against the declared output schema, names the schema keyword. Unexpected exceptions, unusable versions and
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_canary_secrets.py tests/apps/worker/test_logs.py tests/apps/worker/test_run_graph_boundary.py tests/apps/worker/test_run_graph_policies.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_canary_secrets.py tests/apps/worker/test_logs.py tests/apps/worker/test_run_graph_boundary.py tests/apps/worker/test_run_graph_policies.py`): they passed. The replay showed:
 
 ````text
 54 passed in 26.32s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,524 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "fix(worker): a plugin's failure shows only its constants; Temporal's records keep exact text (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,524 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -27281,7 +27094,21 @@ From the owner's third milestone-5 review.
 - Temporal's activity records keep only the SDK's exact fixed text: no error code (its shape proves nothing about
   where it came from), no class.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 2cf09e6541d7`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 2cf09e6541d7
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/worker/test_canary_secrets.py b/backend/tests/apps/worker/test_canary_secrets.py
@@ -27505,11 +27332,7 @@ index 0000000..411b917
 +    raise RuntimeError(text)
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_canary_secrets.py tests/apps/worker/test_logs.py`
-
-Expected: FAIL. A class name and a frame are logged as they are, and Temporal's records keep the error's code. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_canary_secrets.py tests/apps/worker/test_logs.py`): they failed, as expected: a class name and a frame are logged as they are, and Temporal's records keep the error's code. The replay showed:
 
 ````text
 FAILED tests/apps/worker/test_logs.py::test_a_frame_is_named_only_when_its_code_was_compiled_from_its_modules_source 
@@ -27530,7 +27353,7 @@ E         ...Full output truncated (10 lines hidden), use '-vv' to show
 ==================== 3 failed, 5 passed, 1 error in 12.70s =====================
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/apps/worker/activities.py b/backend/src/dewpoint/apps/worker/activities.py
@@ -27760,27 +27583,13 @@ index 604f3c1..df4af58 100644
  - **Evidence:** CEL spike, branch `spike/cel-evaluation`, commits `d6a8162` and `13a62e1`. See
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_canary_secrets.py tests/apps/worker/test_logs.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_canary_secrets.py tests/apps/worker/test_logs.py`): they passed. The replay showed:
 
 ````text
 14 passed in 18.56s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,527 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "fix(worker): class names and frames shown only when proven; no code in Temporal's records (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,527 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -27804,7 +27613,21 @@ tb_lineno=n)`) survives `raise` with any integer, so a numeric secret could reac
 from the module's own compiled code, kept per function with its file, name and first line, not from the frame's code,
 whose line table can be replaced too: a line that function doesn't have leaves the place without it.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 7ce55cc51ea5`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 7ce55cc51ea5
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/worker/test_canary_secrets.py b/backend/tests/apps/worker/test_canary_secrets.py
@@ -27908,11 +27731,7 @@ index e2bdfd2..d475679 100644
          if config.how == "fail_code":
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_canary_secrets.py tests/apps/worker/test_logs.py`
-
-Expected: FAIL. A forged traceback's line is logged as it was given. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_canary_secrets.py tests/apps/worker/test_logs.py`): they failed, as expected: a forged traceback's line is logged as it was given. The replay showed:
 
 ````text
 FAILED tests/apps/worker/test_logs.py::test_a_frames_line_is_logged_only_when_its_compiled_function_has_it 
@@ -27932,7 +27751,7 @@ FAILED tests/apps/worker/test_canary_secrets.py::test_a_crash_whose_traceback_a_
 ======================== 2 failed, 14 passed in 18.46s =========================
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/apps/worker/logs.py b/backend/src/dewpoint/apps/worker/logs.py
@@ -28024,27 +27843,13 @@ index a559bcc..528e1a6 100644
    withheld`. The step's code is in its row.
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_canary_secrets.py tests/apps/worker/test_logs.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/worker/test_canary_secrets.py tests/apps/worker/test_logs.py`): they passed. The replay showed:
 
 ````text
 16 passed in 19.21s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
-
-Expected: together, 1,529 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "fix(worker): a frame's line is logged only when its compiled function has it (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
+*The whole suite at this commit*, as recorded when it was made: 1,529 passed and 8 skipped, ruff, mypy and import-linter clean.
 
 ---
 
@@ -28070,7 +27875,21 @@ the sub-flow step's failure message, so a secret map key reached decrypted histo
 with `projection.location`, as far as the schema declares it (a property, a position), a key the data supplied as
 `*`, and orders the reasons by that text rather than by the data. Admission and the child crossing share it.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Apply the commit**
+
+Run: `git cherry-pick --no-commit 856eb22af04c`
+
+Expected: no conflicts (`git diff --name-only --diff-filter=U` prints nothing).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git commit -C 856eb22af04c
+```
+
+**The replay's record** (historical: run when this plan was written, on the tree the previous task left; not run again when executing):
+
+*The tests:*
 
 ````diff
 diff --git a/backend/tests/apps/test_inputs.py b/backend/tests/apps/test_inputs.py
@@ -28238,11 +28057,7 @@ index 830464a..9ffaa4b 100644
 +        assert MAP_KEY not in where
 ````
 
-- [ ] **Step 2: Run them, and watch them fail**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_inputs.py tests/apps/test_runs.py tests/apps/worker/test_canary_secrets.py`
-
-Expected: FAIL. A refusal names the data's own map key, in the crossing's result and the step's message. The replay showed:
+*Before the implementation* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_inputs.py tests/apps/test_runs.py tests/apps/worker/test_canary_secrets.py`): they failed, as expected: a refusal names the data's own map key, in the crossing's result and the step's message. The replay showed:
 
 ````text
 FAILED tests/apps/test_inputs.py::test_a_refusal_names_a_map_key_as_a_star_never_the_key 
@@ -28263,7 +28078,7 @@ E        +  where "The run's input doesn't match the workflow's input schema at 
 ======================== 4 failed, 35 passed in 22.12s =========================
 ````
 
-- [ ] **Step 3: Implement**
+*The implementation:*
 
 ````diff
 diff --git a/backend/src/dewpoint/apps/inputs.py b/backend/src/dewpoint/apps/inputs.py
@@ -28356,36 +28171,29 @@ index df4af58..ed71020 100644
    §6.1), with `REJECT_DUPLICATE`. An unanswered start is retried with the same id, and a duplicate refusal confirms it.
 ````
 
-- [ ] **Step 4: Run the tests again**
-
-Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_inputs.py tests/apps/test_runs.py tests/apps/worker/test_canary_secrets.py`
-
-Expected (the replay):
+*After it* (`cd backend && uv run pytest -q -p no:cacheprovider -n auto tests/apps/test_inputs.py tests/apps/test_runs.py tests/apps/worker/test_canary_secrets.py`): they passed. The replay showed:
 
 ````text
 39 passed in 20.15s
 ````
 
-- [ ] **Step 5: The whole suite, lint, types and layers**
+*The whole suite at this commit*, as recorded when it was made: 1,532 passed and 8 skipped, ruff, mypy and import-linter clean.
+
+**The final check, once:** the whole suite and the static checks, then a fresh reviewer.
+
+- [ ] **Step 3: The whole suite, lint, types and layers**
 
 Run: `cd backend && uv run pytest -q -p no:cacheprovider -n auto --ignore=tests/apps/cel_evaluator`, then `uv run pytest -q -p no:cacheprovider tests/apps/cel_evaluator`, `uv run ruff check --no-cache src tests migrations`, `uv run ruff format --no-cache --check src tests migrations`, `uv run mypy src` and `uv run lint-imports`.
 
-Expected: together, 1,532 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add -A backend docs && git commit -m "fix(claims): an input's refusal names a key the data supplied as `*` (2b-1b)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-```
-
-**Checkpoint:** stop here for a fresh reviewer's review of the whole branch.
+Expected (final): together, 1,532 passed and 8 skipped; ruff and its formatter clean; mypy: no issues; import-linter: 10 contracts kept. Run it again only if a concrete failure or a code change warrants it.
 
 ---
 
 ## During execution
 
-- A task's tests failing for a reason other than the one quoted, or a whole suite whose count differs, is a finding:
-  stop and report it.
+- A commit that conflicts, a checkpoint's focused tests failing, or a final check whose count differs from the
+  final figures is a finding: stop and report it. `main` was still at `d4185e0`, the prototype's base, when this plan
+  was written, so no conflict is expected.
 - The golden histories come with their commits. If the replay gate refuses a task's goldens, the merge base is wrong:
   check that `feat/engine-2b1b` is cut from `main` after this plan landed.
 - Two known test-environment quirks, neither the engine's: the Java time-skipping test server rejects cancelling an
