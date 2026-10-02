@@ -14,6 +14,7 @@ from typing import Any
 from dewpoint.engine.handles import escape
 
 SENSITIVE = "x-sensitive"
+SECRET_INDEX_LIMIT = "secret_index_limit"  # noqa: S105 - a code: as core.claims.secret_index's (a test keeps them equal)
 MIN_SECRET = 4  # a secret's characters, at least: shorter values would match ordinary text ("1", "yes") everywhere
 _MAX_DEPTH = 64  # a schema that refers to itself ends here
 

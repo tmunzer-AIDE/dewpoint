@@ -27,7 +27,7 @@ from dewpoint.engine.runtime.size import (
     STEP_INPUT_TOO_LARGE,
 )
 from tests.apps.worker.harness import MemoryStore, run_id_of, start, workers
-from tests.support.graphs import G, ref, template
+from tests.support.graphs import G, cel, nid, ref, template
 
 LIMIT = 50_000
 ITEMS = {
@@ -249,6 +249,44 @@ async def test_a_step_whose_secrets_would_pass_the_index_bound_fails(
         "applied",
         None,
     )
+
+
+def sensitive_child(store: MemoryStore) -> str:
+    child = G()
+    child.settings = {
+        "input_schema": {"type": "object", "properties": {"s": {"type": "string", "x-sensitive": True}},
+                         "required": ["s"], "additionalProperties": False},
+        "outputs": {},
+    }  # fmt: skip
+    child.node("e", ECHO, {"value": 1})
+    return str(store.publish(child))
+
+
+@pytest.mark.parametrize("path", ["cel", "filter", "sub_flow"])
+async def test_secrets_past_the_index_bound_fail_their_step_with_its_code_on_every_path(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    """The review's I4: §3.7's bound fails the step that would pass it with `secret_index_limit`, never retried, on
+    every path that extends the index: a CEL result read from sensitive data (claimed with taint), a filter's kept
+    items under a sensitive predicate, a sub-flow's sensitive input."""
+    monkeypatch.setattr(secret_index, "MAX_BYTES", 5_000)
+    store = MemoryStore()
+    g = graph(code=ref("steps.b.error.code", default="none"))
+    g.node("a", SECRET, {"seed": "a", "size": 3_000})  # indexed: 3,000 of the 5,000 bytes
+    if path == "cel":
+        g.node("b", "flow.transform@1", {"fields": {"v": cel("steps.a.output.token + 'x'")}}, on_error="continue")
+    elif path == "filter":
+        g.settings["declassify"] = [{"node": str(nid("b")), "field": "/predicate"}]
+        kept = {"items": ["q" * 2_500, "r" * 2_500], "predicate": cel("size(steps.a.output.token) > 0")}
+        g.node("b", "flow.filter@1", kept, on_error="continue")
+    else:
+        g.node("p", BLOB, {"size": 3_000}).edge("a", "p")
+        sub = {"workflow_id": sensitive_child(store), "input": {"s": ref("steps.p.output.value")}}
+        g.node("b", RUN, sub, on_error="continue").edge("p", "b")
+    g.edge("a", "b")
+    handle, result = await finished(env, store, g)
+    assert (result.status, result.outputs) == ("succeeded", {"code": SECRET_INDEX_LIMIT}), result.error
+    assert store.index_of[run_id_of(handle)] == {"a" + "s" * 2_999}  # nothing past the bound was added
 
 
 async def test_a_result_past_the_limit_anyway_ends_the_run_as_a_bug(

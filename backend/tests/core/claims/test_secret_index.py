@@ -81,7 +81,7 @@ async def test_past_its_bounds_an_extension_is_refused_and_nothing_changes(
     assert await read(worker_sessionmaker, tenant, root) == before
 
 
-def test_the_minimum_is_the_engines() -> None:
-    from dewpoint.engine.sensitive import MIN_SECRET
+def test_the_minimum_and_the_code_are_the_engines() -> None:
+    from dewpoint.engine.sensitive import MIN_SECRET, SECRET_INDEX_LIMIT
 
-    assert secret_index.MIN_SECRET == MIN_SECRET
+    assert (secret_index.MIN_SECRET, secret_index.SECRET_INDEX_LIMIT) == (MIN_SECRET, SECRET_INDEX_LIMIT)

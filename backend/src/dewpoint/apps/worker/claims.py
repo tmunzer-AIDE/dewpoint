@@ -19,7 +19,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from dewpoint.apps.inputs import FORGED, reasons
-from dewpoint.core.claims.secret_index import Index
+from dewpoint.core.claims.secret_index import SECRET_INDEX_LIMIT, Index, SecretIndexLimitError
 from dewpoint.core.claims.service import CLAIM_UNAVAILABLE, ClaimUnavailableError, NewClaim
 from dewpoint.engine.cel import evaluate as cel
 from dewpoint.engine.cel import types as T
@@ -220,9 +220,12 @@ async def _claimed(
         NewClaim(_claim_id(claims.seed, i), value, sensitive, uuid.UUID(run), uuid.UUID(claims.root_run_id))
         for i, value in results
     ]
+    if tainted:  # the extension first: past the index's bounds, nothing is written (§3.7)
+        try:
+            await store.remember(tenant, claims.root_run_id, sorted({t for _, v in results for t in _strings(v)}))
+        except SecretIndexLimitError as e:  # the step fails with the bound's code, never retried (review I4)
+            return {i: {"error": SECRET_INDEX_LIMIT, "message": str(e)} for i, _ in results}
     await store.write(tenant, rows, kind="cel", step_id=claims.step_id, iteration_key=claims.iteration_key)
-    if tainted:
-        await store.remember(tenant, claims.root_run_id, sorted({t for _, v in results for t in _strings(v)}))
     return {i: {"ok": ClaimRef(str(row.id)).to_json()} for (i, _), row in zip(results, rows, strict=True)}
 
 
@@ -492,7 +495,10 @@ async def filter_claimed(
     claim_id = _claim_id(claims.seed, 0)
     new = NewClaim(claim_id, kept, ("",) if tainted else (), uuid.UUID(run), uuid.UUID(claims.root_run_id))
     if tainted:
-        await store.remember(tenant, claims.root_run_id, sorted(set(_strings(kept))))
+        try:
+            await store.remember(tenant, claims.root_run_id, sorted(set(_strings(kept))))
+        except SecretIndexLimitError as e:  # the step fails with the bound's code, never retried (review I4)
+            return {"error": SECRET_INDEX_LIMIT, "message": str(e)}
     await store.write(tenant, [new], kind="filter", step_id=claims.step_id, iteration_key=claims.iteration_key)
     return {"ok": {"items": ClaimRef(str(claim_id)).to_json(), "count": len(kept), "input": len(items)}}
 
@@ -599,7 +605,10 @@ async def child_input(data: ChildInput, store: ClaimStore) -> ChildInputResult:
         (NewClaim(uuid.UUID(c.id), c.value, ("",) if c.tainted else (), made.child, made.root), c.pointer)
         for c in done.claims
     ]  # the reclassified first: the split's may nest them
-    await store.remember(tenant, data.root_run_id, sorted(made.strings | set(done.secrets)))
+    try:
+        await store.remember(tenant, data.root_run_id, sorted(made.strings | set(done.secrets)))
+    except SecretIndexLimitError as e:  # the step fails with the bound's code, never retried (review I4)
+        raise ApplicationError(str(e), type=SECRET_INDEX_LIMIT, non_retryable=True) from None
     if rows:
         await store.write_inputs(tenant, rows)
     try:

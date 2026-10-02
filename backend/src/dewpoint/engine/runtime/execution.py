@@ -118,6 +118,7 @@ with workflow.unsafe.imports_passed_through():
         inline_limit,
         payload_bytes,
     )
+    from dewpoint.engine.sensitive import SECRET_INDEX_LIMIT
     from dewpoint.engine.split import json_bytes, sized
     from dewpoint.engine.taint import Shape, from_schema, tainted_positions
 
@@ -1301,6 +1302,8 @@ class Execution:
                 raise asyncio.CancelledError from None
             if isinstance(e.cause, ApplicationError) and e.cause.type == CLAIM_UNAVAILABLE:
                 return Failure(CLAIM_UNAVAILABLE, CLAIM_REFUSED)
+            if isinstance(e.cause, ApplicationError) and e.cause.type == SECRET_INDEX_LIMIT:  # its message is fixed
+                return Failure(SECRET_INDEX_LIMIT, e.cause.message)
             if isinstance(e.cause, ApplicationError) and e.cause.type == VERSION_UNUSABLE:
                 return Failure(VERSION_UNUSABLE, e.cause.message)
             return Failure(INTERNAL_ERROR, f"{lost} ({type(e.cause or e).__name__}).")
