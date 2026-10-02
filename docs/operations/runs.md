@@ -181,7 +181,7 @@ Anyone who can view runs can read the projection, so it keeps secrets out:
   that field is declared, a position in a list. A map key, numeric or not, and an unknown key show as `*`
   (`headers.* (int_parsing)`). The rule's code is one Pydantic defines; a validator's own error type shows as
   `custom_error`. An unexpected exception, a version this build can't run and an interpreter error name only the
-  error's type. The full text goes to the worker's log, masked against the run tree's secret index.
+  error's type ([the worker's log](#what-the-workers-log-shows) records where it was raised).
 - Previews hold at most 8 KiB of JSON each; a larger one shows as `[truncated]`.
 - Characters Postgres can't store (NUL, lone surrogates) show as U+FFFD, and a number JSON can't hold (NaN,
   infinity) as its name.
@@ -189,6 +189,26 @@ Anyone who can view runs can read the projection, so it keeps secrets out:
 Temporal's own history holds every payload encrypted with the tenant's data key: its Web UI shows ciphertext. A run's
 workflow id is `t:<tenant>:run:<run id>`, a sub-flow's and a failure handler's too
 ([`deployment.md`](deployment.md#encrypted-payloads)).
+
+## What the worker's log shows
+
+The worker's log holds no text a run's data could have written unless it's proven to be code. A secret a plugin makes
+itself, such as a token an API has just issued, is in no secret index until the step's output is claimed, so masking
+can't catch it there:
+
+- A plugin's `ctx.log` keeps an event, a field's name and a field's value only when each is a constant written in the
+  plugin's own source, a boolean or null. A computed event is logged as `step_event_withheld`, a computed field name
+  is dropped (`fields_withheld` counts them), and any other value, a number included, shows as `[redacted]`. A field
+  whose name looks secret (`password`, `token`, …) is redacted even then. Log `"token_refreshed"`, not
+  `f"refreshed {token}"`.
+- A bug in a node (an unexpected exception, a validator's or the claim store's failure) is logged with its type and
+  where it was raised (`where`: file, function and line), and with its text only when that's a constant of the
+  plugin.
+- Temporal's own record of a failed attempt keeps the error's code and drops its text and traceback; its records that
+  would quote an error or heartbeat details are withheld.
+
+A plugin's own failure message (`FatalError`, `RetryableError`, `OutcomeUnknownError`) is its step's error: it's
+masked against the run tree's index and shown in the projection, so it must not quote a secret the run doesn't know.
 
 ## How a run ends
 

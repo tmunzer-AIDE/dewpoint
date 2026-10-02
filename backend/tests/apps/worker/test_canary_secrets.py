@@ -3,12 +3,16 @@
 claimed at admission, and one a plugin step outputs at a sensitive position. Both travel through plugin steps, CEL in
 the evaluator, a sub-flow, a batched loop, a filter, a spill, a failure message and a plugin's crash. Decrypted, no
 payload of any of the run's histories holds either; nor does any row the projection writes, nor any log line. They
-did travel: the run's outputs read them back through its claims."""
+did travel: the run's outputs read them back through its claims.
+
+A secret a plugin makes itself is unknown to the run until its output is claimed: a log line, a crash or a failure
+before then can't be masked against anything. So no log holds text that isn't proven to be code (§6.7): the focused
+canaries below leak a fresh secret each way before it's claimed."""
 
 import asyncio
 import json
 import logging
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from typing import Any
 
 import pytest
@@ -37,6 +41,8 @@ CANARIES = (IN_TRIGGER, FROM_A_PLUGIN)
 SECRET = {"type": "string", "x-sensitive": True}
 ECHO, SLOW_ECHO, BLOB = "testkit.echo@1", "testkit.slow_echo@1", "testkit.blob@1"
 LIMIT, INLINE, BLOBS, EACH = 50_000, 10_000, 6, 9_000  # six blobs: together past the lowered payload limit
+LEAKY_SEED = "canary-leaky-"  # a literal of the graph; the plugin's token isn't, nor one of its code
+TOKEN = (LEAKY_SEED + "t" * 24)[:24]  # what testkit.leaky makes from it
 
 
 @pytest.fixture(autouse=True)
@@ -139,3 +145,89 @@ async def test_no_history_projection_or_log_of_a_canary_run_holds_its_secrets(
         assert canary not in plain, canary
         assert canary not in rows, canary
         assert canary not in logs, canary
+
+
+@dataclass
+class Observed:
+    result: Any
+    plain: str  # every payload of every history, decrypted
+    rows: str  # every row the projection wrote
+    logs: str  # every log line, structured and not
+    entries: list[dict[str, Any]]  # the structured ones
+
+
+async def observed(env: WorkflowEnvironment, caplog: pytest.LogCaptureFixture, g: G) -> Observed:
+    store = MemoryStore()
+    caplog.set_level(logging.DEBUG)
+    with structlog.testing.capture_logs() as entries:
+        async with workers(env.client, store):
+            handle = await start(env.client, store, g, {}, claimed=True)
+            result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+            histories = await executions(env.client, handle.id, handle.first_execution_run_id or "")
+    rows = [asdict(r) for r in store.rows.values()] + [asdict(r) for r in store.runs.values()]
+    logs = json.dumps(entries, default=str) + caplog.text
+    return Observed(result, await decoded(histories), json.dumps(rows, default=str), logs, list(entries))
+
+
+def leaky(how: str, **outputs: Any) -> G:
+    g = G()
+    g.settings = {"input_schema": {"type": "object", "additionalProperties": False}, "outputs": outputs}
+    on_error = "fail" if how == "log" else "continue"  # a step that logs and returns, or one that fails
+    g.node("k", "testkit.leaky@1", {"seed": LEAKY_SEED, "size": len(TOKEN), "how": how}, on_error=on_error)
+    g.nodes[-1]["options"]["max_attempts"] = 1
+    return g
+
+
+def entry(seen: Observed, event: str) -> dict[str, Any]:
+    [found] = [e for e in seen.entries if e.get("event") == event]
+    return found
+
+
+async def test_a_secret_a_plugin_logs_before_its_claimed_never_reaches_the_log(
+    env: WorkflowEnvironment, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A plugin logs its fresh token in an event, a neutral field, a nested value and a field's name, then returns it
+    at a sensitive position. Only the plugin's own constants are logged: the computed event is withheld, its fields'
+    computed values redacted, a computed field name dropped; a boolean and a constant value stay."""
+    seen = await observed(env, caplog, leaky("log", token=ref("steps.k.output.token")))
+    assert seen.result.status == "succeeded", seen.result.error
+    withheld = entry(seen, "step_event_withheld")
+    assert (withheld["detail"], withheld["nested"], withheld["ok"], withheld["fields_withheld"]) == (
+        "[redacted]", "[redacted]", True, 1,
+    )  # fmt: skip
+    issued = entry(seen, "token_issued")
+    assert (issued["detail"], issued["ok"], issued["size"], issued["kind"]) == (
+        "[redacted]",
+        True,
+        "[redacted]",
+        "bearer",
+    )
+    for where in (seen.plain, seen.rows, seen.logs):
+        assert TOKEN not in where
+
+
+async def test_a_crash_quoting_a_secret_never_claimed_logs_its_type_and_place_only(
+    env: WorkflowEnvironment, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A plugin crashes quoting a token it made and never returned: no index knows it. The worker logs the bug's type
+    and where it was raised, never its text; the step's message names only the type."""
+    seen = await observed(env, caplog, leaky("crash", said=ref("steps.k.error.message", default="")))
+    assert seen.result.outputs == {"said": "The node raised RuntimeError."}
+    bug = entry(seen, "step_unexpected_error")
+    assert bug["error_type"] == "RuntimeError" and "error" not in bug
+    assert any(w.startswith("testkit.py:run:") for w in bug["where"])
+    for where in (seen.plain, seen.rows, seen.logs):
+        assert TOKEN not in where
+
+
+async def test_a_failure_quoting_a_secret_never_claimed_isnt_logged(
+    env: WorkflowEnvironment, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A plugin fails quoting a token it made and never returned. Temporal's worker logs a failed attempt with its
+    exception: the record keeps the error's type and drops its text. (The message itself is the step's error, masked
+    against the index as every failure's is (§3.7), which can't know this token: the projection shows the plugin's
+    own message as the plugin wrote it.)"""
+    seen = await observed(env, caplog, leaky("fail"))
+    assert seen.result.status == "succeeded", seen.result.error
+    assert "Completing activity as failed" in seen.logs and "leaky_failed" in seen.logs
+    assert TOKEN not in seen.logs

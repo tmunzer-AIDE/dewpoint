@@ -246,8 +246,41 @@ class SlowEcho(Node):
         return EchoOutput(value=config.value)
 
 
+class LeakyConfig(BaseModel):
+    seed: str
+    size: int = Field(ge=1, le=1024)
+    how: Literal["log", "crash", "fail"] = "log"
+
+
+class LeakyOutput(BaseModel):
+    token: str = sensitive()
+
+
+class Leaky(Node):
+    """Makes a secret of `size` characters from `seed`, as an API issues a token, and leaks it before it's returned
+    at a sensitive position, as a careless plugin would (engine 2b spec §12): before it's claimed, no index knows it.
+    `log` logs it in an event, a neutral field, a nested value and a field's name; `crash` raises an unexpected error
+    quoting it; `fail` fails quoting it."""
+
+    type = "testkit.leaky"
+    version = 1
+    title = "Leaky"
+    Config = LeakyConfig
+    Output = LeakyOutput
+
+    async def run(self, ctx: StepContext, config: LeakyConfig) -> LeakyOutput:
+        token = (config.seed + "t" * config.size)[: config.size]
+        if config.how == "crash":
+            raise RuntimeError(f"crashed holding {token}")
+        if config.how == "fail":
+            raise FatalError("leaky_failed", f"failed holding {token}")
+        ctx.log.info(f"issued {token}", detail=token, nested={"token": token}, ok=True, **{token: 1})
+        ctx.log.warning("token_issued", detail=token, ok=True, size=config.size, kind="bearer")
+        return LeakyOutput(token=token)
+
+
 TESTKIT = Plugin(
     name="testkit",
     version="0.0.0",
-    nodes=(Echo, FailN, Slow, Sensitive, AmbiguousSend, SlowSend, Reconcile, Blob, SecretBlob, SlowEcho),
+    nodes=(Echo, FailN, Slow, Sensitive, AmbiguousSend, SlowSend, Reconcile, Blob, SecretBlob, SlowEcho, Leaky),
 )

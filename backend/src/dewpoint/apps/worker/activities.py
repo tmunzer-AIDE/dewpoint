@@ -35,6 +35,7 @@ from temporalio.converter import DataConverter
 from temporalio.exceptions import ApplicationError
 
 from dewpoint.apps.cel_client import EvaluatorUnavailable, evaluate_remote
+from dewpoint.apps.worker import logs
 from dewpoint.apps.worker.claims import (
     UNAVAILABLE,
     ClaimStore,
@@ -142,17 +143,16 @@ class _StepFailed(Exception):
         return ApplicationError(message, details, type=self.code, non_retryable=not self.retryable)
 
 
-def _bug(what: str, step: StepInput, e: Exception, secrets: Matcher) -> None:
-    """A bug's log line: its error's text masked against the run's secrets before it's cut (engine 2b spec §12: no
-    log line holds a secret), as every message leaving the activity is (§3.7)."""
+def _bug(what: str, step: StepInput, e: Exception, node: type[Node]) -> None:
+    """A bug's log line: its type and where it was raised, never text that isn't proven safe (engine 2b spec §6.7,
+    §12). A secret the node made and never returned is in no index, so masking proves nothing here."""
     _log.warning(
         what,
         run_id=step.run_id,
         step_id=step.step_id,
         iteration_key=step.iteration_key,
         attempt=step.attempt,
-        error_type=type(e).__name__,
-        error=secrets.mask(str(e), REDACTED)[:500],
+        **logs.bug(e, logs.literals(node.__module__)),
     )
 
 
@@ -169,20 +169,19 @@ def _code(error_type: str) -> str:
     return error_type if error_type in _PYDANTIC_CODES else "custom_error"
 
 
-async def _call(
-    node: type[Node], step: StepInput, schema: Mapping[str, Any], secrets: Callable[[], Awaitable[Matcher]]
-) -> tuple[BaseModel, str]:
+async def _call(node: type[Node], step: StepInput, schema: Mapping[str, Any]) -> tuple[BaseModel, str]:
     try:
         config = node.Config.model_validate(step.config)
     except ValidationError as e:
         message = f"The config doesn't match `{step.ref}`: {_fields(e, schema)}"
         raise _StepFailed(CONFIG_INVALID, message, retryable=False) from None
     except Exception as e:  # a validator's bug: it raised something pydantic doesn't turn into a validation error
-        _bug("step_config_check_failed", step, e, await secrets())
+        _bug("step_config_check_failed", step, e, node)
         message = f"The config doesn't match `{step.ref}`: checking it raised {type(e).__name__}."
         raise _StepFailed(CONFIG_INVALID, message, retryable=False) from None
     try:
-        ctx = context(step.tenant_id, step.run_id, step.step_id, step.iteration_key, step.attempt)
+        known = logs.literals(node.__module__)  # what its log may hold (engine 2b spec §6.7)
+        ctx = context(step.tenant_id, step.run_id, step.step_id, step.iteration_key, step.attempt, known)
         instance = node()
         if step.mode == SIMULATE:
             return await instance.simulate(ctx, config), SIMULATED
@@ -202,7 +201,7 @@ async def _call(
     except Exception as e:
         if isinstance(e, NotImplementedError) and step.mode == SIMULATE:
             raise _StepFailed(SIMULATION_UNAVAILABLE, f"`{step.ref}` can't be simulated.", retryable=False) from None
-        _bug("step_unexpected_error", step, e, await secrets())
+        _bug("step_unexpected_error", step, e, node)
         message = f"The node raised {type(e).__name__}."
         if node.side_effect == SideEffect.AMBIGUOUS:
             raise _StepFailed(OUTCOME_UNKNOWN, message, retryable=False, outcome=OUTCOME_UNKNOWN) from None
@@ -282,7 +281,7 @@ def step_activity_for(node: type[Node], store: ClaimStore) -> Callable[[StepInpu
                     seen = await store.remember(step.tenant_id, root, marked)
                 except SecretIndexLimitError as e:
                     raise _StepFailed(SECRET_INDEX_LIMIT, str(e), retryable=False) from None
-            result, outcome = await _call(node, replace(step, config=config), config_schema, secrets)
+            result, outcome = await _call(node, replace(step, config=config), config_schema)
         except _StepFailed as f:
             raise f.mapped(await secrets()) from None
         try:  # the node ran: whatever fails from here, its effect happened, so nothing is retried
@@ -294,7 +293,7 @@ def step_activity_for(node: type[Node], store: ClaimStore) -> Callable[[StepInpu
             except SecretIndexLimitError as e:
                 raise _StepFailed(SECRET_INDEX_LIMIT, str(e), retryable=False, outcome=outcome) from None
             except Exception as e:  # the claim store failed after the node ran: never a plain output instead
-                _bug("step_output_unclaimed", step, e, await secrets())
+                _bug("step_output_unclaimed", step, e, node)
                 raise _StepFailed(CLAIM_UNAVAILABLE, OUTPUT_UNCLAIMED, retryable=False, outcome=outcome) from None
             done = StepResult(envelope, outcome)
             if not size.fits(done, JSON):  # Temporal would refuse to record it (engine 2b spec §5.2)
@@ -307,7 +306,7 @@ def step_activity_for(node: type[Node], store: ClaimStore) -> Callable[[StepInpu
         except ValidationError as e:
             raise violation(_fields(e, output_schema)).mapped() from None
         except Exception as e:  # a validator's bug: it raised something pydantic doesn't turn into a validation error
-            _bug("step_output_check_failed", step, e, await secrets())
+            _bug("step_output_check_failed", step, e, node)
             raise violation(f"checking it raised {type(e).__name__}.").mapped() from None
 
     return run_step
@@ -318,6 +317,7 @@ def engine_activities(store: RunStore, plugins: Iterable[Plugin], *, abi: int = 
     `abi` is the engine ABI this build runs (another build's in the two-build tests): a version runs only on a build
     of its ABI (spec §7). Admission already compares with the current build's; the loader refuses any other too, for
     a run that reached this build anyway (a promotion that raced its start), a sub-flow or a failure handler."""
+    logs.withhold_activity_errors()  # Temporal's records of failed attempts keep no error text (engine 2b spec §12)
 
     @activity.defn(name=LOAD_VERSION)
     async def load_version(data: LoadVersionInput) -> VersionData:
@@ -401,6 +401,7 @@ def remote_evaluator(socket_path: str, profile: str) -> Evaluate:
 def cel_activity(evaluate: Evaluate, store: ClaimStore | None = None) -> Callable[[CelInput], Awaitable[CelResult]]:
     """`cel.evaluate`: outcomes are recorded; an unavailable evaluator is retried by Temporal (3 attempts). A request
     with `claims` resolves its handles through `store` and claims what read sensitive data (engine 2b spec §4.2)."""
+    logs.withhold_activity_errors()  # Temporal's records of failed attempts keep no error text (engine 2b spec §12)
 
     @activity.defn(name=CEL_EVALUATE)
     async def cel_evaluate(data: CelInput) -> CelResult:

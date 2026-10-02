@@ -113,7 +113,10 @@
     claiming its largest containers; a loop's collected values compact into segments, and a loop that spilled ends
     with one claim; its `failures` are in index order (§4.2). `snapshot_format` becomes 2, with no queues, and an
     execution opens at most a cap of iterations computed and pinned at publish (§6). A snapshot or a restore runs part
-    by part, charged in structural units, and a version's program is compiled once per worker. `engine_abi` becomes 6.
+    by part, charged in structural units, and a version's program is compiled once per worker; a take in an
+    execution's first task gets its startup tenth too. The worker's log holds only text proven to be code: a plugin's
+    `ctx.log` keeps its own constants, a bug its type and place, Temporal's record of a failed attempt its code (§3,
+    §8). `engine_abi` becomes 6.
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
   This spec **narrows parent §6.4** (where CEL runs) and resolves the CEL item in parent §15.
 - **Evidence:** CEL spike, branch `spike/cel-evaluation`, commits `d6a8162` and `13a62e1`. See
@@ -200,7 +203,7 @@ class Node(Protocol):
 **`StepContext` (2a):**
 - `tenant_id`, `run_id`, `step_id`, `iteration_key`, `attempt`;
 - `idempotency_key()`, derived from `(run_id, step_id, iteration_key)`;
-- a redacting logger, `heartbeat()`, `cancelled`.
+- a logger that keeps only the plugin's own constants (2b spec §6.7), `heartbeat()`, `cancelled`.
 - `ctx.connection()`, `ctx.http` and `options()` arrive in sub-project 3.
 
 **Errors:**
@@ -1183,8 +1186,9 @@ cancel while the version loads cancels the run.
   From ABI 6 the workflow holds no sensitive value, only handles (2b spec §3.6): the project activity masks every row
   against the run tree's secret index (§3.7). Its strings (4 characters or more) come from every tainted claim (a
   trigger's, a step's output's, a CEL result's) and from configs' sensitive fields, indexed before the attempt. Every
-  message leaving an activity is masked against it too, CEL errors included, and so is a bug's text in the worker's
-  log. Messages never quote input:
+  message leaving an activity is masked against it too, CEL errors included. The worker's log holds no text a run's
+  data could have written unless it's proven to be code (2b spec §6.7): a plugin's log lines keep only its own
+  constants, a bug is logged by its type and place. Messages never quote input:
   validation errors give the location only as far as the schema declares it (map keys, numeric or not, show as `*`)
   and the rule's code, if pydantic defines it (`custom_error` otherwise); an output instance, checked as emitted
   against the declared output schema, names the schema keyword. Unexpected exceptions, unusable versions and
