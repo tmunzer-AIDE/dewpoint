@@ -53,6 +53,7 @@ from dewpoint.engine.runtime.execution import INTERNAL_ERROR, VERSION_UNUSABLE
 from dewpoint.engine.runtime.ids import run_of, tenant_of
 from dewpoint.engine.runtime.projection import REDACTED
 from dewpoint.engine.runtime.resolve import Part, ValueFailure, join
+from dewpoint.engine.runtime.scheduler import assembled
 from dewpoint.engine.runtime.size import inline_limit
 from dewpoint.engine.sensitive import MIN_SECRET, marked_positions
 from dewpoint.engine.split import ForgedHandleError, json_bytes, split
@@ -555,18 +556,27 @@ async def spill(data: SpillInput, store: ClaimStore) -> None:
     holds nothing sensitive in plain), before a command carries their handles. Written again, a claim must hold the
     same content (hash-checked), or nothing is written."""
     tenant, run = caller()
-    rows = []
+    rows: dict[str, list[NewClaim]] = {}
     for entry in data.claims:
         value: Any
+        kind = entry.get("kind", "spill")
+        if "assemble" in entry:  # a collection as one list, from its segments (§5.3)
+            value = await assembled(entry["assemble"], lambda claim_id: _stored(claim_id, store, tenant, run))
+            claim = NewClaim(uuid.UUID(entry["id"]), value, (), uuid.UUID(run), uuid.UUID(data.root_run_id or run))
+            rows.setdefault(kind, []).append(claim)
+            continue
         if "concat" in entry:  # a list written in parts: joined, so its handle addresses each item by position
             value = [item for part in entry["concat"] for item in await _stored(part, store, tenant, run)]
-            rows.append(NewClaim(uuid.UUID(entry["id"]), value, (), uuid.UUID(run), uuid.UUID(data.root_run_id or run)))
+            claim = NewClaim(uuid.UUID(entry["id"]), value, (), uuid.UUID(run), uuid.UUID(data.root_run_id or run))
+            rows.setdefault(kind, []).append(claim)
             continue
         value = entry["value"]
         if entry.get("prev"):  # a container claimed again: its earlier keys are read through the claim before
             value = {**await _forwarding(entry["prev"], store, tenant, run), **value}
-        rows.append(NewClaim(uuid.UUID(entry["id"]), value, (), uuid.UUID(run), uuid.UUID(data.root_run_id or run)))
-    await store.write(tenant, rows, kind="spill", step_id=data.step_id, iteration_key=data.iteration_key)
+        claim = NewClaim(uuid.UUID(entry["id"]), value, (), uuid.UUID(run), uuid.UUID(data.root_run_id or run))
+        rows.setdefault(kind, []).append(claim)
+    for kind, new in rows.items():
+        await store.write(tenant, new, kind=kind, step_id=data.step_id, iteration_key=data.iteration_key)
 
 
 async def _stored(claim_id: str, store: ClaimStore, tenant: str, run: str) -> Any:

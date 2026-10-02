@@ -94,16 +94,20 @@ async def test_a_sub_flow_whose_outputs_are_too_large_fails_its_step(env: Workfl
     assert (store.runs[child].status, store.runs[child].error_code) == ("failed", PAYLOAD_TOO_LARGE)
 
 
-async def test_a_batch_that_collected_too_much_to_return_fails_its_loop(env: WorkflowEnvironment) -> None:
-    """A batch of 100 iterations collecting 1,000 characters each: it reports what it used, and its loop fails; no
-    collected item is dropped silently."""
+async def test_a_batch_that_collected_more_than_it_could_return_spills_it(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A batch of 100 iterations collecting 1,000 characters each: its collection past the inline limit goes to
+    segment claims (engine 2b spec §5.3), so its result stays small, and the loop never fails for what it collected.
+    (The inline limit is lowered with the payload limit, as they relate in production.)"""
+    monkeypatch.setattr(size, "INLINE_LIMIT", 10_000)
     store = MemoryStore()
-    g = graph(code=ref("steps.l.error.code", default="none"))
+    g = graph(code=ref("steps.l.error.code", default="none"), n=ref("steps.l.output.count", default=0))
     g.node("l", LOOP, {"items": list(range(150)), "collect": ref("steps.b.output.value")}, on_error="continue")
     g.node("b", BLOB, {"size": 1_000}).edge("l", "b", "body")
     _, result = await finished(env, store, g)
-    assert (result.status, result.outputs) == ("succeeded", {"code": PAYLOAD_TOO_LARGE})
-    assert result.iterations == 100  # the batch reported what it used
+    assert (result.status, result.outputs, result.iterations) == ("succeeded", {"code": "none", "n": 150}, 150)
+    assert [c for c in store.claims.values() if c.kind == "segment"]
 
 
 async def children_started(handle: WorkflowHandle[Any, Any]) -> int:

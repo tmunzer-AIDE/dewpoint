@@ -1307,11 +1307,12 @@ class Execution:
             parts[-1].append(item)
             weight += size
         ids = [str(uuid.uuid5(uuid.UUID(entry["id"]), str(k))) for k in range(len(parts))]
+        kind = entry.get("kind", "spill")
         for part_id, part in zip(ids, parts, strict=True):
-            failed = await self._spill([{"id": part_id, "value": part}], None, scope)
+            failed = await self._spill([{"id": part_id, "value": part, "kind": kind}], None, scope)
             if failed is not None:
                 return failed
-        return await self._spill([{"id": entry["id"], "concat": ids}], None, scope)
+        return await self._spill([{"id": entry["id"], "concat": ids, "kind": kind}], None, scope)
 
     async def _spill(self, claims: list[dict[str, Any]], step: Step | None, scope: ScopeKey) -> Failure | None:
         data = SpillInput(claims, self.root_run_id, str(step.id) if step else None, iteration_key(scope))
@@ -1453,7 +1454,10 @@ class Execution:
                 return _Effect(failure=CANCELLED)
             return _Effect(end=end)
         stopped = Failure.from_json(result.stopped) if result.stopped else None
-        return _Effect(batch=BatchOutcome(list(result.collected), list(result.failures), stopped))
+        outcome = BatchOutcome(
+            list(result.collected), list(result.failures), stopped, result.collection, result.failure_collection
+        )
+        return _Effect(batch=outcome)
 
     def _batch_input(self, b: Batch, grant: int) -> BatchInput:
         step = self.sched.step(b.loop)
@@ -1477,6 +1481,7 @@ class Execution:
             outer=self._outer(b.loop),
             items=b.items if isinstance(b.items, list) else [],
             items_ref=b.items.to_json() if isinstance(b.items, ItemsRef) else None,
+            collect_base=self.sched.collect_base(b.loop),
             offset=b.start,
             concurrency=loop.concurrency,
             stop_on_error=loop.stop_on_error,

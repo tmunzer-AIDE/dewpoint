@@ -7,7 +7,7 @@ again, and the two agree (the property test checks it after every change)."""
 import json
 from typing import Any
 
-from dewpoint.engine.runtime.scheduler import Failure, Scheduler
+from dewpoint.engine.runtime.scheduler import Collection, Failure, Scheduler
 from tests.engine.runtime.support import program
 from tests.support.graphs import G
 
@@ -31,14 +31,14 @@ def test_the_live_state_counts_values_as_they_enter_and_leave() -> None:
     assert s.live == size({}) + size({"output": {"n": "abc"}})
     [loop] = s.take_ready()
     s.open_loop(loop, ["p", "q"], concurrency=1, stop_on_error=False)  # its items, what it collects, its failures
-    base = size({}) + size({"output": {"n": "abc"}}) + size(["p", "q"]) + size([None, None]) + size([])
+    base = size({}) + size({"output": {"n": "abc"}}) + size(["p", "q"]) + size([]) + size([])  # two segment lists
     assert s.live == base + size("p")  # and the open iteration's item
     [x] = s.take_ready()
     s.fail(x, Failure("testkit.boom", "it broke"))  # the iteration fails: its scope goes, the failure stays
     assert (
         s.live
         == s.recount()
-        == base + size([{"index": 0, "code": "testkit.boom", "message": "it broke"}]) - 2 + size("q")
+        == base + Collection.entry_bytes(0, {"code": "testkit.boom", "message": "it broke"}) + size("q")
     )
     [x] = s.take_ready()
     s.succeed(x, {"v": 1})
