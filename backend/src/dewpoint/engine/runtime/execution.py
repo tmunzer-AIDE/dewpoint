@@ -65,7 +65,7 @@ with workflow.unsafe.imports_passed_through():
         step_activity,
     )
     from dewpoint.engine.runtime.budget import LOCAL, Need
-    from dewpoint.engine.runtime.ids import batch_workflow_id, run_workflow_id
+    from dewpoint.engine.runtime.ids import ITEM_CAP_MAX, batch_workflow_id, run_workflow_id
     from dewpoint.engine.runtime.program import Program, Step
     from dewpoint.engine.runtime.projection import (
         Secrets,
@@ -723,6 +723,11 @@ class Execution:
                 if _decision(owner, pointer) and contains_marker(values[pointer]):
                     values[pointer] = await self._declassified(values[pointer], owner, scope)
                     mode = "activity"
+                elif owner is not None and owner.ref == "flow.loop@1" and pointer == "/items":
+                    handle = ClaimRef.of(values[pointer])
+                    if handle is not None:
+                        values[pointer] = await self._items(handle, owner, scope)
+                        mode = "activity"
             elif isinstance(value, TemplateValue):
                 parts = [await self._part(p, owner, scope) for p in resolve.template_parts(v, value)]
                 joined = resolve.join(parts)
@@ -807,6 +812,20 @@ class Execution:
         request = EvaluateRequest(self.program.cel_profile, "v", {"v": "bool"}, ({"v": handle},)).to_json()
         data = CelInput(request, claims=self._claiming(owner, scope, tainted=False, decision=True))
         return resolve.outcome_value(await self._remote(data))
+
+    async def _items(self, handle: ClaimRef, owner: Step, scope: ScopeKey) -> list[dict[str, str]]:
+        """A loop's items that are a handle (engine 2b spec §4.3): their count, from the activity that reads the claim
+        (a listed loop's declassified decision, or the plain count of a list only its size claimed), and each item a
+        handle into the list. A count past the largest item cap is cut there: the loop then fails its cap."""
+        if handle.extend(str(ITEM_CAP_MAX)).too_long():
+            bounded = ClaimRef.of(await self._bounded(handle, owner, scope))
+            if bounded is None:
+                raise resolve.ValueFailure(cel.TYPE_MISMATCH, "`items` must be a list.")
+            handle = bounded
+        request = EvaluateRequest(self.program.cel_profile, "size(v)", {"v": "list<dyn>"}, ({"v": handle.to_json()},))
+        data = CelInput(request.to_json(), claims=self._claiming(owner, scope, tainted=False, decision=True))
+        count = resolve.outcome_value(await self._remote(data))
+        return [handle.extend(str(i)).to_json() for i in range(min(int(count), ITEM_CAP_MAX + 1))]
 
     async def _remote(self, data: CelInput) -> cel.Outcome:
         """One `cel.evaluate` request of one binding set, or a template: its outcome."""
