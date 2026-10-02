@@ -1457,8 +1457,8 @@ class Execution:
     # --- continue-as-new ------------------------------------------------------------------------------------------
 
     def _snapshot(self) -> dict[str, Any]:
-        """Where a continued run carries on (spec §6, `snapshot_format` 1). The projection is written first, so no
-        row is carried; timers carry their wake times."""
+        """Where a continued run carries on (spec §6; `snapshot_format` 2, engine 2b spec §5.3). The projection is
+        written first, so no row is carried; timers carry their wake times."""
         return {
             "snapshot_format": SNAPSHOT_FORMAT,
             "scheduler": self.sched.to_json(),
