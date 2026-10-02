@@ -26,6 +26,7 @@ from dewpoint.apps.worker.logs import UNNAMED
 from dewpoint.engine.handles import resolve_value
 from dewpoint.engine.runtime import size
 from dewpoint.engine.runtime.activities import CLAIMS_CHILD_INPUT
+from dewpoint.sdk import Empty, StepContext
 from tests.apps.worker.harness import (
     EVALUATOR_ONLY,
     RESULT_TIMEOUT_S,
@@ -38,6 +39,7 @@ from tests.apps.worker.harness import (
 )
 from tests.engine.replay.record import executions
 from tests.support.graphs import G, cel, nid, ref
+from tests.support.plugins.testkit import Slow, SlowConfig
 
 IN_TRIGGER = "canary-in-the-trigger-7d2f"
 SEED = "canary-from-a-plugin-"  # a literal of the graph, which its history holds: only the seed
@@ -406,3 +408,29 @@ async def test_a_listed_decision_that_isnt_a_boolean_reveals_nothing(
     assert seen.result.outputs == {"said": "type_mismatch"}
     for where in (seen.plain, seen.rows, seen.logs):
         assert DECIDED not in where
+
+
+async def test_a_secret_a_plugin_heartbeats_never_reaches_history(
+    own_env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review finding (M5): Temporal keeps an attempt's last heartbeat details, and a timeout writes them into the
+    run's history (`last_heartbeat_details`). A plugin's details are its own data, a secret it holds too: the
+    boundary sends none."""
+    beat = "canary-heartbeat-5c1e"
+
+    async def run(self: Slow, ctx: StepContext, config: SlowConfig) -> Empty:
+        ctx.heartbeat({"cursor": beat})
+        await asyncio.sleep(config.seconds)
+        return Empty()
+
+    monkeypatch.setattr(Slow, "run", run)
+    store, g = MemoryStore(), G()
+    g.settings = {"input_schema": {"type": "object", "additionalProperties": False}, "outputs": {}}
+    g.node("s", "testkit.slow@1", {"seconds": 3})
+    g.nodes[0]["options"].update(timeout_s=1, max_attempts=1)
+    async with workers(own_env.client, store):
+        handle = await start(own_env.client, store, g, {})
+        result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+        histories = await executions(own_env.client, handle.id, handle.first_execution_run_id or "")
+    assert result.status == "failed" and result.error is not None and result.error["code"] == "timeout"
+    assert beat not in await decoded(histories)

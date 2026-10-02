@@ -33,7 +33,7 @@ class Context:
         return idempotency_key(str(self.run_id), str(self.step_id), self.iteration_key)
 
     def heartbeat(self, *details: object) -> None:
-        activity.heartbeat(*details)
+        activity.heartbeat()  # never the details: a plugin's own data, which a timeout writes into history (§12)
 
 
 def context(
