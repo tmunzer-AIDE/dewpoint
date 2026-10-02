@@ -171,7 +171,6 @@ async def test_ready_steps_spread_over_workflow_tasks_by_their_structural_units(
     a take takes only what the task's share allows. With the share lowered, 60 ready steps (each 1,000 units and 4
     per step of its view) go out over many workflow tasks, not one; every one runs."""
     monkeypatch.setattr(route, "YIELD_STRUCTURE", 12_000)
-    monkeypatch.setattr(execution, "YIELD_STRUCTURE", 12_000)
     store = MemoryStore()
     g = G()
     g.settings = {"input_schema": {"type": "object"}, "outputs": {}}

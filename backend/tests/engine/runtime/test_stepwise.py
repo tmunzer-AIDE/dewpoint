@@ -9,7 +9,7 @@ from collections.abc import Generator
 from typing import Any
 
 from dewpoint.engine.cel.route import STARTUP_SHARE, YIELD_STRUCTURE, YieldBudget
-from dewpoint.engine.runtime.scheduler import STRUCTURE_STEP, Scheduler
+from dewpoint.engine.runtime.scheduler import STRUCTURE_STEP, TAKE_WEIGHT, Scheduler
 from tests.engine.runtime.support import program
 from tests.support.graphs import G, ref
 
@@ -88,3 +88,16 @@ def test_a_workflow_task_yields_once_its_structural_share_is_spent() -> None:
     budget.charge(structure=YIELD_STRUCTURE // STARTUP_SHARE)
     assert budget.must_yield(structure=1)
     assert not budget.must_yield(structure=1, whole=True)  # steps get the whole share: their work is light
+
+
+def test_a_take_in_an_executions_first_task_gets_the_startup_tenth() -> None:
+    """The owner's M4 CPU review: an execution's first task also compiles and starts it, so a take there takes at most
+    the startup tenth's worth of queued steps (on the target runner, a whole share's take of ~19,000 deferred loop
+    steps shared that task with the first compile). A later task takes the whole share's; a spent one still takes one,
+    so the run moves on."""
+    budget = YieldBudget()
+    assert budget.takes_left(TAKE_WEIGHT) == YIELD_STRUCTURE // TAKE_WEIGHT
+    budget.reset(startup=True)
+    assert budget.takes_left(TAKE_WEIGHT) == YIELD_STRUCTURE // STARTUP_SHARE // TAKE_WEIGHT
+    budget.charge(structure=YIELD_STRUCTURE)
+    assert budget.takes_left(TAKE_WEIGHT) == 1
