@@ -30,6 +30,7 @@ from dewpoint.engine.handles import (
     RESERVED,
     ClaimRef,
     Fetch,
+    NestingError,
     StoredClaim,
     contains_marker,
     escape,
@@ -62,6 +63,7 @@ from dewpoint.engine.split import ForgedHandleError, json_bytes, split
 from dewpoint.engine.taint import Shape, from_schema, tainted_positions
 
 UNAVAILABLE = "A claim this run may not read, or that doesn't exist."
+UNREADABLE = (ClaimUnavailableError, NestingError)  # a claim refused as `claim_unavailable`: nested past the bound too
 NO_CHILD_VERSION = "The sub-flow's pinned version isn't there, so its input can't be checked or split for it."
 _OUTPUTS = uuid.uuid5(uuid.NAMESPACE_URL, "dewpoint:claims:output")  # a step output's claim ids are derived under it
 _INPUTS = uuid.uuid5(uuid.NAMESPACE_URL, "dewpoint:claims:child-input")  # a child input's, under it
@@ -287,7 +289,7 @@ async def evaluate_claimed(
     for i, bindings in enumerate(sets):
         try:
             plain, read_tainted = await _bindings(bindings, request["declarations"], fetch)
-        except ClaimUnavailableError:
+        except UNREADABLE:
             outcomes[i] = {"error": CLAIM_UNAVAILABLE, "message": UNAVAILABLE}
             continue
         except BindingError as e:
@@ -331,7 +333,7 @@ async def join_claimed(parts: list[Any], claims: Claiming, store: ClaimStore) ->
         if found.found is not MISSING and contains_marker(found.found):
             try:
                 resolved = await resolve_value(found.found, fetch)
-            except ClaimUnavailableError:
+            except UNREADABLE:
                 return {"error": CLAIM_UNAVAILABLE, "message": UNAVAILABLE}
             found = Part(resolved.value, found.default, found.path)
             tainted = tainted or resolved.tainted
@@ -359,7 +361,7 @@ async def derive(data: DeriveInput, store: ClaimStore) -> DeriveResult:
         raise ApplicationError("Not a handle.", type=INTERNAL_ERROR, non_retryable=True)
     try:
         found = await part(source, _fetcher(store, tenant, run))
-    except ClaimUnavailableError:
+    except UNREADABLE:
         raise ApplicationError(UNAVAILABLE, type=CLAIM_UNAVAILABLE, non_retryable=True) from None
     if found is None:
         return DeriveResult(None, present=False)
@@ -464,7 +466,7 @@ async def filter_claimed(
     try:
         found = await resolve_value(spec["items"], fetch)
         base, base_tainted = await _bindings(request["bindings"][0], request["declarations"], fetch)
-    except ClaimUnavailableError:
+    except UNREADABLE:
         return {"error": CLAIM_UNAVAILABLE, "message": UNAVAILABLE}
     except BindingError as e:
         [failed] = await _masked([{"error": cel.TYPE_MISMATCH, "message": str(e)}], store, tenant, claims.root_run_id)
@@ -530,7 +532,7 @@ async def grant(data: GrantInput, store: ClaimStore) -> None:
     tenant, run = caller()
     try:
         await _granted(store, tenant, run, data.to_run_id, data.value, data.root_run_id)
-    except ClaimUnavailableError:
+    except UNREADABLE:
         raise ApplicationError(UNAVAILABLE, type=CLAIM_UNAVAILABLE, non_retryable=True) from None
 
 
@@ -589,7 +591,7 @@ async def child_input(data: ChildInput, store: ClaimStore) -> ChildInputResult:
         if refused:
             return ChildInputResult(reasons=refused)
         value = await _reclassify(data.value, from_schema(schema), fetch, made)
-    except ClaimUnavailableError:
+    except UNREADABLE:
         raise ApplicationError(UNAVAILABLE, type=CLAIM_UNAVAILABLE, non_retryable=True) from None
     try:
         done = split(
@@ -613,7 +615,7 @@ async def child_input(data: ChildInput, store: ClaimStore) -> ChildInputResult:
         await store.write_inputs(tenant, rows)
     try:
         await _granted(store, tenant, run, data.child_run_id, data.value, data.root_run_id)
-    except ClaimUnavailableError:
+    except UNREADABLE:
         raise ApplicationError(UNAVAILABLE, type=CLAIM_UNAVAILABLE, non_retryable=True) from None
     return ChildInputResult(trigger=done.envelope)
 
@@ -649,7 +651,7 @@ async def spill(data: SpillInput, store: ClaimStore) -> None:
 async def _stored(claim_id: str, store: ClaimStore, tenant: str, run: str) -> Any:
     try:
         return (await store.fetch(tenant, run, claim_id)).value
-    except ClaimUnavailableError:
+    except UNREADABLE:
         raise ApplicationError(UNAVAILABLE, type=CLAIM_UNAVAILABLE, non_retryable=True) from None
 
 
@@ -658,7 +660,7 @@ async def _forwarding(prev: str, store: ClaimStore, tenant: str, run: str) -> di
     forwarded to already, so any key is read in two hops at most."""
     try:
         before = (await store.fetch(tenant, run, prev)).value
-    except ClaimUnavailableError:
+    except UNREADABLE:
         raise ApplicationError(UNAVAILABLE, type=CLAIM_UNAVAILABLE, non_retryable=True) from None
     return {
         k: v if ClaimRef.of(v) is not None else ClaimRef(prev, "/" + escape(k)).to_json() for k, v in before.items()
@@ -673,7 +675,7 @@ async def message(data: MessageInput, store: ClaimStore) -> MessageResult:
     tenant, run = caller()
     try:
         found = await resolve_value(data.value, _fetcher(store, tenant, run))
-    except ClaimUnavailableError:
+    except UNREADABLE:
         raise ApplicationError(UNAVAILABLE, type=CLAIM_UNAVAILABLE, non_retryable=True) from None
     value = "" if found.value is MISSING or found.value is None else found.value
     text = value if isinstance(value, str) else json.dumps(value)

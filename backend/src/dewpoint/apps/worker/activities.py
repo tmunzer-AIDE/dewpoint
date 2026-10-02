@@ -38,6 +38,7 @@ from dewpoint.apps.cel_client import EvaluatorUnavailable, evaluate_remote
 from dewpoint.apps.worker import logs
 from dewpoint.apps.worker.claims import (
     UNAVAILABLE,
+    UNREADABLE,
     ClaimStore,
     Evaluate,
     child_input,
@@ -55,8 +56,8 @@ from dewpoint.apps.worker.claims import (
     unforged,
 )
 from dewpoint.apps.worker.context import context
-from dewpoint.core.claims.secret_index import SECRET_INDEX_LIMIT, SecretIndexLimitError
-from dewpoint.core.claims.service import CLAIM_UNAVAILABLE, ClaimUnavailableError
+from dewpoint.core.claims.secret_index import SECRET_INDEX_LIMIT, SECRET_INDEX_UNAVAILABLE, SecretIndexLimitError
+from dewpoint.core.claims.service import CLAIM_UNAVAILABLE
 from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.cel import ipc
 from dewpoint.engine.handles import contains_marker
@@ -115,6 +116,7 @@ SIMULATION_UNAVAILABLE = "simulation_unavailable"
 UNEXPECTED_ERROR = "unexpected_error"
 INVALID_REQUEST = "invalid_request"
 OUTPUT_UNCLAIMED = "The step's output couldn't be stored as claims, so it isn't used (engine 2b spec §3.6)."
+STORE_UNAVAILABLE = "The claim store didn't answer before the step ran, so nothing was sent: the attempt is retried."
 NODE_FAILED = "node_failed"  # a node's failure whose own code isn't a safe identifier its code declares
 MESSAGE_WITHHELD = "The node's message isn't shown: it was computed, and only text written in the node's code is."
 _log = structlog.get_logger("dewpoint.worker")
@@ -278,22 +280,30 @@ def step_activity_for(node: type[Node], store: ClaimStore) -> Callable[[StepInpu
         before it leaves, every message masked against the run's secret index."""
         _same_tenant(step.tenant_id)
         root = step.root_run_id or step.run_id
-        await secrets_of(store, step.tenant_id, root)  # read once before the attempt: the index's cached automaton
+        held = Matcher(())  # the index read before the attempt; until then, every message is the boundary's own text
 
-        async def secrets() -> Matcher:  # the index at the boundary: another activity may have extended it (§3.7)
-            return (await secrets_of(store, step.tenant_id, root)).matcher
+        async def secrets() -> Matcher:
+            """The index at the boundary: another activity may have extended it (§3.7). When the store doesn't
+            answer again, the one held masks: the failure stays what it was, never one of unknown outcome."""
+            try:
+                return (await secrets_of(store, step.tenant_id, root)).matcher
+            except Exception:
+                return held
 
         try:
-            try:
+            try:  # before the node runs: nothing is sent, so a store that doesn't answer fails the attempt retryable
+                held = (await secrets_of(store, step.tenant_id, root)).matcher  # the index's cached automaton
                 config = await resolved_config(step.config, store)
-            except ClaimUnavailableError:
-                raise _StepFailed(CLAIM_UNAVAILABLE, UNAVAILABLE, retryable=False) from None
-            marked = config_secrets(config, config_schema)  # only the config marks them: indexed before the attempt
-            if marked:
-                try:
+                marked = config_secrets(config, config_schema)  # only the config marks them: indexed before the attempt
+                if marked:
                     await store.remember(step.tenant_id, root, marked)
-                except SecretIndexLimitError as e:
-                    raise _StepFailed(SECRET_INDEX_LIMIT, str(e), retryable=False) from None
+            except UNREADABLE:
+                raise _StepFailed(CLAIM_UNAVAILABLE, UNAVAILABLE, retryable=False) from None
+            except SecretIndexLimitError as e:
+                raise _StepFailed(SECRET_INDEX_LIMIT, str(e), retryable=False) from None
+            except Exception as e:
+                _bug("step_store_unavailable", step, e, node)
+                raise _StepFailed(SECRET_INDEX_UNAVAILABLE, STORE_UNAVAILABLE, retryable=True) from None
             result, outcome = await _call(node, replace(step, config=config), config_schema)
         except _StepFailed as f:
             raise f.mapped(await secrets()) from None
