@@ -836,7 +836,8 @@ log line safe. So:
 - A bug in a node is logged by its type and where it was raised (file, function and line); its text only when that's
   such a constant. A class name is text too, which a plugin can make at run time: it's shown, in a log line and in a
   step's message, only when the class is a builtin or its module's code declares the name. A frame is named only when
-  its code was compiled from its module's source.
+  its code was compiled from its module's source, and its line only when that compiled function has it: a traceback a
+  plugin builds survives `raise` and can carry any number.
 - Temporal's records of activities keep only the exact text of one of the SDK's fixed messages, never what follows it
   (an activity's details, an error's text), nor an error's code or class: a code's shape proves nothing about where it
   came from. Any other record is withheld whole, and no record keeps an exception or its traceback.
@@ -1685,7 +1686,8 @@ Beyond each task's own tests:
   canary in the trigger and one a plugin outputs at a sensitive position, carried through plugin steps, the evaluator,
   a sub-flow, batches, a filter, a spill, a failure message and a crash, appear in no decrypted history, projection or
   log line; and a secret a plugin makes and leaks before it's claimed appears in none of them either: in its `ctx.log`
-  event, field names and values (no log line), in a crash's text or its class's name (no history, row or log line),
+  event, field names and values (no log line), in a crash's text, its class's name or its traceback's line (no
+  history, row or log line),
   and in a failure's message or code, shaped as a valid identifier included (no history, row or log line) (§3.7,
   §6.7).
 - **Properties:** the taint analysis (no tainted path is routed locally; plain output appears only at listed sites);
