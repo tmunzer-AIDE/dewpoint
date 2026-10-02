@@ -26,8 +26,20 @@ from dewpoint.core.platform.service import record_worker
 log = structlog.get_logger()
 
 # Compiled into the build: what every live instance of the current build must hold before runs start on it (2b-2).
-# 2b-1b adds claim_check.
-CAPABILITIES = ("cel_request_size_guard", "payload_codec")
+CAPABILITIES = ("cel_request_size_guard", "claim_check", "payload_codec")
+# What `claim_check` proves the role may do (engine 2b spec §2.7): read and write claims, grants and the secret index.
+CLAIM_PRIVILEGES = (
+    ("run_inputs", "SELECT"),
+    ("run_inputs", "INSERT"),
+    ("step_outputs", "SELECT"),
+    ("step_outputs", "INSERT"),
+    ("claim_grants", "SELECT"),
+    ("claim_grants", "INSERT"),
+    ("run_secret_index", "SELECT"),
+    ("run_secret_index", "INSERT"),
+    ("run_secret_index", "UPDATE"),
+)
+_CLAIMS = "SELECT " + " AND ".join(f"has_table_privilege('{t}', '{p}')" for t, p in CLAIM_PRIVILEGES)
 HEALTH_INTERVAL_S = 30.0
 
 
@@ -36,22 +48,26 @@ class WorkerUnhealthyError(Exception):
 
 
 async def self_check(keyring: Keyring, sessionmaker: async_sessionmaker[AsyncSession]) -> bool | None:
-    """True when this instance can encrypt for its tenants: its KEK wraps and unwraps, and its role may read data
-    keys. False when either is definitely not so. None when the database didn't answer: nothing is proven either way."""
+    """True when this instance can encrypt for its tenants, its KEK wrapping and unwrapping and its role reading data
+    keys (`payload_codec`), and its claim store answers, its role reading and writing claims (`claim_check`). False
+    when any is definitely not so. None when the database didn't answer: nothing is proven either way."""
     try:
         keyring.self_check()
     except Exception as e:  # whatever fails, the answer is the same: this instance can't unwrap keys
         log.error("worker_self_check_failed", check="kek", error=type(e).__name__)
         return False
     try:
-        async with sessionmaker() as s:  # the grant, read from the catalog: an answer, whichever tenant is asked for
+        async with sessionmaker() as s:  # the grants, read from the catalog: an answer, whichever tenant is asked for
             readable: bool = (await s.execute(text("SELECT has_table_privilege('data_keys', 'SELECT')"))).scalar_one()
+            claims: bool = (await s.execute(text(_CLAIMS))).scalar_one()
     except Exception as e:
         log.warning("worker_self_check_unanswered", error=type(e).__name__)
         return None
     if not readable:
         log.error("worker_self_check_failed", check="data_keys")
-    return readable
+    if not claims:
+        log.error("worker_self_check_failed", check="claims")
+    return readable and claims
 
 
 def reporter(
