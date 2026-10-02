@@ -64,6 +64,9 @@
   - **The owner's decision (2026-10-01): go for the focused §5.3 gate (§11.3).** Revision 5's §5.3 is approved for
     implementation by the 2b-1b plan, not as production-ready: the plan turns the prototype's guarantees into
     regression tests and completes what the prototype didn't. The unpinned-run fix (#22, #23) is separate.
+  - Revision 6 (draft, for the owner's approval with the 2b-1b plan), from the owner's review of the 2b-1b prototype's
+    milestone 5: worker logs hold only text proven to be code, which replaces redaction by field name; a secret a
+    plugin makes and leaks before it's claimed is a canary of its own (§6.7, §12).
 - **Parent specs:**
   - `2026-09-24-dewpoint-architecture-design.md` (§5, §6.1, §6.5, §6.8, §12, §15). This spec **changes** its
     workflow-id contract (§6.1), replaces its `outbox` table (§6.1), details its claim check (§6.5) and settles the
@@ -814,10 +817,23 @@ largest container when the budget requires.
 ### 6.7 Without a codec server
 
 There's no codec server in 2b; Temporal's Web UI shows ciphertext. Incidents rely on the run projections (status,
-steps, codes, masked messages), worker logs redacted by field name, and `dewpoint runs diagnose <run>`, which reports
-only what Temporal shows without decoding — the workflow's status and timestamps, its task queue and build id,
-pending activity types and attempt counts, and whether a failure exists — next to the projection. It doesn't promise
-failure types.
+steps, codes, masked messages), worker logs (below), and `dewpoint runs diagnose <run>`, which reports only what
+Temporal shows without decoding — the workflow's status and timestamps, its task queue and build id, pending activity
+types and attempt counts, and whether a failure exists — next to the projection. It doesn't promise failure types.
+
+**Worker logs hold only text proven to be code (§12).** A secret a plugin makes itself, such as a token an API has
+just issued, is in no secret index until the step's output is claimed (§3.7), so neither masking nor redaction by a
+field's name proves a log line safe. So:
+- A plugin's log line keeps its event, a field's name and a field's value only when each is a constant of the plugin's
+  own source (read from its package's code objects), a boolean or null. A computed event is withheld, a computed field
+  name dropped, and any other value redacted, numbers included. A field whose name looks secret is redacted even then.
+- A bug in a node is logged by its type and where it was raised (file, function and line); its text only when that's
+  such a constant.
+- Temporal's own records of an activity keep the SDK's fixed messages and the error's code. A record that would quote
+  an error or heartbeat details is withheld, and no record keeps an exception or its traceback.
+
+A plugin's own failure message is its step's error, not a log line: like every message leaving the activity, it's
+masked against the run tree's index (§3.7), and a plugin must not quote in it a secret the run doesn't know.
 
 ## 7. Admission and dispatch (2b-2)
 
@@ -1654,7 +1670,11 @@ With every container claimed, the live state needs at most 660,576 B (250 root l
 Beyond each task's own tests:
 - **Canary secrets** — the main end-to-end proof: runs seeded with known secrets have their entire decoded history,
   projections and logs scanned; no secret may appear. 2b-1a's part: no execution of a canary run (its sub-flow, its
-  batches, its `cel.evaluate` requests and local activities) holds the canary in its raw history.
+  batches, its `cel.evaluate` requests and local activities) holds the canary in its raw history. 2b-1b's part: a
+  canary in the trigger and one a plugin outputs at a sensitive position, carried through plugin steps, the evaluator,
+  a sub-flow, batches, a filter, a spill, a failure message and a crash, appear in no decrypted history, projection or
+  log line; and a secret a plugin makes and leaks before it's claimed — in its log's event, field names and values, in
+  a crash, in a failure — appears in no log line (§6.7).
 - **Properties:** the taint analysis (no tainted path is routed locally; plain output appears only at listed sites);
   the splitter (nothing plain at sensitive or undeclared positions; nesting follows the claiming order); forged
   handles refused.
