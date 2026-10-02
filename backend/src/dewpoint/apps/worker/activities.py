@@ -42,12 +42,14 @@ from dewpoint.apps.worker.claims import (
     child_input,
     claim_output,
     config_secrets,
+    current,
     derive,
     evaluate_claimed,
     filter_claimed,
     grant,
     join_claimed,
     resolved_config,
+    unforged,
 )
 from dewpoint.apps.worker.context import context
 from dewpoint.core.claims.secret_index import SECRET_INDEX_LIMIT, SecretIndexLimitError
@@ -253,8 +255,11 @@ def step_activity_for(node: type[Node], store: ClaimStore) -> Callable[[StepInpu
         before it leaves, every message masked against the run's secret index."""
         _same_tenant(step.tenant_id)
         root = step.root_run_id or step.run_id
-        known = await store.secrets(step.tenant_id, root)
-        secrets = Matcher(known)
+        seen = await store.index(step.tenant_id, root)
+
+        async def secrets() -> Matcher:  # the index at the boundary: another activity may have extended it (§3.7)
+            return Matcher((await current(store, step.tenant_id, root, seen)).strings)
+
         try:
             try:
                 config = await resolved_config(step.config, store)
@@ -263,20 +268,18 @@ def step_activity_for(node: type[Node], store: ClaimStore) -> Callable[[StepInpu
             marked = config_secrets(config, config_schema)  # only the config marks them: indexed before the attempt
             if marked:
                 try:
-                    await store.remember(step.tenant_id, root, marked)
+                    seen = await store.remember(step.tenant_id, root, marked)
                 except SecretIndexLimitError as e:
                     raise _StepFailed(SECRET_INDEX_LIMIT, str(e), retryable=False) from None
-                known = (*known, *marked)
-                secrets = Matcher(known)
             result, outcome = await _call(node, replace(step, config=config), config_schema)
         except _StepFailed as f:
-            raise f.mapped(secrets) from None
+            raise f.mapped(await secrets()) from None
         try:  # the node ran: whatever fails from here, its effect happened, so nothing is retried
             data = output_of(result)
             if contains_marker(data):  # a forged handle never crosses into a run (§3.2)
                 raise violation("it holds the reserved key `$claim`.")
             try:
-                envelope = await claim_output(data, output_schema, step, store, known)
+                envelope = await claim_output(data, output_schema, step, store, seen)
             except SecretIndexLimitError as e:
                 raise _StepFailed(SECRET_INDEX_LIMIT, str(e), retryable=False, outcome=outcome) from None
             except Exception as e:  # the claim store failed after the node ran: never a plain output instead
@@ -287,7 +290,7 @@ def step_activity_for(node: type[Node], store: ClaimStore) -> Callable[[StepInpu
                 raise _StepFailed(size.PAYLOAD_TOO_LARGE, size.STEP_OUTPUT_TOO_LARGE, retryable=False, outcome=outcome)
             return done
         except _StepFailed as f:
-            raise f.mapped(secrets) from None
+            raise f.mapped(await secrets()) from None
         except PydanticSerializationError:
             raise violation("it can't be written as JSON.").mapped() from None
         except ValidationError as e:
@@ -330,7 +333,7 @@ def engine_activities(store: RunStore, plugins: Iterable[Plugin], *, abi: int = 
         """Every row masked against the run tree's secret index before it's written (engine 2b spec §3.7)."""
         _same_tenant(data.tenant_id)
         root = data.root_run_id or (data.run.run_id if data.run is not None else "")
-        secrets = Matcher(await store.secrets(data.tenant_id, root)) if root else Matcher(())
+        secrets = Matcher((await store.index(data.tenant_id, root)).strings) if root else Matcher(())
         await store.project(_masked(data, secrets) if secrets.strings else data)
 
     @activity.defn(name=CLAIMS_DERIVE)
@@ -380,7 +383,7 @@ def cel_activity(evaluate: Evaluate, store: ClaimStore | None = None) -> Callabl
                         "A request whose bindings hold handles came without claims.", type=INTERNAL_ERROR,
                         non_retryable=True,
                     )  # fmt: skip
-                return CelResult(await evaluate(data.request))
+                return CelResult(unforged(await evaluate(data.request)))
             if store is None:
                 raise ApplicationError("This CEL worker reads no claims.", type=INTERNAL_ERROR, non_retryable=True)
             if data.template is not None:

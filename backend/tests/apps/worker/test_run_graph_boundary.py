@@ -52,17 +52,19 @@ async def test_a_steps_sensitive_output_is_claimed_and_read_resolved_by_the_next
     assert held(store, result.outputs["secret"]) == ("s3cr3t-value", True)
     # the echo got the value, resolved in its activity; what it returned repeats a secret the run knows: claimed
     assert held(store, result.outputs["echoed"]) == ("s3cr3t-value", True)
-    assert {"s3cr3t-value", "pa55word"} <= store.index[only_run(store)]
+    assert {"s3cr3t-value", "pa55word"} <= store.index_of[only_run(store)]
     rows = {r.node_key: r for r in store.steps(only_run(store))}
     assert "s3cr3t-value" not in repr(rows) and "pa55word" not in repr(rows)
 
 
 async def test_output_that_holds_the_marker_is_refused(env: WorkflowEnvironment) -> None:
     store = MemoryStore()
-    g = graph(code=ref("steps.e.error.code", default="none"))
-    g.node("e", "testkit.echo@1", {"value": {"$claim": "not a claim"}}, on_error="continue")
-    async with workers(env.client, store):
-        result = await run(env.client, store, g, {})
+    g = graph(
+        {"type": "object", "properties": {"x": {}}, "required": ["x"]}, code=ref("steps.e.error.code", default="none")
+    )
+    g.node("e", "testkit.echo@1", {"value": ref("trigger.x")}, on_error="continue")
+    async with workers(env.client, store):  # unclaimed, as admission would refuse it: a node's output may hold it
+        result = await run(env.client, store, g, {"x": {"$claim": "not a claim"}})
     assert result.status == "succeeded", result.error
     assert result.outputs == {"code": "output_schema_violation"}
 
@@ -102,3 +104,24 @@ async def test_plain_data_at_a_sensitive_position_fails_the_run(env: WorkflowEnv
         result = await handle.result()
     assert (result.status, result.error and result.error["code"]) == ("failed", "internal_error")
     assert "s3cr3t-value" not in repr(store.rows) + repr(store.runs)
+
+
+async def test_a_secret_indexed_while_a_step_runs_is_claimed_and_masked_at_its_boundary(
+    env: WorkflowEnvironment,
+) -> None:
+    """Engine 2b spec §3.7: the index a step read before its attempt can be stale at its end, when another activity
+    indexed a secret meanwhile. Its output and its message are checked against the index as it is at the boundary."""
+    store = MemoryStore()
+    note = {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"],
+            "additionalProperties": False}  # fmt: skip
+    g = graph(note, echoed=ref("steps.a.output.value"), said=ref("steps.f.error.message", default="none"))
+    g.node("a", "testkit.slow_echo@1", {"seconds": 3, "value": ref("trigger.note")})
+    g.node("f", "testkit.slow_echo@1", {"seconds": 3, "value": ref("trigger.note"), "fail": True}, on_error="continue")
+    g.node("w", "testkit.slow@1", {"seconds": 1})  # `a` and `f` have read the index by then
+    g.node("s", "testkit.secret_blob@1", {"seed": "hunter2-hunter2", "size": 15}).edge("w", "s")  # indexes it
+    async with workers(env.client, store):
+        result = await run(env.client, store, g, {"note": "hunter2-hunter2"}, claimed=True)
+    assert result.status == "succeeded", result.error
+    assert result.outputs is not None
+    assert held(store, result.outputs["echoed"]) == ("hunter2-hunter2", True)  # claimed: it repeats a secret
+    assert result.outputs["said"] == "failed on [redacted]"  # masked before it left the activity

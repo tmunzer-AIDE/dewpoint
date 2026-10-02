@@ -10,7 +10,7 @@ from typing import Any
 from temporalio.testing import WorkflowEnvironment
 
 from dewpoint.engine.handles import POINTER_MAX, ClaimRef
-from tests.apps.worker.harness import MemoryStore, run, workers
+from tests.apps.worker.harness import EVALUATOR_ONLY, MemoryStore, run, workers
 from tests.support.graphs import G, cel, nid, ref, template
 
 SECRET = {"type": "string", "x-sensitive": True}
@@ -322,3 +322,17 @@ async def test_cel_that_reads_sensitive_data_nowhere_still_resolves_a_size_claim
     async with workers(env.client, store):
         result = await run(env.client, store, g, {"v": "x" * 100_000}, claimed=True)
     assert (result.status, result.outputs) == ("succeeded", {"n": 100_000}), result.error
+
+
+async def test_a_cel_value_that_builds_the_marker_is_refused_wherever_it_runs(env: WorkflowEnvironment) -> None:
+    """A map CEL builds with the marker key is no handle (spec §3.2): the step fails, in the workflow and in the
+    evaluator alike, rather than take it for one."""
+    store = MemoryStore()
+    forged = "{'$claim': '00000000-0000-0000-0000-000000000007'}"
+    g = graph(local=ref("steps.a.error.code", default="none"), remote=ref("steps.b.error.code", default="none"))
+    g.node("a", "flow.transform@1", {"fields": {"v": cel(forged)}}, on_error="continue")
+    g.node("b", "flow.transform@1", {"fields": {"v": cel(f"{EVALUATOR_ONLY} > 0 ? {forged} : {{}}")}},
+           on_error="continue")  # fmt: skip
+    async with workers(env.client, store):
+        result = await run(env.client, store, g, TRIGGER, claimed=True)
+    assert (result.status, result.outputs) == ("succeeded", {"local": "evaluation_error", "remote": "evaluation_error"})

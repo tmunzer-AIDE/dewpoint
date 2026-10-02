@@ -31,7 +31,7 @@ with workflow.unsafe.imports_passed_through():
     from dewpoint.engine.cel.record import ExpressionRecord
     from dewpoint.engine.cel.route import YieldBudget
     from dewpoint.engine.graph.values import CelValue, RefValue, TemplateValue
-    from dewpoint.engine.handles import CLAIM_UNAVAILABLE, MISSING, ClaimRef, contains_marker
+    from dewpoint.engine.handles import CLAIM_UNAVAILABLE, MISSING, RESERVED, ClaimRef, contains_marker
     from dewpoint.engine.registry import control
     from dewpoint.engine.runtime import nodes, resolve
     from dewpoint.engine.runtime.activities import (
@@ -878,7 +878,10 @@ class Execution:
             outcomes = []
             for bindings in task.bindings:  # a filter's items one at a time: each is an evaluation
                 await self._yield_point(task.record)
-                outcomes.append(task.run_one(bindings))
+                outcome = task.run_one(bindings)
+                if outcome.ok and contains_marker(outcome.value):  # no handle: the marker is Dewpoint's (§3.2)
+                    outcome = cel.Outcome(error=cel.EVALUATION_ERROR, message=RESERVED)
+                outcomes.append(outcome)
                 self._yield.charge(task.record)
             return outcomes
         out: list[cel.Outcome] = []

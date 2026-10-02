@@ -220,8 +220,31 @@ class SecretBlob(Node):
         return await self.run(ctx, config)
 
 
+class SlowEchoConfig(BaseModel):
+    seconds: float = Field(ge=0, le=600)
+    value: Any = None
+    fail: bool = False
+
+
+class SlowEcho(Node):
+    """Takes `seconds`, then returns `value`, or fails quoting it: what it returns or says comes from its input, and
+    the run may have learned it's sensitive meanwhile (engine 2b spec §3.7)."""
+
+    type = "testkit.slow_echo"
+    version = 1
+    title = "Slow echo"
+    Config = SlowEchoConfig
+    Output = EchoOutput
+
+    async def run(self, ctx: StepContext, config: SlowEchoConfig) -> EchoOutput:
+        await asyncio.sleep(config.seconds)
+        if config.fail:
+            raise FatalError("echo_failed", f"failed on {config.value}")
+        return EchoOutput(value=config.value)
+
+
 TESTKIT = Plugin(
     name="testkit",
     version="0.0.0",
-    nodes=(Echo, FailN, Slow, Sensitive, AmbiguousSend, SlowSend, Reconcile, Blob, SecretBlob),
+    nodes=(Echo, FailN, Slow, Sensitive, AmbiguousSend, SlowSend, Reconcile, Blob, SecretBlob, SlowEcho),
 )

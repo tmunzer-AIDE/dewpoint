@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Any
 
 import structlog
+from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.exceptions import ApplicationError
@@ -20,6 +21,7 @@ from dewpoint.core.claims import service as claims
 from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.crypto.keys import KeySource
 from dewpoint.core.db import tenant_scope
+from dewpoint.core.models.claims import SecretIndex
 from dewpoint.core.models.workflows import WorkflowVersion
 from dewpoint.core.plugins.registry import load_node_types
 from dewpoint.core.runs import service as runs
@@ -93,22 +95,31 @@ class DbRunStore:
             return None
         return dict((v.graph.get("settings") or {}).get("input_schema", {"type": "object"}))
 
-    async def secrets(self, tenant_id: str, root_run_id: str) -> tuple[str, ...]:
+    async def index(self, tenant_id: str, root_run_id: str) -> secret_index.Index:
         if self.index_cipher is None:
-            return ()
+            return secret_index.Index(0, ())
         async with self.sessionmaker() as s, s.begin():
             await tenant_scope(s, uuid.UUID(tenant_id))
-            index = await secret_index.read(s, self.index_cipher, uuid.UUID(tenant_id), uuid.UUID(root_run_id))
-        return index.strings
+            return await secret_index.read(s, self.index_cipher, uuid.UUID(tenant_id), uuid.UUID(root_run_id))
 
-    async def remember(self, tenant_id: str, root_run_id: str, strings: Sequence[str]) -> None:
+    async def index_version(self, tenant_id: str, root_run_id: str) -> int:
+        async with self.sessionmaker() as s, s.begin():
+            await tenant_scope(s, uuid.UUID(tenant_id))
+            found = await s.execute(
+                select(SecretIndex.version).where(SecretIndex.root_run_id == uuid.UUID(root_run_id))
+            )
+            return found.scalar_one_or_none() or 0
+
+    async def remember(self, tenant_id: str, root_run_id: str, strings: Sequence[str]) -> secret_index.Index:
         if not strings:
-            return
+            return await self.index(tenant_id, root_run_id)
         if self.index_cipher is None:
             raise ApplicationError("This worker's store knows no secrets.", type=INTERNAL_ERROR, non_retryable=True)
         async with self.sessionmaker() as s, s.begin():
             await tenant_scope(s, uuid.UUID(tenant_id))
-            await secret_index.extend(s, self.index_cipher, uuid.UUID(tenant_id), uuid.UUID(root_run_id), list(strings))
+            return await secret_index.extend(
+                s, self.index_cipher, uuid.UUID(tenant_id), uuid.UUID(root_run_id), list(strings)
+            )
 
     async def fetch(self, tenant_id: str, run_id: str, claim_id: str) -> StoredClaim:
         cipher = self._claims()

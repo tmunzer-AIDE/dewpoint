@@ -309,7 +309,7 @@ async def test_a_step_whose_secrets_would_pass_the_index_bound_fails(
     g.node("b", SECRET, {"seed": "b", "size": 3_000}, on_error="continue").edge("a", "b")
     handle, result = await finished(env, store, g)
     assert (result.status, result.outputs) == ("succeeded", {"code": SECRET_INDEX_LIMIT})
-    assert store.index[run_id_of(handle)] == {"a" + "s" * 2_999}
+    assert store.index_of[run_id_of(handle)] == {"a" + "s" * 2_999}
     [row] = [r for r in store.steps(run_id_of(handle)) if r.node_key == "b"]
     assert (row.status, row.error_code, row.outcome, row.output_preview) == (
         "failed",
