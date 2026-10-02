@@ -4,16 +4,19 @@ in-memory store and an in-process CEL evaluator (the real one needs Linux and it
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Iterable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
+from temporalio.api.common.v1 import Payload
 from temporalio.client import Client, WorkflowHandle
+from temporalio.converter import WorkflowSerializationContext
 from temporalio.exceptions import ApplicationError
 from temporalio.worker import Worker, WorkflowRunner
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
+from dewpoint.apps import codec
 from dewpoint.apps.worker.activities import Evaluate, RunStore, cel_activity, engine_activities
 from dewpoint.core.claims import secret_index
 from dewpoint.core.claims.service import ClaimConflictError, ClaimUnavailableError, NewClaim
@@ -43,6 +46,7 @@ from dewpoint.engine.split import split
 from dewpoint.sdk import Plugin
 from tests.engine.runtime.support import CATALOG, MANIFESTS
 from tests.support.graphs import G
+from tests.support.keys import FixtureKeys
 from tests.support.plugins.testkit import TESTKIT
 
 TENANT = str(uuid.UUID(int=1))
@@ -288,3 +292,35 @@ async def run(
     """A run to its end: a run that hangs fails its test instead of stalling the suite (2a-3a's final review, M6)."""
     handle = await start(client, store, g, trigger, **options)
     return await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+
+
+def _payloads(message: Any) -> Iterator[Payload]:
+    for described, value in message.ListFields():
+        if described.type != described.TYPE_MESSAGE:
+            continue
+        if described.message_type.GetOptions().map_entry:
+            items = list(value.values())
+        else:
+            items = [value] if hasattr(value, "ListFields") else list(value)  # one message, or a repeated field
+        for item in items:
+            if isinstance(item, Payload):
+                yield item
+            elif hasattr(item, "ListFields"):
+                yield from _payloads(item)
+
+
+async def decoded(histories: Any) -> str:
+    """Every payload of every history, decrypted with the fixture keys: what Temporal holds, in plain text. It takes
+    each payload's tenant from its metadata, which only a test may do (the codec never does)."""
+    out = []
+    for history in histories:
+        for event in history.events:
+            for payload in _payloads(event):
+                if payload.metadata.get("encoding") == codec.ENCODING:
+                    workflow_id = run_workflow_id(payload.metadata[codec.TENANT].decode(), str(uuid.UUID(int=0)))
+                    decoder = codec.TenantCodec(FixtureKeys()).with_context(
+                        WorkflowSerializationContext("default", workflow_id)
+                    )
+                    [payload] = await decoder.decode([payload])
+                out.append(payload.data.decode(errors="replace"))
+    return "\n".join(out)

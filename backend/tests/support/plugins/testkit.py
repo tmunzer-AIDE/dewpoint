@@ -224,11 +224,12 @@ class SlowEchoConfig(BaseModel):
     seconds: float = Field(ge=0, le=600)
     value: Any = None
     fail: bool = False
+    crash: bool = False  # raises an unexpected error quoting it: a plugin's bug
 
 
 class SlowEcho(Node):
-    """Takes `seconds`, then returns `value`, or fails quoting it: what it returns or says comes from its input, and
-    the run may have learned it's sensitive meanwhile (engine 2b spec §3.7)."""
+    """Takes `seconds`, then returns `value`, or fails quoting it (or crashes, quoting it): what it returns or says
+    comes from its input, and the run may have learned it's sensitive meanwhile (engine 2b spec §3.7)."""
 
     type = "testkit.slow_echo"
     version = 1
@@ -240,6 +241,8 @@ class SlowEcho(Node):
         await asyncio.sleep(config.seconds)
         if config.fail:
             raise FatalError("echo_failed", f"failed on {config.value}")
+        if config.crash:
+            raise RuntimeError(f"crashed on {config.value}")
         return EchoOutput(value=config.value)
 
 
