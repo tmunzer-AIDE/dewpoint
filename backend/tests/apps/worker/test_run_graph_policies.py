@@ -629,6 +629,16 @@ async def test_a_damaged_output_fails_the_run_as_unusable(env: WorkflowEnvironme
     assert result.error and result.error["code"] == "version_unusable" and store.steps(run_id) == []
 
 
+async def test_an_output_that_fails_ends_the_run_with_its_own_code(env: WorkflowEnvironment) -> None:
+    """The outputs are evaluated in the sandbox, where the workflow catches the failure the interpreter raises: the
+    run fails with the output's code and message, never as an interpreter failure."""
+    store = MemoryStore()
+    async with workers(env.client, store):
+        result = await run(env.client, store, graph(n=cel("trigger.x / 0")), TRIGGER)
+    assert result.status == "failed" and result.error is not None
+    assert result.error["code"] == "evaluation_error", result.error
+
+
 class HeldStore(MemoryStore):
     """Holds the run's summary write open until the test lets it go: a cancel can arrive in between."""
 

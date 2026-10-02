@@ -20,7 +20,6 @@ from temporalio.exceptions import ApplicationError, ChildWorkflowError
 with workflow.unsafe.imports_passed_through():
     from dewpoint.engine.graph.values import iter_values, pointer_str
     from dewpoint.engine.handles import contains_marker
-    from dewpoint.engine.runtime import resolve
     from dewpoint.engine.runtime.activities import (
         FAILURE_HANDLER,
         LOAD_VERSION,
@@ -55,6 +54,10 @@ with workflow.unsafe.imports_passed_through():
     )
     from dewpoint.engine.runtime.ids import run_of, run_workflow_id, tenant_of
     from dewpoint.engine.runtime.program import Program
+
+    # by the module's own name: `from <package> import <module>` loads a copy inside the sandbox, the package being
+    # loaded there already, and its ValueFailure isn't the one the interpreter raises
+    from dewpoint.engine.runtime.resolve import ValueFailure, assemble
     from dewpoint.engine.runtime.scheduler import (
         ITERATION_CAP,
         SNAPSHOT_FORMAT,
@@ -237,7 +240,7 @@ class RunGraph(Execution):
             return RunEnd(DEADLINE_EXCEEDED, Failure(DEADLINE_EXCEEDED, "The run passed its deadline.")), None
         try:
             return end, task.result()
-        except resolve.ValueFailure as e:
+        except ValueFailure as e:
             return RunEnd("failed", e.failure), None
 
     def _returnable(self, outputs: dict[str, Any]) -> bool:
@@ -250,7 +253,7 @@ class RunGraph(Execution):
         settings_outputs = self.program.graph.settings.outputs
         pairs = [(pointer_str(p), v) for p, v in iter_values(settings_outputs, ("settings", "outputs"))]
         values, _ = await self._values(None, pairs, ())
-        assembled = resolve.assemble({"settings": {"outputs": settings_outputs}}, values)
+        assembled = assemble({"settings": {"outputs": settings_outputs}}, values)
         return dict(assembled["settings"]["outputs"])
 
     async def _finish(
