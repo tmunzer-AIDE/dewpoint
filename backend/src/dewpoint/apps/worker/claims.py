@@ -259,7 +259,11 @@ async def evaluate_claimed(
         for (i, _), outcome in zip(ready, answered, strict=True):
             outcomes[i] = outcome
     done = [o if o is not None else {"error": cel.EVALUATION_ERROR, "message": UNAVAILABLE} for o in outcomes]
-    if not claims.decision:  # a declassified decision comes back plain (§4.3)
+    if claims.decision:  # a declassified decision comes back plain, only as a decision (§4.3; review I1)
+        for i, o in enumerate(done):
+            if "ok" in o and not _decides(o["ok"], claims.decides):
+                done[i] = {"error": cel.TYPE_MISMATCH, "message": NOT_DECIDED.get(claims.decides, NOT_DECIDED["bool"])}
+    else:
         secrets = Matcher((await store.index(tenant, claims.root_run_id)).strings)
         results = [(i, o["ok"]) for i, o in enumerate(done) if "ok" in o and (tainted[i] or _repeats(o["ok"], secrets))]
         claimed = {i for i, _ in results}
@@ -389,6 +393,17 @@ async def claim_output(output: Any, schema: Mapping[str, Any], step: StepInput, 
 FILTER_BATCH = 1_000  # items per evaluator request
 NOT_A_LIST = "`items` must be a list."
 NOT_A_DECISION = "`predicate` must give true or false."
+NOT_DECIDED = {
+    "bool": "A listed decision must give true or false.",
+    "int": "A listed loop's count must be a whole number.",
+}
+
+
+def _decides(value: Any, kind: str) -> bool:
+    """Whether a declassified decision's value is of the type it decides with: only that comes back plain (I1)."""
+    if kind == "int":
+        return isinstance(value, int) and not isinstance(value, bool)
+    return isinstance(value, bool)
 
 
 async def filter_claimed(

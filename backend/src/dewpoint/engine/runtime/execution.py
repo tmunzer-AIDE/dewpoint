@@ -880,7 +880,8 @@ class Execution:
                 raise resolve.ValueFailure(cel.TYPE_MISMATCH, "`items` must be a list.")
             handle = bounded
         request = EvaluateRequest(self.program.cel_profile, "size(v)", {"v": "list<dyn>"}, ({"v": handle.to_json()},))
-        data = CelInput(request.to_json(), claims=self._claiming(owner, scope, tainted=False, decision=True))
+        claims = self._claiming(owner, scope, tainted=False, decision=True, decides="int")
+        data = CelInput(request.to_json(), claims=claims)
         count = resolve.outcome_value(await self._remote(data))
         return ItemsRef(handle.to_json(), min(int(count), ITEM_CAP_MAX + 1))
 
@@ -905,12 +906,15 @@ class Execution:
             raise resolve.ValueFailure(cel.PROFILE_UNAVAILABLE, message) from None
         return cel.Outcome.from_json(result.outcomes[0])
 
-    def _claiming(self, owner: Step | None, scope: ScopeKey, *, tainted: bool, decision: bool) -> Claiming:
+    def _claiming(
+        self, owner: Step | None, scope: ScopeKey, *, tainted: bool, decision: bool, decides: str = "bool"
+    ) -> Claiming:
         return Claiming(
             root_run_id=self.root_run_id,
             seed=str(workflow.uuid4()),
             tainted=tainted,
             decision=decision,
+            decides=decides,
             step_id=str(owner.id) if owner is not None else None,
             iteration_key=iteration_key(scope),
         )

@@ -176,12 +176,14 @@ class Claiming:
     """What `cel.evaluate` does with handles and results (engine 2b spec §3.3, §4.2): it resolves the handles among
     the bindings, checked against their rows for the run its workflow id names, and claims a result that read
     sensitive data, or one whose expression does (`tainted`), under ids derived from `seed` (the same on a retry). A
-    declassified decision (`decision`) comes back plain."""
+    declassified decision (`decision`) comes back plain, and only as the type it decides with (`decides`): a value of
+    another type fails `type_mismatch` there, never revealed (review I1)."""
 
     root_run_id: str
     seed: str
     tainted: bool = False
     decision: bool = False
+    decides: str = "bool"  # a decision's type: "bool" (a branch, a case) or "int" (a loop's count)
     step_id: str | None = None  # the producer, recorded on the claim for tracing
     iteration_key: str | None = None
 

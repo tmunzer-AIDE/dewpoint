@@ -382,3 +382,27 @@ async def test_a_secret_map_key_reaches_no_history_row_or_log_and_declared_field
                        "name": "ann"}  # fmt: skip
     for where in (seen.plain, seen.rows, seen.logs):
         assert SECRET_KEY not in where
+
+
+DECIDED = "sk-l3ak-canary-0001"  # a sensitive value a listed condition evaluates to, instead of a boolean
+
+
+async def test_a_listed_decision_that_isnt_a_boolean_reveals_nothing(
+    env: WorkflowEnvironment, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review finding I1: a listed site reveals its decision, the branch taken, never a value. A condition whose CEL
+    evaluates to the sensitive value itself (publish can't type a field the schema leaves open) fails its step
+    `type_mismatch` in the activity, with a fixed message: the value reaches no history, row or log line."""
+    store = MemoryStore()
+    g = G()
+    g.settings = {
+        "input_schema": {"type": "object", "properties": {"cfg": {"type": "object"}}, "required": ["cfg"],
+                         "additionalProperties": False},
+        "outputs": {"said": ref("steps.i.error.code", default="")},
+        "declassify": [{"node": str(nid("i")), "field": "/condition"}],
+    }  # fmt: skip
+    g.node("i", "flow.if@1", {"condition": cel("trigger.cfg.enabled")}, on_error="continue")
+    seen = await observed(env, caplog, g, {"cfg": {"enabled": DECIDED}}, store)
+    assert seen.result.outputs == {"said": "type_mismatch"}
+    for where in (seen.plain, seen.rows, seen.logs):
+        assert DECIDED not in where
