@@ -148,7 +148,7 @@ async def test_no_workflow_task_passes_the_cpu_target(name: str, monkeypatch: py
                 workflow_task_executor=executor,
             )
             evaluator = Worker(
-                env.client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(in_process)]
+                env.client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(in_process, store)]
             )
             async with engine, evaluator:
                 handle = await start(env.client, store, g, AT_CAPS)

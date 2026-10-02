@@ -116,7 +116,7 @@ async def test_a_run_stays_on_the_build_it_started_on_with_its_children_and_cont
 ) -> None:
     client, old, new = dev_env.client, build("old"), build("new")
     store, g = graph()
-    cel_worker = Worker(client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(in_process)])
+    cel_worker = Worker(client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(in_process, store)])
     async with engine(client, store, old), engine(client, store, new), cel_worker:
         await set_current(client, old)
         first = await start(client, store, g, {}, checkpoint_events=60)

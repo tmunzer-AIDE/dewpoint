@@ -21,9 +21,9 @@ from dewpoint.engine.handles import ClaimRef
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, StepInput, StepResult, step_activity
 from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.engine.runtime.workflow import LoopBatch, RunGraph
-from tests.apps.worker.harness import MemoryStore, run, run_id_of, start, workers
+from tests.apps.worker.harness import EVALUATOR_ONLY, MemoryStore, run, run_id_of, start, workers
 from tests.engine.replay.record import executions
-from tests.support.graphs import G, ref, template
+from tests.support.graphs import G, cel, ref, template
 from tests.support.keys import FixtureKeys
 
 SECRET = {"type": "string", "x-sensitive": True}
@@ -194,3 +194,66 @@ async def test_a_failure_message_that_repeats_a_secret_is_masked_in_the_result_a
     plain = await decoded(histories)
     assert "workflow_failed" in plain and "[redacted]" in plain  # decrypted: the result and the handler's trigger
     assert "s3cr3t-value" not in plain
+
+
+def known_secret(g: G) -> G:
+    """A step that makes the run index `hunter2-hunter2` (a sensitive output), before `w` runs: what follows can
+    repeat it in plain text."""
+    g.node("s", "testkit.secret_blob@1", {"seed": "hunter2-hunter2", "size": 15})
+    return g.node("w", "testkit.echo@1", {"value": 1}).edge("s", "w")
+
+
+NOTE = {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"],
+        "additionalProperties": False}  # fmt: skip
+
+
+async def test_a_literal_failure_message_is_masked_too(env: WorkflowEnvironment) -> None:
+    """A literal can repeat a secret the run learned since it was written (engine 2b spec §3.7, §4.6): it's masked
+    before it becomes the run's error, its result's and its failure handler's trigger's."""
+    store = MemoryStore()
+    g = known_secret(graph())
+    g.settings["failure_handler"] = str(store.publish(graph().node("h", "testkit.echo@1", {"value": 1})))
+    g.node("f", "flow.fail@1", {"message": "gave up on hunter2-hunter2"}).edge("w", "f")
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {})
+        result = await handle.result()
+        histories = await executions(env.client, handle.id, handle.first_execution_run_id or "")
+    assert result.error is not None and (result.error["code"], result.error["message"]) == (
+        "workflow_failed",
+        "gave up on [redacted]",
+    )
+    handler = [h for h in histories if h.workflow_id != handle.id]  # the run's own holds its graph, literal and all
+    assert handler and "hunter2-hunter2" not in await decoded(handler)
+
+
+async def test_a_failure_message_that_cant_be_read_fails_with_its_own_code(env: WorkflowEnvironment) -> None:
+    """A message the masking boundary can't read is no intentional failure: the step fails with the boundary's safe
+    code, `claim_unavailable` here, never `workflow_failed`."""
+    store = MemoryStore()
+    other = store.claim("someone else's", owner=str(uuid.uuid4()), tainted=True)
+    g = graph({"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]})  # plain, as published
+    g.node("f", "flow.fail@1", {"message": ref("trigger.x")})  # the handle reaches the message boundary as it is
+    async with workers(env.client, store):
+        result = await run(env.client, store, g, {"x": other})  # unclaimed: a handle to a claim it may not read
+    assert result.error is not None and result.error["code"] == "claim_unavailable"
+
+
+async def test_a_plain_cel_value_or_error_that_repeats_a_secret_is_claimed_or_masked(env: WorkflowEnvironment) -> None:
+    """Untainted bindings, an untainted expression: still checked against the index where they're evaluated (§3.6,
+    §4.6). A result in the evaluator comes back claimed, and an error masked, in the evaluator and in the workflow
+    alike."""
+    store = MemoryStore()
+    g = known_secret(graph(NOTE, remote=ref("steps.r.output.v"), remote_error=ref("steps.e.error.message", default=""),
+                           local_error=ref("steps.l.error.message", default="")))  # fmt: skip
+    g.node("r", "flow.transform@1", {"fields": {"v": cel(f"{EVALUATOR_ONLY} > 0 ? trigger.note : ''")}}).edge("w", "r")
+    lookup = "{'a': 1}[trigger.note] > 0"  # CEL's message quotes the missing key
+    g.node("e", "flow.transform@1", {"fields": {"v": cel(f"{EVALUATOR_ONLY} > 0 && {lookup}")}}, on_error="continue")
+    g.node("l", "flow.transform@1", {"fields": {"v": cel(lookup)}}, on_error="continue")
+    g.edge("w", "e").edge("w", "l")
+    async with workers(env.client, store):
+        result = await run(env.client, store, g, {"note": "hunter2-hunter2"}, claimed=True)
+    assert result.status == "succeeded", result.error
+    assert result.outputs is not None
+    assert held(store, result.outputs["remote"]) == ("hunter2-hunter2", True)
+    for said in (result.outputs["remote_error"], result.outputs["local_error"]):
+        assert "[redacted]" in said and "hunter2-hunter2" not in said, said
