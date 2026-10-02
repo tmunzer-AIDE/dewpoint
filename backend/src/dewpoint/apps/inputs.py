@@ -4,8 +4,9 @@ version's input schema, then splits it: its sensitive and undeclared values, tex
 become claims owned by the run (§3.4), and the strings of the tainted ones seed the run tree's secret index (§3.7).
 What's left is the envelope the start carries, with handles in place of claims.
 
-An input that doesn't match its schema is refused with the places and rules it breaks, never a value; one that holds
-the handle marker is refused: data from outside never crosses into a run as a handle (§3.2)."""
+An input that doesn't match its schema is refused with the places and rules it breaks, never a value nor a key the data
+supplied (a map's key can be a secret, and a sub-flow's refusal is an activity result: history); one that holds the
+handle marker is refused: data from outside never crosses into a run as a handle (§3.2)."""
 
 import uuid
 from collections.abc import Mapping
@@ -18,7 +19,8 @@ from dewpoint.core.claims import secret_index
 from dewpoint.core.claims import service as claims
 from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.crypto.keys import KeySource
-from dewpoint.engine.handles import contains_marker, escape
+from dewpoint.engine.handles import contains_marker
+from dewpoint.engine.runtime.projection import location
 from dewpoint.engine.split import split
 
 FORGED = "The run's input holds the reserved key `$claim`, which only Dewpoint writes."
@@ -32,13 +34,18 @@ class InputRefusedError(Exception):
 
 
 def reasons(schema: Mapping[str, Any], value: Any) -> list[str]:
-    """Why `value` doesn't match `schema`: each place and the rule it breaks, never what's there."""
-    found = sorted(Draft202012Validator(schema).iter_errors(value), key=lambda e: [str(p) for p in e.absolute_path])
-    out = []
-    for e in found[:_REASONS]:
-        where = "".join("/" + escape(p) for p in e.absolute_path) or "its root"
-        out.append(f"The run's input doesn't match the workflow's input schema at {where}: it breaks `{e.validator}`.")
-    return out
+    """Why `value` doesn't match `schema`: each place, as far as the schema declares it (`projection.location`: a key
+    the data supplied shows as `*`), and the rule it breaks; never what's there. Ordered by that text, not by the
+    data."""
+    found = sorted(
+        (location(list(e.absolute_path), schema), str(e.validator))
+        for e in Draft202012Validator(schema).iter_errors(value)
+    )
+    return [
+        f"The run's input doesn't match the workflow's input schema at "
+        f"{'its root' if where == '(root)' else where}: it breaks `{rule}`."
+        for where, rule in found[:_REASONS]
+    ]
 
 
 async def claim_input(

@@ -1210,7 +1210,8 @@ cancel while the version loads cancels the run.
 - **Internal only:** `engine` defines the start request. `apps` provides `start_run(version_id, payload, *, mode)` for tests, the dev CLI (`dewpoint dev run <version> --input file.json`) and, later, 2b's dispatcher.
 - **No public run API in 2a.** Admission, idempotency keys and tenant slots arrive in 2b.
 - **Payloads are validated at admission** from ABI 6 (2b spec §3.5): a trigger that breaks the input schema is
-  refused with the places and rules it breaks, never a value, and leaves no run; one that passes is claimed, and the
+  refused with the places and rules it breaks, never a value nor a key the data supplied (shown as `*`), and leaves
+  no run; one that passes is claimed, and the
   run starts with its envelope. Before ABI 6 a payload that broke its schema failed the step that read the bad value.
 - **A start is failed only when it certainly never began.** The workflow id is `t:<tenant>:run:<run id>` (2b spec
   §6.1), with `REJECT_DUPLICATE`. An unanswered start is retried with the same id, and a duplicate refusal confirms it.

@@ -698,7 +698,7 @@ async def test_admission_claims_the_triggers_sensitive_values_and_seeds_its_secr
 @pytest.mark.parametrize(
     ("trigger", "reason"),
     [
-        ({"token": 12345678, "name": "ann"}, "/token"),  # the wrong type: its place and rule, never its value
+        ({"token": 12345678, "name": "ann"}, "at token: it breaks `type`"),  # its place and rule, never its value
         ({"name": "ann"}, "required"),
         ({"token": "t0k3n-1234", "name": "ann", "extra": {"$claim": str(uuid.UUID(int=7))}}, "$claim"),  # forged
     ],

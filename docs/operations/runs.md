@@ -67,7 +67,7 @@ dewpoint dev run <version-id> --tenant <tenant-id> --input trigger.json
 - Exit codes: 0 when the run succeeded; 1 when it ended otherwise, or its start was refused (by Temporal, or because
   it couldn't be encrypted); 2 when it wasn't admitted (each reason is printed: in a `production` deployment,
   "Production runs are off in this deployment"; a trigger that doesn't match the workflow's input schema, each place
-  and rule it breaks, never a value; a trigger that holds the key `$claim`; a `dewpoint` of another engine ABI than
+  and rule it breaks, never a value, a map's key shown as `*`; a trigger that holds the key `$claim`; a `dewpoint` of another engine ABI than
   the current build's, [`deployment.md`](deployment.md)); 3 when Temporal never confirmed the start (see below).
 - It needs `DEWPOINT_DATABASE_URL` with a login in the `dewpoint_dispatch` role, the Temporal settings above, and the
   KEK: it encrypts the trigger's claims and the start with the tenant's data key.
@@ -243,7 +243,7 @@ key `$claim` too), `unexpected_error`, `evaluation_error`, `type_mismatch`, `tim
 type, but no worker of this build runs it: install its plugin on the workers), `payload_too_large`,
 `claim_unavailable` (a claim the run may not read or that isn't there, or the step's output couldn't be stored as
 claims after the node ran: its effect happened, and its row says so), `secret_index_limit`, `input_invalid` (a
-sub-flow's input that doesn't match the child's input schema) and `node_failed` (a plugin's failure whose own code
+sub-flow's input that doesn't match the child's input schema: each place and rule, a map's key shown as `*`) and `node_failed` (a plugin's failure whose own code
 wasn't a constant identifier of its code, [above](#what-the-workers-log-shows)). A sub-flow step fails with its sub-flow's code, and with `terminated`
 when an operator terminated the sub-flow; a loop fails with `terminated` when one of its batches was.
 

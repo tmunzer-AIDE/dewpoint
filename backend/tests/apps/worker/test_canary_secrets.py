@@ -13,16 +13,19 @@ import asyncio
 import json
 import logging
 from dataclasses import asdict, dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import structlog
+from temporalio.api.enums.v1 import EventType
 from temporalio.testing import WorkflowEnvironment
 
 from dewpoint.apps.worker.activities import MESSAGE_WITHHELD, NODE_FAILED
 from dewpoint.apps.worker.logs import UNNAMED
 from dewpoint.engine.handles import resolve_value
 from dewpoint.engine.runtime import size
+from dewpoint.engine.runtime.activities import CLAIMS_CHILD_INPUT
 from tests.apps.worker.harness import (
     EVALUATOR_ONLY,
     RESULT_TIMEOUT_S,
@@ -154,23 +157,49 @@ async def test_no_history_projection_or_log_of_a_canary_run_holds_its_secrets(
 @dataclass
 class Observed:
     result: Any
+    histories: list[Any]
     plain: str  # every payload of every history, decrypted
     rows: str  # every row the projection wrote
     logs: str  # every log line, structured and not
     entries: list[dict[str, Any]]  # the structured ones
 
 
-async def observed(env: WorkflowEnvironment, caplog: pytest.LogCaptureFixture, g: G) -> Observed:
-    store = MemoryStore()
+async def observed(
+    env: WorkflowEnvironment,
+    caplog: pytest.LogCaptureFixture,
+    g: G,
+    trigger: dict[str, Any] | None = None,
+    store: MemoryStore | None = None,
+) -> Observed:
+    store = store or MemoryStore()
     caplog.set_level(logging.DEBUG)
     with structlog.testing.capture_logs() as entries:
         async with workers(env.client, store):
-            handle = await start(env.client, store, g, {}, claimed=True)
+            handle = await start(env.client, store, g, trigger or {}, claimed=True)
             result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
             histories = await executions(env.client, handle.id, handle.first_execution_run_id or "")
     rows = [asdict(r) for r in store.rows.values()] + [asdict(r) for r in store.runs.values()]
     logs = json.dumps(entries, default=str) + caplog.text
-    return Observed(result, await decoded(histories), json.dumps(rows, default=str), logs, list(entries))
+    plain = await decoded(histories)
+    return Observed(result, histories, plain, json.dumps(rows, default=str), logs, list(entries))
+
+
+async def results_of(histories: list[Any], activity: str) -> str:
+    """The results of every `activity` attempt in the histories, decrypted."""
+    done = []
+    for h in histories:
+        scheduled = {
+            e.event_id: e.activity_task_scheduled_event_attributes.activity_type.name
+            for e in h.events
+            if e.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED
+        }
+        done += [
+            e
+            for e in h.events
+            if e.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_COMPLETED
+            and scheduled.get(e.activity_task_completed_event_attributes.scheduled_event_id) == activity
+        ]
+    return await decoded([SimpleNamespace(events=done)])
 
 
 def leaky(how: str, **outputs: Any) -> G:
@@ -272,3 +301,40 @@ async def test_a_failure_quoting_a_secret_never_claimed_shows_only_the_plugins_c
     assert "Completing activity as failed" in seen.logs
     for where in (seen.plain, seen.rows, seen.logs):
         assert TOKEN not in where and IDENT not in where
+
+
+MAP_KEY = "canary-map-key-5c1e"  # a secret the run's input holds as a key, not a value
+
+
+async def test_a_sub_flow_input_refused_under_a_secret_key_never_names_the_key(
+    env: WorkflowEnvironment, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A parent passes a sensitive map to a child whose sensitive field wants integer values: an object for an object
+    passes publish, but a string under a secret key fails the child's check at the crossing (§3.5). The refusal names
+    each place as far as the child's schema declares it: the key, data the input supplied, shows as `*`, in the
+    crossing's result, the step's message, the decrypted history, the rows and the logs."""
+    store = MemoryStore()
+    creds = {"type": "object", "x-sensitive": True}
+    numbers = {**creds, "additionalProperties": {"type": "integer"}}
+    child = G()
+    child.settings = {
+        "input_schema": {"type": "object", "properties": {"creds": numbers}, "required": ["creds"],
+                         "additionalProperties": False},
+        "outputs": {},
+    }  # fmt: skip
+    child.node("e", ECHO, {"value": 1})
+    g = G()
+    g.settings = {
+        "input_schema": {"type": "object", "properties": {"creds": creds}, "required": ["creds"],
+                         "additionalProperties": False},
+        "outputs": {"said": ref("steps.r.error.message", default="")},
+    }  # fmt: skip
+    sub = {"workflow_id": str(store.publish(child)), "input": {"creds": ref("trigger.creds")}}
+    g.node("r", "flow.run_workflow@1", sub, on_error="continue")
+    seen = await observed(env, caplog, g, {"creds": {MAP_KEY: "not-an-integer"}}, store)
+    why = "at creds.*: it breaks `type`"
+    assert why in seen.result.outputs["said"]
+    crossing = await results_of(seen.histories, CLAIMS_CHILD_INPUT)
+    assert why in crossing and MAP_KEY not in crossing
+    for where in (seen.plain, seen.rows, seen.logs):
+        assert MAP_KEY not in where
