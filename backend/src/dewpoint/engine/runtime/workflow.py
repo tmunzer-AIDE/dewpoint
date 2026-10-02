@@ -219,7 +219,7 @@ class RunGraph(Execution):
         budget = Budget(ITERATION_CAP, root=True) if parent is None else Budget(parent.grant, root=False)
         self.sched = Scheduler(program, budget=budget)
         schema = program.graph.settings.vars_schema
-        self.vars = {k: p.get("default") for k, p in sorted(schema.get("properties", {}).items())}
+        self.sched.init_vars({k: p.get("default") for k, p in sorted(schema.get("properties", {}).items())})
         self.sched.start()
 
     async def _outputs_by(self, end: RunEnd) -> tuple[RunEnd, dict[str, Any] | None]:
@@ -455,7 +455,7 @@ class LoopBatch(Execution):
             else:
                 self.program = program
                 self.sched = Scheduler(program, budget=Budget(start.parent.grant, root=False))
-                self.vars = dict(start.variables)
+                self.sched.init_vars(dict(start.variables))
                 outer = [
                     OuterScope(tuple((str(k), int(i)) for k, i in o["key"]), o["results"], o["item"], o["index"])
                     for o in start.outer

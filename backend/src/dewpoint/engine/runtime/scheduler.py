@@ -22,6 +22,11 @@ holding nothing); root-region loop steps are never deferred; a batch-mode loop i
 until it ends. The deepest iteration on the path can always open one of its own loop's iterations, so it completes,
 frees its scopes, and the path moves on.
 
+The scheduler keeps the variables: numbered versions (the defaults are 0; each root `set_variables` makes the next).
+A loop step inside an iteration captures the version it became ready under, and reads it when it starts, however
+long the cap deferred it; every other step reads the current ones. While a queued step names an older version, each
+write since keeps what it replaced (an undo record), and the snapshot keeps them too.
+
 A snapshot (`snapshot_format` 2, engine 2b spec §5.3) holds states, not queues: one code per node and per edge in
 region order, steps and loops by their topological index. Restoring rebuilds what's queued from those states, minus
 what was handed out before the snapshot and is still running."""
@@ -29,7 +34,7 @@ what was handed out before the snapshot and is still running."""
 import bisect
 import heapq
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -70,6 +75,18 @@ _NODE_CODE = {
 _NODE_FROM = {c: n for n, c in _NODE_CODE.items()}
 _EDGE_CODE = {EdgeState.PENDING: "p", EdgeState.LIVE: "l", EdgeState.DEAD: "x"}
 _EDGE_FROM = {c: e for e, c in _EDGE_CODE.items()}
+_B62 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+NO_CAPTURE = ".."  # a scope's captures: two characters per loop step of its region, in region order
+
+
+def _capture_code(version: int) -> str:
+    if not 0 <= version < len(_B62) ** 2:
+        raise ValueError(f"variable version {version} is past the capture encoding")
+    return _B62[version // len(_B62)] + _B62[version % len(_B62)]
+
+
+def _capture_from(code: str) -> int:
+    return _B62.index(code[0]) * len(_B62) + _B62.index(code[1])
 
 
 def _then_wake[**P, T](fn: Callable[P, T]) -> Callable[P, T]:
@@ -246,6 +263,16 @@ class Scheduler:
         self._deferred: set[Instance] = set()
         self._deferred_by_scope: dict[ScopeKey, list[Instance]] = {}
         self._deferred_heap: list[tuple[tuple[Any, ...], Instance]] = []
+        # the variables, their versions, and the captures of queued loop steps inside iterations
+        self._loop_members = {
+            region: tuple(m for m in members if m in program.regions) for region, members in self._members.items()
+        }
+        self._vars: dict[str, Any] = {}
+        self.vars_version = 0
+        self.undo: dict[int, dict[str, list[Any]]] = {}  # write k (version k -> k + 1): {name: [old] or [] if none}
+        self._captures: dict[Instance, int] = {}  # a queued loop step -> the version it became ready under
+        self._released: dict[Instance, int] = {}  # handed out, its unit not yet started
+        self._vrefs: dict[int, int] = {}  # a captured version -> the queued or released loop steps that name it
 
     @property
     def iterations(self) -> int:
@@ -327,6 +354,8 @@ class Scheduler:
         self._handed -= set(steps)
         for inst in steps:  # a loop step handed out and not started gives its slot back, and waits again
             self._starting.pop(inst, None)
+            if inst in self._released:
+                self._captures[inst] = self._released.pop(inst)
         self._collects_out -= {(c.loop, c.index) for c in collects}
         self._batches_out -= {(b.loop, b.start) for b in batches}
 
@@ -468,6 +497,10 @@ class Scheduler:
         self._starting.clear()
         self._held.clear()
         self._capped.clear()
+        self._captures.clear()
+        self._released.clear()
+        self._vrefs.clear()
+        self._gc_versions()
         self._batches = []
         self.budget.drop_local()  # a loop waiting for its next iteration opens none now
         self._budget_waits.clear()
@@ -552,6 +585,7 @@ class Scheduler:
 
     def _prune(self, key: ScopeKey) -> None:
         """Forget a settled iteration's scope and every scope nested in it: its loop has what it needs."""
+        self._drop_captures(key)
         for k in [k for k in self.scopes if k[: len(key)] == key]:
             if k and not self.scopes[k].frozen:
                 self._n_open -= 1
@@ -586,7 +620,11 @@ class Scheduler:
             return None
         if not states or any(s == EdgeState.LIVE for s in states):
             scope.nodes[node_id] = NodeState.RUNNING  # queued; take_ready() hands it over
-            self._ready.append(Instance(scope.key, node_id))
+            inst = Instance(scope.key, node_id)
+            self._ready.append(inst)
+            if self.batch_loop is None and self._iter_loop(inst):  # its variables, as of now (§5.3)
+                self._captures[inst] = self.vars_version
+                self._vrefs[self.vars_version] = self._vrefs.get(self.vars_version, 0) + 1
             return None
         scope.nodes[node_id] = NodeState.DEAD
         return step
@@ -595,6 +633,7 @@ class Scheduler:
         """An unhandled failure ends its scope: waiting steps die, running ones are cancelled, and so is every scope
         nested inside it. `report`: tell the loop the iteration failed (not when the loop itself is stopping it)."""
         scope.failure = failure
+        self._drop_captures(scope.key)
         queued = set(self._ready)
         for key in [k for k in self.scopes if k[: len(scope.key)] == scope.key]:
             inner = self.scopes[key]
@@ -780,7 +819,7 @@ class Scheduler:
             _, inst = heapq.heappop(self._deferred_heap)
             if inst in self._deferred:  # else it left the queue meanwhile
                 self._undefer(inst)
-                self._starting[inst] = False
+                self._release(inst, False)
                 out.append(inst)
         if self._deferred and self._taken() >= self.cap:
             for key in sorted(self._path(), key=len):
@@ -790,9 +829,14 @@ class Scheduler:
                 if queue and not self._reserved_at(len(key) + 1):
                     inst = queue[0]
                     self._undefer(inst)
-                    self._starting[inst] = True
+                    self._release(inst, True)
                     out.append(inst)
         return out
+
+    def _release(self, inst: Instance, reserved: bool) -> None:
+        self._starting[inst] = reserved
+        if inst in self._captures:
+            self._released[inst] = self._captures.pop(inst)
 
     def _reserved_at(self, level: int) -> bool:
         if any(s.reserved and len(s.key) == level for s in self.scopes.values()):
@@ -840,6 +884,74 @@ class Scheduler:
         finally:
             self._waking = False
 
+    # --- the variables, their versions and captures (engine 2b spec §5.3) -------------------------------------------
+
+    def init_vars(self, values: dict[str, Any]) -> None:
+        """Version 0: the defaults, or a batch's variables (which never change)."""
+        self._vars = dict(values)
+
+    @property
+    def vars(self) -> dict[str, Any]:
+        """The current variables: what a step reads when it starts."""
+        return dict(self._vars)
+
+    def set_variables(self, values: Mapping[str, Any], step: Instance | None = None) -> None:
+        """A root `set_variables` settled: the next version. While a queued loop step names an older one, this write
+        keeps what it replaced."""
+        if self._captures or self._released:
+            self.undo[self.vars_version] = {name: [self._vars[name]] if name in self._vars else [] for name in values}
+        self._vars.update(values)
+        self.vars_version += 1
+
+    def vars_at(self, version: int) -> dict[str, Any]:
+        """The variables as they were at `version`: each written name from the oldest write after it."""
+        out = self.vars
+        for k in range(self.vars_version - 1, version - 1, -1):
+            for name, old in self.undo[k].items():
+                if old:
+                    out[name] = old[0]
+                else:
+                    out.pop(name, None)
+        return out
+
+    def consume_capture(self, inst: Instance) -> dict[str, Any] | None:
+        """A released loop step's unit starts: the variables of the version it captured, read before that version
+        may be dropped. None when it captured none: it reads the current ones."""
+        if inst not in self._released:
+            return None
+        version = self._released.pop(inst)
+        self._unref(version)
+        variables = self.vars_at(version)
+        self._gc_versions()
+        return variables
+
+    def _unref(self, version: int) -> None:
+        n = self._vrefs[version] - 1
+        if n:
+            self._vrefs[version] = n
+        else:
+            del self._vrefs[version]
+
+    def _drop_captures(self, key: ScopeKey) -> None:
+        """The captures of the queued and released loop steps in scope `key` and inside it, found through the queues
+        that hold them (not a scan of every capture)."""
+        steps = [i for k, q in self._deferred_by_scope.items() if k[: len(key)] == key for i in q]
+        steps += [i for i in self._ready if i.scope[: len(key)] == key]
+        for inst in steps:
+            version = self._captures.pop(inst, None)
+            if version is not None:
+                self._unref(version)
+        for inst in [i for i in self._released if i.scope[: len(key)] == key]:
+            self._unref(self._released.pop(inst))
+        self._gc_versions()
+
+    def _gc_versions(self) -> None:
+        """Undo records no captured version needs any more are dropped."""
+        if self.undo:
+            oldest = min(self._vrefs) if self._vrefs else self.vars_version
+            for k in [k for k in self.undo if k < oldest]:
+                del self.undo[k]
+
     # --- continue-as-new ---------------------------------------------------------------------------------------------
 
     def to_json(self, *, check: bool = False) -> dict[str, Any]:
@@ -852,9 +964,12 @@ class Scheduler:
         if check:
             self._check_queues()
         loops = set(self.loops)
+        by_scope: dict[ScopeKey, dict[uuid.UUID, int]] = {}
+        for inst, version in self._captures.items():
+            by_scope.setdefault(inst.scope, {})[inst.step] = version
         return {
             "snapshot_format": SNAPSHOT_FORMAT,
-            "scopes": [self._scope_json(sc) for sc in self.scopes.values()],
+            "scopes": [self._scope_json(sc, by_scope.get(sc.key, {})) for sc in self.scopes.values()],
             "loops": [self._loop_json(loop) for loop in self.loops.values()],
             "handed": [self._i(i) for i in sorted(self._handed_now(), key=self.order)],
             "collects_out": [
@@ -875,6 +990,10 @@ class Scheduler:
             ],
             "held": [[self._i(i), int(r)] for i, r in sorted(self._held.items(), key=lambda c: self.order(c[0]))],
             "seq": self._seq,
+            "vars": self._vars,
+            "vars_version": self.vars_version,
+            "undo": [[k, u] for k, u in sorted(self.undo.items())],
+            "released": [[self._i(i), v] for i, v in sorted(self._released.items(), key=lambda c: self.order(c[0]))],
         }
 
     @classmethod
@@ -896,6 +1015,12 @@ class Scheduler:
         s._starting = {s._if(i): bool(r) for i, r in data["starting"]}
         s._held = {s._if(i): bool(r) for i, r in data["held"]}
         s._seq = int(data["seq"])
+        s._vars = dict(data["vars"])
+        s.vars_version = int(data["vars_version"])
+        s.undo = {int(k): dict(u) for k, u in data["undo"]}
+        s._released = {s._if(i): int(v) for i, v in data["released"]}
+        for version in s._released.values():
+            s._vrefs[version] = s._vrefs.get(version, 0) + 1
         s._n_open = sum(1 for sc in s.scopes.values() if sc.key and not sc.frozen)
         ready, s._collects, s._batches = s._rebuilt()
         for inst in ready:  # queued loop steps inside iterations wait deferred, the rest ready
@@ -982,10 +1107,11 @@ class Scheduler:
             self._edge_orders[region] = order
         return order
 
-    def _scope_json(self, sc: Scope) -> list[Any]:
-        """[key, region, node codes, edge codes, results, item, index, failure, frozen, seq, reserved]: results by
-        step index, as
-        [index, 0, output], [index, 1, error] or [index, 2, output, error]. A frozen scope has no codes."""
+    def _scope_json(self, sc: Scope, captures: Mapping[uuid.UUID, int]) -> list[Any]:
+        """[key, region, node codes, edge codes, results, item, index, failure, frozen, seq, reserved, captures]:
+        results by step index, as [index, 0, output], [index, 1, error] or [index, 2, output, error]; the captures,
+        two characters per loop step of the region (none: ".."), or "" when there are none. A frozen scope has no
+        codes."""
         nodes = edges = ""
         if not sc.frozen:
             nodes = "".join(_NODE_CODE[sc.nodes[m]] for m in self._members[sc.region])
@@ -1001,9 +1127,14 @@ class Scheduler:
                 results.append([t, 0, r["output"]])
         region = self.program.steps[sc.region].topo if sc.region is not None else -1
         failure = sc.failure.to_json() if sc.failure else None
+        codes = ""
+        if captures:
+            codes = "".join(
+                _capture_code(captures[m]) if m in captures else NO_CAPTURE for m in self._loop_members[sc.region]
+            )
         return [
             self._k(sc.key), region, nodes, edges, results, sc.item, sc.index, failure, int(sc.frozen), sc.seq,
-            int(sc.reserved),
+            int(sc.reserved), codes,
         ]  # fmt: skip
 
     def _scope_from(self, raw: list[Any]) -> Scope:
@@ -1021,6 +1152,12 @@ class Scheduler:
                 {"output": r[2]} if r[1] == 0 else {"error": r[2]} if r[1] == 1 else {"output": r[2], "error": r[3]}
             )
         failure = Failure.from_json(raw[7]) if raw[7] else None
+        for n, m in enumerate(self._loop_members[region] if raw[11] else ()):
+            code = raw[11][2 * n : 2 * n + 2]
+            if code != NO_CAPTURE:
+                version = _capture_from(code)
+                self._captures[Instance(key, m)] = version
+                self._vrefs[version] = self._vrefs.get(version, 0) + 1
         return Scope(key, region, nodes, edges, results, raw[5], raw[6], failure, frozen, int(raw[9]), bool(raw[10]))
 
     def _loop_json(self, loop: LoopRun) -> list[Any]:
