@@ -736,3 +736,23 @@ async def test_a_trigger_too_large_to_send_is_claimed_so_its_start_fits(
     )  # fmt: skip
     [(arg, _, _)] = client.started
     assert contains_marker(arg.trigger) and len(json.dumps(arg.trigger)) <= TRIGGER_INLINE
+
+
+async def test_a_trigger_whose_secrets_would_pass_the_index_bound_is_refused(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings, monkeypatch
+) -> None:
+    """Engine 2b spec §3.7: admission seeds the run tree's secret index, which is bounded; a trigger past the bound is
+    refused (`secret_index_limit` among a request's reasons, §9), and leaves no row."""
+    monkeypatch.setattr(secret_index, "MAX_BYTES", 5_000)
+    ctx, _, version = await published(
+        owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, CLAIMED_GRAPH.data()
+    )
+    with pytest.raises(NotAdmissibleError) as refused:
+        await start_run(
+            dispatch_sessionmaker, FakeClient(), api_settings,  # type: ignore[arg-type]
+            tenant_id=ctx.tenant_id, version_id=version, trigger={"token": "k" * 6_000, "name": "ann"},
+        )  # fmt: skip
+    assert "secret index" in " ".join(refused.value.reasons)
+    async with owner_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        assert await service.list_runs(s) == []

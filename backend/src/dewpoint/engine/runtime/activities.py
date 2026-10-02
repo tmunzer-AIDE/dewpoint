@@ -59,7 +59,6 @@ class Parent:
     deadline: str  # ISO 8601: the logical run's deadline, which children share (a failure handler gets its own)
     grant: int  # the iterations its parent reserved for it
     depth: int = 1  # sub-flows nest at most 5 deep (spec §6)
-    secrets: list[str] = field(default_factory=list)  # sensitive values the parent learned, masked here too
     root_run_id: str = ""  # the tree's root run: what its claims record (engine 2b spec §3.1)
 
 
@@ -86,7 +85,6 @@ class RunResult:
     outputs: dict[str, Any] | None = None
     error: dict[str, Any] | None = None  # {code, message}
     iterations: int = 0
-    secrets: list[str] = field(default_factory=list)  # what it learned: its parent masks them too
 
 
 @dataclass(frozen=True)
@@ -122,7 +120,6 @@ class BatchResult:
     stopped: dict[str, Any] | None = None  # the failure that stopped the slice (`on_item_error: stop`)
     end: dict[str, Any] | None = None  # the run ended inside the batch (a fail or stop node, the deadline)
     iterations: int = 0
-    secrets: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

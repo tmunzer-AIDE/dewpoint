@@ -29,6 +29,7 @@ from dewpoint.engine.handles import (
     handles_in,
     part,
     resolve_value,
+    tokens,
 )
 from dewpoint.engine.matcher import Matcher
 from dewpoint.engine.runtime.activities import (
@@ -44,7 +45,7 @@ from dewpoint.engine.runtime.execution import INTERNAL_ERROR
 from dewpoint.engine.runtime.ids import run_of, tenant_of
 from dewpoint.engine.runtime.projection import REDACTED
 from dewpoint.engine.runtime.resolve import Part, ValueFailure, join
-from dewpoint.engine.sensitive import MIN_SECRET
+from dewpoint.engine.sensitive import MIN_SECRET, marked_positions
 from dewpoint.engine.split import ForgedHandleError, split
 from dewpoint.engine.taint import from_schema, tainted_positions
 
@@ -281,6 +282,19 @@ async def resolved_config(config: dict[str, Any], store: ClaimStore) -> dict[str
     tenant, run = caller()
     found = await resolve_value(config, _fetcher(store, tenant, run))
     return dict(found.value)
+
+
+def config_secrets(config: Any, schema: Mapping[str, Any]) -> list[str]:
+    """The strings a step's config holds where the node's config schema marks it `x-sensitive` (§3.6): a value only
+    the config marks sensitive, resolved now. They join the index before the attempt, so whatever echoes them is
+    masked. Undeclared positions don't count: a node's free-form input is no secret of its own."""
+    out: list[str] = []
+    for pointer in marked_positions(config, schema):
+        found: Any = config
+        for token in tokens(pointer):
+            found = found[int(token)] if isinstance(found, list) else found[token]
+        out += _strings(found)
+    return sorted(set(out))
 
 
 async def claim_output(
