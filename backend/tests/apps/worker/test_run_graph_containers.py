@@ -12,7 +12,7 @@ from temporalio.client import WorkflowHandle
 from temporalio.testing import WorkflowEnvironment
 
 from dewpoint.engine.handles import ClaimRef, resolve_value
-from dewpoint.engine.runtime import scheduler
+from dewpoint.engine.runtime import scheduler, size
 from dewpoint.engine.runtime.activities import RunResult
 from tests.apps.worker.harness import TENANT, MemoryStore, run_id_of, start, workers
 from tests.support.graphs import G, cel, ref
@@ -105,3 +105,42 @@ async def test_past_the_budget_a_step_is_sent_the_floor_and_its_activity_claims_
     assert result.status == "succeeded", result.error
     claimed = ClaimRef.of(result.outputs["v"])
     assert claimed is not None and store.claims[claimed.id].value == "x" * 2_000
+
+
+async def test_an_inline_item_list_past_the_budget_is_claimed_and_the_loop_carries_on(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scheduler, "LIVE_BUDGET", 3_000)
+    store = MemoryStore()
+    items = [f"{i:03d}" + "i" * 197 for i in range(20)]
+    g = graph(sizes=ref("steps.l.output.items"), n=ref("steps.l.output.count"))
+    g.node("l", LOOP, {"items": items, "collect": cel("size(item)")}).node("x", ECHO, {"value": 1})
+    g.edge("l", "x", "body")
+    _, result = await finished(env, store, g)
+    assert result.status == "succeeded", result.error
+    assert result.outputs == {"sizes": [200] * 20, "n": 20}
+    assert items in spilled(store)  # the list went to a claim; the loop read the rest by handle
+
+
+async def test_a_list_past_one_spill_is_written_in_parts_and_joined(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its claim still addresses each item by position (engine 2b spec §5.3)."""
+    monkeypatch.setattr(scheduler, "LIVE_BUDGET", 3_000)
+    monkeypatch.setattr(size, "PAYLOAD_BYTES", 20_000)
+    store = MemoryStore()
+    items = ["i" * (1_000 + i) for i in range(30)]  # each item its own size: its position shows
+    g = graph(sizes=ref("steps.l.output.items"))
+    g.settings["input_schema"] = {
+        "type": "object",
+        "properties": {"items": {"type": "array", "items": {"type": "string"}}},
+        "required": ["items"],
+    }
+    g.node("l", LOOP, {"items": ref("trigger.items"), "collect": cel("size(item)")}).node("x", ECHO, {"value": 1})
+    g.edge("l", "x", "body")
+    async with workers(env.client, store):  # the test's trigger isn't admitted: it starts inline, past one spill
+        handle = await start(env.client, store, g, {"items": items})
+        result = await asyncio.wait_for(handle.result(), 60)
+    assert result.status == "succeeded", result.error
+    assert result.outputs == {"sizes": [1_000 + i for i in range(30)]}
+    assert items in spilled(store)  # joined from its parts

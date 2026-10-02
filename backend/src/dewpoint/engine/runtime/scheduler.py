@@ -156,6 +156,42 @@ class Failure:
         return cls(str(data["code"]), str(data["message"]), int(data.get("attempt", 1)))
 
 
+@dataclass(frozen=True)
+class ItemsRef:
+    """A loop's items in a claimed list (§5.3: pending work is cursors): `n` of them, from position `first` of the
+    list `handle` addresses. Item p is the handle extended by `first + p`: no list of handles is ever built."""
+
+    handle: dict[str, Any]
+    n: int
+    first: int = 0
+
+    def to_json(self) -> list[Any]:
+        return [self.handle, self.n, self.first]
+
+    @classmethod
+    def from_json(cls, raw: list[Any]) -> "ItemsRef":
+        return cls(raw[0], int(raw[1]), int(raw[2]))
+
+
+def count(items: "list[Any] | ItemsRef") -> int:
+    return items.n if isinstance(items, ItemsRef) else len(items)
+
+
+def item_at(items: "list[Any] | ItemsRef", pos: int) -> Any:
+    if isinstance(items, ItemsRef):
+        listed = ClaimRef.of(items.handle)
+        if listed is None:
+            raise ValueError("a claimed list without a handle")
+        return listed.extend(items.first + pos).to_json()
+    return items[pos]
+
+
+def sliced(items: "list[Any] | ItemsRef", start: int, stop: int) -> "list[Any] | ItemsRef":
+    if isinstance(items, ItemsRef):
+        return ItemsRef(items.handle, stop - start, items.first + start)
+    return items[start:stop]
+
+
 @dataclass
 class Box:
     """A container's claims (§5.3): the part being claimed (`sealing`: it still counts, and is still read inline,
@@ -206,7 +242,7 @@ class Spill:
     """A container's part on its way to a claim, for `claims.spill`: `entry` is what the activity writes."""
 
     owner: Instance  # the scope's (step NIL), or a loop step's
-    which: str  # r, t: a scope's results, its item; v: the variables; u: an undo record
+    which: str  # r, t: a scope's results, its item; v: the variables; u: an undo record; i: a loop's item list
     first: int  # the claim's number in its container
     entry: dict[str, Any]
 
@@ -239,7 +275,7 @@ class LoopRun:
     `items[0]` (a batch child runs a slice). With `batch`, the items run in children of that many, one at a time."""
 
     instance: Instance
-    items: list[Any]
+    items: list[Any] | ItemsRef
     concurrency: int
     stop_on_error: bool
     offset: int = 0
@@ -251,6 +287,7 @@ class LoopRun:
     failures: list[dict[str, Any]] = field(default_factory=list)
     running_batch: int | None = None  # the start of the batch a child is running
     waiting: bool = False  # the next iteration waits for budget
+    items_sealing: bool = False  # its inline list is being claimed: it waits for the claim, then reads by handle
 
 
 @dataclass(frozen=True)
@@ -268,7 +305,7 @@ class Batch:
 
     loop: Instance
     start: int
-    items: list[Any]
+    items: list[Any] | ItemsRef
 
 
 @dataclass(frozen=True)
@@ -386,7 +423,7 @@ class Scheduler:
         self,
         loop_step: uuid.UUID,
         outer: list[OuterScope],
-        items: list[Any],
+        items: list[Any] | ItemsRef,
         *,
         offset: int,
         concurrency: int,
@@ -403,7 +440,8 @@ class Scheduler:
             self._live += self._scope_bytes(frozen)
         loop_inst = Instance(outer[-1].key, loop_step)
         self.batch_loop = loop_inst
-        loop = LoopRun(loop_inst, list(items), concurrency, stop_on_error, offset=offset, collected=[None] * len(items))
+        items = items if isinstance(items, ItemsRef) else list(items)
+        loop = LoopRun(loop_inst, items, concurrency, stop_on_error, offset=offset, collected=[None] * count(items))
         self.loops[loop_inst] = loop
         self._live += self._loop_bytes(loop)
         self._advance(loop)
@@ -470,6 +508,14 @@ class Scheduler:
             elif which == "t" and sc.item_sealing:
                 self._live += size(handle) - size(sc.item)
                 sc.item, sc.item_sealing = handle, False
+        elif which == "i":
+            loop = self.loops.get(owner)
+            if loop is None or not loop.items_sealing or not isinstance(loop.items, list):
+                return
+            listed = ItemsRef(handle, len(loop.items))
+            self._live += size(listed.to_json()) - size(loop.items)
+            loop.items, loop.items_sealing = listed, False
+            self._advance(loop)
         elif which == "v" and self.vbox.sealing is not None and self.vbox.claims == first:
             before = self.vbox.bytes()
             self.vbox = Box(None, handle, first + 1)
@@ -542,14 +588,15 @@ class Scheduler:
 
     @_then_wake
     def open_loop(
-        self, inst: Instance, items: list[Any], *, concurrency: int, stop_on_error: bool, batch: int = 0
+        self, inst: Instance, items: list[Any] | ItemsRef, *, concurrency: int, stop_on_error: bool, batch: int = 0
     ) -> None:
         """The loop node's `items` are known: open its first iterations, or hand out its first batch. An empty list
         completes it at once."""
         scope, step = self._running(inst)
         if scope is None:
             return
-        loop = LoopRun(inst, list(items), concurrency, stop_on_error, batch=batch, collected=[None] * len(items))
+        items = items if isinstance(items, ItemsRef) else list(items)
+        loop = LoopRun(inst, items, concurrency, stop_on_error, batch=batch, collected=[None] * count(items))
         self.loops[inst] = loop
         self._live += self._loop_bytes(loop)
         if batch and self._iter_loop(inst):  # it opens no scope: it holds its slot until it ends (§5.3)
@@ -880,7 +927,7 @@ class Scheduler:
 
     def _open_next(self, loop: LoopRun, *, reserved: bool = False) -> None:
         index = loop.offset + loop.next
-        item = loop.items[loop.next]
+        item = item_at(loop.items, loop.next)
         loop.next += 1
         loop.open.append(index)
         key = self._iteration_scope(loop, index)
@@ -888,16 +935,19 @@ class Scheduler:
 
     def _advance(self, loop: LoopRun) -> None:
         """Open iterations up to the concurrency (or hand out the next batch), or complete the loop when every item
-        is done."""
+        is done. A loop whose inline list is on its way to a claim waits for it."""
+        if loop.items_sealing:
+            return
+        n = count(loop.items)
         if loop.batch:
-            if loop.running_batch is None and loop.next < len(loop.items):
+            if loop.running_batch is None and loop.next < n:
                 start = loop.next
-                loop.next = min(start + loop.batch, len(loop.items))
+                loop.next = min(start + loop.batch, n)
                 loop.running_batch = start
-                self._batches.append(Batch(loop.instance, start, loop.items[start : loop.next]))
+                self._batches.append(Batch(loop.instance, start, sliced(loop.items, start, loop.next)))
                 return
         else:
-            while loop.next < len(loop.items) and len(loop.open) < loop.concurrency and not loop.waiting:
+            while loop.next < n and len(loop.open) < loop.concurrency and not loop.waiting:
                 room = self._room(loop)
                 if room is None:  # the cap: it opens once scopes are freed (`_settle_wakes`)
                     self._capped.add(loop.instance)
@@ -912,12 +962,12 @@ class Scheduler:
                 self._open_next(loop, reserved=room)
                 if loop.instance not in self.loops:  # the iteration failed at once and stopped the loop
                     return
-        if not loop.open and loop.next >= len(loop.items) and loop.running_batch is None and not loop.waiting:
+        if not loop.open and loop.next >= n and loop.running_batch is None and not loop.waiting:
             self._drop_loop(loop)
             if loop.instance == self.batch_loop:
                 self._batch_over(loop, None)
                 return
-            output = {"items": loop.collected, "failures": loop.failures, "count": len(loop.items)}
+            output = {"items": loop.collected, "failures": loop.failures, "count": n}
             scope = self.scopes.get(loop.instance.scope)
             if scope is not None and scope.failure is None and self.ended is None:
                 self.succeed(loop.instance, output, (DONE,))
@@ -942,7 +992,8 @@ class Scheduler:
 
     @staticmethod
     def _loop_bytes(loop: LoopRun) -> int:
-        return size(loop.items) + size(loop.collected) + size(loop.failures)
+        items = size(loop.items.to_json()) if isinstance(loop.items, ItemsRef) else size(loop.items)
+        return items + size(loop.collected) + size(loop.failures)
 
     def _enforce_budget(self) -> None:
         """Past LIVE_BUDGET, the largest spillable container goes to a claim, until what's on its way out brings the
@@ -969,6 +1020,11 @@ class Scheduler:
                 n = size(sc.item)
                 if n > HANDLE_MAX:
                     out.append((n, order, "t", sc))
+        for lp in self.loops.values():
+            if isinstance(lp.items, list) and not lp.items_sealing:
+                n = size(lp.items)
+                if n > HANDLE_MAX:
+                    out.append((n, self.order(lp.instance), "i", lp))
         root = self.order(Instance((), NIL))
         n = size(self._vars)
         if n > HANDLE_MAX and self.vbox.sealing is None:
@@ -981,6 +1037,7 @@ class Scheduler:
     def _relief(self) -> int:
         """What the claims on their way will take out of the live state."""
         out = self.vbox.sealing_size + sum(u.bytes() for u in self.undo.values() if u.sealing)
+        out += sum(size(lp.items) for lp in self.loops.values() if lp.items_sealing)
         for sc in self.scopes.values():
             out += sc.rbox.sealing_size + (size(sc.item) if sc.item_sealing else 0)
         return out
@@ -989,7 +1046,8 @@ class Scheduler:
         """A container's claim id, from where it was claimed: a retry, a replay or a restore derives the same."""
         sc = self.scopes.get(owner.scope)
         seq = sc.seq if sc is not None and which in ("r", "t") else 0
-        return str(uuid.uuid5(CLAIMS, f"{self.prefix}/{which}/{iteration_key(owner.scope)}/{seq}/{first}"))
+        topo = self.program.steps[owner.step].topo if owner.step != NIL else -1
+        return str(uuid.uuid5(CLAIMS, f"{self.prefix}/{which}/{iteration_key(owner.scope)}/{seq}/{topo}/{first}"))
 
     def _spill_container(self, which: str, target: Any) -> None:
         root = Instance((), NIL)
@@ -1012,6 +1070,11 @@ class Scheduler:
                 "prev": prev.id if prev else None,
             }
             self._spills.append(Spill(owner, "r", first, entry))
+        elif which == "i":
+            lp: LoopRun = target
+            lp.items_sealing = True
+            entry = {"id": self._claim_id(lp.instance, "i", 0), "value": lp.items}
+            self._spills.append(Spill(lp.instance, "i", 0, entry))
         elif which == "t":
             sc = target
             owner = Instance(sc.key, NIL)
@@ -1377,7 +1440,10 @@ class Scheduler:
         s._capped = {  # a loop with items left and room for them may be one the cap held back: it tries again
             inst
             for inst, loop in s.loops.items()
-            if not loop.batch and not loop.waiting and loop.next < len(loop.items) and len(loop.open) < loop.concurrency
+            if not loop.batch
+            and not loop.waiting
+            and loop.next < count(loop.items)
+            and len(loop.open) < loop.concurrency
         }
         return s
 
@@ -1408,6 +1474,9 @@ class Scheduler:
         for k, u in sorted(self.undo.items()):
             if u.sealing:
                 out.append(Spill(root, "u", k, {"id": self._claim_id(root, "u", k), "value": u.vals}))
+        for lp in self.loops.values():
+            if lp.items_sealing:
+                out.append(Spill(lp.instance, "i", 0, {"id": self._claim_id(lp.instance, "i", 0), "value": lp.items}))
         return out
 
     def _handed_now(self) -> set[Instance]:
@@ -1438,7 +1507,7 @@ class Scheduler:
             if (loop.instance, i) not in self._collects_out
         ]
         batches = [
-            Batch(loop.instance, loop.running_batch, loop.items[loop.running_batch : loop.next])
+            Batch(loop.instance, loop.running_batch, sliced(loop.items, loop.running_batch, loop.next))
             for loop in self.loops.values()
             if loop.running_batch is not None and (loop.instance, loop.running_batch) not in self._batches_out
         ]
@@ -1458,8 +1527,8 @@ class Scheduler:
             raise AssertionError(f"rebuilt {len(ready)} ready steps, but {len(self._ready) + len(self._deferred)} wait")
         if {(c.loop, c.index, c.scope) for c in collects} != {(c.loop, c.index, c.scope) for c in self._collects}:
             raise AssertionError("the rebuilt collects differ from those queued")
-        if {(b.loop, b.start, len(b.items)) for b in batches} != {
-            (b.loop, b.start, len(b.items)) for b in self._batches
+        if {(b.loop, b.start, count(b.items)) for b in batches} != {
+            (b.loop, b.start, count(b.items)) for b in self._batches
         }:
             raise AssertionError("the rebuilt batches differ from those queued")
         pending = {(sp.owner, sp.which, sp.first) for sp in self._pending()} - self._spills_out
@@ -1545,24 +1614,31 @@ class Scheduler:
         return scope
 
     def _loop_json(self, loop: LoopRun) -> list[Any]:
+        listed = loop.items.to_json() if isinstance(loop.items, ItemsRef) else None
+        inline = loop.items if isinstance(loop.items, list) else None
         return [
-            self._i(loop.instance), loop.items, loop.concurrency, int(loop.stop_on_error), loop.offset, loop.batch,
+            self._i(loop.instance), inline, loop.concurrency, int(loop.stop_on_error), loop.offset, loop.batch,
             loop.next, list(loop.open), sorted(loop.collecting), loop.collected, loop.failures, loop.running_batch,
-            int(loop.waiting),
+            int(loop.waiting), listed, int(loop.items_sealing),
         ]  # fmt: skip
 
     def _loop_from(self, raw: list[Any]) -> LoopRun:
+        items = ItemsRef.from_json(raw[13]) if raw[13] is not None else list(raw[1])
         return LoopRun(
-            instance=self._if(raw[0]), items=list(raw[1]), concurrency=int(raw[2]), stop_on_error=bool(raw[3]),
+            instance=self._if(raw[0]), items=items, concurrency=int(raw[2]), stop_on_error=bool(raw[3]),
             offset=int(raw[4]), batch=int(raw[5]), next=int(raw[6]), open=[int(i) for i in raw[7]],
             collecting={int(i) for i in raw[8]}, collected=list(raw[9]), failures=list(raw[10]),
-            running_batch=raw[11], waiting=bool(raw[12]),
+            running_batch=raw[11], waiting=bool(raw[12]), items_sealing=bool(raw[14]),
         )  # fmt: skip
 
 
 __all__ = [
     "Batch",
     "Box",
+    "ItemsRef",
+    "count",
+    "item_at",
+    "sliced",
     "INLINE_FLOOR",
     "LIVE_BUDGET",
     "NIL",

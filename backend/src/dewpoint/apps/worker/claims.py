@@ -557,11 +557,23 @@ async def spill(data: SpillInput, store: ClaimStore) -> None:
     tenant, run = caller()
     rows = []
     for entry in data.claims:
+        value: Any
+        if "concat" in entry:  # a list written in parts: joined, so its handle addresses each item by position
+            value = [item for part in entry["concat"] for item in await _stored(part, store, tenant, run)]
+            rows.append(NewClaim(uuid.UUID(entry["id"]), value, (), uuid.UUID(run), uuid.UUID(data.root_run_id or run)))
+            continue
         value = entry["value"]
         if entry.get("prev"):  # a container claimed again: its earlier keys are read through the claim before
             value = {**await _forwarding(entry["prev"], store, tenant, run), **value}
         rows.append(NewClaim(uuid.UUID(entry["id"]), value, (), uuid.UUID(run), uuid.UUID(data.root_run_id or run)))
     await store.write(tenant, rows, kind="spill", step_id=data.step_id, iteration_key=data.iteration_key)
+
+
+async def _stored(claim_id: str, store: ClaimStore, tenant: str, run: str) -> Any:
+    try:
+        return (await store.fetch(tenant, run, claim_id)).value
+    except ClaimUnavailableError:
+        raise ApplicationError(UNAVAILABLE, type=CLAIM_UNAVAILABLE, non_retryable=True) from None
 
 
 async def _forwarding(prev: str, store: ClaimStore, tenant: str, run: str) -> dict[str, Any]:

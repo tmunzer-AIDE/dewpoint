@@ -114,6 +114,7 @@ class BatchInput:
     checkpoint_events: int = CHECKPOINT_EVENTS
     drain_events: int = DRAIN_EVENTS
     iterations: int = 0  # a continued batch: what it had used, readable even when its snapshot isn't
+    items_ref: list[Any] | None = None  # the slice of a claimed list, as [handle, n, first]: `items` is then empty
 
 
 @dataclass(frozen=True)

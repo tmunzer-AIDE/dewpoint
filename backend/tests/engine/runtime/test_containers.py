@@ -96,16 +96,56 @@ def test_the_largest_container_goes_first_ties_by_scheduling_order() -> None:
     assert (sp.which, sp.owner.scope) == ("r", (("l", 0),))
 
 
-def test_an_iteration_item_is_claimed_and_read_by_handle() -> None:
+def test_an_inline_item_list_is_claimed_and_the_loop_carries_on_over_it() -> None:
+    """The list is the largest container: it's claimed, the loop waits for its claim, then reads items by handle."""
     g = G().node("l", LOOP, {"items": [1]}).node("x", ECHO).edge("l", "x", "body")
     s = started(g)
     [loop] = s.take_ready()
-    s.open_loop(loop, ["i" * 1_100], concurrency=1, stop_on_error=True)  # the list, and the iteration's item
+    items = [f"{i:04d}" + "i" * 200 for i in range(10)]
+    s.open_loop(loop, items, concurrency=1, stop_on_error=True)
     [sp] = s.take_spills()
-    assert (sp.which, sp.owner.scope, sp.entry["value"]) == ("t", (("l", 0),), "i" * 1_100)
+    assert (sp.which, sp.owner, sp.entry["value"]) == ("i", loop, items)
+    [x] = s.take_ready()  # its first iteration opened before: its item is inline
+    assert s.scopes[x.scope].item == items[0]
+    s.succeed(x, {})
+    [c] = s.take_collects()
+    s.collected(c.loop, c.index, 0)
+    assert s.take_ready() == []  # it waits for its claim
     land(s, [sp])
-    assert s.scopes[(("l", 0),)].item == ClaimRef(sp.entry["id"]).to_json()
+    [x] = s.take_ready()
+    assert s.scopes[x.scope].item == ClaimRef(sp.entry["id"], "/1").to_json()
     assert s.live == s.recount() <= BUDGET
+
+
+def test_a_loop_over_a_claimed_list_is_a_cursor_and_its_batches_are_slices() -> None:
+    """No item list is ever built: a count, and each item a handle into the list's claim (§5.3, pending work is
+    cursors). A batch carries its slice the same way."""
+    g = G().node("l", LOOP, {"items": [1]}).node("x", ECHO).edge("l", "x", "body")
+    s = started(g)
+    [loop] = s.take_ready()
+    listed = ClaimRef("00000000-0000-4000-8000-000000000007")
+    s.open_loop(loop, S.ItemsRef(listed.to_json(), 250), concurrency=1, stop_on_error=True, batch=100)
+    [b] = s.take_batches()
+    assert (b.start, b.items) == (0, S.ItemsRef(listed.to_json(), 100, 0))
+    child = Scheduler(program(g), budget=Budget(100, root=False), prefix="t:1:run:2/batch")
+    child.start_batch(loop.step, [S.OuterScope((), {})], S.ItemsRef(listed.to_json(), 50, 200), offset=200,
+                      concurrency=1, stop_on_error=True)  # fmt: skip
+    [x] = child.take_ready()
+    assert child.scopes[x.scope].item == listed.extend(200).to_json()
+
+
+def test_a_frozen_scope_item_is_claimed_and_read_by_handle() -> None:
+    """In a batch child, an enclosing iteration's item is the child's to hold: a container like any other."""
+    g = G().node("o", LOOP, {"items": [1]}).node("m", LOOP, {"items": [1]}).node("x", ECHO)
+    g.edge("o", "m", "body").edge("m", "x", "body")
+    s = Scheduler(program(g), budget=Budget(10, root=False), prefix="t:1:run:2/batch")
+    big = "o" * 2_100
+    outer = [S.OuterScope((), {}), S.OuterScope((("o", 0),), {}, big, 0)]
+    s.start_batch(s.program.by_key["m"], outer, [1, 2], offset=0, concurrency=1, stop_on_error=True)
+    [sp] = s.take_spills()
+    assert (sp.which, sp.owner.scope, sp.entry["value"]) == ("t", (("o", 0),), big)
+    land(s, [sp])
+    assert s.scopes[(("o", 0),)].item == ClaimRef(sp.entry["id"]).to_json()
 
 
 def test_the_variables_are_claimed_and_read_by_handle() -> None:

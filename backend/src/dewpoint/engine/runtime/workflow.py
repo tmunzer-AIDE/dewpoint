@@ -58,6 +58,7 @@ with workflow.unsafe.imports_passed_through():
         ITERATION_CAP,
         SNAPSHOT_FORMAT,
         Failure,
+        ItemsRef,
         OuterScope,
         RunEnd,
         Scheduler,
@@ -481,7 +482,7 @@ class LoopBatch(Execution):
                 self.sched.start_batch(
                     uuid.UUID(start.loop_step),
                     outer,
-                    start.items,
+                    ItemsRef.from_json(start.items_ref) if start.items_ref else start.items,
                     offset=start.offset,
                     concurrency=start.concurrency,
                     stop_on_error=start.stop_on_error,
