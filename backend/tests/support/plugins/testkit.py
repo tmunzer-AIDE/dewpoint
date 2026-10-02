@@ -2,6 +2,8 @@
 """Engine test fixtures. Lives under tests/, so it is never packaged or registered in production."""
 
 import asyncio
+import sys
+import types
 from datetime import UTC, datetime
 from typing import Any, ClassVar, Literal
 
@@ -249,7 +251,7 @@ class SlowEcho(Node):
 class LeakyConfig(BaseModel):
     seed: str
     size: int = Field(ge=1, le=1024)
-    how: Literal["log", "crash", "crash_class", "fail", "fail_code"] = "log"
+    how: Literal["log", "crash", "crash_class", "crash_forged", "fail", "fail_code"] = "log"
 
 
 class LeakyOutput(BaseModel):
@@ -260,8 +262,9 @@ class Leaky(Node):
     """Makes a secret of `size` characters from `seed`, as an API issues a token, and leaks it before it's returned
     at a sensitive position, as a careless plugin would (engine 2b spec §12): before it's claimed, no index knows it.
     `log` logs it in an event, a neutral field, a nested value and a field's name; `crash` raises an unexpected error
-    quoting it, `crash_class` one whose class it names; `fail` fails quoting it in its message, `fail_code` in its
-    code. The last two use it as a valid identifier (`-` made `_`): shaped like a safe name, made at run time."""
+    quoting it, `crash_class` one whose class it names, `crash_forged` one whose traceback it forges to carry a number
+    made from it as a line; `fail` fails quoting it in its message, `fail_code` in its code. The class and the code
+    use it as a valid identifier (`-` made `_`): shaped like a safe name, made at run time."""
 
     type = "testkit.leaky"
     version = 1
@@ -276,6 +279,9 @@ class Leaky(Node):
             raise RuntimeError(f"crashed holding {token}")
         if config.how == "crash_class":
             raise type(ident, (Exception,), {})("crashed")
+        if config.how == "crash_forged":
+            pin = 100_000 + sum(map(ord, token))  # a numeric secret, made at run time
+            raise RuntimeError("crashed").with_traceback(types.TracebackType(None, sys._getframe(), 0, pin))
         if config.how == "fail":
             raise FatalError("leaky_failed", f"failed holding {token}")
         if config.how == "fail_code":

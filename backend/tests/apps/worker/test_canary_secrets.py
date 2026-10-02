@@ -46,6 +46,7 @@ LIMIT, INLINE, BLOBS, EACH = 50_000, 10_000, 6, 9_000  # six blobs: together pas
 LEAKY_SEED = "canary-leaky-"  # a literal of the graph; the plugin's token isn't, nor one of its code
 TOKEN = (LEAKY_SEED + "t" * 24)[:24]  # what testkit.leaky makes from it
 IDENT = TOKEN.replace("-", "_")  # the same, as a valid identifier: a class name, a code
+PIN = 100_000 + sum(map(ord, TOKEN))  # a number made from it, as testkit.leaky's forged traceback carries it
 
 
 @pytest.fixture(autouse=True)
@@ -234,6 +235,20 @@ async def test_a_crash_whose_class_a_plugin_named_with_a_secret_never_shows_that
     assert entry(seen, "step_unexpected_error")["error_type"] == UNNAMED
     for where in (seen.plain, seen.rows, seen.logs):
         assert IDENT not in where
+
+
+async def test_a_crash_whose_traceback_a_plugin_forged_never_logs_its_line(
+    env: WorkflowEnvironment, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A plugin raises with a traceback it built itself, whose line is a number made from its fresh token: Python
+    keeps a caller's traceback through `raise`. A frame's line is logged only when the frame's function, compiled from
+    its module's source, has that line; the forged one names the place without it."""
+    seen = await observed(env, caplog, leaky("crash_forged", said=ref("steps.k.error.message", default="")))
+    assert seen.result.outputs == {"said": "The node raised RuntimeError."}
+    where = entry(seen, "step_unexpected_error")["where"]
+    assert "testkit.py:run" in where  # the forged frame: its place, not its line
+    assert any(w.startswith("testkit.py:run:") for w in where)  # the real raise: its line, proven
+    assert f":{PIN}" not in seen.logs
 
 
 @pytest.mark.parametrize(

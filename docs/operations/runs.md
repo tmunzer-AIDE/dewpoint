@@ -207,7 +207,7 @@ API has just issued, is in no secret index until the step's output is claimed, s
   plugin. A class name is text too, and a plugin can name a class at run time: it's shown only when the class is a
   builtin or its module's code declares that name, else as "an exception whose class name isn't shown", in the log
   and in the step's message alike. A frame is named only when its code was compiled from its module's source, else
-  `withheld`.
+  `withheld`, and its line only when that compiled function has it (a traceback a plugin built can carry any number).
 - Temporal's records of activities keep only the exact text of the SDK's fixed messages: never what follows it (an
   activity's details, an error's text), nor an error's code or class. The rest are logged as `Activity record
   withheld`. The step's code is in its row.

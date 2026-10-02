@@ -75,6 +75,17 @@ def test_a_frame_is_named_only_when_its_code_was_compiled_from_its_modules_sourc
     assert where[0] == logs.UNNAMED_FRAME  # this test's own frame: pytest's loader gives no code to prove it
 
 
+def test_a_frames_line_is_logged_only_when_its_compiled_function_has_it() -> None:
+    with pytest.raises(RuntimeError) as caught:
+        raises("x")
+    real = caught.value.__traceback__
+    assert real is not None and real.tb_next is not None
+    frame = real.tb_next.tb_frame  # `raises`, compiled from its module's source
+    forged = RuntimeError("x").with_traceback(types.TracebackType(None, frame, 0, 739_184))  # any integer
+    assert logs.bug(forged, KNOWN)["where"] == ["raising.py:raises"]
+    assert logs.bug(caught.value, KNOWN)["where"][-1] == f"raising.py:raises:{real.tb_next.tb_lineno}"
+
+
 def test_temporals_activity_records_keep_their_fixed_messages_and_no_error_text(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

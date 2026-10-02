@@ -10,7 +10,8 @@ code, never a run's data: that's what a log may hold.
   whose name looks secret is redacted even then.
 - A bug in a node is logged by its type and where it was raised; its text only when that's such a constant. A class
   name is text too: it's shown when the class is a builtin or its module's code declares that name, else as UNNAMED;
-  a frame is named only when its code was compiled from its module's source (a function renamed at run time isn't).
+  a frame is named only when its code was compiled from its module's source (a function renamed at run time isn't),
+  and its line only when that compiled function has it (a traceback a plugin built can carry any number).
 - Temporal's worker logs a failed attempt with its exception, and some of its messages quote an error, heartbeat
   details or an activity's info: its activity records keep only the exact text of one of the SDK's fixed messages,
   never what follows it, nor an error's code or class, nor an exception.
@@ -59,14 +60,18 @@ def _codes(code: types.CodeType) -> Iterator[types.CodeType]:
             yield from _codes(c)
 
 
+type Functions = dict[tuple[str, str, int], frozenset[int]]
+
+
 @functools.cache
-def _package(module: str) -> tuple[Literals, frozenset[tuple[str, str, int]]]:
+def _package(module: str) -> tuple[Literals, Functions]:
     """What the source of `module`'s package holds, read from its modules' code objects once per package: every string
-    and number written in it, as (type, value) (a keyword's or a class's name is one too), and every function's code
-    as (file, name, first line). What a module's loader can't give as code adds nothing, so it's withheld."""
+    and number written in it, as (type, value) (a keyword's or a class's name is one too), and every function's code,
+    by (file, name, first line), with the lines it has. What a module's loader can't give as code adds nothing, so
+    it's withheld."""
     package = module.rpartition(".")[0] or module
     found: set[tuple[type, object]] = set()
-    functions: set[tuple[str, str, int]] = set()
+    functions: dict[tuple[str, str, int], frozenset[int]] = {}
     for name in sorted(n for n in list(sys.modules) if n == package or n.startswith(package + ".")):
         loader = getattr(getattr(sys.modules.get(name), "__spec__", None), "loader", None)
         get_code = getattr(loader, "get_code", None)
@@ -76,8 +81,10 @@ def _package(module: str) -> tuple[Literals, frozenset[tuple[str, str, int]]]:
             continue
         if code is not None:
             found |= {(type(c), c) for c in _constants([code]) if type(c) in (str, int, float)}
-            functions |= {(c.co_filename, c.co_name, c.co_firstlineno) for c in _codes(code)}
-    return frozenset(found), frozenset(functions)
+            for c in _codes(code):
+                key = (c.co_filename, c.co_name, c.co_firstlineno)
+                functions[key] = functions.get(key, frozenset()) | {n for _, _, n in c.co_lines() if n is not None}
+    return frozenset(found), functions
 
 
 def literals(module: str) -> Literals:
@@ -141,11 +148,19 @@ def error_class(e: BaseException) -> str:
 
 
 def _frame(frame: types.FrameType, line: int | None) -> str:
-    """A frame's file, function and line, when its code was compiled from its module's source; else UNNAMED_FRAME."""
+    """A frame's file and function when its code was compiled from its module's source (else UNNAMED_FRAME), and its
+    line only when that compiled function has it: the lines come from the module's own code, not the frame's, whose
+    line table can be replaced too, and a traceback a caller built carries whatever line it was given."""
     code, module = frame.f_code, frame.f_globals.get("__name__")
-    if isinstance(module, str) and (code.co_filename, code.co_name, code.co_firstlineno) in _package(module)[1]:
-        return f"{os.path.basename(code.co_filename)}:{code.co_name}:{line}"
-    return UNNAMED_FRAME
+    lines = (
+        _package(module)[1].get((code.co_filename, code.co_name, code.co_firstlineno))
+        if isinstance(module, str)
+        else None
+    )
+    if lines is None:
+        return UNNAMED_FRAME
+    place = f"{os.path.basename(code.co_filename)}:{code.co_name}"
+    return f"{place}:{line}" if line in lines else place
 
 
 def bug(e: BaseException, known: Literals) -> dict[str, Any]:
