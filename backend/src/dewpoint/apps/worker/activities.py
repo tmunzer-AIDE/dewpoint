@@ -41,6 +41,7 @@ from dewpoint.apps.worker.claims import (
     Evaluate,
     child_input,
     claim_output,
+    config_secrets,
     derive,
     evaluate_claimed,
     filter_claimed,
@@ -251,13 +252,22 @@ def step_activity_for(node: type[Node], store: ClaimStore) -> Callable[[StepInpu
         """One attempt, across the boundary (engine 2b spec §3.6): its input's handles resolved here, its output split
         before it leaves, every message masked against the run's secret index."""
         _same_tenant(step.tenant_id)
-        known = await store.secrets(step.tenant_id, step.root_run_id or step.run_id)
+        root = step.root_run_id or step.run_id
+        known = await store.secrets(step.tenant_id, root)
         secrets = Matcher(known)
         try:
             try:
                 config = await resolved_config(step.config, store)
             except ClaimUnavailableError:
                 raise _StepFailed(CLAIM_UNAVAILABLE, UNAVAILABLE, retryable=False) from None
+            marked = config_secrets(config, config_schema)  # only the config marks them: indexed before the attempt
+            if marked:
+                try:
+                    await store.remember(step.tenant_id, root, marked)
+                except SecretIndexLimitError as e:
+                    raise _StepFailed(SECRET_INDEX_LIMIT, str(e), retryable=False) from None
+                known = (*known, *marked)
+                secrets = Matcher(known)
             result, outcome = await _call(node, replace(step, config=config), config_schema)
         except _StepFailed as f:
             raise f.mapped(secrets) from None

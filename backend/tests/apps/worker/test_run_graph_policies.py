@@ -533,18 +533,23 @@ async def test_a_sensitive_trigger_field_is_masked_where_it_is_copied(env: Workf
     }
     g.node("e", ECHO, {"value": template("Bearer ", {"ref": "trigger.api_key"})})
     async with workers(env.client, store):
-        handle = await start(env.client, store, g, {"api_key": "k3y-k3y-k3y"})
+        handle = await start(env.client, store, g, {"api_key": "k3y-k3y-k3y"}, claimed=True)
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     [row] = store.steps(run_id_of(handle))
-    assert (row.input_preview, row.output_preview) == ({"value": "Bearer [redacted]"}, {"value": "Bearer [redacted]"})
-    assert result.outputs == {"key": "k3y-k3y-k3y"}  # the workflow's own outputs are its contract, not a preview
+    # engine 2b spec §3.6: the template is joined where the claim is read, and comes back claimed; the echo's output
+    # repeats a secret the run knows, so it's claimed too
+    assert ClaimRef.of(row.input_preview["value"]) is not None and ClaimRef.of(row.output_preview["value"]) is not None
+    assert "k3y-k3y-k3y" not in repr(store.rows) + repr(store.runs)
+    key = ClaimRef.of(result.outputs["key"]) if result.outputs else None  # its outputs hold the handle
+    assert key is not None and store.claims[key.id].value == "k3y-k3y-k3y"
 
 
 async def test_a_sensitive_config_value_is_masked_where_it_is_copied_or_echoed(env: WorkflowEnvironment) -> None:
     """Review finding: a node's `x-sensitive` config field is redacted in its own input preview, but a control step
     can copy the same value, and the node can echo it in its error. A sensitive value comes in through the run's input
-    (a literal is refused at publish, engine 2b spec §3.8), and the run learns it when it starts; a value that only the
-    config marks sensitive (here from an unmarked trigger field), before its attempt."""
+    (a literal is refused at publish, engine 2b spec §3.8), claimed and indexed at admission; a value that only the
+    config marks sensitive (here from an unmarked trigger field) is indexed at the step's boundary, before its attempt
+    (§3.6, §3.7): every message is masked against the index."""
     store = MemoryStore()
     token, passed = "tok-hunter22", "tok-from-trigger"
     g = graph().node("t", "flow.transform@1", {"fields": {"copy": ref("trigger.tok")}})
@@ -561,10 +566,10 @@ async def test_a_sensitive_config_value_is_masked_where_it_is_copied_or_echoed(e
     echo = {"outcome": "rejected", "token": ref("trigger.open.tok")}  # declared plain: only the config marks it
     g.node("q", "testkit.ambiguous_send@1", echo, on_error="continue").edge("t", "p").edge("t", "q")
     async with workers(env.client, store):
-        handle = await start(env.client, store, g, {"x": 7, "tok": token, "open": {"tok": passed}})
+        handle = await start(env.client, store, g, {"x": 7, "tok": token, "open": {"tok": passed}}, claimed=True)
         await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     rows = {r.node_key: r for r in store.steps(run_id_of(handle))}
-    assert rows["t"].output_preview == {"copy": "[redacted]"}  # projected before `p` ran
+    assert ClaimRef.of(rows["t"].output_preview["copy"]) is not None  # a copy of a handle
     assert rows["p"].input_preview == {"outcome": "rejected", "token": "[redacted]"}
     assert rows["p"].error_message == rows["q"].error_message == "the receiver rejected the request for [redacted]"
     assert token not in repr(store.rows) + repr(store.runs) and passed not in repr(store.rows) + repr(store.runs)

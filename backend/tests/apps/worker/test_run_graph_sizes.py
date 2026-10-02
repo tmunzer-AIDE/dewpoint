@@ -23,7 +23,6 @@ from dewpoint.engine.runtime.size import (
     PAYLOAD_TOO_LARGE,
     RESULT_TOO_LARGE,
     RUN_SNAPSHOT_TOO_LARGE,
-    SECRETS_TOO_LARGE,
     SNAPSHOT_TOO_LARGE,
     STEP_INPUT_TOO_LARGE,
 )
@@ -237,25 +236,23 @@ async def test_a_batch_whose_snapshot_is_too_large_fails_its_loop(
 async def test_a_failure_handler_whose_input_is_too_large_never_starts_and_says_why(
     env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Its input carries what the run learned is sensitive, to mask it too. The bound on those values keeps it far
-    under the limit, so the limit is set here just above the run's own failed result, which carries them too: the
-    handler's input passes it, its row records `payload_too_large`, and the run's end stands."""
-    key = "k" * LIMIT
-    failed = RunResult("failed", None, {"code": "workflow_failed", "message": "it went wrong", "attempt": 1}, 0, [key])
+    """Its input carries the run's error, and more. With the limits set inconsistently (stored messages up to 60,000
+    characters, and a payload limit just above the run's own failed result), a failure's message built from a
+    40,000-character output fits in the run's result, but not in the handler's input: its row records
+    `payload_too_large`, and the run's end stands."""
+    message = "x" * 40_000
+    failed = RunResult("failed", None, {"code": "workflow_failed", "message": message, "attempt": 1}, 0)
+    monkeypatch.setattr(projection, "MESSAGE_LIMIT", 60_000)
     monkeypatch.setattr(
         size, "PAYLOAD_BYTES", size.encoded_bytes(failed, DataConverter.default.payload_converter) + 100
     )
     store = MemoryStore()
     g = graph()
-    g.settings["input_schema"] = {
-        "type": "object",
-        "properties": {"key": {"type": "string", "x-sensitive": True}},
-        "required": ["key"],
-    }
     g.settings["failure_handler"] = str(store.publish(graph().node("h", ECHO, {"value": 1})))
-    g.node("f", "flow.fail@1", {"message": "it went wrong"})
+    g.node("b", BLOB, {"size": 40_000})
+    g.node("f", "flow.fail@1", {"message": template({"ref": "steps.b.output.value"})}).edge("b", "f")
     async with workers(env.client, store):
-        handle = await start(env.client, store, g, {"key": key})
+        handle = await start(env.client, store, g, {})
         result = await asyncio.wait_for(handle.result(), 60)
     assert result.status == "failed" and result.error is not None and result.error["code"] == "workflow_failed"
     [(child, row)] = store.starts.items()
@@ -299,13 +296,6 @@ async def test_a_workflow_task_sends_at_most_its_bytes_of_every_command(
 SECRET = "testkit.secret_blob@1"
 
 
-@pytest.fixture
-def few_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A run may carry 5,000 bytes of sensitive values: two 3,000-character ones don't fit together."""
-    monkeypatch.setattr(size, "SECRETS_BYTES", 5_000)
-
-
-@pytest.mark.usefixtures("few_secrets")
 async def test_a_step_whose_secrets_would_pass_the_index_bound_fails(
     env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -329,25 +319,6 @@ async def test_a_step_whose_secrets_would_pass_the_index_bound_fails(
     )
 
 
-@pytest.mark.usefixtures("few_secrets")
-async def test_a_trigger_whose_sensitive_values_dont_fit_fails_the_run_before_any_step(
-    env: WorkflowEnvironment,
-) -> None:
-    store = MemoryStore()
-    g = graph().node("e", ECHO, {"value": 1})
-    g.settings["input_schema"] = {
-        "type": "object",
-        "properties": {"key": {"type": "string", "x-sensitive": True}},
-        "required": ["key"],
-    }
-    async with workers(env.client, store):
-        handle = await start(env.client, store, g, {"key": "k" * 6_000})
-        result = await asyncio.wait_for(handle.result(), 60)
-    assert result.status == "failed" and result.error is not None
-    assert (result.error["code"], result.error["message"], result.secrets) == (PAYLOAD_TOO_LARGE, SECRETS_TOO_LARGE, [])
-    assert store.steps(run_id_of(handle)) == []
-
-
 async def test_a_result_past_the_limit_anyway_ends_the_run_as_a_bug(
     env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -361,7 +332,7 @@ async def test_a_result_past_the_limit_anyway_ends_the_run_as_a_bug(
     g = graph().node("a", BLOB, {"size": 5_500})
     g.node("f", "flow.fail@1", {"message": template({"ref": "steps.a.output.value"}, "n" * 400)}).edge("a", "f")
     handle, result = await finished(env, store, g)
-    assert (result.status, result.outputs, result.secrets) == ("failed", None, [])
+    assert (result.status, result.outputs) == ("failed", None)
     assert result.error is not None and (result.error["code"], result.error["message"]) == (
         "internal_error",
         RESULT_TOO_LARGE,
