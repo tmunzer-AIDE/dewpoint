@@ -19,10 +19,12 @@ from temporalio.exceptions import ApplicationError, ChildWorkflowError
 
 with workflow.unsafe.imports_passed_through():
     from dewpoint.engine.graph.values import iter_values, pointer_str
+    from dewpoint.engine.handles import contains_marker
     from dewpoint.engine.runtime import resolve
     from dewpoint.engine.runtime.activities import (
         FAILURE_HANDLER,
         LOAD_VERSION,
+        SUBFLOW,
         BatchInput,
         BatchResult,
         LoadVersionInput,
@@ -190,6 +192,11 @@ class RunGraph(Execution):
                 end, outputs = await self._outputs_by(end)
             if outputs is not None and not self._returnable(outputs):  # checked here, where the result is made
                 end, outputs = RunEnd("failed", Failure(PAYLOAD_TOO_LARGE, OUTPUTS_TOO_LARGE)), None
+            if outputs is not None and start.parent is not None and start.parent.kind == SUBFLOW:
+                # its parent reads the handles in them through a grant, made before the result returns (2b spec §3.4)
+                refused = await self._grant(start.parent.run_id, outputs) if contains_marker(outputs) else None
+                if refused is not None:
+                    end, outputs = RunEnd("failed", refused), None
         except asyncio.CancelledError:
             self.sched.end(RunEnd("cancelled", CANCELLED))
             result = await self._finish(RunEnd("cancelled", CANCELLED))

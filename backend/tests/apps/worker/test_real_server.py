@@ -33,7 +33,7 @@ from tests.support.plugins.testkit import TESTKIT
 async def serving(client: Client, store: MemoryStore) -> AsyncIterator[None]:
     """A build of this test's own, current: the dev server keeps the deployment's routing between tests."""
     this = build("real")
-    evaluator = Worker(client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(in_process)])
+    evaluator = Worker(client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(in_process, store)])
     async with evaluator, engine_worker(client, store, [TESTKIT], settings(), build=this, identity=this):
         await set_current(client, this)
         yield

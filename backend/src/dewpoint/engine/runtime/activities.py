@@ -16,6 +16,8 @@ LOAD_VERSION = "dewpoint.load_version"
 PROJECT = "dewpoint.project"
 CEL_EVALUATE = "cel.evaluate"
 CLAIMS_DERIVE = "claims.derive"
+CLAIMS_CHILD_INPUT = "claims.child_input"
+CLAIMS_GRANT = "claims.grant"
 LIVE, SIMULATE = "live", "simulate"
 APPLIED, SIMULATED, OUTCOME_UNKNOWN = "applied", "simulated", "outcome_unknown"
 SUBFLOW, FAILURE_HANDLER, BATCH = "subflow", "failure_handler", "batch"  # the kinds of child execution
@@ -198,6 +200,34 @@ class DeriveInput:
     root_run_id: str
     step_id: str | None = None
     iteration_key: str | None = None
+
+
+@dataclass(frozen=True)
+class ChildInput:
+    """A sub-flow's input, split as a trigger is before its parent starts it (engine 2b spec §3.4, §3.5): checked
+    against the child version's input schema, its values resolved; the parent's handles left in place and granted to
+    the child; its other sensitive, undeclared or large parts claimed for the child."""
+
+    child_run_id: str
+    version_id: str
+    value: dict[str, Any]
+    root_run_id: str
+
+
+@dataclass(frozen=True)
+class ChildInputResult:
+    trigger: dict[str, Any] | None = None  # the envelope the child starts with
+    reasons: list[str] = field(default_factory=list)  # refused: what the input breaks
+
+
+@dataclass(frozen=True)
+class GrantInput:
+    """The handles in `value`, and the claims they nest, granted by the run the activity's workflow id names to
+    `to_run_id`: its parent or its child (engine 2b spec §3.4)."""
+
+    to_run_id: str
+    value: Any
+    root_run_id: str
 
 
 @dataclass(frozen=True)

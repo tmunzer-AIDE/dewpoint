@@ -540,3 +540,16 @@ async def test_output_the_claim_store_can_not_take_fails_the_step_and_keeps_its_
 
     failed = await failure(step_activity_for(Sensitive, Down()), step("testkit.sensitive@1"))
     assert (failed.type, failed.non_retryable, failed.details[0]["outcome"]) == ("claim_unavailable", True, "applied")
+
+
+async def test_a_request_whose_bindings_hold_handles_without_claims_is_never_evaluated() -> None:
+    """A tripwire (engine 2b spec §4.2): a handle evaluated as data would give a wrong answer silently."""
+
+    async def never(request: dict[str, Any]) -> list[dict[str, Any]]:
+        raise AssertionError("evaluated")
+
+    handle = ClaimRef(str(uuid.UUID(int=3))).to_json()
+    request = CelInput(ipc.EvaluateRequest(CURRENT_CEL_PROFILE, "size(x)", {"x": T.DYN}, ({"x": handle},)).to_json())
+    with pytest.raises(ApplicationError) as refused:
+        await ActivityEnvironment().run(cel_activity(never), request)
+    assert (refused.value.type, refused.value.non_retryable) == ("internal_error", True)

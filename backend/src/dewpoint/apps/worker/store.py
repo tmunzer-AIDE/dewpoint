@@ -64,6 +64,35 @@ class DbRunStore:
             raise ApplicationError("This worker's store reads no claims.", type=INTERNAL_ERROR, non_retryable=True)
         return self.cipher
 
+    async def write_inputs(self, tenant_id: str, new: Sequence[tuple[claims.NewClaim, str]]) -> None:
+        cipher = self._claims()
+        async with self.sessionmaker() as s, s.begin():
+            await tenant_scope(s, uuid.UUID(tenant_id))
+            for claim, pointer in new:
+                await claims.write_input(s, cipher, uuid.UUID(tenant_id), claim, pointer=pointer)
+
+    async def grant(
+        self, tenant_id: str, *, granted_by: str, to: str, claim_ids: Sequence[str], root_run_id: str
+    ) -> None:
+        async with self.sessionmaker() as s, s.begin():
+            await tenant_scope(s, uuid.UUID(tenant_id))
+            await claims.grant(
+                s,
+                uuid.UUID(tenant_id),
+                granted_by=uuid.UUID(granted_by),
+                to=uuid.UUID(to),
+                claim_ids=[uuid.UUID(c) for c in claim_ids],
+                root_run_id=uuid.UUID(root_run_id),
+            )
+
+    async def input_schema(self, tenant_id: str, version_id: str) -> dict[str, Any] | None:
+        async with self.sessionmaker() as s, s.begin():
+            await tenant_scope(s, uuid.UUID(tenant_id))
+            v = await s.get(WorkflowVersion, uuid.UUID(version_id))
+        if v is None:
+            return None
+        return dict((v.graph.get("settings") or {}).get("input_schema", {"type": "object"}))
+
     async def secrets(self, tenant_id: str, root_run_id: str) -> tuple[str, ...]:
         if self.index_cipher is None:
             return ()

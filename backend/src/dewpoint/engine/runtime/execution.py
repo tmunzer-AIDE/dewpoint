@@ -38,7 +38,9 @@ with workflow.unsafe.imports_passed_through():
         BATCH,
         BUDGET,
         CEL_EVALUATE,
+        CLAIMS_CHILD_INPUT,
         CLAIMS_DERIVE,
+        CLAIMS_GRANT,
         ENGINE_QUEUE,
         MAPPED,
         OUTCOME_UNKNOWN,
@@ -49,9 +51,12 @@ with workflow.unsafe.imports_passed_through():
         BatchResult,
         CelInput,
         CelResult,
+        ChildInput,
+        ChildInputResult,
         Claiming,
         DeriveInput,
         DeriveResult,
+        GrantInput,
         Parent,
         ProjectInput,
         RunInput,
@@ -121,6 +126,7 @@ CANCELLED = Failure("cancelled", "The run was cancelled.")
 AMBIGUOUS = "ambiguous"  # a manifest's side_effect: the request may have been sent
 CONTINUE = "continue"  # `_drive`'s answer when the execution continues-as-new
 CLAIM_REFUSED = "A claim this run may not read, or that doesn't exist."
+INPUT_INVALID = "input_invalid"  # a sub-flow's input that doesn't match its schema, found where it's resolved
 
 
 class ExposedError(Exception):
@@ -907,7 +913,7 @@ class Execution:
             return outcomes
         out: list[cel.Outcome] = []
         profile = self.program.cel_profile
-        claiming = task.record.tainted or contains_marker(task.bindings)
+        claiming = task.record.tainted or any(contains_marker(b) for b in task.bindings)
 
         def claims() -> Claiming | None:  # a seed per request: its results' claim ids
             return self._claiming(owner, scope, tainted=task.record.tainted, decision=decision) if claiming else None
@@ -1107,6 +1113,9 @@ class Execution:
             return _Effect(failure=Failure(VERSION_UNUSABLE, f"`{step.key}` can't run its sub-flow: {reason}."))
         child_run = str(workflow.uuid4())
         child = run_workflow_id(self.tenant_id, child_run)  # its workflow id, and its key in this budget
+        trigger = await self._hand_over(child_run, version, start.input)
+        if isinstance(trigger, Failure):
+            return _Effect(failure=trigger, cel_mode=cel_mode)
         grant = self.sched.budget.start_child(child, SUBFLOW_GRANT)
         parent = Parent(
             workflow_id=workflow.info().workflow_id,
@@ -1124,7 +1133,7 @@ class Execution:
             self.tenant_id,
             child_run,
             version,
-            start.input,
+            trigger,
             self.mode,
             self.max_run_duration_s,
             self.cel_schedule_to_start_s,
@@ -1167,6 +1176,42 @@ class Execution:
             return _Effect(output=dict(result.outputs or {}), cel_mode=cel_mode)
         error = result.error or {"code": result.status, "message": f"The sub-flow ended {result.status}."}
         return _Effect(failure=Failure(str(error["code"]), str(error["message"])), cel_mode=cel_mode)
+
+    async def _crossing[R](self, name: str, data: Any, result_type: type[R]) -> R | Failure:
+        """An activity that hands claims to another run (engine 2b spec §3.4): its result, or why it failed."""
+        await self._send(data)
+        try:
+            result: R = await workflow.execute_activity(
+                name,
+                data,
+                result_type=result_type,
+                start_to_close_timeout=timedelta(minutes=1),
+                retry_policy=RetryPolicy(maximum_attempts=3, initial_interval=timedelta(seconds=1)),
+            )
+            return result
+        except ActivityError as e:
+            if isinstance(e.cause, ActivityCancelled):
+                raise asyncio.CancelledError from None
+            if isinstance(e.cause, ApplicationError) and e.cause.type == CLAIM_UNAVAILABLE:
+                return Failure(CLAIM_UNAVAILABLE, CLAIM_REFUSED)
+            return Failure(INTERNAL_ERROR, f"Claims couldn't cross to another run ({type(e.cause or e).__name__}).")
+
+    async def _hand_over(self, child_run: str, version: str, value: dict[str, Any]) -> dict[str, Any] | Failure:
+        """A sub-flow's input, split for the child as a trigger is, this run's handles in it granted to the child
+        (engine 2b spec §3.4, §3.5): the envelope its start carries."""
+        found = await self._crossing(
+            CLAIMS_CHILD_INPUT, ChildInput(child_run, version, value, self.root_run_id), ChildInputResult
+        )
+        if isinstance(found, Failure):
+            return found
+        if found.trigger is None:
+            return Failure(INPUT_INVALID, " ".join(found.reasons))
+        return found.trigger
+
+    async def _grant(self, to: str, value: Any) -> Failure | None:
+        """The handles in `value`, and the claims they nest, granted to run `to` (engine 2b spec §3.4)."""
+        found = await self._crossing(CLAIMS_GRANT, GrantInput(to, value, self.root_run_id), type(None))
+        return found if isinstance(found, Failure) else None
 
     @staticmethod
     def _lost(kind: str, e: ChildWorkflowError) -> Failure:

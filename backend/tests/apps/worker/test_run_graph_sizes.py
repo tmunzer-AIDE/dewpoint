@@ -139,8 +139,17 @@ async def test_a_step_input_too_large_to_send_fails_the_step_before_any_attempt(
 
 
 async def test_a_sub_flow_input_too_large_to_send_fails_its_step_and_starts_nothing(env: WorkflowEnvironment) -> None:
+    """A sub-flow's input is split as a trigger (engine 2b spec §3.4, §3.5): what the child doesn't declare, or
+    what passes 64 KiB, is claimed for it. Two declared 25,000-character strings stay in the envelope, which this
+    test's lowered payload limit (below TRIGGER_INLINE) refuses: the start is never sent."""
     store = MemoryStore()
     sub = graph().node("e", ECHO, {"value": 1})
+    sub.settings["input_schema"] = {
+        "type": "object",
+        "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
+        "required": ["a", "b"],
+        "additionalProperties": False,
+    }
     g = graph(code=ref("steps.r.error.code", default="none"))
     g.node("a", BLOB, {"size": LIMIT // 2}).node("b", BLOB, {"size": LIMIT // 2})
     g.node(
