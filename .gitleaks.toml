@@ -4,5 +4,5 @@
 useDefault = true
 
 [allowlist]
-description = "Test/CI fixture password used by unit tests and the e2e admin bootstrap (not a credential)"
-regexes = ['''^violet-otter-canyon-42$''']
+description = "Test fixtures, not credentials: the password unit tests and the e2e admin bootstrap use, and a canary secret the engine's tests plant to prove it never reaches Temporal"
+regexes = ['''^violet-otter-canyon-42$''', '''^sk-k3y-echoed-canary-0003$''']
