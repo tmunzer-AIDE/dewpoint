@@ -390,3 +390,45 @@ async def test_a_filter_the_budget_refuses_after_its_activity_returns_no_output(
         "succeeded",
         {"kept": "none", "count": -1, "code": "iteration_cap_exceeded"},
     )
+
+
+async def test_a_loop_over_cel_items_too_large_to_carry_counts_their_claim(env: WorkflowEnvironment) -> None:
+    """Review finding I2: a loop whose `items` is CEL whose result is claimed for its size (past 64 KiB, §5.1) loops
+    over the claim as over a reference's: its count from an activity, its items a cursor into the claim."""
+    lines = {"type": "array", "items": {"type": "string"}}
+    store = MemoryStore()
+    g = G()
+    g.settings = {
+        "input_schema": {"type": "object", "properties": {"lines": lines}, "required": ["lines"],
+                         "additionalProperties": False},
+        "outputs": {"count": ref("steps.l.output.count")},
+    }  # fmt: skip
+    g.node("l", "flow.loop@1", {"items": cel("trigger.lines.filter(x, size(x) > 0)"), "collect": ref("index")})
+    g.node("e", "testkit.echo@1", {"value": 1}).edge("l", "e", "body")
+    async with workers(env.client, store):
+        result = await run(env.client, store, g, {"lines": ["y" * 400] * 200})
+    assert result.status == "succeeded", result.error
+    assert result.outputs == {"count": 200}
+
+
+async def test_a_listed_loop_over_tainted_cel_items_counts_their_claim(env: WorkflowEnvironment) -> None:
+    """Review finding I2: a listed loop over CEL items computed from sensitive data gets them claimed, with taint: it
+    reveals their count, and each item is a handle into the claim."""
+    secret_list = {"type": "array", "x-sensitive": True, "items": {"type": "string"}}
+    store = MemoryStore()
+    g = G()
+    g.settings = {
+        "input_schema": {"type": "object", "properties": {"keys": secret_list}, "required": ["keys"],
+                         "additionalProperties": False},
+        "outputs": {"count": ref("steps.l.output.count"), "items": ref("steps.l.output.items")},
+        "declassify": [{"node": str(nid("l")), "field": "/items"}],
+    }  # fmt: skip
+    g.node("l", "flow.loop@1", {"items": cel("trigger.keys.filter(k, k.startsWith('k3y'))"),
+                                "collect": ref("steps.e.output.value")})  # fmt: skip
+    g.node("e", "testkit.echo@1", {"value": ref("item")}).edge("l", "e", "body")
+    async with workers(env.client, store):
+        result = await run(env.client, store, g, {"keys": ["k3y-one", "x3y-two", "k3y-three"]}, claimed=True)
+    assert result.status == "succeeded", result.error
+    assert result.outputs is not None and result.outputs["count"] == 2
+    assert [held(store, h)[0] for h in result.outputs["items"]] == ["k3y-one", "k3y-three"]
+    assert "k3y-" not in repr(store.rows)

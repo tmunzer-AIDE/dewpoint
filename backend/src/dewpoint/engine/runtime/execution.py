@@ -798,6 +798,10 @@ class Execution:
                 [outcome] = await self._evaluate(task, owner=owner, scope=scope, decision=_decision(owner, pointer))
                 values[pointer] = resolve.outcome_value(outcome)
                 mode = "activity" if mode == "activity" or not task.local else "local"
+                handle = ClaimRef.of(values[pointer])
+                if handle is not None and owner is not None and owner.ref == "flow.loop@1" and pointer == "/items":
+                    values[pointer] = await self._items(handle, owner, scope)  # claimed: a cursor, as a reference's
+                    mode = "activity"
             else:
                 values[pointer] = value.value
         return values, mode
