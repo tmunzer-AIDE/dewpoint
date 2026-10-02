@@ -52,8 +52,9 @@ from dewpoint.engine.runtime.execution import INTERNAL_ERROR, VERSION_UNUSABLE
 from dewpoint.engine.runtime.ids import run_of, tenant_of
 from dewpoint.engine.runtime.projection import REDACTED
 from dewpoint.engine.runtime.resolve import Part, ValueFailure, join
+from dewpoint.engine.runtime.size import INLINE_LIMIT
 from dewpoint.engine.sensitive import MIN_SECRET, marked_positions
-from dewpoint.engine.split import ForgedHandleError, split
+from dewpoint.engine.split import ForgedHandleError, json_bytes, split
 from dewpoint.engine.taint import Shape, from_schema, tainted_positions
 
 UNAVAILABLE = "A claim this run may not read, or that doesn't exist."
@@ -168,18 +169,26 @@ async def _bindings(
 
 
 async def _claimed(
-    store: ClaimStore, tenant: str, run: str, claims: Claiming, results: list[tuple[int, Any]]
+    store: ClaimStore, tenant: str, run: str, claims: Claiming, results: list[tuple[int, Any]], *, tainted: bool = True
 ) -> dict[int, dict[str, Any]]:
-    """`results` (an index and a value each) written as tainted claims: each index's outcome, now its handle."""
+    """`results` (an index and a value each) written as claims, tainted (their strings join the index) or, past 64
+    KiB, as size claims (§5.1): each index's outcome, now its handle."""
     if not results:
         return {}
+    sensitive = ("",) if tainted else ()
     rows = [
-        NewClaim(_claim_id(claims.seed, i), value, ("",), uuid.UUID(run), uuid.UUID(claims.root_run_id))
+        NewClaim(_claim_id(claims.seed, i), value, sensitive, uuid.UUID(run), uuid.UUID(claims.root_run_id))
         for i, value in results
     ]
     await store.write(tenant, rows, kind="cel", step_id=claims.step_id, iteration_key=claims.iteration_key)
-    await store.remember(tenant, claims.root_run_id, sorted({t for _, v in results for t in _strings(v)}))
+    if tainted:
+        await store.remember(tenant, claims.root_run_id, sorted({t for _, v in results for t in _strings(v)}))
     return {i: {"ok": ClaimRef(str(row.id)).to_json()} for (i, _), row in zip(results, rows, strict=True)}
+
+
+def _large(value: Any) -> bool:
+    """Larger than the workflow may hold inline (§5.1): a size claim, untainted."""
+    return json_bytes(value) > INLINE_LIMIT
 
 
 def _repeats(value: Any, secrets: Matcher) -> bool:
@@ -251,7 +260,11 @@ async def evaluate_claimed(
     if not claims.decision:  # a declassified decision comes back plain (§4.3)
         secrets = Matcher((await store.index(tenant, claims.root_run_id)).strings)
         results = [(i, o["ok"]) for i, o in enumerate(done) if "ok" in o and (tainted[i] or _repeats(o["ok"], secrets))]
+        claimed = {i for i, _ in results}
+        large = [(i, o["ok"]) for i, o in enumerate(done) if "ok" in o and i not in claimed and _large(o["ok"])]
         for i, outcome in (await _claimed(store, tenant, run, claims, results)).items():
+            done[i] = outcome
+        for i, outcome in (await _claimed(store, tenant, run, claims, large, tainted=False)).items():
             done[i] = outcome
     return await _masked(done, store, tenant, claims.root_run_id)
 
@@ -284,6 +297,8 @@ async def join_claimed(parts: list[Any], claims: Claiming, store: ClaimStore) ->
         )
         return failed
     if not tainted and not _repeats(text, Matcher((await store.index(tenant, claims.root_run_id)).strings)):
+        if _large(text):
+            return (await _claimed(store, tenant, run, claims, [(0, text)], tainted=False))[0]
         return {"ok": text}
     return (await _claimed(store, tenant, run, claims, [(0, text)]))[0]
 
@@ -339,7 +354,8 @@ def config_secrets(config: Any, schema: Mapping[str, Any]) -> list[str]:
 
 async def claim_output(output: Any, schema: Mapping[str, Any], step: StepInput, store: ClaimStore, seen: Index) -> Any:
     """A step's output as it may leave the activity: split by the node's output schema, what's sensitive or
-    undeclared, and text that repeats a secret the run knows, claimed; their strings join the index. What the run
+    undeclared, and text that repeats a secret the run knows, claimed; their strings join the index. Then what's
+    larger than 64 KiB, and the envelope down to the inline limit the workflow sent (§5.1, §5.4). What the run
     knows is the index at this boundary, not the copy read before the attempt (`seen`, §3.7): another activity may
     have extended it meanwhile, or does while this one splits, which the extension that follows shows. The claims'
     ids come from the attempt and their place, so writing them again writes the same rows."""
@@ -348,7 +364,9 @@ async def claim_output(output: Any, schema: Mapping[str, Any], step: StepInput, 
     seed = uuid.uuid5(_OUTPUTS, f"{run}/{step.step_id}/{step.iteration_key}/{step.attempt}")
     known = set((await current(store, tenant, root, seen)).strings)
     while True:  # past the index's bounds, nothing is written: the extension comes first
-        done = split(output, schema, lambda pointer: str(uuid.uuid5(seed, pointer)), known=known, sizes=False)
+        done = split(
+            output, schema, lambda pointer: str(uuid.uuid5(seed, pointer)), known=known, envelope=step.inline_limit
+        )
         merged = await store.remember(tenant, root, done.secrets)
         if set(merged.strings) <= known | set(done.secrets):
             break

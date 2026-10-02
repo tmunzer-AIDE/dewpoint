@@ -404,7 +404,7 @@ def test_the_idempotency_key_is_per_step_and_iteration_not_per_attempt() -> None
 
 def test_the_workflow_sends_the_attempt_and_nothing_to_project() -> None:
     names = [f.name for f in dataclasses.fields(StepInput)]
-    assert names[-3:] == ["mode", "attempt", "root_run_id"] and "cel_mode" not in names
+    assert names[-4:] == ["mode", "attempt", "root_run_id", "inline_limit"] and "cel_mode" not in names
 
 
 @asynccontextmanager
@@ -553,3 +553,24 @@ async def test_a_request_whose_bindings_hold_handles_without_claims_is_never_eva
     with pytest.raises(ApplicationError) as refused:
         await ActivityEnvironment().run(cel_activity(never), request)
     assert (refused.value.type, refused.value.non_retryable) == ("internal_error", True)
+
+
+async def test_an_output_past_64_kib_is_a_size_claim_where_it_is_made() -> None:
+    """Engine 2b spec §5.1: what the workflow couldn't evaluate locally never enters history. The step returns the
+    handle; the claim holds the value, untainted, owned by the run."""
+    store = MemoryStore()
+    result = await call(step_activity_for(Blob, store), step("testkit.blob@1", {"size": 70_000}))
+    handle = ClaimRef.of(result.output["value"])
+    assert handle is not None and handle.pointer == ""
+    held = store.claims[handle.id]
+    assert (held.value, held.sensitive_pointers, held.kind, held.owner) == ("x" * 70_000, (), "output", IDS["run_id"])
+    small = await call(step_activity_for(Blob, store), step("testkit.blob@1", {"size": 60_000}))
+    assert small.output == {"value": "x" * 60_000}  # within 64 KiB: inline
+
+
+async def test_an_output_past_the_inline_limit_it_was_sent_is_a_size_claim() -> None:
+    """Engine 2b spec §5.4: above the live-state budget, the workflow sends a lower threshold (the 1 KiB floor)."""
+    store = MemoryStore()
+    result = await call(step_activity_for(Blob, store), step("testkit.blob@1", {"size": 2_000}, inline_limit=1_024))
+    handle = ClaimRef.of(result.output["value"])
+    assert handle is not None and store.claims[handle.id].value == "x" * 2_000

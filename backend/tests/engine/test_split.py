@@ -212,3 +212,12 @@ def test_the_matcher_builds_an_nfa_so_a_long_secret_costs_its_length() -> None:
     assert Matcher.IMPLEMENTATION is ahocorasick_rs.Implementation.ContiguousNFA
     long = "s" * 1_000_000
     assert Matcher([long]).found("x" + long + "x") == {long}
+
+
+def test_an_envelope_limit_claims_down_to_it() -> None:
+    """A step's output is split to the inline threshold the workflow sent (engine 2b spec §5.4), not the trigger's."""
+    value = {"a": "x" * 3_000, "b": "y" * 500, "c": 1}
+    schema = obj(a={"type": "string"}, b={"type": "string"}, c={"type": "integer"})
+    done = split(value, schema, ids(), envelope=1_024)
+    assert size(done.envelope) <= 1_024
+    assert [c.pointer for c in done.claims] == ["/a"]
