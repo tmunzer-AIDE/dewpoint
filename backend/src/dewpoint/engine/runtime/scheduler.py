@@ -1199,8 +1199,11 @@ class Scheduler:
         return [("c", loop.coll), ("f", loop.fails)]
 
     def collect_base(self, loop: Instance) -> str:
-        """What a loop's collections' segments are named by: a batch child is given its parent's."""
-        return f"{self.prefix}/{iteration_key(loop.scope)}/{self.program.steps[loop.step].topo}"
+        """What a loop's collections' segments are named by, a UUID (its size is fixed in the snapshot): a batch
+        child is given its parent's."""
+        return str(
+            uuid.uuid5(CLAIMS, f"{self.prefix}/{iteration_key(loop.scope)}/{self.program.steps[loop.step].topo}")
+        )
 
     def _seal(self, loop: LoopRun, which: str, coll: Collection) -> None:
         """A collection's tail goes to a segment claim."""

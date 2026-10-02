@@ -34,7 +34,9 @@ from dewpoint.engine.runtime.activities import (
     VersionData,
     cel_queue,
 )
+from dewpoint.engine.runtime.bounds import pinned
 from dewpoint.engine.runtime.ids import run_of, run_workflow_id
+from dewpoint.engine.runtime.program import compile_program
 from dewpoint.engine.runtime.workflow import LoopBatch, RunGraph
 from dewpoint.engine.sensitive import MIN_SECRET
 from dewpoint.engine.split import split
@@ -87,16 +89,21 @@ class MemoryStore:
         version_id = str(uuid.uuid4())
         refs = {n["type"] for n in g.nodes}
         handler = result.failure_handler_version_id
+        expressions = [r.to_json() for r in result.expressions]
+        manifests = {r: MANIFESTS[r] for r in sorted(refs)}
+        cap, depth = pinned(compile_program(g.data(), manifests, expressions, CURRENT_CEL_PROFILE))  # as publish does
         self.versions[version_id] = VersionData(
             version_id=version_id,
             workflow_id=str(workflow_id or uuid.uuid4()),
             graph=g.data(),
-            expressions=[r.to_json() for r in result.expressions],
+            expressions=expressions,
             cel_profile=CURRENT_CEL_PROFILE,
-            manifests={r: MANIFESTS[r] for r in sorted(refs)},
+            manifests=manifests,
             subflow_version_ids=dict(result.subflow_pins),
             failure_handler_version_id=str(handler) if handler else None,
             engine_abi=engine_abi,
+            open_scopes_cap=cap,
+            loop_depth=depth,
         )
         self.schemas[version_id] = dict(result.output_schema)
         self.taints[version_id] = dict(result.output_taint)

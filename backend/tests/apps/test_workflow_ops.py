@@ -128,6 +128,21 @@ async def test_a_published_version_carries_the_abi_of_this_build(
     )
 
 
+async def test_a_published_version_pins_its_open_iteration_cap_and_its_loop_depth(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    """Engine 2b spec §5.3: publish computes them from the version's structure and stores them, so a later change of a
+    constant can't change how a pinned run schedules; the worker loads them with the version."""
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    looped = G().node("o", "flow.loop@1", {"items": [1]}).node("i", "flow.loop@1", {"items": [1]})
+    looped.node("e", "testkit.echo@1", {"value": 1}).edge("o", "i", "body").edge("i", "e", "body")
+    wf_id = await create(api_sessionmaker, ctx, looped.data())
+    out = await publish(api_sessionmaker, ctx, wf_id, api_settings)
+    assert out.errors == [] and out.version is not None
+    assert (out.version.open_scopes_cap, out.version.loop_depth) == (100, 2)
+
+
 async def test_publish_refuses_invalid_graphs_and_stale_revisions(
     owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
 ) -> None:

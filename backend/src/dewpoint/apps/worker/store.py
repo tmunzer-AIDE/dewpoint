@@ -171,6 +171,8 @@ class DbRunStore:
                 subflow_version_ids=dict(sorted(v.subflow_version_ids.items())),
                 failure_handler_version_id=str(v.failure_handler_version_id) if v.failure_handler_version_id else None,
                 engine_abi=v.engine_abi,
+                open_scopes_cap=v.open_scopes_cap,
+                loop_depth=v.loop_depth,
             )
 
     async def project(self, data: ProjectInput) -> None:
