@@ -1,5 +1,7 @@
 name: ci
-on: [push, pull_request]
+on:  # a throwaway probe branch's push runs nothing (proto/2b1b-v1-cpu, never merged)
+  push: { branches-ignore: ["proto/**"] }
+  pull_request:
 permissions: { contents: read }
 jobs:
   backend:

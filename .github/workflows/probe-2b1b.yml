@@ -1,0 +1,42 @@
+name: probe-2b1b
+# 2b-1b's focused workflow-task CPU check on the target runner (engine 2b spec §5.3; the owner's M4 condition). Run by
+# hand only (gh workflow run probe-2b1b.yml --ref proto/2b1b-v1-cpu): a push runs nothing. About 10 minutes.
+# Only what needs the runner: a workflow task's CPU and every failed task's cause at the heaviest queued state, with
+# the engine worker at its intended 2 workflow-task slots, one run and four at once, each copy cancelled after
+# STOP_AFTER continues. Not the 99,990-item probe, nor the full workloads. The check asserts every acceptance condition
+# and exits non-zero on any. Throwaway branch, never merged.
+on: { workflow_dispatch: {} }
+permissions: { contents: read }
+jobs:
+  cpu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults: { run: { working-directory: backend } }
+    env:
+      PYTHONPATH: "."
+      STOP_AFTER: "40"
+      WFT_SLOTS: "2"
+      CPU_LIMIT_MS: "1000"
+      PROBE_TIMEOUT: "1500"
+      RESULTS: probe/results_cpu.jsonl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+      - run: uv sync --locked
+      - run: nproc && python3 -c "import platform; print(platform.platform())"
+      - name: The scheduler alone at 21,600 queued loop steps
+        run: uv run python probe/cpu_check.py bench
+      - name: Queued state, one run of each
+        if: ${{ !cancelled() }}
+        run: uv run python probe/cpu_check.py exhausted_root many_siblings
+      - name: Queued state, four runs at once, an exhausted budget
+        if: ${{ !cancelled() }}
+        env: { CONCURRENT: "4" }
+        run: uv run python probe/cpu_check.py exhausted_root
+      - name: Queued state, four runs at once, 240 sibling loops
+        if: ${{ !cancelled() }}
+        env: { CONCURRENT: "4" }
+        run: uv run python probe/cpu_check.py many_siblings
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: probe-2b1b-cpu, path: backend/probe/results_cpu.jsonl }
