@@ -20,11 +20,13 @@ import pytest
 import structlog
 from temporalio.api.enums.v1 import EventType
 from temporalio.testing import WorkflowEnvironment
+from temporalio.worker import UnsandboxedWorkflowRunner
 
 from dewpoint.apps.worker.activities import MESSAGE_WITHHELD, NODE_FAILED
 from dewpoint.apps.worker.logs import UNNAMED
 from dewpoint.engine.handles import resolve_value
 from dewpoint.engine.runtime import size
+from dewpoint.engine.runtime import workflow as run_graph
 from dewpoint.engine.runtime.activities import CLAIMS_CHILD_INPUT
 from dewpoint.sdk import Empty, StepContext
 from tests.apps.worker.harness import (
@@ -434,3 +436,50 @@ async def test_a_secret_a_plugin_heartbeats_never_reaches_history(
         histories = await executions(own_env.client, handle.id, handle.first_execution_run_id or "")
     assert result.status == "failed" and result.error is not None and result.error["code"] == "timeout"
     assert beat not in await decoded(histories)
+
+
+IN_A_BUG = "canary-in-a-bug-3e9a"  # what the workflow's own exception quotes: the run's data, say
+
+
+async def bug_logged(env: WorkflowEnvironment, caplog: pytest.LogCaptureFixture, event: str) -> logging.LogRecord:
+    """A run whose workflow code raises an exception quoting IN_A_BUG, outside the sandbox so a test can break it:
+    the record the workflow logs for it. No log line holds the exception's text."""
+    caplog.set_level(logging.DEBUG)
+    store, g = MemoryStore(), G()
+    g.settings = {"input_schema": {"type": "object", "additionalProperties": False}, "outputs": {}}
+    g.node("e", ECHO, {"value": 1})
+    with structlog.testing.capture_logs() as entries:
+        async with workers(env.client, store, runner=UnsandboxedWorkflowRunner()):
+            handle = await start(env.client, store, g, {})
+            result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+    assert result.status == "failed", result
+    assert IN_A_BUG not in caplog.text + json.dumps(entries, default=str)
+    [record] = [r for r in caplog.records if r.getMessage().startswith(event)]
+    return record
+
+
+async def test_a_bug_in_the_workflow_logs_its_type_and_place_never_its_text(
+    env: WorkflowEnvironment, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review finding (M6): the workflow logged its own bugs with their tracebacks, whose text may quote the run's
+    data. As the activities' bugs are (§6.7), each is logged by its type and where it was raised, never its text."""
+
+    async def outputs(self: run_graph.RunGraph) -> dict[str, Any]:
+        raise RuntimeError(f"no outputs for {IN_A_BUG}")
+
+    monkeypatch.setattr(run_graph.RunGraph, "_outputs", outputs)
+    bug = await bug_logged(env, caplog, "run_internal_error")
+    assert bug.exc_info is None and getattr(bug, "error_type", None) == "RuntimeError"
+    assert any(w.startswith("test_canary_secrets.py:outputs:") for w in getattr(bug, "where", []))
+
+
+async def test_a_version_the_workflow_cant_compile_logs_its_type_and_place_never_its_text(
+    env: WorkflowEnvironment, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def compiled(data: Any) -> Any:
+        raise ValueError(f"can't compile {IN_A_BUG}")
+
+    monkeypatch.setattr(run_graph, "program_of", compiled)
+    bug = await bug_logged(env, caplog, "run_version_unusable")
+    assert bug.exc_info is None and getattr(bug, "error_type", None) == "ValueError"
+    assert any(w.startswith("test_canary_secrets.py:compiled:") for w in getattr(bug, "where", []))

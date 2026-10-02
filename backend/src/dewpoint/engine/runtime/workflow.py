@@ -8,6 +8,7 @@
 Both drive the shared `Execution` loop, and both may continue-as-new at a quiescent point, carrying a snapshot."""
 
 import asyncio
+import traceback
 import uuid
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -84,6 +85,15 @@ with workflow.unsafe.imports_passed_through():
 
 
 HANDLED = ("failed", DEADLINE_EXCEEDED)  # the ends that run a failure handler (a cancel is no failure)
+WHERE_FRAMES = 8  # the innermost frames a bug's log names, as the activities' (apps.worker.logs)
+
+
+def _bug(e: BaseException) -> dict[str, Any]:
+    """A workflow bug's log fields (engine 2b spec §6.7): its type and where it was raised, never its text, which may
+    quote the run's data. No plugin code runs in the workflow, so its exceptions' types and frames are code."""
+    frames = traceback.walk_tb(e.__traceback__)
+    where = [f"{f.f_code.co_filename.rsplit('/', 1)[-1]}:{f.f_code.co_name}:{line}" for f, line in frames]
+    return {"error_type": type(e).__name__, "where": where[-WHERE_FRAMES:]}
 
 
 def _same_run(tenant_id: str, run_id: str) -> None:
@@ -162,13 +172,13 @@ class RunGraph(Execution):
         except Exception as e:
             if _cancelled(e):
                 return await self._cancelled_early(start.iterations)
-            workflow.logger.error("run_version_unusable", exc_info=True)
+            workflow.logger.error("run_version_unusable", extra=_bug(e))
             return await self._end_early(RunEnd("failed", Failure(VERSION_UNUSABLE, _unloadable(e))), start.iterations)
         self._charge_sent(data)  # its marker goes out with this workflow task's commands (engine 2b spec §5.2)
         try:
             program = program_of(data)  # compiled once per worker process (engine 2b spec §5.3)
         except Exception as e:
-            workflow.logger.error("run_version_unusable", exc_info=True)
+            workflow.logger.error("run_version_unusable", extra=_bug(e))
             message = f"This build can't run the version ({type(e).__name__}); the worker's log has the details."
             return await self._end_early(RunEnd("failed", Failure(VERSION_UNUSABLE, message)), start.iterations)
         outputs: dict[str, Any] | None = None
@@ -202,7 +212,7 @@ class RunGraph(Execution):
                 raise
             return result  # a child reports back instead: its parent learns what it used
         except Exception as e:  # a bug: the text may quote run data, so it goes to the log, not the projection
-            workflow.logger.error("run_internal_error", exc_info=True)
+            workflow.logger.error("run_internal_error", extra=_bug(e))
             message = f"The interpreter failed ({type(e).__name__}); the worker's log has the details."
             end, outputs = RunEnd("failed", Failure(INTERNAL_ERROR, message)), None
         ended = workflow.now()  # the end is decided: whatever follows, it stands
@@ -398,7 +408,7 @@ class RunGraph(Execution):
                 "RunGraph", run, result_type=RunResult, **child_options(child)
             )
         except ChildWorkflowError as e:
-            workflow.logger.warning("failure_handler_failed", exc_info=True)
+            workflow.logger.warning("failure_handler_failed", extra=_bug(e))
             await self._lost_end(run, started, self._lost("failure handler", e))
             return None
         return result.iterations
@@ -445,7 +455,7 @@ class LoopBatch(Execution):
         except Exception as e:
             if _cancelled(e):
                 return BatchResult([], [], end=RunEnd("cancelled", CANCELLED).to_json(), iterations=start.iterations)
-            workflow.logger.error("batch_version_unusable", exc_info=True)
+            workflow.logger.error("batch_version_unusable", extra=_bug(e))
             message = f"This build can't run the version ({type(e).__name__}); the worker's log has the details."
             raise ApplicationError(message, type=VERSION_UNUSABLE, non_retryable=True) from None
         self._charge_sent(data)  # its marker goes out with this workflow task's commands (engine 2b spec §5.2)
@@ -504,7 +514,7 @@ class LoopBatch(Execution):
             await self._project_end(None)
             return await self._returned(self._result(RunEnd("cancelled", CANCELLED)))
         except Exception as e:
-            workflow.logger.error("batch_internal_error", exc_info=True)
+            workflow.logger.error("batch_internal_error", extra=_bug(e))
             await self._project_end(None)  # its steps' rows land first, as a run's do
             message = f"The batch failed ({type(e).__name__}); the worker's log has the details."
             raise ApplicationError(message, type=INTERNAL_ERROR, non_retryable=True) from None
