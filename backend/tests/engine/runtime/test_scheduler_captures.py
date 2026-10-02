@@ -100,9 +100,9 @@ def test_a_write_keeps_what_it_replaced_only_while_a_queued_step_needs_it() -> N
     s, w = started(cap=1)
     s.take_ready()
     write(s, w)
-    assert s.undo == {0: {"x": [0]}}
+    assert {k: u.vals for k, u in s.undo.items()} == {0: {"x": [0]}}
     s.consume_capture(inner(s, 0))
-    assert s.undo == {0: {"x": [0]}}  # `o:1/i` still names version 0
+    assert {k: u.vals for k, u in s.undo.items()} == {0: {"x": [0]}}  # `o:1/i` still names version 0
     finish_iteration(s, 0)
     [i1] = s.take_ready()
     s.consume_capture(i1)

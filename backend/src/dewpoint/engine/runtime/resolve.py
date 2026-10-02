@@ -47,14 +47,14 @@ def view(
     settles), its enclosing loops, the innermost item (or `item`, a filter's), the run."""
     program = scheduler.program
     scope = scheduler.scopes[key]
-    steps: dict[str, Mapping[str, Any]] = {}
+    steps: dict[str, Any] = {}
     loops: dict[str, dict[str, Any]] = {}
     at = key
     for region in program.chain(scope.region):
         current = scheduler.scopes[at]
         for member in program.regions[region].members:
             name = program.steps[member].key
-            steps[name] = current.results.get(name, {})
+            steps[name] = scheduler.result_of(current, name)  # or a handle into its scope's claimed results
         if at:
             loops[at[-1][0]] = {"item": current.item, "index": current.index}
             at = at[:-1]
@@ -72,6 +72,9 @@ def _base(v: ScopeView, path: RefPath) -> Any:
         return v.trigger
     if path.root == "steps":
         entry = v.steps.get(str(path.name), MISSING)
+        claimed = ClaimRef.of(entry)
+        if claimed is not None:  # its scope's results are claimed: read by handle (engine 2b spec §5.3)
+            return claimed.extend(str(path.section)).to_json()
         return entry.get(str(path.section), MISSING) if isinstance(entry, Mapping) else MISSING
     if path.root == "vars":
         return v.vars.get(str(path.name), MISSING)

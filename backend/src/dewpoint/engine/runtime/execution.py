@@ -34,6 +34,7 @@ with workflow.unsafe.imports_passed_through():
     from dewpoint.engine.handles import CLAIM_UNAVAILABLE, MISSING, RESERVED, ClaimRef, contains_marker
     from dewpoint.engine.registry import control
     from dewpoint.engine.runtime import nodes, resolve
+    from dewpoint.engine.runtime import scheduler as live_state
     from dewpoint.engine.runtime.activities import (
         BATCH,
         BUDGET,
@@ -84,6 +85,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from dewpoint.engine.runtime.scheduler import (
         CAP_MESSAGE,
+        INLINE_FLOOR,
         ITERATION_CAP_EXCEEDED,
         SNAPSHOT_FORMAT,
         Batch,
@@ -94,6 +96,7 @@ with workflow.unsafe.imports_passed_through():
         RunEnd,
         Scheduler,
         ScopeKey,
+        Spill,
         iteration_key,
     )
     from dewpoint.engine.runtime.size import (
@@ -277,6 +280,8 @@ class Execution:
         self._drained: dict[str, Any] = {}  # what draining waited for, and added: history events and bytes
         self._draining = False  # drain mode: nothing new starts until the execution continues-as-new
         self._shapes: dict[str, Shape] = {}  # a node type's output taint (`_output_shape`)
+        self._spill_units: dict[tuple[Instance, str, int], Spill] = {}  # containers' claims queued or running (§5.3)
+        self._merging: list[tuple[tuple[Any, ...], _Effect]] = []  # results claimed before they merge (§5.3)
 
     # --- the budget signals ----------------------------------------------------------------------------------------
 
@@ -330,6 +335,14 @@ class Execution:
         try:
             while self.sched.ended is None:
                 self._serve_budget()
+                # containers' claims are units under the in-flight cap; a drain starts them too: they only shrink the
+                # state, and a continue waits until it's back within its budget (engine 2b spec §5.3)
+                for sp in self.sched.take_spills():
+                    self._spill_units[(sp.owner, sp.which, sp.first)] = sp
+                    waiting.append(("spill", sp.owner, sp.which, sp.first))
+                for unit, merged in self._merging:
+                    tasks[("merge", *unit[1:])] = asyncio.create_task(self._claimed_result(unit, merged))
+                self._merging = []
                 if not self._draining:
                     waiting += [("step", i) for i in self.sched.take_ready()]
                     waiting += [("collect", c) for c in self.sched.take_collects()]
@@ -367,10 +380,12 @@ class Execution:
                         [w[1] for w in waiting if w[0] == "step"],
                         [w[1] for w in waiting if w[0] == "collect"],
                         [self._batches.pop((w[1], w[2])) for w in waiting if w[0] == "batch"],
+                        [self._spill_units.pop((w[1], w[2], w[3])) for w in waiting if w[0] == "spill"],
                     )
                     return CONTINUE
-                while not self._draining and waiting and self._in_flight(tasks) < IN_FLIGHT_CAP:
-                    unit = waiting.pop(0)
+                startable = [w for w in waiting if not self._draining or w[0] == "spill"]
+                for unit in startable[: max(0, IN_FLIGHT_CAP - self._in_flight(tasks))]:
+                    waiting.remove(unit)
                     tasks[unit] = asyncio.create_task(self._unit(unit))
                 if self._rows and not any(key[0] == "project" for key in tasks):  # one at a time: rows wait for it
                     self._projects += 1
@@ -428,6 +443,8 @@ class Execution:
         return dict(sorted(kinds.items()))
 
     def _kind(self, key: tuple[Any, ...]) -> str:
+        if key[0] in ("spill", "merge"):
+            return "claims"
         if key[0] == "batch":
             return "children"
         if key[0] != "step":
@@ -440,7 +457,7 @@ class Execution:
         return "children" if step.ref == control.RUN_WORKFLOW else "values"
 
     def _quiescent(self, tasks: Mapping[tuple[Any, ...], asyncio.Task[Any]]) -> bool:
-        return quiescent(tasks, self._timers, self.sched.budget, self._mail, self._answers)
+        return quiescent(tasks, self._timers, self.sched.budget, self._mail, self._answers, live=self.sched.live)
 
     async def _settle_for_continue(self, tasks: dict[tuple[Any, ...], asyncio.Task[Any]]) -> None:
         """Continue-as-new: the sleeping timer steps stop here (their wake times go into the snapshot), and the
@@ -471,10 +488,17 @@ class Execution:
             return (self.sched.order(Instance(c.scope, c.loop.step)), 1)
         if key[0] == "batch":
             return (self.sched.order(key[1]), 2, key[2])
+        if key[0] == "merge":
+            return (self.sched.order(key[1]), 0)
+        if key[0] == "spill":
+            return (self.sched.order(key[1]), 4, key[2], key[3])
         return ((), 3, key[1])
 
     def _gone(self, unit: tuple[Any, ...]) -> bool:
-        """A queued unit whose scope has ended since: it never starts."""
+        """A queued unit whose scope has ended since: it never starts. A claim always goes: it only shrinks the
+        state, and its container, if it's gone, ignores it."""
+        if unit[0] == "spill":
+            return False
         key = unit[1].scope  # a step's, a batch's loop's, or a collect's own
         scope = self.sched.scopes.get(key)
         return scope is None or scope.failure is not None
@@ -485,9 +509,26 @@ class Execution:
             return await self._step(key[1])
         if key[0] == "batch":
             return await self._batch(self._batches.pop((key[1], key[2])))
+        if key[0] == "spill":
+            sp = self._spill_units.pop((key[1], key[2], key[3]))
+            failed = await self._spill([sp.entry], None, sp.owner.scope)
+            return _Effect(failure=failed)
         return await self._collect(key[1])
 
     def _apply(self, key: tuple[Any, ...], effect: _Effect) -> None:
+        if key[0] == "spill":
+            if effect.failure is not None:  # the claim store couldn't take it: the run can't stay within its state
+                self.sched.end(RunEnd("failed", effect.failure))
+            else:
+                self.sched.spilled(key[1], key[2], key[3])
+            return
+        if key[0] == "merge":
+            key = ("step", key[1])
+        elif key[0] == "step" and effect.output is not None and effect.loop is None and effect.end is None:
+            n = live_state.size(effect.output)  # merges are authoritative (engine 2b spec §5.3): past the budget, the
+            if n > INLINE_FLOOR and self.sched.live + n > live_state.LIVE_BUDGET:  # result is claimed before it merges
+                self._merging.append((key, effect))
+                return
         if key[0] == "collect":
             c: Collect = key[1]
             if effect.failure is not None:
@@ -1215,20 +1256,19 @@ class Execution:
         done = sized(value, lambda p: str(uuid.uuid5(SPILLS, f"{wid}/{where}{p}")), envelope=room, part=part)
         converter = workflow.payload_converter()
         empty = SpillInput([], self.root_run_id, str(step.id) if step else None, iteration_key(scope))
-        chunk: list[list[Any]] = []
+        chunk: list[dict[str, Any]] = []
         weight, limit = 0, payload_bytes() - encoded_bytes(empty, converter)
         for c in done.claims:
             size = json_bytes(c.value) + SPILL_FRAME
-            if not fits(
-                replace(empty, claims=[[c.id, c.value]]), converter
-            ):  # a leaf past the limit: it can't be split
+            alone = replace(empty, claims=[{"id": c.id, "value": c.value}])
+            if not fits(alone, converter):  # a leaf past the limit: it can't be split
                 return Failure(PAYLOAD_TOO_LARGE, SPILL_FAILED)
             if chunk and weight + size > limit:
                 failed = await self._spill(chunk, step, scope)
                 if failed is not None:
                     return failed
                 chunk, weight = [], 0
-            chunk.append([c.id, c.value])
+            chunk.append({"id": c.id, "value": c.value})
             weight += size
         if chunk:
             failed = await self._spill(chunk, step, scope)
@@ -1236,7 +1276,18 @@ class Execution:
                 return failed
         return done.envelope
 
-    async def _spill(self, claims: list[list[Any]], step: Step | None, scope: ScopeKey) -> Failure | None:
+    async def _claimed_result(self, key: tuple[Any, ...], effect: _Effect) -> _Effect:
+        """A result that would take the live state past its budget, claimed before it merges (engine 2b spec §5.3):
+        its largest parts, down to the floor, so what merges is small."""
+        inst: Instance = key[1]
+        step = self.sched.step(inst)
+        where = f"merge/{iteration_key(inst.scope)}/{step.topo}"
+        fitted = await self._fit(effect.output, INLINE_FLOOR, where, step=step, scope=inst.scope)
+        if isinstance(fitted, Failure):
+            return replace(effect, output=None, failure=fitted)
+        return replace(effect, output=fitted)
+
+    async def _spill(self, claims: list[dict[str, Any]], step: Step | None, scope: ScopeKey) -> Failure | None:
         data = SpillInput(claims, self.root_run_id, str(step.id) if step else None, iteration_key(scope))
         found = await self._crossing(CLAIMS_SPILL, data, type(None), lost=SPILL_FAILED.removesuffix("."))
         return found if isinstance(found, Failure) else None
@@ -1294,9 +1345,17 @@ class Execution:
         out = []
         for depth in range(len(loop.scope) + 1):
             scope = self.sched.scopes[loop.scope[:depth]]
-            results = {k: v for k, v in scope.results.items() if reads is None or k in reads}
+            inline = {**(scope.rbox.sealing or {}), **scope.results}  # and what's claimed, by its handle (§5.3)
+            results = {k: v for k, v in inline.items() if reads is None or k in reads}
             out.append(
-                {"key": [[k, i] for k, i in scope.key], "results": results, "item": scope.item, "index": scope.index}
+                {
+                    "key": [[k, i] for k, i in scope.key],
+                    "results": results,
+                    "item": scope.item,
+                    "index": scope.index,
+                    "chain": scope.rbox.head,
+                    "claimed": self.sched.claimed_in(scope),
+                }
             )
         return out
 
@@ -1440,7 +1499,7 @@ class Execution:
                 mode=self.mode,
                 attempt=attempt,
                 root_run_id=self.root_run_id,
-                inline_limit=inline_limit(),
+                inline_limit=inline_limit() if self.sched.live <= live_state.LIVE_BUDGET else INLINE_FLOOR,  # §5.4
             )
             converter = workflow.payload_converter()
             fitted: Any = None
@@ -1570,7 +1629,7 @@ class Execution:
         if snapshot.get("snapshot_format") != SNAPSHOT_FORMAT:
             raise ValueError(f"unknown snapshot format {snapshot.get('snapshot_format')!r}")
         self.program = program
-        self.sched = Scheduler.from_json(program, snapshot["scheduler"])
+        self.sched = Scheduler.from_json(program, snapshot["scheduler"], prefix=workflow.info().workflow_id)
         for key, step, wake, started, mode in snapshot["timers"]:
             inst = Instance(tuple((str(k), int(n)) for k, n in key), uuid.UUID(step))
             self._timers[inst] = datetime.fromisoformat(wake)
@@ -1593,14 +1652,17 @@ def quiescent(
     budget: Budget,
     mail: Sequence[Any],
     answers: Sequence[Any],
+    *,
+    live: int = 0,
 ) -> bool:
     """Where an execution may continue as new: no activity and no child outstanding, and no request to or from a
     parent or child; a sleeping timer step doesn't count, nor a projection (it's written before the run continues).
     Nor may its iteration budget hold a waiting need or a child's grant (engine 2b spec §5.3, the at-continue term):
-    a continued input carries only the budget's fixed counters."""
+    a continued input carries only the budget's fixed counters. And its live state is within its budget, its claims
+    landed: a continued input carries at most LIVE_BUDGET of values."""
     idle = all(k[0] == "project" or (k[0] == "step" and k[1] in timers) for k in tasks)
     settled = not budget.asking and not budget.waiting and not budget.reserved and not mail and not answers
-    return idle and settled
+    return idle and settled and live <= live_state.LIVE_BUDGET
 
 
 __all__ = [
