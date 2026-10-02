@@ -388,6 +388,37 @@ async def test_a_secret_map_key_reaches_no_history_row_or_log_and_declared_field
         assert SECRET_KEY not in where
 
 
+ECHOED_KEY = "sk-k3y-echoed-canary-0003"  # a secret map key that a declared sibling field repeats
+
+
+async def test_a_secret_map_key_a_sibling_field_repeats_reaches_no_history_row_or_log(
+    env: WorkflowEnvironment, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The owner's re-review of C1: a declared, plain field that repeats an undeclared map key stayed plain in the run's
+    start, because the keys were collected after the reappearing-text check. The key is a secret before the rest is
+    checked: the sibling is claimed, and the map's declared field still reads plain. Decrypted, no history, row or log
+    line holds the key; the run's outputs read the sibling back through its claim."""
+    open_map = {"type": "object", "properties": {"env": {"type": "string"}}, "required": ["env"],
+                "additionalProperties": {"type": "string"}}  # fmt: skip
+    store, g = MemoryStore(), G()
+    g.settings = {
+        "input_schema": {"type": "object", "properties": {"c": open_map, "note": {"type": "string"}},
+                         "required": ["c", "note"], "additionalProperties": False},
+        "outputs": {"note": ref("trigger.note"), "env": ref("steps.n.output.value")},
+    }  # fmt: skip
+    g.node("n", ECHO, {"value": ref("trigger.c.env")})
+    seen = await observed(env, caplog, g, {"c": {"env": "prod", ECHOED_KEY: "x"}, "note": ECHOED_KEY}, store)
+    assert seen.result.status == "succeeded", seen.result.error
+    assert seen.result.outputs["env"] == "prod"  # a declared field of the map, read plain
+
+    async def fetch(claim_id: str) -> Any:
+        return await store.fetch(TENANT, seen.run_id, claim_id)
+
+    assert (await resolve_value(seen.result.outputs, fetch)).value == {"note": ECHOED_KEY, "env": "prod"}
+    for where in (seen.plain, seen.rows, seen.logs):
+        assert ECHOED_KEY not in where
+
+
 DECIDED = "sk-l3ak-canary-0001"  # a sensitive value a listed condition evaluates to, instead of a boolean
 
 

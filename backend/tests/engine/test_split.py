@@ -276,6 +276,25 @@ def test_a_maps_declared_fields_stay_in_its_key_claim_plain_and_innermost_maps_g
     assert {KEY, "extra-key-1"} <= set(done.secrets)
 
 
+def test_a_key_the_schema_doesnt_declare_is_a_secret_before_the_rest_is_checked() -> None:
+    """The owner's re-review of C1: keys were collected after the reappearing-text check, so a plain field repeating an
+    undeclared key stayed plain in the envelope. The keys join the secrets first: a sibling or a declared field of the
+    map itself that repeats one is claimed with taint, and the map is still claimed whole, without taint, for its
+    own keys: a reference to a declared field reads plain."""
+    open_map = {"type": "object", "properties": {"env": {"type": "string"}}, "additionalProperties": {"type": "string"}}
+    schema = obj(c=open_map, note={"type": "string"})
+    done = split({"c": {"env": "prod", KEY: "x"}, "note": KEY}, schema, ids())
+    assert KEY not in json.dumps(done.envelope) and KEY in done.secrets
+    claims = {c.pointer: c for c in done.claims}
+    assert (claims["/note"].value, claims["/note"].tainted) == (KEY, True)
+    assert (claims["/c"].value["env"], claims["/c"].tainted) == ("prod", False)
+    inside = split({"c": {"env": KEY, KEY: "x"}, "note": "n"}, schema, ids())  # the map's own declared field
+    claims = {c.pointer: c for c in inside.claims}
+    assert (claims["/c/env"].value, claims["/c/env"].tainted) == (KEY, True)
+    assert not claims["/c"].tainted and ClaimRef.of(claims["/c"].value["env"]) == ClaimRef(claims["/c/env"].id)
+    assert inside.envelope["note"] == "n"
+
+
 def test_a_closed_object_has_no_key_claim() -> None:
     done = split({"o": {"name": "ann"}}, obj(o=obj(name={"type": "string"})), ids())
     assert done.claims == () and done.envelope == {"o": {"name": "ann"}}

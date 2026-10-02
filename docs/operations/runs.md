@@ -133,9 +133,9 @@ claims are.
   before it leaves the step's activity: every value at a position the schema marks `x-sensitive`, and every position it
   doesn't declare (unknown counts as sensitive: `additionalProperties`, pattern properties, a key one branch of a union
   leaves open); a map that holds a key its schema doesn't declare, whole, since a key the data supplied is data too (a
-  reference to one of its declared fields still reads that field); text that repeats a secret the run already knows; and
-  any value over 64 KiB, claimed for its size. What CEL or a template returns from `cel.evaluate` is claimed when it
-  read sensitive data, when it repeats a known secret, or when it's over 64 KiB.
+  reference to one of its declared fields still reads that field); text that repeats a secret the run already knows, or
+  such a key; and any value over 64 KiB, claimed for its size. What CEL or a template returns from `cel.evaluate` is
+  claimed when it read sensitive data, when it repeats a known secret, or when it's over 64 KiB.
 - **Where a claim is read.** Only in an activity, by the run that owns it or was granted it. A plugin step gets its
   input with every handle resolved. CEL or a template that reads a handle runs in the evaluator (`cel_mode`
   `activity`), and so does CEL that indexes trigger or step data by a computed key or position. A reference further

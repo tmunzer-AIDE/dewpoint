@@ -288,8 +288,10 @@ secret and a sub-flow's refusal is an activity result, in history.
   taint. Unknown counts as sensitive.
 - **Then keys:** a handle keeps its map's keys, and a key the data supplied is data too. So a map holding a key its
   schema doesn't declare is claimed whole, without taint (its undeclared values are handles already), and each such
-  key of 4 characters or more joins the secret index (§3.7). A reference to a declared field reads it through the
-  claim; the handles nested in it stay the run's.
+  key of 4 characters or more joins the secret index (§3.7). It's a secret before any text is checked for reappearing
+  secrets, so a field that repeats it, a sibling or the map's own declared field, is claimed with taint; the key
+  alone doesn't taint its own map. A reference to a declared field reads it through the claim; the handles nested in
+  it stay the run's.
 - **Then size:** a value larger than 64 KiB is claimed without taint. A size claim is made after its sensitive
   descendants were claimed, so it holds handles where they were: a pointer into a size claim reaches plain data or a
   nested handle, never an untainted view of a sensitive value.

@@ -3,13 +3,15 @@
 input when its parent starts it. The input was validated against its schema first.
 
 1. **Sensitive values:** every value at an `x-sensitive` position, or at one the schema doesn't declare (unknown counts
-   as sensitive), is claimed with taint. Their strings of MIN_SECRET characters or more are the run's first secrets.
-2. **Reappearing text:** an untainted string, or a key, that contains one of those secrets is claimed with taint. This
-   comes before size claims, which are made after their tainted descendants (§3.5), so a size claim never holds a
-   secret in plain text.
+   as sensitive), is claimed with taint. Their strings of MIN_SECRET characters or more are the run's first secrets,
+   and so are the keys at the positions the schema doesn't declare: a key the data supplied can be a secret.
+2. **Reappearing text:** an untainted string, or a key, that contains one of those secrets is claimed with taint, a
+   field that repeats a map's undeclared key included. That key alone doesn't make its own map a match: step 3 claims
+   the map for it. This comes before size claims, which are made after their tainted descendants (§3.5), so a size
+   claim never holds a secret in plain text.
 3. **Keys:** a map that holds a key its schema doesn't declare is claimed whole, without taint (its taint is its
-   nested claims'), innermost first: a key there can be a secret, so it never stays in the envelope, and it joins the
-   run's secrets. Its declared fields stay plain inside the claim.
+   nested claims'), innermost first, so the key never stays in the envelope. Its declared fields stay plain inside
+   the claim.
 4. **Size:** a value larger than SIZE_CLAIM is claimed without taint, after its own large parts, so it holds handles
    where they were.
 5. **The envelope:** while the input passes TRIGGER_INLINE (or the limit a step's output is sent with, §5.4), its
@@ -116,10 +118,11 @@ class _Splitter:
         else:
             node[key] = handle
 
-    def reappearing(self, *matchers: Matcher) -> list[str]:
+    def reappearing(self, *matchers: Matcher, keyed: Mapping[str, frozenset[str]] | None = None) -> list[str]:
         """The pointers of strings, and of objects whose keys, contain a secret any of `matchers` finds: never inside a
-        handle."""
+        handle. `keyed`: each map's undeclared keys, which don't make it a match (its key claim hides them)."""
         found: list[str] = []
+        own = keyed or {}
 
         def has(text: str) -> bool:
             return any(m.found(text) for m in matchers)
@@ -131,7 +134,7 @@ class _Splitter:
                 if has(value):
                     found.append(pointer)
             elif isinstance(value, dict):
-                if any(has(k) for k in value):
+                if any(has(k) for k in value if k not in own.get(pointer, ())):
                     found.append(pointer)
                     return
                 for k, child in value.items():
@@ -238,15 +241,16 @@ def split(
     shape = from_schema(schema)
     for pointer in tainted_positions(value, shape):
         s.claim(pointer, tainted=True)
+    keyed = {pointer: frozenset(keys) for pointer, keys in keyed_positions(s.doc, shape)}
     secrets = {t for c in s.claims for t in _strings(c.value) if len(t) >= MIN_SECRET}
+    secrets |= {k for keys in keyed.values() for k in keys if len(k) >= MIN_SECRET}  # before any text is checked
     if ClaimRef.of(s.doc) is None:
         matchers = [Matcher(secrets), known] if isinstance(known, Matcher) else [Matcher(secrets | set(known))]
-        for pointer in s.reappearing(*matchers):
+        for pointer in s.reappearing(*matchers, keyed=keyed):
             s.claim(pointer, tainted=True)
             secrets |= {t for t in _strings(s.claims[-1].value) if len(t) >= MIN_SECRET}
-        for pointer, keys in keyed_positions(s.doc, shape):  # after reappearing, which claims a matching map whole
+        for pointer, _ in keyed_positions(s.doc, shape):  # the maps reappearing text didn't claim whole
             s.claim(pointer, tainted=False)  # its taint is its nested claims': a declared field reads plain
-            secrets |= {k for k in keys if len(k) >= MIN_SECRET}
         if sizes:
             s.by_size(s.doc, "")
             s.envelope(envelope)
