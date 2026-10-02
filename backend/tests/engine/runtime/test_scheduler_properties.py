@@ -6,8 +6,10 @@
 - no edge is left pending when a run succeeds, so nothing deadlocks.
 
 The same runs also take snapshots at random points and carry on from them (continue-as-new), and some loops run in
-batches whose children report random outcomes (2a-3b)."""
+batches whose children report random outcomes (2a-3b). Some run under a small open-iteration cap (engine 2b spec
+§5.3): open iteration scopes never pass the cap plus the version's loop depth, and nothing is left stuck."""
 
+import dataclasses
 import json
 from typing import Any
 
@@ -101,13 +103,15 @@ def _entry_ok(s: Scheduler, inst: Instance) -> bool:
 @settings(max_examples=300, deadline=None, suppress_health_check=[HealthCheck.too_slow])
 @given(graphs(), st.data())
 def test_random_runs_keep_the_scheduling_invariants(g: G, data: st.DataObject) -> None:
-    s = Scheduler(program(g))
+    cap = data.draw(st.sampled_from([None, 1, 2]), label="cap")
+    s = Scheduler(dataclasses.replace(program(g), open_scopes_cap=cap))
     s.start()
     running: list[Instance] = []
     collects: list[Any] = []
     batches: list[Batch] = []
     handed: dict[Instance, int] = {}
     while s.ended is None:
+        assert s.open_scopes <= s.cap + s.reserve, "open iteration scopes passed the cap and the reservation"
         cancelled = set(s.take_cancels())
         running = [r for r in running if r not in cancelled]
         batches = [b for b in batches if b.loop not in cancelled]
