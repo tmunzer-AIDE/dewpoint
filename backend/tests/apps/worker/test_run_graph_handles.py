@@ -179,3 +179,54 @@ async def test_a_reference_to_a_sensitive_value_decides_a_listed_branch_and_case
     assert result.status == "succeeded", result.error
     ran = {r.node_key for r in store.steps(result_run(store))}
     assert {"y", "d"} <= ran and not {"n", "g"} & ran
+
+
+async def test_a_loop_over_a_sensitive_list_counts_it_in_an_activity_and_iterates_item_handles(
+    env: WorkflowEnvironment,
+) -> None:
+    """Spec §4.3: a listed loop over a tainted list reveals its count, nothing else. The count comes from an activity;
+    each item is a handle into the list; a body step gets its item resolved in its activity."""
+    secret_list = {"type": "array", "x-sensitive": True, "items": {"type": "string"}}
+    store = MemoryStore()
+    g = G()
+    g.settings = {
+        "input_schema": {"type": "object", "properties": {"keys": secret_list}, "required": ["keys"],
+                         "additionalProperties": False},
+        "outputs": {"count": ref("steps.l.output.count"), "items": ref("steps.l.output.items")},
+        "declassify": [{"node": str(nid("l")), "field": "/items"}],
+    }  # fmt: skip
+    g.node("l", "flow.loop@1", {"items": ref("trigger.keys"), "collect": ref("steps.e.output.value")})
+    g.node("e", "testkit.echo@1", {"value": ref("item")}).edge("l", "e", "body")
+    async with workers(env.client, store):
+        result = await run(env.client, store, g, {"keys": ["k3y-one", "k3y-two", "k3y-three"]}, claimed=True)
+    assert result.status == "succeeded", result.error
+    assert result.outputs is not None and result.outputs["count"] == 3
+    collected = [held(store, h)[0] for h in result.outputs["items"]]  # each echoed value repeats a secret: claimed
+    assert collected == ["k3y-one", "k3y-two", "k3y-three"]
+    assert "k3y-" not in repr(store.rows)
+
+
+async def test_a_loop_over_a_list_too_large_to_carry_runs_in_batches_of_item_handles(env: WorkflowEnvironment) -> None:
+    """A list over 64 KiB is claimed without taint (spec §3.5): its count is plain, no listing needed, and its
+    batches carry item handles."""
+    lines = {"type": "array", "items": {"type": "string"}}
+    store = MemoryStore()
+    g = G()
+    g.settings = {
+        "input_schema": {"type": "object", "properties": {"lines": lines}, "required": ["lines"],
+                         "additionalProperties": False},
+        "outputs": {"count": ref("steps.l.output.count")},
+    }  # fmt: skip
+    g.node("l", "flow.loop@1", {"items": ref("trigger.lines"), "concurrency": 5})
+    g.node("e", "testkit.blob@1", {"size": 1}).edge("l", "e", "body")
+    async with workers(env.client, store):
+        result = await run(env.client, store, g, {"lines": [f"{i:04d}" + "x" * 700 for i in range(150)]}, claimed=True)
+    assert result.status == "succeeded", result.error
+    assert result.outputs == {"count": 150}
+
+
+def held(store: MemoryStore, value: Any) -> tuple[Any, bool]:
+    found = ClaimRef.of(value)
+    assert found is not None, value
+    claim = store.claims[found.id]
+    return claim.value, claim.sensitive_pointers == ("",)
