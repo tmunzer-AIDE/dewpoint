@@ -115,6 +115,7 @@ class BatchInput:
     drain_events: int = DRAIN_EVENTS
     iterations: int = 0  # a continued batch: what it had used, readable even when its snapshot isn't
     items_ref: list[Any] | None = None  # the slice of a claimed list, as [handle, n, first]: `items` is then empty
+    collect_base: str = ""  # the loop's collections' base: it names the segments this batch writes (2b §5.3)
 
 
 @dataclass(frozen=True)
@@ -124,6 +125,8 @@ class BatchResult:
     stopped: dict[str, Any] | None = None  # the failure that stopped the slice (`on_item_error: stop`)
     end: dict[str, Any] | None = None  # the run ended inside the batch (a fail or stop node, the deadline)
     iterations: int = 0
+    collection: dict[str, Any] | None = None  # spilled (2b §5.3): what it collected, as segments; `collected` empty
+    failure_collection: dict[str, Any] | None = None  # and its failures, the same way
 
 
 @dataclass(frozen=True)

@@ -37,6 +37,12 @@ its claim is written. A reference into a claimed container reads by handle (`res
 reads a claim. A scope's result set and the variables are claimed again as they grow: each new claim forwards to the
 one before (the activity writes it), so one handle reaches every part.
 
+Collections compact: a loop's collected values and its failures are immutable segment claims plus a short inline
+tail, by absolute index. The tail is claimed as one segment past SEGMENT_BYTES, or earlier when the budget needs it;
+the segment list is a container too, claimed as index segments. A loop whose collection spilled ends with one claim of
+the whole list, assembled from its segments (`assembled`), so its handle addresses each item by position. A batch
+child writes its segments where its parent's loop names them, and returns its collection for the parent to merge.
+
 A snapshot (`snapshot_format` 2, engine 2b spec §5.3) holds states, not queues: one code per node and per edge in
 region order, steps and loops by their topological index. Restoring rebuilds what's queued from those states, minus
 what was handed out before the snapshot and is still running."""
@@ -45,7 +51,7 @@ import bisect
 import heapq
 import json
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -54,6 +60,7 @@ from dewpoint.engine.handles import HANDLE_MAX, ClaimRef
 from dewpoint.engine.registry.control import SET_VARIABLES
 from dewpoint.engine.runtime.budget import LOCAL, Answer, Ask, Budget, Need
 from dewpoint.engine.runtime.program import BODY, DONE, ERROR_PORT, Program, Step
+from dewpoint.engine.runtime.size import inline_limit
 
 ScopeKey = tuple[tuple[str, int], ...]
 ITERATION_CAP = 100_000  # loop iterations and filter items across the whole logical run (spec §4.2)
@@ -63,6 +70,7 @@ SNAPSHOT_FORMAT = 2
 OPEN_SCOPES_CAP = 100  # open iteration scopes per execution, besides the progress path's reservation (§5.3)
 LIVE_BUDGET = 1_048_576  # the live state a snapshot may hold, at most (§5.3, component 5)
 INLINE_FLOOR = 1_024  # above the budget, activities claim outputs larger than this (§5.4)
+SEGMENT_BYTES = 262_144  # a collection's tail is claimed as one segment past this (§5.3)
 NIL = uuid.UUID(int=0)  # the owner of a container that isn't a step's: a scope's, the variables'
 CLAIMS = uuid.UUID("2b1b5e11-0000-4000-8000-000000000535")  # containers' claim ids: from where they were claimed
 
@@ -122,6 +130,37 @@ def _then_wake[**P, T](fn: Callable[P, T]) -> Callable[P, T]:
 def size(value: Any) -> int:
     """What a value adds to the live state: its compact JSON, as the payload converter writes it."""
     return len(json.dumps(value, separators=(",", ":")))
+
+
+def segment_id(base: str, first: int) -> str:
+    """A collection's segment claim: named by its loop (`base`, the parent's for a batch child) and its first index."""
+    return str(uuid.uuid5(CLAIMS, f"{base}/{first}"))
+
+
+async def assembled(spec: dict[str, Any], fetch: Callable[[str], Awaitable[Any]]) -> list[Any]:
+    """A collection as one list (§5.3), from its segments (and the index segments that list them), and its tail: the
+    values by position, null where nothing was collected; or, for failures, the entries in index order. `fetch` reads
+    a claim as it's stored."""
+    values: dict[int, Any] = {}
+
+    async def walk(entries: list[Any]) -> None:
+        for e in entries:
+            index = ClaimRef.of(e)
+            if index is not None:
+                stored = await fetch(index.id)
+                await walk(stored["segs"])
+                if stored.get("prev") is not None:
+                    await walk([stored["prev"]])
+                continue
+            for i, v in await fetch(segment_id(spec["base"], int(e[0]))):
+                values[int(i)] = v
+
+    await walk(list(spec["segs"]))
+    for i, v in spec["tail"]:
+        values[int(i)] = v
+    if spec["entries"]:
+        return [{"index": i, **values[i]} for i in sorted(values)]
+    return [values.get(int(spec["offset"]) + p) for p in range(int(spec["n"]))]
 
 
 def claimed_codes(program: Program, region: uuid.UUID | None, keys: set[str]) -> str:
@@ -237,12 +276,120 @@ class Undo:
         return size(self.vals) if self.vals is not None else size(self.head)
 
 
+@dataclass
+class Collection:
+    """A loop's collected values or its failures, by absolute index (§5.3): segment claims (`segs`: [first, count]
+    each, or an index claim's handle) and an inline `tail`. A position with nothing reads as null. `sealing`: tails
+    on their way to a segment (still counted, still read inline); `ibox`: the segment list's own claims (index
+    segments); `assembled`: the handle of the whole list, once it's written at the loop's end."""
+
+    base: str
+    n: int
+    offset: int
+    entries: bool = False  # failures: read as entries in index order
+    segs: list[Any] = field(default_factory=list)
+    tail: dict[int, Any] = field(default_factory=dict)
+    sealing: dict[int, list[list[Any]]] = field(default_factory=dict)
+    ibox: Box = field(default_factory=lambda: Box())
+    assembling: bool = False
+    assembled: dict[str, Any] | None = None
+    tail_bytes: int = 0
+    sealing_bytes: int = 0
+
+    @staticmethod
+    def entry_bytes(index: int, value: Any) -> int:
+        return size([index, value]) + 1
+
+    def live_bytes(self) -> int:
+        handle = size(self.assembled) if self.assembled is not None else 0
+        return self.tail_bytes + self.sealing_bytes + size(self.segs) + self.ibox.bytes() + handle
+
+    @property
+    def spilled(self) -> bool:
+        return bool(self.segs or self.sealing or self.ibox.head is not None or self.ibox.sealing is not None)
+
+    @property
+    def busy(self) -> bool:
+        return bool(self.sealing) or self.ibox.sealing is not None or self.assembling
+
+    def put(self, index: int, value: Any) -> int:
+        added = self.entry_bytes(index, value) - (
+            self.entry_bytes(index, self.tail[index]) if index in self.tail else 0
+        )
+        self.tail[index] = value
+        self.tail_bytes += added
+        return added
+
+    def seal(self) -> tuple[int, list[list[Any]]] | None:
+        if not self.tail:
+            return None
+        pairs = [[i, self.tail[i]] for i in sorted(self.tail)]
+        self.tail = {}
+        self.sealing[pairs[0][0]] = pairs
+        self.sealing_bytes += self.tail_bytes
+        self.tail_bytes = 0
+        return pairs[0][0], pairs
+
+    def sealed(self, first: int) -> None:
+        pairs = self.sealing.pop(first)
+        self.sealing_bytes -= sum(self.entry_bytes(i, v) for i, v in pairs)
+        self.segs.append([first, len(pairs)])
+
+    def merge(self, other: dict[str, Any]) -> None:
+        """A batch child's collection: its segments, its index's head as one entry, and its tail."""
+        self.segs.extend(other["segs"])
+        head = Box.from_json(other.get("index")).head
+        if head is not None:
+            self.segs.append(head)
+        for i, v in other["tail"]:
+            self.put(int(i), v)
+
+    def output(self) -> list[Any]:
+        """Nothing spilled: the values by position, or the failures' entries in index order."""
+        if self.entries:
+            return [{"index": i, **self.tail[i]} for i in sorted(self.tail)]
+        return [self.tail.get(self.offset + p) for p in range(self.n)]
+
+    def spec(self) -> dict[str, Any]:
+        """What `assembled` reads."""
+        segs = self.segs + ([self.ibox.head] if self.ibox.head is not None else [])
+        tail = [[i, self.tail[i]] for i in sorted(self.tail)]
+        return {
+            "base": self.base,
+            "segs": segs,
+            "tail": tail,
+            "n": self.n,
+            "offset": self.offset,
+            "entries": self.entries,
+        }
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "base": self.base, "n": self.n, "offset": self.offset, "entries": self.entries, "segs": self.segs,
+            "tail": [[i, self.tail[i]] for i in sorted(self.tail)],
+            "sealing": [[f, pairs] for f, pairs in sorted(self.sealing.items())], "index": self.ibox.to_json(),
+            "assembling": self.assembling, "assembled": self.assembled,
+        }  # fmt: skip
+
+    @classmethod
+    def from_json(cls, raw: dict[str, Any]) -> "Collection":
+        tail = {int(i): v for i, v in raw["tail"]}
+        sealing = {int(f): pairs for f, pairs in raw["sealing"]}
+        return cls(
+            str(raw["base"]), int(raw["n"]), int(raw["offset"]), bool(raw["entries"]), list(raw["segs"]), tail,
+            sealing, Box.from_json(raw["index"]), bool(raw["assembling"]), raw["assembled"],
+            sum(cls.entry_bytes(i, v) for i, v in tail.items()),
+            sum(cls.entry_bytes(int(i), v) for pairs in sealing.values() for i, v in pairs),
+        )  # fmt: skip
+
+
 @dataclass(frozen=True)
 class Spill:
     """A container's part on its way to a claim, for `claims.spill`: `entry` is what the activity writes."""
 
     owner: Instance  # the scope's (step NIL), or a loop step's
-    which: str  # r, t: a scope's results, its item; v: the variables; u: an undo record; i: a loop's item list
+    which: str  # r, t: a scope's results, its item; v: the variables; u: an undo record; i: a loop's item list;
+    # c, f: a collection's segment (collected values, failures); xc, xf: its index segment; ac, af: its whole list
     first: int  # the claim's number in its container
     entry: dict[str, Any]
 
@@ -283,8 +430,8 @@ class LoopRun:
     next: int = 0  # the next item to open, as a position in `items`
     open: list[int] = field(default_factory=list)  # open iterations, by absolute index
     collecting: set[int] = field(default_factory=set)  # settled iterations whose `collect` is being evaluated
-    collected: list[Any] = field(default_factory=list)  # per item of `items`
-    failures: list[dict[str, Any]] = field(default_factory=list)
+    coll: Collection = field(default_factory=lambda: Collection("", 0, 0))  # what it collected (§5.3)
+    fails: Collection = field(default_factory=lambda: Collection("", 0, 0, entries=True))  # its failed iterations
     running_batch: int | None = None  # the start of the batch a child is running
     waiting: bool = False  # the next iteration waits for budget
     items_sealing: bool = False  # its inline list is being claimed: it waits for the claim, then reads by handle
@@ -316,6 +463,8 @@ class BatchOutcome:
     collected: list[Any]
     failures: list[dict[str, Any]]
     stopped: Failure | None = None
+    collection: dict[str, Any] | None = None  # spilled (§5.3): its collection, whose segments its parent's loop names
+    failure_collection: dict[str, Any] | None = None  # and its failures, the same way
 
 
 @dataclass(frozen=True)
@@ -428,9 +577,11 @@ class Scheduler:
         offset: int,
         concurrency: int,
         stop_on_error: bool,
+        base: str = "",
     ) -> None:
         """A batch child: rebuild the loop's enclosing scopes read-only, outermost first, and run items `offset` ..
-        `offset + len(items)` of it. The loop's own scope is the last one."""
+        `offset + len(items)` of it. The loop's own scope is the last one. `base`: the parent loop's collection base,
+        which names the segments this child writes."""
         chain = self.program.chain(self.program.steps[loop_step].region)  # innermost first
         for depth, o in enumerate(outer):
             region = chain[len(outer) - 1 - depth]
@@ -441,7 +592,9 @@ class Scheduler:
         loop_inst = Instance(outer[-1].key, loop_step)
         self.batch_loop = loop_inst
         items = items if isinstance(items, ItemsRef) else list(items)
-        loop = LoopRun(loop_inst, items, concurrency, stop_on_error, offset=offset, collected=[None] * count(items))
+        base = base or self.collect_base(loop_inst)
+        coll, fails = Collection(base + "/c", count(items), offset), Collection(base + "/f", count(items), offset, True)
+        loop = LoopRun(loop_inst, items, concurrency, stop_on_error, offset=offset, coll=coll, fails=fails)
         self.loops[loop_inst] = loop
         self._live += self._loop_bytes(loop)
         self._advance(loop)
@@ -508,6 +661,20 @@ class Scheduler:
             elif which == "t" and sc.item_sealing:
                 self._live += size(handle) - size(sc.item)
                 sc.item, sc.item_sealing = handle, False
+        elif which in ("c", "f", "xc", "xf", "ac", "af"):
+            loop = self.loops.get(owner)
+            if loop is None:
+                return
+            coll = loop.coll if which[-1] == "c" else loop.fails
+            before = coll.live_bytes()
+            if len(which) == 1 and first in coll.sealing:
+                coll.sealed(first)
+            elif which[0] == "x" and coll.ibox.sealing is not None and coll.ibox.claims == first:
+                coll.ibox = Box(None, handle, first + 1)
+            elif which[0] == "a" and coll.assembling:
+                coll.assembling, coll.assembled = False, handle
+            self._live += coll.live_bytes() - before
+            self._advance(loop)
         elif which == "i":
             loop = self.loops.get(owner)
             if loop is None or not loop.items_sealing or not isinstance(loop.items, list):
@@ -596,7 +763,9 @@ class Scheduler:
         if scope is None:
             return
         items = items if isinstance(items, ItemsRef) else list(items)
-        loop = LoopRun(inst, items, concurrency, stop_on_error, batch=batch, collected=[None] * count(items))
+        base = self.collect_base(inst)
+        coll, fails = Collection(base + "/c", count(items), 0), Collection(base + "/f", count(items), 0, True)
+        loop = LoopRun(inst, items, concurrency, stop_on_error, batch=batch, coll=coll, fails=fails)
         self.loops[inst] = loop
         self._live += self._loop_bytes(loop)
         if batch and self._iter_loop(inst):  # it opens no scope: it holds its slot until it ends (§5.3)
@@ -611,9 +780,9 @@ class Scheduler:
             return
         loop.open.remove(index)
         loop.collecting.discard(index)
-        self._live += size(value) - size(loop.collected[index - loop.offset])
-        loop.collected[index - loop.offset] = value
+        self._live += loop.coll.put(index, value)
         self._prune(self._iteration_scope(loop, index))
+        self._maybe_seal(loop)
         self._advance(loop)
 
     @_then_wake
@@ -634,11 +803,19 @@ class Scheduler:
         if loop is None or loop.running_batch != start:
             return
         loop.running_batch = None
-        for n, value in enumerate(outcome.collected):
-            self._live += size(value) - size(loop.collected[start + n])
-            loop.collected[start + n] = value
-        for f in outcome.failures:
-            self._fail_entry(loop, f)
+        for coll, merged in ((loop.coll, outcome.collection), (loop.fails, outcome.failure_collection)):
+            if merged is not None:
+                before = coll.live_bytes()
+                coll.merge(merged)
+                self._live += coll.live_bytes() - before
+        if outcome.collection is None:
+            for n, value in enumerate(outcome.collected):
+                if value is not None:
+                    self._live += loop.coll.put(start + n, value)
+        if outcome.failure_collection is None:
+            for f in outcome.failures:
+                self._live += loop.fails.put(int(f["index"]), {"code": f["code"], "message": f["message"]})
+        self._maybe_seal(loop)
         if outcome.stopped is not None:
             self._abort(loop, outcome.stopped)
             return
@@ -901,7 +1078,8 @@ class Scheduler:
         if loop.stop_on_error:
             self._abort(loop, failure)
             return
-        self._fail_entry(loop, {"index": index, "code": failure.code, "message": failure.message})
+        self._live += loop.fails.put(index, {"code": failure.code, "message": failure.message})
+        self._maybe_seal(loop)
         self._advance(loop)
 
     def _abort(self, loop: LoopRun, failure: Failure) -> None:
@@ -921,8 +1099,12 @@ class Scheduler:
             self.fail(loop.instance, failure)
 
     def _batch_over(self, loop: LoopRun, stopped: Failure | None) -> None:
+        """A batch child's slice is done: what it collected, plain while nothing spilled, else its collections."""
         if self.ended is None:
-            self.outcome = BatchOutcome(list(loop.collected), list(loop.failures), stopped)
+            if loop.coll.spilled or loop.fails.spilled:
+                self.outcome = BatchOutcome([], [], stopped, loop.coll.to_json(), loop.fails.to_json())
+            else:
+                self.outcome = BatchOutcome(loop.coll.output(), loop.fails.output(), stopped)
             self.ended = RunEnd("succeeded")
 
     def _open_next(self, loop: LoopRun, *, reserved: bool = False) -> None:
@@ -962,15 +1144,32 @@ class Scheduler:
                 self._open_next(loop, reserved=room)
                 if loop.instance not in self.loops:  # the iteration failed at once and stopped the loop
                     return
-        if not loop.open and loop.next >= n and loop.running_batch is None and not loop.waiting:
+        if loop.open or loop.next < n or loop.running_batch is not None or loop.waiting:
+            return
+        colls = self._colls(loop)
+        for which, coll in colls:  # past 64 KiB, or spilled already, what's left goes to a segment too (§5.1)
+            if not coll.sealing and coll.tail_bytes > INLINE_FLOOR:
+                if coll.spilled or coll.tail_bytes > inline_limit() or self._live > LIVE_BUDGET:
+                    self._seal(loop, which, coll)
+        if any(coll.busy for _, coll in colls):
+            return  # it ends once its claims have landed
+        if loop.instance == self.batch_loop:
             self._drop_loop(loop)
-            if loop.instance == self.batch_loop:
-                self._batch_over(loop, None)
-                return
-            output = {"items": loop.collected, "failures": loop.failures, "count": n}
-            scope = self.scopes.get(loop.instance.scope)
-            if scope is not None and scope.failure is None and self.ended is None:
-                self.succeed(loop.instance, output, (DONE,))
+            self._batch_over(loop, None)
+            return
+        for which, coll in colls:  # one claim of the whole list, so its handle addresses each item by position
+            if coll.spilled and coll.assembled is None:
+                coll.assembling = True
+                entry = {"id": self._claim_id(loop.instance, "a" + which, 0), "assemble": coll.spec()}
+                self._spills.append(Spill(loop.instance, "a" + which, 0, entry))
+        if any(coll.busy for _, coll in colls):
+            return
+        self._drop_loop(loop)
+        items = loop.coll.assembled if loop.coll.assembled is not None else loop.coll.output()
+        failures = loop.fails.assembled if loop.fails.assembled is not None else loop.fails.output()
+        scope = self.scopes.get(loop.instance.scope)
+        if scope is not None and scope.failure is None and self.ended is None:
+            self.succeed(loop.instance, {"items": items, "failures": failures, "count": n}, (DONE,))
 
     # --- the live state (engine 2b spec §5.3, component 5) -----------------------------------------------------------
 
@@ -993,7 +1192,29 @@ class Scheduler:
     @staticmethod
     def _loop_bytes(loop: LoopRun) -> int:
         items = size(loop.items.to_json()) if isinstance(loop.items, ItemsRef) else size(loop.items)
-        return items + size(loop.collected) + size(loop.failures)
+        return items + loop.coll.live_bytes() + loop.fails.live_bytes()
+
+    @staticmethod
+    def _colls(loop: LoopRun) -> list[tuple[str, Collection]]:
+        return [("c", loop.coll), ("f", loop.fails)]
+
+    def collect_base(self, loop: Instance) -> str:
+        """What a loop's collections' segments are named by: a batch child is given its parent's."""
+        return f"{self.prefix}/{iteration_key(loop.scope)}/{self.program.steps[loop.step].topo}"
+
+    def _seal(self, loop: LoopRun, which: str, coll: Collection) -> None:
+        """A collection's tail goes to a segment claim."""
+        sealed = coll.seal()
+        if sealed is not None:
+            first, pairs = sealed
+            entry = {"id": segment_id(coll.base, first), "value": pairs, "kind": "segment"}
+            self._spills.append(Spill(loop.instance, which, first, entry))
+
+    def _maybe_seal(self, loop: LoopRun) -> None:
+        """A tail past SEGMENT_BYTES goes to a segment, whatever the budget."""
+        for which, coll in self._colls(loop):
+            if coll.tail_bytes >= SEGMENT_BYTES:
+                self._seal(loop, which, coll)
 
     def _enforce_budget(self) -> None:
         """Past LIVE_BUDGET, the largest spillable container goes to a claim, until what's on its way out brings the
@@ -1021,10 +1242,17 @@ class Scheduler:
                 if n > HANDLE_MAX:
                     out.append((n, order, "t", sc))
         for lp in self.loops.values():
+            order = self.order(lp.instance)
             if isinstance(lp.items, list) and not lp.items_sealing:
                 n = size(lp.items)
                 if n > HANDLE_MAX:
-                    out.append((n, self.order(lp.instance), "i", lp))
+                    out.append((n, order, "i", lp))
+            for which, coll in self._colls(lp):
+                if coll.tail_bytes > HANDLE_MAX:
+                    out.append((coll.tail_bytes, order, which, (lp, coll)))
+                n = size(coll.segs)
+                if n > HANDLE_MAX and coll.ibox.sealing is None:
+                    out.append((n, order, "x" + which, (lp, coll)))
         root = self.order(Instance((), NIL))
         n = size(self._vars)
         if n > HANDLE_MAX and self.vbox.sealing is None:
@@ -1038,6 +1266,8 @@ class Scheduler:
         """What the claims on their way will take out of the live state."""
         out = self.vbox.sealing_size + sum(u.bytes() for u in self.undo.values() if u.sealing)
         out += sum(size(lp.items) for lp in self.loops.values() if lp.items_sealing)
+        for lp in self.loops.values():
+            out += sum(coll.sealing_bytes + coll.ibox.sealing_size for _, coll in self._colls(lp))
         for sc in self.scopes.values():
             out += sc.rbox.sealing_size + (size(sc.item) if sc.item_sealing else 0)
         return out
@@ -1070,8 +1300,24 @@ class Scheduler:
                 "prev": prev.id if prev else None,
             }
             self._spills.append(Spill(owner, "r", first, entry))
+        elif which in ("c", "f"):
+            self._seal(target[0], which, target[1])
+        elif which in ("xc", "xf"):
+            lp, coll = target
+            before = coll.live_bytes()
+            first = coll.ibox.claims
+            coll.ibox.seal(coll.segs)
+            coll.segs = []
+            self._live += coll.live_bytes() - before
+            prev = coll.ibox.head
+            entry = {
+                "id": self._claim_id(lp.instance, which, first),
+                "value": {"segs": coll.ibox.sealing, "prev": prev},
+                "kind": "segment",
+            }
+            self._spills.append(Spill(lp.instance, which, first, entry))
         elif which == "i":
-            lp: LoopRun = target
+            lp = target
             lp.items_sealing = True
             entry = {"id": self._claim_id(lp.instance, "i", 0), "value": lp.items}
             self._spills.append(Spill(lp.instance, "i", 0, entry))
@@ -1129,12 +1375,6 @@ class Scheduler:
         done = (NodeState.DONE, NodeState.FAILED)
         keys = {self.program.steps[m].key for m, st in sc.nodes.items() if st in done} - inline
         return claimed_codes(self.program, sc.region, keys)
-
-    def _fail_entry(self, loop: LoopRun, entry: dict[str, Any]) -> None:
-        """A failed iteration, listed in the loop's failures: the list grows by the entry, and a comma after the
-        first."""
-        self._live += size(entry) + (1 if loop.failures else 0)
-        loop.failures.append(entry)
 
     # --- the open-iteration cap (engine 2b spec §5.3) --------------------------------------------------------------
 
@@ -1477,6 +1717,20 @@ class Scheduler:
         for lp in self.loops.values():
             if lp.items_sealing:
                 out.append(Spill(lp.instance, "i", 0, {"id": self._claim_id(lp.instance, "i", 0), "value": lp.items}))
+            for which, coll in self._colls(lp):
+                for first, pairs in sorted(coll.sealing.items()):
+                    entry = {"id": segment_id(coll.base, first), "value": pairs, "kind": "segment"}
+                    out.append(Spill(lp.instance, which, first, entry))
+                if coll.ibox.sealing is not None:
+                    entry = {
+                        "id": self._claim_id(lp.instance, "x" + which, coll.ibox.claims),
+                        "value": {"segs": coll.ibox.sealing, "prev": coll.ibox.head},
+                        "kind": "segment",
+                    }
+                    out.append(Spill(lp.instance, "x" + which, coll.ibox.claims, entry))
+                if coll.assembling:
+                    entry = {"id": self._claim_id(lp.instance, "a" + which, 0), "assemble": coll.spec()}
+                    out.append(Spill(lp.instance, "a" + which, 0, entry))
         return out
 
     def _handed_now(self) -> set[Instance]:
@@ -1618,8 +1872,8 @@ class Scheduler:
         inline = loop.items if isinstance(loop.items, list) else None
         return [
             self._i(loop.instance), inline, loop.concurrency, int(loop.stop_on_error), loop.offset, loop.batch,
-            loop.next, list(loop.open), sorted(loop.collecting), loop.collected, loop.failures, loop.running_batch,
-            int(loop.waiting), listed, int(loop.items_sealing),
+            loop.next, list(loop.open), sorted(loop.collecting), loop.coll.to_json(), loop.fails.to_json(),
+            loop.running_batch, int(loop.waiting), listed, int(loop.items_sealing),
         ]  # fmt: skip
 
     def _loop_from(self, raw: list[Any]) -> LoopRun:
@@ -1627,14 +1881,19 @@ class Scheduler:
         return LoopRun(
             instance=self._if(raw[0]), items=items, concurrency=int(raw[2]), stop_on_error=bool(raw[3]),
             offset=int(raw[4]), batch=int(raw[5]), next=int(raw[6]), open=[int(i) for i in raw[7]],
-            collecting={int(i) for i in raw[8]}, collected=list(raw[9]), failures=list(raw[10]),
-            running_batch=raw[11], waiting=bool(raw[12]), items_sealing=bool(raw[14]),
+            collecting={int(i) for i in raw[8]}, coll=Collection.from_json(raw[9]),
+            fails=Collection.from_json(raw[10]), running_batch=raw[11], waiting=bool(raw[12]),
+            items_sealing=bool(raw[14]),
         )  # fmt: skip
 
 
 __all__ = [
     "Batch",
     "Box",
+    "Collection",
+    "SEGMENT_BYTES",
+    "assembled",
+    "segment_id",
     "ItemsRef",
     "count",
     "item_at",

@@ -144,3 +144,44 @@ async def test_a_list_past_one_spill_is_written_in_parts_and_joined(
     assert result.status == "succeeded", result.error
     assert result.outputs == {"sizes": [1_000 + i for i in range(30)]}
     assert items in spilled(store)  # joined from its parts
+
+
+async def test_a_batched_loop_collecting_past_the_budget_ends_with_one_claim_of_its_items(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each batch writes segments its parent's loop names, and returns its collection; the parent assembles the whole
+    list into one claim, read back whole."""
+    monkeypatch.setattr(scheduler, "LIVE_BUDGET", 3_000)
+    store = MemoryStore()
+    items = [f"{i:03d}" + "c" * 97 for i in range(150)]
+    g = graph(items=ref("steps.l.output.items"), n=ref("steps.l.output.count"))
+    g.node("l", LOOP, {"items": items, "collect": ref("item")}).node("x", ECHO, {"value": 1}).edge("l", "x", "body")
+    handle, result = await finished(env, store, g)
+    assert result.status == "succeeded", result.error
+    claimed = ClaimRef.of(result.outputs["items"])
+    assert claimed is not None and result.outputs["n"] == 150
+    assert await read(store, run_id_of(handle), result.outputs["items"]) == items
+    assert [c for c in store.claims.values() if c.kind == "segment"]
+
+
+async def test_an_inline_loop_whose_values_and_failures_spill_reads_them_back(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every third iteration fails; the others collect 150 characters. Past the budget both collections spill, and
+    the loop's output reads back: nulls where iterations failed, and the failures in index order."""
+    monkeypatch.setattr(scheduler, "LIVE_BUDGET", 2_000)
+    store = MemoryStore()
+    g = graph(out=ref("steps.l.output"))
+    g.node("l", LOOP, {"items": list(range(40)), "collect": ref("steps.x.output.value"), "on_item_error": "continue",
+                       "concurrency": 4})  # fmt: skip
+    g.node("x", BLOB, {"size": 150}).node(
+        "y", "testkit.slow_echo@1", {"seconds": 0, "value": 1, "fail": cel("index % 3 == 0")}
+    )
+    g.edge("l", "x", "body").edge("x", "y")
+    handle, result = await finished(env, store, g)
+    assert result.status == "succeeded", result.error
+    got = await read(store, run_id_of(handle), result.outputs["out"])
+    failed = [i for i in range(40) if i % 3 == 0]
+    assert got["items"] == [None if i in failed else "x" * 150 for i in range(40)]
+    assert [f["index"] for f in got["failures"]] == failed and got["count"] == 40
+    assert [c for c in store.claims.values() if c.kind == "segment"]
