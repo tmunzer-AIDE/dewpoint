@@ -42,6 +42,7 @@ from dewpoint.apps.worker.claims import (
     claim_output,
     derive,
     evaluate_claimed,
+    filter_claimed,
     join_claimed,
     resolved_config,
 )
@@ -354,6 +355,8 @@ def cel_activity(evaluate: Evaluate, store: ClaimStore | None = None) -> Callabl
                 raise ApplicationError("This CEL worker reads no claims.", type=INTERNAL_ERROR, non_retryable=True)
             if data.template is not None:
                 return CelResult([await join_claimed(data.template, data.claims, store)])
+            if data.filter is not None:
+                return CelResult([await filter_claimed(data.request, data.filter, data.claims, store, evaluate)])
             return CelResult(await evaluate_claimed(data.request, data.claims, store, evaluate))
         except EvaluatorUnavailable as e:
             raise ApplicationError(str(e), type="evaluator_unavailable") from None

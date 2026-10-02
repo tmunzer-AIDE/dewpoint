@@ -17,7 +17,8 @@ from temporalio.exceptions import ApplicationError
 from dewpoint.core.claims.service import CLAIM_UNAVAILABLE, ClaimUnavailableError, NewClaim
 from dewpoint.engine.cel import evaluate as cel
 from dewpoint.engine.cel import types as T
-from dewpoint.engine.cel.bind import BindingError, check_json
+from dewpoint.engine.cel.bind import BindingError, bind_item, check_json
+from dewpoint.engine.cel.record import ExpressionRecord
 from dewpoint.engine.handles import MISSING, ClaimRef, Fetch, StoredClaim, contains_marker, part, resolve_value
 from dewpoint.engine.matcher import Matcher
 from dewpoint.engine.runtime.activities import Claiming, DeriveInput, DeriveResult, StepInput
@@ -267,3 +268,58 @@ async def claim_output(
     if tainted_positions(done.envelope, from_schema(schema)):
         raise LeftPlainError("A step's output kept plain data at a sensitive position.")
     return done.envelope
+
+
+# --- the tainted filter (§4.4) ---------------------------------------------------------------------------------------
+
+FILTER_BATCH = 1_000  # items per evaluator request
+NOT_A_LIST = "`items` must be a list."
+NOT_A_DECISION = "`predicate` must give true or false."
+
+
+async def filter_claimed(
+    request: dict[str, Any], spec: dict[str, Any], claims: Claiming, store: ClaimStore, evaluate: Evaluate
+) -> dict[str, Any]:
+    """A filter run whole here (§4.4): its items resolved, its predicate evaluated per item in the evaluator, and the
+    kept items stored as a claim, tainted when the items or the predicate are. The outcome: the claim's handle, the
+    kept count and the input count; no per-item decision leaves the activity."""
+    tenant, run = caller()
+    fetch = _fetcher(store, tenant, run)
+    record = ExpressionRecord.from_json(spec["record"])
+    try:
+        found = await resolve_value(spec["items"], fetch)
+        base, base_tainted = await _bindings(request["bindings"][0], request["declarations"], fetch)
+    except ClaimUnavailableError:
+        return {"error": CLAIM_UNAVAILABLE, "message": UNAVAILABLE}
+    except BindingError as e:
+        [failed] = await _masked([{"error": cel.TYPE_MISMATCH, "message": str(e)}], store, tenant, claims.root_run_id)
+        return failed
+    items = found.value
+    if not isinstance(items, list):
+        return {"error": cel.TYPE_MISMATCH, "message": NOT_A_LIST}
+    kept: list[Any] = []
+    for start in range(0, len(items), FILTER_BATCH):
+        try:
+            sets = [
+                bind_item(record, base, item, start + i) for i, item in enumerate(items[start : start + FILTER_BATCH])
+            ]
+        except BindingError as e:
+            [failed] = await _masked(
+                [{"error": cel.TYPE_MISMATCH, "message": str(e)}], store, tenant, claims.root_run_id
+            )
+            return failed
+        for i, outcome in enumerate(await evaluate({**request, "bindings": sets}), start):
+            if "error" in outcome:  # the filter fails at its first failing item
+                [failed] = await _masked([outcome], store, tenant, claims.root_run_id)
+                return failed
+            if not isinstance(outcome["ok"], bool):
+                return {"error": cel.TYPE_MISMATCH, "message": NOT_A_DECISION}
+            if outcome["ok"]:
+                kept.append(items[i])
+    tainted = claims.tainted or found.tainted or base_tainted
+    claim_id = _claim_id(claims.seed, 0)
+    new = NewClaim(claim_id, kept, ("",) if tainted else (), uuid.UUID(run), uuid.UUID(claims.root_run_id))
+    if tainted:
+        await store.remember(tenant, claims.root_run_id, sorted(set(_strings(kept))))
+    await store.write(tenant, [new], kind="filter", step_id=claims.step_id, iteration_key=claims.iteration_key)
+    return {"ok": {"items": ClaimRef(str(claim_id)).to_json(), "count": len(kept), "input": len(items)}}

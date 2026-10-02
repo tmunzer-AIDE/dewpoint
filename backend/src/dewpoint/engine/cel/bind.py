@@ -8,7 +8,7 @@ it, and never type-checked here, since its value is the claim's. An expression w
 in `cel.evaluate`, which resolves it and checks the types then (§4.2)."""
 
 import math
-from collections.abc import Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -127,13 +127,12 @@ def _at(roots: Mapping[str, Any], name: str) -> Any:
     return value
 
 
-def bind(record: ExpressionRecord, view: ScopeView) -> dict[str, Any]:
-    roots = view.roots()
+def _bound(record: ExpressionRecord, roots: Mapping[str, Any], names: Iterable[str]) -> dict[str, Any]:
     by_root: dict[str, list[Projection]] = {}
     for p in record.projections:
         by_root.setdefault(p.path[0], []).append(p)
     out: dict[str, Any] = {}
-    for name in record.idents:
+    for name in names:
         if "." in name:
             value = _at(roots, name)
         elif name in roots:
@@ -146,6 +145,22 @@ def bind(record: ExpressionRecord, view: ScopeView) -> dict[str, Any]:
         check_json(name, value)
         out[name] = value
     return out
+
+
+def _root(name: str) -> str:
+    return name.split(".", 1)[0]
+
+
+def bind(record: ExpressionRecord, view: ScopeView, *, skip: Collection[str] = ()) -> dict[str, Any]:
+    """The expression's bindings for one view. `skip`: roots left out, bound later (a filter's `item` and `index`,
+    in the activity that evaluates a filter over claims, engine 2b spec §4.4)."""
+    return _bound(record, view.roots(), [n for n in record.idents if _root(n) not in skip])
+
+
+def bind_item(record: ExpressionRecord, base: Mapping[str, Any], item: Any, index: int) -> dict[str, Any]:
+    """`base`, every binding but the item's, with one item's and its index's, bound as `bind` binds them."""
+    names = [n for n in record.idents if _root(n) in ("item", "index")]
+    return {**base, **_bound(record, {"item": item, "index": index}, names)}
 
 
 @dataclass(frozen=True)

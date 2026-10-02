@@ -182,6 +182,9 @@ class CelInput:
     request: dict[str, Any]  # a cel.evaluate.v1 request; its bindings may hold handles
     claims: Claiming | None = None
     template: list[Any] | None = None  # a template whose parts are handles: its parts (`resolve.Part`), joined there
+    # A filter over claims or with a sensitive predicate, run whole there (engine 2b spec §4.4): {items, record}; the
+    # request's one binding set is everything but the item's
+    filter: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

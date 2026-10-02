@@ -230,3 +230,37 @@ def held(store: MemoryStore, value: Any) -> tuple[Any, bool]:
     assert found is not None, value
     claim = store.claims[found.id]
     return claim.value, claim.sensitive_pointers == ("",)
+
+
+async def test_a_filter_with_a_sensitive_predicate_runs_whole_in_one_activity(env: WorkflowEnvironment) -> None:
+    """Spec §4.4: no per-item decision enters the workflow. The kept items come back as a tainted claim, and the two
+    counts plain: the listed site reveals them, nothing else."""
+    store = MemoryStore()
+    g = graph(count=ref("steps.f.output.count"), kept=ref("steps.f.output.items"))
+    g.settings["declassify"] = [{"node": str(nid("f")), "field": "/predicate"}]
+    g.node("f", "flow.filter@1", {"items": [3, 20, 7, 40], "predicate": cel("size(trigger.token) > item")})
+    async with workers(env.client, store):
+        result = await run(env.client, store, g, TRIGGER, claimed=True)
+    assert result.status == "succeeded", result.error
+    assert result.outputs is not None and result.outputs["count"] == 2
+    assert held(store, result.outputs["kept"]) == ([3, 7], True)  # tainted: its predicate is
+
+
+async def test_a_filter_over_a_sensitive_list_keeps_a_tainted_claim_and_charges_every_item(
+    env: WorkflowEnvironment,
+) -> None:
+    secret_list = {"type": "array", "x-sensitive": True, "items": {"type": "string"}}
+    store = MemoryStore()
+    g = G()
+    g.settings = {
+        "input_schema": {"type": "object", "properties": {"keys": secret_list}, "required": ["keys"],
+                         "additionalProperties": False},
+        "outputs": {"count": ref("steps.f.output.count"), "kept": ref("steps.f.output.items")},
+        "declassify": [{"node": str(nid("f")), "field": f} for f in ("/items", "/predicate")],  # it reads `item`
+    }  # fmt: skip
+    g.node("f", "flow.filter@1", {"items": ref("trigger.keys"), "predicate": cel("item.startsWith('k')")})
+    async with workers(env.client, store):
+        result = await run(env.client, store, g, {"keys": ["k3y-a", "x3y-b", "k3y-c"]}, claimed=True)
+    assert result.status == "succeeded", result.error
+    assert result.outputs is not None and result.outputs["count"] == 2 and result.iterations == 3
+    assert held(store, result.outputs["kept"]) == (["k3y-a", "k3y-c"], True)
