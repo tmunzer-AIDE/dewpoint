@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-# The isolated CEL evaluator (spec §5.7): only the runtime, protobuf and dewpoint.engine.cel, at the locked versions.
+# The isolated CEL evaluator (spec §5.7): only the runtime, protobuf and dewpoint.engine.cel, at the locked versions,
+# with the pure modules it imports (engine.canonical, and engine.handles for bindings that hold handles; both standard
+# library only). A test checks every Dewpoint module the evaluator loads is copied here.
 # No database driver, no web framework, no Temporal SDK: the evaluator imports none of them (import-linter contract).
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS build
 WORKDIR /app
@@ -14,7 +16,7 @@ RUN uv export --locked --no-dev --no-emit-project --no-header --no-annotate > al
 COPY backend/src/dewpoint/__init__.py src/dewpoint/__init__.py
 COPY backend/src/dewpoint/apps/__init__.py src/dewpoint/apps/__init__.py
 COPY backend/src/dewpoint/apps/cel_evaluator src/dewpoint/apps/cel_evaluator
-COPY backend/src/dewpoint/engine/__init__.py backend/src/dewpoint/engine/canonical.py src/dewpoint/engine/
+COPY backend/src/dewpoint/engine/__init__.py backend/src/dewpoint/engine/canonical.py backend/src/dewpoint/engine/handles.py src/dewpoint/engine/
 COPY backend/src/dewpoint/engine/cel src/dewpoint/engine/cel
 RUN /app/.venv/bin/python -m compileall -q src
 
