@@ -42,6 +42,7 @@ with workflow.unsafe.imports_passed_through():
         CLAIMS_DERIVE,
         CLAIMS_GRANT,
         CLAIMS_MESSAGE,
+        CLAIMS_SPILL,
         ENGINE_QUEUE,
         MAPPED,
         OUTCOME_UNKNOWN,
@@ -66,6 +67,7 @@ with workflow.unsafe.imports_passed_through():
         RunResult,
         RunStart,
         RunSummary,
+        SpillInput,
         StepInput,
         StepResult,
         StepRow,
@@ -101,8 +103,10 @@ with workflow.unsafe.imports_passed_through():
         SUBFLOW_INPUT_TOO_LARGE,
         encoded_bytes,
         fits,
+        inline_limit,
         payload_bytes,
     )
+    from dewpoint.engine.split import json_bytes, sized
     from dewpoint.engine.taint import Shape, from_schema, tainted_positions
 
 IN_FLIGHT_CAP = 100  # activities and child workflows outstanding per execution (spec §6)
@@ -123,6 +127,9 @@ AMBIGUOUS = "ambiguous"  # a manifest's side_effect: the request may have been s
 CONTINUE = "continue"  # `_drive`'s answer when the execution continues-as-new
 CLAIM_REFUSED = "A claim this run may not read, or that doesn't exist."
 INPUT_INVALID = "input_invalid"  # a sub-flow's input that doesn't match its schema, found where it's resolved
+SPILLS = uuid.UUID("2b1b5e11-0000-4000-8000-000000000522")  # spilled values' claim ids: from where they were spilled
+SPILL_FRAME = 64  # what a value adds to a spill's input besides its own JSON: its claim id and the framing
+SPILL_FAILED = "A value couldn't be stored before it was sent."
 
 
 class ExposedError(Exception):
@@ -1175,8 +1182,11 @@ class Execution:
         error = result.error or {"code": result.status, "message": f"The sub-flow ended {result.status}."}
         return _Effect(failure=Failure(str(error["code"]), str(error["message"])), cel_mode=cel_mode)
 
-    async def _crossing[R](self, name: str, data: Any, result_type: type[R]) -> R | Failure:
-        """An activity that hands claims to another run (engine 2b spec §3.4): its result, or why it failed."""
+    async def _crossing[R](
+        self, name: str, data: Any, result_type: type[R], *, lost: str = "Claims couldn't cross to another run"
+    ) -> R | Failure:
+        """An activity that hands claims to another run (engine 2b spec §3.4), or stores them for a command that
+        carries their handles (§5.2): its result, or why it failed."""
         await self._send(data)
         try:
             result: R = await workflow.execute_activity(
@@ -1194,7 +1204,42 @@ class Execution:
                 return Failure(CLAIM_UNAVAILABLE, CLAIM_REFUSED)
             if isinstance(e.cause, ApplicationError) and e.cause.type == VERSION_UNUSABLE:
                 return Failure(VERSION_UNUSABLE, e.cause.message)
-            return Failure(INTERNAL_ERROR, f"Claims couldn't cross to another run ({type(e.cause or e).__name__}).")
+            return Failure(INTERNAL_ERROR, f"{lost} ({type(e.cause or e).__name__}).")
+
+    async def _fit(self, value: Any, room: int, where: str, *, step: Step | None = None, scope: ScopeKey = ()) -> Any:
+        """`value` within `room` bytes, as a command carries it (engine 2b spec §5.2): its largest parts written as size
+        claims first, none weighing more than the inline limit, in spills under the payload limit; it holds their
+        handles. A Failure when a part can't go in one spill, or a spill failed: the command then fails."""
+        wid = workflow.info().workflow_id
+        part = min(inline_limit(), payload_bytes() // 2)
+        done = sized(value, lambda p: str(uuid.uuid5(SPILLS, f"{wid}/{where}{p}")), envelope=room, part=part)
+        converter = workflow.payload_converter()
+        empty = SpillInput([], self.root_run_id, str(step.id) if step else None, iteration_key(scope))
+        chunk: list[list[Any]] = []
+        weight, limit = 0, payload_bytes() - encoded_bytes(empty, converter)
+        for c in done.claims:
+            size = json_bytes(c.value) + SPILL_FRAME
+            if not fits(
+                replace(empty, claims=[[c.id, c.value]]), converter
+            ):  # a leaf past the limit: it can't be split
+                return Failure(PAYLOAD_TOO_LARGE, SPILL_FAILED)
+            if chunk and weight + size > limit:
+                failed = await self._spill(chunk, step, scope)
+                if failed is not None:
+                    return failed
+                chunk, weight = [], 0
+            chunk.append([c.id, c.value])
+            weight += size
+        if chunk:
+            failed = await self._spill(chunk, step, scope)
+            if failed is not None:
+                return failed
+        return done.envelope
+
+    async def _spill(self, claims: list[list[Any]], step: Step | None, scope: ScopeKey) -> Failure | None:
+        data = SpillInput(claims, self.root_run_id, str(step.id) if step else None, iteration_key(scope))
+        found = await self._crossing(CLAIMS_SPILL, data, type(None), lost=SPILL_FAILED.removesuffix("."))
+        return found if isinstance(found, Failure) else None
 
     async def _message(self, value: Any) -> str | Failure:
         """A failure's message as it may be recorded (engine 2b spec §3.7, §4.6): resolved and masked in
@@ -1206,9 +1251,15 @@ class Execution:
     async def _hand_over(self, child_run: str, version: str, value: dict[str, Any]) -> dict[str, Any] | Failure:
         """A sub-flow's input, split for the child as a trigger is, this run's handles in it granted to the child
         (engine 2b spec §3.4, §3.5): the envelope its start carries."""
-        found = await self._crossing(
-            CLAIMS_CHILD_INPUT, ChildInput(child_run, version, value, self.root_run_id), ChildInputResult
-        )
+        data = ChildInput(child_run, version, value, self.root_run_id)
+        converter = workflow.payload_converter()
+        if not fits(data, converter):  # its largest values spill first (engine 2b spec §5.2): the child gets grants
+            room = payload_bytes() - encoded_bytes(replace(data, value={}), converter) - 16
+            fitted = await self._fit(value, room, f"sub/{child_run}")
+            if isinstance(fitted, Failure):
+                return fitted
+            data = replace(data, value=fitted)
+        found = await self._crossing(CLAIMS_CHILD_INPUT, data, ChildInputResult)
         if isinstance(found, Failure):
             return found
         if found.trigger is None:
@@ -1269,8 +1320,20 @@ class Execution:
                 batch=len(items),
                 limit=payload_bytes(),
             )
-            if fit == 0:  # its first item alone doesn't fit: the loop fails there, and nothing is dropped
-                return _Effect(failure=Failure(PAYLOAD_TOO_LARGE, BATCH_ITEM_TOO_LARGE))
+            if fit == 0:  # its first item alone doesn't fit: it spills (§5.2), or the loop fails there
+                room = payload_bytes() - envelope - 16
+                item = await self._fit(items[0], room, f"batch/{child}/0", step=step, scope=b.loop.scope)
+                if isinstance(item, Failure) or len(converter.to_payloads([item])[0].data) > room:
+                    return _Effect(failure=Failure(PAYLOAD_TOO_LARGE, BATCH_ITEM_TOO_LARGE))
+                items = [item, *items[1:]]
+                fit, _ = resolve.request_end(
+                    0,
+                    len(items),
+                    lambda i: len(converter.to_payloads([items[i]])[0].data),
+                    envelope=envelope,
+                    batch=len(items),
+                    limit=payload_bytes(),
+                )
             self.sched.cut_batch(b.loop, b.start, b.start + fit)
             b = replace(b, items=items[:fit])
         grant = self.sched.budget.start_child(child, len(b.items))
@@ -1377,9 +1440,22 @@ class Execution:
                 mode=self.mode,
                 attempt=attempt,
                 root_run_id=self.root_run_id,
+                inline_limit=inline_limit(),
             )
-            if not fits(sent, workflow.payload_converter()):  # engine 2b spec §5.2: never sent, so it never ran
+            converter = workflow.payload_converter()
+            fitted: Any = None
+            if not fits(sent, converter):  # its largest values spill first (engine 2b spec §5.2); a retry reuses them
+                room = payload_bytes() - encoded_bytes(replace(sent, config={}), converter) - 16
+                fitted = await self._fit(
+                    config, room, f"in/{iteration_key(inst.scope)}/{step.topo}", step=step, scope=inst.scope
+                )
+                if not isinstance(fitted, Failure):
+                    config = fitted
+                    sent = replace(sent, config=config)
+            if not fits(sent, converter):  # never sent, so it never ran
                 failure = Failure(PAYLOAD_TOO_LARGE, STEP_INPUT_TOO_LARGE, attempt)
+                if isinstance(fitted, Failure) and fitted.code != PAYLOAD_TOO_LARGE:  # a spill failed: its own code
+                    failure = replace(fitted, attempt=attempt)
                 ended = workflow.now().isoformat()
                 self._queue(
                     replace(

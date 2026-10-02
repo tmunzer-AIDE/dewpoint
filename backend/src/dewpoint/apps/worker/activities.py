@@ -50,6 +50,7 @@ from dewpoint.apps.worker.claims import (
     join_claimed,
     message,
     resolved_config,
+    spill,
     unforged,
 )
 from dewpoint.apps.worker.context import context
@@ -67,6 +68,7 @@ from dewpoint.engine.runtime.activities import (
     CLAIMS_DERIVE,
     CLAIMS_GRANT,
     CLAIMS_MESSAGE,
+    CLAIMS_SPILL,
     LOAD_VERSION,
     MAPPED,
     OUTCOME_UNKNOWN,
@@ -84,6 +86,7 @@ from dewpoint.engine.runtime.activities import (
     MessageInput,
     MessageResult,
     ProjectInput,
+    SpillInput,
     StepInput,
     StepResult,
     VersionData,
@@ -356,10 +359,23 @@ def engine_activities(store: RunStore, plugins: Iterable[Plugin], *, abi: int = 
     async def claims_message(data: MessageInput) -> MessageResult:
         return await message(data, store)
 
+    @activity.defn(name=CLAIMS_SPILL)
+    async def claims_spill(data: SpillInput) -> None:
+        await spill(data, store)
+
     steps = [
         step_activity_for(node, store) for plugin in plugins for node in plugin.nodes if node.kind == NodeKind.ACTION
     ]
-    return [load_version, project, claims_derive, claims_child_input, claims_grant, claims_message, *steps]
+    return [
+        load_version,
+        project,
+        claims_derive,
+        claims_child_input,
+        claims_grant,
+        claims_message,
+        claims_spill,
+        *steps,
+    ]
 
 
 def remote_evaluator(socket_path: str, profile: str) -> Evaluate:

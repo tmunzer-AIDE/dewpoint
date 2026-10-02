@@ -3,8 +3,9 @@
 refuses a payload over 2 MiB once the codec has encoded it, and its SDK then retries the workflow task forever; so
 each payload is checked where it's produced — a step's result in its activity, a run's result in the run, a command
 before the workflow sends it — against PAYLOAD_BYTES, measured as the payload converter's JSON plus CODEC_OVERHEAD,
-a bound on what the tenant codec adds (a test of the codec proves it). Too large fails the step, the loop or the run
-with `payload_too_large`: a result, never a retried workflow task. Nothing is spilled before 2b-1b's claims.
+a bound on what the tenant codec adds (a test of the codec proves it). A command spills its largest values into size
+claims first (engine 2b spec §5.2); what still doesn't fit fails the step, the loop or the run with
+`payload_too_large`: a result, never a retried workflow task.
 
 `fits` reads the limit from this module when it's called, so a test can lower it; workflow code imports names from
 this module's full path, which the sandbox passes through (a submodule taken from its package would be a copy)."""
@@ -40,6 +41,11 @@ def encoded_bytes(value: Any, converter: PayloadConverter) -> int:
 def payload_bytes() -> int:
     """PAYLOAD_BYTES, read when it's called."""
     return PAYLOAD_BYTES
+
+
+def inline_limit() -> int:
+    """INLINE_LIMIT, read when it's called."""
+    return INLINE_LIMIT
 
 
 def fits(value: Any, converter: PayloadConverter) -> bool:

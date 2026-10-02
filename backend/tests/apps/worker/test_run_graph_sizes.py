@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Engine 2b spec §5.2: every payload the engine sends Temporal, and every result it gets back, stays under Temporal's
 payload limit once encoded. Each is checked where it's produced: too large fails its step, its loop or its run with
-`payload_too_large`, never a retried or terminated workflow task. The limit is lowered here so small values show it;
-test_real_server.py shows it at the real one."""
+`payload_too_large`, never a retried or terminated workflow task. A command spills its largest values first
+(test_run_graph_spills.py): what's here is what spilling can't rescue, or doesn't apply to. The limit is lowered here
+so small values show it; test_real_server.py shows it at the real one."""
 
 import asyncio
 from typing import Any
@@ -10,7 +11,6 @@ from typing import Any
 import pytest
 from temporalio.api.enums.v1 import EventType
 from temporalio.client import WorkflowHandle
-from temporalio.converter import DataConverter
 from temporalio.testing import WorkflowEnvironment
 
 from dewpoint.core.claims import secret_index
@@ -119,12 +119,14 @@ async def activities_scheduled(handle: WorkflowHandle[Any, Any], name: str) -> i
     )
 
 
-async def test_a_step_input_too_large_to_send_fails_the_step_before_any_attempt(env: WorkflowEnvironment) -> None:
+async def test_a_step_input_that_cant_be_spilled_fails_the_step_before_any_attempt(env: WorkflowEnvironment) -> None:
+    """Engine 2b spec §5.2: a step's input spills its largest values before it fails (test_run_graph_spills.py). A
+    value the workflow made that one spill can't hold, a single string near the limit, still fails the step."""
     store = MemoryStore()
     g = graph(code=ref("steps.e.error.code", default="none"))
     g.node("a", BLOB, {"size": LIMIT // 2}).node("b", BLOB, {"size": LIMIT // 2})
-    g.node("e", ECHO, {"value": [ref("steps.a.output.value"), ref("steps.b.output.value")]}, on_error="continue")
-    g.edge("a", "e").edge("b", "e")
+    joined = template({"ref": "steps.a.output.value"}, {"ref": "steps.b.output.value"})
+    g.node("e", ECHO, {"value": joined}, on_error="continue").edge("a", "e").edge("b", "e")
     handle, result = await finished(env, store, g)
     assert (result.status, result.outputs) == ("succeeded", {"code": PAYLOAD_TOO_LARGE})
     [row] = [r for r in store.steps(run_id_of(handle)) if r.node_key == "e"]
@@ -135,35 +137,6 @@ async def test_a_step_input_too_large_to_send_fails_the_step_before_any_attempt(
         STEP_INPUT_TOO_LARGE,
     )
     assert await activities_scheduled(handle, "testkit.echo.v1") == 0  # never sent
-
-
-async def test_a_sub_flow_input_too_large_to_send_fails_its_step_and_starts_nothing(env: WorkflowEnvironment) -> None:
-    """A sub-flow's input is split as a trigger (engine 2b spec §3.4, §3.5): what the child doesn't declare, or
-    what passes 64 KiB, is claimed for it. Two declared 25,000-character strings stay in the envelope, which this
-    test's lowered payload limit (below TRIGGER_INLINE) refuses: the start is never sent."""
-    store = MemoryStore()
-    sub = graph().node("e", ECHO, {"value": 1})
-    sub.settings["input_schema"] = {
-        "type": "object",
-        "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
-        "required": ["a", "b"],
-        "additionalProperties": False,
-    }
-    g = graph(code=ref("steps.r.error.code", default="none"))
-    g.node("a", BLOB, {"size": LIMIT // 2}).node("b", BLOB, {"size": LIMIT // 2})
-    g.node(
-        "r",
-        RUN,
-        {
-            "workflow_id": str(store.publish(sub)),
-            "input": {"a": ref("steps.a.output.value"), "b": ref("steps.b.output.value")},
-        },
-        on_error="continue",
-    )
-    g.edge("a", "r").edge("b", "r")
-    handle, result = await finished(env, store, g)
-    assert (result.status, result.outputs, result.iterations) == ("succeeded", {"code": PAYLOAD_TOO_LARGE}, 0)
-    assert store.starts == {}  # no sub-run
 
 
 def items(n: int, each: int) -> list[str]:
@@ -184,22 +157,6 @@ async def test_a_batch_is_cut_by_bytes_and_keeps_every_item_in_order(env: Workfl
         result = await asyncio.wait_for(handle.result(), 60)
     assert (result.status, result.outputs) == ("succeeded", {"items": trigger["items"]})
     assert await children_started(handle) > 2  # cut by bytes: the count alone would have made two
-
-
-async def test_an_item_too_large_for_a_batch_fails_its_loop_after_the_items_before_it(env: WorkflowEnvironment) -> None:
-    """It's never dropped: the loop fails with `payload_too_large` once it reaches it."""
-    store = MemoryStore()
-    g = graph(code=ref("steps.l.error.code", default="none"))
-    g.settings["input_schema"] = ITEMS
-    g.node("l", LOOP, {"items": ref("trigger.items"), "collect": ref("steps.x.output.value")}, on_error="continue")
-    g.node("x", ECHO, {"value": ref("item")}).edge("l", "x", "body")
-    trigger = {"items": [*items(120, 10), "y" * (LIMIT // 2), *items(10, 10)]}
-    async with workers(env.client, store):
-        handle = await start(env.client, store, g, trigger)
-        result = await asyncio.wait_for(handle.result(), 60)
-    assert (result.status, result.outputs) == ("succeeded", {"code": PAYLOAD_TOO_LARGE})
-    ran = {r.iteration_key for r in store.steps(run_id_of(handle)) if r.node_key == "x"}
-    assert ran == {f"l:{i}" for i in range(120)}  # every item before it, and none after
 
 
 async def test_a_snapshot_too_large_to_carry_on_fails_the_run(
@@ -231,35 +188,6 @@ async def test_a_batch_whose_snapshot_is_too_large_fails_its_loop(
         handle = await start(env.client, store, g, {}, checkpoint_events=120)
         result = await asyncio.wait_for(handle.result(), 60)
     assert (result.status, result.outputs) == ("succeeded", {"code": SNAPSHOT_TOO_LARGE})
-
-
-async def test_a_failure_handler_whose_input_is_too_large_never_starts_and_says_why(
-    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Its input carries the run's error, and more. With the limits set inconsistently (stored messages up to 60,000
-    characters, and a payload limit just above the run's own failed result), a failure's message built from a
-    40,000-character output fits in the run's result, but not in the handler's input: its row records
-    `payload_too_large`, and the run's end stands."""
-    message = "x" * 40_000
-    failed = RunResult("failed", None, {"code": "workflow_failed", "message": message, "attempt": 1}, 0)
-    monkeypatch.setattr(projection, "MESSAGE_LIMIT", 60_000)
-    monkeypatch.setattr(
-        size, "PAYLOAD_BYTES", size.encoded_bytes(failed, DataConverter.default.payload_converter) + 100
-    )
-    store = MemoryStore()
-    g = graph()
-    g.settings["failure_handler"] = str(store.publish(graph().node("h", ECHO, {"value": 1})))
-    g.node("b", BLOB, {"size": 40_000})
-    g.node("f", "flow.fail@1", {"message": template({"ref": "steps.b.output.value"})}).edge("b", "f")
-    async with workers(env.client, store):
-        handle = await start(env.client, store, g, {})
-        result = await asyncio.wait_for(handle.result(), 60)
-    assert result.status == "failed" and result.error is not None and result.error["code"] == "workflow_failed"
-    [(child, row)] = store.starts.items()
-    assert row.kind == "failure_handler"
-    assert (store.runs[child].status, store.runs[child].error_code) == ("failed", PAYLOAD_TOO_LARGE)
-    assert store.runs[run_id_of(handle)].status == "failed"
-    assert await children_started(handle) == 0  # it was never sent
 
 
 async def scheduled_in(handle: WorkflowHandle[Any, Any], name: str) -> list[int]:

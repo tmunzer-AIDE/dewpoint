@@ -16,7 +16,7 @@ from hypothesis import strategies as st
 
 from dewpoint.engine.handles import ClaimRef, contains_marker, handles_in
 from dewpoint.engine.matcher import Matcher
-from dewpoint.engine.split import TRIGGER_INLINE, ForgedHandleError, split
+from dewpoint.engine.split import TRIGGER_INLINE, ForgedHandleError, sized, split
 from dewpoint.engine.taint import from_schema, tainted_positions
 
 SECRET = {"type": "string", "x-sensitive": True}
@@ -221,3 +221,24 @@ def test_an_envelope_limit_claims_down_to_it() -> None:
     done = split(value, schema, ids(), envelope=1_024)
     assert size(done.envelope) <= 1_024
     assert [c.pointer for c in done.claims] == ["/a"]
+
+
+def test_a_spill_claims_parts_no_larger_than_its_bound_and_keeps_handles() -> None:
+    """The workflow's own values, spilled before a command goes (engine 2b spec §5.2): nothing in them is sensitive, so
+    only size counts. Every part fits one spill chunk, the envelope fits its limit, and a handle already there stays."""
+    held = ClaimRef(str(uuid.UUID(int=99))).to_json()
+    value = {"list": ["x" * 9_000] * 8, "deep": {"a": {"b": ["y" * 6_000] * 5}}, "held": held, "n": 1}
+    done = sized(value, ids(), envelope=2_000, part=10_000)
+    assert size(done.envelope) <= 2_000
+    assert all(size(c.value) <= 10_000 for c in done.claims)
+    assert not any(c.tainted for c in done.claims) and done.secrets == ()
+    assert done.envelope["held"] == held
+    made: set[str] = set()
+    for c in done.claims:  # a claim's handles name claims made before it, or the run's own
+        assert {h.id for _, h in handles_in(c.value)} <= made | {held["$claim"]}
+        made.add(c.id)
+
+
+def test_a_spill_of_a_value_that_fits_claims_nothing() -> None:
+    done = sized({"a": "x" * 100}, ids(), envelope=2_000, part=10_000)
+    assert (done.envelope, done.claims) == ({"a": "x" * 100}, ())

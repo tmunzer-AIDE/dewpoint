@@ -46,13 +46,14 @@ from dewpoint.engine.runtime.activities import (
     GrantInput,
     MessageInput,
     MessageResult,
+    SpillInput,
     StepInput,
 )
 from dewpoint.engine.runtime.execution import INTERNAL_ERROR, VERSION_UNUSABLE
 from dewpoint.engine.runtime.ids import run_of, tenant_of
 from dewpoint.engine.runtime.projection import REDACTED
 from dewpoint.engine.runtime.resolve import Part, ValueFailure, join
-from dewpoint.engine.runtime.size import INLINE_LIMIT
+from dewpoint.engine.runtime.size import inline_limit
 from dewpoint.engine.sensitive import MIN_SECRET, marked_positions
 from dewpoint.engine.split import ForgedHandleError, json_bytes, split
 from dewpoint.engine.taint import Shape, from_schema, tainted_positions
@@ -188,7 +189,7 @@ async def _claimed(
 
 def _large(value: Any) -> bool:
     """Larger than the workflow may hold inline (§5.1): a size claim, untainted."""
-    return json_bytes(value) > INLINE_LIMIT
+    return json_bytes(value) > inline_limit()
 
 
 def _repeats(value: Any, secrets: Matcher) -> bool:
@@ -547,6 +548,18 @@ async def child_input(data: ChildInput, store: ClaimStore) -> ChildInputResult:
     except ClaimUnavailableError:
         raise ApplicationError(UNAVAILABLE, type=CLAIM_UNAVAILABLE, non_retryable=True) from None
     return ChildInputResult(trigger=done.envelope)
+
+
+async def spill(data: SpillInput, store: ClaimStore) -> None:
+    """`claims.spill` (§5.2): the workflow's values written as size claims owned by its run, untainted (the workflow
+    holds nothing sensitive in plain), before a command carries their handles. Written again, a claim must hold the
+    same content (hash-checked), or nothing is written."""
+    tenant, run = caller()
+    rows = [
+        NewClaim(uuid.UUID(claim_id), value, (), uuid.UUID(run), uuid.UUID(data.root_run_id or run))
+        for claim_id, value in data.claims
+    ]
+    await store.write(tenant, rows, kind="spill", step_id=data.step_id, iteration_key=data.iteration_key)
 
 
 async def message(data: MessageInput, store: ClaimStore) -> MessageResult:
