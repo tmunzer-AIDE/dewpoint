@@ -5,6 +5,10 @@ pointer, never reading the claim; a binding or a template part that is a handle 
 import uuid
 from typing import Any
 
+import pytest
+
+from dewpoint.engine import handles
+from dewpoint.engine.cel import bind as bind_module
 from dewpoint.engine.cel.bind import ScopeView, bind
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.graph.values import RefPath, TemplateValue, iter_values, parse_ref
@@ -64,6 +68,32 @@ def test_a_binding_that_is_a_handle_is_kept_whole_and_never_evaluated_here() -> 
         version_profile=CURRENT_CEL_PROFILE,
     )
     assert not task.local
+
+
+@pytest.mark.parametrize("declared", [{}, {"trigger.rows": "list<dyn>"}])
+def test_binding_plain_values_never_walks_them_for_the_marker(
+    declared: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CI's gate 7b, the workflow task's CPU: 2b-1b's handle checks walked every bound value twice more, inside the
+    workflow task, which took its heaviest load past the 1 s target. Binding looks for the marker only in a value that
+    doesn't conform to its declared type, and routing reads what `measure`'s own walk saw: a plain binding is never
+    walked for it, and a handle still never runs here."""
+    walks: list[Any] = []
+
+    def counting(value: Any) -> bool:
+        walks.append(value)
+        return handles.contains_marker(value)
+
+    monkeypatch.setattr(bind_module, "contains_marker", counting)
+    monkeypatch.setattr(resolve, "contains_marker", counting)
+    record = make_record("size(trigger.rows) > 0", declared)
+
+    def local(view: ScopeView) -> bool:
+        bound, profile = [resolve.bind_view(record, view)], CURRENT_CEL_PROFILE
+        return resolve.cel_task(record, bound, local_profile=profile, version_profile=profile).local
+
+    assert local(scope_view(trigger={"rows": [[1, 2], [3, 4]]})) and walks == []
+    assert not local(scope_view(trigger={"rows": H}))
 
 
 def test_a_typed_path_through_a_handle_extends_its_pointer() -> None:

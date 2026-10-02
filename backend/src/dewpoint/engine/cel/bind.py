@@ -16,7 +16,7 @@ from dewpoint.engine.canonical import canonical_json
 from dewpoint.engine.cel import caps
 from dewpoint.engine.cel import types as T
 from dewpoint.engine.cel.record import ExpressionRecord, Projection
-from dewpoint.engine.handles import ClaimRef, contains_marker
+from dewpoint.engine.handles import MARKER, ClaimRef, contains_marker
 
 
 @dataclass(frozen=True)
@@ -140,7 +140,9 @@ def _bound(record: ExpressionRecord, roots: Mapping[str, Any], names: Iterable[s
         else:
             raise BindingError(f"`{name}` isn't available here")
         signature = record.declarations.get(name, T.DYN)
-        if not contains_marker(value) and not T.conforms(signature, value):
+        # a handle conforms to no declared type; the marker is looked for only then: a walk of the whole value, in the
+        # workflow task, at every evaluation (CI's gate 7b)
+        if not T.conforms(signature, value) and not contains_marker(value):
             raise BindingError(f"`{name}` doesn't match its declared type {signature}")
         check_json(name, value)
         out[name] = value
@@ -171,6 +173,7 @@ class Measure:
     largest_map: int
     longest_string: int
     nodes: int  # every value bound, containers included: what binding them costs grows with this (spec §5.6)
+    handles: bool = False  # a handle, or the marker, anywhere in them: they're never evaluated here (2b spec §4.2)
 
     @property
     def within_caps(self) -> bool:
@@ -186,16 +189,18 @@ class Measure:
 def measure(bindings: Mapping[str, Any]) -> Measure:
     sizes = [len(canonical_json(v)) for v in bindings.values()]
     lists = maps = strings = nodes = 0
+    handles = False
     stack = list(bindings.values())
     while stack:
         v = stack.pop()
         nodes += 1
         if isinstance(v, dict):
             maps = max(maps, len(v))
+            handles = handles or MARKER in v
             stack.extend(v.values())
         elif isinstance(v, list):
             lists = max(lists, len(v))
             stack.extend(v)
         elif isinstance(v, str):
             strings = max(strings, len(v.encode()))
-    return Measure(sum(sizes), max(sizes, default=0), lists, maps, strings, nodes)
+    return Measure(sum(sizes), max(sizes, default=0), lists, maps, strings, nodes, handles)

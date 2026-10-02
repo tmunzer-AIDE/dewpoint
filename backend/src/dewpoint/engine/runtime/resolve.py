@@ -248,7 +248,7 @@ def cel_task(
     (engine 2b spec §4.2)."""
     local = all(
         route(record, b.measured, local_profile=local_profile, version_profile=version_profile) == "local"
-        and not contains_marker(b.bindings)
+        and not b.measured.handles  # seen by `measure`'s walk: never another walk, in the workflow task
         for b in bound
     )
     return CelTask(record, tuple(b.bindings for b in bound), local)
