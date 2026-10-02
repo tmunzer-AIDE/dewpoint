@@ -217,3 +217,34 @@ async def test_validate_reports_how_each_expression_runs(app, owner_sessionmaker
     assert checked["expressions"] == [
         {"node": str(nid("a")), "field": "/value", "mode": "activity", "reason": "more than one nested loop"}
     ]
+
+
+async def test_validation_explains_the_taint_to_the_editor(app, owner_sessionmaker, api_settings) -> None:
+    """Engine 2b spec §4.1: the editor shows why an expression runs in the evaluator, which values are tainted, and
+    what each declassified site reveals."""
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    g = G().node("c", "flow.if@1", {"condition": cel("size(trigger.token) > 8")}).node("a", "testkit.echo@1")
+    g.node("b", "testkit.echo@1", {"value": ref("trigger.token")}).edge("c", "a", "true").edge("c", "b", "false")
+    g.settings = {
+        "input_schema": {
+            "type": "object",
+            "properties": {"token": {"type": "string", "x-sensitive": True}},
+            "required": ["token"],
+            "additionalProperties": False,
+        },
+        "declassify": [{"node": str(nid("c")), "field": "/condition"}],
+    }
+    async with c:
+        wf = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "Taint", "draft": g.data()})).json()
+        checked = (await c.post(f"/api/v1/t/{tid}/workflows/{wf['id']}/validate")).json()
+    assert checked["valid"] is True
+    assert checked["expressions"] == [
+        {"node": str(nid("c")), "field": "/condition", "mode": "activity", "reason": "reads sensitive data"}
+    ]
+    assert checked["taint"] == {
+        "sites": sorted(
+            [{"node": str(nid("b")), "field": "/value"}, {"node": str(nid("c")), "field": "/condition"}],
+            key=lambda s: s["node"],
+        ),
+        "declassified": [{"node": str(nid("c")), "field": "/condition", "reveals": "the branch taken"}],
+    }

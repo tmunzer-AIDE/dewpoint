@@ -42,7 +42,7 @@ from tests.support.plugins.testkit import SlowSend
 ECHO, LOOP, SWITCH = "testkit.echo@1", "flow.loop@1", "flow.switch@1"
 SCHEMA: dict[str, Any] = {
     "type": "object",
-    "properties": {"x": {"type": "integer"}, "open": {"type": "object"}},
+    "properties": {"x": {"type": "integer"}, "open": {"type": "object"}, "note": {"type": "string"}},
     "required": ["x", "open"],
 }
 TRIGGER: dict[str, Any] = {"x": 7, "open": {}}
@@ -482,7 +482,9 @@ async def test_a_backlog_is_projected_in_bounded_batches(env: WorkflowEnvironmen
 
 async def test_sensitive_values_never_reach_the_projection(env: WorkflowEnvironment) -> None:
     """Review finding: a nested model's sensitive field sits behind `$ref`, and control steps, templates, plugin inputs
-    and messages can all copy a sensitive value into a place no schema marks."""
+    and messages can all copy a sensitive value into a place no schema marks. A failure's message can't read
+    sensitive data (refused at publish, engine 2b spec §4.5), but the same text arriving through a plain field is
+    still masked: the run learned it."""
     store = MemoryStore()
     secret, password = ref("steps.s.output.secret_value"), ref("steps.s.output.login.password")
     g = graph().node("s", "testkit.sensitive@1")
@@ -491,12 +493,12 @@ async def test_sensitive_values_never_reach_the_projection(env: WorkflowEnvironm
     g.node("e", ECHO, {"value": password}).node(
         "p", "testkit.ambiguous_send@1", {"outcome": "rejected", "detail": secret}, on_error="continue"
     )
-    g.node("f", "flow.fail@1", {"message": template("gave up on ", {"ref": "steps.s.output.login.password"})})
+    g.node("f", "flow.fail@1", {"message": template("gave up on ", {"ref": "trigger.note", "default": ""})})
     lookup = cel("{'a': 1}[steps.s.output.secret_value] > 0")  # CEL's message quotes the missing key
     g.node("k", "flow.transform@1", {"fields": {"n": lookup}}, on_error="continue").edge("s", "k").edge("k", "f")
     g.edge("s", "t").edge("s", "e").edge("s", "p").edge("t", "f").edge("e", "f").edge("p", "f")
     async with workers(env.client, store):
-        handle = await start(env.client, store, g, TRIGGER)
+        handle = await start(env.client, store, g, {**TRIGGER, "note": "pa55word"})  # the password's text, plain
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     rows = {r.node_key: r for r in store.steps(run_id_of(handle))}
     assert rows["s"].output_preview == {

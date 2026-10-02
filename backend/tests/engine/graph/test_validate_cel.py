@@ -20,7 +20,12 @@ INPUT: dict[str, Any] = {
     "properties": {
         "events": {
             "type": "array",
-            "items": {"type": "object", "properties": {"mac": {"type": "string"}}, "required": ["mac"]},
+            "items": {
+                "type": "object",
+                "properties": {"mac": {"type": "string"}},
+                "required": ["mac"],
+                "additionalProperties": False,  # declared whole: an undeclared field would count as tainted
+            },
         },
         "tags": {"type": "array", "items": {"type": "string"}},
         "maybe": {"type": "array"},
@@ -307,7 +312,7 @@ def test_item_and_index_inside_loops_and_filter_predicates() -> None:
         .node("l", LOOP, {"items": ref("trigger.events")})
         .node("e", ECHO, {"value": cel("item.mac + string(index)")})
     )
-    body.edge("l", "e", "body").settings = {"input_schema": INPUT, "declassify": declassify(("l", "/items"))}
+    body.edge("l", "e", "body").settings = {"input_schema": INPUT}
     assert codes(body) == []
     f = G().node("f", FILTER, {"items": ref("trigger.tags"), "predicate": cel("item.startsWith('a') && index < 3")})
     f.settings = {"input_schema": INPUT}
@@ -317,7 +322,7 @@ def test_item_and_index_inside_loops_and_filter_predicates() -> None:
 
 def test_result_type_is_checked_against_the_field() -> None:
     assert codes(one("1 + 1", IF, "condition")) == ["cel.type_mismatch"]
-    assert codes(one("trigger.events.size() > 0", IF, "condition", declassify=declassify(("a", "/condition")))) == []
+    assert codes(one("trigger.events.size() > 0", IF, "condition")) == []
     assert codes(one("b'x'")) == ["cel.non_json_result"]
 
 

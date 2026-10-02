@@ -194,7 +194,7 @@ def test_composed_schemas_keep_each_producers_definitions() -> None:
             "additionalProperties": False,
             "$defs": {"Item": {"type": item}},
         }
-        return SubflowInfo(workflow, uuid.UUID(int=10 + workflow.int), {"type": "object"}, out)
+        return SubflowInfo(workflow, uuid.UUID(int=10 + workflow.int), {"type": "object"}, out, output_taint={})
 
     g = (
         G()
@@ -444,7 +444,7 @@ def test_templates() -> None:
     assert codes(G().node("d", "flow.delay@1", {"duration_s": template("5")})) == ["template.not_string"]
     whole = template("failed: ", {"ref": "steps.s.output"})
     g = G().node("s", "testkit.sensitive@1").node("f", "flow.fail@1", {"message": whole}).edge("s", "f")
-    assert codes(g) == ["template.part_not_scalar"]
+    assert codes(g) == ["template.part_not_scalar", "taint.fail_message"]  # the whole output holds secrets too
     part = template("failed: ", {"ref": "steps.s.output.public"})
     ok = G().node("s", "testkit.sensitive@1").node("f", "flow.fail@1", {"message": part}).edge("s", "f")
     assert codes(ok) == []
