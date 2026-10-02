@@ -5,7 +5,7 @@ the worker keeps running through) proves nothing either way, and neither does a 
 
 import pytest
 
-from dewpoint.apps.worker.health import WorkerUnhealthyError, self_check, start_healthy, watch
+from dewpoint.apps.worker.health import CAPABILITIES, WorkerUnhealthyError, self_check, start_healthy, watch
 from dewpoint.core.crypto.kek import Kek, KekSet
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.db import make_engine, make_sessionmaker
@@ -96,3 +96,16 @@ async def test_the_check_proves_the_kek_and_the_roles_access_to_data_keys(
         await unreachable.dispose()
     monkeypatch.setattr(Kek, "unwrap", lambda self, blob, aad: b"not the key")
     assert await self_check(keyring, worker_sessionmaker) is False
+
+
+async def test_the_check_proves_the_claim_store_answers(pg_url, _test_users, worker_sessionmaker) -> None:
+    """Engine 2b spec §2.7, `claim_check`: from 2b-1b the instance's role must read and write claims, grants and the
+    secret index. The dispatcher's role reads data keys, but writes no step's claims: a definite failure."""
+    keyring = Keyring(KekSet(Kek("k1", b"k" * 32)))
+    assert "claim_check" in CAPABILITIES
+    assert await self_check(keyring, worker_sessionmaker) is True
+    dispatch = make_engine(_url_for(pg_url, "dewpoint_dispatch"))
+    try:
+        assert await self_check(keyring, make_sessionmaker(dispatch)) is False
+    finally:
+        await dispatch.dispose()
