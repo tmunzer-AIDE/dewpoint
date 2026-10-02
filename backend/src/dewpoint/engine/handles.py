@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 MARKER = "$claim"
+CLAIM_UNAVAILABLE = "claim_unavailable"  # every refusal to read a claim (§3.3): as core.claims.service's
 MISSING: Any = object()  # what a pointer that addresses nothing reads: a reference's default then applies
 POINTER = "pointer"
 POINTER_MAX = 256  # bytes, as JSON (spec §15: provisional)
@@ -188,3 +189,51 @@ async def _plain(value: Any, fetch: Fetch, depth: int) -> tuple[Any, bool]:
             tainted = tainted or t
         return items, tainted
     return value, False
+
+
+def _held(sensitive: tuple[str, ...], path: list[str]) -> bool:
+    """Whether a sensitive pointer holds the part at `path`: it is sensitive whole."""
+    return any(path[: len(mark)] == mark for mark in (tokens(p) for p in sensitive) if len(mark) <= len(path))
+
+
+def _rebased(sensitive: tuple[str, ...], path: list[str]) -> tuple[str, ...]:
+    """The sensitive pointers of a claim, as they apply to its part at `path`."""
+    if _held(sensitive, path):
+        return ("",)
+    marks = (tokens(p) for p in sensitive)
+    return tuple(sorted("".join("/" + escape(t) for t in m[len(path) :]) for m in marks if m[: len(path)] == path))
+
+
+async def part(ref: ClaimRef, fetch: Fetch, depth: int = 0) -> StoredClaim | None:
+    """What `ref` addresses as it's stored: its nested handles kept, and its claim's sensitive pointers re-based onto
+    it (all of it, when one holds it). None when the pointer addresses nothing. A derived claim copies it (§3.2)."""
+    if depth > NESTING_MAX:
+        raise NestingError("Claims nested too deep.")
+    stored = await fetch(ref.id)
+    value, path = stored.value, tokens(ref.pointer)
+    for i, token in enumerate(path):
+        nested = ClaimRef.of(value)
+        if nested is not None:  # the pointer goes on inside a claim nested here
+            inner = await part(nested.extend(*path[i:]), fetch, depth + 1)
+            if inner is not None and _held(stored.sensitive_pointers, path[:i]):
+                return StoredClaim(inner.value, ("",))
+            return inner
+        value, found = _step(value, token)
+        if not found:
+            return None
+    return StoredClaim(value, _rebased(stored.sensitive_pointers, path))
+
+
+async def resolve_value(value: Any, fetch: Fetch) -> Resolved:
+    """`value` with every handle in it resolved, and whether any of them was tainted. A handle that addresses nothing
+    drops its key from the map holding it, and is MISSING as a whole value."""
+    plain, tainted = await _plain(value, fetch, 0)
+    return Resolved(_present(plain), tainted)
+
+
+def _present(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _present(v) for k, v in value.items() if v is not MISSING}
+    if isinstance(value, list):
+        return [_present(v) for v in value]
+    return value

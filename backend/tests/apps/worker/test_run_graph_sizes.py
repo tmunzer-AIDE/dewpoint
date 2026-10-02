@@ -26,7 +26,7 @@ from dewpoint.engine.runtime.size import (
     STEP_INPUT_TOO_LARGE,
 )
 from tests.apps.worker.harness import MemoryStore, run_id_of, start, workers
-from tests.support.graphs import G, cel, ref
+from tests.support.graphs import G, ref
 
 LIMIT = 50_000
 ITEMS = {
@@ -272,14 +272,15 @@ async def test_a_workflow_task_sends_at_most_its_bytes_of_every_command(
     together, pass a 70 KB budget, so the third waits for the next workflow task; replay decides the same."""
     monkeypatch.setattr(route, "YIELD_SEND_BYTES", 70_000)
     store = MemoryStore()
-    g = graph(**{k: cel(f"size(steps.{k}.output.value)") for k in "xyz"})
+    g = graph()
     g.node("b", BLOB, {"size": 30_000})
     for k in "xyz":
         g.node(k, ECHO, {"value": ref("steps.b.output.value")}).edge("b", k)
     async with workers(env.client, store, cache=cache):
         handle = await start(env.client, store, g, {})
         result = await asyncio.wait_for(handle.result(), 60)
-    assert (result.status, result.outputs) == ("succeeded", {k: 30_000 for k in "xyz"})
+    assert result.status == "succeeded", result.error
+    assert {r.node_key for r in store.steps(run_id_of(handle)) if r.status == "succeeded"} == {"b", *"xyz"}
     tasks = await scheduled_in(handle, "testkit.echo.v1")
     assert len(tasks) == 3 and len(set(tasks)) == 2
 

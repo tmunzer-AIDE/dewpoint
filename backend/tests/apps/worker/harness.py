@@ -15,10 +15,12 @@ from temporalio.worker import Worker, WorkflowRunner
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
 from dewpoint.apps.worker.activities import Evaluate, RunStore, cel_activity, engine_activities
+from dewpoint.core.claims.service import ClaimConflictError, ClaimUnavailableError, NewClaim
 from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.cel import ipc
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.graph.validate import SubflowInfo, ValidationContext, validate
+from dewpoint.engine.handles import ClaimRef, StoredClaim
 from dewpoint.engine.runtime.activities import (
     ENGINE_QUEUE,
     LIVE,
@@ -33,6 +35,7 @@ from dewpoint.engine.runtime.activities import (
 )
 from dewpoint.engine.runtime.ids import run_of, run_workflow_id
 from dewpoint.engine.runtime.workflow import LoopBatch, RunGraph
+from dewpoint.engine.split import split
 from dewpoint.sdk import Plugin
 from tests.engine.runtime.support import CATALOG, MANIFESTS
 from tests.support.graphs import G
@@ -47,6 +50,18 @@ RESULT_TIMEOUT_S = 60  # the harness's runs are time-skipped: a minute is far mo
 EVALUATOR_ONLY = "timestamp('2026-01-01T00:00:00Z').getHours('Europe/Paris')"
 
 
+@dataclass(frozen=True)
+class HeldClaim:
+    """A claim as the store holds it (engine 2b spec §3.1)."""
+
+    tenant_id: str
+    owner: str
+    root: str
+    value: Any
+    sensitive_pointers: tuple[str, ...]
+    kind: str
+
+
 @dataclass
 class MemoryStore:
     versions: dict[str, VersionData] = field(default_factory=dict)
@@ -56,6 +71,8 @@ class MemoryStore:
     starts: dict[str, RunStart] = field(default_factory=dict)  # sub-runs' own rows
     schemas: dict[str, dict[str, Any]] = field(default_factory=dict)  # version -> its output schema
     taints: dict[str, dict[str, Any]] = field(default_factory=dict)  # version -> its outputs' taint (2b spec §4.1)
+    claims: dict[str, HeldClaim] = field(default_factory=dict)
+    grants: set[tuple[str, str]] = field(default_factory=set)  # (claim, run) (2b spec §3.4)
 
     def add(self, g: G, workflow_id: uuid.UUID | None = None, *, engine_abi: int = ENGINE_ABI) -> str:
         """Publish `g` as a version, pinned to the sub-flows it runs (as `publish` registered them). `engine_abi`:
@@ -108,6 +125,46 @@ class MemoryStore:
     def steps(self, run_id: str) -> list[StepRow]:
         return [r for k, r in sorted(self.rows.items()) if k[0] == run_id]
 
+    # --- claims (2b spec §3), checked as the database store checks them ------------------------------------------
+
+    async def fetch(self, tenant_id: str, run_id: str, claim_id: str) -> StoredClaim:
+        held = self.claims.get(claim_id)
+        if (
+            held is None
+            or held.tenant_id != tenant_id
+            or (held.owner != run_id and (claim_id, run_id) not in self.grants)
+        ):
+            raise ClaimUnavailableError("A claim this run may not read, or that doesn't exist.")
+        return StoredClaim(held.value, held.sensitive_pointers)
+
+    async def write(
+        self, tenant_id: str, claims: Any, *, kind: str, step_id: str | None, iteration_key: str | None
+    ) -> None:
+        for c in claims:
+            assert isinstance(c, NewClaim)
+            held = HeldClaim(tenant_id, str(c.owner_run_id), str(c.root_run_id), c.value, c.sensitive_pointers, kind)
+            existing = self.claims.get(str(c.id))
+            if existing is not None and (existing.value, existing.sensitive_pointers) != (
+                c.value,
+                c.sensitive_pointers,
+            ):
+                raise ClaimConflictError("A claim was written again with other content.")
+            self.claims[str(c.id)] = held
+
+    def claim(self, value: Any, *, owner: str, tainted: bool) -> dict[str, Any]:
+        """A claim made outside any run, for a test to hand one: its handle."""
+        claim_id = str(uuid.uuid4())
+        self.claims[claim_id] = HeldClaim(TENANT, owner, owner, value, ("",) if tainted else (), "input")
+        return ClaimRef(claim_id).to_json()
+
+    def admit(self, trigger: dict[str, Any], schema: Any, run_id: str) -> Any:
+        """`trigger` split as admission splits it (2b spec §3.5), its claims owned by `run_id`: the envelope."""
+        done = split(trigger, schema, lambda pointer: str(uuid.uuid4()))
+        for c in done.claims:
+            sensitive = ("",) if c.tainted else ()
+            self.claims[c.id] = HeldClaim(TENANT, run_id, run_id, c.value, sensitive, "input")
+        return done.envelope
+
 
 async def in_process(request: dict[str, Any]) -> list[dict[str, Any]]:
     """What the evaluator would answer, computed here: `ipc.evaluate_request` is the child's own work."""
@@ -141,21 +198,33 @@ async def workers(
         if evaluate is None:  # no evaluator serves the profile
             yield
             return
-        async with Worker(client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(evaluate)]):
+        async with Worker(
+            client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(evaluate, store)]
+        ):
             yield
 
 
 async def start(
-    client: Client, store: MemoryStore, g: G, trigger: dict[str, Any] | None = None, **options: Any
+    client: Client,
+    store: MemoryStore,
+    g: G,
+    trigger: dict[str, Any] | None = None,
+    *,
+    claimed: bool = False,
+    **options: Any,
 ) -> WorkflowHandle[Any, RunResult]:
-    return await start_version(client, store.add(g), trigger, **options)
+    """`claimed`: the trigger is split as admission splits it (2b spec §3.5), its sensitive values handles."""
+    run_id = str(uuid.uuid4())
+    if claimed:
+        trigger = store.admit(trigger or {}, g.settings.get("input_schema"), run_id)
+    return await start_version(client, store.add(g), trigger, run_id=run_id, **options)
 
 
 async def start_version(
-    client: Client, version_id: str, trigger: dict[str, Any] | None = None, **options: Any
+    client: Client, version_id: str, trigger: dict[str, Any] | None = None, *, run_id: str | None = None, **options: Any
 ) -> WorkflowHandle[Any, RunResult]:
     """A run of a version the store already has."""
-    run_id = str(uuid.uuid4())
+    run_id = run_id or str(uuid.uuid4())
     run = RunInput(TENANT, run_id, version_id, trigger or {}, options.pop("mode", LIVE), **options)
     return await client.start_workflow(RunGraph.run, run, id=run_workflow_id(TENANT, run_id), task_queue=ENGINE_QUEUE)
 

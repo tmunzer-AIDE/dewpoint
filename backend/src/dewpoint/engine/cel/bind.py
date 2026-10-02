@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Binding for one evaluation (spec §5.3, §5.6): project each root to what the expression reads, check every value
 against its declared type, and measure the result against the local caps. Pure and deterministic: the interpreter
-calls it inside workflow code."""
+calls it inside workflow code.
+
+A handle (engine 2b spec §3.2) is bound as it is: kept whole by a projection, extended by a typed path that goes past
+it, and never type-checked here, since its value is the claim's. An expression with a handle among its bindings runs
+in `cel.evaluate`, which resolves it and checks the types then (§4.2)."""
 
 import math
 from collections.abc import Mapping
@@ -12,6 +16,7 @@ from dewpoint.engine.canonical import canonical_json
 from dewpoint.engine.cel import caps
 from dewpoint.engine.cel import types as T
 from dewpoint.engine.cel.record import ExpressionRecord, Projection
+from dewpoint.engine.handles import ClaimRef, contains_marker
 
 
 @dataclass(frozen=True)
@@ -76,7 +81,7 @@ def project(value: Any, projections: list[Projection]) -> Any:
 
 
 def _prune(value: Any, node: _Node) -> Any:
-    if node.whole or not isinstance(value, dict):
+    if node.whole or not isinstance(value, dict) or ClaimRef.of(value) is not None:
         return value
     out: dict[str, Any] = {}
     for key, child in (node.children or {}).items():
@@ -111,7 +116,11 @@ def check_json(name: str, value: Any) -> None:
 
 def _at(roots: Mapping[str, Any], name: str) -> Any:
     value: Any = roots
-    for key in name.split("."):
+    keys = name.split(".")
+    for i, key in enumerate(keys):
+        handle = ClaimRef.of(value)
+        if handle is not None:
+            return handle.extend(*keys[i:]).to_json()
         if not isinstance(value, dict) or key not in value:
             raise BindingError(f"`{name}` is missing")
         value = value[key]
@@ -132,7 +141,7 @@ def bind(record: ExpressionRecord, view: ScopeView) -> dict[str, Any]:
         else:
             raise BindingError(f"`{name}` isn't available here")
         signature = record.declarations.get(name, T.DYN)
-        if not T.conforms(signature, value):
+        if not contains_marker(value) and not T.conforms(signature, value):
             raise BindingError(f"`{name}` doesn't match its declared type {signature}")
         check_json(name, value)
         out[name] = value

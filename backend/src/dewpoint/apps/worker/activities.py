@@ -34,6 +34,7 @@ from temporalio.converter import DataConverter
 from temporalio.exceptions import ApplicationError
 
 from dewpoint.apps.cel_client import EvaluatorUnavailable, evaluate_remote
+from dewpoint.apps.worker.claims import ClaimStore, Evaluate, derive, evaluate_claimed, join_claimed
 from dewpoint.apps.worker.context import context
 from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.cel import ipc
@@ -41,6 +42,7 @@ from dewpoint.engine.runtime import size
 from dewpoint.engine.runtime.activities import (
     APPLIED,
     CEL_EVALUATE,
+    CLAIMS_DERIVE,
     LOAD_VERSION,
     MAPPED,
     OUTCOME_UNKNOWN,
@@ -49,6 +51,8 @@ from dewpoint.engine.runtime.activities import (
     SIMULATED,
     CelInput,
     CelResult,
+    DeriveInput,
+    DeriveResult,
     LoadVersionInput,
     ProjectInput,
     StepInput,
@@ -88,7 +92,7 @@ CHECKED_FORMATS = ("date", "uuid", "email", "ipv4", "ipv6", "regex")
 JSON = DataConverter.default.payload_converter  # what the SDK encodes a result with, before the codec
 
 
-class RunStore(Protocol):
+class RunStore(ClaimStore, Protocol):
     async def version(self, tenant_id: str, version_id: str) -> VersionData: ...
     async def project(self, data: ProjectInput) -> None: ...
 
@@ -254,11 +258,12 @@ def engine_activities(store: RunStore, plugins: Iterable[Plugin], *, abi: int = 
         _same_tenant(data.tenant_id)
         await store.project(data)
 
+    @activity.defn(name=CLAIMS_DERIVE)
+    async def claims_derive(data: DeriveInput) -> DeriveResult:
+        return await derive(data, store)
+
     steps = [step_activity_for(node) for plugin in plugins for node in plugin.nodes if node.kind == NodeKind.ACTION]
-    return [load_version, project, *steps]
-
-
-Evaluate = Callable[[dict[str, Any]], Awaitable[list[dict[str, Any]]]]
+    return [load_version, project, claims_derive, *steps]
 
 
 def remote_evaluator(socket_path: str, profile: str) -> Evaluate:
@@ -277,13 +282,20 @@ def remote_evaluator(socket_path: str, profile: str) -> Evaluate:
     return evaluate
 
 
-def cel_activity(evaluate: Evaluate) -> Callable[[CelInput], Awaitable[CelResult]]:
-    """`cel.evaluate`: outcomes are recorded; an unavailable evaluator is retried by Temporal (3 attempts)."""
+def cel_activity(evaluate: Evaluate, store: ClaimStore | None = None) -> Callable[[CelInput], Awaitable[CelResult]]:
+    """`cel.evaluate`: outcomes are recorded; an unavailable evaluator is retried by Temporal (3 attempts). A request
+    with `claims` resolves its handles through `store` and claims what read sensitive data (engine 2b spec §4.2)."""
 
     @activity.defn(name=CEL_EVALUATE)
     async def cel_evaluate(data: CelInput) -> CelResult:
         try:
-            return CelResult(await evaluate(data.request))
+            if data.claims is None:
+                return CelResult(await evaluate(data.request))
+            if store is None:
+                raise ApplicationError("This CEL worker reads no claims.", type=INTERNAL_ERROR, non_retryable=True)
+            if data.template is not None:
+                return CelResult([await join_claimed(data.template, data.claims, store)])
+            return CelResult(await evaluate_claimed(data.request, data.claims, store, evaluate))
         except EvaluatorUnavailable as e:
             raise ApplicationError(str(e), type="evaluator_unavailable") from None
 

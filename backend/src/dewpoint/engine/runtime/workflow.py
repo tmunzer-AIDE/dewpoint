@@ -343,6 +343,7 @@ class RunGraph(Execution):
             grant=grant,
             depth=self.depth + 1,
             secrets=list(self._secrets),
+            root_run_id=self.root_run_id,
         )
         trigger = {
             "run_id": self.run_id,

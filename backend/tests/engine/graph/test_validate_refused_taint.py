@@ -7,6 +7,7 @@ stored record says why."""
 import uuid
 from typing import Any
 
+from dewpoint.engine.cel.record import ExpressionRecord
 from dewpoint.engine.graph.validate import SubflowInfo, ValidationContext, ValidationResult, validate
 from dewpoint.plugins.flow import PLUGIN
 from tests.support.catalog import catalog
@@ -87,3 +88,6 @@ def test_a_tainted_expression_is_recorded_to_run_in_the_evaluator() -> None:
     records = {r.node: r for r in check(g).expressions}
     assert (records[str(nid("a"))].mode, records[str(nid("a"))].reason) == ("activity", "reads sensitive data")
     assert records[str(nid("b"))].mode == "local"
+    # the run reads it from the record: its result is claimed, tainted (spec §4.2)
+    assert (records[str(nid("a"))].tainted, records[str(nid("b"))].tainted) == (True, False)
+    assert ExpressionRecord.from_json(records[str(nid("a"))].to_json()) == records[str(nid("a"))]
