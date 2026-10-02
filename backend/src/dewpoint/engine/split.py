@@ -116,18 +116,22 @@ class _Splitter:
         else:
             node[key] = handle
 
-    def reappearing(self, matcher: Matcher) -> list[str]:
-        """The pointers of strings, and of objects whose keys, contain a secret: never inside a handle."""
+    def reappearing(self, *matchers: Matcher) -> list[str]:
+        """The pointers of strings, and of objects whose keys, contain a secret any of `matchers` finds: never inside a
+        handle."""
         found: list[str] = []
+
+        def has(text: str) -> bool:
+            return any(m.found(text) for m in matchers)
 
         def walk(value: Any, pointer: str) -> None:
             if ClaimRef.of(value) is not None:
                 return
             if isinstance(value, str):
-                if matcher.found(value):
+                if has(value):
                     found.append(pointer)
             elif isinstance(value, dict):
-                if any(matcher.found(k) for k in value):
+                if any(has(k) for k in value):
                     found.append(pointer)
                     return
                 for k, child in value.items():
@@ -217,13 +221,14 @@ def split(
     schema: Mapping[str, Any] | None,
     new_id: Callable[[str], str],
     *,
-    known: Iterable[str] = (),
+    known: Matcher | Iterable[str] = (),
     sizes: bool = True,
     handles: bool = False,
     envelope: int = TRIGGER_INLINE,
 ) -> Split:
     """`value` (a validated trigger or sub-flow input, or an activity's result) as its envelope and its claims
-    (above). `known`: the run's secrets so far (its secret index, §3.7): text that repeats one is claimed too.
+    (above). `known`: the run's secrets so far (its secret index, §3.7), as strings or as the index's cached
+    automaton: text that repeats one is claimed too.
     `sizes` False: only what's sensitive is claimed. `handles`: the value may hold the run's own handles (a sub-flow's
     input, from its parent, §3.4), left where they are; any other use of the marker is still refused. `envelope`: the
     envelope's limit, the trigger's or the inline threshold a step's output is split to (§5.4)."""
@@ -235,7 +240,8 @@ def split(
         s.claim(pointer, tainted=True)
     secrets = {t for c in s.claims for t in _strings(c.value) if len(t) >= MIN_SECRET}
     if ClaimRef.of(s.doc) is None:
-        for pointer in s.reappearing(Matcher(secrets | set(known))):
+        matchers = [Matcher(secrets), known] if isinstance(known, Matcher) else [Matcher(secrets | set(known))]
+        for pointer in s.reappearing(*matchers):
             s.claim(pointer, tainted=True)
             secrets |= {t for t in _strings(s.claims[-1].value) if len(t) >= MIN_SECRET}
         for pointer, keys in keyed_positions(s.doc, shape):  # after reappearing, which claims a matching map whole

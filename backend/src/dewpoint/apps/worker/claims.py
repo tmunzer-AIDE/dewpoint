@@ -7,8 +7,10 @@ the claim's owner or holds a grant. Every refusal looks the same, whatever its c
 sensitive data, or whose expression does: the workflow gets its handle, never the value (§3.6, §4.2). A handle whose
 pointer passed POINTER_MAX is derived: what it addresses is copied, as stored, into a claim of its own (§3.2)."""
 
+import asyncio
 import json
 import uuid
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -120,11 +122,47 @@ class ClaimStore(Protocol):
         ...
 
 
-async def current(store: ClaimStore, tenant: str, root: str, seen: Index) -> Index:
-    """The tree's index as it is now (§3.7): `seen` again, unless another activity extended it since."""
-    if await store.index_version(tenant, root) == seen.version:
-        return seen
-    return await store.index(tenant, root)
+SECRETS_CACHE = 256  # run trees whose index and automaton a worker process keeps, the most recently used
+
+
+@dataclass(frozen=True)
+class Secrets:
+    """A run tree's secret index at one version, its automaton, and its strings as a set."""
+
+    index: Index
+    matcher: Matcher
+    known: frozenset[str]
+
+
+SECRETS: "OrderedDict[tuple[str, str], Secrets]" = OrderedDict()
+
+
+def _built(index: Index) -> Secrets:
+    return Secrets(index, Matcher(index.strings), frozenset(index.strings))
+
+
+async def secrets_for(index: Index, tenant: str, root: str) -> Secrets:
+    """`index` (just read or extended) with its automaton: built once per version, in a worker thread, and cached
+    with it (§3.7; the review's I3: at the index's bounds a build takes about a second, which on the event loop
+    stalled every activity and workflow task of the worker)."""
+    key = (tenant, root)
+    held = SECRETS.get(key)
+    if held is None or held.index.version != index.version:
+        held = await asyncio.to_thread(_built, index)
+        SECRETS[key] = held
+    SECRETS.move_to_end(key)
+    while len(SECRETS) > SECRETS_CACHE:
+        SECRETS.popitem(last=False)
+    return held
+
+
+async def secrets_of(store: ClaimStore, tenant: str, root: str) -> Secrets:
+    """The tree's index as it is now, with its automaton (§3.7): read again, and built, only when its version moved
+    since this process last held it, which a version check tells."""
+    held = SECRETS.get((tenant, root))
+    if held is not None and await store.index_version(tenant, root) == held.index.version:
+        return await secrets_for(held.index, tenant, root)
+    return await secrets_for(await store.index(tenant, root), tenant, root)
 
 
 def caller() -> tuple[str, str]:
@@ -219,7 +257,7 @@ async def _masked(outcomes: list[dict[str, Any]], store: ClaimStore, tenant: str
     """Every error message masked against the run tree's secrets before it leaves the activity (§3.7)."""
     if not any("error" in o for o in outcomes):
         return outcomes
-    secrets = Matcher((await store.index(tenant, root)).strings)
+    secrets = (await secrets_of(store, tenant, root)).matcher
     return [
         {**o, "message": secrets.mask(str(o.get("message", "")), REDACTED)} if "error" in o else o for o in outcomes
     ]
@@ -264,7 +302,7 @@ async def evaluate_claimed(
             if "ok" in o and not _decides(o["ok"], claims.decides):
                 done[i] = {"error": cel.TYPE_MISMATCH, "message": NOT_DECIDED.get(claims.decides, NOT_DECIDED["bool"])}
     else:
-        secrets = Matcher((await store.index(tenant, claims.root_run_id)).strings)
+        secrets = (await secrets_of(store, tenant, claims.root_run_id)).matcher
         results = [(i, o["ok"]) for i, o in enumerate(done) if "ok" in o and (tainted[i] or _repeats(o["ok"], secrets))]
         claimed = {i for i, _ in results}
         large = [(i, o["ok"]) for i, o in enumerate(done) if "ok" in o and i not in claimed and _large(o["ok"])]
@@ -302,7 +340,7 @@ async def join_claimed(parts: list[Any], claims: Claiming, store: ClaimStore) ->
             [{"error": e.failure.code, "message": e.failure.message}], store, tenant, claims.root_run_id
         )
         return failed
-    if not tainted and not _repeats(text, Matcher((await store.index(tenant, claims.root_run_id)).strings)):
+    if not tainted and not _repeats(text, (await secrets_of(store, tenant, claims.root_run_id)).matcher):
         if _large(text):
             return (await _claimed(store, tenant, run, claims, [(0, text)], tainted=False))[0]
         return {"ok": text}
@@ -358,7 +396,7 @@ def config_secrets(config: Any, schema: Mapping[str, Any]) -> list[str]:
     return sorted(set(out))
 
 
-async def claim_output(output: Any, schema: Mapping[str, Any], step: StepInput, store: ClaimStore, seen: Index) -> Any:
+async def claim_output(output: Any, schema: Mapping[str, Any], step: StepInput, store: ClaimStore) -> Any:
     """A step's output as it may leave the activity: split by the node's output schema, what's sensitive or
     undeclared, and text that repeats a secret the run knows, claimed; their strings join the index. Then what's
     larger than 64 KiB, and the envelope down to the inline limit the workflow sent (§5.1, §5.4). What the run
@@ -368,15 +406,20 @@ async def claim_output(output: Any, schema: Mapping[str, Any], step: StepInput, 
     tenant, run = caller()
     root = step.root_run_id or run
     seed = uuid.uuid5(_OUTPUTS, f"{run}/{step.step_id}/{step.iteration_key}/{step.attempt}")
-    known = set((await current(store, tenant, root, seen)).strings)
+    held = await secrets_of(store, tenant, root)
     while True:  # past the index's bounds, nothing is written: the extension comes first
         done = split(
-            output, schema, lambda pointer: str(uuid.uuid5(seed, pointer)), known=known, envelope=step.inline_limit
+            output,
+            schema,
+            lambda pointer: str(uuid.uuid5(seed, pointer)),
+            known=held.matcher,
+            envelope=step.inline_limit,
         )
         merged = await store.remember(tenant, root, done.secrets)
-        if set(merged.strings) <= known | set(done.secrets):
+        wrote = not held.known.issuperset(done.secrets)  # an extension makes one new version (§3.7)
+        if merged.version == held.index.version + (1 if wrote else 0):
             break
-        known = set(merged.strings)  # indexed since: split again against it
+        held = await secrets_for(merged, tenant, root)  # extended since by another activity: split again against it
     rows = [
         NewClaim(uuid.UUID(c.id), c.value, ("",) if c.tainted else (), uuid.UUID(run), uuid.UUID(root))
         for c in done.claims
@@ -547,7 +590,7 @@ async def child_input(data: ChildInput, store: ClaimStore) -> ChildInputResult:
             value,
             schema,
             lambda pointer: str(uuid.uuid5(seed, pointer)),
-            known=(await store.index(tenant, data.root_run_id)).strings,
+            known=(await secrets_of(store, tenant, data.root_run_id)).matcher,
             handles=True,
         )
     except ForgedHandleError:
@@ -625,4 +668,4 @@ async def message(data: MessageInput, store: ClaimStore) -> MessageResult:
         raise ApplicationError(UNAVAILABLE, type=CLAIM_UNAVAILABLE, non_retryable=True) from None
     value = "" if found.value is MISSING or found.value is None else found.value
     text = value if isinstance(value, str) else json.dumps(value)
-    return MessageResult(Matcher((await store.index(tenant, data.root_run_id)).strings).mask(text, REDACTED))
+    return MessageResult((await secrets_of(store, tenant, data.root_run_id)).matcher.mask(text, REDACTED))

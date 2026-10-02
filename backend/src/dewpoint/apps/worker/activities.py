@@ -43,7 +43,6 @@ from dewpoint.apps.worker.claims import (
     child_input,
     claim_output,
     config_secrets,
-    current,
     derive,
     evaluate_claimed,
     filter_claimed,
@@ -51,6 +50,7 @@ from dewpoint.apps.worker.claims import (
     join_claimed,
     message,
     resolved_config,
+    secrets_of,
     spill,
     unforged,
 )
@@ -278,10 +278,10 @@ def step_activity_for(node: type[Node], store: ClaimStore) -> Callable[[StepInpu
         before it leaves, every message masked against the run's secret index."""
         _same_tenant(step.tenant_id)
         root = step.root_run_id or step.run_id
-        seen = await store.index(step.tenant_id, root)
+        await secrets_of(store, step.tenant_id, root)  # read once before the attempt: the index's cached automaton
 
         async def secrets() -> Matcher:  # the index at the boundary: another activity may have extended it (§3.7)
-            return Matcher((await current(store, step.tenant_id, root, seen)).strings)
+            return (await secrets_of(store, step.tenant_id, root)).matcher
 
         try:
             try:
@@ -291,7 +291,7 @@ def step_activity_for(node: type[Node], store: ClaimStore) -> Callable[[StepInpu
             marked = config_secrets(config, config_schema)  # only the config marks them: indexed before the attempt
             if marked:
                 try:
-                    seen = await store.remember(step.tenant_id, root, marked)
+                    await store.remember(step.tenant_id, root, marked)
                 except SecretIndexLimitError as e:
                     raise _StepFailed(SECRET_INDEX_LIMIT, str(e), retryable=False) from None
             result, outcome = await _call(node, replace(step, config=config), config_schema)
@@ -302,7 +302,7 @@ def step_activity_for(node: type[Node], store: ClaimStore) -> Callable[[StepInpu
             if contains_marker(data):  # a forged handle never crosses into a run (§3.2)
                 raise violation("it holds the reserved key `$claim`.")
             try:
-                envelope = await claim_output(data, output_schema, step, store, seen)
+                envelope = await claim_output(data, output_schema, step, store)
             except SecretIndexLimitError as e:
                 raise _StepFailed(SECRET_INDEX_LIMIT, str(e), retryable=False, outcome=outcome) from None
             except Exception as e:  # the claim store failed after the node ran: never a plain output instead
@@ -357,7 +357,7 @@ def engine_activities(store: RunStore, plugins: Iterable[Plugin], *, abi: int = 
         """Every row masked against the run tree's secret index before it's written (engine 2b spec §3.7)."""
         _same_tenant(data.tenant_id)
         root = data.root_run_id or (data.run.run_id if data.run is not None else "")
-        secrets = Matcher((await store.index(data.tenant_id, root)).strings) if root else Matcher(())
+        secrets = (await secrets_of(store, data.tenant_id, root)).matcher if root else Matcher(())
         await store.project(_masked(data, secrets) if secrets.strings else data)
 
     @activity.defn(name=CLAIMS_DERIVE)
