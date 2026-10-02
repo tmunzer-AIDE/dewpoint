@@ -93,10 +93,12 @@ with workflow.unsafe.imports_passed_through():
         Collect,
         Failure,
         Instance,
+        ItemsRef,
         RunEnd,
         Scheduler,
         ScopeKey,
         Spill,
+        count,
         iteration_key,
     )
     from dewpoint.engine.runtime.size import (
@@ -511,8 +513,7 @@ class Execution:
             return await self._batch(self._batches.pop((key[1], key[2])))
         if key[0] == "spill":
             sp = self._spill_units.pop((key[1], key[2], key[3]))
-            failed = await self._spill([sp.entry], None, sp.owner.scope)
-            return _Effect(failure=failed)
+            return _Effect(failure=await self._spill_entry(sp.entry, sp.owner.scope))
         return await self._collect(key[1])
 
     def _apply(self, key: tuple[Any, ...], effect: _Effect) -> None:
@@ -852,10 +853,11 @@ class Execution:
         data = CelInput(request, claims=self._claiming(owner, scope, tainted=False, decision=True))
         return resolve.outcome_value(await self._remote(data))
 
-    async def _items(self, handle: ClaimRef, owner: Step, scope: ScopeKey) -> list[dict[str, str]]:
+    async def _items(self, handle: ClaimRef, owner: Step, scope: ScopeKey) -> ItemsRef:
         """A loop's items that are a handle (engine 2b spec §4.3): their count, from the activity that reads the claim
-        (a listed loop's declassified decision, or the plain count of a list only its size claimed), and each item a
-        handle into the list. A count past the largest item cap is cut there: the loop then fails its cap."""
+        (a listed loop's declassified decision, or the plain count of a list only its size claimed), as a cursor:
+        each item a handle into the list, made as it opens (§5.3). A count past the largest item cap is cut there:
+        the loop then fails its cap."""
         if handle.extend(str(ITEM_CAP_MAX)).too_long():
             bounded = ClaimRef.of(await self._bounded(handle, owner, scope))
             if bounded is None:
@@ -864,7 +866,7 @@ class Execution:
         request = EvaluateRequest(self.program.cel_profile, "size(v)", {"v": "list<dyn>"}, ({"v": handle.to_json()},))
         data = CelInput(request.to_json(), claims=self._claiming(owner, scope, tainted=False, decision=True))
         count = resolve.outcome_value(await self._remote(data))
-        return [handle.extend(str(i)).to_json() for i in range(min(int(count), ITEM_CAP_MAX + 1))]
+        return ItemsRef(handle.to_json(), min(int(count), ITEM_CAP_MAX + 1))
 
     async def _remote(self, data: CelInput) -> cel.Outcome:
         """One `cel.evaluate` request of one binding set, or a template: its outcome."""
@@ -1287,6 +1289,30 @@ class Execution:
             return replace(effect, output=None, failure=fitted)
         return replace(effect, output=fitted)
 
+    async def _spill_entry(self, entry: dict[str, Any], scope: ScopeKey) -> Failure | None:
+        """A container's claim. A list past one spill's payload goes in parts first, then the claim joins them, so
+        its handle still addresses each item by position (engine 2b spec §5.3)."""
+        converter = workflow.payload_converter()
+        empty = SpillInput([], self.root_run_id, None, iteration_key(scope))
+        if fits(replace(empty, claims=[entry]), converter) or not isinstance(entry["value"], list):
+            return await self._spill([entry], None, scope)
+        limit = payload_bytes() - encoded_bytes(empty, converter) - SPILL_FRAME
+        parts: list[list[Any]] = [[]]
+        weight = 0
+        for item in entry["value"]:
+            size = json_bytes(item) + 1
+            if parts[-1] and weight + size > limit:
+                parts.append([])
+                weight = 0
+            parts[-1].append(item)
+            weight += size
+        ids = [str(uuid.uuid5(uuid.UUID(entry["id"]), str(k))) for k in range(len(parts))]
+        for part_id, part in zip(ids, parts, strict=True):
+            failed = await self._spill([{"id": part_id, "value": part}], None, scope)
+            if failed is not None:
+                return failed
+        return await self._spill([{"id": entry["id"], "concat": ids}], None, scope)
+
     async def _spill(self, claims: list[dict[str, Any]], step: Step | None, scope: ScopeKey) -> Failure | None:
         data = SpillInput(claims, self.root_run_id, str(step.id) if step else None, iteration_key(scope))
         found = await self._crossing(CLAIMS_SPILL, data, type(None), lost=SPILL_FAILED.removesuffix("."))
@@ -1367,8 +1393,8 @@ class Execution:
         # run, the loop step and its scope name the loop, the start names the batch)
         child = batch_workflow_id(self.tenant_id, self.run_id, str(step.id), iteration_key(b.loop.scope), b.start)
         converter = workflow.payload_converter()
-        draft = self._batch_input(b, len(b.items))
-        if not fits(draft, converter):  # engine 2b spec §5.2: as many of its items as fit, in order; the rest follow
+        draft = self._batch_input(b, count(b.items))
+        if isinstance(b.items, list) and not fits(draft, converter):  # §5.2: as many as fit, in order; the rest next
             items = b.items
             envelope = encoded_bytes(replace(draft, items=[]), converter)
             fit, _ = resolve.request_end(
@@ -1395,7 +1421,7 @@ class Execution:
                 )
             self.sched.cut_batch(b.loop, b.start, b.start + fit)
             b = replace(b, items=items[:fit])
-        grant = self.sched.budget.start_child(child, len(b.items))
+        grant = self.sched.budget.start_child(child, count(b.items))
         batch = self._batch_input(b, grant)
         used: int | None = None  # until it reports, all it was granted counts: it may have run
         try:
@@ -1449,7 +1475,8 @@ class Execution:
             version_id=self.version_id,
             loop_step=str(step.id),
             outer=self._outer(b.loop),
-            items=b.items,
+            items=b.items if isinstance(b.items, list) else [],
+            items_ref=b.items.to_json() if isinstance(b.items, ItemsRef) else None,
             offset=b.start,
             concurrency=loop.concurrency,
             stop_on_error=loop.stop_on_error,
