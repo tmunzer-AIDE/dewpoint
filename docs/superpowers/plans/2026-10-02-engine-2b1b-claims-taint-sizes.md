@@ -157,7 +157,16 @@ Checkpoints for the owner: after milestone 2 (the static half), after 3, after 4
 32. **Canary secrets end to end (§12).** Runs seeded with known secrets, through triggers, plugin outputs, sub-flows,
     batches, filters and spills: their decoded histories, projections and logs hold none.
 33. **Docs.** The operations guides (ABI 6 rollout, `claim_check`, the new codes); engine-core and the architecture spec
-    (§13); measured values back into spec §15.
+    (§13); measured values back into spec §15. The ABI 6 upgrade notes in `docs/operations/deployment.md` ("A build
+    with a new engine ABI"; every version is republished for it), each with its fix (the owner's ruling, 2026-10-02):
+    - a position a schema doesn't declare is sensitive: `additionalProperties`, pattern properties, a key one union
+      branch leaves open; CEL over it runs in the evaluator, and claiming takes it;
+    - a computed key or index into trigger or step data runs in the evaluator;
+    - newly refused: a literal or default at a sensitive position, null and "" included (`sensitive.literal`,
+      `sensitive.default`); a tainted wait, failure message or sub-flow input (`taint.timer`, `taint.fail_message`,
+      `taint.subflow_input`); an undeclared tainted decision (`taint.undeclassified`, listing needs the declassify
+      permission); a sensitive variable read before a step sure to set it, unless its type allows null
+      (`vars.unassigned`).
 
 ---
 
