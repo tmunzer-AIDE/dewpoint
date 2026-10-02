@@ -233,11 +233,13 @@ class GrantInput:
 
 @dataclass(frozen=True)
 class SpillInput:
-    """Values the workflow holds, written as size claims owned by its run before a command carries their handles
-    (engine 2b spec §5.2): each [claim id, value]. They're the workflow's own, so plain or handles, never sensitive
-    (§3.6): untainted. Their ids come from the workflow, so a retry writes the same rows, hash-checked."""
+    """Values the workflow holds, written as claims owned by its run: before a command carries their handles (engine
+    2b spec §5.2), or as its live state's containers (§5.3). Each entry: {"id", "value"}, and "prev", a claim this one
+    forwards to: a container claimed again (its keys not in "value" are read through it). They're the workflow's
+    own, so plain or handles, never sensitive (§3.6): untainted. Their ids come from the workflow, so a retry writes
+    the same rows, hash-checked."""
 
-    claims: list[list[Any]]
+    claims: list[dict[str, Any]]
     root_run_id: str
     step_id: str | None = None
     iteration_key: str | None = None

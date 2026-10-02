@@ -555,11 +555,25 @@ async def spill(data: SpillInput, store: ClaimStore) -> None:
     holds nothing sensitive in plain), before a command carries their handles. Written again, a claim must hold the
     same content (hash-checked), or nothing is written."""
     tenant, run = caller()
-    rows = [
-        NewClaim(uuid.UUID(claim_id), value, (), uuid.UUID(run), uuid.UUID(data.root_run_id or run))
-        for claim_id, value in data.claims
-    ]
+    rows = []
+    for entry in data.claims:
+        value = entry["value"]
+        if entry.get("prev"):  # a container claimed again: its earlier keys are read through the claim before
+            value = {**await _forwarding(entry["prev"], store, tenant, run), **value}
+        rows.append(NewClaim(uuid.UUID(entry["id"]), value, (), uuid.UUID(run), uuid.UUID(data.root_run_id or run)))
     await store.write(tenant, rows, kind="spill", step_id=data.step_id, iteration_key=data.iteration_key)
+
+
+async def _forwarding(prev: str, store: ClaimStore, tenant: str, run: str) -> dict[str, Any]:
+    """A container's earlier claim, as handles: each key to where its value is (§5.3), the earlier claim or the one it
+    forwarded to already, so any key is read in two hops at most."""
+    try:
+        before = (await store.fetch(tenant, run, prev)).value
+    except ClaimUnavailableError:
+        raise ApplicationError(UNAVAILABLE, type=CLAIM_UNAVAILABLE, non_retryable=True) from None
+    return {
+        k: v if ClaimRef.of(v) is not None else ClaimRef(prev, "/" + escape(k)).to_json() for k, v in before.items()
+    }
 
 
 async def message(data: MessageInput, store: ClaimStore) -> MessageResult:
