@@ -1006,6 +1006,10 @@ class Execution:
         config = resolve.assemble(step.config, values)
         if not step.control:
             return await self._activity(inst, step, config, cel_mode)
+        if step.ref == "flow.filter@1":
+            record = self.program.record(step.id, "/predicate")
+            if record.tainted or contains_marker(config.get("items")):
+                return await self._claimed_filter(inst, step, config.get("items"), record)
         decision = nodes.decide(step.ref, config)
         if decision.failure is not None:
             return _Effect(failure=decision.failure, cel_mode=cel_mode)
@@ -1055,6 +1059,30 @@ class Execution:
             if outcome.value:
                 kept.append(item)
         return _Effect(output={"items": kept, "count": len(kept)}, cel_mode="local" if task.local else "activity")
+
+    async def _claimed_filter(self, inst: Instance, step: Step, items: Any, record: ExpressionRecord) -> _Effect:
+        """A filter over claims, or with a sensitive predicate, run whole in one activity (engine 2b spec §4.4): the
+        workflow gets the kept items' handle and the two counts, never a per-item decision, and the budget is charged
+        the input count."""
+        try:
+            base = await self._bounded_bindings(resolve.bind_base(record, self._view(inst.scope)), step, inst.scope)
+            request = EvaluateRequest(
+                self.program.cel_profile, record.expr, dict(record.declarations), (base.bindings,)
+            )
+            data = CelInput(
+                request.to_json(),
+                claims=self._claiming(step, inst.scope, tainted=record.tainted, decision=False),
+                filter={"items": items, "record": record.to_json()},
+            )
+            outcome = await self._remote(data)
+        except resolve.ValueFailure as e:
+            return _Effect(failure=e.failure)
+        if not outcome.ok:
+            return _Effect(failure=Failure(str(outcome.error), outcome.message))
+        result = outcome.value
+        if not await self._take_budget(f"filter:{iteration_key(inst.scope)}:{step.key}", int(result["input"])):
+            return _Effect(failure=Failure(ITERATION_CAP_EXCEEDED, CAP_MESSAGE))
+        return _Effect(output={"items": result["items"], "count": result["count"]}, cel_mode="activity")
 
     async def _collect(self, c: Collect) -> _Effect:
         step = self.sched.step(c.loop)

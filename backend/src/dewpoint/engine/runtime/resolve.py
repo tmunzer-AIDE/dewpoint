@@ -229,6 +229,15 @@ def bind_view(record: ExpressionRecord, view: ScopeView) -> Bound:
     return Bound(b, measure(b))
 
 
+def bind_base(record: ExpressionRecord, view: ScopeView) -> Bound:
+    """A filter's bindings but its item's (engine 2b spec §4.4): the activity binds each item."""
+    try:
+        b = bind(record, view, skip=("item", "index"))
+    except BindingError as e:
+        raise ValueFailure(evaluate.TYPE_MISMATCH, str(e)) from None
+    return Bound(b, measure(b))
+
+
 def cel_task(
     record: ExpressionRecord, bound: Sequence[Bound], *, local_profile: str | None, version_profile: str
 ) -> CelTask:
@@ -265,6 +274,7 @@ __all__ = [
     "Part",
     "ValueFailure",
     "assemble",
+    "bind_base",
     "cel_task",
     "defaulted",
     "holds_handle",
