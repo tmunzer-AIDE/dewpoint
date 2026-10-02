@@ -307,7 +307,6 @@ class Execution:
         self.depth = parent.depth if parent is not None else 0
         self.run_started_at, self.deadline = run_started_at, deadline
         self.checkpoint_events, self.drain_events = checkpoint_events, drain_events
-        self.vars: dict[str, Any] = {}
         # the tree's root run: what the claims this execution makes record (engine 2b spec §3.1)
         self.root_run_id = parent.root_run_id if parent is not None and parent.root_run_id else run_id
 
@@ -516,7 +515,7 @@ class Execution:
             self.sched.fail(inst, effect.failure)
         else:
             if effect.variables:
-                self.vars.update(effect.variables)
+                self.sched.set_variables(effect.variables, inst)  # the next variable version (engine 2b spec §5.3)
             self.sched.succeed(inst, effect.output, effect.ports)
 
     # --- the budget ------------------------------------------------------------------------------------------------
@@ -681,21 +680,35 @@ class Execution:
 
     # --- values ----------------------------------------------------------------------------------------------------
 
-    def _view(self, scope: ScopeKey, item: tuple[Any, int] | None = None) -> Any:
+    @property
+    def vars(self) -> dict[str, Any]:
+        """The current variables: the scheduler keeps them, with the versions queued loop steps captured."""
+        return self.sched.vars
+
+    def _view(
+        self, scope: ScopeKey, item: tuple[Any, int] | None = None, variables: dict[str, Any] | None = None
+    ) -> Any:
         run = {
             "id": self.run_id,
             "started_at": self.run_started_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
             "now": workflow.now().astimezone(UTC).isoformat().replace("+00:00", "Z"),
         }
-        return resolve.view(self.sched, scope, trigger=self.trigger, variables=dict(self.vars), run=run, item=item)
+        variables = self.vars if variables is None else variables
+        return resolve.view(self.sched, scope, trigger=self.trigger, variables=variables, run=run, item=item)
 
     async def _values(
-        self, owner: Step | None, pairs: list[tuple[str, Any]], scope: ScopeKey
+        self,
+        owner: Step | None,
+        pairs: list[tuple[str, Any]],
+        scope: ScopeKey,
+        variables: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], str | None]:
-        """Every envelope's value, by JSON pointer, and the CEL mode used (activity wins over local)."""
+        """Every envelope's value, by JSON pointer, and the CEL mode used (activity wins over local). `variables`:
+        those a loop step inside an iteration captured when it became ready (engine 2b spec §5.3); otherwise the
+        current ones."""
         values: dict[str, Any] = {}
         mode: str | None = None
-        v = self._view(scope)
+        v = self._view(scope, variables=variables)
         for pointer, value in pairs:
             if isinstance(value, RefValue):
                 values[pointer] = await self._ref(v, value, owner, scope)
@@ -986,8 +999,9 @@ class Execution:
         step = self.sched.step(inst)
         skip = ("/collect",) if step.ref == "flow.loop@1" else ("/predicate",) if step.ref == "flow.filter@1" else ()
         pairs = [(p, v) for p, v in step.values if not any(p == s or p.startswith(s + "/") for s in skip)]
+        captured = self.sched.consume_capture(inst)  # a loop step's variables, as when it became ready (§5.3)
         try:
-            values, cel_mode = await self._values(step, pairs, inst.scope)
+            values, cel_mode = await self._values(step, pairs, inst.scope, captured)
         except resolve.ValueFailure as e:
             if not step.control:  # it never reached an attempt: its one row says why
                 self._queue_unstarted(inst, step, e.failure)
@@ -1462,7 +1476,6 @@ class Execution:
         return {
             "snapshot_format": SNAPSHOT_FORMAT,
             "scheduler": self.sched.to_json(),
-            "variables": self.vars,
             "run_started_at": self.run_started_at.isoformat(),
             "deadline": self.deadline.isoformat(),
             "drained": self._drained,
@@ -1483,7 +1496,6 @@ class Execution:
             raise ValueError(f"unknown snapshot format {snapshot.get('snapshot_format')!r}")
         self.program = program
         self.sched = Scheduler.from_json(program, snapshot["scheduler"])
-        self.vars = dict(snapshot["variables"])
         for key, step, wake, started, mode in snapshot["timers"]:
             inst = Instance(tuple((str(k), int(n)) for k, n in key), uuid.UUID(step))
             self._timers[inst] = datetime.fromisoformat(wake)
