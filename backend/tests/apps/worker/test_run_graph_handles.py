@@ -144,3 +144,38 @@ async def test_a_declassified_condition_over_a_sensitive_value_decides_plainly(e
     assert result.status == "succeeded", result.error
     ran = {r.node_key for r in store.steps(result_run(store))}
     assert "a" in ran and "b" not in ran  # the branch taken: what the listed site reveals (spec §4.3)
+
+
+FLAGS: dict[str, Any] = {
+    "type": "object",
+    "properties": {"vip": {"type": "boolean", "x-sensitive": True}, "tier": {"type": "integer", "x-sensitive": True}},
+    "required": ["vip", "tier"],
+    "additionalProperties": False,
+}
+
+
+async def test_a_reference_to_a_sensitive_value_decides_a_listed_branch_and_case_plainly(
+    env: WorkflowEnvironment,
+) -> None:
+    """A decision that reads a handle is resolved where the claim is read (spec §4.2): a listed branch's condition
+    and a switch case's `when` come back as the plain decision, the only thing they reveal (§4.3)."""
+    store = MemoryStore()
+    g = G()
+    g.settings = {
+        "input_schema": FLAGS,
+        "outputs": {},
+        "declassify": [
+            {"node": str(nid("c")), "field": "/condition"},
+            {"node": str(nid("s")), "field": "/cases/0/when"},
+        ],
+    }
+    g.node("c", "flow.if@1", {"condition": ref("trigger.vip")})
+    g.node("y", "testkit.echo@1", {"value": 1}).node("n", "testkit.echo@1", {"value": 2})
+    g.node("s", "flow.switch@1", {"cases": [{"port": "gold", "when": cel("trigger.tier > 2")}]})
+    g.node("g", "testkit.echo@1", {"value": 3}).node("d", "testkit.echo@1", {"value": 4})
+    g.edge("c", "y", "true").edge("c", "n", "false").edge("s", "g", "gold").edge("s", "d", "default")
+    async with workers(env.client, store):
+        result = await run(env.client, store, g, {"vip": True, "tier": 1}, claimed=True)
+    assert result.status == "succeeded", result.error
+    ran = {r.node_key for r in store.steps(result_run(store))}
+    assert {"y", "d"} <= ran and not {"n", "g"} & ran

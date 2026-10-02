@@ -26,6 +26,7 @@ from temporalio.exceptions import CancelledError as ActivityCancelled
 with workflow.unsafe.imports_passed_through():
     from dewpoint.engine.canonical import canonical_json
     from dewpoint.engine.cel import evaluate as cel
+    from dewpoint.engine.cel.ipc import EvaluateRequest
     from dewpoint.engine.cel.profile import LOCAL_CEL_PROFILE
     from dewpoint.engine.cel.record import ExpressionRecord
     from dewpoint.engine.cel.route import YieldBudget
@@ -719,6 +720,9 @@ class Execution:
         for pointer, value in pairs:
             if isinstance(value, RefValue):
                 values[pointer] = await self._ref(v, value, owner, scope)
+                if _decision(owner, pointer) and contains_marker(values[pointer]):
+                    values[pointer] = await self._declassified(values[pointer], owner, scope)
+                    mode = "activity"
             elif isinstance(value, TemplateValue):
                 parts = [await self._part(p, owner, scope) for p in resolve.template_parts(v, value)]
                 joined = resolve.join(parts)
@@ -790,12 +794,23 @@ class Execution:
     async def _template(self, parts: list[str | resolve.Part], owner: Step | None, scope: ScopeKey) -> Any:
         """A template over a handle, joined in `cel.evaluate` once its parts are resolved: claimed when they read
         sensitive data."""
-        profile = self.program.cel_profile
         data = CelInput(
             {},
             claims=self._claiming(owner, scope, tainted=False, decision=False),
             template=[p if isinstance(p, str) else p.to_json() for p in parts],
         )
+        return resolve.outcome_value(await self._remote(data))
+
+    async def _declassified(self, handle: Any, owner: Step | None, scope: ScopeKey) -> Any:
+        """A decision that reads a handle, made where the claim is read (engine 2b spec §4.2): the value it reveals
+        comes back plain, a boolean or the step fails `type_mismatch` (§4.3)."""
+        request = EvaluateRequest(self.program.cel_profile, "v", {"v": "bool"}, ({"v": handle},)).to_json()
+        data = CelInput(request, claims=self._claiming(owner, scope, tainted=False, decision=True))
+        return resolve.outcome_value(await self._remote(data))
+
+    async def _remote(self, data: CelInput) -> cel.Outcome:
+        """One `cel.evaluate` request of one binding set, or a template: its outcome."""
+        profile = self.program.cel_profile
         await self._send(data)
         try:
             result = await workflow.execute_activity(
@@ -812,7 +827,7 @@ class Execution:
                 raise asyncio.CancelledError from None
             message = f"No evaluator served `{profile}` ({type(e.cause or e).__name__})."
             raise resolve.ValueFailure(cel.PROFILE_UNAVAILABLE, message) from None
-        return resolve.outcome_value(cel.Outcome.from_json(result.outcomes[0]))
+        return cel.Outcome.from_json(result.outcomes[0])
 
     def _claiming(self, owner: Step | None, scope: ScopeKey, *, tainted: bool, decision: bool) -> Claiming:
         return Claiming(
