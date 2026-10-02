@@ -132,6 +132,8 @@ def compile_program(
     open_scopes_cap: int | None = None,
     loop_depth: int | None = None,
 ) -> Program:
+    if open_scopes_cap is not None and open_scopes_cap < 1:  # no cap fit at publish: the bound was never established
+        raise ProgramError(f"The version is pinned an open-iteration cap of {open_scopes_cap}: none fits its bound.")
     graph = parse_graph(graph_json)
     structure, diagnostics = analyze_structure(graph, Catalog(spec_from_manifest(m) for m in manifests.values()))
     errors = [d for d in diagnostics if d.severity == "error"]

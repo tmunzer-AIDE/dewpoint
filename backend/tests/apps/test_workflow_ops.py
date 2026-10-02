@@ -18,6 +18,7 @@ from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.cel.record import ExpressionRecord
 from dewpoint.engine.graph.model import version_hash
+from dewpoint.engine.runtime import bounds
 from dewpoint.engine.runtime.build import build_id
 from tests.apps.api.helpers import PW
 from tests.support.graphs import G, cel, nid, ref
@@ -141,6 +142,21 @@ async def test_a_published_version_pins_its_open_iteration_cap_and_its_loop_dept
     out = await publish(api_sessionmaker, ctx, wf_id, api_settings)
     assert out.errors == [] and out.version is not None
     assert (out.version.open_scopes_cap, out.version.loop_depth) == (100, 2)
+
+
+async def test_publish_refuses_a_version_whose_continued_input_no_cap_bounds(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, monkeypatch
+) -> None:
+    """Engine 2b spec §5.3: with the bound deliberately tightened, no open-iteration cap fits; publish refuses the
+    version rather than pin a cap its runs would read as absent."""
+    monkeypatch.setattr(bounds, "SNAPSHOT_MAX", 10_000)
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    looped = (
+        G().node("o", "flow.loop@1", {"items": [1]}).node("e", "testkit.echo@1", {"value": 1}).edge("o", "e", "body")
+    )
+    out = await publish(api_sessionmaker, ctx, await create(api_sessionmaker, ctx, looped.data()), api_settings)
+    assert out.version is None and [e.code for e in out.errors] == ["version.unbounded"]
 
 
 async def test_publish_refuses_invalid_graphs_and_stale_revisions(

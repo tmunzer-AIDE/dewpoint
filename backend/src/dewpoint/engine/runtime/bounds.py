@@ -11,7 +11,8 @@ iteration budget's waiting needs and children's grants are none at a continue (t
 counters travel, in the envelope.
 
 Publish computes a version's cap and its loop depth `D` (`pinned`) and stores them in the version: runs pin it, so a
-later change of a constant can't change how a pinned run schedules."""
+later change of a constant can't change how a pinned run schedules. A version no cap fits fails to establish the bound
+(`BoundError`): publish refuses it, never pinning a cap of 0 a run could read as none."""
 
 import json
 import uuid
@@ -195,6 +196,10 @@ class Maxima:
         return HANDLE_MAX * (2 * scopes + 5 * loops + self.root_setvars + 1)
 
 
+class BoundError(ValueError):
+    """No open-iteration cap fits the continued-input bound: the bound can't be established for the version."""
+
+
 _ENVELOPE: list[int] = []
 
 
@@ -224,9 +229,16 @@ def maxima(program: Program) -> Maxima:
 
 
 def pinned(program: Program) -> tuple[int, int]:
-    """What publish stores in a version: its open-iteration cap, and its loop depth `D`."""
+    """What publish stores in a version: its open-iteration cap, and its loop depth `D`. Raises BoundError when no
+    cap fits."""
     m = maxima(program)
-    return m.cap(), m.d
+    cap = m.cap()
+    if cap < 1:
+        raise BoundError(
+            f"No open-iteration cap fits the continued-input bound: {m.total(1):,} bytes at a cap of 1, past "
+            f"{SNAPSHOT_MAX:,}."
+        )
+    return cap, m.d
 
 
-__all__ = ["SNAPSHOT_MAX", "TRIGGER_MAX", "Maxima", "maxima", "pinned"]
+__all__ = ["SNAPSHOT_MAX", "TRIGGER_MAX", "BoundError", "Maxima", "maxima", "pinned"]

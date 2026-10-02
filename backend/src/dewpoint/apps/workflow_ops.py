@@ -29,7 +29,7 @@ from dewpoint.engine.graph.validate import (
     validate,
 )
 from dewpoint.engine.registry.catalog import Catalog, spec_from_manifest
-from dewpoint.engine.runtime.bounds import pinned
+from dewpoint.engine.runtime.bounds import BoundError, pinned
 from dewpoint.engine.runtime.program import compile_program
 
 
@@ -194,7 +194,10 @@ async def publish(
     version_id = uuid.uuid4()
     graph_settings = checked.graph.settings
     authored = graph_hash(checked.graph)
-    cap, depth = await _pinned(s, checked)
+    try:
+        cap, depth = await _pinned(s, checked)
+    except BoundError as e:  # engine 2b spec §5.3: the continued-input bound can't be established for it
+        return Published(None, [Diagnostic(code="version.unbounded", message=str(e))], warnings)
     fh = checked.result.failure_handler_version_id
     version = await service.insert_version(
         s,
