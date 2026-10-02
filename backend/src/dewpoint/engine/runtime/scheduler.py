@@ -813,8 +813,12 @@ class Scheduler:
 
     def _start_deferred(self) -> list[Instance]:
         """Queued loop steps that may start now, each taking a slot its loop's first iteration then uses: under the
-        cap, in scheduling order; past it, one per level on the progress path, from that level's reserved scope."""
+        cap, in scheduling order; past it, one per level on the progress path, from that level's reserved scope. None
+        while the iteration budget waits or asks: queued loop steps share its one request, and never add a need of
+        their own (§5.3). Once it decides, they start: a refused one fails at its first iteration."""
         out: list[Instance] = []
+        if not self._deferred or self.budget.waiting or self.budget.asking:
+            return out
         while self._taken() < self.cap and self._deferred:
             _, inst = heapq.heappop(self._deferred_heap)
             if inst in self._deferred:  # else it left the queue meanwhile
@@ -961,6 +965,8 @@ class Scheduler:
         `check` (tests): restoring would rebuild exactly what's queued now."""
         if self._settled or self._cancels or self.ended is not None:
             raise ValueError("a snapshot is taken only between units, and never after the run ended")
+        if self.budget.waiting or self.budget.reserved or self._budget_waits:  # the at-continue term (§5.3)
+            raise ValueError("a snapshot is taken only when the iteration budget holds no waiting need or child grant")
         if check:
             self._check_queues()
         loops = set(self.loops)
