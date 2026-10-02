@@ -532,9 +532,10 @@ async def child_input(data: ChildInput, store: ClaimStore) -> ChildInputResult:
 
 
 async def message(data: MessageInput, store: ClaimStore) -> MessageResult:
-    """`claims.message`: a failure's message the workflow built from data (`flow.fail`), as it may be recorded: its
-    handles resolved, and every secret the run knows masked, against the index as it is now (§3.7). The workflow
-    holds no secret to mask with, and the message becomes the run's error, its result's and its failure handler's."""
+    """`claims.message`: a failure's message (`flow.fail`), as it may be recorded: its handles resolved, and every
+    secret the run knows masked, against the index as it is now (§3.7, §4.6), a literal's too: it may repeat a secret
+    learned since it was written. The workflow holds no secret to mask with, and the message becomes the run's
+    error, its result's and its failure handler's."""
     tenant, run = caller()
     try:
         found = await resolve_value(data.value, _fetcher(store, tenant, run))

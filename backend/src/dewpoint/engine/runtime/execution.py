@@ -30,7 +30,7 @@ with workflow.unsafe.imports_passed_through():
     from dewpoint.engine.cel.profile import LOCAL_CEL_PROFILE
     from dewpoint.engine.cel.record import ExpressionRecord
     from dewpoint.engine.cel.route import YieldBudget
-    from dewpoint.engine.graph.values import CelValue, LiteralValue, RefValue, TemplateValue
+    from dewpoint.engine.graph.values import CelValue, RefValue, TemplateValue
     from dewpoint.engine.handles import CLAIM_UNAVAILABLE, MISSING, RESERVED, ClaimRef, contains_marker
     from dewpoint.engine.registry import control
     from dewpoint.engine.runtime import nodes, resolve
@@ -123,7 +123,6 @@ AMBIGUOUS = "ambiguous"  # a manifest's side_effect: the request may have been s
 CONTINUE = "continue"  # `_drive`'s answer when the execution continues-as-new
 CLAIM_REFUSED = "A claim this run may not read, or that doesn't exist."
 INPUT_INVALID = "input_invalid"  # a sub-flow's input that doesn't match its schema, found where it's resolved
-UNREADABLE_MESSAGE = "The workflow failed; its message couldn't be read."
 
 
 class ExposedError(Exception):
@@ -875,9 +874,11 @@ class Execution:
     async def _evaluate(
         self, task: resolve.CelTask, *, owner: Step | None = None, scope: ScopeKey = (), decision: bool = False
     ) -> list[cel.Outcome]:
-        """Each binding set's outcome. Sent to `cel.evaluate` with what to do about claims when a binding is a handle,
-        or the expression reads sensitive data (engine 2b spec §4.2): resolve them there, and claim the results, or
-        give a declassified `decision` back plain."""
+        """Each binding set's outcome. In `cel.evaluate`, every request says what to do about claims (engine 2b spec
+        §4.2, §3.7): resolve its handles, claim a result that read sensitive data or repeats a secret the run knows, or
+        give a declassified `decision` back plain, and mask every error. Here, a local error may quote a value that
+        repeats a secret, and this workflow holds none to mask it with: that binding set is evaluated again there, and
+        its masked error is the one kept (§4.6). Sending the message itself out would record it unmasked."""
         if task.local:
             outcomes = []
             for bindings in task.bindings:  # a filter's items one at a time: each is an evaluation
@@ -887,13 +888,18 @@ class Execution:
                     outcome = cel.Outcome(error=cel.EVALUATION_ERROR, message=RESERVED)
                 outcomes.append(outcome)
                 self._yield.charge(task.record)
+            failed = [i for i, o in enumerate(outcomes) if not o.ok and o.message != RESERVED]
+            if failed:
+                again = resolve.CelTask(task.record, tuple(task.bindings[i] for i in failed), False)
+                for i, outcome in zip(failed, await self._evaluate(again, owner=owner, scope=scope, decision=decision),
+                                      strict=True):  # fmt: skip
+                    outcomes[i] = outcome
             return outcomes
         out: list[cel.Outcome] = []
         profile = self.program.cel_profile
-        claiming = task.record.tainted or any(contains_marker(b) for b in task.bindings)
 
-        def claims() -> Claiming | None:  # a seed per request: its results' claim ids
-            return self._claiming(owner, scope, tainted=task.record.tainted, decision=decision) if claiming else None
+        def claims() -> Claiming:  # a seed per request: its results' claim ids
+            return self._claiming(owner, scope, tainted=task.record.tainted, decision=decision)
 
         envelope = _json_bytes(CelInput(resolve.CelTask(task.record, (), False).request(profile), claims=claims()))
         start, count = 0, len(task.bindings)
@@ -989,10 +995,11 @@ class Execution:
         config = resolve.assemble(step.config, values)
         if not step.control:
             return await self._activity(inst, step, config, cel_mode)
-        if step.ref == "flow.fail@1" and any(
-            p == "/message" and not isinstance(v, LiteralValue) for p, v in step.values
-        ):
-            config = {**config, "message": await self._message(config.get("message"))}
+        if step.ref == "flow.fail@1":  # masked where the index is read, a literal too: it may repeat a secret (§3.7)
+            message = await self._message(config.get("message"))
+            if isinstance(message, Failure):  # not the intended failure: the boundary's own, with its code
+                return _Effect(failure=message, cel_mode=cel_mode)
+            config = {**config, "message": message}
         if step.ref == "flow.filter@1":
             record = self.program.record(step.id, "/predicate")
             if record.tainted or contains_marker(config.get("items")):
@@ -1176,11 +1183,12 @@ class Execution:
                 return Failure(VERSION_UNUSABLE, e.cause.message)
             return Failure(INTERNAL_ERROR, f"Claims couldn't cross to another run ({type(e.cause or e).__name__}).")
 
-    async def _message(self, value: Any) -> str:
-        """A failure's message built from data, as it may be recorded (engine 2b spec §3.7): resolved and masked in
-        `claims.message`, which reads the run tree's secret index. This workflow holds no secret to mask it with."""
+    async def _message(self, value: Any) -> str | Failure:
+        """A failure's message as it may be recorded (engine 2b spec §3.7, §4.6): resolved and masked in
+        `claims.message`, which reads the run tree's secret index; this workflow holds no secret to mask it with. Or
+        why that failed, with its own safe code."""
         found = await self._crossing(CLAIMS_MESSAGE, MessageInput(value, self.root_run_id), MessageResult)
-        return UNREADABLE_MESSAGE if isinstance(found, Failure) else found.text
+        return found if isinstance(found, Failure) else found.text
 
     async def _hand_over(self, child_run: str, version: str, value: dict[str, Any]) -> dict[str, Any] | Failure:
         """A sub-flow's input, split for the child as a trigger is, this run's handles in it granted to the child

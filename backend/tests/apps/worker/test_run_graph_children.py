@@ -32,6 +32,9 @@ LISTS = {
     "required": ["items"],
 }
 NUMBER = {"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]}
+# A step that fails the run in the turn it starts, in workflow code: the trigger `{}`, which the harness starts without
+# admitting it, doesn't hold `items`. A `flow.fail` takes a turn more: its message is masked in an activity (§3.7).
+TRANSFORM, UNREAD = "flow.transform@1", {"fields": {"n": ref("trigger.items")}}
 
 
 def graph(schema: dict[str, Any] | None = None, **outputs: Any) -> G:
@@ -482,11 +485,11 @@ async def test_a_batch_that_fails_as_a_workflow_fails_its_loop_and_its_whole_gra
 
 
 async def test_a_sub_flow_the_run_ends_before_it_starts_uses_nothing(env: WorkflowEnvironment) -> None:
-    """The run fails in the turn that would start its sub-flow: the start never goes out, and the sub-flow's grant
-    comes back whole (reviewed: it was counted as used)."""
+    """The run fails while its sub-flow's input crosses to the child: the start never goes out, and the sub-flow's
+    grant comes back whole (reviewed: it was counted as used)."""
     store = MemoryStore()
     g = graph()
-    g.node("r", RUN, {"workflow_id": str(store.publish(sleeper()))}).node("f", FAIL, {"message": "at once"})
+    g.node("r", RUN, {"workflow_id": str(store.publish(sleeper()))}).node("t", TRANSFORM, UNREAD)
     handle, result = await finished(env, store, g, {})
     assert (result.status, result.iterations, store.runs[run_id_of(handle)].iterations) == ("failed", 0, 0)
     assert await children_started(handle) == 0
@@ -495,9 +498,8 @@ async def test_a_sub_flow_the_run_ends_before_it_starts_uses_nothing(env: Workfl
 async def test_a_batch_the_run_ends_before_it_starts_uses_nothing(env: WorkflowEnvironment) -> None:
     store = MemoryStore()
     g = graph()
-    g.node("l", LOOP, {"items": list(range(150))}).node("x", ECHO).edge("l", "x", "body")
-    g.node("t", "flow.transform@1", {"fields": {"n": 1}}).node("f", FAIL, {"message": "at once"}).edge("t", "f")
-    handle, result = await finished(env, store, g, {})  # `f` fails the run in the turn the first batch would start
+    g.node("l", LOOP, {"items": list(range(150))}).node("x", ECHO).edge("l", "x", "body").node("t", TRANSFORM, UNREAD)
+    handle, result = await finished(env, store, g, {})  # `t` fails the run in the turn the first batch would start
     assert (result.status, result.iterations, store.runs[run_id_of(handle)].iterations) == ("failed", 0, 0)
     assert await children_started(handle) == 0
 
