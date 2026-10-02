@@ -171,8 +171,9 @@ Anyone who can view runs can read the projection, so it keeps secrets out:
 - A field the node's schema marks sensitive shows as `[redacted]`, however deep: nested models, lists and optional
   values included.
 - A sensitive value shows as its handle. Text that repeats a secret of the run tree's index is masked as
-  `[redacted]` wherever it reappears: copied by a transform, embedded in a template, passed to another step, echoed in
-  an error message, a CEL error or a `fail` node's message. The index learns from every sensitive claim (the input's,
+  `[redacted]` wherever it reappears: copied by a transform, embedded in a template, passed to another step, in a CEL
+  error or a `fail` node's message. A plugin's failure message is shown only when it's text written in the plugin's
+  code ([below](#what-the-workers-log-shows)). The index learns from every sensitive claim (the input's,
   the outputs') and from nodes' configs, whose sensitive fields are indexed before the step's attempt. Values under 4
   characters aren't masked, and neither is a secret that CEL has transformed (encoded, sliced): only copies are
   recognized.
@@ -192,9 +193,9 @@ workflow id is `t:<tenant>:run:<run id>`, a sub-flow's and a failure handler's t
 
 ## What the worker's log shows
 
-The worker's log holds no text a run's data could have written unless it's proven to be code. A secret a plugin makes
-itself, such as a token an API has just issued, is in no secret index until the step's output is claimed, so masking
-can't catch it there:
+The log lines the worker controls hold no text a run's data could have written unless it's proven to be code: its own
+logs, a plugin's `ctx.log`, and Temporal's records of activities. A secret a plugin makes itself, such as a token an
+API has just issued, is in no secret index until the step's output is claimed, so masking can't catch it there:
 
 - A plugin's `ctx.log` keeps an event, a field's name and a field's value only when each is a constant written in the
   plugin's own source, a boolean or null. A computed event is logged as `step_event_withheld`, a computed field name
@@ -204,11 +205,18 @@ can't catch it there:
 - A bug in a node (an unexpected exception, a validator's or the claim store's failure) is logged with its type and
   where it was raised (`where`: file, function and line), and with its text only when that's a constant of the
   plugin.
-- Temporal's own record of a failed attempt keeps the error's code and drops its text and traceback; its records that
-  would quote an error or heartbeat details are withheld.
+- Temporal's records of activities keep only the exact text of the SDK's fixed messages (never what follows it, such
+  as an activity's details or an error's text) and a validated code; the rest are logged as `Activity record
+  withheld`.
 
-A plugin's own failure message (`FatalError`, `RetryableError`, `OutcomeUnknownError`) is its step's error: it's
-masked against the run tree's index and shown in the projection, so it must not quote a secret the run doesn't know.
+Outside these paths nothing is promised: a plugin that logs through Python's `logging` or `print`, or calls a library
+that logs, writes what it writes. Plugins log through `ctx.log`.
+
+A plugin's own failure (`FatalError`, `RetryableError`, `OutcomeUnknownError`) is its step's error, held to the same
+rule: its code is shown only when it's a constant of the plugin's code and a dotted lowercase identifier
+(`mist.rate_limited`), else as `node_failed`; its message only when it's a constant of the plugin's code, else as
+"The node's message isn't shown: it was computed, and only text written in the node's code is." The retry behavior is
+its error class's either way.
 
 ## How a run ends
 
@@ -231,8 +239,9 @@ key `$claim` too), `unexpected_error`, `evaluation_error`, `type_mismatch`, `tim
 `input_too_large`, `item_cap_exceeded`, `iteration_cap_exceeded`, `node_type_unavailable` (the registry lists the node
 type, but no worker of this build runs it: install its plugin on the workers), `payload_too_large`,
 `claim_unavailable` (a claim the run may not read or that isn't there, or the step's output couldn't be stored as
-claims after the node ran: its effect happened, and its row says so), `secret_index_limit` and `input_invalid` (a
-sub-flow's input that doesn't match the child's input schema). A sub-flow step fails with its sub-flow's code, and with `terminated`
+claims after the node ran: its effect happened, and its row says so), `secret_index_limit`, `input_invalid` (a
+sub-flow's input that doesn't match the child's input schema) and `node_failed` (a plugin's failure whose own code
+wasn't a constant identifier of its code, [above](#what-the-workers-log-shows)). A sub-flow step fails with its sub-flow's code, and with `terminated`
 when an operator terminated the sub-flow; a loop fails with `terminated` when one of its batches was.
 
 ## Attempts and retries

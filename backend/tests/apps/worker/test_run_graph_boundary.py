@@ -12,7 +12,7 @@ from temporalio import activity
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
-from dewpoint.apps.worker.activities import engine_activities
+from dewpoint.apps.worker.activities import MESSAGE_WITHHELD, engine_activities
 from dewpoint.engine.handles import ClaimRef
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, StepInput, StepResult, step_activity
 from dewpoint.engine.runtime.workflow import LoopBatch, RunGraph
@@ -71,9 +71,11 @@ async def test_output_that_holds_the_marker_is_refused(env: WorkflowEnvironment)
     assert result.outputs == {"code": "output_schema_violation"}
 
 
-async def test_a_message_that_repeats_a_secret_is_masked_before_it_leaves_the_activity(
+async def test_a_message_a_node_computed_from_a_secret_never_leaves_the_activity(
     env: WorkflowEnvironment,
 ) -> None:
+    """A node's failure message is shown only when it's a constant of its code (engine 2b spec §3.7, §6.7): one it
+    built from its input, here quoting the token it was sent, is replaced by the generic message; its code stays."""
     store = MemoryStore()
     schema = {"type": "object", "properties": {"tok": SECRET}, "required": ["tok"], "additionalProperties": False}
     g = graph(schema)
@@ -83,8 +85,8 @@ async def test_a_message_that_repeats_a_secret_is_masked_before_it_leaves_the_ac
         result = await handle.result()
     assert result.status == "succeeded", result.error
     [row] = [r for r in store.steps(run_id_of(handle)) if r.node_key == "p"]
-    assert row.error_message == "the receiver rejected the request for [redacted]"
-    assert row.input_preview["token"] != "hunter2-hunter2"
+    assert (row.error_code, row.error_message) == ("testkit.rejected", MESSAGE_WITHHELD)
+    assert "hunter2-hunter2" not in repr(store.rows) + repr(store.runs)
 
 
 async def test_plain_data_at_a_sensitive_position_fails_the_run(env: WorkflowEnvironment) -> None:
@@ -112,7 +114,8 @@ async def test_a_secret_indexed_while_a_step_runs_is_claimed_and_masked_at_its_b
     env: WorkflowEnvironment,
 ) -> None:
     """Engine 2b spec §3.7: the index a step read before its attempt can be stale at its end, when another activity
-    indexed a secret meanwhile. Its output and its message are checked against the index as it is at the boundary."""
+    indexed a secret meanwhile. Its output is checked against the index as it is at the boundary; its message, computed
+    from its input, isn't shown at all (§6.7)."""
     store = MemoryStore()
     note = {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"],
             "additionalProperties": False}  # fmt: skip
@@ -126,7 +129,7 @@ async def test_a_secret_indexed_while_a_step_runs_is_claimed_and_masked_at_its_b
     assert result.status == "succeeded", result.error
     assert result.outputs is not None
     assert held(store, result.outputs["echoed"]) == ("hunter2-hunter2", True)  # claimed: it repeats a secret
-    assert result.outputs["said"] == "failed on [redacted]"  # masked before it left the activity
+    assert result.outputs["said"] == MESSAGE_WITHHELD  # its computed message: never shown
 
 
 async def test_a_failure_message_that_repeats_a_secret_is_masked_in_the_result_and_in_history(

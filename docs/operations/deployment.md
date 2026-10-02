@@ -111,6 +111,9 @@ What a run does differently on ABI 6:
 - A run's input is checked against its input schema when it's admitted: a trigger that doesn't match is refused
   before any run exists.
 - A loop's `failures` list in index order, not in the order the iterations failed.
+- A plugin's failure shows its message only when it's text written in the plugin's code, and its code only when that's
+  a constant identifier of its code (`node_failed` otherwise): a message a plugin computed is replaced by a generic
+  one ([`runs.md`](runs.md#what-the-workers-log-shows)).
 - A loop that collects more than 64 KiB, or more than the run's live state holds, outputs one claim:
   `steps.<loop>.output.items` is a handle, read by position as before.
 

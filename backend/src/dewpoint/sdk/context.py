@@ -8,7 +8,8 @@ class StepLogger(Protocol):
     are kept when each is a constant of the plugin's source (a string or number literal), a boolean or null. A
     computed event is withheld, a computed field name dropped, and any other value redacted, so log
     `"token_refreshed"`, not `f"refreshed {token}"`. A field whose name looks secret (`password`, `token`, …) is
-    redacted even then."""
+    redacted even then. Only this logger is bound by it: a plugin's own `logging` or `print`, or a library's logging,
+    isn't, so a plugin logs through `ctx.log`."""
 
     def info(self, event: str, **fields: object) -> None: ...
 

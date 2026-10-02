@@ -66,13 +66,22 @@ def test_temporals_activity_records_keep_their_fixed_messages_and_no_error_text(
         raise ApplicationError(f"failed holding {COMPUTED}", type="leaky_failed")
     except ApplicationError:
         activity.warning("Completing activity as failed ({'activity_type': 'x'})", exc_info=True)
+    try:
+        raise ApplicationError("failed", type=COMPUTED)  # a code that isn't a safe identifier
+    except ApplicationError:
+        activity.warning("Completing activity as failed", exc_info=True)
+    activity.warning(f"Completing activity as failed {COMPUTED}")  # a fixed start, a canary after it
     activity.warning(f"Completing as failure during heartbeat with error of type {ValueError}: {COMPUTED}")
     logging.getLogger("temporalio.worker._activity").debug("Recording heartbeat with details %s", [COMPUTED])
+    logging.getLogger("temporalio.worker._activity").debug("Running activity %s (token %s)", COMPUTED, b"t")
     activity.debug("Starting activity")
     assert [r.getMessage() for r in caplog.records] == [
-        "Completing activity as failed ({'activity_type': 'x'}) [leaky_failed: its text withheld]",
-        "Activity record [its text withheld]",
-        "Activity record [its text withheld]",
+        "Completing activity as failed [leaky_failed]",  # its exact fixed text and its validated code, nothing more
+        "Completing activity as failed [error]",
+        "Completing activity as failed",
+        "Activity record withheld",
+        "Activity record withheld",
+        "Running activity",
         "Starting activity",
     ]
     assert COMPUTED not in caplog.text and all(r.exc_info is None for r in caplog.records)

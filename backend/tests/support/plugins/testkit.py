@@ -249,7 +249,7 @@ class SlowEcho(Node):
 class LeakyConfig(BaseModel):
     seed: str
     size: int = Field(ge=1, le=1024)
-    how: Literal["log", "crash", "fail"] = "log"
+    how: Literal["log", "crash", "fail", "fail_code"] = "log"
 
 
 class LeakyOutput(BaseModel):
@@ -260,7 +260,7 @@ class Leaky(Node):
     """Makes a secret of `size` characters from `seed`, as an API issues a token, and leaks it before it's returned
     at a sensitive position, as a careless plugin would (engine 2b spec §12): before it's claimed, no index knows it.
     `log` logs it in an event, a neutral field, a nested value and a field's name; `crash` raises an unexpected error
-    quoting it; `fail` fails quoting it."""
+    quoting it; `fail` fails quoting it in its message, `fail_code` in its code."""
 
     type = "testkit.leaky"
     version = 1
@@ -274,6 +274,8 @@ class Leaky(Node):
             raise RuntimeError(f"crashed holding {token}")
         if config.how == "fail":
             raise FatalError("leaky_failed", f"failed holding {token}")
+        if config.how == "fail_code":
+            raise FatalError(f"leaky.{token}", "the token was refused")
         ctx.log.info(f"issued {token}", detail=token, nested={"token": token}, ok=True, **{token: 1})
         ctx.log.warning("token_issued", detail=token, ok=True, size=config.size, kind="bearer")
         return LeakyOutput(token=token)

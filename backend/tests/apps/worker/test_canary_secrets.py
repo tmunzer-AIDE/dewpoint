@@ -19,6 +19,7 @@ import pytest
 import structlog
 from temporalio.testing import WorkflowEnvironment
 
+from dewpoint.apps.worker.activities import MESSAGE_WITHHELD, NODE_FAILED
 from dewpoint.engine.handles import resolve_value
 from dewpoint.engine.runtime import size
 from tests.apps.worker.harness import (
@@ -126,7 +127,7 @@ async def test_no_history_projection_or_log_of_a_canary_run_holds_its_secrets(
     assert outputs["items"] == [IN_TRIGGER] * 101
     assert outputs["kept"] == 2
     assert outputs["spilled"] == ["x" * EACH] * BLOBS + [IN_TRIGGER, FROM_A_PLUGIN]
-    assert result.outputs["failed"] == "failed on [redacted]"  # masked where it left the activity
+    assert result.outputs["failed"] == MESSAGE_WITHHELD  # the plugin's computed message: never shown
     assert result.outputs["crashed"] == "The node raised RuntimeError."
     types = [h.events[0].workflow_execution_started_event_attributes.workflow_type.name for h in histories]
     assert types.count("RunGraph") == 2 and "LoopBatch" in types  # the run, its sub-flow, its batches
@@ -220,14 +221,24 @@ async def test_a_crash_quoting_a_secret_never_claimed_logs_its_type_and_place_on
         assert TOKEN not in where
 
 
-async def test_a_failure_quoting_a_secret_never_claimed_isnt_logged(
-    env: WorkflowEnvironment, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize(
+    ("how", "code", "message"),
+    [
+        ("fail", "leaky_failed", MESSAGE_WITHHELD),  # a computed message: the generic one instead, its code kept
+        ("fail_code", NODE_FAILED, "the token was refused"),  # a computed code: the generic one, its message kept
+    ],
+)
+async def test_a_failure_quoting_a_secret_never_claimed_shows_only_the_plugins_constants(
+    env: WorkflowEnvironment, caplog: pytest.LogCaptureFixture, how: str, code: str, message: str
 ) -> None:
-    """A plugin fails quoting a token it made and never returned. Temporal's worker logs a failed attempt with its
-    exception: the record keeps the error's type and drops its text. (The message itself is the step's error, masked
-    against the index as every failure's is (§3.7), which can't know this token: the projection shows the plugin's
-    own message as the plugin wrote it.)"""
-    seen = await observed(env, caplog, leaky("fail"))
-    assert seen.result.status == "succeeded", seen.result.error
-    assert "Completing activity as failed" in seen.logs and "leaky_failed" in seen.logs
-    assert TOKEN not in seen.logs
+    """A plugin fails quoting a token it made and never returned, in its message or its code. No index knows the
+    token, so masking proves nothing: a failure's code is shown only when it's a safe identifier its plugin's code
+    declares, its message only when it's a constant of that code, and a generic one stands for either otherwise. The
+    retry behavior stays its error class's. Temporal's record of the failed attempt keeps its fixed text and the
+    validated code. The token reaches no history, row or log."""
+    seen = await observed(env, caplog, leaky(how, code=ref("steps.k.error.code", default=""),
+                                             said=ref("steps.k.error.message", default="")))  # fmt: skip
+    assert seen.result.outputs == {"code": code, "said": message}
+    assert f"Completing activity as failed [{code}]" in seen.logs
+    for where in (seen.plain, seen.rows, seen.logs):
+        assert TOKEN not in where

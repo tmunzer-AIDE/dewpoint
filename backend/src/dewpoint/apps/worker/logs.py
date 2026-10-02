@@ -9,8 +9,12 @@ code, never a run's data: that's what a log may hold.
   dropped (`fields_withheld` counts them), and any other value redacted, a number included (a PIN is one). A field
   whose name looks secret is redacted even then.
 - A bug in a node is logged by its type and where it was raised; its text only when that's such a constant.
-- Temporal's worker logs a failed attempt with its exception, and some of its messages quote an error or heartbeat
-  details: its activity records keep their message only when it's one of the SDK's fixed ones, never an exception."""
+- Temporal's worker logs a failed attempt with its exception, and some of its messages quote an error, heartbeat
+  details or an activity's info: its activity records keep only the exact text of one of the SDK's fixed messages and
+  a validated code, never what follows the text, nor an exception.
+
+These are the log paths the worker controls: `ctx.log`, its own logs and Temporal's activity records. A plugin that
+logs through Python's `logging` or `print`, or a library it calls that logs, is outside them."""
 
 import functools
 import logging
@@ -27,6 +31,9 @@ from temporalio.exceptions import ApplicationError
 
 REDACTED = "[redacted]"
 WITHHELD = "step_event_withheld"
+CODE_MAX = 64
+_CODE = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*")  # a step's code: `echo_failed`, `mist.rate_limited`
+_CLASS = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")  # an exception's class
 WHERE_FRAMES = 8  # the innermost frames a bug's log names
 _SECRET = re.compile(r"password|secret|token|credential|authorization|api_?key", re.IGNORECASE)
 
@@ -60,6 +67,11 @@ def literals(module: str) -> Literals:
         if code is not None:
             out |= {(type(c), c) for c in _constants([code]) if type(c) in (str, int, float)}
     return frozenset(out)
+
+
+def safe_code(code: object) -> bool:
+    """A code's shape: a dotted lowercase identifier of at most CODE_MAX characters, nothing a message could hide in."""
+    return isinstance(code, str) and len(code) <= CODE_MAX and _CODE.fullmatch(code) is not None
 
 
 def proven(value: object, known: Literals) -> bool:
@@ -108,36 +120,43 @@ def bug(e: BaseException, known: Literals) -> dict[str, Any]:
     return out
 
 
-# The SDK's activity messages that hold nothing of a run's (its own text, ids, types, encrypted payloads).
-_FIXED = (
-    "Completing activity as failed",
-    "Completing as cancelled",
-    "Completing asynchronously",
-    "Completing as failure due to unhandled cancel error produced by activity",
-    "Completing activity with completion: ",
-    "Starting activity",
-    "Running activity ",
-    "Cancelling activity ",
-    "Failed completing activity task",
-    "Failed recording heartbeat",
-    "Final heartbeat task didn't trap error",
+# The SDK's activity messages, each kept exactly as written here: a record is matched by its start, and only this
+# text is kept, never what follows it (an activity's info, an error's text, heartbeat details). Longest first, so a
+# message matches its own text, not a shorter one's.
+_FIXED = tuple(
+    sorted(
+        (
+            "Completing activity as failed",
+            "Completing as cancelled",
+            "Completing asynchronously",
+            "Completing as failure due to unhandled cancel error produced by activity pause",
+            "Completing as failure due to unhandled cancel error produced by activity reset",
+            "Completing activity with completion",
+            "Starting activity",
+            "Running activity",
+            "Cancelling activity because failed recording heartbeat",
+            "Cancelling activity",
+            "Failed completing activity task",
+            "Failed recording heartbeat (activity already done, cannot error)",
+            "Final heartbeat task didn't trap error",
+        ),
+        key=len,
+        reverse=True,
+    )
 )
+WITHHELD_RECORD = "Activity record withheld"
 
 
 class _Withheld(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
-        message = record.getMessage()
+        written = str(record.msg)
+        text = next((f for f in _FIXED if written.startswith(f)), WITHHELD_RECORD)
         error = record.exc_info[1] if record.exc_info else None
-        if not message.startswith(_FIXED):
-            message = "Activity record"
         if error is not None:
-            kind = type(error).__name__
-            if isinstance(error, ApplicationError) and error.type:
-                kind = error.type  # a step's code
-            message += f" [{kind}: its text withheld]"
-        elif message == "Activity record":
-            message += " [its text withheld]"
-        record.msg, record.args, record.exc_info, record.exc_text = message, None, None, None
+            code = error.type if isinstance(error, ApplicationError) else type(error).__name__
+            valid = safe_code(code) or (isinstance(code, str) and len(code) <= CODE_MAX and _CLASS.fullmatch(code))
+            text += f" [{code}]" if valid else " [error]"
+        record.msg, record.args, record.exc_info, record.exc_text = text, None, None, None
         return True
 
 
@@ -152,4 +171,14 @@ def withhold_activity_errors() -> None:
             logger.addFilter(_WITHHOLD)
 
 
-__all__ = ["REDACTED", "WITHHELD", "StepLog", "bug", "literals", "proven", "withhold_activity_errors"]
+__all__ = [
+    "REDACTED",
+    "WITHHELD",
+    "WITHHELD_RECORD",
+    "StepLog",
+    "bug",
+    "literals",
+    "proven",
+    "safe_code",
+    "withhold_activity_errors",
+]

@@ -99,6 +99,7 @@ from dewpoint.engine.runtime.projection import REDACTED, location
 from dewpoint.sdk import (
     FatalError,
     Node,
+    NodeError,
     NodeKind,
     OutcomeUnknownError,
     Plugin,
@@ -114,6 +115,8 @@ SIMULATION_UNAVAILABLE = "simulation_unavailable"
 UNEXPECTED_ERROR = "unexpected_error"
 INVALID_REQUEST = "invalid_request"
 OUTPUT_UNCLAIMED = "The step's output couldn't be stored as claims, so it isn't used (engine 2b spec §3.6)."
+NODE_FAILED = "node_failed"  # a node's failure whose own code isn't a safe identifier its code declares
+MESSAGE_WITHHELD = "The node's message isn't shown: it was computed, and only text written in the node's code is."
 _log = structlog.get_logger("dewpoint.worker")
 _PYDANTIC_CODES = frozenset(get_args(ErrorType))  # every built-in validation error type
 # The `format`s an emitted output is checked for: those whose checks agree with what pydantic emits, and need no
@@ -169,6 +172,16 @@ def _code(error_type: str) -> str:
     return error_type if error_type in _PYDANTIC_CODES else "custom_error"
 
 
+def _declared(e: NodeError, node: type[Node]) -> tuple[str, str]:
+    """A node's failure as its step shows it (engine 2b spec §3.7, §6.7): its code only when it's a safe identifier its
+    plugin's code declares, its message only when it's a constant of that code, a generic one otherwise. A secret the
+    node made and quoted is in no index yet, so masking proves nothing about computed text; the message is still
+    masked when it leaves (a constant can repeat a secret the run knows)."""
+    known = logs.literals(node.__module__)
+    code = e.code if logs.safe_code(e.code) and logs.proven(e.code, known) else NODE_FAILED
+    return code, (e.message if logs.proven(e.message, known) else MESSAGE_WITHHELD)
+
+
 async def _call(node: type[Node], step: StepInput, schema: Mapping[str, Any]) -> tuple[BaseModel, str]:
     try:
         config = node.Config.model_validate(step.config)
@@ -191,11 +204,11 @@ async def _call(node: type[Node], step: StepInput, schema: Mapping[str, Any]) ->
                 return found, APPLIED
         return await instance.run(ctx, config), APPLIED
     except OutcomeUnknownError as e:
-        raise _StepFailed(e.code, e.message, retryable=False, outcome=OUTCOME_UNKNOWN) from None
+        raise _StepFailed(*_declared(e, node), retryable=False, outcome=OUTCOME_UNKNOWN) from None
     except FatalError as e:
-        raise _StepFailed(e.code, e.message, retryable=False) from None
+        raise _StepFailed(*_declared(e, node), retryable=False) from None
     except RetryableError as e:
-        raise _StepFailed(e.code, e.message, retryable=True) from None
+        raise _StepFailed(*_declared(e, node), retryable=True) from None
     except asyncio.CancelledError:
         raise
     except Exception as e:

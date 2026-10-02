@@ -13,6 +13,7 @@ from temporalio.client import WorkflowFailureError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner
 
+from dewpoint.apps.worker.activities import MESSAGE_WITHHELD
 from dewpoint.engine.canonical import canonical_json
 from dewpoint.engine.handles import ClaimRef
 from dewpoint.engine.runtime import nodes
@@ -514,7 +515,7 @@ async def test_sensitive_values_never_reach_the_projection(env: WorkflowEnvironm
     assert store.claims[ClaimRef.of(line).id].value == "key=s3cr3t-value"  # type: ignore[union-attr]
     assert ClaimRef.of(rows["e"].input_preview["value"]) is not None  # the echo got it resolved in its activity
     assert ClaimRef.of(rows["e"].output_preview["value"]) is not None  # and what it returned repeats it: claimed
-    assert rows["p"].error_message == "the receiver rejected the request: [redacted]"
+    assert rows["p"].error_message == MESSAGE_WITHHELD  # the node's own computed message: never shown
     assert rows["f"].error_message == "gave up on [redacted]"
     assert rows["k"].error_message == 'NOT_FOUND: Key not found in map : "[redacted]"'
     assert store.runs[run_id_of(handle)].error_message == "gave up on [redacted]"
@@ -571,7 +572,7 @@ async def test_a_sensitive_config_value_is_masked_where_it_is_copied_or_echoed(e
     rows = {r.node_key: r for r in store.steps(run_id_of(handle))}
     assert ClaimRef.of(rows["t"].output_preview["copy"]) is not None  # a copy of a handle
     assert rows["p"].input_preview == {"outcome": "rejected", "token": "[redacted]"}
-    assert rows["p"].error_message == rows["q"].error_message == "the receiver rejected the request for [redacted]"
+    assert rows["p"].error_message == rows["q"].error_message == MESSAGE_WITHHELD  # computed: never shown
     assert token not in repr(store.rows) + repr(store.runs) and passed not in repr(store.rows) + repr(store.runs)
 
 
