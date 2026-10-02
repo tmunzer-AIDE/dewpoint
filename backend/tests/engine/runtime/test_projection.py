@@ -154,6 +154,16 @@ def test_masking_takes_the_longest_secret_and_skips_values_too_short_to_mean_any
     assert masked("abcdef abcd xy", secrets, REDACTED) == f"{REDACTED} {REDACTED} xy"
 
 
+def test_secrets_that_overlap_are_masked_as_one_span() -> None:
+    """Review finding (M4): the longest match at each place left the rest of a second secret that overlaps it
+    visible, `[redacted]-SECRET-PART`. Every match counts, and overlapping ones are masked together."""
+    secrets = Matcher(["user-tok-1234", "1234-SECRET-PART"])
+    text = "x user-tok-1234-SECRET-PART y"
+    assert secrets.found(text) == {"user-tok-1234", "1234-SECRET-PART"}
+    assert masked(text, secrets, REDACTED) == f"x {REDACTED} y"
+    assert masked({text: text}, secrets, REDACTED) == {f"x {REDACTED} y": f"x {REDACTED} y"}
+
+
 def test_a_preview_over_8_kib_is_truncated() -> None:
     assert preview({"s": "x" * (PREVIEW_BYTES - 8)}) == {"s": "x" * (PREVIEW_BYTES - 8)}  # exactly 8 KiB
     assert preview({"s": "x" * (PREVIEW_BYTES - 7)}) == TRUNCATED

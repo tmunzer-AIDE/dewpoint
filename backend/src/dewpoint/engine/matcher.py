@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Finding a run's secrets in text (engine 2b spec §3.5, §3.7): one Aho–Corasick automaton built once for a set of
-strings, so a scan costs the text's length, never its length times the number of secrets. A secret has at least
-MIN_SECRET characters: shorter ones would match ordinary text everywhere."""
+strings, so a scan costs the text's length and the matches it finds, never its length times the number of secrets.
+A secret has at least MIN_SECRET characters: shorter ones would match ordinary text everywhere."""
 
 from collections.abc import Iterable
 from typing import Any
@@ -21,7 +21,7 @@ class Matcher:
         self._automaton = (
             ahocorasick_rs.AhoCorasick(
                 list(self.strings),
-                matchkind=ahocorasick_rs.MatchKind.LeftmostLongest,
+                matchkind=ahocorasick_rs.MatchKind.Standard,  # every match, overlapping ones too (the review's M4)
                 implementation=self.IMPLEMENTATION,
             )
             if self.strings
@@ -29,16 +29,24 @@ class Matcher:
         )
 
     def _matches(self, text: str) -> list[tuple[int, int, int]]:
-        return self._automaton.find_matches_as_indexes(text) if self._automaton is not None else []
+        """Every place a secret is in `text`, overlapping ones included, by where each ends."""
+        return self._automaton.find_matches_as_indexes(text, overlapping=True) if self._automaton is not None else []
 
     def found(self, text: str) -> set[str]:
-        """The secrets `text` contains, the longest at each place."""
+        """The secrets `text` contains."""
         return {self.strings[index] for index, _, _ in self._matches(text)}
 
     def mask(self, text: str, replacement: str) -> str:
-        """`text` with every secret it contains replaced, the longest at each place."""
+        """`text` with every secret it contains replaced: secrets that overlap are one span, so no part of either
+        shows."""
+        spans: list[list[int]] = []
+        for start, end in sorted((start, end) for _, start, end in self._matches(text)):
+            if spans and start < spans[-1][1]:
+                spans[-1][1] = max(spans[-1][1], end)
+            else:
+                spans.append([start, end])
         out, last = [], 0
-        for _, start, end in self._matches(text):
+        for start, end in spans:
             out += [text[last:start], replacement]
             last = end
         return "".join(out) + text[last:] if out else text
