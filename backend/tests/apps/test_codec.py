@@ -54,7 +54,7 @@ def codec(keys: FixtureKeys | None = None) -> TenantCodec:
 
 async def test_a_payload_round_trips_under_its_tenants_key() -> None:
     plain = payload({"tenant_id": A, "x": "secret"})
-    for context in (workflow(A), workflow(A, "/s/l:0/batch:0"), activity(run_workflow_id(A, RUN))):
+    for context in (workflow(A), workflow(A, f"/{uuid.UUID(int=5)}/l:0/batch:0"), activity(run_workflow_id(A, RUN))):
         c = codec().with_context(context)
         [sealed] = await c.encode([plain])
         assert sealed.metadata["encoding"] == ENCODING
