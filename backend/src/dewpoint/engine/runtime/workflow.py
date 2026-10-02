@@ -71,7 +71,9 @@ with workflow.unsafe.imports_passed_through():
         RESULT_TOO_LARGE,
         RUN_SNAPSHOT_TOO_LARGE,
         SNAPSHOT_TOO_LARGE,
+        encoded_bytes,
         fits,
+        payload_bytes,
         snapshot_fits,
     )
 
@@ -359,7 +361,14 @@ class RunGraph(Execution):
             checkpoint_events=self.checkpoint_events,
             drain_events=self.drain_events,
         )
-        if not fits(run, workflow.payload_converter()):  # engine 2b spec §5.2: never sent; its row says why
+        converter = workflow.payload_converter()
+        if not fits(run, converter):  # its largest values spill first, granted to it (engine 2b spec §3.4, §5.2)
+            room = payload_bytes() - encoded_bytes(replace(run, trigger={}), converter) - 16
+            fitted = await self._fit(trigger, room, f"handler/{child_run}")
+            refused = fitted if isinstance(fitted, Failure) else await self._grant(child_run, fitted)
+            if refused is None:
+                run = replace(run, trigger=fitted)
+        if not fits(run, converter):  # never sent; its row says why
             self.sched.budget.settle_child(child, 0)
             failure = Failure(PAYLOAD_TOO_LARGE, HANDLER_INPUT_TOO_LARGE)
             await self._lost_end(run, workflow.now().isoformat(), failure)

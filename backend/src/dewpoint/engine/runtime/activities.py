@@ -20,6 +20,7 @@ CLAIMS_DERIVE = "claims.derive"
 CLAIMS_CHILD_INPUT = "claims.child_input"
 CLAIMS_GRANT = "claims.grant"
 CLAIMS_MESSAGE = "claims.message"
+CLAIMS_SPILL = "claims.spill"
 LIVE, SIMULATE = "live", "simulate"
 APPLIED, SIMULATED, OUTCOME_UNKNOWN = "applied", "simulated", "outcome_unknown"
 SUBFLOW, FAILURE_HANDLER, BATCH = "subflow", "failure_handler", "batch"  # the kinds of child execution
@@ -228,6 +229,18 @@ class GrantInput:
     to_run_id: str
     value: Any
     root_run_id: str
+
+
+@dataclass(frozen=True)
+class SpillInput:
+    """Values the workflow holds, written as size claims owned by its run before a command carries their handles
+    (engine 2b spec §5.2): each [claim id, value]. They're the workflow's own, so plain or handles, never sensitive
+    (§3.6): untainted. Their ids come from the workflow, so a retry writes the same rows, hash-checked."""
+
+    claims: list[list[Any]]
+    root_run_id: str
+    step_id: str | None = None
+    iteration_key: str | None = None
 
 
 @dataclass(frozen=True)

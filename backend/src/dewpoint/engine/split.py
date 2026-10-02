@@ -14,7 +14,10 @@ input when its parent starts it. The input was validated against its schema firs
    more than the handle that replaces it. The root goes last, and the input is then one handle.
 
 The result is the envelope, with handles in place of claims, and the claims in the order they were made: a claim's
-nested handles always name claims made before it. Ids come from the caller (`new_id`): random at admission,
+nested handles always name claims made before it.
+
+`sized` splits by size alone: the workflow's own values, spilled before a command goes (engine 2b spec §5.2), hold
+nothing sensitive (§3.6), only plain data and handles. Ids come from the caller (`new_id`): random at admission,
 derived where a retry must make the same ones."""
 
 import copy
@@ -149,6 +152,32 @@ class _Splitter:
                     self.claim(at, tainted=False)
         return json_bytes(value)
 
+    def _at(self, pointer: str) -> Any:
+        node = self.doc
+        for part in tokens(pointer):
+            node = node[int(part)] if isinstance(node, list) else node[part]
+        return node
+
+    def fit(self, pointer: str, limit: int, part: int) -> None:
+        """Claims the largest parts below `pointer`, largest first (ties by pointer), until it weighs at most `limit`.
+        A part past `part` is fitted first, so no claim weighs more than `part` (a leaf can't be split): each fits
+        one spill. A part is worth claiming only if it weighs more than the handle that replaces it."""
+        node = self._at(pointer)
+        while json_bytes(node) > limit:
+            pairs = node.items() if isinstance(node, dict) else enumerate(node) if isinstance(node, list) else ()
+            kids = [(json_bytes(v), pointer + "/" + escape(k)) for k, v in pairs if ClaimRef.of(v) is None]
+            kids = [kw for kw in kids if kw[0] > HANDLE_BYTES]
+            if not kids:
+                return
+            weight, at = min(kids, key=lambda kw: (-kw[0], kw[1]))
+            if weight > part and isinstance(self._at(at), (dict, list)):
+                self.fit(at, part, part)
+                if json_bytes(self._at(at)) < weight:  # it shrank: what's largest now, and does this still pass?
+                    node = self._at(pointer)
+                    continue
+            self.claim(at, tainted=False)
+            node = self._at(pointer)
+
     def envelope(self, limit: int) -> None:
         total = json_bytes(self.doc)
         if total <= limit:
@@ -167,6 +196,17 @@ class _Splitter:
             total -= weight - HANDLE_BYTES
         if total > limit:
             self.claim("", tainted=False)
+
+
+def sized(value: Any, new_id: Callable[[str], str], *, envelope: int, part: int) -> Split:
+    """`value`, the workflow's own, within `envelope`: its largest parts claimed first, untainted, none weighing more
+    than `part`; the root last when nothing else is left to claim. Its handles stay where they are."""
+    s = _Splitter(value, new_id)
+    if ClaimRef.of(s.doc) is None and json_bytes(s.doc) > envelope:
+        s.fit("", envelope, part)
+        if json_bytes(s.doc) > envelope:
+            s.claim("", tainted=False)
+    return Split(s.doc, tuple(s.claims), ())
 
 
 def split(
