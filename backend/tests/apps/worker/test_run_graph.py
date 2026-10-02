@@ -9,6 +9,7 @@ from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer
 
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
+from dewpoint.engine.handles import ClaimRef
 from dewpoint.engine.runtime.workflow import RunGraph
 from tests.apps.worker.harness import EVALUATOR_ONLY, RESULT_TIMEOUT_S, MemoryStore, run, run_id_of, start, workers
 from tests.support.graphs import G, cel, ref, template
@@ -159,7 +160,9 @@ async def test_simulation_calls_simulate_and_records_it(env: WorkflowEnvironment
     async with workers(env.client, store):
         handle = await start(env.client, store, g, TRIGGER, mode="simulate")
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
-    assert result.outputs == {"v": {"simulated": 5}}
+    assert result.outputs is not None
+    simulated = ClaimRef.of(result.outputs["v"]["simulated"])  # an echo's output is undeclared: claimed
+    assert simulated is not None and store.claims[simulated.id].value == 5
     assert [r.outcome for r in store.steps(run_id_of(handle))] == ["simulated"]
 
 

@@ -15,8 +15,10 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.exceptions import ApplicationError
 
+from dewpoint.core.claims import secret_index
 from dewpoint.core.claims import service as claims
 from dewpoint.core.claims.cipher import ClaimCipher
+from dewpoint.core.crypto.keys import KeySource
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.workflows import WorkflowVersion
 from dewpoint.core.plugins.registry import load_node_types
@@ -50,14 +52,34 @@ def _row(row: StepRow) -> dict[str, Any]:
 
 
 class DbRunStore:
-    def __init__(self, sessionmaker: async_sessionmaker[AsyncSession], cipher: ClaimCipher | None = None) -> None:
+    def __init__(self, sessionmaker: async_sessionmaker[AsyncSession], keys: KeySource | None = None) -> None:
+        """`keys`: the tenants' data keys, which claims and secret indexes are sealed with (engine 2b spec §3.1,
+        §3.7). A store without them reads and writes no claims, and knows no secrets."""
         self.sessionmaker = sessionmaker
-        self.cipher = cipher  # the claims' (engine 2b spec §3.1): a store without one reads and writes none
+        self.cipher = ClaimCipher(keys) if keys is not None else None
+        self.index_cipher = ClaimCipher(keys, purpose=secret_index.PURPOSE) if keys is not None else None
 
     def _claims(self) -> ClaimCipher:
         if self.cipher is None:
             raise ApplicationError("This worker's store reads no claims.", type=INTERNAL_ERROR, non_retryable=True)
         return self.cipher
+
+    async def secrets(self, tenant_id: str, root_run_id: str) -> tuple[str, ...]:
+        if self.index_cipher is None:
+            return ()
+        async with self.sessionmaker() as s, s.begin():
+            await tenant_scope(s, uuid.UUID(tenant_id))
+            index = await secret_index.read(s, self.index_cipher, uuid.UUID(tenant_id), uuid.UUID(root_run_id))
+        return index.strings
+
+    async def remember(self, tenant_id: str, root_run_id: str, strings: Sequence[str]) -> None:
+        if not strings:
+            return
+        if self.index_cipher is None:
+            raise ApplicationError("This worker's store knows no secrets.", type=INTERNAL_ERROR, non_retryable=True)
+        async with self.sessionmaker() as s, s.begin():
+            await tenant_scope(s, uuid.UUID(tenant_id))
+            await secret_index.extend(s, self.index_cipher, uuid.UUID(tenant_id), uuid.UUID(root_run_id), list(strings))
 
     async def fetch(self, tenant_id: str, run_id: str, claim_id: str) -> StoredClaim:
         cipher = self._claims()

@@ -101,6 +101,7 @@ with workflow.unsafe.imports_passed_through():
         secret_bytes,
         secrets_limit,
     )
+    from dewpoint.engine.taint import Shape, from_schema, tainted_positions
 
 IN_FLIGHT_CAP = 100  # activities and child workflows outstanding per execution (spec §6)
 PROJECT_BYTES = 256 * 1024  # a projection's rows at most, as JSON: far below Temporal's 2 MiB payload limit
@@ -119,6 +120,11 @@ CANCELLED = Failure("cancelled", "The run was cancelled.")
 AMBIGUOUS = "ambiguous"  # a manifest's side_effect: the request may have been sent
 CONTINUE = "continue"  # `_drive`'s answer when the execution continues-as-new
 CLAIM_REFUSED = "A claim this run may not read, or that doesn't exist."
+
+
+class ExposedError(Exception):
+    """Plain data arrived where a schema puts sensitive data: the boundary failed, and the run fails `internal_error`
+    rather than use it (engine 2b spec §3.6)."""
 
 
 @dataclass(frozen=True)
@@ -262,6 +268,7 @@ class Execution:
         ] = {}  # a batch unit's key -> the batch (its items aren't hashable)
         self._drained: dict[str, Any] = {}  # what draining waited for, and added: history events and bytes
         self._draining = False  # drain mode: nothing new starts until the execution continues-as-new
+        self._shapes: dict[str, Shape] = {}  # a node type's output taint (`_output_shape`)
 
     # --- the budget signals ----------------------------------------------------------------------------------------
 
@@ -647,7 +654,7 @@ class Execution:
     async def _project(
         self, rows: list[StepRow], summary: RunSummary | None = None, start: RunStart | None = None
     ) -> None:
-        data = ProjectInput(self.tenant_id, rows, summary, start)
+        data = ProjectInput(self.tenant_id, rows, summary, start, root_run_id=self.root_run_id)
         await self._send(data)
         await workflow.execute_activity(
             PROJECT,
@@ -1262,6 +1269,7 @@ class Execution:
                 config=config,
                 mode=self.mode,
                 attempt=attempt,
+                root_run_id=self.root_run_id,
             )
             if not fits(sent, workflow.payload_converter()):  # engine 2b spec §5.2: never sent, so it never ran
                 failure = Failure(PAYLOAD_TOO_LARGE, STEP_INPUT_TOO_LARGE, attempt)
@@ -1297,6 +1305,8 @@ class Execution:
                 outcome = OUTCOME_UNKNOWN if ambiguous else None  # its request may have been sent
                 self._queue(replace(row, status="cancelled", ended_at=workflow.now().isoformat(), outcome=outcome))
                 raise asyncio.CancelledError from None
+            if tainted_positions(result.output, self._output_shape(step.ref)):  # the tripwire (engine 2b spec §3.6)
+                raise ExposedError(f"`{step.ref}` returned plain data at a sensitive position.")
             if not self._learn(result.output, manifest["output_schema"]):
                 # the node ran, so its outcome stands; its output goes nowhere
                 failure = Failure(PAYLOAD_TOO_LARGE, SECRETS_TOO_LARGE, attempt)
@@ -1314,6 +1324,13 @@ class Execution:
                 )
             )
             return _Effect(output=result.output, cel_mode=cel_mode)
+
+    def _output_shape(self, ref: str) -> Shape:
+        """The taint of a node type's output, from its manifest (engine 2b spec §4.1): what must arrive claimed."""
+        shape = self._shapes.get(ref)
+        if shape is None:
+            shape = self._shapes[ref] = from_schema(self.program.manifests[ref]["output_schema"])
+        return shape
 
     def _queue_unstarted(self, inst: Instance, step: Step, failure: Failure) -> None:
         now = workflow.now().isoformat()

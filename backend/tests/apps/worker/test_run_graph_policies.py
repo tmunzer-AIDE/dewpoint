@@ -14,6 +14,7 @@ from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner
 
 from dewpoint.engine.canonical import canonical_json
+from dewpoint.engine.handles import ClaimRef
 from dewpoint.engine.runtime import nodes
 from dewpoint.engine.runtime import workflow as run_graph
 from dewpoint.engine.runtime.activities import (
@@ -482,9 +483,11 @@ async def test_a_backlog_is_projected_in_bounded_batches(env: WorkflowEnvironmen
 
 async def test_sensitive_values_never_reach_the_projection(env: WorkflowEnvironment) -> None:
     """Review finding: a nested model's sensitive field sits behind `$ref`, and control steps, templates, plugin inputs
-    and messages can all copy a sensitive value into a place no schema marks. A failure's message can't read
-    sensitive data (refused at publish, engine 2b spec §4.5), but the same text arriving through a plain field is
-    still masked: the run learned it."""
+    and messages can all copy a sensitive value into a place no schema marks. From 2b-1b the value never reaches the
+    workflow (engine 2b spec §3.6): copies are handles, a template over it is claimed, and every message leaving an
+    activity, and every row projected, is masked against the run's secret index (§3.7). A failure's message can't
+    read sensitive data (refused at publish, §4.5); the same text arriving through a plain field is masked in the
+    rows."""
     store = MemoryStore()
     secret, password = ref("steps.s.output.secret_value"), ref("steps.s.output.login.password")
     g = graph().node("s", "testkit.sensitive@1")
@@ -506,13 +509,16 @@ async def test_sensitive_values_never_reach_the_projection(env: WorkflowEnvironm
         "secret_value": "[redacted]",
         "login": {"user": "ops", "password": "[redacted]"},
     }
-    assert rows["t"].output_preview == {"copy": "[redacted]", "line": "key=[redacted]"}
-    assert (rows["e"].input_preview, rows["e"].output_preview) == ({"value": "[redacted]"}, {"value": "[redacted]"})
+    copy, line = rows["t"].output_preview["copy"], rows["t"].output_preview["line"]
+    assert ClaimRef.of(copy) is not None and store.claims[ClaimRef.of(copy).id].value == "s3cr3t-value"  # type: ignore[union-attr]
+    assert store.claims[ClaimRef.of(line).id].value == "key=s3cr3t-value"  # type: ignore[union-attr]
+    assert ClaimRef.of(rows["e"].input_preview["value"]) is not None  # the echo got it resolved in its activity
+    assert ClaimRef.of(rows["e"].output_preview["value"]) is not None  # and what it returned repeats it: claimed
     assert rows["p"].error_message == "the receiver rejected the request: [redacted]"
     assert rows["f"].error_message == "gave up on [redacted]"
     assert rows["k"].error_message == 'NOT_FOUND: Key not found in map : "[redacted]"'
     assert store.runs[run_id_of(handle)].error_message == "gave up on [redacted]"
-    assert result.error and result.error["message"] == "gave up on [redacted]"
+    assert result.status == "failed"
     dump = repr(store.rows) + repr(store.runs)
     assert "s3cr3t-value" not in dump and "pa55word" not in dump
 

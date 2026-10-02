@@ -9,6 +9,7 @@ import json
 import uuid
 from typing import Any
 
+import ahocorasick_rs
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
@@ -51,22 +52,25 @@ def positions(value: Any, schema: Any) -> list[str]:
         ({"$defs": {"P": SECRET}, **obj(p={"$ref": "#/$defs/P"})}, {"p": "x"}, ["/p"]),
         (obj(u={"anyOf": [{"type": "string"}, SECRET]}), {"u": "x"}, ["/u"]),  # any branch sensitive
         ({"type": "object", "properties": {"a": {"type": "string"}}}, {"a": "x", "extra": 1}, ["/extra"]),
-        ({"type": "object", "additionalProperties": {"type": "string"}}, {"k": "v"}, [""]),  # whole, keys too
-        ({"type": "object", "patternProperties": {"^x": {"type": "string"}}}, {"xa": "v"}, [""]),
+        ({"type": "object", "additionalProperties": {"type": "string"}}, {"k": "v"}, ["/k"]),
+        ({"type": "object", "patternProperties": {"^x": {"type": "string"}}}, {"xa": "v"}, ["/xa"]),
         (obj(rows={"type": "array"}), {"rows": [1, 2]}, ["/rows/0", "/rows/1"]),  # elements not declared
         (obj(rows={"type": "array", "items": {"type": "integer"}}), {"rows": [1, 2]}, []),
         (obj(t={"type": "array", "prefixItems": [{"type": "integer"}]}), {"t": [1, 2]}, ["/t/0", "/t/1"]),  # one taint
-        (obj(u={"anyOf": [obj(token={"type": "string"}), {"type": "object"}]}), {"u": {"token": "t"}}, ["/u"]),
+        (obj(u={"anyOf": [obj(token={"type": "string"}), {"type": "object"}]}), {"u": {"token": "t"}}, ["/u/token"]),
         ({**obj(a={"type": "string"}), "patternProperties": {"^x": {"type": "string"}}}, {"a": "x", "xa": "v"},
          ["/xa"]),
         ({**obj(a={"type": "string"}), "anyOf": [{"required": ["a"]}, {"type": "object"}]}, {"a": "x"}, []),
         (obj(m={"type": "object", "propertyNames": {"x-sensitive": True}}), {"m": {"a": 1}}, ["/m"]),
-        ({}, {"a": 1}, [""]),
+        ({}, {"a": 1}, ["/a"]),
+        (obj(v={}), {"v": "plain"}, []),  # a declared key of any type: a scalar there is plain, its parts aren't
+        (obj(v={}), {"v": {"a": 1}}, ["/v/a"]),
+        (obj(v={}), {"v": [1, 2]}, ["/v/0", "/v/1"]),
         (None, {"a": 1}, [""]),  # no schema at all: the whole value
     ],
 )  # fmt: skip
 def test_sensitive_positions(schema: Any, value: Any, expected: list[str]) -> None:
-    """The largest wholly tainted parts: a value no part of which is declared is claimed whole, its keys with it."""
+    """The largest wholly tainted parts: each undeclared key's value, each undeclared element."""
     assert positions(value, schema) == expected
 
 
@@ -176,3 +180,35 @@ def without_handles(value: Any) -> Any:
     if isinstance(value, list):
         return [without_handles(v) for v in value]
     return value
+
+
+def test_text_that_repeats_a_secret_the_run_already_knows_is_claimed_too() -> None:
+    """At the activity boundary (§3.6, §3.7): a plain output string holding a string of the run's secret index is
+    claimed with taint, as one holding the output's own secret is."""
+    done = split({"note": "token=t0k3n-1234 ok", "n": 1}, obj(note={"type": "string"}, n={"type": "integer"}), ids(),
+                 known=("t0k3n-1234",))  # fmt: skip
+    assert [(c.pointer, c.tainted) for c in done.claims] == [("/note", True)]
+    assert done.secrets == ("token=t0k3n-1234 ok",)  # its strings join the index; what the index held, it holds
+
+
+def test_without_sizes_only_sensitive_text_is_claimed() -> None:
+    """A step's output is split for what's sensitive now; spilling what's large comes with sizes (§5.2)."""
+    big = "x" * (TRIGGER_INLINE + 10)
+    done = split({"big": big, "token": "t0k3n"}, obj(big={"type": "string"}, token=SECRET), ids(), sizes=False)
+    assert [(c.pointer, c.tainted) for c in done.claims] == [("/token", True)]
+    assert done.envelope["big"] == big
+
+
+def test_a_handle_is_claimed_already_nothing_under_it_is_listed() -> None:
+    held = ClaimRef(str(uuid.UUID(int=9))).to_json()
+    assert positions({"token": held, "name": "x"}, obj(token=SECRET, name={"type": "string"})) == []
+    assert positions(held, None) == []
+
+
+def test_the_matcher_builds_an_nfa_so_a_long_secret_costs_its_length() -> None:
+    """The automaton's default for few patterns is a DFA, whose construction grows with a long secret's length squared
+    (20,000 characters took seconds; a step's output hung). The index holds strings up to 8 MiB, so the matcher
+    always builds the contiguous NFA: its cost is the length of what it's given, to build and to scan."""
+    assert Matcher.IMPLEMENTATION is ahocorasick_rs.Implementation.ContiguousNFA
+    long = "s" * 1_000_000
+    assert Matcher([long]).found("x" + long + "x") == {long}

@@ -8,11 +8,13 @@ from temporalio.testing import WorkflowEnvironment
 
 from dewpoint.apps.cli.main import dev_run_version
 from dewpoint.apps.worker.store import DbRunStore
+from dewpoint.engine.handles import ClaimRef
 from dewpoint.engine.runtime.ids import run_workflow_id
 from tests.apps.test_workflow_ops import actor, create, publish
 from tests.apps.worker.harness import workers
 from tests.conftest import _url_for
 from tests.support.graphs import G, cel, ref
+from tests.support.keys import FixtureKeys
 from tests.support.registry import sync_test_plugins
 
 # its run starts on the time-skipping server, in a development deployment (engine 2b spec §2.3)
@@ -43,11 +45,12 @@ async def test_dev_run_starts_the_active_version(
     assert out.version is not None
     settings = api_settings.model_copy(update={"database_url": _url_for(pg_url, "dewpoint_dispatch")})
     common: dict[str, Any] = {"tenant_id": ctx.tenant_id, "version_id": out.version.id, "trigger": {"x": 1}}
-    async with workers(env.client, DbRunStore(worker_sessionmaker)):
+    async with workers(env.client, DbRunStore(worker_sessionmaker, FixtureKeys())):
         _, waited = await dev_run_version(settings, env.client, **common)
         _, simulated = await dev_run_version(settings, env.client, simulate=True, **common)
         started, nothing = await dev_run_version(settings, env.client, wait=False, **common)
         await env.client.get_workflow_handle(run_workflow_id(str(ctx.tenant_id), str(started))).result()
     assert waited is not None and (waited.status, waited.outputs) == ("succeeded", {"v": 2})
-    assert simulated is not None and simulated.outputs == {"v": {"simulated": 2}}
+    assert simulated is not None and simulated.outputs is not None
+    assert ClaimRef.of(simulated.outputs["v"]["simulated"]) is not None  # an echo's output is undeclared: claimed
     assert nothing is None

@@ -15,6 +15,7 @@ from temporalio.worker import Worker, WorkflowRunner
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
 from dewpoint.apps.worker.activities import Evaluate, RunStore, cel_activity, engine_activities
+from dewpoint.core.claims import secret_index
 from dewpoint.core.claims.service import ClaimConflictError, ClaimUnavailableError, NewClaim
 from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.cel import ipc
@@ -35,6 +36,7 @@ from dewpoint.engine.runtime.activities import (
 )
 from dewpoint.engine.runtime.ids import run_of, run_workflow_id
 from dewpoint.engine.runtime.workflow import LoopBatch, RunGraph
+from dewpoint.engine.sensitive import MIN_SECRET
 from dewpoint.engine.split import split
 from dewpoint.sdk import Plugin
 from tests.engine.runtime.support import CATALOG, MANIFESTS
@@ -73,6 +75,7 @@ class MemoryStore:
     taints: dict[str, dict[str, Any]] = field(default_factory=dict)  # version -> its outputs' taint (2b spec §4.1)
     claims: dict[str, HeldClaim] = field(default_factory=dict)
     grants: set[tuple[str, str]] = field(default_factory=set)  # (claim, run) (2b spec §3.4)
+    index: dict[str, set[str]] = field(default_factory=dict)  # root run -> its secret index (2b spec §3.7)
 
     def add(self, g: G, workflow_id: uuid.UUID | None = None, *, engine_abi: int = ENGINE_ABI) -> str:
         """Publish `g` as a version, pinned to the sub-flows it runs (as `publish` registered them). `engine_abi`:
@@ -151,6 +154,14 @@ class MemoryStore:
                 raise ClaimConflictError("A claim was written again with other content.")
             self.claims[str(c.id)] = held
 
+    async def secrets(self, tenant_id: str, root_run_id: str) -> tuple[str, ...]:
+        return tuple(sorted(self.index.get(root_run_id, set())))
+
+    async def remember(self, tenant_id: str, root_run_id: str, strings: Any) -> None:
+        merged = self.index.get(root_run_id, set()) | {s for s in strings if len(s) >= MIN_SECRET}
+        secret_index.check(sorted(merged))  # past its bounds, nothing changes (2b spec §3.7)
+        self.index[root_run_id] = merged
+
     def claim(self, value: Any, *, owner: str, tainted: bool) -> dict[str, Any]:
         """A claim made outside any run, for a test to hand one: its handle."""
         claim_id = str(uuid.uuid4())
@@ -163,6 +174,7 @@ class MemoryStore:
         for c in done.claims:
             sensitive = ("",) if c.tainted else ()
             self.claims[c.id] = HeldClaim(TENANT, run_id, run_id, c.value, sensitive, "input")
+        self.index.setdefault(run_id, set()).update(done.secrets)  # admission seeds the index
         return done.envelope
 
 

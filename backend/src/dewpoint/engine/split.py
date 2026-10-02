@@ -20,7 +20,7 @@ derived where a retry must make the same ones."""
 import copy
 import json
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -156,8 +156,17 @@ class _Splitter:
             self.claim("", tainted=False)
 
 
-def split(value: Any, schema: Mapping[str, Any] | None, new_id: Callable[[str], str]) -> Split:
-    """`value` (a validated trigger or sub-flow input) as its envelope and its claims (above)."""
+def split(
+    value: Any,
+    schema: Mapping[str, Any] | None,
+    new_id: Callable[[str], str],
+    *,
+    known: Iterable[str] = (),
+    sizes: bool = True,
+) -> Split:
+    """`value` (a validated trigger or sub-flow input, or an activity's result) as its envelope and its claims
+    (above). `known`: the run's secrets so far (its secret index, §3.7): text that repeats one is claimed too.
+    `sizes` False: only what's sensitive is claimed, as a step's output is until it spills (§5.2)."""
     if contains_marker(value):
         raise ForgedHandleError("An input that holds the handle marker.")
     s = _Splitter(value, new_id)
@@ -165,9 +174,10 @@ def split(value: Any, schema: Mapping[str, Any] | None, new_id: Callable[[str], 
         s.claim(pointer, tainted=True)
     secrets = {t for c in s.claims for t in _strings(c.value) if len(t) >= MIN_SECRET}
     if ClaimRef.of(s.doc) is None:
-        for pointer in s.reappearing(Matcher(secrets)):
+        for pointer in s.reappearing(Matcher(secrets | set(known))):
             s.claim(pointer, tainted=True)
             secrets |= {t for t in _strings(s.claims[-1].value) if len(t) >= MIN_SECRET}
-        s.by_size(s.doc, "")
-        s.envelope()
+        if sizes:
+            s.by_size(s.doc, "")
+            s.envelope()
     return Split(s.doc, tuple(s.claims), tuple(sorted(secrets)))

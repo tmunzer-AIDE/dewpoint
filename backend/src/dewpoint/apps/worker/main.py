@@ -22,7 +22,6 @@ from dewpoint.apps.worker.claims import ClaimStore
 from dewpoint.apps.worker.deployment import deployment_config, set_current, this_build
 from dewpoint.apps.worker.health import reporter, self_check, start_healthy, watch
 from dewpoint.apps.worker.store import DbRunStore
-from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.config import Settings
 from dewpoint.core.crypto.kek import KekSet
 from dewpoint.core.crypto.keyring import Keyring
@@ -102,7 +101,7 @@ async def run(settings: Settings) -> None:
         client = await Client.connect(
             settings.temporal_address, namespace=settings.temporal_namespace, data_converter=data_converter(keys)
         )
-        store = DbRunStore(sessionmaker, ClaimCipher(keys))  # claims under the same keys (engine 2b spec §3.1)
+        store = DbRunStore(sessionmaker, keys)  # claims, sealed with the same keys (engine 2b spec §3.1)
         workers = [engine_worker(client, store, installed_plugins(), settings)]
         if settings.cel_socket:
             profile = await evaluator_profile(settings.cel_socket)

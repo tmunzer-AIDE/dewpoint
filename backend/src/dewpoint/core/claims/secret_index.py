@@ -38,7 +38,8 @@ class Index:
     strings: tuple[str, ...]  # sorted
 
 
-def _check(strings: list[str]) -> None:
+def check(strings: list[str]) -> None:
+    """Raises SecretIndexLimitError when `strings` pass the index's bounds."""
     if len(strings) > MAX_STRINGS or sum(len(x.encode()) for x in strings) > MAX_BYTES:
         raise SecretIndexLimitError(
             "The run's sensitive values are too many to index (over its secret index's bounds)."
@@ -78,7 +79,7 @@ async def extend(
         if not fresh:
             return Index(0, ())
         merged = sorted(fresh)
-        _check(merged)
+        check(merged)
         seal = await cipher.seal(str(tenant_id), str(root_run_id), json.dumps(merged).encode())
         values = {
             "root_run_id": root_run_id,
@@ -100,7 +101,7 @@ async def extend(
     merged = sorted(set(current) | fresh)
     if len(merged) == len(current):
         return Index(row.version, tuple(current))
-    _check(merged)
+    check(merged)
     seal = await cipher.seal(str(tenant_id), str(root_run_id), json.dumps(merged).encode())
     await s.execute(
         update(SecretIndex)

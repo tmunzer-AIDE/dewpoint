@@ -4,6 +4,7 @@ strings, so a scan costs the text's length, never its length times the number of
 MIN_SECRET characters: shorter ones would match ordinary text everywhere."""
 
 from collections.abc import Iterable
+from typing import Any
 
 import ahocorasick_rs
 
@@ -11,10 +12,18 @@ from dewpoint.engine.sensitive import MIN_SECRET
 
 
 class Matcher:
+    # Never the DFA the library picks for few patterns: its construction grows with a long secret's length squared,
+    # and the index holds strings up to 8 MiB. The contiguous NFA builds and scans in their length.
+    IMPLEMENTATION = ahocorasick_rs.Implementation.ContiguousNFA
+
     def __init__(self, strings: Iterable[str]) -> None:
         self.strings = tuple(sorted({s for s in strings if len(s) >= MIN_SECRET}))
         self._automaton = (
-            ahocorasick_rs.AhoCorasick(list(self.strings), matchkind=ahocorasick_rs.MatchKind.LeftmostLongest)
+            ahocorasick_rs.AhoCorasick(
+                list(self.strings),
+                matchkind=ahocorasick_rs.MatchKind.LeftmostLongest,
+                implementation=self.IMPLEMENTATION,
+            )
             if self.strings
             else None
         )
@@ -33,3 +42,16 @@ class Matcher:
             out += [text[last:start], replacement]
             last = end
         return "".join(out) + text[last:] if out else text
+
+
+def masked(value: Any, matcher: Matcher, replacement: str) -> Any:
+    """`value` with every secret in its strings and keys replaced, at any depth."""
+    if not matcher.strings:
+        return value
+    if isinstance(value, str):
+        return matcher.mask(value, replacement)
+    if isinstance(value, dict):
+        return {matcher.mask(k, replacement): masked(v, matcher, replacement) for k, v in value.items()}
+    if isinstance(value, list):
+        return [masked(v, matcher, replacement) for v in value]
+    return value

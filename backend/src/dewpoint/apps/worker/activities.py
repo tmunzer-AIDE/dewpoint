@@ -22,6 +22,7 @@ unexpected exception names only its type. Its text goes to the worker's log."""
 
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable, Mapping
+from dataclasses import replace
 from typing import Any, Protocol, get_args
 
 import structlog
@@ -34,10 +35,23 @@ from temporalio.converter import DataConverter
 from temporalio.exceptions import ApplicationError
 
 from dewpoint.apps.cel_client import EvaluatorUnavailable, evaluate_remote
-from dewpoint.apps.worker.claims import ClaimStore, Evaluate, derive, evaluate_claimed, join_claimed
+from dewpoint.apps.worker.claims import (
+    UNAVAILABLE,
+    ClaimStore,
+    Evaluate,
+    claim_output,
+    derive,
+    evaluate_claimed,
+    join_claimed,
+    resolved_config,
+)
 from dewpoint.apps.worker.context import context
+from dewpoint.core.claims.secret_index import SECRET_INDEX_LIMIT, SecretIndexLimitError
+from dewpoint.core.claims.service import CLAIM_UNAVAILABLE, ClaimUnavailableError
 from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.cel import ipc
+from dewpoint.engine.handles import contains_marker
+from dewpoint.engine.matcher import Matcher, masked
 from dewpoint.engine.runtime import size
 from dewpoint.engine.runtime.activities import (
     APPLIED,
@@ -62,7 +76,7 @@ from dewpoint.engine.runtime.activities import (
 )
 from dewpoint.engine.runtime.execution import INTERNAL_ERROR, VERSION_UNUSABLE
 from dewpoint.engine.runtime.ids import tenant_of
-from dewpoint.engine.runtime.projection import location
+from dewpoint.engine.runtime.projection import REDACTED, location
 from dewpoint.sdk import (
     FatalError,
     Node,
@@ -80,6 +94,7 @@ OUTPUT_SCHEMA_VIOLATION = "output_schema_violation"
 SIMULATION_UNAVAILABLE = "simulation_unavailable"
 UNEXPECTED_ERROR = "unexpected_error"
 INVALID_REQUEST = "invalid_request"
+OUTPUT_UNCLAIMED = "The step's output couldn't be stored as claims, so it isn't used (engine 2b spec §3.6)."
 _log = structlog.get_logger("dewpoint.worker")
 _PYDANTIC_CODES = frozenset(get_args(ErrorType))  # every built-in validation error type
 # The `format`s an emitted output is checked for: those whose checks agree with what pydantic emits, and need no
@@ -102,9 +117,11 @@ class _StepFailed(Exception):
         super().__init__(message)
         self.code, self.message, self.retryable, self.outcome = code, message, retryable, outcome
 
-    def mapped(self) -> ApplicationError:
+    def mapped(self, secrets: Matcher | None = None) -> ApplicationError:
+        """The failure as the workflow gets it: its message masked against the run's secrets (engine 2b spec §3.7)."""
         details = {"outcome": self.outcome, MAPPED: True}
-        return ApplicationError(self.message, details, type=self.code, non_retryable=not self.retryable)
+        message = secrets.mask(self.message, REDACTED) if secrets is not None else self.message
+        return ApplicationError(message, details, type=self.code, non_retryable=not self.retryable)
 
 
 def _bug(what: str, step: StepInput, e: Exception) -> None:
@@ -180,7 +197,26 @@ def _same_tenant(tenant_id: str) -> None:
         )
 
 
-def step_activity_for(node: type[Node]) -> Callable[[StepInput], Awaitable[StepResult]]:
+def _masked(data: ProjectInput, secrets: Matcher) -> ProjectInput:
+    """A projection with every secret in its previews and messages replaced."""
+
+    def text(message: str | None) -> str | None:
+        return secrets.mask(message, REDACTED) if message is not None else None
+
+    steps = [
+        replace(
+            r,
+            input_preview=masked(r.input_preview, secrets, REDACTED),
+            output_preview=masked(r.output_preview, secrets, REDACTED),
+            error_message=text(r.error_message),
+        )
+        for r in data.steps
+    ]
+    run = replace(data.run, error_message=text(data.run.error_message)) if data.run is not None else None
+    return replace(data, steps=steps, run=run)
+
+
+def step_activity_for(node: type[Node], store: ClaimStore) -> Callable[[StepInput], Awaitable[StepResult]]:
     ref = f"{node.type}@{node.version}"
     config_schema = node.Config.model_json_schema(mode="validation")
     output_schema = node_manifest(node)["output_schema"]  # what the node promises to emit: serialized and closed
@@ -204,18 +240,36 @@ def step_activity_for(node: type[Node]) -> Callable[[StepInput], Awaitable[StepR
 
     @activity.defn(name=step_activity(ref))
     async def run_step(step: StepInput) -> StepResult:
+        """One attempt, across the boundary (engine 2b spec §3.6): its input's handles resolved here, its output split
+        before it leaves, every message masked against the run's secret index."""
         _same_tenant(step.tenant_id)
+        known = await store.secrets(step.tenant_id, step.root_run_id or step.run_id)
+        secrets = Matcher(known)
         try:
-            result, outcome = await _call(node, step, config_schema)
+            try:
+                config = await resolved_config(step.config, store)
+            except ClaimUnavailableError:
+                raise _StepFailed(CLAIM_UNAVAILABLE, UNAVAILABLE, retryable=False) from None
+            result, outcome = await _call(node, replace(step, config=config), config_schema)
         except _StepFailed as f:
-            raise f.mapped() from None
+            raise f.mapped(secrets) from None
         try:  # the node ran: whatever fails from here, its effect happened, so nothing is retried
-            done = StepResult(output_of(result), outcome)
+            data = output_of(result)
+            if contains_marker(data):  # a forged handle never crosses into a run (§3.2)
+                raise violation("it holds the reserved key `$claim`.")
+            try:
+                envelope = await claim_output(data, output_schema, step, store, known)
+            except SecretIndexLimitError as e:
+                raise _StepFailed(SECRET_INDEX_LIMIT, str(e), retryable=False, outcome=outcome) from None
+            except Exception as e:  # the claim store failed after the node ran: never a plain output instead
+                _bug("step_output_unclaimed", step, e)
+                raise _StepFailed(CLAIM_UNAVAILABLE, OUTPUT_UNCLAIMED, retryable=False, outcome=outcome) from None
+            done = StepResult(envelope, outcome)
             if not size.fits(done, JSON):  # Temporal would refuse to record it (engine 2b spec §5.2)
                 raise _StepFailed(size.PAYLOAD_TOO_LARGE, size.STEP_OUTPUT_TOO_LARGE, retryable=False, outcome=outcome)
             return done
         except _StepFailed as f:
-            raise f.mapped() from None
+            raise f.mapped(secrets) from None
         except PydanticSerializationError:
             raise violation("it can't be written as JSON.").mapped() from None
         except ValidationError as e:
@@ -255,14 +309,19 @@ def engine_activities(store: RunStore, plugins: Iterable[Plugin], *, abi: int = 
 
     @activity.defn(name=PROJECT)
     async def project(data: ProjectInput) -> None:
+        """Every row masked against the run tree's secret index before it's written (engine 2b spec §3.7)."""
         _same_tenant(data.tenant_id)
-        await store.project(data)
+        root = data.root_run_id or (data.run.run_id if data.run is not None else "")
+        secrets = Matcher(await store.secrets(data.tenant_id, root)) if root else Matcher(())
+        await store.project(_masked(data, secrets) if secrets.strings else data)
 
     @activity.defn(name=CLAIMS_DERIVE)
     async def claims_derive(data: DeriveInput) -> DeriveResult:
         return await derive(data, store)
 
-    steps = [step_activity_for(node) for plugin in plugins for node in plugin.nodes if node.kind == NodeKind.ACTION]
+    steps = [
+        step_activity_for(node, store) for plugin in plugins for node in plugin.nodes if node.kind == NodeKind.ACTION
+    ]
     return [load_version, project, claims_derive, *steps]
 
 
