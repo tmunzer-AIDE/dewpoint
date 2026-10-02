@@ -543,7 +543,9 @@ class Scheduler:
         self._collects_out: set[tuple[Instance, int]] = set()
         self._batches_out: set[tuple[Instance, int]] = set()
         # the open-iteration cap (§5.3), pinned in the version, and the reservation: one scope per nesting level
-        self.cap = program.open_scopes_cap or OPEN_SCOPES_CAP
+        self.cap = OPEN_SCOPES_CAP if program.open_scopes_cap is None else program.open_scopes_cap
+        if self.cap < 1:  # never the default instead: a version no cap fits was never published (§5.3)
+            raise ValueError(f"an open-iteration cap of {self.cap}: the version's bound was never established")
         self.reserve = program.depth
         self._seq = 0
         self._n_open = 0  # open iteration scopes, frozen ones aside

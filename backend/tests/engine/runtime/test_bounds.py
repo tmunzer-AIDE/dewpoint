@@ -5,16 +5,19 @@ which the sum fits SNAPSHOT_MAX. Nothing is refused on an assumption: the larges
 2,000 edges, loops 3 deep, 63-character keys) get a cap of at least 1, and LIVE_BUDGET is above what the live state
 needs with every container claimed, for every cap the formula allows."""
 
+import dataclasses
 from collections.abc import Callable
 
 import pytest
 
+from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.graph.structure import MAX_LOOP_DEPTH
 from dewpoint.engine.handles import HANDLE_MAX
 from dewpoint.engine.runtime import bounds
 from dewpoint.engine.runtime import scheduler as S
 from dewpoint.engine.runtime.ids import ID_MAX
-from tests.engine.runtime.support import program
+from dewpoint.engine.runtime.program import ProgramError, compile_program
+from tests.engine.runtime.support import MANIFESTS, expressions, program
 from tests.support.graphs import G
 
 ECHO, LOOP, SET = "testkit.echo@1", "flow.loop@1", "flow.set_variables@1"
@@ -125,3 +128,20 @@ def test_a_cap_that_wouldnt_fit_is_none() -> None:
     m = bounds.maxima(program(one_loop()))
     tight = bounds.Maxima(**{**m.__dict__, "live": bounds.SNAPSHOT_MAX})
     assert tight.cap() == 0
+
+
+def test_a_version_no_cap_fits_fails_bound_establishment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the bound deliberately tightened below what one iteration needs, no cap fits: that's a failure to
+    establish the bound, never a cap of 0 a run would read as "no cap pinned" and schedule at 100."""
+    monkeypatch.setattr(bounds, "SNAPSHOT_MAX", 10_000)
+    with pytest.raises(bounds.BoundError, match="No open-iteration cap"):
+        bounds.pinned(program(one_loop()))
+
+
+def test_a_program_or_a_scheduler_given_cap_0_refuses_it() -> None:
+    """Belt and braces: a version pinned with no cap never schedules as if it had the default."""
+    g = G().node("a", ECHO)
+    with pytest.raises(ProgramError, match="cap"):
+        compile_program(g.data(), MANIFESTS, expressions(g), CURRENT_CEL_PROFILE, open_scopes_cap=0, loop_depth=0)
+    with pytest.raises(ValueError, match="cap"):
+        S.Scheduler(dataclasses.replace(program(g), open_scopes_cap=0))
