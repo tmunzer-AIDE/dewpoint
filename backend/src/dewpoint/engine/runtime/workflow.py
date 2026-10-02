@@ -490,7 +490,17 @@ class LoopBatch(Execution):
                 )
             if await self._drive() == CONTINUE:
                 await self._flush()
-                continued = replace(start, snapshot=self._snapshot(), iterations=self.sched.iterations)
+                # each value travels once (engine 2b spec §5.3): the snapshot holds the slice, the enclosing scopes and
+                # the variables, so the continued input carries none of them again
+                continued = replace(
+                    start,
+                    snapshot=self._snapshot(),
+                    iterations=self.sched.iterations,
+                    items=[],
+                    items_ref=None,
+                    outer=[],
+                    variables={},
+                )
                 if snapshot_fits(continued, workflow.payload_converter()):
                     await self._send(continued)
                     workflow.continue_as_new(continued)
