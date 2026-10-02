@@ -183,3 +183,15 @@ def test_a_dynamically_addressed_read_is_tainted_even_into_plain_data() -> None:
     assert tainted(result) == {("a", "/value"), ("b", "/value"), ("c", "/value")}
     modes = {r.node: r.mode for r in result.expressions}
     assert [modes[str(nid(k))] for k in "abcdef"] == ["activity"] * 3 + ["local"] * 3
+
+
+def test_whether_a_step_ran_is_the_runs_shape_not_its_data() -> None:
+    """`has(steps.k.output)` asks whether a step ran (spec §4.6: the run's shape is visible), whatever its output
+    holds; a presence test on data stays as tainted as what it tests."""
+    g = G().node("s", "testkit.sensitive@1", on_error="continue")
+    g.node("a", ECHO, {"value": cel("has(steps.s.output) ? 'ran' : 'skipped'")})
+    g.node("b", ECHO, {"value": cel("has(steps.s.error) ? 'failed' : 'ok'")})
+    g.node("c", ECHO, {"value": cel("has(trigger.login.pw)")})
+    for k in "abc":
+        g.edge("s", k)
+    assert tainted(checked(g)) == {("c", "/value")}

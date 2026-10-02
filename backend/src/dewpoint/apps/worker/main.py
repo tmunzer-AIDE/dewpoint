@@ -18,9 +18,11 @@ from dewpoint.apps.codec import KeyringKeys, data_converter
 from dewpoint.apps.environment import verify_environment
 from dewpoint.apps.plugin_loader import installed_plugins
 from dewpoint.apps.worker.activities import RunStore, cel_activity, engine_activities, remote_evaluator
+from dewpoint.apps.worker.claims import ClaimStore
 from dewpoint.apps.worker.deployment import deployment_config, set_current, this_build
 from dewpoint.apps.worker.health import reporter, self_check, start_healthy, watch
 from dewpoint.apps.worker.store import DbRunStore
+from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.config import Settings
 from dewpoint.core.crypto.kek import KekSet
 from dewpoint.core.crypto.keyring import Keyring
@@ -68,11 +70,11 @@ def engine_worker(
     )
 
 
-def cel_worker(client: Client, socket_path: str, profile: str, *, max_concurrent: int) -> Worker:
+def cel_worker(client: Client, socket_path: str, profile: str, store: ClaimStore, *, max_concurrent: int) -> Worker:
     return Worker(
         client,
         task_queue=cel_queue(profile),
-        activities=[cel_activity(remote_evaluator(socket_path, profile))],
+        activities=[cel_activity(remote_evaluator(socket_path, profile), store)],
         max_concurrent_activities=max_concurrent,
     )
 
@@ -96,16 +98,18 @@ async def run(settings: Settings) -> None:
         keyring = Keyring(KekSet.from_settings(settings))
         report = reporter(sessionmaker, uuid.uuid4(), this_build())
         await start_healthy(lambda: self_check(keyring, sessionmaker), report)
+        keys = KeyringKeys(sessionmaker, keyring)
         client = await Client.connect(
-            settings.temporal_address,
-            namespace=settings.temporal_namespace,
-            data_converter=data_converter(KeyringKeys(sessionmaker, keyring)),
+            settings.temporal_address, namespace=settings.temporal_namespace, data_converter=data_converter(keys)
         )
-        workers = [engine_worker(client, DbRunStore(sessionmaker), installed_plugins(), settings)]
+        store = DbRunStore(sessionmaker, ClaimCipher(keys))  # claims under the same keys (engine 2b spec §3.1)
+        workers = [engine_worker(client, store, installed_plugins(), settings)]
         if settings.cel_socket:
             profile = await evaluator_profile(settings.cel_socket)
             log.info("cel_queue", profile=profile)
-            workers.append(cel_worker(client, settings.cel_socket, profile, max_concurrent=settings.cel_max_concurrent))
+            workers.append(
+                cel_worker(client, settings.cel_socket, profile, store, max_concurrent=settings.cel_max_concurrent)
+            )
 
         async def stop() -> None:
             await asyncio.gather(*(w.shutdown() for w in workers))

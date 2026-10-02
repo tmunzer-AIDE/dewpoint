@@ -720,7 +720,7 @@ class _Validator:
         if result.record is not None:  # a tainted value always runs in the isolated evaluator (§4.2)
             record = result.record
             self.expressions.append(
-                dataclasses.replace(record, mode="activity", reason=TAINTED_REASON) if tainted else record
+                dataclasses.replace(record, mode="activity", reason=TAINTED_REASON, tainted=True) if tainted else record
             )
         if result.resolved is None:
             return None
@@ -1118,9 +1118,9 @@ class _CelSite:
         self.has_item = site.item_node is not None
         self.tainted = False
 
-    def resolve(self, path: RefPath, *, report: bool) -> Resolved | None:
+    def resolve(self, path: RefPath, *, report: bool, reads: bool = True) -> Resolved | None:
         resolved = self.v._resolve(self.site, path, report=report)
-        if report and resolved is not None and resolved.taint.tainted:
+        if report and reads and resolved is not None and resolved.taint.tainted:
             self.tainted = True  # a path the expression reads: its typing questions (`report=False`) aren't reads
         return resolved
 

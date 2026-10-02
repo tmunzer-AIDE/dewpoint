@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from dewpoint.engine.handles import MISSING, ClaimRef, NestingError, StoredClaim, resolve
+from dewpoint.engine.handles import MISSING, ClaimRef, NestingError, StoredClaim, part, resolve
 
 A, B, C = (str(uuid.UUID(int=i)) for i in (1, 2, 3))
 
@@ -69,3 +69,22 @@ async def test_claims_nested_without_end_are_refused() -> None:
     fetch = store(**{A: ({"next": ClaimRef(A).to_json()}, ())})
     with pytest.raises(NestingError):
         await resolve(ClaimRef(A), fetch)
+
+
+async def test_a_part_is_copied_as_it_is_stored_with_its_taint_rebased() -> None:
+    """What deriving a claim copies (§3.2): the part a long pointer addresses, its nested handles kept, and its
+    sensitive pointers re-based onto it; a part inside a sensitive pointer is sensitive whole."""
+    fetch = store(
+        **{
+            A: ({"login": {"user": "u", "pw": "p"}, "n": ClaimRef(B).to_json(), "secret": {"k": 1}},
+                ("/login/pw", "/secret")),
+            B: ({"x": 1, "y": 2}, ("/x",)),
+        }
+    )  # fmt: skip
+    assert await part(ClaimRef(A, "/login"), fetch) == StoredClaim({"user": "u", "pw": "p"}, ("/pw",))
+    assert await part(ClaimRef(A, "/login/user"), fetch) == StoredClaim("u", ())
+    assert await part(ClaimRef(A, "/secret/k"), fetch) == StoredClaim(1, ("",))
+    assert await part(ClaimRef(A, "/n"), fetch) == StoredClaim(ClaimRef(B).to_json(), ())  # its taint is its own
+    assert await part(ClaimRef(A, "/n/x"), fetch) == StoredClaim(1, ("",))  # through the nested claim, B's taint
+    assert await part(ClaimRef(A, "/n/y"), fetch) == StoredClaim(2, ())
+    assert await part(ClaimRef(A, "/absent"), fetch) is None

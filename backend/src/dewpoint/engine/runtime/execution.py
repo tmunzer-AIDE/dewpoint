@@ -30,12 +30,14 @@ with workflow.unsafe.imports_passed_through():
     from dewpoint.engine.cel.record import ExpressionRecord
     from dewpoint.engine.cel.route import YieldBudget
     from dewpoint.engine.graph.values import CelValue, RefValue, TemplateValue
+    from dewpoint.engine.handles import CLAIM_UNAVAILABLE, MISSING, ClaimRef, contains_marker
     from dewpoint.engine.registry import control
     from dewpoint.engine.runtime import nodes, resolve
     from dewpoint.engine.runtime.activities import (
         BATCH,
         BUDGET,
         CEL_EVALUATE,
+        CLAIMS_DERIVE,
         ENGINE_QUEUE,
         MAPPED,
         OUTCOME_UNKNOWN,
@@ -46,6 +48,9 @@ with workflow.unsafe.imports_passed_through():
         BatchResult,
         CelInput,
         CelResult,
+        Claiming,
+        DeriveInput,
+        DeriveResult,
         Parent,
         ProjectInput,
         RunInput,
@@ -113,6 +118,7 @@ NODE_TYPE_UNAVAILABLE = "node_type_unavailable"  # the registry has it, but this
 CANCELLED = Failure("cancelled", "The run was cancelled.")
 AMBIGUOUS = "ambiguous"  # a manifest's side_effect: the request may have been sent
 CONTINUE = "continue"  # `_drive`'s answer when the execution continues-as-new
+CLAIM_REFUSED = "A claim this run may not read, or that doesn't exist."
 
 
 @dataclass(frozen=True)
@@ -207,6 +213,17 @@ def child_options(child_id: str) -> dict[str, Any]:
     }
 
 
+def _decision(owner: Step | None, pointer: str) -> bool:
+    """Whether a field's value is a decision (engine 2b spec §4.3): over sensitive data, the activity that computes it
+    gives it back plain. A branch's condition, a switch case's `when`."""
+    if owner is None:
+        return False
+    if owner.ref == "flow.if@1":
+        return pointer == "/condition"
+    parts = pointer.split("/")
+    return owner.ref == "flow.switch@1" and len(parts) == 4 and parts[1] == "cases" and parts[3] == "when"
+
+
 def _json_bytes(value: Any) -> int:
     """The JSON bytes Temporal's payload converter writes for `value`: what the SDK checks against its payload limit,
     before any codec (#15)."""
@@ -283,6 +300,8 @@ class Execution:
         self.run_started_at, self.deadline = run_started_at, deadline
         self.checkpoint_events, self.drain_events = checkpoint_events, drain_events
         self.vars: dict[str, Any] = {}
+        # the tree's root run: what the claims this execution makes record (engine 2b spec §3.1)
+        self.root_run_id = parent.root_run_id if parent is not None and parent.root_run_id else run_id
         if parent is not None:
             self._carry(remember((), tuple(parent.secrets)))
 
@@ -692,21 +711,120 @@ class Execution:
         v = self._view(scope)
         for pointer, value in pairs:
             if isinstance(value, RefValue):
-                values[pointer] = resolve.ref(v, value)
+                values[pointer] = await self._ref(v, value, owner, scope)
             elif isinstance(value, TemplateValue):
-                values[pointer] = resolve.template(v, value)
+                parts = [await self._part(p, owner, scope) for p in resolve.template_parts(v, value)]
+                joined = resolve.join(parts)
+                if joined is None:  # a part is a handle: joined where it's resolved (engine 2b spec §4.2)
+                    values[pointer] = await self._template(parts, owner, scope)
+                    mode = "activity"
+                else:
+                    values[pointer] = joined
             elif isinstance(value, CelValue):
                 record = self.program.record(owner.id if owner is not None else None, pointer)
-                task = await self._cel_task(record, [v])
-                [outcome] = await self._evaluate(task)
+                task = await self._cel_task(record, [v], owner=owner, scope=scope)
+                [outcome] = await self._evaluate(task, owner=owner, scope=scope, decision=_decision(owner, pointer))
                 values[pointer] = resolve.outcome_value(outcome)
                 mode = "activity" if mode == "activity" or not task.local else "local"
             else:
                 values[pointer] = value.value
         return values, mode
 
+    # --- handles (engine 2b spec §3.2–3.3): never read here, resolved in activities ------------------------------
+
+    async def _ref(self, v: Any, value: RefValue, owner: Step | None, scope: ScopeKey) -> Any:
+        """A reference: past a handle, the handle to what it addresses. Whether that's missing or null is known only
+        where the claim is read, so a reference with a default asks there; so does a pointer past POINTER_MAX."""
+        found = resolve.read(v, value.path)
+        handle = ClaimRef.of(found)
+        if handle is not None and (value.has_default or handle.too_long()):
+            found = await self._bounded(handle, owner, scope)
+        return resolve.defaulted(found, value)
+
+    async def _part(self, part: str | resolve.Part, owner: Step | None, scope: ScopeKey) -> str | resolve.Part:
+        if not isinstance(part, resolve.Part):
+            return part
+        handle = ClaimRef.of(part.found)
+        if handle is None or not handle.too_long():
+            return part
+        return resolve.Part(await self._bounded(handle, owner, scope), part.default, part.path)
+
+    async def _bounded(self, handle: ClaimRef, owner: Step | None, scope: ScopeKey) -> Any:
+        """What `handle` addresses, as the workflow may hold it: a handle within POINTER_MAX (a derived claim's, for a
+        longer one), None for null, MISSING for nothing (`claims.derive`)."""
+        data = DeriveInput(
+            handle.to_json(),
+            str(workflow.uuid4()),
+            self.root_run_id,
+            step_id=str(owner.id) if owner is not None else None,
+            iteration_key=iteration_key(scope),
+        )
+        await self._send(data)
+        try:
+            derived = await workflow.execute_activity(
+                CLAIMS_DERIVE,
+                data,
+                result_type=DeriveResult,
+                start_to_close_timeout=timedelta(minutes=1),
+                retry_policy=RetryPolicy(maximum_attempts=3, initial_interval=timedelta(seconds=1)),
+            )
+        except ActivityError as e:
+            if isinstance(e.cause, ActivityCancelled):
+                raise asyncio.CancelledError from None
+            if isinstance(e.cause, ApplicationError) and e.cause.type == CLAIM_UNAVAILABLE:
+                raise resolve.ValueFailure(CLAIM_UNAVAILABLE, CLAIM_REFUSED) from None
+            raise resolve.ValueFailure(
+                INTERNAL_ERROR, f"A claim couldn't be read ({type(e.cause or e).__name__})."
+            ) from None
+        if not derived.present:
+            return MISSING
+        return derived.handle
+
+    async def _template(self, parts: list[str | resolve.Part], owner: Step | None, scope: ScopeKey) -> Any:
+        """A template over a handle, joined in `cel.evaluate` once its parts are resolved: claimed when they read
+        sensitive data."""
+        profile = self.program.cel_profile
+        data = CelInput(
+            {},
+            claims=self._claiming(owner, scope, tainted=False, decision=False),
+            template=[p if isinstance(p, str) else p.to_json() for p in parts],
+        )
+        await self._send(data)
+        try:
+            result = await workflow.execute_activity(
+                CEL_EVALUATE,
+                data,
+                result_type=CelResult,
+                task_queue=cel_queue(profile),
+                schedule_to_start_timeout=timedelta(seconds=self.cel_schedule_to_start_s),
+                start_to_close_timeout=timedelta(minutes=1),
+                retry_policy=RetryPolicy(maximum_attempts=3, initial_interval=timedelta(seconds=1)),
+            )
+        except ActivityError as e:
+            if isinstance(e.cause, ActivityCancelled):
+                raise asyncio.CancelledError from None
+            message = f"No evaluator served `{profile}` ({type(e.cause or e).__name__})."
+            raise resolve.ValueFailure(cel.PROFILE_UNAVAILABLE, message) from None
+        return resolve.outcome_value(cel.Outcome.from_json(result.outcomes[0]))
+
+    def _claiming(self, owner: Step | None, scope: ScopeKey, *, tainted: bool, decision: bool) -> Claiming:
+        return Claiming(
+            root_run_id=self.root_run_id,
+            seed=str(workflow.uuid4()),
+            tainted=tainted,
+            decision=decision,
+            step_id=str(owner.id) if owner is not None else None,
+            iteration_key=iteration_key(scope),
+        )
+
     async def _cel_task(
-        self, record: ExpressionRecord, views: Sequence[Any], *, inline: bool = True
+        self,
+        record: ExpressionRecord,
+        views: Sequence[Any],
+        *,
+        inline: bool = True,
+        owner: Step | None = None,
+        scope: ScopeKey = (),
     ) -> resolve.CelTask:
         """Bind each view within the workflow task's budget (spec §5.6). Binding converts every value it binds, so
         it's charged as they are (`Measure.nodes`), whether the expression then runs here or in `cel.evaluate`.
@@ -716,11 +834,29 @@ class Execution:
             await self._yield_point(None)
             b = resolve.bind_view(record, v)
             self._yield.charge(nodes=b.measured.nodes)
-            bound.append(b)
+            bound.append(await self._bounded_bindings(b, owner, scope))
         local_profile = LOCAL_CEL_PROFILE if inline else None
         return resolve.cel_task(record, bound, local_profile=local_profile, version_profile=self.program.cel_profile)
 
-    async def _evaluate(self, task: resolve.CelTask) -> list[cel.Outcome]:
+    async def _bounded_bindings(self, b: resolve.Bound, owner: Step | None, scope: ScopeKey) -> resolve.Bound:
+        """A typed path past a handle extends it (`bind`): one past POINTER_MAX derives a claim, as a reference
+        does. What it addresses must be there, as a typed path's value must."""
+        long = {name: h for name, value in b.bindings.items() if (h := ClaimRef.of(value)) is not None and h.too_long()}
+        if not long:
+            return b
+        bindings = dict(b.bindings)
+        for name, handle in long.items():
+            bindings[name] = await self._bounded(handle, owner, scope)
+            if bindings[name] is MISSING:
+                raise resolve.ValueFailure(cel.TYPE_MISMATCH, f"`{name}` is missing")
+        return resolve.Bound(bindings, b.measured)
+
+    async def _evaluate(
+        self, task: resolve.CelTask, *, owner: Step | None = None, scope: ScopeKey = (), decision: bool = False
+    ) -> list[cel.Outcome]:
+        """Each binding set's outcome. Sent to `cel.evaluate` with what to do about claims when a binding is a handle,
+        or the expression reads sensitive data (engine 2b spec §4.2): resolve them there, and claim the results, or
+        give a declassified `decision` back plain."""
         if task.local:
             outcomes = []
             for bindings in task.bindings:  # a filter's items one at a time: each is an evaluation
@@ -730,7 +866,12 @@ class Execution:
             return outcomes
         out: list[cel.Outcome] = []
         profile = self.program.cel_profile
-        envelope = _json_bytes(CelInput(resolve.CelTask(task.record, (), False).request(profile)))
+        claiming = task.record.tainted or contains_marker(task.bindings)
+
+        def claims() -> Claiming | None:  # a seed per request: its results' claim ids
+            return self._claiming(owner, scope, tainted=task.record.tainted, decision=decision) if claiming else None
+
+        envelope = _json_bytes(CelInput(resolve.CelTask(task.record, (), False).request(profile), claims=claims()))
         start, count = 0, len(task.bindings)
         while start < count:
             end, size = resolve.request_end(
@@ -754,7 +895,7 @@ class Execution:
             try:
                 result = await workflow.execute_activity(
                     CEL_EVALUATE,
-                    CelInput(chunk.request(profile)),
+                    CelInput(chunk.request(profile), claims=claims()),
                     result_type=CelResult,
                     task_queue=cel_queue(profile),
                     schedule_to_start_timeout=timedelta(seconds=self.cel_schedule_to_start_s),
@@ -908,6 +1049,7 @@ class Execution:
             grant=grant,
             depth=self.depth + 1,
             secrets=list(self._secrets),
+            root_run_id=self.root_run_id,
         )
         run = RunInput(
             self.tenant_id,
@@ -1059,6 +1201,7 @@ class Execution:
             grant=grant,
             depth=self.depth,
             secrets=list(self._secrets),
+            root_run_id=self.root_run_id,
         )
         return BatchInput(
             tenant_id=self.tenant_id,

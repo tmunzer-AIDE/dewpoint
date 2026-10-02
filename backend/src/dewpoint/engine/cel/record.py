@@ -30,6 +30,7 @@ class ExpressionRecord:
     iterations: int | None = None
     bytes: int | None = None
     work: int | None = None
+    tainted: bool = False  # it reads sensitive data (engine 2b spec §4.1): it runs in the evaluator, its result claimed
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -44,6 +45,7 @@ class ExpressionRecord:
             "iterations": self.iterations,
             "bytes": self.bytes,
             "work": self.work,
+            "tainted": self.tainted,
         }
 
     @classmethod
@@ -60,6 +62,7 @@ class ExpressionRecord:
             iterations=data["iterations"],
             bytes=data["bytes"],
             work=data["work"],
+            tainted=bool(data.get("tainted", False)),
         )
 
 

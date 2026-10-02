@@ -15,6 +15,7 @@ ENGINE_QUEUE = "dewpoint-engine"
 LOAD_VERSION = "dewpoint.load_version"
 PROJECT = "dewpoint.project"
 CEL_EVALUATE = "cel.evaluate"
+CLAIMS_DERIVE = "claims.derive"
 LIVE, SIMULATE = "live", "simulate"
 APPLIED, SIMULATED, OUTCOME_UNKNOWN = "applied", "simulated", "outcome_unknown"
 SUBFLOW, FAILURE_HANDLER, BATCH = "subflow", "failure_handler", "batch"  # the kinds of child execution
@@ -57,6 +58,7 @@ class Parent:
     grant: int  # the iterations its parent reserved for it
     depth: int = 1  # sub-flows nest at most 5 deep (spec §6)
     secrets: list[str] = field(default_factory=list)  # sensitive values the parent learned, masked here too
+    root_run_id: str = ""  # the tree's root run: what its claims record (engine 2b spec §3.1)
 
 
 @dataclass(frozen=True)
@@ -160,8 +162,47 @@ class StepResult:
 
 
 @dataclass(frozen=True)
+class Claiming:
+    """What `cel.evaluate` does with handles and results (engine 2b spec §3.3, §4.2): it resolves the handles among
+    the bindings, checked against their rows for the run its workflow id names, and claims a result that read
+    sensitive data, or one whose expression does (`tainted`), under ids derived from `seed` (the same on a retry). A
+    declassified decision (`decision`) comes back plain."""
+
+    root_run_id: str
+    seed: str
+    tainted: bool = False
+    decision: bool = False
+    step_id: str | None = None  # the producer, recorded on the claim for tracing
+    iteration_key: str | None = None
+
+
+@dataclass(frozen=True)
 class CelInput:
-    request: dict[str, Any]  # a cel.evaluate.v1 request
+    request: dict[str, Any]  # a cel.evaluate.v1 request; its bindings may hold handles
+    claims: Claiming | None = None
+    template: list[Any] | None = None  # a template whose parts are handles: its parts (`resolve.Part`), joined there
+
+
+@dataclass(frozen=True)
+class DeriveInput:
+    """A handle the workflow can't hold or judge as it is (engine 2b spec §3.2): whether it addresses anything, and
+    null, and past POINTER_MAX, what it addresses as a claim of its own, owned by the run the activity's workflow id
+    names, with the source's taint for that part."""
+
+    handle: dict[str, Any]
+    claim_id: str  # the workflow's: the same on a retry
+    root_run_id: str
+    step_id: str | None = None
+    iteration_key: str | None = None
+
+
+@dataclass(frozen=True)
+class DeriveResult:
+    """What the handle addresses, as the workflow may hold it: the same handle within POINTER_MAX, a derived claim's
+    past it; None for null. `present` False: the pointer addresses nothing."""
+
+    handle: dict[str, Any] | None
+    present: bool = True
 
 
 @dataclass(frozen=True)

@@ -22,7 +22,9 @@ _ELEMENT = {"object": T.MAP, "string": T.STRING, "boolean": T.BOOL, "array": T.L
 class CelContext(Protocol):
     has_item: bool  # `item` and `index` exist here (a loop body, or a filter predicate)
 
-    def resolve(self, path: RefPath, *, report: bool) -> Resolved | None: ...
+    def resolve(self, path: RefPath, *, report: bool, reads: bool = True) -> Resolved | None:
+        """`reads` False: the expression asks only whether the path exists, as the run's shape tells (a step ran)."""
+        ...
 
     def optional_fields(self, path: RefPath) -> tuple[int, ...]:
         """Positions in `path.rest` of fields its schema declares but doesn't require."""
@@ -182,7 +184,9 @@ def _references(checked: Any, ctx: CelContext) -> bool:
             ctx.error("cel.bad_path", f"`{'.'.join(chain.path)}`: {e}.")
             ok = False
             continue
-        if ctx.resolve(ref, report=True) is None:
+        # `has(steps.k.output)`, `has(steps.k.error)`: whether a step ran, the run's shape (engine 2b spec §4.6)
+        shape = chain.presence and chain.root == "steps" and len(chain.path) == 3
+        if ctx.resolve(ref, report=True, reads=not shape) is None:
             ok = False
             continue
         known = facts[chain.expr_id]

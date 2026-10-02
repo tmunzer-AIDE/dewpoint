@@ -19,6 +19,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from dewpoint.engine.canonical import canonical_json
+from dewpoint.engine.handles import ClaimRef
 from dewpoint.engine.sensitive import (
     MIN_SECRET,
     SENSITIVE,
@@ -63,6 +64,8 @@ def _walk(value: Any, schemas: list[Any], root: Mapping[str, Any], found: list[A
 def _strings(value: Any) -> Iterable[str]:
     if isinstance(value, str):
         yield value
+    elif ClaimRef.of(value) is not None:  # a handle's id and pointer are metadata, never a value (engine 2b spec §4.6)
+        return
     elif isinstance(value, dict):
         for k, v in value.items():
             yield from _strings(k)

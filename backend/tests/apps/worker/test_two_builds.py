@@ -57,7 +57,7 @@ def graphs() -> tuple[MemoryStore, G, G]:
     new = G()  # N's: nothing retired
     new.settings = {
         "input_schema": {"type": "object"},
-        "outputs": {"n": cel(f"steps.e.output.value + {EVALUATOR_ONLY}")},
+        "outputs": {"n": cel(f"41 + {EVALUATOR_ONLY}")},  # in the evaluator, reading nothing sensitive
     }
     new.node("e", "testkit.echo@1", {"value": 41})
     return store, old, new
