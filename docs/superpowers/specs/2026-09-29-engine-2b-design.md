@@ -69,7 +69,7 @@
     redaction by field name, and nothing is promised for a plugin's own `logging` or `print`; a plugin's failure shows
     its code and message only when they're constants of its code; a secret a plugin makes and leaks before it's
     claimed is a canary of its own (§3.7, §6.7, §12). From the owner's whole-branch review: an input's refusal names
-    a key the data supplied as `*` (§3.5).
+    a key the data supplied as `*` (§3.5). The 2b-1b plan's measured values go into §15.
 - **Parent specs:**
   - `2026-09-24-dewpoint-architecture-design.md` (§5, §6.1, §6.5, §6.8, §12, §15). This spec **changes** its
     workflow-id contract (§6.1), replaces its `outbox` table (§6.1), details its claim check (§6.5) and settles the
@@ -1759,6 +1759,21 @@ measurements establish it; the spec is revised with the measured value when that
   budget (1 MiB), `TRIGGER_INLINE` (64 KiB), `SEGMENT_BYTES` (256 KiB) and `OPEN_SCOPES_CAP` (100, the most a
   version's derived cap may be, §5.3); a handle's `POINTER_MAX` (256 bytes, §3.2); the
   spill floor (1 KiB, §5.4); the secret-index bounds (100,000 strings or 8 MiB, §3.7).
+- **Measured by 2b-1b** (revision 6):
+  - The version bound's maxima, built with the snapshot's own encoders: `ENVELOPE_MAX` 2,037 bytes, a unit 378 bytes,
+    `TRIGGER_MAX` 65,852 bytes. With `SNAPSHOT_MAX` (1.5 MiB) and the live-state budget (1 MiB), the five largest
+    shapes of §11.3 each get the full cap of 100, and the all-claimed live minimum is at most 621,256 bytes (250 root
+    loops), below the budget: `SNAPSHOT_MAX`, the live-state budget, `TRIGGER_INLINE` and `OPEN_SCOPES_CAP` hold for
+    them.
+  - A handle: `HANDLE_MAX` 316 bytes for `POINTER_MAX`'s 256.
+  - A workflow task's CPU on the target runner (ubuntu-latest, 2 CPUs, the engine worker at 2 workflow-task slots),
+    at the heaviest queued state (240 sibling loops in nested loops, and the same with the root's budget spent), one
+    run and four at once: the worst activation 371.6 ms of the 1 s target, p99 at most 194 ms, no failed workflow
+    task (run 37016438529, once a take in an execution's first task got its startup tenth; 943 ms before).
+  - The 256 KiB bound on carried sensitive values retires: from 2b-1b the workflow carries none.
+  - Still provisional: `SEGMENT_BYTES`, the spill floor, the secret-index bounds (the matcher's build cost at them is
+    unmeasured) and the structural weights of a workflow task's share (measured locally; the target-runner check
+    covers the heaviest shape only).
 - **Operational intervals:** worker health every 30 s, live for 90 s (§2.7); dispatcher and reconciler reports
   within 5 minutes (§10.6); the retention SLO's 24 hours (§10.3).
 - **Configurable defaults** (policy, not measurement): 5 concurrent root runs per tenant, raised only after capacity
