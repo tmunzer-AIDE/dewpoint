@@ -14,24 +14,43 @@ from typing import Any, Protocol
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from dewpoint.apps.inputs import FORGED, reasons
 from dewpoint.core.claims.service import CLAIM_UNAVAILABLE, ClaimUnavailableError, NewClaim
 from dewpoint.engine.cel import evaluate as cel
 from dewpoint.engine.cel import types as T
 from dewpoint.engine.cel.bind import BindingError, bind_item, check_json
 from dewpoint.engine.cel.record import ExpressionRecord
-from dewpoint.engine.handles import MISSING, ClaimRef, Fetch, StoredClaim, contains_marker, part, resolve_value
+from dewpoint.engine.handles import (
+    MISSING,
+    ClaimRef,
+    Fetch,
+    StoredClaim,
+    contains_marker,
+    handles_in,
+    part,
+    resolve_value,
+)
 from dewpoint.engine.matcher import Matcher
-from dewpoint.engine.runtime.activities import Claiming, DeriveInput, DeriveResult, StepInput
+from dewpoint.engine.runtime.activities import (
+    ChildInput,
+    ChildInputResult,
+    Claiming,
+    DeriveInput,
+    DeriveResult,
+    GrantInput,
+    StepInput,
+)
 from dewpoint.engine.runtime.execution import INTERNAL_ERROR
 from dewpoint.engine.runtime.ids import run_of, tenant_of
 from dewpoint.engine.runtime.projection import REDACTED
 from dewpoint.engine.runtime.resolve import Part, ValueFailure, join
 from dewpoint.engine.sensitive import MIN_SECRET
-from dewpoint.engine.split import split
+from dewpoint.engine.split import ForgedHandleError, split
 from dewpoint.engine.taint import from_schema, tainted_positions
 
 UNAVAILABLE = "A claim this run may not read, or that doesn't exist."
 _OUTPUTS = uuid.uuid5(uuid.NAMESPACE_URL, "dewpoint:claims:output")  # a step output's claim ids are derived under it
+_INPUTS = uuid.uuid5(uuid.NAMESPACE_URL, "dewpoint:claims:child-input")  # a child input's, under it
 
 
 class LeftPlainError(Exception):
@@ -56,6 +75,22 @@ class ClaimStore(Protocol):
         iteration_key: str | None,
     ) -> None:
         """Claims made during a run (`step_outputs`), written once: a retry writes the same rows."""
+        ...
+
+    async def write_inputs(self, tenant_id: str, claims: Sequence[tuple[NewClaim, str]]) -> None:
+        """Claims made before a run starts (`run_inputs`), each with where in its input it came from."""
+        ...
+
+    async def grant(
+        self, tenant_id: str, *, granted_by: str, to: str, claim_ids: Sequence[str], root_run_id: str
+    ) -> None:
+        """`to` may read the claims, which `granted_by` owns or holds a grant on (§3.4). Raises
+        ClaimUnavailableError, granting nothing, for any other."""
+        ...
+
+    async def input_schema(self, tenant_id: str, version_id: str) -> Mapping[str, Any] | None:
+        """A version's input schema, what a sub-flow's input is checked and split by (§3.4); None if there's no
+        such version."""
         ...
 
     async def secrets(self, tenant_id: str, root_run_id: str) -> tuple[str, ...]:
@@ -323,3 +358,75 @@ async def filter_claimed(
         await store.remember(tenant, claims.root_run_id, sorted(set(_strings(kept))))
     await store.write(tenant, [new], kind="filter", step_id=claims.step_id, iteration_key=claims.iteration_key)
     return {"ok": {"items": ClaimRef(str(claim_id)).to_json(), "count": len(kept), "input": len(items)}}
+
+
+# --- crossing between runs (§3.4) ----------------------------------------------------------------------------------
+
+
+async def _closure(claim_ids: Sequence[str], fetch: Fetch) -> list[str]:
+    """`claim_ids` and every claim nested in them: what a run must be granted to resolve their handles."""
+    seen: set[str] = set()
+    queue = list(claim_ids)
+    while queue:
+        claim_id = queue.pop()
+        if claim_id in seen:
+            continue
+        seen.add(claim_id)
+        queue.extend(h.id for _, h in handles_in((await fetch(claim_id)).value))
+    return sorted(seen)
+
+
+async def _granted(store: ClaimStore, tenant: str, run: str, to: str, value: Any, root: str) -> None:
+    ids = await _closure([h.id for _, h in handles_in(value)], _fetcher(store, tenant, run))
+    if ids:
+        await store.grant(tenant, granted_by=run, to=to, claim_ids=ids, root_run_id=root)
+
+
+async def grant(data: GrantInput, store: ClaimStore) -> None:
+    """`claims.grant`: the calling run grants the handles in `value`, and the claims they nest, to `to_run_id`."""
+    tenant, run = caller()
+    try:
+        await _granted(store, tenant, run, data.to_run_id, data.value, data.root_run_id)
+    except ClaimUnavailableError:
+        raise ApplicationError(UNAVAILABLE, type=CLAIM_UNAVAILABLE, non_retryable=True) from None
+
+
+async def child_input(data: ChildInput, store: ClaimStore) -> ChildInputResult:
+    """`claims.child_input` (§3.4, §3.5): the calling run's input for its child, checked against the child's schema
+    with its values resolved, then split for the child with the run's own handles left in place; those, and the
+    claims they nest, are granted to the child, and the new claims' secrets join the tree's index. A child whose
+    version isn't there gets its input as it is: it fails loading it, before it reads anything."""
+    tenant, run = caller()
+    schema = await store.input_schema(tenant, data.version_id)
+    if schema is None:
+        return ChildInputResult(trigger=data.value)
+    try:
+        resolved = await resolve_value(data.value, _fetcher(store, tenant, run))
+    except ClaimUnavailableError:
+        raise ApplicationError(UNAVAILABLE, type=CLAIM_UNAVAILABLE, non_retryable=True) from None
+    refused = reasons(schema, resolved.value)
+    if refused:
+        return ChildInputResult(reasons=refused)
+    seed = uuid.uuid5(_INPUTS, data.child_run_id)
+    try:
+        done = split(
+            data.value,
+            schema,
+            lambda pointer: str(uuid.uuid5(seed, pointer)),
+            known=await store.secrets(tenant, data.root_run_id),
+            handles=True,
+        )
+    except ForgedHandleError:
+        return ChildInputResult(reasons=[FORGED])
+    child, root = uuid.UUID(data.child_run_id), uuid.UUID(data.root_run_id)
+    rows = [
+        (NewClaim(uuid.UUID(c.id), c.value, ("",) if c.tainted else (), child, root), c.pointer) for c in done.claims
+    ]
+    await store.remember(tenant, data.root_run_id, done.secrets)
+    if rows:
+        await store.write_inputs(tenant, rows)
+    try:
+        await _granted(store, tenant, run, data.child_run_id, data.value, data.root_run_id)
+    except ClaimUnavailableError:
+        raise ApplicationError(UNAVAILABLE, type=CLAIM_UNAVAILABLE, non_retryable=True) from None
+    return ChildInputResult(trigger=done.envelope)

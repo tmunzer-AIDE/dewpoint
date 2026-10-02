@@ -59,8 +59,11 @@ def json_bytes(value: Any) -> int:
 
 
 def _strings(value: Any) -> Iterator[str]:
+    """A value's strings and keys: never a handle's, whose id and pointer are metadata."""
     if isinstance(value, str):
         yield value
+    elif ClaimRef.of(value) is not None:
+        return
     elif isinstance(value, Mapping):
         for key, child in value.items():
             yield key
@@ -68,6 +71,16 @@ def _strings(value: Any) -> Iterator[str]:
     elif isinstance(value, list):
         for child in value:
             yield from _strings(child)
+
+
+def _without_handles(value: Any) -> Any:
+    if ClaimRef.of(value) is not None:
+        return None
+    if isinstance(value, dict):
+        return {k: _without_handles(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_without_handles(v) for v in value]
+    return value
 
 
 class _Splitter:
@@ -163,11 +176,14 @@ def split(
     *,
     known: Iterable[str] = (),
     sizes: bool = True,
+    handles: bool = False,
 ) -> Split:
     """`value` (a validated trigger or sub-flow input, or an activity's result) as its envelope and its claims
     (above). `known`: the run's secrets so far (its secret index, §3.7): text that repeats one is claimed too.
-    `sizes` False: only what's sensitive is claimed, as a step's output is until it spills (§5.2)."""
-    if contains_marker(value):
+    `sizes` False: only what's sensitive is claimed, as a step's output is until it spills (§5.2). `handles`: the
+    value may hold the run's own handles (a sub-flow's input, from its parent, §3.4), left where they are; any
+    other use of the marker is still refused."""
+    if contains_marker(_without_handles(value) if handles else value):
         raise ForgedHandleError("An input that holds the handle marker.")
     s = _Splitter(value, new_id)
     for pointer in tainted_positions(value, from_schema(schema)):

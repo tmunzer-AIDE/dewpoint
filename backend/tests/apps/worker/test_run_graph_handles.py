@@ -264,3 +264,61 @@ async def test_a_filter_over_a_sensitive_list_keeps_a_tainted_claim_and_charges_
     assert result.status == "succeeded", result.error
     assert result.outputs is not None and result.outputs["count"] == 2 and result.iterations == 3
     assert held(store, result.outputs["kept"]) == (["k3y-a", "k3y-c"], True)
+
+
+async def test_a_sensitive_value_crosses_into_a_sub_flow_and_its_result_back_through_grants(
+    env: WorkflowEnvironment,
+) -> None:
+    """Spec §3.4: the parent grants the child the handles it passes, before the start; the child grants its parent
+    the handles in its outputs, before its result returns. Each reads the other's claims only through those grants."""
+    store = MemoryStore()
+    child = G()
+    child.settings = {
+        "input_schema": {"type": "object", "properties": {"key": SECRET}, "required": ["key"],
+                         "additionalProperties": False},
+        "outputs": {"n": ref("steps.t.output.n")},
+    }  # fmt: skip
+    child.node("t", "flow.transform@1", {"fields": {"n": cel("size(trigger.key)")}})
+    g = graph(n=ref("steps.r.output.n"), more=ref("steps.p.output.more"))
+    g.node(
+        "r", "flow.run_workflow@1", {"workflow_id": str(store.publish(child)), "input": {"key": ref("trigger.token")}}
+    )
+    g.node("p", "flow.transform@1", {"fields": {"more": cel("steps.r.output.n + 1")}}).edge("r", "p")
+    async with workers(env.client, store):
+        result = await run(env.client, store, g, TRIGGER, claimed=True)
+    assert result.status == "succeeded", result.error
+    assert result.outputs is not None
+    assert held(store, result.outputs["n"]) == (12, True)  # the child's claim, read through its grant
+    assert held(store, result.outputs["more"]) == (13, True)  # the parent's own, computed from it
+    [(child_run, _)] = store.starts.items()
+    [token_claim] = [cid for cid, c in store.claims.items() if c.value == "s3cr3t-token"]
+    assert (token_claim, child_run) in store.grants  # parent -> child
+
+
+async def test_a_sub_flows_undeclared_input_is_claimed_for_the_child(env: WorkflowEnvironment) -> None:
+    store = MemoryStore()
+    child = G()
+    child.settings = {"input_schema": {"type": "object"}, "outputs": {}}
+    child.node("e", "testkit.echo@1", {"value": 1})
+    g = graph().node("r", "flow.run_workflow@1", {"workflow_id": str(store.publish(child)), "input": {"x": 41}})
+    async with workers(env.client, store):
+        result = await run(env.client, store, g, TRIGGER, claimed=True)
+    assert result.status == "succeeded", result.error
+    [(child_run, _)] = store.starts.items()
+    assert [(c.value, c.owner) for c in store.claims.values() if c.kind == "input" and c.owner == child_run] == [
+        (41, child_run)
+    ]
+
+
+async def test_cel_that_reads_sensitive_data_nowhere_still_resolves_a_size_claim(env: WorkflowEnvironment) -> None:
+    """A value only its size claimed is plain data behind a handle (spec §3.5): an untainted expression over it goes to
+    `cel.evaluate`, which resolves it, and its result comes back plain. Review finding: binding sets travel as a
+    tuple, which the marker check didn't look into, so the evaluator got the handle itself and gave `size()` of it."""
+    big = {"type": "object", "properties": {"v": {"type": "string"}}, "required": ["v"], "additionalProperties": False}
+    store = MemoryStore()
+    g = G()
+    g.settings = {"input_schema": big, "outputs": {"n": cel("size(trigger.v)")}}
+    g.node("e", "testkit.echo@1", {"value": 1})
+    async with workers(env.client, store):
+        result = await run(env.client, store, g, {"v": "x" * 100_000}, claimed=True)
+    assert (result.status, result.outputs) == ("succeeded", {"n": 100_000}), result.error

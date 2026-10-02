@@ -39,10 +39,12 @@ from dewpoint.apps.worker.claims import (
     UNAVAILABLE,
     ClaimStore,
     Evaluate,
+    child_input,
     claim_output,
     derive,
     evaluate_claimed,
     filter_claimed,
+    grant,
     join_claimed,
     resolved_config,
 )
@@ -57,7 +59,9 @@ from dewpoint.engine.runtime import size
 from dewpoint.engine.runtime.activities import (
     APPLIED,
     CEL_EVALUATE,
+    CLAIMS_CHILD_INPUT,
     CLAIMS_DERIVE,
+    CLAIMS_GRANT,
     LOAD_VERSION,
     MAPPED,
     OUTCOME_UNKNOWN,
@@ -66,8 +70,11 @@ from dewpoint.engine.runtime.activities import (
     SIMULATED,
     CelInput,
     CelResult,
+    ChildInput,
+    ChildInputResult,
     DeriveInput,
     DeriveResult,
+    GrantInput,
     LoadVersionInput,
     ProjectInput,
     StepInput,
@@ -320,10 +327,18 @@ def engine_activities(store: RunStore, plugins: Iterable[Plugin], *, abi: int = 
     async def claims_derive(data: DeriveInput) -> DeriveResult:
         return await derive(data, store)
 
+    @activity.defn(name=CLAIMS_CHILD_INPUT)
+    async def claims_child_input(data: ChildInput) -> ChildInputResult:
+        return await child_input(data, store)
+
+    @activity.defn(name=CLAIMS_GRANT)
+    async def claims_grant(data: GrantInput) -> None:
+        await grant(data, store)
+
     steps = [
         step_activity_for(node, store) for plugin in plugins for node in plugin.nodes if node.kind == NodeKind.ACTION
     ]
-    return [load_version, project, claims_derive, *steps]
+    return [load_version, project, claims_derive, claims_child_input, claims_grant, *steps]
 
 
 def remote_evaluator(socket_path: str, profile: str) -> Evaluate:
@@ -350,6 +365,11 @@ def cel_activity(evaluate: Evaluate, store: ClaimStore | None = None) -> Callabl
     async def cel_evaluate(data: CelInput) -> CelResult:
         try:
             if data.claims is None:
+                if any(contains_marker(b) for b in data.request.get("bindings", ())):  # never evaluated as data
+                    raise ApplicationError(
+                        "A request whose bindings hold handles came without claims.", type=INTERNAL_ERROR,
+                        non_retryable=True,
+                    )  # fmt: skip
                 return CelResult(await evaluate(data.request))
             if store is None:
                 raise ApplicationError("This CEL worker reads no claims.", type=INTERNAL_ERROR, non_retryable=True)

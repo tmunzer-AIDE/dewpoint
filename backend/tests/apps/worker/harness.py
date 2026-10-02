@@ -154,6 +154,20 @@ class MemoryStore:
                 raise ClaimConflictError("A claim was written again with other content.")
             self.claims[str(c.id)] = held
 
+    async def write_inputs(self, tenant_id: str, claims: Any) -> None:
+        for c, _ in claims:
+            held = HeldClaim(tenant_id, str(c.owner_run_id), str(c.root_run_id), c.value, c.sensitive_pointers, "input")
+            self.claims[str(c.id)] = held
+
+    async def grant(self, tenant_id: str, *, granted_by: str, to: str, claim_ids: Any, root_run_id: str) -> None:
+        for claim_id in claim_ids:  # only what the granter may read: all or nothing
+            await self.fetch(tenant_id, granted_by, claim_id)
+        self.grants.update((claim_id, to) for claim_id in claim_ids)
+
+    async def input_schema(self, tenant_id: str, version_id: str) -> Any:
+        version = self.versions.get(version_id)
+        return None if version is None else version.graph.get("settings", {}).get("input_schema", {"type": "object"})
+
     async def secrets(self, tenant_id: str, root_run_id: str) -> tuple[str, ...]:
         return tuple(sorted(self.index.get(root_run_id, set())))
 
