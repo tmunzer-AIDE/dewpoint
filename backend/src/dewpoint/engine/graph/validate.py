@@ -187,6 +187,23 @@ _SENSITIVE_LITERAL = (
 )
 
 
+_TIMER = "A wait's duration is visible in the run's history, so it can't come from sensitive data."
+_FAIL_MESSAGE = "A failure's message is recorded as it is, so it can't hold sensitive data."
+_SUBFLOW_INPUT = "This passes sensitive data into a field the sub-flow doesn't mark sensitive."
+TAINTED_REASON = "reads sensitive data"  # why a tainted CEL value runs in the isolated evaluator (§4.2)
+
+
+def _covered(shape: Shape, schema: Mapping[str, Any], path: Pointer) -> bool:
+    """Whether every tainted part of a value written at `path` lies where `schema` marks it sensitive."""
+    if not shape.tainted or is_marked(schema, path):
+        return True
+    if shape.all or (shape.other is not None and shape.other.tainted):
+        return False  # tainted as a whole, or under keys no schema names: the container itself must be marked
+    if shape.items is not None and shape.items.tainted and not _covered(shape.items, schema, (*path, 0)):
+        return False
+    return all(_covered(sub, schema, (*path, name)) for name, sub in shape.fields)
+
+
 _REVEALS = {
     C.IF: "the branch taken",
     C.SWITCH: "the port taken",
@@ -486,6 +503,27 @@ class _Validator:
                 self.pins[str(n.id)] = str(info.version_id)
         self.out_schema[n.id] = self._output_schema(n, spec, resolved)
         self.out_taint[n.id] = self._output_taint(n, spec, resolved)
+        self._refused_taint(n, spec, resolved)
+
+    def _refused_taint(self, n: GraphNode, spec: NodeTypeSpec, resolved: Mapping[Pointer, Resolved | None]) -> None:
+        """Tainted data where history would show it (engine 2b spec §4.5): a timer's duration, a failure's message; or
+        where a child's own analysis wouldn't know it's sensitive: a sub-flow input field it doesn't mark."""
+        tainted = [(p, r) for p, r in resolved.items() if r is not None and r.taint.tainted]
+        if spec.ref in (C.DELAY, C.WAIT_UNTIL):
+            for pointer, _ in tainted:
+                self.err(
+                    "taint.timer", _TIMER, node=n.id, fld=pointer_str(pointer), fix="Wait on data that isn't sensitive."
+                )
+        elif spec.ref == C.FAIL:
+            for pointer, _ in tainted:
+                self.err(
+                    "taint.fail_message", _FAIL_MESSAGE, node=n.id, fld=pointer_str(pointer), fix="Use a fixed message."
+                )
+        elif spec.ref == C.RUN_WORKFLOW and (info := self._subflow(n)) is not None:
+            for pointer, r in tainted:
+                if pointer[:1] == ("input",) and not _covered(r.taint, info.input_schema, pointer[1:]):
+                    self.err("taint.subflow_input", _SUBFLOW_INPUT, node=n.id, fld=pointer_str(pointer),
+                             fix="Mark that field sensitive (x-sensitive) in the sub-flow's input schema.")  # fmt: skip
 
     def _output_taint(self, n: GraphNode, spec: NodeTypeSpec, resolved: Mapping[Pointer, Resolved | None]) -> Shape:
         """What a node's output holds that's tainted (§4.1)."""
@@ -661,12 +699,15 @@ class _Validator:
         result = cel_check.check(
             value.expr, target, context, node=str(site.node) if site.node else None, field=site.field
         )
-        if result.record is not None:
-            self.expressions.append(result.record)
-        if result.resolved is None:
-            return None
         whole_roots = {p.path[0] for p in result.record.projections if len(p.path) == 1} if result.record else set()
         tainted = context.tainted or any(self._root_tainted(site, root) for root in whole_roots)
+        if result.record is not None:  # a tainted value always runs in the isolated evaluator (§4.2)
+            record = result.record
+            self.expressions.append(
+                dataclasses.replace(record, mode="activity", reason=TAINTED_REASON) if tainted else record
+            )
+        if result.resolved is None:
+            return None
         return dataclasses.replace(result.resolved, taint=TAINTED if tainted else CLEAN)
 
     def _root_tainted(self, site: _Site, root: str) -> bool:

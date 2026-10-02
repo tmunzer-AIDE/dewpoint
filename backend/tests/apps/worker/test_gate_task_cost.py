@@ -31,22 +31,36 @@ from tests.support.keys import FIXTURE_CONVERTER
 
 S = {"type": "string"}
 INTS = {"type": "array", "items": {"type": "integer"}}
-SCHEMA: dict[str, Any] = {  # AT_CAPS, typed as publish sees it: every list a proven list
+
+
+def declared(value: dict[str, Any], each: dict[str, Any]) -> dict[str, Any]:
+    """A map with every key declared: a position no schema declares is tainted and never runs local (engine 2b spec
+    §4.1), so this is how a map at the cap reaches a local expression."""
+    return {"type": "object", "properties": dict.fromkeys(sorted(value), each), "additionalProperties": False}
+
+
+SCHEMA: dict[str, Any] = {  # AT_CAPS, typed as publish sees it: every list a proven list, every position declared
     "type": "object",
     "properties": {
         "events": {
             "type": "array",
-            "items": {"type": "object", "properties": {"mac": S, "type": S}, "required": ["mac", "type"]},
+            "items": {
+                "type": "object",
+                "properties": {"mac": S, "type": S},
+                "required": ["mac", "type"],
+                "additionalProperties": False,
+            },
         },
-        "m": {"type": "object", "additionalProperties": {"type": "integer"}},
+        "m": declared(AT_CAPS["m"], {"type": "integer"}),
         "s": S,
         "needle": S,
         "texts": {"type": "array", "items": S},
         "c1": {"type": "array", "items": INTS},
         "c2": {"type": "array", "items": INTS},
-        "dense": {"type": "object", "additionalProperties": INTS},
+        "dense": declared(AT_CAPS["dense"], INTS),
     },
     "required": ["events", "m", "s", "needle", "texts", "c1", "c2", "dense"],
+    "additionalProperties": False,
 }
 
 

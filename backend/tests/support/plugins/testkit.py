@@ -173,6 +173,10 @@ class BlobConfig(BaseModel):
     size: int = Field(ge=0, le=4 * 1024 * 1024)
 
 
+class BlobOutput(BaseModel):
+    value: str  # declared, so plain: a sub-flow can take it into a field it doesn't mark sensitive (spec §4.5)
+
+
 class Blob(Node):
     """An output of `size` characters from a small config: what a step returns can pass Temporal's payload limit
     when what it was sent doesn't (engine 2b spec §5.2)."""
@@ -181,13 +185,13 @@ class Blob(Node):
     version = 1
     title = "Blob"
     Config = BlobConfig
-    Output = EchoOutput
+    Output = BlobOutput
 
-    async def run(self, ctx: StepContext, config: BlobConfig) -> EchoOutput:
-        return EchoOutput(value="x" * config.size)
+    async def run(self, ctx: StepContext, config: BlobConfig) -> BlobOutput:
+        return BlobOutput(value="x" * config.size)
 
-    async def simulate(self, ctx: StepContext, config: BlobConfig) -> EchoOutput:
-        return EchoOutput(value="x" * config.size)
+    async def simulate(self, ctx: StepContext, config: BlobConfig) -> BlobOutput:
+        return BlobOutput(value="x" * config.size)
 
 
 class SecretBlobConfig(BaseModel):

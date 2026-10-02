@@ -169,13 +169,21 @@ async def validate_draft(
 ) -> dict[str, object]:
     wf = await _get(db, ctx, workflow_id)
     checked = await workflow_ops.check_draft(db, ctx.tenant_id, wf.draft, settings)
-    expressions = checked.result.expressions if checked.result is not None else ()
+    result = checked.result
+    expressions = result.expressions if result is not None else ()
     return {
         "draft_revision": wf.draft_revision,
         "valid": not any(d.severity == "error" for d in checked.diagnostics),
         "diagnostics": [d.to_json() for d in checked.diagnostics],
         # How each CEL value runs, for the editor (spec §5.10): "local" runs inline, "activity" as a separate step.
         "expressions": [{"node": r.node, "field": r.field, "mode": r.mode, "reason": r.reason} for r in expressions],
+        # Which values read sensitive data, and what each declassified site reveals (engine 2b spec §4.1, §4.3).
+        "taint": {
+            "sites": [{"node": n, "field": f} for n, f in (result.tainted_sites if result is not None else ())],
+            "declassified": [
+                {"node": n, "field": f, "reveals": r} for n, f, r in (result.declassified if result is not None else ())
+            ],
+        },
     }
 
 
