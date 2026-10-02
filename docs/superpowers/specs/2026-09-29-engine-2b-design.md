@@ -68,7 +68,8 @@
     prototype's milestone 5: the log lines the worker controls hold only text proven to be code, which replaces
     redaction by field name, and nothing is promised for a plugin's own `logging` or `print`; a plugin's failure shows
     its code and message only when they're constants of its code; a secret a plugin makes and leaks before it's
-    claimed is a canary of its own (§3.7, §6.7, §12).
+    claimed is a canary of its own (§3.7, §6.7, §12). From the owner's whole-branch review: an input's refusal names
+    a key the data supplied as `*` (§3.5).
 - **Parent specs:**
   - `2026-09-24-dewpoint-architecture-design.md` (§5, §6.1, §6.5, §6.8, §12, §15). This spec **changes** its
     workflow-id contract (§6.1), replaces its `outbox` table (§6.1), details its claim check (§6.5) and settles the
@@ -270,7 +271,10 @@ Every resolution happens in an activity and checks, against the stored row:
 
 ### 3.5 Claiming inputs before a run starts
 
-One function in `apps` validates a trigger against the version's input schema, then splits it:
+One function in `apps` validates a trigger against the version's input schema, then splits it. An input it refuses,
+at admission or at a sub-flow's crossing (§3.4), is told each place it breaks and the rule, never what's there: a place
+is named as far as the schema declares it, and a key the data supplied (a map's) shows as `*`, since a key can be a
+secret and a sub-flow's refusal is an activity result, in history.
 - **Sensitive first:** every value at an `x-sensitive` position, and every value at a position the schema doesn't
   declare (`additionalProperties`, pattern properties, a union where any branch is sensitive), is claimed with
   taint. Unknown counts as sensitive.
