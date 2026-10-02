@@ -8,8 +8,11 @@ queued state, with the engine worker at its intended 2 workflow-task slots, one 
 
 It times each workflow activation's CPU (the activating thread's) and wall time, around the sandboxed runner the engine
 worker uses. Acceptance, asserted (the process exits non-zero otherwise): every activation within CPU_LIMIT_MS of CPU
-(engine-core's 1 s), no failed workflow task but one the probe's own cancel explains (a task completing as the cancel
-lands, which the server rejects: the next event is the cancel request), and every copy continued at least once."""
+(engine-core's 1 s), compared unrounded; no failed workflow task but one the probe's own cancel explains (a task
+completing as the cancel lands, which the server rejects: the next event is the cancel request); and every copy ended
+as intended: it completed as expected (succeeded, with its workload's exact iteration count), or the probe cancelled it
+once it had continued STOP_AFTER times and it ended cancelled. A copy that failed, or ended any other way early, fails
+the check."""
 
 import asyncio
 import json
@@ -21,7 +24,8 @@ import uuid
 from typing import Any
 
 from temporalio.api.enums.v1 import EventType
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowFailureError
+from temporalio.exceptions import CancelledError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker, WorkflowRunner
 from temporalio.worker._workflow_instance import WorkflowInstance, WorkflowInstanceDetails
@@ -112,9 +116,10 @@ def siblings(k: int, n: int, *, on_error: str = "fail") -> G:
     return g
 
 
-WORKLOADS: dict[str, tuple[Any, int]] = {
-    "many_siblings": (lambda: siblings(240, 2), scheduler.ITERATION_CAP),  # 240 sibling loops
-    "exhausted_root": (lambda: siblings(240, 3, on_error="continue"), 610),  # the root's budget spent early
+# name: (graph, the root's iteration cap, the iterations a completed run counts)
+WORKLOADS: dict[str, tuple[Any, int, int]] = {
+    "many_siblings": (lambda: siblings(240, 2), scheduler.ITERATION_CAP, 10 + 100 + 100 * 240 * 2),  # 240 siblings
+    "exhausted_root": (lambda: siblings(240, 3, on_error="continue"), 610, 610),  # the root's budget spent early
 }
 
 
@@ -129,7 +134,7 @@ def summary(rows: list[tuple[str, float, float]]) -> dict[str, Any]:
         return round(xs[min(n - 1, n * q // 100)])
 
     return {
-        "activations": n, "cpu_p50": pct(cpu, 50), "cpu_p99": pct(cpu, 99), "cpu_max": round(cpu[-1]),
+        "activations": n, "cpu_p50": pct(cpu, 50), "cpu_p99": pct(cpu, 99), "cpu_max": round(cpu[-1], 1),
         "cpu_over_500": sum(c > 500 for c in cpu), "cpu_over_1000": sum(c > 1000 for c in cpu),
         "wall_p99": pct(wall, 99), "wall_max": round(wall[-1]), "wall_over_2000": sum(w > 2000 for w in wall),
     }  # fmt: skip
@@ -168,33 +173,56 @@ def bench() -> dict[str, Any]:
     }  # fmt: skip
 
 
-async def stop_after(client: Client, handles: list[Any]) -> set[str]:
-    """Once every copy has continued STOP_AFTER times (its latest run id changed as often), cancel each. Returns the
-    copies whose cancel was sent."""
+async def stop_after(client: Client, handles: list[Any]) -> dict[str, int]:
+    """Once every copy still running has continued STOP_AFTER times (its latest run id changed as often), cancel it.
+    Returns each cancelled copy with the continues it had made when its cancel was sent; a copy that ended by itself
+    isn't cancelled."""
     runs: dict[str, set[str]] = {h.id: set() for h in handles}
+    running: set[str] = {h.id for h in handles}
     started = time.monotonic()
-    while time.monotonic() - started < TIMEOUT_S:
-        done = 0
+    while running and time.monotonic() - started < TIMEOUT_S:
         for h in handles:
+            if h.id not in running:
+                continue
             d = await client.get_workflow_handle(h.id).describe()
             runs[h.id].add(d.run_id)
-            done += d.status is not None and d.status.name != "RUNNING"
-        if done == len(handles):
-            return set()
-        if min(len(r) - 1 for r in runs.values()) >= STOP_AFTER:
+            if d.status is not None and d.status.name != "RUNNING":
+                running.discard(h.id)
+        if running and all(len(runs[w]) - 1 >= STOP_AFTER for w in running):
             break
         await asyncio.sleep(2)
-    cancelled = set()
-    for h in handles:
+    cancelled: dict[str, int] = {}
+    for w in sorted(running):
         try:
-            await client.get_workflow_handle(h.id).cancel()
-            cancelled.add(h.id)
+            await client.get_workflow_handle(w).cancel()
+            cancelled[w] = len(runs[w]) - 1
         except Exception as e:  # loud: a copy whose cancel failed runs on
-            FAILURES.append(f"cancel of {h.id[-12:]} failed: {type(e).__name__}: {e}")
+            FAILURES.append(f"cancel of {w[-12:]} failed: {type(e).__name__}: {e}")
     return cancelled
 
 
-def failed_tasks(histories: list[Any], cancelled: set[str]) -> tuple[list[str], int]:
+async def ending(handle: Any, cancelled: dict[str, int], iterations: int) -> str:
+    """How a copy ended, and whether as intended: completed as expected, or cancelled at its stopping point."""
+    try:
+        result = await asyncio.wait_for(handle.result(), TIMEOUT_S)
+    except WorkflowFailureError as e:
+        if handle.id in cancelled and isinstance(e.cause, CancelledError):
+            if cancelled[handle.id] >= STOP_AFTER:
+                return f"cancelled after {cancelled[handle.id]} continues"
+            FAILURES.append(f"{handle.id[-12:]}: cancelled after only {cancelled[handle.id]} continues")
+            return "cancelled early"
+        FAILURES.append(f"{handle.id[-12:]}: ended {type(e.cause).__name__}: {e.cause}")
+        return f"failed: {type(e.cause).__name__}"
+    except Exception as e:
+        FAILURES.append(f"{handle.id[-12:]}: no result: {type(e).__name__}: {e}")
+        return f"no result: {type(e).__name__}"
+    if (result.status, result.iterations) != ("succeeded", iterations):
+        FAILURES.append(f"{handle.id[-12:]}: ended {result.status} with {result.iterations} iterations: {result.error}")
+        return f"{result.status} unexpectedly"
+    return f"succeeded, {result.iterations} iterations"
+
+
+def failed_tasks(histories: list[Any], cancelled: dict[str, int]) -> tuple[list[str], int]:
     """Every failed workflow task's cause; and how many aren't explained by the probe's own cancel landing as the
     task completed (the next event is the cancel request, in a run the probe cancelled)."""
     causes, unexcused = [], 0
@@ -214,7 +242,7 @@ def failed_tasks(histories: list[Any], cancelled: set[str]) -> tuple[list[str], 
 
 
 async def workload(env: WorkflowEnvironment, name: str) -> dict[str, Any]:
-    build, cap = WORKLOADS[name]
+    build, cap, iterations = WORKLOADS[name]
     scheduler.ITERATION_CAP = run_graph.ITERATION_CAP = cap  # read as a new run's sandbox imports the workflow
     ACTIVATIONS.clear()
     store = MemoryStore()
@@ -243,26 +271,23 @@ async def workload(env: WorkflowEnvironment, name: str) -> dict[str, Any]:
                 )
             )
         cancelled = await stop_after(env.client, handles)
-        statuses = []
-        for h in handles:
-            try:
-                statuses.append((await asyncio.wait_for(h.result(), TIMEOUT_S)).status)
-            except Exception as e:  # a cancelled run ends cancelled, as an error to its caller
-                statuses.append(type(e).__name__)
+        endings = [await ending(h, cancelled, iterations) for h in handles]
     histories = [x for h in handles for x in await executions(env.client, h.id, h.first_execution_run_id or "")]
     continues = [sum(1 for x in histories if x.workflow_id == h.id) - 1 for h in handles]
     causes, unexcused = failed_tasks(histories, cancelled)
     out = {
         "workload": f"{name} x{CONCURRENT}", "slots": SLOTS, "elapsed_s": round(time.monotonic() - t0),
-        "statuses": statuses, "continues": continues, "executions": len(histories), **summary(ACTIVATIONS),
+        "endings": endings, "continues": continues, "executions": len(histories), **summary(ACTIVATIONS),
         "failed_tasks": causes, "unexcused_failed_tasks": unexcused,
     }  # fmt: skip
-    if out.get("cpu_max", 0) > CPU_LIMIT_MS:
-        FAILURES.append(f"{out['workload']}: an activation took {out['cpu_max']} ms of CPU, past {CPU_LIMIT_MS}")
+    worst = max((c for _, c, _ in ACTIVATIONS), default=0.0)  # unrounded
+    out["cpu_max_exact"] = worst
+    if worst > CPU_LIMIT_MS:
+        FAILURES.append(f"{out['workload']}: an activation took {worst} ms of CPU, past {CPU_LIMIT_MS}")
     if unexcused:
         FAILURES.append(f"{out['workload']}: {unexcused} failed workflow task(s) no cancel explains: {causes}")
-    if min(continues) < 1:
-        FAILURES.append(f"{out['workload']}: a copy never continued: {continues}")
+    if not ACTIVATIONS:
+        FAILURES.append(f"{out['workload']}: no activation was timed")
     return out
 
 
