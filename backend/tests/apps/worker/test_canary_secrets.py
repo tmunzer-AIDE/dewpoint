@@ -157,6 +157,7 @@ async def test_no_history_projection_or_log_of_a_canary_run_holds_its_secrets(
 @dataclass
 class Observed:
     result: Any
+    run_id: str
     histories: list[Any]
     plain: str  # every payload of every history, decrypted
     rows: str  # every row the projection wrote
@@ -181,7 +182,7 @@ async def observed(
     rows = [asdict(r) for r in store.rows.values()] + [asdict(r) for r in store.runs.values()]
     logs = json.dumps(entries, default=str) + caplog.text
     plain = await decoded(histories)
-    return Observed(result, histories, plain, json.dumps(rows, default=str), logs, list(entries))
+    return Observed(result, run_id_of(handle), histories, plain, json.dumps(rows, default=str), logs, list(entries))
 
 
 async def results_of(histories: list[Any], activity: str) -> str:
@@ -338,3 +339,46 @@ async def test_a_sub_flow_input_refused_under_a_secret_key_never_names_the_key(
     assert why in crossing and MAP_KEY not in crossing
     for where in (seen.plain, seen.rows, seen.logs):
         assert MAP_KEY not in where
+
+
+SECRET_KEY = "sk-k3y-canary-0002"  # a secret the run's input holds as a map key, at a position its schema leaves open
+
+
+async def test_a_secret_map_key_reaches_no_history_row_or_log_and_declared_fields_still_read(
+    env: WorkflowEnvironment, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review finding C1: a map's keys are data, and one at a position the schema doesn't declare can be a secret. The
+    map is claimed whole, so the key never enters the run; a step echoes the map, a sub-flow gets it through its
+    grants and returns it, and a reference to a declared sibling still reads it plain. Decrypted, no history, row or
+    log line holds the key; the run's outputs read it back through its claims."""
+    store = MemoryStore()
+    creds = {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"],
+             "additionalProperties": {"type": "string"}}  # fmt: skip
+    child = G()
+    child.settings = {
+        "input_schema": {"type": "object", "properties": {"c": {**creds, "x-sensitive": True}}, "required": ["c"],
+                         "additionalProperties": False},
+        "outputs": {"c": ref("steps.e.output.value")},
+    }  # fmt: skip
+    child.node("e", ECHO, {"value": ref("trigger.c")})
+    g = G()
+    g.settings = {
+        "input_schema": {"type": "object", "properties": {"c": creds}, "required": ["c"],
+                         "additionalProperties": False},
+        "outputs": {"echoed": ref("steps.e.output.value"), "sub": ref("steps.r.output.c"),
+                    "name": ref("steps.n.output.value")},
+    }  # fmt: skip
+    g.node("e", ECHO, {"value": ref("trigger.c")})
+    g.node("n", ECHO, {"value": ref("trigger.c.name")})
+    g.node("r", "flow.run_workflow@1", {"workflow_id": str(store.publish(child)), "input": {"c": ref("trigger.c")}})
+    seen = await observed(env, caplog, g, {"c": {"name": "ann", SECRET_KEY: "prod"}}, store)
+    assert seen.result.status == "succeeded", seen.result.error
+
+    async def fetch(claim_id: str) -> Any:
+        return await store.fetch(TENANT, seen.run_id, claim_id)
+
+    outputs = (await resolve_value(seen.result.outputs, fetch)).value
+    assert outputs == {"echoed": {"name": "ann", SECRET_KEY: "prod"}, "sub": {"name": "ann", SECRET_KEY: "prod"},
+                       "name": "ann"}  # fmt: skip
+    for where in (seen.plain, seen.rows, seen.logs):
+        assert SECRET_KEY not in where

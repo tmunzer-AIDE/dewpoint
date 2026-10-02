@@ -203,7 +203,7 @@ async def test_the_active_version_starts_under_a_workflow_id_built_from_its_tena
     assert (workflow_id, queue) == (run_workflow_id(str(ctx.tenant_id), str(run_id)), ENGINE_QUEUE)  # 2b spec §6.1
     assert (arg.tenant_id, arg.run_id) == (str(ctx.tenant_id), str(run_id))
     assert (arg.version_id, arg.mode) == (str(version), SIMULATE)
-    assert ClaimRef.of(arg.trigger["x"]) is not None  # undeclared by its input schema: claimed (engine 2b spec §3.5)
+    assert ClaimRef.of(arg.trigger) is not None  # its key undeclared by its input schema: claimed whole (§3.5, C1)
     assert arg.max_run_duration_s == api_settings.max_run_duration_days * 86_400
     row = await run_row(owner_sessionmaker, ctx.tenant_id, run_id)
     assert (row.status, row.mode, row.workflow_version_id) == ("running", SIMULATE, version)

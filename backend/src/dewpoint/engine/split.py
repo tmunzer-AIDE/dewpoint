@@ -7,9 +7,12 @@ input when its parent starts it. The input was validated against its schema firs
 2. **Reappearing text:** an untainted string, or a key, that contains one of those secrets is claimed with taint. This
    comes before size claims, which are made after their tainted descendants (§3.5), so a size claim never holds a
    secret in plain text.
-3. **Size:** a value larger than SIZE_CLAIM is claimed without taint, after its own large parts, so it holds handles
+3. **Keys:** a map that holds a key its schema doesn't declare is claimed whole, without taint (its taint is its
+   nested claims'), innermost first: a key there can be a secret, so it never stays in the envelope, and it joins the
+   run's secrets. Its declared fields stay plain inside the claim.
+4. **Size:** a value larger than SIZE_CLAIM is claimed without taint, after its own large parts, so it holds handles
    where they were.
-4. **The envelope:** while the input passes TRIGGER_INLINE (or the limit a step's output is sent with, §5.4), its
+5. **The envelope:** while the input passes TRIGGER_INLINE (or the limit a step's output is sent with, §5.4), its
    largest remaining part is claimed without taint, ties broken by pointer; a part is worth claiming only if it weighs
    more than the handle that replaces it. The root goes last, and the input is then one handle.
 
@@ -30,7 +33,7 @@ from typing import Any
 from dewpoint.engine.handles import ClaimRef, contains_marker, escape, tokens
 from dewpoint.engine.matcher import Matcher
 from dewpoint.engine.sensitive import MIN_SECRET
-from dewpoint.engine.taint import from_schema, tainted_positions
+from dewpoint.engine.taint import from_schema, keyed_positions, tainted_positions
 
 TRIGGER_INLINE = 65_536  # a run's input envelope, as JSON, at most (spec §15: provisional)
 SIZE_CLAIM = 65_536  # a value larger than this, as JSON, is a size claim (§5.1: the local CEL per-value cap)
@@ -227,13 +230,17 @@ def split(
     if contains_marker(_without_handles(value) if handles else value):
         raise ForgedHandleError("An input that holds the handle marker.")
     s = _Splitter(value, new_id)
-    for pointer in tainted_positions(value, from_schema(schema)):
+    shape = from_schema(schema)
+    for pointer in tainted_positions(value, shape):
         s.claim(pointer, tainted=True)
     secrets = {t for c in s.claims for t in _strings(c.value) if len(t) >= MIN_SECRET}
     if ClaimRef.of(s.doc) is None:
         for pointer in s.reappearing(Matcher(secrets | set(known))):
             s.claim(pointer, tainted=True)
             secrets |= {t for t in _strings(s.claims[-1].value) if len(t) >= MIN_SECRET}
+        for pointer, keys in keyed_positions(s.doc, shape):  # after reappearing, which claims a matching map whole
+            s.claim(pointer, tainted=False)  # its taint is its nested claims': a declared field reads plain
+            secrets |= {k for k in keys if len(k) >= MIN_SECRET}
         if sizes:
             s.by_size(s.doc, "")
             s.envelope(envelope)

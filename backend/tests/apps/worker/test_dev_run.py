@@ -52,5 +52,5 @@ async def test_dev_run_starts_the_active_version(
         await env.client.get_workflow_handle(run_workflow_id(str(ctx.tenant_id), str(started))).result()
     assert waited is not None and (waited.status, waited.outputs) == ("succeeded", {"v": 2})
     assert simulated is not None and simulated.outputs is not None
-    assert ClaimRef.of(simulated.outputs["v"]["simulated"]) is not None  # an echo's output is undeclared: claimed
+    assert ClaimRef.of(simulated.outputs["v"]) is not None  # an echo's output is undeclared: claimed whole (C1)
     assert nothing is None

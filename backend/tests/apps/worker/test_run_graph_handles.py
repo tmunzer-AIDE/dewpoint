@@ -308,9 +308,9 @@ async def test_a_sub_flows_undeclared_input_is_claimed_for_the_child(env: Workfl
         result = await run(env.client, store, g, TRIGGER, claimed=True)
     assert result.status == "succeeded", result.error
     [(child_run, _)] = store.starts.items()
-    assert [(c.value, c.owner) for c in store.claims.values() if c.kind == "input" and c.owner == child_run] == [
-        (41, child_run)
-    ]
+    value, keyed = [c for c in store.claims.values() if c.kind == "input" and c.owner == child_run]
+    assert (value.value, value.sensitive_pointers) == (41, ("",))
+    assert ClaimRef.of(keyed.value["x"]) is not None and keyed.sensitive_pointers == ()  # its key: undeclared (C1)
 
 
 async def test_cel_that_reads_sensitive_data_nowhere_still_resolves_a_size_claim(env: WorkflowEnvironment) -> None:

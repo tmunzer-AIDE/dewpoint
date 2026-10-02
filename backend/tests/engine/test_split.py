@@ -242,3 +242,40 @@ def test_a_spill_claims_parts_no_larger_than_its_bound_and_keeps_handles() -> No
 def test_a_spill_of_a_value_that_fits_claims_nothing() -> None:
     done = sized({"a": "x" * 100}, ids(), envelope=2_000, part=10_000)
     assert (done.envelope, done.claims) == ({"a": "x" * 100}, ())
+
+
+KEY = "sk-k3y-canary-0002"  # a secret the input holds as a key, at a position its schema doesn't declare
+
+
+def test_a_key_the_schema_doesnt_declare_leaves_the_envelope_inside_a_claim_and_joins_the_secrets() -> None:
+    """Review finding C1: a map's keys are data too, and one at a position its schema doesn't declare can be a secret.
+    Its value is claimed with taint as before; the map itself is then claimed whole (without taint: its taint is its
+    nested claims'), so the key never stays in the envelope, and the key joins the run's secrets."""
+    schema = obj(m={"type": "object", "additionalProperties": {"type": "string"}})
+    done = split({"m": {KEY: "prod"}}, schema, ids())
+    assert KEY not in json.dumps(done.envelope)
+    value, keys = done.claims
+    assert (value.pointer, value.value, value.tainted) == (f"/m/{KEY}", "prod", True)
+    assert (keys.pointer, keys.value, keys.tainted) == ("/m", {KEY: ClaimRef(value.id).to_json()}, False)
+    assert done.envelope == {"m": ClaimRef(keys.id).to_json()}
+    assert KEY in done.secrets
+
+
+def test_a_maps_declared_fields_stay_in_its_key_claim_plain_and_innermost_maps_go_first() -> None:
+    """The map is claimed whole only because of its undeclared keys: its declared fields stay plain inside the claim,
+    so a reference to one reads plain data (§4.1). A map nested in another is claimed before it."""
+    inner = {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}
+    schema = obj(o={"type": "object", "properties": {"name": {"type": "string"}, "inner": inner},
+                    "required": ["name", "inner"]})  # fmt: skip
+    done = split({"o": {"name": "ann", "inner": {"id": "i1", KEY: "x"}, "extra-key-1": "y"}}, schema, ids())
+    assert KEY not in json.dumps(done.envelope) and "extra-key-1" not in json.dumps(done.envelope)
+    keyed = [c for c in done.claims if not c.tainted]
+    assert [c.pointer for c in keyed] == ["/o/inner", "/o"]  # innermost first
+    assert keyed[1].value["name"] == "ann" and ClaimRef.of(keyed[1].value["inner"]) == ClaimRef(keyed[0].id)
+    assert keyed[0].value["id"] == "i1"
+    assert {KEY, "extra-key-1"} <= set(done.secrets)
+
+
+def test_a_closed_object_has_no_key_claim() -> None:
+    done = split({"o": {"name": "ann"}}, obj(o=obj(name={"type": "string"})), ids())
+    assert done.claims == () and done.envelope == {"o": {"name": "ann"}}

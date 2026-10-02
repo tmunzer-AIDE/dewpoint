@@ -161,7 +161,9 @@ async def test_simulation_calls_simulate_and_records_it(env: WorkflowEnvironment
         handle = await start(env.client, store, g, TRIGGER, mode="simulate")
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     assert result.outputs is not None
-    simulated = ClaimRef.of(result.outputs["v"]["simulated"])  # an echo's output is undeclared: claimed
+    keyed = ClaimRef.of(result.outputs["v"])  # an echo's output is undeclared: claimed, its map whole (review C1)
+    assert keyed is not None
+    simulated = ClaimRef.of(store.claims[keyed.id].value["simulated"])
     assert simulated is not None and store.claims[simulated.id].value == 5
     assert [r.outcome for r in store.steps(run_id_of(handle))] == ["simulated"]
 

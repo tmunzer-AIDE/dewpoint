@@ -275,6 +275,30 @@ def _walk(value: Any, shape: Shape, pointer: str, out: list[str]) -> None:
             _walk(child, shape.element(), pointer + "/" + str(index), out)
 
 
+def _keyed(value: Any, shape: Shape, pointer: str, out: list[tuple[str, list[str]]]) -> None:
+    if ClaimRef.of(value) is not None or shape.all or not shape.tainted:
+        return
+    if isinstance(value, dict):
+        declared = {name for name, _ in shape.fields}
+        for key, child in value.items():
+            _keyed(child, shape.field(key), pointer + "/" + escape(key), out)
+        undeclared = [k for k in value if k not in declared]
+        if undeclared and shape.other is not None and shape.other.tainted:
+            out.append((pointer, undeclared))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            _keyed(child, shape.element(), pointer + "/" + str(index), out)
+
+
+def keyed_positions(value: Any, shape: Shape) -> list[tuple[str, list[str]]]:
+    """The maps that hold a key their shape doesn't declare, innermost first, each with those keys (review C1): a key
+    is data, and one at an undeclared position can be a secret (§3.5). Claiming takes such a map whole once its tainted
+    values are claimed, so its keys never stay in the envelope; its declared fields stay plain inside the claim."""
+    out: list[tuple[str, list[str]]] = []
+    _keyed(value, shape, "", out)
+    return out
+
+
 def tainted_positions(value: Any, shape: Shape) -> list[str]:
     """The pointers of `value`'s largest wholly tainted parts, in document order: what claiming takes with taint
     (§3.5). It walks the shape publish reads, so a position publish finds plain never holds a claim. A handle is

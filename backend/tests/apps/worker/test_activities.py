@@ -380,9 +380,12 @@ async def test_simulation_calls_simulate_or_says_it_cannot() -> None:
     store = MemoryStore()
     echoed = await call(step_activity_for(Echo, store), step("testkit.echo@1", {"value": 1}, mode="simulate"))
     refused = await failure(step_activity_for(Sensitive, store), step("testkit.sensitive@1", mode="simulate"))
-    [held] = store.claims.values()  # an echo's output is undeclared: its parts leave as handles (engine 2b §3.6)
-    assert echoed.outcome == "simulated" and held.value == 1
-    assert ClaimRef.of(echoed.output["value"]["simulated"]) is not None
+    # an echo's output is undeclared: its value leaves as a handle, then the map holding it, whose key is undeclared
+    # too, leaves whole (engine 2b §3.5–3.6, review C1)
+    (value_id, value), (map_id, keyed) = store.claims.items()
+    assert echoed.outcome == "simulated" and value.value == 1
+    assert keyed.value == {"simulated": ClaimRef(value_id).to_json()}
+    assert ClaimRef.of(echoed.output["value"]) == ClaimRef(map_id)
     assert (refused.type, refused.non_retryable) == ("simulation_unavailable", True)
 
 
