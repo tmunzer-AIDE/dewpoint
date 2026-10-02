@@ -72,7 +72,7 @@ with workflow.unsafe.imports_passed_through():
         cel_queue,
         step_activity,
     )
-    from dewpoint.engine.runtime.budget import LOCAL, Need
+    from dewpoint.engine.runtime.budget import LOCAL, Budget, Need
     from dewpoint.engine.runtime.ids import ITEM_CAP_MAX, batch_workflow_id, run_workflow_id
     from dewpoint.engine.runtime.program import Program, Step
     from dewpoint.engine.runtime.projection import (
@@ -368,7 +368,9 @@ class Execution:
                 if self._rows and not any(key[0] == "project" for key in tasks):  # one at a time: rows wait for it
                     self._projects += 1
                     tasks[("project", self._projects)] = asyncio.create_task(self._project(self._take_rows()))
-                if not tasks and self._ask is None:  # waiting for our parent's answer isn't stuck: nothing else is
+                if not tasks and self._ask is None and self.sched.budget.waiting:
+                    self._dirty = True  # a need asked while an answer was applied: decide it before anything else
+                elif not tasks and self._ask is None:  # waiting for our parent's answer isn't stuck: nothing else is
                     raise RuntimeError("nothing is running and the run hasn't ended")
                 wake = asyncio.create_task(
                     workflow.wait_condition(
@@ -431,10 +433,7 @@ class Execution:
         return "children" if step.ref == control.RUN_WORKFLOW else "values"
 
     def _quiescent(self, tasks: Mapping[tuple[Any, ...], asyncio.Task[Any]]) -> bool:
-        """No activity and no child outstanding, and no request to or from a parent or child: a sleeping timer step
-        doesn't count, nor a projection (it's written before the run continues)."""
-        idle = all(k[0] == "project" or (k[0] == "step" and k[1] in self._timers) for k in tasks)
-        return idle and not self.sched.budget.asking and not self._mail and not self._answers
+        return quiescent(tasks, self._timers, self.sched.budget, self._mail, self._answers)
 
     async def _settle_for_continue(self, tasks: dict[tuple[Any, ...], asyncio.Task[Any]]) -> None:
         """Continue-as-new: the sleeping timer steps stop here (their wake times go into the snapshot), and the
@@ -1512,6 +1511,22 @@ class Execution:
             raise asyncio.CancelledError
 
 
+def quiescent(
+    tasks: Mapping[tuple[Any, ...], Any],
+    timers: Mapping[Instance, Any],
+    budget: Budget,
+    mail: Sequence[Any],
+    answers: Sequence[Any],
+) -> bool:
+    """Where an execution may continue as new: no activity and no child outstanding, and no request to or from a
+    parent or child; a sleeping timer step doesn't count, nor a projection (it's written before the run continues).
+    Nor may its iteration budget hold a waiting need or a child's grant (engine 2b spec §5.3, the at-continue term):
+    a continued input carries only the budget's fixed counters."""
+    idle = all(k[0] == "project" or (k[0] == "step" and k[1] in timers) for k in tasks)
+    settled = not budget.asking and not budget.waiting and not budget.reserved and not mail and not answers
+    return idle and settled
+
+
 __all__ = [
     "CEL_BATCH",
     "CEL_REQUEST_BYTES",
@@ -1526,4 +1541,5 @@ __all__ = [
     "VERSION_UNUSABLE",
     "Execution",
     "child_options",
+    "quiescent",
 ]
