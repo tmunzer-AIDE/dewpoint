@@ -169,6 +169,8 @@ class RunGraph(Execution):
                 data.cel_profile,
                 data.subflow_version_ids,
                 data.failure_handler_version_id,
+                data.open_scopes_cap,  # pinned at publish (engine 2b spec §5.3)
+                data.loop_depth,
             )
         except Exception as e:
             workflow.logger.error("run_version_unusable", exc_info=True)
@@ -449,6 +451,8 @@ class LoopBatch(Execution):
                 data.cel_profile,
                 data.subflow_version_ids,
                 data.failure_handler_version_id,
+                data.open_scopes_cap,  # pinned at publish (engine 2b spec §5.3)
+                data.loop_depth,
             )
         except asyncio.CancelledError:
             return BatchResult([], [], end=RunEnd("cancelled", CANCELLED).to_json(), iterations=start.iterations)

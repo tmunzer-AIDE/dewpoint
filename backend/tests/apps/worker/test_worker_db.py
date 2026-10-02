@@ -227,3 +227,16 @@ async def test_a_sub_flow_is_projected_as_a_run_of_its_own(
     assert child["workflow_id"] == str(sub_id)
     sub_detail = (await viewer.get(f"/api/v1/t/{ctx.tenant_id}/runs/{child['id']}")).json()
     assert [s["key"] for s in sub_detail["steps"]] == ["t"] and sub_detail["parent_run_id"] == str(run_id)
+
+
+async def test_the_worker_loads_a_versions_pinned_cap_and_depth(
+    owner_sessionmaker: Any, api_sessionmaker: Any, admin_sessionmaker: Any, api_settings: Any, worker_sessionmaker: Any
+) -> None:
+    """Engine 2b spec §5.3: what publish pinned is what a run schedules with."""
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    g = G().node("o", "flow.loop@1", {"items": [1]}).node("e", "testkit.echo@1", {"value": 1}).edge("o", "e", "body")
+    out = await publish(api_sessionmaker, ctx, await create(api_sessionmaker, ctx, g.data()), api_settings)
+    assert out.version is not None
+    data = await DbRunStore(worker_sessionmaker, FixtureKeys()).version(str(ctx.tenant_id), str(out.version.id))
+    assert (data.open_scopes_cap, data.loop_depth) == (100, 1)

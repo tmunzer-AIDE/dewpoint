@@ -146,6 +146,8 @@ class VersionData:
     subflow_version_ids: dict[str, str] = field(default_factory=dict)  # run_workflow node id -> pinned version id
     failure_handler_version_id: str | None = None
     engine_abi: int | None = None  # the ABI it was published for; None only in histories recorded before 2a-3c
+    open_scopes_cap: int | None = None  # its open-iteration cap, pinned at publish (engine 2b spec §5.3)
+    loop_depth: int | None = None  # its deepest loop nesting, D
 
 
 @dataclass(frozen=True)

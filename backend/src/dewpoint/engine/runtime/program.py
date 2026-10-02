@@ -129,6 +129,8 @@ def compile_program(
     cel_profile: str,
     subflows: Mapping[str, str] | None = None,
     failure_handler: str | None = None,
+    open_scopes_cap: int | None = None,
+    loop_depth: int | None = None,
 ) -> Program:
     graph = parse_graph(graph_json)
     structure, diagnostics = analyze_structure(graph, Catalog(spec_from_manifest(m) for m in manifests.values()))
@@ -186,6 +188,8 @@ def compile_program(
         cel_profile=cel_profile,
         subflows=dict(sorted((subflows or {}).items())),
         failure_handler=failure_handler,
+        open_scopes_cap=open_scopes_cap,
+        loop_depth=loop_depth,
     )
 
 

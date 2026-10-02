@@ -29,6 +29,8 @@ from dewpoint.engine.graph.validate import (
     validate,
 )
 from dewpoint.engine.registry.catalog import Catalog, spec_from_manifest
+from dewpoint.engine.runtime.bounds import pinned
+from dewpoint.engine.runtime.program import compile_program
 
 
 async def _lifecycle_locked() -> None:
@@ -192,6 +194,7 @@ async def publish(
     version_id = uuid.uuid4()
     graph_settings = checked.graph.settings
     authored = graph_hash(checked.graph)
+    cap, depth = await _pinned(s, checked)
     fh = checked.result.failure_handler_version_id
     version = await service.insert_version(
         s,
@@ -216,6 +219,8 @@ async def publish(
             expressions=[r.to_json() for r in checked.result.expressions],
             tainted_sites=[{"node": node, "field": fld} for node, fld in checked.result.tainted_sites],
             output_taint=dict(checked.result.output_taint),
+            open_scopes_cap=cap,
+            loop_depth=depth,
             declassified=[
                 {"node": node, "field": fld, "reveals": reveals} for node, fld, reveals in checked.result.declassified
             ],
@@ -230,6 +235,21 @@ async def publish(
         ),
     )
     return Published(version, [], warnings)
+
+
+async def _pinned(s: AsyncSession, checked: Checked) -> tuple[int, int]:
+    """The version's open-iteration cap and loop depth (engine 2b spec §5.3): computed from its structure, pinned in
+    it, so a later change of a constant can't change how a pinned run schedules."""
+    if checked.graph is None or checked.result is None:
+        raise ValueError("a version is published only once checked")
+    rows = await registry.load_node_types(s, checked.result.node_refs)
+    program = compile_program(
+        graph_json(checked.graph),
+        {r.ref: r.manifest for r in rows},
+        [r.to_json() for r in checked.result.expressions],
+        CURRENT_CEL_PROFILE,
+    )
+    return await asyncio.to_thread(pinned, program)  # CPU-bound: keep the event loop serving others
 
 
 async def _check_runnable(s: AsyncSession, version: WorkflowVersion) -> list[Diagnostic]:
