@@ -108,9 +108,11 @@ def heaviest(template: Callable[[int], str]) -> str:
 
 def loads() -> Iterator[tuple[str, str]]:
     for i, expr in enumerate(WORST):
+        assert publishes_local(expr), expr  # what runs in the evaluator costs the workflow task nothing to measure
         yield f"worst{i}", expr
     for name, template in ADVERSARIAL.items():
         yield name, heaviest(template)
+    assert publishes_local(BINDING), BINDING
     yield "binding", BINDING
 
 

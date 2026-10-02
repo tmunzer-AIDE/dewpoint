@@ -61,3 +61,45 @@ def test_shapes_join_and_round_trip_as_json() -> None:
     for shape in (CLEAN, TAINTED, joined, from_schema(obj(a=SECRET, b={"type": "integer"}))):
         assert Shape.from_json(shape.to_json()) == shape
     assert CLEAN.to_json() is False and TAINTED.to_json() is True
+
+
+UNIONS_LEAVING_TOKEN_OPEN = [
+    {"anyOf": [obj(token={"type": "string"}), {"type": "object"}]},
+    {"oneOf": [obj(token={"type": "string"}), {"type": "object", "additionalProperties": {"type": "string"}}]},
+    {"anyOf": [obj(token={"type": "string"}),
+               {"type": "object", "patternProperties": {"^t": {"type": "string"}}, "additionalProperties": False}]},
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("union", UNIONS_LEAVING_TOKEN_OPEN)
+def test_a_key_one_branch_of_a_union_leaves_undeclared_is_tainted(union: dict[str, Any]) -> None:
+    """A value matches one branch of a union: a key one branch declares plain may arrive through another that
+    doesn't declare it (spec §3.5)."""
+    assert from_schema(obj(u=union)).at(("u", "token")) == TAINTED
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {**obj(a={"type": "string"}, b={"type": "string"}), "anyOf": [{"required": ["a"]}, {"required": ["b"]}]},
+        {"anyOf": [obj(a={"type": "string"}), obj(a={"type": "integer"}, b={"type": "string"})]},
+        {"allOf": [obj(a={"type": "string"}), {"properties": {"a": {"minLength": 1}}}]},
+        {"$defs": {"A": obj(a={"type": "string"})}, "$ref": "#/$defs/A", "required": ["a"]},
+    ],
+)
+def test_schemas_applied_together_declare_what_any_of_them_declares(schema: dict[str, Any]) -> None:
+    """`allOf`, `$ref` and a union of alternatives applied together narrow a value: what one of them declares, and
+    closes, stays plain."""
+    assert not from_schema(schema).tainted
+
+
+def test_a_pattern_neither_declares_nor_closes_a_key() -> None:
+    """No regex runs at publish: a key only a pattern admits is undeclared, and a pattern may or may not govern a
+    declared key, so only what it marks counts there."""
+    by_pattern = {"type": "object", "patternProperties": {"^x": {"type": "string"}}, "additionalProperties": False}
+    assert from_schema(by_pattern).at(("xa",)) == TAINTED
+    closing = {**obj(k={"type": "object"}), "patternProperties": {"^k": {"type": "object",
+                                                                         "additionalProperties": False}}}  # fmt: skip
+    assert from_schema(closing).at(("k", "extra")) == TAINTED
+    marking = {**obj(k={"type": "string"}), "patternProperties": {"^k": SECRET}}
+    assert from_schema(marking).at(("k",)) == TAINTED

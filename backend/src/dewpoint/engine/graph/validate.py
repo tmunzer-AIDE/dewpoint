@@ -58,7 +58,7 @@ from dewpoint.engine.graph.values import (
 from dewpoint.engine.registry import control as C
 from dewpoint.engine.registry.catalog import Catalog, NodeTypeSpec
 from dewpoint.engine.schema_refs import ref_problems, subschemas
-from dewpoint.engine.sensitive import SENSITIVE, empty, expand, is_marked, marked_positions
+from dewpoint.engine.sensitive import SENSITIVE, expand, is_marked, marked_positions
 from dewpoint.engine.taint import CLEAN, TAINTED, Shape, from_schema, make
 from dewpoint.sdk.fields import KINDS
 
@@ -282,23 +282,21 @@ def _writes_sensitive(
     value: Value, root: Mapping[str, Any], pointer: Pointer, target: Mapping[str, Any] | None
 ) -> bool:
     """Whether a value envelope writes a literal at a sensitive position (§3.8): the literal itself, a part of it the
-    target schema marks, or a reference's or a template's default."""
+    target schema marks, or a reference's or a template's default. Null and the empty string are written too."""
     if isinstance(value, LiteralValue):
-        if empty(value.value):
-            return False
         return is_marked(root, pointer) or bool(target is not None and marked_positions(value.value, target))
     if not is_marked(root, pointer):
         return False
     if isinstance(value, RefValue):
-        return value.has_default and not empty(value.default)
+        return value.has_default
     if isinstance(value, TemplateValue):
-        return any(isinstance(p, TemplateRef) and not empty(p.default) for p in value.parts)
+        return any(isinstance(p, TemplateRef) and p.default is not None for p in value.parts)
     return False
 
 
 def _sensitive_defaults(label: str, schema: Mapping[str, Any]) -> list[Diagnostic]:
     """A `default` at a position the schema marks sensitive, or holding a part it does (engine 2b spec §3.8): a
-    secret written into the version. A null or empty default writes nothing."""
+    secret written into the version, even null or empty: an omitted default is what's allowed."""
     found: list[str] = []
 
     def walk(node: Any, path: str, inherited: bool) -> None:
@@ -306,7 +304,7 @@ def _sensitive_defaults(label: str, schema: Mapping[str, Any]) -> list[Diagnosti
             return
         branches = expand(node, schema)
         here = inherited or any(b.get(SENSITIVE) is True for b in branches)
-        defaults = [b["default"] for b in branches if "default" in b and not empty(b["default"])]
+        defaults = [b["default"] for b in branches if "default" in b]
         if defaults and (here or any(marked_positions(d, node, schema) for d in defaults)):
             found.append(path)
         for suffix, sub in subschemas(node):
@@ -373,7 +371,7 @@ def _settings(graph: Graph) -> list[Diagnostic]:
                 )
             )
         if not isinstance(schema, Mapping) or "default" not in schema:
-            if not is_marked(st.vars_schema, (name,)):  # a sensitive variable is null until a step sets it
+            if not is_marked(st.vars_schema, (name,)):  # a sensitive one is null until set (`_Validator.unset`)
                 out.append(
                     Diagnostic(code="vars.no_default", field=where, message="Every variable needs a default value.")
                 )
@@ -413,6 +411,22 @@ class _Validator:
         self.vars_root: dict[str, Any] = {"type": "object", "properties": self.vars, "additionalProperties": False}
         if settings_ok and isinstance(vars_schema.get("$defs"), Mapping):
             self.vars_root["$defs"] = vars_schema["$defs"]
+        # A sensitive variable has no default (§3.8): it's null until a step sets it. Unless its type allows null,
+        # every read must come after a step sure to have set it.
+        self.unset = {
+            name
+            for name, schema in self.vars.items()
+            if isinstance(schema, Mapping)
+            and "default" not in schema
+            and is_marked(self.vars_root, (name,))
+            and not Draft202012Validator(standalone(self.vars_root, schema)).is_valid(None)
+        }
+        self.writers: dict[str, list[uuid.UUID]] = {}
+        for n_id in s.topo:  # only the root's: a write in a loop body is refused (`_variables`)
+            assignments = s.nodes[n_id].config.get("assignments")
+            if s.specs[n_id].ref == C.SET_VARIABLES and s.region_of[n_id] is None and isinstance(assignments, Mapping):
+                for name in assignments if not is_envelope(assignments) else ():
+                    self.writers.setdefault(name, []).append(n_id)
         # `stop` anywhere, inside a loop body too, ends the whole run: outputs may miss steps that hadn't run yet
         self.has_stop = any(spec.ref == C.STOP for spec in s.specs.values())
         self.availability: dict[tuple[Any, ...], bool] = {}
@@ -575,7 +589,7 @@ class _Validator:
     def _check_literals(self, n: GraphNode, spec: NodeTypeSpec) -> None:
         stripped, envelopes = strip_values(n.config)
         self._schema_errors(n.id, "", spec.config_schema, stripped, envelopes)
-        self._sensitive_literals(n, spec, stripped)
+        self._sensitive_literals(n, spec, stripped, envelopes)
         props = spec.config_schema.get("properties")
         for name, prop in props.items() if isinstance(props, Mapping) else ():
             kinds = prop.get(KINDS) if isinstance(prop, Mapping) else None
@@ -601,7 +615,7 @@ class _Validator:
                 inner = [p[1:] for p in envelopes if p[:1] == ("input",)]
                 self._schema_errors(n.id, "/input", info.input_schema, stripped.get("input", {}), inner)
 
-    def _sensitive_literals(self, n: GraphNode, spec: NodeTypeSpec, stripped: Any) -> None:
+    def _sensitive_literals(self, n: GraphNode, spec: NodeTypeSpec, stripped: Any, envelopes: list[Pointer]) -> None:
         """Config written as literals where a schema marks it sensitive (engine 2b spec §3.8): the node's own config,
         a variable an assignment writes, a child's input. Envelopes are checked where they're resolved (`_value`)."""
         own: Any = stripped
@@ -615,8 +629,10 @@ class _Validator:
             parts.append(("/input", stripped.get("input"), info.input_schema if info else None))
         parts.append(("", own, spec.config_schema))
         for prefix, value, schema in parts:
+            depth = prefix.count("/")
+            holes = {pointer_str(p[depth:]) for p in envelopes if pointer_str(p[:depth]) == prefix}
             if isinstance(schema, Mapping):
-                for where in marked_positions(value, schema):
+                for where in marked_positions(value, schema, holes=holes):
                     self.err("sensitive.literal", _SENSITIVE_LITERAL, node=n.id, fld=prefix + where)
 
     def _schema_errors(
@@ -700,7 +716,7 @@ class _Validator:
             value.expr, target, context, node=str(site.node) if site.node else None, field=site.field
         )
         whole_roots = {p.path[0] for p in result.record.projections if len(p.path) == 1} if result.record else set()
-        tainted = context.tainted or any(self._root_tainted(site, root) for root in whole_roots)
+        tainted = context.tainted or result.dynamic or any(self._root_tainted(site, root) for root in whole_roots)
         if result.record is not None:  # a tainted value always runs in the isolated evaluator (§4.2)
             record = result.record
             self.expressions.append(
@@ -826,6 +842,15 @@ class _Validator:
                         "ref.unknown_var", f"`{p.name}` isn't a declared variable.", node=site.node, fld=site.field
                     )
                     return None
+                if p.name in self.unset and not self._set_before(site, str(p.name)):
+                    self.err(
+                        "vars.unassigned",
+                        f"`vars.{p.name}` has no default, so it's null until a step sets it, and its type doesn't "
+                        "allow null.",
+                        node=site.node,
+                        fld=site.field,
+                        fix="Set it in a step that always runs before this one, or allow null in its type.",
+                    )
                 return navigate(self.vars_root, p.rest, start=self.vars[str(p.name)])
             if p.root in ("item", "index", "loops"):
                 return self._resolve_loop(site, p)
@@ -883,19 +908,10 @@ class _Validator:
             )
             return None
         region = self.live[home]
-        consumer: lv.Cond
-        consumer_key: tuple[Any, ...]
-        if home == site.region and site.at_exit:
-            consumer, upstream, consumer_key = region.exit, True, ("exit",)
-        elif home == site.region and site.node is not None:
-            consumer, upstream = region.live[site.node], site.node in self.desc[producer]
-            consumer_key = ("node", site.node)
-        else:
-            ancestor = chain[chain.index(home) - 1]  # the loop node, in `home`, that contains the consumer
-            if ancestor is None:
-                return None
-            consumer, upstream = region.live[ancestor], ancestor in self.desc[producer]
-            consumer_key = ("node", ancestor)
+        found = self._consumer(site, home, producer)
+        if found is None:
+            return None
+        consumer, upstream, consumer_key = found
         if not upstream:
             self.err(
                 "ref.not_upstream",
@@ -927,6 +943,35 @@ class _Validator:
             return Resolved(None, not available)
         r = navigate(schema, p.rest)
         return Resolved(r.schema, r.conditional or not available)
+
+    def _consumer(
+        self, site: _Site, home: uuid.UUID | None, producer: uuid.UUID
+    ) -> tuple[lv.Cond, bool, tuple[Any, ...]] | None:
+        """When `site` runs, as `home`'s liveness sees it (the site, or the loop node in `home` containing it), whether
+        `producer` runs before that, and the memo key. None: no node in `home` contains the site."""
+        region = self.live[home]
+        if home == site.region and site.at_exit:
+            return region.exit, True, ("exit",)
+        if home == site.region and site.node is not None:
+            return region.live[site.node], site.node in self.desc[producer], ("node", site.node)
+        chain = self.s.chain(site.region)
+        ancestor = chain[chain.index(home) - 1]  # the loop node, in `home`, that contains the consumer
+        if ancestor is None:
+            return None
+        return region.live[ancestor], ancestor in self.desc[producer], ("node", ancestor)
+
+    def _set_before(self, site: _Site, name: str) -> bool:
+        """Whether a step sure to have set variable `name` has run when `site` reads it (spec §4.3 path availability,
+        as for a step's output)."""
+        if site.at_exit and site.region is None and self.has_stop:
+            return False  # `stop` may end the run before any of them ran
+        for writer in self.writers.get(name, ()):
+            found = self._consumer(site, None, writer)
+            if found is None or not found[1] or self.s.nodes[writer].options.on_error == "continue":
+                continue
+            if self._implies(None, found[2], found[0], writer, "ok", self.live[None]):
+                return True
+        return False
 
     def _declared_optional(self, site: _Site, p: RefPath) -> tuple[int, ...]:
         """Positions in `p.rest` the schema declares optional (spec §4.3): CEL guards them, references default them."""

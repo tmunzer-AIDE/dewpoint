@@ -26,7 +26,8 @@ from typing import Any
 
 from dewpoint.engine.handles import ClaimRef, contains_marker, escape, tokens
 from dewpoint.engine.matcher import Matcher
-from dewpoint.engine.sensitive import MIN_SECRET, sensitive_positions
+from dewpoint.engine.sensitive import MIN_SECRET
+from dewpoint.engine.taint import from_schema, tainted_positions
 
 TRIGGER_INLINE = 65_536  # a run's input envelope, as JSON, at most (spec §15: provisional)
 SIZE_CLAIM = 65_536  # a value larger than this, as JSON, is a size claim (§5.1: the local CEL per-value cap)
@@ -160,7 +161,7 @@ def split(value: Any, schema: Mapping[str, Any] | None, new_id: Callable[[str], 
     if contains_marker(value):
         raise ForgedHandleError("An input that holds the handle marker.")
     s = _Splitter(value, new_id)
-    for pointer in sensitive_positions(value, schema):
+    for pointer in tainted_positions(value, from_schema(schema)):
         s.claim(pointer, tainted=True)
     secrets = {t for c in s.claims for t in _strings(c.value) if len(t) >= MIN_SECRET}
     if ClaimRef.of(s.doc) is None:

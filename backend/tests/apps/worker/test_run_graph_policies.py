@@ -547,12 +547,12 @@ async def test_a_sensitive_config_value_is_masked_where_it_is_copied_or_echoed(e
         "properties": {
             **SCHEMA["properties"],
             "tok": {"type": "string", "x-sensitive": True},
-            "open": {"type": "object"},
+            "open": {"type": "object", "properties": {"tok": {"type": "string"}}, "required": ["tok"]},
         },
         "required": ["x", "open", "tok"],
     }
     g.node("p", "testkit.ambiguous_send@1", {"outcome": "rejected", "token": ref("trigger.tok")}, on_error="continue")
-    echo = {"outcome": "rejected", "token": ref("trigger.open.tok", default="")}
+    echo = {"outcome": "rejected", "token": ref("trigger.open.tok")}  # declared plain: only the config marks it
     g.node("q", "testkit.ambiguous_send@1", echo, on_error="continue").edge("t", "p").edge("t", "q")
     async with workers(env.client, store):
         handle = await start(env.client, store, g, {"x": 7, "tok": token, "open": {"tok": passed}})

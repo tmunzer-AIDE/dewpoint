@@ -39,6 +39,7 @@ class CelContext(Protocol):
 class CelResult:
     resolved: Resolved | None  # the value's type, for downstream checks
     record: record.ExpressionRecord | None  # None when the expression has errors
+    dynamic: bool = False  # it indexes data by a computed key: tainted (engine 2b spec §4.1)
 
 
 def _element_signature(schema: Mapping[str, Any] | None) -> str:
@@ -290,4 +291,5 @@ def check(expr: str, target: Mapping[str, Any] | None, ctx: CelContext, *, node:
             bytes=c.bytes,
             work=c.work,
         ),
+        dynamic=bool(ast.dynamic_reads(checked.expr)),
     )

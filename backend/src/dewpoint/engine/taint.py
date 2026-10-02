@@ -5,15 +5,23 @@ A `Shape` says it of a value: all of it, none of it, or part by part (fields by 
 one for list elements). Shapes come from schemas where data enters a run, and travel with the values the validator
 resolves: references, transforms, loops' collected items, filters, sub-flows' outputs. From a schema, a position marked
 `x-sensitive` is tainted, a map whose keys are marked is tainted whole, and so is any position the schema doesn't
-declare: unknown counts as sensitive."""
+declare: unknown counts as sensitive.
+
+A schema is read as the ways a value can match it: `$ref` and `allOf` add schemas a value matches all of, `anyOf` and
+`oneOf` split it into alternatives. A position is declared when a schema the value surely matches declares it, so a key
+one branch of a union declares and another leaves open is undeclared. Claiming (§3.5) walks the same shape
+(`tainted_positions`): a position publish finds plain never holds a claim."""
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from dewpoint.engine.sensitive import SENSITIVE, children, elements, expand, keys_sensitive
+from dewpoint.engine.handles import escape
+from dewpoint.engine.sensitive import SENSITIVE, keys_sensitive, patterns, resolve
 
 _DEPTH = 32  # deeper than this, a schema is taken as tainted: recursive `$ref`s end here, on the safe side
+_REFS = 64  # `$ref`s and combinators followed within one position, at most
+_WAYS = 64  # more ways than this for a value to match a schema: taken as tainted, on the safe side
 
 
 @dataclass(frozen=True)
@@ -104,54 +112,171 @@ def join(a: Shape, b: Shape) -> Shape:
     return make([(n, join(a.field(n), b.field(n))) for n in names], _union(a.other, b.other), _union(a.items, b.items))
 
 
-def _types(branches: list[Mapping[str, Any]]) -> set[str] | None:
-    """The JSON types the branches allow between them; None: any (some branch doesn't say)."""
-    out: set[str] = set()
-    for b in branches:
-        t = b.get("type")
-        if t is None:
-            if not any(k in b for k in ("const", "enum", "anyOf", "oneOf", "allOf", "$ref")):
-                return None
+# --- from a schema ------------------------------------------------------------------------------------------------
+
+Way = tuple[Mapping[str, Any], ...]  # schemas a value matches all at once, each by its own keywords
+
+
+def _ways(schema: Any, root: Mapping[str, Any], depth: int) -> list[Way] | None:
+    """The ways a value can match `schema`. None: too many to say (more than _WAYS, or nested past _REFS)."""
+    if schema is False:
+        return []  # nothing matches
+    if not isinstance(schema, Mapping):
+        return [()]  # `true` (or nothing usable): no constraint
+    if depth > _REFS:
+        return None
+    together: list[Any] = []
+    ref = schema.get("$ref")
+    if isinstance(ref, str):
+        together.append(resolve(root, ref))
+    subs = schema.get("allOf")
+    together += subs if isinstance(subs, list) else []
+    ways = _all_of(together, root, depth + 1)
+    if ways is None:
+        return None
+    ways = [(schema, *w) for w in ways]
+    for key in ("anyOf", "oneOf"):
+        subs = schema.get(key)
+        if not isinstance(subs, list) or not subs:
             continue
-        out |= set(t) if isinstance(t, list) else {t}
-    return out or None
+        either: list[Way] = []
+        for sub in subs:
+            found = _ways(sub, root, depth + 1)
+            if found is None:
+                return None
+            either += found
+        ways = [w + e for w in ways for e in either]
+        if len(ways) > _WAYS:
+            return None
+    return ways
 
 
-def _may_be(branch: Mapping[str, Any], kind: str) -> bool:
-    t = branch.get("type")
+def _all_of(schemas: Sequence[Any], root: Mapping[str, Any], depth: int) -> list[Way] | None:
+    """The ways a value can match every schema in `schemas`."""
+    ways: list[Way] = [()]
+    for schema in schemas:
+        found = _ways(schema, root, depth)
+        if found is None:
+            return None
+        ways = [w + f for w in ways for f in found]
+        if len(ways) > _WAYS:
+            return None
+    return ways
+
+
+def _may_be(schema: Mapping[str, Any], kind: str) -> bool:
+    t = schema.get("type")
     if t is None:
-        return not any(k in branch for k in ("const", "enum"))
+        return not any(k in schema for k in ("const", "enum"))
     return kind in (t if isinstance(t, list) else [t])
 
 
-def _shape(schemas: list[Any], root: Mapping[str, Any], depth: int) -> Shape:
-    if depth > _DEPTH:
+def _closed(schema: Mapping[str, Any]) -> bool:
+    """No key beyond its `properties` can be present: a key a pattern admits is undeclared (spec §3.5)."""
+    return schema.get("additionalProperties") is False and not patterns(schema)
+
+
+def _field(way: Way, key: str) -> list[list[Any]]:
+    """What may govern `key`'s value in `way`, as alternatives a value matches one of: the schemas that surely apply
+    (each declaration, and `additionalProperties` where no pattern could apply instead), alone or with one that may
+    (a pattern, which no regex checks here). More schemas at once only declare more, so each alternative adds just
+    what its extra schema marks."""
+    sure: list[Any] = []
+    maybe: list[Any] = []
+    for schema in way:
+        props = schema.get("properties")
+        found = patterns(schema)
+        maybe += found
+        if isinstance(props, Mapping) and key in props:
+            sure.append(props[key])
+            continue
+        extra = schema.get("additionalProperties", True)
+        if extra is False and not found:
+            return []  # this schema admits no such key: the value can't hold it this way
+        if extra is not False:
+            (maybe if found else sure).append(extra)
+    return [sure, *([*sure, m] for m in maybe)]
+
+
+def _items(way: Way, root: Mapping[str, Any], depth: int) -> Shape:
+    """The taint of a list's elements, every position joined: a position takes what governs it (a tuple's
+    `prefixItems`, `items` after it), and one nothing declares is tainted."""
+    longest = max((len(s["prefixItems"]) for s in way if isinstance(s.get("prefixItems"), list)), default=0)
+    out = CLEAN
+    for index in range(longest + 1):  # the last stands for every position after the tuples
+        governing: list[Any] = []
+        possible = True
+        for schema in way:
+            prefix = schema.get("prefixItems")
+            prefix = prefix if isinstance(prefix, list) else []
+            items = schema.get("items")
+            if index < len(prefix):
+                governing.append(prefix[index])
+            elif items is False:
+                possible = False  # no element here
+            elif isinstance(items, (Mapping, bool)):
+                governing.append(items)
+        if possible:
+            out = join(out, _shape([governing], root, depth + 1) if governing else TAINTED)
+    return out
+
+
+def _way(way: Way, root: Mapping[str, Any], depth: int) -> Shape:
+    if any(s.get(SENSITIVE) is True for s in way) or keys_sensitive(list(way), root):
         return TAINTED
-    branches = [b for s in schemas for b in expand(s, root)]
-    if not branches or any(b.get(SENSITIVE) is True for b in branches) or keys_sensitive(branches, root):
-        return TAINTED
-    types = _types(branches)
     fields: list[tuple[str, Shape]] = []
     other: Shape | None = None
     items: Shape | None = None
-    if types is None or "object" in types:
-        declared = sorted({k for b in branches if isinstance(b.get("properties"), Mapping) for k in b["properties"]})
-        fields = [(k, _shape(children(branches, k), root, depth + 1)) for k in declared]
-        if not all(b.get("additionalProperties") is False for b in branches if _may_be(b, "object")):
-            other = TAINTED  # keys the schema doesn't declare may exist
-    if types is None or "array" in types:
-        declares = any(isinstance(b.get("items"), Mapping) or isinstance(b.get("prefixItems"), list) for b in branches)
-        if not declares:
-            items = TAINTED
-        else:
-            prefix = max((len(b["prefixItems"]) for b in branches if isinstance(b.get("prefixItems"), list)), default=0)
-            for index in range(prefix + 1):
-                items = _union(items, _shape(elements(branches, index), root, depth + 1))
+    if all(_may_be(s, "object") for s in way):
+        names = sorted({k for s in way if isinstance(s.get("properties"), Mapping) for k in s["properties"]})
+        fields = [(k, _shape(_field(way, k), root, depth + 1)) for k in names]
+        if not any(_closed(s) for s in way):
+            other = TAINTED  # keys no schema declares may exist
+    if all(_may_be(s, "array") for s in way):
+        items = _items(way, root, depth)
     return make(fields, other, items)
+
+
+def _shape(alternatives: Sequence[Sequence[Any]], root: Mapping[str, Any], depth: int) -> Shape:
+    """The taint of a value that matches all the schemas of one of `alternatives`."""
+    if depth > _DEPTH:
+        return TAINTED
+    out = CLEAN
+    for schemas in alternatives:
+        ways = _all_of(schemas, root, 0)
+        if ways is None:
+            return TAINTED
+        for way in ways:
+            out = join(out, _way(way, root, depth))
+            if out.all:
+                return out
+    return out
 
 
 def from_schema(schema: Mapping[str, Any] | None, root: Mapping[str, Any] | None = None) -> Shape:
     """The taint of a value `schema` describes (§4.1). No schema at all: tainted, since nothing is declared."""
     if schema is None:
         return TAINTED
-    return _shape([schema], root if root is not None else schema, 0)
+    return _shape([[schema]], root if root is not None else schema, 0)
+
+
+# --- claiming -----------------------------------------------------------------------------------------------------
+
+
+def _walk(value: Any, shape: Shape, pointer: str, out: list[str]) -> None:
+    if shape.all:
+        out.append(pointer)
+    elif shape.tainted and isinstance(value, dict):
+        for key, child in value.items():
+            _walk(child, shape.field(key), pointer + "/" + escape(key), out)
+    elif shape.tainted and isinstance(value, list):
+        for index, child in enumerate(value):
+            _walk(child, shape.element(), pointer + "/" + str(index), out)
+
+
+def tainted_positions(value: Any, shape: Shape) -> list[str]:
+    """The pointers of `value`'s largest wholly tainted parts, in document order: what claiming takes with taint
+    (§3.5). It walks the shape publish reads, so a position publish finds plain never holds a claim."""
+    out: list[str] = []
+    _walk(value, shape, "", out)
+    return out
