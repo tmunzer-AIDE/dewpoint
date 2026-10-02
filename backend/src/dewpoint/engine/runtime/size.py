@@ -14,6 +14,7 @@ from typing import Any
 from temporalio.converter import PayloadConverter
 
 CODEC_OVERHEAD = 256  # bytes the tenant codec adds to a payload, at most: its metadata, the nonce and the tag
+INLINE_LIMIT = 65_536  # a value larger than this, as JSON, is a size claim where it's produced (engine 2b spec §5.1)
 PAYLOAD_BYTES = 1_835_008  # 1.75 MiB, encoded: a margin under Temporal's 2 MiB (2,097,152) payload limit
 SNAPSHOT_BYTES = 1_572_864  # 1.5 MiB, encoded: a continued run's input (spec §5.3's SNAPSHOT_MAX)
 PAYLOAD_TOO_LARGE = "payload_too_large"

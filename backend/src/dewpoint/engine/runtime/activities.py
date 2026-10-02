@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from dewpoint.engine import ENGINE_ABI
+from dewpoint.engine.runtime.size import INLINE_LIMIT
 
 ENGINE_QUEUE = "dewpoint-engine"
 LOAD_VERSION = "dewpoint.load_version"
@@ -154,6 +155,7 @@ class StepInput:
     mode: str = LIVE
     attempt: int = 1  # RunGraph counts attempts: each one is its own activity execution
     root_run_id: str = ""  # the run tree's root: its claims record it, and its secret index masks (engine 2b §3.7)
+    inline_limit: int = INLINE_LIMIT  # an output past this, as JSON, is claimed and its handle returned (2b §5.1, §5.4)
 
 
 @dataclass(frozen=True)

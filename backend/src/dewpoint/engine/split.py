@@ -9,9 +9,9 @@ input when its parent starts it. The input was validated against its schema firs
    secret in plain text.
 3. **Size:** a value larger than SIZE_CLAIM is claimed without taint, after its own large parts, so it holds handles
    where they were.
-4. **The envelope:** while the input passes TRIGGER_INLINE, its largest remaining part is claimed without taint, ties
-   broken by pointer; a part is worth claiming only if it weighs more than the handle that replaces it. The root goes
-   last, and the input is then one handle.
+4. **The envelope:** while the input passes TRIGGER_INLINE (or the limit a step's output is sent with, §5.4), its
+   largest remaining part is claimed without taint, ties broken by pointer; a part is worth claiming only if it weighs
+   more than the handle that replaces it. The root goes last, and the input is then one handle.
 
 The result is the envelope, with handles in place of claims, and the claims in the order they were made: a claim's
 nested handles always name claims made before it. Ids come from the caller (`new_id`): random at admission,
@@ -149,9 +149,9 @@ class _Splitter:
                     self.claim(at, tainted=False)
         return json_bytes(value)
 
-    def envelope(self) -> None:
+    def envelope(self, limit: int) -> None:
         total = json_bytes(self.doc)
-        if total <= TRIGGER_INLINE:
+        if total <= limit:
             return
         children: list[tuple[str | int, Any]] = (
             list(self.doc.items()) if isinstance(self.doc, dict) else list(enumerate(self.doc))
@@ -159,13 +159,13 @@ class _Splitter:
         )  # fmt: skip
         sized = [(json_bytes(child), "/" + escape(key)) for key, child in children if ClaimRef.of(child) is None]
         for weight, pointer in sorted(sized, key=lambda wp: (-wp[0], wp[1])):
-            if total <= TRIGGER_INLINE:
+            if total <= limit:
                 return
             if weight <= HANDLE_BYTES:
                 break
             self.claim(pointer, tainted=False)
             total -= weight - HANDLE_BYTES
-        if total > TRIGGER_INLINE:
+        if total > limit:
             self.claim("", tainted=False)
 
 
@@ -177,12 +177,13 @@ def split(
     known: Iterable[str] = (),
     sizes: bool = True,
     handles: bool = False,
+    envelope: int = TRIGGER_INLINE,
 ) -> Split:
     """`value` (a validated trigger or sub-flow input, or an activity's result) as its envelope and its claims
     (above). `known`: the run's secrets so far (its secret index, §3.7): text that repeats one is claimed too.
-    `sizes` False: only what's sensitive is claimed, as a step's output is until it spills (§5.2). `handles`: the
-    value may hold the run's own handles (a sub-flow's input, from its parent, §3.4), left where they are; any
-    other use of the marker is still refused."""
+    `sizes` False: only what's sensitive is claimed. `handles`: the value may hold the run's own handles (a sub-flow's
+    input, from its parent, §3.4), left where they are; any other use of the marker is still refused. `envelope`: the
+    envelope's limit, the trigger's or the inline threshold a step's output is split to (§5.4)."""
     if contains_marker(_without_handles(value) if handles else value):
         raise ForgedHandleError("An input that holds the handle marker.")
     s = _Splitter(value, new_id)
@@ -195,5 +196,5 @@ def split(
             secrets |= {t for t in _strings(s.claims[-1].value) if len(t) >= MIN_SECRET}
         if sizes:
             s.by_size(s.doc, "")
-            s.envelope()
+            s.envelope(envelope)
     return Split(s.doc, tuple(s.claims), tuple(sorted(secrets)))
