@@ -4,6 +4,7 @@ index version, off the event loop, and cached with it; a boundary reads the inde
 At the index's bounds a build takes about a second, so building it at every boundary, on the loop, stalled every
 activity and workflow task of the worker."""
 
+import asyncio
 import threading
 import uuid
 from collections.abc import Iterator
@@ -13,6 +14,7 @@ import pytest
 from temporalio.testing import WorkflowEnvironment
 
 from dewpoint.apps.worker import claims
+from dewpoint.core.claims.secret_index import Index
 from dewpoint.engine import matcher as matcher_module
 from tests.apps.worker.harness import TENANT, MemoryStore, run, workers
 from tests.support.graphs import G, ref
@@ -54,6 +56,30 @@ async def test_an_automaton_is_built_once_per_index_version_off_the_event_loop(
     await store.remember(TENANT, root, ["s3cr3t-value"])
     moved = await claims.secrets_of(store, TENANT, root)
     assert (moved.index.version, len(builds)) == (first.index.version + 1, 2) and moved.matcher.found("s3cr3t-value")
+
+
+async def test_concurrent_boundaries_share_one_build_and_an_older_one_never_replaces_a_newer(
+    builds: list[tuple[frozenset[str], int]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's review of I3: boundaries that missed the cache while a build ran each built the automaton for the
+    same version, and whichever build ended last was cached, an older version included. Every boundary waiting for
+    one version shares its one build, and the cache keeps the newest version a boundary has built."""
+    release, built = threading.Event(), claims._built
+
+    def slow(index: Index) -> claims.Secrets:  # a build at the index's bounds takes about a second
+        release.wait(5)
+        return built(index)
+
+    monkeypatch.setattr(claims, "_built", slow)
+    root = str(uuid.uuid4())
+    older, newer = Index(1, (SECRET,)), Index(2, (SECRET, "s3cr3t-value"))
+    waiting = [asyncio.create_task(claims.secrets_for(newer, TENANT, root)) for _ in range(5)]
+    await asyncio.sleep(0.05)  # every boundary has missed the cache while the first build runs
+    release.set()
+    held = await asyncio.gather(*waiting)
+    assert len(builds) == 1 and all(h is held[0] for h in held)
+    stale = await claims.secrets_for(older, TENANT, root)  # a boundary that read the index just before it moved
+    assert stale.index.version == 1 and claims.SECRETS[(TENANT, root)].index.version == 2
 
 
 async def test_a_runs_boundaries_build_its_automaton_once_per_index_version(

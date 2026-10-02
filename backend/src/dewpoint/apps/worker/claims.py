@@ -137,6 +137,9 @@ class Secrets:
 
 
 SECRETS: "OrderedDict[tuple[str, str], Secrets]" = OrderedDict()
+# The builds running, one per run tree and version (and event loop): every boundary that misses the cache meanwhile
+# waits for it instead of building the same automaton again (the owner's review of I3).
+_BUILDING: "dict[tuple[asyncio.AbstractEventLoop, str, str, int], asyncio.Future[Secrets]]" = {}
 
 
 def _built(index: Index) -> Secrets:
@@ -146,13 +149,22 @@ def _built(index: Index) -> Secrets:
 async def secrets_for(index: Index, tenant: str, root: str) -> Secrets:
     """`index` (just read or extended) with its automaton: built once per version, in a worker thread, and cached
     with it (§3.7; the review's I3: at the index's bounds a build takes about a second, which on the event loop
-    stalled every activity and workflow task of the worker)."""
+    stalled every activity and workflow task of the worker). Boundaries that miss the cache while it's built share
+    the build; the cache keeps the newest version built, and an older index asked for is still the one returned."""
     key = (tenant, root)
     held = SECRETS.get(key)
     if held is None or held.index.version != index.version:
-        held = await asyncio.to_thread(_built, index)
-        SECRETS[key] = held
-    SECRETS.move_to_end(key)
+        building = (asyncio.get_running_loop(), tenant, root, index.version)
+        build = _BUILDING.get(building)
+        if build is None:
+            build = _BUILDING[building] = asyncio.ensure_future(asyncio.to_thread(_built, index))
+            build.add_done_callback(lambda _: _BUILDING.pop(building, None))
+        held = await asyncio.shield(build)  # a boundary cancelled meanwhile leaves the build to the others
+        cached = SECRETS.get(key)
+        if cached is None or cached.index.version < held.index.version:  # never an older version over a newer
+            SECRETS[key] = held
+    if key in SECRETS:
+        SECRETS.move_to_end(key)
     while len(SECRETS) > SECRETS_CACHE:
         SECRETS.popitem(last=False)
     return held
