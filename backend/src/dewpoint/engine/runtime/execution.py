@@ -12,8 +12,11 @@ point (no activity and no child outstanding): opportunistically past `checkpoint
 isn't outstanding: its wake time goes into the snapshot, and the continued run re-arms it."""
 
 import asyncio
+import dataclasses
+import hashlib
+import json
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Generator, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -29,7 +32,7 @@ with workflow.unsafe.imports_passed_through():
     from dewpoint.engine.cel.ipc import EvaluateRequest
     from dewpoint.engine.cel.profile import LOCAL_CEL_PROFILE
     from dewpoint.engine.cel.record import ExpressionRecord
-    from dewpoint.engine.cel.route import YieldBudget
+    from dewpoint.engine.cel.route import YIELD_STRUCTURE, YieldBudget
     from dewpoint.engine.graph.values import CelValue, RefValue, TemplateValue
     from dewpoint.engine.handles import CLAIM_UNAVAILABLE, MISSING, RESERVED, ClaimRef, contains_marker
     from dewpoint.engine.registry import control
@@ -77,7 +80,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from dewpoint.engine.runtime.budget import LOCAL, Budget, Need
     from dewpoint.engine.runtime.ids import ITEM_CAP_MAX, batch_workflow_id, run_workflow_id
-    from dewpoint.engine.runtime.program import Program, Step
+    from dewpoint.engine.runtime.program import Program, Step, compile_program
     from dewpoint.engine.runtime.projection import (
         preview,
         sanitize,
@@ -88,6 +91,10 @@ with workflow.unsafe.imports_passed_through():
         INLINE_FLOOR,
         ITERATION_CAP_EXCEEDED,
         SNAPSHOT_FORMAT,
+        STEP_WEIGHT,
+        STRUCTURE_STEP,
+        TAKE_WEIGHT,
+        VIEW_WEIGHT,
         Batch,
         BatchOutcome,
         Collect,
@@ -284,6 +291,7 @@ class Execution:
         self._shapes: dict[str, Shape] = {}  # a node type's output taint (`_output_shape`)
         self._spill_units: dict[tuple[Instance, str, int], Spill] = {}  # containers' claims queued or running (§5.3)
         self._merging: list[tuple[tuple[Any, ...], _Effect]] = []  # results claimed before they merge (§5.3)
+        self._view_sizes: dict[uuid.UUID | None, int] = {}  # the steps a step's view reads, by region
 
     # --- the budget signals ----------------------------------------------------------------------------------------
 
@@ -345,8 +353,9 @@ class Execution:
                 for unit, merged in self._merging:
                     tasks[("merge", *unit[1:])] = asyncio.create_task(self._claimed_result(unit, merged))
                 self._merging = []
-                if not self._draining:
-                    waiting += [("step", i) for i in self.sched.take_ready()]
+                if not self._draining:  # a take takes what this workflow task's share allows (engine 2b spec §5.3)
+                    waiting += [("step", i) for i in self.sched.take_ready(self._take_limit())]
+                    self._task_budget().charge(structure=TAKE_WEIGHT * self.sched.taken_last)
                     waiting += [("collect", c) for c in self.sched.take_collects()]
                     for b in self.sched.take_batches():
                         self._batches[(b.loop, b.start)] = b
@@ -392,7 +401,9 @@ class Execution:
                 if self._rows and not any(key[0] == "project" for key in tasks):  # one at a time: rows wait for it
                     self._projects += 1
                     tasks[("project", self._projects)] = asyncio.create_task(self._project(self._take_rows()))
-                if not tasks and self._ask is None and self.sched.budget.waiting:
+                if not tasks and self._ask is None and self.sched.queued_left():
+                    pass  # the rest of a cut-short take: the next workflow task takes it
+                elif not tasks and self._ask is None and self.sched.budget.waiting:
                     self._dirty = True  # a need asked while an answer was applied: decide it before anything else
                 elif not tasks and self._ask is None:  # waiting for our parent's answer isn't stuck: nothing else is
                     raise RuntimeError("nothing is running and the run hasn't ended")
@@ -404,7 +415,12 @@ class Execution:
                         )
                     )
                 )
-                done, _ = await workflow.wait([*tasks.values(), clock, wake], return_when=asyncio.FIRST_COMPLETED)
+                cut: list[asyncio.Task[None]] = []
+                if self.sched.queued_left():  # the take was cut short: the rest in the next workflow task
+                    if self._yield_timer is None or self._yield_timer.done():
+                        self._yield_timer = asyncio.create_task(asyncio.sleep(0.001))
+                    cut.append(self._yield_timer)
+                done, _ = await workflow.wait([*tasks.values(), clock, wake, *cut], return_when=asyncio.FIRST_COMPLETED)
                 wake.cancel()
                 if clock in done:
                     self.sched.end(
@@ -1012,13 +1028,43 @@ class Execution:
             self._yield.reset(startup=length == self._startup_task)
         return self._yield
 
-    async def _yield_point(self, record: ExpressionRecord | None, *, send: int = 0) -> None:
+    def _step_units(self, inst: Instance) -> int:
+        """A step unit's structural units (engine 2b spec §5.3): its own work, and the view it reads (the steps of its
+        region and the regions around it). A count from the version, so a replay charges the same."""
+        region = self.program.steps[inst.step].region
+        size = self._view_sizes.get(region)
+        if size is None:
+            size = sum(len(self.program.regions[r].members) for r in self.program.chain(region))
+            self._view_sizes[region] = size
+        return STEP_WEIGHT + VIEW_WEIGHT * size
+
+    def _take_limit(self) -> int:
+        """How many ready steps this workflow task may still take: at least one, so the run moves on."""
+        left = YIELD_STRUCTURE - self._task_budget().structure  # the whole share: a take's work is light
+        return max(1, left // TAKE_WEIGHT)
+
+    async def _stepwise[T](self, steps: Generator[int, None, T]) -> T:
+        """A snapshot or a restore, part by part (engine 2b spec §5.3): each part's units are charged to the workflow
+        task; once its share is spent, the next part waits for the next task (the 1 ms durable timer, as §5.6's
+        interpreter does). The units count what's encoded, so a replay yields at the same points."""
+        while True:
+            try:
+                units = next(steps)
+            except StopIteration as done:
+                value: T = done.value
+                return value
+            self._task_budget().charge(structure=units)
+            await self._yield_point(None, structure=STRUCTURE_STEP)
+
+    async def _yield_point(
+        self, record: ExpressionRecord | None, *, send: int = 0, structure: int = 0, whole: bool = False
+    ) -> None:
         """Before binding a view (`record` None) or evaluating `record` locally: when the current workflow task's budget
         is spent, await a 1 ms durable timer, which ends the task (spec §5.6). Concurrent units share the budget and
         one timer, and each checks again once it fires. Before sending a payload (`send` its bytes), the same wait
         keeps a task's commands under Temporal's gRPC message limit (#15, engine 2b spec §5.2)."""
         while True:
-            if not self._task_budget().must_yield(record, send=send):
+            if not self._task_budget().must_yield(record, send=send, structure=structure, whole=whole):
                 return
             if self._yield_timer is None or self._yield_timer.done():
                 self._yield_timer = asyncio.create_task(asyncio.sleep(0.001))
@@ -1048,6 +1094,9 @@ class Execution:
         step = self.sched.step(inst)
         skip = ("/collect",) if step.ref == "flow.loop@1" else ("/predicate",) if step.ref == "flow.filter@1" else ()
         pairs = [(p, v) for p, v in step.values if not any(p == s or p.startswith(s + "/") for s in skip)]
+        units = self._step_units(inst)  # its work in this workflow task, charged before it starts (§5.3)
+        await self._yield_point(None, structure=units, whole=True)  # the task's whole share: a step's work is light
+        self._task_budget().charge(structure=units)
         captured = self.sched.consume_capture(inst)  # a loop step's variables, as when it became ready (§5.3)
         try:
             values, cel_mode = await self._values(step, pairs, inst.scope, captured)
@@ -1636,12 +1685,12 @@ class Execution:
 
     # --- continue-as-new ------------------------------------------------------------------------------------------
 
-    def _snapshot(self) -> dict[str, Any]:
+    async def _snapshot(self) -> dict[str, Any]:
         """Where a continued run carries on (spec §6; `snapshot_format` 2, engine 2b spec §5.3). The projection is
         written first, so no row is carried; timers carry their wake times."""
         return {
             "snapshot_format": SNAPSHOT_FORMAT,
-            "scheduler": self.sched.to_json(),
+            "scheduler": await self._stepwise(self.sched.encoding()),
             "run_started_at": self.run_started_at.isoformat(),
             "deadline": self.deadline.isoformat(),
             "drained": self._drained,
@@ -1657,11 +1706,12 @@ class Execution:
             ],
         }
 
-    def _restore(self, program: Program, snapshot: dict[str, Any]) -> None:
+    async def _restore(self, program: Program, snapshot: dict[str, Any]) -> None:
         if snapshot.get("snapshot_format") != SNAPSHOT_FORMAT:
             raise ValueError(f"unknown snapshot format {snapshot.get('snapshot_format')!r}")
         self.program = program
-        self.sched = Scheduler.from_json(program, snapshot["scheduler"], prefix=workflow.info().workflow_id)
+        self.sched = Scheduler.restoring(program, snapshot["scheduler"], prefix=workflow.info().workflow_id)
+        await self._stepwise(self.sched.decoding(snapshot["scheduler"]))
         for key, step, wake, started, mode in snapshot["timers"]:
             inst = Instance(tuple((str(k), int(n)) for k, n in key), uuid.UUID(step))
             self._timers[inst] = datetime.fromisoformat(wake)
@@ -1697,6 +1747,36 @@ def quiescent(
     return idle and settled and live <= live_state.LIVE_BUDGET
 
 
+PROGRAM_CACHE = 64  # compiled versions a worker process keeps
+_PROGRAMS: dict[tuple[str, str], Program] = {}
+
+
+def program_of(data: Any) -> Program:
+    """A version's program, compiled once per worker process (engine 2b spec §5.3, a workflow task's CPU): compiling
+    a large version took most of a workflow task, in the first task of every execution and every continue. A version
+    is immutable, so its program is the same wherever and whenever it's compiled, and a replay gets the same one; a
+    program is never changed once compiled. Keyed by the version's content as well as its id: a damaged version
+    compiles again, and fails as before. One that can't compile isn't kept: it raises again."""
+    content = json.dumps(dataclasses.asdict(data), sort_keys=True, separators=(",", ":"), default=str)
+    key = (data.version_id, hashlib.sha256(content.encode()).hexdigest())
+    found = _PROGRAMS.pop(key, None)
+    if found is None:
+        found = compile_program(
+            data.graph,
+            data.manifests,
+            data.expressions,
+            data.cel_profile,
+            data.subflow_version_ids,
+            data.failure_handler_version_id,
+            data.open_scopes_cap,
+            data.loop_depth,
+        )
+    _PROGRAMS[key] = found  # the most recently used last
+    while len(_PROGRAMS) > PROGRAM_CACHE:
+        del _PROGRAMS[next(iter(_PROGRAMS))]
+    return found
+
+
 __all__ = [
     "CEL_BATCH",
     "CEL_REQUEST_BYTES",
@@ -1711,5 +1791,6 @@ __all__ = [
     "VERSION_UNUSABLE",
     "Execution",
     "child_options",
+    "program_of",
     "quiescent",
 ]

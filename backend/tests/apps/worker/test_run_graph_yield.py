@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 from temporalio import workflow
+from temporalio.api.enums.v1 import EventType
 from temporalio.testing import WorkflowEnvironment
 
 from dewpoint.engine.cel import route
@@ -39,14 +40,14 @@ class Recording(route.YieldBudget):
     """Records every charge under the workflow task it was made in (its history length). A replay makes the same
     charges again, for tasks already recorded: those aren't recorded twice."""
 
-    def charge(self, record: Any = None, *, nodes: int = 0, sent: int = 0) -> None:
+    def charge(self, record: Any = None, *, nodes: int = 0, sent: int = 0, structure: int = 0) -> None:
         if not workflow.unsafe.is_replaying():
             task = TASKS[workflow.info().get_current_history_length()]
             if nodes:
                 task.append(("bind", nodes))
             if record is not None:
                 task.append(("eval", record.work or 0))
-        super().charge(record, nodes=nodes, sent=sent)
+        super().charge(record, nodes=nodes, sent=sent, structure=structure)
 
 
 @pytest.fixture
@@ -161,3 +162,30 @@ async def test_an_executions_first_workflow_task_leaves_heavy_cel_to_the_next_on
     tenth = route.YIELD_WORK // route.STARTUP_SHARE
     assert first[0] <= tenth
     assert [w for works in later for w in works if w > tenth]  # the heavy one, in a later task
+
+
+async def test_ready_steps_spread_over_workflow_tasks_by_their_structural_units(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A workflow task's CPU (engine 2b spec §5.3): each step unit charges its work and its view before it starts, and
+    a take takes only what the task's share allows. With the share lowered, 60 ready steps (each 1,000 units and 4
+    per step of its view) go out over many workflow tasks, not one; every one runs."""
+    monkeypatch.setattr(route, "YIELD_STRUCTURE", 12_000)
+    monkeypatch.setattr(execution, "YIELD_STRUCTURE", 12_000)
+    store = MemoryStore()
+    g = G()
+    g.settings = {"input_schema": {"type": "object"}, "outputs": {}}
+    for n in range(60):
+        g.node(f"a{n}", "testkit.echo@1", {"value": n})
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {})
+        result = await asyncio.wait_for(handle.result(), 60)
+    assert result.status == "succeeded"
+    tasks = {
+        e.activity_task_scheduled_event_attributes.workflow_task_completed_event_id
+        for e in (await handle.fetch_history()).events
+        if e.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED
+        and e.activity_task_scheduled_event_attributes.activity_type.name == "testkit.echo.v1"
+    }
+    assert len(tasks) >= 6  # 60 steps of 1,240 units each (its view: 60 steps): about 9 per task
+    assert len(store.steps(run_id_of(handle))) == 60
