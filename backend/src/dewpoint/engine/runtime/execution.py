@@ -30,7 +30,7 @@ with workflow.unsafe.imports_passed_through():
     from dewpoint.engine.cel.profile import LOCAL_CEL_PROFILE
     from dewpoint.engine.cel.record import ExpressionRecord
     from dewpoint.engine.cel.route import YieldBudget
-    from dewpoint.engine.graph.values import CelValue, RefValue, TemplateValue
+    from dewpoint.engine.graph.values import CelValue, LiteralValue, RefValue, TemplateValue
     from dewpoint.engine.handles import CLAIM_UNAVAILABLE, MISSING, RESERVED, ClaimRef, contains_marker
     from dewpoint.engine.registry import control
     from dewpoint.engine.runtime import nodes, resolve
@@ -41,6 +41,7 @@ with workflow.unsafe.imports_passed_through():
         CLAIMS_CHILD_INPUT,
         CLAIMS_DERIVE,
         CLAIMS_GRANT,
+        CLAIMS_MESSAGE,
         ENGINE_QUEUE,
         MAPPED,
         OUTCOME_UNKNOWN,
@@ -57,6 +58,8 @@ with workflow.unsafe.imports_passed_through():
         DeriveInput,
         DeriveResult,
         GrantInput,
+        MessageInput,
+        MessageResult,
         Parent,
         ProjectInput,
         RunInput,
@@ -120,6 +123,7 @@ AMBIGUOUS = "ambiguous"  # a manifest's side_effect: the request may have been s
 CONTINUE = "continue"  # `_drive`'s answer when the execution continues-as-new
 CLAIM_REFUSED = "A claim this run may not read, or that doesn't exist."
 INPUT_INVALID = "input_invalid"  # a sub-flow's input that doesn't match its schema, found where it's resolved
+UNREADABLE_MESSAGE = "The workflow failed; its message couldn't be read."
 
 
 class ExposedError(Exception):
@@ -985,6 +989,10 @@ class Execution:
         config = resolve.assemble(step.config, values)
         if not step.control:
             return await self._activity(inst, step, config, cel_mode)
+        if step.ref == "flow.fail@1" and any(
+            p == "/message" and not isinstance(v, LiteralValue) for p, v in step.values
+        ):
+            config = {**config, "message": await self._message(config.get("message"))}
         if step.ref == "flow.filter@1":
             record = self.program.record(step.id, "/predicate")
             if record.tainted or contains_marker(config.get("items")):
@@ -1164,7 +1172,15 @@ class Execution:
                 raise asyncio.CancelledError from None
             if isinstance(e.cause, ApplicationError) and e.cause.type == CLAIM_UNAVAILABLE:
                 return Failure(CLAIM_UNAVAILABLE, CLAIM_REFUSED)
+            if isinstance(e.cause, ApplicationError) and e.cause.type == VERSION_UNUSABLE:
+                return Failure(VERSION_UNUSABLE, e.cause.message)
             return Failure(INTERNAL_ERROR, f"Claims couldn't cross to another run ({type(e.cause or e).__name__}).")
+
+    async def _message(self, value: Any) -> str:
+        """A failure's message built from data, as it may be recorded (engine 2b spec §3.7): resolved and masked in
+        `claims.message`, which reads the run tree's secret index. This workflow holds no secret to mask it with."""
+        found = await self._crossing(CLAIMS_MESSAGE, MessageInput(value, self.root_run_id), MessageResult)
+        return UNREADABLE_MESSAGE if isinstance(found, Failure) else found.text
 
     async def _hand_over(self, child_run: str, version: str, value: dict[str, Any]) -> dict[str, Any] | Failure:
         """A sub-flow's input, split for the child as a trigger is, this run's handles in it granted to the child
