@@ -1,6 +1,6 @@
 # Dewpoint — Engine Core Design (sub-project 2a)
 
-- **Status:** Accepted as the basis for implementation, revision 5.6 (2026-09-28).
+- **Status:** Accepted as the basis for implementation, revision 5.8 (2026-10-02).
   - Revision 2 addressed join scopes, the local-CEL switch, evaluator isolation, profile routing and retirement.
   - Revision 3 addresses the version lifecycle (activation, queued requests, closure), nested loops, evaluator
     aggregate memory, and Temporal membership.
@@ -102,6 +102,18 @@
     never sent, so it fails with `start_failed` (§9). Since requests are encrypted from ABI 5 on, a `cel.evaluate`
     queue names its ABI as well as its profile (§5.7, §7), and only a build of the current build's ABI starts runs
     (§7).
+  - Revision 5.8 (sub-project 2b-1b, from `2026-09-29-engine-2b-design.md` §3–§5): sensitive and large values are
+    claims, and a run holds handles. A run's input is validated against its input schema at admission and claimed;
+    a plugin step's output is split at its activity's boundary; CEL and templates over handles, and decisions a
+    workflow lists in `graph.settings.declassify`, run where the claim is read; sub-flows read their parent's claims
+    through grants (§4.2, §5.6, §6, §9). The workflow no longer learns, carries or masks secrets: the project activity
+    masks every row against the run tree's secret index (§8). Publish runs a taint analysis and refuses sensitive
+    literals and defaults, tainted timers, failure messages and sub-flow inputs, and unlisted tainted decisions (§4).
+    A command spills its largest values before it fails for size; an execution's live state is bounded (1 MiB) by
+    claiming its largest containers; a loop's collected values compact into segments, and a loop that spilled ends
+    with one claim; its `failures` are in index order (§4.2). `snapshot_format` becomes 2, with no queues, and an
+    execution opens at most a cap of iterations computed and pinned at publish (§6). A snapshot or a restore runs part
+    by part, charged in structural units, and a version's program is compiled once per worker. `engine_abi` becomes 6.
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
   This spec **narrows parent §6.4** (where CEL runs) and resolves the CEL item in parent §15.
 - **Evidence:** CEL spike, branch `spike/cel-evaluation`, commits `d6a8162` and `13a62e1`. See
@@ -280,6 +292,8 @@ Tenant-scoped tables use FORCE RLS with the foundations policy pattern.
   - The loop's `collect` value is evaluated at the end of each iteration and becomes `steps.<loop>.output.items[i]`.
     A failed iteration (`on_item_error: continue`) leaves `items[i] = null` and adds `{index, code, message}` to
     `failures`; a `collect` that can't be computed fails its iteration the same way. `count` is the number of items.
+    `failures` are in index order. A loop whose collected values spilled, or that collected more than 64 KiB, outputs
+    them as one claim: `items` is its handle, addressed by position (2b spec §5.3).
 
 ### 4.3 Values, scope and availability
 
@@ -978,18 +992,22 @@ abandons or restarts an activity or a child workflow.
   draining adds at most about 1,000 events. That keeps runs far below Temporal's 10,240-event warning and
   51,200-event limit. The draining run itself adds almost no history while it waits. Measured in 2a-3b, with the
   in-flight cap saturated when draining began: 405–501 events and 98–131 KB. The headroom test also bounds the bytes
-  its workload's drain adds, at 512 KiB. That bounds the measured workload only, not every payload: payload sizes
-  aren't enforced until 2b's claim check.
+  its workload's drain adds, at 512 KiB. That bounds the measured workload only, not every payload; payload sizes are
+  bounded by 2b's claim check (2b spec §5).
 - **Cost.** A long child, for example a sub-flow in a long `delay`, holds the checkpoint back, and parallel branches
   wait until it settles. That only delays them; it never changes the result. The validator warns when a graph can
   run a long wait in parallel with other work.
-- **Snapshot** (`snapshot_format: 1`):
-  - variables and the learned sensitive values;
-  - completed outputs (values now, handles after 2b);
-  - edge and node states per open scope, and loop cursors, with each loop's collected values, failures and running
-    batch;
-  - the ready, collect and batch queues, and timer wake times;
-  - the iteration counter (below), with its reservations and waiting needs, the run's start time and the deadline.
+- **Snapshot** (`snapshot_format: 2`, 2b spec §5.3; format 1 until ABI 5):
+  - the variables, versioned, with what each write replaced while a waiting loop step reads an older version;
+  - completed outputs, values or handles;
+  - one code per node and per edge of each open scope, in region order, scopes and loops by topological index, and
+    loop cursors, with each loop's collected values and failures (segments by handle, a short tail) and running batch;
+  - no queues: a restore rebuilds the ready steps, collects and batches from the states, minus what was handed out
+    and still runs; timer wake times;
+  - the iteration counter (below), with its reservations, the run's start time and the deadline. A snapshot is taken
+    only with no waiting need and no child's grant, and with the live state within its budget.
+
+  Learned sensitive values aren't carried: from ABI 6 the workflow holds none.
 
   The continued run's input also carries the iterations used so far, outside the snapshot: a run that ends
   before restoring its snapshot still reports them, whether the snapshot is one a build can't read, its version
@@ -1162,8 +1180,11 @@ cancel while the version loads cancels the run.
   Redaction follows local `$ref`s, every branch of `anyOf`, `oneOf` and `allOf`, every `patternProperties` schema of
   an object (for every key, declared ones included) and each tuple position (`prefixItems`); a map whose keys are
   sensitive (`propertyNames`) is redacted whole.
-  Strings the run has seen at sensitive positions (of plugin outputs and configs, and of the trigger by its input
-  schema; 4 characters or more) are masked wherever they reappear, CEL errors included. Messages never quote input:
+  From ABI 6 the workflow holds no sensitive value, only handles (2b spec §3.6): the project activity masks every row
+  against the run tree's secret index (§3.7). Its strings (4 characters or more) come from every tainted claim (a
+  trigger's, a step's output's, a CEL result's) and from configs' sensitive fields, indexed before the attempt. Every
+  message leaving an activity is masked against it too, CEL errors included, and so is a bug's text in the worker's
+  log. Messages never quote input:
   validation errors give the location only as far as the schema declares it (map keys, numeric or not, show as `*`)
   and the rule's code, if pydantic defines it (`custom_error` otherwise); an output instance, checked as emitted
   against the declared output schema, names the schema keyword. Unexpected exceptions, unusable versions and
@@ -1181,8 +1202,9 @@ cancel while the version loads cancels the run.
 
 - **Internal only:** `engine` defines the start request. `apps` provides `start_run(version_id, payload, *, mode)` for tests, the dev CLI (`dewpoint dev run <version> --input file.json`) and, later, 2b's dispatcher.
 - **No public run API in 2a.** Admission, idempotency keys and tenant slots arrive in 2b.
-- **Payloads are test data in 2a.** 2b validates them against the input schema. Until then a payload that breaks its
-  schema fails the step that reads the bad value.
+- **Payloads are validated at admission** from ABI 6 (2b spec §3.5): a trigger that breaks the input schema is
+  refused with the places and rules it breaks, never a value, and leaves no run; one that passes is claimed, and the
+  run starts with its envelope. Before ABI 6 a payload that broke its schema failed the step that read the bad value.
 - **A start is failed only when it certainly never began.** The workflow id is `t:<tenant>:run:<run id>` (2b spec
   §6.1), with `REJECT_DUPLICATE`. An unanswered start is retried with the same id, and a duplicate refusal confirms it.
   `start_failed` is recorded for a confirmed refusal, or for a start the client couldn't encrypt, which it never sent
