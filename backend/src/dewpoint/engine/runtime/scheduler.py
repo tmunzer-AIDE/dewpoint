@@ -15,11 +15,21 @@ Every iteration and filter item is debited from the execution's `Budget` (spec �
 iteration that can't be debited waits for budget, or ends the loop at the cap. A settled iteration's scope is pruned
 once its loop has taken its result: only open scopes stay, which keeps a continue-as-new snapshot small.
 
+Open iterations are capped per execution (engine 2b spec §5.3): at most the version's `OPEN_SCOPES_CAP_v` open
+iteration scopes, plus one reserved per nesting level (`D`) for the progress path, the oldest open iteration at each
+level. A loop step inside an iteration starts only when its loop can open an iteration at once (it waits, queued,
+holding nothing); root-region loop steps are never deferred; a batch-mode loop inside an iteration holds its slot
+until it ends. The deepest iteration on the path can always open one of its own loop's iterations, so it completes,
+frees its scopes, and the path moves on.
+
 A snapshot (`snapshot_format` 2, engine 2b spec §5.3) holds states, not queues: one code per node and per edge in
 region order, steps and loops by their topological index. Restoring rebuilds what's queued from those states, minus
 what was handed out before the snapshot and is still running."""
 
+import bisect
+import heapq
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -32,6 +42,7 @@ ITERATION_CAP = 100_000  # loop iterations and filter items across the whole log
 ITERATION_CAP_EXCEEDED = "iteration_cap_exceeded"
 CAP_MESSAGE = "This run reached its limit of 100,000 loop iterations."
 SNAPSHOT_FORMAT = 2
+OPEN_SCOPES_CAP = 100  # open iteration scopes per execution, besides the progress path's reservation (§5.3)
 
 
 class NodeState(StrEnum):
@@ -59,6 +70,18 @@ _NODE_CODE = {
 _NODE_FROM = {c: n for n, c in _NODE_CODE.items()}
 _EDGE_CODE = {EdgeState.PENDING: "p", EdgeState.LIVE: "l", EdgeState.DEAD: "x"}
 _EDGE_FROM = {c: e for e, c in _EDGE_CODE.items()}
+
+
+def _then_wake[**P, T](fn: Callable[P, T]) -> Callable[P, T]:
+    """After a change from outside, the loops the cap held back open what they can (`_settle_wakes`)."""
+
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
+        out = fn(*args, **kwargs)
+        self: Scheduler = args[0]  # type: ignore[assignment]
+        self._settle_wakes()
+        return out
+
+    return wrapper
 
 
 def iteration_key(scope: ScopeKey) -> str:
@@ -99,6 +122,8 @@ class Scope:
     index: int | None = None
     failure: Failure | None = None  # the unhandled failure that ended this scope
     frozen: bool = False  # an enclosing scope a batch child reads, and never runs
+    seq: int = 0  # its opening order: the oldest open iterations make the progress path (§5.3)
+    reserved: bool = False  # opened from its level's reserved scope
 
     @property
     def settled(self) -> bool:
@@ -207,6 +232,20 @@ class Scheduler:
         self._handed: set[Instance] = set()
         self._collects_out: set[tuple[Instance, int]] = set()
         self._batches_out: set[tuple[Instance, int]] = set()
+        # the open-iteration cap (§5.3), pinned in the version, and the reservation: one scope per nesting level
+        self.cap = program.open_scopes_cap or OPEN_SCOPES_CAP
+        self.reserve = program.depth
+        self._seq = 0
+        self._n_open = 0  # open iteration scopes, frozen ones aside
+        self._capped: set[Instance] = set()  # loops the cap holds back
+        self._freed = False  # a scope or a slot was freed: the capped loops try again
+        self._waking = False
+        self._starting: dict[Instance, bool] = {}  # a released loop step -> whether it took its level's reserved scope
+        self._held: dict[Instance, bool] = {}  # a batch-mode loop inside an iteration: it holds its slot to the end
+        # queued loop steps inside iterations, not started: by scope in scheduling order, and all in one heap
+        self._deferred: set[Instance] = set()
+        self._deferred_by_scope: dict[ScopeKey, list[Instance]] = {}
+        self._deferred_heap: list[tuple[tuple[Any, ...], Instance]] = []
 
     @property
     def iterations(self) -> int:
@@ -241,9 +280,17 @@ class Scheduler:
         self._advance(loop)
 
     def take_ready(self) -> list[Instance]:
-        """Ready steps, in (scope, topological) order. They are running from now on."""
-        ready = sorted(self._ready, key=self.order)
+        """Ready steps, in (scope, topological) order. They are running from now on. A loop step inside an iteration
+        is handed out only when its loop can open an iteration at once; until then it stays queued (§5.3)."""
+        ready = []
+        for inst in self._ready:
+            if self._iter_loop(inst):
+                self._defer(inst)
+            else:
+                ready.append(inst)
         self._ready = []
+        ready += self._start_deferred()
+        ready.sort(key=self.order)
         for inst in ready:
             self.scopes[inst.scope].nodes[inst.step] = NodeState.RUNNING
         self._handed.update(ready)
@@ -278,9 +325,12 @@ class Scheduler:
         self._collects = collects + self._collects
         self._batches = batches + self._batches
         self._handed -= set(steps)
+        for inst in steps:  # a loop step handed out and not started gives its slot back, and waits again
+            self._starting.pop(inst, None)
         self._collects_out -= {(c.loop, c.index) for c in collects}
         self._batches_out -= {(b.loop, b.start) for b in batches}
 
+    @_then_wake
     def succeed(self, inst: Instance, output: Any, ports: tuple[str, ...] | None = None) -> None:
         """The step succeeded. `ports`: the normal ports whose edges are live (if/switch pick one); all by default."""
         self._handed.discard(inst)
@@ -294,11 +344,14 @@ class Scheduler:
         self._resolve(scope, step, {p for p in step.ports if p in live} - {BODY})
         self._after_settle(scope)
 
+    @_then_wake
     def fail(self, inst: Instance, failure: Failure) -> None:
         """The step failed. Its `on_error` decides: `port` follows the error edges, `continue` the normal ones, and
         `fail` ends the scope: the run in the root, the iteration in a loop body. Either handled way, the step has an
         error and no output, so `has(steps.x.output)` is false (spec §5.3) and a reference's default applies."""
         self._handed.discard(inst)
+        if self._starting.pop(inst, None) is not None:  # a loop step that failed before its loop opened
+            self._freed = True
         scope, step = self._running(inst)
         if scope is None:
             return
@@ -315,6 +368,7 @@ class Scheduler:
             return
         self._after_settle(scope)
 
+    @_then_wake
     def open_loop(
         self, inst: Instance, items: list[Any], *, concurrency: int, stop_on_error: bool, batch: int = 0
     ) -> None:
@@ -325,8 +379,11 @@ class Scheduler:
             return
         loop = LoopRun(inst, list(items), concurrency, stop_on_error, batch=batch, collected=[None] * len(items))
         self.loops[inst] = loop
+        if batch and self._iter_loop(inst):  # it opens no scope: it holds its slot until it ends (§5.3)
+            self._held[inst] = self._starting.pop(inst, False)
         self._advance(loop)
 
+    @_then_wake
     def collected(self, loop_inst: Instance, index: int, value: Any) -> None:
         self._collects_out.discard((loop_inst, index))
         loop = self.loops.get(loop_inst)
@@ -338,6 +395,7 @@ class Scheduler:
         self._prune(self._iteration_scope(loop, index))
         self._advance(loop)
 
+    @_then_wake
     def collect_failed(self, loop_inst: Instance, index: int, failure: Failure) -> None:
         """`collect` couldn't be evaluated: the iteration failed after all."""
         self._collects_out.discard((loop_inst, index))
@@ -346,6 +404,7 @@ class Scheduler:
             return
         self._iteration_failed(loop, index, failure)
 
+    @_then_wake
     def batch_done(self, loop_inst: Instance, start: int, outcome: BatchOutcome) -> None:
         """A batch child finished its slice: take its results, then hand out the next batch or complete the loop. A
         slice stopped by a failed iteration (`on_item_error: stop`) fails the loop."""
@@ -368,6 +427,7 @@ class Scheduler:
         if loop is not None and loop.running_batch == start and start < end < loop.next:
             loop.next = end
 
+    @_then_wake
     def batch_failed(self, loop_inst: Instance, start: int, failure: Failure) -> None:
         """A batch child failed as a whole (not one of its iterations): the loop fails with it."""
         self._batches_out.discard((loop_inst, start))
@@ -377,6 +437,7 @@ class Scheduler:
         loop.running_batch = None
         self._abort(loop, failure)
 
+    @_then_wake
     def finish(self, inst: Instance, end: RunEnd, output: Any = None) -> None:
         """A stop or fail node: record its result, then end the run (it has no edges to resolve)."""
         self._handed.discard(inst)
@@ -397,16 +458,21 @@ class Scheduler:
         if self.ended is not None:
             return
         self.ended = end
-        queued = set(self._ready)
+        queued = set(self._ready) | self._deferred
         for scope in self.scopes.values():
             for node_id, state in scope.nodes.items():
                 if state == NodeState.RUNNING and Instance(scope.key, node_id) not in queued:
                     self._cancels.append(Instance(scope.key, node_id))
         self._ready = []
+        self._clear_deferred(())
+        self._starting.clear()
+        self._held.clear()
+        self._capped.clear()
         self._batches = []
         self.budget.drop_local()  # a loop waiting for its next iteration opens none now
         self._budget_waits.clear()
 
+    @_then_wake
     def answer_budget(self) -> tuple[list[Answer], Ask | None]:
         """Serve the budget's waiting needs. The loops' own answers are applied here: a granted iteration opens, a
         refused one ends its loop at the cap. The other answers (a filter's, a child's) and the Ask for the parent
@@ -426,7 +492,12 @@ class Scheduler:
             if not a.granted:
                 self._abort(loop, Failure(ITERATION_CAP_EXCEEDED, CAP_MESSAGE))
                 continue
-            self._open_next(loop)
+            room = self._room(loop)
+            if room is None:  # granted, but the cap is full: it gives the grant back and waits for a scope
+                self.budget.used -= a.granted
+                self._capped.add(loop.instance)
+                continue
+            self._open_next(loop, reserved=room)
             self._advance(loop)
         return others, ask
 
@@ -452,7 +523,15 @@ class Scheduler:
             raise ValueError(f"`{step.key}` isn't running in {iteration_key(inst.scope)!r}")
         return scope, step
 
-    def _open_scope(self, key: ScopeKey, region: uuid.UUID | None, item: Any = None, index: int | None = None) -> None:
+    def _open_scope(
+        self,
+        key: ScopeKey,
+        region: uuid.UUID | None,
+        item: Any = None,
+        index: int | None = None,
+        *,
+        reserved: bool = False,
+    ) -> None:
         members = self._members[region]
         member_set = set(members)
         edges: dict[int, EdgeState] = {}
@@ -461,7 +540,11 @@ class Scheduler:
                 source = self.program.edges[e].source
                 # an edge from this region's own loop node is its body edge: live for every iteration
                 edges[e] = EdgeState.LIVE if source not in member_set and source == region else EdgeState.PENDING
-        scope = Scope(key, region, dict.fromkeys(members, NodeState.WAITING), edges, {}, item, index)
+        scope = Scope(key, region, dict.fromkeys(members, NodeState.WAITING), edges, {}, item, index, reserved=reserved)
+        if key:
+            self._seq += 1
+            scope.seq = self._seq
+            self._n_open += 1
         self.scopes[key] = scope
         for node_id in members:
             self._check_ready(scope, node_id)
@@ -470,6 +553,9 @@ class Scheduler:
     def _prune(self, key: ScopeKey) -> None:
         """Forget a settled iteration's scope and every scope nested in it: its loop has what it needs."""
         for k in [k for k in self.scopes if k[: len(key)] == key]:
+            if k and not self.scopes[k].frozen:
+                self._n_open -= 1
+                self._freed = True
             del self.scopes[k]
 
     def _resolve(self, scope: Scope, step: Step, live_ports: set[str]) -> None:
@@ -516,12 +602,16 @@ class Scheduler:
                 inner.failure = failure
             for node_id, state in inner.nodes.items():
                 inst = Instance(key, node_id)
-                if state == NodeState.RUNNING and inst not in queued:
+                if state == NodeState.RUNNING and inst not in queued and inst not in self._deferred:
                     self._cancels.append(inst)
                     self._handed.discard(inst)
                 if state in (NodeState.RUNNING, NodeState.WAITING):
                     inner.nodes[node_id] = NodeState.DEAD
         self._ready = [r for r in self._ready if r.scope[: len(scope.key)] != scope.key]
+        self._clear_deferred(scope.key)
+        for inst in [i for i in self._starting if i.scope[: len(scope.key)] == scope.key]:
+            del self._starting[inst]
+            self._freed = True
         for inst in [i for i in self.loops if i.scope[: len(scope.key)] == scope.key]:
             self._drop_loop(self.loops[inst])
         if scope.key == ():
@@ -532,6 +622,9 @@ class Scheduler:
     def _drop_loop(self, loop: LoopRun) -> None:
         """The loop ends: nothing it waits for is still wanted."""
         del self.loops[loop.instance]
+        self._capped.discard(loop.instance)
+        if self._starting.pop(loop.instance, None) is not None or self._held.pop(loop.instance, None) is not None:
+            self._freed = True  # its slot is free
         for key in [k for k, inst in self._budget_waits.items() if inst == loop.instance]:
             del self._budget_waits[key]
             self.budget.waiting = [n for n in self.budget.waiting if not (n.requester == LOCAL and n.key == key)]
@@ -591,12 +684,13 @@ class Scheduler:
             self.outcome = BatchOutcome(list(loop.collected), list(loop.failures), stopped)
             self.ended = RunEnd("succeeded")
 
-    def _open_next(self, loop: LoopRun) -> None:
+    def _open_next(self, loop: LoopRun, *, reserved: bool = False) -> None:
         index = loop.offset + loop.next
         item = loop.items[loop.next]
         loop.next += 1
         loop.open.append(index)
-        self._open_scope(self._iteration_scope(loop, index), loop.instance.step, item=item, index=index)
+        key = self._iteration_scope(loop, index)
+        self._open_scope(key, loop.instance.step, item=item, index=index, reserved=reserved)
 
     def _advance(self, loop: LoopRun) -> None:
         """Open iterations up to the concurrency (or hand out the next batch), or complete the loop when every item
@@ -610,13 +704,18 @@ class Scheduler:
                 return
         else:
             while loop.next < len(loop.items) and len(loop.open) < loop.concurrency and not loop.waiting:
+                room = self._room(loop)
+                if room is None:  # the cap: it opens once scopes are freed (`_settle_wakes`)
+                    self._capped.add(loop.instance)
+                    return
                 if not self.budget.take(1):
                     loop.waiting = True
                     key = f"loop:{iteration_key(loop.instance.scope)}:{self.program.steps[loop.instance.step].key}"
                     self._budget_waits[key] = loop.instance
                     self.budget.request(Need(LOCAL, key, 1, 1))
                     return
-                self._open_next(loop)
+                self._capped.discard(loop.instance)
+                self._open_next(loop, reserved=room)
                 if loop.instance not in self.loops:  # the iteration failed at once and stopped the loop
                     return
         if not loop.open and loop.next >= len(loop.items) and loop.running_batch is None and not loop.waiting:
@@ -628,6 +727,118 @@ class Scheduler:
             scope = self.scopes.get(loop.instance.scope)
             if scope is not None and scope.failure is None and self.ended is None:
                 self.succeed(loop.instance, output, (DONE,))
+
+    # --- the open-iteration cap (engine 2b spec §5.3) --------------------------------------------------------------
+
+    @property
+    def open_scopes(self) -> int:
+        """Open iteration scopes, frozen ones aside: never past `cap + reserve`."""
+        return self._n_open
+
+    def _room(self, loop: LoopRun) -> bool | None:
+        """Whether `loop` may open an iteration now: False under the cap, True from its level's reserved scope, None
+        not at all. A reserved scope is only for a loop on the progress path, one per level."""
+        if loop.instance in self._starting:  # the slot it took when it was released
+            return self._starting.pop(loop.instance)
+        taken = self._taken()
+        if taken < self.cap:
+            return False
+        if taken >= self.cap + self.reserve:
+            return None
+        level = len(loop.instance.scope) + 1
+        if self._reserved_at(level):
+            return None
+        return True if loop.instance.scope in self._path() else None
+
+    def _taken(self) -> int:
+        return self._n_open + len(self._starting) + len(self._held)
+
+    def _root_key(self) -> ScopeKey:
+        return self.batch_loop.scope if self.batch_loop is not None else ()
+
+    def _iter_loop(self, inst: Instance) -> bool:
+        """A loop step inside an iteration scope: the only step the cap defers."""
+        return inst.step in self.program.regions and inst.scope != self._root_key()
+
+    def _defer(self, inst: Instance) -> None:
+        self._deferred.add(inst)
+        bisect.insort(self._deferred_by_scope.setdefault(inst.scope, []), inst, key=self.order)
+        heapq.heappush(self._deferred_heap, (self.order(inst), inst))
+
+    def _undefer(self, inst: Instance) -> None:
+        self._deferred.discard(inst)
+        queue = self._deferred_by_scope[inst.scope]
+        queue.remove(inst)
+        if not queue:
+            del self._deferred_by_scope[inst.scope]
+
+    def _start_deferred(self) -> list[Instance]:
+        """Queued loop steps that may start now, each taking a slot its loop's first iteration then uses: under the
+        cap, in scheduling order; past it, one per level on the progress path, from that level's reserved scope."""
+        out: list[Instance] = []
+        while self._taken() < self.cap and self._deferred:
+            _, inst = heapq.heappop(self._deferred_heap)
+            if inst in self._deferred:  # else it left the queue meanwhile
+                self._undefer(inst)
+                self._starting[inst] = False
+                out.append(inst)
+        if self._deferred and self._taken() >= self.cap:
+            for key in sorted(self._path(), key=len):
+                if self._taken() >= self.cap + self.reserve:
+                    break
+                queue = self._deferred_by_scope.get(key)
+                if queue and not self._reserved_at(len(key) + 1):
+                    inst = queue[0]
+                    self._undefer(inst)
+                    self._starting[inst] = True
+                    out.append(inst)
+        return out
+
+    def _reserved_at(self, level: int) -> bool:
+        if any(s.reserved and len(s.key) == level for s in self.scopes.values()):
+            return True
+        held = list(self._starting.items()) + list(self._held.items())
+        return any(r and len(i.scope) + 1 == level for i, r in held)
+
+    def _clear_deferred(self, key: ScopeKey) -> None:
+        for k in [k for k in self._deferred_by_scope if k[: len(key)] == key]:
+            self._deferred -= set(self._deferred_by_scope.pop(k))
+
+    def _path(self) -> set[ScopeKey]:
+        """The progress path: from the execution's own root (a batch child's loop scope), the oldest open iteration
+        at each level below, by opening order."""
+        oldest: dict[ScopeKey, Scope] = {}
+        for sc in self.scopes.values():
+            if sc.key and not sc.frozen:
+                best = oldest.get(sc.key[:-1])
+                if best is None or sc.seq < best.seq:
+                    oldest[sc.key[:-1]] = sc
+        current = self._root_key()
+        path = {current}
+        while current in oldest:
+            current = oldest[current].key
+            path.add(current)
+        return path
+
+    def _settle_wakes(self) -> None:
+        """Loops the cap held back open what they can once scopes are freed, in scheduling order."""
+        if self._waking:
+            return
+        if self.ended is not None:
+            self._capped.clear()
+            return
+        self._waking = True
+        try:
+            while self._freed:
+                self._freed = False
+                for inst in sorted(self._capped, key=self.order):
+                    loop = self.loops.get(inst)
+                    if loop is None:
+                        self._capped.discard(inst)
+                    elif not loop.waiting:
+                        self._advance(loop)
+        finally:
+            self._waking = False
 
     # --- continue-as-new ---------------------------------------------------------------------------------------------
 
@@ -659,6 +870,11 @@ class Scheduler:
             "budget": self.budget.to_json(),
             "budget_waits": [[k, self._i(i)] for k, i in self._budget_waits.items()],
             "batch_loop": self._i(self.batch_loop) if self.batch_loop else None,
+            "starting": [
+                [self._i(i), int(r)] for i, r in sorted(self._starting.items(), key=lambda c: self.order(c[0]))
+            ],
+            "held": [[self._i(i), int(r)] for i, r in sorted(self._held.items(), key=lambda c: self.order(c[0]))],
+            "seq": self._seq,
         }
 
     @classmethod
@@ -677,7 +893,21 @@ class Scheduler:
         s._batches_out = {(s._if(i), int(n)) for i, n in data["batches_out"]}
         s._budget_waits = {str(k): s._if(i) for k, i in data["budget_waits"]}
         s.batch_loop = s._if(data["batch_loop"]) if data["batch_loop"] else None
-        s._ready, s._collects, s._batches = s._rebuilt()
+        s._starting = {s._if(i): bool(r) for i, r in data["starting"]}
+        s._held = {s._if(i): bool(r) for i, r in data["held"]}
+        s._seq = int(data["seq"])
+        s._n_open = sum(1 for sc in s.scopes.values() if sc.key and not sc.frozen)
+        ready, s._collects, s._batches = s._rebuilt()
+        for inst in ready:  # queued loop steps inside iterations wait deferred, the rest ready
+            if s._iter_loop(inst):
+                s._defer(inst)
+            else:
+                s._ready.append(inst)
+        s._capped = {  # a loop with items left and room for them may be one the cap held back: it tries again
+            inst
+            for inst, loop in s.loops.items()
+            if not loop.batch and not loop.waiting and loop.next < len(loop.items) and len(loop.open) < loop.concurrency
+        }
         return s
 
     def _handed_now(self) -> set[Instance]:
@@ -722,8 +952,8 @@ class Scheduler:
             ready, collects, batches = self._rebuilt()
         finally:
             self._handed = saved
-        if set(ready) != set(self._ready):
-            raise AssertionError(f"rebuilt {len(ready)} ready steps, but {len(self._ready)} are queued")
+        if set(ready) != set(self._ready) | self._deferred:
+            raise AssertionError(f"rebuilt {len(ready)} ready steps, but {len(self._ready) + len(self._deferred)} wait")
         if {(c.loop, c.index, c.scope) for c in collects} != {(c.loop, c.index, c.scope) for c in self._collects}:
             raise AssertionError("the rebuilt collects differ from those queued")
         if {(b.loop, b.start, len(b.items)) for b in batches} != {
@@ -753,7 +983,8 @@ class Scheduler:
         return order
 
     def _scope_json(self, sc: Scope) -> list[Any]:
-        """[key, region, node codes, edge codes, results, item, index, failure, frozen]: results by step index, as
+        """[key, region, node codes, edge codes, results, item, index, failure, frozen, seq, reserved]: results by
+        step index, as
         [index, 0, output], [index, 1, error] or [index, 2, output, error]. A frozen scope has no codes."""
         nodes = edges = ""
         if not sc.frozen:
@@ -770,7 +1001,10 @@ class Scheduler:
                 results.append([t, 0, r["output"]])
         region = self.program.steps[sc.region].topo if sc.region is not None else -1
         failure = sc.failure.to_json() if sc.failure else None
-        return [self._k(sc.key), region, nodes, edges, results, sc.item, sc.index, failure, int(sc.frozen)]
+        return [
+            self._k(sc.key), region, nodes, edges, results, sc.item, sc.index, failure, int(sc.frozen), sc.seq,
+            int(sc.reserved),
+        ]  # fmt: skip
 
     def _scope_from(self, raw: list[Any]) -> Scope:
         key, region = self._kf(raw[0]), (self._by_topo[raw[1]] if raw[1] >= 0 else None)
@@ -787,7 +1021,7 @@ class Scheduler:
                 {"output": r[2]} if r[1] == 0 else {"error": r[2]} if r[1] == 1 else {"output": r[2], "error": r[3]}
             )
         failure = Failure.from_json(raw[7]) if raw[7] else None
-        return Scope(key, region, nodes, edges, results, raw[5], raw[6], failure, frozen)
+        return Scope(key, region, nodes, edges, results, raw[5], raw[6], failure, frozen, int(raw[9]), bool(raw[10]))
 
     def _loop_json(self, loop: LoopRun) -> list[Any]:
         return [

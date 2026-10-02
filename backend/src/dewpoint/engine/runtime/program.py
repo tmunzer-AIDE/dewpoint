@@ -68,6 +68,16 @@ class Program:
     cel_profile: str
     subflows: Mapping[str, str] = field(default_factory=dict)  # run_workflow node id -> its pinned version id
     failure_handler: str | None = None  # the pinned failure-handler version id
+    # pinned in the version (engine 2b spec §5.3): its open-iteration cap, computed at publish, and its loop depth
+    open_scopes_cap: int | None = None
+    loop_depth: int | None = None
+
+    @property
+    def depth(self) -> int:
+        """`D`: the deepest loop nesting, as the version pins it (or as its graph has it)."""
+        if self.loop_depth is not None:
+            return self.loop_depth
+        return max((len(self.chain(self.steps[r].region)) for r in self.regions if r is not None), default=0)
 
     def chain(self, region: uuid.UUID | None) -> list[uuid.UUID | None]:
         """`region` and every region enclosing it, innermost first, ending with the root (None)."""
