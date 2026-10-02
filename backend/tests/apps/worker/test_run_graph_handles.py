@@ -7,9 +7,12 @@ activity resolves them against their rows, and claims a result that read sensiti
 import uuid
 from typing import Any
 
+import pytest
 from temporalio.testing import WorkflowEnvironment
+from temporalio.worker import UnsandboxedWorkflowRunner
 
 from dewpoint.engine.handles import POINTER_MAX, ClaimRef
+from dewpoint.engine.runtime import workflow as run_graph
 from tests.apps.worker.harness import EVALUATOR_ONLY, MemoryStore, run, workers
 from tests.support.graphs import G, cel, nid, ref, template
 
@@ -336,3 +339,54 @@ async def test_a_cel_value_that_builds_the_marker_is_refused_wherever_it_runs(en
     async with workers(env.client, store):
         result = await run(env.client, store, g, TRIGGER, claimed=True)
     assert (result.status, result.outputs) == ("succeeded", {"local": "evaluation_error", "remote": "evaluation_error"})
+
+
+async def test_a_parents_size_claim_entering_a_childs_sensitive_field_is_reclassified_and_indexed(
+    env: WorkflowEnvironment,
+) -> None:
+    """Spec §3.4, §3.7: a parent's claim made for its size only is plain, and nothing indexed its text. Where it enters
+    a child field marked sensitive, the crossing claims it again for the child, tainted, and indexes it: a plain
+    output repeating that text is claimed, as one repeating any secret the run knows."""
+    notes = "n0tes-" + "x" * 70_000  # past 64 KiB: claimed at admission for its size, untainted
+    parent_input = {"type": "object", "properties": {"notes": {"type": "string"}}, "required": ["notes"],
+                    "additionalProperties": False}  # fmt: skip
+    store = MemoryStore()
+    child = G()
+    child.settings = {
+        "input_schema": {"type": "object", "properties": {"key": SECRET}, "required": ["key"],
+                         "additionalProperties": False},
+        "outputs": {"echoed": ref("steps.e.output.value")},
+    }  # fmt: skip
+    child.node("e", "testkit.echo@1", {"value": ref("trigger.key")})
+    g = G()
+    g.settings = {"input_schema": parent_input, "outputs": {"echoed": ref("steps.r.output.echoed")}}
+    g.node(
+        "r", "flow.run_workflow@1", {"workflow_id": str(store.publish(child)), "input": {"key": ref("trigger.notes")}}
+    )
+    async with workers(env.client, store):
+        result = await run(env.client, store, g, {"notes": notes}, claimed=True)
+    assert result.status == "succeeded", result.error
+    assert result.outputs is not None
+    assert held(store, result.outputs["echoed"]) == (notes, True)  # the echo repeated it: claimed, tainted
+    assert notes not in repr(store.rows)
+
+
+async def test_a_filter_the_budget_refuses_after_its_activity_returns_no_output(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec §4.4: the input count of a filter run in one activity is known only once it ran, so the budget is charged
+    then. Refused, the filter fails `iteration_cap_exceeded` and gives nothing: its kept items stay in a claim the run
+    never reads."""
+    monkeypatch.setattr(run_graph, "ITERATION_CAP", 2)
+    store = MemoryStore()
+    g = graph(kept=ref("steps.f.output.items", default="none"), count=ref("steps.f.output.count", default=-1),
+              code=ref("steps.f.error.code", default="none"))  # fmt: skip
+    g.settings["declassify"] = [{"node": str(nid("f")), "field": "/predicate"}]
+    g.node("f", "flow.filter@1", {"items": [3, 20, 7, 40], "predicate": cel("size(trigger.token) > item")},
+           on_error="continue")  # fmt: skip
+    async with workers(env.client, store, runner=UnsandboxedWorkflowRunner()):
+        result = await run(env.client, store, g, TRIGGER, claimed=True)
+    assert (result.status, result.outputs) == (
+        "succeeded",
+        {"kept": "none", "count": -1, "code": "iteration_cap_exceeded"},
+    )

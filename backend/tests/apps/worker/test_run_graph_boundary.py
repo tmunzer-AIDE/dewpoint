@@ -5,18 +5,26 @@ repeats a secret the run knows, comes back as handles, and its strings join the 
 holds the handle marker is refused. Every message leaving the activity is masked against the index, and so is every
 row the projection writes. The workflow checks what arrives: plain data at a sensitive position fails the run."""
 
+import uuid
+from collections.abc import Iterator
 from typing import Any
 
 from temporalio import activity
+from temporalio.api.common.v1 import Payload
+from temporalio.converter import WorkflowSerializationContext
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
+from dewpoint.apps.codec import ENCODING, TENANT, TenantCodec
 from dewpoint.apps.worker.activities import engine_activities
 from dewpoint.engine.handles import ClaimRef
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, StepInput, StepResult, step_activity
+from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.engine.runtime.workflow import LoopBatch, RunGraph
 from tests.apps.worker.harness import MemoryStore, run, run_id_of, start, workers
-from tests.support.graphs import G, ref
+from tests.engine.replay.record import executions
+from tests.support.graphs import G, ref, template
+from tests.support.keys import FixtureKeys
 
 SECRET = {"type": "string", "x-sensitive": True}
 
@@ -125,3 +133,64 @@ async def test_a_secret_indexed_while_a_step_runs_is_claimed_and_masked_at_its_b
     assert result.outputs is not None
     assert held(store, result.outputs["echoed"]) == ("hunter2-hunter2", True)  # claimed: it repeats a secret
     assert result.outputs["said"] == "failed on [redacted]"  # masked before it left the activity
+
+
+def _payloads(message: Any) -> Iterator[Payload]:
+    for field, value in message.ListFields():
+        if field.type != field.TYPE_MESSAGE:
+            continue
+        if field.message_type.GetOptions().map_entry:
+            items = list(value.values())
+        else:
+            items = [value] if hasattr(value, "ListFields") else list(value)  # one message, or a repeated field
+        for item in items:
+            if isinstance(item, Payload):
+                yield item
+            elif hasattr(item, "ListFields"):
+                yield from _payloads(item)
+
+
+async def decoded(histories: Any) -> str:
+    """Every payload of every history, decrypted with the fixture keys: what Temporal holds, in plain text. It takes
+    each payload's tenant from its metadata, which only a test may do (the codec never does)."""
+    out = []
+    for history in histories:
+        for event in history.events:
+            for payload in _payloads(event):
+                if payload.metadata.get("encoding") == ENCODING:
+                    workflow_id = run_workflow_id(payload.metadata[TENANT].decode(), str(uuid.UUID(int=0)))
+                    codec = TenantCodec(FixtureKeys()).with_context(
+                        WorkflowSerializationContext("default", workflow_id)
+                    )
+                    [payload] = await codec.decode([payload])
+                out.append(payload.data.decode(errors="replace"))
+    return "\n".join(out)
+
+
+async def test_a_failure_message_that_repeats_a_secret_is_masked_in_the_result_and_in_history(
+    env: WorkflowEnvironment,
+) -> None:
+    """A failure's message is built in the workflow (`flow.fail`), from data publish can't see is sensitive: here a
+    field only its size claimed, whose text holds a secret the run learns later. The text is resolved where the claim
+    is read, and it repeats a secret the run knows, so it comes back claimed; the message is masked against the index
+    before it becomes the run's error, its result's and its failure handler's trigger's (engine 2b spec §3.6, §3.7).
+    Neither the result nor any payload of the run's histories holds the secret, decrypted."""
+    notes = "s3cr3t-value then " + "x" * 70_000  # past 64 KiB: claimed for its size at admission
+    schema = {"type": "object", "properties": {"notes": {"type": "string"}}, "required": ["notes"],
+              "additionalProperties": False}  # fmt: skip
+    store = MemoryStore()
+    g = graph(schema)
+    g.settings["failure_handler"] = str(store.publish(graph().node("h", "testkit.echo@1", {"value": 1})))
+    g.node("s", "testkit.sensitive@1")  # the run learns s3cr3t-value here
+    g.node("f", "flow.fail@1", {"message": template("gave up: ", {"ref": "trigger.notes"})}).edge("s", "f")
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {"notes": notes}, claimed=True)
+        result = await handle.result()
+        histories = await executions(env.client, handle.id, handle.first_execution_run_id or "")
+    assert result.status == "failed" and result.error is not None and result.error["code"] == "workflow_failed"
+    # the joined text repeated a secret, so it came back claimed, tainted: every string of it is a secret now (§3.7)
+    assert result.error["message"] == "[redacted]"
+    assert len(histories) >= 2  # the run, and its failure handler
+    plain = await decoded(histories)
+    assert "workflow_failed" in plain and "[redacted]" in plain  # decrypted: the result and the handler's trigger
+    assert "s3cr3t-value" not in plain

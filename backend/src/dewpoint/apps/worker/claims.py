@@ -7,8 +7,10 @@ the claim's owner or holds a grant. Every refusal looks the same, whatever its c
 sensitive data, or whose expression does: the workflow gets its handle, never the value (§3.6, §4.2). A handle whose
 pointer passed POINTER_MAX is derived: what it addresses is copied, as stored, into a claim of its own (§3.2)."""
 
+import json
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from temporalio import activity
@@ -28,6 +30,7 @@ from dewpoint.engine.handles import (
     Fetch,
     StoredClaim,
     contains_marker,
+    escape,
     handles_in,
     part,
     resolve_value,
@@ -41,17 +44,20 @@ from dewpoint.engine.runtime.activities import (
     DeriveInput,
     DeriveResult,
     GrantInput,
+    MessageInput,
+    MessageResult,
     StepInput,
 )
-from dewpoint.engine.runtime.execution import INTERNAL_ERROR
+from dewpoint.engine.runtime.execution import INTERNAL_ERROR, VERSION_UNUSABLE
 from dewpoint.engine.runtime.ids import run_of, tenant_of
 from dewpoint.engine.runtime.projection import REDACTED
 from dewpoint.engine.runtime.resolve import Part, ValueFailure, join
 from dewpoint.engine.sensitive import MIN_SECRET, marked_positions
 from dewpoint.engine.split import ForgedHandleError, split
-from dewpoint.engine.taint import from_schema, tainted_positions
+from dewpoint.engine.taint import Shape, from_schema, tainted_positions
 
 UNAVAILABLE = "A claim this run may not read, or that doesn't exist."
+NO_CHILD_VERSION = "The sub-flow's pinned version isn't there, so its input can't be checked or split for it."
 _OUTPUTS = uuid.uuid5(uuid.NAMESPACE_URL, "dewpoint:claims:output")  # a step output's claim ids are derived under it
 _INPUTS = uuid.uuid5(uuid.NAMESPACE_URL, "dewpoint:claims:child-input")  # a child input's, under it
 
@@ -176,6 +182,17 @@ async def _claimed(
     return {i: {"ok": ClaimRef(str(row.id)).to_json()} for (i, _), row in zip(results, rows, strict=True)}
 
 
+def _repeats(value: Any, secrets: Matcher) -> bool:
+    """Whether a plain value's text repeats a secret the run knows: it's claimed with taint, as output is (§3.6)."""
+    if isinstance(value, str):
+        return bool(secrets.found(value))
+    if isinstance(value, dict):
+        return any(secrets.found(k) or _repeats(v, secrets) for k, v in value.items())
+    if isinstance(value, list):
+        return any(_repeats(v, secrets) for v in value)
+    return False
+
+
 def _strings(value: Any) -> list[str]:
     """The strings of a claimed value the index takes (MIN_SECRET characters or more), keys included."""
     if isinstance(value, str):
@@ -232,7 +249,8 @@ async def evaluate_claimed(
             outcomes[i] = outcome
     done = [o if o is not None else {"error": cel.EVALUATION_ERROR, "message": UNAVAILABLE} for o in outcomes]
     if not claims.decision:  # a declassified decision comes back plain (§4.3)
-        results = [(i, o["ok"]) for i, o in enumerate(done) if "ok" in o and tainted[i]]
+        secrets = Matcher((await store.index(tenant, claims.root_run_id)).strings)
+        results = [(i, o["ok"]) for i, o in enumerate(done) if "ok" in o and (tainted[i] or _repeats(o["ok"], secrets))]
         for i, outcome in (await _claimed(store, tenant, run, claims, results)).items():
             done[i] = outcome
     return await _masked(done, store, tenant, claims.root_run_id)
@@ -265,7 +283,7 @@ async def join_claimed(parts: list[Any], claims: Claiming, store: ClaimStore) ->
             [{"error": e.failure.code, "message": e.failure.message}], store, tenant, claims.root_run_id
         )
         return failed
-    if not tainted:
+    if not tainted and not _repeats(text, Matcher((await store.index(tenant, claims.root_run_id)).strings)):
         return {"ok": text}
     return (await _claimed(store, tenant, run, claims, [(0, text)]))[0]
 
@@ -432,26 +450,66 @@ async def grant(data: GrantInput, store: ClaimStore) -> None:
         raise ApplicationError(UNAVAILABLE, type=CLAIM_UNAVAILABLE, non_retryable=True) from None
 
 
+@dataclass
+class _Reclassified:
+    """Parent handles a child's schema makes sensitive, claimed again for the child (`_reclassify`)."""
+
+    seed: uuid.UUID
+    child: uuid.UUID
+    root: uuid.UUID
+    rows: list[tuple[NewClaim, str]] = field(default_factory=list)
+    strings: set[str] = field(default_factory=set)
+
+
+async def _reclassify(value: Any, shape: Shape, fetch: Fetch, made: _Reclassified, pointer: str = "") -> Any:
+    """`value` with every parent handle the child's schema makes sensitive (`shape`) replaced by a claim of the child,
+    tainted whole, its text indexed (§3.4, §3.7): a claim made for its size only is plain, and nothing indexed it,
+    but the child takes it for sensitive. One tainted whole already was indexed when it was made, and stays."""
+    handle = ClaimRef.of(value)
+    if handle is not None:
+        if not shape.tainted:
+            return value
+        stored = await part(handle, fetch)
+        if stored is None or stored.sensitive_pointers == ("",):
+            return value
+        claim_id = uuid.uuid5(made.seed, "reclassified:" + pointer)
+        made.rows.append((NewClaim(claim_id, stored.value, ("",), made.child, made.root), pointer))
+        made.strings.update(_strings((await resolve_value(value, fetch)).value))
+        return ClaimRef(str(claim_id)).to_json()
+    if isinstance(value, dict):
+        return {
+            k: await _reclassify(v, shape.field(k), fetch, made, pointer + "/" + escape(k)) for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [await _reclassify(v, shape.element(), fetch, made, f"{pointer}/{i}") for i, v in enumerate(value)]
+    return value
+
+
 async def child_input(data: ChildInput, store: ClaimStore) -> ChildInputResult:
     """`claims.child_input` (§3.4, §3.5): the calling run's input for its child, checked against the child's schema
-    with its values resolved, then split for the child with the run's own handles left in place; those, and the
-    claims they nest, are granted to the child, and the new claims' secrets join the tree's index. A child whose
-    version isn't there gets its input as it is: it fails loading it, before it reads anything."""
+    with its values resolved, then split for the child with the run's own handles left in place, except those the
+    child's schema makes sensitive, which are claimed again for the child (`_reclassify`); the run's handles, and the
+    claims they nest, are granted to the child, and the new claims' secrets join the tree's index. With no version to
+    read the schema from, the crossing fails here: the child never starts, so its history never holds the input
+    unsplit."""
     tenant, run = caller()
     schema = await store.input_schema(tenant, data.version_id)
     if schema is None:
-        return ChildInputResult(trigger=data.value)
+        raise ApplicationError(NO_CHILD_VERSION, type=VERSION_UNUSABLE, non_retryable=True)
+    fetch = _fetcher(store, tenant, run)
+    seed = uuid.uuid5(_INPUTS, data.child_run_id)
+    made = _Reclassified(seed, uuid.UUID(data.child_run_id), uuid.UUID(data.root_run_id))
     try:
-        resolved = await resolve_value(data.value, _fetcher(store, tenant, run))
+        resolved = await resolve_value(data.value, fetch)
+        refused = reasons(schema, resolved.value)
+        if refused:
+            return ChildInputResult(reasons=refused)
+        value = await _reclassify(data.value, from_schema(schema), fetch, made)
     except ClaimUnavailableError:
         raise ApplicationError(UNAVAILABLE, type=CLAIM_UNAVAILABLE, non_retryable=True) from None
-    refused = reasons(schema, resolved.value)
-    if refused:
-        return ChildInputResult(reasons=refused)
-    seed = uuid.uuid5(_INPUTS, data.child_run_id)
     try:
         done = split(
-            data.value,
+            value,
             schema,
             lambda pointer: str(uuid.uuid5(seed, pointer)),
             known=(await store.index(tenant, data.root_run_id)).strings,
@@ -459,11 +517,11 @@ async def child_input(data: ChildInput, store: ClaimStore) -> ChildInputResult:
         )
     except ForgedHandleError:
         return ChildInputResult(reasons=[FORGED])
-    child, root = uuid.UUID(data.child_run_id), uuid.UUID(data.root_run_id)
-    rows = [
-        (NewClaim(uuid.UUID(c.id), c.value, ("",) if c.tainted else (), child, root), c.pointer) for c in done.claims
-    ]
-    await store.remember(tenant, data.root_run_id, done.secrets)
+    rows = made.rows + [
+        (NewClaim(uuid.UUID(c.id), c.value, ("",) if c.tainted else (), made.child, made.root), c.pointer)
+        for c in done.claims
+    ]  # the reclassified first: the split's may nest them
+    await store.remember(tenant, data.root_run_id, sorted(made.strings | set(done.secrets)))
     if rows:
         await store.write_inputs(tenant, rows)
     try:
@@ -471,3 +529,17 @@ async def child_input(data: ChildInput, store: ClaimStore) -> ChildInputResult:
     except ClaimUnavailableError:
         raise ApplicationError(UNAVAILABLE, type=CLAIM_UNAVAILABLE, non_retryable=True) from None
     return ChildInputResult(trigger=done.envelope)
+
+
+async def message(data: MessageInput, store: ClaimStore) -> MessageResult:
+    """`claims.message`: a failure's message the workflow built from data (`flow.fail`), as it may be recorded: its
+    handles resolved, and every secret the run knows masked, against the index as it is now (§3.7). The workflow
+    holds no secret to mask with, and the message becomes the run's error, its result's and its failure handler's."""
+    tenant, run = caller()
+    try:
+        found = await resolve_value(data.value, _fetcher(store, tenant, run))
+    except ClaimUnavailableError:
+        raise ApplicationError(UNAVAILABLE, type=CLAIM_UNAVAILABLE, non_retryable=True) from None
+    value = "" if found.value is MISSING or found.value is None else found.value
+    text = value if isinstance(value, str) else json.dumps(value)
+    return MessageResult(Matcher((await store.index(tenant, data.root_run_id)).strings).mask(text, REDACTED))

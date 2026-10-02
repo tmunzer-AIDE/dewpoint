@@ -548,18 +548,18 @@ class SlowToLoad(MemoryStore):
         return await super().version(tenant_id, version_id)
 
 
-async def test_a_sub_flow_whose_version_does_not_load_still_has_its_row(env: WorkflowEnvironment) -> None:
-    """A sub-run writes its row before its version loads, so one that ends right there still shows, with its end."""
+async def test_a_sub_flow_whose_version_is_gone_fails_its_step_and_starts_nothing(env: WorkflowEnvironment) -> None:
+    """Its input is checked and split by the child's schema before it starts (engine 2b spec §3.4, §3.5): with no
+    version to read it from, the crossing fails in the parent. Starting the child anyway would send its input unsplit,
+    sensitive values included, into the child's history."""
     store = MemoryStore()
     sub = store.publish(doubler())
-    del store.versions[str(store.subflows[sub].version_id)]  # gone: the loader can't find it
+    del store.versions[str(store.subflows[sub].version_id)]  # gone: neither its schema nor its graph can be read
     g = graph(code=ref("steps.r.error.code", default="none"))
     g.node("r", RUN, {"workflow_id": str(sub), "input": {"n": 1}}, on_error="continue")
     _, result = await finished(env, store, g, {})
     assert (result.status, result.outputs) == ("succeeded", {"code": "version_unusable"})
-    [(child, row)] = store.starts.items()
-    assert (row.kind, row.workflow_id) == ("subflow", str(sub))
-    assert (store.runs[child].status, store.runs[child].error_code) == ("failed", "version_unusable")
+    assert store.starts == {}  # no sub-run
 
 
 async def test_a_sub_flow_cancelled_while_its_version_loads_still_has_its_row(env: WorkflowEnvironment) -> None:

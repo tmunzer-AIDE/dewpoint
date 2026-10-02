@@ -18,6 +18,7 @@ CEL_EVALUATE = "cel.evaluate"
 CLAIMS_DERIVE = "claims.derive"
 CLAIMS_CHILD_INPUT = "claims.child_input"
 CLAIMS_GRANT = "claims.grant"
+CLAIMS_MESSAGE = "claims.message"
 LIVE, SIMULATE = "live", "simulate"
 APPLIED, SIMULATED, OUTCOME_UNKNOWN = "applied", "simulated", "outcome_unknown"
 SUBFLOW, FAILURE_HANDLER, BATCH = "subflow", "failure_handler", "batch"  # the kinds of child execution
@@ -225,6 +226,20 @@ class GrantInput:
     to_run_id: str
     value: Any
     root_run_id: str
+
+
+@dataclass(frozen=True)
+class MessageInput:
+    """A failure's message built from data (engine 2b spec §3.7): text, or a handle, which the activity resolves and
+    masks against the run tree's secret index."""
+
+    value: Any
+    root_run_id: str
+
+
+@dataclass(frozen=True)
+class MessageResult:
+    text: str
 
 
 @dataclass(frozen=True)
