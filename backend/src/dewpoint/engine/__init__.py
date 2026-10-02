@@ -7,5 +7,6 @@
 # binding set can't fit, and paced per workflow task. 5: 2b-1a's workflow ids, built from the tenant and the run
 # (sub-flows' and failure handlers' too), and what a run sends Temporal, measured before it's sent: a loop's batch cut
 # by bytes, a continued run's state within 1.5 MiB, every command paced per workflow task; `cel.evaluate` on a queue of
-# the build's ABI.
-ENGINE_ABI = 5
+# the build's ABI. 6: 2b-1b's claims: a run's sensitive and large values held as handles, resolved in activities and
+# the evaluator; taint routing and declassified decisions; the exact workflow-id grammar.
+ENGINE_ABI = 6

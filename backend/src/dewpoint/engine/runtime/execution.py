@@ -59,7 +59,7 @@ with workflow.unsafe.imports_passed_through():
         step_activity,
     )
     from dewpoint.engine.runtime.budget import LOCAL, Need
-    from dewpoint.engine.runtime.ids import run_workflow_id
+    from dewpoint.engine.runtime.ids import batch_workflow_id, run_workflow_id
     from dewpoint.engine.runtime.program import Program, Step
     from dewpoint.engine.runtime.projection import (
         Secrets,
@@ -992,9 +992,7 @@ class Execution:
         step = self.sched.step(b.loop)
         # from the input, not the workflow id: a replay of this history sees the same id (the run id names the logical
         # run, the loop step and its scope name the loop, the start names the batch)
-        child = (
-            f"{run_workflow_id(self.tenant_id, self.run_id)}/{step.id}/{iteration_key(b.loop.scope)}/batch:{b.start}"
-        )
+        child = batch_workflow_id(self.tenant_id, self.run_id, str(step.id), iteration_key(b.loop.scope), b.start)
         converter = workflow.payload_converter()
         draft = self._batch_input(b, len(b.items))
         if not fits(draft, converter):  # engine 2b spec §5.2: as many of its items as fit, in order; the rest follow

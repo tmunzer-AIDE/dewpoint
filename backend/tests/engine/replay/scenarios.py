@@ -135,7 +135,11 @@ def _failure_handler(store: MemoryStore) -> G:
 def _grants(store: MemoryStore) -> G:
     sub = G()
     sub.settings = {
-        "input_schema": {"type": "object", "properties": {"items": {"type": "array"}}, "required": ["items"]},
+        "input_schema": {
+            "type": "object",
+            "properties": {"items": {"type": "array", "items": {"type": "integer"}}},
+            "required": ["items"],
+        },  # declared: a filter over undeclared items is a tainted decision
         "outputs": {"n": ref("steps.k.output.count")},
     }
     sub.node("k", "flow.filter@1", {"items": ref("trigger.items"), "predicate": cel("item % 2 == 0")})
