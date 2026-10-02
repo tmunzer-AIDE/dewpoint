@@ -114,7 +114,7 @@ def test_random_runs_keep_the_scheduling_invariants(g: G, data: st.DataObject) -
         # continue-as-new: carry on from a snapshot, taken with work still queued, as drain mode leaves it
         if data.draw(st.integers(0, 7), label="snapshot") == 0:
             s.take_settled()
-            s = Scheduler.from_json(s.program, json.loads(json.dumps(s.to_json())))
+            s = Scheduler.from_json(s.program, json.loads(json.dumps(s.to_json(check=True))))
         for inst in s.take_ready():
             handed[inst] = handed.get(inst, 0) + 1
             assert handed[inst] == 1, "a step ran twice in one scope"

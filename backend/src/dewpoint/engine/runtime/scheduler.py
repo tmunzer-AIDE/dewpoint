@@ -13,7 +13,11 @@ workflow runs as a child execution, and takes back its results. A batch child's 
 
 Every iteration and filter item is debited from the execution's `Budget` (spec §6, one counter per logical run). An
 iteration that can't be debited waits for budget, or ends the loop at the cap. A settled iteration's scope is pruned
-once its loop has taken its result: only open scopes stay, which keeps a continue-as-new snapshot small."""
+once its loop has taken its result: only open scopes stay, which keeps a continue-as-new snapshot small.
+
+A snapshot (`snapshot_format` 2, engine 2b spec §5.3) holds states, not queues: one code per node and per edge in
+region order, steps and loops by their topological index. Restoring rebuilds what's queued from those states, minus
+what was handed out before the snapshot and is still running."""
 
 import uuid
 from dataclasses import dataclass, field
@@ -27,7 +31,7 @@ ScopeKey = tuple[tuple[str, int], ...]
 ITERATION_CAP = 100_000  # loop iterations and filter items across the whole logical run (spec §4.2)
 ITERATION_CAP_EXCEEDED = "iteration_cap_exceeded"
 CAP_MESSAGE = "This run reached its limit of 100,000 loop iterations."
-SNAPSHOT_FORMAT = 1
+SNAPSHOT_FORMAT = 2
 
 
 class NodeState(StrEnum):
@@ -45,6 +49,16 @@ class EdgeState(StrEnum):
 
 
 SETTLED = frozenset({NodeState.DONE, NodeState.FAILED, NodeState.DEAD})
+_NODE_CODE = {
+    NodeState.WAITING: "w",
+    NodeState.RUNNING: "r",
+    NodeState.DONE: "d",
+    NodeState.FAILED: "f",
+    NodeState.DEAD: "x",
+}
+_NODE_FROM = {c: n for n, c in _NODE_CODE.items()}
+_EDGE_CODE = {EdgeState.PENDING: "p", EdgeState.LIVE: "l", EdgeState.DEAD: "x"}
+_EDGE_FROM = {c: e for e, c in _EDGE_CODE.items()}
 
 
 def iteration_key(scope: ScopeKey) -> str:
@@ -187,6 +201,12 @@ class Scheduler:
         self._members: dict[uuid.UUID | None, tuple[uuid.UUID, ...]] = {
             region: r.members for region, r in program.regions.items()
         }
+        self._by_topo = {s.topo: s.id for s in program.steps.values()}
+        self._edge_orders: dict[uuid.UUID | None, list[int]] = {}
+        # handed out and not settled: what restoring mustn't queue again (a snapshot holds no queue)
+        self._handed: set[Instance] = set()
+        self._collects_out: set[tuple[Instance, int]] = set()
+        self._batches_out: set[tuple[Instance, int]] = set()
 
     @property
     def iterations(self) -> int:
@@ -226,14 +246,17 @@ class Scheduler:
         self._ready = []
         for inst in ready:
             self.scopes[inst.scope].nodes[inst.step] = NodeState.RUNNING
+        self._handed.update(ready)
         return ready
 
     def take_collects(self) -> list[Collect]:
         out, self._collects = self._collects, []
+        self._collects_out.update((c.loop, c.index) for c in out)
         return out
 
     def take_batches(self) -> list[Batch]:
         out, self._batches = self._batches, []
+        self._batches_out.update((b.loop, b.start) for b in out)
         return out
 
     def take_settled(self) -> list[tuple[Instance, dict[str, Any]]]:
@@ -254,9 +277,13 @@ class Scheduler:
         self._ready = steps + self._ready
         self._collects = collects + self._collects
         self._batches = batches + self._batches
+        self._handed -= set(steps)
+        self._collects_out -= {(c.loop, c.index) for c in collects}
+        self._batches_out -= {(b.loop, b.start) for b in batches}
 
     def succeed(self, inst: Instance, output: Any, ports: tuple[str, ...] | None = None) -> None:
         """The step succeeded. `ports`: the normal ports whose edges are live (if/switch pick one); all by default."""
+        self._handed.discard(inst)
         scope, step = self._running(inst)
         if scope is None:
             return
@@ -271,6 +298,7 @@ class Scheduler:
         """The step failed. Its `on_error` decides: `port` follows the error edges, `continue` the normal ones, and
         `fail` ends the scope: the run in the root, the iteration in a loop body. Either handled way, the step has an
         error and no output, so `has(steps.x.output)` is false (spec §5.3) and a reference's default applies."""
+        self._handed.discard(inst)
         scope, step = self._running(inst)
         if scope is None:
             return
@@ -300,6 +328,7 @@ class Scheduler:
         self._advance(loop)
 
     def collected(self, loop_inst: Instance, index: int, value: Any) -> None:
+        self._collects_out.discard((loop_inst, index))
         loop = self.loops.get(loop_inst)
         if loop is None or index not in loop.open:
             return
@@ -311,6 +340,7 @@ class Scheduler:
 
     def collect_failed(self, loop_inst: Instance, index: int, failure: Failure) -> None:
         """`collect` couldn't be evaluated: the iteration failed after all."""
+        self._collects_out.discard((loop_inst, index))
         loop = self.loops.get(loop_inst)
         if loop is None or index not in loop.open:
             return
@@ -319,6 +349,7 @@ class Scheduler:
     def batch_done(self, loop_inst: Instance, start: int, outcome: BatchOutcome) -> None:
         """A batch child finished its slice: take its results, then hand out the next batch or complete the loop. A
         slice stopped by a failed iteration (`on_item_error: stop`) fails the loop."""
+        self._batches_out.discard((loop_inst, start))
         loop = self.loops.get(loop_inst)
         if loop is None or loop.running_batch != start:
             return
@@ -339,6 +370,7 @@ class Scheduler:
 
     def batch_failed(self, loop_inst: Instance, start: int, failure: Failure) -> None:
         """A batch child failed as a whole (not one of its iterations): the loop fails with it."""
+        self._batches_out.discard((loop_inst, start))
         loop = self.loops.get(loop_inst)
         if loop is None or loop.running_batch != start:
             return
@@ -347,6 +379,7 @@ class Scheduler:
 
     def finish(self, inst: Instance, end: RunEnd, output: Any = None) -> None:
         """A stop or fail node: record its result, then end the run (it has no edges to resolve)."""
+        self._handed.discard(inst)
         scope, step = self._running(inst)
         if scope is None:
             return
@@ -485,6 +518,7 @@ class Scheduler:
                 inst = Instance(key, node_id)
                 if state == NodeState.RUNNING and inst not in queued:
                     self._cancels.append(inst)
+                    self._handed.discard(inst)
                 if state in (NodeState.RUNNING, NodeState.WAITING):
                     inner.nodes[node_id] = NodeState.DEAD
         self._ready = [r for r in self._ready if r.scope[: len(scope.key)] != scope.key]
@@ -597,21 +631,34 @@ class Scheduler:
 
     # --- continue-as-new ---------------------------------------------------------------------------------------------
 
-    def to_json(self) -> dict[str, Any]:
-        """The scheduler's state for a continue-as-new snapshot. Taken between units: nothing settled or cancelled
-        is left to hand over."""
+    def to_json(self, *, check: bool = False) -> dict[str, Any]:
+        """The scheduler's state for a continue-as-new snapshot (`snapshot_format` 2, engine 2b spec §5.3): scopes,
+        steps and loops by index, node and edge states as one code each in region order, and no queue: what's queued
+        is rebuilt from the states on restore. Taken between units: nothing settled or cancelled is left to hand over.
+        `check` (tests): restoring would rebuild exactly what's queued now."""
         if self._settled or self._cancels or self.ended is not None:
             raise ValueError("a snapshot is taken only between units, and never after the run ended")
+        if check:
+            self._check_queues()
+        loops = set(self.loops)
         return {
             "snapshot_format": SNAPSHOT_FORMAT,
-            "scopes": [_scope_json(s) for s in self.scopes.values()],
-            "loops": [_loop_json(loop) for loop in self.loops.values()],
-            "ready": [_inst_json(i) for i in self._ready],
-            "collects": [[_inst_json(c.loop), c.index, _key_json(c.scope)] for c in self._collects],
-            "batches": [[_inst_json(b.loop), b.start, b.items] for b in self._batches],
+            "scopes": [self._scope_json(sc) for sc in self.scopes.values()],
+            "loops": [self._loop_json(loop) for loop in self.loops.values()],
+            "handed": [self._i(i) for i in sorted(self._handed_now(), key=self.order)],
+            "collects_out": [
+                [self._i(i), n]
+                for i, n in sorted(self._collects_out, key=lambda c: (self.order(c[0]), c[1]))
+                if i in loops
+            ],
+            "batches_out": [
+                [self._i(i), n]
+                for i, n in sorted(self._batches_out, key=lambda b: (self.order(b[0]), b[1]))
+                if i in loops
+            ],
             "budget": self.budget.to_json(),
-            "budget_waits": [[k, _inst_json(i)] for k, i in self._budget_waits.items()],
-            "batch_loop": _inst_json(self.batch_loop) if self.batch_loop else None,
+            "budget_waits": [[k, self._i(i)] for k, i in self._budget_waits.items()],
+            "batch_loop": self._i(self.batch_loop) if self.batch_loop else None,
         }
 
     @classmethod
@@ -620,97 +667,142 @@ class Scheduler:
             raise ValueError(f"unknown snapshot format {data.get('snapshot_format')!r}")
         s = cls(program, budget=Budget.from_json(data["budget"]))
         for raw in data["scopes"]:
-            scope = _scope_from(raw)
+            scope = s._scope_from(raw)
             s.scopes[scope.key] = scope
         for raw in data["loops"]:
-            loop = _loop_from(raw)
+            loop = s._loop_from(raw)
             s.loops[loop.instance] = loop
-        s._ready = [_inst_from(i) for i in data["ready"]]
-        s._collects = [Collect(_inst_from(i), int(n), _key_from(k)) for i, n, k in data["collects"]]
-        s._batches = [Batch(_inst_from(i), int(n), list(items)) for i, n, items in data["batches"]]
-        s._budget_waits = {str(k): _inst_from(i) for k, i in data["budget_waits"]}
-        s.batch_loop = _inst_from(data["batch_loop"]) if data["batch_loop"] else None
+        s._handed = {s._if(i) for i in data["handed"]} | set(s.loops)  # a loop step runs for as long as its loop
+        s._collects_out = {(s._if(i), int(n)) for i, n in data["collects_out"]}
+        s._batches_out = {(s._if(i), int(n)) for i, n in data["batches_out"]}
+        s._budget_waits = {str(k): s._if(i) for k, i in data["budget_waits"]}
+        s.batch_loop = s._if(data["batch_loop"]) if data["batch_loop"] else None
+        s._ready, s._collects, s._batches = s._rebuilt()
         return s
 
+    def _handed_now(self) -> set[Instance]:
+        """Steps handed out and still running, loop steps aside (their loop says they run)."""
+        out = set()
+        for inst in self._handed:
+            scope = self.scopes.get(inst.scope)
+            if scope is not None and scope.nodes.get(inst.step) == NodeState.RUNNING and inst not in self.loops:
+                out.add(inst)
+        return out
 
-def _key_json(key: ScopeKey) -> list[list[Any]]:
-    return [[loop, index] for loop, index in key]
+    def _rebuilt(self) -> tuple[list[Instance], list[Collect], list[Batch]]:
+        """What's queued, from the states: running steps not handed out, iterations whose `collect` waits, batches
+        not handed out."""
+        ready = sorted(
+            (
+                Instance(sc.key, n)
+                for sc in self.scopes.values()
+                for n, state in sc.nodes.items()
+                if state == NodeState.RUNNING and Instance(sc.key, n) not in self._handed
+            ),
+            key=self.order,
+        )
+        collects = [
+            Collect(loop.instance, i, self._iteration_scope(loop, i))
+            for loop in self.loops.values()
+            for i in sorted(loop.collecting)
+            if (loop.instance, i) not in self._collects_out
+        ]
+        batches = [
+            Batch(loop.instance, loop.running_batch, loop.items[loop.running_batch : loop.next])
+            for loop in self.loops.values()
+            if loop.running_batch is not None and (loop.instance, loop.running_batch) not in self._batches_out
+        ]
+        return ready, collects, batches
 
+    def _check_queues(self) -> None:
+        """Restoring rebuilds exactly what's queued now."""
+        handed = self._handed | set(self.loops)
+        saved, self._handed = self._handed, handed
+        try:
+            ready, collects, batches = self._rebuilt()
+        finally:
+            self._handed = saved
+        if set(ready) != set(self._ready):
+            raise AssertionError(f"rebuilt {len(ready)} ready steps, but {len(self._ready)} are queued")
+        if {(c.loop, c.index, c.scope) for c in collects} != {(c.loop, c.index, c.scope) for c in self._collects}:
+            raise AssertionError("the rebuilt collects differ from those queued")
+        if {(b.loop, b.start, len(b.items)) for b in batches} != {
+            (b.loop, b.start, len(b.items)) for b in self._batches
+        }:
+            raise AssertionError("the rebuilt batches differ from those queued")
 
-def _key_from(raw: list[list[Any]]) -> ScopeKey:
-    return tuple((str(loop), int(index)) for loop, index in raw)
+    # indexes: a scope key as [loop topo, item index, ...], an instance as [key, step topo]
+    def _k(self, key: ScopeKey) -> list[int]:
+        return [x for loop, i in key for x in (self.program.steps[self.program.by_key[loop]].topo, i)]
 
+    def _kf(self, raw: list[int]) -> ScopeKey:
+        return tuple((self.program.steps[self._by_topo[raw[j]]].key, int(raw[j + 1])) for j in range(0, len(raw), 2))
 
-def _inst_json(inst: Instance) -> list[Any]:
-    return [_key_json(inst.scope), str(inst.step)]
+    def _i(self, inst: Instance) -> list[Any]:
+        return [self._k(inst.scope), self.program.steps[inst.step].topo]
 
+    def _if(self, raw: list[Any]) -> Instance:
+        return Instance(self._kf(raw[0]), self._by_topo[int(raw[1])])
 
-def _inst_from(raw: list[Any]) -> Instance:
-    return Instance(_key_from(raw[0]), uuid.UUID(raw[1]))
+    def _edge_order(self, region: uuid.UUID | None) -> list[int]:
+        """A region's edges in the order `_open_scope` lays them out."""
+        order = self._edge_orders.get(region)
+        if order is None:
+            order = [e for node_id in self._members[region] for e in self.program.steps[node_id].ins]
+            self._edge_orders[region] = order
+        return order
 
+    def _scope_json(self, sc: Scope) -> list[Any]:
+        """[key, region, node codes, edge codes, results, item, index, failure, frozen]: results by step index, as
+        [index, 0, output], [index, 1, error] or [index, 2, output, error]. A frozen scope has no codes."""
+        nodes = edges = ""
+        if not sc.frozen:
+            nodes = "".join(_NODE_CODE[sc.nodes[m]] for m in self._members[sc.region])
+            edges = "".join(_EDGE_CODE[sc.edges[e]] for e in self._edge_order(sc.region))
+        results: list[list[Any]] = []
+        for key, r in sc.results.items():
+            t = self.program.steps[self.program.by_key[key]].topo
+            if "output" in r and "error" in r:
+                results.append([t, 2, r["output"], r["error"]])
+            elif "error" in r:
+                results.append([t, 1, r["error"]])
+            else:
+                results.append([t, 0, r["output"]])
+        region = self.program.steps[sc.region].topo if sc.region is not None else -1
+        failure = sc.failure.to_json() if sc.failure else None
+        return [self._k(sc.key), region, nodes, edges, results, sc.item, sc.index, failure, int(sc.frozen)]
 
-def _scope_json(s: Scope) -> dict[str, Any]:
-    return {
-        "key": _key_json(s.key),
-        "region": str(s.region) if s.region else None,
-        "nodes": [[str(n), state.value] for n, state in s.nodes.items()],
-        "edges": [[e, state.value] for e, state in s.edges.items()],
-        "results": s.results,
-        "item": s.item,
-        "index": s.index,
-        "failure": s.failure.to_json() if s.failure else None,
-        "frozen": s.frozen,
-    }
+    def _scope_from(self, raw: list[Any]) -> Scope:
+        key, region = self._kf(raw[0]), (self._by_topo[raw[1]] if raw[1] >= 0 else None)
+        frozen = bool(raw[8])
+        nodes: dict[uuid.UUID, NodeState] = {}
+        edges: dict[int, EdgeState] = {}
+        if not frozen:
+            nodes = {m: _NODE_FROM[c] for m, c in zip(self._members[region], raw[2], strict=True)}
+            edges = {e: _EDGE_FROM[c] for e, c in zip(self._edge_order(region), raw[3], strict=True)}
+        results: dict[str, dict[str, Any]] = {}
+        for r in raw[4]:
+            k = self.program.steps[self._by_topo[r[0]]].key
+            results[k] = (
+                {"output": r[2]} if r[1] == 0 else {"error": r[2]} if r[1] == 1 else {"output": r[2], "error": r[3]}
+            )
+        failure = Failure.from_json(raw[7]) if raw[7] else None
+        return Scope(key, region, nodes, edges, results, raw[5], raw[6], failure, frozen)
 
+    def _loop_json(self, loop: LoopRun) -> list[Any]:
+        return [
+            self._i(loop.instance), loop.items, loop.concurrency, int(loop.stop_on_error), loop.offset, loop.batch,
+            loop.next, list(loop.open), sorted(loop.collecting), loop.collected, loop.failures, loop.running_batch,
+            int(loop.waiting),
+        ]  # fmt: skip
 
-def _scope_from(raw: dict[str, Any]) -> Scope:
-    return Scope(
-        key=_key_from(raw["key"]),
-        region=uuid.UUID(raw["region"]) if raw["region"] else None,
-        nodes={uuid.UUID(n): NodeState(state) for n, state in raw["nodes"]},
-        edges={int(e): EdgeState(state) for e, state in raw["edges"]},
-        results=dict(raw["results"]),
-        item=raw["item"],
-        index=raw["index"],
-        failure=Failure.from_json(raw["failure"]) if raw["failure"] else None,
-        frozen=bool(raw["frozen"]),
-    )
-
-
-def _loop_json(loop: LoopRun) -> dict[str, Any]:
-    return {
-        "instance": _inst_json(loop.instance),
-        "items": loop.items,
-        "concurrency": loop.concurrency,
-        "stop_on_error": loop.stop_on_error,
-        "offset": loop.offset,
-        "batch": loop.batch,
-        "next": loop.next,
-        "open": list(loop.open),
-        "collecting": sorted(loop.collecting),
-        "collected": loop.collected,
-        "failures": loop.failures,
-        "running_batch": loop.running_batch,
-        "waiting": loop.waiting,
-    }
-
-
-def _loop_from(raw: dict[str, Any]) -> LoopRun:
-    return LoopRun(
-        instance=_inst_from(raw["instance"]),
-        items=list(raw["items"]),
-        concurrency=int(raw["concurrency"]),
-        stop_on_error=bool(raw["stop_on_error"]),
-        offset=int(raw["offset"]),
-        batch=int(raw["batch"]),
-        next=int(raw["next"]),
-        open=[int(i) for i in raw["open"]],
-        collecting={int(i) for i in raw["collecting"]},
-        collected=list(raw["collected"]),
-        failures=list(raw["failures"]),
-        running_batch=raw["running_batch"],
-        waiting=bool(raw["waiting"]),
-    )
+    def _loop_from(self, raw: list[Any]) -> LoopRun:
+        return LoopRun(
+            instance=self._if(raw[0]), items=list(raw[1]), concurrency=int(raw[2]), stop_on_error=bool(raw[3]),
+            offset=int(raw[4]), batch=int(raw[5]), next=int(raw[6]), open=[int(i) for i in raw[7]],
+            collecting={int(i) for i in raw[8]}, collected=list(raw[9]), failures=list(raw[10]),
+            running_batch=raw[11], waiting=bool(raw[12]),
+        )  # fmt: skip
 
 
 __all__ = [
