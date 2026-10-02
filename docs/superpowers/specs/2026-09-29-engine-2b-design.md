@@ -834,10 +834,12 @@ log line safe. So:
   own source (read from its package's code objects), a boolean or null. A computed event is withheld, a computed field
   name dropped, and any other value redacted, numbers included. A field whose name looks secret is redacted even then.
 - A bug in a node is logged by its type and where it was raised (file, function and line); its text only when that's
-  such a constant.
+  such a constant. A class name is text too, which a plugin can make at run time: it's shown, in a log line and in a
+  step's message, only when the class is a builtin or its module's code declares the name. A frame is named only when
+  its code was compiled from its module's source.
 - Temporal's records of activities keep only the exact text of one of the SDK's fixed messages, never what follows it
-  (an activity's details, an error's text), and the error's code when it's a valid identifier; any other record is
-  withheld whole, and no record keeps an exception or its traceback.
+  (an activity's details, an error's text), nor an error's code or class: a code's shape proves nothing about where it
+  came from. Any other record is withheld whole, and no record keeps an exception or its traceback.
 - A plugin's failure, its step's error, follows the same rule (§3.7): its code and message are shown only when they're
   constants of its code.
 
@@ -1683,8 +1685,9 @@ Beyond each task's own tests:
   canary in the trigger and one a plugin outputs at a sensitive position, carried through plugin steps, the evaluator,
   a sub-flow, batches, a filter, a spill, a failure message and a crash, appear in no decrypted history, projection or
   log line; and a secret a plugin makes and leaks before it's claimed appears in none of them either: in its `ctx.log`
-  event, field names and values (no log line), in a crash (no history, row or log line), and in a failure's message
-  or code (no history, row or log line) (§3.7, §6.7).
+  event, field names and values (no log line), in a crash's text or its class's name (no history, row or log line),
+  and in a failure's message or code, shaped as a valid identifier included (no history, row or log line) (§3.7,
+  §6.7).
 - **Properties:** the taint analysis (no tainted path is routed locally; plain output appears only at listed sites);
   the splitter (nothing plain at sensitive or undeclared positions; nesting follows the claiming order); forged
   handles refused.
