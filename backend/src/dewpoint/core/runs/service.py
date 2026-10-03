@@ -82,6 +82,33 @@ async def insert_run(
     return run
 
 
+async def precreate_run(
+    s: AsyncSession,
+    *,
+    run_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    workflow_id: uuid.UUID,
+    version_id: uuid.UUID,
+    mode: str,
+    started_by: uuid.UUID | None,
+    queued_at: datetime,
+) -> None:
+    """A root run's row, written at dispatch before Temporal answers (engine 2b spec §7.3): queued with its request,
+    not yet started. An earlier attempt's row is reused: a retried dispatch changes nothing."""
+    statement = insert(Run).values(
+        id=run_id,
+        tenant_id=tenant_id,
+        workflow_id=workflow_id,
+        workflow_version_id=version_id,
+        mode=mode,
+        status="running",
+        iterations=0,
+        started_by=started_by,
+        queued_at=queued_at,
+    )
+    await s.execute(statement.on_conflict_do_nothing(index_elements=["id"]))
+
+
 async def ensure_run(
     s: AsyncSession,
     *,
