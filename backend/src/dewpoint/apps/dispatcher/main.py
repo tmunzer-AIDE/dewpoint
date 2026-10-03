@@ -11,6 +11,7 @@ from temporalio.client import Client
 from temporalio.service import RPCError, RPCStatusCode
 
 from dewpoint.apps.codec import KeyringKeys, data_converter
+from dewpoint.apps.dispatcher.dispatch import dispatch_once
 from dewpoint.apps.dispatcher.observe import observe, report
 from dewpoint.apps.environment import verify_environment
 from dewpoint.apps.worker.deployment import describe, this_build
@@ -47,7 +48,10 @@ async def run(settings: Settings) -> None:
         log.info("dispatcher_started", instance=str(instance), build=this_build())
         while True:
             build = await observe(sessionmaker, await current_build(client))
-            await report(sessionmaker, instance, build.build_id if build else "", {"current_build": bool(build)})
+            done = await dispatch_once(sessionmaker, client, keys, settings, build) if build else {}
+            await report(
+                sessionmaker, instance, build.build_id if build else "", {"current_build": bool(build), **done}
+            )
             await asyncio.sleep(CYCLE_S)
     finally:
         await engine.dispose()

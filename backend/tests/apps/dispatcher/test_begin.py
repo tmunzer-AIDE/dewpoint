@@ -11,55 +11,16 @@ from typing import Any
 import pytest
 from sqlalchemy import text
 
-from dewpoint.apps.codec import data_converter
 from dewpoint.apps.dispatcher import dispatch
-from dewpoint.apps.dispatcher.observe import REQUIRED, Build
-from dewpoint.apps.worker.deployment import this_build
+from dewpoint.apps.dispatcher.observe import Build
 from dewpoint.core.plugins import lifecycle
 from dewpoint.engine import ENGINE_ABI
-from tests.apps.test_admission import KEYS, TOKEN, admit, current, published
+from tests.apps.dispatcher.support import begin, state, workers
+from tests.apps.test_admission import KEYS, TOKEN, admit
 from tests.apps.test_workflow_ops import update
 from tests.support.keys import FixtureKeys
 
 pytestmark = pytest.mark.usefixtures("development_deployment")
-BUILD = Build(this_build(), ENGINE_ABI)
-REQUEUE = text("update run_requests set status = 'queued', attempts = 1 where id = :i")
-
-
-async def workers(owner: Any, *, capabilities: tuple[str, ...] = REQUIRED, healthy: bool = True) -> None:
-    async with owner() as s, s.begin():
-        await s.execute(
-            text("insert into worker_instances (instance_id, build_id, capabilities, healthy) values (:i, :b, :c, :h)"),
-            {"i": uuid.uuid4(), "b": BUILD.build_id, "c": list(capabilities), "h": healthy},
-        )
-
-
-@pytest.fixture
-async def queued(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings) -> Any:
-    """A tenant with one admitted request, and the current build's workers ready."""
-    ctx, wf = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings)
-    await current(dispatch_sessionmaker)
-    await workers(owner_sessionmaker)
-    return ctx, wf, (await admit(api_sessionmaker, ctx, wf)).request
-
-
-async def begin(
-    dispatch_sessionmaker: Any, request: Any, settings: Any, *, keys: Any = KEYS, build: Build = BUILD
-) -> Any:
-    seal = dispatch.sealer(data_converter(keys), "default")
-    return await dispatch.begin(
-        dispatch_sessionmaker, seal, settings, keys, tenant_id=request.tenant_id, request_id=request.id, build=build
-    )
-
-
-async def state(owner: Any, request_id: uuid.UUID) -> dict[str, Any]:
-    async with owner() as s:
-        r = (await s.execute(text("select status, reason, attempts from run_requests where id = :i"),
-                             {"i": request_id})).one()  # fmt: skip
-        run = (await s.execute(text("select status, started_at, queued_at from runs where id = :i"),
-                               {"i": request_id})).first()  # fmt: skip
-        slot = (await s.execute(text("select count(*) from run_slots where run_id = :i"), {"i": request_id})).scalar()
-    return {"request": tuple(r), "run": tuple(run) if run else None, "slot": slot}
 
 
 async def test_a_due_request_becomes_starting_with_its_slot_and_its_runs_row(

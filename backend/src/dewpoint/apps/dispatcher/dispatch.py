@@ -12,16 +12,23 @@ reserved, the run's row written (or an earlier attempt's reused) and the request
 itself is sent after the commit, with no lock held across the call to Temporal."""
 
 import uuid
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import structlog
 from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from temporalio.client import Client
+from temporalio.common import WorkflowIDReusePolicy
 from temporalio.converter import DataConverter, WorkflowSerializationContext
+from temporalio.exceptions import WorkflowAlreadyStartedError
+from temporalio.service import RPCError, RPCStatusCode
 
+from dewpoint.apps.codec import CodecRefusedError
 from dewpoint.apps.dispatcher.observe import REQUIRED, Build
 from dewpoint.core.audit import service as audit
 from dewpoint.core.claims import service as claims
@@ -37,11 +44,26 @@ from dewpoint.core.platform.service import PRODUCTION, workers_ready
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.runs import service as runs
 from dewpoint.core.workflows.service import other_abi
-from dewpoint.engine.runtime.activities import RunInput
+from dewpoint.engine.runtime.activities import ENGINE_QUEUE, RunInput
 from dewpoint.engine.runtime.ids import run_workflow_id
+from dewpoint.engine.runtime.workflow import RunGraph
 
 log = structlog.get_logger("dewpoint.dispatcher")
 GATE_LOCK = "dewpoint:production-gate"
+START_DEADLINE = timedelta(seconds=10)  # a start's own deadline: the reconciler's grace period is longer (§7.6)
+MAX_ATTEMPTS = 10  # confirmed refusals before a request is dead (§7.4)
+CANDIDATES = 50  # tenants picked per cycle, each its oldest due request
+START_REFUSED = "start_refused"
+ID_COLLISION = "id_collision"
+START_FAILED = "start_failed"
+REFUSED_MESSAGE = "Temporal refused the run's start 10 times (engine 2b spec §7.4)."
+COLLISION_MESSAGE = "Another execution holds this run's workflow id (engine 2b spec §7.4)."
+# A status Temporal answers with when it certainly refused the start (2a's rule, `apps.runs`).
+REFUSED = {
+    RPCStatusCode.INVALID_ARGUMENT, RPCStatusCode.NOT_FOUND, RPCStatusCode.PERMISSION_DENIED,
+    RPCStatusCode.UNAUTHENTICATED, RPCStatusCode.FAILED_PRECONDITION, RPCStatusCode.OUT_OF_RANGE,
+    RPCStatusCode.UNIMPLEMENTED,
+}  # fmt: skip
 
 
 def tenant_lock(tenant_id: uuid.UUID) -> str:
@@ -214,3 +236,151 @@ async def _cancel(s: AsyncSession, request: RunRequest, reason: str, details: di
                        target_type="run_request", target_id=str(request.id), details=details)  # fmt: skip
     await s.flush()
     return Cancelled(reason)
+
+
+# --- the start, and what its outcome does (§7.4, §7.8) -------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Outcome:
+    """What a start's answer means: `started` (accepted, or a verified duplicate, at `at` when Temporal says),
+    `refused` (an attempt), `throttled` (certainly not started, no attempt), `collision` or `uncertain`."""
+
+    kind: str
+    at: datetime | None = None
+    detail: str = ""
+
+
+def backoff(attempts: int) -> timedelta:
+    """The wait before the next attempt after `attempts` confirmed refusals: 5 s, doubling, capped at 10 min."""
+    return timedelta(seconds=min(5 * 2 ** (attempts - 1), 600))
+
+
+async def start(client: Client, starting: Starting) -> Outcome:
+    """One start, `REJECT_DUPLICATE` under the run's server-built id (§6.1), with its own deadline. Its answer is
+    classified, never acted on here: no transaction is open across the call."""
+    workflow_id = run_workflow_id(starting.start.tenant_id, starting.start.run_id)
+    try:
+        await client.start_workflow(
+            RunGraph.run, starting.start, id=workflow_id, task_queue=ENGINE_QUEUE,
+            id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE, rpc_timeout=START_DEADLINE,
+        )  # fmt: skip
+        return Outcome("started")
+    except WorkflowAlreadyStartedError:
+        return await verify(client, starting)
+    except CodecRefusedError:  # the client seals the start again, and failed: it was never sent
+        return Outcome("throttled", detail="unsealed")
+    except RPCError as e:
+        if e.status in REFUSED:
+            return Outcome("refused", detail=e.status.name)
+        if e.status == RPCStatusCode.RESOURCE_EXHAUSTED:  # throttled before anything was created
+            return Outcome("throttled", detail=e.status.name)
+        return Outcome("uncertain", detail=e.status.name)
+    except Exception as e:  # a lost connection or a timeout: it may have been accepted
+        return Outcome("uncertain", detail=type(e).__name__)
+
+
+async def verify(client: Client, starting: Starting) -> Outcome:
+    """ "Already started" counts only once the execution's own start names this request (§7.4): its started event's
+    input, decoded with the tenant's key, has the request's tenant, run id, frozen version, mode and envelope.
+    Anything else is an id collision, which the server-built ids make impossible. A history that can't be read leaves
+    the start uncertain, for the reconciler."""
+    workflow_id = run_workflow_id(starting.start.tenant_id, starting.start.run_id)
+    try:
+        first: Any = None
+        async for event in client.get_workflow_handle(workflow_id).fetch_history_events():
+            first = event
+            break
+        attributes = first.workflow_execution_started_event_attributes
+        context = WorkflowSerializationContext(namespace=client.namespace, workflow_id=workflow_id)
+        [found] = await client.data_converter.with_context(context).decode(attributes.input.payloads, [RunInput])
+    except Exception as e:
+        return Outcome("uncertain", detail=f"unverified ({type(e).__name__})")
+    ours, theirs = starting.start, found
+    same = (theirs.tenant_id, theirs.run_id, theirs.version_id, theirs.mode, theirs.trigger) == (
+        ours.tenant_id, ours.run_id, ours.version_id, ours.mode, ours.trigger,
+    )  # fmt: skip
+    if not same:
+        return Outcome("collision")
+    return Outcome("started", at=first.event_time.ToDatetime(tzinfo=UTC))
+
+
+async def settle(sessionmaker: async_sessionmaker[AsyncSession], starting: Starting, outcome: Outcome) -> str:
+    """The outcome applied to the request, its slot and its run's row in one transaction (§7.8); what happened, for
+    the cycle's report. A request no longer `starting` (the reconciler settled it) is left as it is."""
+    async with sessionmaker() as s, s.begin():
+        await tenant_scope(s, starting.tenant_id)
+        request = (
+            await s.execute(
+                select(RunRequest)
+                .where(RunRequest.id == starting.request_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+        if request.status != "starting":
+            return "moved"
+        if outcome.kind == "started":
+            await confirm(s, request, outcome.at)
+            return "started"
+        if outcome.kind == "uncertain":
+            log.warning("start_uncertain", request_id=str(request.id), detail=outcome.detail)
+            return "uncertain"  # starting, its slot held, for the reconciler (§7.6)
+        await _release(s, request.id)
+        if outcome.kind == "throttled":
+            request.status, request.next_attempt_at = "queued", datetime.now(UTC) + backoff(1)
+            return "throttled"
+        if outcome.kind == "collision":
+            log.error("start_id_collision", request_id=str(request.id))
+            await _dead(s, request, ID_COLLISION, COLLISION_MESSAGE)
+            return "dead"
+        request.attempts += 1
+        if request.attempts >= MAX_ATTEMPTS:
+            await _dead(s, request, START_REFUSED, REFUSED_MESSAGE)
+            return "dead"
+        request.status, request.next_attempt_at = "queued", datetime.now(UTC) + backoff(request.attempts)
+        return "refused"
+
+
+async def confirm(s: AsyncSession, request: RunRequest, at: datetime | None) -> None:
+    """`starting` → `started`, idempotent and late-safe (§7.8): the run's `started_at` is set only if it has none, a
+    terminal status is never overwritten, and no slot is reserved again (the root's end write releases it)."""
+    request.status = "started"
+    await s.execute(
+        text("update runs set started_at = coalesce(started_at, :at) where id = :i"),
+        {"at": at or datetime.now(UTC), "i": request.id},
+    )
+
+
+async def _release(s: AsyncSession, run_id: uuid.UUID) -> None:
+    await s.execute(text("delete from run_slots where run_id = :i"), {"i": run_id})
+
+
+async def _dead(s: AsyncSession, request: RunRequest, reason: str, message: str) -> None:
+    """`starting` → `dead`: terminal, its run failed with `start_failed`, its slot released (§7.8). Admins see it; a
+    retry is a re-run."""
+    request.status, request.reason, request.ended_at = "dead", reason, datetime.now(UTC)
+    await runs.finish_run(s, request.id, status="failed", ended_at=datetime.now(UTC), error_code=START_FAILED,
+                          error_message=message, if_running=True)  # fmt: skip
+    await audit.record(s, tenant_id=request.tenant_id, actor_id=None, action="run.request.dead",
+                       target_type="run_request", target_id=str(request.id), details={"reason": reason})  # fmt: skip
+
+
+async def dispatch_once(
+    sessionmaker: async_sessionmaker[AsyncSession], client: Client, keys: KeySource, settings: Settings, build: Build
+) -> dict[str, int]:
+    """One cycle: each tenant's oldest due request, picked through `dispatch_candidates` (queue-selection metadata
+    only), begun, started and settled in turn. What happened, counted, for the report."""
+    seal = sealer(client.data_converter, client.namespace)
+    async with sessionmaker() as s:
+        picked = (await s.execute(text("select tenant_id, request_id from dispatch_candidates(:n)"),
+                                  {"n": CANDIDATES})).all()  # fmt: skip
+    counts: Counter[str] = Counter()
+    for tenant_id, request_id in picked:
+        outcome = await begin(sessionmaker, seal, settings, keys, tenant_id=tenant_id, request_id=request_id,
+                              build=build)  # fmt: skip
+        if isinstance(outcome, Starting):
+            counts[await settle(sessionmaker, outcome, await start(client, outcome))] += 1
+        elif outcome is not None:
+            counts[outcome.reason] += 1
+    return dict(counts)
