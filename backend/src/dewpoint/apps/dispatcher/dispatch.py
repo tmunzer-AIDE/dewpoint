@@ -59,6 +59,7 @@ START_REFUSED = "start_refused"
 ID_COLLISION = "id_collision"
 START_FAILED = "start_failed"
 ENVELOPE_UNREADABLE = "envelope_unreadable"
+RUN_ENDED = "run_ended"
 KEY_UNUSABLE = "key_unusable"
 ENVELOPE_MESSAGE = (
     "The request's trigger envelope doesn't open or isn't JSON; repairing a key never reopens it (engine 2b spec §7.1)."
@@ -116,6 +117,14 @@ class Ref:
 class Dead:
     """The request can never start (a broken envelope): `dead`, audited, an earlier attempt's run row failed. Terminal:
     repairing a key later (a wrong key fails as a tampered envelope does) never reopens it; a re-run is a new one."""
+
+    reason: str
+
+
+@dataclass(frozen=True)
+class Held:
+    """Never started: its run's row already records an end (an end write that landed after an absence requeued it).
+    Back to `starting`, without a slot, with an alert, for the reconciler to verify or leave for an operator."""
 
     reason: str
 
@@ -194,7 +203,7 @@ async def begin(
     tenant_id: uuid.UUID,
     request_id: uuid.UUID,
     build: Build,
-) -> Starting | Waiting | Cancelled | Dead | None:
+) -> Starting | Waiting | Cancelled | Dead | Held | None:
     """One due request's starting transaction. None: no longer due, or another dispatcher holds it. Anything it
     can't classify (a bug, an envelope its foreign key should have kept, an outage) raises; nothing it wrote stays."""
     async with sessionmaker() as s, s.begin():
@@ -212,7 +221,7 @@ async def _begin(
     tenant_id: uuid.UUID,
     request_id: uuid.UUID,
     build: Build,
-) -> Starting | Waiting | Cancelled | Dead | None:
+) -> Starting | Waiting | Cancelled | Dead | Held | None:
     await lifecycle.assert_read_committed(s)
     await tenant_scope(s, tenant_id)
     await _lock(s, GATE_LOCK)
@@ -231,6 +240,12 @@ async def _begin(
     ).scalar_one_or_none()
     if request is None or request.workflow_version_id is None:
         return None
+    ran = (await s.execute(text("select status from runs where id = :i for update"), {"i": request.id})).scalar()
+    if ran is not None and ran != "running":  # an earlier attempt's execution ran to its end: never a second start
+        log.error("start_after_end", request_id=str(request.id))
+        request.status, request.starting_at = "starting", func.statement_timestamp()
+        await s.flush()
+        return Held(RUN_ENDED)
     platform = await s.get(PlatformSettings, 1, populate_existing=True)
     if platform is None:
         return Waiting("environment_not_recorded")
@@ -427,9 +442,9 @@ async def _settle(s: AsyncSession, starting: Target, outcome: Outcome) -> str:
     if outcome.kind == "uncertain":
         log.warning("start_uncertain", request_id=str(request.id), detail=outcome.detail)
         return "uncertain"  # starting, its slot held, for the reconciler (§7.6)
-    if outcome.kind == "absent" and await _run_ended(s, request.id):
-        # Its run's row records an end: a start did happen, and only its history is gone. Never queued or started
-        # again; left as it is for an operator (the owner's M3 review).
+    if outcome.kind == "absent" and not await _unstarted(s, request.id):
+        # Its end write ran (its row records an end, or its slot was released): a start did happen, and only its
+        # history is gone. Never queued or started again; left as it is for an operator (the owner's M3 reviews).
         return "history_missing"
     await release(s, request.id)
     if outcome.kind in ("refused", "throttled", "absent") and request.cancel_requested_at is not None:
@@ -456,9 +471,16 @@ async def _settle(s: AsyncSession, starting: Target, outcome: Outcome) -> str:
     return "refused"
 
 
-async def _run_ended(s: AsyncSession, run_id: uuid.UUID) -> bool:
-    status = (await s.execute(text("select status from runs where id = :i"), {"i": run_id})).scalar()
-    return status is not None and status != "running"
+async def _unstarted(s: AsyncSession, run_id: uuid.UUID) -> bool:
+    """An absence's evidence that no start happened: the run's pre-created row still `running` and the slot reserved at
+    dispatch still held, which only the root's end write releases while a request is `starting`. Read under those rows'
+    locks, taken in the end write's own order (row, then slot): an end write in flight is waited for and then seen. The
+    slot is released here when it was held."""
+    status = (await s.execute(text("select status from runs where id = :i for update"), {"i": run_id})).scalar()
+    if status != "running":
+        return False
+    held = await s.execute(text("delete from run_slots where run_id = :i returning run_id"), {"i": run_id})
+    return held.first() is not None
 
 
 async def confirm(s: AsyncSession, request: RunRequest, at: datetime | None) -> None:

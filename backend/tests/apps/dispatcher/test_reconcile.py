@@ -7,6 +7,7 @@ slot is released only once its run's latest execution is closed, never because i
 settles is audited (§2.4)."""
 
 import asyncio
+import dataclasses
 import uuid
 from datetime import timedelta
 from typing import Any
@@ -19,7 +20,7 @@ from temporalio.service import RPCStatusCode
 
 from dewpoint.apps.dispatcher import dispatch, reconcile
 from dewpoint.apps.worker.store import DbRunStore
-from dewpoint.engine.runtime.activities import ENGINE_QUEUE
+from dewpoint.engine.runtime.activities import ENGINE_QUEUE, ProjectInput
 from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.engine.runtime.workflow import RunGraph
 from tests.apps.dispatcher.support import begin, state
@@ -191,23 +192,35 @@ async def test_a_leaked_slot_is_released_only_once_its_runs_execution_is_closed(
     assert (await state(owner_sessionmaker, request.id))["slot"] == 0
 
 
+class RefusedEndWrite(DbRunStore):
+    """The worker's projection, but the database refuses the root's end write: logged and skipped, its row left
+    `running`, its slot released all the same (the owner's ruling on M2's Task 10)."""
+
+    async def project(self, data: ProjectInput) -> None:
+        refused = dataclasses.replace(data.run, status="bogus") if data.run is not None else None
+        await super().project(dataclasses.replace(data, run=refused))
+
+
+@pytest.mark.parametrize("end_write", ["recorded", "refused"])
 async def test_a_lost_reply_whose_run_already_ended_is_still_reconciled(
-    queued, owner_sessionmaker, dispatch_sessionmaker, worker_sessionmaker, api_settings, env, monkeypatch
+    queued, owner_sessionmaker, dispatch_sessionmaker, worker_sessionmaker, api_settings, env, monkeypatch, end_write
 ) -> None:
-    """The owner's M3 checkpoint: a start accepted, its reply lost, and the run so quick that its end write released
-    the slot while the request was still `starting`. The reconciler finds it by when it entered `starting`, never by a
-    slot it no longer has."""
+    """The owner's M3 checkpoints: a start accepted, its reply lost, and the run so quick that its end write (recorded,
+    or refused) released the slot while the request was still `starting`. The reconciler finds it by when it entered
+    `starting`, never by a slot it no longer has; with its history unavailable it's never queued or started again."""
     ctx, _, request = queued
     monkeypatch.setattr(reconcile, "GRACE", timedelta(0))  # its grace period over at once
-    async with workers(env.client, DbRunStore(worker_sessionmaker, KEYS)):
+    store = DbRunStore if end_write == "recorded" else RefusedEndWrite
+    async with workers(env.client, store(worker_sessionmaker, KEYS)):
         lost = await starting(dispatch_sessionmaker, request, api_settings)
         assert (await dispatch.start(env.client, lost)).kind == "started"  # accepted; its reply never settled
         handle = env.client.get_workflow_handle_for(RunGraph.run, run_workflow_id(str(ctx.tenant_id), str(request.id)))
         assert (await asyncio.wait_for(handle.result(), 30)).status == "succeeded"
     before = await state(owner_sessionmaker, request.id)
-    assert (before["request"][0], before["slot"], before["run"][0]) == ("starting", 0, "succeeded")
-    # Its history unavailable (NOT_FOUND from a namespace that answers): its row records an end, so a start did happen.
-    # Never back in the queue, never started again: unresolved, with an alert, for an operator (the owner's M3 review).
+    row = "succeeded" if end_write == "recorded" else "running"
+    assert (before["request"][0], before["slot"], before["run"][0]) == ("starting", 0, row)
+    # Its history unavailable (NOT_FOUND from a namespace that answers), and its slot gone: its end write ran, so a
+    # start did happen. Never back in the queue, never started again: unresolved, with an alert, for an operator.
     with structlog.testing.capture_logs() as seen:
         assert await once(dispatch_sessionmaker, DescribeFails(rpc(RPCStatusCode.NOT_FOUND)), api_settings) == {
             "unresolved": 1
@@ -219,9 +232,71 @@ async def test_a_lost_reply_whose_run_already_ended_is_still_reconciled(
         await s.execute(text("update run_requests set checked_at = null where id = :i"), {"i": request.id})
     assert await once(dispatch_sessionmaker, env.client, api_settings) == {"started": 1}
     after = await state(owner_sessionmaker, request.id)
-    assert (after["request"][0], after["slot"], after["run"][0]) == ("started", 0, "succeeded")
+    assert (after["request"][0], after["slot"]) == ("started", 0)
     assert after["run"][1] is not None  # its started_at, from the execution's own start
-    assert await once(dispatch_sessionmaker, env.client, api_settings) == {}  # nothing left to settle
+    # A recorded end leaves nothing to settle; a refused one leaves a running row, ended from Temporal's result (§7.6).
+    assert await once(dispatch_sessionmaker, env.client, api_settings) == (
+        {} if end_write == "recorded" else {"ended": 1}
+    )
+    assert (await state(owner_sessionmaker, request.id))["run"][0] == "succeeded"
+
+
+async def until_someone_waits(owner: Any) -> None:
+    """Until a transaction waits for a lock someone else holds (a row's, here)."""
+    for _ in range(200):
+        async with owner() as s:
+            if (await s.execute(text("select count(*) from pg_locks where not granted"))).scalar_one():
+                return
+        await asyncio.sleep(0.05)
+    raise AssertionError("nobody is waiting for a lock")
+
+
+@pytest.mark.parametrize("end_write", ["recorded", "refused"])
+async def test_an_end_write_in_flight_is_waited_for_before_an_absence_requeues(
+    queued, owner_sessionmaker, dispatch_sessionmaker, worker_sessionmaker, api_settings, end_write
+) -> None:
+    """The owner's M3 review: the request's lock doesn't hold back the worker's own writes to the run's row and slot.
+    An absence's evidence (the row still `running`, the slot still held) is read under those rows' locks, so an end
+    write in flight is waited for, and then seen: no requeue."""
+    ctx, _, request = queued
+    await starting(dispatch_sessionmaker, request, api_settings)
+    async with worker_sessionmaker() as w, w.begin():  # the end write, not yet committed
+        await w.execute(text("select set_config('app.tenant_id', :t, true)"), {"t": str(ctx.tenant_id)})
+        if end_write == "recorded":
+            await w.execute(
+                text("update runs set status = 'succeeded', ended_at = now() where id = :i"), {"i": request.id}
+            )
+        await w.execute(text("delete from run_slots where run_id = :i"), {"i": request.id})
+        settling = asyncio.create_task(
+            dispatch.settle(dispatch_sessionmaker, dispatch.Ref(request.id, ctx.tenant_id), dispatch.Outcome("absent"))
+        )
+        await until_someone_waits(owner_sessionmaker)
+        assert not settling.done()
+    assert await settling == "history_missing"
+    assert (await state(owner_sessionmaker, request.id))["request"][0] == "starting"
+
+
+async def test_a_queued_request_whose_run_already_ended_is_never_started_again(
+    queued, owner_sessionmaker, dispatch_sessionmaker, api_settings, env
+) -> None:
+    """An end write that lands only after an absence requeued its request (Temporal said NOT_FOUND for an execution
+    that was in fact live): the dispatcher never starts it again. It goes back to `starting`, without a slot, with an
+    alert, for the reconciler to verify or leave for an operator."""
+    ctx, _, request = queued
+    lost = await starting(dispatch_sessionmaker, request, api_settings)
+    assert await dispatch.settle(dispatch_sessionmaker, lost, dispatch.Outcome("absent")) == "absent"
+    async with owner_sessionmaker() as s, s.begin():  # the late end write
+        await s.execute(text("update runs set status = 'succeeded', ended_at = now() where id = :i"), {"i": request.id})
+    with structlog.testing.capture_logs() as seen:
+        assert await begin(dispatch_sessionmaker, request, api_settings) == dispatch.Held("run_ended")
+    after = await state(owner_sessionmaker, request.id)
+    assert (after["request"][0], after["slot"], after["run"][0]) == ("starting", 0, "succeeded")
+    assert any(e["event"] == "start_after_end" and e["log_level"] == "error" for e in seen)
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("update run_requests set starting_at = now() - interval '1 hour' where id = :i"),
+                        {"i": request.id})  # fmt: skip
+    gone = DescribeFails(rpc(RPCStatusCode.NOT_FOUND))
+    assert await once(dispatch_sessionmaker, gone, api_settings) == {"unresolved": 1}  # never back in the queue
 
 
 async def test_a_leaked_slot_whose_history_is_gone_is_kept_with_an_alert(
