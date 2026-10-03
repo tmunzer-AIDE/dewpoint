@@ -2,7 +2,7 @@
 """Declassification (engine 2b spec §4.3): only a `flow.if` condition, a `flow.switch` case's `when`, a loop's
 `items` and a filter's `items` or `predicate` may turn tainted input into a plain decision, and each such site must be
 listed in `graph.settings.declassify`. Publish refuses an unlisted tainted decision and a stale entry. A loop over
-`trigger.rows`, whose length is already public, needs no entry."""
+the rows of a version's CSV, `trigger.rows`, whose length is already public (`trigger.row_count`), needs no entry."""
 
 from typing import Any
 
@@ -77,6 +77,17 @@ def test_a_loop_over_tainted_items_must_be_listed_except_over_trigger_rows() -> 
     assert ("taint.undeclassified", "/items") in codes(check(loop(ref("trigger.list"))))
     assert check(loop(ref("trigger.list")), ("l", "/items")).ok
     assert check(loop(ref("trigger.rows"))).ok  # its length is public: no entry needed
+
+
+def test_without_a_csv_a_loop_over_trigger_rows_needs_its_entry() -> None:
+    """#31: only a version declaring a CSV has a public `row_count`, so only its loop over `trigger.rows` skips the
+    entry (§4.3). Elsewhere `trigger.rows` is whatever the caller sent: here undeclared, so sensitive."""
+    rows = ref("trigger.rows", default=[])  # undeclared, so optional: the default makes it a direct reference still
+    g = G().node("l", LOOP, {"items": rows}).node("x", ECHO, {"value": 1}).edge("l", "x", "body")
+    g.settings = {"input_schema": {"type": "object"}}
+    assert codes(validate(g.build(), ValidationContext(catalog=CAT))) == [("taint.undeclassified", "/items")]
+    g.settings["declassify"] = [{"node": str(nid("l")), "field": "/items"}]
+    assert validate(g.build(), ValidationContext(catalog=CAT)).ok
 
 
 def test_a_filter_lists_each_tainted_field() -> None:

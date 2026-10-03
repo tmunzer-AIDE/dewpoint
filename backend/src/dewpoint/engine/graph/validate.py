@@ -258,9 +258,12 @@ def _decision_sites(graph: Graph, s: Structure) -> dict[tuple[uuid.UUID, str], s
     return out
 
 
-def _public_length(n: GraphNode) -> bool:
-    """A loop over `trigger.rows` itself: its length is already public (`trigger.row_count`), so it needs no entry.
-    A derived or filtered list doesn't inherit that (§4.3)."""
+def _public_length(graph: Graph, n: GraphNode) -> bool:
+    """A loop over `trigger.rows` itself, in a version declaring a CSV: its length is already public
+    (`trigger.row_count`), so it needs no entry. A derived or filtered list doesn't inherit that (§4.3), and without a
+    CSV `trigger.rows` is whatever the caller sent, with no public count (#31)."""
+    if graph.settings.csv is None:
+        return False
     raw = n.config.get("items")
     body = raw.get(ENVELOPE) if isinstance(raw, Mapping) and is_envelope(raw) else None
     return isinstance(body, Mapping) and body.get("kind") == "ref" and body.get("path") == "trigger.rows"
@@ -276,7 +279,7 @@ def _declassify(
     for (node, fld), ref in sites.items():
         if not site_taint.get((node, fld)) or (node, fld) in listed:
             continue
-        if ref == C.LOOP and _public_length(s.nodes[node]):
+        if ref == C.LOOP and _public_length(graph, s.nodes[node]):
             continue
         out.append(
             Diagnostic(

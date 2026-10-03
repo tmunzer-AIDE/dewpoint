@@ -253,10 +253,11 @@ claims are.
   `graph.settings.declassify`, and the decision is made where the claim is read. Publishing such a workflow needs the
   `workflow.declassify` permission (tenant admins and owners), and its audit entry lists what each site reveals. A
   decision comes back plain only as a decision, `true` or `false` for a condition or a case and a whole number for a
-  loop's count: anything else fails the step with `type_mismatch`, revealing nothing. A loop over a list itself
-  (`trigger.rows`) needs no entry: a list's length isn't secret. A loop over a list held as a handle (a reference's, or
-  CEL's that comes back claimed) gets each item as a handle into it. A filter over sensitive data runs whole in one
-  activity: the run sees the kept items' handle and the two counts, never a decision per item.
+  loop's count: anything else fails the step with `type_mismatch`, revealing nothing. A loop over a CSV's rows
+  themselves (`trigger.rows`, in a workflow that declares a CSV) needs no entry: their count, `trigger.row_count`, is
+  already public. A loop over any other sensitive list needs its entry. A loop over a list held as a handle (a
+  reference's, or CEL's that comes back claimed) gets each item as a handle into it. A filter over sensitive data runs
+  whole in one activity: the run sees the kept items' handle and the two counts, never a decision per item.
 - **Sub-flows and failure handlers.** A sub-flow's input is checked against the child's input schema
   (`input_invalid` when it doesn't match) and claimed as a trigger is, and the child is granted the parent's claims it
   holds; a sub-flow grants its parent the claims in its outputs. A failure handler is granted what its trigger holds.
