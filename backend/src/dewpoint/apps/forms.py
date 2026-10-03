@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """A start form's fields (engine 2b spec §7.7): the typed top-level fields of a version's `input_schema`, for the UI.
 A sensitive field shows its type and whether it's required, never a value the schema holds for it: its default and
-its enum are masked (publish refuses a sensitive literal anyway, §3.8). `x-dewpoint-picker` is passed through for
+its enum are masked. Publish refuses both now (§3.8, #32), but versions published before that are immutable and may
+still hold them. `x-dewpoint-picker` is passed through for
 sub-project 3's pickers. A CSV declaration (§8.1) is described with its columns: a sensitive one has no default and no
 values to show, since publish refuses them."""
 

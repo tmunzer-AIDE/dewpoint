@@ -5,6 +5,7 @@ from dewpoint.apps.forms import form_fields
 
 
 def test_a_sensitive_fields_default_and_enum_are_masked() -> None:
+    """Publish refuses both now (#32), but a version published before that is immutable: its form still masks them."""
     schema = {
         "properties": {
             "token": {"type": "string", "x-sensitive": True, "default": "d3fault-secret", "enum": ["s1", "s2"]},

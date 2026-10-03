@@ -61,8 +61,9 @@ from dewpoint.engine.graph.values import (
 from dewpoint.engine.handles import RESERVED, contains_marker
 from dewpoint.engine.registry import control as C
 from dewpoint.engine.registry.catalog import Catalog, NodeTypeSpec
+from dewpoint.engine.schema_refs import PREFIX as REF_PREFIX
 from dewpoint.engine.schema_refs import ref_problems, subschemas
-from dewpoint.engine.sensitive import SENSITIVE, expand, is_marked, marked_positions
+from dewpoint.engine.sensitive import SENSITIVE, expand, is_marked, marked_positions, resolve
 from dewpoint.engine.taint import CLEAN, TAINTED, Shape, from_schema, make
 from dewpoint.sdk.fields import KINDS
 
@@ -192,6 +193,10 @@ _SENSITIVE_LITERAL = (
 )
 
 
+_SCHEMA_LITERAL = (
+    "A sensitive position can't list values (`enum`, `const`, `examples`): they'd be written into the workflow in "
+    "plain text. Leave them out; check the value where it's used instead."
+)
 _CSV_HEADER = "Another column already has this header: each header maps to one column."
 _CSV_NAME = "Another column already has this name: each column is one field of a row."
 _CSV_IDENT = "Column names are lowercase identifiers, and not `in`, `true`, `false` or `null`."
@@ -323,26 +328,42 @@ def _writes_sensitive(
     return False
 
 
-def _sensitive_defaults(label: str, schema: Mapping[str, Any]) -> list[Diagnostic]:
-    """A `default` at a position the schema marks sensitive, or holding a part it does (engine 2b spec §3.8): a
-    secret written into the version, even null or empty: an omitted default is what's allowed."""
-    found: list[str] = []
+_SCHEMA_LITERALS = ("default", "enum", "const", "examples")  # what a schema writes of its instances
+
+
+def _sensitive_schema_literals(label: str, schema: Mapping[str, Any]) -> list[Diagnostic]:
+    """A literal a schema writes — a `default`, an `enum`'s values, a `const`, `examples` — at a position it marks
+    sensitive, or holding a part it does (engine 2b spec §3.8): a secret written into the version, even null or empty;
+    an omitted one is what's allowed. Each is found where it's written: nested, in a union's branch, or in a definition
+    that a sensitive position reaches through a local `$ref`. A start form masks a sensitive field's enum and default,
+    but that never protected the published graph; versions published before this rule keep their masking."""
+    found: dict[tuple[str, str], None] = {}  # (where, keyword), in document order
+    seen: set[tuple[str, bool]] = set()
+
+    def instances(node: Mapping[str, Any], key: str) -> list[Any]:
+        value = node[key]
+        return list(value) if key in ("enum", "examples") and isinstance(value, list) else [value]
 
     def walk(node: Any, path: str, inherited: bool) -> None:
-        if not isinstance(node, Mapping):
+        if not isinstance(node, Mapping) or (path, inherited) in seen:
             return
-        branches = expand(node, schema)
-        here = inherited or any(b.get(SENSITIVE) is True for b in branches)
-        defaults = [b["default"] for b in branches if "default" in b]
-        if defaults and (here or any(marked_positions(d, node, schema) for d in defaults)):
-            found.append(path)
+        seen.add((path, inherited))
+        here = inherited or any(b.get(SENSITIVE) is True for b in expand(node, schema))
+        for key in _SCHEMA_LITERALS:
+            if key in node and (here or any(marked_positions(v, node, schema) for v in instances(node, key))):
+                found[(path, key)] = None
         for suffix, sub in subschemas(node):
             walk(sub, path + suffix, here)
+        ref = node.get("$ref")
+        if here and isinstance(ref, str) and ref.startswith(REF_PREFIX):  # the definition, sensitive from here
+            walk(resolve(schema, ref), ref[1:], True)
 
     walk(schema, "", False)
     return [
         Diagnostic(code="sensitive.default", field=f"/settings/{label}{where}", message=_SENSITIVE_LITERAL)
-        for where in found
+        if key == "default"
+        else Diagnostic(code="sensitive.literal", field=f"/settings/{label}{where}/{key}", message=_SCHEMA_LITERAL)
+        for where, key in found
     ]
 
 
@@ -415,7 +436,7 @@ def _settings(graph: Graph) -> list[Diagnostic]:
         ]
     for label, schema in (("input_schema", st.input_schema), ("vars_schema", st.vars_schema)):
         if not any((d.field or "").startswith(f"/settings/{label}") for d in out):
-            out += _sensitive_defaults(label, schema)
+            out += _sensitive_schema_literals(label, schema)
     out += _csv_declaration(st.csv)
     props = st.input_schema.get("properties")
     out += [
