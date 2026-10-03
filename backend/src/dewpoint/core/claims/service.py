@@ -217,3 +217,24 @@ async def read_envelope(s: AsyncSession, cipher: ClaimCipher, tenant_id: uuid.UU
         return json.loads(plain)
     except ValueError:  # not UTF-8, or not JSON
         raise EnvelopeUnreadableError("A trigger envelope that isn't JSON.") from None
+
+
+async def read_request_claim(
+    s: AsyncSession, cipher: ClaimCipher, tenant_id: uuid.UUID, *, request_id: uuid.UUID, claim_id: uuid.UUID
+) -> Stored:
+    """One of a request's own input claims, for a re-run rebuilding its input (engine 2b spec §7.7): in `run_inputs`,
+    owned by the request, never its envelope; nothing else is read. Raises ClaimUnavailableError, as `fetch` does."""
+    found = (
+        await s.execute(
+            select(InputClaim.sensitive_pointers, InputClaim.ciphertext).where(
+                InputClaim.id == claim_id, InputClaim.owner_run_id == request_id, InputClaim.role == "claim"
+            )
+        )
+    ).first()
+    if found is None:
+        raise ClaimUnavailableError("A claim this request doesn't own, or that doesn't exist.")
+    try:
+        plain = await cipher.open(str(tenant_id), str(claim_id), found.ciphertext)
+    except ClaimUnreadableError as e:
+        raise ClaimUnavailableError("A claim that doesn't open under its tenant.") from e
+    return Stored(json.loads(plain), tuple(found.sensitive_pointers))

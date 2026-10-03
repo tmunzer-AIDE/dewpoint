@@ -83,3 +83,26 @@ async def test_the_database_holds_no_envelope_in_plain_text(owner_sessionmaker, 
             await s.execute(text("select ciphertext, pointer, role from run_inputs where id = :e"), {"e": envelope})
         ).one()
     assert b"site" not in row.ciphertext and (row.pointer, row.role) == (None, "envelope")
+
+
+async def test_a_reruns_reader_reads_only_its_requests_own_input_claims(
+    owner_sessionmaker, dispatch_sessionmaker, api_sessionmaker
+) -> None:
+    """The re-run's reader (§7.7), as the API role: a claim the request owns in `run_inputs`; never its envelope,
+    another run's claim, or anything outside `run_inputs`."""
+    tenant, request, envelope = await admitted(owner_sessionmaker, dispatch_sessionmaker)
+    mine, others = uuid.uuid4(), uuid.uuid4()
+    async with dispatch_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        await service.write_input(s, CIPHER, tenant, service.NewClaim(mine, "t0ken", ("",), request, request),
+                                  pointer="/token")  # fmt: skip
+        stranger = uuid.uuid4()
+        await service.write_input(s, CIPHER, tenant, service.NewClaim(others, "x", ("",), stranger, stranger),
+                                  pointer="/token")  # fmt: skip
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        stored = await service.read_request_claim(s, CIPHER, tenant, request_id=request, claim_id=mine)
+        assert (stored.value, stored.sensitive_pointers) == ("t0ken", ("",))
+        for claim_id in (envelope, others, uuid.uuid4()):
+            with pytest.raises(service.ClaimUnavailableError):
+                await service.read_request_claim(s, CIPHER, tenant, request_id=request, claim_id=claim_id)
