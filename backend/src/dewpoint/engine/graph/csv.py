@@ -4,6 +4,7 @@ type's canonical value. A cell is converted to its column's canonical value once
 must already be one, so the version holds exactly what a run would."""
 
 import ipaddress
+import math
 import re
 from collections.abc import Mapping
 from typing import Any, Literal
@@ -24,6 +25,27 @@ _JSON_TYPES = {"integer": "integer", "number": "number", "boolean": "boolean"}  
 _JSON_TYPES.update({t: "string" for t in ("string", "mac", "ip", "cidr", "enum")})
 
 _MAC = re.compile(r"[0-9a-f]{2}(?::[0-9a-f]{2}){5}")  # the canonical form: lowercase, colon-separated
+_MAC_FORMS = (
+    re.compile(r"[0-9a-f]{2}([:-])[0-9a-f]{2}(?:\1[0-9a-f]{2}){4}"),  # aa:bb:cc:dd:ee:ff, aa-bb-cc-dd-ee-ff
+    re.compile(r"[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4}"),  # aabb.ccdd.eeff
+    re.compile(r"[0-9a-f]{12}"),  # aabbccddeeff
+)
+_INTEGER = re.compile(r"[+-]?[0-9]+")  # ASCII digits only: Python's int() also takes other scripts and underscores
+_NUMBER = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
+_TRUE, _FALSE = ("true", "yes", "1"), ("false", "no", "0")
+# What a cell that doesn't convert gives: fixed codes, never the cell's text (a cell may hold a secret).
+CELL_CODES = frozenset(
+    {"not_integer", "out_of_range", "not_number", "not_boolean", "not_mac", "not_ip", "not_cidr", "not_in_enum"}
+)
+
+
+def mac(text: str) -> str | None:
+    """`text` in lowercase colon form, from any of the usual spellings; None if it isn't a MAC address."""
+    lowered = text.lower()
+    if not any(form.fullmatch(lowered) for form in _MAC_FORMS):
+        return None
+    digits = re.sub(r"[:.-]", "", lowered)
+    return ":".join(digits[i : i + 2] for i in range(0, 12, 2))
 
 
 def ip(text: str) -> str | None:
@@ -40,6 +62,27 @@ def cidr(text: str) -> str | None:
         return str(ipaddress.ip_network(text, strict=True))
     except ValueError:
         return None
+
+
+def convert(type_: CsvType, text: str, values: list[str] | None = None) -> tuple[Any, str | None]:
+    """A non-empty cell's canonical value, and None; or None and the code saying why it doesn't convert."""
+    if type_ == "string":
+        return text, None
+    if type_ == "integer":
+        if not _INTEGER.fullmatch(text):
+            return None, "not_integer"
+        number = int(text)
+        return (number, None) if INT_MIN <= number <= INT_MAX else (None, "out_of_range")
+    if type_ == "number":
+        real = float(text) if _NUMBER.fullmatch(text) else math.inf
+        return (real, None) if math.isfinite(real) else (None, "not_number")
+    if type_ == "boolean":
+        lowered = text.lower()
+        return (lowered in _TRUE, None) if lowered in _TRUE + _FALSE else (None, "not_boolean")
+    if type_ == "enum":
+        return (text, None) if text in (values or ()) else (None, "not_in_enum")
+    converted = {"mac": mac, "ip": ip, "cidr": cidr}[type_](text)
+    return (converted, None) if converted is not None else (None, f"not_{type_}")
 
 
 def is_canonical(type_: CsvType, value: Any, values: list[str] | None = None) -> bool:
