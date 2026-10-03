@@ -19,6 +19,7 @@ from sqlalchemy.orm import InstrumentedAttribute
 from dewpoint.core.audit.service import record
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.plugins import CelProfile, NodeTypeVersion
+from dewpoint.core.models.requests import RunRequest
 from dewpoint.core.models.workflows import Workflow, WorkflowVersion
 from dewpoint.core.plugins.registry import split_ref
 
@@ -60,6 +61,20 @@ async def lock_shared(s: AsyncSession, entries: Iterable[Entry]) -> None:
     await assert_read_committed(s)
     for entry in sorted(set(entries)):
         await s.execute(text("select pg_advisory_xact_lock_shared(hashtextextended(:k, 0))"), {"k": entry.lock_key})
+
+
+async def try_lock_shared(s: AsyncSession, entries: Iterable[Entry]) -> bool:
+    """`lock_shared` without waiting: False as soon as one entry is held exclusively (a retirement in progress). The
+    locks it got stay held until the transaction ends. For a caller that holds row locks a retirement may need (a
+    starting transaction holds its request's): waiting there could deadlock with the retirement."""
+    await assert_read_committed(s)
+    for entry in sorted(set(entries)):
+        found = await s.execute(
+            text("select pg_try_advisory_xact_lock_shared(hashtextextended(:k, 0))"), {"k": entry.lock_key}
+        )
+        if not found.scalar_one():
+            return False
+    return True
 
 
 async def lock_exclusive(s: AsyncSession, entry: Entry) -> None:
@@ -117,18 +132,33 @@ class AffectedVersion:
 
 
 @dataclass(frozen=True)
+class QueuedRef:
+    """A run request that hasn't started, frozen on a version whose closure uses the entry: a `queued` one, which a
+    forced retirement cancels, or a `starting` one, which may still reach Temporal and is left to start or come back."""
+
+    tenant_id: uuid.UUID
+    request_id: uuid.UUID
+    workflow_id: uuid.UUID
+    version_id: uuid.UUID
+    status: str
+
+
+@dataclass(frozen=True)
 class RetirePreview:
     entry: Entry
     state: str
     active_refs: tuple[ActiveRef, ...]  # enabled workflows whose active closure uses the entry
     affected: tuple[AffectedVersion, ...]  # every version whose closure uses it, per tenant (spec §4.5 preview)
     applied: bool = False
-    # Sub-project 2b adds the queued run requests a forced retirement would cancel.
+    queued: tuple[QueuedRef, ...] = ()  # requests that haven't started: a forced retirement cancels the queued ones
 
 
 class ReferencedError(RuntimeError):
     def __init__(self, preview: RetirePreview) -> None:
-        super().__init__(f"{preview.entry} is used by {len(preview.active_refs)} active workflow(s)")
+        super().__init__(
+            f"{preview.entry} is used by {len(preview.active_refs)} active workflow(s) and "
+            f"{len(preview.queued)} run request(s) that haven't started"
+        )
         self.preview = preview
 
 
@@ -160,7 +190,14 @@ async def _preview(s: AsyncSession, entry: Entry, state: str) -> RetirePreview:
         .order_by(Workflow.tenant_id, Workflow.name, WorkflowVersion.number)
     )
     versions = tuple(AffectedVersion(*row) for row in affected)
-    return RetirePreview(entry=entry, state=state, active_refs=refs, affected=versions)
+    unstarted = await s.execute(
+        select(RunRequest.tenant_id, RunRequest.id, RunRequest.workflow_id, WorkflowVersion.id, RunRequest.status)
+        .join(WorkflowVersion, WorkflowVersion.id == RunRequest.workflow_version_id)
+        .where(uses, RunRequest.status.in_(("queued", "starting")))
+        .order_by(RunRequest.tenant_id, RunRequest.queued_at, RunRequest.id)
+    )
+    queued = tuple(QueuedRef(*row) for row in unstarted)
+    return RetirePreview(entry=entry, state=state, active_refs=refs, affected=versions, queued=queued)
 
 
 async def _set_state(s: AsyncSession, entry: Entry, state: str) -> None:
@@ -190,9 +227,12 @@ async def deprecate(s: AsyncSession, entry: Entry, *, actor_id: uuid.UUID | None
 async def retire(
     s: AsyncSession, entry: Entry, *, force: bool = False, confirm: bool = False, actor_id: uuid.UUID | None = None
 ) -> RetirePreview:
-    """Normal path: refuse while an enabled workflow's active closure uses the entry. Forced path: return the
-    preview unless `confirm`; with `confirm`, affected workflows stop being startable and each tenant gets an audit
-    entry. Runs inside the caller's transaction (READ COMMITTED); the caller commits."""
+    """Normal path: refuse while an enabled workflow's active closure, or a request that hasn't started, uses the
+    entry. Forced path: return the preview unless `confirm`; with `confirm`, affected workflows stop being startable,
+    every queued request on them is cancelled explicitly (`node_type_retired`, `cel_profile_retired`), and each tenant
+    gets an audit entry. A `starting` request is left alone: it either starts, and a started run is never broken, or
+    comes back to the queue, where dispatch's defensive check cancels it. Runs inside the caller's transaction (READ
+    COMMITTED); the caller commits."""
     await lock_exclusive(s, entry)  # first: every statement below sees references committed before the lock
     current = (await states(s, [entry]))[entry]
     if current == "missing":
@@ -200,11 +240,20 @@ async def retire(
     preview = await _preview(s, entry, current)
     if current == "retired":
         return replace(preview, applied=True)
-    if preview.active_refs and not force:
+    referenced = bool(preview.active_refs or preview.queued)
+    if referenced and not force:
         raise ReferencedError(preview)
-    if preview.active_refs and not confirm:
+    if referenced and not confirm:
         return preview
     await _set_state(s, entry, "retired")
+    cancelled = [q for q in preview.queued if q.status == "queued"]
+    if cancelled:
+        reason = "node_type_retired" if entry.kind == "node" else "cel_profile_retired"
+        await s.execute(
+            update(RunRequest)
+            .where(RunRequest.id.in_([q.request_id for q in cancelled]), RunRequest.status == "queued")
+            .values(status="cancelled", reason=reason, ended_at=func.now())
+        )
     await record(
         s,
         tenant_id=None,
@@ -212,13 +261,18 @@ async def retire(
         action="lifecycle.retire",
         target_type=entry.kind,
         target_id=entry.key,
-        details={"forced": bool(preview.active_refs), "active_workflows": len(preview.active_refs)},
+        details={"forced": referenced, "active_workflows": len(preview.active_refs), "requests": len(cancelled)},
     )
-    by_tenant: dict[uuid.UUID, list[str]] = {}
+    workflows: dict[uuid.UUID, list[str]] = {}
+    requests: dict[uuid.UUID, list[str]] = {}
     for ref in preview.active_refs:
-        by_tenant.setdefault(ref.tenant_id, []).append(str(ref.workflow_id))
-    for tenant_id, workflow_ids in sorted(by_tenant.items()):
+        workflows.setdefault(ref.tenant_id, []).append(str(ref.workflow_id))
+    for q in cancelled:
+        requests.setdefault(q.tenant_id, []).append(str(q.request_id))
+    for tenant_id in sorted(workflows.keys() | requests.keys()):
         await tenant_scope(s, tenant_id)  # tenant audit entries need the tenant context; nothing reads after this
+        for request_id in requests.get(tenant_id, []):  # an earlier attempt's row ends with its request (§7.8)
+            await s.execute(text("select end_unstarted_run(:i)"), {"i": uuid.UUID(request_id)})
         await record(
             s,
             tenant_id=tenant_id,
@@ -226,6 +280,10 @@ async def retire(
             action="lifecycle.retire",
             target_type=entry.kind,
             target_id=entry.key,
-            details={"forced": True, "workflows": workflow_ids},
+            details={
+                "forced": True,
+                "workflows": workflows.get(tenant_id, []),
+                "requests": requests.get(tenant_id, []),
+            },
         )
     return replace(preview, applied=True)

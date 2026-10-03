@@ -1,24 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
-"""`dev_run_version` (spec §9): the dev CLI's path, through the dispatch role, to a run of the active version."""
+"""`dewpoint dev run`'s path (engine 2b spec §7.7): the dev CLI admits a workflow's active version with the source
+`dev`, as the dispatch role; the dispatcher starts it; the CLI's bounded wait reports the end the database records, not
+merely that it started. No command starts a run itself: `start_run` is a test helper."""
 
 from typing import Any
 
 import pytest
 from temporalio.testing import WorkflowEnvironment
 
-from dewpoint.apps.cli.main import dev_run_version
+from dewpoint.apps import admission, dev_run
+from dewpoint.apps.dispatcher.dispatch import dispatch_once
 from dewpoint.apps.worker.store import DbRunStore
-from dewpoint.engine.handles import ClaimRef
-from dewpoint.engine.runtime.ids import run_workflow_id
-from tests.apps.test_workflow_ops import actor, create, publish
+from tests.apps.dispatcher.support import BUILD
+from tests.apps.dispatcher.support import workers as ready_workers
+from tests.apps.test_admission import KEYS, current
+from tests.apps.test_workflow_ops import actor, create, publish, update
 from tests.apps.worker.harness import workers
-from tests.conftest import _url_for
 from tests.support.graphs import G, cel, ref
-from tests.support.keys import FixtureKeys
 from tests.support.registry import sync_test_plugins
 
-# its run starts on the time-skipping server, in a development deployment (engine 2b spec §2.3)
-pytestmark = pytest.mark.usefixtures("this_build_is_current", "development_deployment")
+pytestmark = pytest.mark.usefixtures("development_deployment")
 
 
 def graph() -> dict[str, Any]:
@@ -30,27 +31,60 @@ def graph() -> dict[str, Any]:
     return g.node("a", "testkit.echo@1", {"value": cel("trigger.x + 1")}).data()
 
 
-async def test_dev_run_starts_the_active_version(
-    env: WorkflowEnvironment,
-    pg_url: str,
-    owner_sessionmaker: Any,
-    api_sessionmaker: Any,
-    admin_sessionmaker: Any,
-    worker_sessionmaker: Any,
-    api_settings: Any,
-) -> None:
+@pytest.fixture
+async def workflow(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> Any:
     await sync_test_plugins(admin_sessionmaker)
     ctx = await actor(owner_sessionmaker)
-    out = await publish(api_sessionmaker, ctx, await create(api_sessionmaker, ctx, graph()), api_settings)
-    assert out.version is not None
-    settings = api_settings.model_copy(update={"database_url": _url_for(pg_url, "dewpoint_dispatch")})
-    common: dict[str, Any] = {"tenant_id": ctx.tenant_id, "version_id": out.version.id, "trigger": {"x": 1}}
-    async with workers(env.client, DbRunStore(worker_sessionmaker, FixtureKeys())):
-        _, waited = await dev_run_version(settings, env.client, **common)
-        _, simulated = await dev_run_version(settings, env.client, simulate=True, **common)
-        started, nothing = await dev_run_version(settings, env.client, wait=False, **common)
-        await env.client.get_workflow_handle(run_workflow_id(str(ctx.tenant_id), str(started))).result()
-    assert waited is not None and (waited.status, waited.outputs) == ("succeeded", {"v": 2})
-    assert simulated is not None and simulated.outputs is not None
-    assert ClaimRef.of(simulated.outputs["v"]) is not None  # an echo's output is undeclared: claimed whole (C1)
-    assert nothing is None
+    wf = await create(api_sessionmaker, ctx, graph())
+    assert (await publish(api_sessionmaker, ctx, wf, api_settings)).version is not None
+    await current(dispatch_sessionmaker)
+    await ready_workers(owner_sessionmaker)
+    return ctx, wf
+
+
+async def test_dev_run_admits_the_workflow_and_waits_for_the_end_the_database_records(
+    env: WorkflowEnvironment, workflow, dispatch_sessionmaker, worker_sessionmaker, api_settings
+) -> None:
+    ctx, wf = workflow
+    request = await dev_run.admit(dispatch_sessionmaker, KEYS, tenant_id=ctx.tenant_id, workflow_id=wf,
+                                  input={"x": 1}, simulate=False, idempotency_key="d1")  # fmt: skip
+    assert (request.source, request.status, request.mode) == ("dev", "queued", "live")
+    assert await dev_run.wait_for_end(dispatch_sessionmaker, ctx.tenant_id, request.id, within=0) is None
+    async with workers(env.client, DbRunStore(worker_sessionmaker, KEYS)):
+        assert await dispatch_once(dispatch_sessionmaker, env.client, KEYS, api_settings, BUILD) == {"started": 1}
+        ended = await dev_run.wait_for_end(dispatch_sessionmaker, ctx.tenant_id, request.id, within=30, poll=0.1)
+    assert ended == dev_run.Ended("run", "succeeded", None, None)
+
+
+async def test_dev_run_simulates_when_asked(workflow, dispatch_sessionmaker) -> None:
+    ctx, wf = workflow
+    request = await dev_run.admit(dispatch_sessionmaker, KEYS, tenant_id=ctx.tenant_id, workflow_id=wf,
+                                  input={"x": 1}, simulate=True, idempotency_key="d2")  # fmt: skip
+    assert (request.source, request.mode) == ("dev", "simulate")
+
+
+async def test_a_dev_run_admission_refuses_says_why(workflow, api_sessionmaker, dispatch_sessionmaker) -> None:
+    ctx, wf = workflow
+    await update(api_sessionmaker, ctx, wf, enabled=False)
+    with pytest.raises(admission.AdmissionRefusedError) as refused:
+        await dev_run.admit(dispatch_sessionmaker, KEYS, tenant_id=ctx.tenant_id, workflow_id=wf, input={"x": 1},
+                            simulate=False, idempotency_key="d3")  # fmt: skip
+    assert refused.value.reason == "workflow_disabled"
+
+
+async def test_a_request_that_ends_without_starting_reports_its_own_end(
+    workflow, dispatch_sessionmaker, api_settings
+) -> None:
+    from tests.apps.dispatcher.support import begin
+
+    ctx, wf = workflow
+    request = await dev_run.admit(dispatch_sessionmaker, KEYS, tenant_id=ctx.tenant_id, workflow_id=wf,
+                                  input={"x": 1}, simulate=False, idempotency_key="d4")  # fmt: skip
+    from dewpoint.apps.dispatcher import dispatch
+
+    starting = await begin(dispatch_sessionmaker, request, api_settings)
+    assert await dispatch.settle(dispatch_sessionmaker, starting, dispatch.Outcome("collision")) == "dead"
+    ended = await dev_run.wait_for_end(dispatch_sessionmaker, ctx.tenant_id, request.id, within=0)
+    assert ended == dev_run.Ended("request", "dead", "id_collision", None)

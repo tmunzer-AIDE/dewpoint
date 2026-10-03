@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import delete, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.exceptions import ApplicationError
@@ -22,6 +22,7 @@ from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.crypto.keys import KeySource
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.claims import SecretIndex
+from dewpoint.core.models.requests import RunSlot
 from dewpoint.core.models.workflows import WorkflowVersion
 from dewpoint.core.plugins.registry import load_node_types
 from dewpoint.core.runs import service as runs
@@ -176,57 +177,70 @@ class DbRunStore:
             )
 
     async def project(self, data: ProjectInput) -> None:
+        """One transaction. A projection the database refuses (a deterministic error) is written again row by row in
+        the same transaction, and a row refused again is logged and skipped. A run's end holds its row locked from the
+        start, past any refused savepoint, until its slot is released: the reconciler, which reads both before it puts
+        a start back in the queue, never sees one without the other (the owner's M3 review)."""
         tenant = uuid.UUID(data.tenant_id)
-        try:
-            async with self.sessionmaker() as s, s.begin():
-                await tenant_scope(s, tenant)
-                if data.start is not None:
-                    await _start(s, tenant, data.start)
-                await runs.upsert_steps(s, tenant, [_row(r) for r in data.steps])
-                if data.run is not None:
-                    await _finish(s, data.run)
-        except DBAPIError as e:
-            if _refused(e) is None:
-                raise
-            await self._one_by_one(tenant, data)
-
-    async def _one_by_one(self, tenant: uuid.UUID, data: ProjectInput) -> None:
         async with self.sessionmaker() as s, s.begin():
             await tenant_scope(s, tenant)
-            if data.start is not None:
-                try:
-                    async with s.begin_nested():
-                        await _start(s, tenant, data.start)
-                except DBAPIError as e:
-                    state = _refused(e)
-                    if state is None:
-                        raise
-                    _log.warning("projection_start_refused", run_id=data.start.run_id, sqlstate=state)
-            for row in data.steps:
-                try:
-                    async with s.begin_nested():
-                        await runs.upsert_steps(s, tenant, [_row(row)])
-                except DBAPIError as e:
-                    state = _refused(e)
-                    if state is None:
-                        raise
-                    _log.warning(
-                        "projection_row_refused",
-                        run_id=row.run_id,
-                        step_id=row.step_id,
-                        iteration_key=row.iteration_key,
-                        attempt=row.attempt,
-                        sqlstate=state,
-                    )
             if data.run is not None:
-                try:
-                    async with s.begin_nested():
+                await _hold(s, data.run)
+            try:
+                async with s.begin_nested():
+                    if data.start is not None:
+                        await _start(s, tenant, data.start)
+                    await runs.upsert_steps(s, tenant, [_row(r) for r in data.steps])
+                    if data.run is not None:
                         await _finish(s, data.run)
-                except DBAPIError as e:
-                    state = _refused(e)
-                    if state is None:
-                        raise
-                    _log.warning("projection_run_refused", run_id=data.run.run_id, sqlstate=state)
+                        await _release(s, data.run)
+            except DBAPIError as e:
+                if _refused(e) is None:
+                    raise
+                await self._one_by_one(s, tenant, data)
+
+    async def _one_by_one(self, s: AsyncSession, tenant: uuid.UUID, data: ProjectInput) -> None:
+        if data.start is not None:
+            try:
+                async with s.begin_nested():
+                    await _start(s, tenant, data.start)
+            except DBAPIError as e:
+                state = _refused(e)
+                if state is None:
+                    raise
+                _log.warning("projection_start_refused", run_id=data.start.run_id, sqlstate=state)
+        for row in data.steps:
+            try:
+                async with s.begin_nested():
+                    await runs.upsert_steps(s, tenant, [_row(row)])
+            except DBAPIError as e:
+                state = _refused(e)
+                if state is None:
+                    raise
+                _log.warning(
+                    "projection_row_refused",
+                    run_id=row.run_id,
+                    step_id=row.step_id,
+                    iteration_key=row.iteration_key,
+                    attempt=row.attempt,
+                    sqlstate=state,
+                )
+        if data.run is not None:
+            try:
+                async with s.begin_nested():
+                    await _finish(s, data.run)
+            except DBAPIError as e:
+                state = _refused(e)
+                if state is None:
+                    raise
+                _log.warning("projection_run_refused", run_id=data.run.run_id, sqlstate=state)
+            await _release(s, data.run)  # the execution ended either way
+
+
+async def _hold(s: AsyncSession, run: RunSummary) -> None:
+    """The run's row locked for the whole end write, in the outer transaction: a savepoint's rollback never releases
+    it. Taken first, in the order the reconciler takes it too (row, then slot)."""
+    await s.execute(text("select 1 from runs where id = :i for update"), {"i": uuid.UUID(run.run_id)})
 
 
 async def _start(s: AsyncSession, tenant: uuid.UUID, start: RunStart) -> None:
@@ -243,6 +257,12 @@ async def _start(s: AsyncSession, tenant: uuid.UUID, start: RunStart) -> None:
         parent_iteration_key=start.parent_iteration_key,
         started_at=datetime.fromisoformat(start.started_at),
     )
+
+
+async def _release(s: AsyncSession, run: RunSummary) -> None:
+    """A root run's end frees its tenant's slot in the end write's own transaction (engine 2b spec §7.5); a sub-run
+    holds none, so this matches nothing for it."""
+    await s.execute(delete(RunSlot).where(RunSlot.run_id == uuid.UUID(run.run_id)))
 
 
 async def _finish(s: AsyncSession, run: RunSummary) -> None:

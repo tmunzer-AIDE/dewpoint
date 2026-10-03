@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from dewpoint.core.claims import secret_index
 from dewpoint.core.claims import service as claims
 from dewpoint.core.claims.cipher import ClaimCipher
+from dewpoint.core.claims.secret_index import SECRET_INDEX_LIMIT
 from dewpoint.core.crypto.keys import KeySource
 from dewpoint.engine.handles import contains_marker
 from dewpoint.engine.runtime.projection import location
@@ -27,10 +28,15 @@ FORGED = "The run's input holds the reserved key `$claim`, which only Dewpoint w
 _REASONS = 5  # an input that breaks more rules is told about the first ones
 
 
+INPUT_INVALID = "input_invalid"
+
+
 class InputRefusedError(Exception):
-    def __init__(self, reasons: list[str]) -> None:
+    """`reasons`: what to tell the caller, places and rules only; `reason`: its code (engine 2b spec §9)."""
+
+    def __init__(self, reasons: list[str], reason: str = INPUT_INVALID) -> None:
         super().__init__("; ".join(reasons))
-        self.reasons = reasons
+        self.reasons, self.reason = reasons, reason
 
 
 def reasons(schema: Mapping[str, Any], value: Any) -> list[str]:
@@ -76,5 +82,5 @@ async def claim_input(
         try:
             await secret_index.extend(s, index, tenant_id, root_run_id, list(done.secrets))
         except secret_index.SecretIndexLimitError as e:
-            raise InputRefusedError([str(e)]) from None
+            raise InputRefusedError([str(e)], SECRET_INDEX_LIMIT) from None
     return done.envelope

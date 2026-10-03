@@ -2,7 +2,6 @@
 """The claim tables (engine 2b spec §3.1, §3.4, §3.7, §14): tenant-scoped under forced row-level security, written
 once and never changed, and reachable only by the roles that make and resolve claims."""
 
-import hashlib
 import uuid
 from typing import Any
 
@@ -32,8 +31,7 @@ def row(table: str, tenant: uuid.UUID) -> dict[str, Any]:
         return {"root_run_id": run, "tenant_id": tenant, "version": 1, "string_count": 0, "byte_count": 0,
                 "ciphertext": b"\x01"}  # fmt: skip
     claim = {"id": uuid.uuid4(), "tenant_id": tenant, "owner_run_id": run, "root_run_id": run,
-             "sensitive_pointers": "[]", "content_hash": hashlib.sha256(b"x").digest(),
-             "ciphertext": b"\x01"}  # fmt: skip
+             "sensitive_pointers": "[]", "ciphertext": b"\x01"}  # fmt: skip
     if table == "run_inputs":
         return {**claim, "pointer": ""}
     return {**claim, "kind": "output", "step_id": uuid.uuid4(), "iteration_key": "", "attempt": 1}
@@ -82,10 +80,12 @@ async def test_a_row_for_another_tenant_is_refused(owner_sessionmaker, worker_se
             await s.execute(insert(table, values), values)
 
 
-# Who may do what. Admission (the dispatch role, until 2b-2's dispatcher) claims a trigger and seeds the secret index;
-# the worker claims during a run, grants, and resolves. Nobody updates or deletes a claim: retention (2b-4) gets its
-# own role.
+# Who may do what. Admission claims a trigger and seeds the secret index in its caller's transaction: the API's (the
+# owner's ruling on 2b-2), the CLI's as dispatch; the worker claims during a run, grants, and resolves. Nobody updates
+# or deletes a claim: retention (2b-4) gets its own role.
 ALLOWED = {
+    ("api", "run_inputs"): {"select", "insert"},
+    ("api", "run_secret_index"): {"select", "insert", "update"},
     ("dispatch", "run_inputs"): {"select", "insert"},
     ("dispatch", "run_secret_index"): {"select", "insert", "update"},
     ("worker", "run_inputs"): {"select", "insert"},

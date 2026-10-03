@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Runs, read-only (spec §8): the list of top-level runs, and one run with its steps and the sub-runs it started (its
-sub-flows and failure handler). The UI reads this projection, never Temporal history. Starting runs isn't public
-until 2b."""
+"""Runs, read-only (spec §8; engine 2b spec §7.7): requests and top-level runs listed together, and one with its steps
+and the sub-runs it started (its sub-flows and failure handler). The UI reads this projection, never Temporal history.
+A request that hasn't started is shown as its request, never as the row an attempt pre-created. Starting a run is
+`run_requests`'s."""
 
 import uuid
 from datetime import datetime
@@ -11,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.http import TenantContext, get_db, require
+from dewpoint.core.models.requests import RunRequest
 from dewpoint.core.models.runs import Run, RunStep
 from dewpoint.core.runs import service
 
@@ -21,6 +23,47 @@ def _when(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
 
 
+def _request(r: RunRequest | None) -> dict[str, object] | None:
+    return {"status": r.status, "source": r.source, "reason": r.reason} if r is not None else None
+
+
+def _item(i: service.Listed) -> dict[str, object]:
+    return {
+        "id": str(i.id),
+        "workflow_id": str(i.workflow_id),
+        "version_id": str(i.version_id) if i.version_id else None,
+        "mode": i.mode,
+        "status": i.status,
+        "queued_at": _when(i.queued_at),
+        "started_at": _when(i.started_at),
+        "ended_at": _when(i.ended_at),
+        "error": {"code": i.error_code, "message": i.error_message} if i.error_code else None,
+        "iterations": i.iterations,
+        "kind": i.kind,
+        "parent_run_id": None,
+        "request": {"status": i.request_status, "source": i.source, "reason": i.reason} if i.request_status else None,
+    }
+
+
+def _unstarted(r: RunRequest) -> dict[str, object]:
+    """A request that hasn't started, as the list shows it: its own status, no run yet."""
+    return {
+        "id": str(r.id),
+        "workflow_id": str(r.workflow_id),
+        "version_id": str(r.workflow_version_id) if r.workflow_version_id else None,
+        "mode": r.mode,
+        "status": r.status,
+        "queued_at": _when(r.queued_at),
+        "started_at": None,
+        "ended_at": _when(r.ended_at),
+        "error": None,
+        "iterations": 0,
+        "kind": "run",
+        "parent_run_id": None,
+        "request": _request(r),
+    }
+
+
 def _run(r: Run) -> dict[str, object]:
     return {
         "id": str(r.id),
@@ -28,6 +71,7 @@ def _run(r: Run) -> dict[str, object]:
         "version_id": str(r.workflow_version_id),
         "mode": r.mode,
         "status": r.status,
+        "queued_at": _when(r.queued_at),
         "started_at": _when(r.started_at),
         "ended_at": _when(r.ended_at),
         "error": {"code": r.error_code, "message": r.error_message} if r.error_code else None,
@@ -71,13 +115,14 @@ async def list_runs(
     ctx: TenantContext = Depends(require(P.RUN_VIEW)),
     db: AsyncSession = Depends(get_db, scope="function"),
 ) -> list[dict[str, object]]:
-    """Newest first. The next page: `before` and `before_id`, the last run's `started_at` and `id`, always together:
-    runs can start in the same instant, so the time alone would skip some."""
+    """Requests and runs, newest first by `(queued_at, id)`. The next page: `before` and `before_id`, the last item's
+    `queued_at` and `id`, always together: items can be queued in the same instant, so the time alone would skip
+    some."""
     if (before is None) != (before_id is None):
         raise HTTPException(422, detail={"error": "invalid_cursor", "message": "Give before and before_id together."})
     cursor = (before, before_id) if before is not None and before_id is not None else None
-    runs = await service.list_runs(db, workflow_id=workflow_id, before=cursor, limit=limit)
-    return [_run(r) for r in runs]
+    items = await service.list_items(db, workflow_id=workflow_id, before=cursor, limit=limit)
+    return [_item(i) for i in items]
 
 
 @router.get("/t/{tenant_id}/runs/{run_id}")
@@ -86,11 +131,15 @@ async def get_run(
     ctx: TenantContext = Depends(require(P.RUN_VIEW)),
     db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, object]:
+    request = await db.get(RunRequest, run_id)  # row-level security: the caller's tenant's only
+    if request is not None and request.status != "started":
+        return {**_unstarted(request), "steps": [], "children": []}
     run = await service.get_run(db, run_id)
     if run is None or run.tenant_id != ctx.tenant_id:
         raise HTTPException(404, detail={"error": "not_found"})
     return {
         **_run(run),
+        "request": _request(request),
         "steps": [_step(r) for r in await service.run_steps(db, run.id)],
         "children": [_child(c) for c in await service.children(db, run.id)],
     }

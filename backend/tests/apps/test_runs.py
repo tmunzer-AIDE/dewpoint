@@ -112,7 +112,7 @@ class FakeClient:
         self.calls: list[tuple[str, WorkflowIDReusePolicy]] = []
 
     async def start_workflow(
-        self, _run: Any, arg: RunInput, *, id: str, task_queue: str, id_reuse_policy: WorkflowIDReusePolicy
+        self, _run: Any, arg: RunInput, *, id: str, task_queue: str, id_reuse_policy: WorkflowIDReusePolicy, **_: Any
     ) -> None:
         self.calls.append((id, id_reuse_policy))
         answer = self.answers.pop(0) if self.answers else None

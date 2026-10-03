@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+# Development (engine 2b spec §2.1): CI and local work opt in with
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+# on a database created for it (a Compose project's own volume) and its own Temporal namespace
+# (DEWPOINT_TEMPORAL_NAMESPACE). The migrate step then records `development`: runs start with no gate, and every
+# process that talks to Temporal refuses any other namespace. The label proves nothing about the data: synthetic
+# fixtures only. Plain Compose stays `production`, and gated.
+services:
+  migrate:
+    environment:
+      DEWPOINT_ENVIRONMENT: development

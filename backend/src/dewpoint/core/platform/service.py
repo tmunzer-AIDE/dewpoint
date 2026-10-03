@@ -7,12 +7,14 @@ operator's job. Its engine worker instances record what they can do (§2.7)."""
 
 import uuid
 from collections.abc import Sequence
+from datetime import timedelta
 
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dewpoint.core.models.platform import PlatformSettings, WorkerInstance
+from dewpoint.core.models.platform import DispatcherReport, PlatformSettings, WorkerInstance
+from dewpoint.core.models.requests import CurrentBuild
 
 PRODUCTION = "production"
 DEVELOPMENT = "development"
@@ -78,4 +80,58 @@ async def record_worker(
     statement = insert(WorkerInstance).values(instance_id=instance_id, **values)
     await s.execute(
         statement.on_conflict_do_update(index_elements=["instance_id"], set_={**values, "checked_at": func.now()})
+    )
+
+
+LIVE_WINDOW = timedelta(seconds=90)  # an instance that hasn't checked in since isn't live (engine 2b spec §2.7)
+
+
+async def workers_ready(s: AsyncSession, build_id: str, required: Sequence[str]) -> list[str]:
+    """What holds `build_id` back from running new work, empty when nothing does (engine 2b spec §2.7): every live
+    instance of it (checked within LIVE_WINDOW, by the statement's clock) is healthy and holds every capability in
+    `required`, and at least one exists. One fresh healthy row can't hide another live instance that lacks one."""
+    live = (
+        (
+            await s.execute(
+                select(WorkerInstance).where(
+                    WorkerInstance.build_id == build_id,
+                    WorkerInstance.checked_at >= func.statement_timestamp() - LIVE_WINDOW,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not live:
+        return [f"No live engine worker instance of build {build_id}."]
+    problems = []
+    for instance in sorted(live, key=lambda i: str(i.instance_id)):
+        missing = sorted(set(required) - set(instance.capabilities))
+        if not instance.healthy:
+            problems.append(f"Engine worker instance {instance.instance_id} of build {build_id} isn't healthy.")
+        elif missing:
+            problems.append(
+                f"Engine worker instance {instance.instance_id} of build {build_id} lacks {', '.join(missing)}."
+            )
+    return problems
+
+
+async def record_current_build(s: AsyncSession, build_id: str, engine_abi: int) -> None:
+    """The current build as the dispatcher just read it from Temporal, and when: admission's ABI check (the owner's
+    ruling on 2b-2), which fails closed once the record is stale."""
+    values = {"build_id": build_id, "engine_abi": engine_abi, "observed_at": func.statement_timestamp()}
+    statement = insert(CurrentBuild).values(id=1, **values)
+    await s.execute(statement.on_conflict_do_update(index_elements=["id"], set_=values))
+
+
+async def record_dispatcher(
+    s: AsyncSession, *, instance_id: uuid.UUID, kind: str, build_id: str, details: dict[str, object]
+) -> None:
+    """A dispatcher instance's report, written each cycle (engine 2b spec §10.6)."""
+    statement = insert(DispatcherReport).values(instance_id=instance_id, kind=kind, build_id=build_id, details=details)
+    await s.execute(
+        statement.on_conflict_do_update(
+            index_elements=["instance_id"],
+            set_={"kind": kind, "build_id": build_id, "details": details, "reported_at": func.now()},
+        )
     )

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typer.testing import CliRunner
 
 from dewpoint.apps.cli import main as cli
+from dewpoint.apps.dispatcher.main import run as run_dispatcher
 from dewpoint.apps.worker.main import run
 from dewpoint.core.config import Settings, get_settings
 from dewpoint.core.platform.service import (
@@ -56,3 +57,14 @@ def test_the_clis_temporal_commands_wont_connect_before_the_record(
     result = CliRunner().invoke(cli.app, ["deployment", "status"])
     assert result.exit_code == 2
     assert "isn't recorded" in result.output
+
+
+@pytest.mark.usefixtures("_test_users")
+async def test_a_dispatcher_wont_drive_another_namespace(
+    pg_url: str, owner_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """Engine 2b spec §2.1: every process that talks to Temporal checks its namespace first, the dispatcher too."""
+    async with owner_sessionmaker() as s, s.begin():
+        await record_environment(s, environment=DEVELOPMENT, namespace="dewpoint-dev")
+    with pytest.raises(EnvironmentMismatchError, match="configured for `default`"):
+        await run_dispatcher(worker_settings(pg_url))

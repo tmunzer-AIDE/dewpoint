@@ -17,6 +17,7 @@ from dewpoint.apps.api.routes import (
     mfa,
     node_types,
     passkeys,
+    run_requests,
     runs,
     tenants,
     workflows,
@@ -24,6 +25,7 @@ from dewpoint.apps.api.routes import (
 from dewpoint.core.config import Settings, get_settings
 from dewpoint.core.crypto.kek import KekSet
 from dewpoint.core.crypto.keyring import Keyring
+from dewpoint.core.crypto.keys import KeyringKeys
 from dewpoint.core.db import make_engine, make_sessionmaker
 
 
@@ -43,6 +45,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.engine = make_engine(settings.database_url)
     app.state.sessionmaker = make_sessionmaker(app.state.engine)
     app.state.keyring = Keyring(KekSet.from_settings(settings))
+    app.state.keys = KeyringKeys(app.state.sessionmaker, app.state.keyring)  # admission's: claims, envelopes, digests
     # Created eagerly (not in the lifespan) so ASGI test transports, which skip lifespan, get it too.
     app.state.http = httpx.AsyncClient(timeout=10, follow_redirects=False)
     app.add_middleware(
@@ -63,6 +66,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         connections.router,
         node_types.router,
         workflows.router,
+        run_requests.router,
         runs.router,
     ):
         app.include_router(router)

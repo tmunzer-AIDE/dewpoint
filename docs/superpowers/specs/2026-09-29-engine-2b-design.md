@@ -1000,9 +1000,13 @@ In this order:
 
 `dewpoint dispatcher` (role `dewpoint_dispatch`), every second:
 - Before any transaction, it reads the current build from Temporal and records it, with when it was observed, for
-  admission's ABI check (§7.2).
-- It picks, per tenant, the oldest **due** `queued` request, through `dispatch_candidates()`, which returns ids only:
-  FIFO among due requests, so one in backoff doesn't block those behind it. Up to 50 tenants a cycle.
+  admission's ABI check (§7.2). A cycle that can't read it (Temporal, or the database, briefly unavailable) dispatches
+  nothing, and the next one asks again; a cycle that fails is logged and the process goes on, and Compose restarts a
+  dispatcher that ends.
+- It picks, per tenant, the oldest **due** `queued` request, through `dispatch_candidates()`, which returns
+  queue-selection metadata only (ids, and when the request was queued): FIFO among due requests, so one in backoff
+  doesn't block those behind it. Up to 50 tenants a cycle, going on from where the last full pick ended and wrapping
+  around, so tenants that can't start (at their limit, waiting on a key) never keep the others from being picked.
 - In one transaction, under the shared gate and tenant locks, it locks the request (`SKIP LOCKED`) and checks:
   - a request whose pre-created row already records an end (an end write that landed after an absence put it
     back, §7.6) is never started again: it goes back to `starting`, without a slot, with an alert, for the
@@ -1942,8 +1946,8 @@ Each plan updates the older specs as it lands, as the engine-core 5.x revisions 
     key admin has a platform-wide read of `run_requests` and a narrow `queued` → `cancelled` update, for retirement;
   - the API admits (claims, envelope, request) and cancels a queued request; the dispatcher moves requests and holds
     slots and limits; the worker releases a slot;
-  - cross-tenant reads are functions returning ids only: `dispatch_candidates()`, `reconcile_candidates()`,
-    `cancel_candidates()`; writes past a role's grants are functions with one narrow effect: `end_unstarted_run()`
+  - cross-tenant reads are functions returning queue-selection metadata only: `dispatch_candidates()` (ids and
+    `queued_at`), `reconcile_candidates()` and `cancel_candidates()` (ids); writes past a role's grants are functions with one narrow effect: `end_unstarted_run()`
     (the API and the key admin: a cancelled request's row in the caller's tenant) and `disable_production_runs()`
     (the key admin: the gate off, under its lock).
 - **Permissions:** `run.cancel` (operators and above), `trigger.manage` (editors and above), `workflow.declassify`

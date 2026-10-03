@@ -2,7 +2,12 @@
 import uuid
 
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+
+# SQLSTATE classes of a server that doesn't serve: connection exception, insufficient resources, operator intervention
+UNAVAILABLE_STATES = ("08", "53", "57")
 
 
 def make_engine(url: str) -> AsyncEngine:
@@ -11,6 +16,16 @@ def make_engine(url: str) -> AsyncEngine:
 
 def make_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(engine, expire_on_commit=False)
+
+
+def unavailable(e: BaseException) -> bool:
+    """Whether `e` says the database didn't answer, never that a statement was wrong: a connection the driver lost
+    (SQLAlchemy invalidates it), a server refusing to serve (`UNAVAILABLE_STATES`), the network, or no pooled connection
+    in time. A statement's own error (a syntax error, a constraint) is none of them."""
+    if isinstance(e, DBAPIError):
+        state = getattr(e.orig, "sqlstate", None)
+        return e.connection_invalidated or (isinstance(state, str) and state[:2] in UNAVAILABLE_STATES)
+    return isinstance(e, (OSError, PoolTimeoutError))
 
 
 async def _set_scope(session: AsyncSession, tenant: str, user: str) -> None:

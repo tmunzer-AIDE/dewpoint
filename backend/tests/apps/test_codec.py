@@ -19,6 +19,7 @@ from dewpoint.apps.codec import (
     CodecRefusedError,
     TenantCodec,
 )
+from dewpoint.core.crypto.keyring import NoKeyError
 from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.engine.runtime.size import CODEC_OVERHEAD
 from tests.support.keys import FixtureKeys
@@ -116,9 +117,9 @@ async def test_a_tenant_without_a_key_is_refused() -> None:
     """Every failure to encode is the codec's refusal, so a client that sends what it encodes knows nothing was sent
     (owner's review, Task 6); the cause stays chained."""
     c = codec(FixtureKeys(missing={A})).with_context(workflow(A))
-    with pytest.raises(CodecRefusedError, match=r"couldn't be encrypted \(LookupError\)") as e:
+    with pytest.raises(CodecRefusedError, match=r"couldn't be encrypted \(NoKeyError\)") as e:
         await c.encode([payload(1)])
-    assert isinstance(e.value.__cause__, LookupError)
+    assert isinstance(e.value.__cause__, NoKeyError)
 
 
 @pytest.mark.parametrize("size", [0, 1, 1_000, 65_536, 1_835_008, 2_097_152])

@@ -8,10 +8,13 @@ from typing import Any
 import pytest
 from sqlalchemy import func, select, text
 
+from dewpoint.apps import admission
 from dewpoint.apps.runs import PRODUCTION_RUNS_DISABLED, NotAdmissibleError, start_run
 from dewpoint.core.models.runs import Run
 from dewpoint.core.platform.service import NOT_RECORDED, PRODUCTION, record_environment
 from dewpoint.engine.runtime.activities import SIMULATE
+from tests.apps.test_admission import admit, current
+from tests.apps.test_admission import published as published_workflow
 from tests.apps.test_runs import FakeClient, published
 
 
@@ -64,3 +67,20 @@ async def test_a_deployment_that_never_recorded_its_environment_admits_nothing(
     reasons, client = await refused(dispatch_sessionmaker, api_settings, ctx, version)
     assert reasons == [NOT_RECORDED]
     assert (client.calls, await run_count(owner_sessionmaker)) == ([], 0)
+
+
+async def test_admission_refuses_an_interactive_request_and_queues_a_durable_one_while_the_gate_is_off(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """Engine 2b spec §2.3, §2.5: the run API, the CLI and re-runs are refused with `production_runs_disabled`; a
+    schedule tick or a webhook event still records its work, queued, which waits for the gate."""
+    async with owner_sessionmaker() as s, s.begin():
+        await record_environment(s, environment=PRODUCTION, namespace="default")
+    ctx, wf = await published_workflow(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings)
+    await current(dispatch_sessionmaker)
+    for source in ("manual", "rerun", "dev"):
+        with pytest.raises(admission.AdmissionRefusedError) as gate:
+            await admit(api_sessionmaker, ctx, wf, key=source, source=source)
+        assert gate.value.reason == "production_runs_disabled"
+    durable = await admit(api_sessionmaker, ctx, wf, key="tick", source="schedule")
+    assert (durable.new, durable.request.status) == (True, "queued")

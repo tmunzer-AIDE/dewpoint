@@ -61,3 +61,45 @@ def test_the_migrate_step_gives_tenants_keys_as_the_key_admin() -> None:
     assert environment("migrate")["DEWPOINT_ADMIN_DATABASE_URL"] == (
         "postgresql+asyncpg://dewpoint_admin_login:admin-pw@postgres/dewpoint"
     )
+
+
+OVERRIDE = COMPOSE.with_name("docker-compose.dev.yml")
+CI = COMPOSE.parents[2] / ".github" / "workflows" / "ci.yml"
+
+
+def test_the_dispatcher_runs_as_the_dispatch_role_on_the_recorded_namespace() -> None:
+    """Engine 2b spec §7.3, §14: `dewpoint dispatcher` (with its reconciler) logs in as `dewpoint_dispatch`, and checks
+    the namespace the migrate step recorded before it connects to Temporal (§2.1)."""
+    dispatcher, env = service("dispatcher"), environment("dispatcher")
+    assert dispatcher["command"] == ["dewpoint", "dispatcher"]
+    assert env["DEWPOINT_DATABASE_URL"] == "postgresql+asyncpg://dewpoint_dispatch_login:dispatch-pw@postgres/dewpoint"
+    assert (env["DEWPOINT_TEMPORAL_ADDRESS"], env["DEWPOINT_TEMPORAL_NAMESPACE"]) == ("temporal:7233", "dewpoint-ci")
+    assert dispatcher["depends_on"]["migrate"] == {"condition": "service_completed_successfully"}
+    assert dispatcher["depends_on"]["temporal"] == {"condition": "service_healthy"}
+
+
+def test_a_stopping_dispatcher_outlasts_a_starts_deadline() -> None:
+    """A start in flight when the dispatcher is stopped gets its answer, or its deadline, before the process goes."""
+    from dewpoint.apps.dispatcher.dispatch import START_DEADLINE
+
+    grace = service("dispatcher")["stop_grace_period"]
+    assert grace.endswith("s") and int(grace[:-1]) > START_DEADLINE.total_seconds()
+
+
+def test_plain_compose_is_production_and_the_development_override_initializes_development() -> None:
+    """§2.1: ordinary Compose is `production`, and gated; CI and local development opt in through their own override,
+    which changes nothing else."""
+    assert environment("migrate")["DEWPOINT_ENVIRONMENT"] == "production"
+    override: dict[str, Any] = yaml.safe_load(OVERRIDE.read_text())
+    assert override["services"] == {"migrate": {"environment": {"DEWPOINT_ENVIRONMENT": "development"}}}
+
+
+def test_ci_runs_every_compose_command_with_the_development_override() -> None:
+    e2e = yaml.safe_load(CI.read_text())["jobs"]["e2e"]
+    assert e2e["env"]["COMPOSE_FILE"] == "docker-compose.yml:docker-compose.dev.yml"
+
+
+def test_a_dispatcher_that_exits_is_restarted() -> None:
+    """The whole-branch review: a dispatcher process that ends (whatever the cause) comes back, so queued runs keep
+    starting once what stopped it recovers."""
+    assert service("dispatcher")["restart"] == "unless-stopped"

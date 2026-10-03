@@ -86,7 +86,7 @@ async def test_forced_retirement_previews_then_applies(admin_sessionmaker, owner
             )
         ).all()
     assert [r.tenant_id for r in rows] == [None, tenant]
-    assert rows[1].details == {"forced": True, "workflows": [str(wf)]}
+    assert rows[1].details == {"forced": True, "workflows": [str(wf)], "requests": []}  # no queued request
 
 
 async def test_retirement_requires_read_committed(admin_sessionmaker) -> None:

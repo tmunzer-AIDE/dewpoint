@@ -1,15 +1,120 @@
-# Runs: the worker, development runs and the runs API
+# Runs: admission, the dispatcher, the worker and the runs API
 
 Spec: `docs/superpowers/specs/2026-09-25-engine-core-design.md` §6 (the interpreter), §8 (projection), §9 (starting
-runs), and `2026-09-29-engine-2b-design.md` §3–§5 (claims, taint, sizes).
+runs), and `2026-09-29-engine-2b-design.md` §3–§5 (claims, taint, sizes) and §7 (admission and dispatch).
 
 A run executes one published version of a workflow on Temporal. `RunGraph`, the interpreter, walks the graph: control
 nodes (`if`, `switch`, `loop`, …) run inside the workflow, and each attempt of a plugin step runs as an activity.
 Every step's progress is copied into the database (`run_steps`), which is what the UI reads; Temporal's own history is
 never shown.
 
-**2a runs are internal.** Only `dewpoint dev run` and the tests start runs. Triggers, schedules, webhooks and the
-public run API arrive with sub-project 2b, and so do admission control and idempotency keys.
+A run starts as a **request**: the run API and `dewpoint dev run` admit it, in their own transaction, and
+`dewpoint dispatcher` starts it on Temporal within its tenant's slots. Nothing else starts a run. Schedules, webhooks
+and CSV starts arrive with sub-project 2b-3.
+
+## Starting a run
+
+`POST /api/v1/t/{tenant}/workflows/{workflow}/runs`, with the `run.start` permission (operators and up), an
+`Idempotency-Key` header (at most 255 characters; without one, 428 `idempotency_key_required`) and the body
+`{"input": {...}, "mode": "live" | "simulate"}`, admits a request and answers 202 with it, `queued`. The API never
+talks to Temporal.
+
+- The same key with the same body returns the same request, as it is now; another body under the key is 409
+  `idempotency_conflict`. Retrying after a lost answer is safe.
+- Admission takes the workflow's active version, if the workflow is enabled, and freezes it in the request. It checks
+  the deployment's environment is recorded and, in `production`, that production runs are on; that the dispatcher
+  recorded a current build within the last 2 minutes, of the version's engine ABI; that nothing the version uses is
+  retired; and the input, against the version's input schema. Then it claims the input, as any run's
+  ([below](#sensitive-and-large-values-claims)), and keeps the request's input, with handles in place of its claimed
+  values, encrypted beside them (its trigger envelope).
+- A refusal answers with its code and fixed messages that never quote a value: 503 `production_runs_disabled`,
+  `environment_not_recorded`, `no_current_build` or `key_unusable` (the tenant's data key can't be read); 422
+  `input_invalid` or `secret_index_limit`, with each place and rule the input breaks; 409 `workflow_disabled`,
+  `not_active`, `version_unusable`, `node_type_retired`, `cel_profile_retired` or `tenant_erasing`; 404 for a workflow
+  that isn't the tenant's. A refused start leaves no request.
+
+`GET /api/v1/t/{tenant}/workflows/{workflow}/start-form` (`run.start`) describes the active version's input for a
+form: its typed top-level fields, each with its `type`, whether it's `required`, its `title`, `description`, `enum`
+and `default`, and `x-dewpoint-picker` as `picker`. A sensitive field never shows a value its schema holds:
+`default_masked` and `enum_masked` say there is one. 409 `not_active` without an active version.
+
+## The dispatcher
+
+`dewpoint dispatcher` starts admitted requests. Run one or more. It needs `DEWPOINT_DATABASE_URL` with a login in the
+`dewpoint_dispatch` role, `DEWPOINT_TEMPORAL_ADDRESS` and `DEWPOINT_TEMPORAL_NAMESPACE` (checked against the recorded
+namespace before it connects: exit 2 otherwise, [`deployment.md`](deployment.md)), and the KEK. Every second it:
+
+1. reads the current build from Temporal and records it, for admission's engine ABI check;
+2. picks each tenant's oldest due request (through `dispatch_candidates()`, which returns ids and when they were
+   queued), up to 50 tenants, going on from where the last full pick ended so that tenants that can't start never
+   hold the others back, and, in one transaction under the production gate's and the tenant's shared locks, checks
+   again what must hold at a start:
+   - production runs on (in `production`), and the tenant not being erased;
+   - every live worker of the current build healthy, with every capability the build needs;
+   - nothing the frozen version uses retired, else the request is `cancelled` (`node_type_retired`,
+     `cel_profile_retired`), and the version of the build's engine ABI, else `cancelled` (`engine_abi_changed`);
+   - a free slot: a tenant runs at most `max_concurrent` top-level runs at once (`tenant_run_limits`, else the
+     platform's default, 5);
+   - the tenant's key: it opens the request's envelope and encrypts the start with it.
+
+   A check that doesn't hold leaves the request queued, no attempt counted: waiting isn't failing. An envelope that
+   doesn't open, or isn't JSON, makes the request `dead` (`envelope_unreadable`), audited; repairing a key never
+   reopens it: re-run it;
+3. reserves the slot, writes the run's row (`running`, no start time yet), marks the request `starting`, and starts the
+   workflow under its run's id, refusing a duplicate, with a 10-second deadline.
+
+What Temporal answers decides what follows:
+
+- accepted: `started`, and the run's start time recorded;
+- refused: back in the queue after 5 seconds, doubling up to 10 minutes; the 10th refusal makes it `dead`
+  (`start_refused`), audited, and its run `failed` with `start_failed`;
+- busy (`RESOURCE_EXHAUSTED`), or the start couldn't be encrypted: back in the queue, no attempt counted;
+- already started: it counts only once the execution's own start decodes to this request; anything else is an id
+  collision, which the server-built ids make impossible: `dead` (`id_collision`), with an alert;
+- no answer: it stays `starting`, its slot held, for the reconciler.
+
+The root run's end write releases its slot. A failure the dispatcher can't classify is logged (`dispatch_failed`, its
+type only) and leaves that request as it was; the cycle goes on with the other tenants. A cycle that can't read the
+current build from Temporal dispatches nothing (`dispatcher_observe_failed`), and the next one asks again; a cycle
+that fails is logged (`dispatcher_cycle_failed`) and the process goes on. Each instance records its
+last cycle in `dispatcher_reports`.
+
+### The reconciler
+
+One dispatcher at a time also leads the reconciler (an advisory lock held on a connection of its own; another takes
+over when it goes). It asks Temporal about each request at most once every 30 seconds:
+
+- **A request still `starting` 30 seconds after it became so.** An execution found is verified as above, and the
+  request is `started`. A `NOT_FOUND` from a namespace that answers puts it back in the queue, no attempt counted,
+  with a warning, but only while its run's row is still `running` and its slot still held: when its row records an end
+  or its slot is gone, its end write ran, and it's left `starting` with an error (`start_history_missing`) for an
+  operator. Any other answer leaves it `starting`; still so 10 minutes on, an error (`start_unresolved`). Each one it
+  settles is audited (`run.request.reconciled`).
+- **A started run whose row is still `running`,** once Temporal says the logical run's latest execution closed:
+  completed records the run's own result; cancelled, `cancelled`; terminated, `failed` with `terminated`; failed or
+  timed out, `failed` with `internal_error`, and an alert. Its slot is released in the same transaction. This is how a
+  run whose end write was lost, or refused, ends.
+- **A slot whose run's row has ended:** released once its execution is closed.
+- **History Temporal no longer has**, for a started run or a held slot: left as it is, with an error
+  (`run_history_missing`, `slot_history_missing`); no outcome is invented and no slot released. Recover it by hand.
+- **Cancels:** it sends each recorded cancel to Temporal, once.
+
+## Cancelling and re-running
+
+`POST /api/v1/t/{tenant}/runs/{id}/cancel`, with `run.cancel` (operators and up), names a request (its id is also its
+run's): a queued request is cancelled at once, 200 `cancelled` (reason `user_cancelled`), audited; a starting request
+or a running run has its cancel recorded, 202 `requested`, audited once: the dispatcher applies it when the start
+doesn't happen, or sends it to Temporal and the run ends `cancelled`. 409 `run_ended` when there's nothing left to
+cancel.
+
+`POST /api/v1/t/{tenant}/runs/{id}/rerun`, with `run.start` and an `Idempotency-Key`, admits a new request (source
+`rerun`) on the workflow's active version. With `{"input": {...}}` it uses that new input, offered whatever was
+retained. Without it, it uses the old request's complete input: rebuilt from its envelope and its claims in memory
+only, then validated and claimed again, so no old handle is reused; 410 `input_not_retained` for a run from before
+2b-2, a refused request, or an input retention has removed. `{"mode": ...}` is optional (the old one's by default).
+The key covers what was asked (the request re-run, the mode, any new input), and is checked before anything is
+rebuilt: an exact retry returns the request it admitted even once retention has removed the old input, and another
+re-run under the key is 409 `idempotency_conflict`. The audit entry names the request re-run (`rerun_of`).
 
 ## The worker
 
@@ -55,39 +160,42 @@ started on. Rolling out a build, and what Docker Compose runs (Temporal's dev se
 ## Starting a development run
 
 ```bash
-dewpoint dev run <version-id> --tenant <tenant-id> --input trigger.json
+dewpoint dev run <workflow-id> --tenant <tenant-id> --input input.json --wait 60
 ```
 
-- The version must be the **active** version of an **enabled** workflow, and nothing it uses may be retired. It,
-  and the sub-flows and failure handler it runs, must have been published for the engine ABI of the deployment's
-  current build, where the run starts ([`deployment.md`](deployment.md)).
+It admits the workflow's active version with the source `dev`, as any start is admitted
+([above](#starting-a-run)), and the dispatcher starts it: one must be running.
+
 - `--simulate` calls each plugin node's `simulate()` instead of `run()`: nothing is sent anywhere. A node without a
   simulation fails its step with `simulation_unavailable`. Timers still wait, as they would in a live run.
-- By default the command waits and prints the result. `--no-wait` prints the run id and returns.
-- Exit codes: 0 when the run succeeded; 1 when it ended otherwise, or its start was refused (by Temporal, or because
-  it couldn't be encrypted); 2 when it wasn't admitted (each reason is printed: in a `production` deployment,
-  "Production runs are off in this deployment"; a trigger that doesn't match the workflow's input schema, each place
-  and rule it breaks, never a value, a map's key shown as `*`; a trigger that holds the key `$claim`; a `dewpoint` of another engine ABI than
-  the current build's, [`deployment.md`](deployment.md)); 3 when Temporal never confirmed the start (see below).
-- It needs `DEWPOINT_DATABASE_URL` with a login in the `dewpoint_dispatch` role, the Temporal settings above, and the
-  KEK: it encrypts the trigger's claims and the start with the tenant's data key.
+- `--wait SECONDS` waits up to that long for the end the database records: its run's (status, code and message), or,
+  when it never started, the request's own (`cancelled`, `refused` or `dead`, with its reason). Without it, the
+  command prints the queued request and returns.
+- `--idempotency-key` retries a request; by default each invocation admits a new one.
+- Exit codes: 0 when it was admitted (with `--wait`: when its run succeeded); 1 when it ended otherwise; 2 when it
+  wasn't admitted (each message is printed, never a value: in a `production` deployment, "Production runs are off in
+  this deployment"; an input that doesn't match the workflow's input schema, each place and rule it breaks, a map's key
+  shown as `*`; an input that holds the key `$claim`; a version of another engine ABI than the current build's,
+  [`deployment.md`](deployment.md)); 3 when the wait ran out.
+- It needs `DEWPOINT_DATABASE_URL` with a login in the `dewpoint_dispatch` role and the KEK: it claims the input with
+  the tenant's data key. It doesn't talk to Temporal.
 
-The trigger is checked against the version's input schema when the run is admitted, then claimed
+The input is checked against the version's input schema when the request is admitted, then claimed
 ([below](#sensitive-and-large-values-claims)): its sensitive values, the positions its schema doesn't declare, and any
 value over 64 KiB are stored encrypted in `run_inputs`, and the run starts with handles in their place. A refused
-trigger leaves no run.
-
-**An unconfirmed start.** A start whose answer is lost looks like a failure, so it's retried with the same workflow id
-(`t:<tenant>:run:<run id>`), which Temporal refuses as a duplicate if the first attempt went through. A run is recorded
-as failed (`start_failed`) only when its start certainly never began: Temporal refused it, or the start couldn't be
-encrypted, so it was never sent (for example, the tenant has no data key: `dewpoint keys ensure-tenants` gives it
-one). If no attempt is answered at all, the run may be executing: it stays `running`, and the command exits 3.
+input leaves no request.
 
 ## Reading runs
 
-`GET /api/v1/t/{tenant}/runs` lists top-level runs, newest first (`workflow_id`, `before` and `limit` filter and page
-them). `GET /api/v1/t/{tenant}/runs/{run_id}` returns one run with its steps (one row per step, loop iteration and
-attempt) and its `children`: the sub-runs it started. The `iteration_key` is the loop step's key and the item's index,
+`GET /api/v1/t/{tenant}/runs` lists requests and top-level runs together, newest first by `(queued_at, id)`
+(`workflow_id`, `before`, `before_id` and `limit` filter and page them). A request's `queued_at` is when it was
+admitted; its run shares its id and `queued_at`; a run from before 2b-2 has its `started_at`. **The order changed in
+2b-2:** it was by start time, and the next page's cursor is now the last item's `queued_at` with its `id`, given
+together (else 422 `invalid_cursor`). Each item's `request` holds its `status`, `source` and `reason` (none for a run
+from before 2b-2). A request that hasn't started is shown as itself — `queued`, `starting`, `cancelled`, `refused` or
+`dead` — never as the row an attempt pre-created. `GET /api/v1/t/{tenant}/runs/{run_id}` returns one run with its
+steps (one row per step, loop iteration and attempt) and its `children`: the sub-runs it started (a request that hasn't
+started has neither). The `iteration_key` is the loop step's key and the item's index,
 like `each_ap:3`, or `outer:1/inner:4` when nested. Both need the `run.view` permission.
 
 Every run has a `kind`. A sub-flow's run (`subflow`) and a failure handler's (`failure_handler`) are runs of their

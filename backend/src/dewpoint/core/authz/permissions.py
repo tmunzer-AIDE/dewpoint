@@ -17,12 +17,13 @@ class P(StrEnum):
     WORKFLOW_DECLASSIFY = "workflow.declassify"  # publishing a version that lists declassified sites (2b §4.3)
     RUN_START = "run.start"
     RUN_VIEW = "run.view"
+    RUN_CANCEL = "run.cancel"  # a queued request at once, a running run through the dispatcher (2b §7.7)
     APPROVAL_DECIDE = "approval.decide"
     AGENT_GRANT = "agent.grant"
 
 
 _VIEWER = frozenset({P.TENANT_VIEW, P.WORKFLOW_VIEW, P.RUN_VIEW, P.CONNECTION_VIEW, P.MEMBER_VIEW})
-_OPERATOR = _VIEWER | {P.RUN_START, P.APPROVAL_DECIDE}
+_OPERATOR = _VIEWER | {P.RUN_START, P.RUN_CANCEL, P.APPROVAL_DECIDE}
 _EDITOR = _OPERATOR | {P.WORKFLOW_EDIT, P.WORKFLOW_PUBLISH, P.CONNECTION_USE}
 _ADMIN = _EDITOR | {
     P.TENANT_MANAGE,
