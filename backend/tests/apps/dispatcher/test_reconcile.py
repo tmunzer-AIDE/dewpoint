@@ -9,7 +9,7 @@ settles is audited (§2.4)."""
 import asyncio
 import dataclasses
 import uuid
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -19,8 +19,9 @@ from sqlalchemy.exc import IntegrityError
 from temporalio.service import RPCStatusCode
 
 from dewpoint.apps.dispatcher import dispatch, reconcile
+from dewpoint.apps.worker import store
 from dewpoint.apps.worker.store import DbRunStore
-from dewpoint.engine.runtime.activities import ENGINE_QUEUE, ProjectInput
+from dewpoint.engine.runtime.activities import ENGINE_QUEUE, ProjectInput, RunSummary
 from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.engine.runtime.workflow import RunGraph
 from tests.apps.dispatcher.support import begin, state
@@ -274,6 +275,42 @@ async def test_an_end_write_in_flight_is_waited_for_before_an_absence_requeues(
         assert not settling.done()
     assert await settling == "history_missing"
     assert (await state(owner_sessionmaker, request.id))["request"][0] == "starting"
+
+
+async def test_a_refused_end_write_keeps_its_row_locked_until_its_slot_is_released(
+    queued, owner_sessionmaker, dispatch_sessionmaker, worker_sessionmaker, api_settings, monkeypatch
+) -> None:
+    """The owner's M3 review: a refused end write rolls back its savepoint, and the row lock taken inside it, before it
+    releases the slot. Its outer transaction keeps the run's row locked across both, so an absence checked in between
+    waits, then finds the slot released: no requeue."""
+    ctx, _, request = queued
+    await starting(dispatch_sessionmaker, request, api_settings)
+    paused, go = asyncio.Event(), asyncio.Event()
+    release = store._release
+
+    async def release_when_told(s: Any, run: Any) -> None:  # paused after the refused savepoint, before the release
+        paused.set()
+        await go.wait()
+        await release(s, run)
+
+    monkeypatch.setattr(store, "_release", release_when_told)
+    refused = RunSummary(str(request.id), "bogus", datetime.now(UTC).isoformat())
+    writing = asyncio.create_task(
+        DbRunStore(worker_sessionmaker, KEYS).project(ProjectInput(str(ctx.tenant_id), [], refused))
+    )
+    try:
+        await asyncio.wait_for(paused.wait(), 10)
+        settling = asyncio.create_task(
+            dispatch.settle(dispatch_sessionmaker, dispatch.Ref(request.id, ctx.tenant_id), dispatch.Outcome("absent"))
+        )
+        done, _ = await asyncio.wait({settling}, timeout=1.0)
+        assert not done, f"settled during the end write: {settling.result()}"  # it waits for the row's lock
+    finally:
+        go.set()
+        await writing
+    assert await settling == "history_missing"
+    after = await state(owner_sessionmaker, request.id)
+    assert (after["request"][0], after["slot"], after["run"][0]) == ("starting", 0, "running")
 
 
 async def test_a_queued_request_whose_run_already_ended_is_never_started_again(
