@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """The dispatcher process (engine 2b spec §7.3), role `dewpoint_dispatch`. It checks the deployment's environment
 before it connects to Temporal (§2.1), encrypts every start with the tenant's key (§6.2), and each cycle observes the
-current build, dispatches what's due, and reports."""
+current build, dispatches what's due, and reports; the one that leads the reconciler (§7.6) also settles what starts
+left uncertain, and reports that apart."""
 
 import asyncio
 import uuid
@@ -13,6 +14,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from dewpoint.apps.codec import KeyringKeys, data_converter
 from dewpoint.apps.dispatcher.dispatch import dispatch_once
 from dewpoint.apps.dispatcher.observe import observe, report
+from dewpoint.apps.dispatcher.reconcile import Leader, reconcile_once
 from dewpoint.apps.environment import verify_environment
 from dewpoint.apps.worker.deployment import describe, this_build
 from dewpoint.core.config import Settings
@@ -45,13 +47,19 @@ async def run(settings: Settings) -> None:
             settings.temporal_address, namespace=settings.temporal_namespace, data_converter=data_converter(keys)
         )
         instance = uuid.uuid4()
+        reconciler, leader = uuid.uuid5(instance, "reconciler"), Leader(engine)
         log.info("dispatcher_started", instance=str(instance), build=this_build())
-        while True:
-            build = await observe(sessionmaker, await current_build(client))
-            done = await dispatch_once(sessionmaker, client, keys, settings, build) if build else {}
-            await report(
-                sessionmaker, instance, build.build_id if build else "", {"current_build": bool(build), **done}
-            )
-            await asyncio.sleep(CYCLE_S)
+        try:
+            while True:
+                build = await observe(sessionmaker, await current_build(client))
+                build_id = build.build_id if build else ""
+                done = await dispatch_once(sessionmaker, client, keys, settings, build) if build else {}
+                await report(sessionmaker, instance, build_id, {"current_build": bool(build), **done})
+                if await leader.leading():
+                    settled = await reconcile_once(sessionmaker, client, keys, settings)
+                    await report(sessionmaker, reconciler, build_id, {**settled}, kind="reconciler")
+                await asyncio.sleep(CYCLE_S)
+        finally:
+            await leader.close()
     finally:
         await engine.dispose()

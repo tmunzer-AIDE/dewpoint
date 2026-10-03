@@ -16,7 +16,7 @@ from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Protocol
 
 import structlog
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -91,6 +91,24 @@ class Waiting:
     `workers_not_ready`, `no_slot` or `key_unusable`."""
 
     reason: str
+
+
+class Target(Protocol):
+    """A request a start's outcome is applied to."""
+
+    @property
+    def request_id(self) -> uuid.UUID: ...
+
+    @property
+    def tenant_id(self) -> uuid.UUID: ...
+
+
+@dataclass(frozen=True)
+class Ref:
+    """A request, by id: what the reconciler settles when it has no start of its own (§7.6)."""
+
+    request_id: uuid.UUID
+    tenant_id: uuid.UUID
 
 
 @dataclass(frozen=True)
@@ -255,15 +273,7 @@ async def _begin(
         await _dead(s, request, ENVELOPE_UNREADABLE, ENVELOPE_MESSAGE)
         await s.flush()
         return Dead(ENVELOPE_UNREADABLE)
-    start = RunInput(
-        tenant_id=str(tenant_id),
-        run_id=str(request.id),
-        version_id=str(version.id),
-        trigger=envelope,
-        mode=request.mode,
-        max_run_duration_s=settings.max_run_duration_days * 86_400,
-        cel_schedule_to_start_s=settings.cel_schedule_to_start_s,
-    )
+    start = run_input(request, version.id, envelope, settings)
     try:
         await seal(start)
     except CodecRefusedError as e:  # the codec wraps whatever stopped it: only a key that can't be read waits
@@ -279,6 +289,19 @@ async def _begin(
     request.status = "starting"
     await s.flush()
     return Starting(request.id, tenant_id, start)
+
+
+def run_input(request: RunRequest, version_id: uuid.UUID, envelope: Any, settings: Settings) -> RunInput:
+    """A request's start: its frozen version and its envelope, with the deployment's run bounds."""
+    return RunInput(
+        tenant_id=str(request.tenant_id),
+        run_id=str(request.id),
+        version_id=str(version_id),
+        trigger=envelope,
+        mode=request.mode,
+        max_run_duration_s=settings.max_run_duration_days * 86_400,
+        cel_schedule_to_start_s=settings.cel_schedule_to_start_s,
+    )
 
 
 async def _slot_free(s: AsyncSession, tenant_id: uuid.UUID, platform: PlatformSettings) -> bool:
@@ -369,41 +392,57 @@ async def verify(client: Client, starting: Starting) -> Outcome:
     return Outcome("started", at=first.event_time.ToDatetime(tzinfo=UTC))
 
 
-async def settle(sessionmaker: async_sessionmaker[AsyncSession], starting: Starting, outcome: Outcome) -> str:
+async def settle(
+    sessionmaker: async_sessionmaker[AsyncSession], starting: Target, outcome: Outcome, *, audited: bool = False
+) -> str:
     """The outcome applied to the request, its slot and its run's row in one transaction (§7.8); what happened, for
-    the cycle's report. A request no longer `starting` (the reconciler settled it) is left as it is."""
+    the cycle's report. A request no longer `starting` (the other of the dispatcher and the reconciler settled it) is
+    left as it is. `audited`: the reconciler's settlements are audited (§2.4), a dead one as every dead one is."""
     async with sessionmaker() as s, s.begin():
-        await tenant_scope(s, starting.tenant_id)
-        request = (
-            await s.execute(
-                select(RunRequest)
-                .where(RunRequest.id == starting.request_id)
-                .with_for_update()
-                .execution_options(populate_existing=True)
-            )
-        ).scalar_one()
-        if request.status != "starting":
-            return "moved"
-        if outcome.kind == "started":
-            await confirm(s, request, outcome.at)
-            return "started"
-        if outcome.kind == "uncertain":
-            log.warning("start_uncertain", request_id=str(request.id), detail=outcome.detail)
-            return "uncertain"  # starting, its slot held, for the reconciler (§7.6)
-        await _release(s, request.id)
-        if outcome.kind == "throttled":
-            request.status, request.next_attempt_at = "queued", datetime.now(UTC) + backoff(1)
-            return "throttled"
-        if outcome.kind == "collision":
-            log.error("start_id_collision", request_id=str(request.id))
-            await _dead(s, request, ID_COLLISION, COLLISION_MESSAGE)
-            return "dead"
-        request.attempts += 1
-        if request.attempts >= MAX_ATTEMPTS:
-            await _dead(s, request, START_REFUSED, REFUSED_MESSAGE)
-            return "dead"
-        request.status, request.next_attempt_at = "queued", datetime.now(UTC) + backoff(request.attempts)
-        return "refused"
+        happened = await _settle(s, starting, outcome)
+        if audited and happened in ("started", "absent"):
+            await audit.record(s, tenant_id=starting.tenant_id, actor_id=None, action="run.request.reconciled",
+                               target_type="run_request", target_id=str(starting.request_id),
+                               details={"outcome": happened})  # fmt: skip
+        return happened
+
+
+async def _settle(s: AsyncSession, starting: Target, outcome: Outcome) -> str:
+    await tenant_scope(s, starting.tenant_id)
+    request = (
+        await s.execute(
+            select(RunRequest)
+            .where(RunRequest.id == starting.request_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    if request.status != "starting":
+        return "moved"
+    if outcome.kind == "started":
+        await confirm(s, request, outcome.at)
+        return "started"
+    if outcome.kind == "uncertain":
+        log.warning("start_uncertain", request_id=str(request.id), detail=outcome.detail)
+        return "uncertain"  # starting, its slot held, for the reconciler (§7.6)
+    await release(s, request.id)
+    if outcome.kind == "throttled":
+        request.status, request.next_attempt_at = "queued", datetime.now(UTC) + backoff(1)
+        return "throttled"
+    if outcome.kind == "absent":  # a trustworthy absence (§7.6): back in the queue, due at once, no attempt
+        log.warning("start_absent", request_id=str(request.id))
+        request.status, request.next_attempt_at = "queued", datetime.now(UTC)
+        return "absent"
+    if outcome.kind == "collision":
+        log.error("start_id_collision", request_id=str(request.id))
+        await _dead(s, request, ID_COLLISION, COLLISION_MESSAGE)
+        return "dead"
+    request.attempts += 1
+    if request.attempts >= MAX_ATTEMPTS:
+        await _dead(s, request, START_REFUSED, REFUSED_MESSAGE)
+        return "dead"
+    request.status, request.next_attempt_at = "queued", datetime.now(UTC) + backoff(request.attempts)
+    return "refused"
 
 
 async def confirm(s: AsyncSession, request: RunRequest, at: datetime | None) -> None:
@@ -416,7 +455,7 @@ async def confirm(s: AsyncSession, request: RunRequest, at: datetime | None) -> 
     )
 
 
-async def _release(s: AsyncSession, run_id: uuid.UUID) -> None:
+async def release(s: AsyncSession, run_id: uuid.UUID) -> None:
     await s.execute(text("delete from run_slots where run_id = :i"), {"i": run_id})
 
 
