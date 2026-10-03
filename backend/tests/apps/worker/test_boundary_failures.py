@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """What the activity boundary does when the claim store fails around a plugin step (engine 2b spec §3.7, the review's
 I5). Before the node runs, a store that doesn't answer fails the attempt retryable, never as an ambiguous outcome:
-nothing was sent. After it ran, a failure stays the node's even when the index can't be read again to mask its
-message. Claims nested past NESTING_MAX are refused as any unreadable claim is, `claim_unavailable`."""
+nothing was sent. A bug in the boundary's own work then is no outage: it fails as `internal_error`, never retried. After
+it ran, a failure stays the node's even when the index can't be read again to mask its message. Claims nested past
+NESTING_MAX are refused as any unreadable claim is, `claim_unavailable`."""
 
 import asyncio
 import uuid
@@ -12,7 +13,7 @@ import pytest
 from temporalio import activity
 from temporalio.testing import WorkflowEnvironment
 
-from dewpoint.apps.worker import claims
+from dewpoint.apps.worker import activities, claims
 from dewpoint.core.claims.secret_index import SECRET_INDEX_UNAVAILABLE, Index
 from dewpoint.engine.handles import NESTING_MAX
 from dewpoint.engine.runtime.activities import step_activity
@@ -121,3 +122,27 @@ async def test_a_reference_reading_claims_nested_past_the_bound_is_refused_as_un
         result = await asyncio.wait_for(wf.result(), RESULT_TIMEOUT_S)
     assert result.status == "failed" and result.error is not None
     assert result.error["code"] == "claim_unavailable", result.error
+
+
+async def test_a_bug_before_the_node_runs_is_an_internal_error_never_a_store_outage(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's ruling on the fix pass: only a store that doesn't answer is `secret_index_unavailable`. A bug in
+    the boundary's own work before the node runs (here, finding the config's secrets) is logged and fails as what it
+    is, `internal_error`: never retried, and with no outcome, since nothing was sent."""
+
+    def broken(config: Any, schema: Any) -> list[str]:
+        raise RuntimeError("finding the config's secrets broke")
+
+    monkeypatch.setattr(activities, "config_secrets", broken)
+    store = MemoryStore()
+    g = graph(code=ref("steps.p.error.code", default=""))
+    g.node("p", "testkit.ambiguous_send@1", {"outcome": "sent"}, on_error="continue")
+    g.nodes[-1]["options"]["max_attempts"] = 3
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {})
+        result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+    assert result.outputs == {"code": "internal_error"}
+    assert [(r.attempt, r.error_code, r.outcome) for r in store.steps(run_id_of(handle))] == [
+        (1, "internal_error", None)
+    ]

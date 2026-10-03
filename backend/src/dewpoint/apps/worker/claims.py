@@ -8,12 +8,14 @@ sensitive data, or whose expression does: the workflow gets its handle, never th
 pointer passed POINTER_MAX is derived: what it addresses is copied, as stored, into a claim of its own (§3.2)."""
 
 import asyncio
+import functools
+import inspect
 import json
 import uuid
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -122,6 +124,38 @@ class ClaimStore(Protocol):
         """Strings of new tainted claims, added to the tree's index: the index as it is then, with every extension
         before this one (they're serialized). Raises SecretIndexLimitError past its bounds, changing nothing."""
         ...
+
+
+class StoreUnavailableError(Exception):
+    """The claim store failed to answer a call: an outage, never a refusal (a claim, an index's bound) or the caller's
+    own bug. The store's error is its cause."""
+
+
+class _Answering:
+    def __init__(self, store: ClaimStore) -> None:
+        self._store = store
+
+    def __getattr__(self, name: str) -> Any:
+        method = getattr(self._store, name)
+        if not inspect.iscoroutinefunction(method):
+            return method
+
+        @functools.wraps(method)
+        async def call(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return await method(*args, **kwargs)
+            except (ClaimUnavailableError, SecretIndexLimitError):  # the store answered: a refusal
+                raise
+            except Exception as e:
+                raise StoreUnavailableError(name) from e
+
+        return call
+
+
+def answering(store: ClaimStore) -> ClaimStore:
+    """`store`, whose calls that fail raise StoreUnavailableError, a refusal apart: so a caller tells the store's
+    outage from a bug in its own work around the calls (the owner's ruling on the 2b-1b fix pass, §3.7)."""
+    return cast(ClaimStore, _Answering(store))
 
 
 SECRETS_CACHE = 256  # run trees whose index and automaton a worker process keeps, the most recently used
