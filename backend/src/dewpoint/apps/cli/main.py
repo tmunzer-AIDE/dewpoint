@@ -17,6 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import Client
 
 from dewpoint.apps.codec import KeyringKeys, data_converter
+from dewpoint.apps.dispatcher.dispatch import START_DEADLINE
+from dewpoint.apps.dispatcher.gate import disable_and_wait
 from dewpoint.apps.environment import verify_environment
 from dewpoint.apps.plugin_loader import PluginLoadError, installed_plugins, prepare
 from dewpoint.apps.runs import NotAdmissibleError, StartRefusedError, StartUncertainError, start_run
@@ -427,6 +429,32 @@ def platform_init_environment(
         typer.echo(f"ERROR: {e}")
         raise typer.Exit(2) from None
     typer.echo(f"this deployment is {env}, with the Temporal namespace `{ns}`")
+
+
+@platform_cli.command("disable-production-runs")
+def platform_disable_production_runs(
+    wait: float = typer.Option(
+        START_DEADLINE.total_seconds(), "--wait", help="seconds to wait for starts already made to settle"
+    ),
+) -> None:
+    """Turn production runs off (engine 2b spec §2.4), audited: queued requests wait, started runs continue. Then wait
+    for the starts already made to settle; exit 3, with their ids, while any is unresolved (the gate stays off). Run
+    as dewpoint_admin. Turning them on is 2b-4's, with its readiness checks."""
+    settings = get_settings()
+
+    async def _go() -> list[uuid.UUID]:
+        engine = make_engine(settings.database_url)
+        try:
+            return await disable_and_wait(make_sessionmaker(engine), deadline=timedelta(seconds=wait))
+        finally:
+            await engine.dispose()
+
+    left = asyncio.run(_go())
+    if left:
+        many = "start is" if len(left) == 1 else "starts are"
+        typer.echo(f"production runs are off; {len(left)} {many} still unresolved: {', '.join(map(str, left))}")
+        raise typer.Exit(3)
+    typer.echo("production runs are off; no start is left unresolved")
 
 
 @deployment_cli.command("set-current")
