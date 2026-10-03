@@ -117,16 +117,19 @@ async def test_a_starting_request_back_in_the_queue_after_its_closure_was_retire
     (a confirmed refusal), dispatch's defensive check cancels it, audited, and the run's row an earlier attempt wrote
     becomes terminal with it (§7.8). Nothing starts."""
     ctx, wf, request = queued
-    assert isinstance(await begin(dispatch_sessionmaker, request, api_settings), dispatch.Starting)
+    starting = await begin(dispatch_sessionmaker, request, api_settings)
+    assert isinstance(starting, dispatch.Starting)
     await update(api_sessionmaker, ctx, wf, enabled=False)
     async with admin_sessionmaker() as s, s.begin():
         assert (await lifecycle.retire(s, lifecycle.Entry("node", "testkit.echo@1"), force=True, confirm=True)).applied
     assert (await state(owner_sessionmaker, request.id))["request"][0] == "starting"  # left alone
-    async with owner_sessionmaker() as s, s.begin():  # Temporal refused it: back in the queue, its slot released
-        await s.execute(
-            text("update run_requests set status = 'queued', attempts = 1 where id = :i"), {"i": request.id}
-        )
-        await s.execute(text("delete from run_slots"))
+    # Temporal refused it: back in the queue, one attempt counted, its slot released
+    assert await dispatch.settle(dispatch_sessionmaker, starting, dispatch.Outcome("refused")) == "refused"
+    assert await state(owner_sessionmaker, request.id) == {
+        "request": ("queued", None, 1), "slot": 0, "run": (await state(owner_sessionmaker, request.id))["run"],
+    }  # fmt: skip
+    async with owner_sessionmaker() as s, s.begin():  # its backoff over
+        await s.execute(text("update run_requests set next_attempt_at = now() where id = :i"), {"i": request.id})
     assert await begin(dispatch_sessionmaker, request, api_settings) == dispatch.Cancelled("node_type_retired")
     after = await state(owner_sessionmaker, request.id)
     assert after["request"][:2] == ("cancelled", "node_type_retired") and after["slot"] == 0
