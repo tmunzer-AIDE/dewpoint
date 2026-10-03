@@ -515,9 +515,17 @@ async def _dead(s: AsyncSession, request: RunRequest, reason: str, message: str)
                        target_type="run_request", target_id=str(request.id), details={"reason": reason})  # fmt: skip
 
 
+@dataclass
+class Rotation:
+    """Where the last cycle's pick of due tenants ended (unused yet)."""
+
+    after: tuple[datetime, uuid.UUID] | None = None
+
+
 async def dispatch_once(
-    sessionmaker: async_sessionmaker[AsyncSession], client: Client, keys: KeySource, settings: Settings, build: Build
-) -> dict[str, int]:
+    sessionmaker: async_sessionmaker[AsyncSession], client: Client, keys: KeySource, settings: Settings, build: Build,
+    rotation: Rotation | None = None,
+) -> dict[str, int]:  # fmt: skip
     """One cycle: each tenant's oldest due request, picked through `dispatch_candidates` (queue-selection metadata
     only), begun, started and settled in turn. What happened, counted, for the report."""
     seal = sealer(client.data_converter, client.namespace)

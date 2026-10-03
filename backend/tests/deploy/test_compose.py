@@ -97,3 +97,9 @@ def test_plain_compose_is_production_and_the_development_override_initializes_de
 def test_ci_runs_every_compose_command_with_the_development_override() -> None:
     e2e = yaml.safe_load(CI.read_text())["jobs"]["e2e"]
     assert e2e["env"]["COMPOSE_FILE"] == "docker-compose.yml:docker-compose.dev.yml"
+
+
+def test_a_dispatcher_that_exits_is_restarted() -> None:
+    """The whole-branch review: a dispatcher process that ends (whatever the cause) comes back, so queued runs keep
+    starting once what stopped it recovers."""
+    assert service("dispatcher")["restart"] == "unless-stopped"

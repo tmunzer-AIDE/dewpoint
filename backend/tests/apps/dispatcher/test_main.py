@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: Apache-2.0
+"""The dispatcher process outlives what it can't control (the whole-branch review): a cycle whose observation of the
+current build fails (Temporal briefly unavailable) dispatches nothing, and the next one dispatches again; any cycle
+that fails is logged by type and the loop goes on."""
+
+import uuid
+from typing import Any
+
+import pytest
+from sqlalchemy import text
+from temporalio.service import RPCStatusCode
+
+from dewpoint.apps.dispatcher import dispatch, main
+from dewpoint.apps.worker.deployment import this_build
+from tests.apps.dispatcher.support import state
+from tests.apps.test_admission import KEYS
+from tests.apps.test_runs import FakeClient, FakeDeployment, rpc
+
+pytestmark = pytest.mark.usefixtures("development_deployment")
+
+
+class Flaky(FakeDeployment):
+    """The deployment, unavailable for its first `failures` calls."""
+
+    def __init__(self, failures: int) -> None:
+        super().__init__(this_build())
+        self.failures = failures
+
+    async def describe_worker_deployment(self, request: Any) -> Any:
+        if self.failures:
+            self.failures -= 1
+            raise rpc(RPCStatusCode.UNAVAILABLE)
+        return await super().describe_worker_deployment(request)
+
+
+class NotLeading:
+    async def leading(self) -> bool:
+        return False
+
+
+async def reported(owner: Any, instance: uuid.UUID) -> Any:
+    async with owner() as s:
+        found = await s.execute(text("select details from dispatcher_reports where instance_id = :i"), {"i": instance})
+        return found.scalar()
+
+
+async def test_a_cycle_whose_observation_fails_dispatches_nothing_and_the_next_one_dispatches(
+    queued, owner_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    _, _, request = queued
+    client = FakeClient()
+    client.workflow_service = Flaky(failures=1)
+    instance, rotation = uuid.uuid4(), dispatch.Rotation()
+
+    async def cycle() -> None:
+        await main.cycle(dispatch_sessionmaker, client, KEYS, api_settings, instance=instance, reconciler=uuid.uuid4(),
+                         leader=NotLeading(), rotation=rotation)  # type: ignore[arg-type]  # fmt: skip
+
+    await cycle()  # Temporal unavailable: no build observed, nothing dispatched
+    assert (await state(owner_sessionmaker, request.id))["request"][0] == "queued"
+    assert (await reported(owner_sessionmaker, instance))["current_build"] is False
+    await cycle()  # Temporal back
+    assert (await state(owner_sessionmaker, request.id))["request"][0] == "started"
+    assert (await reported(owner_sessionmaker, instance)) == {"current_build": True, "started": 1}
+
+
+async def test_the_loop_outlives_a_cycle_that_fails(monkeypatch) -> None:
+    monkeypatch.setattr(main, "CYCLE_S", 0)
+    calls: list[int] = []
+
+    async def cycle() -> None:
+        calls.append(len(calls))
+        if len(calls) == 1:
+            raise ConnectionResetError("the database went away")
+
+    await main.serve(cycle, cycles=3)
+    assert calls == [0, 1, 2]

@@ -132,6 +132,7 @@ services:
       DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_dispatch_login:${DEWPOINT_DISPATCH_DB_PASSWORD}@postgres/dewpoint
       DEWPOINT_TEMPORAL_ADDRESS: temporal:7233
     stop_grace_period: 15s  # longer than a start's own deadline (10 s): a start in flight gets its answer
+    restart: unless-stopped  # a dispatcher that ends comes back: queued runs keep starting
     depends_on:
       migrate: { condition: service_completed_successfully }
       temporal: { condition: service_healthy }
