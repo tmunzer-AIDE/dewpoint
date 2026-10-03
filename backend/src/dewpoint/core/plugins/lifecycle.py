@@ -63,6 +63,20 @@ async def lock_shared(s: AsyncSession, entries: Iterable[Entry]) -> None:
         await s.execute(text("select pg_advisory_xact_lock_shared(hashtextextended(:k, 0))"), {"k": entry.lock_key})
 
 
+async def try_lock_shared(s: AsyncSession, entries: Iterable[Entry]) -> bool:
+    """`lock_shared` without waiting: False as soon as one entry is held exclusively (a retirement in progress). The
+    locks it got stay held until the transaction ends. For a caller that holds row locks a retirement may need (a
+    starting transaction holds its request's): waiting there could deadlock with the retirement."""
+    await assert_read_committed(s)
+    for entry in sorted(set(entries)):
+        found = await s.execute(
+            text("select pg_try_advisory_xact_lock_shared(hashtextextended(:k, 0))"), {"k": entry.lock_key}
+        )
+        if not found.scalar_one():
+            return False
+    return True
+
+
 async def lock_exclusive(s: AsyncSession, entry: Entry) -> None:
     await assert_read_committed(s)
     await s.execute(text("select pg_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": entry.lock_key})

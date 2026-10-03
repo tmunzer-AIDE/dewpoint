@@ -60,6 +60,7 @@ ID_COLLISION = "id_collision"
 START_FAILED = "start_failed"
 ENVELOPE_UNREADABLE = "envelope_unreadable"
 RUN_ENDED = "run_ended"
+RETIRING = "retiring"  # a retirement holds the closure's lifecycle lock: back next cycle
 KEY_UNUSABLE = "key_unusable"
 ENVELOPE_MESSAGE = (
     "The request's trigger envelope doesn't open or isn't JSON; repairing a key never reopens it (engine 2b spec §7.1)."
@@ -190,6 +191,10 @@ class KeyFailures:
             raise KeyUnusableError("A tenant's digest key can't be read.") from e
 
 
+async def _after_lifecycle_lock() -> None:
+    """Runs right after the starting transaction takes its lifecycle locks. A no-op; the race tests pause here."""
+
+
 async def _lock(s: AsyncSession, key: str) -> None:
     await s.execute(text("select pg_advisory_xact_lock_shared(hashtextextended(:k, 0))"), {"k": key})
 
@@ -262,7 +267,10 @@ async def _begin(
     if version is None:
         raise RuntimeError("A request frozen on a version that isn't there.")
     entries = lifecycle.entries_for(version.closure_node_refs, version.closure_cel_profiles)
-    await lifecycle.lock_shared(s, entries)
+    # Never waited for: this transaction holds the request's row, which a retirement holding these locks cancels.
+    if not await lifecycle.try_lock_shared(s, entries):
+        return Waiting(RETIRING)
+    await _after_lifecycle_lock()
     blocked = lifecycle.not_executable(await lifecycle.states(s, entries))
     if blocked:  # the defensive check: admission's locks make this impossible, but for a request that came back
         reason = "node_type_retired" if any(e.kind == "node" for e in blocked) else "cel_profile_retired"
