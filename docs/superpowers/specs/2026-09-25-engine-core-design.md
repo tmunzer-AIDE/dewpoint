@@ -121,7 +121,7 @@
     they're constants of its code, and an exception's class only when it's a builtin or its module's code names it
     (§3, §8). `engine_abi` becomes 6.
   - Revision 5.10 (pending, with the 2b spec's revision 7): §9 describes starting runs through admission and the
-    dispatcher (2b-2).
+    dispatcher (2b-2); §8's `GET /runs` lists requests and runs together by `(queued_at, id)`.
   - Revision 5.9 (with the 2b spec's revision 6): the `cel-evaluator` also holds `engine.handles`,
     which `engine.cel`'s binding imports (§5.7).
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
@@ -1208,7 +1208,7 @@ cancel while the version loads cancels the run.
   `deadline_exceeded`, `cancelled`, `terminated` (a sub-run an operator terminated: its parent records the end, and
   its step or loop fails with it) and
   `node_type_unavailable` (no worker of the build runs the node type).
-- **Read API:** `GET /runs` (top-level runs, newest first, paged by the last run's start time and id, given together as `before` and `before_id`: half of it is refused) and `GET /runs/{id}` (with steps, and the sub-runs it started). The UI
+- **Read API:** `GET /runs` (from 2b-2, requests and top-level runs together, newest first by `(queued_at, id)`: a request that hasn't started is shown as itself, never as the row an attempt pre-created; paged by the last item's `queued_at` and id, given together as `before` and `before_id`: half of it is refused; 2b spec §7.7) and `GET /runs/{id}` (with steps, and the sub-runs it started). The UI
   never reads Temporal history.
 
 ## 9. Starting runs
@@ -1219,8 +1219,9 @@ cancel while the version loads cancels the run.
   reconciler settles what a start leaves uncertain. No command starts a run directly: 2a's `start_run(version_id,
   payload, *, mode)` stays a test helper.
 - **Payloads are validated at admission** from ABI 6 (2b spec §3.5): an input that breaks the input schema is
-  refused with the places and rules it breaks, never a value nor a key the data supplied (shown as `*`), and leaves
-  no request; one that passes is claimed, and the run starts with its envelope. Before ABI 6 a payload that broke its
+  refused with the places and rules it breaks, never a value nor a key the data supplied (shown as `*`): an
+  interactive source's refusal leaves no request, and a durable source's is kept as a `refused` request (2b spec
+  §7.2). One that passes is claimed, and the run starts with its envelope. Before ABI 6 a payload that broke its
   schema failed the step that read the bad value.
 - **A start is failed only when it certainly never began.** The workflow id is `t:<tenant>:run:<run id>` (2b spec
   §6.1), with `REJECT_DUPLICATE`. A confirmed refusal backs off and counts an attempt; the 10th fails the run with

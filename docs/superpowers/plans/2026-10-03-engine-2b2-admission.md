@@ -158,8 +158,10 @@ it. The diffs below remain the plan's record of every change.
    procedure later; CSV in 2b-3; `disable-production-runs` now; health evidence recorded now, without claiming 2b-4's
    retention or readiness gate has passed.
 5. **Re-runs:** new admissions on the active version; the complete retained input is reconstructed and validated
-   against the new version; old handles are never reused. Refined with the envelope (below): a re-run resolves the
-   old *request*, not a run.
+   against the new version; old handles are never reused. Refined with the envelope (below): a re-run with the
+   original input resolves the old *request*, not a run. Later (the owner's milestone-4 checkpoint): a re-run may
+   take new input, whatever was retained, and then may name a run from before 2b-2, which supplies the workflow and
+   the default mode.
 6. **Dev CLI:** `--wait` bounded, reporting the database's terminal outcome.
 7. **ABI:** no change expected; a change to the workflow payload or the replay contract comes back for approval.
 8. **Process:** prototype first; focused checks at milestones and one final suite, not a full suite at every replayed
@@ -169,12 +171,14 @@ it. The diffs below remain the plan's record of every change.
    backups in the migration.
 10. **The trigger envelope** (2026-10-03): the storage approach is approved for revision 7 and the prototype, not as
     production sign-off, with two boundaries explicit: ordinary claim lookup and grants exclude envelopes, read only
-    through a tenant- and request-scoped reader, with a test of an attempted handle read and of an attempted grant;
-    and a re-run resolves the old request by id, authorizes reading that request's input and `run.start` on its
-    workflow, then reconstructs and re-admits, with `input_not_retained` for runs from before 2b-2 and for a missing
-    envelope or claim. The row shape is enforceable (one envelope per owner, a valid request-to-envelope reference, an
-    explicit `pointer` rule); envelope, claims and request share one transaction; retention keeps all three while the
-    request is `queued` or `starting` and deletes them together at the applicable terminal cutoff.
+    through a tenant- and request-scoped reader, with a test of an attempted handle read and of an attempted grant; and
+    a re-run with the original input resolves the old request by id, authorizes reading that request's input and
+    `run.start` on its workflow, then reconstructs and re-admits, with `input_not_retained` for runs from before 2b-2
+    and for a missing envelope or claim. A re-run with new input needs none of it, and accepts a run from before 2b-2
+    (the owner's milestone-4 checkpoint). The row shape is enforceable (one envelope per owner, a valid
+    request-to-envelope reference, an explicit `pointer` rule); envelope, claims and request share one transaction;
+    retention keeps all three while the request is `queued` or `starting` and deletes them together at the applicable
+    terminal cutoff.
 
 ## Milestone 1 — The queue and admission
 
@@ -193,8 +197,9 @@ Migration 0017 (engine 2b spec §7, §14; revision 7):
   actor, mode, idempotency key unique per tenant, the tenant-keyed digest and its key version, status and reason,
   attempts and next attempt, when it was queued and ended, a recorded cancel.
 - The trigger envelope beside its claims in `run_inputs` (role `envelope`): a claim always has a pointer and the
-  envelope none, one envelope per owner, and a foreign key on (envelope_id, id, 'envelope') that lets a request reach
-  only an envelope it owns, which can't be deleted while the request exists; only a `refused` request has none.
+  envelope none, one envelope per owner, and a foreign key on (envelope_id, tenant_id, id, 'envelope') that lets a
+  request reach only an envelope of its tenant that it owns, which can't be deleted while the request exists; only a
+  `refused` request has none.
 - `tenant_run_limits` (the platform default, 5, in `platform_settings`), `run_slots`, `current_build`;
   `tenants.status` (`active`, `erasing`).
 - `runs.queued_at`, backfilled from `started_at`, which becomes nullable with no default; the list index follows it.
@@ -204,6 +209,9 @@ Migration 0017 (engine 2b spec §7, §14; revision 7):
 
 Upgrade, downgrade and upgrade again checked on postgres:16-alpine with a pre-2b-2 run row.
 
+
+The prototype commit's message names the envelope's foreign key without `tenant_id`; its migration, as replayed here,
+includes it (the owner's milestone-1 correction, folded into this task).
 
 - [ ] **Step 1: its tests alone, before its code.** Run: `uv run pytest -n 4 tests/core/claims/test_rls_claims.py tests/core/requests/test_schema.py`. Replay result (exit 1), shortened:
 
@@ -4776,6 +4784,9 @@ outage) raises out of the starting transaction, and the cycle isolates
 it: logged, the request left queued, the other tenants dispatched.
 
 
+**Later tasks refine this.** Task 14 narrows the key wrapper: only a key read's expected failures (no key, an unknown
+KEK, a key that doesn't unwrap, a keyring database that doesn't answer) wait; a bug reading a key raises.
+
 - [ ] **Step 1: its tests alone, before its code.** Run: `uv run pytest -n 4 tests/apps/dispatcher/test_envelope_failures.py`. Replay result (exit 1), shortened:
 
 ```
@@ -5549,6 +5560,11 @@ transaction. This ends a run whose end write was lost or refused.
 A slot whose run's row ended is released once its execution is closed
 or absent. Failures are isolated per request, as the dispatcher's are.
 
+
+**Later tasks refine this.** Tasks 18–21 refine the reconciler: an uncertain start is found by `starting_at`, never by
+its slot; a NOT_FOUND puts it back in the queue only while its row is still `running` and its slot still held, read
+under the end write's locks, else it stays `starting` with an alert; missing history never releases a slot or infers an
+outcome; and the end write holds its row across its savepoints.
 
 - [ ] **Step 1: its tests alone, before its code.** Run: `uv run pytest -n 4 tests/apps/dispatcher/test_reconcile.py tests/apps/dispatcher/test_reconcile_runs.py`. Replay result (exit 1), shortened:
 
@@ -7743,6 +7759,9 @@ an operator. The check runs in settle's transaction, under the
 request's lock.
 
 
+**Later tasks refine this.** Task 20 replaces this check: the evidence for a requeue is the row still `running` and the
+slot still held, read under the end write's locks; and a request whose row ended is never started again.
+
 - [ ] **Step 1: its tests alone, before its code.** Run: `uv run pytest -n 4 tests/apps/dispatcher/test_reconcile.py`. Replay result (exit 1), shortened:
 
 ```
@@ -8892,6 +8911,10 @@ envelope or claim retention removed.
 A tenant key that can't be read answers 503 key_unusable on every
 admission path, classified as the dispatcher classifies one.
 
+
+**Later tasks refine this.** Task 27 refines the re-run: its key is checked before the old input is rebuilt, and it may
+take new input, whatever was retained, a run from before 2b-2 included; `input_not_retained` applies to a re-run with
+the original input.
 
 - [ ] **Step 1: its tests alone, before its code.** Run: `uv run pytest -n 4 tests/apps/api/test_run_requests_api.py tests/core/requests/test_envelope.py`. Replay result (exit 1), shortened:
 
