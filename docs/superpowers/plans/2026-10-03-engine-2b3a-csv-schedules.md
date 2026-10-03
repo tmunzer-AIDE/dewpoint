@@ -1,6 +1,7 @@
 # Engine 2b-3a: CSV Starts and Schedules Implementation Plan
 
-> **Status: outline revised with the owner's rulings (2026-10-03), for the owner's look before the prototype.** The
+> **Status: outline revised with the owner's rulings (2026-10-03) and corrections (2026-10-04); the prototype is
+> approved to start with M1, and the schedule sync stays provisional until its conflict-token path is proven.** The
 > owner approved splitting 2b-3 into 2b-3a (CSV and schedules, this plan) and 2b-3b (webhook ingress, its own outline,
 > prototype, plan and PR), and the prototype-first process. As in 2b-1a, 2b-1b and 2b-2, each task is built and tested
 > on a prototype branch from `main` first, and the plan is then written from the tested diffs, each replayed
@@ -73,11 +74,16 @@ dependency.
    to lowercase colon form; `ip` and `cidr` to `ipaddress`'s canonical form, a `cidr` with host bits set invalid; `enum`
    exact); per-row errors as row, column and code, never a value. Fuzzed with hypothesis.
 5. `csv_uploads` (tenant, owner user, workflow, raw cells and headers encrypted under `csv.upload`, expiry one hour,
-   consumed-by; RLS); `POST /t/{tid}/workflows/{wid}/csv-uploads` (`run.start`, a raw `text/csv` body). **The cap is
-   enforced while reading (ruling 4):** the middleware gives this route the platform's 5 MB instead of 1 MiB, counted on
-   the bytes received, and the route stops at the declaration's own `max_bytes` + 1 as it reads the stream: 413 without
-   reading the rest, nothing buffered past the cap. The response: headers with exact matches mapped (or the saved
-   default, below), a preview of the first rows with sensitive columns masked, the per-row errors.
+   consumed-by; RLS); `POST /t/{tid}/workflows/{wid}/csv-uploads` (`run.start`, a raw `text/csv` body). **The caps
+   are enforced as bytes arrive (ruling 4, corrected 2026-10-04):** `BodyLimitMiddleware` buffers a whole permitted body
+   before the route runs, so it doesn't raise its cap for this route: it passes this one route (`POST`, matched
+   exactly) through unbuffered, and the route reads the stream itself. Before reading any of the body, the route
+   authorizes the caller and loads the active version's declaration, then reads chunk by chunk up to the smaller of the
+   declaration's `max_bytes` and the platform's 5 MB: a declared `Content-Length` past it, or one byte past it as
+   chunks arrive, answers 413 without reading the rest, and nothing past the cap is ever buffered. Tests: a chunked
+   body with no `Content-Length` stops at the declaration's cap + 1 byte (the bytes read are counted), and every other
+   route keeps the 1 MiB middleware. The response: headers with exact matches mapped (or the saved default, below), a
+   preview of the first rows with sensitive columns masked, the per-row errors.
 6. **The saved default mapping (ruling 6):** one per workflow, encrypted under `csv.mapping`, saved with
    `trigger.manage`, with the declaration it was saved against. Whenever it's read, it's checked against the active
    version's declaration; one that no longer fits (a column it maps is gone, a required column is unmapped) is marked
@@ -85,12 +91,19 @@ dependency.
    clears the mark. A start always needs a mapping valid for its version (422 `csv_mapping_invalid`), whatever the
    default.
 7. **CSV starts (ruling 5):** `POST …/runs` with `csv: {upload_id, mapping, skip_invalid}`.
-   - The key first: the digest covers what was asked, `{input, csv: {upload_id, mapping, skip_invalid}}`, so an exact
-     retry returns its request even after the upload was consumed, and another start under the key is a 409.
+   - The key first: the digest covers what was asked, `{input, csv: {upload_id, mapping, skip_invalid}}`, so a retry
+     is recognized without rebuilding the rows, even after the upload was consumed, and another start under the key is
+     a 409.
+   - **An exact retry is returned only to the upload's owner (corrected 2026-10-04).** The start that consumed an
+     upload ran as its owner (below), so that request's actor is the owner. A key that matches a CSV start's digest
+     returns its request only when the caller is that actor; any other caller, even one of the tenant who knows the
+     key and the upload's id, gets the same 409 `idempotency_conflict` as a different request under the key, which
+     reveals nothing more. Test: a second user of the tenant replaying the owner's exact start gets the 409 and no
+     request.
    - Then the upload, locked (`FOR UPDATE`) and verified: its tenant (row-level security and an explicit check), its
      owner (the caller), its workflow (the path's), not expired (`upload_expired`), not consumed. A start that finds it
-     consumed looks up its own key again, since the consumer has committed: an exact retry returns that request, and
-     anything else is 409 `upload_consumed`. Concurrent starts therefore yield one consumer.
+     consumed looks up its own key again, since the consumer has committed: an exact retry returns that request (its
+     owner verified first), and anything else is 409 `upload_consumed`. Concurrent starts therefore yield one consumer.
    - Admission validates again against the frozen version's declaration, builds typed rows and `row_count`, claims
      (sensitive cells with taint, then the list for size), and consumes the upload by an UPDATE in the same
      transaction: consumed-by set, staged cells cleared (§10.3: only retention deletes rows).
@@ -137,16 +150,36 @@ dependency.
     passes their synced one, or whose wanted pause differs from the synced pause (wanted paused: the schedule disabled,
     its workflow disabled, or its tenant `erasing`). Temporal Schedule id `t:<tenant>:sched:<id>`, overlap allow-all,
     the schedule's catch-up window, never `trigger`.
-    - **An older state is never recorded as current.** The sync reads a row's generation and wanted state in a short
-      transaction, closes it, and makes one Temporal call. A create, update or pause carries the conflict token of the
-      describe it was computed from, so a writer that lost its lead can't overwrite a newer update. It then records
-      that generation as synced only if the row still has it and the leader still holds its lock. A schedule changed
-      or disabled while the call was in flight stays a candidate, and the next pass applies its newer state. A test
-      changes the row during the Temporal call.
-    - **Deletion keeps a tombstone.** Deleting marks the row deleted (its fixed input cleared) and removes the
-      Temporal Schedule. The row keeps the tenant, schedule id, workflow and mode, so a late tick (fired before the
-      deletion synced, caught up, or delayed by a stopped worker) records `schedule_deleted`. 2b-4's retention deletes a
-      tombstone only once Temporal reports its schedule gone and no tick of it is open.
+    - **The fence is Temporal's conflict token, sent by a path of our own (corrected 2026-10-04; provisional until
+      proven).** The pinned SDK 1.33.0 never sends one: `ScheduleHandle.update()` describes, then builds
+      `UpdateScheduleRequest` without `conflict_token` (`client/_impl.py`, with a TODO saying so). In the API, only
+      `DescribeScheduleResponse` and `UpdateScheduleRequest` carry the token; `PatchSchedule` (pause), create and
+      delete carry none. So `apps/dispatcher/schedules.py` calls the service directly: `describe_schedule` for the
+      token and Temporal's state, then `update_schedule` with that token and the schedule built by the SDK's own
+      conversion (as the SDK's update does, so the codec seals the action under the tenant). A pause is never a patch:
+      it's the update's `state.paused`. **The first step of M3, before the sync is built,** is a dev-server contract
+      test of that path, in `test_temporal_contract.py` (so a test fails on any other SDK or server version): an update
+      with the current token lands; an update with a token from before another update is refused, with the error
+      Temporal gives a stale token classified; the updated action decodes under the tenant. If the path can't be proven,
+      the sync's design comes back to the owner (or a verified SDK upgrade, for approval).
+    - **The order makes a stale writer harmless.** Each change is: describe (token T) → read the row's generation and
+      wanted state, in a short transaction → update with T. A writer whose update would replace a newer state read
+      that state's token before the newer update landed, so its token is stale and Temporal refuses it; a writer that
+      described after a newer update read the row after that update's own read, so it writes a state at least as new
+      (generations only grow). The sync then records the generation as synced only if the row still has it; a schedule
+      changed or disabled meanwhile stays a candidate, and the next pass applies its newer state. The leader lock only
+      keeps two writers from contending. Tests: the row changed between the describe and the update; a second writer's
+      update landing between another's describe and update (the first is refused); a stale leader's late update.
+    - **Creates and deletes, which carry no token.** A create follows a describe that answered `NOT_FOUND`; a create
+      that finds the schedule already there leaves the row a candidate, and the next pass updates it with a token.
+      Deleting marks the row a tombstone (its fixed input cleared): tombstones are final, so no newer state can follow
+      one. But a stale writer's create, started before the tombstone, could land after the delete and bring the Temporal
+      Schedule back, so a tombstone stays a candidate until a describe made at least one call deadline after its delete
+      answers `NOT_FOUND`, and a tick that finds a tombstone makes it a candidate again.
+    - **Deletion keeps a tombstone.** The row keeps the tenant, schedule id, workflow and mode, so a late tick (fired
+      before the deletion synced, caught up, delayed by a stopped worker, or from a schedule a stale create brought
+      back) records `schedule_deleted`. 2b-4's retention deletes a tombstone only once Temporal reports its schedule gone
+      and no tick of it is open.
     - **Misses are counted, not promised away.** No tick within the catch-up window is dropped, but a Temporal outage
       longer than the window skips the firings it missed. The leader reads each enabled schedule's
       `num_actions_missed_catchup_window` from Temporal (every 5 minutes, a bounded batch a pass, provisional) and
@@ -214,6 +247,15 @@ window detected and reported (task 10).
 - The reserved names apply to every version, CSV or not, so existing tests that declare `rows` by hand move to a CSV
   declaration; and a version declaring a CSV can't be a sub-flow's or failure handler's target, since no caller may
   supply its rows.
-- Every change to a Temporal Schedule, its pause included, goes through an update carrying the conflict token; the
-  prototype verifies that the SDK sends it.
-- Misses are read from Temporal's own counter; the tick's activity retries without limit and alerts past 10 minutes.
+- Misses are read from Temporal's own counter (`ScheduleInfo.missed_catchup_window`); the tick's activity retries
+  without limit and alerts past 10 minutes.
+
+**The owner's corrections (2026-10-04)**, recorded above; filing the amended issue and starting M1 are approved, and the
+schedule sync isn't settled until its conflict-token path is proven:
+1. Schedule fencing: SDK 1.33.0's `ScheduleHandle.update()` sends no conflict token, so the sync uses a narrow,
+   tested RPC path that sends the token from `DescribeScheduleResponse`, proven first in M3 (task 10). A post-call
+   generation check alone can't keep a stale leader from overwriting a newer Temporal state.
+2. Upload streaming: the middleware buffers a whole permitted body, so the CSV route streams itself, with the platform
+   cap enforced as bytes arrive and the declaration's cap enforced before the remainder is buffered (task 5).
+3. Upload ownership on retries: the key-first lookup stays, without rebuilding rows, but an exact retry is returned
+   only to the upload's owner (task 7).
