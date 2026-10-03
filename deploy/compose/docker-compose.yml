@@ -122,6 +122,20 @@ services:
       temporal: { condition: service_healthy }
       cel-evaluator: { condition: service_healthy }
 
+  dispatcher:
+    <<: *app
+    # Starts admitted runs within each tenant's slots, and leads the reconciler when no other dispatcher does
+    # (engine 2b spec §7.3, §7.6; docs/operations/runs.md). The API admits runs but never talks to Temporal.
+    command: ["dewpoint", "dispatcher"]
+    environment:
+      <<: *appenv
+      DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_dispatch_login:${DEWPOINT_DISPATCH_DB_PASSWORD}@postgres/dewpoint
+      DEWPOINT_TEMPORAL_ADDRESS: temporal:7233
+    stop_grace_period: 15s  # longer than a start's own deadline (10 s): a start in flight gets its answer
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      temporal: { condition: service_healthy }
+
   cel-evaluator:
     image: ${DEWPOINT_CEL_EVALUATOR_IMAGE:-dewpoint-cel-evaluator:dev}
     build: { context: ../.., dockerfile: deploy/docker/cel-evaluator.Dockerfile }

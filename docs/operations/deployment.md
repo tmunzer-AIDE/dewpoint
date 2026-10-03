@@ -143,14 +143,26 @@ dewpoint platform init-environment --environment production --temporal-namespace
 
 - The defaults are `DEWPOINT_ENVIRONMENT` (else `production`) and `DEWPOINT_TEMPORAL_NAMESPACE` (else `default`).
   Running it again with the same values changes nothing; with other values it refuses: neither can change.
-- Every process that talks to Temporal — the worker and the CLI's Temporal commands — compares its configured
-  namespace with the record before it connects, and exits 2 when there's no record or it doesn't match. So a
+- Every process that talks to Temporal — the worker, the dispatcher and the CLI's Temporal commands — compares its
+  configured namespace with the record before it connects, and exits 2 when there's no record or it doesn't match. So a
   development database can't drive a namespace it wasn't set up for, and a production database can't either. The
   label proves nothing about the data: keep development's database and namespace apart from production's, with
   synthetic data only.
 - In `production`, no run starts until the production gate is lifted (sub-project 2b-4, after its readiness checks):
-  `dewpoint dev run` is refused, exit 2, with "Production runs are off in this deployment". In `development`, runs
-  start freely.
+  the run API answers 503 `production_runs_disabled` and `dewpoint dev run` exits 2, with "Production runs are off in
+  this deployment"; the dispatcher starts nothing, and queued requests wait. In `development`, runs start freely.
+
+### Turning production runs off
+
+```bash
+dewpoint platform disable-production-runs --wait 10
+```
+
+As `dewpoint_admin`, it turns the gate off at once, audited (`platform.production_runs.disable`): queued requests wait
+and started runs continue. It waits for any starting transaction to finish first, so no request becomes `starting`
+after it. Then it waits up to `--wait` seconds (the dispatcher's start deadline by default) for the starts already made
+to settle, and exits 3 with the ids of any still unresolved: the gate stays off, and the reconciler settles and audits
+them. No role turns the gate on outside 2b-4's command.
 
 ## Encrypted payloads
 
@@ -161,8 +173,8 @@ every run, a sub-flow and a failure handler included, and `t:<tenant>:run:<run i
 for a loop's batch. Temporal's Web UI shows ciphertext; what stays readable there is the ids, workflow and activity
 types, task queues, timestamps, and a local activity's own bookkeeping (its type and times).
 
-- The worker and `dewpoint dev run` need the KEK (`DEWPOINT_KEK_B64`, `DEWPOINT_KEK_ID`) and read tenants' data keys
-  through their database roles; they cache them for at most 5 minutes, and never longer, so a rotation reaches every
+- The worker, the dispatcher, the API and `dewpoint dev run` need the KEK (`DEWPOINT_KEK_B64`, `DEWPOINT_KEK_ID`) and
+  read tenants' data keys through their database roles; they cache them for at most 5 minutes, and never longer, so a rotation reaches every
   process within 5 minutes ([`key-rotation.md`](key-rotation.md)).
 - **Runs don't ride out a long database outage.** A key whose 5 minutes are up is read again, and while the database
   doesn't answer, it can't be: that tenant's payloads stop. An activity that starts or finishes then fails its
@@ -206,13 +218,19 @@ and reads each tenant's key the way the workers do, first.
 ## Docker Compose (evaluation)
 
 Compose runs Temporal's dev server (the `temporal` service: its state in SQLite on the `temporal-data` volume, its Web
-UI at <http://127.0.0.1:8233>) and one `worker`. Production uses a Temporal cluster instead.
+UI at <http://127.0.0.1:8233>), one `worker` and one `dispatcher`. Production uses a Temporal cluster instead.
 
 Its `migrate` service upgrades the schema, records the environment (`DEWPOINT_ENVIRONMENT`, `production` unless set)
 with the Temporal namespace (`DEWPOINT_TEMPORAL_NAMESPACE`, `default` unless set), and gives every tenant a data key as
 `dewpoint_admin_login`. Set the namespace in `.env`: every service takes it from there, and the worker exits 2 unless
-its own matches the record. Ordinary Compose is `production`, so no run starts; CI and local development set
-`DEWPOINT_ENVIRONMENT=development` through their own override, on a database of their own.
+its own matches the record. Ordinary Compose is `production`, so no run starts; CI and local development use the
+development override, on a database of their own (a project's own volume), with synthetic data only:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+```
+
+It records `development` (`DEWPOINT_ENVIRONMENT`); CI sets `COMPOSE_FILE` to both files.
 
 Compose runs one build at a time, so its worker makes its own build current as it starts
 (`DEWPOINT_WORKER_SET_CURRENT=true`). Replacing the `worker` container with a new image removes the old build's only
@@ -220,7 +238,7 @@ worker: **let runs end before upgrading**, or their build's worker must come bac
 image has a new engine ABI, publish every workflow again after upgrading (above). Leave the setting off wherever builds
 overlap.
 
-The worker and `dewpoint dev run` log in as `dewpoint_worker_login` and `dewpoint_dispatch_login`
+The worker, and the dispatcher and `dewpoint dev run`, log in as `dewpoint_worker_login` and `dewpoint_dispatch_login`
 (`DEWPOINT_WORKER_DB_PASSWORD`, `DEWPOINT_DISPATCH_DB_PASSWORD`). A fresh install creates both. An install whose
 database predates them creates them once, as the database owner:
 
