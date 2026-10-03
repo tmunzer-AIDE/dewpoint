@@ -2,24 +2,30 @@
 """The reconciler (engine 2b spec §7.6): one leader among the dispatchers settles what a start left uncertain. An
 execution it finds is verified as a dispatcher verifies one, and its request is `started`; a request goes back to the
 queue, no attempt counted, only after a trustworthy absence (a describe after the grace period, from a namespace that
-answers); any error leaves it `starting`, its slot held. A slot is released only once its run's latest execution is
-closed. Every request it settles is audited (§2.4)."""
+answers); any error leaves it `starting`, its slot held. Its grace runs from when it became `starting`, slot or not. A
+slot is released only once its run's latest execution is closed, never because its history is gone. Every request it
+settles is audited (§2.4)."""
 
+import asyncio
 import uuid
 from datetime import timedelta
 from typing import Any
 
 import pytest
+import structlog
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from temporalio.service import RPCStatusCode
 
 from dewpoint.apps.dispatcher import dispatch, reconcile
+from dewpoint.apps.worker.store import DbRunStore
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE
 from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.engine.runtime.workflow import RunGraph
 from tests.apps.dispatcher.support import begin, state
 from tests.apps.test_admission import KEYS
 from tests.apps.test_runs import rpc
+from tests.apps.worker.harness import workers
 
 pytestmark = pytest.mark.usefixtures("development_deployment")
 
@@ -31,10 +37,10 @@ async def starting(dispatch_sessionmaker: Any, request: Any, settings: Any) -> d
 
 
 async def aged(owner: Any, request_id: uuid.UUID, by: timedelta = reconcile.GRACE + timedelta(seconds=5)) -> None:
-    """The start was made `by` ago: its slot was reserved then."""
+    """The request became `starting` `by` ago."""
     async with owner() as s, s.begin():
         await s.execute(
-            text("update run_slots set reserved_at = reserved_at - cast(:by as interval) where run_id = :i"),
+            text("update run_requests set starting_at = starting_at - cast(:by as interval) where id = :i"),
             {"by": by, "i": request_id},
         )
 
@@ -77,7 +83,7 @@ class DescribeFails:
     def __init__(self, error: BaseException, namespace_error: BaseException | None = None) -> None:
         self.error, self.workflow_service = error, Service(namespace_error)
 
-    def get_workflow_handle(self, _: str) -> Handle:
+    def get_workflow_handle(self, _: str, **__: Any) -> Handle:
         return Handle(self.error)
 
 
@@ -183,3 +189,53 @@ async def test_a_leaked_slot_is_released_only_once_its_runs_execution_is_closed(
         await s.execute(text("update run_requests set checked_at = null where id = :i"), {"i": request.id})
     assert await once(dispatch_sessionmaker, env.client, api_settings) == {"released": 1}
     assert (await state(owner_sessionmaker, request.id))["slot"] == 0
+
+
+async def test_a_lost_reply_whose_run_already_ended_is_still_reconciled(
+    queued, owner_sessionmaker, dispatch_sessionmaker, worker_sessionmaker, api_settings, env, monkeypatch
+) -> None:
+    """The owner's M3 checkpoint: a start accepted, its reply lost, and the run so quick that its end write released
+    the slot while the request was still `starting`. The reconciler finds it by when it entered `starting`, never by a
+    slot it no longer has."""
+    ctx, _, request = queued
+    monkeypatch.setattr(reconcile, "GRACE", timedelta(0))  # its grace period over at once
+    async with workers(env.client, DbRunStore(worker_sessionmaker, KEYS)):
+        lost = await starting(dispatch_sessionmaker, request, api_settings)
+        assert (await dispatch.start(env.client, lost)).kind == "started"  # accepted; its reply never settled
+        handle = env.client.get_workflow_handle_for(RunGraph.run, run_workflow_id(str(ctx.tenant_id), str(request.id)))
+        assert (await asyncio.wait_for(handle.result(), 30)).status == "succeeded"
+    before = await state(owner_sessionmaker, request.id)
+    assert (before["request"][0], before["slot"], before["run"][0]) == ("starting", 0, "succeeded")
+    assert await once(dispatch_sessionmaker, env.client, api_settings) == {"started": 1}
+    after = await state(owner_sessionmaker, request.id)
+    assert (after["request"][0], after["slot"], after["run"][0]) == ("started", 0, "succeeded")
+    assert after["run"][1] is not None  # its started_at, from the execution's own start
+    assert await once(dispatch_sessionmaker, env.client, api_settings) == {}  # nothing left to settle
+
+
+async def test_a_leaked_slot_whose_history_is_gone_is_kept_with_an_alert(
+    queued, owner_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """The owner's ruling: a slot is never released solely because Temporal no longer has the run's history; it's left
+    unresolved, with an alert, for an operator."""
+    _, _, request = queued
+    found = await starting(dispatch_sessionmaker, request, api_settings)
+    assert await dispatch.settle(dispatch_sessionmaker, found, dispatch.Outcome("started")) == "started"
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("update runs set status = 'failed', ended_at = now() where id = :i"), {"i": request.id})
+    with structlog.testing.capture_logs() as seen:
+        assert await once(dispatch_sessionmaker, DescribeFails(rpc(RPCStatusCode.NOT_FOUND)), api_settings) == {
+            "unresolved": 1
+        }
+    assert (await state(owner_sessionmaker, request.id))["slot"] == 1
+    assert {"event": "slot_history_missing", "log_level": "error"}.items() <= next(
+        e for e in seen if e["event"] == "slot_history_missing"
+    ).items()
+
+
+async def test_a_starting_request_always_says_when_it_became_starting(queued, owner_sessionmaker) -> None:
+    """The reconciler's grace depends on it: the schema refuses a `starting` request without it."""
+    _, _, request = queued
+    with pytest.raises(IntegrityError, match="run_requests_starting_since"):
+        async with owner_sessionmaker() as s, s.begin():
+            await s.execute(text("update run_requests set status = 'starting' where id = :i"), {"i": request.id})

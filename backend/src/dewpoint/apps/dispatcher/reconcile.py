@@ -4,7 +4,8 @@ uncertain, records the end of runs whose workflow closed without their end write
 
 It reads across tenants only through `reconcile_candidates()` (ids and a kind), then works tenant-scoped, one
 request per transaction, with no transaction open across a call to Temporal. It asks about each request at most once
-per `RECHECK`. A failure it can't classify is logged and isolated, as the dispatcher's are."""
+per `RECHECK`. An uncertain start is found by when it became `starting`, never by its slot, which a quick run's end
+write may already have released. A failure it can't classify is logged and isolated, as the dispatcher's are."""
 
 import uuid
 from collections import Counter
@@ -25,7 +26,7 @@ from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.config import Settings
 from dewpoint.core.crypto.keys import KeySource
 from dewpoint.core.db import tenant_scope
-from dewpoint.core.models.requests import RunRequest, RunSlot
+from dewpoint.core.models.requests import RunRequest
 from dewpoint.core.runs import service as runs
 from dewpoint.engine.runtime.activities import RunResult
 from dewpoint.engine.runtime.execution import CANCELLED, INTERNAL_ERROR, TERMINATED
@@ -180,13 +181,8 @@ async def _unresolved(
     """Left `starting`, its slot held; an error once it has been so for ALERT_AFTER."""
     async with sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant_id)
-        age = (
-            await s.execute(
-                select(text("statement_timestamp() - reserved_at"))
-                .select_from(RunSlot)
-                .where(RunSlot.run_id == request_id)
-            )
-        ).scalar()
+        since = select(text("statement_timestamp() - starting_at")).select_from(RunRequest)
+        age = (await s.execute(since.where(RunRequest.id == request_id))).scalar()  # its slot may be gone already
         await _checked(s, request_id)
     if isinstance(age, timedelta) and age >= ALERT_AFTER:
         log.error("start_unresolved", request_id=str(request_id), detail=detail, age_s=int(age.total_seconds()))
@@ -215,7 +211,7 @@ async def _open(
     try:
         described = await handle.describe()  # no run id: the latest execution, past every continue-as-new
     except Exception as e:
-        log.warning("reconcile_unanswered", run_id=str(run_id), error=type(e).__name__)
+        await _missing_or_unanswered(client, e, run_id, "run_history_missing")
         await _checked_alone(sessionmaker, tenant_id, run_id)
         return "unresolved"
     if described.status is None or described.status in LIVE:
@@ -251,29 +247,34 @@ async def _ended(handle: Any, status: WorkflowExecutionStatus, run_id: uuid.UUID
 async def _slot(
     sessionmaker: async_sessionmaker[AsyncSession], client: Client, tenant_id: uuid.UUID, run_id: uuid.UUID
 ) -> str:
-    """A slot whose run's row has ended: released only once the logical run's latest execution is closed, or absent
-    from a namespace that answers."""
+    """A slot whose run's row has ended: released only once the logical run's latest execution is closed. Its history
+    gone is an alert, never a release (the owner's ruling)."""
     try:
         described = await client.get_workflow_handle(run_workflow_id(str(tenant_id), str(run_id))).describe()
-    except RPCError as e:
-        if not (e.status == RPCStatusCode.NOT_FOUND and await namespace_answers(client)):
-            log.warning("reconcile_unanswered", run_id=str(run_id), error=e.status.name)
-            await _checked_alone(sessionmaker, tenant_id, run_id)
-            return "unresolved"
     except Exception as e:
-        log.warning("reconcile_unanswered", run_id=str(run_id), error=type(e).__name__)
+        await _missing_or_unanswered(client, e, run_id, "slot_history_missing")
         await _checked_alone(sessionmaker, tenant_id, run_id)
         return "unresolved"
-    else:
-        if described.status is None or described.status in LIVE:
-            log.warning("slot_execution_live", run_id=str(run_id))  # its row ended, its execution didn't
-            await _checked_alone(sessionmaker, tenant_id, run_id)
-            return "live"
+    if described.status is None or described.status in LIVE:
+        log.warning("slot_execution_live", run_id=str(run_id))  # its row ended, its execution didn't
+        await _checked_alone(sessionmaker, tenant_id, run_id)
+        return "live"
     async with sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant_id)
         await dispatch.release(s, run_id)
         await _checked(s, run_id)
     return "released"
+
+
+async def _missing_or_unanswered(client: Client, e: Exception, run_id: uuid.UUID, missing: str) -> None:
+    """A started run's history Temporal no longer has (NOT_FOUND, from a namespace that answers) is an alert: no outcome
+    is invented and no slot released from missing history alone; an operator recovers it (the owner's ruling). Any other
+    failure: unanswered this time."""
+    if isinstance(e, RPCError) and e.status == RPCStatusCode.NOT_FOUND and await namespace_answers(client):
+        log.error(missing, run_id=str(run_id))
+        return
+    error = e.status.name if isinstance(e, RPCError) else type(e).__name__
+    log.warning("reconcile_unanswered", run_id=str(run_id), error=error)
 
 
 async def _checked(s: AsyncSession, request_id: uuid.UUID) -> None:

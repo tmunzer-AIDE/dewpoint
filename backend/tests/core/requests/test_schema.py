@@ -39,9 +39,10 @@ def request(tenant: uuid.UUID, wf: uuid.UUID, version: uuid.UUID | None, **extra
 
 INSERT_REQUEST = text(
     "insert into run_requests (id, tenant_id, workflow_id, workflow_version_id, source, mode, idempotency_key, digest, "
-    "digest_key_version, status, envelope_id, ended_at) values (:id, :tenant_id, :workflow_id, :workflow_version_id, "
-    ":source, :mode, :idempotency_key, :digest, :digest_key_version, cast(:status as varchar), :envelope_id, "
-    "case when cast(:status as varchar) in ('cancelled', 'refused', 'dead') then now() end)"
+    "digest_key_version, status, envelope_id, ended_at, starting_at) values (:id, :tenant_id, :workflow_id, "
+    ":workflow_version_id, :source, :mode, :idempotency_key, :digest, :digest_key_version, cast(:status as varchar), "
+    ":envelope_id, case when cast(:status as varchar) in ('cancelled', 'refused', 'dead') then now() end, "
+    "case when cast(:status as varchar) = 'starting' then now() end)"
 )
 
 

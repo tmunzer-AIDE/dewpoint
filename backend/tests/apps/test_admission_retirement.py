@@ -73,7 +73,9 @@ async def test_a_starting_request_blocks_normal_retirement_and_survives_a_forced
                                     api_settings)  # fmt: skip
     await update(api_sessionmaker, ctx, wf, enabled=False)  # only the request references the entry
     async with owner_sessionmaker() as s, s.begin():
-        await s.execute(text("update run_requests set status = 'starting' where id = :i"), {"i": request.id})
+        await s.execute(
+            text("update run_requests set status = 'starting', starting_at = now() where id = :i"), {"i": request.id}
+        )
     with pytest.raises(lifecycle.ReferencedError):
         async with admin_sessionmaker() as s, s.begin():
             await lifecycle.retire(s, ECHO)

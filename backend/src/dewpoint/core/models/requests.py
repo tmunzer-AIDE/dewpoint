@@ -41,6 +41,7 @@ class RunRequest(Base):
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cancel_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    starting_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # when it last became starting
     checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # the reconciler's last look
     envelope_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
 

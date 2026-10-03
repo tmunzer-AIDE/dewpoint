@@ -288,6 +288,7 @@ async def _begin(
         mode=request.mode, started_by=request.actor_id, queued_at=request.queued_at,
     )  # fmt: skip
     request.status = "starting"
+    request.starting_at = func.statement_timestamp()  # the reconciler's grace runs from here, slot or not (§7.6)
     await s.flush()
     return Starting(request.id, tenant_id, start)
 

@@ -9,8 +9,10 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import structlog
 from sqlalchemy import text
 from temporalio.client import WorkflowExecutionStatus
+from temporalio.service import RPCStatusCode
 
 from dewpoint.apps.dispatcher import dispatch, reconcile
 from dewpoint.apps.worker.store import DbRunStore
@@ -18,7 +20,9 @@ from dewpoint.engine.runtime.activities import ProjectInput
 from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.engine.runtime.workflow import RunGraph
 from tests.apps.dispatcher.support import BUILD, begin, state
+from tests.apps.dispatcher.test_reconcile import DescribeFails
 from tests.apps.test_admission import KEYS
+from tests.apps.test_runs import rpc
 from tests.apps.worker.harness import workers
 
 pytestmark = pytest.mark.usefixtures("development_deployment")
@@ -126,3 +130,18 @@ async def test_a_live_logical_run_is_left_running(
     }
     assert await ended(owner_sessionmaker, request.id) == ("running", None)
     assert (await state(owner_sessionmaker, request.id))["slot"] == 1
+
+
+async def test_a_started_run_whose_history_is_gone_is_left_unresolved_with_an_alert(
+    queued, owner_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """The owner's ruling: no outcome is invented and no slot released from missing history alone; an operator
+    recovers it."""
+    _, _, request = queued
+    await started(dispatch_sessionmaker, request, api_settings)
+    gone = DescribeFails(rpc(RPCStatusCode.NOT_FOUND))
+    with structlog.testing.capture_logs() as seen:
+        assert await reconcile.reconcile_once(dispatch_sessionmaker, gone, KEYS, api_settings) == {"unresolved": 1}
+    assert await ended(owner_sessionmaker, request.id) == ("running", None)
+    assert (await state(owner_sessionmaker, request.id))["slot"] == 1
+    assert any(e["event"] == "run_history_missing" and e["log_level"] == "error" for e in seen)

@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """the reconciler's view across tenants and its round robin (engine 2b spec §7.6)
 
-`run_requests.checked_at`: when the reconciler last asked Temporal about a request, so each one is asked at most once
-per recheck interval. `reconcile_candidates()`: like `dispatch_candidates()`, ids and a kind only, never a request's
+`run_requests.starting_at`: when the request last became `starting`, kept apart from its slot: a start accepted whose
+reply was lost can finish, and its end write release the slot, while the request is still `starting` (the owner's M3
+checkpoint). `run_requests.checked_at`: when the reconciler last asked Temporal about a request, so each one is asked at
+most once per recheck interval. `reconcile_candidates()`: like `dispatch_candidates()`, ids and a kind only, never a request's
 contents: uncertain starts past their grace period, started runs whose rows are still `running`, and slots held by
 runs whose rows have ended."""
 
@@ -19,9 +21,9 @@ CREATE FUNCTION reconcile_candidates(grace interval, recheck interval, max_rows 
 RETURNS TABLE (tenant_id uuid, request_id uuid, kind text)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
   SELECT c.tenant_id, c.request_id, c.kind FROM (
-    SELECT r.tenant_id, r.id AS request_id, 'starting'::text AS kind, s.reserved_at AS since
-    FROM run_requests r JOIN run_slots s ON s.run_id = r.id
-    WHERE r.status = 'starting' AND s.reserved_at < statement_timestamp() - grace
+    SELECT r.tenant_id, r.id AS request_id, 'starting'::text AS kind, r.starting_at AS since
+    FROM run_requests r
+    WHERE r.status = 'starting' AND r.starting_at < statement_timestamp() - grace
     UNION ALL
     SELECT r.tenant_id, r.id, 'open', u.queued_at
     FROM run_requests r JOIN runs u ON u.id = r.id
@@ -38,6 +40,17 @@ $$"""
 
 
 def upgrade() -> None:
+    op.add_column("run_requests", sa.Column("starting_at", sa.DateTime(timezone=True)))
+    op.execute(
+        "UPDATE run_requests r SET starting_at = coalesce("
+        "(SELECT s.reserved_at FROM run_slots s WHERE s.run_id = r.id), now()) WHERE r.status = 'starting'"
+    )
+    op.create_check_constraint(
+        "run_requests_starting_since", "run_requests", "status <> 'starting' OR starting_at IS NOT NULL"
+    )
+    op.create_index(
+        "run_requests_starting", "run_requests", ["starting_at"], postgresql_where=sa.text("status = 'starting'")
+    )
     op.add_column("run_requests", sa.Column("checked_at", sa.DateTime(timezone=True)))
     op.execute(CANDIDATES)
     op.execute("REVOKE ALL ON FUNCTION reconcile_candidates(interval, interval, integer) FROM PUBLIC")
@@ -47,3 +60,6 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.execute("DROP FUNCTION reconcile_candidates(interval, interval, integer)")
     op.drop_column("run_requests", "checked_at")
+    op.drop_index("run_requests_starting", table_name="run_requests")
+    op.drop_constraint("run_requests_starting_since", "run_requests", type_="check")
+    op.drop_column("run_requests", "starting_at")
