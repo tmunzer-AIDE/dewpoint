@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from dewpoint.apps.codec import KeyringKeys, TenantCodec
 from dewpoint.core.crypto.kek import Kek, KekSet
 from dewpoint.core.crypto.keyring import Keyring, NoKeyError
+from dewpoint.core.crypto.keys import digest_key_of
 from dewpoint.core.db import tenant_scope
 from tests.apps.test_codec import payload, workflow
 
@@ -122,3 +123,20 @@ async def test_an_expired_key_is_never_used_while_the_database_doesnt_answer(
         await keys.active(str(tenant))
     with pytest.raises(ConnectionRefusedError):
         await keys.get(str(tenant), 1)
+
+
+async def test_a_tenants_digest_key_is_derived_from_its_data_key_and_cached_with_it(
+    owner_sessionmaker, worker_sessionmaker
+) -> None:
+    """The request digest's key (engine 2b spec §7.2) comes from the same read as the data key, expires with it, and is
+    derived from it, never the data key itself."""
+    tenant, now = uuid.uuid4(), [0.0]
+    await with_key(owner_sessionmaker, tenant)
+    counted = Counted(worker_sessionmaker)
+    keys = KeyringKeys(counted, KEYRING, ttl_s=60, clock=lambda: now[0])  # type: ignore[arg-type]
+    version, key = await keys.digest_key(str(tenant), None)
+    assert await keys.digest_key(str(tenant), 1) == (1, key) and (await keys.active(str(tenant)))[0] == version == 1
+    assert counted.opened == 1
+    async with owner_sessionmaker() as s, s.begin():
+        _, raw = await KEYRING.read_dek(s, tenant)
+    assert key == digest_key_of(raw, str(tenant)) and key != raw and len(key) == 32

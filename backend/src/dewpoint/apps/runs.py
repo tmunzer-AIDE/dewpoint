@@ -285,6 +285,9 @@ class _NoKeys:
     async def get(self, tenant_id: str, version: int) -> Any:
         raise NotAdmissibleError(["This process can't seal the run's input: it has no keys."])
 
+    async def digest_key(self, tenant_id: str, version: int | None) -> Any:
+        raise NotAdmissibleError(["This process can't seal the run's input: it has no keys."])
+
 
 _NO_KEYS = _NoKeys()
 
