@@ -127,7 +127,7 @@ async def _starting(
     try:
         await handle.describe()
     except RPCError as e:
-        if e.status == RPCStatusCode.NOT_FOUND and await _namespace_answers(client):
+        if e.status == RPCStatusCode.NOT_FOUND and await namespace_answers(client):
             return await dispatch.settle(sessionmaker, dispatch.Ref(request_id, tenant_id), dispatch.Outcome("absent"),
                                          audited=True)  # fmt: skip
         return await _unresolved(sessionmaker, tenant_id, request_id, e.status.name)
@@ -165,7 +165,7 @@ async def _expected(
     return dispatch.Starting(request_id, tenant_id, start)
 
 
-async def _namespace_answers(client: Client) -> bool:
+async def namespace_answers(client: Client) -> bool:
     """Whether the namespace is reachable, so a NOT_FOUND is about the execution (§7.6). Any failure: it isn't known."""
     try:
         await client.workflow_service.describe_namespace(DescribeNamespaceRequest(namespace=client.namespace))
@@ -256,7 +256,7 @@ async def _slot(
     try:
         described = await client.get_workflow_handle(run_workflow_id(str(tenant_id), str(run_id))).describe()
     except RPCError as e:
-        if not (e.status == RPCStatusCode.NOT_FOUND and await _namespace_answers(client)):
+        if not (e.status == RPCStatusCode.NOT_FOUND and await namespace_answers(client)):
             log.warning("reconcile_unanswered", run_id=str(run_id), error=e.status.name)
             await _checked_alone(sessionmaker, tenant_id, run_id)
             return "unresolved"

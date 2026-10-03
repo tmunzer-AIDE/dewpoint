@@ -29,6 +29,7 @@ from temporalio.converter import DataConverter, WorkflowSerializationContext
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
+from dewpoint.apps.cancels import USER_CANCELLED
 from dewpoint.apps.codec import CodecRefusedError
 from dewpoint.apps.dispatcher.observe import REQUIRED, Build
 from dewpoint.core.audit import service as audit
@@ -426,6 +427,11 @@ async def _settle(s: AsyncSession, starting: Target, outcome: Outcome) -> str:
         log.warning("start_uncertain", request_id=str(request.id), detail=outcome.detail)
         return "uncertain"  # starting, its slot held, for the reconciler (§7.6)
     await release(s, request.id)
+    if outcome.kind in ("refused", "throttled", "absent") and request.cancel_requested_at is not None:
+        # A cancel recorded while it was starting, applied now that it didn't start (§7.8). A 10th refusal is
+        # cancelled too: the user asked first.
+        await _cancel(s, request, USER_CANCELLED, {"reason": USER_CANCELLED})
+        return "cancelled"
     if outcome.kind == "throttled":
         request.status, request.next_attempt_at = "queued", datetime.now(UTC) + backoff(1)
         return "throttled"

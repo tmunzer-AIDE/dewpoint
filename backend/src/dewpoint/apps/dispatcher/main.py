@@ -12,6 +12,7 @@ from temporalio.client import Client
 from temporalio.service import RPCError, RPCStatusCode
 
 from dewpoint.apps.codec import KeyringKeys, data_converter
+from dewpoint.apps.dispatcher.cancels import send_cancels
 from dewpoint.apps.dispatcher.dispatch import dispatch_once
 from dewpoint.apps.dispatcher.observe import observe, report
 from dewpoint.apps.dispatcher.reconcile import Leader, reconcile_once
@@ -57,6 +58,7 @@ async def run(settings: Settings) -> None:
                 await report(sessionmaker, instance, build_id, {"current_build": bool(build), **done})
                 if await leader.leading():
                     settled = await reconcile_once(sessionmaker, client, keys, settings)
+                    settled.update({f"cancel_{k}": v for k, v in (await send_cancels(sessionmaker, client)).items()})
                     await report(sessionmaker, reconciler, build_id, {**settled}, kind="reconciler")
                 await asyncio.sleep(CYCLE_S)
         finally:
