@@ -35,7 +35,7 @@ from dewpoint.core.audit import service as audit
 from dewpoint.core.claims import service as claims
 from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.config import Settings
-from dewpoint.core.crypto.keys import KeySource
+from dewpoint.core.crypto.keys import KeySource, key_unreadable
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.platform import PlatformSettings
 from dewpoint.core.models.requests import RunRequest, RunSlot, TenantRunLimits
@@ -59,7 +59,9 @@ ID_COLLISION = "id_collision"
 START_FAILED = "start_failed"
 ENVELOPE_UNREADABLE = "envelope_unreadable"
 KEY_UNUSABLE = "key_unusable"
-ENVELOPE_MESSAGE = "The request's trigger envelope doesn't open (engine 2b spec §7.1)."
+ENVELOPE_MESSAGE = (
+    "The request's trigger envelope doesn't open or isn't JSON; repairing a key never reopens it (engine 2b spec §7.1)."
+)
 REFUSED_MESSAGE = "Temporal refused the run's start 10 times (engine 2b spec §7.4)."
 COLLISION_MESSAGE = "Another execution holds this run's workflow id (engine 2b spec §7.4)."
 # A status Temporal answers with when it certainly refused the start (2a's rule, `apps.runs`).
@@ -93,7 +95,8 @@ class Waiting:
 
 @dataclass(frozen=True)
 class Dead:
-    """The request can never start (a broken envelope): `dead`, audited, an earlier attempt's run row failed."""
+    """The request can never start (a broken envelope): `dead`, audited, an earlier attempt's run row failed. Terminal:
+    repairing a key later (a wrong key fails as a tampered envelope does) never reopens it; a re-run is a new one."""
 
     reason: str
 
@@ -122,12 +125,14 @@ def sealer(converter: DataConverter, namespace: str) -> Seal:
 
 
 class KeyUnusableError(Exception):
-    """A tenant's key that couldn't be read: no such key, or the keyring didn't answer. Its cause says which."""
+    """A tenant's key that couldn't be read (`key_unreadable`): no such key, one that doesn't unwrap, or the keyring
+    didn't answer. Its cause says which."""
 
 
 class KeyFailures:
-    """A `KeySource` whose every failure is the key's own, as KeyUnusableError: wrapping only the key's read, so an
-    envelope that doesn't open, or a bug around it, is never taken for a key outage."""
+    """A `KeySource` whose expected failures (`key_unreadable`) say they're the key's, as KeyUnusableError: only the
+    key's read is wrapped, so an envelope that doesn't open is never taken for a key outage, and a bug in reading the
+    key raises as it is (the owner's M2 review)."""
 
     def __init__(self, keys: KeySource) -> None:
         self._keys = keys
@@ -136,18 +141,24 @@ class KeyFailures:
         try:
             return await self._keys.active(tenant_id)
         except Exception as e:
+            if not key_unreadable(e):
+                raise
             raise KeyUnusableError("The tenant's active key can't be read.") from e
 
     async def get(self, tenant_id: str, version: int) -> AESGCM:
         try:
             return await self._keys.get(tenant_id, version)
         except Exception as e:
+            if not key_unreadable(e):
+                raise
             raise KeyUnusableError("A tenant's key can't be read.") from e
 
     async def digest_key(self, tenant_id: str, version: int | None) -> tuple[int, bytes]:
         try:
             return await self._keys.digest_key(tenant_id, version)
         except Exception as e:
+            if not key_unreadable(e):
+                raise
             raise KeyUnusableError("A tenant's digest key can't be read.") from e
 
 
@@ -255,7 +266,9 @@ async def _begin(
     )
     try:
         await seal(start)
-    except CodecRefusedError as e:  # the codec's refusal: its tenant is in the id built here, so its key can't be read
+    except CodecRefusedError as e:  # the codec wraps whatever stopped it: only a key that can't be read waits
+        if not key_unreadable(e.__cause__):
+            raise
         log.warning("dispatch_waiting", reason=KEY_UNUSABLE, error=type(e.__cause__).__name__)
         return Waiting(KEY_UNUSABLE)
     s.add(RunSlot(run_id=request.id, tenant_id=tenant_id))

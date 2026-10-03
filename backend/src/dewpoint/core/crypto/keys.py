@@ -8,13 +8,15 @@ from collections import OrderedDict
 from collections.abc import Callable
 from typing import Protocol
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from dewpoint.core.crypto.keyring import Keyring
-from dewpoint.core.db import tenant_scope
+from dewpoint.core.crypto.kek import UnknownKekError
+from dewpoint.core.crypto.keyring import Keyring, NoKeyError
+from dewpoint.core.db import tenant_scope, unavailable
 
 
 def digest_key_of(raw: bytes, tenant_id: str) -> bytes:
@@ -24,9 +26,18 @@ def digest_key_of(raw: bytes, tenant_id: str) -> bytes:
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=info).derive(raw)
 
 
+def key_unreadable(e: BaseException | None) -> bool:
+    """Whether `e` is how reading a tenant's key fails with nothing wrong in the code (a `KeySource`'s contract): no
+    such key (`NoKeyError`), its KEK not configured (`UnknownKekError`), a stored key that doesn't unwrap under its KEK
+    (`InvalidTag`), or a keyring database that doesn't answer (`core.db.unavailable`). A bug in the reader is none."""
+    if e is None:
+        return False
+    return isinstance(e, (NoKeyError, UnknownKekError, InvalidTag)) or unavailable(e)
+
+
 class KeySource(Protocol):
     """A tenant's data keys, by version. Read-only: neither the codec nor the claim cipher creates a key (a tenant
-    gets one when it's created)."""
+    gets one when it's created). A key that can't be read raises what `key_unreadable` accepts."""
 
     async def active(self, tenant_id: str) -> tuple[int, AESGCM]: ...
 

@@ -13,6 +13,7 @@ from temporalio.api.common.v1 import Payload
 from temporalio.converter import WorkflowSerializationContext
 
 from dewpoint.apps.codec import TENANT, TenantCodec, data_converter
+from dewpoint.core.crypto.keyring import NoKeyError
 from dewpoint.core.crypto.keys import digest_key_of
 from dewpoint.engine.runtime.ids import run_workflow_id
 
@@ -36,7 +37,7 @@ class FixtureKeys:
 
     def _raw(self, tenant_id: str, version: int) -> bytes:
         if tenant_id in self.missing:
-            raise LookupError(f"no key for tenant {tenant_id}")
+            raise NoKeyError(f"no key for tenant {tenant_id}")  # as the keyring says it
         return hashlib.sha256(f"dewpoint-fixture-key|{tenant_id}|{version}".encode()).digest()
 
 
