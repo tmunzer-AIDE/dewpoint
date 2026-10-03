@@ -12,6 +12,7 @@ from dewpoint.apps.api.routes import (
     audit,
     auth,
     connections,
+    csv_uploads,
     health,
     members,
     mfa,
@@ -27,6 +28,7 @@ from dewpoint.core.crypto.kek import KekSet
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.crypto.keys import KeyringKeys
 from dewpoint.core.db import make_engine, make_sessionmaker
+from dewpoint.engine.graph.csv import MAX_BYTES as CSV_MAX_BYTES
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -49,7 +51,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Created eagerly (not in the lifespan) so ASGI test transports, which skip lifespan, get it too.
     app.state.http = httpx.AsyncClient(timeout=10, follow_redirects=False)
     app.add_middleware(
-        BodyLimitMiddleware, max_bytes=settings.max_request_body_bytes
+        BodyLimitMiddleware,
+        max_bytes=settings.max_request_body_bytes,
+        streamed=csv_uploads.STREAMED,  # a CSV upload reads its own body, to its declaration's cap
+        streamed_max=CSV_MAX_BYTES,
     )  # innermost: its 413 gets security headers
     app.add_middleware(ClientHeaderMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
@@ -67,6 +72,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         node_types.router,
         workflows.router,
         run_requests.router,
+        csv_uploads.router,
         runs.router,
     ):
         app.include_router(router)

@@ -43,3 +43,10 @@ async def matches(
     _, fresh = await digest(keys, tenant_id, source=source, workflow_id=workflow_id, mode=mode, input=input,
                             version=version)  # fmt: skip
     return hmac.compare_digest(fresh, stored)
+
+
+async def file_digest(keys: KeySource, tenant_id: str, data: bytes) -> tuple[int, bytes]:
+    """A file's digest with the tenant's active request-digest key (a CSV's, for its start's audit entry, §8.1), and
+    that version. The prefix keeps it apart from any request's: a request's canonical JSON starts with `{`."""
+    version, key = await keys.digest_key(tenant_id, None)
+    return version, hmac.new(key, b"csv-file\x00" + data, hashlib.sha256).digest()

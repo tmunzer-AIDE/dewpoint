@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+import re
+
 from starlette.datastructures import Headers
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
@@ -37,17 +39,30 @@ class ClientHeaderMiddleware(BaseHTTPMiddleware):
 class BodyLimitMiddleware:
     """Caps request bodies by the bytes actually received. Content-Length can't be relied on: chunked requests have
     none, and FastAPI parses a body before any route dependency could object. The body is buffered up to the limit
-    before the app runs; one byte more answers 413 without reading the rest."""
+    before the app runs; one byte more answers 413 without reading the rest.
 
-    def __init__(self, app: ASGIApp, max_bytes: int) -> None:
+    A `streamed` route (a POST whose path it matches whole) reads its own body as it arrives, to a cap it knows only
+    once it has authorized the caller (a CSV upload's, engine 2b spec §8.1): it's passed through unread, refused here
+    only when it declares more than `streamed_max`, which its own cap never passes."""
+
+    def __init__(
+        self, app: ASGIApp, max_bytes: int, streamed: re.Pattern[str] | None = None, streamed_max: int = 0
+    ) -> None:
         self.app = app
         self.max_bytes = max_bytes
+        self.streamed, self.streamed_max = streamed, streamed_max
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
         declared = Headers(scope=scope).get("content-length", "")
+        if self.streamed is not None and scope["method"] == "POST" and self.streamed.fullmatch(scope["path"]):
+            if declared.isdigit() and int(declared) > self.streamed_max:
+                await JSONResponse({"error": "too_large"}, status_code=413)(scope, receive, send)
+                return
+            await self.app(scope, receive, send)
+            return
         if declared.isdigit() and int(declared) > self.max_bytes:
             await JSONResponse({"error": "too_large"}, status_code=413)(scope, receive, send)
             return
