@@ -427,6 +427,10 @@ async def _settle(s: AsyncSession, starting: Target, outcome: Outcome) -> str:
     if outcome.kind == "uncertain":
         log.warning("start_uncertain", request_id=str(request.id), detail=outcome.detail)
         return "uncertain"  # starting, its slot held, for the reconciler (§7.6)
+    if outcome.kind == "absent" and await _run_ended(s, request.id):
+        # Its run's row records an end: a start did happen, and only its history is gone. Never queued or started
+        # again; left as it is for an operator (the owner's M3 review).
+        return "history_missing"
     await release(s, request.id)
     if outcome.kind in ("refused", "throttled", "absent") and request.cancel_requested_at is not None:
         # A cancel recorded while it was starting, applied now that it didn't start (§7.8). A 10th refusal is
@@ -450,6 +454,11 @@ async def _settle(s: AsyncSession, starting: Target, outcome: Outcome) -> str:
         return "dead"
     request.status, request.next_attempt_at = "queued", datetime.now(UTC) + backoff(request.attempts)
     return "refused"
+
+
+async def _run_ended(s: AsyncSession, run_id: uuid.UUID) -> bool:
+    status = (await s.execute(text("select status from runs where id = :i"), {"i": run_id})).scalar()
+    return status is not None and status != "running"
 
 
 async def confirm(s: AsyncSession, request: RunRequest, at: datetime | None) -> None:

@@ -206,6 +206,17 @@ async def test_a_lost_reply_whose_run_already_ended_is_still_reconciled(
         assert (await asyncio.wait_for(handle.result(), 30)).status == "succeeded"
     before = await state(owner_sessionmaker, request.id)
     assert (before["request"][0], before["slot"], before["run"][0]) == ("starting", 0, "succeeded")
+    # Its history unavailable (NOT_FOUND from a namespace that answers): its row records an end, so a start did happen.
+    # Never back in the queue, never started again: unresolved, with an alert, for an operator (the owner's M3 review).
+    with structlog.testing.capture_logs() as seen:
+        assert await once(dispatch_sessionmaker, DescribeFails(rpc(RPCStatusCode.NOT_FOUND)), api_settings) == {
+            "unresolved": 1
+        }
+    assert await state(owner_sessionmaker, request.id) == before
+    assert any(e["event"] == "start_history_missing" and e["log_level"] == "error" for e in seen)
+    assert await begin(dispatch_sessionmaker, request, api_settings) is None  # not due: it isn't queued
+    async with owner_sessionmaker() as s, s.begin():  # its history back: asked again without waiting for RECHECK
+        await s.execute(text("update run_requests set checked_at = null where id = :i"), {"i": request.id})
     assert await once(dispatch_sessionmaker, env.client, api_settings) == {"started": 1}
     after = await state(owner_sessionmaker, request.id)
     assert (after["request"][0], after["slot"], after["run"][0]) == ("started", 0, "succeeded")

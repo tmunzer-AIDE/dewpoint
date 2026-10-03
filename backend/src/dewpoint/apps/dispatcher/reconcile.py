@@ -129,8 +129,13 @@ async def _starting(
         await handle.describe()
     except RPCError as e:
         if e.status == RPCStatusCode.NOT_FOUND and await namespace_answers(client):
-            return await dispatch.settle(sessionmaker, dispatch.Ref(request_id, tenant_id), dispatch.Outcome("absent"),
-                                         audited=True)  # fmt: skip
+            ref = dispatch.Ref(request_id, tenant_id)
+            happened = await dispatch.settle(sessionmaker, ref, dispatch.Outcome("absent"), audited=True)
+            if happened != "history_missing":
+                return happened
+            log.error("start_history_missing", request_id=str(request_id))  # its row ended: an operator recovers it
+            await _checked_alone(sessionmaker, tenant_id, request_id)
+            return "unresolved"
         return await _unresolved(sessionmaker, tenant_id, request_id, e.status.name)
     except Exception as e:  # a lost connection or a timeout: nothing is known
         return await _unresolved(sessionmaker, tenant_id, request_id, type(e).__name__)
