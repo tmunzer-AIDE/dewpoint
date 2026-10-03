@@ -206,12 +206,16 @@ async def test_the_dispatcher_picks_from_every_tenant_seeing_only_what_it_needs(
                                      "where id = :i"), {"i": values["id"]})  # fmt: skip
             rows.append(values["id"])
     async with dispatch_sessionmaker() as s:
-        picked = (await s.execute(text("select * from dispatch_candidates(10)"))).mappings().all()
-    assert {(r["tenant_id"], r["request_id"]) for r in picked} == {(a, rows[1]), (b, rows[3])}
-    assert set(picked[0].keys()) == {"tenant_id", "request_id"}
+        picked = (await s.execute(text("select * from dispatch_candidates(10, null, null)"))).mappings().all()
+        assert {(r["tenant_id"], r["request_id"]) for r in picked} == {(a, rows[1]), (b, rows[3])}
+        assert set(picked[0].keys()) == {"tenant_id", "request_id", "queued_at"}
+        first = picked[0]
+        after = await s.execute(text("select request_id from dispatch_candidates(10, :q, :r)"),
+                                {"q": first["queued_at"], "r": first["request_id"]})  # fmt: skip
+        assert list(after.scalars()) == [picked[1]["request_id"]]  # on from a pick's last tenant
     with pytest.raises(DBAPIError, match="permission denied"):
         async with api_sessionmaker() as s:
-            await s.execute(text("select * from dispatch_candidates(10)"))
+            await s.execute(text("select * from dispatch_candidates(10, null, null)"))
 
 
 async def test_a_slot_is_reserved_by_the_dispatcher_and_released_by_the_end_write(

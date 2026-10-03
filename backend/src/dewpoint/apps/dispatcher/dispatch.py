@@ -517,7 +517,10 @@ async def _dead(s: AsyncSession, request: RunRequest, reason: str, message: str)
 
 @dataclass
 class Rotation:
-    """Where the last cycle's pick of due tenants ended (unused yet)."""
+    """Where the last cycle's pick of due tenants ended: the next cycle goes on from there, and wraps around once a
+    pick comes back short. So a full pick of tenants that can't start (at their limit, waiting on a key) never keeps
+    the others from being picked: every due tenant is reached within ⌈due tenants / CANDIDATES⌉ cycles (the
+    whole-branch review)."""
 
     after: tuple[datetime, uuid.UUID] | None = None
 
@@ -527,13 +530,21 @@ async def dispatch_once(
     rotation: Rotation | None = None,
 ) -> dict[str, int]:  # fmt: skip
     """One cycle: each tenant's oldest due request, picked through `dispatch_candidates` (queue-selection metadata
-    only), begun, started and settled in turn. What happened, counted, for the report."""
+    only) on from where `rotation` says the last pick ended, begun, started and settled in turn. What happened,
+    counted, for the report."""
+    rotation = rotation if rotation is not None else Rotation()
     seal = sealer(client.data_converter, client.namespace)
+    after_queued, after_request = rotation.after if rotation.after is not None else (None, None)
     async with sessionmaker() as s:
-        picked = (await s.execute(text("select tenant_id, request_id from dispatch_candidates(:n)"),
-                                  {"n": CANDIDATES})).all()  # fmt: skip
+        picked = (
+            await s.execute(
+                text("select tenant_id, request_id, queued_at from dispatch_candidates(:n, :after_queued, :after_id)"),
+                {"n": CANDIDATES, "after_queued": after_queued, "after_id": after_request},
+            )
+        ).all()
+    rotation.after = (picked[-1].queued_at, picked[-1].request_id) if len(picked) == CANDIDATES else None
     counts: Counter[str] = Counter()
-    for tenant_id, request_id in picked:
+    for tenant_id, request_id, _ in picked:
         try:
             happened = await _dispatch(sessionmaker, client, seal, keys, settings, build, tenant_id, request_id)
         except Exception as e:  # a bug or an outage: the request stays as it was, and the cycle goes on (M2 review)

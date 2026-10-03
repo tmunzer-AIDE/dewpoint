@@ -218,7 +218,8 @@ and reads each tenant's key the way the workers do, first.
 ## Docker Compose (evaluation)
 
 Compose runs Temporal's dev server (the `temporal` service: its state in SQLite on the `temporal-data` volume, its Web
-UI at <http://127.0.0.1:8233>), one `worker` and one `dispatcher`. Production uses a Temporal cluster instead.
+UI at <http://127.0.0.1:8233>), one `worker` and one `dispatcher`, which Compose restarts unless it's stopped.
+Production uses a Temporal cluster instead.
 
 Its `migrate` service upgrades the schema, records the environment (`DEWPOINT_ENVIRONMENT`, `production` unless set)
 with the Temporal namespace (`DEWPOINT_TEMPORAL_NAMESPACE`, `default` unless set), and gives every tenant a data key as

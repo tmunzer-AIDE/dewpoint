@@ -45,8 +45,10 @@ and `default`, and `x-dewpoint-picker` as `picker`. A sensitive field never show
 namespace before it connects: exit 2 otherwise, [`deployment.md`](deployment.md)), and the KEK. Every second it:
 
 1. reads the current build from Temporal and records it, for admission's engine ABI check;
-2. picks each tenant's oldest due request (through `dispatch_candidates()`, which returns ids only) and, in one
-   transaction under the production gate's and the tenant's shared locks, checks again what must hold at a start:
+2. picks each tenant's oldest due request (through `dispatch_candidates()`, which returns ids and when they were
+   queued), up to 50 tenants, going on from where the last full pick ended so that tenants that can't start never
+   hold the others back, and, in one transaction under the production gate's and the tenant's shared locks, checks
+   again what must hold at a start:
    - production runs on (in `production`), and the tenant not being erased;
    - every live worker of the current build healthy, with every capability the build needs;
    - nothing the frozen version uses retired, else the request is `cancelled` (`node_type_retired`,
@@ -72,7 +74,9 @@ What Temporal answers decides what follows:
 - no answer: it stays `starting`, its slot held, for the reconciler.
 
 The root run's end write releases its slot. A failure the dispatcher can't classify is logged (`dispatch_failed`, its
-type only) and leaves that request as it was; the cycle goes on with the other tenants. Each instance records its
+type only) and leaves that request as it was; the cycle goes on with the other tenants. A cycle that can't read the
+current build from Temporal dispatches nothing (`dispatcher_observe_failed`), and the next one asks again; a cycle
+that fails is logged (`dispatcher_cycle_failed`) and the process goes on. Each instance records its
 last cycle in `dispatcher_reports`.
 
 ### The reconciler
