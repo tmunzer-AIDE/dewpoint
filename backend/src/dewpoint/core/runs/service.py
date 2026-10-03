@@ -10,7 +10,7 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select, tuple_, update
+from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -75,6 +75,7 @@ async def insert_run(
         status="running",
         iterations=0,
         started_by=started_by,
+        started_at=func.now(),
     )
     s.add(run)
     await s.flush()

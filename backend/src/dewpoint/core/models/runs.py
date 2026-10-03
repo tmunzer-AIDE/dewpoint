@@ -24,7 +24,10 @@ class Run(Base):
     workflow_version_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     mode: Mapped[str] = mapped_column(String(16))
     status: Mapped[str] = mapped_column(String(32))
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # A root run's row is written at dispatch, before Temporal answers (engine 2b spec §7.3): queued then, started
+    # once the start is confirmed. A run from before 2b-2 was queued when it started.
+    queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error_code: Mapped[str | None] = mapped_column(Text)  # a plugin's code: nothing bounds it, sanitize() does
     error_message: Mapped[str | None] = mapped_column(Text)

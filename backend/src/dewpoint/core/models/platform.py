@@ -18,6 +18,7 @@ class PlatformSettings(Base):
     environment: Mapped[str] = mapped_column(String(16))
     temporal_namespace: Mapped[str] = mapped_column(Text)
     production_runs: Mapped[bool] = mapped_column(Boolean, default=False)
+    max_concurrent_runs: Mapped[int] = mapped_column(SmallInteger, default=5)  # per tenant, unless its limits row says
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

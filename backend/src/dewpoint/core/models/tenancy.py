@@ -17,6 +17,7 @@ class Tenant(UUIDPk, Timestamps, Base):
     name: Mapped[str] = mapped_column(String(200))
     slug: Mapped[str] = mapped_column(String(63), unique=True)
     require_passkey: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(String(16), default="active")  # `erasing`: refused by admission and dispatch
 
 
 class Membership(UUIDPk, Timestamps, Base):

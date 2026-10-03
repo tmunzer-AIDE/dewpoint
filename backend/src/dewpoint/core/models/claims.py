@@ -29,10 +29,14 @@ class _Claim:
 
 
 class InputClaim(_Claim, Base):
-    """A claim made before its run starts: a trigger's claimed parts, a sub-flow's input (§3.5)."""
+    """A claim made before its run starts: a trigger's claimed parts, a sub-flow's input (§3.5). Or, with the role
+    `envelope`, a request's trigger envelope (revision 7, §7.1): not a claim, never read or granted as one."""
 
     __tablename__ = "run_inputs"
-    pointer: Mapped[str] = mapped_column(Text)  # where in the run's input it was claimed from
+    role: Mapped[str] = mapped_column(String(16), default="claim")
+    pointer: Mapped[str | None] = mapped_column(
+        Text
+    )  # where in the run's input it was claimed from; none for an envelope
 
 
 class OutputClaim(_Claim, Base):
