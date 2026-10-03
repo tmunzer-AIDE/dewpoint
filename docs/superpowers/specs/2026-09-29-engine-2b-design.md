@@ -1,9 +1,9 @@
 # Dewpoint — Engine 2b Design (payload protection, admission, triggers, retention)
 
-- **Status:** revision 6, a draft pending the owner's approval. Revision 4 (2026-09-30) was approved by the owner:
-  every section was approved in conversation before it was written here, and this document is their written form.
-  Revision 5 (2026-10-01) was approved for implementation by the 2b-1b plan, which isn't production readiness:
-  nothing runs in production before 2b-4 lifts the gate (§2).
+- **Status:** revision 7, a draft pending the owner's approval with the 2b-2 plan. Revision 6 (2026-10-03) is
+  approved. Revision 4 (2026-09-30) was approved by the owner: every section was approved in conversation before it
+  was written here, and this document is their written form. Revision 5 (2026-10-01) was approved for implementation
+  by the 2b-1b plan, which isn't production readiness: nothing runs in production before 2b-4 lifts the gate (§2).
   - Revision 2 folds in the owner's review of revision 1: a claim is owned by the run that produced it, with the
     root run id kept for retention and the secret index (§3.4); passing a secret-index bound is a fixed,
     non-retryable error, and matching work is bounded (§3.7); an idempotency retry is compared under its stored
@@ -89,6 +89,11 @@
     From the owner's ruling on the revision 6 review (2026-10-03): the claims activities keep their sites' codes when
     the claim store doesn't answer; a bug before a plugin's node runs fails the step `internal_error`, never as the
     store's outage (§3.7); the evaluator holds `engine.handles`, which `engine.cel`'s binding imports (§13).
+  - Revision 7 (draft, for the owner's approval with the 2b-2 plan), from the owner's rulings on the 2b-2 outline
+    (2026-10-03): a request's trigger envelope is stored, encrypted, beside its claims, never served as a claim, read
+    only through its own request-scoped reader, and kept and deleted with its request (§3.1, §7.1, §10.1); a re-run
+    resolves the old request, not a run, and is refused with `input_not_retained` when its input is gone (§7.7, §9);
+    a claim keeps no digest of its value (#28, §3.1).
 - **Parent specs:**
   - `2026-09-24-dewpoint-architecture-design.md` (§5, §6.1, §6.5, §6.8, §12, §15). This spec **changes** its
     workflow-id contract (§6.1), replaces its `outbox` table (§6.1), details its claim check (§6.5) and settles the
@@ -165,7 +170,7 @@ lifts, so publishing every workflow again after each ABI change costs only that.
 - **At dispatch.** Immediately before `RunGraph` starts, in the transaction that marks a request `starting`, the
   dispatcher rechecks every critical condition. Any failure leaves the request queued, with a metric and an alert;
   it isn't failed or cancelled:
-  - the gate is on, and the tenant isn't `erasing` (§6.8);
+  - the gate is on, and the tenant isn't `erasing` (§6.5);
   - the current build's capabilities (§2.7);
   - the tenant's key is usable: the dispatcher encrypts the start payload with it, so a key that doesn't work stops
     the start;
@@ -233,14 +238,17 @@ depth for what does enter history.
 
 ### 3.1 Storage
 
-- **`run_inputs`:** claims made before a run starts — a trigger's claimed parts, 2b-3's CSV rows and their mapping.
+- **`run_inputs`:** claims made before a run starts — a trigger's claimed parts, 2b-3's CSV rows and their mapping —
+  and each request's trigger envelope, which isn't a claim (§7.1).
 - **`step_outputs`:** claims made during a run — plugin outputs, CEL results, spilled values and segments.
 - Each row holds one value, encrypted with the keyring under the purpose `claim`, with the claim's id as context, so
   the tenant, the purpose and the id are bound to the ciphertext.
 - **Authoritative metadata** on every row: the tenant; the **owner**, the run that produced the claim (§3.4); the
   **root run id** of the owner's tree, used by retention (§10.1) and the secret index (§3.7), never for
   authorization; the producer (step, iteration, attempt, for tracing); a **sensitive-pointer map** listing which
-  pointers inside the value are tainted; a content hash.
+  pointers inside the value are tainted. No digest of the value is kept: an unkeyed hash would let anyone who reads
+  the table test guesses for a low-entropy secret (#28). A write that finds its id already taken decrypts the existing
+  row and compares the canonical plaintext: the same value is an idempotent retry, another one a conflict.
 
 ### 3.2 Handles
 
@@ -911,6 +919,23 @@ trigger isn't on the row: it lives in `run_inputs`, encrypted, as an envelope ho
 
 **Statuses:** `queued`, `starting`, `started`, `cancelled`, `refused`, `dead`.
 
+**The trigger envelope.** What §3.5 returns, the trigger's untainted values within `TRIGGER_INLINE` with a handle in
+place of every claim, is what a run starts with. The dispatcher (another process, later) and a re-run (much later)
+both need it, so admission stores it:
+- **Storage:** one row of `run_inputs`, encrypted as a claim is (the purpose `claim`, the row's id as context), with
+  the role `envelope` where a claim's is `claim`, and no tainted pointer: every sensitive value is a claim it holds by
+  handle. Its owner and root are the request's id, which is the run's, the owner of the claims it references.
+- **An enforced shape:** at most one envelope per owner; a claim always has a `pointer` and the envelope never does;
+  the request names its envelope, and a foreign key on `(envelope_id, id, 'envelope')` lets it reach only an envelope
+  the request owns, which can't be deleted while the request exists; only a `refused` request has none.
+- **Never a claim:** ordinary claim reads and grants exclude it, so a handle that names its id is refused
+  (`claim_unavailable`) and a grant that reaches it grants nothing. It's read only through its own tenant- and
+  request-scoped reader, by the dispatcher building the start and by a re-run (§7.7).
+- **One transaction:** admission writes the claims, the envelope and the request in one savepoint of its caller's
+  transaction; they commit or roll back together.
+- **Retention:** all three are kept while the request is `queued` or `starting`, and deleted together at the
+  applicable terminal cutoff (§10.1).
+
 ### 7.2 `admit_request`
 
 **It runs inside its caller's READ COMMITTED transaction and never commits it.** The caller commits: the API handler
@@ -1020,6 +1045,13 @@ Inside the dispatcher, with one leader chosen through an advisory lock:
   so the API has no Temporal client.
 - Re-runs are new admissions on the active version. With the original input, they're offered only while its
   `run_inputs` are retained (§10.1), and the input is claimed again for the new request (§3.4).
+  `POST /t/{tid}/runs/{id}/rerun` names the old **request** (its id is also its run's, if it has one): a request
+  cancelled while queued may never have had a run. The caller needs `run.view` to read that request's input and
+  `run.start` on its workflow. Its envelope is read through its own reader and every handle in it resolved, as the
+  request that owns the claims, into the complete input, held in memory only; that input is then admitted as a new
+  request (source `rerun`), validated against the active version's input schema and claimed again under the new
+  request's id. No old handle is ever reused. A run from before 2b-2 (no request), a `refused` request (no
+  envelope), or an envelope or claim retention has removed: `410 input_not_retained`.
 - `GET /t/{tid}/runs` lists requests and runs together, by one stable sort key `(queued_at, id)`: a request's
   `queued_at` is when it was created, its run shares its id and `queued_at`, and a run from before 2b gets
   `queued_at = started_at` (backfilled). The paired cursor stays: `before` and `before_id`, given together or refused
@@ -1146,7 +1178,7 @@ transition out of `starting` says what happens to both, in the same transaction 
 - **Run and step codes added:** `payload_too_large`, `snapshot_too_large`, `claim_unavailable`,
   `secret_index_limit`, `secret_index_unavailable`. `terminated` now also applies
   to a root run an operator terminated (recorded by the reconciler).
-- **API errors added:** `production_runs_disabled` (503), `idempotency_conflict` (409).
+- **API errors added:** `production_runs_disabled` (503), `idempotency_conflict` (409), `input_not_retained` (410).
 - **Request statuses:** `queued`, `starting`, `started`, `cancelled`, `refused`, `dead`. Reasons include
   `engine_abi_changed`, `node_type_retired`, `cel_profile_retired`, `workflow_disabled`, `not_active`,
   `schedule_paused`, `input_invalid`, `secret_index_limit`, `start_refused`, `id_collision`, `user_cancelled`,
@@ -1169,10 +1201,11 @@ transition out of `starting` says what happens to both, in the same transaction 
   Temporal resets stop being supported: from then on the claims may disappear, and a reset execution that resolves
   a deleted claim fails that step with `claim_unavailable`, not retried.
 - **Physical deletion within 24 hours after the cutoff** is an enforced operational SLO (§10.3).
-- **What's deleted:** a terminal root's whole tree, found by root run id — `runs`, `run_steps`, `step_outputs`
-  (spills, segments, snapshots), `run_inputs`, `run_secret_index`, `claim_grants`; terminal requests that never started (with their
-  inputs); `matched`, `unmatched`, `cancelled` and `dead` events. Nothing of a non-terminal tree, and no `pending`
-  event, is ever deleted. `csv_uploads` expire after one hour.
+- **What's deleted:** a terminal root's whole tree, found by root run id — `runs`, `run_steps`, `step_outputs` (spills,
+  segments, snapshots), `run_inputs`, `run_secret_index`, `claim_grants`; terminal requests that never started (with
+  their inputs). A request, its envelope and its claims are deleted together, in one transaction, and never while the
+  request is `queued` or `starting`; `matched`, `unmatched`, `cancelled` and `dead` events. Nothing of a non-terminal
+  tree, and no `pending` event, is ever deleted. `csv_uploads` expire after one hour.
 - **Never "exactly N days":** the spec and the guide describe retention by cutoff, visibility, deletion time and the
   backup exception.
 
