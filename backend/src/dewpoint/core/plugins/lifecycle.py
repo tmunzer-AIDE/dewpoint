@@ -257,6 +257,8 @@ async def retire(
         requests.setdefault(q.tenant_id, []).append(str(q.request_id))
     for tenant_id in sorted(workflows.keys() | requests.keys()):
         await tenant_scope(s, tenant_id)  # tenant audit entries need the tenant context; nothing reads after this
+        for request_id in requests.get(tenant_id, []):  # an earlier attempt's row ends with its request (§7.8)
+            await s.execute(text("select end_unstarted_run(:i)"), {"i": uuid.UUID(request_id)})
         await record(
             s,
             tenant_id=tenant_id,
