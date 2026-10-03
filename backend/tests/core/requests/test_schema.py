@@ -241,6 +241,7 @@ async def test_a_tenant_is_active_until_it_is_erased(owner_sessionmaker) -> None
 # dispatcher moves requests, reserves slots under the limits row and records the current build; the worker's end write
 # releases a slot. Column-level grants narrow the API's updates to a cancel's columns.
 ALLOWED = {
+    ("admin", "run_requests"): {"select", "update"},  # a forced retirement cancels queued requests (engine-core §4.5)
     ("api", "run_requests"): {"select", "insert", "update"},
     ("api", "tenant_run_limits"): {"select"},
     ("api", "run_slots"): {"select"},
