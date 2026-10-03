@@ -110,6 +110,9 @@
       take new input whatever was retained, a run from before 2b-2 included (§7.2, §7.7);
     - a forced retirement ends the rows of the requests it cancels (§7.8);
     - what stays open before production is listed in §7.9.
+  - Revision 8 (draft, for the owner's approval with the 2b-3a plan; the rest is written from its prototype), from the
+    owner's review of the 2b-3a prototype's milestone 1 (2026-10-04): every literal a schema writes at a sensitive
+    position is refused, as a default is, nested and behind a local `$ref` (§3.8, #32).
 - **Parent specs:**
   - `2026-09-24-dewpoint-architecture-design.md` (§5, §6.1, §6.5, §6.8, §12, §15). This spec **changes** its
     workflow-id contract (§6.1), replaces its `outbox` table (§6.1), details its claim check (§6.5) and settles the
@@ -402,10 +405,14 @@ secret and a sub-flow's refusal is an activity result, in history.
 
 ### 3.8 Sensitive literals are refused
 
-- Publish refuses a literal at a sensitive config position, a `default` at a sensitive position of `input_schema`
-  or `vars_schema`, and a default on a sensitive CSV column (§8.1). Null and the empty string are literals too: an
-  omitted default is what's allowed, not a written empty one. The diagnostic points to trigger inputs now and to
-  connections in sub-project 3.
+- Publish refuses a literal at a sensitive config position, and every literal a schema writes of its instances — a
+  `default`, an `enum`'s values, a `const`, `examples` — at a sensitive position of `input_schema` or `vars_schema`,
+  or holding a part one marks: nested, in a union's branch, or in a definition a sensitive position reaches through a
+  local `$ref` (#32). A sensitive CSV column takes neither a default nor `values` (§8.1). Null and the empty string are
+  literals too: an omitted default is what's allowed, not a written empty one. The diagnostic points to trigger inputs
+  now and to connections in sub-project 3.
+- A start form still masks a sensitive field's default and enum (§7.7): versions published before this rule are
+  immutable and may hold them.
 - A sensitive variable therefore has no default: it is null until a step sets it. Publish accepts it when its type
   admits null, or when every read of it comes after a step sure to have set it (path availability, as for a step's
   output); otherwise the read is refused.

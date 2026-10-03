@@ -67,6 +67,14 @@ dependency.
    whose `row_count` is public; a loop over a `rows` list without one needs its `declassify` entry. Filed as #31
    (2026-10-04).
 
+   **From the owner's M1 reviews (2026-10-04), test first:** a CSV's input schema may hold only `type`, `properties`,
+   `required`, `additionalProperties`, `$defs` and annotations at its root, since any other keyword (a closed `allOf`
+   branch, a root `$ref`, `propertyNames`, `maxProperties`, `x-sensitive`, ...) could refuse the generated `rows`, or
+   make their count sensitive (`csv.input_schema`); a sensitive column lists no `values` (`sensitive.literal`). And,
+   as its own issue (#32): publish refuses a `default`, `enum`, `const` or `examples` at a sensitive position of
+   `input_schema` or `vars_schema`, nested, in a union's branch, or in a definition a sensitive position reaches
+   through a local `$ref`; §3.8 states it, and the start form keeps `enum_masked` for versions published before.
+
 **M2. CSV uploads and CSV starts**
 4. The parser, data only: UTF-8 with an optional BOM; the delimiter detected among comma, semicolon and tab; the caps
    (bytes, then rows); unique headers; each cell converted to its column's type (ruling 7: an empty cell is absent, so
