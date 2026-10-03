@@ -64,8 +64,8 @@ dependency.
    a CSV is started only by the run API with a CSV, or by a re-run of such a request: publish refuses it as a
    sub-flow's or a failure handler's target.
 3. **The `trigger.rows` fix (ruling 11, test first):** the exception holds only for a version that declares a CSV,
-   whose `row_count` is public; a loop over a `rows` list without one needs its `declassify` entry. The issue is filed
-   before the prototype starts.
+   whose `row_count` is public; a loop over a `rows` list without one needs its `declassify` entry. Filed as #31
+   (2026-10-04).
 
 **M2. CSV uploads and CSV starts**
 4. The parser, data only: UTF-8 with an optional BOM; the delimiter detected among comma, semicolon and tab; the caps
