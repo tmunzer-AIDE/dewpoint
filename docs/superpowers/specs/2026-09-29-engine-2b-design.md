@@ -94,6 +94,22 @@
     only through its own request-scoped reader, and kept and deleted with its request (§3.1, §7.1, §10.1); a re-run
     resolves the old request, not a run, and is refused with `input_not_retained` when its input is gone (§7.7, §9);
     a claim keeps no digest of its value (#28, §3.1).
+    From the owner's checkpoints on the 2b-2 prototype (2026-10-03), approved as prototype checkpoints, not
+    production sign-off:
+    - admission fails closed without a fresh current-build record (2 minutes, aged by the statement's clock), with
+      `environment_not_recorded`, `no_current_build` and `version_unusable` (§7.2, §9); the tenant-scoped policies
+      are the operational roles' only, and the envelope's foreign key includes the tenant (§7.1, §14);
+    - dispatch tells a key that can't be read (it waits) from an envelope that doesn't open (the request goes `dead`,
+      and repairing a key never reopens it) and from a bug (isolated per request), and never waits on a retirement's
+      lifecycle lock while it holds the request's row (§7.3);
+    - the reconciler finds an uncertain start by when it became `starting`, never by its slot, puts it back in the
+      queue only on a trustworthy absence with its run's row still `running` and its slot still held, read under the
+      end write's locks, and never infers an outcome or releases a slot from missing history (§7.5, §7.6);
+    - a request whose run already ended is never started again: `queued` → `starting` without a slot (§7.8);
+    - a re-run's idempotency digest covers what was asked, checked before the old input is rebuilt, and a re-run may
+      take new input whatever was retained, a run from before 2b-2 included (§7.2, §7.7);
+    - a forced retirement ends the rows of the requests it cancels (§7.8);
+    - what stays open before production is listed in §7.9.
 - **Parent specs:**
   - `2026-09-24-dewpoint-architecture-design.md` (§5, §6.1, §6.5, §6.8, §12, §15). This spec **changes** its
     workflow-id contract (§6.1), replaces its `outbox` table (§6.1), details its claim check (§6.5) and settles the
@@ -194,6 +210,10 @@ lifts, so publishing every workflow again after each ABI change costs only that.
 - If the wait times out, the gate **stays off**, the command reports those starts as **unresolved**, and their
   eventual outcomes are audited when the reconciler settles them. A disable is never reported as fully settled
   while any start is unresolved.
+- `dewpoint platform disable-production-runs [--wait SECONDS]` runs as `dewpoint_admin`, through a function that
+  takes the lock, can only turn the gate off, and returns whether it was on; the disable is audited with that. It
+  exits 3, listing the unresolved starts' ids, when any start is still unsettled after the wait (the start deadline
+  by default). No role updates `platform_settings` directly; turning the gate on is 2b-4's audited command (§10.6).
 
 ### 2.5 Durable work while the gate is off
 
@@ -914,8 +934,10 @@ that logs, writes what it writes. The SDK says so, and plugins log through `ctx.
 `run_requests` is the durable, transactional queue; it replaces the parent spec's separate `outbox` (the request row
 is itself the intent, written atomically). Each row: the id (also the future run's id); the tenant, workflow and
 frozen version; the source (`manual`, `rerun`, `schedule`, `webhook`, `dev`) and the actor; the mode; the
-idempotency key and digest; the status and a reason code; the attempt count and next-attempt time; `queued_at`. The
-trigger isn't on the row: it lives in `run_inputs`, encrypted, as an envelope holding handles.
+idempotency key and digest; the status and a reason code; the attempt count and next-attempt time; `queued_at`;
+`starting_at`, when it last became `starting` (required while it is); `checked_at`, when the reconciler last asked
+Temporal about it; `cancel_requested_at` and `cancel_sent_at` (§7.7). The trigger isn't on the row: it lives in
+`run_inputs`, encrypted, as an envelope holding handles.
 
 **Statuses:** `queued`, `starting`, `started`, `cancelled`, `refused`, `dead`.
 
@@ -926,8 +948,9 @@ both need it, so admission stores it:
   the role `envelope` where a claim's is `claim`, and no tainted pointer: every sensitive value is a claim it holds by
   handle. Its owner and root are the request's id, which is the run's, the owner of the claims it references.
 - **An enforced shape:** at most one envelope per owner; a claim always has a `pointer` and the envelope never does;
-  the request names its envelope, and a foreign key on `(envelope_id, id, 'envelope')` lets it reach only an envelope
-  the request owns, which can't be deleted while the request exists; only a `refused` request has none.
+  the request names its envelope, and a foreign key on `(envelope_id, tenant_id, id, 'envelope')` lets it reach only
+  an envelope of its tenant that the request owns, which can't be deleted while the request exists; only a `refused`
+  request has none.
 - **Never a claim:** ordinary claim reads and grants exclude it, so a handle that names its id is refused
   (`claim_unavailable`) and a grant that reaches it grants nothing. It's read only through its own tenant- and
   request-scoped reader, by the dispatcher building the start and by a re-run (§7.7).
@@ -945,7 +968,10 @@ seed, request, audit entry — commits or rolls back with the caller's transacti
 
 The **digest** is tenant-keyed: an HMAC with a key derived from the tenant's data key, over the canonical JSON of the
 source, workflow, mode and input — never an unkeyed hash of input that may hold low-entropy secrets. Each request
-stores the digest's key version.
+stores the digest's key version. **A re-run's digest** covers what was asked in place of the input it admits: the
+request (or, from before 2b-2, the run) it re-runs, the mode, and any new input. So an exact retry is recognized,
+and another re-run under the key refused, before the old input is rebuilt (§7.7), whatever retention has removed
+since.
 
 In this order:
 1. **Authorize** the caller: `run.start` in the tenant for interactive sources; a durable source is authorized by
@@ -956,7 +982,10 @@ In this order:
    different request under the same key is a conflict (409 `idempotency_conflict`).
 3. **Only for a new key,** the mutable checks: the tenant isn't `erasing`; the gate, for interactive sources
    (§2.3); engine-core §4.5's rules — the workflow's admission lock, enabled, active version, executable, ABI against
-   the current build; the input schema (errors give locations only).
+   the current build; the input schema (errors give locations only). The current build is the record the
+   dispatcher writes (§7.3): none, or one older than 2 minutes by the statement's clock, refuses with
+   `no_current_build`; a deployment with no recorded environment refuses with `environment_not_recorded`; a version
+   of another engine ABI refuses with `version_unusable`.
 4. **Digest** with the tenant's **active** key version.
 5. **Claim** the trigger (§3.5) and seed the secret index.
 6. **Insert** the request with `ON CONFLICT DO NOTHING`, and its audit entry. If a concurrent insert won the key,
@@ -969,19 +998,38 @@ In this order:
 
 ### 7.3 Dispatch
 
-`dewpoint dispatcher` (role `dewpoint_dispatch`):
-- Before its transaction, it reads the current build (ABI, and instance capabilities — §2.7).
-- It picks, per tenant, the oldest **due** `queued` request with `SKIP LOCKED`: FIFO among due requests, so one in
-  backoff doesn't block those behind it.
-- In the transaction, under the shared gate and tenant locks, it checks §2.3's critical conditions, executability
-  (the defensive check), the ABI (`engine_abi_changed` cancels, audited), and a free slot; then it reserves the slot
-  and marks the request `starting`.
-- It starts `RunGraph` with id `t:<tenant>:run:<id>`, the payload encrypted by the codec, and `REJECT_DUPLICATE`.
+`dewpoint dispatcher` (role `dewpoint_dispatch`), every second:
+- Before any transaction, it reads the current build from Temporal and records it, with when it was observed, for
+  admission's ABI check (§7.2).
+- It picks, per tenant, the oldest **due** `queued` request, through `dispatch_candidates()`, which returns ids only:
+  FIFO among due requests, so one in backoff doesn't block those behind it. Up to 50 tenants a cycle.
+- In one transaction, under the shared gate and tenant locks, it locks the request (`SKIP LOCKED`) and checks:
+  - a request whose pre-created row already records an end (an end write that landed after an absence put it
+    back, §7.6) is never started again: it goes back to `starting`, without a slot, with an alert, for the
+    reconciler (§7.8);
+  - §2.3's critical conditions: the gate, the tenant not `erasing`, every live instance of the current build healthy
+    with every required capability (§2.7), checked here whatever the record says;
+  - executability (the defensive check, which cancels with `node_type_retired` or `cel_profile_retired`) and the ABI
+    (`engine_abi_changed` cancels, audited). The closure's lifecycle locks are **tried, never waited on**: the
+    transaction holds the request's row, which a retirement holding those locks needs to cancel it, so a held lock
+    leaves the request queued for the next cycle;
+  - a free slot;
+  - the tenant's key: it opens the request's envelope and encrypts the start. Only a key that can't be read waits
+    (`key_unusable`): no such key, a key that doesn't unwrap, or a keyring database that doesn't answer. An envelope
+    that doesn't authenticate or isn't JSON, a wrong key's included, is broken for good: the request goes `dead`
+    (`envelope_unreadable`), audited, and repairing a key never reopens it (a re-run is a new request). Anything else
+    — a bug, an envelope its foreign key should have kept — raises, and the cycle isolates it: logged by type only,
+    the request left as it was, the other tenants dispatched.
+
+  Then it reserves the slot, writes the root's `runs` row, records `starting_at`, and marks the request `starting`.
+- It starts `RunGraph` with id `t:<tenant>:run:<id>`, the payload encrypted by the codec, `REJECT_DUPLICATE`, and a
+  10-second deadline, with no transaction open across the call; §7.4 says what each answer does.
 - **The root's `runs` row is written before the start,** in the `starting` transaction, as 2a's `admit` does today:
   the worker's projection relies on it existing before any step row. Its `started_at` is set when the start is
   confirmed. While the request is `queued` or `starting` — a start still uncertain, or a request put back in the
   queue — every read path shows the **request's** status, never a run that may not exist; the run's own status is
   shown once the request is `started`. A request that goes `dead` fails its run with `start_failed`.
+- Each instance records its last cycle in `dispatcher_reports` (health evidence for §10.6, which claims nothing).
 
 ### 7.4 Refusals and uncertain starts
 
@@ -993,6 +1041,8 @@ In this order:
 - **An uncertain start** — a timeout, an unavailable service, a lost answer — counts as nothing. The request stays
   `starting`; the reconciler resolves it (§7.6).
 - **Infrastructure checks** failing at dispatch leave the request queued without consuming an attempt (§2.5).
+- **A busy Temporal** (`RESOURCE_EXHAUSTED`), or a start the client couldn't encrypt after the dispatch-time check,
+  certainly never started: the request goes back to the queue, no attempt counted, due again in 5 seconds.
 - **"Already started" is verified before it counts.** The dispatcher reads the existing execution's
   `WorkflowExecutionStarted` event and decodes its input with its own codec. Its tenant, run id, frozen version and
   request identity must all match the request; then the request is `started`. Otherwise it's an id collision, which
@@ -1004,24 +1054,35 @@ In this order:
   Raising the default toward 20 waits for capacity tests.
 - `run_slots(tenant_id, run_id)`: one row per running root run, reserved under the limits row's lock.
 - Sub-flows, batches and failure handlers run inside their root's slot.
-- The root's end write, after its failure handler, deletes the slot in the same transaction.
+- The root's end write, after its failure handler, deletes the slot in the same transaction. That transaction locks
+  the run's row first and holds it until the slot is released and it commits: its writes and their row-by-row retry
+  after a refusal are savepoints inside it, whose rollback never releases the row. A refused end write is logged
+  and skipped, and still releases the slot, since the execution ended; the reconciler ends its row (§7.6).
 
 ### 7.6 The reconciler
 
-Inside the dispatcher, with one leader chosen through an advisory lock:
-- **Uncertain starts:** a request still `starting` may already have a running, or even closed, workflow whose start
-  reply was lost. If a describe finds the execution, the reconciler verifies it as in §7.4, moves the request to
-  `started`, and then, if the execution has already closed, maps its terminal outcome as for any started row
-  (below). The request goes back to `queued`
-  (same id, no attempt counted, but counted and alerted on) only after a **trustworthy absence**: a describe made
-  after a grace period longer than the start call's own deadline returns `NOT_FOUND` from a reachable namespace. Any
-  error keeps it `starting`, retried, and alerted past a threshold.
+Inside the dispatcher, with one leader chosen through a session-level advisory lock held on a connection of its own
+(losing the connection loses the lock). It reads across tenants only through `reconcile_candidates()` (ids and a
+kind), works tenant-scoped with no transaction open across a call to Temporal, and asks about each request at most
+once per recheck interval (30 seconds, `checked_at`). A failure it can't classify is logged and isolated, as the
+dispatcher's are.
+- **Uncertain starts:** a request still `starting` 30 seconds after `starting_at` — longer than the start call's own
+  deadline — found by that time, never by its slot, which a quick run's end write may already have released. If a
+  describe finds the execution, the reconciler verifies it as in §7.4 and moves the request to `started`; if the
+  execution has already closed, the next pass maps its terminal outcome as for any started row (below). The request
+  goes back to `queued` (same id, due at once, no attempt counted, but counted and alerted on) only after a
+  **trustworthy absence**: a describe returns `NOT_FOUND` from a namespace that answers (`DescribeNamespace`), and
+  the evidence that no start happened holds — the pre-created row still `running` and the slot reserved at dispatch
+  still held — read under those rows' locks in the end write's own order (row, then slot), so an end write in flight
+  is waited for and then seen. When its row records an end or its slot is gone, its end write ran: it stays
+  `starting` with an alert, for an operator. Any other error keeps it `starting`, retried, and alerted past 10
+  minutes. Every request it settles is audited.
 - **Leaked slots:** a slot is released only when the **latest execution of its logical run is terminal** — the
-  reconciler follows continue-as-new to that execution first. An earlier execution that closed by continuing as new
-  never frees its run's slot.
+  reconciler follows continue-as-new to that execution first (a describe by workflow id). An earlier execution that
+  closed by continuing as new never frees its run's slot.
 - **Rows left `running` whose workflow is closed** (rows whose request is `started`, including one just confirmed
-  above; a row whose request is `queued` has no workflow and follows §7.8): it follows continue-as-new to the logical run's latest
-  execution and records the outcome Temporal reports, releasing the slot in the same transaction:
+  above; a row whose request is `queued` has no workflow and follows §7.8): it follows continue-as-new to the logical
+  run's latest execution and records the outcome Temporal reports, releasing the slot in the same transaction:
   - `COMPLETED` → the decoded `RunResult` (the run's own end, which its end write should already have recorded);
   - `CANCELED` → `cancelled`;
   - `TERMINATED` → `failed` with `terminated`. An operator's termination stays `terminated`. A run Temporal itself
@@ -1030,33 +1091,57 @@ Inside the dispatcher, with one leader chosen through an advisory lock:
     `GRPC_MESSAGE_TOO_LARGE` cause before the termination — and a test proves it; otherwise it stays `terminated`;
   - `FAILED`, or `TIMED_OUT` (Dewpoint sets no execution timeout, so it's unexpected) → `failed` with
     `internal_error`, and an alert.
+- **History Temporal no longer has** — for a started run whose row is still `running`, or a slot whose row has ended
+  — isn't evidence that the latest execution is terminal: the row and the slot stay as they are, with an alert, for
+  an operator's recovery (§7.9). No outcome is inferred and no slot released from missing history alone.
+- **Cancels:** it sends each recorded cancel of a running run to Temporal once (§7.7).
 - The synchronization that disabling the gate (§2.4) and erasing a tenant (§6.5) wait for.
 
 ### 7.7 The run API
 
-- `POST /t/{tid}/workflows/{wid}/runs` — `run.start`, `Idempotency-Key` header, body `{input, mode, csv?}` → 202 with
-  the request; 503 `production_runs_disabled` while the gate is off; 422 with locations; 409 on an idempotency
-  conflict.
-- `GET /t/{tid}/workflows/{wid}/start-form` — form metadata from the active version: the typed fields of
-  `input_schema` (types, required, enums, defaults, which are sensitive and so masked), the CSV declaration (§8.1),
-  and the reserved `x-dewpoint-picker` annotation for sub-project 3's pickers.
+- `POST /t/{tid}/workflows/{wid}/runs` — `run.start`, an `Idempotency-Key` header (required: 428
+  `idempotency_key_required` without one; at most 255 characters), body `{input, mode}` → 202 with the request,
+  admitted in the API's own transaction. The `csv` field arrives with 2b-3 and is refused as unknown until then. A
+  refusal answers with its code (§9) and fixed messages that never quote a value: 503 `production_runs_disabled`,
+  `environment_not_recorded`, `no_current_build` or `key_unusable`; 422 `input_invalid` or `secret_index_limit`, with
+  the places and rules the input breaks; 409 `workflow_disabled`, `not_active`, `version_unusable`,
+  `node_type_retired`, `cel_profile_retired` or `tenant_erasing`; 409 `idempotency_conflict`; 404 for a workflow of
+  another tenant. A refused start leaves no request.
+- `GET /t/{tid}/workflows/{wid}/start-form` — `run.start`. Form metadata from the active version: the typed top-level
+  fields of `input_schema` (types, required, titles, descriptions, enums, defaults), with a sensitive field's default
+  and enum masked (`default_masked`, `enum_masked`: publish refuses a sensitive literal anyway, §3.8), the CSV
+  declaration (§8.1; none until 2b-3), and the reserved `x-dewpoint-picker` annotation, passed through as `picker`, for
+  sub-project 3's pickers. 409 `not_active` without an active version.
 - `POST /t/{tid}/runs/{id}/cancel` — the new permission `run.cancel` (operators and above). A queued request is
-  cancelled at once, audited. A running run gets a cancel request recorded, and the dispatcher sends it to Temporal,
-  so the API has no Temporal client.
-- Re-runs are new admissions on the active version. With the original input, they're offered only while its
-  `run_inputs` are retained (§10.1), and the input is claimed again for the new request (§3.4).
-  `POST /t/{tid}/runs/{id}/rerun` names the old **request** (its id is also its run's, if it has one): a request
-  cancelled while queued may never have had a run. The caller needs `run.view` to read that request's input and
-  `run.start` on its workflow. Its envelope is read through its own reader and every handle in it resolved, as the
-  request that owns the claims, into the complete input, held in memory only; that input is then admitted as a new
-  request (source `rerun`), validated against the active version's input schema and claimed again under the new
-  request's id. No old handle is ever reused. A run from before 2b-2 (no request), a `refused` request (no
-  envelope), or an envelope or claim retention has removed: `410 input_not_retained`.
+  cancelled at once (200, `user_cancelled`), audited, and the row an earlier attempt pre-created ends with it, through a
+  function that ends only a cancelled request's row in the caller's tenant: the API holds no write on `runs`. A
+  starting request or a running run has its cancel recorded once, audited (202): it's applied when the start resolves
+  (§7.8), or sent to Temporal by the reconciler's leader (§7.6), so the API has no Temporal client. 409 `run_ended` when
+  nothing is left to cancel.
+- `POST /t/{tid}/runs/{id}/rerun` — `run.start` and an `Idempotency-Key`; body `{mode?, input?}`. It names the old
+  **request** (its id is also its run's, if it has one: a request cancelled while queued may never have had a run), or a
+  run from before 2b-2, and admits a new request (source `rerun`) on the workflow's active version, the old one's mode
+  by default. The key is checked first, by the re-run's digest (§7.2): an exact retry returns the request it admitted;
+  another re-run under the key is a 409.
+  - **With new input,** it's admitted as any start's input is, whatever the old request's input retained. For a run
+    from before 2b-2, the run supplies the workflow and the default mode.
+  - **With the original input,** offered only while its `run_inputs` are retained (§10.1): the caller needs `run.view`
+    to read that request's input and `run.start` on its workflow. Its envelope is read through its own reader, and
+    every handle in it resolved as the request that owns the claims, through a reader of that request's own input
+    claims only, into the complete input, held in memory only; that input is then validated against the active
+    version's input schema and claimed again under the new request's id. No old handle is ever reused. A run from
+    before 2b-2 (no request), a `refused` request (no envelope), or an envelope or claim retention has removed: `410
+    input_not_retained`.
+  - The audit entry names the request it re-runs (`rerun_of`).
 - `GET /t/{tid}/runs` lists requests and runs together, by one stable sort key `(queued_at, id)`: a request's
   `queued_at` is when it was created, its run shares its id and `queued_at`, and a run from before 2b gets
   `queued_at = started_at` (backfilled). The paired cursor stays: `before` and `before_id`, given together or refused
-  (422 `invalid_cursor`). The ordering change is documented.
-- The dev CLI calls `admit_request` with the source `dev`.
+  (422 `invalid_cursor`). Each item carries its request's status, source and reason; a request that hasn't started is
+  shown as itself, never as its pre-created row, in the list and in `GET /t/{tid}/runs/{id}`. The ordering change is
+  documented.
+- The dev CLI calls `admit_request` with the source `dev`, as `dewpoint_dispatch`; its `--wait SECONDS` is bounded and
+  reports the end the database records (the run's, or the request's own when it never started), not merely a start.
+  No command starts a run directly: 2a's `start_run` is a test helper.
 
 ### 7.8 Request, slot and row transitions
 
@@ -1070,7 +1155,8 @@ transition out of `starting` says what happens to both, in the same transaction 
 | `starting` → `starting` | uncertain start; the reconciler hasn't decided | **kept** until reconciled | unchanged |
 | `starting` → `queued` | confirmed refusal with attempts left, or a trustworthy `NOT_FOUND` (§7.6) | **released** | kept, non-terminal, hidden behind the request's status |
 | `starting` → `dead` | the 10th confirmed refusal, or `id_collision` | released | terminal: `failed`, `start_failed` |
-| `queued` → `cancelled` | a user, `engine_abi_changed`, a retirement, tenant erasure | none held | if one was written by an earlier attempt: terminal, `cancelled` |
+| `queued` → `cancelled` | a user, `engine_abi_changed`, a retirement, tenant erasure | none held | if one was written by an earlier attempt: terminal, `cancelled`, with the request's reason |
+| `queued` → `starting` | its row already records an end: an end write landed after an absence put it back (§7.3) | none reserved | unchanged; the reconciler verifies the execution, or leaves it for an operator |
 | — → `refused` | admission refused a durable source | none | none written |
 
 - A row whose request never reached `started` is never shown as a run (§7.3), and it's always made terminal when
@@ -1084,6 +1170,19 @@ transition out of `starting` says what happens to both, in the same transaction 
   Temporal if the run started, or as `queued` → `cancelled` if it didn't.
 - An uncertain start holds its slot, so with a tenant limit of 1 nothing else of that tenant starts until the
   reconciler decides; a confirmed refusal or a trustworthy absence frees the slot at once.
+
+### 7.9 Open before production sign-off
+
+The owner approved 2b-2's milestones as prototype checkpoints; these stay open until production sign-off (§10.6):
+- **Bound the serial dispatch cycle.** A cycle starts its candidates one after another, so 50 slow starts take about
+  500 seconds: the one-second interval is no throughput guarantee.
+- **Bounded retry and alerting for a deterministic per-request failure,** the dispatcher's and the reconciler's: a
+  bug is retried every cycle (the reconciler's every recheck interval) and holds the head of its tenant's queue.
+- **An operator's recovery path** for a run or a slot whose history Temporal no longer has, and for a `starting`
+  request whose run already ended (§7.6, §7.8).
+- **Bounded retry and alerting for a cancel that keeps failing to send** (§7.7).
+- **The disable command's audit identifies the operator** (§2.4): a prototype's admin CLI records no actor.
+- **The Compose proof** (§12) passes in CI.
 
 ## 8. Triggers (2b-3)
 
@@ -1178,11 +1277,14 @@ transition out of `starting` says what happens to both, in the same transaction 
 - **Run and step codes added:** `payload_too_large`, `snapshot_too_large`, `claim_unavailable`,
   `secret_index_limit`, `secret_index_unavailable`. `terminated` now also applies
   to a root run an operator terminated (recorded by the reconciler).
-- **API errors added:** `production_runs_disabled` (503), `idempotency_conflict` (409), `input_not_retained` (410).
+- **API errors added:** `production_runs_disabled` (503), `idempotency_conflict` (409), `input_not_retained` (410),
+  `idempotency_key_required` (428), `key_unusable` (503), `run_ended` (409), and admission's reasons with their
+  statuses (§7.7).
 - **Request statuses:** `queued`, `starting`, `started`, `cancelled`, `refused`, `dead`. Reasons include
   `engine_abi_changed`, `node_type_retired`, `cel_profile_retired`, `workflow_disabled`, `not_active`,
   `schedule_paused`, `input_invalid`, `secret_index_limit`, `start_refused`, `id_collision`, `user_cancelled`,
-  `tenant_erasing`.
+  `tenant_erasing`, `envelope_unreadable`, `environment_not_recorded`, `no_current_build`, `version_unusable`.
+  Waiting at dispatch isn't a reason: the request stays queued (a metric and an alert, §2.3).
 - **Event statuses:** `pending`, `matched`, `unmatched`, `cancelled`, `dead`.
 - Every code is fixed and sanitized; none is derived from a sensitive value or plugin-supplied free text.
 - Audit detail keys avoid the names `core/audit` rejects (`…code…`, `…secret…`, `…token…`): reasons are recorded as
@@ -1783,7 +1885,16 @@ Beyond each task's own tests:
 - **Golden histories** per merged ABI (abi5, abi6), recorded encrypted with fixture keys, replayed by the replay
   gate; `ScheduleTick`'s replay test.
 - **Fault injection:** admission and dispatch races, the gate-off race, erasure, uncertain starts, duplicate-id
-  verification, the reconciler's outcome mapping on the dev server, matching interrupted by a crash.
+  verification, the reconciler's outcome mapping on the dev server, matching interrupted by a crash. 2b-2's part:
+  admission and dispatch against normal and forced retirement in both orders (no deadlock when a retirement comes
+  first); an admission in flight when the gate goes off queues a request that never starts; a lost reply, a
+  trustworthy absence, a namespace that doesn't exist (never an absence), a duplicate verified from a real history,
+  a real termination and a run that continued as new, on the dev server; the end write's lock held across a refused
+  savepoint.
+- **Real keys, end to end:** a run and its re-run through the API, the dispatcher and a versioned worker with the
+  keyring's keys everywhere; every execution's whole raw history holds no canary.
+- **The Compose proof,** in CI: a synthetic tenant and published workflow, then `dewpoint dev run --wait` as the
+  dispatch login, which fails unless the run succeeds through the Compose dispatcher.
 - **Every transition of §7.8,** with a tenant limit of 1: a confirmed refusal frees the slot and another request
   starts; a refusal followed by a cancellation leaves the row terminal and no slot held; an uncertain start holds the
   slot until reconciled, then frees it on a trustworthy absence; the 10th refusal and an `id_collision` each leave the
@@ -1809,30 +1920,44 @@ Each plan updates the older specs as it lands, as the engine-core 5.x revisions 
   the `outbox` replaced by `run_requests` (§7.1); §6.5's claim check detailed by §3–§5; §15's open defaults settled —
   5 concurrent root runs per tenant, 30 days of tenant retention, 7 days of Temporal retention (at most 30).
 - **Engine-core spec:** the "hard rule until 2b ships" (lifted by §10.6); §9 (starting runs: admission and the
-  dispatcher); §8 (the new codes, the cutoff on read paths, the `(queued_at, id)` ordering); §4.5 (dispatch as §7.3
-  describes it); §5.6 (the per-task byte budget); §6 (claims, handles, the live-state budget, snapshots in
-  `snapshot_format` 2, the open-iteration cap); §7 (ABI 5 and 6, ids); §5.7 (the `cel-evaluator` also holds
-  `engine.handles`, standard library only, which `engine.cel`'s binding imports; a test checks its image holds every
-  Dewpoint module it loads).
+  dispatcher, in its revision 5.10 with this spec's revision 7); §8 (the new codes, the cutoff on read paths, the
+  `(queued_at, id)` ordering); §4.5 (dispatch as §7.3 describes it); §5.6 (the per-task byte budget); §6 (claims,
+  handles, the live-state budget, snapshots in `snapshot_format` 2, the open-iteration cap); §7 (ABI 5 and 6, ids); §5.7
+  (the `cel-evaluator` also holds `engine.handles`, standard library only, which `engine.cel`'s binding imports; a test
+  checks its image holds every Dewpoint module it loads).
 
 ## 14. Roles, tables and permissions (summary)
 
 - **New tables:** `platform_settings`, `worker_instances`, `run_inputs`, `step_outputs`, `claim_grants`,
-  `run_secret_index`, `run_requests`, `tenant_run_limits`, `run_slots`, `csv_uploads`, `schedules`,
-  `webhook_endpoints`, `trigger_bindings`, `inbound_events`, `tenant_event_keys`, `tenant_retention`,
-  `retention_sweeps`. `tenants` gains a status (`active`, `erasing`). `runs` gains `queued_at` (existing rows
+  `run_secret_index`, `run_requests`, `tenant_run_limits`, `run_slots`, `csv_uploads`, `schedules`, `webhook_endpoints`,
+  `trigger_bindings`, `inbound_events`, `tenant_event_keys`, `tenant_retention`, `retention_sweeps`, `current_build`,
+  `dispatcher_reports`. `tenants` gains a status (`active`, `erasing`). `runs` gains `queued_at` (existing rows
   backfilled from `started_at`), and `runs.started_at` becomes nullable with no default: existing rows keep their
-  values, a row pre-created at dispatch has none until the start is confirmed (§7.8), and every read path and the
-  cursor order by `queued_at` (§7.7). 2b-1's `admit` keeps setting `started_at` as it does today.
+  values, a row pre-created at dispatch has none until the start is confirmed (§7.8), and every read path and the cursor
+  order by `queued_at` (§7.7). 2b-1's `admit` keeps setting `started_at` as it does today.
 - **Roles:** `dewpoint_dispatch` gains `SELECT` on `data_keys` and the admission tables; `dewpoint_ingress` gets a
   login and only `resolve_webhook_endpoint()` plus event inserts and counters; `dewpoint_retention` is new; the
-  worker gains the claim tables and `worker_instances`. The plans give the exact grants.
+  worker gains the claim tables and `worker_instances`. The plans give the exact grants. 2b-2's:
+  - the tenant-scoped policies on the admission tables are the API's, the dispatcher's and the worker's only; the
+    key admin has a platform-wide read of `run_requests` and a narrow `queued` → `cancelled` update, for retirement;
+  - the API admits (claims, envelope, request) and cancels a queued request; the dispatcher moves requests and holds
+    slots and limits; the worker releases a slot;
+  - cross-tenant reads are functions returning ids only: `dispatch_candidates()`, `reconcile_candidates()`,
+    `cancel_candidates()`; writes past a role's grants are functions with one narrow effect: `end_unstarted_run()`
+    (the API and the key admin: a cancelled request's row in the caller's tenant) and `disable_production_runs()`
+    (the key admin: the gate off, under its lock).
 - **Permissions:** `run.cancel` (operators and above), `trigger.manage` (editors and above), `workflow.declassify`
   (admins and owners).
 - **Processes:** `dewpoint dispatcher` (dispatch, reconciler, schedule sync, `ScheduleTick` worker), `dewpoint
   ingress`, `dewpoint retention`, alongside the API and the worker.
 
 ## 15. Provisional values
+
+**2b-2's prototype values,** approved as prototype limits, to be retuned with measurements: a start's deadline 10 s;
+a dispatch cycle every 1 s over up to 50 tenants; a throttled start due again in 5 s; refusals backing off from 5 s,
+doubling to 10 min, `dead` at the 10th; a current-build record fresh for 2 minutes; a worker instance live for 90 s;
+the reconciler's grace 30 s, recheck 30 s, alert after 10 minutes and 50 requests a pass; a tenant's default limit 5
+concurrent root runs; an `Idempotency-Key` of at most 255 characters.
 
 These numbers are starting points. Each stays provisional until the go/no-go experiments (§11) or the owning plan's
 measurements establish it; the spec is revised with the measured value when that plan lands.
