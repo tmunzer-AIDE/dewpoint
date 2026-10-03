@@ -10,11 +10,17 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from dewpoint.engine import ENGINE_ABI
+from dewpoint.engine.runtime.size import INLINE_LIMIT
 
 ENGINE_QUEUE = "dewpoint-engine"
 LOAD_VERSION = "dewpoint.load_version"
 PROJECT = "dewpoint.project"
 CEL_EVALUATE = "cel.evaluate"
+CLAIMS_DERIVE = "claims.derive"
+CLAIMS_CHILD_INPUT = "claims.child_input"
+CLAIMS_GRANT = "claims.grant"
+CLAIMS_MESSAGE = "claims.message"
+CLAIMS_SPILL = "claims.spill"
 LIVE, SIMULATE = "live", "simulate"
 APPLIED, SIMULATED, OUTCOME_UNKNOWN = "applied", "simulated", "outcome_unknown"
 SUBFLOW, FAILURE_HANDLER, BATCH = "subflow", "failure_handler", "batch"  # the kinds of child execution
@@ -56,7 +62,7 @@ class Parent:
     deadline: str  # ISO 8601: the logical run's deadline, which children share (a failure handler gets its own)
     grant: int  # the iterations its parent reserved for it
     depth: int = 1  # sub-flows nest at most 5 deep (spec §6)
-    secrets: list[str] = field(default_factory=list)  # sensitive values the parent learned, masked here too
+    root_run_id: str = ""  # the tree's root run: what its claims record (engine 2b spec §3.1)
 
 
 @dataclass(frozen=True)
@@ -82,7 +88,6 @@ class RunResult:
     outputs: dict[str, Any] | None = None
     error: dict[str, Any] | None = None  # {code, message}
     iterations: int = 0
-    secrets: list[str] = field(default_factory=list)  # what it learned: its parent masks them too
 
 
 @dataclass(frozen=True)
@@ -109,6 +114,8 @@ class BatchInput:
     checkpoint_events: int = CHECKPOINT_EVENTS
     drain_events: int = DRAIN_EVENTS
     iterations: int = 0  # a continued batch: what it had used, readable even when its snapshot isn't
+    items_ref: list[Any] | None = None  # the slice of a claimed list, as [handle, n, first]: `items` is then empty
+    collect_base: str = ""  # the loop's collections' base: it names the segments this batch writes (2b §5.3)
 
 
 @dataclass(frozen=True)
@@ -118,7 +125,8 @@ class BatchResult:
     stopped: dict[str, Any] | None = None  # the failure that stopped the slice (`on_item_error: stop`)
     end: dict[str, Any] | None = None  # the run ended inside the batch (a fail or stop node, the deadline)
     iterations: int = 0
-    secrets: list[str] = field(default_factory=list)
+    collection: dict[str, Any] | None = None  # spilled (2b §5.3): what it collected, as segments; `collected` empty
+    failure_collection: dict[str, Any] | None = None  # and its failures, the same way
 
 
 @dataclass(frozen=True)
@@ -138,6 +146,8 @@ class VersionData:
     subflow_version_ids: dict[str, str] = field(default_factory=dict)  # run_workflow node id -> pinned version id
     failure_handler_version_id: str | None = None
     engine_abi: int | None = None  # the ABI it was published for; None only in histories recorded before 2a-3c
+    open_scopes_cap: int | None = None  # its open-iteration cap, pinned at publish (engine 2b spec §5.3)
+    loop_depth: int | None = None  # its deepest loop nesting, D
 
 
 @dataclass(frozen=True)
@@ -151,6 +161,8 @@ class StepInput:
     config: dict[str, Any]
     mode: str = LIVE
     attempt: int = 1  # RunGraph counts attempts: each one is its own activity execution
+    root_run_id: str = ""  # the run tree's root: its claims record it, and its secret index masks (engine 2b §3.7)
+    inline_limit: int = INLINE_LIMIT  # an output past this, as JSON, is claimed and its handle returned (2b §5.1, §5.4)
 
 
 @dataclass(frozen=True)
@@ -160,8 +172,108 @@ class StepResult:
 
 
 @dataclass(frozen=True)
+class Claiming:
+    """What `cel.evaluate` does with handles and results (engine 2b spec §3.3, §4.2): it resolves the handles among
+    the bindings, checked against their rows for the run its workflow id names, and claims a result that read
+    sensitive data, or one whose expression does (`tainted`), under ids derived from `seed` (the same on a retry). A
+    declassified decision (`decision`) comes back plain, and only as the type it decides with (`decides`): a value of
+    another type fails `type_mismatch` there, never revealed (review I1)."""
+
+    root_run_id: str
+    seed: str
+    tainted: bool = False
+    decision: bool = False
+    decides: str = "bool"  # a decision's type: "bool" (a branch, a case) or "int" (a loop's count)
+    step_id: str | None = None  # the producer, recorded on the claim for tracing
+    iteration_key: str | None = None
+
+
+@dataclass(frozen=True)
 class CelInput:
-    request: dict[str, Any]  # a cel.evaluate.v1 request
+    request: dict[str, Any]  # a cel.evaluate.v1 request; its bindings may hold handles
+    claims: Claiming | None = None
+    template: list[Any] | None = None  # a template whose parts are handles: its parts (`resolve.Part`), joined there
+    # A filter over claims or with a sensitive predicate, run whole there (engine 2b spec §4.4): {items, record}; the
+    # request's one binding set is everything but the item's
+    filter: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class DeriveInput:
+    """A handle the workflow can't hold or judge as it is (engine 2b spec §3.2): whether it addresses anything, and
+    null, and past POINTER_MAX, what it addresses as a claim of its own, owned by the run the activity's workflow id
+    names, with the source's taint for that part."""
+
+    handle: dict[str, Any]
+    claim_id: str  # the workflow's: the same on a retry
+    root_run_id: str
+    step_id: str | None = None
+    iteration_key: str | None = None
+
+
+@dataclass(frozen=True)
+class ChildInput:
+    """A sub-flow's input, split as a trigger is before its parent starts it (engine 2b spec §3.4, §3.5): checked
+    against the child version's input schema, its values resolved; the parent's handles left in place and granted to
+    the child; its other sensitive, undeclared or large parts claimed for the child."""
+
+    child_run_id: str
+    version_id: str
+    value: dict[str, Any]
+    root_run_id: str
+
+
+@dataclass(frozen=True)
+class ChildInputResult:
+    trigger: dict[str, Any] | None = None  # the envelope the child starts with
+    reasons: list[str] = field(default_factory=list)  # refused: what the input breaks
+
+
+@dataclass(frozen=True)
+class GrantInput:
+    """The handles in `value`, and the claims they nest, granted by the run the activity's workflow id names to
+    `to_run_id`: its parent or its child (engine 2b spec §3.4)."""
+
+    to_run_id: str
+    value: Any
+    root_run_id: str
+
+
+@dataclass(frozen=True)
+class SpillInput:
+    """Values the workflow holds, written as claims owned by its run: before a command carries their handles (engine
+    2b spec §5.2), or as its live state's containers (§5.3). Each entry: {"id", "value"}, and "prev", a claim this one
+    forwards to: a container claimed again (its keys not in "value" are read through it). They're the workflow's
+    own, so plain or handles, never sensitive (§3.6): untainted. Their ids come from the workflow, so a retry writes
+    the same rows, hash-checked."""
+
+    claims: list[dict[str, Any]]
+    root_run_id: str
+    step_id: str | None = None
+    iteration_key: str | None = None
+
+
+@dataclass(frozen=True)
+class MessageInput:
+    """A failure's message built from data (engine 2b spec §3.7): text, or a handle, which the activity resolves and
+    masks against the run tree's secret index."""
+
+    value: Any
+    root_run_id: str
+
+
+@dataclass(frozen=True)
+class MessageResult:
+    text: str
+
+
+@dataclass(frozen=True)
+class DeriveResult:
+    """What the handle addresses, as the workflow may hold it: the same handle within POINTER_MAX, a derived claim's
+    past it; None for null. `present` False: the pointer addresses nothing."""
+
+    handle: dict[str, Any] | None
+    present: bool = True
 
 
 @dataclass(frozen=True)
@@ -239,3 +351,4 @@ class ProjectInput:
     steps: list[StepRow] = field(default_factory=list)
     run: RunSummary | None = None
     start: RunStart | None = None
+    root_run_id: str = ""  # the run tree's root: its secret index masks every row (engine 2b spec §3.7)

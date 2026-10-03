@@ -1,7 +1,7 @@
 # Deploying builds: Temporal and the engine worker
 
-Specs: `docs/superpowers/specs/2026-09-25-engine-core-design.md` §7, and `2026-09-29-engine-2b-design.md` §2 and §6
-(the environment, the production gate, encrypted payloads, worker health).
+Specs: `docs/superpowers/specs/2026-09-25-engine-core-design.md` §7, and `2026-09-29-engine-2b-design.md` §2–§6
+(the environment, the production gate, claims, taint, sizes, encrypted payloads, worker health).
 
 A run is **pinned** to the build it started on. Its sub-flows, its loop batches and the runs it continues as finish
 on that build too, even after a newer build takes over. That's what lets a new build change how runs execute without
@@ -10,7 +10,7 @@ breaking the runs already going. Runs of a build from before versioning aren't p
 
 ## Builds and versions
 
-- Each build of Dewpoint has a build ID, `dewpoint-<version>+abi<engine ABI>`, for example `dewpoint-0.1.0+abi5`. The
+- Each build of Dewpoint has a build ID, `dewpoint-<version>+abi<engine ABI>`, for example `dewpoint-0.1.0+abi6`. The
   engine ABI changes whenever a build could execute a workflow differently, so such a build always has a new ID.
 - Every engine worker joins one Temporal **Worker Deployment**, `dewpoint-engine`, as its build's version.
 - New runs start on the deployment's **current** version. Nothing becomes current by itself: making a build current
@@ -23,9 +23,9 @@ breaking the runs already going. Runs of a build from before versioning aren't p
 `dewpoint deployment status` shows the current build and every version Temporal knows:
 
 ```text
-current: dewpoint-0.1.0+abi5
-dewpoint-0.1.0+abi4  draining
-dewpoint-0.1.0+abi5  current
+current: dewpoint-0.1.0+abi6
+dewpoint-0.1.0+abi5  draining
+dewpoint-0.1.0+abi6  current
 ```
 
 A `draining` version still has runs pinned to it. A `drained` one has none left.
@@ -50,7 +50,7 @@ old build's runs that still use it finish on the old build's workers, which stil
 
 ## A build with a new engine ABI
 
-A build ID ends with its engine ABI (`+abi5`), which changes whenever a build could execute a workflow differently. A
+A build ID ends with its engine ABI (`+abi6`), which changes whenever a build could execute a workflow differently. A
 version runs only on a build of the ABI it was published for. So when a new build changes it:
 
 - Runs already started on the old build finish there, pinned to it, with their sub-flows and failure handlers. (A
@@ -69,6 +69,53 @@ version runs only on a build of the ABI it was published for. So when a new buil
   with `version_unusable` before any step runs, with the same explanation. Start it again.
 
 Rolling back across an ABI change means publishing again with the old build, too.
+
+### ABI 6: what publishing again may refuse
+
+ABI 6 (sub-project 2b-1b) keeps sensitive and large values out of runs as claims, and publish checks where sensitive
+data flows. A workflow that published under ABI 5 may be refused, or run differently, when it's published again. Each
+change, with its fix:
+
+- **A position a schema doesn't declare is sensitive**: an object's `additionalProperties`, its pattern properties, a
+  key one branch of a union declares and another leaves open, a list whose elements aren't described. CEL over it runs
+  in the evaluator, and its value is claimed. Fix: declare the data (closed objects, declared element types) where it
+  isn't secret.
+- **A computed key or index into trigger or step data** (`trigger.rows[i]`, `m[k]` with `k` computed) runs in the
+  evaluator. Fix: read static paths where the expression should stay in the workflow.
+- **A literal or a default at a sensitive position** is refused, null and `""` included: a node's config, a reference's
+  or a template's default, an assignment to a sensitive variable, a sub-flow's sensitive input field
+  (`sensitive.literal`), and a `default` at a sensitive position of the input or variables schema
+  (`sensitive.default`). Fix: pass the secret in the run's input, in a field marked `x-sensitive`.
+- **Sensitive data that would leave a run in plain text** is refused: a timer computed from it (`taint.timer`), a
+  `fail` node's message built from it (`taint.fail_message`), or a sub-flow input field the child doesn't mark
+  sensitive (`taint.subflow_input`). Fix: compute timers and messages from plain data; mark the child's field
+  `x-sensitive`.
+- **A decision over sensitive data must be listed** in `graph.settings.declassify`: a `flow.if` condition, a switch
+  case's `when`, a loop's items, a filter's items or predicate (`taint.undeclassified`; an entry that declassifies
+  nothing is `taint.stale_declassify`). Publishing a workflow with entries needs the `workflow.declassify` permission
+  (tenant admins and owners, `declassify.forbidden` otherwise), and the audit log lists what each site reveals. Fix:
+  list the site, or decide on plain data.
+- **A sensitive variable has no default** and is null until a step sets it: a read before a step sure to have set it
+  is refused (`vars.unassigned`) unless the variable's type allows null. Fix: allow null, or set it first.
+- **The key `$claim` is Dewpoint's**: an authored value, output or schema that holds it is refused
+  (`value.reserved_key`).
+- **A version whose state can't be bounded** is refused (`version.unbounded`): publish computes each version's limit
+  on open loop iterations so that a run's carried state fits 1.5 MiB; a graph none fits can't run. No graph within
+  the editor's limits is known to hit it: the largest shapes tested all get the full limit, 100.
+
+What a run does differently on ABI 6:
+
+- A sensitive value, a value over 64 KiB, and anything at a position its schema doesn't declare is a handle
+  (`{"$claim": ...}`) in a run's outputs, its rows and its sub-runs: a client that read those values from a run's
+  outputs reads handles instead ([`runs.md`](runs.md#sensitive-and-large-values-claims)).
+- A run's input is checked against its input schema when it's admitted: a trigger that doesn't match is refused
+  before any run exists.
+- A loop's `failures` list in index order, not in the order the iterations failed.
+- A plugin's failure shows its message only when it's text written in the plugin's code, and its code only when that's
+  a constant identifier of its code (`node_failed` otherwise): a message a plugin computed is replaced by a generic
+  one ([`runs.md`](runs.md#what-the-workers-log-shows)).
+- A loop that collects more than 64 KiB, or more than the run's live state holds, outputs one claim:
+  `steps.<loop>.output.items` is a handle, read by position as before.
 
 ## Upgrading from a build without versioning
 
@@ -129,16 +176,22 @@ types, task queues, timestamps, and a local activity's own bookkeeping (its type
   role that isn't the key admin, which would see none of them.
 - A run of an older build (ABI 4 and before) keeps its plain-text payloads and its old workflow id; it finishes on its
   own build, as any pinned run does.
+- **Claims** (from ABI 6) are stored in the database, encrypted with the same data keys and bound to their id and
+  tenant: `run_inputs` and `step_outputs` hold sensitive and large values, `claim_grants` which run may read which, and
+  `run_secret_index` each run tree's known secrets, used to mask messages and rows. The worker's role reads and writes
+  them; admission (the dispatch role) writes a run's input claims and seeds its index. No role updates or deletes a
+  claim; tenant retention will (sub-project 2b-4).
 
 ## Worker health
 
 Each engine worker instance records itself in `worker_instances`: its build, its capabilities (`payload_codec`,
-`cel_request_size_guard`), and whether its self-check passed — at startup, before it polls, and every 30 seconds. The
-check proves what `payload_codec` needs of the instance: its KEK wraps and unwraps a key, and its database role may
-read data keys. An instance that fails it stops polling (running attempts get the shutdown grace) and exits with code
-3; its process manager should restart it. A database that doesn't answer proves nothing either way: during an outage
-the worker keeps running, records nothing, and its row goes stale. Sub-project 2b-2's dispatcher starts runs only
-while every live instance of the current build is healthy and holds every capability.
+`cel_request_size_guard`, and from ABI 6 `claim_check`), and whether its self-check passed — at startup, before it
+polls, and every 30 seconds. The check proves what `payload_codec` needs of the instance, that its KEK wraps and
+unwraps a key and its database role may read data keys, and what `claim_check` needs, that its role may read and write
+claims, grants and the secret index. An instance that fails it stops polling (running attempts get the shutdown grace)
+and exits with code 3; its process manager should restart it. A database that doesn't answer proves nothing either
+way: during an outage the worker keeps running, records nothing, and its row goes stale. Sub-project 2b-2's dispatcher
+starts runs only while every live instance of the current build is healthy and holds every capability.
 
 The check is deliberately light: it proves a grant and a fresh key's round trip, not that stored keys unwrap. A wrong
 KEK configured under the right id passes it, and passes `dewpoint keys status`, which compares KEK ids

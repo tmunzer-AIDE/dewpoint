@@ -1,9 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """A published version compiled for execution (spec §6), and the versions that can't be."""
 
+import dataclasses
+import uuid
+
 import pytest
 
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
+from dewpoint.engine.runtime.activities import VersionData
+from dewpoint.engine.runtime.execution import program_of
 from dewpoint.engine.runtime.program import ProgramError, compile_program
 from tests.engine.runtime.support import MANIFESTS, expressions, program
 from tests.support.graphs import G, cel, nid, ref, template
@@ -80,3 +85,15 @@ def test_a_loops_outer_reads_are_the_outside_steps_its_body_references() -> None
     whole.node("x", "testkit.echo@1", {"value": cel("size(steps) > 0")}).edge("a", "l").edge("l", "x", "body")
     p = program(whole)
     assert p.outer_reads(p.by_key["l"]) is None
+
+
+def test_a_version_compiles_once_per_worker_process() -> None:
+    """A workflow task's CPU (engine 2b spec §5.3): compiling a large version took most of a task, in the first task
+    of every execution and every continue. A version is immutable, so its program is the same wherever it's compiled;
+    one whose content differs (damaged) compiles again."""
+    g = G().node("a", "testkit.echo@1", {"value": 1})
+    data = VersionData(str(uuid.uuid4()), str(uuid.uuid4()), g.data(), expressions(g), CURRENT_CEL_PROFILE,
+                       {"testkit.echo@1": MANIFESTS["testkit.echo@1"]})  # fmt: skip
+    assert program_of(data) is program_of(data)
+    other = dataclasses.replace(data, graph=G().node("b", "testkit.echo@1", {"value": 2}).data())
+    assert program_of(other) is not program_of(data)

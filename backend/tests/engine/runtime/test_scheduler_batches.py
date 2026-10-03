@@ -160,7 +160,7 @@ def test_a_batched_loop_survives_a_snapshot() -> None:
     s, loop = parent_at_loop(150)
     [b] = s.take_batches()
     s.take_settled()
-    s = Scheduler.from_json(s.program, json.loads(json.dumps(s.to_json())))
+    s = Scheduler.from_json(s.program, json.loads(json.dumps(s.to_json(check=True))))
     s.batch_done(loop, b.start, BatchOutcome(list(b.items), []))
     [b2] = s.take_batches()
     assert b2 == Batch(loop, 100, list(range(100, 150)))

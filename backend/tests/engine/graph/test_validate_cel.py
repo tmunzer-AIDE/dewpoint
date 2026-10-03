@@ -20,7 +20,12 @@ INPUT: dict[str, Any] = {
     "properties": {
         "events": {
             "type": "array",
-            "items": {"type": "object", "properties": {"mac": {"type": "string"}}, "required": ["mac"]},
+            "items": {
+                "type": "object",
+                "properties": {"mac": {"type": "string"}},
+                "required": ["mac"],
+                "additionalProperties": False,  # declared whole: an undeclared field would count as tainted
+            },
         },
         "tags": {"type": "array", "items": {"type": "string"}},
         "maybe": {"type": "array"},
@@ -43,6 +48,11 @@ def one(expr: str, target_type: str = ECHO, field: str = "value", **settings: An
     g = G().node("a", target_type, {field: cel(expr)})
     g.settings = {"input_schema": INPUT, **settings}
     return g
+
+
+def declassify(*sites: tuple[str, str]) -> list[dict[str, str]]:
+    """Entries for decisions over elements the schema leaves open: undeclared counts as tainted (2b §4.1, §4.3)."""
+    return [{"node": str(nid(key)), "field": field} for key, field in sites]
 
 
 def record(g: G) -> ExpressionRecord:
@@ -131,7 +141,7 @@ def test_optional_fields_of_items_and_variables_need_a_guard() -> None:
     }
     loose["required"] = [*INPUT["required"], "loose"]
     body = G().node("l", LOOP, {"items": ref("trigger.loose")}).node("e", ECHO, {"value": cel("item.x")})
-    body.edge("l", "e", "body").settings = {"input_schema": loose}
+    body.edge("l", "e", "body").settings = {"input_schema": loose, "declassify": declassify(("l", "/items"))}
     assert codes(body) == ["cel.conditional_ref"]
     v = G().node("a", ECHO, {"value": cel("vars.cfg.name")})
     v.settings = {
@@ -155,7 +165,7 @@ def test_nullable_arrays_are_never_typed() -> None:
 
 def test_loop_items_through_a_reference_default_type_the_item() -> None:
     body = G().node("l", LOOP, {"items": ref("trigger.maybe", default=[])}).node("e", ECHO, {"value": cel("item")})
-    body.edge("l", "e", "body").settings = {"input_schema": INPUT}
+    body.edge("l", "e", "body").settings = {"input_schema": INPUT, "declassify": declassify(("l", "/items"))}
     assert codes(body) == [] and record(body).declarations["item"] == T.DYN
 
 

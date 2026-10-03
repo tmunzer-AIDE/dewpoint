@@ -15,6 +15,7 @@ from temporalio.client import WorkflowFailureError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner
 
+from dewpoint.engine.handles import ClaimRef
 from dewpoint.engine.runtime import execution
 from dewpoint.engine.runtime import workflow as run_graph
 from dewpoint.engine.runtime.activities import ProjectInput, VersionData
@@ -24,8 +25,16 @@ from tests.support.graphs import G, cel, ref
 from tests.support.keys import opened
 
 ECHO, LOOP, FILTER, RUN, FAIL = "testkit.echo@1", "flow.loop@1", "flow.filter@1", "flow.run_workflow@1", "flow.fail@1"
-LISTS = {"type": "object", "properties": {"items": {"type": "array"}}, "required": ["items"]}
+# Elements declared: an undeclared one counts as sensitive, and filtering it would declassify (engine 2b spec §4.1).
+LISTS = {
+    "type": "object",
+    "properties": {"items": {"type": "array", "items": {"type": "integer"}}},
+    "required": ["items"],
+}
 NUMBER = {"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]}
+# A step that fails the run in the turn it starts, in workflow code: the trigger `{}`, which the harness starts without
+# admitting it, doesn't hold `items`. A `flow.fail` takes a turn more: its message is masked in an activity (§3.7).
+TRANSFORM, UNREAD = "flow.transform@1", {"fields": {"n": ref("trigger.items")}}
 
 
 def graph(schema: dict[str, Any] | None = None, **outputs: Any) -> G:
@@ -69,9 +78,9 @@ async def test_a_loop_over_more_than_a_hundred_items_runs_in_batches_and_collect
     assert all(set(b["outer"][0]["results"]) == {"a"} for b in batches)  # only what the body reads goes along
 
 
-async def test_a_secret_a_batch_learned_is_masked_in_its_parent_too(env: WorkflowEnvironment) -> None:
-    """A batch returns the sensitive values it learned: the parent masks them where they reappear, as it would have
-    learned them inline."""
+async def test_what_a_batch_collects_reaches_its_parent_as_handles(env: WorkflowEnvironment) -> None:
+    """A batch's collected sensitive values are handles (engine 2b spec §3.6): the parent never holds them, and a step
+    that reads them gets them resolved in its activity, its output claimed again."""
     store = MemoryStore()
     g = graph()
     g.node("l", LOOP, {"items": list(range(101)), "collect": ref("steps.s.output.secret_value")})
@@ -80,7 +89,8 @@ async def test_a_secret_a_batch_learned_is_masked_in_its_parent_too(env: Workflo
     handle, result = await finished(env, store, g, {})
     assert result.status == "succeeded"
     [echoed] = [r for r in store.steps(run_id_of(handle)) if r.node_key == "e"]
-    assert "s3cr3t-value" not in json.dumps(echoed.output_preview) and "[redacted]" in json.dumps(echoed.output_preview)
+    assert "s3cr3t-value" not in json.dumps(echoed.output_preview)
+    assert all(ClaimRef.of(v) is not None for v in echoed.output_preview["value"])
 
 
 @pytest.mark.parametrize(("policy", "status"), [("continue", "succeeded"), ("stop", "failed")])
@@ -475,11 +485,11 @@ async def test_a_batch_that_fails_as_a_workflow_fails_its_loop_and_its_whole_gra
 
 
 async def test_a_sub_flow_the_run_ends_before_it_starts_uses_nothing(env: WorkflowEnvironment) -> None:
-    """The run fails in the turn that would start its sub-flow: the start never goes out, and the sub-flow's grant
-    comes back whole (reviewed: it was counted as used)."""
+    """The run fails while its sub-flow's input crosses to the child: the start never goes out, and the sub-flow's
+    grant comes back whole (reviewed: it was counted as used)."""
     store = MemoryStore()
     g = graph()
-    g.node("r", RUN, {"workflow_id": str(store.publish(sleeper()))}).node("f", FAIL, {"message": "at once"})
+    g.node("r", RUN, {"workflow_id": str(store.publish(sleeper()))}).node("t", TRANSFORM, UNREAD)
     handle, result = await finished(env, store, g, {})
     assert (result.status, result.iterations, store.runs[run_id_of(handle)].iterations) == ("failed", 0, 0)
     assert await children_started(handle) == 0
@@ -488,9 +498,8 @@ async def test_a_sub_flow_the_run_ends_before_it_starts_uses_nothing(env: Workfl
 async def test_a_batch_the_run_ends_before_it_starts_uses_nothing(env: WorkflowEnvironment) -> None:
     store = MemoryStore()
     g = graph()
-    g.node("l", LOOP, {"items": list(range(150))}).node("x", ECHO).edge("l", "x", "body")
-    g.node("t", "flow.transform@1", {"fields": {"n": 1}}).node("f", FAIL, {"message": "at once"}).edge("t", "f")
-    handle, result = await finished(env, store, g, {})  # `f` fails the run in the turn the first batch would start
+    g.node("l", LOOP, {"items": list(range(150))}).node("x", ECHO).edge("l", "x", "body").node("t", TRANSFORM, UNREAD)
+    handle, result = await finished(env, store, g, {})  # `t` fails the run in the turn the first batch would start
     assert (result.status, result.iterations, store.runs[run_id_of(handle)].iterations) == ("failed", 0, 0)
     assert await children_started(handle) == 0
 
@@ -541,18 +550,18 @@ class SlowToLoad(MemoryStore):
         return await super().version(tenant_id, version_id)
 
 
-async def test_a_sub_flow_whose_version_does_not_load_still_has_its_row(env: WorkflowEnvironment) -> None:
-    """A sub-run writes its row before its version loads, so one that ends right there still shows, with its end."""
+async def test_a_sub_flow_whose_version_is_gone_fails_its_step_and_starts_nothing(env: WorkflowEnvironment) -> None:
+    """Its input is checked and split by the child's schema before it starts (engine 2b spec §3.4, §3.5): with no
+    version to read it from, the crossing fails in the parent. Starting the child anyway would send its input unsplit,
+    sensitive values included, into the child's history."""
     store = MemoryStore()
     sub = store.publish(doubler())
-    del store.versions[str(store.subflows[sub].version_id)]  # gone: the loader can't find it
+    del store.versions[str(store.subflows[sub].version_id)]  # gone: neither its schema nor its graph can be read
     g = graph(code=ref("steps.r.error.code", default="none"))
     g.node("r", RUN, {"workflow_id": str(sub), "input": {"n": 1}}, on_error="continue")
     _, result = await finished(env, store, g, {})
     assert (result.status, result.outputs) == ("succeeded", {"code": "version_unusable"})
-    [(child, row)] = store.starts.items()
-    assert (row.kind, row.workflow_id) == ("subflow", str(sub))
-    assert (store.runs[child].status, store.runs[child].error_code) == ("failed", "version_unusable")
+    assert store.starts == {}  # no sub-run
 
 
 async def test_a_sub_flow_cancelled_while_its_version_loads_still_has_its_row(env: WorkflowEnvironment) -> None:

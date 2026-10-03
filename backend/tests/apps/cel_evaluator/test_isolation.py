@@ -23,6 +23,33 @@ def test_the_evaluator_imports_only_the_runtime_and_engine_cel() -> None:
     assert "cel_expr_python" in {m.split(".")[0] for m in loaded}
 
 
+IMAGE = Path(__file__).parents[4] / "deploy" / "docker" / "cel-evaluator.Dockerfile"
+
+
+def test_every_dewpoint_module_the_evaluator_loads_is_in_its_image() -> None:
+    """The e2e job's evaluator exited at startup: `engine.cel.bind` had come to import `engine.handles`, which its
+    image doesn't copy. Every Dewpoint module the evaluator loads is a file its Dockerfile copies."""
+    copied = [
+        source.removeprefix("backend/src/")
+        for line in IMAGE.read_text().splitlines()
+        if line.startswith("COPY ") and "--from=" not in line
+        for source in line.split()[1:-1]
+        if source.startswith("backend/src/")
+    ]
+    code = (
+        "import sys, json, dewpoint.apps.cel_evaluator.__main__; "
+        "print(json.dumps({m: getattr(v, '__file__', None) for m, v in sys.modules.items() if m[:8] == 'dewpoint'}))"
+    )
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True, timeout=60)
+    src = (Path(__file__).parents[3] / "src").resolve()
+    files = {m: Path(f).resolve().relative_to(src).as_posix() for m, f in json.loads(done.stdout).items() if f}
+
+    def in_image(file: str) -> bool:
+        return any(file == c or file.startswith(c.rstrip("/") + "/") for c in copied)
+
+    assert sorted(m for m, f in files.items() if not in_image(f)) == [], copied
+
+
 def test_it_refuses_to_start_with_anything_secret_looking_in_its_environment() -> None:
     secret = "kek-value-that-must-not-leak"
     env = {"PATH": os.environ["PATH"], "PYTHONPATH": os.environ.get("PYTHONPATH", ""), "DEWPOINT_KEK_B64": secret}

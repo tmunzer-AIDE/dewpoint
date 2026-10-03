@@ -43,6 +43,10 @@ class WorkflowVersion(UUIDPk, Base):
     output_schema: Mapped[dict[str, Any]] = mapped_column(JSONB)
     vars_schema: Mapped[dict[str, Any]] = mapped_column(JSONB)
     expressions: Mapped[list[Any]] = mapped_column(JSONB, default=list)
+    tainted_sites: Mapped[list[Any]] = mapped_column(JSONB, default=list)  # [{node, field}] (2b spec §4.1)
+    output_taint: Mapped[dict[str, Any] | None] = mapped_column(JSONB)  # each output's taint; None: unknown
+    open_scopes_cap: Mapped[int | None] = mapped_column(Integer)  # computed at publish, pinned (2b spec §5.3)
+    loop_depth: Mapped[int | None] = mapped_column(Integer)  # its deepest loop nesting, D
     closure_version_ids: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(UUID(as_uuid=True)))
     closure_workflow_ids: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(UUID(as_uuid=True)))
     closure_node_refs: Mapped[list[str]] = mapped_column(ARRAY(Text))

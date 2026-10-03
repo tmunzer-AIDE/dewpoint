@@ -4,21 +4,27 @@ in-memory store and an in-process CEL evaluator (the real one needs Linux and it
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Iterable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
+from temporalio.api.common.v1 import Payload
 from temporalio.client import Client, WorkflowHandle
+from temporalio.converter import WorkflowSerializationContext
 from temporalio.exceptions import ApplicationError
 from temporalio.worker import Worker, WorkflowRunner
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
+from dewpoint.apps import codec
 from dewpoint.apps.worker.activities import Evaluate, RunStore, cel_activity, engine_activities
+from dewpoint.core.claims import secret_index
+from dewpoint.core.claims.service import ClaimConflictError, ClaimUnavailableError, NewClaim
 from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.cel import ipc
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.graph.validate import SubflowInfo, ValidationContext, validate
+from dewpoint.engine.handles import ClaimRef, StoredClaim
 from dewpoint.engine.runtime.activities import (
     ENGINE_QUEUE,
     LIVE,
@@ -31,11 +37,16 @@ from dewpoint.engine.runtime.activities import (
     VersionData,
     cel_queue,
 )
+from dewpoint.engine.runtime.bounds import pinned
 from dewpoint.engine.runtime.ids import run_of, run_workflow_id
+from dewpoint.engine.runtime.program import compile_program
 from dewpoint.engine.runtime.workflow import LoopBatch, RunGraph
+from dewpoint.engine.sensitive import MIN_SECRET
+from dewpoint.engine.split import split
 from dewpoint.sdk import Plugin
 from tests.engine.runtime.support import CATALOG, MANIFESTS
 from tests.support.graphs import G
+from tests.support.keys import FixtureKeys
 from tests.support.plugins.testkit import TESTKIT
 
 TENANT = str(uuid.UUID(int=1))
@@ -47,6 +58,18 @@ RESULT_TIMEOUT_S = 60  # the harness's runs are time-skipped: a minute is far mo
 EVALUATOR_ONLY = "timestamp('2026-01-01T00:00:00Z').getHours('Europe/Paris')"
 
 
+@dataclass(frozen=True)
+class HeldClaim:
+    """A claim as the store holds it (engine 2b spec §3.1)."""
+
+    tenant_id: str
+    owner: str
+    root: str
+    value: Any
+    sensitive_pointers: tuple[str, ...]
+    kind: str
+
+
 @dataclass
 class MemoryStore:
     versions: dict[str, VersionData] = field(default_factory=dict)
@@ -55,6 +78,11 @@ class MemoryStore:
     subflows: dict[uuid.UUID, SubflowInfo] = field(default_factory=dict)  # what validation sees as published
     starts: dict[str, RunStart] = field(default_factory=dict)  # sub-runs' own rows
     schemas: dict[str, dict[str, Any]] = field(default_factory=dict)  # version -> its output schema
+    taints: dict[str, dict[str, Any]] = field(default_factory=dict)  # version -> its outputs' taint (2b spec §4.1)
+    claims: dict[str, HeldClaim] = field(default_factory=dict)
+    grants: set[tuple[str, str]] = field(default_factory=set)  # (claim, run) (2b spec §3.4)
+    index_of: dict[str, set[str]] = field(default_factory=dict)  # root run -> its secret index (2b spec §3.7)
+    versions_of: dict[str, int] = field(default_factory=dict)  # root run -> its index's version
 
     def add(self, g: G, workflow_id: uuid.UUID | None = None, *, engine_abi: int = ENGINE_ABI) -> str:
         """Publish `g` as a version, pinned to the sub-flows it runs (as `publish` registered them). `engine_abi`:
@@ -65,18 +93,24 @@ class MemoryStore:
         version_id = str(uuid.uuid4())
         refs = {n["type"] for n in g.nodes}
         handler = result.failure_handler_version_id
+        expressions = [r.to_json() for r in result.expressions]
+        manifests = {r: MANIFESTS[r] for r in sorted(refs)}
+        cap, depth = pinned(compile_program(g.data(), manifests, expressions, CURRENT_CEL_PROFILE))  # as publish does
         self.versions[version_id] = VersionData(
             version_id=version_id,
             workflow_id=str(workflow_id or uuid.uuid4()),
             graph=g.data(),
-            expressions=[r.to_json() for r in result.expressions],
+            expressions=expressions,
             cel_profile=CURRENT_CEL_PROFILE,
-            manifests={r: MANIFESTS[r] for r in sorted(refs)},
+            manifests=manifests,
             subflow_version_ids=dict(result.subflow_pins),
             failure_handler_version_id=str(handler) if handler else None,
             engine_abi=engine_abi,
+            open_scopes_cap=cap,
+            loop_depth=depth,
         )
         self.schemas[version_id] = dict(result.output_schema)
+        self.taints[version_id] = dict(result.output_taint)
         return version_id
 
     def publish(self, g: G, workflow_id: uuid.UUID | None = None, *, engine_abi: int = ENGINE_ABI) -> uuid.UUID:
@@ -86,7 +120,7 @@ class MemoryStore:
         version_id = self.add(g, workflow_id, engine_abi=engine_abi)
         input_schema = g.settings.get("input_schema", {"type": "object"})
         self.subflows[workflow_id] = SubflowInfo(
-            workflow_id, uuid.UUID(version_id), input_schema, self.schemas[version_id]
+            workflow_id, uuid.UUID(version_id), input_schema, self.schemas[version_id], self.taints[version_id]
         )
         return workflow_id
 
@@ -105,6 +139,79 @@ class MemoryStore:
 
     def steps(self, run_id: str) -> list[StepRow]:
         return [r for k, r in sorted(self.rows.items()) if k[0] == run_id]
+
+    # --- claims (2b spec §3), checked as the database store checks them ------------------------------------------
+
+    async def fetch(self, tenant_id: str, run_id: str, claim_id: str) -> StoredClaim:
+        held = self.claims.get(claim_id)
+        if (
+            held is None
+            or held.tenant_id != tenant_id
+            or (held.owner != run_id and (claim_id, run_id) not in self.grants)
+        ):
+            raise ClaimUnavailableError("A claim this run may not read, or that doesn't exist.")
+        return StoredClaim(held.value, held.sensitive_pointers)
+
+    async def write(
+        self, tenant_id: str, claims: Any, *, kind: str, step_id: str | None, iteration_key: str | None
+    ) -> None:
+        for c in claims:
+            assert isinstance(c, NewClaim)
+            held = HeldClaim(tenant_id, str(c.owner_run_id), str(c.root_run_id), c.value, c.sensitive_pointers, kind)
+            existing = self.claims.get(str(c.id))
+            if existing is not None and (existing.value, existing.sensitive_pointers) != (
+                c.value,
+                c.sensitive_pointers,
+            ):
+                raise ClaimConflictError("A claim was written again with other content.")
+            self.claims[str(c.id)] = held
+
+    async def write_inputs(self, tenant_id: str, claims: Any) -> None:
+        for c, _ in claims:
+            held = HeldClaim(tenant_id, str(c.owner_run_id), str(c.root_run_id), c.value, c.sensitive_pointers, "input")
+            self.claims[str(c.id)] = held
+
+    async def grant(self, tenant_id: str, *, granted_by: str, to: str, claim_ids: Any, root_run_id: str) -> None:
+        for claim_id in claim_ids:  # only what the granter may read: all or nothing
+            await self.fetch(tenant_id, granted_by, claim_id)
+        self.grants.update((claim_id, to) for claim_id in claim_ids)
+
+    async def input_schema(self, tenant_id: str, version_id: str) -> Any:
+        version = self.versions.get(version_id)
+        return None if version is None else version.graph.get("settings", {}).get("input_schema", {"type": "object"})
+
+    async def index(self, tenant_id: str, root_run_id: str) -> secret_index.Index:
+        strings = tuple(sorted(self.index_of.get(root_run_id, set())))
+        return secret_index.Index(self.versions_of.get(root_run_id, 0), strings)
+
+    async def index_version(self, tenant_id: str, root_run_id: str) -> int:
+        return self.versions_of.get(root_run_id, 0)
+
+    async def remember(self, tenant_id: str, root_run_id: str, strings: Any) -> secret_index.Index:
+        current = self.index_of.get(root_run_id, set())
+        merged = current | {s for s in strings if len(s) >= MIN_SECRET}
+        secret_index.check(sorted(merged))  # past its bounds, nothing changes (2b spec §3.7)
+        if merged != current:
+            self.index_of[root_run_id] = merged
+            self.versions_of[root_run_id] = self.versions_of.get(root_run_id, 0) + 1
+        return await self.index(tenant_id, root_run_id)
+
+    def claim(self, value: Any, *, owner: str, tainted: bool) -> dict[str, Any]:
+        """A claim made outside any run, for a test to hand one: its handle."""
+        claim_id = str(uuid.uuid4())
+        self.claims[claim_id] = HeldClaim(TENANT, owner, owner, value, ("",) if tainted else (), "input")
+        return ClaimRef(claim_id).to_json()
+
+    def admit(self, trigger: dict[str, Any], schema: Any, run_id: str) -> Any:
+        """`trigger` split as admission splits it (2b spec §3.5), its claims owned by `run_id`: the envelope."""
+        done = split(trigger, schema, lambda pointer: str(uuid.uuid4()))
+        for c in done.claims:
+            sensitive = ("",) if c.tainted else ()
+            self.claims[c.id] = HeldClaim(TENANT, run_id, run_id, c.value, sensitive, "input")
+        if done.secrets:  # admission seeds the index
+            self.index_of.setdefault(run_id, set()).update(done.secrets)
+            self.versions_of[run_id] = self.versions_of.get(run_id, 0) + 1
+        return done.envelope
 
 
 async def in_process(request: dict[str, Any]) -> list[dict[str, Any]]:
@@ -139,21 +246,33 @@ async def workers(
         if evaluate is None:  # no evaluator serves the profile
             yield
             return
-        async with Worker(client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(evaluate)]):
+        async with Worker(
+            client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(evaluate, store)]
+        ):
             yield
 
 
 async def start(
-    client: Client, store: MemoryStore, g: G, trigger: dict[str, Any] | None = None, **options: Any
+    client: Client,
+    store: MemoryStore,
+    g: G,
+    trigger: dict[str, Any] | None = None,
+    *,
+    claimed: bool = False,
+    **options: Any,
 ) -> WorkflowHandle[Any, RunResult]:
-    return await start_version(client, store.add(g), trigger, **options)
+    """`claimed`: the trigger is split as admission splits it (2b spec §3.5), its sensitive values handles."""
+    run_id = str(uuid.uuid4())
+    if claimed:
+        trigger = store.admit(trigger or {}, g.settings.get("input_schema"), run_id)
+    return await start_version(client, store.add(g), trigger, run_id=run_id, **options)
 
 
 async def start_version(
-    client: Client, version_id: str, trigger: dict[str, Any] | None = None, **options: Any
+    client: Client, version_id: str, trigger: dict[str, Any] | None = None, *, run_id: str | None = None, **options: Any
 ) -> WorkflowHandle[Any, RunResult]:
     """A run of a version the store already has."""
-    run_id = str(uuid.uuid4())
+    run_id = run_id or str(uuid.uuid4())
     run = RunInput(TENANT, run_id, version_id, trigger or {}, options.pop("mode", LIVE), **options)
     return await client.start_workflow(RunGraph.run, run, id=run_workflow_id(TENANT, run_id), task_queue=ENGINE_QUEUE)
 
@@ -173,3 +292,35 @@ async def run(
     """A run to its end: a run that hangs fails its test instead of stalling the suite (2a-3a's final review, M6)."""
     handle = await start(client, store, g, trigger, **options)
     return await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+
+
+def _payloads(message: Any) -> Iterator[Payload]:
+    for described, value in message.ListFields():
+        if described.type != described.TYPE_MESSAGE:
+            continue
+        if described.message_type.GetOptions().map_entry:
+            items = list(value.values())
+        else:
+            items = [value] if hasattr(value, "ListFields") else list(value)  # one message, or a repeated field
+        for item in items:
+            if isinstance(item, Payload):
+                yield item
+            elif hasattr(item, "ListFields"):
+                yield from _payloads(item)
+
+
+async def decoded(histories: Any) -> str:
+    """Every payload of every history, decrypted with the fixture keys: what Temporal holds, in plain text. It takes
+    each payload's tenant from its metadata, which only a test may do (the codec never does)."""
+    out = []
+    for history in histories:
+        for event in history.events:
+            for payload in _payloads(event):
+                if payload.metadata.get("encoding") == codec.ENCODING:
+                    workflow_id = run_workflow_id(payload.metadata[codec.TENANT].decode(), str(uuid.UUID(int=0)))
+                    decoder = codec.TenantCodec(FixtureKeys()).with_context(
+                        WorkflowSerializationContext("default", workflow_id)
+                    )
+                    [payload] = await decoder.decode([payload])
+                out.append(payload.data.decode(errors="replace"))
+    return "\n".join(out)

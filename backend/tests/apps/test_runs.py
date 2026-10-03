@@ -2,6 +2,7 @@
 """`start_run` (spec §4.5, §9): admission of the workflow's active version under the lifecycle locks."""
 
 import asyncio
+import json
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sqlalchemy import select
 from temporalio.api.workflowservice.v1 import (
     DescribeWorkerDeploymentRequest,
     DescribeWorkerDeploymentResponse,
@@ -33,15 +35,19 @@ from dewpoint.apps.runs import (
     start_run,
 )
 from dewpoint.apps.worker.deployment import this_build
+from dewpoint.core.claims import secret_index
+from dewpoint.core.claims import service as claims
+from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.db import tenant_scope
+from dewpoint.core.models.claims import InputClaim
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.runs import service
 from dewpoint.core.workflows import service as workflows
 from dewpoint.engine import ENGINE_ABI
-from dewpoint.engine.runtime import size
+from dewpoint.engine.handles import ClaimRef, contains_marker
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, SIMULATE, RunInput
 from dewpoint.engine.runtime.ids import run_workflow_id
-from dewpoint.engine.runtime.size import RUN_INPUT_TOO_LARGE
+from dewpoint.engine.split import TRIGGER_INLINE
 from tests.apps.test_lifecycle_races import until_someone_waits_for_a_lock
 from tests.apps.test_workflow_ops import (
     ECHO,
@@ -54,6 +60,7 @@ from tests.apps.test_workflow_ops import (
     save,
     update,
 )
+from tests.support.graphs import G
 from tests.support.keys import FIXTURE_CONVERTER, FixtureKeys
 from tests.support.registry import sync_test_plugins
 
@@ -159,10 +166,19 @@ def no_waits(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(run_ops, "START_RETRY_S", (0.0, 0.0))
 
 
-async def published(owner: Any, api: Any, admin: Any, settings: Any) -> tuple[Any, uuid.UUID, uuid.UUID]:
+@pytest.fixture(autouse=True)
+def fixture_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Admission seals a trigger's claims with the tenant's keys: here the fixture keys, as the fake client encrypts
+    its starts with them."""
+    monkeypatch.setattr(run_ops, "keyring_keys", lambda sessionmaker, settings: FixtureKeys())
+
+
+async def published(
+    owner: Any, api: Any, admin: Any, settings: Any, graph: dict[str, Any] | None = None
+) -> tuple[Any, uuid.UUID, uuid.UUID]:
     await sync_test_plugins(admin)
     ctx = await actor(owner)
-    wf = await create(api, ctx, ECHO_GRAPH)
+    wf = await create(api, ctx, graph or ECHO_GRAPH)
     out = await publish(api, ctx, wf, settings)
     assert out.version is not None
     return ctx, wf, out.version.id
@@ -186,7 +202,8 @@ async def test_the_active_version_starts_under_a_workflow_id_built_from_its_tena
     [(arg, workflow_id, queue)] = client.started
     assert (workflow_id, queue) == (run_workflow_id(str(ctx.tenant_id), str(run_id)), ENGINE_QUEUE)  # 2b spec §6.1
     assert (arg.tenant_id, arg.run_id) == (str(ctx.tenant_id), str(run_id))
-    assert (arg.version_id, arg.trigger, arg.mode) == (str(version), {"x": 1}, SIMULATE)
+    assert (arg.version_id, arg.mode) == (str(version), SIMULATE)
+    assert ClaimRef.of(arg.trigger) is not None  # its key undeclared by its input schema: claimed whole (§3.5, C1)
     assert arg.max_run_duration_s == api_settings.max_run_duration_days * 86_400
     row = await run_row(owner_sessionmaker, ctx.tenant_id, run_id)
     assert (row.status, row.mode, row.workflow_version_id) == ("running", SIMULATE, version)
@@ -632,21 +649,110 @@ async def test_a_start_that_cant_be_encrypted_is_refused_and_its_run_failed(
     assert (row.status, row.error_code) == ("failed", START_FAILED)
 
 
-async def test_a_run_whose_input_is_too_large_to_start_is_refused_before_admission(
-    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings, monkeypatch
+SECRET = {"type": "string", "x-sensitive": True}
+CLAIMED_GRAPH = G().node("a", "testkit.echo@1", {"value": 1})
+CLAIMED_GRAPH.settings = {
+    "input_schema": {
+        "type": "object",
+        "properties": {"token": SECRET, "name": {"type": "string"}, "extra": {"type": "object"}},
+        "required": ["token", "name"],
+        "additionalProperties": False,
+    }
+}
+
+
+async def test_admission_claims_the_triggers_sensitive_values_and_seeds_its_secret_index(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
 ) -> None:
-    """Engine 2b spec §5.2: the client checks the start it would send, before the run is admitted: no row, no start,
-    and a fixed reason, never Temporal's refusal."""
-    monkeypatch.setattr(size, "PAYLOAD_BYTES", 10_000)
-    ctx, _, version = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings)
+    """Engine 2b spec §3.5: the trigger is validated, then split; its claims are owned by the run (§3.4), and their
+    strings seed the run tree's secret index (§3.7). The start carries handles where they were."""
+    ctx, _, version = await published(
+        owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, CLAIMED_GRAPH.data()
+    )
+    client = FakeClient()
+    run_id = await start_run(
+        dispatch_sessionmaker, client, api_settings,  # type: ignore[arg-type]
+        tenant_id=ctx.tenant_id, version_id=version, trigger={"token": "s3cr3t-tok3n", "name": "ann"},
+    )  # fmt: skip
+    [(arg, _, _)] = client.started
+    handle = ClaimRef.of(arg.trigger["token"])
+    assert handle is not None and arg.trigger["name"] == "ann"
+    async with owner_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        row = (await s.execute(select(InputClaim).where(InputClaim.id == uuid.UUID(handle.id)))).scalar_one()
+        assert (row.owner_run_id, row.root_run_id, row.pointer, row.sensitive_pointers) == (
+            run_id,
+            run_id,
+            "/token",
+            [""],
+        )
+        stored = await claims.fetch(
+            s, ClaimCipher(FixtureKeys()), ctx.tenant_id, run_id=run_id, claim_id=uuid.UUID(handle.id)
+        )
+        index = await secret_index.read(
+            s, ClaimCipher(FixtureKeys(), purpose=secret_index.PURPOSE), ctx.tenant_id, run_id
+        )
+    assert (stored.value, index.strings) == ("s3cr3t-tok3n", ("s3cr3t-tok3n",))
+
+
+@pytest.mark.parametrize(
+    ("trigger", "reason"),
+    [
+        ({"token": 12345678, "name": "ann"}, "at token: it breaks `type`"),  # its place and rule, never its value
+        ({"name": "ann"}, "required"),
+        ({"token": "t0k3n-1234", "name": "ann", "extra": {"$claim": str(uuid.UUID(int=7))}}, "$claim"),  # forged
+    ],
+)
+async def test_a_trigger_that_doesnt_match_or_holds_the_marker_is_refused_and_leaves_no_row(
+    trigger, reason, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    ctx, _, version = await published(
+        owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, CLAIMED_GRAPH.data()
+    )
     client = FakeClient()
     with pytest.raises(NotAdmissibleError) as refused:
         await start_run(
             dispatch_sessionmaker, client, api_settings,  # type: ignore[arg-type]
-            tenant_id=ctx.tenant_id, version_id=version, trigger={"x": "y" * 10_000},
+            tenant_id=ctx.tenant_id, version_id=version, trigger=trigger,
         )  # fmt: skip
-    assert refused.value.reasons == [RUN_INPUT_TOO_LARGE]
+    assert reason in " ".join(refused.value.reasons) and "12345678" not in " ".join(refused.value.reasons)
     async with owner_sessionmaker() as s, s.begin():
         await tenant_scope(s, ctx.tenant_id)
         assert await service.list_runs(s) == []
+        assert (await s.execute(select(InputClaim))).scalars().all() == []
     assert client.started == []
+
+
+async def test_a_trigger_too_large_to_send_is_claimed_so_its_start_fits(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """Engine 2b spec §3.5: past TRIGGER_INLINE, the trigger's largest parts are claimed until its envelope fits; the
+    start carries handles, never the 3 MB."""
+    ctx, _, version = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings)
+    client = FakeClient()
+    await start_run(
+        dispatch_sessionmaker, client, api_settings,  # type: ignore[arg-type]
+        tenant_id=ctx.tenant_id, version_id=version, trigger={"x": "y" * 3_000_000},
+    )  # fmt: skip
+    [(arg, _, _)] = client.started
+    assert contains_marker(arg.trigger) and len(json.dumps(arg.trigger)) <= TRIGGER_INLINE
+
+
+async def test_a_trigger_whose_secrets_would_pass_the_index_bound_is_refused(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings, monkeypatch
+) -> None:
+    """Engine 2b spec §3.7: admission seeds the run tree's secret index, which is bounded; a trigger past the bound is
+    refused (`secret_index_limit` among a request's reasons, §9), and leaves no row."""
+    monkeypatch.setattr(secret_index, "MAX_BYTES", 5_000)
+    ctx, _, version = await published(
+        owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, CLAIMED_GRAPH.data()
+    )
+    with pytest.raises(NotAdmissibleError) as refused:
+        await start_run(
+            dispatch_sessionmaker, FakeClient(), api_settings,  # type: ignore[arg-type]
+            tenant_id=ctx.tenant_id, version_id=version, trigger={"token": "k" * 6_000, "name": "ann"},
+        )  # fmt: skip
+    assert "secret index" in " ".join(refused.value.reasons)
+    async with owner_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        assert await service.list_runs(s) == []

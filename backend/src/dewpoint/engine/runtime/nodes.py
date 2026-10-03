@@ -9,7 +9,7 @@ from typing import Any
 
 from dewpoint.engine.cel.evaluate import TYPE_MISMATCH
 from dewpoint.engine.registry import control
-from dewpoint.engine.runtime.scheduler import Failure, RunEnd
+from dewpoint.engine.runtime.scheduler import Failure, ItemsRef, RunEnd, count
 
 INLINE_ITEMS = 100  # larger loops run in batches of this many items, one child workflow per batch (spec §6)
 MAX_DELAY_S = 30 * 86_400  # flow.delay's own bound: a value resolved at run time isn't checked by its schema
@@ -19,7 +19,7 @@ WORKFLOW_FAILED = "workflow_failed"  # a fail node ended the run
 
 @dataclass(frozen=True)
 class LoopStart:
-    items: list[Any]
+    items: list[Any] | ItemsRef  # or a claimed list: a count and a handle (engine 2b spec §5.3)
     concurrency: int
     stop_on_error: bool
     batch: int = 0  # > 0: the items run in child workflows of this many
@@ -96,12 +96,13 @@ def decide(ref: str, config: Mapping[str, Any]) -> Decision:
         return Decision(output={}, wait_until=until)
     if ref == control.LOOP:
         items = config.get("items")
-        if not isinstance(items, list):
+        if not isinstance(items, list | ItemsRef):  # or a claimed list, as a count and a handle (engine 2b spec §5.3)
             return _mismatch("`items` must be a list.")
+        n = count(items)
         cap = int(config.get("item_cap", 10_000))
-        if len(items) > cap:
-            return Decision(failure=Failure(ITEM_CAP_EXCEEDED, f"{len(items)} items exceed this loop's cap of {cap}."))
-        batch = INLINE_ITEMS if len(items) > INLINE_ITEMS else 0
+        if n > cap:
+            return Decision(failure=Failure(ITEM_CAP_EXCEEDED, f"{n} items exceed this loop's cap of {cap}."))
+        batch = INLINE_ITEMS if n > INLINE_ITEMS else 0
         stop = config.get("on_item_error", "stop") == "stop"
         return Decision(loop=LoopStart(items, int(config.get("concurrency", 1)), stop, batch))
     if ref == control.FILTER:

@@ -18,6 +18,7 @@ from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.cel.record import ExpressionRecord
 from dewpoint.engine.graph.model import version_hash
+from dewpoint.engine.runtime import bounds
 from dewpoint.engine.runtime.build import build_id
 from tests.apps.api.helpers import PW
 from tests.support.graphs import G, cel, nid, ref
@@ -126,6 +127,36 @@ async def test_a_published_version_carries_the_abi_of_this_build(
         cel_profile=v.cel_profile,
         engine_abi=abi,
     )
+
+
+async def test_a_published_version_pins_its_open_iteration_cap_and_its_loop_depth(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    """Engine 2b spec §5.3: publish computes them from the version's structure and stores them, so a later change of a
+    constant can't change how a pinned run schedules; the worker loads them with the version."""
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    looped = G().node("o", "flow.loop@1", {"items": [1]}).node("i", "flow.loop@1", {"items": [1]})
+    looped.node("e", "testkit.echo@1", {"value": 1}).edge("o", "i", "body").edge("i", "e", "body")
+    wf_id = await create(api_sessionmaker, ctx, looped.data())
+    out = await publish(api_sessionmaker, ctx, wf_id, api_settings)
+    assert out.errors == [] and out.version is not None
+    assert (out.version.open_scopes_cap, out.version.loop_depth) == (100, 2)
+
+
+async def test_publish_refuses_a_version_whose_continued_input_no_cap_bounds(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, monkeypatch
+) -> None:
+    """Engine 2b spec §5.3: with the bound deliberately tightened, no open-iteration cap fits; publish refuses the
+    version rather than pin a cap its runs would read as absent."""
+    monkeypatch.setattr(bounds, "SNAPSHOT_MAX", 10_000)
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    looped = (
+        G().node("o", "flow.loop@1", {"items": [1]}).node("e", "testkit.echo@1", {"value": 1}).edge("o", "e", "body")
+    )
+    out = await publish(api_sessionmaker, ctx, await create(api_sessionmaker, ctx, looped.data()), api_settings)
+    assert out.version is None and [e.code for e in out.errors] == ["version.unbounded"]
 
 
 async def test_publish_refuses_invalid_graphs_and_stale_revisions(
@@ -383,3 +414,79 @@ async def test_a_writer_sees_what_was_committed_while_its_session_held_the_workf
             await workflow_ops.publish(s, ctx, wf, expected_revision=seen, settings=api_settings)
         await workflow_ops.update(s, ctx, wf, name=None, enabled=True)  # an enable, not a no-op
     assert await is_enabled(api_sessionmaker, ctx, wf_id)
+
+
+async def test_publish_stores_the_tainted_sites_and_the_output_taint_a_parent_then_reads(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    """Engine 2b spec §4.1: the version records which value sites are tainted, and its outputs' taint map; a parent's
+    analysis reads its pinned sub-flow's map."""
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    token_schema = {
+        "type": "object",
+        "properties": {"token": {"type": "string", "x-sensitive": True}},
+        "required": ["token"],
+        "additionalProperties": False,
+    }
+    child_graph = G().node("a", "testkit.echo@1", {"value": ref("trigger.token")})
+    child_graph.settings = {"input_schema": token_schema, "outputs": {"secret": ref("trigger.token"), "plain": 1}}
+    child = await create(api_sessionmaker, ctx, child_graph.data(), name="child")
+    child_v = (await publish(api_sessionmaker, ctx, child, api_settings)).version
+    assert child_v is not None
+    assert child_v.tainted_sites == [
+        {"node": None, "field": "/settings/outputs/secret"},  # the workflow's outputs first
+        {"node": str(nid("a")), "field": "/value"},
+    ]
+    assert child_v.output_taint == {"secret": True, "plain": False}
+    parent_graph = G().node(
+        "r", "flow.run_workflow@1", {"workflow_id": str(child), "input": {"token": ref("trigger.token")}}
+    )
+    parent_graph.node("e", "testkit.echo@1", {"value": ref("steps.r.output.secret")}).edge("r", "e")
+    parent_graph.node("p", "testkit.echo@1", {"value": ref("steps.r.output.plain")}).edge("r", "p")
+    parent_graph.settings = {"input_schema": token_schema}
+    parent = await create(api_sessionmaker, ctx, parent_graph.data(), name="parent")
+    out = await publish(api_sessionmaker, ctx, parent, api_settings)
+    assert out.errors == [] and out.version is not None
+    sites = {(site["node"], site["field"]) for site in out.version.tainted_sites}
+    assert (str(nid("e")), "/value") in sites and (str(nid("p")), "/value") not in sites
+
+
+DECLASSIFYING = {
+    "input_schema": {
+        "type": "object",
+        "properties": {"token": {"type": "string", "x-sensitive": True}},
+        "required": ["token"],
+        "additionalProperties": False,
+    },
+    "declassify": [{"node": str(nid("c")), "field": "/condition"}],
+}
+
+
+def declassifying_graph() -> dict[str, Any]:
+    g = G().node("c", "flow.if@1", {"condition": cel("size(trigger.token) > 8")}).node("a", "testkit.echo@1")
+    g.node("b", "testkit.echo@1").edge("c", "a", "true").edge("c", "b", "false")
+    g.settings = DECLASSIFYING
+    return g.data()
+
+
+async def test_declassifying_needs_its_permission_and_the_audit_entry_lists_each_site(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    """Engine 2b spec §4.3: publishing a version that lists declassified sites needs `workflow.declassify` (tenant
+    admins and owners); the publish audit entry records every listed site and what it reveals."""
+    await sync_test_plugins(admin_sessionmaker)
+    editor = await actor(owner_sessionmaker)
+    wf_id = await create(api_sessionmaker, editor, declassifying_graph())
+    refused = await publish(api_sessionmaker, editor, wf_id, api_settings)
+    assert refused.version is None and [(d.code, d.field) for d in refused.errors] == [
+        ("declassify.forbidden", "/settings/declassify")
+    ]
+    admin = TenantContext(tenant_id=editor.tenant_id, user=editor.user, role="admin", session=None)  # type: ignore[arg-type]
+    published = await publish(api_sessionmaker, admin, wf_id, api_settings)
+    assert published.errors == [] and published.version is not None
+    async with owner_sessionmaker() as s:
+        details = (
+            await s.execute(text("select details from audit_log where action = 'workflow.publish'"))
+        ).scalar_one()
+    assert details["declassify"] == [{"node": str(nid("c")), "field": "/condition", "reveals": "the branch taken"}]

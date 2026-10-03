@@ -2,6 +2,7 @@
 """Publish-time validation of a workflow graph (spec §4). Pure: the caller loads the catalog and sub-flow data."""
 
 import contextlib
+import dataclasses
 import re
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -54,9 +55,12 @@ from dewpoint.engine.graph.values import (
     pointer_str,
     strip_values,
 )
+from dewpoint.engine.handles import RESERVED, contains_marker
 from dewpoint.engine.registry import control as C
 from dewpoint.engine.registry.catalog import Catalog, NodeTypeSpec
 from dewpoint.engine.schema_refs import ref_problems, subschemas
+from dewpoint.engine.sensitive import SENSITIVE, expand, is_marked, marked_positions
+from dewpoint.engine.taint import CLEAN, TAINTED, Shape, from_schema, make
 from dewpoint.sdk.fields import KINDS
 
 MAX_SUBFLOW_DEPTH = 5
@@ -82,6 +86,20 @@ class SubflowInfo:
     version_id: uuid.UUID
     input_schema: Mapping[str, Any]
     output_schema: Mapping[str, Any]
+    output_taint: Mapping[str, Any] | None = None  # its version's: each output's `Shape` JSON; None: unknown
+
+
+@dataclass(frozen=True)
+class TaintFacts:
+    """What one pass of the analysis learns that reads anywhere depend on (engine 2b spec §4.1): the variables some
+    assignment taints, and the loops whose collected values are tainted. The analysis runs again until they stop
+    changing; they only grow, so it ends."""
+
+    vars: frozenset[str] = frozenset()
+    collects: frozenset[uuid.UUID] = frozenset()
+
+
+NO_FACTS = TaintFacts()
 
 
 @dataclass(frozen=True)
@@ -99,6 +117,9 @@ class ValidationResult:
     failure_handler_version_id: uuid.UUID | None = None
     output_schema: Mapping[str, Any] = field(default_factory=dict)
     expressions: tuple[ExpressionRecord, ...] = ()  # every CEL value, classified (spec §5.5)
+    declassified: tuple[tuple[str, str, str], ...] = ()  # (node id, field, what it reveals): listed, and tainted
+    tainted_sites: tuple[tuple[str | None, str], ...] = ()  # (node id, field) of every tainted value (2b spec §4.1)
+    output_taint: Mapping[str, Any] = field(default_factory=dict)  # each workflow output's `Shape`, as JSON
 
     @property
     def ok(self) -> bool:
@@ -162,6 +183,142 @@ def _regex_keywords(schema: Any) -> list[str]:
     return sorted(found)
 
 
+_SENSITIVE_LITERAL = (
+    "A sensitive value can't be written into the workflow: pass it in the run's input, in a field marked sensitive."
+)
+
+
+_TIMER = "A wait's duration is visible in the run's history, so it can't come from sensitive data."
+_FAIL_MESSAGE = "A failure's message is recorded as it is, so it can't hold sensitive data."
+_SUBFLOW_INPUT = "This passes sensitive data into a field the sub-flow doesn't mark sensitive."
+TAINTED_REASON = "reads sensitive data"  # why a tainted CEL value runs in the isolated evaluator (§4.2)
+_RESERVED_FIX = "Rename the key: a run's data never holds `$claim`."
+
+
+def _covered(shape: Shape, schema: Mapping[str, Any], path: Pointer) -> bool:
+    """Whether every tainted part of a value written at `path` lies where `schema` marks it sensitive."""
+    if not shape.tainted or is_marked(schema, path):
+        return True
+    if shape.all or (shape.other is not None and shape.other.tainted):
+        return False  # tainted as a whole, or under keys no schema names: the container itself must be marked
+    if shape.items is not None and shape.items.tainted and not _covered(shape.items, schema, (*path, 0)):
+        return False
+    return all(_covered(sub, schema, (*path, name)) for name, sub in shape.fields)
+
+
+_REVEALS = {
+    C.IF: "the branch taken",
+    C.SWITCH: "the port taken",
+    C.LOOP: "the item count",
+    C.FILTER: "the input count and the kept count",
+}
+
+
+def _decision_sites(graph: Graph, s: Structure) -> dict[tuple[uuid.UUID, str], str]:
+    """The fields that may declassify (§4.3), with their node's type: a condition, a case's `when`, a loop's items,
+    a filter's items and predicate."""
+    out: dict[tuple[uuid.UUID, str], str] = {}
+    for n in graph.nodes:
+        ref = s.specs[n.id].ref
+        if ref == C.IF:
+            out[(n.id, "/condition")] = ref
+        elif ref == C.SWITCH:
+            cases = n.config.get("cases")
+            for i in range(len(cases) if isinstance(cases, list) else 0):
+                out[(n.id, f"/cases/{i}/when")] = ref
+        elif ref == C.LOOP:
+            out[(n.id, "/items")] = ref
+        elif ref == C.FILTER:
+            out[(n.id, "/items")] = ref
+            out[(n.id, "/predicate")] = ref
+    return out
+
+
+def _public_length(n: GraphNode) -> bool:
+    """A loop over `trigger.rows` itself: its length is already public (`trigger.row_count`), so it needs no entry.
+    A derived or filtered list doesn't inherit that (§4.3)."""
+    raw = n.config.get("items")
+    body = raw.get(ENVELOPE) if isinstance(raw, Mapping) and is_envelope(raw) else None
+    return isinstance(body, Mapping) and body.get("kind") == "ref" and body.get("path") == "trigger.rows"
+
+
+def _declassify(
+    graph: Graph, s: Structure, site_taint: Mapping[tuple[uuid.UUID | None, str], bool]
+) -> tuple[list[Diagnostic], tuple[tuple[str, str, str], ...]]:
+    """Every tainted decision must be listed in `settings.declassify`, and every entry must be one (§4.3)."""
+    listed = [(e.node, e.field) for e in graph.settings.declassify]
+    sites = _decision_sites(graph, s)
+    out: list[Diagnostic] = []
+    for (node, fld), ref in sites.items():
+        if not site_taint.get((node, fld)) or (node, fld) in listed:
+            continue
+        if ref == C.LOOP and _public_length(s.nodes[node]):
+            continue
+        out.append(
+            Diagnostic(
+                code="taint.undeclassified",
+                node=node,
+                field=fld,
+                message=f"This decision reads sensitive data, so {_REVEALS[ref]} becomes visible.",
+                fix="List it in the workflow's declassify settings, or decide on data that isn't sensitive.",
+            )
+        )
+    declassified: list[tuple[str, str, str]] = []
+    for i, (node, fld) in enumerate(listed):
+        kind = sites.get((node, fld))
+        if kind is None or not site_taint.get((node, fld)):
+            out.append(
+                Diagnostic(
+                    code="taint.stale_declassify",
+                    field=f"/settings/declassify/{i}",
+                    message="This entry declassifies nothing: it isn't a decision that reads sensitive data.",
+                    fix="Remove it.",
+                )
+            )
+        else:
+            declassified.append((str(node), fld, _REVEALS[kind]))
+    return out, tuple(declassified)
+
+
+def _writes_sensitive(
+    value: Value, root: Mapping[str, Any], pointer: Pointer, target: Mapping[str, Any] | None
+) -> bool:
+    """Whether a value envelope writes a literal at a sensitive position (§3.8): the literal itself, a part of it the
+    target schema marks, or a reference's or a template's default. Null and the empty string are written too."""
+    if isinstance(value, LiteralValue):
+        return is_marked(root, pointer) or bool(target is not None and marked_positions(value.value, target))
+    if not is_marked(root, pointer):
+        return False
+    if isinstance(value, RefValue):
+        return value.has_default
+    if isinstance(value, TemplateValue):
+        return any(isinstance(p, TemplateRef) and p.default is not None for p in value.parts)
+    return False
+
+
+def _sensitive_defaults(label: str, schema: Mapping[str, Any]) -> list[Diagnostic]:
+    """A `default` at a position the schema marks sensitive, or holding a part it does (engine 2b spec §3.8): a
+    secret written into the version, even null or empty: an omitted default is what's allowed."""
+    found: list[str] = []
+
+    def walk(node: Any, path: str, inherited: bool) -> None:
+        if not isinstance(node, Mapping):
+            return
+        branches = expand(node, schema)
+        here = inherited or any(b.get(SENSITIVE) is True for b in branches)
+        defaults = [b["default"] for b in branches if "default" in b]
+        if defaults and (here or any(marked_positions(d, node, schema) for d in defaults)):
+            found.append(path)
+        for suffix, sub in subschemas(node):
+            walk(sub, path + suffix, here)
+
+    walk(schema, "", False)
+    return [
+        Diagnostic(code="sensitive.default", field=f"/settings/{label}{where}", message=_SENSITIVE_LITERAL)
+        for where in found
+    ]
+
+
 def _settings(graph: Graph) -> list[Diagnostic]:
     st = graph.settings
     out: list[Diagnostic] = []
@@ -198,6 +355,9 @@ def _settings(graph: Graph) -> list[Diagnostic]:
             Diagnostic(code="settings.unresolvable_ref", field=f"/settings/{label}", message=f"{problem}.")
             for problem in ref_problems(schema)
         ]
+    for label, schema in (("input_schema", st.input_schema), ("vars_schema", st.vars_schema)):
+        if not any((d.field or "").startswith(f"/settings/{label}") for d in out):
+            out += _sensitive_defaults(label, schema)
     if any((d.field or "").startswith("/settings/vars_schema") for d in out):  # never run defaults through it
         return out
     props = st.vars_schema.get("properties", {})
@@ -213,11 +373,19 @@ def _settings(graph: Graph) -> list[Diagnostic]:
                 )
             )
         if not isinstance(schema, Mapping) or "default" not in schema:
-            out.append(Diagnostic(code="vars.no_default", field=where, message="Every variable needs a default value."))
+            if not is_marked(st.vars_schema, (name,)):  # a sensitive one is null until set (`_Validator.unset`)
+                out.append(
+                    Diagnostic(code="vars.no_default", field=where, message="Every variable needs a default value.")
+                )
         elif list(Draft202012Validator({**schema, "$defs": defs}).iter_errors(schema["default"])):
             out.append(
                 Diagnostic(code="vars.bad_default", field=where, message="The default value doesn't match the type.")
             )
+    places = [(f"/settings/outputs/{k}", v) for k, v in st.outputs.items()]
+    places += [("/settings/input_schema", st.input_schema), ("/settings/vars_schema", st.vars_schema)]
+    for where, value in places:  # the handle marker is Dewpoint's (engine 2b spec §3.2)
+        if contains_marker(value):
+            out.append(Diagnostic(code="value.reserved_key", field=where, message=RESERVED, fix=_RESERVED_FIX))
     for name in st.outputs:
         if not IDENT.match(name):
             out.append(
@@ -231,8 +399,10 @@ def _settings(graph: Graph) -> list[Diagnostic]:
 
 
 class _Validator:
-    def __init__(self, graph: Graph, s: Structure, ctx: ValidationContext, settings_ok: bool) -> None:
-        self.g, self.s, self.ctx = graph, s, ctx
+    def __init__(
+        self, graph: Graph, s: Structure, ctx: ValidationContext, settings_ok: bool, facts: TaintFacts = NO_FACTS
+    ) -> None:
+        self.g, self.s, self.ctx, self.facts = graph, s, ctx, facts
         self.diags: list[Diagnostic] = []
         self.live = {r: lv.analyze_region(s, r) for r in s.regions}
         self.desc = _descendants(s)
@@ -248,10 +418,35 @@ class _Validator:
         self.vars_root: dict[str, Any] = {"type": "object", "properties": self.vars, "additionalProperties": False}
         if settings_ok and isinstance(vars_schema.get("$defs"), Mapping):
             self.vars_root["$defs"] = vars_schema["$defs"]
+        # A sensitive variable has no default (§3.8): it's null until a step sets it. Unless its type allows null,
+        # every read must come after a step sure to have set it.
+        self.unset = {
+            name
+            for name, schema in self.vars.items()
+            if isinstance(schema, Mapping)
+            and "default" not in schema
+            and is_marked(self.vars_root, (name,))
+            and not Draft202012Validator(standalone(self.vars_root, schema)).is_valid(None)
+        }
+        self.writers: dict[str, list[uuid.UUID]] = {}
+        for n_id in s.topo:  # only the root's: a write in a loop body is refused (`_variables`)
+            assignments = s.nodes[n_id].config.get("assignments")
+            if s.specs[n_id].ref == C.SET_VARIABLES and s.region_of[n_id] is None and isinstance(assignments, Mapping):
+                for name in assignments if not is_envelope(assignments) else ():
+                    self.writers.setdefault(name, []).append(n_id)
         # `stop` anywhere, inside a loop body too, ends the whole run: outputs may miss steps that hadn't run yet
         self.has_stop = any(spec.ref == C.STOP for spec in s.specs.values())
         self.availability: dict[tuple[Any, ...], bool] = {}
         self.expressions: list[ExpressionRecord] = []
+        # taint (2b spec §4.1): its sources, each node's output, each loop's element, and what this pass learns
+        self.trigger_shape = from_schema(graph.settings.input_schema) if settings_ok else TAINTED
+        self.vars_shape = from_schema(self.vars_root)
+        self.out_taint: dict[uuid.UUID, Shape] = {}
+        self.item_taint: dict[uuid.UUID, Shape] = {}
+        self.site_taint: dict[tuple[uuid.UUID | None, str], bool] = {}
+        self.assigned: set[str] = set()
+        self.collected_tainted: set[uuid.UUID] = set()
+        self.output_taint: dict[str, Any] = {}
 
     def err(
         self,
@@ -277,7 +472,9 @@ class _Validator:
         for n_id in self.s.topo:
             self._node(self.s.nodes[n_id])
         for site, value in self.deferred:
-            self._value(site, value, None, ())
+            collect = self._value(site, value, None, ())
+            if collect is not None and collect.taint.tainted and site.node is not None:
+                self.collected_tainted.add(site.node)
         self._variables()
         self._waits()
         self._outputs()
@@ -293,6 +490,7 @@ class _Validator:
         values = list(iter_values(n.config))
         if spec.ref in (C.LOOP, C.FILTER):  # `items` first: the predicate and `collect` read its element type
             values.sort(key=lambda pv: pv[0][:1] != ("items",))
+            self.item_taint[n.id] = CLEAN  # written in the workflow, unless an `items` value says otherwise below
         for pointer, value in values:
             where = pointer_str(pointer)
             if not pointer or ((spec.ref, pointer[0]) in _WHOLE_LITERAL and len(pointer) == 1):
@@ -307,6 +505,11 @@ class _Validator:
             if spec.ref in (C.LOOP, C.FILTER) and pointer == ("items",):
                 items = resolved[pointer]
                 self.item_schema[n.id] = element_schema(items.schema) if items is not None else None
+                self.item_taint[n.id] = items.taint.element() if items is not None else TAINTED
+        if spec.ref == C.SET_VARIABLES:
+            for pointer, r in resolved.items():
+                if pointer[:1] == ("assignments",) and len(pointer) >= 2 and r is not None and r.taint.tainted:
+                    self.assigned.add(str(pointer[1]))
         if spec.ref == C.RUN_WORKFLOW:
             info = self._subflow(n)
             if info is None:
@@ -320,6 +523,56 @@ class _Validator:
             else:
                 self.pins[str(n.id)] = str(info.version_id)
         self.out_schema[n.id] = self._output_schema(n, spec, resolved)
+        self.out_taint[n.id] = self._output_taint(n, spec, resolved)
+        self._refused_taint(n, spec, resolved)
+
+    def _refused_taint(self, n: GraphNode, spec: NodeTypeSpec, resolved: Mapping[Pointer, Resolved | None]) -> None:
+        """Tainted data where history would show it (engine 2b spec §4.5): a timer's duration, a failure's message; or
+        where a child's own analysis wouldn't know it's sensitive: a sub-flow input field it doesn't mark."""
+        tainted = [(p, r) for p, r in resolved.items() if r is not None and r.taint.tainted]
+        if spec.ref in (C.DELAY, C.WAIT_UNTIL):
+            for pointer, _ in tainted:
+                self.err(
+                    "taint.timer", _TIMER, node=n.id, fld=pointer_str(pointer), fix="Wait on data that isn't sensitive."
+                )
+        elif spec.ref == C.FAIL:
+            for pointer, _ in tainted:
+                self.err(
+                    "taint.fail_message", _FAIL_MESSAGE, node=n.id, fld=pointer_str(pointer), fix="Use a fixed message."
+                )
+        elif spec.ref == C.RUN_WORKFLOW and (info := self._subflow(n)) is not None:
+            for pointer, r in tainted:
+                if pointer[:1] == ("input",) and not _covered(r.taint, info.input_schema, pointer[1:]):
+                    self.err("taint.subflow_input", _SUBFLOW_INPUT, node=n.id, fld=pointer_str(pointer),
+                             fix="Mark that field sensitive (x-sensitive) in the sub-flow's input schema.")  # fmt: skip
+
+    def _output_taint(self, n: GraphNode, spec: NodeTypeSpec, resolved: Mapping[Pointer, Resolved | None]) -> Shape:
+        """What a node's output holds that's tainted (§4.1)."""
+
+        def under(prefix: Pointer) -> Shape:
+            exact = resolved.get(prefix)
+            if exact is not None:
+                return exact.taint
+            deeper = [r for p, r in resolved.items() if p[: len(prefix)] == prefix and r is not None]
+            return TAINTED if any(r.taint.tainted for r in deeper) else CLEAN
+
+        if spec.ref == C.TRANSFORM:
+            fields = n.config.get("fields")
+            names = sorted(fields) if isinstance(fields, Mapping) and not is_envelope(fields) else []
+            return make([(name, under(("fields", name))) for name in names])
+        if spec.ref == C.LOOP:  # its count and failures stay plain; its collected items take `collect`'s taint
+            return make([("items", make(items=TAINTED) if n.id in self.facts.collects else CLEAN)])
+        if spec.ref == C.FILTER:  # tainted items or predicate: the kept items stay tainted; the count is plain
+            source, predicate = under(("items",)), under(("predicate",))
+            return make([("items", TAINTED if source.tainted or predicate.tainted else CLEAN)])
+        if spec.ref == C.RUN_WORKFLOW:
+            info = self._subflow(n)
+            if info is None or info.output_taint is None:
+                return TAINTED  # a version without a taint map: unknown counts as tainted
+            return make([(name, Shape.from_json(t)) for name, t in info.output_taint.items()])
+        if spec.ref in C.CONTROL_TYPES:
+            return CLEAN
+        return from_schema(spec.output_schema)  # a plugin's: its sensitive positions, and what it doesn't declare
 
     def _subflow(self, n: GraphNode) -> SubflowInfo | None:
         raw = n.config.get("workflow_id")
@@ -341,8 +594,12 @@ class _Validator:
         return spec.config_schema, pointer
 
     def _check_literals(self, n: GraphNode, spec: NodeTypeSpec) -> None:
+        for key, value in n.config.items():  # the handle marker is Dewpoint's (engine 2b spec §3.2)
+            if contains_marker(value):
+                self.err("value.reserved_key", RESERVED, node=n.id, fld=pointer_str((key,)), fix=_RESERVED_FIX)
         stripped, envelopes = strip_values(n.config)
         self._schema_errors(n.id, "", spec.config_schema, stripped, envelopes)
+        self._sensitive_literals(n, spec, stripped, envelopes)
         props = spec.config_schema.get("properties")
         for name, prop in props.items() if isinstance(props, Mapping) else ():
             kinds = prop.get(KINDS) if isinstance(prop, Mapping) else None
@@ -367,6 +624,26 @@ class _Validator:
             if info is not None:
                 inner = [p[1:] for p in envelopes if p[:1] == ("input",)]
                 self._schema_errors(n.id, "/input", info.input_schema, stripped.get("input", {}), inner)
+
+    def _sensitive_literals(self, n: GraphNode, spec: NodeTypeSpec, stripped: Any, envelopes: list[Pointer]) -> None:
+        """Config written as literals where a schema marks it sensitive (engine 2b spec §3.8): the node's own config,
+        a variable an assignment writes, a child's input. Envelopes are checked where they're resolved (`_value`)."""
+        own: Any = stripped
+        parts: list[tuple[str, Any, Mapping[str, Any] | None]] = []
+        if isinstance(stripped, dict) and spec.ref == C.SET_VARIABLES:
+            own = {k: v for k, v in stripped.items() if k != "assignments"}
+            parts.append(("/assignments", stripped.get("assignments"), self.vars_root))
+        elif isinstance(stripped, dict) and spec.ref == C.RUN_WORKFLOW:
+            own = {k: v for k, v in stripped.items() if k != "input"}
+            info = self._subflow(n)
+            parts.append(("/input", stripped.get("input"), info.input_schema if info else None))
+        parts.append(("", own, spec.config_schema))
+        for prefix, value, schema in parts:
+            depth = prefix.count("/")
+            holes = {pointer_str(p[depth:]) for p in envelopes if pointer_str(p[:depth]) == prefix}
+            if isinstance(schema, Mapping):
+                for where in marked_positions(value, schema, holes=holes):
+                    self.err("sensitive.literal", _SENSITIVE_LITERAL, node=n.id, fld=prefix + where)
 
     def _schema_errors(
         self, node: uuid.UUID, prefix: str, schema: Mapping[str, Any], instance: Any, envelopes: list[Pointer]
@@ -427,22 +704,49 @@ class _Validator:
                 fld=site.field,
             )
             return None
+        if root is not None and _writes_sensitive(value, root, pointer, target):
+            self.err("sensitive.literal", _SENSITIVE_LITERAL, node=site.node, fld=site.field)
+        out: Resolved | None
         if isinstance(value, LiteralValue):
             self._check_instance(site, target, value.value)
-            return Resolved({"type": literal_type(value.value)}, False)
-        if isinstance(value, RefValue):
-            return self._ref_value(site, value, target)
-        if isinstance(value, TemplateValue):
-            return self._template(site, value, target)
-        return self._cel(site, value, target)
+            out = Resolved({"type": literal_type(value.value)}, False)
+        elif isinstance(value, RefValue):
+            out = self._ref_value(site, value, target)
+        elif isinstance(value, TemplateValue):
+            out = self._template(site, value, target)
+        else:
+            out = self._cel(site, value, target)
+        if out is not None:
+            self.site_taint[(site.node, site.field)] = out.taint.tainted
+        return out
 
     def _cel(self, site: _Site, value: CelValue, target: Mapping[str, Any] | None) -> Resolved | None:
+        context = _CelSite(self, site)
         result = cel_check.check(
-            value.expr, target, _CelSite(self, site), node=str(site.node) if site.node else None, field=site.field
+            value.expr, target, context, node=str(site.node) if site.node else None, field=site.field
         )
-        if result.record is not None:
-            self.expressions.append(result.record)
-        return result.resolved
+        whole_roots = {p.path[0] for p in result.record.projections if len(p.path) == 1} if result.record else set()
+        tainted = context.tainted or result.dynamic or any(self._root_tainted(site, root) for root in whole_roots)
+        if result.record is not None:  # a tainted value always runs in the isolated evaluator (§4.2)
+            record = result.record
+            self.expressions.append(
+                dataclasses.replace(record, mode="activity", reason=TAINTED_REASON, tainted=True) if tainted else record
+            )
+        if result.resolved is None:
+            return None
+        return dataclasses.replace(result.resolved, taint=TAINTED if tainted else CLEAN)
+
+    def _root_tainted(self, site: _Site, root: str) -> bool:
+        """A CEL expression that reads a root whole (§4.1: a whole read is tainted if any part of it is)."""
+        if root == "trigger":
+            return self.trigger_shape.tainted
+        if root == "vars":
+            return self.vars_shape.tainted or bool(self.facts.vars)
+        if root in ("run", "index"):
+            return False
+        if root == "item":
+            return site.item_node is None or self.item_taint.get(site.item_node, TAINTED).tainted
+        return True  # `steps` or `loops` read whole: on the safe side
 
     def _check_instance(self, site: _Site, schema: Mapping[str, Any] | None, instance: Any) -> None:
         if schema is None:
@@ -472,19 +776,22 @@ class _Validator:
         if not value.has_default:
             return resolved
         self._check_instance(site, target, value.default)
-        return Resolved(widen(resolved.schema, value.default), False)
+        return Resolved(widen(resolved.schema, value.default), False, resolved.taint)
 
     def _template(self, site: _Site, value: TemplateValue, target: Mapping[str, Any] | None) -> Resolved:
         if target is not None and not compatible({"type": "string"}, target):
             self.err(
                 "template.not_string", "Text with references can only fill text fields.", node=site.node, fld=site.field
             )
+        taint = CLEAN
         for part in value.parts:
             if not isinstance(part, TemplateRef):
                 continue
             r = self._resolve(site, part.path)
             if r is None:
                 continue
+            if r.taint.tainted:
+                taint = TAINTED
             if r.conditional and part.default is None:
                 self.err(
                     "ref.conditional",
@@ -501,7 +808,7 @@ class _Validator:
                     node=site.node,
                     fld=site.field,
                 )
-        return Resolved({"type": "string"}, False)
+        return Resolved({"type": "string"}, False, taint)
 
     # ---- references -----------------------------------------------------------------------------------------
 
@@ -514,6 +821,26 @@ class _Validator:
         return resolved
 
     def _resolve_reported(self, site: _Site, p: RefPath) -> Resolved | None:
+        resolved = self._resolve_typed(site, p)
+        return dataclasses.replace(resolved, taint=self._taint_of(site, p)) if resolved is not None else None
+
+    def _taint_of(self, site: _Site, p: RefPath) -> Shape:
+        """What a read of `p` holds that's tainted (§4.1)."""
+        if p.root == "trigger":
+            return self.trigger_shape.at(p.rest)
+        if p.root in ("run", "index") or p.section == "index":
+            return CLEAN
+        if p.root == "vars":
+            return TAINTED if p.name in self.facts.vars else self.vars_shape.at((str(p.name), *p.rest))
+        if p.root in ("item", "loops"):
+            loop = site.item_node if p.root == "item" else self.s.by_key.get(str(p.name))
+            return self.item_taint.get(loop, TAINTED).at(p.rest) if loop is not None else TAINTED
+        if p.section == "error":
+            return CLEAN  # fixed codes, and masked messages
+        producer = self.s.by_key.get(str(p.name))
+        return self.out_taint.get(producer, TAINTED).at(p.rest) if producer is not None else TAINTED
+
+    def _resolve_typed(self, site: _Site, p: RefPath) -> Resolved | None:
         try:
             if p.root == "trigger":
                 return navigate(self.g.settings.input_schema, p.rest)
@@ -525,6 +852,15 @@ class _Validator:
                         "ref.unknown_var", f"`{p.name}` isn't a declared variable.", node=site.node, fld=site.field
                     )
                     return None
+                if p.name in self.unset and not self._set_before(site, str(p.name)):
+                    self.err(
+                        "vars.unassigned",
+                        f"`vars.{p.name}` has no default, so it's null until a step sets it, and its type doesn't "
+                        "allow null.",
+                        node=site.node,
+                        fld=site.field,
+                        fix="Set it in a step that always runs before this one, or allow null in its type.",
+                    )
                 return navigate(self.vars_root, p.rest, start=self.vars[str(p.name)])
             if p.root in ("item", "index", "loops"):
                 return self._resolve_loop(site, p)
@@ -582,19 +918,10 @@ class _Validator:
             )
             return None
         region = self.live[home]
-        consumer: lv.Cond
-        consumer_key: tuple[Any, ...]
-        if home == site.region and site.at_exit:
-            consumer, upstream, consumer_key = region.exit, True, ("exit",)
-        elif home == site.region and site.node is not None:
-            consumer, upstream = region.live[site.node], site.node in self.desc[producer]
-            consumer_key = ("node", site.node)
-        else:
-            ancestor = chain[chain.index(home) - 1]  # the loop node, in `home`, that contains the consumer
-            if ancestor is None:
-                return None
-            consumer, upstream = region.live[ancestor], ancestor in self.desc[producer]
-            consumer_key = ("node", ancestor)
+        found = self._consumer(site, home, producer)
+        if found is None:
+            return None
+        consumer, upstream, consumer_key = found
         if not upstream:
             self.err(
                 "ref.not_upstream",
@@ -626,6 +953,35 @@ class _Validator:
             return Resolved(None, not available)
         r = navigate(schema, p.rest)
         return Resolved(r.schema, r.conditional or not available)
+
+    def _consumer(
+        self, site: _Site, home: uuid.UUID | None, producer: uuid.UUID
+    ) -> tuple[lv.Cond, bool, tuple[Any, ...]] | None:
+        """When `site` runs, as `home`'s liveness sees it (the site, or the loop node in `home` containing it), whether
+        `producer` runs before that, and the memo key. None: no node in `home` contains the site."""
+        region = self.live[home]
+        if home == site.region and site.at_exit:
+            return region.exit, True, ("exit",)
+        if home == site.region and site.node is not None:
+            return region.live[site.node], site.node in self.desc[producer], ("node", site.node)
+        chain = self.s.chain(site.region)
+        ancestor = chain[chain.index(home) - 1]  # the loop node, in `home`, that contains the consumer
+        if ancestor is None:
+            return None
+        return region.live[ancestor], ancestor in self.desc[producer], ("node", ancestor)
+
+    def _set_before(self, site: _Site, name: str) -> bool:
+        """Whether a step sure to have set variable `name` has run when `site` reads it (spec §4.3 path availability,
+        as for a step's output)."""
+        if site.at_exit and site.region is None and self.has_stop:
+            return False  # `stop` may end the run before any of them ran
+        for writer in self.writers.get(name, ()):
+            found = self._consumer(site, None, writer)
+            if found is None or not found[1] or self.s.nodes[writer].options.on_error == "continue":
+                continue
+            if self._implies(None, found[2], found[0], writer, "ok", self.live[None]):
+                return True
+        return False
 
     def _declared_optional(self, site: _Site, p: RefPath) -> tuple[int, ...]:
         """Positions in `p.rest` the schema declares optional (spec §4.3): CEL guards them, references default them."""
@@ -738,11 +1094,15 @@ class _Validator:
                 props[name] = r.schema if r is not None and r.schema is not None else {}
                 if r is not None and not r.conditional:
                     required.append(name)
+                self.output_taint[name] = r.taint.to_json() if r is not None else True
                 continue
-            for pointer, value in iter_values(raw):
+            inner = [
                 self._value(_Site(None, where + pointer_str(pointer), None, at_exit=True), value, None, ())
+                for pointer, value in iter_values(raw)
+            ]
             props[name] = {"type": literal_type(raw)}
             required.append(name)
+            self.output_taint[name] = any(r is None or r.taint.tainted for r in inner)
         self.output_schema = object_schema(props, required)
 
     def _failure_handler(self) -> None:
@@ -766,9 +1126,13 @@ class _CelSite:
     def __init__(self, v: _Validator, site: _Site) -> None:
         self.v, self.site = v, site
         self.has_item = site.item_node is not None
+        self.tainted = False
 
-    def resolve(self, path: RefPath, *, report: bool) -> Resolved | None:
-        return self.v._resolve(self.site, path, report=report)
+    def resolve(self, path: RefPath, *, report: bool, reads: bool = True) -> Resolved | None:
+        resolved = self.v._resolve(self.site, path, report=report)
+        if report and reads and resolved is not None and resolved.taint.tainted:
+            self.tainted = True  # a path the expression reads: its typing questions (`report=False`) aren't reads
+        return resolved
 
     def optional_fields(self, path: RefPath) -> tuple[int, ...]:
         return self.v._declared_optional(self.site, path)
@@ -787,13 +1151,29 @@ def validate(graph: Graph, ctx: ValidationContext) -> ValidationResult:
     if structure is None:
         return ValidationResult(tuple([*settings, *structural]), node_refs)
     unusable = ("settings.invalid_schema", "settings.unresolvable_ref", "settings.unsupported_keyword")
-    v = _Validator(graph, structure, ctx, settings_ok=not any(d.code in unusable for d in settings))
-    v.run()
+    settings_ok = not any(d.code in unusable for d in settings)
+    facts = NO_FACTS
+    while True:  # the taint analysis's fixpoint (§4.1): facts only grow, so this ends
+        v = _Validator(graph, structure, ctx, settings_ok, facts)
+        v.run()
+        learned = TaintFacts(facts.vars | v.assigned, facts.collects | frozenset(v.collected_tainted))
+        if learned == facts:
+            break
+        facts = learned
+    declassify, declassified = _declassify(graph, structure, v.site_taint)
     return ValidationResult(
-        diagnostics=tuple([*settings, *structural, *v.diags]),
+        diagnostics=tuple([*settings, *structural, *v.diags, *declassify]),
         node_refs=node_refs,
         subflow_pins=dict(v.pins),
         failure_handler_version_id=v.failure_handler_version_id,
         output_schema=v.output_schema,
         expressions=tuple(sorted(v.expressions, key=lambda r: (r.node or "", r.field))),
+        tainted_sites=tuple(
+            sorted(
+                ((str(node) if node else None, fld) for (node, fld), t in v.site_taint.items() if t),
+                key=lambda site: (site[0] or "", site[1]),
+            )
+        ),
+        output_taint=dict(v.output_taint),
+        declassified=declassified,
     )

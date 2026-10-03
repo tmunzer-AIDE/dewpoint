@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Engine 2b spec §5.2: every payload the engine sends Temporal, and every result it gets back, stays under Temporal's
 payload limit once encoded. Each is checked where it's produced: too large fails its step, its loop or its run with
-`payload_too_large`, never a retried or terminated workflow task. The limit is lowered here so small values show it;
-test_real_server.py shows it at the real one."""
+`payload_too_large`, never a retried or terminated workflow task. A command spills its largest values first
+(test_run_graph_spills.py): what's here is what spilling can't rescue, or doesn't apply to. The limit is lowered here
+so small values show it; test_real_server.py shows it at the real one."""
 
 import asyncio
 from typing import Any
@@ -10,26 +11,30 @@ from typing import Any
 import pytest
 from temporalio.api.enums.v1 import EventType
 from temporalio.client import WorkflowHandle
-from temporalio.converter import DataConverter
 from temporalio.testing import WorkflowEnvironment
 
+from dewpoint.core.claims import secret_index
+from dewpoint.core.claims.secret_index import SECRET_INDEX_LIMIT
 from dewpoint.engine.cel import route
-from dewpoint.engine.runtime import size
+from dewpoint.engine.runtime import projection, size
 from dewpoint.engine.runtime.activities import RunResult
 from dewpoint.engine.runtime.size import (
     OUTPUTS_TOO_LARGE,
     PAYLOAD_TOO_LARGE,
     RESULT_TOO_LARGE,
     RUN_SNAPSHOT_TOO_LARGE,
-    SECRETS_TOO_LARGE,
     SNAPSHOT_TOO_LARGE,
     STEP_INPUT_TOO_LARGE,
 )
 from tests.apps.worker.harness import MemoryStore, run_id_of, start, workers
-from tests.support.graphs import G, cel, ref
+from tests.support.graphs import G, cel, nid, ref, template
 
 LIMIT = 50_000
-ITEMS = {"type": "object", "properties": {"items": {"type": "array"}}, "required": ["items"]}
+ITEMS = {
+    "type": "object",
+    "properties": {"items": {"type": "array", "items": {"type": "string"}}},
+    "required": ["items"],
+}
 BLOB, ECHO, LOOP, RUN = "testkit.blob@1", "testkit.echo@1", "flow.loop@1", "flow.run_workflow@1"
 
 
@@ -89,16 +94,20 @@ async def test_a_sub_flow_whose_outputs_are_too_large_fails_its_step(env: Workfl
     assert (store.runs[child].status, store.runs[child].error_code) == ("failed", PAYLOAD_TOO_LARGE)
 
 
-async def test_a_batch_that_collected_too_much_to_return_fails_its_loop(env: WorkflowEnvironment) -> None:
-    """A batch of 100 iterations collecting 1,000 characters each: it reports what it used, and its loop fails; no
-    collected item is dropped silently."""
+async def test_a_batch_that_collected_more_than_it_could_return_spills_it(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A batch of 100 iterations collecting 1,000 characters each: its collection past the inline limit goes to
+    segment claims (engine 2b spec §5.3), so its result stays small, and the loop never fails for what it collected.
+    (The inline limit is lowered with the payload limit, as they relate in production.)"""
+    monkeypatch.setattr(size, "INLINE_LIMIT", 10_000)
     store = MemoryStore()
-    g = graph(code=ref("steps.l.error.code", default="none"))
+    g = graph(code=ref("steps.l.error.code", default="none"), n=ref("steps.l.output.count", default=0))
     g.node("l", LOOP, {"items": list(range(150)), "collect": ref("steps.b.output.value")}, on_error="continue")
     g.node("b", BLOB, {"size": 1_000}).edge("l", "b", "body")
     _, result = await finished(env, store, g)
-    assert (result.status, result.outputs) == ("succeeded", {"code": PAYLOAD_TOO_LARGE})
-    assert result.iterations == 100  # the batch reported what it used
+    assert (result.status, result.outputs, result.iterations) == ("succeeded", {"code": "none", "n": 150}, 150)
+    assert [c for c in store.claims.values() if c.kind == "segment"]
 
 
 async def children_started(handle: WorkflowHandle[Any, Any]) -> int:
@@ -114,12 +123,14 @@ async def activities_scheduled(handle: WorkflowHandle[Any, Any], name: str) -> i
     )
 
 
-async def test_a_step_input_too_large_to_send_fails_the_step_before_any_attempt(env: WorkflowEnvironment) -> None:
+async def test_a_step_input_that_cant_be_spilled_fails_the_step_before_any_attempt(env: WorkflowEnvironment) -> None:
+    """Engine 2b spec §5.2: a step's input spills its largest values before it fails (test_run_graph_spills.py). A
+    value the workflow made that one spill can't hold, a single string near the limit, still fails the step."""
     store = MemoryStore()
     g = graph(code=ref("steps.e.error.code", default="none"))
     g.node("a", BLOB, {"size": LIMIT // 2}).node("b", BLOB, {"size": LIMIT // 2})
-    g.node("e", ECHO, {"value": [ref("steps.a.output.value"), ref("steps.b.output.value")]}, on_error="continue")
-    g.edge("a", "e").edge("b", "e")
+    joined = template({"ref": "steps.a.output.value"}, {"ref": "steps.b.output.value"})
+    g.node("e", ECHO, {"value": joined}, on_error="continue").edge("a", "e").edge("b", "e")
     handle, result = await finished(env, store, g)
     assert (result.status, result.outputs) == ("succeeded", {"code": PAYLOAD_TOO_LARGE})
     [row] = [r for r in store.steps(run_id_of(handle)) if r.node_key == "e"]
@@ -130,26 +141,6 @@ async def test_a_step_input_too_large_to_send_fails_the_step_before_any_attempt(
         STEP_INPUT_TOO_LARGE,
     )
     assert await activities_scheduled(handle, "testkit.echo.v1") == 0  # never sent
-
-
-async def test_a_sub_flow_input_too_large_to_send_fails_its_step_and_starts_nothing(env: WorkflowEnvironment) -> None:
-    store = MemoryStore()
-    sub = graph().node("e", ECHO, {"value": 1})
-    g = graph(code=ref("steps.r.error.code", default="none"))
-    g.node("a", BLOB, {"size": LIMIT // 2}).node("b", BLOB, {"size": LIMIT // 2})
-    g.node(
-        "r",
-        RUN,
-        {
-            "workflow_id": str(store.publish(sub)),
-            "input": {"a": ref("steps.a.output.value"), "b": ref("steps.b.output.value")},
-        },
-        on_error="continue",
-    )
-    g.edge("a", "r").edge("b", "r")
-    handle, result = await finished(env, store, g)
-    assert (result.status, result.outputs, result.iterations) == ("succeeded", {"code": PAYLOAD_TOO_LARGE}, 0)
-    assert store.starts == {}  # no sub-run
 
 
 def items(n: int, each: int) -> list[str]:
@@ -170,22 +161,6 @@ async def test_a_batch_is_cut_by_bytes_and_keeps_every_item_in_order(env: Workfl
         result = await asyncio.wait_for(handle.result(), 60)
     assert (result.status, result.outputs) == ("succeeded", {"items": trigger["items"]})
     assert await children_started(handle) > 2  # cut by bytes: the count alone would have made two
-
-
-async def test_an_item_too_large_for_a_batch_fails_its_loop_after_the_items_before_it(env: WorkflowEnvironment) -> None:
-    """It's never dropped: the loop fails with `payload_too_large` once it reaches it."""
-    store = MemoryStore()
-    g = graph(code=ref("steps.l.error.code", default="none"))
-    g.settings["input_schema"] = ITEMS
-    g.node("l", LOOP, {"items": ref("trigger.items"), "collect": ref("steps.x.output.value")}, on_error="continue")
-    g.node("x", ECHO, {"value": ref("item")}).edge("l", "x", "body")
-    trigger = {"items": [*items(120, 10), "y" * (LIMIT // 2), *items(10, 10)]}
-    async with workers(env.client, store):
-        handle = await start(env.client, store, g, trigger)
-        result = await asyncio.wait_for(handle.result(), 60)
-    assert (result.status, result.outputs) == ("succeeded", {"code": PAYLOAD_TOO_LARGE})
-    ran = {r.iteration_key for r in store.steps(run_id_of(handle)) if r.node_key == "x"}
-    assert ran == {f"l:{i}" for i in range(120)}  # every item before it, and none after
 
 
 async def test_a_snapshot_too_large_to_carry_on_fails_the_run(
@@ -219,37 +194,6 @@ async def test_a_batch_whose_snapshot_is_too_large_fails_its_loop(
     assert (result.status, result.outputs) == ("succeeded", {"code": SNAPSHOT_TOO_LARGE})
 
 
-async def test_a_failure_handler_whose_input_is_too_large_never_starts_and_says_why(
-    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Its input carries what the run learned is sensitive, to mask it too. The bound on those values keeps it far
-    under the limit, so the limit is set here just above the run's own failed result, which carries them too: the
-    handler's input passes it, its row records `payload_too_large`, and the run's end stands."""
-    key = "k" * LIMIT
-    failed = RunResult("failed", None, {"code": "workflow_failed", "message": "it went wrong", "attempt": 1}, 0, [key])
-    monkeypatch.setattr(
-        size, "PAYLOAD_BYTES", size.encoded_bytes(failed, DataConverter.default.payload_converter) + 100
-    )
-    store = MemoryStore()
-    g = graph()
-    g.settings["input_schema"] = {
-        "type": "object",
-        "properties": {"key": {"type": "string", "x-sensitive": True}},
-        "required": ["key"],
-    }
-    g.settings["failure_handler"] = str(store.publish(graph().node("h", ECHO, {"value": 1})))
-    g.node("f", "flow.fail@1", {"message": "it went wrong"})
-    async with workers(env.client, store):
-        handle = await start(env.client, store, g, {"key": key})
-        result = await asyncio.wait_for(handle.result(), 60)
-    assert result.status == "failed" and result.error is not None and result.error["code"] == "workflow_failed"
-    [(child, row)] = store.starts.items()
-    assert row.kind == "failure_handler"
-    assert (store.runs[child].status, store.runs[child].error_code) == ("failed", PAYLOAD_TOO_LARGE)
-    assert store.runs[run_id_of(handle)].status == "failed"
-    assert await children_started(handle) == 0  # it was never sent
-
-
 async def scheduled_in(handle: WorkflowHandle[Any, Any], name: str) -> list[int]:
     """The workflow task that scheduled each `name` activity, in order."""
     return [
@@ -268,14 +212,15 @@ async def test_a_workflow_task_sends_at_most_its_bytes_of_every_command(
     together, pass a 70 KB budget, so the third waits for the next workflow task; replay decides the same."""
     monkeypatch.setattr(route, "YIELD_SEND_BYTES", 70_000)
     store = MemoryStore()
-    g = graph(**{k: cel(f"size(steps.{k}.output.value)") for k in "xyz"})
+    g = graph()
     g.node("b", BLOB, {"size": 30_000})
     for k in "xyz":
         g.node(k, ECHO, {"value": ref("steps.b.output.value")}).edge("b", k)
     async with workers(env.client, store, cache=cache):
         handle = await start(env.client, store, g, {})
         result = await asyncio.wait_for(handle.result(), 60)
-    assert (result.status, result.outputs) == ("succeeded", {k: 30_000 for k in "xyz"})
+    assert result.status == "succeeded", result.error
+    assert {r.node_key for r in store.steps(run_id_of(handle)) if r.status == "succeeded"} == {"b", *"xyz"}
     tasks = await scheduled_in(handle, "testkit.echo.v1")
     assert len(tasks) == 3 and len(set(tasks)) == 2
 
@@ -283,84 +228,81 @@ async def test_a_workflow_task_sends_at_most_its_bytes_of_every_command(
 SECRET = "testkit.secret_blob@1"
 
 
-@pytest.fixture
-def few_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A run may carry 5,000 bytes of sensitive values: two 3,000-character ones don't fit together."""
-    monkeypatch.setattr(size, "SECRETS_BYTES", 5_000)
-
-
-@pytest.mark.usefixtures("few_secrets")
-async def test_a_sensitive_value_past_the_bound_fails_the_step_that_would_add_it(env: WorkflowEnvironment) -> None:
-    """What the run carries is never dropped: the step that would pass the bound fails once (its node ran, so its
-    outcome stands), and its output goes nowhere."""
+async def test_a_step_whose_secrets_would_pass_the_index_bound_fails(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Engine 2b spec §3.7: a run tree's secret index is bounded, and shared by its sub-flows and batches. The step
+    whose sensitive output would pass the bound fails once (its node ran, so its outcome stands), its output goes
+    nowhere, and the index keeps what it had."""
+    monkeypatch.setattr(secret_index, "MAX_BYTES", 5_000)
     store = MemoryStore()
     g = graph(code=ref("steps.b.error.code", default="none"))
     g.node("a", SECRET, {"seed": "a", "size": 3_000})
     g.node("b", SECRET, {"seed": "b", "size": 3_000}, on_error="continue").edge("a", "b")
     handle, result = await finished(env, store, g)
-    assert (result.status, result.outputs) == ("succeeded", {"code": PAYLOAD_TOO_LARGE})
-    assert result.secrets == ["a" + "s" * 2_999]
+    assert (result.status, result.outputs) == ("succeeded", {"code": SECRET_INDEX_LIMIT})
+    assert store.index_of[run_id_of(handle)] == {"a" + "s" * 2_999}
     [row] = [r for r in store.steps(run_id_of(handle)) if r.node_key == "b"]
-    assert (row.status, row.error_code, row.error_message, row.outcome) == (
+    assert (row.status, row.error_code, row.outcome, row.output_preview) == (
         "failed",
-        PAYLOAD_TOO_LARGE,
-        SECRETS_TOO_LARGE,
+        SECRET_INDEX_LIMIT,
         "applied",
+        None,
     )
-    assert row.output_preview is None
 
 
-@pytest.mark.usefixtures("few_secrets")
-async def test_a_sub_flow_whose_sensitive_values_dont_fit_with_its_parents_fails_its_step(
-    env: WorkflowEnvironment,
+def sensitive_child(store: MemoryStore) -> str:
+    child = G()
+    child.settings = {
+        "input_schema": {"type": "object", "properties": {"s": {"type": "string", "x-sensitive": True}},
+                         "required": ["s"], "additionalProperties": False},
+        "outputs": {},
+    }  # fmt: skip
+    child.node("e", ECHO, {"value": 1})
+    return str(store.publish(child))
+
+
+@pytest.mark.parametrize("path", ["cel", "filter", "sub_flow"])
+async def test_secrets_past_the_index_bound_fail_their_step_with_its_code_on_every_path(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch, path: str
 ) -> None:
-    """The sub-flow starts before its parent learns anything, and learns a value that fits alone; meanwhile the parent
-    learns one too, and together they'd pass the bound. The parent fails the step, and never uses the sub-flow's
-    outputs, which it couldn't mask."""
+    """The review's I4: §3.7's bound fails the step that would pass it with `secret_index_limit`, never retried, on
+    every path that extends the index: a CEL result read from sensitive data (claimed with taint), a filter's kept
+    items under a sensitive predicate, a sub-flow's sensitive input."""
+    monkeypatch.setattr(secret_index, "MAX_BYTES", 5_000)
     store = MemoryStore()
-    sub = graph(n=ref("steps.s.output.token")).node("w", "testkit.slow@1", {"seconds": 1})
-    sub.node("s", SECRET, {"seed": "sub", "size": 3_000}).edge("w", "s")  # the parent's step ends first
-    g = graph(code=ref("steps.r.error.code", default="none"))
-    g.node("a", SECRET, {"seed": "a", "size": 3_000})
-    g.node("r", RUN, {"workflow_id": str(store.publish(sub)), "input": {}}, on_error="continue")
-    _, result = await finished(env, store, g)
-    assert (result.status, result.outputs) == ("succeeded", {"code": PAYLOAD_TOO_LARGE})
-    [(child, _)] = store.starts.items()
-    assert store.runs[child].status == "succeeded"  # the sub-run itself was fine
-
-
-@pytest.mark.usefixtures("few_secrets")
-async def test_a_trigger_whose_sensitive_values_dont_fit_fails_the_run_before_any_step(
-    env: WorkflowEnvironment,
-) -> None:
-    store = MemoryStore()
-    g = graph().node("e", ECHO, {"value": 1})
-    g.settings["input_schema"] = {
-        "type": "object",
-        "properties": {"key": {"type": "string", "x-sensitive": True}},
-        "required": ["key"],
-    }
-    async with workers(env.client, store):
-        handle = await start(env.client, store, g, {"key": "k" * 6_000})
-        result = await asyncio.wait_for(handle.result(), 60)
-    assert result.status == "failed" and result.error is not None
-    assert (result.error["code"], result.error["message"], result.secrets) == (PAYLOAD_TOO_LARGE, SECRETS_TOO_LARGE, [])
-    assert store.steps(run_id_of(handle)) == []
+    g = graph(code=ref("steps.b.error.code", default="none"))
+    g.node("a", SECRET, {"seed": "a", "size": 3_000})  # indexed: 3,000 of the 5,000 bytes
+    if path == "cel":
+        g.node("b", "flow.transform@1", {"fields": {"v": cel("steps.a.output.token + 'x'")}}, on_error="continue")
+    elif path == "filter":
+        g.settings["declassify"] = [{"node": str(nid("b")), "field": "/predicate"}]
+        kept = {"items": ["q" * 2_500, "r" * 2_500], "predicate": cel("size(steps.a.output.token) > 0")}
+        g.node("b", "flow.filter@1", kept, on_error="continue")
+    else:
+        g.node("p", BLOB, {"size": 3_000}).edge("a", "p")
+        sub = {"workflow_id": sensitive_child(store), "input": {"s": ref("steps.p.output.value")}}
+        g.node("b", RUN, sub, on_error="continue").edge("p", "b")
+    g.edge("a", "b")
+    handle, result = await finished(env, store, g)
+    assert (result.status, result.outputs) == ("succeeded", {"code": SECRET_INDEX_LIMIT}), result.error
+    assert store.index_of[run_id_of(handle)] == {"a" + "s" * 2_999}  # nothing past the bound was added
 
 
 async def test_a_result_past_the_limit_anyway_ends_the_run_as_a_bug(
     env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Every final result is checked, a failure's too. With the limits set inconsistently (a 6,000-byte payload
-    limit, and the default bound on sensitive values), a step's 5,500-character sensitive output fits in its result,
-    but not in the failed run's with its message: the run ends `internal_error`, with no outputs and nothing to mask,
-    rather than retry its workflow task."""
+    """Every final result is checked, a failure's too. With the limits set inconsistently (a 6,000-byte payload limit,
+    and stored messages up to 10,000 characters), a step's 5,500-character output fits in its result, but a failure's
+    message built from it doesn't fit in the failed run's: the run ends `internal_error`, with no outputs, rather than
+    retry its workflow task."""
     monkeypatch.setattr(size, "PAYLOAD_BYTES", 6_000)
+    monkeypatch.setattr(projection, "MESSAGE_LIMIT", 10_000)
     store = MemoryStore()
-    g = graph().node("a", SECRET, {"seed": "a", "size": 5_500})
-    g.node("f", "flow.fail@1", {"message": "n" * 400}).edge("a", "f")
+    g = graph().node("a", BLOB, {"size": 5_500})
+    g.node("f", "flow.fail@1", {"message": template({"ref": "steps.a.output.value"}, "n" * 400)}).edge("a", "f")
     handle, result = await finished(env, store, g)
-    assert (result.status, result.outputs, result.secrets) == ("failed", None, [])
+    assert (result.status, result.outputs) == ("failed", None)
     assert result.error is not None and (result.error["code"], result.error["message"]) == (
         "internal_error",
         RESULT_TOO_LARGE,

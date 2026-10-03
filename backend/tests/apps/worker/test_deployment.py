@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import pytest
 from temporalio.api.enums.v1 import EventType, VersioningBehavior
 from temporalio.client import Client, WorkflowHandle, WorkflowHistory
-from temporalio.service import RPCError
+from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
@@ -89,6 +89,17 @@ async def test_set_current_waits_for_the_builds_workers(dev_env: WorkflowEnviron
     assert deployment.current == first and ("current" in {v.status for v in deployment.versions if v.build_id == first})
 
 
+async def current_build(client: Client) -> str | None:
+    """The build new runs start on; None until the deployment exists, which is once one of its workers has polled (a
+    test that runs first in its process asks before then)."""
+    try:
+        return (await describe(client)).current
+    except RPCError as e:
+        if e.status == RPCStatusCode.NOT_FOUND:
+            return None
+        raise
+
+
 def graph() -> tuple[MemoryStore, G]:
     """A plugin step long enough to switch builds under it, then a sub-flow and a batched loop: children."""
     store = MemoryStore()
@@ -116,7 +127,7 @@ async def test_a_run_stays_on_the_build_it_started_on_with_its_children_and_cont
 ) -> None:
     client, old, new = dev_env.client, build("old"), build("new")
     store, g = graph()
-    cel_worker = Worker(client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(in_process)])
+    cel_worker = Worker(client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(in_process, store)])
     async with engine(client, store, old), engine(client, store, new), cel_worker:
         await set_current(client, old)
         first = await start(client, store, g, {}, checkpoint_events=60)
@@ -202,10 +213,10 @@ async def test_a_worker_set_to_makes_its_build_current_once_it_polls(
     worker = asyncio.create_task(main.run(settings(worker_set_current=True, worker_shutdown_grace_s=0.1)))
     try:
         for _ in range(60):
-            if (await describe(dev_env.client)).current == this_build():
+            if await current_build(dev_env.client) == this_build():
                 break
             await asyncio.sleep(0.5)
-        assert (await describe(dev_env.client)).current == this_build()
+        assert await current_build(dev_env.client) == this_build()
     finally:
         worker.cancel()
         with contextlib.suppress(asyncio.CancelledError):

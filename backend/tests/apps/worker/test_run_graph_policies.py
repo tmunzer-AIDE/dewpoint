@@ -13,7 +13,9 @@ from temporalio.client import WorkflowFailureError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner
 
+from dewpoint.apps.worker.activities import MESSAGE_WITHHELD
 from dewpoint.engine.canonical import canonical_json
+from dewpoint.engine.handles import ClaimRef
 from dewpoint.engine.runtime import nodes
 from dewpoint.engine.runtime import workflow as run_graph
 from dewpoint.engine.runtime.activities import (
@@ -42,7 +44,7 @@ from tests.support.plugins.testkit import SlowSend
 ECHO, LOOP, SWITCH = "testkit.echo@1", "flow.loop@1", "flow.switch@1"
 SCHEMA: dict[str, Any] = {
     "type": "object",
-    "properties": {"x": {"type": "integer"}, "open": {"type": "object"}},
+    "properties": {"x": {"type": "integer"}, "open": {"type": "object"}, "note": {"type": "string"}},
     "required": ["x", "open"],
 }
 TRIGGER: dict[str, Any] = {"x": 7, "open": {}}
@@ -482,7 +484,11 @@ async def test_a_backlog_is_projected_in_bounded_batches(env: WorkflowEnvironmen
 
 async def test_sensitive_values_never_reach_the_projection(env: WorkflowEnvironment) -> None:
     """Review finding: a nested model's sensitive field sits behind `$ref`, and control steps, templates, plugin inputs
-    and messages can all copy a sensitive value into a place no schema marks."""
+    and messages can all copy a sensitive value into a place no schema marks. From 2b-1b the value never reaches the
+    workflow (engine 2b spec §3.6): copies are handles, a template over it is claimed, and every message leaving an
+    activity, and every row projected, is masked against the run's secret index (§3.7). A failure's message can't
+    read sensitive data (refused at publish, §4.5); the same text arriving through a plain field is masked in the
+    rows."""
     store = MemoryStore()
     secret, password = ref("steps.s.output.secret_value"), ref("steps.s.output.login.password")
     g = graph().node("s", "testkit.sensitive@1")
@@ -491,12 +497,12 @@ async def test_sensitive_values_never_reach_the_projection(env: WorkflowEnvironm
     g.node("e", ECHO, {"value": password}).node(
         "p", "testkit.ambiguous_send@1", {"outcome": "rejected", "detail": secret}, on_error="continue"
     )
-    g.node("f", "flow.fail@1", {"message": template("gave up on ", {"ref": "steps.s.output.login.password"})})
+    g.node("f", "flow.fail@1", {"message": template("gave up on ", {"ref": "trigger.note", "default": ""})})
     lookup = cel("{'a': 1}[steps.s.output.secret_value] > 0")  # CEL's message quotes the missing key
     g.node("k", "flow.transform@1", {"fields": {"n": lookup}}, on_error="continue").edge("s", "k").edge("k", "f")
     g.edge("s", "t").edge("s", "e").edge("s", "p").edge("t", "f").edge("e", "f").edge("p", "f")
     async with workers(env.client, store):
-        handle = await start(env.client, store, g, TRIGGER)
+        handle = await start(env.client, store, g, {**TRIGGER, "note": "pa55word"})  # the password's text, plain
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     rows = {r.node_key: r for r in store.steps(run_id_of(handle))}
     assert rows["s"].output_preview == {
@@ -504,13 +510,16 @@ async def test_sensitive_values_never_reach_the_projection(env: WorkflowEnvironm
         "secret_value": "[redacted]",
         "login": {"user": "ops", "password": "[redacted]"},
     }
-    assert rows["t"].output_preview == {"copy": "[redacted]", "line": "key=[redacted]"}
-    assert (rows["e"].input_preview, rows["e"].output_preview) == ({"value": "[redacted]"}, {"value": "[redacted]"})
-    assert rows["p"].error_message == "the receiver rejected the request: [redacted]"
+    copy, line = rows["t"].output_preview["copy"], rows["t"].output_preview["line"]
+    assert ClaimRef.of(copy) is not None and store.claims[ClaimRef.of(copy).id].value == "s3cr3t-value"  # type: ignore[union-attr]
+    assert store.claims[ClaimRef.of(line).id].value == "key=s3cr3t-value"  # type: ignore[union-attr]
+    assert ClaimRef.of(rows["e"].input_preview["value"]) is not None  # the echo got it resolved in its activity
+    assert ClaimRef.of(rows["e"].output_preview["value"]) is not None  # and what it returned repeats it: claimed
+    assert rows["p"].error_message == MESSAGE_WITHHELD  # the node's own computed message: never shown
     assert rows["f"].error_message == "gave up on [redacted]"
     assert rows["k"].error_message == 'NOT_FOUND: Key not found in map : "[redacted]"'
     assert store.runs[run_id_of(handle)].error_message == "gave up on [redacted]"
-    assert result.error and result.error["message"] == "gave up on [redacted]"
+    assert result.status == "failed"
     dump = repr(store.rows) + repr(store.runs)
     assert "s3cr3t-value" not in dump and "pa55word" not in dump
 
@@ -525,30 +534,45 @@ async def test_a_sensitive_trigger_field_is_masked_where_it_is_copied(env: Workf
     }
     g.node("e", ECHO, {"value": template("Bearer ", {"ref": "trigger.api_key"})})
     async with workers(env.client, store):
-        handle = await start(env.client, store, g, {"api_key": "k3y-k3y-k3y"})
+        handle = await start(env.client, store, g, {"api_key": "k3y-k3y-k3y"}, claimed=True)
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     [row] = store.steps(run_id_of(handle))
-    assert (row.input_preview, row.output_preview) == ({"value": "Bearer [redacted]"}, {"value": "Bearer [redacted]"})
-    assert result.outputs == {"key": "k3y-k3y-k3y"}  # the workflow's own outputs are its contract, not a preview
+    # engine 2b spec §3.6: the template is joined where the claim is read, and comes back claimed; the echo's output
+    # repeats a secret the run knows, so it's claimed too
+    assert ClaimRef.of(row.input_preview["value"]) is not None and ClaimRef.of(row.output_preview["value"]) is not None
+    assert "k3y-k3y-k3y" not in repr(store.rows) + repr(store.runs)
+    key = ClaimRef.of(result.outputs["key"]) if result.outputs else None  # its outputs hold the handle
+    assert key is not None and store.claims[key.id].value == "k3y-k3y-k3y"
 
 
 async def test_a_sensitive_config_value_is_masked_where_it_is_copied_or_echoed(env: WorkflowEnvironment) -> None:
     """Review finding: a node's `x-sensitive` config field is redacted in its own input preview, but a control step
-    can copy the same literal, and the node can echo it in its error. Literals are learned when the run starts;
-    a value that only the config marks sensitive (here from an unmarked trigger field), before its attempt."""
+    can copy the same value, and the node can echo it in its error. A sensitive value comes in through the run's input
+    (a literal is refused at publish, engine 2b spec §3.8), claimed and indexed at admission; a value that only the
+    config marks sensitive (here from an unmarked trigger field) is indexed at the step's boundary, before its attempt
+    (§3.6, §3.7): every message is masked against the index."""
     store = MemoryStore()
     token, passed = "tok-hunter22", "tok-from-trigger"
-    g = graph().node("t", "flow.transform@1", {"fields": {"copy": token}})
-    g.node("p", "testkit.ambiguous_send@1", {"outcome": "rejected", "token": token}, on_error="continue")
-    echo = {"outcome": "rejected", "token": ref("trigger.open.tok", default="")}
+    g = graph().node("t", "flow.transform@1", {"fields": {"copy": ref("trigger.tok")}})
+    g.settings["input_schema"] = {
+        "type": "object",
+        "properties": {
+            **SCHEMA["properties"],
+            "tok": {"type": "string", "x-sensitive": True},
+            "open": {"type": "object", "properties": {"tok": {"type": "string"}}, "required": ["tok"]},
+        },
+        "required": ["x", "open", "tok"],
+    }
+    g.node("p", "testkit.ambiguous_send@1", {"outcome": "rejected", "token": ref("trigger.tok")}, on_error="continue")
+    echo = {"outcome": "rejected", "token": ref("trigger.open.tok")}  # declared plain: only the config marks it
     g.node("q", "testkit.ambiguous_send@1", echo, on_error="continue").edge("t", "p").edge("t", "q")
     async with workers(env.client, store):
-        handle = await start(env.client, store, g, {"x": 7, "open": {"tok": passed}})
+        handle = await start(env.client, store, g, {"x": 7, "tok": token, "open": {"tok": passed}}, claimed=True)
         await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     rows = {r.node_key: r for r in store.steps(run_id_of(handle))}
-    assert rows["t"].output_preview == {"copy": "[redacted]"}  # projected before `p` ran
+    assert ClaimRef.of(rows["t"].output_preview["copy"]) is not None  # a copy of a handle
     assert rows["p"].input_preview == {"outcome": "rejected", "token": "[redacted]"}
-    assert rows["p"].error_message == rows["q"].error_message == "the receiver rejected the request for [redacted]"
+    assert rows["p"].error_message == rows["q"].error_message == MESSAGE_WITHHELD  # computed: never shown
     assert token not in repr(store.rows) + repr(store.runs) and passed not in repr(store.rows) + repr(store.runs)
 
 
@@ -603,6 +627,16 @@ async def test_a_damaged_output_fails_the_run_as_unusable(env: WorkflowEnvironme
         )
         result = await asyncio.wait_for(handle.result(), 10)
     assert result.error and result.error["code"] == "version_unusable" and store.steps(run_id) == []
+
+
+async def test_an_output_that_fails_ends_the_run_with_its_own_code(env: WorkflowEnvironment) -> None:
+    """The outputs are evaluated in the sandbox, where the workflow catches the failure the interpreter raises: the
+    run fails with the output's code and message, never as an interpreter failure."""
+    store = MemoryStore()
+    async with workers(env.client, store):
+        result = await run(env.client, store, graph(n=cel("trigger.x / 0")), TRIGGER)
+    assert result.status == "failed" and result.error is not None
+    assert result.error["code"] == "evaluation_error", result.error
 
 
 class HeldStore(MemoryStore):

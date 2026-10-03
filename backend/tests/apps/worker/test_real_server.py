@@ -33,7 +33,7 @@ from tests.support.plugins.testkit import TESTKIT
 async def serving(client: Client, store: MemoryStore) -> AsyncIterator[None]:
     """A build of this test's own, current: the dev server keeps the deployment's routing between tests."""
     this = build("real")
-    evaluator = Worker(client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(in_process)])
+    evaluator = Worker(client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(in_process, store)])
     async with evaluator, engine_worker(client, store, [TESTKIT], settings(), build=this, identity=this):
         await set_current(client, this)
         yield
@@ -156,7 +156,7 @@ async def test_temporal_suggesting_continue_as_new_drains_the_run() -> None:
     args = ["--dynamic-config-value", "limit.historyCount.suggestContinueAsNew=100"]
     store = MemoryStore()
     g = graph(items=ref("steps.l.output.items"))
-    g.node("l", "flow.loop@1", {"items": list(range(40)), "collect": cel("steps.x.output.value")})
+    g.node("l", "flow.loop@1", {"items": list(range(40)), "collect": ref("steps.x.output.value")})
     g.node("x", "testkit.echo@1", {"value": ref("item")}).edge("l", "x", "body")
     local = WorkflowEnvironment.start_local(data_converter=FIXTURE_CONVERTER, dev_server_extra_args=args)
     async with await local as env, serving(env.client, store):

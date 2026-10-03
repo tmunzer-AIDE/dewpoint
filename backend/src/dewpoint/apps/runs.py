@@ -17,20 +17,25 @@ codec refuses was never sent (`CodecRefusedError`)."""
 
 import asyncio
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
-from temporalio.converter import DataConverter, WorkflowSerializationContext
+from temporalio.converter import WorkflowSerializationContext
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
-from dewpoint.apps.codec import CodecRefusedError
+from dewpoint.apps.codec import CodecRefusedError, KeyringKeys
+from dewpoint.apps.inputs import InputRefusedError, claim_input
 from dewpoint.apps.worker.deployment import current_abi
 from dewpoint.apps.workflow_ops import abi_reasons
 from dewpoint.core.config import Settings
+from dewpoint.core.crypto.kek import KekSet
+from dewpoint.core.crypto.keyring import Keyring
+from dewpoint.core.crypto.keys import KeySource
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.runs import Run
 from dewpoint.core.models.workflows import WorkflowVersion
@@ -39,7 +44,6 @@ from dewpoint.core.plugins import lifecycle
 from dewpoint.core.runs import service as runs
 from dewpoint.core.workflows.service import lock_for_admission, other_abi
 from dewpoint.engine import ENGINE_ABI
-from dewpoint.engine.runtime import size
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, LIVE, RunInput
 from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.engine.runtime.workflow import RunGraph
@@ -88,6 +92,17 @@ class StartUncertainError(Exception):
         self.run_id = run_id
 
 
+@dataclass(frozen=True)
+class Admitted:
+    run: Run
+    trigger: dict[str, Any]  # the envelope the start carries: handles in place of its claims (engine 2b spec §3.5)
+
+
+def keyring_keys(sessionmaker: async_sessionmaker[AsyncSession], settings: Settings) -> KeySource:
+    """The tenants' data keys, read through this process's role: what its client's codec reads too (spec §6.2)."""
+    return KeyringKeys(sessionmaker, Keyring(KekSet.from_settings(settings)))
+
+
 async def _admission_locked() -> None:
     """Hook that runs once the workflow's admission lock and the lifecycle locks are held. A no-op; the race tests
     pause here."""
@@ -101,10 +116,14 @@ async def admit(
     abi: int | None,
     mode: str = LIVE,
     started_by: uuid.UUID | None = None,
-) -> Run:
+    trigger: dict[str, Any] | None = None,
+    keys: KeySource | None = None,
+) -> Admitted:
     """Insert the run, or raise NotAdmissibleError. Call it inside a READ COMMITTED transaction. `abi` is the engine
     ABI of the deployment's current build, where the run will start (`current_abi`; None: no build is current). The
     process that starts the run must be a build of that ABI, since the start is written for its own (`start_run`).
+    The trigger is claimed last, before the row, in the same transaction (engine 2b spec §3.5): a refused one leaves
+    nothing. `keys` seal its claims; a trigger that makes none needs none.
 
     First, what this deployment is (engine 2b spec §2.3): with no record, or in production while the gate is off, it
     admits nothing — every start path comes through here, the dev CLI included."""
@@ -133,15 +152,25 @@ async def admit(
     blocked = lifecycle.not_executable(await lifecycle.states(s, entries))
     if blocked:
         raise NotAdmissibleError([f"{entry} has been retired." for entry in blocked])
-    return await runs.insert_run(
+    run_id = uuid.uuid4()
+    schema = (version.graph.get("settings") or {}).get("input_schema", {"type": "object"})
+    try:
+        envelope = await claim_input(
+            s, keys or _NO_KEYS, tenant_id=tenant_id, run_id=run_id, root_run_id=run_id, schema=schema,
+            value=trigger or {},
+        )  # fmt: skip
+    except InputRefusedError as e:
+        raise NotAdmissibleError(e.reasons) from None
+    run = await runs.insert_run(
         s,
-        run_id=uuid.uuid4(),
+        run_id=run_id,
         tenant_id=tenant_id,
         workflow_id=version.workflow_id,
         version_id=version.id,
         mode=mode,
         started_by=started_by,
     )
+    return Admitted(run, envelope)
 
 
 def other_build(abi: int) -> str:
@@ -162,32 +191,36 @@ async def start_run(
     trigger: dict[str, Any],
     mode: str = LIVE,
     started_by: uuid.UUID | None = None,
+    keys: KeySource | None = None,
 ) -> uuid.UUID:
     """Admit the run and start it. Raises NotAdmissibleError, StartRefusedError (the run is recorded as failed) or
     StartUncertainError (the run stays `running`: it may be executing). Only a build of the current build's ABI starts
     runs: a start is written for its own ABI (engine 2b spec §6.6). A promotion between the admission and the start is
-    caught when the run loads its version (§7). A start too large to send is refused before admission, so
-    it leaves no row (engine 2b spec §5.2)."""
+    caught when the run loads its version (§7). The trigger is claimed at admission (engine 2b spec §3.5), so the
+    start carries an envelope of at most TRIGGER_INLINE: it always fits. `keys` seal the claims: the tenants' data
+    keys through this process's role by default (`keyring_keys`)."""
 
-    def start_of(run_id: uuid.UUID) -> RunInput:
+    def start_of(run_id: uuid.UUID, envelope: dict[str, Any]) -> RunInput:
         return RunInput(
             tenant_id=str(tenant_id),
             run_id=str(run_id),
             version_id=str(version_id),
-            trigger=trigger,
+            trigger=envelope,
             mode=mode,
             max_run_duration_s=settings.max_run_duration_days * 86_400,
             cel_schedule_to_start_s=settings.cel_schedule_to_start_s,
         )
 
-    if not size.fits(start_of(uuid.UUID(int=0)), DataConverter.default.payload_converter):  # a run id's length
-        raise NotAdmissibleError([size.RUN_INPUT_TOO_LARGE])
     abi = await current_abi(client)  # before the transaction: no lock is held across a call to Temporal
     if abi is not None and abi != ENGINE_ABI:  # its start is written for this build's ABI, which that build can't read
         raise NotAdmissibleError([other_build(abi)])
     async with sessionmaker() as s, s.begin():
-        run = await admit(s, tenant_id=tenant_id, version_id=version_id, abi=abi, mode=mode, started_by=started_by)
-    start = start_of(run.id)
+        admitted = await admit(
+            s, tenant_id=tenant_id, version_id=version_id, abi=abi, mode=mode, started_by=started_by,
+            trigger=trigger, keys=keys or keyring_keys(sessionmaker, settings),
+        )  # fmt: skip
+    run = admitted.run
+    start = start_of(run.id, admitted.trigger)
     try:
         await _start(client, start, run.id)
     except StartRefusedError as e:
@@ -243,11 +276,24 @@ async def _start(client: Client, start: RunInput, run_id: uuid.UUID) -> None:
     raise StartRefusedError("Temporal refused the run: it was busy (RESOURCE_EXHAUSTED).") from last
 
 
+class _NoKeys:
+    """`admit` without keys: a trigger that makes claims can't be admitted."""
+
+    async def active(self, tenant_id: str) -> Any:
+        raise NotAdmissibleError(["This process can't seal the run's input: it has no keys."])
+
+    async def get(self, tenant_id: str, version: int) -> Any:
+        raise NotAdmissibleError(["This process can't seal the run's input: it has no keys."])
+
+
+_NO_KEYS = _NoKeys()
+
 __all__ = [
     "START_FAILED",
     "PRODUCTION_RUNS_DISABLED",
     "NO_CURRENT_BUILD",
     "START_RETRY_S",
+    "Admitted",
     "NotAdmissibleError",
     "StartRefusedError",
     "StartUncertainError",

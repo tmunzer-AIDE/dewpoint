@@ -167,6 +167,11 @@ class NewVersion:
     version_hash: str
     expressions: list[Any] = field(default_factory=list)
     connection_ids: list[uuid.UUID] = field(default_factory=list)
+    tainted_sites: list[Any] = field(default_factory=list)
+    output_taint: dict[str, Any] | None = None
+    declassified: list[dict[str, str]] = field(default_factory=list)  # for the audit entry only (§4.3)
+    open_scopes_cap: int | None = None  # computed at publish, pinned (2b spec §5.3)
+    loop_depth: int | None = None
 
 
 async def insert_version(s: AsyncSession, ctx: TenantContext, wf: Workflow, new: NewVersion) -> WorkflowVersion:
@@ -191,6 +196,10 @@ async def insert_version(s: AsyncSession, ctx: TenantContext, wf: Workflow, new:
         output_schema=new.output_schema,
         vars_schema=new.vars_schema,
         expressions=new.expressions,
+        tainted_sites=new.tainted_sites,
+        output_taint=new.output_taint,
+        open_scopes_cap=new.open_scopes_cap,
+        loop_depth=new.loop_depth,
         closure_version_ids=new.closure_version_ids,
         closure_workflow_ids=new.closure_workflow_ids,
         closure_node_refs=new.closure_node_refs,
@@ -218,6 +227,7 @@ async def insert_version(s: AsyncSession, ctx: TenantContext, wf: Workflow, new:
             "graph_hash": new.graph_hash,
             "version_hash": new.version_hash,
             "closure_depth": new.closure_depth,
+            **({"declassify": new.declassified} if new.declassified else {}),
         },
     )
     return version

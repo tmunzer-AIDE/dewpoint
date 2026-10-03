@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Binding for one evaluation (spec §5.3, §5.6): project each root to what the expression reads, check every value
 against its declared type, and measure the result against the local caps. Pure and deterministic: the interpreter
-calls it inside workflow code."""
+calls it inside workflow code.
+
+A handle (engine 2b spec §3.2) is bound as it is: kept whole by a projection, extended by a typed path that goes past
+it, and never type-checked here, since its value is the claim's. An expression with a handle among its bindings runs
+in `cel.evaluate`, which resolves it and checks the types then (§4.2)."""
 
 import math
-from collections.abc import Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -12,6 +16,7 @@ from dewpoint.engine.canonical import canonical_json
 from dewpoint.engine.cel import caps
 from dewpoint.engine.cel import types as T
 from dewpoint.engine.cel.record import ExpressionRecord, Projection
+from dewpoint.engine.handles import MARKER, ClaimRef, contains_marker
 
 
 @dataclass(frozen=True)
@@ -76,7 +81,7 @@ def project(value: Any, projections: list[Projection]) -> Any:
 
 
 def _prune(value: Any, node: _Node) -> Any:
-    if node.whole or not isinstance(value, dict):
+    if node.whole or not isinstance(value, dict) or ClaimRef.of(value) is not None:
         return value
     out: dict[str, Any] = {}
     for key, child in (node.children or {}).items():
@@ -111,20 +116,23 @@ def check_json(name: str, value: Any) -> None:
 
 def _at(roots: Mapping[str, Any], name: str) -> Any:
     value: Any = roots
-    for key in name.split("."):
+    keys = name.split(".")
+    for i, key in enumerate(keys):
+        handle = ClaimRef.of(value)
+        if handle is not None:
+            return handle.extend(*keys[i:]).to_json()
         if not isinstance(value, dict) or key not in value:
             raise BindingError(f"`{name}` is missing")
         value = value[key]
     return value
 
 
-def bind(record: ExpressionRecord, view: ScopeView) -> dict[str, Any]:
-    roots = view.roots()
+def _bound(record: ExpressionRecord, roots: Mapping[str, Any], names: Iterable[str]) -> dict[str, Any]:
     by_root: dict[str, list[Projection]] = {}
     for p in record.projections:
         by_root.setdefault(p.path[0], []).append(p)
     out: dict[str, Any] = {}
-    for name in record.idents:
+    for name in names:
         if "." in name:
             value = _at(roots, name)
         elif name in roots:
@@ -132,11 +140,29 @@ def bind(record: ExpressionRecord, view: ScopeView) -> dict[str, Any]:
         else:
             raise BindingError(f"`{name}` isn't available here")
         signature = record.declarations.get(name, T.DYN)
-        if not T.conforms(signature, value):
+        # a handle conforms to no declared type; the marker is looked for only then: a walk of the whole value, in the
+        # workflow task, at every evaluation (CI's gate 7b)
+        if not T.conforms(signature, value) and not contains_marker(value):
             raise BindingError(f"`{name}` doesn't match its declared type {signature}")
         check_json(name, value)
         out[name] = value
     return out
+
+
+def _root(name: str) -> str:
+    return name.split(".", 1)[0]
+
+
+def bind(record: ExpressionRecord, view: ScopeView, *, skip: Collection[str] = ()) -> dict[str, Any]:
+    """The expression's bindings for one view. `skip`: roots left out, bound later (a filter's `item` and `index`,
+    in the activity that evaluates a filter over claims, engine 2b spec §4.4)."""
+    return _bound(record, view.roots(), [n for n in record.idents if _root(n) not in skip])
+
+
+def bind_item(record: ExpressionRecord, base: Mapping[str, Any], item: Any, index: int) -> dict[str, Any]:
+    """`base`, every binding but the item's, with one item's and its index's, bound as `bind` binds them."""
+    names = [n for n in record.idents if _root(n) in ("item", "index")]
+    return {**base, **_bound(record, {"item": item, "index": index}, names)}
 
 
 @dataclass(frozen=True)
@@ -147,6 +173,7 @@ class Measure:
     largest_map: int
     longest_string: int
     nodes: int  # every value bound, containers included: what binding them costs grows with this (spec §5.6)
+    handles: bool = False  # a handle, or the marker, anywhere in them: they're never evaluated here (2b spec §4.2)
 
     @property
     def within_caps(self) -> bool:
@@ -162,16 +189,18 @@ class Measure:
 def measure(bindings: Mapping[str, Any]) -> Measure:
     sizes = [len(canonical_json(v)) for v in bindings.values()]
     lists = maps = strings = nodes = 0
+    handles = False
     stack = list(bindings.values())
     while stack:
         v = stack.pop()
         nodes += 1
         if isinstance(v, dict):
             maps = max(maps, len(v))
+            handles = handles or MARKER in v
             stack.extend(v.values())
         elif isinstance(v, list):
             lists = max(lists, len(v))
             stack.extend(v)
         elif isinstance(v, str):
             strings = max(strings, len(v.encode()))
-    return Measure(sum(sizes), max(sizes, default=0), lists, maps, strings, nodes)
+    return Measure(sum(sizes), max(sizes, default=0), lists, maps, strings, nodes, handles)

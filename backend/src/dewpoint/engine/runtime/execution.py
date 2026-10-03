@@ -12,8 +12,11 @@ point (no activity and no child outstanding): opportunistically past `checkpoint
 isn't outstanding: its wake time goes into the snapshot, and the continued run re-arms it."""
 
 import asyncio
+import dataclasses
+import hashlib
+import json
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Generator, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -26,16 +29,24 @@ from temporalio.exceptions import CancelledError as ActivityCancelled
 with workflow.unsafe.imports_passed_through():
     from dewpoint.engine.canonical import canonical_json
     from dewpoint.engine.cel import evaluate as cel
+    from dewpoint.engine.cel.ipc import EvaluateRequest
     from dewpoint.engine.cel.profile import LOCAL_CEL_PROFILE
     from dewpoint.engine.cel.record import ExpressionRecord
     from dewpoint.engine.cel.route import YieldBudget
     from dewpoint.engine.graph.values import CelValue, RefValue, TemplateValue
+    from dewpoint.engine.handles import CLAIM_UNAVAILABLE, MISSING, RESERVED, ClaimRef, contains_marker
     from dewpoint.engine.registry import control
     from dewpoint.engine.runtime import nodes, resolve
+    from dewpoint.engine.runtime import scheduler as live_state
     from dewpoint.engine.runtime.activities import (
         BATCH,
         BUDGET,
         CEL_EVALUATE,
+        CLAIMS_CHILD_INPUT,
+        CLAIMS_DERIVE,
+        CLAIMS_GRANT,
+        CLAIMS_MESSAGE,
+        CLAIMS_SPILL,
         ENGINE_QUEUE,
         MAPPED,
         OUTCOME_UNKNOWN,
@@ -46,56 +57,70 @@ with workflow.unsafe.imports_passed_through():
         BatchResult,
         CelInput,
         CelResult,
+        ChildInput,
+        ChildInputResult,
+        Claiming,
+        DeriveInput,
+        DeriveResult,
+        GrantInput,
+        MessageInput,
+        MessageResult,
         Parent,
         ProjectInput,
         RunInput,
         RunResult,
         RunStart,
         RunSummary,
+        SpillInput,
         StepInput,
         StepResult,
         StepRow,
         cel_queue,
         step_activity,
     )
-    from dewpoint.engine.runtime.budget import LOCAL, Need
-    from dewpoint.engine.runtime.ids import run_workflow_id
-    from dewpoint.engine.runtime.program import Program, Step
+    from dewpoint.engine.runtime.budget import LOCAL, Budget, Need
+    from dewpoint.engine.runtime.ids import ITEM_CAP_MAX, batch_workflow_id, run_workflow_id
+    from dewpoint.engine.runtime.program import Program, Step, compile_program
     from dewpoint.engine.runtime.projection import (
-        Secrets,
-        mask,
         preview,
-        remember,
         sanitize,
-        sensitive_values,
         storable,
     )
     from dewpoint.engine.runtime.scheduler import (
         CAP_MESSAGE,
+        INLINE_FLOOR,
         ITERATION_CAP_EXCEEDED,
         SNAPSHOT_FORMAT,
+        STEP_WEIGHT,
+        STRUCTURE_STEP,
+        TAKE_WEIGHT,
+        VIEW_WEIGHT,
         Batch,
         BatchOutcome,
         Collect,
         Failure,
         Instance,
+        ItemsRef,
         RunEnd,
         Scheduler,
         ScopeKey,
+        Spill,
+        count,
         iteration_key,
     )
     from dewpoint.engine.runtime.size import (
         BATCH_ITEM_TOO_LARGE,
         PAYLOAD_TOO_LARGE,
-        SECRETS_TOO_LARGE,
         STEP_INPUT_TOO_LARGE,
         SUBFLOW_INPUT_TOO_LARGE,
         encoded_bytes,
         fits,
+        inline_limit,
         payload_bytes,
-        secret_bytes,
-        secrets_limit,
     )
+    from dewpoint.engine.sensitive import SECRET_INDEX_LIMIT
+    from dewpoint.engine.split import json_bytes, sized
+    from dewpoint.engine.taint import Shape, from_schema, tainted_positions
 
 IN_FLIGHT_CAP = 100  # activities and child workflows outstanding per execution (spec §6)
 PROJECT_BYTES = 256 * 1024  # a projection's rows at most, as JSON: far below Temporal's 2 MiB payload limit
@@ -113,6 +138,16 @@ NODE_TYPE_UNAVAILABLE = "node_type_unavailable"  # the registry has it, but this
 CANCELLED = Failure("cancelled", "The run was cancelled.")
 AMBIGUOUS = "ambiguous"  # a manifest's side_effect: the request may have been sent
 CONTINUE = "continue"  # `_drive`'s answer when the execution continues-as-new
+CLAIM_REFUSED = "A claim this run may not read, or that doesn't exist."
+INPUT_INVALID = "input_invalid"  # a sub-flow's input that doesn't match its schema, found where it's resolved
+SPILLS = uuid.UUID("2b1b5e11-0000-4000-8000-000000000522")  # spilled values' claim ids: from where they were spilled
+SPILL_FRAME = 64  # what a value adds to a spill's input besides its own JSON: its claim id and the framing
+SPILL_FAILED = "A value couldn't be stored before it was sent."
+
+
+class ExposedError(Exception):
+    """Plain data arrived where a schema puts sensitive data: the boundary failed, and the run fails `internal_error`
+    rather than use it (engine 2b spec §3.6)."""
 
 
 @dataclass(frozen=True)
@@ -207,6 +242,17 @@ def child_options(child_id: str) -> dict[str, Any]:
     }
 
 
+def _decision(owner: Step | None, pointer: str) -> bool:
+    """Whether a field's value is a decision (engine 2b spec §4.3): over sensitive data, the activity that computes it
+    gives it back plain. A branch's condition, a switch case's `when`."""
+    if owner is None:
+        return False
+    if owner.ref == "flow.if@1":
+        return pointer == "/condition"
+    parts = pointer.split("/")
+    return owner.ref == "flow.switch@1" and len(parts) == 4 and parts[1] == "cases" and parts[3] == "when"
+
+
 def _json_bytes(value: Any) -> int:
     """The JSON bytes Temporal's payload converter writes for `value`: what the SDK checks against its payload limit,
     before any codec (#15)."""
@@ -225,8 +271,6 @@ class Execution:
         self._startup_task = workflow.info().get_current_history_length()  # this execution's first: it starts it
         self._yield_timer: asyncio.Task[None] | None = None  # the one yield point every waiter shares
         self._rows: dict[tuple[str, str, int], StepRow] = {}  # queued for the next projection, per attempt
-        self._secrets: Secrets = ()  # sensitive values seen so far: masked in everything projected
-        self._secrets_json = 0  # their JSON bytes, without the list's brackets and commas (`_learned`)
         self._started: dict[Instance, str] = {}
         self._cel_modes: dict[Instance, str] = {}
         self._projects = 0
@@ -245,6 +289,10 @@ class Execution:
         ] = {}  # a batch unit's key -> the batch (its items aren't hashable)
         self._drained: dict[str, Any] = {}  # what draining waited for, and added: history events and bytes
         self._draining = False  # drain mode: nothing new starts until the execution continues-as-new
+        self._shapes: dict[str, Shape] = {}  # a node type's output taint (`_output_shape`)
+        self._spill_units: dict[tuple[Instance, str, int], Spill] = {}  # containers' claims queued or running (§5.3)
+        self._merging: list[tuple[tuple[Any, ...], _Effect]] = []  # results claimed before they merge (§5.3)
+        self._view_sizes: dict[uuid.UUID | None, int] = {}  # the steps a step's view reads, by region
 
     # --- the budget signals ----------------------------------------------------------------------------------------
 
@@ -282,9 +330,8 @@ class Execution:
         self.depth = parent.depth if parent is not None else 0
         self.run_started_at, self.deadline = run_started_at, deadline
         self.checkpoint_events, self.drain_events = checkpoint_events, drain_events
-        self.vars: dict[str, Any] = {}
-        if parent is not None:
-            self._carry(remember((), tuple(parent.secrets)))
+        # the tree's root run: what the claims this execution makes record (engine 2b spec §3.1)
+        self.root_run_id = parent.root_run_id if parent is not None and parent.root_run_id else run_id
 
     # --- the scheduler loop ----------------------------------------------------------------------------------------
 
@@ -299,8 +346,17 @@ class Execution:
         try:
             while self.sched.ended is None:
                 self._serve_budget()
-                if not self._draining:
-                    waiting += [("step", i) for i in self.sched.take_ready()]
+                # containers' claims are units under the in-flight cap; a drain starts them too: they only shrink the
+                # state, and a continue waits until it's back within its budget (engine 2b spec §5.3)
+                for sp in self.sched.take_spills():
+                    self._spill_units[(sp.owner, sp.which, sp.first)] = sp
+                    waiting.append(("spill", sp.owner, sp.which, sp.first))
+                for unit, merged in self._merging:
+                    tasks[("merge", *unit[1:])] = asyncio.create_task(self._claimed_result(unit, merged))
+                self._merging = []
+                if not self._draining:  # a take takes what this workflow task's share allows (engine 2b spec §5.3)
+                    waiting += [("step", i) for i in self.sched.take_ready(self._take_limit())]
+                    self._task_budget().charge(structure=TAKE_WEIGHT * self.sched.taken_last)
                     waiting += [("collect", c) for c in self.sched.take_collects()]
                     for b in self.sched.take_batches():
                         self._batches[(b.loop, b.start)] = b
@@ -336,15 +392,21 @@ class Execution:
                         [w[1] for w in waiting if w[0] == "step"],
                         [w[1] for w in waiting if w[0] == "collect"],
                         [self._batches.pop((w[1], w[2])) for w in waiting if w[0] == "batch"],
+                        [self._spill_units.pop((w[1], w[2], w[3])) for w in waiting if w[0] == "spill"],
                     )
                     return CONTINUE
-                while not self._draining and waiting and self._in_flight(tasks) < IN_FLIGHT_CAP:
-                    unit = waiting.pop(0)
+                startable = [w for w in waiting if not self._draining or w[0] == "spill"]
+                for unit in startable[: max(0, IN_FLIGHT_CAP - self._in_flight(tasks))]:
+                    waiting.remove(unit)
                     tasks[unit] = asyncio.create_task(self._unit(unit))
                 if self._rows and not any(key[0] == "project" for key in tasks):  # one at a time: rows wait for it
                     self._projects += 1
                     tasks[("project", self._projects)] = asyncio.create_task(self._project(self._take_rows()))
-                if not tasks and self._ask is None:  # waiting for our parent's answer isn't stuck: nothing else is
+                if not tasks and self._ask is None and self.sched.queued_left():
+                    pass  # the rest of a cut-short take: the next workflow task takes it
+                elif not tasks and self._ask is None and self.sched.budget.waiting:
+                    self._dirty = True  # a need asked while an answer was applied: decide it before anything else
+                elif not tasks and self._ask is None:  # waiting for our parent's answer isn't stuck: nothing else is
                     raise RuntimeError("nothing is running and the run hasn't ended")
                 wake = asyncio.create_task(
                     workflow.wait_condition(
@@ -354,7 +416,12 @@ class Execution:
                         )
                     )
                 )
-                done, _ = await workflow.wait([*tasks.values(), clock, wake], return_when=asyncio.FIRST_COMPLETED)
+                cut: list[asyncio.Task[None]] = []
+                if self.sched.queued_left():  # the take was cut short: the rest in the next workflow task
+                    if self._yield_timer is None or self._yield_timer.done():
+                        self._yield_timer = asyncio.create_task(asyncio.sleep(0.001))
+                    cut.append(self._yield_timer)
+                done, _ = await workflow.wait([*tasks.values(), clock, wake, *cut], return_when=asyncio.FIRST_COMPLETED)
                 wake.cancel()
                 if clock in done:
                     self.sched.end(
@@ -395,6 +462,8 @@ class Execution:
         return dict(sorted(kinds.items()))
 
     def _kind(self, key: tuple[Any, ...]) -> str:
+        if key[0] in ("spill", "merge"):
+            return "claims"
         if key[0] == "batch":
             return "children"
         if key[0] != "step":
@@ -407,10 +476,7 @@ class Execution:
         return "children" if step.ref == control.RUN_WORKFLOW else "values"
 
     def _quiescent(self, tasks: Mapping[tuple[Any, ...], asyncio.Task[Any]]) -> bool:
-        """No activity and no child outstanding, and no request to or from a parent or child: a sleeping timer step
-        doesn't count, nor a projection (it's written before the run continues)."""
-        idle = all(k[0] == "project" or (k[0] == "step" and k[1] in self._timers) for k in tasks)
-        return idle and not self.sched.budget.asking and not self._mail and not self._answers
+        return quiescent(tasks, self._timers, self.sched.budget, self._mail, self._answers, live=self.sched.live)
 
     async def _settle_for_continue(self, tasks: dict[tuple[Any, ...], asyncio.Task[Any]]) -> None:
         """Continue-as-new: the sleeping timer steps stop here (their wake times go into the snapshot), and the
@@ -441,10 +507,17 @@ class Execution:
             return (self.sched.order(Instance(c.scope, c.loop.step)), 1)
         if key[0] == "batch":
             return (self.sched.order(key[1]), 2, key[2])
+        if key[0] == "merge":
+            return (self.sched.order(key[1]), 0)
+        if key[0] == "spill":
+            return (self.sched.order(key[1]), 4, key[2], key[3])
         return ((), 3, key[1])
 
     def _gone(self, unit: tuple[Any, ...]) -> bool:
-        """A queued unit whose scope has ended since: it never starts."""
+        """A queued unit whose scope has ended since: it never starts. A claim always goes: it only shrinks the
+        state, and its container, if it's gone, ignores it."""
+        if unit[0] == "spill":
+            return False
         key = unit[1].scope  # a step's, a batch's loop's, or a collect's own
         scope = self.sched.scopes.get(key)
         return scope is None or scope.failure is not None
@@ -455,9 +528,25 @@ class Execution:
             return await self._step(key[1])
         if key[0] == "batch":
             return await self._batch(self._batches.pop((key[1], key[2])))
+        if key[0] == "spill":
+            sp = self._spill_units.pop((key[1], key[2], key[3]))
+            return _Effect(failure=await self._spill_entry(sp.entry, sp.owner.scope))
         return await self._collect(key[1])
 
     def _apply(self, key: tuple[Any, ...], effect: _Effect) -> None:
+        if key[0] == "spill":
+            if effect.failure is not None:  # the claim store couldn't take it: the run can't stay within its state
+                self.sched.end(RunEnd("failed", effect.failure))
+            else:
+                self.sched.spilled(key[1], key[2], key[3])
+            return
+        if key[0] == "merge":
+            key = ("step", key[1])
+        elif key[0] == "step" and effect.output is not None and effect.loop is None and effect.end is None:
+            n = live_state.size(effect.output)  # merges are authoritative (engine 2b spec §5.3): past the budget, the
+            if n > INLINE_FLOOR and self.sched.live + n > live_state.LIVE_BUDGET:  # result is claimed before it merges
+                self._merging.append((key, effect))
+                return
         if key[0] == "collect":
             c: Collect = key[1]
             if effect.failure is not None:
@@ -491,7 +580,7 @@ class Execution:
             self.sched.fail(inst, effect.failure)
         else:
             if effect.variables:
-                self.vars.update(effect.variables)
+                self.sched.set_variables(effect.variables, inst)  # the next variable version (engine 2b spec §5.3)
             self.sched.succeed(inst, effect.output, effect.ports)
 
     # --- the budget ------------------------------------------------------------------------------------------------
@@ -575,30 +664,11 @@ class Execution:
             size += row_size
         return taken
 
-    def _carry(self, secrets: Secrets) -> None:
-        """What a parent or a snapshot hands over: within the bound already."""
-        self._secrets, self._secrets_json = secrets, sum(secret_bytes(v) for v in secrets)
-
-    def _learned(self, values: Iterable[str]) -> bool:
-        """Remember `values` as sensitive, unless carrying them would pass SECRETS_BYTES: the execution carries what it
-        learned in its result, its children's starts and its snapshot, so that they're masked there too (engine 2b
-        spec §5.2). Past the bound nothing is remembered, and False tells the caller to fail what taught them, and
-        never use it. What's carried is never dropped: a parent masks everything its children tell it. Measured as it
-        grows, since binding and learning happen in one workflow task (#18)."""
-        grown = remember(self._secrets, values)
-        if grown is self._secrets:
-            return True
-        json_bytes = self._secrets_json + sum(secret_bytes(v) for v in set(grown).difference(self._secrets))
-        if 2 + json_bytes + len(grown) - 1 > secrets_limit():
-            return False
-        self._secrets, self._secrets_json = grown, json_bytes
-        return True
-
-    def _learn(self, value: Any, schema: Mapping[str, Any] | None) -> bool:
-        return self._learned(sensitive_values(value, schema))
-
-    def _preview(self, value: Any, schema: Mapping[str, Any] | None = None) -> Any:
-        return preview(value, schema, self._secrets)
+    @staticmethod
+    def _preview(value: Any, schema: Mapping[str, Any] | None = None) -> Any:
+        """A row's preview: what its schema marks sensitive redacted. The project activity masks the rest against the
+        run tree's secret index (engine 2b spec §3.7); the workflow never holds a secret to mask with."""
+        return preview(value, schema)
 
     def _queue_settled(self) -> None:
         """Control steps that settled since the last call. Plugin steps queue their own attempts (`_activity`)."""
@@ -620,7 +690,7 @@ class Execution:
                     ended_at=now,
                     output_preview=self._preview(result.get("output")),
                     error_code=error["code"] if error else None,
-                    error_message=mask(error["message"], self._secrets) if error else None,
+                    error_message=error["message"] if error else None,
                     cel_mode=self._cel_modes.get(inst),
                 )
             )
@@ -628,7 +698,7 @@ class Execution:
     async def _project(
         self, rows: list[StepRow], summary: RunSummary | None = None, start: RunStart | None = None
     ) -> None:
-        data = ProjectInput(self.tenant_id, rows, summary, start)
+        data = ProjectInput(self.tenant_id, rows, summary, start, root_run_id=self.root_run_id)
         await self._send(data)
         await workflow.execute_activity(
             PROJECT,
@@ -675,38 +745,193 @@ class Execution:
 
     # --- values ----------------------------------------------------------------------------------------------------
 
-    def _view(self, scope: ScopeKey, item: tuple[Any, int] | None = None) -> Any:
+    @property
+    def vars(self) -> dict[str, Any]:
+        """The current variables: the scheduler keeps them, with the versions queued loop steps captured."""
+        return self.sched.vars
+
+    def _view(
+        self, scope: ScopeKey, item: tuple[Any, int] | None = None, variables: dict[str, Any] | None = None
+    ) -> Any:
         run = {
             "id": self.run_id,
             "started_at": self.run_started_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
             "now": workflow.now().astimezone(UTC).isoformat().replace("+00:00", "Z"),
         }
-        return resolve.view(self.sched, scope, trigger=self.trigger, variables=dict(self.vars), run=run, item=item)
+        variables = self.vars if variables is None else variables
+        return resolve.view(self.sched, scope, trigger=self.trigger, variables=variables, run=run, item=item)
 
     async def _values(
-        self, owner: Step | None, pairs: list[tuple[str, Any]], scope: ScopeKey
+        self,
+        owner: Step | None,
+        pairs: list[tuple[str, Any]],
+        scope: ScopeKey,
+        variables: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], str | None]:
-        """Every envelope's value, by JSON pointer, and the CEL mode used (activity wins over local)."""
+        """Every envelope's value, by JSON pointer, and the CEL mode used (activity wins over local). `variables`:
+        those a loop step inside an iteration captured when it became ready (engine 2b spec §5.3); otherwise the
+        current ones."""
         values: dict[str, Any] = {}
         mode: str | None = None
-        v = self._view(scope)
+        v = self._view(scope, variables=variables)
         for pointer, value in pairs:
             if isinstance(value, RefValue):
-                values[pointer] = resolve.ref(v, value)
+                values[pointer] = await self._ref(v, value, owner, scope)
+                if _decision(owner, pointer) and contains_marker(values[pointer]):
+                    values[pointer] = await self._declassified(values[pointer], owner, scope)
+                    mode = "activity"
+                elif owner is not None and owner.ref == "flow.loop@1" and pointer == "/items":
+                    handle = ClaimRef.of(values[pointer])
+                    if handle is not None:
+                        values[pointer] = await self._items(handle, owner, scope)
+                        mode = "activity"
             elif isinstance(value, TemplateValue):
-                values[pointer] = resolve.template(v, value)
+                parts = [await self._part(p, owner, scope) for p in resolve.template_parts(v, value)]
+                joined = resolve.join(parts)
+                if joined is None:  # a part is a handle: joined where it's resolved (engine 2b spec §4.2)
+                    values[pointer] = await self._template(parts, owner, scope)
+                    mode = "activity"
+                else:
+                    values[pointer] = joined
             elif isinstance(value, CelValue):
                 record = self.program.record(owner.id if owner is not None else None, pointer)
-                task = await self._cel_task(record, [v])
-                [outcome] = await self._evaluate(task)
+                task = await self._cel_task(record, [v], owner=owner, scope=scope)
+                [outcome] = await self._evaluate(task, owner=owner, scope=scope, decision=_decision(owner, pointer))
                 values[pointer] = resolve.outcome_value(outcome)
                 mode = "activity" if mode == "activity" or not task.local else "local"
+                handle = ClaimRef.of(values[pointer])
+                if handle is not None and owner is not None and owner.ref == "flow.loop@1" and pointer == "/items":
+                    values[pointer] = await self._items(handle, owner, scope)  # claimed: a cursor, as a reference's
+                    mode = "activity"
             else:
                 values[pointer] = value.value
         return values, mode
 
+    # --- handles (engine 2b spec §3.2–3.3): never read here, resolved in activities ------------------------------
+
+    async def _ref(self, v: Any, value: RefValue, owner: Step | None, scope: ScopeKey) -> Any:
+        """A reference: past a handle, the handle to what it addresses. Whether that's missing or null is known only
+        where the claim is read, so a reference with a default asks there; so does a pointer past POINTER_MAX."""
+        found = resolve.read(v, value.path)
+        handle = ClaimRef.of(found)
+        if handle is not None and (value.has_default or handle.too_long()):
+            found = await self._bounded(handle, owner, scope)
+        return resolve.defaulted(found, value)
+
+    async def _part(self, part: str | resolve.Part, owner: Step | None, scope: ScopeKey) -> str | resolve.Part:
+        if not isinstance(part, resolve.Part):
+            return part
+        handle = ClaimRef.of(part.found)
+        if handle is None or not handle.too_long():
+            return part
+        return resolve.Part(await self._bounded(handle, owner, scope), part.default, part.path)
+
+    async def _bounded(self, handle: ClaimRef, owner: Step | None, scope: ScopeKey) -> Any:
+        """What `handle` addresses, as the workflow may hold it: a handle within POINTER_MAX (a derived claim's, for a
+        longer one), None for null, MISSING for nothing (`claims.derive`)."""
+        data = DeriveInput(
+            handle.to_json(),
+            str(workflow.uuid4()),
+            self.root_run_id,
+            step_id=str(owner.id) if owner is not None else None,
+            iteration_key=iteration_key(scope),
+        )
+        await self._send(data)
+        try:
+            derived = await workflow.execute_activity(
+                CLAIMS_DERIVE,
+                data,
+                result_type=DeriveResult,
+                start_to_close_timeout=timedelta(minutes=1),
+                retry_policy=RetryPolicy(maximum_attempts=3, initial_interval=timedelta(seconds=1)),
+            )
+        except ActivityError as e:
+            if isinstance(e.cause, ActivityCancelled):
+                raise asyncio.CancelledError from None
+            if isinstance(e.cause, ApplicationError) and e.cause.type == CLAIM_UNAVAILABLE:
+                raise resolve.ValueFailure(CLAIM_UNAVAILABLE, CLAIM_REFUSED) from None
+            raise resolve.ValueFailure(
+                INTERNAL_ERROR, f"A claim couldn't be read ({type(e.cause or e).__name__})."
+            ) from None
+        if not derived.present:
+            return MISSING
+        return derived.handle
+
+    async def _template(self, parts: list[str | resolve.Part], owner: Step | None, scope: ScopeKey) -> Any:
+        """A template over a handle, joined in `cel.evaluate` once its parts are resolved: claimed when they read
+        sensitive data."""
+        data = CelInput(
+            {},
+            claims=self._claiming(owner, scope, tainted=False, decision=False),
+            template=[p if isinstance(p, str) else p.to_json() for p in parts],
+        )
+        return resolve.outcome_value(await self._remote(data))
+
+    async def _declassified(self, handle: Any, owner: Step | None, scope: ScopeKey) -> Any:
+        """A decision that reads a handle, made where the claim is read (engine 2b spec §4.2): the value it reveals
+        comes back plain, a boolean or the step fails `type_mismatch` (§4.3)."""
+        request = EvaluateRequest(self.program.cel_profile, "v", {"v": "bool"}, ({"v": handle},)).to_json()
+        data = CelInput(request, claims=self._claiming(owner, scope, tainted=False, decision=True))
+        return resolve.outcome_value(await self._remote(data))
+
+    async def _items(self, handle: ClaimRef, owner: Step, scope: ScopeKey) -> ItemsRef:
+        """A loop's items that are a handle (engine 2b spec §4.3): their count, from the activity that reads the claim
+        (a listed loop's declassified decision, or the plain count of a list only its size claimed), as a cursor:
+        each item a handle into the list, made as it opens (§5.3). A count past the largest item cap is cut there:
+        the loop then fails its cap."""
+        if handle.extend(str(ITEM_CAP_MAX)).too_long():
+            bounded = ClaimRef.of(await self._bounded(handle, owner, scope))
+            if bounded is None:
+                raise resolve.ValueFailure(cel.TYPE_MISMATCH, "`items` must be a list.")
+            handle = bounded
+        request = EvaluateRequest(self.program.cel_profile, "size(v)", {"v": "list<dyn>"}, ({"v": handle.to_json()},))
+        claims = self._claiming(owner, scope, tainted=False, decision=True, decides="int")
+        data = CelInput(request.to_json(), claims=claims)
+        count = resolve.outcome_value(await self._remote(data))
+        return ItemsRef(handle.to_json(), min(int(count), ITEM_CAP_MAX + 1))
+
+    async def _remote(self, data: CelInput) -> cel.Outcome:
+        """One `cel.evaluate` request of one binding set, or a template: its outcome."""
+        profile = self.program.cel_profile
+        await self._send(data)
+        try:
+            result = await workflow.execute_activity(
+                CEL_EVALUATE,
+                data,
+                result_type=CelResult,
+                task_queue=cel_queue(profile),
+                schedule_to_start_timeout=timedelta(seconds=self.cel_schedule_to_start_s),
+                start_to_close_timeout=timedelta(minutes=1),
+                retry_policy=RetryPolicy(maximum_attempts=3, initial_interval=timedelta(seconds=1)),
+            )
+        except ActivityError as e:
+            if isinstance(e.cause, ActivityCancelled):
+                raise asyncio.CancelledError from None
+            message = f"No evaluator served `{profile}` ({type(e.cause or e).__name__})."
+            raise resolve.ValueFailure(cel.PROFILE_UNAVAILABLE, message) from None
+        return cel.Outcome.from_json(result.outcomes[0])
+
+    def _claiming(
+        self, owner: Step | None, scope: ScopeKey, *, tainted: bool, decision: bool, decides: str = "bool"
+    ) -> Claiming:
+        return Claiming(
+            root_run_id=self.root_run_id,
+            seed=str(workflow.uuid4()),
+            tainted=tainted,
+            decision=decision,
+            decides=decides,
+            step_id=str(owner.id) if owner is not None else None,
+            iteration_key=iteration_key(scope),
+        )
+
     async def _cel_task(
-        self, record: ExpressionRecord, views: Sequence[Any], *, inline: bool = True
+        self,
+        record: ExpressionRecord,
+        views: Sequence[Any],
+        *,
+        inline: bool = True,
+        owner: Step | None = None,
+        scope: ScopeKey = (),
     ) -> resolve.CelTask:
         """Bind each view within the workflow task's budget (spec §5.6). Binding converts every value it binds, so
         it's charged as they are (`Measure.nodes`), whether the expression then runs here or in `cel.evaluate`.
@@ -716,21 +941,54 @@ class Execution:
             await self._yield_point(None)
             b = resolve.bind_view(record, v)
             self._yield.charge(nodes=b.measured.nodes)
-            bound.append(b)
+            bound.append(await self._bounded_bindings(b, owner, scope))
         local_profile = LOCAL_CEL_PROFILE if inline else None
         return resolve.cel_task(record, bound, local_profile=local_profile, version_profile=self.program.cel_profile)
 
-    async def _evaluate(self, task: resolve.CelTask) -> list[cel.Outcome]:
+    async def _bounded_bindings(self, b: resolve.Bound, owner: Step | None, scope: ScopeKey) -> resolve.Bound:
+        """A typed path past a handle extends it (`bind`): one past POINTER_MAX derives a claim, as a reference
+        does. What it addresses must be there, as a typed path's value must."""
+        long = {name: h for name, value in b.bindings.items() if (h := ClaimRef.of(value)) is not None and h.too_long()}
+        if not long:
+            return b
+        bindings = dict(b.bindings)
+        for name, handle in long.items():
+            bindings[name] = await self._bounded(handle, owner, scope)
+            if bindings[name] is MISSING:
+                raise resolve.ValueFailure(cel.TYPE_MISMATCH, f"`{name}` is missing")
+        return resolve.Bound(bindings, b.measured)
+
+    async def _evaluate(
+        self, task: resolve.CelTask, *, owner: Step | None = None, scope: ScopeKey = (), decision: bool = False
+    ) -> list[cel.Outcome]:
+        """Each binding set's outcome. In `cel.evaluate`, every request says what to do about claims (engine 2b spec
+        §4.2, §3.7): resolve its handles, claim a result that read sensitive data or repeats a secret the run knows, or
+        give a declassified `decision` back plain, and mask every error. Here, a local error may quote a value that
+        repeats a secret, and this workflow holds none to mask it with: that binding set is evaluated again there, and
+        its masked error is the one kept (§4.6). Sending the message itself out would record it unmasked."""
         if task.local:
             outcomes = []
             for bindings in task.bindings:  # a filter's items one at a time: each is an evaluation
                 await self._yield_point(task.record)
-                outcomes.append(task.run_one(bindings))
+                outcome = task.run_one(bindings)
+                if outcome.ok and contains_marker(outcome.value):  # no handle: the marker is Dewpoint's (§3.2)
+                    outcome = cel.Outcome(error=cel.EVALUATION_ERROR, message=RESERVED)
+                outcomes.append(outcome)
                 self._yield.charge(task.record)
+            failed = [i for i, o in enumerate(outcomes) if not o.ok and o.message != RESERVED]
+            if failed:
+                again = resolve.CelTask(task.record, tuple(task.bindings[i] for i in failed), False)
+                for i, outcome in zip(failed, await self._evaluate(again, owner=owner, scope=scope, decision=decision),
+                                      strict=True):  # fmt: skip
+                    outcomes[i] = outcome
             return outcomes
         out: list[cel.Outcome] = []
         profile = self.program.cel_profile
-        envelope = _json_bytes(CelInput(resolve.CelTask(task.record, (), False).request(profile)))
+
+        def claims() -> Claiming:  # a seed per request: its results' claim ids
+            return self._claiming(owner, scope, tainted=task.record.tainted, decision=decision)
+
+        envelope = _json_bytes(CelInput(resolve.CelTask(task.record, (), False).request(profile), claims=claims()))
         start, count = 0, len(task.bindings)
         while start < count:
             end, size = resolve.request_end(
@@ -754,7 +1012,7 @@ class Execution:
             try:
                 result = await workflow.execute_activity(
                     CEL_EVALUATE,
-                    CelInput(chunk.request(profile)),
+                    CelInput(chunk.request(profile), claims=claims()),
                     result_type=CelResult,
                     task_queue=cel_queue(profile),
                     schedule_to_start_timeout=timedelta(seconds=self.cel_schedule_to_start_s),
@@ -779,13 +1037,42 @@ class Execution:
             self._yield.reset(startup=length == self._startup_task)
         return self._yield
 
-    async def _yield_point(self, record: ExpressionRecord | None, *, send: int = 0) -> None:
+    def _step_units(self, inst: Instance) -> int:
+        """A step unit's structural units (engine 2b spec §5.3): its own work, and the view it reads (the steps of its
+        region and the regions around it). A count from the version, so a replay charges the same."""
+        region = self.program.steps[inst.step].region
+        size = self._view_sizes.get(region)
+        if size is None:
+            size = sum(len(self.program.regions[r].members) for r in self.program.chain(region))
+            self._view_sizes[region] = size
+        return STEP_WEIGHT + VIEW_WEIGHT * size
+
+    def _take_limit(self) -> int:
+        """How many ready steps this workflow task may still take (engine 2b spec §5.3)."""
+        return self._task_budget().takes_left(TAKE_WEIGHT)
+
+    async def _stepwise[T](self, steps: Generator[int, None, T]) -> T:
+        """A snapshot or a restore, part by part (engine 2b spec §5.3): each part's units are charged to the workflow
+        task; once its share is spent, the next part waits for the next task (the 1 ms durable timer, as §5.6's
+        interpreter does). The units count what's encoded, so a replay yields at the same points."""
+        while True:
+            try:
+                units = next(steps)
+            except StopIteration as done:
+                value: T = done.value
+                return value
+            self._task_budget().charge(structure=units)
+            await self._yield_point(None, structure=STRUCTURE_STEP)
+
+    async def _yield_point(
+        self, record: ExpressionRecord | None, *, send: int = 0, structure: int = 0, whole: bool = False
+    ) -> None:
         """Before binding a view (`record` None) or evaluating `record` locally: when the current workflow task's budget
         is spent, await a 1 ms durable timer, which ends the task (spec §5.6). Concurrent units share the budget and
         one timer, and each checks again once it fires. Before sending a payload (`send` its bytes), the same wait
         keeps a task's commands under Temporal's gRPC message limit (#15, engine 2b spec §5.2)."""
         while True:
-            if not self._task_budget().must_yield(record, send=send):
+            if not self._task_budget().must_yield(record, send=send, structure=structure, whole=whole):
                 return
             if self._yield_timer is None or self._yield_timer.done():
                 self._yield_timer = asyncio.create_task(asyncio.sleep(0.001))
@@ -815,8 +1102,12 @@ class Execution:
         step = self.sched.step(inst)
         skip = ("/collect",) if step.ref == "flow.loop@1" else ("/predicate",) if step.ref == "flow.filter@1" else ()
         pairs = [(p, v) for p, v in step.values if not any(p == s or p.startswith(s + "/") for s in skip)]
+        units = self._step_units(inst)  # its work in this workflow task, charged before it starts (§5.3)
+        await self._yield_point(None, structure=units, whole=True)  # the task's whole share: a step's work is light
+        self._task_budget().charge(structure=units)
+        captured = self.sched.consume_capture(inst)  # a loop step's variables, as when it became ready (§5.3)
         try:
-            values, cel_mode = await self._values(step, pairs, inst.scope)
+            values, cel_mode = await self._values(step, pairs, inst.scope, captured)
         except resolve.ValueFailure as e:
             if not step.control:  # it never reached an attempt: its one row says why
                 self._queue_unstarted(inst, step, e.failure)
@@ -824,6 +1115,15 @@ class Execution:
         config = resolve.assemble(step.config, values)
         if not step.control:
             return await self._activity(inst, step, config, cel_mode)
+        if step.ref == "flow.fail@1":  # masked where the index is read, a literal too: it may repeat a secret (§3.7)
+            message = await self._message(config.get("message"))
+            if isinstance(message, Failure):  # not the intended failure: the boundary's own, with its code
+                return _Effect(failure=message, cel_mode=cel_mode)
+            config = {**config, "message": message}
+        if step.ref == "flow.filter@1":
+            record = self.program.record(step.id, "/predicate")
+            if record.tainted or contains_marker(config.get("items")):
+                return await self._claimed_filter(inst, step, config.get("items"), record)
         decision = nodes.decide(step.ref, config)
         if decision.failure is not None:
             return _Effect(failure=decision.failure, cel_mode=cel_mode)
@@ -874,6 +1174,30 @@ class Execution:
                 kept.append(item)
         return _Effect(output={"items": kept, "count": len(kept)}, cel_mode="local" if task.local else "activity")
 
+    async def _claimed_filter(self, inst: Instance, step: Step, items: Any, record: ExpressionRecord) -> _Effect:
+        """A filter over claims, or with a sensitive predicate, run whole in one activity (engine 2b spec §4.4): the
+        workflow gets the kept items' handle and the two counts, never a per-item decision, and the budget is charged
+        the input count."""
+        try:
+            base = await self._bounded_bindings(resolve.bind_base(record, self._view(inst.scope)), step, inst.scope)
+            request = EvaluateRequest(
+                self.program.cel_profile, record.expr, dict(record.declarations), (base.bindings,)
+            )
+            data = CelInput(
+                request.to_json(),
+                claims=self._claiming(step, inst.scope, tainted=record.tainted, decision=False),
+                filter={"items": items, "record": record.to_json()},
+            )
+            outcome = await self._remote(data)
+        except resolve.ValueFailure as e:
+            return _Effect(failure=e.failure)
+        if not outcome.ok:
+            return _Effect(failure=Failure(str(outcome.error), outcome.message))
+        result = outcome.value
+        if not await self._take_budget(f"filter:{iteration_key(inst.scope)}:{step.key}", int(result["input"])):
+            return _Effect(failure=Failure(ITERATION_CAP_EXCEEDED, CAP_MESSAGE))
+        return _Effect(output={"items": result["items"], "count": result["count"]}, cel_mode="activity")
+
     async def _collect(self, c: Collect) -> _Effect:
         step = self.sched.step(c.loop)
         collect = step.config.get("collect")
@@ -897,6 +1221,9 @@ class Execution:
             return _Effect(failure=Failure(VERSION_UNUSABLE, f"`{step.key}` can't run its sub-flow: {reason}."))
         child_run = str(workflow.uuid4())
         child = run_workflow_id(self.tenant_id, child_run)  # its workflow id, and its key in this budget
+        trigger = await self._hand_over(child_run, version, start.input)
+        if isinstance(trigger, Failure):
+            return _Effect(failure=trigger, cel_mode=cel_mode)
         grant = self.sched.budget.start_child(child, SUBFLOW_GRANT)
         parent = Parent(
             workflow_id=workflow.info().workflow_id,
@@ -907,13 +1234,13 @@ class Execution:
             deadline=self.deadline.isoformat(),
             grant=grant,
             depth=self.depth + 1,
-            secrets=list(self._secrets),
+            root_run_id=self.root_run_id,
         )
         run = RunInput(
             self.tenant_id,
             child_run,
             version,
-            start.input,
+            trigger,
             self.mode,
             self.max_run_duration_s,
             self.cel_schedule_to_start_s,
@@ -950,12 +1277,136 @@ class Execution:
         finally:
             self.sched.budget.settle_child(child, used)
             self._dirty = True
-        if not self._learned(result.secrets):  # its outputs go unused, so nothing here needs them masked
-            return _Effect(failure=Failure(PAYLOAD_TOO_LARGE, SECRETS_TOO_LARGE), cel_mode=cel_mode)
         if result.status == "succeeded":
             return _Effect(output=dict(result.outputs or {}), cel_mode=cel_mode)
         error = result.error or {"code": result.status, "message": f"The sub-flow ended {result.status}."}
         return _Effect(failure=Failure(str(error["code"]), str(error["message"])), cel_mode=cel_mode)
+
+    async def _crossing[R](
+        self, name: str, data: Any, result_type: type[R], *, lost: str = "Claims couldn't cross to another run"
+    ) -> R | Failure:
+        """An activity that hands claims to another run (engine 2b spec §3.4), or stores them for a command that
+        carries their handles (§5.2): its result, or why it failed."""
+        await self._send(data)
+        try:
+            result: R = await workflow.execute_activity(
+                name,
+                data,
+                result_type=result_type,
+                start_to_close_timeout=timedelta(minutes=1),
+                retry_policy=RetryPolicy(maximum_attempts=3, initial_interval=timedelta(seconds=1)),
+            )
+            return result
+        except ActivityError as e:
+            if isinstance(e.cause, ActivityCancelled):
+                raise asyncio.CancelledError from None
+            if isinstance(e.cause, ApplicationError) and e.cause.type == CLAIM_UNAVAILABLE:
+                return Failure(CLAIM_UNAVAILABLE, CLAIM_REFUSED)
+            if isinstance(e.cause, ApplicationError) and e.cause.type == SECRET_INDEX_LIMIT:  # its message is fixed
+                return Failure(SECRET_INDEX_LIMIT, e.cause.message)
+            if isinstance(e.cause, ApplicationError) and e.cause.type == VERSION_UNUSABLE:
+                return Failure(VERSION_UNUSABLE, e.cause.message)
+            return Failure(INTERNAL_ERROR, f"{lost} ({type(e.cause or e).__name__}).")
+
+    async def _fit(self, value: Any, room: int, where: str, *, step: Step | None = None, scope: ScopeKey = ()) -> Any:
+        """`value` within `room` bytes, as a command carries it (engine 2b spec §5.2): its largest parts written as size
+        claims first, none weighing more than the inline limit, in spills under the payload limit; it holds their
+        handles. A Failure when a part can't go in one spill, or a spill failed: the command then fails."""
+        wid = workflow.info().workflow_id
+        part = min(inline_limit(), payload_bytes() // 2)
+        done = sized(value, lambda p: str(uuid.uuid5(SPILLS, f"{wid}/{where}{p}")), envelope=room, part=part)
+        converter = workflow.payload_converter()
+        empty = SpillInput([], self.root_run_id, str(step.id) if step else None, iteration_key(scope))
+        chunk: list[dict[str, Any]] = []
+        weight, limit = 0, payload_bytes() - encoded_bytes(empty, converter)
+        for c in done.claims:
+            size = json_bytes(c.value) + SPILL_FRAME
+            alone = replace(empty, claims=[{"id": c.id, "value": c.value}])
+            if not fits(alone, converter):  # a leaf past the limit: it can't be split
+                return Failure(PAYLOAD_TOO_LARGE, SPILL_FAILED)
+            if chunk and weight + size > limit:
+                failed = await self._spill(chunk, step, scope)
+                if failed is not None:
+                    return failed
+                chunk, weight = [], 0
+            chunk.append({"id": c.id, "value": c.value})
+            weight += size
+        if chunk:
+            failed = await self._spill(chunk, step, scope)
+            if failed is not None:
+                return failed
+        return done.envelope
+
+    async def _claimed_result(self, key: tuple[Any, ...], effect: _Effect) -> _Effect:
+        """A result that would take the live state past its budget, claimed before it merges (engine 2b spec §5.3):
+        its largest parts, down to the floor, so what merges is small."""
+        inst: Instance = key[1]
+        step = self.sched.step(inst)
+        where = f"merge/{iteration_key(inst.scope)}/{step.topo}"
+        fitted = await self._fit(effect.output, INLINE_FLOOR, where, step=step, scope=inst.scope)
+        if isinstance(fitted, Failure):
+            return replace(effect, output=None, failure=fitted)
+        return replace(effect, output=fitted)
+
+    async def _spill_entry(self, entry: dict[str, Any], scope: ScopeKey) -> Failure | None:
+        """A container's claim. A list past one spill's payload goes in parts first, then the claim joins them, so
+        its handle still addresses each item by position (engine 2b spec §5.3)."""
+        converter = workflow.payload_converter()
+        empty = SpillInput([], self.root_run_id, None, iteration_key(scope))
+        if fits(replace(empty, claims=[entry]), converter) or not isinstance(entry["value"], list):
+            return await self._spill([entry], None, scope)
+        limit = payload_bytes() - encoded_bytes(empty, converter) - SPILL_FRAME
+        parts: list[list[Any]] = [[]]
+        weight = 0
+        for item in entry["value"]:
+            size = json_bytes(item) + 1
+            if parts[-1] and weight + size > limit:
+                parts.append([])
+                weight = 0
+            parts[-1].append(item)
+            weight += size
+        ids = [str(uuid.uuid5(uuid.UUID(entry["id"]), str(k))) for k in range(len(parts))]
+        kind = entry.get("kind", "spill")
+        for part_id, part in zip(ids, parts, strict=True):
+            failed = await self._spill([{"id": part_id, "value": part, "kind": kind}], None, scope)
+            if failed is not None:
+                return failed
+        return await self._spill([{"id": entry["id"], "concat": ids, "kind": kind}], None, scope)
+
+    async def _spill(self, claims: list[dict[str, Any]], step: Step | None, scope: ScopeKey) -> Failure | None:
+        data = SpillInput(claims, self.root_run_id, str(step.id) if step else None, iteration_key(scope))
+        found = await self._crossing(CLAIMS_SPILL, data, type(None), lost=SPILL_FAILED.removesuffix("."))
+        return found if isinstance(found, Failure) else None
+
+    async def _message(self, value: Any) -> str | Failure:
+        """A failure's message as it may be recorded (engine 2b spec §3.7, §4.6): resolved and masked in
+        `claims.message`, which reads the run tree's secret index; this workflow holds no secret to mask it with. Or
+        why that failed, with its own safe code."""
+        found = await self._crossing(CLAIMS_MESSAGE, MessageInput(value, self.root_run_id), MessageResult)
+        return found if isinstance(found, Failure) else found.text
+
+    async def _hand_over(self, child_run: str, version: str, value: dict[str, Any]) -> dict[str, Any] | Failure:
+        """A sub-flow's input, split for the child as a trigger is, this run's handles in it granted to the child
+        (engine 2b spec §3.4, §3.5): the envelope its start carries."""
+        data = ChildInput(child_run, version, value, self.root_run_id)
+        converter = workflow.payload_converter()
+        if not fits(data, converter):  # its largest values spill first (engine 2b spec §5.2): the child gets grants
+            room = payload_bytes() - encoded_bytes(replace(data, value={}), converter) - 16
+            fitted = await self._fit(value, room, f"sub/{child_run}")
+            if isinstance(fitted, Failure):
+                return fitted
+            data = replace(data, value=fitted)
+        found = await self._crossing(CLAIMS_CHILD_INPUT, data, ChildInputResult)
+        if isinstance(found, Failure):
+            return found
+        if found.trigger is None:
+            return Failure(INPUT_INVALID, " ".join(found.reasons))
+        return found.trigger
+
+    async def _grant(self, to: str, value: Any) -> Failure | None:
+        """The handles in `value`, and the claims they nest, granted to run `to` (engine 2b spec §3.4)."""
+        found = await self._crossing(CLAIMS_GRANT, GrantInput(to, value, self.root_run_id), type(None))
+        return found if isinstance(found, Failure) else None
 
     @staticmethod
     def _lost(kind: str, e: ChildWorkflowError) -> Failure:
@@ -980,9 +1431,17 @@ class Execution:
         out = []
         for depth in range(len(loop.scope) + 1):
             scope = self.sched.scopes[loop.scope[:depth]]
-            results = {k: v for k, v in scope.results.items() if reads is None or k in reads}
+            inline = {**(scope.rbox.sealing or {}), **scope.results}  # and what's claimed, by its handle (§5.3)
+            results = {k: v for k, v in inline.items() if reads is None or k in reads}
             out.append(
-                {"key": [[k, i] for k, i in scope.key], "results": results, "item": scope.item, "index": scope.index}
+                {
+                    "key": [[k, i] for k, i in scope.key],
+                    "results": results,
+                    "item": scope.item,
+                    "index": scope.index,
+                    "chain": scope.rbox.head,
+                    "claimed": self.sched.claimed_in(scope),
+                }
             )
         return out
 
@@ -992,12 +1451,10 @@ class Execution:
         step = self.sched.step(b.loop)
         # from the input, not the workflow id: a replay of this history sees the same id (the run id names the logical
         # run, the loop step and its scope name the loop, the start names the batch)
-        child = (
-            f"{run_workflow_id(self.tenant_id, self.run_id)}/{step.id}/{iteration_key(b.loop.scope)}/batch:{b.start}"
-        )
+        child = batch_workflow_id(self.tenant_id, self.run_id, str(step.id), iteration_key(b.loop.scope), b.start)
         converter = workflow.payload_converter()
-        draft = self._batch_input(b, len(b.items))
-        if not fits(draft, converter):  # engine 2b spec §5.2: as many of its items as fit, in order; the rest follow
+        draft = self._batch_input(b, count(b.items))
+        if isinstance(b.items, list) and not fits(draft, converter):  # §5.2: as many as fit, in order; the rest next
             items = b.items
             envelope = encoded_bytes(replace(draft, items=[]), converter)
             fit, _ = resolve.request_end(
@@ -1008,11 +1465,23 @@ class Execution:
                 batch=len(items),
                 limit=payload_bytes(),
             )
-            if fit == 0:  # its first item alone doesn't fit: the loop fails there, and nothing is dropped
-                return _Effect(failure=Failure(PAYLOAD_TOO_LARGE, BATCH_ITEM_TOO_LARGE))
+            if fit == 0:  # its first item alone doesn't fit: it spills (§5.2), or the loop fails there
+                room = payload_bytes() - envelope - 16
+                item = await self._fit(items[0], room, f"batch/{child}/0", step=step, scope=b.loop.scope)
+                if isinstance(item, Failure) or len(converter.to_payloads([item])[0].data) > room:
+                    return _Effect(failure=Failure(PAYLOAD_TOO_LARGE, BATCH_ITEM_TOO_LARGE))
+                items = [item, *items[1:]]
+                fit, _ = resolve.request_end(
+                    0,
+                    len(items),
+                    lambda i: len(converter.to_payloads([items[i]])[0].data),
+                    envelope=envelope,
+                    batch=len(items),
+                    limit=payload_bytes(),
+                )
             self.sched.cut_batch(b.loop, b.start, b.start + fit)
             b = replace(b, items=items[:fit])
-        grant = self.sched.budget.start_child(child, len(b.items))
+        grant = self.sched.budget.start_child(child, count(b.items))
         batch = self._batch_input(b, grant)
         used: int | None = None  # until it reports, all it was granted counts: it may have run
         try:
@@ -1038,15 +1507,16 @@ class Execution:
         finally:
             self.sched.budget.settle_child(child, used)
             self._dirty = True
-        if not self._learned(result.secrets):  # what it collected goes unused: its loop fails
-            return _Effect(failure=Failure(PAYLOAD_TOO_LARGE, SECRETS_TOO_LARGE))
         if result.end is not None:
             end = RunEnd.from_json(result.end)
             if end.status == "cancelled":
                 return _Effect(failure=CANCELLED)
             return _Effect(end=end)
         stopped = Failure.from_json(result.stopped) if result.stopped else None
-        return _Effect(batch=BatchOutcome(list(result.collected), list(result.failures), stopped))
+        outcome = BatchOutcome(
+            list(result.collected), list(result.failures), stopped, result.collection, result.failure_collection
+        )
+        return _Effect(batch=outcome)
 
     def _batch_input(self, b: Batch, grant: int) -> BatchInput:
         step = self.sched.step(b.loop)
@@ -1060,7 +1530,7 @@ class Execution:
             deadline=self.deadline.isoformat(),
             grant=grant,
             depth=self.depth,
-            secrets=list(self._secrets),
+            root_run_id=self.root_run_id,
         )
         return BatchInput(
             tenant_id=self.tenant_id,
@@ -1068,7 +1538,9 @@ class Execution:
             version_id=self.version_id,
             loop_step=str(step.id),
             outer=self._outer(b.loop),
-            items=b.items,
+            items=b.items if isinstance(b.items, list) else [],
+            items_ref=b.items.to_json() if isinstance(b.items, ItemsRef) else None,
+            collect_base=self.sched.collect_base(b.loop),
             offset=b.start,
             concurrency=loop.concurrency,
             stop_on_error=loop.stop_on_error,
@@ -1093,10 +1565,6 @@ class Execution:
         attempts = step.max_attempts or int(retry["max_attempts"])
         timeout = timedelta(seconds=step.timeout_s or float(manifest["timeout_s"]))
         ambiguous = manifest["side_effect"] == AMBIGUOUS
-        if not self._learn(config, manifest["config_schema"]):  # a resolved sensitive value, before anything echoes it
-            failure = Failure(PAYLOAD_TOO_LARGE, SECRETS_TOO_LARGE)
-            self._queue_unstarted(inst, step, failure)  # never sent
-            return _Effect(failure=failure, cel_mode=cel_mode)
         attempt = 1
         while True:
             row = StepRow(
@@ -1121,9 +1589,23 @@ class Execution:
                 config=config,
                 mode=self.mode,
                 attempt=attempt,
+                root_run_id=self.root_run_id,
+                inline_limit=inline_limit() if self.sched.live <= live_state.LIVE_BUDGET else INLINE_FLOOR,  # §5.4
             )
-            if not fits(sent, workflow.payload_converter()):  # engine 2b spec §5.2: never sent, so it never ran
+            converter = workflow.payload_converter()
+            fitted: Any = None
+            if not fits(sent, converter):  # its largest values spill first (engine 2b spec §5.2); a retry reuses them
+                room = payload_bytes() - encoded_bytes(replace(sent, config={}), converter) - 16
+                fitted = await self._fit(
+                    config, room, f"in/{iteration_key(inst.scope)}/{step.topo}", step=step, scope=inst.scope
+                )
+                if not isinstance(fitted, Failure):
+                    config = fitted
+                    sent = replace(sent, config=config)
+            if not fits(sent, converter):  # never sent, so it never ran
                 failure = Failure(PAYLOAD_TOO_LARGE, STEP_INPUT_TOO_LARGE, attempt)
+                if isinstance(fitted, Failure) and fitted.code != PAYLOAD_TOO_LARGE:  # a spill failed: its own code
+                    failure = replace(fitted, attempt=attempt)
                 ended = workflow.now().isoformat()
                 self._queue(
                     replace(
@@ -1156,13 +1638,8 @@ class Execution:
                 outcome = OUTCOME_UNKNOWN if ambiguous else None  # its request may have been sent
                 self._queue(replace(row, status="cancelled", ended_at=workflow.now().isoformat(), outcome=outcome))
                 raise asyncio.CancelledError from None
-            if not self._learn(result.output, manifest["output_schema"]):
-                # the node ran, so its outcome stands; its output goes nowhere
-                failure = Failure(PAYLOAD_TOO_LARGE, SECRETS_TOO_LARGE, attempt)
-                ended = workflow.now().isoformat()
-                failed = replace(row, status="failed", ended_at=ended, error_code=failure.code, outcome=result.outcome)
-                self._queue(replace(failed, error_message=failure.message))
-                return _Effect(failure=failure, cel_mode=cel_mode)
+            if tainted_positions(result.output, self._output_shape(step.ref)):  # the tripwire (engine 2b spec §3.6)
+                raise ExposedError(f"`{step.ref}` returned plain data at a sensitive position.")
             self._queue(
                 replace(
                     row,
@@ -1173,6 +1650,13 @@ class Execution:
                 )
             )
             return _Effect(output=result.output, cel_mode=cel_mode)
+
+    def _output_shape(self, ref: str) -> Shape:
+        """The taint of a node type's output, from its manifest (engine 2b spec §4.1): what must arrive claimed."""
+        shape = self._shapes.get(ref)
+        if shape is None:
+            shape = self._shapes[ref] = from_schema(self.program.manifests[ref]["output_schema"])
+        return shape
 
     def _queue_unstarted(self, inst: Instance, step: Step, failure: Failure) -> None:
         now = workflow.now().isoformat()
@@ -1187,7 +1671,7 @@ class Execution:
                 started_at=self._started.get(inst, now),
                 ended_at=now,
                 error_code=failure.code,
-                error_message=mask(failure.message, self._secrets),
+                error_message=failure.message,
             )
         )
 
@@ -1203,7 +1687,7 @@ class Execution:
                 status="failed",
                 ended_at=workflow.now().isoformat(),
                 error_code=failure.code,
-                error_message=mask(failure.message, self._secrets),
+                error_message=failure.message,
                 outcome=outcome,
             )
         )
@@ -1211,14 +1695,12 @@ class Execution:
 
     # --- continue-as-new ------------------------------------------------------------------------------------------
 
-    def _snapshot(self) -> dict[str, Any]:
-        """Where a continued run carries on (spec §6, `snapshot_format` 1). The projection is written first, so no
-        row is carried; timers carry their wake times."""
+    async def _snapshot(self) -> dict[str, Any]:
+        """Where a continued run carries on (spec §6; `snapshot_format` 2, engine 2b spec §5.3). The projection is
+        written first, so no row is carried; timers carry their wake times."""
         return {
             "snapshot_format": SNAPSHOT_FORMAT,
-            "scheduler": self.sched.to_json(),
-            "variables": self.vars,
-            "secrets": list(self._secrets),
+            "scheduler": await self._stepwise(self.sched.encoding()),
             "run_started_at": self.run_started_at.isoformat(),
             "deadline": self.deadline.isoformat(),
             "drained": self._drained,
@@ -1234,13 +1716,12 @@ class Execution:
             ],
         }
 
-    def _restore(self, program: Program, snapshot: dict[str, Any]) -> None:
+    async def _restore(self, program: Program, snapshot: dict[str, Any]) -> None:
         if snapshot.get("snapshot_format") != SNAPSHOT_FORMAT:
             raise ValueError(f"unknown snapshot format {snapshot.get('snapshot_format')!r}")
         self.program = program
-        self.sched = Scheduler.from_json(program, snapshot["scheduler"])
-        self.vars = dict(snapshot["variables"])
-        self._carry(remember((), tuple(snapshot["secrets"])))
+        self.sched = Scheduler.restoring(program, snapshot["scheduler"], prefix=workflow.info().workflow_id)
+        await self._stepwise(self.sched.decoding(snapshot["scheduler"]))
         for key, step, wake, started, mode in snapshot["timers"]:
             inst = Instance(tuple((str(k), int(n)) for k, n in key), uuid.UUID(step))
             self._timers[inst] = datetime.fromisoformat(wake)
@@ -1257,6 +1738,55 @@ class Execution:
             raise asyncio.CancelledError
 
 
+def quiescent(
+    tasks: Mapping[tuple[Any, ...], Any],
+    timers: Mapping[Instance, Any],
+    budget: Budget,
+    mail: Sequence[Any],
+    answers: Sequence[Any],
+    *,
+    live: int = 0,
+) -> bool:
+    """Where an execution may continue as new: no activity and no child outstanding, and no request to or from a
+    parent or child; a sleeping timer step doesn't count, nor a projection (it's written before the run continues).
+    Nor may its iteration budget hold a waiting need or a child's grant (engine 2b spec §5.3, the at-continue term):
+    a continued input carries only the budget's fixed counters. And its live state is within its budget, its claims
+    landed: a continued input carries at most LIVE_BUDGET of values."""
+    idle = all(k[0] == "project" or (k[0] == "step" and k[1] in timers) for k in tasks)
+    settled = not budget.asking and not budget.waiting and not budget.reserved and not mail and not answers
+    return idle and settled and live <= live_state.LIVE_BUDGET
+
+
+PROGRAM_CACHE = 64  # compiled versions a worker process keeps
+_PROGRAMS: dict[tuple[str, str], Program] = {}
+
+
+def program_of(data: Any) -> Program:
+    """A version's program, compiled once per worker process (engine 2b spec §5.3, a workflow task's CPU): compiling
+    a large version took most of a workflow task, in the first task of every execution and every continue. A version
+    is immutable, so its program is the same wherever and whenever it's compiled, and a replay gets the same one; a
+    program is never changed once compiled. Keyed by the version's content as well as its id: a damaged version
+    compiles again, and fails as before. One that can't compile isn't kept: it raises again."""
+    content = json.dumps(dataclasses.asdict(data), sort_keys=True, separators=(",", ":"), default=str)
+    key = (data.version_id, hashlib.sha256(content.encode()).hexdigest())
+    found = _PROGRAMS.pop(key, None)
+    if found is None:
+        found = compile_program(
+            data.graph,
+            data.manifests,
+            data.expressions,
+            data.cel_profile,
+            data.subflow_version_ids,
+            data.failure_handler_version_id,
+            data.open_scopes_cap,
+            data.loop_depth,
+        )
+    _PROGRAMS[key] = found  # the most recently used last
+    while len(_PROGRAMS) > PROGRAM_CACHE:
+        del _PROGRAMS[next(iter(_PROGRAMS))]
+    return found
+
+
 __all__ = [
     "CEL_BATCH",
     "CEL_REQUEST_BYTES",
@@ -1271,4 +1801,6 @@ __all__ = [
     "VERSION_UNUSABLE",
     "Execution",
     "child_options",
+    "program_of",
+    "quiescent",
 ]

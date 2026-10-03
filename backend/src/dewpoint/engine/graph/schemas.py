@@ -13,6 +13,7 @@ from jsonschema.exceptions import SchemaError
 from referencing.exceptions import Unresolvable
 
 from dewpoint.engine.schema_refs import PREFIX, SCHEMA_LIST, SCHEMA_MAP, SCHEMA_ONE
+from dewpoint.engine.taint import CLEAN, Shape
 from dewpoint.sdk.fields import KINDS, LITERAL
 
 Schema = Mapping[str, Any]
@@ -35,6 +36,7 @@ class PathError(ValueError):
 class Resolved:
     schema: Schema | None  # None: unknown, any value
     conditional: bool  # may be missing or null at run time
+    taint: Shape = CLEAN  # which parts are tainted (engine 2b spec §4.1)
 
 
 def literal_type(value: Any) -> str:

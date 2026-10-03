@@ -1,23 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-"""`run_steps` previews (spec §8): `x-sensitive` fields are redacted wherever the schema puts them, values learned to be
-sensitive are masked wherever they reappear, and oversize previews are truncated."""
+"""`run_steps` previews (spec §8): `x-sensitive` fields are redacted wherever the schema puts them, and oversize
+previews are truncated. A sensitive value never reaches the workflow (engine 2b spec §3.6): the project activity masks
+every row against the run tree's secret index, with the matcher (§3.7)."""
 
 from typing import Annotated, Any
 
 import pytest
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
-from dewpoint.engine.runtime.projection import (
-    MIN_SECRET,
-    PREVIEW_BYTES,
-    REDACTED,
-    TRUNCATED,
-    location,
-    mask,
-    preview,
-    remember,
-    sensitive_values,
-)
+from dewpoint.engine.matcher import Matcher, masked
+from dewpoint.engine.runtime.projection import PREVIEW_BYTES, REDACTED, TRUNCATED, location, preview
+from dewpoint.engine.sensitive import MIN_SECRET
 from dewpoint.sdk import Node, node_manifest, sensitive
 
 SCHEMA: dict[str, Any] = {
@@ -132,7 +125,6 @@ def test_redaction_covers_patterned_maps_tuples_and_sensitive_keys() -> None:
         "keyed": REDACTED,
         "overlap": {"x-token": REDACTED, "name": REDACTED},  # every pattern applies, matched or not: over-redaction
     }
-    assert sensitive_values(value, schema) == ["k3y-one", "k3y-two", "k3y-three", "k3y-four", "n"]
 
 
 def test_a_recursive_schema_ends() -> None:
@@ -143,26 +135,33 @@ def test_a_recursive_schema_ends() -> None:
     assert preview({"k": {"k": {"s": "x"}}, "s": "y"}, tree) == {"k": {"k": {"s": REDACTED}}, "s": REDACTED}
 
 
-def test_sensitive_values_are_learned_and_masked_wherever_they_reappear() -> None:
+def test_a_known_secret_is_masked_wherever_it_reappears() -> None:
     """Review finding: a control step copies a secret into a field no schema marks (a transform, a template, a
-    message). The run remembers every sensitive value it has seen and masks it everywhere it projects."""
-    learned = sensitive_values({"cred": {"user": "u", "secret": "hunter22"}, "maybe": None, "many": []}, NESTED)
-    assert learned == ["hunter22"]
-    secrets = remember((), learned)
-    assert preview({"copy": "hunter22", "header": "Bearer hunter22!", "n": 1}, None, secrets) == {
+    message). The project activity masks every row against the run tree's index, in strings and keys, at any depth."""
+    secrets = Matcher(["hunter22"])
+    row = {"copy": "hunter22", "header": "Bearer hunter22!", "n": 1, "hunter22": [{"m": "login failed for hunter22"}]}
+    assert masked(row, secrets, REDACTED) == {
         "copy": REDACTED,
         "header": f"Bearer {REDACTED}!",
         "n": 1,
+        REDACTED: [{"m": f"login failed for {REDACTED}"}],
     }
-    assert mask("login failed for hunter22", secrets) == f"login failed for {REDACTED}"
-    assert preview({"hunter22": 1}, None, secrets) == {REDACTED: 1}  # keys too
 
 
-def test_masking_is_deterministic_and_skips_values_too_short_to_mean_anything() -> None:
-    secrets = remember(remember((), ["abcd"]), ["abcdef", "xy"])  # "xy" is below MIN_SECRET
-    assert MIN_SECRET == 4 and secrets == ("abcdef", "abcd")  # longest first: a longer secret is masked whole
-    assert mask("abcdef abcd", secrets) == f"{REDACTED} {REDACTED}"
-    assert remember(secrets, ["abcd"]) is secrets  # nothing new, nothing rebuilt
+def test_masking_takes_the_longest_secret_and_skips_values_too_short_to_mean_anything() -> None:
+    secrets = Matcher(["abcd", "abcdef", "xy"])  # "xy" is below MIN_SECRET
+    assert MIN_SECRET == 4 and secrets.strings == ("abcd", "abcdef")
+    assert masked("abcdef abcd xy", secrets, REDACTED) == f"{REDACTED} {REDACTED} xy"
+
+
+def test_secrets_that_overlap_are_masked_as_one_span() -> None:
+    """Review finding (M4): the longest match at each place left the rest of a second secret that overlaps it
+    visible, `[redacted]-SECRET-PART`. Every match counts, and overlapping ones are masked together."""
+    secrets = Matcher(["user-tok-1234", "1234-SECRET-PART"])
+    text = "x user-tok-1234-SECRET-PART y"
+    assert secrets.found(text) == {"user-tok-1234", "1234-SECRET-PART"}
+    assert masked(text, secrets, REDACTED) == f"x {REDACTED} y"
+    assert masked({text: text}, secrets, REDACTED) == {f"x {REDACTED} y": f"x {REDACTED} y"}
 
 
 def test_a_preview_over_8_kib_is_truncated() -> None:

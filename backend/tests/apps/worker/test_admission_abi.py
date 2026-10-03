@@ -23,6 +23,7 @@ from tests.apps.test_workflow_ops import ECHO_GRAPH, actor, create, publish, pub
 from tests.apps.worker.test_deployment import placement
 from tests.apps.worker.test_main import settings
 from tests.engine.replay.record import executions
+from tests.support.keys import FixtureKeys
 from tests.support.plugins.testkit import TESTKIT
 from tests.support.registry import sync_test_plugins
 
@@ -71,7 +72,7 @@ async def test_admission_follows_the_current_build_through_a_promotion(
             dispatch_sessionmaker, client, api_settings, tenant_id=ctx.tenant_id, version_id=version_id, trigger={}
         )
 
-    store = DbRunStore(worker_sessionmaker)
+    store = DbRunStore(worker_sessionmaker, FixtureKeys())
     n1, n = dewpoint_build(OLD), dewpoint_build(NEW)
     async with engine_worker(client, store, [TESTKIT], settings(), build=n1, identity=n1, abi=OLD):
         await set_current(client, n1)

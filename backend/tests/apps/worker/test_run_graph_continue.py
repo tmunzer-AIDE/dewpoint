@@ -214,7 +214,11 @@ async def test_the_headroom_draining_adds_is_measured_and_bounded(own_env: Workf
     store = MemoryStore()
     sub = G()
     sub.settings = {
-        "input_schema": {"type": "object", "properties": {"items": {"type": "array"}}, "required": ["items"]},
+        "input_schema": {
+            "type": "object",
+            "properties": {"items": {"type": "array", "items": {"type": "integer"}}},
+            "required": ["items"],
+        },
         "outputs": {"n": ref("steps.k.output.count")},
     }
     sub.node("s", "testkit.slow@1", {"seconds": 1})  # so it asks for budget while its parent drains

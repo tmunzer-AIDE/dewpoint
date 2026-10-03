@@ -68,6 +68,16 @@ class Program:
     cel_profile: str
     subflows: Mapping[str, str] = field(default_factory=dict)  # run_workflow node id -> its pinned version id
     failure_handler: str | None = None  # the pinned failure-handler version id
+    # pinned in the version (engine 2b spec §5.3): its open-iteration cap, computed at publish, and its loop depth
+    open_scopes_cap: int | None = None
+    loop_depth: int | None = None
+
+    @property
+    def depth(self) -> int:
+        """`D`: the deepest loop nesting, as the version pins it (or as its graph has it)."""
+        if self.loop_depth is not None:
+            return self.loop_depth
+        return max((len(self.chain(self.steps[r].region)) for r in self.regions if r is not None), default=0)
 
     def chain(self, region: uuid.UUID | None) -> list[uuid.UUID | None]:
         """`region` and every region enclosing it, innermost first, ending with the root (None)."""
@@ -119,7 +129,11 @@ def compile_program(
     cel_profile: str,
     subflows: Mapping[str, str] | None = None,
     failure_handler: str | None = None,
+    open_scopes_cap: int | None = None,
+    loop_depth: int | None = None,
 ) -> Program:
+    if open_scopes_cap is not None and open_scopes_cap < 1:  # no cap fit at publish: the bound was never established
+        raise ProgramError(f"The version is pinned an open-iteration cap of {open_scopes_cap}: none fits its bound.")
     graph = parse_graph(graph_json)
     structure, diagnostics = analyze_structure(graph, Catalog(spec_from_manifest(m) for m in manifests.values()))
     errors = [d for d in diagnostics if d.severity == "error"]
@@ -176,6 +190,8 @@ def compile_program(
         cel_profile=cel_profile,
         subflows=dict(sorted((subflows or {}).items())),
         failure_handler=failure_handler,
+        open_scopes_cap=open_scopes_cap,
+        loop_depth=loop_depth,
     )
 
 

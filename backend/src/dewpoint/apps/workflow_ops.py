@@ -10,6 +10,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dewpoint.core.authz.permissions import ROLE_PERMISSIONS, P
 from dewpoint.core.config import Settings
 from dewpoint.core.http import TenantContext
 from dewpoint.core.models.workflows import Workflow, WorkflowVersion
@@ -28,6 +29,8 @@ from dewpoint.engine.graph.validate import (
     validate,
 )
 from dewpoint.engine.registry.catalog import Catalog, spec_from_manifest
+from dewpoint.engine.runtime.bounds import BoundError, pinned
+from dewpoint.engine.runtime.program import compile_program
 
 
 async def _lifecycle_locked() -> None:
@@ -52,7 +55,9 @@ async def check_draft(s: AsyncSession, tenant_id: uuid.UUID, draft: Any, setting
     pins = await service.active_versions(s, tenant_id, referenced_workflows(graph))
     ctx = ValidationContext(
         catalog=catalog,
-        subflows={wid: SubflowInfo(wid, v.id, v.input_schema, v.output_schema) for wid, v in pins.items()},
+        subflows={
+            wid: SubflowInfo(wid, v.id, v.input_schema, v.output_schema, v.output_taint) for wid, v in pins.items()
+        },
         max_run_duration=timedelta(days=settings.max_run_duration_days),
     )
     result = await asyncio.to_thread(validate, graph, ctx)  # CPU-bound: keep the event loop serving others
@@ -150,6 +155,14 @@ async def _pin_abi_errors(s: AsyncSession, pins: list[WorkflowVersion]) -> list[
     ]
 
 
+_DECLASSIFY_FORBIDDEN = Diagnostic(
+    code="declassify.forbidden",
+    field="/settings/declassify",
+    message="Publishing a workflow that declassifies sensitive data needs the workflow.declassify permission "
+    "(tenant admins and owners).",
+)
+
+
 async def publish(
     s: AsyncSession, ctx: TenantContext, wf: Workflow, *, expected_revision: int, settings: Settings
 ) -> Published:
@@ -161,6 +174,8 @@ async def publish(
     warnings = [d for d in checked.diagnostics if d.severity == "warning"]
     if checked.graph is None or checked.result is None or errors:
         return Published(None, errors, warnings)
+    if checked.graph.settings.declassify and P.WORKFLOW_DECLASSIFY not in ROLE_PERMISSIONS[ctx.role]:
+        return Published(None, [_DECLASSIFY_FORBIDDEN], warnings)
     errors = _pin_errors(wf.id, checked.pins)
     if errors:
         return Published(None, errors, warnings)
@@ -179,6 +194,10 @@ async def publish(
     version_id = uuid.uuid4()
     graph_settings = checked.graph.settings
     authored = graph_hash(checked.graph)
+    try:
+        cap, depth = await _pinned(s, checked)
+    except BoundError as e:  # engine 2b spec §5.3: the continued-input bound can't be established for it
+        return Published(None, [Diagnostic(code="version.unbounded", message=str(e))], warnings)
     fh = checked.result.failure_handler_version_id
     version = await service.insert_version(
         s,
@@ -201,6 +220,13 @@ async def publish(
             closure_cel_profiles=closure_cel_profiles,
             closure_depth=_depth(checked.pins),
             expressions=[r.to_json() for r in checked.result.expressions],
+            tainted_sites=[{"node": node, "field": fld} for node, fld in checked.result.tainted_sites],
+            output_taint=dict(checked.result.output_taint),
+            open_scopes_cap=cap,
+            loop_depth=depth,
+            declassified=[
+                {"node": node, "field": fld, "reveals": reveals} for node, fld, reveals in checked.result.declassified
+            ],
             graph_hash=authored,
             version_hash=version_hash(
                 graph_hash=authored,
@@ -212,6 +238,21 @@ async def publish(
         ),
     )
     return Published(version, [], warnings)
+
+
+async def _pinned(s: AsyncSession, checked: Checked) -> tuple[int, int]:
+    """The version's open-iteration cap and loop depth (engine 2b spec §5.3): computed from its structure, pinned in
+    it, so a later change of a constant can't change how a pinned run schedules."""
+    if checked.graph is None or checked.result is None:
+        raise ValueError("a version is published only once checked")
+    rows = await registry.load_node_types(s, checked.result.node_refs)
+    program = compile_program(
+        graph_json(checked.graph),
+        {r.ref: r.manifest for r in rows},
+        [r.to_json() for r in checked.result.expressions],
+        CURRENT_CEL_PROFILE,
+    )
+    return await asyncio.to_thread(pinned, program)  # CPU-bound: keep the event loop serving others
 
 
 async def _check_runnable(s: AsyncSession, version: WorkflowVersion) -> list[Diagnostic]:

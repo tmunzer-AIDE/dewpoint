@@ -2,6 +2,8 @@
 """Engine test fixtures. Lives under tests/, so it is never packaged or registered in production."""
 
 import asyncio
+import sys
+import types
 from datetime import UTC, datetime
 from typing import Any, ClassVar, Literal
 
@@ -173,6 +175,10 @@ class BlobConfig(BaseModel):
     size: int = Field(ge=0, le=4 * 1024 * 1024)
 
 
+class BlobOutput(BaseModel):
+    value: str  # declared, so plain: a sub-flow can take it into a field it doesn't mark sensitive (spec §4.5)
+
+
 class Blob(Node):
     """An output of `size` characters from a small config: what a step returns can pass Temporal's payload limit
     when what it was sent doesn't (engine 2b spec §5.2)."""
@@ -181,13 +187,13 @@ class Blob(Node):
     version = 1
     title = "Blob"
     Config = BlobConfig
-    Output = EchoOutput
+    Output = BlobOutput
 
-    async def run(self, ctx: StepContext, config: BlobConfig) -> EchoOutput:
-        return EchoOutput(value="x" * config.size)
+    async def run(self, ctx: StepContext, config: BlobConfig) -> BlobOutput:
+        return BlobOutput(value="x" * config.size)
 
-    async def simulate(self, ctx: StepContext, config: BlobConfig) -> EchoOutput:
-        return EchoOutput(value="x" * config.size)
+    async def simulate(self, ctx: StepContext, config: BlobConfig) -> BlobOutput:
+        return BlobOutput(value="x" * config.size)
 
 
 class SecretBlobConfig(BaseModel):
@@ -216,8 +222,77 @@ class SecretBlob(Node):
         return await self.run(ctx, config)
 
 
+class SlowEchoConfig(BaseModel):
+    seconds: float = Field(ge=0, le=600)
+    value: Any = None
+    fail: bool = False
+    crash: bool = False  # raises an unexpected error quoting it: a plugin's bug
+
+
+class SlowEcho(Node):
+    """Takes `seconds`, then returns `value`, or fails quoting it (or crashes, quoting it): what it returns or says
+    comes from its input, and the run may have learned it's sensitive meanwhile (engine 2b spec §3.7)."""
+
+    type = "testkit.slow_echo"
+    version = 1
+    title = "Slow echo"
+    Config = SlowEchoConfig
+    Output = EchoOutput
+
+    async def run(self, ctx: StepContext, config: SlowEchoConfig) -> EchoOutput:
+        await asyncio.sleep(config.seconds)
+        if config.fail:
+            raise FatalError("echo_failed", f"failed on {config.value}")
+        if config.crash:
+            raise RuntimeError(f"crashed on {config.value}")
+        return EchoOutput(value=config.value)
+
+
+class LeakyConfig(BaseModel):
+    seed: str
+    size: int = Field(ge=1, le=1024)
+    how: Literal["log", "crash", "crash_class", "crash_forged", "fail", "fail_code"] = "log"
+
+
+class LeakyOutput(BaseModel):
+    token: str = sensitive()
+
+
+class Leaky(Node):
+    """Makes a secret of `size` characters from `seed`, as an API issues a token, and leaks it before it's returned
+    at a sensitive position, as a careless plugin would (engine 2b spec §12): before it's claimed, no index knows it.
+    `log` logs it in an event, a neutral field, a nested value and a field's name; `crash` raises an unexpected error
+    quoting it, `crash_class` one whose class it names, `crash_forged` one whose traceback it forges to carry a number
+    made from it as a line; `fail` fails quoting it in its message, `fail_code` in its code. The class and the code
+    use it as a valid identifier (`-` made `_`): shaped like a safe name, made at run time."""
+
+    type = "testkit.leaky"
+    version = 1
+    title = "Leaky"
+    Config = LeakyConfig
+    Output = LeakyOutput
+
+    async def run(self, ctx: StepContext, config: LeakyConfig) -> LeakyOutput:
+        token = (config.seed + "t" * config.size)[: config.size]
+        ident = token.replace("-", "_")
+        if config.how == "crash":
+            raise RuntimeError(f"crashed holding {token}")
+        if config.how == "crash_class":
+            raise type(ident, (Exception,), {})("crashed")
+        if config.how == "crash_forged":
+            pin = 100_000 + sum(map(ord, token))  # a numeric secret, made at run time
+            raise RuntimeError("crashed").with_traceback(types.TracebackType(None, sys._getframe(), 0, pin))
+        if config.how == "fail":
+            raise FatalError("leaky_failed", f"failed holding {token}")
+        if config.how == "fail_code":
+            raise FatalError(ident, "the token was refused")
+        ctx.log.info(f"issued {token}", detail=token, nested={"token": token}, ok=True, **{token: 1})
+        ctx.log.warning("token_issued", detail=token, ok=True, size=config.size, kind="bearer")
+        return LeakyOutput(token=token)
+
+
 TESTKIT = Plugin(
     name="testkit",
     version="0.0.0",
-    nodes=(Echo, FailN, Slow, Sensitive, AmbiguousSend, SlowSend, Reconcile, Blob, SecretBlob),
+    nodes=(Echo, FailN, Slow, Sensitive, AmbiguousSend, SlowSend, Reconcile, Blob, SecretBlob, SlowEcho, Leaky),
 )

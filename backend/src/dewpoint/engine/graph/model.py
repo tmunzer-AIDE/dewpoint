@@ -70,11 +70,19 @@ def _vars_schema() -> dict[str, Any]:
     return {"type": "object", "properties": {}}
 
 
+class DeclassifySite(_Strict):
+    """A decision that may turn tainted input into plain output (engine 2b spec §4.3): a node and its field."""
+
+    node: uuid.UUID
+    field: str = Field(max_length=200)
+
+
 class GraphSettings(_Strict):
     input_schema: dict[str, Any] = Field(default_factory=_object_schema)
     vars_schema: dict[str, Any] = Field(default_factory=_vars_schema)  # every variable declares a default
     outputs: dict[str, Any] = Field(default_factory=dict)  # evaluated when the run succeeds
     failure_handler: uuid.UUID | None = None  # a workflow id, pinned to its active version at publish
+    declassify: list[DeclassifySite] = Field(default_factory=list, max_length=200)  # §4.3: listed, never implied
 
 
 class Graph(_Strict):

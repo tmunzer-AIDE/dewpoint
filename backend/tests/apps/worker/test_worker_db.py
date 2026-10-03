@@ -22,6 +22,7 @@ from tests.apps.test_workflow_ops import actor, create, publish
 from tests.apps.worker.harness import workers
 from tests.core.runs.test_service import seeded_run
 from tests.support.graphs import G, cel, ref
+from tests.support.keys import FixtureKeys
 from tests.support.registry import sync_test_plugins
 
 # its runs start on the time-skipping server, in a development deployment (engine 2b spec §2.3)
@@ -55,7 +56,7 @@ async def test_a_run_is_projected_and_readable_through_the_api(
     ctx = await actor(owner_sessionmaker)
     out = await publish(api_sessionmaker, ctx, await create(api_sessionmaker, ctx, graph()), api_settings)
     assert out.version is not None
-    async with workers(env.client, DbRunStore(worker_sessionmaker)):
+    async with workers(env.client, DbRunStore(worker_sessionmaker, FixtureKeys())):
         run_id = await start_run(
             dispatch_sessionmaker, env.client, api_settings,
             tenant_id=ctx.tenant_id, version_id=out.version.id, trigger={"x": 1},
@@ -99,7 +100,7 @@ async def test_a_row_the_database_refuses_never_holds_up_the_others_or_the_run(
         return StepRow(str(run_id), step, "a", "", n, status, ended_at=datetime.now(UTC).isoformat())
 
     summary = RunSummary(str(run_id), "succeeded", datetime.now(UTC).isoformat(), iterations=2)
-    await DbRunStore(worker_sessionmaker).project(
+    await DbRunStore(worker_sessionmaker, FixtureKeys()).project(
         ProjectInput(str(tenant), [attempt(1, "failed"), attempt(2, "bogus"), attempt(3, "succeeded")], summary)
     )
     async with owner_sessionmaker() as s, s.begin():
@@ -129,7 +130,7 @@ async def test_a_character_the_database_refuses_never_keeps_its_run_open(
     g.node("f", "flow.fail@1", {"message": ref("trigger.note")})
     out = await publish(api_sessionmaker, ctx, await create(api_sessionmaker, ctx, g.data()), api_settings)
     assert out.version is not None
-    async with workers(env.client, DbRunStore(worker_sessionmaker)):
+    async with workers(env.client, DbRunStore(worker_sessionmaker, FixtureKeys())):
         run_id = await start_run(
             dispatch_sessionmaker, env.client, api_settings,
             tenant_id=ctx.tenant_id, version_id=out.version.id, trigger={"note": "bad \ud800 note"},
@@ -170,7 +171,7 @@ async def test_a_sub_run_row_the_database_refuses_never_holds_up_its_projection(
         kind="subflow",
         started_at=datetime.now(UTC).isoformat(),
     )
-    await DbRunStore(worker_sessionmaker).project(ProjectInput(str(tenant), [], None, start))
+    await DbRunStore(worker_sessionmaker, FixtureKeys()).project(ProjectInput(str(tenant), [], None, start))
     async with owner_sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant)
         assert await runs.get_run(s, child) is None
@@ -203,7 +204,7 @@ async def test_a_sub_flow_is_projected_as_a_run_of_its_own(
     g.node("r", "flow.run_workflow@1", {"workflow_id": str(sub_id), "input": {"n": 21}})
     out = await publish(api_sessionmaker, ctx, await create(api_sessionmaker, ctx, g.data()), api_settings)
     assert out.version is not None
-    async with workers(env.client, DbRunStore(worker_sessionmaker)):
+    async with workers(env.client, DbRunStore(worker_sessionmaker, FixtureKeys())):
         run_id = await start_run(
             dispatch_sessionmaker, env.client, api_settings,
             tenant_id=ctx.tenant_id, version_id=out.version.id, trigger={},
@@ -226,3 +227,16 @@ async def test_a_sub_flow_is_projected_as_a_run_of_its_own(
     assert child["workflow_id"] == str(sub_id)
     sub_detail = (await viewer.get(f"/api/v1/t/{ctx.tenant_id}/runs/{child['id']}")).json()
     assert [s["key"] for s in sub_detail["steps"]] == ["t"] and sub_detail["parent_run_id"] == str(run_id)
+
+
+async def test_the_worker_loads_a_versions_pinned_cap_and_depth(
+    owner_sessionmaker: Any, api_sessionmaker: Any, admin_sessionmaker: Any, api_settings: Any, worker_sessionmaker: Any
+) -> None:
+    """Engine 2b spec §5.3: what publish pinned is what a run schedules with."""
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    g = G().node("o", "flow.loop@1", {"items": [1]}).node("e", "testkit.echo@1", {"value": 1}).edge("o", "e", "body")
+    out = await publish(api_sessionmaker, ctx, await create(api_sessionmaker, ctx, g.data()), api_settings)
+    assert out.version is not None
+    data = await DbRunStore(worker_sessionmaker, FixtureKeys()).version(str(ctx.tenant_id), str(out.version.id))
+    assert (data.open_scopes_cap, data.loop_depth) == (100, 1)

@@ -162,7 +162,7 @@ class Parent:
             pass
         await workflow.execute_activity(beat, {}, start_to_close_timeout=TIMEOUT, heartbeat_timeout=TIMEOUT)
         await self.child(run_workflow_id(tenant, str(workflow.uuid4())), **{"continue": True})
-        await self.child(f"{me}/step/l:0/batch:0")
+        await self.child(f"{me}/{uuid.UUID(int=7)}/l:0/batch:0")  # a batch, by the exact grammar
         try:
             await self.child(run_workflow_id(tenant, str(workflow.uuid4())), fail=True)
         except ChildWorkflowError:

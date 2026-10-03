@@ -57,7 +57,7 @@ def graphs() -> tuple[MemoryStore, G, G]:
     new = G()  # N's: nothing retired
     new.settings = {
         "input_schema": {"type": "object"},
-        "outputs": {"n": cel(f"steps.e.output.value + {EVALUATOR_ONLY}")},
+        "outputs": {"n": cel(f"41 + {EVALUATOR_ONLY}")},  # in the evaluator, reading nothing sensitive
     }
     new.node("e", "testkit.echo@1", {"value": 41})
     return store, old, new
@@ -67,7 +67,7 @@ async def test_the_old_build_drains_while_the_new_one_serves_new_runs(dev_env: W
     client, n1, n = dev_env.client, build("n-1"), build("n")
     store, old_graph, new_graph = graphs()
     evaluator = Worker(
-        client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(in_process)], identity=CEL
+        client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(in_process, store)], identity=CEL
     )
     async with evaluator, engine_worker(client, store, [TESTKIT], settings(), build=n1, identity=n1):
         await set_current(client, n1)
@@ -149,7 +149,9 @@ async def test_a_cel_worker_of_an_older_abi_never_receives_this_builds_requests(
         await scheduled(run, CEL_EVALUATE)
         await asyncio.sleep(2)  # the older build's CEL worker polls all along
         assert older.decoded == 0
-        async with Worker(client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(in_process)]):
+        async with Worker(
+            client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(in_process, store)]
+        ):
             result = await asyncio.wait_for(run.result(), 60)
     assert (result.status, result.outputs) == ("succeeded", {"n": 42})
 

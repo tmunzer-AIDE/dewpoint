@@ -218,9 +218,10 @@ Every run starts as a durable `run_requests` row, unique on `(tenant_id, idempot
 - Activity inputs carry only IDs (`tenant_id`, `run_id`, `step_id`, `connection_id`) plus non-secret config.
 - A **credential resolver** inside the activity checks that the run's version declares the `connection_id` (and, for unattended agent tools, that a `service_grants` row exists). It then decrypts the secret in memory. There is no cross-tenant caching and **no tenant-default connection fallback**.
 - A **Temporal PayloadCodec** envelope-encrypts every payload with a per-tenant data key, wrapped by a key-encryption key from an environment secret, Vault or KMS. The Temporal Web UI is not exposed, or is restricted to platform operators through an authenticated codec server.
-- **Claim check:** outputs above a size threshold, and fields a manifest marks `sensitive`, are stored encrypted in `step_outputs`; only a handle enters history.
-  - A CEL expression that needs claimed data is evaluated in an `eval` activity that returns only the reduced result.
+- **Claim check** (engine 2b spec §3–§5): values over 64 KiB, positions a schema marks sensitive or doesn't declare, and text repeating a secret the run knows are stored encrypted in `run_inputs` (a run's input) and `step_outputs` (what it produces); only a handle enters history.
+  - A CEL expression that needs claimed data is evaluated in the `cel.evaluate` activity, which reads the claims and returns only the reduced result.
   - A result derived from a sensitive field stays claimed.
+  - Publish traces where sensitive data flows: a decision over it must be listed and permitted (`workflow.declassify`), and it may never become a timer, a failure message or a plain sub-flow input.
 - **Retention:**
   - Temporal: one shared namespace with a single platform-wide closed-history retention period (operator setting, for example 7 days).
   - Tenant-specific retention applies to app-side data: `runs`, `run_steps`, `step_outputs`, `inbound_events`, `llm_calls`.

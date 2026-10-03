@@ -6,14 +6,19 @@
 - no edge is left pending when a run succeeds, so nothing deadlocks.
 
 The same runs also take snapshots at random points and carry on from them (continue-as-new), and some loops run in
-batches whose children report random outcomes (2a-3b)."""
+batches whose children report random outcomes (2a-3b). Some run under a small open-iteration cap (engine 2b spec
+§5.3): open iteration scopes never pass the cap plus the version's loop depth, and nothing is left stuck. Some run
+under a small live-state budget: containers go to claims, which land at random moments, before or after a snapshot;
+the counter always equals a recount."""
 
+import dataclasses
 import json
 from typing import Any
 
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
+from dewpoint.engine.runtime import scheduler as S
 from dewpoint.engine.runtime.scheduler import (
     SETTLED,
     Batch,
@@ -101,20 +106,33 @@ def _entry_ok(s: Scheduler, inst: Instance) -> bool:
 @settings(max_examples=300, deadline=None, suppress_health_check=[HealthCheck.too_slow])
 @given(graphs(), st.data())
 def test_random_runs_keep_the_scheduling_invariants(g: G, data: st.DataObject) -> None:
-    s = Scheduler(program(g))
+    budget = data.draw(st.sampled_from([S.LIVE_BUDGET, 150, 500]), label="live budget")
+    lowered, S.LIVE_BUDGET = S.LIVE_BUDGET, budget
+    try:
+        run(g, data)
+    finally:
+        S.LIVE_BUDGET = lowered
+
+
+def run(g: G, data: st.DataObject) -> None:
+    cap = data.draw(st.sampled_from([None, 1, 2]), label="cap")
+    s = Scheduler(dataclasses.replace(program(g), open_scopes_cap=cap), prefix="t:1:run:2")
     s.start()
+    spills: list[Any] = []
     running: list[Instance] = []
     collects: list[Any] = []
     batches: list[Batch] = []
     handed: dict[Instance, int] = {}
     while s.ended is None:
+        assert s.open_scopes <= s.cap + s.reserve, "open iteration scopes passed the cap and the reservation"
+        assert s.live == s.recount(), "the live-state counter drifted from what the state holds"
         cancelled = set(s.take_cancels())
         running = [r for r in running if r not in cancelled]
         batches = [b for b in batches if b.loop not in cancelled]
         # continue-as-new: carry on from a snapshot, taken with work still queued, as drain mode leaves it
-        if data.draw(st.integers(0, 7), label="snapshot") == 0:
+        if data.draw(st.integers(0, 7), label="snapshot") == 0 and s.live <= S.LIVE_BUDGET:
             s.take_settled()
-            s = Scheduler.from_json(s.program, json.loads(json.dumps(s.to_json())))
+            s = Scheduler.from_json(s.program, json.loads(json.dumps(s.to_json(check=True))), prefix="t:1:run:2")
         for inst in s.take_ready():
             handed[inst] = handed.get(inst, 0) + 1
             assert handed[inst] == 1, "a step ran twice in one scope"
@@ -123,8 +141,15 @@ def test_random_runs_keep_the_scheduling_invariants(g: G, data: st.DataObject) -
             running.append(inst)
         collects += s.take_collects()
         batches += s.take_batches()
-        if not running and not collects and not batches:
+        spills += s.take_spills()
+        if not running and not collects and not batches and not spills:
             raise AssertionError("stuck: nothing running, nothing to collect, and the run hasn't ended")
+        if spills and data.draw(st.integers(0, 2), label="land a claim") == 0:
+            sp = spills.pop(data.draw(st.integers(0, len(spills) - 1), label="which claim"))
+            s.spilled(sp.owner, sp.which, sp.first)
+            continue
+        if not running and not collects and not batches:
+            continue
         pick = data.draw(st.integers(0, len(running) + len(collects) + len(batches) - 1))
         if pick >= len(running) + len(collects):
             b = batches.pop(pick - len(running) - len(collects))
@@ -161,7 +186,7 @@ def test_random_runs_keep_the_scheduling_invariants(g: G, data: st.DataObject) -
         elif data.draw(st.integers(0, 4), label="outcome") == 0:
             s.fail(inst, Failure("testkit.boom", "it broke"))
         else:
-            s.succeed(inst, {"n": 1})
+            s.succeed(inst, {"n": "x" * data.draw(st.sampled_from([0, 50, 400, 700]), label="output")})
     # dead steps never ran; every step of a scope that finished normally settled, with no edge left pending
     for scope in s.scopes.values():
         for node_id, state in scope.nodes.items():
