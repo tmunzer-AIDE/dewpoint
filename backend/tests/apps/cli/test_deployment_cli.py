@@ -15,7 +15,23 @@ from dewpoint.engine.runtime.build import build_id
 from tests.apps.cli.test_dev_run_cli import cli_env  # noqa: F401  (a fixture)
 
 
-@pytest.mark.usefixtures("cli_env")
+class _Client:
+    @staticmethod
+    async def connect(*args: Any, **kwargs: Any) -> "_Client":
+        return _Client()
+
+
+async def _recorded(*args: Any) -> None:
+    """A deployment whose record matches: the CLI's Temporal commands check it before connecting (2b spec §2.1)."""
+
+
+@pytest.fixture
+def temporal_stand_in(cli_env: None, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
+    monkeypatch.setattr(cli, "Client", _Client)
+    monkeypatch.setattr(cli, "verify_environment", _recorded)  # the check itself: tests/apps/test_environment.py
+
+
+@pytest.mark.usefixtures("temporal_stand_in")
 def test_set_current_defaults_to_this_build(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[tuple[str, float]] = []
 
@@ -31,7 +47,7 @@ def test_set_current_defaults_to_this_build(monkeypatch: pytest.MonkeyPatch) -> 
     assert seen == [(this, 60.0), ("b-2", 5.0)]
 
 
-@pytest.mark.usefixtures("cli_env")
+@pytest.mark.usefixtures("temporal_stand_in")
 def test_status_lists_every_version(monkeypatch: pytest.MonkeyPatch) -> None:
     async def describe(client: Any) -> Deployment:
         return Deployment("b-2", [Version("b-1", "draining"), Version("b-2", "current")])

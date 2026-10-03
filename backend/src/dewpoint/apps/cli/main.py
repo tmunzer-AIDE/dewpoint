@@ -6,7 +6,6 @@ import os
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
 
@@ -16,18 +15,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import Client
 
+from dewpoint.apps import admission, dev_run
 from dewpoint.apps.codec import KeyringKeys, data_converter
 from dewpoint.apps.dispatcher.dispatch import START_DEADLINE
 from dewpoint.apps.dispatcher.gate import disable_and_wait
 from dewpoint.apps.environment import verify_environment
 from dewpoint.apps.plugin_loader import PluginLoadError, installed_plugins, prepare
-from dewpoint.apps.runs import NotAdmissibleError, StartRefusedError, StartUncertainError, start_run
 from dewpoint.apps.worker.deployment import Deployment, describe, set_current, this_build
 from dewpoint.apps.worker.health import WorkerUnhealthyError
 from dewpoint.apps.worker.main import run as run_worker
 from dewpoint.core.audit.anchor import FileAnchorSink, anchor_all, anchor_freshness, verify_anchors
 from dewpoint.core.auth.users import PasswordPolicyError, create_user
-from dewpoint.core.config import Settings, get_settings
+from dewpoint.core.config import get_settings
 from dewpoint.core.crypto.kek import KekSet, UnknownKekError
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.db import make_engine, make_sessionmaker
@@ -44,9 +43,6 @@ from dewpoint.core.plugins.registry import (
 )
 from dewpoint.core.tenancy.service import NotKeyAdminError, ensure_tenant_keys
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
-from dewpoint.engine.runtime.activities import LIVE, SIMULATE, RunResult
-from dewpoint.engine.runtime.ids import run_workflow_id
-from dewpoint.engine.runtime.workflow import RunGraph
 from dewpoint.sdk import ManifestError
 
 app = typer.Typer(no_args_is_help=True)
@@ -487,76 +483,56 @@ def deployment_status() -> None:
         typer.echo(f"{v.build_id}  {v.status}")
 
 
-async def dev_run_version(
-    settings: Settings,
-    client: Client,
-    *,
-    tenant_id: uuid.UUID,
-    version_id: uuid.UUID,
-    trigger: dict[str, object],
-    simulate: bool = False,
-    wait: bool = True,
-) -> tuple[uuid.UUID, RunResult | None]:
-    engine = make_engine(settings.database_url)
-    try:
-        run_id = await start_run(
-            make_sessionmaker(engine),
-            client,
-            settings,
-            tenant_id=tenant_id,
-            version_id=version_id,
-            trigger=trigger,
-            mode=SIMULATE if simulate else LIVE,
-        )
-    finally:
-        await engine.dispose()
-    if not wait:
-        return run_id, None
-    return run_id, await client.get_workflow_handle_for(
-        RunGraph.run, run_workflow_id(str(tenant_id), str(run_id))
-    ).result()
-
-
 @dev_cli.command("run")
-def dev_run(
-    version_id: uuid.UUID,
+def dev_run_command(
+    workflow_id: uuid.UUID,
     tenant: str = typer.Option(..., "--tenant", help="tenant id"),
-    input_file: str | None = typer.Option(None, "--input", help="JSON trigger payload (test data only until 2b)"),
+    input_file: str | None = typer.Option(None, "--input", help="JSON input for the active version"),
     simulate: bool = typer.Option(False, "--simulate", help="Plugin steps call simulate(): nothing is sent"),
-    wait: bool = typer.Option(True, "--wait/--no-wait"),
+    wait: float = typer.Option(0.0, "--wait", help="seconds to wait for the end the database records (0: don't)"),
+    idempotency_key: str | None = typer.Option(None, "--idempotency-key", help="retry a request (default: a new one)"),
 ) -> None:
-    """Start a run of a workflow's active version. Development only: 2b brings admission and triggers."""
-    trigger = json.loads(Path(input_file).read_text()) if input_file else {}
-    if not isinstance(trigger, dict):  # a run's trigger is an object: anything else could never start
+    """Admit a run of a workflow's active version (source `dev`); the dispatcher starts it. Run as dewpoint_dispatch.
+    Exit 0 when admitted (or, with --wait, when the run succeeded), 1 when it ended otherwise, 2 when it wasn't
+    admitted, 3 when the wait ran out."""
+    payload = json.loads(Path(input_file).read_text()) if input_file else {}
+    if not isinstance(payload, dict):  # a run's input is an object: anything else could never start
         typer.echo("ERROR: --input must hold a JSON object")
         raise typer.Exit(2)
+    settings = get_settings()
+    tenant_id = uuid.UUID(tenant)
 
-    async def _go() -> tuple[uuid.UUID, RunResult | None]:
-        async with _temporal() as client:
-            return await dev_run_version(
-                get_settings(),
-                client,
-                tenant_id=uuid.UUID(tenant),
-                version_id=version_id,
-                trigger=trigger,
-                simulate=simulate,
-                wait=wait,
-            )
+    async def _go() -> tuple[uuid.UUID, dev_run.Ended | None]:
+        engine = make_engine(settings.database_url)
+        try:
+            sessionmaker = make_sessionmaker(engine)
+            keys = KeyringKeys(sessionmaker, Keyring(KekSet.from_settings(settings)))
+            request = await dev_run.admit(
+                sessionmaker, keys, tenant_id=tenant_id, workflow_id=workflow_id, input=payload, simulate=simulate,
+                idempotency_key=idempotency_key or str(uuid.uuid4()),
+            )  # fmt: skip
+            if wait <= 0:
+                return request.id, None
+            return request.id, await dev_run.wait_for_end(sessionmaker, tenant_id, request.id, within=wait)
+        finally:
+            await engine.dispose()
 
     try:
-        run_id, result = asyncio.run(_go())
-    except NotAdmissibleError as e:
-        for reason in e.reasons:
-            typer.echo(f"ERROR: {reason}")
+        request_id, end = asyncio.run(_go())
+    except admission.AdmissionRefusedError as e:
+        for message in e.messages:
+            typer.echo(f"ERROR: {message}")
         raise typer.Exit(2) from None
-    except StartRefusedError as e:
-        typer.echo(f"ERROR: {e}")
-        raise typer.Exit(1) from None
-    except StartUncertainError as e:
-        typer.echo(f"WARNING: {e}")
-        raise typer.Exit(3) from None
-    typer.echo(f"run {run_id}")
-    if result is not None:
-        typer.echo(json.dumps(asdict(result), indent=2, sort_keys=True))
-        if result.status != "succeeded":
-            raise typer.Exit(1)
+    except (admission.WorkflowNotFoundError, admission.IdempotencyConflictError) as e:
+        typer.echo(f"ERROR: {e or type(e).__name__}")
+        raise typer.Exit(2) from None
+    if wait <= 0:
+        typer.echo(f"request {request_id} queued")
+        return
+    if end is None:
+        typer.echo(f"WARNING: request {request_id} hasn't ended after {wait:g} s")
+        raise typer.Exit(3)
+    detail = ": ".join(part for part in (end.code, end.message) if part)
+    typer.echo(f"{end.what} {request_id} {end.status}" + (f": {detail}" if detail else ""))
+    if (end.what, end.status) != ("run", "succeeded"):
+        raise typer.Exit(1)

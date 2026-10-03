@@ -1,31 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
-"""`dewpoint dev run`'s exit codes: 0 when the run succeeded, 1 when it ended otherwise or Temporal refused it, 2 when
-it wasn't admitted, 3 when Temporal never confirmed the start. The run itself is covered by
-tests/apps/worker/test_dev_run.py; here Temporal and the run are stand-ins."""
+"""`dewpoint dev run` (engine 2b spec §7.7): it admits a workflow with the source `dev` and, with `--wait`, waits a
+bounded time for the end the database records. Exit codes: 0 admitted (or, waited, the run succeeded), 1 it ended
+otherwise, 2 it wasn't admitted, 3 the wait ran out. The path itself is covered by tests/apps/worker/test_dev_run.py;
+here admission and the wait are stand-ins. No command starts a run itself."""
 
 import base64
 import json
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from temporalio.converter import DefaultFailureConverterWithEncodedAttributes
 from typer.testing import CliRunner
 
+from dewpoint.apps import admission, dev_run
 from dewpoint.apps.cli import main as cli
-from dewpoint.apps.codec import TenantCodec
-from dewpoint.apps.runs import NotAdmissibleError, StartRefusedError, StartUncertainError
 from dewpoint.core.config import get_settings
-from dewpoint.engine.runtime.activities import RunResult
 
-RUN = uuid.UUID(int=7)
-
-
-class _Client:
-    @staticmethod
-    async def connect(*args: Any, **kwargs: Any) -> "_Client":
-        return _Client()
+REQUEST = uuid.UUID(int=7)
 
 
 @pytest.fixture
@@ -33,110 +26,90 @@ def cli_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DEWPOINT_DATABASE_URL", "postgresql+asyncpg://nobody@localhost/none")
     monkeypatch.setenv("DEWPOINT_KEK_B64", base64.b64encode(b"k" * 32).decode())
     monkeypatch.setenv("DEWPOINT_PUBLIC_ORIGIN", "https://dewpoint.test")
-    monkeypatch.setattr(cli, "Client", _Client)
-    monkeypatch.setattr(cli, "verify_environment", _recorded)  # the check itself: tests/apps/test_environment.py
     get_settings.cache_clear()
 
 
-async def _recorded(*args: Any) -> None:
-    """A deployment whose record matches: the CLI's Temporal commands check it before connecting (2b spec §2.1)."""
-
-
-def _answer(monkeypatch: pytest.MonkeyPatch, outcome: RunResult | Exception, seen: dict[str, Any]) -> None:
-    async def dev_run_version(settings: Any, client: Any, **kwargs: Any) -> tuple[uuid.UUID, RunResult | None]:
+def answer(monkeypatch: pytest.MonkeyPatch, admitted: Any, ended: Any, seen: dict[str, Any]) -> None:
+    async def admit(sessionmaker: Any, keys: Any, **kwargs: Any) -> Any:
         seen.update(kwargs)
-        if isinstance(outcome, Exception):
-            raise outcome
-        return RUN, outcome if kwargs["wait"] else None
+        if isinstance(admitted, Exception):
+            raise admitted
+        return SimpleNamespace(id=REQUEST, status="queued")
 
-    monkeypatch.setattr(cli, "dev_run_version", dev_run_version)
+    async def wait_for_end(sessionmaker: Any, tenant_id: Any, request_id: Any, *, within: float, **_: Any) -> Any:
+        seen["within"] = within
+        return ended
+
+    monkeypatch.setattr(dev_run, "admit", admit)
+    monkeypatch.setattr(dev_run, "wait_for_end", wait_for_end)
+
+
+def run(*args: str) -> Any:
+    return CliRunner().invoke(cli.app, ["dev", "run", str(uuid.UUID(int=1)), "--tenant", str(uuid.UUID(int=2)), *args])
 
 
 @pytest.mark.usefixtures("cli_env")
-def test_a_succeeded_run_prints_its_result(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_without_wait_it_prints_the_queued_request(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     seen: dict[str, Any] = {}
-    _answer(monkeypatch, RunResult("succeeded", {"v": 2}), seen)
-    payload = tmp_path / "trigger.json"
+    answer(monkeypatch, None, None, seen)
+    payload = tmp_path / "input.json"
     payload.write_text(json.dumps({"x": 1}))
-    tenant, version = uuid.uuid4(), uuid.uuid4()
-    result = CliRunner().invoke(
-        cli.app, ["dev", "run", str(version), "--tenant", str(tenant), "--input", str(payload), "--simulate"]
-    )
-    assert result.exit_code == 0, result.output
-    assert f"run {RUN}" in result.output and '"status": "succeeded"' in result.output
-    assert seen == {"tenant_id": tenant, "version_id": version, "trigger": {"x": 1}, "simulate": True, "wait": True}
-
-
-@pytest.mark.usefixtures("cli_env")
-def test_a_run_that_did_not_succeed_exits_1(monkeypatch: pytest.MonkeyPatch) -> None:
-    _answer(monkeypatch, RunResult("failed", error={"code": "workflow_failed", "message": "no"}), {})
-    result = CliRunner().invoke(cli.app, ["dev", "run", str(uuid.uuid4()), "--tenant", str(uuid.uuid4())])
-    assert result.exit_code == 1 and '"code": "workflow_failed"' in result.output
-
-
-@pytest.mark.usefixtures("cli_env")
-def test_a_refused_run_exits_2_with_its_reasons(monkeypatch: pytest.MonkeyPatch) -> None:
-    _answer(monkeypatch, NotAdmissibleError(["the workflow is disabled"]), {})
-    result = CliRunner().invoke(cli.app, ["dev", "run", str(uuid.uuid4()), "--tenant", str(uuid.uuid4())])
-    assert result.exit_code == 2 and "ERROR: the workflow is disabled" in result.output
-
-
-@pytest.mark.usefixtures("cli_env")
-def test_no_wait_prints_only_the_run_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    _answer(monkeypatch, RunResult("succeeded"), {})
-    args = ["dev", "run", str(uuid.uuid4()), "--tenant", str(uuid.uuid4()), "--no-wait"]
-    result = CliRunner().invoke(cli.app, args)
-    assert (result.exit_code, result.output.strip()) == (0, f"run {RUN}")
+    result = run("--input", str(payload), "--simulate", "--idempotency-key", "k1")
+    assert (result.exit_code, result.output) == (0, f"request {REQUEST} queued\n")
+    assert seen == {"tenant_id": uuid.UUID(int=2), "workflow_id": uuid.UUID(int=1), "input": {"x": 1},
+                    "simulate": True, "idempotency_key": "k1"}  # fmt: skip
 
 
 @pytest.mark.usefixtures("cli_env")
 @pytest.mark.parametrize(
-    ("error", "code", "said"),
+    ("ended", "code", "said"),
     [
-        (StartRefusedError("Temporal refused the run (INVALID_ARGUMENT)."), 1, "ERROR: Temporal refused the run"),
-        (StartUncertainError(RUN), 3, f"WARNING: Temporal didn't confirm or refuse run {RUN}"),
+        (dev_run.Ended("run", "succeeded", None, None), 0, f"run {REQUEST} succeeded"),
+        (dev_run.Ended("run", "failed", "workflow_failed", "no"), 1, f"run {REQUEST} failed: workflow_failed: no"),
+        (dev_run.Ended("request", "dead", "start_refused", None), 1, f"request {REQUEST} dead: start_refused"),
+        (None, 3, f"WARNING: request {REQUEST} hasn't ended after 5 s"),
     ],
+    ids=["succeeded", "failed", "dead", "wait_ran_out"],
 )
-def test_a_start_temporal_refused_or_never_confirmed(
-    monkeypatch: pytest.MonkeyPatch, error: Exception, code: int, said: str
+def test_waiting_reports_the_end_the_database_records(
+    monkeypatch: pytest.MonkeyPatch, ended: Any, code: int, said: str
 ) -> None:
-    _answer(monkeypatch, error, {})
-    result = CliRunner().invoke(cli.app, ["dev", "run", str(uuid.uuid4()), "--tenant", str(uuid.uuid4())])
-    assert result.exit_code == code and said in result.output
+    seen: dict[str, Any] = {}
+    answer(monkeypatch, None, ended, seen)
+    result = run("--wait", "5")
+    assert result.exit_code == code and said in result.output and seen["within"] == 5.0
+
+
+@pytest.mark.usefixtures("cli_env")
+def test_a_refused_admission_exits_2_with_its_reasons(monkeypatch: pytest.MonkeyPatch) -> None:
+    answer(monkeypatch, admission.AdmissionRefusedError("workflow_disabled", ["The workflow is disabled."]), None, {})
+    result = run()
+    assert result.exit_code == 2 and "ERROR: The workflow is disabled." in result.output
+
+
+@pytest.mark.usefixtures("cli_env")
+def test_each_invocation_gets_its_own_idempotency_key_unless_given(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+    answer(monkeypatch, None, None, seen)
+    run()
+    first = seen["idempotency_key"]
+    run()
+    assert first and seen["idempotency_key"] != first
 
 
 @pytest.mark.usefixtures("cli_env")
 @pytest.mark.parametrize("payload", ["[1, 2]", '"text"', "3"])
-def test_an_input_that_isnt_a_json_object_is_refused_before_anything_starts(
+def test_an_input_that_isnt_a_json_object_is_refused_before_admission(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, payload: str
 ) -> None:
-    """2a-3a's final review, M4: a trigger that isn't an object (a list, a string) left the run failing its first
-    workflow task forever, so it hung. The CLI refuses it."""
     seen: dict[str, Any] = {}
-    _answer(monkeypatch, RunResult("succeeded", {}), seen)
-    trigger = tmp_path / "trigger.json"
+    answer(monkeypatch, None, None, seen)
+    trigger = tmp_path / "input.json"
     trigger.write_text(payload)
-    result = CliRunner().invoke(
-        cli.app, ["dev", "run", str(uuid.uuid4()), "--tenant", str(uuid.uuid4()), "--input", str(trigger)]
-    )
+    result = run("--input", str(trigger))
     assert (result.exit_code, result.output) == (2, "ERROR: --input must hold a JSON object\n") and seen == {}
 
 
-@pytest.mark.usefixtures("cli_env")
-def test_the_cli_connects_with_the_tenant_codec(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Engine 2b spec §6.2: the dev CLI's start and its result go through the codec, failures too."""
-    connected: dict[str, Any] = {}
-
-    class Recording(_Client):
-        @staticmethod
-        async def connect(*args: Any, **kwargs: Any) -> "_Client":
-            connected.update(kwargs)
-            return _Client()
-
-    monkeypatch.setattr(cli, "Client", Recording)
-    _answer(monkeypatch, RunResult("succeeded", {}), {})
-    result = CliRunner().invoke(cli.app, ["dev", "run", str(uuid.uuid4()), "--tenant", str(uuid.uuid4())])
-    assert result.exit_code == 0, result.output
-    converter = connected["data_converter"]
-    assert isinstance(converter.payload_codec, TenantCodec)
-    assert converter.failure_converter_class is DefaultFailureConverterWithEncodedAttributes
+def test_no_command_starts_a_run_itself() -> None:
+    """2b-2: every packaged start goes through admission and the dispatcher; `start_run` is a test helper."""
+    assert "start_run" not in vars(cli) and "dev_run_version" not in vars(cli)
