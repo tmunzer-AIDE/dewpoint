@@ -7,13 +7,15 @@ import math
 import re
 import uuid
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, select, tuple_, update
+from sqlalchemy import func, literal, null, or_, select, tuple_, union_all, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dewpoint.core.models.requests import RunRequest
 from dewpoint.core.models.runs import Run, RunStep
 
 MESSAGE_LIMIT = 500
@@ -212,6 +214,64 @@ async def list_runs(
     if before is not None:
         q = q.where(tuple_(Run.started_at, Run.id) < tuple_(*before))
     return list((await s.execute(q)).scalars())
+
+
+@dataclass(frozen=True)
+class Listed:
+    """One item of the runs list (engine 2b spec §7.7): a top-level run, or a request that hasn't started. `status` is
+    the run's once its request started (or when it has none, from before 2b-2), else the request's."""
+
+    id: uuid.UUID
+    workflow_id: uuid.UUID
+    version_id: uuid.UUID | None
+    mode: str
+    status: str
+    queued_at: datetime
+    started_at: datetime | None
+    ended_at: datetime | None
+    error_code: str | None
+    error_message: str | None
+    iterations: int
+    kind: str
+    request_status: str | None
+    source: str | None
+    reason: str | None
+
+
+async def list_items(
+    s: AsyncSession,
+    *,
+    workflow_id: uuid.UUID | None = None,
+    before: tuple[datetime, uuid.UUID] | None = None,
+    limit: int = 50,
+) -> list[Listed]:
+    """Requests and runs together, newest first by `(queued_at, id)`; the next page starts after the last item of this
+    one. A request's pre-created row is never shown until its request has started (§7.3): the request is."""
+    runs = (
+        select(
+            Run.id, Run.workflow_id, Run.workflow_version_id.label("version_id"), Run.mode, Run.status, Run.queued_at,
+            Run.started_at, Run.ended_at, Run.error_code, Run.error_message, Run.iterations, Run.kind,
+            RunRequest.status.label("request_status"), RunRequest.source, RunRequest.reason,
+        )
+        .outerjoin(RunRequest, RunRequest.id == Run.id)
+        .where(Run.parent_run_id.is_(None), or_(RunRequest.id.is_(None), RunRequest.status == "started"))
+    )  # fmt: skip
+    requests = select(
+        RunRequest.id, RunRequest.workflow_id, RunRequest.workflow_version_id.label("version_id"), RunRequest.mode,
+        RunRequest.status, RunRequest.queued_at, null().label("started_at"), RunRequest.ended_at,
+        null().label("error_code"), null().label("error_message"), literal(0).label("iterations"),
+        literal("run").label("kind"), RunRequest.status.label("request_status"), RunRequest.source, RunRequest.reason,
+    ).where(RunRequest.status != "started")  # fmt: skip
+    if workflow_id is not None:
+        runs, requests = (
+            runs.where(Run.workflow_id == workflow_id),
+            requests.where(RunRequest.workflow_id == workflow_id),
+        )
+    both = union_all(runs, requests).subquery()
+    q = select(both).order_by(both.c.queued_at.desc(), both.c.id.desc()).limit(limit)
+    if before is not None:
+        q = q.where(tuple_(both.c.queued_at, both.c.id) < tuple_(*before))
+    return [Listed(**row._mapping) for row in await s.execute(q)]
 
 
 async def children(s: AsyncSession, run_id: uuid.UUID) -> list[Run]:
