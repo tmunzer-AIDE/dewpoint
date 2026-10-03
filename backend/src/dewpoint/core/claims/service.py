@@ -40,6 +40,11 @@ class EnvelopeUnavailableError(Exception):
     has removed. The message is fixed."""
 
 
+class EnvelopeUnreadableError(EnvelopeUnavailableError):
+    """A request's trigger envelope that is there but broken: its ciphertext doesn't open under its tenant and id, or
+    what it opens to isn't JSON. Reading it again never mends it. The message is fixed."""
+
+
 class ClaimConflictError(Exception):
     """A claim written again under its id with other content: nothing was written. A bug, never a value's fault."""
 
@@ -205,6 +210,10 @@ async def read_envelope(s: AsyncSession, cipher: ClaimCipher, tenant_id: uuid.UU
     if found is None:
         raise EnvelopeUnavailableError("A request whose trigger envelope isn't there.")
     try:
-        return json.loads(await cipher.open(str(tenant_id), str(found.id), found.ciphertext))
+        plain = await cipher.open(str(tenant_id), str(found.id), found.ciphertext)
     except ClaimUnreadableError as e:
-        raise EnvelopeUnavailableError("A trigger envelope that doesn't open under its tenant.") from e
+        raise EnvelopeUnreadableError("A trigger envelope that doesn't open under its tenant.") from e
+    try:
+        return json.loads(plain)
+    except ValueError:  # not UTF-8, or not JSON
+        raise EnvelopeUnreadableError("A trigger envelope that isn't JSON.") from None

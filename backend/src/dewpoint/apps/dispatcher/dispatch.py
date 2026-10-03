@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -56,6 +57,9 @@ CANDIDATES = 50  # tenants picked per cycle, each its oldest due request
 START_REFUSED = "start_refused"
 ID_COLLISION = "id_collision"
 START_FAILED = "start_failed"
+ENVELOPE_UNREADABLE = "envelope_unreadable"
+KEY_UNUSABLE = "key_unusable"
+ENVELOPE_MESSAGE = "The request's trigger envelope doesn't open (engine 2b spec §7.1)."
 REFUSED_MESSAGE = "Temporal refused the run's start 10 times (engine 2b spec §7.4)."
 COLLISION_MESSAGE = "Another execution holds this run's workflow id (engine 2b spec §7.4)."
 # A status Temporal answers with when it certainly refused the start (2a's rule, `apps.runs`).
@@ -88,6 +92,13 @@ class Waiting:
 
 
 @dataclass(frozen=True)
+class Dead:
+    """The request can never start (a broken envelope): `dead`, audited, an earlier attempt's run row failed."""
+
+    reason: str
+
+
+@dataclass(frozen=True)
 class Cancelled:
     """A request cancelled at dispatch: `engine_abi_changed`, `node_type_retired` or `cel_profile_retired`."""
 
@@ -110,6 +121,36 @@ def sealer(converter: DataConverter, namespace: str) -> Seal:
     return seal
 
 
+class KeyUnusableError(Exception):
+    """A tenant's key that couldn't be read: no such key, or the keyring didn't answer. Its cause says which."""
+
+
+class KeyFailures:
+    """A `KeySource` whose every failure is the key's own, as KeyUnusableError: wrapping only the key's read, so an
+    envelope that doesn't open, or a bug around it, is never taken for a key outage."""
+
+    def __init__(self, keys: KeySource) -> None:
+        self._keys = keys
+
+    async def active(self, tenant_id: str) -> tuple[int, AESGCM]:
+        try:
+            return await self._keys.active(tenant_id)
+        except Exception as e:
+            raise KeyUnusableError("The tenant's active key can't be read.") from e
+
+    async def get(self, tenant_id: str, version: int) -> AESGCM:
+        try:
+            return await self._keys.get(tenant_id, version)
+        except Exception as e:
+            raise KeyUnusableError("A tenant's key can't be read.") from e
+
+    async def digest_key(self, tenant_id: str, version: int | None) -> tuple[int, bytes]:
+        try:
+            return await self._keys.digest_key(tenant_id, version)
+        except Exception as e:
+            raise KeyUnusableError("A tenant's digest key can't be read.") from e
+
+
 async def _lock(s: AsyncSession, key: str) -> None:
     await s.execute(text("select pg_advisory_xact_lock_shared(hashtextextended(:k, 0))"), {"k": key})
 
@@ -123,8 +164,9 @@ async def begin(
     tenant_id: uuid.UUID,
     request_id: uuid.UUID,
     build: Build,
-) -> Starting | Waiting | Cancelled | None:
-    """One due request's starting transaction. None: no longer due, or another dispatcher holds it."""
+) -> Starting | Waiting | Cancelled | Dead | None:
+    """One due request's starting transaction. None: no longer due, or another dispatcher holds it. Anything it
+    can't classify (a bug, an envelope its foreign key should have kept, an outage) raises; nothing it wrote stays."""
     async with sessionmaker() as s, s.begin():
         outcome = await _begin(s, seal, settings, keys, tenant_id, request_id, build)
         if isinstance(outcome, Waiting):
@@ -140,7 +182,7 @@ async def _begin(
     tenant_id: uuid.UUID,
     request_id: uuid.UUID,
     build: Build,
-) -> Starting | Waiting | Cancelled | None:
+) -> Starting | Waiting | Cancelled | Dead | None:
     await lifecycle.assert_read_committed(s)
     await tenant_scope(s, tenant_id)
     await _lock(s, GATE_LOCK)
@@ -190,23 +232,32 @@ async def _begin(
         return Waiting("no_slot")
     if keys is None:
         raise RuntimeError("Dispatch reads envelopes with the tenants' keys.")
-    try:  # the tenant's key opens the envelope and seals the start: one that doesn't work stops it (§2.3)
-        envelope = await claims.read_envelope(s, ClaimCipher(keys), tenant_id, request_id=request.id)
-        start = RunInput(
-            tenant_id=str(tenant_id),
-            run_id=str(request.id),
-            version_id=str(version.id),
-            trigger=envelope,
-            mode=request.mode,
-            max_run_duration_s=settings.max_run_duration_days * 86_400,
-            cel_schedule_to_start_s=settings.cel_schedule_to_start_s,
-        )
+    # The tenant's key opens the envelope and seals the start: one that can't be read waits (§2.3). Each failure is
+    # told apart where it happens, so a broken envelope or a bug never reads as a key outage (the owner's M2 review).
+    try:
+        envelope = await claims.read_envelope(s, ClaimCipher(KeyFailures(keys)), tenant_id, request_id=request.id)
+    except KeyUnusableError as e:
+        log.warning("dispatch_waiting", reason=KEY_UNUSABLE, error=type(e.__cause__).__name__)
+        return Waiting(KEY_UNUSABLE)
+    except claims.EnvelopeUnreadableError:  # broken for good: no retry mends it
+        log.error("dispatch_envelope_unreadable", request_id=str(request.id))
+        await _dead(s, request, ENVELOPE_UNREADABLE, ENVELOPE_MESSAGE)
+        await s.flush()
+        return Dead(ENVELOPE_UNREADABLE)
+    start = RunInput(
+        tenant_id=str(tenant_id),
+        run_id=str(request.id),
+        version_id=str(version.id),
+        trigger=envelope,
+        mode=request.mode,
+        max_run_duration_s=settings.max_run_duration_days * 86_400,
+        cel_schedule_to_start_s=settings.cel_schedule_to_start_s,
+    )
+    try:
         await seal(start)
-    except claims.EnvelopeUnavailableError:
-        raise  # the request's foreign key keeps its envelope: a bug, never a key's fault
-    except Exception as e:
-        log.warning("dispatch_waiting", reason="key_unusable", error=type(e).__name__)
-        return Waiting("key_unusable")
+    except CodecRefusedError as e:  # the codec's refusal: its tenant is in the id built here, so its key can't be read
+        log.warning("dispatch_waiting", reason=KEY_UNUSABLE, error=type(e.__cause__).__name__)
+        return Waiting(KEY_UNUSABLE)
     s.add(RunSlot(run_id=request.id, tenant_id=tenant_id))
     await runs.precreate_run(
         s, run_id=request.id, tenant_id=tenant_id, workflow_id=request.workflow_id, version_id=version.id,
@@ -377,10 +428,23 @@ async def dispatch_once(
                                   {"n": CANDIDATES})).all()  # fmt: skip
     counts: Counter[str] = Counter()
     for tenant_id, request_id in picked:
-        outcome = await begin(sessionmaker, seal, settings, keys, tenant_id=tenant_id, request_id=request_id,
-                              build=build)  # fmt: skip
-        if isinstance(outcome, Starting):
-            counts[await settle(sessionmaker, outcome, await start(client, outcome))] += 1
-        elif outcome is not None:
-            counts[outcome.reason] += 1
+        try:
+            happened = await _dispatch(sessionmaker, client, seal, keys, settings, build, tenant_id, request_id)
+        except Exception as e:  # a bug or an outage: the request stays as it was, and the cycle goes on (M2 review)
+            log.error("dispatch_failed", tenant_id=str(tenant_id), request_id=str(request_id), error=type(e).__name__)
+            counts["error"] += 1
+            continue
+        if happened is not None:
+            counts[happened] += 1
     return dict(counts)
+
+
+async def _dispatch(
+    sessionmaker: async_sessionmaker[AsyncSession], client: Client, seal: Seal, keys: KeySource, settings: Settings,
+    build: Build, tenant_id: uuid.UUID, request_id: uuid.UUID,
+) -> str | None:  # fmt: skip
+    """One candidate begun, started and settled: what happened to it; None when another dispatcher had it."""
+    outcome = await begin(sessionmaker, seal, settings, keys, tenant_id=tenant_id, request_id=request_id, build=build)
+    if isinstance(outcome, Starting):
+        return await settle(sessionmaker, outcome, await start(client, outcome))
+    return outcome.reason if outcome is not None else None
