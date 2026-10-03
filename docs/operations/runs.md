@@ -254,7 +254,9 @@ type, but no worker of this build runs it: install its plugin on the workers), `
 `claim_unavailable` (a claim the run may not read, that isn't there or that's nested deeper than 32 claims, or the
 step's output couldn't be stored as claims after the node ran: its effect happened, and its row says so),
 `secret_index_limit`, `secret_index_unavailable` (the claim store didn't answer before a plugin's node ran: nothing
-was sent, and the attempt is retried under the step's retry policy), `input_invalid` (a
+was sent, and the attempt is retried under the step's retry policy), `internal_error` (a bug in the worker, such as
+one while preparing a step before its node ran: nothing was sent, it isn't retried, and the worker's log names where
+it was raised), `input_invalid` (a
 sub-flow's input that doesn't match the child's input schema: each place and rule, a map's key shown as `*`) and `node_failed` (a plugin's failure whose own code
 wasn't a constant identifier of its code, [above](#what-the-workers-log-shows)). A sub-flow step fails with its sub-flow's code, and with `terminated`
 when an operator terminated the sub-flow; a loop fails with `terminated` when one of its batches was.

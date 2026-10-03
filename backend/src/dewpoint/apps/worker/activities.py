@@ -41,6 +41,8 @@ from dewpoint.apps.worker.claims import (
     UNREADABLE,
     ClaimStore,
     Evaluate,
+    StoreUnavailableError,
+    answering,
     child_input,
     claim_output,
     config_secrets,
@@ -292,18 +294,23 @@ def step_activity_for(node: type[Node], store: ClaimStore) -> Callable[[StepInpu
 
         try:
             try:  # before the node runs: nothing is sent, so a store that doesn't answer fails the attempt retryable
-                held = (await secrets_of(store, step.tenant_id, root)).matcher  # the index's cached automaton
-                config = await resolved_config(step.config, store)
+                answered = answering(store)  # its outages told from a bug in this work
+                held = (await secrets_of(answered, step.tenant_id, root)).matcher  # the index's cached automaton
+                config = await resolved_config(step.config, answered)
                 marked = config_secrets(config, config_schema)  # only the config marks them: indexed before the attempt
                 if marked:
-                    await store.remember(step.tenant_id, root, marked)
+                    await answered.remember(step.tenant_id, root, marked)
             except UNREADABLE:
                 raise _StepFailed(CLAIM_UNAVAILABLE, UNAVAILABLE, retryable=False) from None
             except SecretIndexLimitError as e:
                 raise _StepFailed(SECRET_INDEX_LIMIT, str(e), retryable=False) from None
-            except Exception as e:
-                _bug("step_store_unavailable", step, e, node)
+            except StoreUnavailableError as e:
+                _bug("step_store_unavailable", step, e.__cause__ if isinstance(e.__cause__, Exception) else e, node)
                 raise _StepFailed(SECRET_INDEX_UNAVAILABLE, STORE_UNAVAILABLE, retryable=True) from None
+            except Exception as e:  # a bug in this work, no outage: nothing was sent, and retrying won't mend it
+                _bug("step_input_unprepared", step, e, node)
+                message = f"Preparing the step raised {logs.error_class(e)}; the worker's log says where."
+                raise _StepFailed(INTERNAL_ERROR, message, retryable=False) from None
             result, outcome = await _call(node, replace(step, config=config), config_schema)
         except _StepFailed as f:
             raise f.mapped(await secrets()) from None

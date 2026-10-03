@@ -1,7 +1,9 @@
 # Dewpoint — Engine 2b Design (payload protection, admission, triggers, retention)
 
-- **Status:** approved by the owner, revision 4 (2026-09-30). Every section was approved in conversation before it was
-  written here; this document is their written form.
+- **Status:** revision 6, a draft pending the owner's approval. Revision 4 (2026-09-30) was approved by the owner:
+  every section was approved in conversation before it was written here, and this document is their written form.
+  Revision 5 (2026-10-01) was approved for implementation by the 2b-1b plan, which isn't production readiness:
+  nothing runs in production before 2b-4 lifts the gate (§2).
   - Revision 2 folds in the owner's review of revision 1: a claim is owned by the run that produced it, with the
     root run id kept for retention and the secret index (§3.4); passing a secret-index bound is a fixed,
     non-retryable error, and matching work is bounded (§3.7); an idempotency retry is compared under its stored
@@ -78,6 +80,15 @@
     - secrets that overlap are masked as one span (§3.7);
     - a plugin's heartbeat sends no details (§3.6);
     - the workflow logs its own bugs by type and place (§6.7).
+    From the owner's rulings at the 2b-1b prototype's milestone-2 checkpoint (2026-10-02), which the plan's code
+    follows: reappearing text is claimed before size claims, so no size claim encloses it, and §3.5's steps follow the
+    splitter's order; a key one branch of a union declares and another leaves open is undeclared, and claiming walks
+    the taint publish computed (§3.5); null and the empty string are literals, and a sensitive variable is accepted
+    without a default only if its type admits null or every read follows a step sure to have set it (§3.8); a
+    dynamically addressed CEL path is tainted even into data whose every field is declared plain (§4.1).
+    From the owner's ruling on the revision 6 review (2026-10-03): the claims activities keep their sites' codes when
+    the claim store doesn't answer; a bug before a plugin's node runs fails the step `internal_error`, never as the
+    store's outage (§3.7); the evaluator holds `engine.handles`, which `engine.cel`'s binding imports (§13).
 - **Parent specs:**
   - `2026-09-24-dewpoint-architecture-design.md` (§5, §6.1, §6.5, §6.8, §12, §15). This spec **changes** its
     workflow-id contract (§6.1), replaces its `outbox` table (§6.1), details its claim check (§6.5) and settles the
@@ -284,19 +295,20 @@ at admission or at a sub-flow's crossing (§3.4), is told each place it breaks a
 is named as far as the schema declares it, and a key the data supplied (a map's) shows as `*`, since a key can be a
 secret and a sub-flow's refusal is an activity result, in history.
 - **Sensitive first:** every value at an `x-sensitive` position, and every value at a position the schema doesn't
-  declare (`additionalProperties`, pattern properties, a union where any branch is sensitive), is claimed with
-  taint. Unknown counts as sensitive.
-- **Then keys:** a handle keeps its map's keys, and a key the data supplied is data too. So a map holding a key its
-  schema doesn't declare is claimed whole, without taint (its undeclared values are handles already), and each such
-  key of 4 characters or more joins the secret index (§3.7). It's a secret before any text is checked for reappearing
-  secrets, so a field that repeats it, a sibling or the map's own declared field, is claimed with taint; the key
-  alone doesn't taint its own map. A reference to a declared field reads it through the claim; the handles nested in
-  it stay the run's.
+  declare (`additionalProperties`, pattern properties, a key one branch of a union declares and another leaves open,
+  a union where any branch is sensitive), is claimed with taint. Unknown counts as sensitive. These are the positions
+  publish finds tainted (§4.1): claiming walks the taint the validator computes from the same schema, so a position
+  publish finds plain never holds a claim. A handle keeps its map's keys, and a key the data supplied is data too: each
+  key of 4 characters or more at a position the schema doesn't declare is a secret from here on (§3.7).
+- **Then reappearing text:** an untainted field that contains a string (4 characters or more) from one of the
+  trigger's own sensitive fields, or one of those keys, is claimed with taint: a sibling field or the map's own
+  declared field. A map's own undeclared keys alone don't make it a match; the next step claims it for them.
+- **Then keys:** a map holding a key its schema doesn't declare is claimed whole, without taint (its undeclared values
+  are handles already), so the key never stays in the envelope. A reference to a declared field reads it through the
+  claim; the handles nested in it stay the run's.
 - **Then size:** a value larger than 64 KiB is claimed without taint. A size claim is made after its sensitive
-  descendants were claimed, so it holds handles where they were: a pointer into a size claim reaches plain data or a
-  nested handle, never an untainted view of a sensitive value.
-- **Reappearing text:** an untainted field that contains a string (4 characters or more) from one of the trigger's
-  own sensitive fields is claimed with taint.
+  descendants and any reappearing text in it were claimed, so it holds handles where they were: a pointer into a size
+  claim reaches plain data or a nested handle, never an untainted view of a sensitive value.
 - **Then the envelope:** while the trigger envelope passes `TRIGGER_INLINE` (initially 64 KiB), its largest remaining
   subtree is claimed without taint. Ties are broken by pointer. The root is claimed last, and the envelope is then one
   handle. Every continued input carries the envelope again, so it has to stay small (§5.3). A sub-flow's input is split
@@ -346,13 +358,15 @@ secret and a sub-flow's refusal is an activity result, in history.
   §5.2 bounds, and a value is claimed at its first match. Work per boundary is therefore bounded by the index bound
   plus the output bound, never by their product.
 - **Unavailability is transient, and nothing returns unchecked:**
-  - A plugin step whose claim store doesn't answer before its node runs (reading the index or the claims its config
+  - A plugin step whose claim store fails a call before its node runs (reading the index or the claims its config
     holds, or indexing its config's secrets) sent nothing: the attempt fails with `secret_index_unavailable`,
-    retryable, and the step's retry policy bounds it. Once the node ran, a failure to read the index again masks its
-    message with the version read before the attempt, and the failure stays the node's.
+    retryable, and the step's retry policy bounds it. A bug in the boundary's own work then is no outage: it's logged
+    by type and place, and the step fails `internal_error`, not retried, with no outcome. Once the node ran, a failure
+    to read the index again masks its message with the version read before the attempt, and the failure stays the
+    node's.
   - The claims activities (`cel.evaluate`, a filter, a crossing, a derived reference) are retried up to three times,
     then fail with the code their site gives any failure: `cel_profile_unavailable` for CEL, `internal_error` for
-    the others.
+    the others. Their store outages are never `secret_index_unavailable`.
   - Claims nested deeper than `NESTING_MAX` (32) are refused as any unreadable claim is, `claim_unavailable`.
 - **The guarantee** covers the secrets recorded when a boundary checks. A secret learned concurrently can't
   retroactively change an earlier result.
@@ -361,8 +375,12 @@ secret and a sub-flow's refusal is an activity result, in history.
 ### 3.8 Sensitive literals are refused
 
 - Publish refuses a literal at a sensitive config position, a `default` at a sensitive position of `input_schema`
-  or `vars_schema`, and a default on a sensitive CSV column (§8.1). The diagnostic points to trigger inputs now and to
+  or `vars_schema`, and a default on a sensitive CSV column (§8.1). Null and the empty string are literals too: an
+  omitted default is what's allowed, not a written empty one. The diagnostic points to trigger inputs now and to
   connections in sub-project 3.
+- A sensitive variable therefore has no default: it is null until a step sets it. Publish accepts it when its type
+  admits null, or when every read of it comes after a step sure to have set it (path availability, as for a step's
+  output); otherwise the read is refused.
 - Publishing again an existing version that has such literals fails the same way, so the protection ABI can't admit
   it unchanged.
 
@@ -379,8 +397,9 @@ the evaluator, and what each declassified site reveals.
   (`trigger.rows[*].<column>`);
 - plugin output paths at `x-sensitive` positions of the manifest's output schema;
 - variable paths at `x-sensitive` positions of `vars_schema`;
-- any position the schema doesn't declare, and any path a CEL expression addresses dynamically (a computed map key,
-  for example) — unknown counts as sensitive, never local.
+- any position the schema doesn't declare (§3.5), and any path a CEL expression addresses dynamically (a computed
+  map key or list index, for example), even into data whose every field is declared plain — unknown counts as
+  sensitive, never local.
 
 **Propagation (per path, not per value):**
 - a ref, template, CEL expression or transform field is tainted if any path it reads is;
@@ -1759,7 +1778,9 @@ Each plan updates the older specs as it lands, as the engine-core 5.x revisions 
 - **Engine-core spec:** the "hard rule until 2b ships" (lifted by §10.6); §9 (starting runs: admission and the
   dispatcher); §8 (the new codes, the cutoff on read paths, the `(queued_at, id)` ordering); §4.5 (dispatch as §7.3
   describes it); §5.6 (the per-task byte budget); §6 (claims, handles, the live-state budget, snapshots in
-  `snapshot_format` 2, the open-iteration cap); §7 (ABI 5 and 6, ids).
+  `snapshot_format` 2, the open-iteration cap); §7 (ABI 5 and 6, ids); §5.7 (the `cel-evaluator` also holds
+  `engine.handles`, standard library only, which `engine.cel`'s binding imports; a test checks its image holds every
+  Dewpoint module it loads).
 
 ## 14. Roles, tables and permissions (summary)
 
