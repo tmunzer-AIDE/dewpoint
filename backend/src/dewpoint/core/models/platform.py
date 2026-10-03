@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, SmallInteger, String, Text, func
-from sqlalchemy.dialects.postgresql import ARRAY, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from dewpoint.core.models.base import Base
@@ -33,3 +33,16 @@ class WorkerInstance(Base):
     healthy: Mapped[bool] = mapped_column(Boolean)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DispatcherReport(Base):
+    """A dispatcher instance's last report (engine 2b spec §10.6): what it did and when, as health evidence 2b-4's
+    readiness checks read. It claims nothing by itself."""
+
+    __tablename__ = "dispatcher_reports"
+    instance_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16))  # dispatcher | reconciler
+    build_id: Mapped[str] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    reported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    details: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)

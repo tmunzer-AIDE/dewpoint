@@ -351,6 +351,18 @@ def lifecycle_retire(
     typer.echo(f"{entry}: retired")
 
 
+@app.command("dispatcher")
+def dispatcher() -> None:
+    """Run the dispatcher: it starts every admitted run within its tenant's slots (engine 2b spec §7.3)."""
+    from dewpoint.apps.dispatcher.main import run as run_dispatcher
+
+    try:
+        asyncio.run(run_dispatcher(get_settings()))
+    except (EnvironmentNotRecordedError, EnvironmentMismatchError) as e:
+        typer.echo(f"ERROR: {e}")
+        raise typer.Exit(2) from None
+
+
 @app.command("worker")
 def worker() -> None:
     """Run the Temporal worker: RunGraph and its activities, and cel.evaluate when DEWPOINT_CEL_SOCKET is set."""
