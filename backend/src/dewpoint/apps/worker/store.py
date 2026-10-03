@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.exceptions import ApplicationError
@@ -22,6 +22,7 @@ from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.crypto.keys import KeySource
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.claims import SecretIndex
+from dewpoint.core.models.requests import RunSlot
 from dewpoint.core.models.workflows import WorkflowVersion
 from dewpoint.core.plugins.registry import load_node_types
 from dewpoint.core.runs import service as runs
@@ -185,6 +186,7 @@ class DbRunStore:
                 await runs.upsert_steps(s, tenant, [_row(r) for r in data.steps])
                 if data.run is not None:
                     await _finish(s, data.run)
+                    await _release(s, data.run)
         except DBAPIError as e:
             if _refused(e) is None:
                 raise
@@ -227,6 +229,7 @@ class DbRunStore:
                     if state is None:
                         raise
                     _log.warning("projection_run_refused", run_id=data.run.run_id, sqlstate=state)
+                await _release(s, data.run)  # the execution ended either way
 
 
 async def _start(s: AsyncSession, tenant: uuid.UUID, start: RunStart) -> None:
@@ -243,6 +246,12 @@ async def _start(s: AsyncSession, tenant: uuid.UUID, start: RunStart) -> None:
         parent_iteration_key=start.parent_iteration_key,
         started_at=datetime.fromisoformat(start.started_at),
     )
+
+
+async def _release(s: AsyncSession, run: RunSummary) -> None:
+    """A root run's end frees its tenant's slot in the end write's own transaction (engine 2b spec §7.5); a sub-run
+    holds none, so this matches nothing for it."""
+    await s.execute(delete(RunSlot).where(RunSlot.run_id == uuid.UUID(run.run_id)))
 
 
 async def _finish(s: AsyncSession, run: RunSummary) -> None:
