@@ -23,7 +23,6 @@ class _Claim:
     owner_run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     root_run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     sensitive_pointers: Mapped[Any] = mapped_column(JSONB)  # the tainted pointers inside the value ("" is all of it)
-    content_hash: Mapped[bytes] = mapped_column(LargeBinary)
     ciphertext: Mapped[bytes] = mapped_column(LargeBinary)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

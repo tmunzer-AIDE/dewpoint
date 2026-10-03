@@ -23,10 +23,10 @@ async def claim(
     claim_id = uuid.uuid4()
     await s.execute(
         text(
-            "insert into run_inputs (id, tenant_id, owner_run_id, root_run_id, sensitive_pointers, content_hash, "
-            "ciphertext, pointer, role) values (:id, :t, :o, :o, '[]', :h, :c, :p, :r)"
+            "insert into run_inputs (id, tenant_id, owner_run_id, root_run_id, sensitive_pointers, ciphertext, "
+            "pointer, role) values (:id, :t, :o, :o, '[]', :c, :p, :r)"
         ),
-        {"id": claim_id, "t": tenant, "o": owner, "h": b"\x00" * 32, "c": b"\x01", "p": pointer, "r": role},
+        {"id": claim_id, "t": tenant, "o": owner, "c": b"\x01", "p": pointer, "r": role},
     )
     return claim_id
 

@@ -2,7 +2,6 @@
 """The claim tables (engine 2b spec §3.1, §3.4, §3.7, §14): tenant-scoped under forced row-level security, written
 once and never changed, and reachable only by the roles that make and resolve claims."""
 
-import hashlib
 import uuid
 from typing import Any
 
@@ -32,8 +31,7 @@ def row(table: str, tenant: uuid.UUID) -> dict[str, Any]:
         return {"root_run_id": run, "tenant_id": tenant, "version": 1, "string_count": 0, "byte_count": 0,
                 "ciphertext": b"\x01"}  # fmt: skip
     claim = {"id": uuid.uuid4(), "tenant_id": tenant, "owner_run_id": run, "root_run_id": run,
-             "sensitive_pointers": "[]", "content_hash": hashlib.sha256(b"x").digest(),
-             "ciphertext": b"\x01"}  # fmt: skip
+             "sensitive_pointers": "[]", "ciphertext": b"\x01"}  # fmt: skip
     if table == "run_inputs":
         return {**claim, "pointer": ""}
     return {**claim, "kind": "output", "step_id": uuid.uuid4(), "iteration_key": "", "attempt": 1}

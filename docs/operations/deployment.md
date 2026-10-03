@@ -181,6 +181,11 @@ types, task queues, timestamps, and a local activity's own bookkeeping (its type
   `run_secret_index` each run tree's known secrets, used to mask messages and rows. The worker's role reads and writes
   them; admission (the dispatch role) writes a run's input claims and seeds its index. No role updates or deletes a
   claim; tenant retention will (sub-project 2b-4).
+- **No digest of a claim's value is kept** (migration 0018, issue #28). Before it, each claim row held an unkeyed
+  SHA-256 of its plaintext, which let anyone who read the table test guesses for a short secret offline. The migration
+  drops the column from the live database, and a rewrite of a claim's id is checked by decrypting the existing claim.
+  A database backup taken before 0018 still holds those hashes: keep it under the same controls as a backup of the
+  data itself, and let it expire on your backup schedule rather than restoring it into a new environment.
 
 ## Worker health
 

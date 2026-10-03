@@ -11,7 +11,6 @@ The caller opens the transaction under the tenant's scope (`tenant_scope`), and 
 activity's server-built workflow id names (§3.3). Pointers and nested handles are the engine's (`engine.handles`):
 this module stores and returns whole values."""
 
-import hashlib
 import json
 import uuid
 from dataclasses import dataclass
@@ -58,14 +57,12 @@ async def _write(
     s: AsyncSession, cipher: ClaimCipher, tenant_id: uuid.UUID, model: Any, new: NewClaim, **extra: Any
 ) -> None:
     plain = _plain(new.value)
-    digest = hashlib.sha256(plain).digest()
     row = {
         "id": new.id,
         "tenant_id": tenant_id,
         "owner_run_id": new.owner_run_id,
         "root_run_id": new.root_run_id,
         "sensitive_pointers": list(new.sensitive_pointers),
-        "content_hash": digest,
         "ciphertext": await cipher.seal(str(tenant_id), str(new.id), plain),
         **extra,
     }
@@ -74,8 +71,10 @@ async def _write(
     )
     if written.scalar_one_or_none() is not None:
         return
-    existing = (await s.execute(select(model.content_hash).where(model.id == new.id))).scalar_one_or_none()
-    if existing != digest:
+    # Its id is taken: a retry writes the same value, anything else is a conflict. The existing claim is opened to
+    # tell, with the key version its ciphertext names: no digest of a value is kept (#28).
+    existing = (await s.execute(select(model.ciphertext).where(model.id == new.id))).scalar_one_or_none()
+    if existing is None or await cipher.open(str(tenant_id), str(new.id), existing) != plain:
         raise ClaimConflictError("A claim was written again with other content.")
 
 
