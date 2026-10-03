@@ -158,6 +158,19 @@ async def test_the_reconciler_follows_continue_as_new_to_the_latest_executions_e
     assert await ended(owner_sessionmaker, found.request_id) == ("succeeded", None)
 
 
+async def raw_histories(client: Any, workflow_id: str) -> list[bytes]:
+    """Every execution of a logical run, the latest first and back through continue-as-new: each one's whole history,
+    every event as the server stores it, as raw bytes."""
+    out: list[bytes] = []
+    run_id: str | None = None
+    while True:
+        history = await client.get_workflow_handle(workflow_id, run_id=run_id).fetch_history()
+        out.append(b"".join(event.SerializeToString() for event in history.events))
+        run_id = history.events[0].workflow_execution_started_event_attributes.continued_execution_run_id or None
+        if run_id is None:
+            return out
+
+
 async def until_ended(client: Any, url: str) -> dict[str, Any]:
     for _ in range(300):
         found = (await client.get(url)).json()
@@ -199,6 +212,10 @@ async def test_a_run_and_its_rerun_end_to_end_with_the_keyrings_real_keys(
         }
         again = await until_ended(operator, f"/api/v1/t/{ctx.tenant_id}/runs/{rerun.json()['id']}")
     assert (run["status"], again["status"], again["request"]["source"]) == ("succeeded", "succeeded", "rerun")
+    for run_id in (request_id, rerun.json()["id"]):  # the owner's M5 review: both executions' whole histories
+        raws = await raw_histories(server.client, run_workflow_id(str(ctx.tenant_id), run_id))
+        assert raws and all(TOKEN.encode() not in raw for raw in raws)
+        assert all(str(ctx.tenant_id).encode() in raw for raw in raws)  # real histories, read whole
     history = server.client.get_workflow_handle(run_workflow_id(str(ctx.tenant_id), request_id))
     started_event = (await history.fetch_history()).events[0].workflow_execution_started_event_attributes
     assert started_event.input.payloads[0].metadata["encoding"] == ENCODING  # sealed, never plain JSON
