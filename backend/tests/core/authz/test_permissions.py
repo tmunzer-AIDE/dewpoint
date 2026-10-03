@@ -17,3 +17,8 @@ def test_key_grants() -> None:
     assert P.AGENT_GRANT in ROLE_PERMISSIONS["admin"]
     assert P.RUN_START in ROLE_PERMISSIONS["operator"] and P.WORKFLOW_EDIT not in ROLE_PERMISSIONS["operator"]
     assert ROLE_PERMISSIONS["viewer"] == {P.TENANT_VIEW, P.WORKFLOW_VIEW, P.RUN_VIEW, P.CONNECTION_VIEW, P.MEMBER_VIEW}
+
+
+def test_managing_triggers_is_an_editors() -> None:
+    """Schedules and a CSV's saved default mapping (engine 2b spec §8, §14): editors and above."""
+    assert P.TRIGGER_MANAGE in ROLE_PERMISSIONS["editor"] and P.TRIGGER_MANAGE not in ROLE_PERMISSIONS["operator"]
