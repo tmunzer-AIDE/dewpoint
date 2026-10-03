@@ -2,14 +2,18 @@
 """The claim store (engine 2b spec §3.1, §3.3, §3.4).
 
 A claim is written once. Its id is derived by whoever makes it, so a retried write writes the same row; a row that
-already exists must hold the same content (its hash), or the write is refused and nothing changes. Only the claim's
+already exists must hold the same value, which is checked by decrypting it, never by a digest of it (#28), or the write
+is refused and nothing changes. Only the claim's
 owner, the run that produced it, or a run it was granted to reads it; a run grants only what it owns or holds a grant
 on. Every refusal looks the same from outside (`ClaimUnavailableError`): a claim that doesn't exist, belongs to another
 tenant (row-level security hides it) or to a run that may not read it.
 
 The caller opens the transaction under the tenant's scope (`tenant_scope`), and checks that the tenant is the one the
 activity's server-built workflow id names (§3.3). Pointers and nested handles are the engine's (`engine.handles`):
-this module stores and returns whole values."""
+this module stores and returns whole values.
+
+A request's trigger envelope sits in `run_inputs` too (revision 7, §7.1), and is never a claim: no claim read and no
+grant ever serves it, and only `read_envelope`, following its request, opens it."""
 
 import json
 import uuid
@@ -22,12 +26,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.claims.cipher import ClaimCipher, ClaimUnreadableError
 from dewpoint.core.models.claims import ClaimGrant, InputClaim, OutputClaim
+from dewpoint.core.models.requests import RunRequest
 
 CLAIM_UNAVAILABLE = "claim_unavailable"
 
 
 class ClaimUnavailableError(Exception):
     """A claim this run may not read, or that doesn't exist. The message is fixed: it never quotes a value."""
+
+
+class EnvelopeUnavailableError(Exception):
+    """A request's trigger envelope that isn't there for this tenant: no such request, a refused one, or one retention
+    has removed. The message is fixed."""
 
 
 class ClaimConflictError(Exception):
@@ -102,12 +112,18 @@ async def write_output(
 
 
 async def _row(s: AsyncSession, claim_id: uuid.UUID) -> Any:
-    for model in (InputClaim, OutputClaim):
-        found = (
-            await s.execute(
-                select(model.owner_run_id, model.sensitive_pointers, model.ciphertext).where(model.id == claim_id)
-            )
-        ).first()
+    """A claim's row, never an envelope's: a handle that names an envelope is refused as any unreadable claim is, and
+    a grant that reaches one grants nothing (revision 7)."""
+    claims = (
+        select(InputClaim.owner_run_id, InputClaim.sensitive_pointers, InputClaim.ciphertext).where(
+            InputClaim.id == claim_id, InputClaim.role == "claim"
+        ),
+        select(OutputClaim.owner_run_id, OutputClaim.sensitive_pointers, OutputClaim.ciphertext).where(
+            OutputClaim.id == claim_id
+        ),
+    )
+    for query in claims:
+        found = (await s.execute(query)).first()
         if found is not None:
             return found
     return None
@@ -155,3 +171,40 @@ async def grant(
             for c in claim_ids
         ]
         await s.execute(insert(ClaimGrant).values(rows).on_conflict_do_nothing(index_elements=["claim_id", "run_id"]))
+
+
+async def write_envelope(
+    s: AsyncSession, cipher: ClaimCipher, tenant_id: uuid.UUID, *, request_id: uuid.UUID, envelope: Any
+) -> uuid.UUID:
+    """A request's trigger envelope, encrypted as a claim is and owned by the request (whose id is its run's), and its
+    id, for the request row. It holds no tainted pointer: every sensitive value is a claim it holds by handle."""
+    envelope_id = uuid.uuid4()
+    row = {
+        "id": envelope_id,
+        "tenant_id": tenant_id,
+        "owner_run_id": request_id,
+        "root_run_id": request_id,
+        "sensitive_pointers": [],
+        "ciphertext": await cipher.seal(str(tenant_id), str(envelope_id), _plain(envelope)),
+        "role": "envelope",
+        "pointer": None,
+    }
+    await s.execute(insert(InputClaim).values(row))
+    return envelope_id
+
+
+async def read_envelope(s: AsyncSession, cipher: ClaimCipher, tenant_id: uuid.UUID, *, request_id: uuid.UUID) -> Any:
+    """A request's trigger envelope: the one its row names and it owns, in the caller's tenant, and nothing else."""
+    found = (
+        await s.execute(
+            select(InputClaim.id, InputClaim.ciphertext)
+            .join(RunRequest, RunRequest.envelope_id == InputClaim.id)
+            .where(RunRequest.id == request_id, InputClaim.owner_run_id == request_id, InputClaim.role == "envelope")
+        )
+    ).first()
+    if found is None:
+        raise EnvelopeUnavailableError("A request whose trigger envelope isn't there.")
+    try:
+        return json.loads(await cipher.open(str(tenant_id), str(found.id), found.ciphertext))
+    except ClaimUnreadableError as e:
+        raise EnvelopeUnavailableError("A trigger envelope that doesn't open under its tenant.") from e
