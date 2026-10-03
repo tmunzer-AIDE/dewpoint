@@ -10,7 +10,11 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dewpoint.apps.api.routes.run_requests import get_keys, key_unusable
 from dewpoint.core.authz.permissions import P
+from dewpoint.core.claims import service as claims
+from dewpoint.core.claims.cipher import ClaimCipher
+from dewpoint.core.crypto.keys import KeySource
 from dewpoint.core.http import TenantContext, get_db, require
 from dewpoint.core.models.requests import RunRequest
 from dewpoint.core.models.runs import Run, RunStep
@@ -130,10 +134,19 @@ async def get_run(
     run_id: uuid.UUID,
     ctx: TenantContext = Depends(require(P.RUN_VIEW)),
     db: AsyncSession = Depends(get_db, scope="function"),
+    keys: KeySource = Depends(get_keys),
 ) -> dict[str, object]:
+    """A run with its steps and sub-runs, or a request that hasn't started as itself; with its CSV record (engine 2b
+    spec §8.1), when it took a CSV: the mapping, the file's headers, the row count and the skipped rows."""
     request = await db.get(RunRequest, run_id)  # row-level security: the caller's tenant's only
+    csv = None
+    if request is not None:
+        try:
+            csv = await claims.read_csv_record(db, ClaimCipher(keys), ctx.tenant_id, request_id=request.id)
+        except Exception as e:
+            raise key_unusable(e) from None
     if request is not None and request.status != "started":
-        return {**_unstarted(request), "steps": [], "children": []}
+        return {**_unstarted(request), "steps": [], "children": [], "csv": csv}
     run = await service.get_run(db, run_id)
     if run is None or run.tenant_id != ctx.tenant_id:
         raise HTTPException(404, detail={"error": "not_found"})
@@ -142,4 +155,5 @@ async def get_run(
         "request": _request(request),
         "steps": [_step(r) for r in await service.run_steps(db, run.id)],
         "children": [_child(c) for c in await service.children(db, run.id)],
+        "csv": csv,
     }

@@ -78,3 +78,29 @@ async def test_an_upload_is_staged_until_a_start_consumes_it(api_sessionmaker, o
         async with api_sessionmaker() as s, s.begin():
             await tenant_scope(s, tenant)
             await s.execute(text(f"update csv_uploads set {change} where id = :i"), {"i": upload_id})
+
+
+async def test_a_csv_record_is_never_a_claim(api_sessionmaker, owner_sessionmaker, worker_sessionmaker) -> None:
+    """A CSV start's record (§8.1, §7.1) sits in `run_inputs` under the role `csv`: no pointer, one per request, and
+    neither a claim read nor a grant serves it, as for an envelope."""
+    from dewpoint.core.claims import service as claims
+    from dewpoint.core.claims.cipher import ClaimCipher
+    from tests.core.requests.test_schema import claim
+    from tests.support.keys import FixtureKeys
+
+    tenant, _ = await upload(api_sessionmaker, owner_sessionmaker)
+    request = uuid.uuid4()
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        record = await claim(s, tenant, request, role="csv", pointer=None)
+    async with worker_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        with pytest.raises(claims.ClaimUnavailableError):
+            await claims.fetch(s, ClaimCipher(FixtureKeys()), tenant, run_id=request, claim_id=record)
+        with pytest.raises(claims.ClaimUnavailableError):
+            await claims.grant(s, tenant, granted_by=request, to=uuid.uuid4(), claim_ids=[record], root_run_id=request)
+    for pointer in (None, ""):  # a second record, then one with a pointer
+        with pytest.raises(IntegrityError):
+            async with api_sessionmaker() as s, s.begin():
+                await tenant_scope(s, tenant)
+                await claim(s, tenant, request, role="csv", pointer=pointer)

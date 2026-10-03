@@ -7,7 +7,7 @@ workflow's state. A cancel and a re-run name a request: its id is its run's, if 
 
 import uuid
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -30,20 +30,37 @@ from dewpoint.engine.handles import NestingError, StoredClaim, resolve_value
 router = APIRouter(prefix="/api/v1", tags=["runs"])
 KEY_MAX = 255
 UNAVAILABLE = {admission.PRODUCTION_RUNS_DISABLED, admission.ENVIRONMENT_NOT_RECORDED, admission.NO_CURRENT_BUILD}
-INVALID = {INPUT_INVALID, SECRET_INDEX_LIMIT}
+INVALID = {INPUT_INVALID, SECRET_INDEX_LIMIT, admission.CSV_MAPPING_INVALID}
+NOT_FOUND = {admission.UPLOAD_NOT_FOUND}  # whoever's it is: an upload is its owner's only
+GONE = {admission.UPLOAD_EXPIRED}
 INPUT_NOT_RETAINED = "input_not_retained"
+
+
+class CsvIn(BaseModel):
+    """A staged upload (`POST …/csv-uploads`), the mapping from declared column names to its headers, and whether rows
+    that break a rule are skipped (and recorded) rather than refusing the start (engine 2b spec §8.1)."""
+
+    model_config = ConfigDict(extra="forbid")
+    upload_id: uuid.UUID
+    mapping: dict[Annotated[str, Field(max_length=63)], Annotated[str, Field(max_length=512)]] = Field(max_length=200)
+    skip_invalid: bool = False
+
+    def start(self) -> admission.CsvStart:
+        return admission.CsvStart(self.upload_id, dict(self.mapping), self.skip_invalid)
 
 
 class StartIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     input: dict[str, Any] = Field(default_factory=dict)
     mode: Literal["live", "simulate"] = "live"
+    csv: CsvIn | None = None  # a workflow that declares a CSV starts only with one (§8.1)
 
 
 class RerunIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     mode: Literal["live", "simulate"] | None = None  # the old request's when not given
     input: dict[str, Any] | None = None  # new input; else the original, rebuilt while it's retained
+    csv: CsvIn | None = None  # a new upload, with `input` (or none) beside it
 
 
 def key_unusable(e: Exception) -> HTTPException:
@@ -92,13 +109,17 @@ async def admit(
         admitted = await admission.admit_request(
             db, keys, tenant_id=ctx.tenant_id, workflow_id=workflow_id, source=source, actor_id=ctx.user.id,
             mode=body.mode, idempotency_key=key, input=body.input, rerun=rerun,
+            csv=body.csv.start() if body.csv is not None else None,
         )  # fmt: skip
     except admission.WorkflowNotFoundError:
         raise HTTPException(404, detail={"error": "not_found"}) from None
     except admission.IdempotencyConflictError:
         raise HTTPException(409, detail={"error": "idempotency_conflict"}) from None
     except admission.AdmissionRefusedError as e:
-        status = 503 if e.reason in UNAVAILABLE else 422 if e.reason in INVALID else 409
+        status = (
+            503 if e.reason in UNAVAILABLE else 422 if e.reason in INVALID else 404 if e.reason in NOT_FOUND
+            else 410 if e.reason in GONE else 409
+        )  # fmt: skip
         raise HTTPException(status, detail={"error": e.reason, "messages": e.messages}) from None
     except Exception as e:
         raise key_unusable(e) from None
@@ -186,11 +207,11 @@ async def rerun(
     if named is None:
         raise HTTPException(404, detail={"error": "not_found"})
     workflow_id, mode = named.workflow_id, given.mode or named.mode
-    again = admission.Rerun(request_id, given.input)
+    again = admission.Rerun(request_id, given.input, given.csv.start() if given.csv is not None else None)
     try:
         existing = await admission.admitted_under(
             db, keys, tenant_id=ctx.tenant_id, idempotency_key=key, source="rerun", workflow_id=workflow_id,
-            mode=mode, rerun=again,
+            mode=mode, rerun=again, actor_id=ctx.user.id,
         )  # fmt: skip
     except admission.IdempotencyConflictError:
         raise HTTPException(409, detail={"error": "idempotency_conflict"}) from None
@@ -198,6 +219,9 @@ async def rerun(
         raise key_unusable(e) from None
     if existing is not None:
         return request_body(existing)
+    if given.csv is not None:
+        start = StartIn(input=given.input or {}, mode=mode, csv=given.csv)
+        return request_body(await admit(db, keys, ctx, workflow_id, "rerun", start, key, rerun=again))
     if given.input is not None:
         value = given.input
     elif old is None:

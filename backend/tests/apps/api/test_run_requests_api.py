@@ -104,11 +104,11 @@ async def test_an_input_that_doesnt_match_its_schema_is_422_with_its_places_neve
 
 
 async def test_a_body_with_unknown_fields_is_refused(keyed_app, ready, owner_sessionmaker, api_settings) -> None:
-    """CSV starts are 2b-3's: a `csv` field isn't accepted yet."""
     ctx, wf = ready
     client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
-    answer = await client.post(runs_url(ctx, wf), json={**BODY, "csv": "u1"}, headers={"Idempotency-Key": "k1"})
-    assert (answer.status_code, answer.json()["error"]) == (422, "invalid")
+    for body in ({**BODY, "rows": []}, {**BODY, "csv": "u1"}, {**BODY, "csv": {"upload_id": "u1", "mapping": {}}}):
+        answer = await client.post(runs_url(ctx, wf), json=body, headers={"Idempotency-Key": "k1"})
+        assert (answer.status_code, answer.json()["error"]) == (422, "invalid")
 
 
 async def test_production_runs_off_answers_503(keyed_app, ready, owner_sessionmaker, api_settings) -> None:
