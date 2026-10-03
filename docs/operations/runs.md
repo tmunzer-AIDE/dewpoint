@@ -104,10 +104,13 @@ doesn't happen, or sends it to Temporal and the run ends `cancelled`. 409 `run_e
 cancel.
 
 `POST /api/v1/t/{tenant}/runs/{id}/rerun`, with `run.start` and an `Idempotency-Key`, admits a new request (source
-`rerun`) on the workflow's active version with the old request's complete input: rebuilt from its envelope and its
-claims in memory only, then validated and claimed again, so no old handle is reused. The body `{"mode": ...}` is
-optional (the old request's by default). 410 `input_not_retained` for a run from before 2b-2, a refused request, or an
-input retention has removed.
+`rerun`) on the workflow's active version. With `{"input": {...}}` it uses that new input, offered whatever was
+retained. Without it, it uses the old request's complete input: rebuilt from its envelope and its claims in memory
+only, then validated and claimed again, so no old handle is reused; 410 `input_not_retained` for a run from before
+2b-2, a refused request, or an input retention has removed. `{"mode": ...}` is optional (the old one's by default).
+The key covers what was asked (the request re-run, the mode, any new input), and is checked before anything is
+rebuilt: an exact retry returns the request it admitted even once retention has removed the old input, and another
+re-run under the key is 409 `idempotency_conflict`. The audit entry names the request re-run (`rerun_of`).
 
 ## The worker
 

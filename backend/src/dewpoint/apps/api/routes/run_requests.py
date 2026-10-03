@@ -43,6 +43,7 @@ class StartIn(BaseModel):
 class RerunIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     mode: Literal["live", "simulate"] | None = None  # the old request's when not given
+    input: dict[str, Any] | None = None  # new input; else the original, rebuilt while it's retained
 
 
 def key_unusable(e: Exception) -> HTTPException:
@@ -84,12 +85,13 @@ def request_body(r: RunRequest) -> dict[str, object]:
 
 
 async def admit(
-    db: AsyncSession, keys: KeySource, ctx: TenantContext, workflow_id: uuid.UUID, source: str, body: StartIn, key: str
-) -> RunRequest:
+    db: AsyncSession, keys: KeySource, ctx: TenantContext, workflow_id: uuid.UUID, source: str, body: StartIn, key: str,
+    rerun: admission.Rerun | None = None,
+) -> RunRequest:  # fmt: skip
     try:
         admitted = await admission.admit_request(
             db, keys, tenant_id=ctx.tenant_id, workflow_id=workflow_id, source=source, actor_id=ctx.user.id,
-            mode=body.mode, idempotency_key=key, input=body.input,
+            mode=body.mode, idempotency_key=key, input=body.input, rerun=rerun,
         )  # fmt: skip
     except admission.WorkflowNotFoundError:
         raise HTTPException(404, detail={"error": "not_found"}) from None
@@ -172,18 +174,38 @@ async def rerun(
     db: AsyncSession = Depends(get_db, scope="function"),
     keys: KeySource = Depends(get_keys),
 ) -> dict[str, object]:
-    """A new admission (source `rerun`) on the workflow's active version, with the old request's complete input,
-    validated and claimed again under the new request: no old handle is reused. 410 `input_not_retained` when it can't
-    be rebuilt: a run from before 2b-2, a refused request, an envelope or a claim retention has removed."""
+    """A new admission (source `rerun`) on the workflow's active version, with new input, or else the old request's
+    complete input, validated and claimed again under the new request: no old handle is reused. The key is checked
+    first: an exact retry returns the request it admitted, whatever retention has removed since; another request under
+    the key is a 409. 410 `input_not_retained` when the original input can't be rebuilt: a run from before 2b-2, a
+    refused request, an envelope or a claim retention has removed. New input needs none of it."""
+    given = body or RerunIn()
     old = await db.get(RunRequest, request_id)  # row-level security: the caller's tenant's only
-    if old is None:
-        if await db.get(Run, request_id) is not None:  # a run 2a started: no request, no envelope
-            raise HTTPException(410, detail={"error": INPUT_NOT_RETAINED})
+    run = await db.get(Run, request_id) if old is None else None  # a run 2a started: no request, no envelope
+    named = old if old is not None else run
+    if named is None:
         raise HTTPException(404, detail={"error": "not_found"})
-    value = await original_input(db, keys, ctx.tenant_id, old)
-    mode = body.mode if body is not None and body.mode is not None else old.mode
+    workflow_id, mode = named.workflow_id, given.mode or named.mode
+    again = admission.Rerun(request_id, given.input)
+    try:
+        existing = await admission.admitted_under(
+            db, keys, tenant_id=ctx.tenant_id, idempotency_key=key, source="rerun", workflow_id=workflow_id,
+            mode=mode, rerun=again,
+        )  # fmt: skip
+    except admission.IdempotencyConflictError:
+        raise HTTPException(409, detail={"error": "idempotency_conflict"}) from None
+    except Exception as e:
+        raise key_unusable(e) from None
+    if existing is not None:
+        return request_body(existing)
+    if given.input is not None:
+        value = given.input
+    elif old is None:
+        raise HTTPException(410, detail={"error": INPUT_NOT_RETAINED})
+    else:
+        value = await original_input(db, keys, ctx.tenant_id, old)
     start = StartIn(input=value, mode=mode)
-    return request_body(await admit(db, keys, ctx, old.workflow_id, "rerun", start, key))
+    return request_body(await admit(db, keys, ctx, workflow_id, "rerun", start, key, rerun=again))
 
 
 async def original_input(db: AsyncSession, keys: KeySource, tenant_id: uuid.UUID, old: RunRequest) -> dict[str, Any]:

@@ -328,3 +328,85 @@ async def test_a_tenant_whose_key_cant_be_read_answers_503(keyed_app, ready, own
     client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
     answer = await client.post(runs_url(ctx, wf), json=BODY, headers={"Idempotency-Key": "k1"})
     assert (answer.status_code, answer.json()) == (503, {"error": "key_unusable"})
+
+
+async def remove_claims(owner: Any, request_id: str) -> None:
+    """Retention removed a request's claims (its envelope stays while a request refers to it)."""
+    async with owner() as s, s.begin():
+        await s.execute(text("delete from run_inputs where owner_run_id = :i and role = 'claim'"), {"i": request_id})
+
+
+async def test_an_exact_rerun_retry_returns_the_admitted_request_even_once_the_old_input_is_gone(
+    keyed_app, ready, owner_sessionmaker, api_settings
+) -> None:
+    """The owner's M4 review: the key is checked before the old input is rebuilt."""
+    ctx, wf = ready
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
+    old = await started_request(client, ctx, wf)
+    url = f"/api/v1/t/{ctx.tenant_id}/runs/{old['id']}/rerun"
+    first = await client.post(url, headers={"Idempotency-Key": "r1"})
+    assert first.status_code == 202, first.text
+    await remove_claims(owner_sessionmaker, old["id"])
+    again = await client.post(url, headers={"Idempotency-Key": "r1"})
+    assert (again.status_code, again.json()["id"]) == (202, first.json()["id"])
+    async with owner_sessionmaker() as s:
+        details = (await s.execute(text("select details from audit_log where action = 'run.request' and "
+                                        "target_id = :i"), {"i": first.json()["id"]})).scalar_one()  # fmt: skip
+    assert details["source"] == "rerun" and details["rerun_of"] == old["id"]
+
+
+@pytest.mark.parametrize("other", [{"mode": "simulate"}, {"input": {"token": TOKEN, "site": "b"}}])
+async def test_a_reused_rerun_key_for_another_rerun_is_a_conflict_even_once_the_old_input_is_gone(
+    keyed_app, ready, owner_sessionmaker, api_settings, other
+) -> None:
+    ctx, wf = ready
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
+    old = await started_request(client, ctx, wf)
+    url = f"/api/v1/t/{ctx.tenant_id}/runs/{old['id']}/rerun"
+    assert (await client.post(url, headers={"Idempotency-Key": "r1"})).status_code == 202
+    await remove_claims(owner_sessionmaker, old["id"])
+    conflict = await client.post(url, json=other, headers={"Idempotency-Key": "r1"})
+    assert (conflict.status_code, conflict.json()["error"]) == (409, "idempotency_conflict")
+
+
+@pytest.mark.parametrize("gone", ["claim_removed", "refused", "pre_2b2_run"])
+async def test_a_rerun_with_new_input_needs_no_retained_input(
+    keyed_app, ready, owner_sessionmaker, api_sessionmaker, dispatch_sessionmaker, api_settings, gone
+) -> None:
+    """Re-running with new input is always offered (§7.7): only the original input depends on retention."""
+    ctx, wf = ready
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
+    if gone == "claim_removed":
+        target = (await started_request(client, ctx, wf))["id"]
+        await remove_claims(owner_sessionmaker, target)
+    elif gone == "refused":
+        await update(api_sessionmaker, ctx, wf, enabled=False)
+        target = str((await admit(api_sessionmaker, ctx, wf, source="schedule")).request.id)
+        await update(api_sessionmaker, ctx, wf, enabled=True)
+    else:
+        async with owner_sessionmaker() as s:
+            version = (
+                await s.execute(text("select active_version_id from workflows where id = :w"), {"w": wf})
+            ).scalar()
+        async with dispatch_sessionmaker() as s, s.begin():
+            await tenant_scope(s, ctx.tenant_id)
+            target = str((await runs.insert_run(s, run_id=uuid.uuid4(), tenant_id=ctx.tenant_id, workflow_id=wf,
+                                                version_id=version, mode="live")).id)  # fmt: skip
+    answer = await client.post(
+        f"/api/v1/t/{ctx.tenant_id}/runs/{target}/rerun", json={"input": {"token": TOKEN, "site": "b"}},
+        headers={"Idempotency-Key": "r1"},
+    )  # fmt: skip
+    assert answer.status_code == 202, answer.text
+    assert answer.json()["source"] == "rerun" and TOKEN not in answer.text
+    assert (await envelope_of(api_sessionmaker, ctx, answer.json()["id"]))["site"] == "b"
+
+
+async def test_a_reruns_new_input_is_validated_as_any_start(keyed_app, ready, owner_sessionmaker, api_settings) -> None:
+    ctx, wf = ready
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
+    old = await started_request(client, ctx, wf)
+    answer = await client.post(
+        f"/api/v1/t/{ctx.tenant_id}/runs/{old['id']}/rerun", json={"input": {"site": "b"}},
+        headers={"Idempotency-Key": "r1"},
+    )  # fmt: skip
+    assert (answer.status_code, answer.json()["error"]) == (422, "input_invalid")

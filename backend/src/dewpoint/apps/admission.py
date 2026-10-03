@@ -85,6 +85,19 @@ class WorkflowNotFoundError(LookupError):
 
 
 @dataclass(frozen=True)
+class Rerun:
+    """A re-run's identity: the request (or, from before 2b-2, the run) it re-runs, and the new input it was given,
+    if any. Its idempotency digest covers this in place of the input it admits, so an exact retry is recognized, and
+    another request under the key refused, without rebuilding the old input, which retention may have removed."""
+
+    of: uuid.UUID
+    input: dict[str, Any] | None = None
+
+    def digested(self) -> dict[str, Any]:
+        return {"rerun_of": str(self.of), "input": self.input}
+
+
+@dataclass(frozen=True)
 class Admitted:
     request: RunRequest
     new: bool  # False: an exact retry, the frozen request as it is now
@@ -110,17 +123,20 @@ async def admit_request(
     mode: str,
     idempotency_key: str,
     input: dict[str, Any],
+    rerun: Rerun | None = None,
 ) -> Admitted:
-    """The request under `idempotency_key`: an exact retry's, or a new one, frozen. Raises IdempotencyConflictError,
-    WorkflowNotFoundError, or, for an interactive source, AdmissionRefusedError."""
+    """The request under `idempotency_key`: an exact retry's, or a new one, frozen. A re-run's digest covers its
+    `rerun` identity in place of `input`. Raises IdempotencyConflictError, WorkflowNotFoundError, or, for an
+    interactive source, AdmissionRefusedError."""
     if source not in INTERACTIVE + DURABLE or mode not in (LIVE, SIMULATE):
         raise ValueError(f"no such source or mode: {source}, {mode}")
     await lifecycle.assert_read_committed(s)
     await tenant_scope(s, tenant_id)
     fields: dict[str, Any] = {"source": source, "workflow_id": workflow_id, "mode": mode, "input": input}
+    digested = {**fields, "input": rerun.digested()} if rerun is not None else fields
     existing = await _by_key(s, idempotency_key)
     if existing is not None:
-        return await _retry(keys, tenant_id, existing, fields)
+        return await _retry(keys, tenant_id, existing, digested)
     request_id = uuid.uuid4()
     savepoint = await s.begin_nested()
     try:
@@ -129,15 +145,31 @@ async def admit_request(
         await savepoint.rollback()
         if source in INTERACTIVE:
             raise AdmissionRefusedError(refused.reason, refused.messages) from None
-        return await _insert(s, keys, tenant_id, request_id, actor_id, idempotency_key, fields, None, None, refused)
+        return await _insert(s, keys, tenant_id, request_id, actor_id, idempotency_key, digested, None, None, refused,
+                             rerun)  # fmt: skip
     await _before_insert()
-    admitted = await _insert(s, keys, tenant_id, request_id, actor_id, idempotency_key, fields, version_id, envelope_id)
+    admitted = await _insert(s, keys, tenant_id, request_id, actor_id, idempotency_key, digested, version_id,
+                             envelope_id, rerun=rerun)  # fmt: skip
     if admitted.new:
         await savepoint.commit()
     else:
         await savepoint.rollback()  # another transaction won the key: this call's claims and envelope go with it
-        return await _retry(keys, tenant_id, await _winner(s, idempotency_key), fields)
+        return await _retry(keys, tenant_id, await _winner(s, idempotency_key), digested)
     return admitted
+
+
+async def admitted_under(
+    s: AsyncSession, keys: KeySource, *, tenant_id: uuid.UUID, idempotency_key: str, source: str,
+    workflow_id: uuid.UUID, mode: str, rerun: Rerun,
+) -> RunRequest | None:  # fmt: skip
+    """The request an exact retry of this re-run finds under its key, before its input is rebuilt; None when the key
+    is free. Raises IdempotencyConflictError for another request under the key."""
+    await tenant_scope(s, tenant_id)
+    existing = await _by_key(s, idempotency_key)
+    if existing is None:
+        return None
+    fields = {"source": source, "workflow_id": workflow_id, "mode": mode, "input": rerun.digested()}
+    return (await _retry(keys, tenant_id, existing, fields)).request
 
 
 async def _by_key(s: AsyncSession, idempotency_key: str) -> RunRequest | None:
@@ -227,6 +259,7 @@ async def _insert(
     version_id: uuid.UUID | None,
     envelope_id: uuid.UUID | None,
     refused: _Refused | None = None,
+    rerun: Rerun | None = None,
 ) -> Admitted:
     """The request row, queued or refused, and its audit entry; `new` False when another transaction won the key."""
     key_version, digest = await digests.digest(keys, str(tenant_id), **fields)  # the tenant's active key (§7.2)
@@ -263,6 +296,8 @@ async def _insert(
         details["version_id"] = str(row["workflow_version_id"])
     if refused:
         details["reason"] = refused.reason
+    if rerun is not None:
+        details["rerun_of"] = str(rerun.of)
     await audit.record(s, tenant_id=tenant_id, actor_id=actor_id, action="run.request", target_type="run_request",
                        target_id=str(request_id), details=details)  # fmt: skip
     request = await s.get(RunRequest, request_id, populate_existing=True)
