@@ -1,7 +1,7 @@
 # Dewpoint — Engine Core Design (sub-project 2a)
 
-- **Status:** Accepted as the basis for implementation, revision 5.8 (2026-10-02); revision 5.9 is pending with the 2b
-  spec's revision 6.
+- **Status:** Accepted as the basis for implementation, revision 5.9 (2026-10-03, with the 2b spec's revision 6);
+  revision 5.10 is pending with the 2b spec's revision 7.
   - Revision 2 addressed join scopes, the local-CEL switch, evaluator isolation, profile routing and retirement.
   - Revision 3 addresses the version lifecycle (activation, queued requests, closure), nested loops, evaluator
     aggregate memory, and Temporal membership.
@@ -120,7 +120,9 @@
     Temporal's activity records only their fixed text; a plugin's failure shows its code and message only when
     they're constants of its code, and an exception's class only when it's a builtin or its module's code names it
     (§3, §8). `engine_abi` becomes 6.
-  - Revision 5.9 (pending, with the 2b spec's revision 6): the `cel-evaluator` also holds `engine.handles`,
+  - Revision 5.10 (pending, with the 2b spec's revision 7): §9 describes starting runs through admission and the
+    dispatcher (2b-2); §8's `GET /runs` lists requests and runs together by `(queued_at, id)`.
+  - Revision 5.9 (with the 2b spec's revision 6): the `cel-evaluator` also holds `engine.handles`,
     which `engine.cel`'s binding imports (§5.7).
 - **Parent spec:** `2026-09-24-dewpoint-architecture-design.md` (§3 boundaries, §6 execution engine, §7 SDK).
   This spec **narrows parent §6.4** (where CEL runs) and resolves the CEL item in parent §15.
@@ -1206,21 +1208,26 @@ cancel while the version loads cancels the run.
   `deadline_exceeded`, `cancelled`, `terminated` (a sub-run an operator terminated: its parent records the end, and
   its step or loop fails with it) and
   `node_type_unavailable` (no worker of the build runs the node type).
-- **Read API:** `GET /runs` (top-level runs, newest first, paged by the last run's start time and id, given together as `before` and `before_id`: half of it is refused) and `GET /runs/{id}` (with steps, and the sub-runs it started). The UI
+- **Read API:** `GET /runs` (from 2b-2, requests and top-level runs together, newest first by `(queued_at, id)`: a request that hasn't started is shown as itself, never as the row an attempt pre-created; paged by the last item's `queued_at` and id, given together as `before` and `before_id`: half of it is refused; 2b spec §7.7) and `GET /runs/{id}` (with steps, and the sub-runs it started). The UI
   never reads Temporal history.
 
-## 9. Starting runs in 2a
+## 9. Starting runs
 
-- **Internal only:** `engine` defines the start request. `apps` provides `start_run(version_id, payload, *, mode)` for tests, the dev CLI (`dewpoint dev run <version> --input file.json`) and, later, 2b's dispatcher.
-- **No public run API in 2a.** Admission, idempotency keys and tenant slots arrive in 2b.
-- **Payloads are validated at admission** from ABI 6 (2b spec §3.5): a trigger that breaks the input schema is
-  refused with the places and rules it breaks, never a value nor a key the data supplied (shown as `*`), and leaves
-  no run; one that passes is claimed, and the
-  run starts with its envelope. Before ABI 6 a payload that broke its schema failed the step that read the bad value.
+- **From 2b-2, every start is admitted, then dispatched** (2b spec §7). The run API and `dewpoint dev run` admit a
+  request in their own transaction (`admit_request`: idempotency first, then the checks of §4.5, the input's
+  validation and claims, the envelope); `dewpoint dispatcher` starts it on Temporal within its tenant's slots, and its
+  reconciler settles what a start leaves uncertain. No command starts a run directly: 2a's `start_run(version_id,
+  payload, *, mode)` stays a test helper.
+- **Payloads are validated at admission** from ABI 6 (2b spec §3.5): an input that breaks the input schema is
+  refused with the places and rules it breaks, never a value nor a key the data supplied (shown as `*`): an
+  interactive source's refusal leaves no request, and a durable source's is kept as a `refused` request (2b spec
+  §7.2). One that passes is claimed, and the run starts with its envelope. Before ABI 6 a payload that broke its
+  schema failed the step that read the bad value.
 - **A start is failed only when it certainly never began.** The workflow id is `t:<tenant>:run:<run id>` (2b spec
-  §6.1), with `REJECT_DUPLICATE`. An unanswered start is retried with the same id, and a duplicate refusal confirms it.
-  `start_failed` is recorded for a confirmed refusal, or for a start the client couldn't encrypt, which it never sent
-  (2b spec §6.2); a start that stays unanswered leaves the run `running`.
+  §6.1), with `REJECT_DUPLICATE`. A confirmed refusal backs off and counts an attempt; the 10th fails the run with
+  `start_failed`. An unanswered start stays `starting`, its slot held, until the reconciler finds the execution or
+  a trustworthy absence (2b spec §7.4, §7.6); "already started" counts only once the execution's own start names the
+  request.
 
 ## 10. Testing strategy
 
