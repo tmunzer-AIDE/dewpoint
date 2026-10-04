@@ -41,7 +41,7 @@ from dewpoint.core.plugins.registry import (
     list_node_types,
     sync_plugins,
 )
-from dewpoint.core.tenancy.service import NotKeyAdminError, ensure_tenant_keys
+from dewpoint.core.tenancy.service import NotKeyAdminError, ensure_tenant_event_keys, ensure_tenant_keys
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.sdk import ManifestError
 
@@ -230,16 +230,17 @@ def keys_ensure_tenants() -> None:
     Idempotent. Run as dewpoint_admin, as Compose's migrate step does: it lists tenants under row-level security."""
     keyring = Keyring(KekSet.from_settings(get_settings()))
 
-    async def _run(s: AsyncSession) -> list[uuid.UUID]:
+    async def _run(s: AsyncSession) -> tuple[list[uuid.UUID], list[uuid.UUID]]:
         async with s.begin():
-            return await ensure_tenant_keys(s, keyring)
+            return await ensure_tenant_keys(s, keyring), await ensure_tenant_event_keys(s, keyring)
 
     try:
-        created = asyncio.run(_in_session(_run))
+        created, paired = asyncio.run(_in_session(_run))
     except NotKeyAdminError as e:
         typer.echo(f"ERROR: {e}")
         raise typer.Exit(2) from None
     typer.echo(f"created a data key for {len(created)} tenant(s)")
+    typer.echo(f"created an inbound keypair for {len(paired)} tenant(s)")
 
 
 @plugins_cli.command("sync")

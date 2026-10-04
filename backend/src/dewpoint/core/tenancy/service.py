@@ -8,6 +8,8 @@ from dewpoint.core.auth.users import get_user_by_email
 from dewpoint.core.authz.permissions import ROLE_PERMISSIONS, P
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.db import tenant_scope, user_scope
+from dewpoint.core.ingress.keys import ensure_event_key
+from dewpoint.core.models.ingress import TenantEventKey
 from dewpoint.core.models.keys import DataKey
 from dewpoint.core.models.tenancy import Membership, Tenant
 
@@ -26,7 +28,8 @@ class ActorNotAuthorizedError(Exception):
 
 
 async def create_tenant(s: AsyncSession, keyring: Keyring, *, name: str, slug: str, owner_id: uuid.UUID) -> Tenant:
-    """A tenant, its owner, and its data key: the payload codec only reads keys (engine 2b spec §6.3)."""
+    """A tenant, its owner, its data key (the payload codec only reads keys, engine 2b spec §6.3) and its inbound
+    keypair (§8.3)."""
     tid = uuid.uuid4()
     await tenant_scope(s, tid)
     tenant = Tenant(id=tid, name=name, slug=slug)
@@ -35,6 +38,7 @@ async def create_tenant(s: AsyncSession, keyring: Keyring, *, name: str, slug: s
     s.add(Membership(tenant_id=tid, user_id=owner_id, role="owner"))
     await s.flush()
     await keyring.ensure_key(s, tid)
+    await ensure_event_key(s, keyring, tid)
     return tenant
 
 
@@ -53,6 +57,19 @@ async def ensure_tenant_keys(s: AsyncSession, keyring: Keyring) -> list[uuid.UUI
     for tid in created:
         await tenant_scope(s, tid)
         await keyring.ensure_key(s, tid)
+    return created
+
+
+async def ensure_tenant_event_keys(s: AsyncSession, keyring: Keyring) -> list[uuid.UUID]:
+    """An inbound keypair for every tenant that has none — tenants created before 2b-3b — and which ones got one. As
+    `ensure_tenant_keys`, it runs as the key admin, which lists every tenant under row-level security."""
+    if not (await s.execute(text("SELECT pg_has_role(current_user, 'dewpoint_admin', 'USAGE')"))).scalar_one():
+        raise NotKeyAdminError("run it as a dewpoint_admin login: it lists every tenant under row-level security.")
+    keyed = select(TenantEventKey.tenant_id).where(TenantEventKey.tenant_id == Tenant.id).exists()
+    created = list((await s.execute(select(Tenant.id).where(~keyed).order_by(Tenant.id))).scalars())
+    for tid in created:
+        await tenant_scope(s, tid)
+        await ensure_event_key(s, keyring, tid)
     return created
 
 
