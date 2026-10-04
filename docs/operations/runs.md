@@ -480,12 +480,13 @@ retry settings (`max_attempts` and `timeout_s` can be overridden per step), and 
   not a bound, and the memory concurrent uploads need is still to be sized.
 - A loop over a CSV's rows, once they pass 64 KiB, runs each step's activity per row as any loop does, and CEL over a
   cell adds one `cel.evaluate` per row. On a development machine (Temporal's dev server, one worker), 1,000 rows took
-  2 minutes 15 seconds with a condition on a cell and 55 seconds without; 2,500 rows, 5 minutes 40 seconds and
-  2 minutes 25 seconds. The time grows with the rows, slightly faster than they do: 10,000 rows would take about 23 to
-  25 minutes with the condition and 10 to 12 without (estimated from those two, not measured).
-- Each sensitive cell is its own claim and joins the run tree's secret index, while the start request waits: 2,500
-  rows with five sensitive columns took 7 seconds to admit (12,501 claims), so 10,000 would take about 30 seconds. Ten
-  sensitive columns of distinct values in 10,000 rows reach the index's 100,000 strings (`secret_index_limit`).
+  133 seconds with a condition on a cell and 54 seconds without; 2,500 rows, 340 seconds and 143 seconds. The time grows
+  with the rows, slightly faster than they do: 10,000 rows would take about 23 to 25 minutes with the condition and 10
+  to 12 without (estimated from those two, not measured).
+- Each sensitive cell is its own claim and joins the run tree's secret index, while the start request waits: 2,500 rows
+  with five sensitive columns took 7 seconds to admit (12,501 claims), so 10,000 would take about 30 seconds (estimated,
+  not measured). Ten sensitive columns of distinct values in 10,000 rows reach the index's 100,000 strings
+  (`secret_index_limit`).
 - A schedule fires at most once a minute, and its catch-up window is 1 minute to 24 hours. Each cycle, the
   dispatcher's leader syncs at most 50 changed schedules (up to three Temporal calls each) and reads at most 50
   schedules' misses, one call after another, each bounded at 10 seconds: a Temporal that answers slowly delays
