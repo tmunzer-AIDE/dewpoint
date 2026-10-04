@@ -51,7 +51,9 @@ draft lands with this plan on branch `docs/engine-2b3b-plan`. Sections: §2.5 (t
 - No value from an event, a secret or a token appears in plain metadata, a log, a code or a message: codes are fixed,
   a log names an exception's type, a settings error quotes no value, and ids are stored only as keyed digests.
 - An endpoint's identity (how it authenticates, where its ids are) never changes: the API refuses a change, and its
-  role has no grant to make one (the owner's docs review).
+  role has no grant to update it. Nor has its role a grant to update an endpoint's rates but the byte burst, which the
+  API writes for a larger body limit: least privilege, not a rate ceiling, since the role still inserts every column of
+  a new endpoint (the owner's docs reviews).
 - Every new table forces row-level security, with tenant-scoped policies for the API and the dispatcher only;
   cross-tenant reads are functions returning ids only (`event_candidates()`, `recount_candidates()`).
 - An alert or a warning about an outcome is logged only once its transaction has committed.
@@ -113,7 +115,7 @@ The diffs are exact, as git wrote them. Git writes a blank line of context as a 
 reports each of those 55 lines in this file as trailing whitespace; they're part of the patches, and no line a diff adds
 ends in whitespace. The 2b-2 and 2b-3a plans carry the same lines.
 
-The prototype is the local branch `proto/2b3b-v3`, cut from `main` at `9fb4ee5`, with one commit per task:
+The prototype is the local branch `proto/2b3b-v4`, cut from `main` at `9fb4ee5`, with one commit per task:
 - `proto/2b3b-v1` was built milestone by milestone, with the owner's checkpoint after each; all four milestones were
   approved as prototype checkpoints.
 - `proto/2b3b-v2` rebuilt it in ten tasks. Its tasks 4 and 5 are folded into one (the owner's ruling: no deployable
@@ -124,20 +126,23 @@ The prototype is the local branch `proto/2b3b-v3`, cut from `main` at `9fb4ee5`,
   transaction open, and the teardown's truncate waited for it for ever (the replay's own run of Task 7's tests before
   their code hung). Each race module now releases what it holds at teardown (`f462f0b` on `proto/2b3b-v1`, folded into
   Tasks 5 to 7). Task 10's proof test names its new task number.
-- `proto/2b3b-v3` folds in the owner's review of this plan's first draft (milestone ruling 5): the API's role loses
+- `proto/2b3b-v3` folded in the owner's review of this plan's first draft (milestone ruling 5): the API's role lost
   its grant on where an endpoint's ids are (`eba8d51` on `proto/2b3b-v1`, Task 3), and a PATCH of an endpoint whose ids
   are at a pointer or in a header is no longer refused (`4a45443`, Task 7). Task 3's schema tests take the new ones
-  ahead of Task 9's. Only Tasks 3, 7 and 9 have a patch that differs from v2's (Task 9's in its context alone); they
-  were replayed again. Every other task's patch is v2's, byte for byte (but for git's index lines), and keeps v2's
-  replay record; Tasks 5 and 6 differ from v2's only in their messages' line breaks. Its last tree is
-  `proto/2b3b-v1`'s (`4a45443`) but for Task 10's line.
+  ahead of Task 9's. Tasks 5 and 6 differ from v2's only in their messages' line breaks.
+- `proto/2b3b-v4` folds in the review of the second draft (milestone ruling 6): the API's role loses its grant on an
+  endpoint's rates too (`9d86dd9`, Task 3). Its last tree is `proto/2b3b-v1`'s (`9d86dd9`) but for Task 10's line.
+
+Each task keeps the record of the replay that ran its patch: Tasks 3 and 9 were replayed on v4 (Task 9's patch changed
+in its context alone), Task 7 on v3, and the others on v2. Each record names the commit the replay ran, whose patch is
+the task's, byte for byte but for git's index lines.
 
 Each commit was verified this way:
 - its tree was reproduced exactly by the replay, its tests failing before its code and passing after, with the
   exceptions each record shows;
-- CI's static checks passed on every task's tree of `proto/2b3b-v3`: ruff and its formatter (without their caches),
+- CI's static checks passed on every task's tree of `proto/2b3b-v4`: ruff and its formatter (without their caches),
   mypy and import-linter;
-- at each checkpoint of `proto/2b3b-v3`, the milestone's focused tests passed (the counts the checkpoints give), and
+- at each checkpoint of `proto/2b3b-v4`, the milestone's focused tests passed (the counts the checkpoints give), and
   the migrations went up, down and up again over existing rows.
 
 Per the owner's ruling on the outline, the whole suite runs once, at the end, not at every task.
@@ -256,14 +261,20 @@ tasks named.
    through the API found every PATCH of an endpoint whose ids are at a pointer or in a header refused, fixed test-first
    (Task 7). The affected tasks and every checkpoint were replayed, and the embedded diffs keep git's single-space
    context lines ("How the steps give code"). The Compose proof remains an open condition of this branch's pull request.
+6. **The review of its second draft (`8a67c57`).** The identity grants and the PATCH fix answer the hold, and the
+   blank-context markers keep the embedded diffs exact. The API's role also loses UPDATE on an endpoint's
+   `request_per_s`, `request_burst`, `event_per_s`, `event_burst` and `byte_per_s`, which the API never writes, with a
+   direct denial test (Task 3). That's least-privilege hardening, not a rate ceiling the database enforces: the role
+   still inserts every column of a new endpoint, and keeps UPDATE on `byte_burst`, which a PATCH of a larger body limit
+   needs. Nothing here claims its role can't raise a limit by direct SQL; that would take a design of its own.
 
 ## Milestone 1 — Keys, the event store and its functions
 
 ### Task 1: The ingress key, endpoint secrets and an event's typed identity
 
-**Commit:** `1ccc8a1` (prototype `proto/2b3b-v3`). Its patch is `proto/2b3b-v2`'s `7dc02fb`, byte for byte but for git's
+**Commit:** `dd2735f` (prototype `proto/2b3b-v4`). Its patch is `proto/2b3b-v2`'s `7dc02fb`, byte for byte but for git's
 index lines; the replay ran `7dc02fb` and reproduced its tree: yes. Its tests pass again at its checkpoint on
-`proto/2b3b-v3`.
+`proto/2b3b-v4`.
 
 **Create:** `backend/src/dewpoint/core/crypto/ingress.py`, `backend/src/dewpoint/core/ingress/__init__.py`,
 `backend/src/dewpoint/core/ingress/identity.py`, `backend/tests/core/crypto/test_ingress_key.py`,
@@ -311,7 +322,7 @@ ERROR tests/core/ingress/test_identity.py - ImportError while importing test ...
 41 passed in 18.95s
 ```
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 1ccc8a1 && git commit -C 1ccc8a1`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit dd2735f && git commit -C dd2735f`
 
 The diff:
 
@@ -700,9 +711,9 @@ index 0000000..cfa3597
 
 ### Task 2: Each tenant's inbound X25519 keypair, and sealing an event to it
 
-**Commit:** `7506ac3` (prototype `proto/2b3b-v3`). Its patch is `proto/2b3b-v2`'s `83f5935`, byte for byte but for git's
+**Commit:** `a291707` (prototype `proto/2b3b-v4`). Its patch is `proto/2b3b-v2`'s `83f5935`, byte for byte but for git's
 index lines; the replay ran `83f5935` and reproduced its tree: yes. Its tests pass again at its checkpoint on
-`proto/2b3b-v3`.
+`proto/2b3b-v4`.
 
 **Create:** `backend/migrations/versions/0031_tenant_event_keys.py`, `backend/src/dewpoint/core/crypto/events.py`,
 `backend/src/dewpoint/core/ingress/keys.py`, `backend/src/dewpoint/core/models/ingress.py`,
@@ -749,7 +760,7 @@ ERROR tests/core/ingress/test_event_keys.py - ImportError while importing tes...
 19 passed in 17.67s
 ```
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 7506ac3 && git commit -C 7506ac3`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit a291707 && git commit -C a291707`
 
 The diff:
 
@@ -1366,7 +1377,7 @@ index 0000000..3d61fef
 
 ### Task 3: The event store, ingress's three functions under one lock order, and its login
 
-**Commit:** `28dbc18` (prototype `proto/2b3b-v3`), whose tree the replay reproduced: yes.
+**Commit:** `65a20d5` (prototype `proto/2b3b-v4`), whose tree the replay reproduced: yes.
 
 **Create:** `backend/migrations/versions/0032_webhook_ingress.py`, `backend/tests/core/ingress/support.py`,
 `backend/tests/core/ingress/test_ingress_guard.py`, `backend/tests/core/ingress/test_ingress_schema.py`,
@@ -1380,15 +1391,16 @@ index 0000000..3d61fef
 Migration 0032: webhook_endpoints (authentication, allowlist, body limit, id source, rate buckets, pending and retained
 counters and quotas), tenant_event_counters, trigger_bindings (a workflow of the endpoint's own tenant, by a composite
 key; one per endpoint and workflow) and inbound_events, under forced row-level security. The API's role has no grant to
-change how an endpoint authenticates or where its ids are. Ingress has no table privilege: only `ingress_environment()`,
-`resolve_webhook_endpoint()` and `record_inbound_events()`, SECURITY DEFINER, search_path pinned, closed to PUBLIC. The
-recording function takes the tenant from the endpoint's row, the tenant's lifecycle lock shared, the endpoint's row,
-then the counter row; reads its clock after the locks; checks the batch itself (count, alignment, digests, key version,
-a sealed size within 5 times the body limit plus 128 bytes an event); spends the rate budget before deciding, so a
-refusal pays; refuses an id reused for other content, then the retained caps (no wait), then the pending quotas (30 s);
-and inserts all or nothing. Every byte burst covers the largest charge an endpoint permits: its largest sealed batch, or
-the global 5 MiB body cap. Nothing is recorded outside a development deployment. The ingress login in Compose's init,
-env and CI, its test sessionmaker; the lock-order races.
+change how an endpoint authenticates or where its ids are, nor its rates, which the API never writes (least privilege,
+not a ceiling: the role still inserts every column and updates the byte burst a larger body limit needs). Ingress has no
+table privilege: only `ingress_environment()`, `resolve_webhook_endpoint()` and `record_inbound_events()`, SECURITY
+DEFINER, search_path pinned, closed to PUBLIC. The recording function takes the tenant from the endpoint's row, the
+tenant's lifecycle lock shared, the endpoint's row, then the counter row; reads its clock after the locks; checks the
+batch itself (count, alignment, digests, key version, a sealed size within 5 times the body limit plus 128 bytes an
+event); spends the rate budget before deciding, so a refusal pays; refuses an id reused for other content, then the
+retained caps (no wait), then the pending quotas (30 s); and inserts all or nothing. Every byte burst covers the largest
+charge an endpoint permits: its largest sealed batch, or the global 5 MiB body cap. Nothing is recorded outside a
+development deployment. The ingress login in Compose's init, env and CI, its test sessionmaker; the lock-order races.
 
 **A later task refines this.** Task 9 sets both event rates' defaults, an endpoint's (200/s here) and a tenant's
 (1,000/s here), to 10/s, below the drain its load probe measured.
@@ -1398,34 +1410,36 @@ env and CI, its test sessionmaker; the lock-order races.
   tests/core/ingress/test_recording.py tests/deploy/test_compose.py`. Replay result (exit 1), shortened:
 
 ```
+FAILED tests/core/ingress/test_recording.py::test_the_tenants_counters_and_quotas_apply_across_its_endpoints
 FAILED tests/core/ingress/test_recording.py::test_a_full_retained_cap_fails_closed_without_a_retry_time[retained_events_max]
 FAILED tests/core/ingress/test_recording.py::test_the_function_checks_the_batch_itself_whatever_its_caller_says
-FAILED tests/core/ingress/test_recording.py::test_a_full_retained_cap_fails_closed_without_a_retry_time[retained_bytes_max]
-FAILED tests/core/ingress/test_recording.py::test_a_disabled_endpoint_or_an_erasing_tenant_records_and_spends_nothing[update webhook_endpoints set enabled = false where id = :e]
 FAILED tests/core/ingress/test_recording.py::test_a_disabled_endpoint_or_an_erasing_tenant_records_and_spends_nothing[update tenants set status = 'erasing' where id = :t]
-FAILED tests/core/ingress/test_recording.py::test_a_body_whose_canonical_json_grows_is_still_accepted
+FAILED tests/core/ingress/test_recording.py::test_a_disabled_endpoint_or_an_erasing_tenant_records_and_spends_nothing[update webhook_endpoints set enabled = false where id = :e]
 FAILED tests/core/ingress/test_recording.py::test_a_tenant_marked_erasing_first_is_refused_by_a_recording_that_waited
-FAILED tests/core/ingress/test_recording.py::test_every_permitted_request_fits_its_bursts
+FAILED tests/core/ingress/test_recording.py::test_a_body_whose_canonical_json_grows_is_still_accepted
 FAILED tests/core/ingress/test_recording.py::test_a_recording_holds_the_tenants_lock_until_it_commits
+FAILED tests/core/ingress/test_recording.py::test_every_permitted_request_fits_its_bursts
 FAILED tests/core/ingress/test_recording.py::test_a_request_at_the_largest_permitted_size_is_recorded_from_a_full_bucket
 FAILED tests/core/ingress/test_recording.py::test_a_refusal_of_the_largest_body_read_is_charged_from_a_full_smallest_bucket
 FAILED tests/core/ingress/test_recording.py::test_the_refill_is_reckoned_from_after_the_locks
 FAILED tests/deploy/test_compose.py::test_the_database_init_makes_an_ingress_login_from_its_password
-40 failed, 7 passed in 17.79s
+45 failed, 7 passed in 17.90s
 ```
 
 - [ ] **Step 2: its code, then the same tests.** Replay result (exit 0), shortened:
 
 ```
-...............................................                          [100%]
-47 passed in 17.32s
+....................................................                     [100%]
+52 passed in 18.71s
 ```
 
 Evidence beyond the replay: the grant regression, on `proto/2b3b-v1` before `eba8d51` revoked the grants: each of its
 four direct updates by the API's role landed in the stored row (`id_source` from `none` to `pointer` with `id_pointer`
 `/id`, for one), while its control passed; with the revoke, each is refused (`permission denied`), the row unchanged.
+The rate denial test, before `9d86dd9`: each of its five direct updates landed (`byte_per_s` from 2,097,152 to
+1,000,000,000, for one); with that revoke, each is refused, the rate unchanged.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 28dbc18 && git commit -C 28dbc18`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 65a20d5 && git commit -C 65a20d5`
 
 The diff:
 
@@ -1444,10 +1458,10 @@ index 5ee444f..c085e9d 100644
            } > .env
 diff --git a/backend/migrations/versions/0032_webhook_ingress.py b/backend/migrations/versions/0032_webhook_ingress.py
 new file mode 100644
-index 0000000..3d87aea
+index 0000000..97d120b
 --- /dev/null
 +++ b/backend/migrations/versions/0032_webhook_ingress.py
-@@ -0,0 +1,425 @@
+@@ -0,0 +1,426 @@
 +# SPDX-License-Identifier: Apache-2.0
 +"""webhook ingress's tables and functions (engine 2b spec §8.3, §14; the owner's rulings on the 2b-3b outline):
 +`webhook_endpoints` (with their rate buckets, quotas and counters), `tenant_event_counters`, `trigger_bindings` and
@@ -1833,11 +1847,12 @@ index 0000000..3d87aea
 +        ),
 +        # The API manages endpoints and bindings and reads events; the dispatcher matches. Ingress: no table at all.
 +        # Never how an endpoint authenticates or where its ids are: the API's role has no grant to change them (the
-+        # owner's docs review), since they decide how its later deliveries are checked and deduplicated.
++        # owner's docs review), since they decide how its later deliveries are checked and deduplicated. Nor its rates,
++        # which the API never writes: least privilege, not a ceiling, since the role still inserts every column of a
++        # new endpoint and updates the byte burst a larger body limit needs.
 +        "GRANT SELECT, INSERT ON webhook_endpoints TO dewpoint_api",
 +        "GRANT UPDATE (name, enabled, bearer_digest, hmac_secret, signature_header, timestamp_header, tolerance_s, "
-+        "allowlist, body_limit, events_pointer, request_per_s, request_burst, event_per_s, event_burst, byte_per_s, "
-+        "byte_burst, updated_at) ON webhook_endpoints TO dewpoint_api",
++        "allowlist, body_limit, events_pointer, byte_burst, updated_at) ON webhook_endpoints TO dewpoint_api",
 +        "GRANT SELECT ON webhook_endpoints TO dewpoint_dispatch",
 +        "GRANT UPDATE (pending_events, pending_bytes, retained_events, retained_bytes) ON webhook_endpoints "
 +        "TO dewpoint_dispatch",
@@ -1992,10 +2007,10 @@ index 0000000..5bad88a
 +        assert (await s.execute(text("select ingress_environment()"))).scalar_one() == "production"
 diff --git a/backend/tests/core/ingress/test_ingress_schema.py b/backend/tests/core/ingress/test_ingress_schema.py
 new file mode 100644
-index 0000000..6a47425
+index 0000000..ccc7b07
 --- /dev/null
 +++ b/backend/tests/core/ingress/test_ingress_schema.py
-@@ -0,0 +1,214 @@
+@@ -0,0 +1,239 @@
 +# SPDX-License-Identifier: Apache-2.0
 +"""Ingress's tables and functions (engine 2b spec §8.3, §14; the owner's rulings 3 and 8 on the 2b-3b outline): every
 +table under forced row-level security; ingress holding **no table privilege**, only `EXECUTE` on its three SECURITY
@@ -2173,6 +2188,31 @@ index 0000000..6a47425
 +        refused = e
 +    stored = await state(owner_sessionmaker, endpoint_id)
 +    assert {column: stored[column] for column in changed} == {column: columns.get(column) for column in changed}
++    assert refused is not None and "permission denied" in str(refused.orig)
++
++
++@pytest.mark.parametrize(
++    ("column", "value"),
++    [("request_per_s", 1000.0), ("request_burst", 100_000), ("event_per_s", 1000.0), ("event_burst", 100_000),
++     ("byte_per_s", 1e9)],
++)  # fmt: skip
++async def test_the_apis_role_has_no_grant_to_update_an_endpoints_rates(
++    owner_sessionmaker, api_sessionmaker, column: str, value: float
++) -> None:
++    """The owner's docs review: the API writes none of an endpoint's rates, so its role has no grant to update them.
++    Least privilege, not a ceiling: the role still inserts every column of a new endpoint, and updates its byte burst,
++    which a larger body limit needs."""
++    tenant, endpoint_id = await endpoint(owner_sessionmaker)
++    before = (await state(owner_sessionmaker, endpoint_id))[column]
++    refused: DBAPIError | None = None
++    try:
++        async with api_sessionmaker() as s, s.begin():
++            await tenant_scope(s, tenant)
++            await s.execute(text(f"update webhook_endpoints set {column} = :v where id = :e"),  # noqa: S608
++                            {"v": value, "e": endpoint_id})  # fmt: skip
++    except DBAPIError as e:
++        refused = e
++    assert (await state(owner_sessionmaker, endpoint_id))[column] == before
 +    assert refused is not None and "permission denied" in str(refused.orig)
 +
 +
@@ -2629,17 +2669,17 @@ index cd86635..2d2c89e 100644
 ````
 
 **Checkpoint (milestone 1).** Focused: `tests/core/ingress`, `tests/core/crypto`, `tests/core/tenancy`,
-`tests/apps/cli`, `tests/deploy` (149 passed on Task 3's tree); the migrations 0030 → 0032 → 0030 → 0032 over existing
-rows. The owner held it once (milestone ruling 1) and approved it as a prototype checkpoint (2026-10-04); the review of
-this plan's first draft added the API's grant fix (milestone ruling 5).
+`tests/apps/cli`, `tests/deploy` (154 passed on Task 3's tree); the migrations 0030 → 0032 → 0030 → 0032 over existing
+rows. The owner held it once (milestone ruling 1) and approved it as a prototype checkpoint (2026-10-04); the reviews of
+this plan's drafts revoked the API's grants on an endpoint's identity and rates (milestone rulings 5 and 6).
 
 ## Milestone 2 — The ingress process
 
 ### Task 4: `dewpoint ingress`, a hook's checks, and its events parsed, sealed and recorded
 
-**Commit:** `e33222e` (prototype `proto/2b3b-v3`). Its patch is `proto/2b3b-v2`'s `8319fe3`, byte for byte but for git's
+**Commit:** `758a4ee` (prototype `proto/2b3b-v4`). Its patch is `proto/2b3b-v2`'s `8319fe3`, byte for byte but for git's
 index lines; the replay ran `8319fe3` and reproduced its tree: yes. Its tests pass again at its checkpoint on
-`proto/2b3b-v3`.
+`proto/2b3b-v4`.
 
 **Create:** `backend/src/dewpoint/apps/ingress/__init__.py`, `backend/src/dewpoint/apps/ingress/addresses.py`,
 `backend/src/dewpoint/apps/ingress/auth.py`, `backend/src/dewpoint/apps/ingress/batch.py`,
@@ -2708,7 +2748,7 @@ approved for this probe), at milestone 2: an allowlisted client was served; anot
 first one's address in `X-Forwarded-For`, and limited after its failures without limiting the first; trusting no proxy,
 ingress took every client for nginx's own address and refused it (6 of 6).
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit e33222e && git commit -C e33222e`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 758a4ee && git commit -C 758a4ee`
 
 The diff:
 
@@ -4780,7 +4820,7 @@ index 0000000..abc01ec
 +            resolve(document, pointer)
 ```
 
-**Checkpoint (milestone 2).** Focused: as milestone 1, with `tests/apps/ingress` (267 passed); no migration. The nginx
+**Checkpoint (milestone 2).** Focused: as milestone 1, with `tests/apps/ingress` (272 passed); no migration. The nginx
 probe (Task 4's evidence). The owner held it twice (milestone ruling 2) and approved it as a prototype checkpoint
 (2026-10-04).
 
@@ -4788,9 +4828,9 @@ probe (Task 4's evidence). The owner held it twice (milestone ruling 2) and appr
 
 ### Task 5: Every dispatcher matches inbound events while the gate is on, fairly, under one lock order
 
-**Commit:** `dfef93d` (prototype `proto/2b3b-v3`). Its patch is `proto/2b3b-v2`'s `54dab51`, byte for byte but for git's
+**Commit:** `cb1da90` (prototype `proto/2b3b-v4`). Its patch is `proto/2b3b-v2`'s `54dab51`, byte for byte but for git's
 index lines; the replay ran `54dab51` and reproduced its tree: yes. Its tests pass again at its checkpoint on
-`proto/2b3b-v3`.
+`proto/2b3b-v4`.
 
 **Create:** `backend/migrations/versions/0033_event_matching.py`, `backend/src/dewpoint/apps/dispatcher/matching.py`,
 `backend/src/dewpoint/core/ingress/filters.py`, `backend/tests/apps/dispatcher/inbound.py`,
@@ -4845,7 +4885,7 @@ ERROR tests/core/ingress/test_filters.py - ImportError while importing test m...
 Evidence beyond the replay: the race tests' release at teardown (from `f462f0b`, on `proto/2b3b-v1`): with a race test
 made to fail while it holds a match, its module failed in 8 s; without the release, it gave no result in 60 s.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit dfef93d && git commit -C dfef93d`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit cb1da90 && git commit -C cb1da90`
 
 The diff:
 
@@ -6134,9 +6174,9 @@ index 0000000..4e01de2
 
 ### Task 6: An event that can't match is dead only when that's confirmed; the leader recounts the counters
 
-**Commit:** `7c7459f` (prototype `proto/2b3b-v3`). Its patch is `proto/2b3b-v2`'s `30e9333`, byte for byte but for git's
+**Commit:** `c055f39` (prototype `proto/2b3b-v4`). Its patch is `proto/2b3b-v2`'s `30e9333`, byte for byte but for git's
 index lines; the replay ran `30e9333` and reproduced its tree: yes. Its tests pass again at its checkpoint on
-`proto/2b3b-v3`.
+`proto/2b3b-v4`.
 
 **Create:** `backend/src/dewpoint/apps/dispatcher/recount.py`,
 `backend/tests/apps/dispatcher/test_matching_outcomes.py`, `backend/tests/apps/dispatcher/test_recount.py`
@@ -6188,7 +6228,7 @@ ERROR tests/apps/dispatcher/test_recount.py - ImportError while importing tes...
 20 passed in 25.04s
 ```
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 7c7459f && git commit -C 7c7459f`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit c055f39 && git commit -C c055f39`
 
 The diff:
 
@@ -6989,7 +7029,9 @@ index 0000000..f8b2ad0
 
 ### Task 7: Webhook endpoints, bindings and inbound events, their secrets shown once and their cancels admins'
 
-**Commit:** `522947a` (prototype `proto/2b3b-v3`), whose tree the replay reproduced: yes.
+**Commit:** `e2fd972` (prototype `proto/2b3b-v4`). Its patch is `proto/2b3b-v3`'s `522947a`, byte for byte but for git's
+index lines; the replay ran `522947a` and reproduced its tree: yes. Its tests pass again at its checkpoint on
+`proto/2b3b-v4`.
 
 **Create:** `backend/src/dewpoint/apps/api/routes/webhooks.py`, `backend/src/dewpoint/apps/webhooks.py`,
 `backend/src/dewpoint/core/ingress/counters.py`, `backend/tests/apps/api/test_webhooks_api.py`
@@ -7015,7 +7057,7 @@ is written. Races: two bindings at the cap; a cancel against a match, each way.
 
 - [ ] **Step 1: its tests alone, before its code.** Run (in `backend/`): `uv run pytest -q -n 2
   tests/apps/api/test_webhooks_api.py tests/apps/dispatcher/test_matching.py tests/core/ingress/test_filters.py`. Replay
-  result (exit 1), shortened:
+  result on `522947a` (exit 1), shortened:
 
 ```
 FAILED tests/apps/api/test_webhooks_api.py::test_rotating_a_secret_shows_the_new_one_once_and_keeps_deduplication
@@ -7034,7 +7076,7 @@ FAILED tests/apps/dispatcher/test_matching.py::test_a_match_waits_for_a_cancel_a
 27 failed, 31 passed in 26.62s
 ```
 
-- [ ] **Step 2: its code, then the same tests.** Replay result (exit 0), shortened:
+- [ ] **Step 2: its code, then the same tests.** Replay result on `522947a` (exit 0), shortened:
 
 ```
 ..........................................................               [100%]
@@ -7045,7 +7087,7 @@ Evidence beyond the replay: the PATCH test, on `proto/2b3b-v1` without `4a45443`
 endpoint (422 `endpoint_invalid`, naming `id_pointer`, then `id_header`); with it, both pass, as they do once `eba8d51`
 has revoked the API's grant on where the ids are.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 522947a && git commit -C 522947a`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit e2fd972 && git commit -C e2fd972`
 
 The diff:
 
@@ -8343,7 +8385,7 @@ index a79c287..f9a3aa5 100644
 ```
 
 **Checkpoint (milestone 3).** Focused: `tests/apps/api`, `tests/apps/cli`, `tests/apps/dispatcher`,
-`tests/apps/ingress`, `tests/core/crypto`, `tests/core/ingress`, `tests/core/tenancy`, `tests/deploy` (654 passed); the
+`tests/apps/ingress`, `tests/core/crypto`, `tests/core/ingress`, `tests/core/tenancy`, `tests/deploy` (659 passed); the
 migrations 0030 → 0033 → 0030 → 0033 and 0033 → 0032 → 0033 over existing rows. The owner held it once (milestone ruling
 3) and approved it as a prototype checkpoint, not production ingress sign-off (2026-10-04); the review of this plan's
 first draft added the PATCH fix (milestone ruling 5).
@@ -8352,9 +8394,9 @@ first draft added the PATCH fix (milestone ruling 5).
 
 ### Task 8: A signed webhook becomes a run end to end with the keyring's real keys, leaking nothing
 
-**Commit:** `79a78cd` (prototype `proto/2b3b-v3`). Its patch is `proto/2b3b-v2`'s `527013c`, byte for byte but for git's
+**Commit:** `4f3300c` (prototype `proto/2b3b-v4`). Its patch is `proto/2b3b-v2`'s `527013c`, byte for byte but for git's
 index lines; the replay ran `527013c` and reproduced its tree: yes. Its tests pass again at its checkpoint on
-`proto/2b3b-v3`.
+`proto/2b3b-v4`.
 
 **Create:** `backend/tests/apps/dispatcher/test_ingress_end_to_end.py`
 
@@ -8391,7 +8433,7 @@ Evidence beyond the replay: a proof of what Tasks 1 to 7 built, so it passes bef
 real data: the request's input, decrypted with the real keys, is the event with its canary, and every history scanned
 names the tenant; neither the canary nor a secret is in any of them.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 79a78cd && git commit -C 79a78cd`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 4f3300c && git commit -C 4f3300c`
 
 The diff:
 
@@ -8593,7 +8635,7 @@ index 0000000..1731e03
 
 ### Task 9: The load probe, and event rates set below what it measured the dispatcher drains
 
-**Commit:** `4cb96f2` (prototype `proto/2b3b-v3`), whose tree the replay reproduced: yes.
+**Commit:** `edbf1b5` (prototype `proto/2b3b-v4`), whose tree the replay reproduced: yes.
 
 **Create:** `backend/tests/probes/__init__.py`, `backend/tests/probes/ingress_load.py`
 
@@ -8619,36 +8661,36 @@ are therefore 10/s (their bursts, 1,000 and 5,000, unchanged), below the five-bi
 E   assert (200.0, 1000) == (10, 1000)
       At index 0 diff: 200.0 != 10
       Use -v to get more diff
-<replay>/t9/backend/tests/core/ingress/test_ingress_schema.py:226: assert (200.0, 1000) == (10, 1000)
+<replay>/t9/backend/tests/core/ingress/test_ingress_schema.py:251: assert (200.0, 1000) == (10, 1000)
 [gw1] darwin -- Python 3.14.7 <venv>/bin/python
 E   assert (1000.0, 5000) == (10, 5000)
       At index 0 diff: 1000.0 != 10
       Use -v to get more diff
-<replay>/t9/backend/tests/core/ingress/test_ingress_schema.py:240: assert (1000.0, 5000) == (10, 5000)
+<replay>/t9/backend/tests/core/ingress/test_ingress_schema.py:265: assert (1000.0, 5000) == (10, 5000)
 =========================== short test summary info ============================
 FAILED tests/core/ingress/test_ingress_schema.py::test_an_endpoints_default_event_rate_is_below_one_dispatchers_measured_drain
 FAILED tests/core/ingress/test_ingress_schema.py::test_a_tenants_default_event_rate_is_below_what_its_endpoints_drain_together
-2 failed, 15 passed in 14.03s
+2 failed, 20 passed in 13.98s
 ```
 
 - [ ] **Step 2: its code, then the same tests.** Replay result (exit 0), shortened:
 
 ```
-.................                                                        [100%]
-17 passed in 13.11s
+......................                                                   [100%]
+22 passed in 15.48s
 ```
 
 Evidence beyond the replay: the probe's parts ran by hand, each on a disposable database, and gave the measurements this
 commit and the guide record; its `buckets` part ran again at the tenant's 10/s default (5,000 of 5,030 events accepted
 in 100-event calls, the refusals waiting 8 to 10 s).
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 4cb96f2 && git commit -C 4cb96f2`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit edbf1b5 && git commit -C edbf1b5`
 
 The diff:
 
 ```diff
 diff --git a/backend/migrations/versions/0032_webhook_ingress.py b/backend/migrations/versions/0032_webhook_ingress.py
-index 3d87aea..d4a2721 100644
+index 97d120b..c42644a 100644
 --- a/backend/migrations/versions/0032_webhook_ingress.py
 +++ b/backend/migrations/versions/0032_webhook_ingress.py
 @@ -259,7 +259,8 @@ def upgrade() -> None:
@@ -8686,10 +8728,10 @@ index df1c1aa..4046d06 100644
      byte_per_s: Mapped[float] = mapped_column(Float, server_default=str(2 * 1024 * 1024))
      byte_burst: Mapped[int] = mapped_column(BigInteger, server_default=str(10 * 1024 * 1024))
 diff --git a/backend/tests/core/ingress/test_ingress_schema.py b/backend/tests/core/ingress/test_ingress_schema.py
-index 6a47425..2badbfd 100644
+index ccc7b07..8bd06bf 100644
 --- a/backend/tests/core/ingress/test_ingress_schema.py
 +++ b/backend/tests/core/ingress/test_ingress_schema.py
-@@ -212,3 +212,29 @@ async def test_the_api_still_makes_endpoints_and_changes_what_it_manages(owner_s
+@@ -237,3 +237,29 @@ async def test_the_api_still_makes_endpoints_and_changes_what_it_manages(owner_s
          "renamed", False, 600, 5242880,
      )  # fmt: skip
      assert (changed["events_pointer"], changed["bearer_digest"], changed["byte_burst"]) == ("/events", digest, 26278400)
@@ -9362,9 +9404,9 @@ index 0000000..b3f5966
 
 ### Task 10: Webhook ingress under its own Compose profile behind nginx, CI's proof through it, and its guide
 
-**Commit:** `0e04ce3` (prototype `proto/2b3b-v3`). Its patch is `proto/2b3b-v2`'s `aa8efc3`, byte for byte but for git's
+**Commit:** `d22dc65` (prototype `proto/2b3b-v4`). Its patch is `proto/2b3b-v2`'s `aa8efc3`, byte for byte but for git's
 index lines; the replay ran `aa8efc3` and reproduced its tree: yes. Its tests pass again at its checkpoint on
-`proto/2b3b-v3`.
+`proto/2b3b-v4`.
 
 **Create:** `backend/tests/deploy/test_compose_ingress_proof.py`, `deploy/compose/ci/ingress-proof.py`,
 `docs/operations/ingress.md`
@@ -9423,7 +9465,7 @@ this proof), pointed at an ingress on the host: buffering, a trickled body got n
 streaming, each got its 408 at 10.0 s, and a whole body its 200. The Compose stack and its CI step haven't run here:
 this branch's pull request runs them.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 0e04ce3 && git commit -C 0e04ce3`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit d22dc65 && git commit -C d22dc65`
 
 The diff:
 
@@ -10072,7 +10114,7 @@ index 9e9a0b7..944f8d6 100644
  ## Starting a run
 ````
 
-**Checkpoint (milestone 4).** Focused: as milestone 3 (662 passed); the migrations as there (Task 9 changes only 0032's
+**Checkpoint (milestone 4).** Focused: as milestone 3 (667 passed); the migrations as there (Task 9 changes only 0032's
 defaults). The load probe and the slow-upload probe by hand (the evidence of Tasks 9 and 10). The owner held it three
 times (milestone ruling 4) and approved it as a prototype checkpoint (2026-10-04), which doesn't claim the Compose proof
 has passed CI: this branch's pull request runs it. Then the whole suite and the static checks once, and a fresh

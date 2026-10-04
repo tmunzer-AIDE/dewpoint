@@ -136,8 +136,9 @@
     milestones the owner approved as prototype checkpoints (2026-10-04), not production sign-off:
     - webhook ingress as §8.3 now describes it: a gated prototype that records nothing outside a development deployment
       until 2b-4; its own process and login with no table privilege, only three SECURITY DEFINER functions; an
-      endpoint's identity, which the API's role has no grant to change; secrets under the ingress key; events sealed to
-      the tenant's versioned X25519 keypairs, each private key checked against its public key on every load;
+      endpoint's identity, and its rates but the byte burst, which the API's role has no grant to update (for the rates,
+      least privilege, not a ceiling); secrets under the ingress key; events sealed to the tenant's versioned X25519
+      keypairs, each private key checked against its public key on every load;
     - deduplication by a typed id or a header id (never by body bytes), canonical JSON for content, and an id reused for
       other content refused; one lock order for every path that touches events or their counters, with the tenant's
       lifecycle lock that 2b-4's erasure takes exclusively (§6.5); refusals that pay their rate budget; pending quotas
@@ -1409,7 +1410,7 @@ its guide.
   headers it names (`x-dewpoint-timestamp` and `x-dewpoint-signature` by default), or by bearer token; an optional
   address allowlist; a body limit (1 MiB by default, at most 5 MiB); where its events' ids are (`id_source`: a JSON
   pointer, a header, or none); an optional pointer to an array of events; its rate buckets and counters. How it
-  authenticates and where its ids are never change: the API refuses a change, and its role has no grant on those
+  authenticates and where its ids are never change: the API refuses a change, and its role has no grant to update those
   columns.
 - **Secrets without tenant keys:** bearer tokens are high-entropy, made by Dewpoint and kept as SHA-256 digests. HMAC
   secrets, and each endpoint's dedupe-digest key, are sealed under a separate ingress key, `DEWPOINT_INGRESS_KEY_B64`
@@ -2199,13 +2200,15 @@ Each plan updates the older specs as it lands, as the engine-core 5.x revisions 
     and records its sync's progress (`synced_generation`, which a tick of a tombstone lowers to queue it again), its
     errors and the misses; its cross-tenant reads are `schedule_candidates()` and `schedule_miss_candidates()`, ids
     only. A CSV record is a `run_inputs` row of the role `csv` (§7.1).
-  - 2b-3b's: the API makes endpoints and changes them, never how one authenticates or where its ids are, and makes and
-    changes bindings (bindings may be deleted), makes a tenant's counter row and inbound keypair (the key admin too
-    makes keypairs, for `keys ensure-tenants`), reads events, and cancels an event (its status, reason and end, and the
-    pending counters it releases); the dispatcher reads them all, moves an event's status (its reason, attempts, next
-    attempt, request count and end) and the counters, and records a recount; its cross-tenant reads are
-    `event_candidates()` and `recount_candidates()`, ids only. Ingress executes `ingress_environment()`,
-    `resolve_webhook_endpoint()` and `record_inbound_events()`, and nothing else.
+  - 2b-3b's: the API makes endpoints and changes them, and makes and changes bindings (bindings may be deleted); its
+    role has no grant to update an endpoint's identity (how it authenticates, where its ids are) or its rates, but for
+    the byte burst a larger body limit needs (for the rates, least privilege, not a rate ceiling: it still inserts every
+    column of a new endpoint). It makes a tenant's counter row and inbound keypair (the key admin too makes keypairs,
+    for `keys ensure-tenants`), reads events, and cancels an event (its status, reason and end, and the pending counters
+    it releases); the dispatcher reads them all, moves an event's status (its reason, attempts, next attempt, request
+    count and end) and the counters, and records a recount; its cross-tenant reads are `event_candidates()` and
+    `recount_candidates()`, ids only. Ingress executes `ingress_environment()`, `resolve_webhook_endpoint()` and
+    `record_inbound_events()`, and nothing else.
 - **Permissions:** `run.cancel` (operators and above), `trigger.manage` (editors and above), `workflow.declassify`
   (admins and owners).
 - **Processes:** `dewpoint dispatcher` (dispatch, reconciler, schedule sync, `ScheduleTick` worker), `dewpoint
