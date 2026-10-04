@@ -9,8 +9,9 @@ Every step's progress is copied into the database (`run_steps`), which is what t
 never shown.
 
 A run starts as a **request**: the run API and `dewpoint dev run` admit it, in their own transaction, and
-`dewpoint dispatcher` starts it on Temporal within its tenant's slots. Nothing else starts a run. Schedules, webhooks
-and CSV starts arrive with sub-project 2b-3.
+`dewpoint dispatcher` starts it on Temporal within its tenant's slots. Nothing else starts a run: a CSV start and a
+schedule's tick are admitted the same way ([below](#starting-a-run-from-a-csv), [schedules](#schedules)); webhooks
+arrive with sub-project 2b-3b.
 
 ## Starting a run
 
@@ -37,6 +38,73 @@ talks to Temporal.
 form: its typed top-level fields, each with its `type`, whether it's `required`, its `title`, `description`, `enum`
 and `default`, and `x-dewpoint-picker` as `picker`. A sensitive field never shows a value its schema holds:
 `default_masked` and `enum_masked` say there is one. 409 `not_active` without an active version.
+
+## Starting a run from a CSV
+
+A workflow that takes a file declares it in `graph.settings.csv`: its columns (the header, a variable name, a type
+among `string`, `integer`, `number`, `boolean`, `mac`, `ip`, `cidr` and `enum`, whether it's required, a default, and
+whether it's sensitive) and its caps, `max_rows` and `max_bytes`, at most the platform's 10,000 rows and 5 MiB. The run
+sees `trigger.rows` (one object per row, each column by its name) and `trigger.row_count`.
+
+- **Publish checks the declaration:** unique headers and identifier names; an enum's values, and only an enum's; a
+  default that's its type's canonical value (`mac` in lowercase colon form, `ip` and `cidr` as Python's `ipaddress`
+  writes them), never beside `required`. A sensitive column takes neither a default nor `values`: both would be
+  written into the workflow in plain text. `rows` and `row_count` are reserved: no input schema may declare them, and
+  no caller may send them. A CSV workflow's input schema stays plain at its root (`type`, `properties`, `required`,
+  `additionalProperties`, `$defs` and annotations), since any other root keyword could refuse the rows. Such a workflow
+  is started only with its file: it can't be a sub-flow, a failure handler or scheduled.
+- **Uploading:** `POST /api/v1/t/{tenant}/workflows/{workflow}/csv-uploads` (`run.start`) with the file as a raw
+  `text/csv` body, read as it arrives and refused one byte past the declaration's `max_bytes` (413 `too_large`). It's
+  read as data only: UTF-8 with an optional BOM, the delimiter detected among comma, semicolon and tab, strict quoting,
+  unique headers, a field as long as the file allows. A file that can't be read is 422 with its code (`csv_encoding`,
+  `csv_empty`, `csv_duplicate_header`, `csv_malformed`, `csv_too_many_rows`, `csv_too_large`). The file is staged,
+  encrypted, for one hour, for its uploader only. The answer gives the headers, the proposed mapping (declared names to
+  headers), what keeps it from building rows, a preview of the first rows without the sensitive columns, and the
+  first 100 errors with their count, each a row number, a column and a code, never a cell.
+- **The saved default mapping:** `PUT …/workflows/{workflow}/csv-mapping` (`trigger.manage`) saves one per workflow,
+  encrypted. An upload proposes it while it fits the active version's declaration; one a later version no longer fits
+  is reported `stale`, with each column's code, and never applied, until a new one is saved.
+- **Starting:** the run API's body takes `"csv": {"upload_id", "mapping", "skip_invalid"}` beside `input`. The rows are
+  built against the version the request freezes: each cell converted to its type (an empty one is its default, or
+  `required`); with `skip_invalid`, a row that breaks a rule is skipped and recorded, else the start is refused
+  (`input_invalid`, naming the first rows, columns and codes). Sensitive cells are claimed as any sensitive value is.
+  The upload is used once: its retry under the same key returns its request, to its uploader only; any other start of
+  it is 409 `upload_consumed`. 404 `upload_not_found` for an upload that isn't yours or this workflow's, 410
+  `upload_expired`, 422 `csv_mapping_invalid`. A re-run takes the original rows while they're retained, or a new file.
+- **What the run keeps:** the mapping, the file's headers and the skipped rows (each one's number and first code, the
+  first 100 errors in detail, and their count), encrypted beside its input; its details show them (`run.view`). The
+  audit entry keeps a tenant-keyed digest of the file and counts.
+- **A loop over the rows** needs no `declassify` entry: their count is `trigger.row_count`, already public. Rows that
+  together pass 64 KiB are one claim, and the loop gives each iteration a handle to its row: a step's reference to a
+  cell is read in its own activity, but CEL over a cell (a condition on `item.status`) runs in `cel.evaluate`, one
+  activity per row ([its cost](#limits-in-this-build)).
+
+## Schedules
+
+`POST /api/v1/t/{tenant}/workflows/{workflow}/schedules` (`trigger.manage`, editors and up) schedules the workflow's
+active version: `cron` or `every_s`, `time_zone` (an IANA name), `catchup_window_s` (1 minute to 24 hours, 10 minutes
+by default), `mode`, a fixed `input` checked against the active version, and `enabled`. `GET` lists and reads them
+(`workflow.view`), never with their input; `PATCH` changes any field (only `cron` and `every_s` take a null, which
+switches the timing's kind); `DELETE` removes one.
+
+- **Cron, as Temporal reads it:** five fields (minute, hour, day of the month, month, day of the week), each `*`, a
+  number, a range, `*/step` or `a-b/step`, or a list; months and days by name in any case; Sunday is 0 or 7. A day of
+  the month and a day of the week together are refused: Temporal requires both to match, where cron usually takes
+  either. A local time a daylight-saving change skips doesn't fire that day; one it repeats fires once, at its second
+  occurrence. An interval is at least 60 seconds.
+- **The dispatcher keeps Temporal in step.** Every change raises the schedule's `generation`, and so does disabling or
+  enabling its workflow; the dispatcher's leader applies it to the Temporal Schedule (paused when the schedule or its
+  workflow is disabled) and marks it synced (`synced_generation`) only once Temporal shows its `dewpoint generation
+  <n>` note. Editing a schedule directly in Temporal isn't supported. A sync Temporal refuses is shown as
+  `sync_error` and retried after a minute. There's no "run now": start the workflow instead.
+- **Each firing is a tick.** It's admitted as any request, under the key `sched:<schedule>:<nominal time>`, so a retry
+  or a backfill over a time that already fired admits nothing new. A tick of a schedule disabled or deleted before
+  Temporal heard of it is a `refused` request (`schedule_paused`, `schedule_deleted`); one of a disabled workflow is
+  refused as admission refuses it; a tenant being erased skips it, audited. A tick that can't be admitted (the database,
+  a key) is retried without limit, and alerts after 10 minutes. Its request's audit entry names the schedule.
+- **Missed firings.** Within the catch-up window, firings missed while Temporal was down fire when it's back, each
+  with its own time. Past it they're skipped: Temporal counts them, and the schedule's `misses` shows the count, read
+  every five minutes, audited and alerted on.
 
 ## The dispatcher
 
@@ -407,6 +475,21 @@ retry settings (`max_attempts` and `timeout_s` can be overridden per step), and 
   wait for the next task.
 - `flow.delay` waits 0 to 30 days, and `wait_until` takes instants from year 1 to 9999 in UTC. A value outside that,
   resolved at run time, fails the step with `type_mismatch`.
+- A CSV holds at most 10,000 rows and 5 MiB (its declaration may lower both), and an upload is kept for one hour. The
+  API reads a file whole: reading one 5 MiB test file peaked at about 72 MB of memory. That's what one file showed,
+  not a bound, and the memory concurrent uploads need is still to be sized.
+- A loop over a CSV's rows, once they pass 64 KiB, runs each step's activity per row as any loop does, and CEL over a
+  cell adds one `cel.evaluate` per row. On a development machine (Temporal's dev server, one worker), 1,000 rows took
+  2 minutes 15 seconds with a condition on a cell and 55 seconds without; 2,500 rows, 5 minutes 40 seconds and
+  2 minutes 25 seconds. The time grows with the rows, slightly faster than they do: 10,000 rows would take about 23 to
+  25 minutes with the condition and 10 to 12 without (estimated from those two, not measured).
+- Each sensitive cell is its own claim and joins the run tree's secret index, while the start request waits: 2,500
+  rows with five sensitive columns took 7 seconds to admit (12,501 claims), so 10,000 would take about 30 seconds. Ten
+  sensitive columns of distinct values in 10,000 rows reach the index's 100,000 strings (`secret_index_limit`).
+- A schedule fires at most once a minute, and its catch-up window is 1 minute to 24 hours. Each cycle, the
+  dispatcher's leader syncs at most 50 changed schedules (up to three Temporal calls each) and reads at most 50
+  schedules' misses, one call after another, each bounded at 10 seconds: a Temporal that answers slowly delays
+  dispatch as well.
 
 ## If the database is unavailable
 

@@ -118,6 +118,17 @@ jobs:
           # Admitted as the dispatcher's login, started by the Compose dispatcher, run by the worker: exit 0 only when
           # the run the database records succeeded.
           docker compose exec -T dispatcher dewpoint dev run "$workflow" --tenant "$tenant" --wait 120
+      - name: A schedule through the Compose dispatcher (engine 2b spec §8.2, §12)
+        working-directory: deploy/compose
+        timeout-minutes: 5
+        run: |
+          set -a; . ./.env; set +a
+          read -r tenant workflow < <(docker compose run --rm -T api python - < ci/seed-workflow.py | tail -n 1)
+          # Every 60 s in Europe/Paris, as the API's login: the API's image must hold the time zone data to accept it.
+          # The dispatcher's sync creates its Temporal Schedule and its admission worker admits each firing: exit 0
+          # only once the first scheduled run succeeded, within 150 s.
+          schedule=$(docker compose run --rm -T api python - create "$tenant" "$workflow" < ci/schedule-proof.py | tail -n 1)
+          docker compose run --rm -T api python - wait "$tenant" "$schedule" 150 < ci/schedule-proof.py
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4  (version comes from package.json "packageManager")
         with: { package_json_file: frontend/package.json }
       - uses: actions/setup-node@v4
