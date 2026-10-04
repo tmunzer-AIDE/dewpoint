@@ -4,11 +4,14 @@
 import math
 import uuid
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, ValidationError, model_serializer
 
 from dewpoint.engine.canonical import sha256_hex
+from dewpoint.engine.graph.csv import MAX_BYTES as CSV_MAX_BYTES
+from dewpoint.engine.graph.csv import MAX_ROWS as CSV_MAX_ROWS
+from dewpoint.engine.graph.csv import CsvType
 from dewpoint.engine.graph.diagnostics import Diagnostic
 
 KEY_PATTERN = r"^[a-z][a-z0-9_]{0,62}$"
@@ -77,12 +80,46 @@ class DeclassifySite(_Strict):
     field: str = Field(max_length=200)
 
 
+class CsvColumn(_Strict):
+    """One column of a CSV declaration (engine 2b spec §8.1). Its `default` is omitted unless written: an omitted
+    default is allowed on a sensitive column, a written one (even null) isn't (§3.8), so the two stay distinct."""
+
+    header: str = Field(min_length=1, max_length=200)
+    name: str = Field(min_length=1, max_length=63)  # `item.<name>`: publish checks it's an identifier
+    type: CsvType
+    required: bool = False
+    default: Any = None
+    sensitive: bool = False
+    values: list[Annotated[str, Field(max_length=200)]] | None = Field(default=None, max_length=200)  # an enum's
+
+    @model_serializer(mode="wrap")
+    def _written_default(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data: dict[str, Any] = handler(self)
+        if "default" not in self.model_fields_set:
+            data.pop("default", None)
+        return data
+
+
+class CsvSettings(_Strict):
+    columns: list[CsvColumn] = Field(min_length=1, max_length=200)
+    max_rows: int = Field(default=CSV_MAX_ROWS, ge=1, le=CSV_MAX_ROWS)
+    max_bytes: int = Field(default=CSV_MAX_BYTES, ge=1, le=CSV_MAX_BYTES)
+
+
 class GraphSettings(_Strict):
     input_schema: dict[str, Any] = Field(default_factory=_object_schema)
     vars_schema: dict[str, Any] = Field(default_factory=_vars_schema)  # every variable declares a default
     outputs: dict[str, Any] = Field(default_factory=dict)  # evaluated when the run succeeds
     failure_handler: uuid.UUID | None = None  # a workflow id, pinned to its active version at publish
     declassify: list[DeclassifySite] = Field(default_factory=list, max_length=200)  # §4.3: listed, never implied
+    csv: CsvSettings | None = None  # 2b spec §8.1; absent from the document unless declared, so hashes stay
+
+    @model_serializer(mode="wrap")
+    def _declared_csv(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data: dict[str, Any] = handler(self)
+        if self.csv is None:
+            data.pop("csv", None)
+        return data
 
 
 class Graph(_Strict):

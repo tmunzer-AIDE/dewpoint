@@ -16,8 +16,9 @@ from jsonschema.exceptions import SchemaError
 from dewpoint.engine.cel.record import ExpressionRecord
 from dewpoint.engine.graph import cel_check
 from dewpoint.engine.graph import liveness as lv
+from dewpoint.engine.graph.csv import is_canonical
 from dewpoint.engine.graph.diagnostics import Diagnostic, Severity
-from dewpoint.engine.graph.model import Graph, GraphNode
+from dewpoint.engine.graph.model import CsvSettings, Graph, GraphNode
 from dewpoint.engine.graph.schemas import (
     PathError,
     Resolved,
@@ -188,6 +189,19 @@ _SENSITIVE_LITERAL = (
 )
 
 
+_CSV_HEADER = "Another column already has this header: each header maps to one column."
+_CSV_NAME = "Another column already has this name: each column is one field of a row."
+_CSV_IDENT = "Column names are lowercase identifiers, and not `in`, `true`, `false` or `null`."
+_CSV_VALUES = "An `enum` column lists its values, and only an `enum` column has them."
+_CSV_SENSITIVE_VALUES = (
+    "A sensitive column can't list its values: they'd be written into the workflow. Make it a `string` column."
+)
+_CSV_REQUIRED = "A required column takes no default: an empty cell is refused, so the default would never apply."
+_CSV_DEFAULT = (
+    "The default isn't a value of the column's type, as a cell would be converted: a number for `integer` and "
+    "`number`, true or false for `boolean`, one of the values for `enum`, lowercase colon form for `mac`, and "
+    "an address or network as Python's `ipaddress` writes it for `ip` and `cidr` (no host bits set)."
+)
 _TIMER = "A wait's duration is visible in the run's history, so it can't come from sensitive data."
 _FAIL_MESSAGE = "A failure's message is recorded as it is, so it can't hold sensitive data."
 _SUBFLOW_INPUT = "This passes sensitive data into a field the sub-flow doesn't mark sensitive."
@@ -319,6 +333,37 @@ def _sensitive_defaults(label: str, schema: Mapping[str, Any]) -> list[Diagnosti
     ]
 
 
+def _csv_declaration(csv: CsvSettings | None) -> list[Diagnostic]:
+    """A CSV declaration's columns (engine 2b spec §8.1): unique headers and identifier names, an enum's values, and a
+    default that's its type's canonical value, never on a sensitive column (§3.8) nor beside `required`."""
+    out: list[Diagnostic] = []
+    headers: set[str] = set()
+    names: set[str] = set()
+    for i, c in enumerate(csv.columns if csv else ()):
+        where = f"/settings/csv/columns/{i}"
+        if c.header in headers:
+            out.append(Diagnostic(code="csv.duplicate_header", field=f"{where}/header", message=_CSV_HEADER))
+        if c.name in names:
+            out.append(Diagnostic(code="csv.duplicate_name", field=f"{where}/name", message=_CSV_NAME))
+        elif not IDENT.match(c.name) or c.name in CEL_KEYWORDS:
+            out.append(Diagnostic(code="csv.invalid_name", field=f"{where}/name", message=_CSV_IDENT))
+        headers.add(c.header)
+        names.add(c.name)
+        if (c.type == "enum") != (c.values is not None):
+            out.append(Diagnostic(code="csv.enum_values", field=f"{where}/values", message=_CSV_VALUES))
+        elif c.sensitive and c.values is not None:  # literals in the published graph (§3.8)
+            out.append(Diagnostic(code="sensitive.literal", field=f"{where}/values", message=_CSV_SENSITIVE_VALUES))
+        if "default" not in c.model_fields_set:
+            continue
+        if c.sensitive:
+            out.append(Diagnostic(code="sensitive.default", field=f"{where}/default", message=_SENSITIVE_LITERAL))
+        elif c.required:
+            out.append(Diagnostic(code="csv.required_default", field=f"{where}/default", message=_CSV_REQUIRED))
+        elif not is_canonical(c.type, c.default, c.values):
+            out.append(Diagnostic(code="csv.bad_default", field=f"{where}/default", message=_CSV_DEFAULT))
+    return out
+
+
 def _settings(graph: Graph) -> list[Diagnostic]:
     st = graph.settings
     out: list[Diagnostic] = []
@@ -358,6 +403,7 @@ def _settings(graph: Graph) -> list[Diagnostic]:
     for label, schema in (("input_schema", st.input_schema), ("vars_schema", st.vars_schema)):
         if not any((d.field or "").startswith(f"/settings/{label}") for d in out):
             out += _sensitive_defaults(label, schema)
+    out += _csv_declaration(st.csv)
     if any((d.field or "").startswith("/settings/vars_schema") for d in out):  # never run defaults through it
         return out
     props = st.vars_schema.get("properties", {})
