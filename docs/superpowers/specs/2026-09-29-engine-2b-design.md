@@ -114,7 +114,8 @@
     milestones the owner approved as prototype checkpoints (2026-10-04), not production sign-off:
     - a CSV is declared, uploaded, mapped and started as §8.1 now describes; a loop over its rows iterates a
       size-claimed list by handle, which replaces the page activity, so `ENGINE_ABI` stays 6; the measured cost is
-      recorded, 10,000 rows as an estimate, since the owner waived that run (2026-10-04, ruling 3);
+      recorded, and 10,000 rows only as an estimate: the owner's milestone-4 waiver (2026-10-04) lifted ruling 3's
+      condition that the prototype measure them;
     - `rows` and `row_count` are reserved names, and the no-declassify exception for a loop over `trigger.rows` needs a
       CSV declaration (#31, §4.3);
     - every literal a schema writes at a sensitive position is refused, as a default is, nested and behind a local
@@ -1215,8 +1216,9 @@ The owner approved 2b-2's milestones as prototype checkpoints; these stay open u
   for up to 200 calls, about 33 minutes.
 - **Erasure pauses schedules** (2b-3a): the transition that sets a tenant `erasing` raises its schedules' generations
   in the same transaction, with a regression proving they pause; a tenant's status changing alone queues nothing.
-- **The CSV reader's memory** (2b-3a): the API reads an upload whole, which takes up to about 72 MB for a file at the 5
-  MiB cap; production sizes the API for it (the owner deferred it to production sizing, 2026-10-04).
+- **The CSV reader's memory** (2b-3a): the API reads an upload whole. Reading one 5 MiB test file peaked at about 72 MB:
+  an observation for that file, not a bound. The memory concurrent uploads need stays open, for production sizing (the
+  owner's deferral, 2026-10-04).
 - **Bounded retry and alerting for a deterministic per-request failure,** the dispatcher's and the reconciler's: a
   bug is retried every cycle (the reconciler's every recheck interval) and holds the head of its tenant's queue.
 - **An operator's recovery path** for a run or a slot whose history Temporal no longer has, and for a `starting`

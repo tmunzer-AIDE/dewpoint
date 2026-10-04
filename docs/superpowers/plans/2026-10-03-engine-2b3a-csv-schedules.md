@@ -67,8 +67,8 @@ exercise. §7.9 keeps them open before production, and the reviewer weighs each 
   each, which delays dispatch as well (§7.9). Expect it noted, not hidden.
 - **A tenant being erased.** Its status changing doesn't pause its schedules: their ticks are skipped, with an audit
   entry, until the erasure transition raises their generations (§7.9).
-- **Uploads at the cap.** The API reads a file whole, up to about 72 MB for a 5 MiB file, and concurrent uploads add
-  up (§7.9, production sizing).
+- **Uploads at the cap.** The API reads a file whole. Reading one 5 MiB test file peaked at about 72 MB: an
+  observation for that file, not a bound. How much memory concurrent uploads need stays open (§7.9, production sizing).
 - **A 10,000-row CSV with CEL over a cell.** One `cel.evaluate` per row takes an estimated 23–25 minutes; with five
   sensitive columns, the start request holds for about 30 s (estimated).
 - **A schedule edited directly in Temporal.** Drift under an intact note isn't detected; such edits aren't supported.
@@ -105,17 +105,23 @@ the record says (or passed, for a contract test or a proof of what earlier tasks
 applied, and the tests passed. New files appear whole, as `new file mode` diffs. In the replay's outputs, local paths
 are shortened to `<replay>` (the replay's checkout), `<venv>` and `<python>`.
 
-The prototype is the local branch `proto/2b3a-v2`, cut from `main` at `85177d8`, with one commit per task. It
-rebuilds `proto/2b3a-v1`, which was built milestone by milestone with the owner's checkpoint after each; all four
-milestones were approved as prototype checkpoints. The rebuild folds in the single-task fix-ups: the milestone-1
-review's two fixes go into Tasks 1 and 2, and the second milestone-3 review's lock fix into Task 16. The cross-task
-review fixes stay their own tasks (9 and 16), and a note on each task they refine says what changes. The rebuild's
-last tree is identical to `proto/2b3a-v1`'s. The replay (branch `replay/2b3a-v2`) reproduced every commit's tree
-exactly.
+The prototype is the local branch `proto/2b3a-v3`, cut from `main` at `85177d8`, with one commit per task:
+- `proto/2b3a-v1` was built milestone by milestone, with the owner's checkpoint after each; all four milestones were
+  approved as prototype checkpoints.
+- `proto/2b3a-v2` rebuilds it, folding in the single-task fix-ups: the milestone-1 review's two fixes go into Tasks 1
+  and 2, and the second milestone-3 review's lock fix into Task 16. The cross-task review fixes stay their own tasks
+  (9 and 16), and a note on each task they refine says what changes. Its last tree is identical to `proto/2b3a-v1`'s.
+  The replay (branch `replay/2b3a-v2`) reproduced each of its commits' trees exactly.
+- `proto/2b3a-v3` rewords `proto/2b3a-v2` after the owner's review of these docs, and changes no code: the commit
+  messages and three test docstrings use this plan's task numbers, Task 18's test says it times nothing, and
+  `runs.md` gives its memory figure as an observation, not a bound, and links to its limits as their cost, not as
+  measured. Tasks 1–13 have the trees the replay reproduced;
+  each record says how a later task's tree differs. Lint and test collection passed on the reworded files; the replay
+  wasn't run again.
 
 Each commit was verified this way:
-- its tree was reproduced exactly by the replay, its tests failing before its code and passing after, with the
-  exceptions each record shows;
+- its tree was reproduced exactly by the replay (as `proto/2b3a-v2`'s commit, which the record names), its tests
+  failing before its code and passing after, with the exceptions each record shows;
 - ruff (without its cache), mypy and import-linter passed when the prototype's commit was made;
 - at each checkpoint, the milestone's focused tests passed (the counts the checkpoints give), and the migrations went
   up, down and up again over existing rows.
@@ -152,7 +158,9 @@ Task numbers below are this plan's.
 1–2. Split approved: CSV and schedules here; ingress gets its own outline, prototype, plan and PR. Prototype first,
      checkpoints after M1, M2 and M3, then M4 and a whole-branch review.
 3. The page activity is deferred and ABI 6 kept, provided the prototype measures a 10,000-row CSV with a representative
-   per-row condition (Task 18); revision 8 replaces §8.1's requirement explicitly.
+   per-row condition (Task 18); revision 8 replaces §8.1's requirement explicitly. **Superseded in part** by the owner's
+   milestone-4 waiver (milestone ruling 5): no 10,000-row run is required, the page activity stays deferred, and the
+   10,000-row durations are estimates.
 4. A raw `text/csv` body, the cap enforced while reading (Task 6).
 5. Key-first digest, consumption by UPDATE, encrypted request-owned CSV metadata; the upload locked and verified, one
    consumer, an exact retry returns its request (Task 8).
@@ -197,8 +205,9 @@ provisional in the corrections above, was settled at milestone 3 (ruling 3 below
    separate issue (#32), fixed test-first in milestone 1 (Task 4): `enum`, `const` and `examples` in `input_schema` and
    `vars_schema`, nested and behind local `$ref`s; `enum_masked` stays for versions published before it.
 2. **Milestone 2.** The error detail grows with the row limit, never with rows times columns; a valid field past
-   Python's default limit reads within the file cap; the upload is staged as its bytes (Task 9). The reader's memory,
-   about 72 MB for a file at the cap, is deferred to production sizing (§7.9).
+   Python's default limit reads within the file cap; the upload is staged as its bytes (Task 9). The reader's memory is
+   deferred to production sizing (§7.9): reading one 5 MiB test file peaked at about 72 MB, an observation for that
+   file, not a bound, and the memory concurrent uploads need stays open.
 3. **Milestone 3, the gate.** Temporal discards a stale schedule update instead of refusing it (Task 10). The generation
    counter goes in the schedule's note, written in the same token-bearing update as the spec, the action and the pause
    state; a generation is marked synced only after a fresh describe shows its marker and a transaction confirms that the
@@ -216,7 +225,8 @@ provisional in the corrections above, was settled at milestone 3 (ruling 3 below
 
 ### Task 1: A workflow's CSV declaration, checked at publish
 
-**Commit:** `9768077` (prototype `proto/2b3a-v2`); the replay's tree was identical: yes.
+**Commit:** `d608f11` (prototype `proto/2b3a-v3`). Replayed as `9768077` (`proto/2b3a-v2`), whose tree the replay
+reproduced: yes; its tree is identical to `9768077`'s.
 
 **Create:** `backend/src/dewpoint/engine/graph/csv.py`, `backend/tests/engine/graph/test_csv_declaration.py`
 
@@ -259,7 +269,7 @@ FAILED tests/engine/graph/test_csv_declaration.py::test_caps_past_the_platforms_
 37 passed in 4.49s
 ```
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 9768077 && git commit -C 9768077`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit d608f11 && git commit -C d608f11`
 
 The diff:
 
@@ -622,7 +632,8 @@ index 0000000..1de474b
 
 ### Task 2: The trigger schema, with a CSV's rows and their count; both names reserved
 
-**Commit:** `94d64db` (prototype `proto/2b3a-v2`); the replay's tree was identical: yes.
+**Commit:** `1cf8ce8` (prototype `proto/2b3a-v3`). Replayed as `94d64db` (`proto/2b3a-v2`), whose tree the replay
+reproduced: yes; its tree is identical to `94d64db`'s.
 
 **Create:** `backend/tests/engine/graph/test_trigger_schema.py`
 
@@ -674,7 +685,7 @@ ERROR tests/engine/graph/test_trigger_schema.py - ImportError while importing...
 112 passed in 15.54s
 ```
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 94d64db && git commit -C 94d64db`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 1cf8ce8 && git commit -C 1cf8ce8`
 
 The diff:
 
@@ -1392,7 +1403,8 @@ index 3a52284..19674e6 100644
 
 ### Task 3: A loop over trigger.rows skips its declassify entry only with a CSV declared (#31)
 
-**Commit:** `b7d7e46` (prototype `proto/2b3a-v2`); the replay's tree was identical: yes.
+**Commit:** `e4087c6` (prototype `proto/2b3a-v3`). Replayed as `b7d7e46` (`proto/2b3a-v2`), whose tree the replay
+reproduced: yes; its tree is identical to `b7d7e46`'s.
 
 **Modify:** `backend/src/dewpoint/engine/graph/validate.py`, `backend/tests/engine/graph/test_validate_declassify.py`, `docs/operations/runs.md`
 
@@ -1428,7 +1440,7 @@ FAILED tests/engine/graph/test_validate_declassify.py::test_without_a_csv_a_loop
 6 passed in 4.70s
 ```
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit b7d7e46 && git commit -C b7d7e46`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit e4087c6 && git commit -C e4087c6`
 
 The diff:
 
@@ -1517,7 +1529,8 @@ index 3562c57..e4140bd 100644
 
 ### Task 4: Publish refuses enum, const and examples literals at sensitive schema positions (#32)
 
-**Commit:** `d100219` (prototype `proto/2b3a-v2`); the replay's tree was identical: yes.
+**Commit:** `df3991f` (prototype `proto/2b3a-v3`). Replayed as `d100219` (`proto/2b3a-v2`), whose tree the replay
+reproduced: yes; its tree is identical to `d100219`'s.
 
 **Modify:** `backend/src/dewpoint/apps/forms.py`, `backend/src/dewpoint/engine/graph/validate.py`, `backend/tests/apps/test_forms.py`, `backend/tests/engine/graph/test_validate_sensitive.py`
 
@@ -1562,7 +1575,7 @@ FAILED tests/engine/graph/test_validate_sensitive.py::test_an_enum_const_or_exam
 43 passed in 8.63s
 ```
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit d100219 && git commit -C d100219`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit df3991f && git commit -C df3991f`
 
 The diff:
 
@@ -1773,7 +1786,8 @@ approved it as a prototype checkpoint (2026-10-04).
 
 ### Task 5: A CSV file read as data only, and its rows built through a mapping
 
-**Commit:** `75a389d` (prototype `proto/2b3a-v2`); the replay's tree was identical: yes.
+**Commit:** `aa06468` (prototype `proto/2b3a-v3`). Replayed as `75a389d` (`proto/2b3a-v2`), whose tree the replay
+reproduced: yes; its tree is identical to `75a389d`'s.
 
 **Create:** `backend/src/dewpoint/apps/csv_input.py`, `backend/tests/apps/test_csv_input.py`, `backend/tests/engine/graph/test_csv_cells.py`
 
@@ -1822,7 +1836,7 @@ ERROR tests/engine/graph/test_csv_cells.py - ImportError while importing test...
 66 passed in 12.09s
 ```
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 75a389d && git commit -C 75a389d`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit aa06468 && git commit -C aa06468`
 
 The diff:
 
@@ -2282,7 +2296,8 @@ index 0000000..5adfbe7
 
 ### Task 6: A CSV upload, staged encrypted for an hour and read as its bytes arrive
 
-**Commit:** `a527753` (prototype `proto/2b3a-v2`); the replay's tree was identical: yes.
+**Commit:** `308654a` (prototype `proto/2b3a-v3`). Replayed as `a527753` (`proto/2b3a-v2`), whose tree the replay
+reproduced: yes; its tree is identical to `a527753`'s.
 
 **Create:** `backend/migrations/versions/0026_csv_uploads.py`, `backend/src/dewpoint/apps/api/routes/csv_uploads.py`, `backend/src/dewpoint/apps/csv_uploads.py`, `backend/src/dewpoint/core/models/uploads.py`, `backend/tests/apps/api/test_csv_uploads_api.py`, `backend/tests/core/requests/test_csv_uploads_schema.py`
 
@@ -2335,7 +2350,7 @@ FAILED tests/apps/api/test_csv_uploads_api.py::test_the_upload_belongs_to_its_up
 17 passed in 13.44s
 ```
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit a527753 && git commit -C a527753`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 308654a && git commit -C 308654a`
 
 The diff:
 
@@ -3010,7 +3025,8 @@ index 0000000..8dc4f9d
 
 ### Task 7: A CSV's saved default mapping, marked stale when a later version no longer fits it
 
-**Commit:** `834eae4` (prototype `proto/2b3a-v2`); the replay's tree was identical: yes.
+**Commit:** `90dc687` (prototype `proto/2b3a-v3`). Replayed as `834eae4` (`proto/2b3a-v2`), whose tree the replay
+reproduced: yes; its tree is identical to `834eae4`'s.
 
 **Create:** `backend/migrations/versions/0027_csv_mappings.py`, `backend/tests/apps/api/test_csv_mappings_api.py`
 
@@ -3056,7 +3072,7 @@ FAILED tests/core/authz/test_permissions.py::test_managing_triggers_is_an_editor
 10 passed in 13.26s
 ```
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 834eae4 && git commit -C 834eae4`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 90dc687 && git commit -C 90dc687`
 
 The diff:
 
@@ -3484,7 +3500,8 @@ index 4deebf5..a787759 100644
 
 ### Task 8: CSV starts: key first, one consumer, rows frozen and the upload consumed
 
-**Commit:** `eaafdc9` (prototype `proto/2b3a-v2`); the replay's tree was identical: yes.
+**Commit:** `caf1cd8` (prototype `proto/2b3a-v3`). Replayed as `eaafdc9` (`proto/2b3a-v2`), whose tree the replay
+reproduced: yes; its tree is identical to `eaafdc9`'s.
 
 **Create:** `backend/migrations/versions/0028_csv_records.py`, `backend/tests/apps/api/test_csv_starts_api.py`, `backend/tests/apps/test_admission_csv.py`
 
@@ -3543,7 +3560,7 @@ FAILED tests/core/requests/test_csv_uploads_schema.py::test_a_csv_record_is_neve
 52 passed in 15.98s
 ```
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit eaafdc9 && git commit -C eaafdc9`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit caf1cd8 && git commit -C caf1cd8`
 
 The diff:
 
@@ -4576,13 +4593,14 @@ index 8dc4f9d..34759b2 100644
 
 ### Task 9: Bounded error detail, the byte cap governs a field's length, the upload staged as its bytes (the owner's milestone-2 review)
 
-**Commit:** `fbc50ff` (prototype `proto/2b3a-v2`); the replay's tree was identical: yes.
+**Commit:** `62c8ee2` (prototype `proto/2b3a-v3`). Replayed as `fbc50ff` (`proto/2b3a-v2`), whose tree the replay
+reproduced: yes; its tree is identical to `fbc50ff`'s.
 
 **Modify:** `backend/src/dewpoint/apps/admission.py`, `backend/src/dewpoint/apps/csv_input.py`, `backend/src/dewpoint/apps/csv_uploads.py`, `backend/tests/apps/api/test_csv_starts_api.py`, `backend/tests/apps/api/test_csv_uploads_api.py`, `backend/tests/apps/test_admission_csv.py`, `backend/tests/apps/test_csv_input.py`
 
 **What it does:**
 
-From the owner's M2 review, refining tasks 4, 5 and 7:
+From the owner's M2 review, refining tasks 5, 6 and 8:
 - 200 required columns and 10,000 records of empty cells fit in a 2 MB file and break 2
   million rules, which the builder held as 2 million errors (a 200 MB peak), the upload's
   answer before listing 100, and a skip_invalid start's record whole. The builder now
@@ -4624,7 +4642,7 @@ ERROR tests/apps/test_csv_input.py - ImportError while importing test module ...
 54 passed in 14.94s
 ```
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit fbc50ff && git commit -C fbc50ff`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 62c8ee2 && git commit -C 62c8ee2`
 
 The diff:
 
@@ -5132,9 +5150,10 @@ reader's memory to production sizing (2026-10-04).
 
 ## Milestone 3 — Schedules
 
-### Task 10: A stale schedule update sent directly is discarded, not refused
+### Task 10: A stale schedule update sent directly is discarded, not refused (the milestone-3 gate)
 
-**Commit:** `9971a55` (prototype `proto/2b3a-v2`); the replay's tree was identical: yes.
+**Commit:** `34d6f5b` (prototype `proto/2b3a-v3`). Replayed as `9971a55` (`proto/2b3a-v2`), whose tree the replay
+reproduced: yes; its tree is identical to `9971a55`'s.
 
 **Modify:** `backend/tests/apps/worker/test_temporal_contract.py`
 
@@ -5168,7 +5187,7 @@ stays sealed under the schedule's tenant. Stable over six runs.
 Evidence beyond the replay: a contract test of Temporal itself, so it passes before any Dewpoint code. The prototype's
 probe found the outline's premise wrong: a stale update isn't refused, it's discarded.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 9971a55 && git commit -C 9971a55`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 34d6f5b && git commit -C 34d6f5b`
 
 The diff:
 
@@ -5260,7 +5279,8 @@ index 46c588f..c87de4b 100644
 
 ### Task 11: A schedule's note shows the generation of the update that landed, never a stale writer's
 
-**Commit:** `c4d35a1` (prototype `proto/2b3a-v2`); the replay's tree was identical: yes.
+**Commit:** `7ffe43a` (prototype `proto/2b3a-v3`). Replayed as `c4d35a1` (`proto/2b3a-v2`), whose tree the replay
+reproduced: yes; its tree is identical to `c4d35a1`'s.
 
 **Modify:** `backend/tests/apps/worker/test_temporal_contract.py`
 
@@ -5290,7 +5310,7 @@ read-back shows, and the stale one's never appears.
 Evidence beyond the replay: a contract test of Temporal itself: in the stale writer's race, the note shows only the
 generation of the update that landed.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit c4d35a1 && git commit -C c4d35a1`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 7ffe43a && git commit -C 7ffe43a`
 
 The diff:
 
@@ -5368,7 +5388,8 @@ index c87de4b..fbb3ee8 100644
 
 ### Task 12: Cron as Temporal reads it, both day fields and time zone changes included
 
-**Commit:** `15f67d5` (prototype `proto/2b3a-v2`); the replay's tree was identical: yes.
+**Commit:** `e6b6dbf` (prototype `proto/2b3a-v3`). Replayed as `15f67d5` (`proto/2b3a-v2`), whose tree the replay
+reproduced: yes; its tree is identical to `15f67d5`'s.
 
 **Modify:** `backend/tests/apps/worker/test_temporal_contract.py`
 
@@ -5399,7 +5420,7 @@ Evidence beyond the replay: a contract test of Temporal itself, through `ListSch
 names, both spellings of Sunday, steps, ranges and lists; both day fields restricted together must both match; and a
 daylight-saving change in each direction.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 15f67d5 && git commit -C 15f67d5`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit e6b6dbf && git commit -C e6b6dbf`
 
 The diff:
 
@@ -5502,7 +5523,8 @@ index fbb3ee8..1b995c3 100644
 
 ### Task 13: The schedules table and API, cron as Temporal reads it
 
-**Commit:** `1f3c20f` (prototype `proto/2b3a-v2`); the replay's tree was identical: yes.
+**Commit:** `e4f1a1f` (prototype `proto/2b3a-v3`). Replayed as `1f3c20f` (`proto/2b3a-v2`), whose tree the replay
+reproduced: yes; its tree is identical to `1f3c20f`'s.
 
 **Create:** `backend/migrations/versions/0029_schedules.py`, `backend/src/dewpoint/apps/api/routes/schedules.py`, `backend/src/dewpoint/apps/schedules.py`, `backend/src/dewpoint/core/models/schedules.py`, `backend/tests/apps/api/test_schedules_api.py`, `backend/tests/apps/test_schedules.py`, `backend/tests/core/requests/test_schedules_schema.py`
 
@@ -5555,7 +5577,7 @@ ERROR tests/apps/test_schedules.py - ImportError while importing test module ...
 66 passed in 36.38s
 ```
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 1f3c20f && git commit -C 1f3c20f`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit e4f1a1f && git commit -C e4f1a1f`
 
 The diff:
 
@@ -6483,7 +6505,9 @@ index 0000000..7fb09bf
 
 ### Task 14: ScheduleTick and its activity, in the dispatcher's own admission worker
 
-**Commit:** `83b90ed` (prototype `proto/2b3a-v2`); the replay's tree was identical: yes.
+**Commit:** `92a169d` (prototype `proto/2b3a-v3`). Replayed as `83b90ed` (`proto/2b3a-v2`), whose tree the replay
+reproduced: yes; its tree differs from `83b90ed`'s only in wording the docs review corrected, in
+`backend/tests/apps/dispatcher/test_schedule_tick_server.py`; no code.
 
 **Create:** `backend/src/dewpoint/apps/dispatcher/tick.py`, `backend/src/dewpoint/apps/dispatcher/tick_workflow.py`, `backend/tests/apps/dispatcher/histories/__init__.py`, `backend/tests/apps/dispatcher/histories/record.py`, `backend/tests/apps/dispatcher/histories/schedule_tick.json`, `backend/tests/apps/dispatcher/test_schedule_tick.py`, `backend/tests/apps/dispatcher/test_schedule_tick_replay.py`, `backend/tests/apps/dispatcher/test_schedule_tick_server.py`
 
@@ -6537,7 +6561,7 @@ ERROR tests/engine/runtime/test_ids.py - ImportError while importing test mod...
 48 passed in 13.72s
 ```
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 83b90ed && git commit -C 83b90ed`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 92a169d && git commit -C 92a169d`
 
 The diff:
 
@@ -7338,7 +7362,7 @@ index 0000000..c04f7cf
 +    }  # fmt: skip
 diff --git a/backend/tests/apps/dispatcher/test_schedule_tick_server.py b/backend/tests/apps/dispatcher/test_schedule_tick_server.py
 new file mode 100644
-index 0000000..196a110
+index 0000000..eb3d42a
 --- /dev/null
 +++ b/backend/tests/apps/dispatcher/test_schedule_tick_server.py
 @@ -0,0 +1,184 @@
@@ -7350,7 +7374,7 @@ index 0000000..196a110
 +over a time that already fired admits nothing new. A failing tick is retried without limit, and one still unadmitted
 +10 minutes after its time alerts.
 +
-+The Temporal Schedules here are created directly: the sync that keeps them in step with `schedules` is task 10's."""
++The Temporal Schedules here are created directly: the sync that keeps them in step with `schedules` is task 15's."""
 +
 +import asyncio
 +import dataclasses
@@ -7569,7 +7593,9 @@ index 213a90b..e538439 100644
 
 ### Task 15: The schedule sync: token-bearing updates, completed only by a read-back of their marker
 
-**Commit:** `9aa31e4` (prototype `proto/2b3a-v2`); the replay's tree was identical: yes.
+**Commit:** `18c8a0d` (prototype `proto/2b3a-v3`). Replayed as `9aa31e4` (`proto/2b3a-v2`), whose tree the replay
+reproduced: yes; its tree differs from `9aa31e4`'s only in wording the docs review corrected, in
+`backend/tests/apps/dispatcher/test_schedule_tick_server.py`; no code.
 
 **Create:** `backend/migrations/versions/0030_schedule_sync.py`, `backend/src/dewpoint/apps/dispatcher/schedule_sync.py`, `backend/tests/apps/dispatcher/test_schedule_sync.py`
 
@@ -7627,7 +7653,7 @@ ERROR tests/apps/dispatcher/test_schedule_sync.py - ImportError while importi...
 9 passed in 38.40s
 ```
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 9aa31e4 && git commit -C 9aa31e4`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 18c8a0d && git commit -C 18c8a0d`
 
 The diff:
 
@@ -8357,13 +8383,15 @@ index 0000000..dde6868
 
 ### Task 16: A tick decides under its schedule's row, held exclusively; nulls refused; its audit names the schedule (the owner's milestone-3 reviews)
 
-**Commit:** `671b6fb` (prototype `proto/2b3a-v2`); the replay's tree was identical: yes.
+**Commit:** `da5a845` (prototype `proto/2b3a-v3`). Replayed as `671b6fb` (`proto/2b3a-v2`), whose tree the replay
+reproduced: yes; its tree differs from `671b6fb`'s only in wording the docs review corrected, in
+`backend/tests/apps/dispatcher/test_schedule_tick_server.py`; no code.
 
 **Modify:** `backend/src/dewpoint/apps/admission.py`, `backend/src/dewpoint/apps/api/routes/schedules.py`, `backend/src/dewpoint/apps/dispatcher/tick.py`, `backend/tests/apps/api/test_schedules_api.py`, `backend/tests/apps/dispatcher/test_schedule_tick.py`
 
 **What it does:**
 
-From the owner's two M3 reviews, refining tasks 8, 9 and 10:
+From the owner's two M3 reviews, refining tasks 13, 14 and 15:
 - A tick read its schedule without a lock, so a disable or a delete could commit between
   its read and its commit, and a request was admitted under a state already replaced. It
   now takes the workflow's admission lock, shared (as admission does: a workflow's change
@@ -8406,7 +8434,7 @@ FAILED tests/apps/api/test_schedules_api.py::test_only_the_timings_kind_may_be_p
 29 passed in 13.31s
 ```
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 671b6fb && git commit -C 671b6fb`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit da5a845 && git commit -C da5a845`
 
 The diff:
 
@@ -8773,7 +8801,9 @@ latency for §7.9, and approved it (2026-10-04).
 
 ### Task 17: CSV starts and schedule ticks end to end, real keys, no canary anywhere; catch-up; the gate
 
-**Commit:** `805aa11` (prototype `proto/2b3a-v2`); the replay's tree was identical: yes.
+**Commit:** `4415596` (prototype `proto/2b3a-v3`). Replayed as `805aa11` (`proto/2b3a-v2`), whose tree the replay
+reproduced: yes; its tree differs from `805aa11`'s only in wording the docs review corrected, in
+`backend/tests/apps/dispatcher/test_schedule_tick_server.py`; no code.
 
 **Create:** `backend/tests/apps/dispatcher/test_schedule_tick_gate.py`, `backend/tests/apps/dispatcher/test_triggers_end_to_end.py`
 
@@ -8809,7 +8839,7 @@ nothing, and it starts once the gate is on.
 Evidence beyond the replay: each request's input, decrypted with the real keys, holds its canary, and every history
 scanned names the tenant, so the scan reads real data, whole; the canary is in none.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 805aa11 && git commit -C 805aa11`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 4415596 && git commit -C 4415596`
 
 The diff:
 
@@ -9130,7 +9160,10 @@ index 0000000..c399899
 
 ### Task 18: What a CSV's claimed rows cost a run, counted; sensitive cells past the secret index refuse the start
 
-**Commit:** `7d4dd0b` (prototype `proto/2b3a-v2`); the replay's tree was identical: yes.
+**Commit:** `9311d16` (prototype `proto/2b3a-v3`). Replayed as `7d4dd0b` (`proto/2b3a-v2`), whose tree the replay
+reproduced: yes; its tree differs from `7d4dd0b`'s only in wording the docs review corrected, in
+`backend/tests/apps/dispatcher/test_csv_rows_cost.py`, `backend/tests/apps/dispatcher/test_schedule_tick_server.py`,
+`backend/tests/apps/test_admission_csv.py`; no code.
 
 **Create:** `backend/tests/apps/dispatcher/test_csv_rows_cost.py`
 
@@ -9160,22 +9193,23 @@ no claim and leaving its upload unconsumed.
 Evidence beyond the replay: with the expected counts set to the rows and 0, both cost cases failed (`assert 1 == 0`);
 with the index's bound at 3, the refusal test failed (the start was admitted).
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 7d4dd0b && git commit -C 7d4dd0b`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 9311d16 && git commit -C 9311d16`
 
 The diff:
 
 ```diff
 diff --git a/backend/tests/apps/dispatcher/test_csv_rows_cost.py b/backend/tests/apps/dispatcher/test_csv_rows_cost.py
 new file mode 100644
-index 0000000..23287d4
+index 0000000..8a30c99
 --- /dev/null
 +++ b/backend/tests/apps/dispatcher/test_csv_rows_cost.py
-@@ -0,0 +1,81 @@
+@@ -0,0 +1,82 @@
 +# SPDX-License-Identifier: Apache-2.0
 +"""What a CSV's rows cost a run once they pass 64 KiB (engine 2b spec §8.1, revision 8; the owner's ruling 3): the rows
 +are one claim, iterated by handle, and the page activity is deferred, so CEL over a plain cell runs in `cel.evaluate`
-+once per row. This counts that work, which the plan's 10,000-row measurement timed: one evaluation per row with a
-+per-row condition, plus the loop's count, against the count alone without it."""
++once per row. This counts that work, at 90 rows: one evaluation per row with a per-row condition, plus the loop's
++count, against the count alone without it. It times nothing: the prototype timed 1,000 and 2,500 rows, and the plan's
++10,000-row durations are estimates from those."""
 +
 +from collections import Counter
 +from collections.abc import AsyncIterator
@@ -9253,7 +9287,7 @@ index 0000000..23287d4
 +    assert counted["cel.evaluate"] == evaluations
 +    assert counted["testkit.echo.v1"] == (ROWS // 2 if condition else ROWS)
 diff --git a/backend/tests/apps/test_admission_csv.py b/backend/tests/apps/test_admission_csv.py
-index 4ddc3f1..698d82f 100644
+index 4ddc3f1..865758b 100644
 --- a/backend/tests/apps/test_admission_csv.py
 +++ b/backend/tests/apps/test_admission_csv.py
 @@ -19,6 +19,7 @@ from sqlalchemy import text
@@ -9271,7 +9305,7 @@ index 4ddc3f1..698d82f 100644
 +async def test_sensitive_cells_past_the_secret_index_bound_refuse_the_start_and_keep_nothing(
 +    csv_ready, owner_sessionmaker, api_sessionmaker, monkeypatch
 +) -> None:
-+    """Each sensitive cell joins the run tree's index (2b-3a task 12): a file whose cells pass its bound is refused with
++    """Each sensitive cell joins the run tree's index (2b-3a task 18): a file whose cells pass its bound is refused with
 +    `secret_index_limit`, its claims discarded and its upload left for another start."""
 +    ctx, wf = csv_ready
 +    upload = await staged(api_sessionmaker, ctx, wf, b"Site,VLAN,PSK\nparis,10,psk-one-1\nlyon,2,psk-two-2\n")
@@ -9290,7 +9324,11 @@ index 4ddc3f1..698d82f 100644
 
 ### Task 19: A schedule through the Compose dispatcher; CSV starts, schedules and their limits in the operations docs
 
-**Commit:** `5d1a21d` (prototype `proto/2b3a-v2`); the replay's tree was identical: yes.
+**Commit:** `7ccf83f` (prototype `proto/2b3a-v3`). Replayed as `5d1a21d` (`proto/2b3a-v2`), whose tree the replay
+reproduced: yes; its tree differs from `5d1a21d`'s only in wording the docs review corrected, in
+`backend/tests/apps/dispatcher/test_csv_rows_cost.py`, `backend/tests/apps/dispatcher/test_schedule_tick_server.py`,
+`backend/tests/apps/test_admission_csv.py`, `backend/tests/deploy/test_compose_schedule_proof.py`,
+`docs/operations/runs.md`; no code.
 
 **Create:** `backend/tests/deploy/test_compose_schedule_proof.py`, `deploy/compose/ci/schedule-proof.py`
 
@@ -9330,7 +9368,7 @@ FAILED tests/deploy/test_compose_schedule_proof.py::test_the_schedule_proof_wait
 3 passed in 11.76s
 ```
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 5d1a21d && git commit -C 5d1a21d`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 7ccf83f && git commit -C 7ccf83f`
 
 The diff:
 
@@ -9359,12 +9397,12 @@ index 496d6cd..5ee444f 100644
        - uses: actions/setup-node@v4
 diff --git a/backend/tests/deploy/test_compose_schedule_proof.py b/backend/tests/deploy/test_compose_schedule_proof.py
 new file mode 100644
-index 0000000..056b9a8
+index 0000000..1d8ebe3
 --- /dev/null
 +++ b/backend/tests/deploy/test_compose_schedule_proof.py
 @@ -0,0 +1,84 @@
 +# SPDX-License-Identifier: Apache-2.0
-+"""CI's schedule proof (engine 2b spec §8.2, §12; 2b-3a task 14): `deploy/compose/ci/schedule-proof.py` makes a
++"""CI's schedule proof (engine 2b spec §8.2, §12; 2b-3a task 19): `deploy/compose/ci/schedule-proof.py` makes a
 +schedule of the seeded workflow, every 60 s in a non-UTC time zone (the API's image must hold the time zone data), as
 +the API's login, then waits for its first run to succeed through the Compose dispatcher's sync, its admission worker,
 +the dispatcher and the worker. Here the script runs against the test database, a tick through admission, the dispatcher
@@ -9567,7 +9605,7 @@ index 9fe7ea7..cd86635 100644
  
  ```bash
 diff --git a/docs/operations/runs.md b/docs/operations/runs.md
-index e4140bd..8e60f31 100644
+index e4140bd..e78b6eb 100644
 --- a/docs/operations/runs.md
 +++ b/docs/operations/runs.md
 @@ -9,8 +9,9 @@ Every step's progress is copied into the database (`run_steps`), which is what t
@@ -9624,7 +9662,7 @@ index e4140bd..8e60f31 100644
 +- **A loop over the rows** needs no `declassify` entry: their count is `trigger.row_count`, already public. Rows that
 +  together pass 64 KiB are one claim, and the loop gives each iteration a handle to its row: a step's reference to a
 +  cell is read in its own activity, but CEL over a cell (a condition on `item.status`) runs in `cel.evaluate`, one
-+  activity per row ([measured](#limits-in-this-build)).
++  activity per row ([its cost](#limits-in-this-build)).
 +
 +## Schedules
 +
@@ -9656,12 +9694,13 @@ index e4140bd..8e60f31 100644
  ## The dispatcher
  
  `dewpoint dispatcher` starts admitted requests. Run one or more. It needs `DEWPOINT_DATABASE_URL` with a login in the
-@@ -407,6 +475,20 @@ retry settings (`max_attempts` and `timeout_s` can be overridden per step), and
+@@ -407,6 +475,21 @@ retry settings (`max_attempts` and `timeout_s` can be overridden per step), and
    wait for the next task.
  - `flow.delay` waits 0 to 30 days, and `wait_until` takes instants from year 1 to 9999 in UTC. A value outside that,
    resolved at run time, fails the step with `type_mismatch`.
 +- A CSV holds at most 10,000 rows and 5 MiB (its declaration may lower both), and an upload is kept for one hour. The
-+  API reads a file whole: one at the cap can take up to about 72 MB of memory while it's read.
++  API reads a file whole: reading one 5 MiB test file peaked at about 72 MB of memory. That's what one file showed,
++  not a bound, and the memory concurrent uploads need is still to be sized.
 +- A loop over a CSV's rows, once they pass 64 KiB, runs each step's activity per row as any loop does, and CEL over a
 +  cell adds one `cel.evaluate` per row. On a development machine (Temporal's dev server, one worker), 1,000 rows took
 +  2 minutes 15 seconds with a condition on a cell and 55 seconds without; 2,500 rows, 5 minutes 40 seconds and
