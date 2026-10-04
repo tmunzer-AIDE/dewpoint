@@ -174,6 +174,7 @@ async def admit_request(
     input: dict[str, Any],
     rerun: Rerun | None = None,
     csv: CsvStart | None = None,
+    details: dict[str, object] | None = None,
 ) -> Admitted:
     """The request under `idempotency_key`: an exact retry's, or a new one, frozen. A re-run's digest covers its
     `rerun` identity in place of `input`, and a CSV start's its `csv` beside it. Raises IdempotencyConflictError,
@@ -210,10 +211,10 @@ async def admit_request(
         if source in INTERACTIVE:
             raise AdmissionRefusedError(refused.reason, refused.messages) from None
         return await _insert(s, keys, tenant_id, request_id, actor_id, idempotency_key, digested, None, None, refused,
-                             rerun)  # fmt: skip
+                             rerun, extra=details)  # fmt: skip
     await _before_insert()
     admitted = await _insert(s, keys, tenant_id, request_id, actor_id, idempotency_key, digested, frozen.version_id,
-                             frozen.envelope_id, rerun=rerun, extra=frozen.details)  # fmt: skip
+                             frozen.envelope_id, rerun=rerun, extra={**frozen.details, **(details or {})})  # fmt: skip
     if admitted.new:
         await savepoint.commit()
     else:
@@ -224,7 +225,7 @@ async def admit_request(
 
 async def record_refused(
     s: AsyncSession, keys: KeySource, *, tenant_id: uuid.UUID, workflow_id: uuid.UUID, source: str, mode: str,
-    idempotency_key: str, reason: str, messages: list[str],
+    idempotency_key: str, reason: str, messages: list[str], details: dict[str, object] | None = None,
 ) -> RunRequest:  # fmt: skip
     """A durable source's refusal decided before admission, a paused or deleted schedule's tick (§8.2): a `refused`
     request under its key, frozen like any, never lost; an exact retry finds it. Raises IdempotencyConflictError when
@@ -237,7 +238,9 @@ async def record_refused(
     if existing is not None:
         return (await _retry(keys, tenant_id, existing, fields)).request
     refused = _Refused(reason, messages)
-    return (await _insert(s, keys, tenant_id, uuid.uuid4(), None, idempotency_key, fields, None, None, refused)).request
+    inserted = await _insert(s, keys, tenant_id, uuid.uuid4(), None, idempotency_key, fields, None, None, refused,
+                             extra=details)  # fmt: skip
+    return inserted.request
 
 
 async def admitted_under(

@@ -7,7 +7,7 @@ import uuid
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +19,7 @@ from dewpoint.core.http import TenantContext, get_db, require
 from dewpoint.core.models.schedules import Schedule
 
 router = APIRouter(prefix="/api/v1", tags=["schedules"])
+NULLABLE = frozenset({"cron", "every_s"})  # a null switches the timing's kind
 
 
 class ScheduleIn(BaseModel):
@@ -34,9 +35,18 @@ class ScheduleIn(BaseModel):
 
 
 class SchedulePatch(BaseModel):
-    """Only the fields given change; `cron` or `every_s` given as null switches the timing's kind."""
+    """Only the fields given change; `cron` or `every_s` given as null switches the timing's kind. Any other field
+    given as null is refused (422): it has no null to become (the owner's M3 review)."""
 
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def _nulls(self) -> "SchedulePatch":
+        nulled = sorted(k for k in self.model_fields_set - NULLABLE if getattr(self, k) is None)
+        if nulled:
+            raise ValueError(f"{', '.join(nulled)} can't be null")
+        return self
+
     cron: str | None = Field(default=None, max_length=120)
     every_s: int | None = None
     offset_s: int | None = None

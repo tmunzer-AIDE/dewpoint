@@ -5,9 +5,17 @@ are parsed from it with the codec's grammar, the argument must name the same sch
 that tenant's scope.
 
 In one transaction, under the tick key `sched:<schedule_id>:<nominal time>`, so every retry finds what the first
-recorded: an enabled schedule's tick is admitted as any durable source is (queued, or a `refused` request with
-admission's reason); one whose schedule was disabled before its pause reached Temporal, or deleted (its tombstone), is a
-`refused` request (`schedule_paused`, `schedule_deleted`); an `erasing` tenant's is an audited skip, never a request.
+recorded, and decided under the schedule's row lock (the owner's M3 reviews), which a change holds until it commits: a
+disable or a delete either commits first and decides the tick, or waits until the tick's request is in. The tick takes
+it exclusively: a tick of a deleted schedule writes the row (it queues the tombstone again), and two ticks holding it
+shared would each wait to write, a deadlock. The workflow's
+admission lock is taken first, shared, as admission takes it: a workflow's change takes it exclusively before it
+writes its schedules' generations, so both take the two in the same order.
+
+An enabled schedule's tick is admitted as any durable source is (queued, or a `refused` request with admission's
+reason); one whose schedule was disabled before its pause reached Temporal, or deleted (its tombstone), is a `refused`
+request (`schedule_paused`, `schedule_deleted`); either way its `run.request` audit entry names the schedule. An
+`erasing` tenant's tick is an audited skip, never a request.
 A platform-wide failure (the database, a key) raises, and the workflow retries it without limit (§2.5): a tick still
 unadmitted 10 minutes after its time alerts."""
 
@@ -17,7 +25,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -30,6 +38,7 @@ from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.requests import RunRequest
 from dewpoint.core.models.schedules import Schedule
 from dewpoint.core.models.tenancy import Tenant
+from dewpoint.core.workflows.service import lock_for_admission
 from dewpoint.engine.runtime.ids import schedule_of
 
 log = structlog.get_logger("dewpoint.dispatcher.tick")
@@ -47,6 +56,10 @@ class TickInput:
     schedule_id: str  # the action's argument, which must name the schedule the workflow id does
     key: str  # `sched:<schedule_id>:<nominal time>`
     nominal: str  # the nominal time, UTC, whole seconds: `2026-10-04T09:00:00Z`
+
+
+async def _after_schedule_locked() -> None:
+    """Runs once a tick holds its schedule's row. A no-op; the race tests start a competing change here."""
 
 
 class ScheduleUnknownError(Exception):
@@ -69,15 +82,24 @@ async def admit_tick(
     """The tick's outcome, recorded in the caller's transaction: `queued`, `refused:<reason>`, `skipped:<reason>`, or
     `recorded` when its key already holds another outcome of this tick (it was paused then, enabled since)."""
     await tenant_scope(s, tenant_id)
-    schedule = await s.get(Schedule, schedule_id, populate_existing=True)  # row-level security: that tenant's only
-    if schedule is None:
+    found = await s.get(Schedule, schedule_id, populate_existing=True)  # row-level security: that tenant's only
+    if found is None:
         raise ScheduleUnknownError(str(schedule_id))
+    await lock_for_admission(s, tenant_id, found.workflow_id)  # a schedule's workflow never changes
+    schedule = (
+        await s.execute(
+            select(Schedule).where(Schedule.id == schedule_id).with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()  # exclusive, held until the caller commits: never a shared lock it would upgrade  # fmt: skip
+    await _after_schedule_locked()
     tenant = await s.get(Tenant, tenant_id, populate_existing=True)
     if tenant is None or tenant.status == "erasing":
         details: dict[str, object] = {"schedule_id": str(schedule_id), "tick": key, "reason": admission.TENANT_ERASING}
         await audit.record(s, tenant_id=tenant_id, actor_id=None, action="schedule.tick_skipped",
                            target_type="schedule", target_id=str(schedule_id), details=details)  # fmt: skip
         return f"skipped:{admission.TENANT_ERASING}"
+    named: dict[str, object] = {"schedule_id": str(schedule_id)}  # its request's audit entry names the schedule
     try:
         if schedule.deleted_at is not None:  # a stale create may have brought it back in Temporal: delete it again
             await s.execute(
@@ -92,14 +114,14 @@ async def admit_tick(
             )  # fmt: skip
             refused = await admission.record_refused(
                 s, keys, tenant_id=tenant_id, workflow_id=schedule.workflow_id, source="schedule", mode=schedule.mode,
-                idempotency_key=key, reason=reason, messages=[said],
+                idempotency_key=key, reason=reason, messages=[said], details=named,
             )  # fmt: skip
             return _outcome(refused)
         cipher = ClaimCipher(keys, purpose=schedules.INPUT_PURPOSE)
         given = json.loads(await cipher.open(str(tenant_id), str(schedule_id), schedule.input))
         admitted = await admission.admit_request(
             s, keys, tenant_id=tenant_id, workflow_id=schedule.workflow_id, source="schedule", actor_id=None,
-            mode=schedule.mode, idempotency_key=key, input=given,
+            mode=schedule.mode, idempotency_key=key, input=given, details=named,
         )  # fmt: skip
     except admission.IdempotencyConflictError:
         return "recorded"

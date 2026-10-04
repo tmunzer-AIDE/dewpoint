@@ -161,3 +161,17 @@ async def test_deleting_leaves_a_tombstone(keyed_app, workflow, owner_sessionmak
     assert (await editor.delete(url)).status_code == 404
     assert (await editor.get(schedules_url(ctx, wf))).json()["schedules"] == []
     assert [d["schedule_id"] for d in await audited(owner_sessionmaker, "schedule.delete")] == [created["id"]]
+
+
+@pytest.mark.parametrize("field", ["input", "enabled", "mode", "offset_s", "time_zone", "catchup_window_s"])
+async def test_only_the_timings_kind_may_be_patched_to_null(
+    keyed_app, workflow, owner_sessionmaker, api_settings, field: str
+) -> None:
+    """The owner's M3 review: a null for any field but `cron` or `every_s` (which switch the timing's kind) is a 422,
+    never a server error, and changes nothing."""
+    ctx, wf = workflow
+    editor = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
+    created = (await editor.post(schedules_url(ctx, wf), json=BODY)).json()
+    answer = await editor.patch(schedule_url(ctx, created["id"]), json={field: None})
+    assert (answer.status_code, answer.json()["error"]) == (422, "invalid")
+    assert (await row(owner_sessionmaker, created["id"]))["generation"] == 1
