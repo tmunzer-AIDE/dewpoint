@@ -71,7 +71,11 @@ def convert(type_: CsvType, text: str, values: list[str] | None = None) -> tuple
     if type_ == "integer":
         if not _INTEGER.fullmatch(text):
             return None, "not_integer"
-        number = int(text)
+        digits = text.lstrip("+-").lstrip("0")
+        # More digits than CEL's int has: out of range, and never given to int(), which refuses past 4,300 digits.
+        if len(digits) > len(str(INT_MAX)):
+            return None, "out_of_range"
+        number = int(("-" if text.startswith("-") else "") + (digits or "0"))
         return (number, None) if INT_MIN <= number <= INT_MAX else (None, "out_of_range")
     if type_ == "number":
         real = float(text) if _NUMBER.fullmatch(text) else math.inf

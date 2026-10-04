@@ -53,6 +53,19 @@ def test_a_cell_that_doesnt_convert_gives_its_code(type_: CsvType, text: str, co
     assert code in CELL_CODES
 
 
+@pytest.mark.parametrize("text", ["1" * 4301, "-" + "9" * 5000, "+" + "1" * 20],
+                         ids=["4301 digits", "5000 digits, signed", "20 digits"])  # fmt: skip
+def test_an_integer_too_long_for_python_to_read_is_out_of_range(text: str) -> None:
+    """The whole-branch review: Python's `int()` refuses more than 4,300 digits; such a cell is out of range, a row's
+    error like any other, never an exception that fails the upload or the start."""
+    assert convert("integer", text) == (None, "out_of_range")
+
+
+def test_an_integers_leading_zeros_dont_count_against_its_length() -> None:
+    assert convert("integer", "0" * 5000 + "42") == (42, None)
+    assert convert("integer", "-" + "0" * 5000) == (0, None)
+
+
 @settings(max_examples=500, deadline=None)
 @given(
     st.sampled_from(["string", "integer", "number", "boolean", "mac", "ip", "cidr", "enum"]),

@@ -205,3 +205,17 @@ async def test_a_cell_longer_than_pythons_default_field_limit_uploads(
     answer = await client.post(uploads_url(ctx, wf), content=long, headers=CSV_TYPE)
     assert answer.status_code == 201, answer.text[:200]
     assert len(answer.json()["preview"][0]["cells"]["site"]) == 140_000
+
+
+async def test_an_integer_cell_too_long_for_python_to_read_is_a_rows_error(
+    keyed_app, csv_workflow, owner_sessionmaker, api_settings
+) -> None:
+    """The whole-branch review: a 5,000-digit integer cell was an unhandled `ValueError` (a 500); it's the row's
+    `out_of_range`, so the upload answers and a start can skip the row."""
+    ctx, wf = csv_workflow
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
+    long = b"Site,VLAN\nparis," + b"1" * 5000 + b"\n"
+    answer = await client.post(uploads_url(ctx, wf), content=long, headers=CSV_TYPE)
+    assert answer.status_code == 201, answer.text[:200]
+    body = answer.json()
+    assert (body["errors"], body["error_count"]) == ([{"row": 1, "column": "vlan", "code": "out_of_range"}], 1)
