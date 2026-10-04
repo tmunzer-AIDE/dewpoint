@@ -1191,9 +1191,11 @@ transition out of `starting` says what happens to both, in the same transaction 
 ### 7.9 Open before production sign-off
 
 The owner approved 2b-2's milestones as prototype checkpoints; these stay open until production sign-off (§10.6):
-- **Bound the serial dispatch cycle.** A cycle starts its candidates one after another, so 50 slow starts take about
-  500 seconds: the one-second interval is no throughput guarantee. 2b-3a's leader adds two more serial batches each
-  cycle, the schedule sync and the misses check, of up to 50 Temporal calls of at most 10 seconds each.
+- **Bound the serial dispatch cycle.** A cycle starts its candidates one after another, so 50 slow starts take about 500
+  seconds: the one-second interval is no throughput guarantee. 2b-3a's leader adds two more serial batches each cycle:
+  the schedule sync, up to 50 schedules of up to three calls each (a describe, the write, the read-back), and the misses
+  check, up to 50 describes. Each call takes at most 10 seconds, so a Temporal that answers slowly can hold one cycle
+  for up to 200 calls, about 33 minutes.
 - **Erasure pauses schedules** (2b-3a): the transition that sets a tenant `erasing` raises its schedules' generations
   in the same transaction, with a regression proving they pause; a tenant's status changing alone queues nothing.
 - **Bounded retry and alerting for a deterministic per-request failure,** the dispatcher's and the reconciler's: a

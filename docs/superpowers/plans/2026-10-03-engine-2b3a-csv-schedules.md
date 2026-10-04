@@ -199,7 +199,8 @@ for its request; a PATCH's null is refused except for `cron` and `every_s`; a ti
 the schedule. **Erasure (ruling, outside 2b-3a):** the transition that sets a tenant `erasing` must raise its
 schedules' generations in the same transaction, with a regression proving they pause; until it exists, nothing
 claims the sync pauses a schedule because its tenant's status changed (the tick skips an erasing tenant's, audited).
-The sync's two serial batches, of up to 50 Temporal calls of at most 10 s each, join §7.9's dispatch-latency gate.
+The sync's two serial batches (up to 50 schedules of three calls each, and up to 50 describes for misses: 200
+calls of at most 10 s each) join §7.9's dispatch-latency gate.
 
 **M4. Proofs, Compose and docs**
 11. On the dev server: a tick becomes a request and a run; a catch-up after downtime admits each missed time once, and
@@ -212,6 +213,13 @@ The sync's two serial batches, of up to 50 Temporal calls of at most 10 s each, 
     admission of 10,000 rows with one and with five sensitive columns: its time, claim rows and secret-index size (a
     CSV past the index bound is refused with `secret_index_limit`). The results go into revision 8; if they make runs
     impractical, the cap comes back to the owner.
+    **Result (dev machine, the CLI dev server, one worker):** 1,000 rows: 133 s with the condition (1,001
+    `cel.evaluate`, 1,511 projections, 500 echoes), 54 s without (1 `cel.evaluate`); 2,500 rows: 340 s and 143 s. Per
+    row about 135 ms and 55 ms, growing slightly with the rows claim each row re-reads (67 KB, then 168 KB). Admission:
+    1 sensitive column 0.61 s / 1.57 s, 5 columns 2.95 s / 7.15 s (12,501 claims, index 313 KB at 2,500 rows). **The
+    owner's ruling (2026-10-04): use the estimate, no 10,000-row run:** about 23–25 min with the condition and 10–12
+    min without, admission about 30 s for 5 sensitive columns. A work-unit test pins the counts (90 rows: `cel.evaluate`
+    = rows + 1 with the condition, 1 without), and one pins the index bound's refusal.
 13. End to end with the keyring's real keys: a CSV run with a canary in a sensitive column, in a header and in the
     mapping, and a schedule whose fixed input holds one: no canary in any execution's whole raw history, any projection
     or any log line (§12). CSV parser fuzzing (§12).
