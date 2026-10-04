@@ -10,6 +10,9 @@ Test-only workflows on the CLI dev server, through the tenant codec with fixture
   call succeeds and nothing changes, so a writer learns it from the describe that follows (2b-3a's sync);
 - a schedule's note carries what its create or its last landed update wrote, the pause included, so the marker a stale
   writer wrote is never what the read-back shows;
+- how Temporal reads a five-field cron expression: a day of the month and a day of the week restricted together must
+  both match (cron's usual reading is either); a local time the spring change skips doesn't fire that day, and one the
+  autumn change repeats fires once, at its second occurrence;
 - the SDK checks a payload's size after the codec;
 - a workflow task whose completion passes the gRPC message limit gets its workflow terminated."""
 
@@ -23,10 +26,16 @@ from pathlib import Path
 from typing import Any
 
 import temporalio
+from google.protobuf.timestamp_pb2 import Timestamp
 from temporalio import activity, workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.api.enums.v1 import EventType
-from temporalio.api.workflowservice.v1 import DescribeScheduleRequest, GetSystemInfoRequest, UpdateScheduleRequest
+from temporalio.api.workflowservice.v1 import (
+    DescribeScheduleRequest,
+    GetSystemInfoRequest,
+    ListScheduleMatchingTimesRequest,
+    UpdateScheduleRequest,
+)
 from temporalio.client import (
     Client,
     Schedule,
@@ -403,6 +412,62 @@ async def test_a_schedules_note_shows_the_generation_of_the_update_that_landed_a
     _, note, paused, _ = await read_back()
     assert (note, paused) == (MARK.format(4), True)  # a pause carries its generation too
     await handle.delete()
+
+
+# An expression, its time zone, a window, and every time Temporal fires in it, in UTC (the window's start excluded).
+CRON = [
+    ("0 9 * * 1-5", "UTC", "2026-06-01", "2026-06-09",
+     ["06-01 09:00", "06-02 09:00", "06-03 09:00", "06-04 09:00", "06-05 09:00", "06-08 09:00"]),
+    ("0 9 13 * 5", "UTC", "2026-01-01", "2026-12-31",
+     ["02-13 09:00", "03-13 09:00", "11-13 09:00"]),  # both days restricted: Fridays the 13th only, not either
+    ("*/20 * * * *", "UTC", "2026-06-01T00:00", "2026-06-01T01:30",
+     ["06-01 00:20", "06-01 00:40", "06-01 01:00", "06-01 01:20"]),
+    ("0 0 1 JAN,JUL *", "UTC", "2026-01-01", "2027-01-02", ["07-01 00:00", "01-01 00:00"]),
+    ("0 12 * * SUN", "UTC", "2026-06-01", "2026-06-20", ["06-07 12:00", "06-14 12:00"]),
+    ("0 12 * * 0", "UTC", "2026-06-01", "2026-06-20", ["06-07 12:00", "06-14 12:00"]),
+    ("0 12 * * 7", "UTC", "2026-06-01", "2026-06-20", ["06-07 12:00", "06-14 12:00"]),
+    ("0 9-17/4 * * *", "UTC", "2026-06-01", "2026-06-02", ["06-01 09:00", "06-01 13:00", "06-01 17:00"]),
+    ("5 4 31 * *", "UTC", "2026-01-01", "2026-12-31",
+     ["01-31 04:05", "03-31 04:05", "05-31 04:05", "07-31 04:05", "08-31 04:05", "10-31 04:05"]),
+    ("0 9 * * *", "Europe/Paris", "2026-03-27", "2026-03-31",
+     ["03-27 08:00", "03-28 08:00", "03-29 07:00", "03-30 07:00"]),  # local 09:00 across the spring change
+    ("30 2 * * *", "Europe/Paris", "2026-03-27", "2026-03-31",
+     ["03-27 01:30", "03-28 01:30", "03-30 00:30"]),  # 02:30 doesn't exist on 03-29: it doesn't fire
+    ("30 2 * * *", "Europe/Paris", "2026-10-23", "2026-10-27",
+     ["10-23 00:30", "10-24 00:30", "10-25 01:30", "10-26 01:30"]),  # 02:30 twice on 10-25: once, the second
+]  # fmt: skip
+
+
+async def test_cron_as_temporal_reads_it(dev_env: WorkflowEnvironment) -> None:
+    """2b-3a's schedules accept only the cron forms whose meaning this pins (the owner's ruling 9): Temporal's own
+    reading, through `ListScheduleMatchingTimes`, never one of Dewpoint's. Names, both spellings of Sunday, steps,
+    ranges and lists read as cron does; a day of the month and a day of the week together must both match, which
+    differs from cron's usual reading, so Dewpoint refuses that form; and a time zone's changes skip a local time that
+    doesn't exist and fire a repeated one once."""
+    client = Client(dev_env.client.service_client, namespace=dev_env.client.namespace, data_converter=RECORDING)
+
+    def at(text: str) -> Timestamp:
+        stamp = Timestamp()
+        stamp.FromDatetime(datetime.fromisoformat(text).replace(tzinfo=UTC))
+        return stamp
+
+    for cron, zone, start, end, expected in CRON:
+        schedule_id = f"t:{A}:sched:{uuid.uuid4()}"
+        handle = await client.create_schedule(
+            schedule_id,
+            Schedule(
+                action=ScheduleActionStartWorkflow(Tick.run, schedule_id, id=schedule_id, task_queue=QUEUE),
+                spec=ScheduleSpec(cron_expressions=[cron], time_zone_name=zone),
+                state=ScheduleState(paused=True),
+            ),
+        )
+        answer = await client.workflow_service.list_schedule_matching_times(
+            ListScheduleMatchingTimesRequest(
+                namespace=client.namespace, schedule_id=schedule_id, start_time=at(start), end_time=at(end)
+            )
+        )
+        assert [t.ToDatetime().strftime("%m-%d %H:%M") for t in answer.start_time] == expected, (cron, zone)
+        await handle.delete()
 
 
 async def replay(workflows: list[type], runs: list[WorkflowHistory]) -> None:
