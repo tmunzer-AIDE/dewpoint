@@ -158,26 +158,24 @@ dependency.
     passes their synced one, or whose wanted pause differs from the synced pause (wanted paused: the schedule disabled,
     its workflow disabled, or its tenant `erasing`). Temporal Schedule id `t:<tenant>:sched:<id>`, overlap allow-all,
     the schedule's catch-up window, never `trigger`.
-    - **The fence is Temporal's conflict token, sent by a path of our own (corrected 2026-10-04; provisional until
-      proven).** The pinned SDK 1.33.0 never sends one: `ScheduleHandle.update()` describes, then builds
-      `UpdateScheduleRequest` without `conflict_token` (`client/_impl.py`, with a TODO saying so). In the API, only
-      `DescribeScheduleResponse` and `UpdateScheduleRequest` carry the token; `PatchSchedule` (pause), create and
-      delete carry none. So `apps/dispatcher/schedules.py` calls the service directly: `describe_schedule` for the
-      token and Temporal's state, then `update_schedule` with that token and the schedule built by the SDK's own
-      conversion (as the SDK's update does, so the codec seals the action under the tenant). A pause is never a patch:
-      it's the update's `state.paused`. **The first step of M3, before the sync is built,** is a dev-server contract
-      test of that path, in `test_temporal_contract.py` (so a test fails on any other SDK or server version): an update
-      with the current token lands; an update with a token from before another update is refused, with the error
-      Temporal gives a stale token classified; the updated action decodes under the tenant. If the path can't be proven,
-      the sync's design comes back to the owner (or a verified SDK upgrade, for approval).
-    - **The order makes a stale writer harmless.** Each change is: describe (token T) → read the row's generation and
-      wanted state, in a short transaction → update with T. A writer whose update would replace a newer state read
-      that state's token before the newer update landed, so its token is stale and Temporal refuses it; a writer that
-      described after a newer update read the row after that update's own read, so it writes a state at least as new
-      (generations only grow). The sync then records the generation as synced only if the row still has it; a schedule
-      changed or disabled meanwhile stays a candidate, and the next pass applies its newer state. The leader lock only
-      keeps two writers from contending. Tests: the row changed between the describe and the update; a second writer's
-      update landing between another's describe and update (the first is refused); a stale leader's late update.
+    - **The fence is Temporal's conflict token, sent by a path of our own; only a read-back completes a change (the
+      owner's rulings, 2026-10-04).** The pinned SDK 1.33.0 never sends the token: `ScheduleHandle.update()` describes,
+      then builds `UpdateScheduleRequest` without `conflict_token`. So `apps/dispatcher/schedules.py` calls the service
+      directly: `describe_schedule` for the token, then `update_schedule` with it and one schedule built by the SDK's
+      own conversion (the codec seals the action under the tenant), holding the spec, the action, the pause state and
+      the note `dewpoint generation <n>` together. **The gate passed in another form** (contract tests 1f7be8a,
+      8405bdd): on this server a stale-token update is discarded, not refused (the call succeeds, nothing changes), a
+      landed one is seen by the describe at once, a firing doesn't move the token, and the note shows the generation of
+      the update that landed, never a stale writer's.
+    - **The order, and the read-back gate.** Each change is: describe (token T) → read the row's generation and wanted
+      state → one update with T and the marker. An OK answer is no evidence: a generation is marked synced only once a
+      fresh describe shows its marker and a transaction confirms that the row still has that generation and the writer
+      still holds the leadership; a marker absent or different leaves the row queued, and the next pass starts again.
+      Tests: the row changed between the describe and the update; another writer's update landing between a describe
+      and its update (the first's marker never shows, and it records nothing); a writer that lost the leadership.
+    - **Out-of-band edits are unsupported.** The marker is evidence of a Dewpoint update, not of the whole state: a
+      direct edit in Temporal that keeps the note intact goes unseen; detecting such drift would take a full
+      comparison, which the sync doesn't make.
     - **Creates and deletes, which carry no token.** A create follows a describe that answered `NOT_FOUND`; a create
       that finds the schedule already there leaves the row a candidate, and the next pass updates it with a token.
       Deleting marks the row a tombstone (its fixed input cleared): tombstones are final, so no newer state can follow

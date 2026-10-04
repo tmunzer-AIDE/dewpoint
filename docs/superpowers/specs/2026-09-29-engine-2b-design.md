@@ -112,7 +112,9 @@
     - what stays open before production is listed in §7.9.
   - Revision 8 (draft, for the owner's approval with the 2b-3a plan; the rest is written from its prototype), from the
     owner's review of the 2b-3a prototype's milestone 1 (2026-10-04): every literal a schema writes at a sensitive
-    position is refused, as a default is, nested and behind a local `$ref` (§3.8, #32).
+    position is refused, as a default is, nested and behind a local `$ref` (§3.8, #32). From the owner's ruling on the
+    milestone-3 gate: a stale schedule update is discarded, not refused, and only a read-back of the generation marker
+    in the schedule's note completes a change (§8.2, §4.6).
 - **Parent specs:**
   - `2026-09-24-dewpoint-architecture-design.md` (§5, §6.1, §6.5, §6.8, §12, §15). This spec **changes** its
     workflow-id contract (§6.1), replaces its `outbox` table (§6.1), details its claim check (§6.5) and settles the
@@ -510,7 +512,9 @@ namespace's retention period, whatever the tenant's retention (§10.2):
 - untainted data, including values up to 64 KiB;
 - payload sizes;
 - a local activity's bookkeeping, which the SDK's core records beside its (encrypted) result, outside any codec: its
-  sequence number, attempt, activity id and type, and times.
+  sequence number, attempt, activity id and type, and times;
+- a schedule's spec and state, outside any codec (only its action's arguments are payloads): its cron or interval, time
+  zone, policies, pause state, and the note `dewpoint generation <n>`, the counter of the sync's last update (§8.2).
 
 ## 5. Sizes and snapshots
 
@@ -1225,6 +1229,15 @@ The owner approved 2b-2's milestones as prototype checkpoints; these stay open u
   purpose `schedule.input`, enabled) is the source of truth; the API writes it (permission `trigger.manage`).
 - A sync loop in the dispatcher creates, updates, pauses and deletes the matching Temporal Schedules. Disabling a
   workflow or a schedule pauses it.
+- **Every change carries a generation, and only a read-back completes it** (2b-3a). Each API change raises the row's
+  generation. The sync describes the schedule, reads the row, and sends one update carrying the describe's conflict
+  token, with the spec, the action, the pause state and the note `dewpoint generation <n>` together. Temporal discards
+  an update whose token a later update made stale: the call succeeds and nothing changes (a contract test pins it), so
+  a successful answer isn't completion. A generation is marked synced only once a fresh describe shows its marker and
+  a transaction confirms that the row still has that generation and the writer still holds the leadership; a marker
+  absent or different leaves it queued for the next pass. The marker is evidence of a Dewpoint update, not of the whole
+  state: editing a schedule directly in Temporal isn't supported, and drift a direct edit leaves under an intact note
+  would take a full comparison, which the sync doesn't make.
 - The Temporal Schedule's action starts `ScheduleTick` with the schedule's id as its only argument (encrypted by the
   codec). Overlap: allow all. Catch-up window: 10 minutes by default, configurable.
 - `ScheduleTick` is a one-activity workflow on its own task queue, `dewpoint-admission`, in the dispatcher process
