@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import structlog
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -78,6 +79,12 @@ async def admit_tick(
                            target_type="schedule", target_id=str(schedule_id), details=details)  # fmt: skip
         return f"skipped:{admission.TENANT_ERASING}"
     try:
+        if schedule.deleted_at is not None:  # a stale create may have brought it back in Temporal: delete it again
+            await s.execute(
+                update(Schedule)
+                .where(Schedule.id == schedule_id, Schedule.synced_generation == Schedule.generation)
+                .values(synced_generation=Schedule.generation - 1)
+            )
         if schedule.deleted_at is not None or not schedule.enabled or schedule.input is None:
             reason, said = (
                 (SCHEDULE_DELETED, "The schedule was deleted.") if schedule.deleted_at is not None
