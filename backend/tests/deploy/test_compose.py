@@ -16,6 +16,7 @@ ENV = {
     "DEWPOINT_AUDITOR_DB_PASSWORD": "auditor-pw",
     "DEWPOINT_WORKER_DB_PASSWORD": "worker-pw",
     "DEWPOINT_DISPATCH_DB_PASSWORD": "dispatch-pw",
+    "DEWPOINT_INGRESS_DB_PASSWORD": "ingress-pw",
     "DEWPOINT_KEK_B64": "k" * 44,
     "DEWPOINT_AUDIT_SIGNING_KEY_B64": "s" * 44,
     "DEWPOINT_TEMPORAL_NAMESPACE": "dewpoint-ci",
@@ -103,3 +104,16 @@ def test_a_dispatcher_that_exits_is_restarted() -> None:
     """The whole-branch review: a dispatcher process that ends (whatever the cause) comes back, so queued runs keep
     starting once what stopped it recovers."""
     assert service("dispatcher")["restart"] == "unless-stopped"
+
+
+def test_the_database_init_makes_an_ingress_login_from_its_password() -> None:
+    """2b-3b: ingress logs in as `dewpoint_ingress_login`, which a fresh database's init creates in the group role, from
+    `DEWPOINT_INGRESS_DB_PASSWORD`; CI writes one like every other login's."""
+    assert environment("postgres")["DEWPOINT_INGRESS_DB_PASSWORD"] == "ingress-pw"
+    init = (COMPOSE.parent / "initdb" / "10-roles.sh").read_text()
+    assert '-v ingress_pw="$DEWPOINT_INGRESS_DB_PASSWORD"' in init
+    assert "CREATE ROLE dewpoint_ingress_login LOGIN PASSWORD :'ingress_pw' IN ROLE dewpoint_ingress;" in init
+    assert "rolname='dewpoint_ingress') THEN CREATE ROLE dewpoint_ingress NOLOGIN" in init
+    ci = (COMPOSE.parents[2] / ".github" / "workflows" / "ci.yml").read_text()
+    assert 'echo "DEWPOINT_INGRESS_DB_PASSWORD=$(openssl rand -hex 16)"' in ci
+    assert "DEWPOINT_INGRESS_DB_PASSWORD=" in (COMPOSE.parent / ".env.example").read_text()

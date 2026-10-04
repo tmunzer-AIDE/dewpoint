@@ -86,6 +86,7 @@ jobs:
             echo "DEWPOINT_AUDITOR_DB_PASSWORD=$(openssl rand -hex 16)"
             echo "DEWPOINT_WORKER_DB_PASSWORD=$(openssl rand -hex 16)"
             echo "DEWPOINT_DISPATCH_DB_PASSWORD=$(openssl rand -hex 16)"
+            echo "DEWPOINT_INGRESS_DB_PASSWORD=$(openssl rand -hex 16)"
             echo "DEWPOINT_KEK_B64=$(openssl rand -base64 32)"
             echo "DEWPOINT_AUDIT_SIGNING_KEY_B64=$(openssl rand -base64 32)"
           } > .env
