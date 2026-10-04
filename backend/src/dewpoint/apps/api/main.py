@@ -20,6 +20,7 @@ from dewpoint.apps.api.routes import (
     passkeys,
     run_requests,
     runs,
+    schedules,
     tenants,
     workflows,
 )
@@ -74,6 +75,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         run_requests.router,
         csv_uploads.router,
         runs.router,
+        schedules.router,
     ):
         app.include_router(router)
     return app
