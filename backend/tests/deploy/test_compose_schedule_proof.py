@@ -6,6 +6,7 @@ the dispatcher and the worker. Here the script runs against the test database, a
 and a worker; CI runs the same against the Compose stack."""
 
 import importlib.util
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -49,7 +50,7 @@ async def test_the_schedule_proof_waits_for_the_first_scheduled_run_to_succeed(
     dispatch_keys, worker_keys = KeyringKeys(dispatch_sessionmaker, keyring), KeyringKeys(worker_sessionmaker, keyring)
     async with dispatch_sessionmaker() as s, s.begin():  # the Compose dispatcher's admission worker, a firing's tick
         assert await tick.admit_tick(s, dispatch_keys, tenant_id=tenant_id, schedule_id=schedule_id,
-                                     key=f"sched:{schedule_id}:2026-10-04T09:00:00Z") == "queued"  # fmt: skip
+                                     key=tick.tick_key(str(schedule_id), datetime.now(UTC))[0]) == "queued"  # fmt: skip
     assert (await proof.state(api_settings, tenant_id, schedule_id))[0] == "queued"
     async with engine_workers(env.client, DbRunStore(worker_sessionmaker, worker_keys)):
         assert await dispatch_once(dispatch_sessionmaker, env.client, dispatch_keys, api_settings, BUILD) == {

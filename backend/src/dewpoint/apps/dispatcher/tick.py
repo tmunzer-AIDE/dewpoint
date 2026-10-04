@@ -16,6 +16,11 @@ An enabled schedule's tick is admitted as any durable source is (queued, or a `r
 reason); one whose schedule was disabled before its pause reached Temporal, or deleted (its tombstone), is a `refused`
 request (`schedule_paused`, `schedule_deleted`); either way its `run.request` audit entry names the schedule. An
 `erasing` tenant's tick is an audited skip, never a request.
+After those decisions, a newly decided tick strictly past its schedule's catch-up window, by the database's clock read
+once it holds the row, is a `refused` request, `schedule_catchup_expired` (the owner's ruling on the whole-branch
+review): an outage of the dispatcher or the database longer than the window admits only the firings within it, as
+Temporal's own catch-up does after its outages. A tick already recorded keeps what it recorded, and a queued request
+never expires. These refusals are reported apart from Temporal's count of the firings it missed (`misses`).
 A platform-wide failure (the database, a key) raises, and the workflow retries it without limit (§2.5): a tick still
 unadmitted 10 minutes after its time alerts."""
 
@@ -25,7 +30,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -46,6 +51,7 @@ ADMISSION_QUEUE = "dewpoint-admission"  # unversioned, outside the engine's Work
 TICK = "schedule.tick"
 SCHEDULE_PAUSED = "schedule_paused"
 SCHEDULE_DELETED = "schedule_deleted"
+SCHEDULE_CATCHUP_EXPIRED = "schedule_catchup_expired"
 LATE = timedelta(minutes=10)  # §15: provisional
 TICK_IDENTITY = "tick_identity"
 SCHEDULE_UNKNOWN = "schedule_unknown"
@@ -60,6 +66,11 @@ class TickInput:
 
 async def _after_schedule_locked() -> None:
     """Runs once a tick holds its schedule's row. A no-op; the race tests start a competing change here."""
+
+
+async def _database_now(s: AsyncSession) -> datetime:
+    """The database's clock, read in a statement of its own, after the tick holds its schedule's row."""
+    return (await s.execute(select(func.statement_timestamp()))).scalar_one()
 
 
 class ScheduleUnknownError(Exception):
@@ -117,6 +128,16 @@ async def admit_tick(
                 idempotency_key=key, reason=reason, messages=[said], details=named,
             )  # fmt: skip
             return _outcome(refused)
+        late = await _database_now(s) - _parsed(key.split(":", 2)[2])
+        if late > timedelta(seconds=schedule.catchup_window_s):  # strictly past it: at its edge, still admitted
+            expired = await admission.record_refused(
+                s, keys, tenant_id=tenant_id, workflow_id=schedule.workflow_id, source="schedule", mode=schedule.mode,
+                idempotency_key=key, reason=SCHEDULE_CATCHUP_EXPIRED,
+                messages=["The tick is past its schedule's catch-up window."], details=named,
+            )  # fmt: skip
+            if expired.reason == SCHEDULE_CATCHUP_EXPIRED:
+                log.error("schedule_tick_expired", schedule_id=str(schedule_id), late_s=int(late.total_seconds()))
+            return _outcome(expired)
         cipher = ClaimCipher(keys, purpose=schedules.INPUT_PURPOSE)
         given = json.loads(await cipher.open(str(tenant_id), str(schedule_id), schedule.input))
         admitted = await admission.admit_request(

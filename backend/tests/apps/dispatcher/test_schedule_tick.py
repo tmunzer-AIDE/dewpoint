@@ -7,6 +7,7 @@ one's tombstone one (`schedule_deleted`); an `erasing` tenant's is an audited sk
 
 import asyncio
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -21,7 +22,18 @@ from tests.apps.test_workflow_ops import publish, save, update
 from tests.support.graphs import G
 
 pytestmark = pytest.mark.usefixtures("development_deployment")
-KEY = "sched:{}:2026-10-04T09:00:00Z"
+_KEYS: dict[uuid.UUID, str] = {}
+
+
+def key(schedule_id: uuid.UUID) -> str:
+    """The key of a tick fired just now, the same for every tick of `schedule_id` here, so a retry finds it: an older
+    one would be past the schedule's catch-up window (the owner's ruling on the whole-branch review)."""
+    return _KEYS.setdefault(schedule_id, tick.tick_key(str(schedule_id), datetime.now(UTC))[0])
+
+
+def at(schedule_id: uuid.UUID, ago: timedelta) -> str:
+    """The key of a tick whose nominal time was `ago` before now."""
+    return tick.tick_key(str(schedule_id), datetime.now(UTC) - ago)[0]
 
 
 @pytest.fixture
@@ -38,10 +50,10 @@ async def ready(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispat
     return ctx, wf, created.id
 
 
-async def ticked(dispatch: Any, ctx: Any, schedule_id: uuid.UUID) -> str:
+async def ticked(dispatch: Any, ctx: Any, schedule_id: uuid.UUID, given: str | None = None) -> str:
     async with dispatch() as s, s.begin():
         return await tick.admit_tick(s, KEYS, tenant_id=ctx.tenant_id, schedule_id=schedule_id,
-                                     key=KEY.format(schedule_id))  # fmt: skip
+                                     key=given or key(schedule_id))  # fmt: skip
 
 
 async def requests(owner: Any) -> list[Any]:
@@ -62,7 +74,7 @@ async def test_an_enabled_schedules_tick_is_a_request_under_its_key(
     assert await ticked(dispatch_sessionmaker, ctx, schedule_id) == "queued"
     [r] = await requests(owner_sessionmaker)
     assert (r["source"], r["actor_id"], r["mode"], r["workflow_id"], r["idempotency_key"]) == (
-        "schedule", None, "simulate", wf, KEY.format(schedule_id),
+        "schedule", None, "simulate", wf, key(schedule_id),
     )  # fmt: skip
     assert await full_input(dispatch_sessionmaker, ctx, r["id"]) == {"token": TOKEN, "site": "a"}
     assert await ticked(dispatch_sessionmaker, ctx, schedule_id) == "queued"  # a retry: the same request
@@ -117,7 +129,7 @@ async def test_an_erasing_tenants_tick_is_an_audited_skip(ready, owner_sessionma
     async with owner_sessionmaker() as s:
         details = (await s.execute(text("select details from audit_log where action = 'schedule.tick_skipped'"))
                    ).scalar_one()  # fmt: skip
-    assert details == {"schedule_id": str(schedule_id), "tick": KEY.format(schedule_id), "reason": "tenant_erasing"}
+    assert details == {"schedule_id": str(schedule_id), "tick": key(schedule_id), "reason": "tenant_erasing"}
 
 
 async def lock_waiters(owner: Any) -> int:
@@ -198,12 +210,12 @@ async def test_a_ticks_request_names_its_schedule_in_its_audit_entry(
     await changed(owner_sessionmaker, schedule_id, "update schedules set enabled = false where id = :i")
     async with dispatch_sessionmaker() as s, s.begin():
         await tick.admit_tick(s, KEYS, tenant_id=ctx.tenant_id, schedule_id=schedule_id,
-                              key=f"sched:{schedule_id}:2026-10-04T10:00:00Z")  # fmt: skip
+                              key=at(schedule_id, timedelta(minutes=1)))  # fmt: skip
     await changed(owner_sessionmaker, schedule_id, "update schedules set enabled = true where id = :i")
     await update(api_sessionmaker, ctx, wf, enabled=False)
     async with dispatch_sessionmaker() as s, s.begin():
         await tick.admit_tick(s, KEYS, tenant_id=ctx.tenant_id, schedule_id=schedule_id,
-                              key=f"sched:{schedule_id}:2026-10-04T11:00:00Z")  # fmt: skip
+                              key=at(schedule_id, timedelta(minutes=2)))  # fmt: skip
     async with owner_sessionmaker() as s:
         entries = (await s.execute(text("select details from audit_log where action = 'run.request' "
                                         "order by seq"))).scalars().all()  # fmt: skip
@@ -247,3 +259,99 @@ async def test_two_late_ticks_of_a_tombstone_both_record_their_outcome(
     assert await at(9) == "refused:schedule_deleted"
     assert await second[0] == "refused:schedule_deleted"
     assert [r["reason"] for r in await requests(owner_sessionmaker)] == ["schedule_deleted"] * 2
+
+
+async def audited_requests(owner: Any) -> list[tuple[str, str | None, str]]:
+    async with owner() as s:
+        entries = (await s.execute(text("select details from audit_log where action = 'run.request' "
+                                        "order by seq"))).scalars().all()  # fmt: skip
+    return [(e["status"], e.get("reason"), e["schedule_id"]) for e in entries]
+
+
+async def misses(owner: Any, schedule_id: uuid.UUID) -> int:
+    async with owner() as s:
+        return int((await s.execute(text("select misses from schedules where id = :i"), {"i": schedule_id})
+                    ).scalar_one())  # fmt: skip
+
+
+async def test_a_tick_strictly_past_its_catch_up_window_is_refused_and_one_at_its_edge_admitted(
+    ready, owner_sessionmaker, dispatch_sessionmaker, monkeypatch
+) -> None:
+    """The owner's ruling on the whole-branch review: a schedule's catch-up window bounds the runs admission takes
+    after an outage of the dispatcher or the database, as Temporal's bounds the firings after its own. A newly decided
+    tick is judged by the database's clock, read once it holds its schedule's row, against the schedule's window as
+    it is then: at its edge it's admitted; strictly past it, it's a `refused` request, `schedule_catchup_expired`,
+    audited with its schedule."""
+    ctx, _, schedule_id = ready
+    nominal = datetime(2026, 10, 4, 9, 0, tzinfo=UTC)
+
+    async def at_the_windows_edge(s: Any) -> datetime:
+        return nominal + timedelta(seconds=600)
+
+    monkeypatch.setattr(tick, "_database_now", at_the_windows_edge)
+    edge, past = f"sched:{schedule_id}:2026-10-04T09:00:00Z", f"sched:{schedule_id}:2026-10-04T08:59:59Z"
+    assert await ticked(dispatch_sessionmaker, ctx, schedule_id, edge) == "queued"
+    assert await ticked(dispatch_sessionmaker, ctx, schedule_id, past) == "refused:schedule_catchup_expired"
+    assert await audited_requests(owner_sessionmaker) == [
+        ("queued", None, str(schedule_id)), ("refused", "schedule_catchup_expired", str(schedule_id)),
+    ]  # fmt: skip
+
+
+async def test_after_an_outage_only_the_ticks_within_the_window_become_runs(
+    ready, owner_sessionmaker, dispatch_sessionmaker
+) -> None:
+    """A dispatcher or database outage longer than a schedule's window (10 minutes here): its piled-up ticks are
+    decided once it's over, and only those within the window become runs. The rest are refused and recorded, and
+    reported apart from Temporal's own count of the firings it missed (`misses`)."""
+    ctx, _, schedule_id = ready
+    backlog = [timedelta(hours=3), timedelta(minutes=30), timedelta(minutes=11), timedelta(minutes=9),
+               timedelta(minutes=1)]  # fmt: skip
+    outcomes = [await ticked(dispatch_sessionmaker, ctx, schedule_id, at(schedule_id, ago)) for ago in backlog]
+    assert outcomes == ["refused:schedule_catchup_expired"] * 3 + ["queued"] * 2
+    assert [r["status"] for r in await requests(owner_sessionmaker)] == ["refused"] * 3 + ["queued"] * 2
+    assert await misses(owner_sessionmaker, schedule_id) == 0
+
+
+async def test_a_tick_is_judged_by_the_database_clock_once_it_holds_its_schedule(
+    ready, owner_sessionmaker, dispatch_sessionmaker, monkeypatch
+) -> None:
+    """A tick that waits for its schedule's row (a change holds it) is judged when it holds it, not when it asked:
+    within its 60-second window when it began, past it once it held the row three seconds later."""
+    ctx, _, schedule_id = ready
+    await changed(owner_sessionmaker, schedule_id, "update schedules set catchup_window_s = 60 where id = :i")
+    assert await ticked(dispatch_sessionmaker, ctx, schedule_id, at(schedule_id, timedelta(seconds=55))) == "queued"
+
+    async def held_three_seconds_later() -> None:
+        await asyncio.sleep(3)
+
+    monkeypatch.setattr(tick, "_after_schedule_locked", held_three_seconds_later)
+    late = at(schedule_id, timedelta(seconds=58))
+    assert await ticked(dispatch_sessionmaker, ctx, schedule_id, late) == "refused:schedule_catchup_expired"
+
+
+async def test_a_recorded_tick_keeps_its_outcome_after_its_window(
+    ready, owner_sessionmaker, dispatch_sessionmaker, monkeypatch
+) -> None:
+    """An exact retry finds what its tick recorded, whatever the time: a queued request never expires, and an expired
+    tick stays the same refused request."""
+    ctx, _, schedule_id = ready
+    nominal = datetime(2026, 10, 4, 9, 0, tzinfo=UTC)
+    clock = [nominal + timedelta(seconds=5)]
+
+    async def database_now(s: Any) -> datetime:
+        return clock[0]
+
+    monkeypatch.setattr(tick, "_database_now", database_now)
+    fresh, stale = f"sched:{schedule_id}:2026-10-04T09:00:00Z", f"sched:{schedule_id}:2026-10-04T08:00:00Z"
+    assert await ticked(dispatch_sessionmaker, ctx, schedule_id, fresh) == "queued"
+    assert await ticked(dispatch_sessionmaker, ctx, schedule_id, stale) == "refused:schedule_catchup_expired"
+    before = await requests(owner_sessionmaker)
+    clock[0] = nominal + timedelta(hours=1)  # both retried an hour later
+    assert await ticked(dispatch_sessionmaker, ctx, schedule_id, fresh) == "recorded"  # its queued request stands
+    assert await ticked(dispatch_sessionmaker, ctx, schedule_id, stale) == "refused:schedule_catchup_expired"
+    after = await requests(owner_sessionmaker)
+    assert (
+        [(r["id"], r["idempotency_key"], r["status"]) for r in after]
+        == [(r["id"], r["idempotency_key"], r["status"]) for r in before]
+        == [(before[0]["id"], fresh, "queued"), (before[1]["id"], stale, "refused")]
+    )

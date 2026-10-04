@@ -105,6 +105,12 @@ switches the timing's kind); `DELETE` removes one.
 - **Missed firings.** Within the catch-up window, firings missed while Temporal was down fire when it's back, each
   with its own time. Past it they're skipped: Temporal counts them, and the schedule's `misses` shows the count, read
   every five minutes, audited and alerted on.
+- **A backlog past the window isn't run.** When the dispatcher or the database is down instead, Temporal keeps firing
+  and the ticks wait. Once they're decided, a tick more than its schedule's catch-up window old, by the database's
+  clock, is a `refused` request, `schedule_catchup_expired`, audited and alerted on (`schedule_tick_expired`): an outage
+  longer than the window starts only the firings within it. A tick already decided keeps its outcome, and a queued
+  request never expires, even one waiting while production runs are off. This limits the runs started, not the ticks
+  Temporal records or the refused requests written as they're decided, and these refusals aren't counted in `misses`.
 
 ## The dispatcher
 

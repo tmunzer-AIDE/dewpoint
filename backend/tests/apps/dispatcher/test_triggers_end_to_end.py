@@ -123,8 +123,9 @@ async def test_a_csv_start_and_a_schedules_tick_end_to_end_with_the_keyrings_rea
             "csv": {"upload_id": upload.json()["upload_id"], "mapping": {"site": "Site", "psk": HEADER}},
         })  # fmt: skip
         assert started.status_code == 202, started.text
+        # Its backfilled firing, at the top of this hour, stays inside a 2-hour catch-up window.
         scheduled = await editor.post(f"{base}/workflows/{scheduled_wf}/schedules", json={
-            "every_s": 3600, "input": {"token": FIXED, "site": "lyon"},
+            "every_s": 3600, "catchup_window_s": 7200, "input": {"token": FIXED, "site": "lyon"},
         })  # fmt: skip
         assert scheduled.status_code == 201, scheduled.text
         schedule_id = uuid.UUID(scheduled.json()["id"])
