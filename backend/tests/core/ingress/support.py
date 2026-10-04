@@ -21,9 +21,9 @@ RECORD = text(
 )
 
 
-async def endpoint(owner: Any, **columns: Any) -> tuple[uuid.UUID, uuid.UUID]:
+async def endpoint(owner: Any, endpoint_id: uuid.UUID | None = None, **columns: Any) -> tuple[uuid.UUID, uuid.UUID]:
     """A tenant (with its keypair) and one of its endpoints, a bearer one unless `columns` say otherwise."""
-    tenant, endpoint_id = uuid.uuid4(), uuid.uuid4()
+    tenant, endpoint_id = uuid.uuid4(), endpoint_id or uuid.uuid4()
     async with owner() as s, s.begin():
         user = (await create_user(s, email=f"{tenant.hex[:10]}@corp.test", password="violet-otter-canyon-42")).id
         await s.execute(text("insert into tenants(id,name,slug) values (:t,'T',:s)"), {"t": tenant, "s": tenant.hex})

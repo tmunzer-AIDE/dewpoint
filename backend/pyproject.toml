@@ -164,6 +164,15 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+name = "ingress imports neither the API, the dispatcher, the worker nor Temporal, and no tenant key's code (spec §8.3)"
+type = "forbidden"
+source_modules = ["dewpoint.apps.ingress"]
+forbidden_modules = [
+  "dewpoint.apps.api", "dewpoint.apps.dispatcher", "dewpoint.apps.worker", "dewpoint.apps.admission", "temporalio",
+  "dewpoint.core.crypto.kek", "dewpoint.core.crypto.keyring", "dewpoint.core.crypto.keys", "dewpoint.core.ingress.keys",
+]
+
+[[tool.importlinter.contracts]]
 name = "engine.runtime is deterministic: no clock, randomness, I/O or threads (spec §6)"
 type = "forbidden"
 source_modules = ["dewpoint.engine.runtime"]

@@ -375,6 +375,43 @@ def worker() -> None:
         raise typer.Exit(3) from None
 
 
+@app.command("ingress")
+def ingress(host: str = typer.Option("127.0.0.1"), port: int = typer.Option(8001, min=1, max=65535)) -> None:
+    """Serve webhook ingress, `/hooks/<endpoint_id>` (engine 2b spec §8.3), in a development deployment only until
+    engine 2b-4. The server's own X-Forwarded-For handling stays off: ingress believes it only from the proxies in
+    DEWPOINT_INGRESS_TRUSTED_PROXIES."""
+    import uvicorn
+
+    from dewpoint.apps.ingress.config import IngressSettings
+    from dewpoint.apps.ingress.main import (
+        IngressRefusedError,
+        create_app,
+        refuse_key_encryption_key,
+        require_development,
+    )
+
+    try:
+        refuse_key_encryption_key(os.environ)
+    except IngressRefusedError as e:
+        typer.echo(f"ERROR: {e}")
+        raise typer.Exit(2) from None
+    settings = IngressSettings()  # read from the environment
+
+    async def _check() -> None:
+        engine = make_engine(settings.database_url)
+        try:
+            await require_development(make_sessionmaker(engine))
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(_check())
+    except IngressRefusedError as e:
+        typer.echo(f"ERROR: {e}")
+        raise typer.Exit(2) from None
+    uvicorn.run(create_app(settings), host=host, port=port, proxy_headers=False, server_header=False)
+
+
 @asynccontextmanager
 async def _temporal() -> AsyncIterator[Client]:
     """A Temporal client, once this process's namespace is the one this deployment recorded (engine 2b spec §2.1).
