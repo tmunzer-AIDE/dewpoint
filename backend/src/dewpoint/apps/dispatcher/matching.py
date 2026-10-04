@@ -28,7 +28,7 @@ from datetime import timedelta
 
 import structlog
 from cryptography.exceptions import InvalidTag
-from sqlalchemy import func, or_, select, text, update
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from dewpoint.apps import admission
@@ -38,7 +38,8 @@ from dewpoint.core.crypto import events
 from dewpoint.core.crypto.keys import KeySource, key_unreadable
 from dewpoint.core.db import tenant_scope, unavailable
 from dewpoint.core.ingress import keys as event_keys
-from dewpoint.core.ingress.filters import matches
+from dewpoint.core.ingress.counters import release
+from dewpoint.core.ingress.filters import MAX_BINDINGS, matches
 from dewpoint.core.models.ingress import InboundEvent, TenantEventCounters, TriggerBinding, WebhookEndpoint
 from dewpoint.core.models.platform import PlatformSettings
 from dewpoint.core.models.tenancy import Tenant
@@ -48,7 +49,6 @@ from dewpoint.engine.runtime.activities import LIVE
 
 log = structlog.get_logger("dewpoint.dispatcher.matching")
 BATCH = 50  # events a cycle (§15, provisional)
-MAX_BINDINGS = 20  # an endpoint's enabled bindings, refused past it when written, rechecked here
 WAIT = timedelta(minutes=1)  # a wait that's no fault of the event's: retried after it, its attempts untouched
 SOURCE = "webhook"
 GATE_OFF = "gate_off"
@@ -262,16 +262,3 @@ async def _dead(s: AsyncSession, event: InboundEvent, reason: str) -> str:
     _alert(s, "inbound_event_dead", tenant_id=str(event.tenant_id), event_id=str(event.id), reason=reason)
     await s.flush()
     return DEAD
-
-
-async def release(s: AsyncSession, tenant_id: uuid.UUID, endpoint_id: uuid.UUID, size: int, events_n: int = 1) -> None:
-    """An event's pending counters released, on its endpoint and its tenant, whose rows the caller holds. Never below
-    zero: a drift the recount corrects doesn't block an event's end."""
-    for model, where in ((WebhookEndpoint, WebhookEndpoint.id == endpoint_id),
-                         (TenantEventCounters, TenantEventCounters.tenant_id == tenant_id)):  # fmt: skip
-        await s.execute(
-            update(model).where(where).values(
-                pending_events=func.greatest(model.pending_events - events_n, 0),
-                pending_bytes=func.greatest(model.pending_bytes - size, 0),
-            )
-        )  # fmt: skip

@@ -11,6 +11,7 @@ from dewpoint.core.ingress.identity import canonical
 from dewpoint.core.ingress.pointer import PointerError, resolve
 
 MAX_CLAUSES = 8
+MAX_BINDINGS = 20  # an endpoint's bindings: refused past it when written, rechecked when matching (§15, provisional)
 MAX_POINTER_CHARS = 256
 MAX_VALUE_CHARS = 1024
 INT_RANGE = (-(2**63), 2**63 - 1)

@@ -61,3 +61,13 @@ def test_a_valid_filter_is_kept_as_given() -> None:
 def test_an_invalid_filter_is_refused_with_a_reason(given) -> None:
     with pytest.raises(FilterError):
         validated(given)
+
+
+def test_the_tenant_lock_is_the_one_the_dispatchers_starts_take() -> None:
+    import uuid
+
+    from dewpoint.apps.dispatcher.dispatch import tenant_lock as dispatchers
+    from dewpoint.core.ingress.counters import tenant_lock
+
+    tenant = uuid.uuid4()
+    assert tenant_lock(tenant) == dispatchers(tenant)

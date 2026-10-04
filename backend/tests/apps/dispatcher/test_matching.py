@@ -334,3 +334,50 @@ def _params(inbound: Any, payload: object, key: bytes) -> dict[str, Any]:
     return {"e": inbound.endpoint_id, "refusal": None, "read": 0, "ids": [event_id],
             "sealed": [sealed(inbound, event_id, payload)], "versions": [1], "dedupe": [key],
             "digests": [hashlib.sha256(canonical(payload)).digest()]}  # fmt: skip
+
+
+async def _cancel(api: Any, inbound: Any, event_id: uuid.UUID) -> str:
+    from dewpoint.apps import webhooks
+    from dewpoint.core.db import tenant_scope
+
+    try:
+        async with api() as s, s.begin():
+            await tenant_scope(s, inbound.tenant_id)
+            event = await webhooks.cancel_event(s, tenant_id=inbound.tenant_id, event_id=event_id,
+                                                actor_id=inbound.user_id)  # fmt: skip
+            return event.status
+    except webhooks.WebhookRefusedError as e:
+        return str(e)
+
+
+async def test_a_cancel_waits_for_a_match_in_flight_and_finds_it_matched(
+    dev, owner_sessionmaker, ingress_sessionmaker, dispatch_sessionmaker, api_sessionmaker, monkeypatch
+) -> None:
+    await bind(owner_sessionmaker, dev)
+    [event_id] = await send(ingress_sessionmaker, dev, ALARM)
+    reached, release = await _held(monkeypatch)
+    matcher = asyncio.create_task(matched(dispatch_sessionmaker, dev, event_id))
+    await reached.wait()
+    cancel = asyncio.create_task(_cancel(api_sessionmaker, dev, event_id))
+    await _waiting(owner_sessionmaker)  # on the endpoint's row
+    release.set()
+    assert (await matcher, await cancel) == ("matched", "not_cancellable")
+    assert await counters(owner_sessionmaker, dev) == ((0, 0), (0, 0))
+
+
+async def test_a_match_waits_for_a_cancel_and_passes_the_cancelled_event_by(
+    dev, owner_sessionmaker, ingress_sessionmaker, dispatch_sessionmaker, api_sessionmaker
+) -> None:
+    from dewpoint.apps import webhooks
+    from dewpoint.core.db import tenant_scope
+
+    await bind(owner_sessionmaker, dev)
+    [event_id] = await send(ingress_sessionmaker, dev, ALARM)
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, dev.tenant_id)
+        await webhooks.cancel_event(s, tenant_id=dev.tenant_id, event_id=event_id, actor_id=dev.user_id)
+        matcher = asyncio.create_task(matched(dispatch_sessionmaker, dev, event_id))
+        await _waiting(owner_sessionmaker)
+    assert await matcher == "skipped"
+    assert await requests_of(owner_sessionmaker, event_id) == []
+    assert await counters(owner_sessionmaker, dev) == ((0, 0), (0, 0))
