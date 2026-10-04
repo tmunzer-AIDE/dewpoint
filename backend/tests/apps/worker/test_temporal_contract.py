@@ -8,6 +8,8 @@ Test-only workflows on the CLI dev server, through the tenant codec with fixture
   that already fired starts a second execution with the same time;
 - a schedule update sent directly with a conflict token that a later update made stale is discarded, not refused: the
   call succeeds and nothing changes, so a writer learns it from the describe that follows (2b-3a's sync);
+- a schedule's note carries what its create or its last landed update wrote, the pause included, so the marker a stale
+  writer wrote is never what the read-back shows;
 - the SDK checks a payload's size after the codec;
 - a workflow task whose completion passes the gRPC message limit gets its workflow terminated."""
 
@@ -350,6 +352,56 @@ async def test_a_stale_schedule_update_is_discarded_and_the_describe_after_it_sh
     assert isinstance(action, ScheduleActionStartWorkflow)
     [arg] = action.args
     assert isinstance(arg, Payload) and arg.metadata[TENANT] == A.encode() and await opened(arg) == schedule_id
+    await handle.delete()
+
+
+MARK = "dewpoint generation {}"  # the only thing 2b-3a writes in a schedule's note (the owner's ruling: option b)
+
+
+async def test_a_schedules_note_shows_the_generation_of_the_update_that_landed_and_never_a_stale_writers(
+    dev_env: WorkflowEnvironment,
+) -> None:
+    """2b-3a's read-back gate (the owner's ruling): the sync writes its generation into the schedule's note in the same
+    token-bearing update as its spec, action and pause state, and marks the generation synced only once a fresh
+    describe shows that marker. The note carries what the create wrote, then what each landed update wrote, a pause
+    included. Two writers describe the same token; the one whose update lands is the one the read-back shows, and the
+    other's marker never appears: its update was discarded, and its read-back tells it so."""
+    client = Client(dev_env.client.service_client, namespace=dev_env.client.namespace, data_converter=RECORDING)
+    schedule_id = f"t:{A}:sched:{uuid.uuid4()}"
+    service, namespace = client.workflow_service, client.namespace
+
+    def wanted(hours: int, generation: int, *, paused: bool) -> Schedule:
+        return Schedule(
+            action=ScheduleActionStartWorkflow(Tick.run, schedule_id, id=schedule_id, task_queue=QUEUE),
+            spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(hours=hours))]),
+            policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.ALLOW_ALL),
+            state=ScheduleState(paused=paused, note=MARK.format(generation)),
+        )
+
+    async def read_back() -> tuple[bytes, str, bool, int]:
+        answer = await service.describe_schedule(DescribeScheduleRequest(namespace=namespace, schedule_id=schedule_id))
+        state = answer.schedule.state
+        return answer.conflict_token, state.notes, state.paused, answer.schedule.spec.interval[0].interval.seconds
+
+    async def update(schedule: Schedule, token: bytes) -> None:
+        await service.update_schedule(
+            UpdateScheduleRequest(
+                namespace=namespace, schedule_id=schedule_id, schedule=await schedule._to_proto(client),
+                conflict_token=token, identity="contract", request_id=str(uuid.uuid4()),
+            )
+        )  # fmt: skip
+
+    handle = await client.create_schedule(schedule_id, wanted(1, 1, paused=False))
+    token, note, paused, _ = await read_back()
+    assert (note, paused) == (MARK.format(1), False)  # on create
+    stale, fresh = token, token  # two writers describe the same token: one read generation 2 before the other read 3
+    await update(wanted(3, 3, paused=False), fresh)
+    await update(wanted(2, 2, paused=False), stale)  # the slower writer's update, computed from the same describe
+    token, note, paused, interval = await read_back()
+    assert (note, paused, interval) == (MARK.format(3), False, 10800)  # the landed update's marker, never the stale one
+    await update(wanted(3, 4, paused=True), token)
+    _, note, paused, _ = await read_back()
+    assert (note, paused) == (MARK.format(4), True)  # a pause carries its generation too
     await handle.delete()
 
 
