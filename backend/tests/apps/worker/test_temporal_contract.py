@@ -6,6 +6,8 @@ Test-only workflows on the CLI dev server, through the tenant codec with fixture
 - every payload, on every path, is encoded and decoded with a context whose workflow id names its tenant;
 - a schedule's `TemporalScheduledStartTime` is whole seconds and the same under replay, and a backfill over a time
   that already fired starts a second execution with the same time;
+- a schedule update sent directly with a conflict token that a later update made stale is discarded, not refused: the
+  call succeeds and nothing changes, so a writer learns it from the describe that follows (2b-3a's sync);
 - the SDK checks a payload's size after the codec;
 - a workflow task whose completion passes the gRPC message limit gets its workflow terminated."""
 
@@ -22,7 +24,7 @@ import temporalio
 from temporalio import activity, workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.api.enums.v1 import EventType
-from temporalio.api.workflowservice.v1 import GetSystemInfoRequest
+from temporalio.api.workflowservice.v1 import DescribeScheduleRequest, GetSystemInfoRequest, UpdateScheduleRequest
 from temporalio.client import (
     Client,
     Schedule,
@@ -294,6 +296,61 @@ async def test_a_schedules_time_is_whole_seconds_the_same_on_replay_and_a_backfi
     TICKS.clear()
     await replay([Tick], runs)
     assert stamps(replaying=True) == times
+
+
+async def test_a_stale_schedule_update_is_discarded_and_the_describe_after_it_shows_it(
+    dev_env: WorkflowEnvironment,
+) -> None:
+    """2b-3a's first M3 gate (the owner's correction): SDK 1.33.0's `ScheduleHandle.update()` sends no conflict token,
+    so the sync sends `UpdateScheduleRequest` itself, with the token of the `DescribeScheduleResponse` it computed from.
+    On this server the token counts the schedule's updates (a firing doesn't move it); an update with the current one
+    lands and is seen by the describe at once; one with a token a later update made stale is DISCARDED: the call
+    succeeds and nothing changes. So Temporal never lets a stale writer overwrite a newer state, but tells it only
+    through the describe that follows, which the sync reads before it records anything. A pause is the update's own
+    `state.paused`, under the same token; the action stays sealed under the schedule's tenant."""
+    client = Client(dev_env.client.service_client, namespace=dev_env.client.namespace, data_converter=RECORDING)
+    schedule_id = f"t:{A}:sched:{uuid.uuid4()}"
+    service, namespace = client.workflow_service, client.namespace
+
+    def every(hours: int, *, paused: bool = True) -> Schedule:
+        return Schedule(
+            action=ScheduleActionStartWorkflow(Tick.run, schedule_id, id=schedule_id, task_queue=QUEUE),
+            spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(hours=hours))]),
+            policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.ALLOW_ALL),
+            state=ScheduleState(paused=paused),
+        )
+
+    async def described() -> tuple[bytes, int, bool]:
+        answer = await service.describe_schedule(DescribeScheduleRequest(namespace=namespace, schedule_id=schedule_id))
+        return answer.conflict_token, answer.schedule.spec.interval[0].interval.seconds, answer.schedule.state.paused
+
+    async def update(schedule: Schedule, token: bytes) -> None:
+        await service.update_schedule(
+            UpdateScheduleRequest(
+                namespace=namespace, schedule_id=schedule_id, schedule=await schedule._to_proto(client),
+                conflict_token=token, identity="contract", request_id=str(uuid.uuid4()),
+            )
+        )  # fmt: skip
+
+    handle = await client.create_schedule(schedule_id, every(1))
+    first, _, _ = await described()
+    await update(every(2), first)
+    second, interval, _ = await described()  # at once: no wait
+    assert second != first and interval == 7200
+    await update(every(3), first)  # computed from the first describe: stale since the second update
+    assert await described() == (second, 7200, True)  # discarded, and the call didn't fail
+    now = datetime.now(UTC).replace(second=0, microsecond=0)
+    await handle.backfill(ScheduleBackfill(start_at=now - timedelta(minutes=2), end_at=now,
+                                           overlap=ScheduleOverlapPolicy.ALLOW_ALL))  # fmt: skip
+    assert (await described())[0] == second  # a firing isn't an update
+    await update(every(3, paused=False), second)
+    third, interval, paused = await described()
+    assert (third != second, interval, paused) == (True, 10800, False)  # unpaused through the update's state
+    action = (await handle.describe()).schedule.action
+    assert isinstance(action, ScheduleActionStartWorkflow)
+    [arg] = action.args
+    assert isinstance(arg, Payload) and arg.metadata[TENANT] == A.encode() and await opened(arg) == schedule_id
+    await handle.delete()
 
 
 async def replay(workflows: list[type], runs: list[WorkflowHistory]) -> None:
