@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps import admission, cancels
-from dewpoint.apps.forms import form_fields
+from dewpoint.apps.forms import csv_form, form_fields
 from dewpoint.apps.inputs import INPUT_INVALID
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.claims import service as claims
@@ -124,7 +124,7 @@ async def start_form(
     ctx: TenantContext = Depends(require(P.RUN_START)),
     db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, object]:
-    """The active version's input, as a form: its typed fields, sensitive ones masked. CSV starts come with 2b-3."""
+    """The active version's input, as a form: its typed fields and its CSV declaration, sensitive ones masked."""
     workflow = await db.get(Workflow, workflow_id)  # row-level security: the caller's tenant's only
     if workflow is None:
         raise HTTPException(404, detail={"error": "not_found"})
@@ -137,7 +137,7 @@ async def start_form(
         "workflow_id": str(workflow.id),
         "version_id": str(version.id),
         "fields": form_fields(version.input_schema or {}),
-        "csv": None,
+        "csv": csv_form((version.graph.get("settings") or {}).get("csv")),
     }
 
 

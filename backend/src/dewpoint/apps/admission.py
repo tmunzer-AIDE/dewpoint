@@ -26,7 +26,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dewpoint.apps.inputs import InputRefusedError, claim_input
+from dewpoint.apps.inputs import INPUT_INVALID, RESERVED_INPUT, InputRefusedError, claim_input
 from dewpoint.apps.workflow_ops import abi_reasons
 from dewpoint.core.audit import service as audit
 from dewpoint.core.claims import service as claims
@@ -40,6 +40,7 @@ from dewpoint.core.platform.service import NOT_RECORDED, PRODUCTION, recorded
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.requests import digest as digests
 from dewpoint.core.workflows.service import lock_for_admission, other_abi
+from dewpoint.engine.graph.csv import RESERVED, trigger_schema
 from dewpoint.engine.runtime.activities import LIVE, SIMULATE
 
 INTERACTIVE = ("manual", "rerun", "dev")  # refused while the gate is off; a refusal is raised
@@ -236,7 +237,9 @@ async def _frozen(
     if blocked:
         reason = NODE_TYPE_RETIRED if any(e.kind == "node" for e in blocked) else CEL_PROFILE_RETIRED
         raise _Refused(reason, [f"{entry} has been retired." for entry in blocked], version.id)
-    schema = (version.graph.get("settings") or {}).get("input_schema", {"type": "object"})
+    if any(name in fields["input"] for name in RESERVED):  # only a CSV upload supplies them (§8.1)
+        raise _Refused(INPUT_INVALID, [RESERVED_INPUT], version.id)
+    schema = trigger_schema(version.graph.get("settings") or {})
     try:
         envelope = await claim_input(
             s, keys, tenant_id=tenant_id, run_id=request_id, root_run_id=request_id, schema=schema,

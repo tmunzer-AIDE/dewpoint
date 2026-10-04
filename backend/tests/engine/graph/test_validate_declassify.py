@@ -17,17 +17,19 @@ ECHO, IF, SWITCH, LOOP, FILTER = "testkit.echo@1", "flow.if@1", "flow.switch@1",
 SECRET = {"type": "string", "x-sensitive": True}
 ROW = {"type": "object", "properties": {"id": {"type": "integer"}, "card": SECRET}, "required": ["id", "card"],
        "additionalProperties": False}  # fmt: skip
+CARD = {"header": "Card", "name": "card", "type": "string", "required": True, "sensitive": True}
+CSV = {"columns": [{"header": "ID", "name": "id", "type": "integer", "required": True}, CARD]}
 INPUT = {
     "type": "object",
-    "properties": {"token": SECRET, "n": {"type": "integer"}, "rows": {"type": "array", "items": ROW},
-                   "list": {"type": "array", "items": ROW}},
-    "required": ["token", "n", "rows", "list"],
+    "properties": {"token": SECRET, "n": {"type": "integer"}, "list": {"type": "array", "items": ROW}},
+    "required": ["token", "n", "list"],
     "additionalProperties": False,
 }  # fmt: skip
 
 
 def check(g: G, *declassify: tuple[str, str]) -> ValidationResult:
-    g.settings = {"input_schema": INPUT, "declassify": [{"node": str(nid(k)), "field": f} for k, f in declassify]}
+    g.settings = {"input_schema": INPUT, "csv": CSV,
+                  "declassify": [{"node": str(nid(k)), "field": f} for k, f in declassify]}  # fmt: skip
     return validate(g.build(), ValidationContext(catalog=CAT))
 
 

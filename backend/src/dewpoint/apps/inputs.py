@@ -25,6 +25,7 @@ from dewpoint.engine.runtime.projection import location
 from dewpoint.engine.split import split
 
 FORGED = "The run's input holds the reserved key `$claim`, which only Dewpoint writes."
+RESERVED_INPUT = "The run's input holds `rows` or `row_count`, which only a CSV upload supplies."
 _REASONS = 5  # an input that breaks more rules is told about the first ones
 
 

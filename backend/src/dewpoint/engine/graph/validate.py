@@ -16,7 +16,9 @@ from jsonschema.exceptions import SchemaError
 from dewpoint.engine.cel.record import ExpressionRecord
 from dewpoint.engine.graph import cel_check
 from dewpoint.engine.graph import liveness as lv
-from dewpoint.engine.graph.csv import is_canonical
+from dewpoint.engine.graph.csv import INPUT_ROOT as CSV_INPUT_ROOT
+from dewpoint.engine.graph.csv import RESERVED as CSV_RESERVED
+from dewpoint.engine.graph.csv import is_canonical, trigger_schema
 from dewpoint.engine.graph.diagnostics import Diagnostic, Severity
 from dewpoint.engine.graph.model import CsvSettings, Graph, GraphNode
 from dewpoint.engine.graph.schemas import (
@@ -88,6 +90,7 @@ class SubflowInfo:
     input_schema: Mapping[str, Any]
     output_schema: Mapping[str, Any]
     output_taint: Mapping[str, Any] | None = None  # its version's: each output's `Shape` JSON; None: unknown
+    declares_csv: bool = False
 
 
 @dataclass(frozen=True)
@@ -196,12 +199,19 @@ _CSV_VALUES = "An `enum` column lists its values, and only an `enum` column has 
 _CSV_SENSITIVE_VALUES = (
     "A sensitive column can't list its values: they'd be written into the workflow. Make it a `string` column."
 )
+_CSV_INPUT_ROOT = (
+    "A workflow that takes a CSV keeps its input schema plain at the root (`properties`, `required`, "
+    "`additionalProperties`, `$defs` and annotations): this keyword could refuse the file's `rows` and `row_count`, "
+    "or make their count sensitive. Move the constraint into a property's own schema."
+)
 _CSV_REQUIRED = "A required column takes no default: an empty cell is refused, so the default would never apply."
 _CSV_DEFAULT = (
     "The default isn't a value of the column's type, as a cell would be converted: a number for `integer` and "
     "`number`, true or false for `boolean`, one of the values for `enum`, lowercase colon form for `mac`, and "
     "an address or network as Python's `ipaddress` writes it for `ip` and `cidr` (no host bits set)."
 )
+_RESERVED = "`rows` and `row_count` are a CSV's: declare the file in `settings.csv`, and its rows arrive there."
+_CSV_TARGET = "This workflow takes a CSV file, which only a start with an upload supplies: no workflow can start it."
 _TIMER = "A wait's duration is visible in the run's history, so it can't come from sensitive data."
 _FAIL_MESSAGE = "A failure's message is recorded as it is, so it can't hold sensitive data."
 _SUBFLOW_INPUT = "This passes sensitive data into a field the sub-flow doesn't mark sensitive."
@@ -404,6 +414,17 @@ def _settings(graph: Graph) -> list[Diagnostic]:
         if not any((d.field or "").startswith(f"/settings/{label}") for d in out):
             out += _sensitive_defaults(label, schema)
     out += _csv_declaration(st.csv)
+    props = st.input_schema.get("properties")
+    out += [
+        Diagnostic(code="settings.reserved_name", field=f"/settings/input_schema/properties/{name}", message=_RESERVED)
+        for name in CSV_RESERVED
+        if isinstance(props, Mapping) and name in props
+    ]
+    out += [  # a schema that could refuse the generated `rows` would publish a CSV no start can satisfy
+        Diagnostic(code="csv.input_schema", field=f"/settings/input_schema/{key}", message=_CSV_INPUT_ROOT)
+        for key in st.input_schema
+        if st.csv is not None and key not in CSV_INPUT_ROOT
+    ]
     if any((d.field or "").startswith("/settings/vars_schema") for d in out):  # never run defaults through it
         return out
     props = st.vars_schema.get("properties", {})
@@ -485,7 +506,8 @@ class _Validator:
         self.availability: dict[tuple[Any, ...], bool] = {}
         self.expressions: list[ExpressionRecord] = []
         # taint (2b spec §4.1): its sources, each node's output, each loop's element, and what this pass learns
-        self.trigger_shape = from_schema(graph.settings.input_schema) if settings_ok else TAINTED
+        self.trigger_root = trigger_schema(graph.settings.model_dump(mode="json")) if settings_ok else {}
+        self.trigger_shape = from_schema(self.trigger_root) if settings_ok else TAINTED
         self.vars_shape = from_schema(self.vars_root)
         self.out_taint: dict[uuid.UUID, Shape] = {}
         self.item_taint: dict[uuid.UUID, Shape] = {}
@@ -667,6 +689,8 @@ class _Validator:
                     self._schema_errors(n.id, pointer_str(("assignments", name)), schema, value, inner)
         if spec.ref == C.RUN_WORKFLOW:
             info = self._subflow(n)
+            if info is not None and info.declares_csv:
+                self.err("subflow.csv_target", _CSV_TARGET, node=n.id, fld="/workflow_id")
             if info is not None:
                 inner = [p[1:] for p in envelopes if p[:1] == ("input",)]
                 self._schema_errors(n.id, "/input", info.input_schema, stripped.get("input", {}), inner)
@@ -889,7 +913,7 @@ class _Validator:
     def _resolve_typed(self, site: _Site, p: RefPath) -> Resolved | None:
         try:
             if p.root == "trigger":
-                return navigate(self.g.settings.input_schema, p.rest)
+                return navigate(self.trigger_root, p.rest)
             if p.root == "run":
                 return Resolved(RUN_SCHEMAS[str(p.section)], False)
             if p.root == "vars":
@@ -1041,7 +1065,7 @@ class _Validator:
         self, site: _Site, p: RefPath, find: Callable[[Any, Sequence[str | int], Any], tuple[int, ...]]
     ) -> tuple[int, ...]:
         if p.root == "trigger":
-            return find(self.g.settings.input_schema, p.rest, None)
+            return find(self.trigger_root, p.rest, None)
         if p.root == "vars" and p.name in self.vars:
             return find(self.vars_root, p.rest, self.vars[str(p.name)])
         if p.root in ("item", "loops") and p.section == "item":
@@ -1164,6 +1188,8 @@ class _Validator:
             )
         else:
             self.failure_handler_version_id = info.version_id
+            if info.declares_csv:
+                self.err("subflow.csv_target", _CSV_TARGET, fld="/settings/failure_handler")
 
 
 class _CelSite:

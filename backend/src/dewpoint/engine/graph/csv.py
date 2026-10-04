@@ -5,12 +5,23 @@ must already be one, so the version holds exactly what a run would."""
 
 import ipaddress
 import re
+from collections.abc import Mapping
 from typing import Any, Literal
 
 CsvType = Literal["string", "integer", "number", "boolean", "mac", "ip", "cidr", "enum"]
 MAX_ROWS = 10_000  # the platform's caps; a declaration may lower them, never raise them
 MAX_BYTES = 5 * 1024 * 1024
 INT_MIN, INT_MAX = -(2**63), 2**63 - 1  # CEL's int
+RESERVED = ("rows", "row_count")  # a trigger's: only admission writes them, from a CSV upload
+# The keywords a CSV's input schema may hold at its root: none can refuse the `rows` and `row_count` the trigger
+# schema adds there (`additionalProperties` skips declared properties). Any other (a closed `allOf` branch, a `$ref`,
+# `propertyNames`, `maxProperties`, `x-sensitive`, ...) could refuse them or taint the public count.
+INPUT_ROOT = frozenset(
+    {"type", "properties", "required", "additionalProperties", "$defs", "$schema", "$comment"}
+    | {"title", "description", "examples", "default", "deprecated", "readOnly", "writeOnly"}
+)
+_JSON_TYPES = {"integer": "integer", "number": "number", "boolean": "boolean"}  # the others are strings
+_JSON_TYPES.update({t: "string" for t in ("string", "mac", "ip", "cidr", "enum")})
 
 _MAC = re.compile(r"[0-9a-f]{2}(?::[0-9a-f]{2}){5}")  # the canonical form: lowercase, colon-separated
 
@@ -50,3 +61,43 @@ def is_canonical(type_: CsvType, value: Any, values: list[str] | None = None) ->
     if type_ == "cidr":
         return cidr(value) == value
     return True
+
+
+def _column_schema(column: Mapping[str, Any]) -> dict[str, Any]:
+    type_ = column["type"]
+    schema: dict[str, Any] = {"type": _JSON_TYPES[type_], "title": column["header"]}
+    if type_ in ("mac", "ip", "cidr"):
+        schema["format"] = type_  # a hint: admission converted every cell to its canonical form already
+    if column.get("values") is not None:
+        schema["enum"] = list(column["values"])
+    if "default" in column:
+        schema["default"] = column["default"]
+    if column.get("sensitive"):
+        schema["x-sensitive"] = True
+    return schema
+
+
+def trigger_schema(settings: Mapping[str, Any]) -> dict[str, Any]:
+    """The schema of a run's trigger, from its version's settings (as the graph document holds them): the
+    `input_schema`, plus, when the version declares a CSV, `rows` (each a closed object of its columns, the sensitive
+    ones marked, a column with a default always filled in) and `row_count`. Publish types and taints `trigger.*` by
+    it, and admission validates and claims by it. `settings` is never changed."""
+    schema: dict[str, Any] = dict(settings.get("input_schema") or {"type": "object"})
+    csv = settings.get("csv")
+    if not csv:
+        return schema
+    columns = csv["columns"]
+    row = {
+        "type": "object",
+        "properties": {c["name"]: _column_schema(c) for c in columns},
+        "required": [c["name"] for c in columns if c.get("required") or "default" in c],
+        "additionalProperties": False,
+    }
+    max_rows = csv.get("max_rows", MAX_ROWS)
+    schema["properties"] = {
+        **(schema.get("properties") or {}),
+        "rows": {"type": "array", "maxItems": max_rows, "items": row},
+        "row_count": {"type": "integer", "minimum": 0, "maximum": max_rows},
+    }
+    schema["required"] = [*(schema.get("required") or ()), *RESERVED]
+    return schema

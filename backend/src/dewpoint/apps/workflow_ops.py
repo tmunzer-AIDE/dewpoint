@@ -37,6 +37,11 @@ async def _lifecycle_locked() -> None:
     """Hook that runs right after the lifecycle locks are held. A no-op; the race tests pause here."""
 
 
+def declares_csv(graph: Mapping[str, Any]) -> bool:
+    """Whether a version's graph document declares a CSV (engine 2b spec §8.1)."""
+    return bool((graph.get("settings") or {}).get("csv"))
+
+
 @dataclass(frozen=True)
 class Checked:
     graph: Graph | None
@@ -56,7 +61,10 @@ async def check_draft(s: AsyncSession, tenant_id: uuid.UUID, draft: Any, setting
     ctx = ValidationContext(
         catalog=catalog,
         subflows={
-            wid: SubflowInfo(wid, v.id, v.input_schema, v.output_schema, v.output_taint) for wid, v in pins.items()
+            wid: SubflowInfo(
+                wid, v.id, v.input_schema, v.output_schema, v.output_taint, declares_csv=declares_csv(v.graph)
+            )
+            for wid, v in pins.items()
         },
         max_run_duration=timedelta(days=settings.max_run_duration_days),
     )
