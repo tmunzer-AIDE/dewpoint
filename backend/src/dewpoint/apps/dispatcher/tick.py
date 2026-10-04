@@ -20,7 +20,9 @@ After those decisions, a newly decided tick strictly past its schedule's catch-u
 once it holds the row, is a `refused` request, `schedule_catchup_expired` (the owner's ruling on the whole-branch
 review): an outage of the dispatcher or the database longer than the window admits only the firings within it, as
 Temporal's own catch-up does after its outages. A tick already recorded keeps what it recorded, and a queued request
-never expires. These refusals are reported apart from Temporal's count of the firings it missed (`misses`).
+never expires. These refusals are reported apart from Temporal's count of the firings it missed (`misses`): each newly
+recorded one alerts once (`schedule_tick_expired`), when its transaction has committed, never for a retry that finds it
+or an attempt rolled back.
 A platform-wide failure (the database, a key) raises, and the workflow retries it without limit (§2.5): a tick still
 unadmitted 10 minutes after its time alerts."""
 
@@ -52,6 +54,7 @@ TICK = "schedule.tick"
 SCHEDULE_PAUSED = "schedule_paused"
 SCHEDULE_DELETED = "schedule_deleted"
 SCHEDULE_CATCHUP_EXPIRED = "schedule_catchup_expired"
+EXPIRED = "dewpoint.tick.expired"  # in the session's `info`: the expiries newly recorded, alerted on commit
 LATE = timedelta(minutes=10)  # §15: provisional
 TICK_IDENTITY = "tick_identity"
 SCHEDULE_UNKNOWN = "schedule_unknown"
@@ -66,6 +69,12 @@ class TickInput:
 
 async def _after_schedule_locked() -> None:
     """Runs once a tick holds its schedule's row. A no-op; the race tests start a competing change here."""
+
+
+async def _recorded(s: AsyncSession, key: str) -> bool:
+    """Whether a request already holds the tick's key. Under the schedule's row lock, any attempt of this tick that
+    decided before has committed, so this sees it."""
+    return (await s.execute(select(RunRequest.id).where(RunRequest.idempotency_key == key))).first() is not None
 
 
 async def _database_now(s: AsyncSession) -> datetime:
@@ -91,7 +100,8 @@ async def admit_tick(
     s: AsyncSession, keys: KeySource, *, tenant_id: uuid.UUID, schedule_id: uuid.UUID, key: str
 ) -> str:
     """The tick's outcome, recorded in the caller's transaction: `queued`, `refused:<reason>`, `skipped:<reason>`, or
-    `recorded` when its key already holds another outcome of this tick (it was paused then, enabled since)."""
+    `recorded` when its key already holds another outcome of this tick (it was paused then, enabled since). An expiry
+    this call newly records is left in `s.info[EXPIRED]`, for the caller to alert on once its transaction commits."""
     await tenant_scope(s, tenant_id)
     found = await s.get(Schedule, schedule_id, populate_existing=True)  # row-level security: that tenant's only
     if found is None:
@@ -130,13 +140,15 @@ async def admit_tick(
             return _outcome(refused)
         late = await _database_now(s) - _parsed(key.split(":", 2)[2])
         if late > timedelta(seconds=schedule.catchup_window_s):  # strictly past it: at its edge, still admitted
+            new = not await _recorded(s, key)
             expired = await admission.record_refused(
                 s, keys, tenant_id=tenant_id, workflow_id=schedule.workflow_id, source="schedule", mode=schedule.mode,
                 idempotency_key=key, reason=SCHEDULE_CATCHUP_EXPIRED,
                 messages=["The tick is past its schedule's catch-up window."], details=named,
             )  # fmt: skip
-            if expired.reason == SCHEDULE_CATCHUP_EXPIRED:
-                log.error("schedule_tick_expired", schedule_id=str(schedule_id), late_s=int(late.total_seconds()))
+            if new and expired.reason == SCHEDULE_CATCHUP_EXPIRED:  # the caller alerts once its transaction commits
+                s.info.setdefault(EXPIRED, []).append({"schedule_id": str(schedule_id),
+                                                       "late_s": int(late.total_seconds())})  # fmt: skip
             return _outcome(expired)
         cipher = ClaimCipher(keys, purpose=schedules.INPUT_PURPOSE)
         given = json.loads(await cipher.open(str(tenant_id), str(schedule_id), schedule.input))
@@ -164,7 +176,10 @@ class Ticker:
         tenant_id, schedule_id = (uuid.UUID(part) for part in named)
         try:
             async with self.sessionmaker() as s, s.begin():
-                return await admit_tick(s, self.keys, tenant_id=tenant_id, schedule_id=schedule_id, key=given.key)
+                outcome = await admit_tick(s, self.keys, tenant_id=tenant_id, schedule_id=schedule_id, key=given.key)
+            for expiry in s.info.pop(EXPIRED, []):  # committed: an attempt rolled back never gets here
+                log.error("schedule_tick_expired", **expiry)
+            return outcome
         except ScheduleUnknownError:
             raise ApplicationError("A tick of no schedule of its tenant.", type=SCHEDULE_UNKNOWN,
                                    non_retryable=True) from None  # fmt: skip

@@ -206,3 +206,32 @@ async def test_the_admission_worker_keeps_no_error_text_in_temporals_activity_re
         "Completing activity as failed"
     ]
     assert TOKEN not in caplog.text
+
+
+async def test_an_expiry_alerts_once_when_it_commits_never_for_a_retry_or_a_rolled_back_attempt(
+    ready, dispatch_sessionmaker, monkeypatch
+) -> None:
+    """The owner's recheck of the catch-up ruling: `schedule_tick_expired` alerts once for each expiry newly recorded,
+    after its transaction commits. An attempt that decided, then rolled back, alerts nothing; the attempt that records
+    it alerts once; an exact retry, which finds the refusal it recorded, alerts nothing again."""
+    ctx, schedule_id = ready
+    ticker = tick.Ticker(dispatch_sessionmaker, KEYS)
+    env = environment(schedule_workflow_id(str(ctx.tenant_id), str(schedule_id)))
+    key, stamp = tick.tick_key(str(schedule_id), datetime.now(UTC) - timedelta(hours=1))
+    decide = tick.admit_tick
+
+    async def decided_then_lost(*args: Any, **kwargs: Any) -> str:
+        await decide(*args, **kwargs)
+        raise OSError("connection lost before the commit")
+
+    alerts: list[int] = []
+    for failing in (True, False, False):
+        monkeypatch.setattr(tick, "admit_tick", decided_then_lost if failing else decide)
+        with structlog.testing.capture_logs() as logs:
+            try:
+                outcome = await env.run(ticker.tick, tick.TickInput(str(schedule_id), key, stamp))
+            except OSError:
+                outcome = "rolled back"
+        alerts.append(sum(entry["event"] == "schedule_tick_expired" for entry in logs))
+        assert outcome == ("rolled back" if failing else "refused:schedule_catchup_expired")
+    assert alerts == [0, 1, 0]

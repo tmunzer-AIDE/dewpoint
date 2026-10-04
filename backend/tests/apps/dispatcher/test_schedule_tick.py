@@ -315,17 +315,25 @@ async def test_after_an_outage_only_the_ticks_within_the_window_become_runs(
 async def test_a_tick_is_judged_by_the_database_clock_once_it_holds_its_schedule(
     ready, owner_sessionmaker, dispatch_sessionmaker, monkeypatch
 ) -> None:
-    """A tick that waits for its schedule's row (a change holds it) is judged when it holds it, not when it asked:
-    within its 60-second window when it began, past it once it held the row three seconds later."""
+    """A tick that waits for its schedule's row (a change holds it) is judged when it holds it, not when it asked: 58
+    seconds old when it began, inside its 60-second window, 61 once it held the row three seconds later. The clock is
+    the database's, injected; the post-lock hook advances it, so nothing here waits on the wall clock."""
     ctx, _, schedule_id = ready
     await changed(owner_sessionmaker, schedule_id, "update schedules set catchup_window_s = 60 where id = :i")
-    assert await ticked(dispatch_sessionmaker, ctx, schedule_id, at(schedule_id, timedelta(seconds=55))) == "queued"
+    clock = [datetime(2026, 10, 4, 9, 0, 58, tzinfo=UTC)]
+
+    async def database_now(s: Any) -> datetime:
+        return clock[0]
 
     async def held_three_seconds_later() -> None:
-        await asyncio.sleep(3)
+        clock[0] += timedelta(seconds=3)
 
+    monkeypatch.setattr(tick, "_database_now", database_now)
+    asked = f"sched:{schedule_id}:2026-10-04T09:00:00Z"
+    assert await ticked(dispatch_sessionmaker, ctx, schedule_id, asked) == "queued"
     monkeypatch.setattr(tick, "_after_schedule_locked", held_three_seconds_later)
-    late = at(schedule_id, timedelta(seconds=58))
+    clock[0] = datetime(2026, 10, 4, 9, 1, 58, tzinfo=UTC)
+    late = f"sched:{schedule_id}:2026-10-04T09:01:00Z"
     assert await ticked(dispatch_sessionmaker, ctx, schedule_id, late) == "refused:schedule_catchup_expired"
 
 

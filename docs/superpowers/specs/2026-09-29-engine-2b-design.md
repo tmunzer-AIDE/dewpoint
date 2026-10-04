@@ -1358,7 +1358,10 @@ The owner approved 2b-2's milestones as prototype checkpoints; these stay open u
   within it, as Temporal's catch-up does after its own outages. A tick already recorded keeps its outcome, and a queued
   request, one admitted while the gate was off included, never expires. This bounds the runs admitted, not the tick
   executions Temporal starts or the refused requests written on recovery. These refusals are reported apart from
-  Temporal's count of the firings it missed (`misses`): each is a `refused` request and a `schedule_tick_expired` alert.
+  Temporal's count of the firings it missed (`misses`): each is a `refused` request, and its alert
+  (`schedule_tick_expired`) is logged once, when it's newly recorded and its transaction has committed, never for a
+  retry that finds it or an attempt rolled back.
+
 ### 8.3 Webhook ingress
 
 - **The process:** `dewpoint ingress`, with its own login (role `dewpoint_ingress`), reached at
