@@ -117,3 +117,61 @@ def test_the_database_init_makes_an_ingress_login_from_its_password() -> None:
     ci = (COMPOSE.parents[2] / ".github" / "workflows" / "ci.yml").read_text()
     assert 'echo "DEWPOINT_INGRESS_DB_PASSWORD=$(openssl rand -hex 16)"' in ci
     assert "DEWPOINT_INGRESS_DB_PASSWORD=" in (COMPOSE.parent / ".env.example").read_text()
+
+
+NGINX = Path(__file__).parents[3] / "deploy" / "docker" / "nginx.conf"
+HOOKS_SUBNET = "172.31.255.248/29"
+
+
+def test_ingress_runs_behind_its_profile_as_its_own_login_without_a_key_encryption_key() -> None:
+    """2b-3b (engine 2b spec §8.3): ingress is a gated prototype until 2b-4, so plain Compose never starts it; the
+    `ingress` profile does, and it still refuses to start unless the deployment is `development`. Its environment is its
+    own (it refuses one holding the key-encryption key), its database login has no table privilege, and it publishes no
+    port: it's reached through `web` only."""
+    ingress = service("ingress")
+    assert ingress["profiles"] == ["ingress"]
+    assert ingress["command"] == ["dewpoint", "ingress", "--host", "0.0.0.0", "--port", "8001"]  # noqa: S104 - no port published
+    env = environment("ingress")
+    assert not [name for name in env if "KEK" in name]
+    assert env["DEWPOINT_DATABASE_URL"] == "postgresql+asyncpg://dewpoint_ingress_login:ingress-pw@postgres/dewpoint"
+    assert env["DEWPOINT_INGRESS_TRUSTED_PROXIES"] == HOOKS_SUBNET
+    assert "ports" not in ingress and ingress["read_only"] is True and ingress["cap_drop"] == ["ALL"]
+    assert ingress["depends_on"] == {"migrate": {"condition": "service_completed_successfully"}}
+
+
+def test_web_reaches_ingress_on_a_network_of_their_own_whose_addresses_ingress_trusts() -> None:
+    """Ruling 11: X-Forwarded-For is believed only from configured proxies. `web` and ingress share a small network
+    (`hooks`), on which ingress is `hooks-ingress`; nginx proxies there, so the peer ingress sees is `web` on that
+    network, the one range it trusts. nginx writes the client it recovered into X-Forwarded-For, never a client's own,
+    and streams a body to ingress as it arrives (chunked ones too, over HTTP/1.1), so ingress's whole-body deadline and
+    its requests-in-flight limit hold through it (the owner's M4 review); its own gap timeout matches."""
+    compose: dict[str, Any] = yaml.safe_load(COMPOSE.read_text())
+    assert rendered(compose["networks"]["hooks"]["ipam"]["config"][0]["subnet"]) == HOOKS_SUBNET
+    assert service("ingress")["networks"] == {"default": None, "hooks": {"aliases": ["hooks-ingress"]}}
+    assert service("web")["networks"] == ["default", "hooks"]
+    conf = NGINX.read_text()
+    hooks = conf[conf.index("location /hooks/") :].split("}", 1)[0]
+    assert "set $ingress http://hooks-ingress:8001;" in conf
+    assert "proxy_pass $ingress;" in hooks
+    assert "proxy_set_header X-Forwarded-For $remote_addr;" in hooks
+    assert "client_body_timeout 10s;" in hooks
+    assert "proxy_request_buffering off;" in hooks and "proxy_http_version 1.1;" in hooks
+
+
+def test_the_api_holds_the_ingress_key_only_when_one_is_set() -> None:
+    """The API seals endpoints' secrets under the ingress key: without one it writes none (503), and plain Compose
+    needs none."""
+    env = environment("api")
+    assert env["DEWPOINT_INGRESS_KEY_B64"] == "" and env["DEWPOINT_INGRESS_KEY_ID"] == "ingress-1"
+
+
+def test_ci_runs_the_ingress_profile_and_proves_a_webhook_through_nginx() -> None:
+    e2e = yaml.safe_load(CI.read_text())["jobs"]["e2e"]
+    assert e2e["env"]["COMPOSE_PROFILES"] == "ingress"
+    steps = {step.get("name", ""): step for step in e2e["steps"]}
+    assert "DEWPOINT_INGRESS_KEY_B64=$(openssl rand -base64 32)" in steps["Write CI env"]["run"]
+    proof = steps["A webhook through nginx and ingress (engine 2b spec §8.3, §12)"]
+    assert proof["timeout-minutes"] == 5
+    assert "http://127.0.0.1:8080/hooks/$endpoint" in proof["run"]
+    assert "ci/ingress-proof.py" in proof["run"]
+    assert 'test "$trickled" = 408' in proof["run"]  # a slow body's deadline holds through nginx

@@ -10,8 +10,8 @@ never shown.
 
 A run starts as a **request**: the run API and `dewpoint dev run` admit it, in their own transaction, and
 `dewpoint dispatcher` starts it on Temporal within its tenant's slots. Nothing else starts a run: a CSV start and a
-schedule's tick are admitted the same way ([below](#starting-a-run-from-a-csv), [schedules](#schedules)); webhooks
-arrive with sub-project 2b-3b.
+schedule's tick are admitted the same way ([below](#starting-a-run-from-a-csv), [schedules](#schedules)), and so is a
+webhook's event, by the dispatcher ([webhook ingress](ingress.md)).
 
 ## Starting a run
 

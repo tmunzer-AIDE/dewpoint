@@ -240,6 +240,10 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 
 It records `development` (`DEWPOINT_ENVIRONMENT`); CI sets `COMPOSE_FILE` to both files.
 
+Webhook ingress, a development-only prototype until engine 2b-4, runs only with the `ingress` profile
+(`COMPOSE_PROFILES=ingress`, as CI sets it) and the development override; it needs `DEWPOINT_INGRESS_KEY_B64` in
+`.env`, which the API holds too ([webhook ingress](ingress.md)).
+
 Compose runs one build at a time, so its worker makes its own build current as it starts
 (`DEWPOINT_WORKER_SET_CURRENT=true`). Replacing the `worker` container with a new image removes the old build's only
 worker: **let runs end before upgrading**, or their build's worker must come back for them to finish. When the new
