@@ -104,11 +104,11 @@ async def test_an_input_that_doesnt_match_its_schema_is_422_with_its_places_neve
 
 
 async def test_a_body_with_unknown_fields_is_refused(keyed_app, ready, owner_sessionmaker, api_settings) -> None:
-    """CSV starts are 2b-3's: a `csv` field isn't accepted yet."""
     ctx, wf = ready
     client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
-    answer = await client.post(runs_url(ctx, wf), json={**BODY, "csv": "u1"}, headers={"Idempotency-Key": "k1"})
-    assert (answer.status_code, answer.json()["error"]) == (422, "invalid")
+    for body in ({**BODY, "rows": []}, {**BODY, "csv": "u1"}, {**BODY, "csv": {"upload_id": "u1", "mapping": {}}}):
+        answer = await client.post(runs_url(ctx, wf), json=body, headers={"Idempotency-Key": "k1"})
+        assert (answer.status_code, answer.json()["error"]) == (422, "invalid")
 
 
 async def test_production_runs_off_answers_503(keyed_app, ready, owner_sessionmaker, api_settings) -> None:
@@ -178,6 +178,38 @@ async def test_the_start_form_describes_the_active_versions_input(
         "count": {"name": "count", "type": "integer", "required": False, "sensitive": False,
                   "description": "How many"},
     }  # fmt: skip
+
+
+async def test_the_start_form_describes_a_csv_declaration(
+    keyed_app, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    """The CSV declaration (engine 2b spec §8.1): each column, a sensitive one with neither default nor values."""
+    csv = {
+        "columns": [
+            {"header": "Site", "name": "site", "type": "string", "required": True},
+            {"header": "VLAN", "name": "vlan", "type": "integer", "default": 1},
+            {"header": "Kind", "name": "kind", "type": "enum", "values": ["ap", "switch"]},
+            {"header": "Key", "name": "key", "type": "string", "sensitive": True},
+        ],
+        "max_rows": 100,
+    }
+    settings = {"input_schema": FORM_SCHEMA, "csv": csv}
+    graph = G().node("a", "testkit.echo@1", {"value": 1}).data() | {"settings": settings}
+    ctx, wf = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, graph)
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
+    form = (await client.get(f"/api/v1/t/{ctx.tenant_id}/workflows/{wf}/start-form")).json()
+    assert form["csv"] == {
+        "max_rows": 100,
+        "max_bytes": 5 * 1024 * 1024,
+        "columns": [
+            {"header": "Site", "name": "site", "type": "string", "required": True, "sensitive": False},
+            {"header": "VLAN", "name": "vlan", "type": "integer", "required": False, "sensitive": False, "default": 1},
+            {"header": "Kind", "name": "kind", "type": "enum", "required": False, "sensitive": False,
+             "values": ["ap", "switch"]},
+            {"header": "Key", "name": "key", "type": "string", "required": False, "sensitive": True},
+        ],
+    }  # fmt: skip
+    assert {f["name"] for f in form["fields"]} == {"token", "site", "count"}  # `rows` comes from the file
 
 
 async def test_a_workflow_without_an_active_version_has_no_start_form(

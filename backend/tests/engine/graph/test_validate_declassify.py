@@ -2,7 +2,7 @@
 """Declassification (engine 2b spec §4.3): only a `flow.if` condition, a `flow.switch` case's `when`, a loop's
 `items` and a filter's `items` or `predicate` may turn tainted input into a plain decision, and each such site must be
 listed in `graph.settings.declassify`. Publish refuses an unlisted tainted decision and a stale entry. A loop over
-`trigger.rows`, whose length is already public, needs no entry."""
+the rows of a version's CSV, `trigger.rows`, whose length is already public (`trigger.row_count`), needs no entry."""
 
 from typing import Any
 
@@ -17,17 +17,19 @@ ECHO, IF, SWITCH, LOOP, FILTER = "testkit.echo@1", "flow.if@1", "flow.switch@1",
 SECRET = {"type": "string", "x-sensitive": True}
 ROW = {"type": "object", "properties": {"id": {"type": "integer"}, "card": SECRET}, "required": ["id", "card"],
        "additionalProperties": False}  # fmt: skip
+CARD = {"header": "Card", "name": "card", "type": "string", "required": True, "sensitive": True}
+CSV = {"columns": [{"header": "ID", "name": "id", "type": "integer", "required": True}, CARD]}
 INPUT = {
     "type": "object",
-    "properties": {"token": SECRET, "n": {"type": "integer"}, "rows": {"type": "array", "items": ROW},
-                   "list": {"type": "array", "items": ROW}},
-    "required": ["token", "n", "rows", "list"],
+    "properties": {"token": SECRET, "n": {"type": "integer"}, "list": {"type": "array", "items": ROW}},
+    "required": ["token", "n", "list"],
     "additionalProperties": False,
 }  # fmt: skip
 
 
 def check(g: G, *declassify: tuple[str, str]) -> ValidationResult:
-    g.settings = {"input_schema": INPUT, "declassify": [{"node": str(nid(k)), "field": f} for k, f in declassify]}
+    g.settings = {"input_schema": INPUT, "csv": CSV,
+                  "declassify": [{"node": str(nid(k)), "field": f} for k, f in declassify]}  # fmt: skip
     return validate(g.build(), ValidationContext(catalog=CAT))
 
 
@@ -75,6 +77,17 @@ def test_a_loop_over_tainted_items_must_be_listed_except_over_trigger_rows() -> 
     assert ("taint.undeclassified", "/items") in codes(check(loop(ref("trigger.list"))))
     assert check(loop(ref("trigger.list")), ("l", "/items")).ok
     assert check(loop(ref("trigger.rows"))).ok  # its length is public: no entry needed
+
+
+def test_without_a_csv_a_loop_over_trigger_rows_needs_its_entry() -> None:
+    """#31: only a version declaring a CSV has a public `row_count`, so only its loop over `trigger.rows` skips the
+    entry (§4.3). Elsewhere `trigger.rows` is whatever the caller sent: here undeclared, so sensitive."""
+    rows = ref("trigger.rows", default=[])  # undeclared, so optional: the default makes it a direct reference still
+    g = G().node("l", LOOP, {"items": rows}).node("x", ECHO, {"value": 1}).edge("l", "x", "body")
+    g.settings = {"input_schema": {"type": "object"}}
+    assert codes(validate(g.build(), ValidationContext(catalog=CAT))) == [("taint.undeclassified", "/items")]
+    g.settings["declassify"] = [{"node": str(nid("l")), "field": "/items"}]
+    assert validate(g.build(), ValidationContext(catalog=CAT)).ok
 
 
 def test_a_filter_lists_each_tainted_field() -> None:

@@ -219,6 +219,39 @@ async def read_envelope(s: AsyncSession, cipher: ClaimCipher, tenant_id: uuid.UU
         raise EnvelopeUnreadableError("A trigger envelope that isn't JSON.") from None
 
 
+async def write_csv_record(
+    s: AsyncSession, cipher: ClaimCipher, tenant_id: uuid.UUID, *, request_id: uuid.UUID, record: dict[str, Any]
+) -> None:
+    """A CSV start's record (§8.1): its mapping, the file's header names and its skipped rows, encrypted as a claim is
+    and owned by the request. Like the envelope it's never a claim: no claim read or grant serves it."""
+    record_id = uuid.uuid4()
+    row = {
+        "id": record_id,
+        "tenant_id": tenant_id,
+        "owner_run_id": request_id,
+        "root_run_id": request_id,
+        "sensitive_pointers": [],
+        "ciphertext": await cipher.seal(str(tenant_id), str(record_id), _plain(record)),
+        "role": "csv",
+        "pointer": None,
+    }
+    await s.execute(insert(InputClaim).values(row))
+
+
+async def read_csv_record(
+    s: AsyncSession, cipher: ClaimCipher, tenant_id: uuid.UUID, *, request_id: uuid.UUID
+) -> dict[str, Any] | None:
+    """A request's CSV record, in the caller's tenant; None for a request that took no CSV, or whose record retention
+    removed."""
+    row = (
+        await s.execute(select(InputClaim).where(InputClaim.owner_run_id == request_id, InputClaim.role == "csv"))
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+    record: dict[str, Any] = json.loads(await cipher.open(str(tenant_id), str(row.id), row.ciphertext))
+    return record
+
+
 async def read_request_claim(
     s: AsyncSession, cipher: ClaimCipher, tenant_id: uuid.UUID, *, request_id: uuid.UUID, claim_id: uuid.UUID
 ) -> Stored:

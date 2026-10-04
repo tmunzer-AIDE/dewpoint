@@ -5,7 +5,15 @@ import uuid
 
 import pytest
 
-from dewpoint.engine.runtime.ids import ID_MAX, batch_workflow_id, run_of, run_workflow_id, tenant_of
+from dewpoint.engine.runtime.ids import (
+    ID_MAX,
+    batch_workflow_id,
+    run_of,
+    run_workflow_id,
+    schedule_of,
+    schedule_workflow_id,
+    tenant_of,
+)
 
 TENANT = "8f14e45f-ceea-467a-9575-8f6a1b2c3d4e"  # letters too: the server writes uuids in lower case
 RUN = str(uuid.UUID(int=2))
@@ -67,6 +75,17 @@ def test_a_batch_suffix_is_matched_part_by_part(suffix: str) -> None:
 def test_a_schedules_firing_names_its_tenant_and_no_run() -> None:
     firing = f"t:{TENANT}:sched:{uuid.UUID(int=4)}-2026-09-29T10:00:00Z"
     assert (tenant_of(firing), run_of(firing)) == (TENANT, None)
+
+
+def test_a_schedules_id_and_its_firings_name_its_tenant_and_the_schedule() -> None:
+    """A tick's activity takes its authority from its workflow id (the owner's ruling 10): both ids, never the
+    argument's."""
+    schedule = str(uuid.UUID(int=4))
+    assert schedule_workflow_id(TENANT, schedule) == f"t:{TENANT}:sched:{schedule}"
+    for workflow_id in (schedule_workflow_id(TENANT, schedule), f"t:{TENANT}:sched:{schedule}-2026-09-29T10:00:00Z"):
+        assert schedule_of(workflow_id) == (TENANT, schedule)
+    for workflow_id in (f"t:{TENANT}:run:{RUN}", f"t:{TENANT}:sched:{schedule}/batch:0", f"t:{TENANT}:sched:x", ""):
+        assert schedule_of(workflow_id) is None
 
 
 @pytest.mark.parametrize(

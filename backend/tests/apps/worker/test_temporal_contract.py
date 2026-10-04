@@ -6,6 +6,13 @@ Test-only workflows on the CLI dev server, through the tenant codec with fixture
 - every payload, on every path, is encoded and decoded with a context whose workflow id names its tenant;
 - a schedule's `TemporalScheduledStartTime` is whole seconds and the same under replay, and a backfill over a time
   that already fired starts a second execution with the same time;
+- a schedule update sent directly with a conflict token that a later update made stale is discarded, not refused: the
+  call succeeds and nothing changes, so a writer learns it from the describe that follows (2b-3a's sync);
+- a schedule's note carries what its create or its last landed update wrote, the pause included, so the marker a stale
+  writer wrote is never what the read-back shows;
+- how Temporal reads a five-field cron expression: a day of the month and a day of the week restricted together must
+  both match (cron's usual reading is either); a local time the spring change skips doesn't fire that day, and one the
+  autumn change repeats fires once, at its second occurrence;
 - the SDK checks a payload's size after the codec;
 - a workflow task whose completion passes the gRPC message limit gets its workflow terminated."""
 
@@ -19,10 +26,16 @@ from pathlib import Path
 from typing import Any
 
 import temporalio
+from google.protobuf.timestamp_pb2 import Timestamp
 from temporalio import activity, workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.api.enums.v1 import EventType
-from temporalio.api.workflowservice.v1 import GetSystemInfoRequest
+from temporalio.api.workflowservice.v1 import (
+    DescribeScheduleRequest,
+    GetSystemInfoRequest,
+    ListScheduleMatchingTimesRequest,
+    UpdateScheduleRequest,
+)
 from temporalio.client import (
     Client,
     Schedule,
@@ -294,6 +307,169 @@ async def test_a_schedules_time_is_whole_seconds_the_same_on_replay_and_a_backfi
     TICKS.clear()
     await replay([Tick], runs)
     assert stamps(replaying=True) == times
+
+
+async def test_a_stale_schedule_update_is_discarded_and_the_describe_after_it_shows_it(
+    dev_env: WorkflowEnvironment,
+) -> None:
+    """2b-3a's first M3 gate (the owner's correction): SDK 1.33.0's `ScheduleHandle.update()` sends no conflict token,
+    so the sync sends `UpdateScheduleRequest` itself, with the token of the `DescribeScheduleResponse` it computed from.
+    On this server the token counts the schedule's updates (a firing doesn't move it); an update with the current one
+    lands and is seen by the describe at once; one with a token a later update made stale is DISCARDED: the call
+    succeeds and nothing changes. So Temporal never lets a stale writer overwrite a newer state, but tells it only
+    through the describe that follows, which the sync reads before it records anything. A pause is the update's own
+    `state.paused`, under the same token; the action stays sealed under the schedule's tenant."""
+    client = Client(dev_env.client.service_client, namespace=dev_env.client.namespace, data_converter=RECORDING)
+    schedule_id = f"t:{A}:sched:{uuid.uuid4()}"
+    service, namespace = client.workflow_service, client.namespace
+
+    def every(hours: int, *, paused: bool = True) -> Schedule:
+        return Schedule(
+            action=ScheduleActionStartWorkflow(Tick.run, schedule_id, id=schedule_id, task_queue=QUEUE),
+            spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(hours=hours))]),
+            policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.ALLOW_ALL),
+            state=ScheduleState(paused=paused),
+        )
+
+    async def described() -> tuple[bytes, int, bool]:
+        answer = await service.describe_schedule(DescribeScheduleRequest(namespace=namespace, schedule_id=schedule_id))
+        return answer.conflict_token, answer.schedule.spec.interval[0].interval.seconds, answer.schedule.state.paused
+
+    async def update(schedule: Schedule, token: bytes) -> None:
+        await service.update_schedule(
+            UpdateScheduleRequest(
+                namespace=namespace, schedule_id=schedule_id, schedule=await schedule._to_proto(client),
+                conflict_token=token, identity="contract", request_id=str(uuid.uuid4()),
+            )
+        )  # fmt: skip
+
+    handle = await client.create_schedule(schedule_id, every(1))
+    first, _, _ = await described()
+    await update(every(2), first)
+    second, interval, _ = await described()  # at once: no wait
+    assert second != first and interval == 7200
+    await update(every(3), first)  # computed from the first describe: stale since the second update
+    assert await described() == (second, 7200, True)  # discarded, and the call didn't fail
+    now = datetime.now(UTC).replace(second=0, microsecond=0)
+    await handle.backfill(ScheduleBackfill(start_at=now - timedelta(minutes=2), end_at=now,
+                                           overlap=ScheduleOverlapPolicy.ALLOW_ALL))  # fmt: skip
+    assert (await described())[0] == second  # a firing isn't an update
+    await update(every(3, paused=False), second)
+    third, interval, paused = await described()
+    assert (third != second, interval, paused) == (True, 10800, False)  # unpaused through the update's state
+    action = (await handle.describe()).schedule.action
+    assert isinstance(action, ScheduleActionStartWorkflow)
+    [arg] = action.args
+    assert isinstance(arg, Payload) and arg.metadata[TENANT] == A.encode() and await opened(arg) == schedule_id
+    await handle.delete()
+
+
+MARK = "dewpoint generation {}"  # the only thing 2b-3a writes in a schedule's note (the owner's ruling: option b)
+
+
+async def test_a_schedules_note_shows_the_generation_of_the_update_that_landed_and_never_a_stale_writers(
+    dev_env: WorkflowEnvironment,
+) -> None:
+    """2b-3a's read-back gate (the owner's ruling): the sync writes its generation into the schedule's note in the same
+    token-bearing update as its spec, action and pause state, and marks the generation synced only once a fresh
+    describe shows that marker. The note carries what the create wrote, then what each landed update wrote, a pause
+    included. Two writers describe the same token; the one whose update lands is the one the read-back shows, and the
+    other's marker never appears: its update was discarded, and its read-back tells it so."""
+    client = Client(dev_env.client.service_client, namespace=dev_env.client.namespace, data_converter=RECORDING)
+    schedule_id = f"t:{A}:sched:{uuid.uuid4()}"
+    service, namespace = client.workflow_service, client.namespace
+
+    def wanted(hours: int, generation: int, *, paused: bool) -> Schedule:
+        return Schedule(
+            action=ScheduleActionStartWorkflow(Tick.run, schedule_id, id=schedule_id, task_queue=QUEUE),
+            spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(hours=hours))]),
+            policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.ALLOW_ALL),
+            state=ScheduleState(paused=paused, note=MARK.format(generation)),
+        )
+
+    async def read_back() -> tuple[bytes, str, bool, int]:
+        answer = await service.describe_schedule(DescribeScheduleRequest(namespace=namespace, schedule_id=schedule_id))
+        state = answer.schedule.state
+        return answer.conflict_token, state.notes, state.paused, answer.schedule.spec.interval[0].interval.seconds
+
+    async def update(schedule: Schedule, token: bytes) -> None:
+        await service.update_schedule(
+            UpdateScheduleRequest(
+                namespace=namespace, schedule_id=schedule_id, schedule=await schedule._to_proto(client),
+                conflict_token=token, identity="contract", request_id=str(uuid.uuid4()),
+            )
+        )  # fmt: skip
+
+    handle = await client.create_schedule(schedule_id, wanted(1, 1, paused=False))
+    token, note, paused, _ = await read_back()
+    assert (note, paused) == (MARK.format(1), False)  # on create
+    stale, fresh = token, token  # two writers describe the same token: one read generation 2 before the other read 3
+    await update(wanted(3, 3, paused=False), fresh)
+    await update(wanted(2, 2, paused=False), stale)  # the slower writer's update, computed from the same describe
+    token, note, paused, interval = await read_back()
+    assert (note, paused, interval) == (MARK.format(3), False, 10800)  # the landed update's marker, never the stale one
+    await update(wanted(3, 4, paused=True), token)
+    _, note, paused, _ = await read_back()
+    assert (note, paused) == (MARK.format(4), True)  # a pause carries its generation too
+    await handle.delete()
+
+
+# An expression, its time zone, a window, and every time Temporal fires in it, in UTC (the window's start excluded).
+CRON = [
+    ("0 9 * * 1-5", "UTC", "2026-06-01", "2026-06-09",
+     ["06-01 09:00", "06-02 09:00", "06-03 09:00", "06-04 09:00", "06-05 09:00", "06-08 09:00"]),
+    ("0 9 13 * 5", "UTC", "2026-01-01", "2026-12-31",
+     ["02-13 09:00", "03-13 09:00", "11-13 09:00"]),  # both days restricted: Fridays the 13th only, not either
+    ("*/20 * * * *", "UTC", "2026-06-01T00:00", "2026-06-01T01:30",
+     ["06-01 00:20", "06-01 00:40", "06-01 01:00", "06-01 01:20"]),
+    ("0 0 1 JAN,JUL *", "UTC", "2026-01-01", "2027-01-02", ["07-01 00:00", "01-01 00:00"]),
+    ("0 12 * * SUN", "UTC", "2026-06-01", "2026-06-20", ["06-07 12:00", "06-14 12:00"]),
+    ("0 12 * * 0", "UTC", "2026-06-01", "2026-06-20", ["06-07 12:00", "06-14 12:00"]),
+    ("0 12 * * 7", "UTC", "2026-06-01", "2026-06-20", ["06-07 12:00", "06-14 12:00"]),
+    ("0 12 * * sun", "UTC", "2026-06-01", "2026-06-20", ["06-07 12:00", "06-14 12:00"]),  # names in any case
+    ("0 9 * * MON-FRI", "UTC", "2026-06-05", "2026-06-10", ["06-05 09:00", "06-08 09:00", "06-09 09:00"]),
+    ("0 9-17/4 * * *", "UTC", "2026-06-01", "2026-06-02", ["06-01 09:00", "06-01 13:00", "06-01 17:00"]),
+    ("5 4 31 * *", "UTC", "2026-01-01", "2026-12-31",
+     ["01-31 04:05", "03-31 04:05", "05-31 04:05", "07-31 04:05", "08-31 04:05", "10-31 04:05"]),
+    ("0 9 * * *", "Europe/Paris", "2026-03-27", "2026-03-31",
+     ["03-27 08:00", "03-28 08:00", "03-29 07:00", "03-30 07:00"]),  # local 09:00 across the spring change
+    ("30 2 * * *", "Europe/Paris", "2026-03-27", "2026-03-31",
+     ["03-27 01:30", "03-28 01:30", "03-30 00:30"]),  # 02:30 doesn't exist on 03-29: it doesn't fire
+    ("30 2 * * *", "Europe/Paris", "2026-10-23", "2026-10-27",
+     ["10-23 00:30", "10-24 00:30", "10-25 01:30", "10-26 01:30"]),  # 02:30 twice on 10-25: once, the second
+]  # fmt: skip
+
+
+async def test_cron_as_temporal_reads_it(dev_env: WorkflowEnvironment) -> None:
+    """2b-3a's schedules accept only the cron forms whose meaning this pins (the owner's ruling 9): Temporal's own
+    reading, through `ListScheduleMatchingTimes`, never one of Dewpoint's. Names, both spellings of Sunday, steps,
+    ranges and lists read as cron does; a day of the month and a day of the week together must both match, which
+    differs from cron's usual reading, so Dewpoint refuses that form; and a time zone's changes skip a local time that
+    doesn't exist and fire a repeated one once."""
+    client = Client(dev_env.client.service_client, namespace=dev_env.client.namespace, data_converter=RECORDING)
+
+    def at(text: str) -> Timestamp:
+        stamp = Timestamp()
+        stamp.FromDatetime(datetime.fromisoformat(text).replace(tzinfo=UTC))
+        return stamp
+
+    for cron, zone, start, end, expected in CRON:
+        schedule_id = f"t:{A}:sched:{uuid.uuid4()}"
+        handle = await client.create_schedule(
+            schedule_id,
+            Schedule(
+                action=ScheduleActionStartWorkflow(Tick.run, schedule_id, id=schedule_id, task_queue=QUEUE),
+                spec=ScheduleSpec(cron_expressions=[cron], time_zone_name=zone),
+                state=ScheduleState(paused=True),
+            ),
+        )
+        answer = await client.workflow_service.list_schedule_matching_times(
+            ListScheduleMatchingTimesRequest(
+                namespace=client.namespace, schedule_id=schedule_id, start_time=at(start), end_time=at(end)
+            )
+        )
+        assert [t.ToDatetime().strftime("%m-%d %H:%M") for t in answer.start_time] == expected, (cron, zone)
+        await handle.delete()
 
 
 async def replay(workflows: list[type], runs: list[WorkflowHistory]) -> None:

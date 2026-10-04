@@ -16,8 +16,11 @@ from jsonschema.exceptions import SchemaError
 from dewpoint.engine.cel.record import ExpressionRecord
 from dewpoint.engine.graph import cel_check
 from dewpoint.engine.graph import liveness as lv
+from dewpoint.engine.graph.csv import INPUT_ROOT as CSV_INPUT_ROOT
+from dewpoint.engine.graph.csv import RESERVED as CSV_RESERVED
+from dewpoint.engine.graph.csv import is_canonical, trigger_schema
 from dewpoint.engine.graph.diagnostics import Diagnostic, Severity
-from dewpoint.engine.graph.model import Graph, GraphNode
+from dewpoint.engine.graph.model import CsvSettings, Graph, GraphNode
 from dewpoint.engine.graph.schemas import (
     PathError,
     Resolved,
@@ -58,8 +61,9 @@ from dewpoint.engine.graph.values import (
 from dewpoint.engine.handles import RESERVED, contains_marker
 from dewpoint.engine.registry import control as C
 from dewpoint.engine.registry.catalog import Catalog, NodeTypeSpec
+from dewpoint.engine.schema_refs import PREFIX as REF_PREFIX
 from dewpoint.engine.schema_refs import ref_problems, subschemas
-from dewpoint.engine.sensitive import SENSITIVE, expand, is_marked, marked_positions
+from dewpoint.engine.sensitive import SENSITIVE, expand, is_marked, marked_positions, resolve
 from dewpoint.engine.taint import CLEAN, TAINTED, Shape, from_schema, make
 from dewpoint.sdk.fields import KINDS
 
@@ -87,6 +91,7 @@ class SubflowInfo:
     input_schema: Mapping[str, Any]
     output_schema: Mapping[str, Any]
     output_taint: Mapping[str, Any] | None = None  # its version's: each output's `Shape` JSON; None: unknown
+    declares_csv: bool = False
 
 
 @dataclass(frozen=True)
@@ -188,6 +193,30 @@ _SENSITIVE_LITERAL = (
 )
 
 
+_SCHEMA_LITERAL = (
+    "A sensitive position can't list values (`enum`, `const`, `examples`): they'd be written into the workflow in "
+    "plain text. Leave them out; check the value where it's used instead."
+)
+_CSV_HEADER = "Another column already has this header: each header maps to one column."
+_CSV_NAME = "Another column already has this name: each column is one field of a row."
+_CSV_IDENT = "Column names are lowercase identifiers, and not `in`, `true`, `false` or `null`."
+_CSV_VALUES = "An `enum` column lists its values, and only an `enum` column has them."
+_CSV_SENSITIVE_VALUES = (
+    "A sensitive column can't list its values: they'd be written into the workflow. Make it a `string` column."
+)
+_CSV_INPUT_ROOT = (
+    "A workflow that takes a CSV keeps its input schema plain at the root (`properties`, `required`, "
+    "`additionalProperties`, `$defs` and annotations): this keyword could refuse the file's `rows` and `row_count`, "
+    "or make their count sensitive. Move the constraint into a property's own schema."
+)
+_CSV_REQUIRED = "A required column takes no default: an empty cell is refused, so the default would never apply."
+_CSV_DEFAULT = (
+    "The default isn't a value of the column's type, as a cell would be converted: a number for `integer` and "
+    "`number`, true or false for `boolean`, one of the values for `enum`, lowercase colon form for `mac`, and "
+    "an address or network as Python's `ipaddress` writes it for `ip` and `cidr` (no host bits set)."
+)
+_RESERVED = "`rows` and `row_count` are a CSV's: declare the file in `settings.csv`, and its rows arrive there."
+_CSV_TARGET = "This workflow takes a CSV file, which only a start with an upload supplies: no workflow can start it."
 _TIMER = "A wait's duration is visible in the run's history, so it can't come from sensitive data."
 _FAIL_MESSAGE = "A failure's message is recorded as it is, so it can't hold sensitive data."
 _SUBFLOW_INPUT = "This passes sensitive data into a field the sub-flow doesn't mark sensitive."
@@ -234,9 +263,12 @@ def _decision_sites(graph: Graph, s: Structure) -> dict[tuple[uuid.UUID, str], s
     return out
 
 
-def _public_length(n: GraphNode) -> bool:
-    """A loop over `trigger.rows` itself: its length is already public (`trigger.row_count`), so it needs no entry.
-    A derived or filtered list doesn't inherit that (§4.3)."""
+def _public_length(graph: Graph, n: GraphNode) -> bool:
+    """A loop over `trigger.rows` itself, in a version declaring a CSV: its length is already public
+    (`trigger.row_count`), so it needs no entry. A derived or filtered list doesn't inherit that (§4.3), and without a
+    CSV `trigger.rows` is whatever the caller sent, with no public count (#31)."""
+    if graph.settings.csv is None:
+        return False
     raw = n.config.get("items")
     body = raw.get(ENVELOPE) if isinstance(raw, Mapping) and is_envelope(raw) else None
     return isinstance(body, Mapping) and body.get("kind") == "ref" and body.get("path") == "trigger.rows"
@@ -252,7 +284,7 @@ def _declassify(
     for (node, fld), ref in sites.items():
         if not site_taint.get((node, fld)) or (node, fld) in listed:
             continue
-        if ref == C.LOOP and _public_length(s.nodes[node]):
+        if ref == C.LOOP and _public_length(graph, s.nodes[node]):
             continue
         out.append(
             Diagnostic(
@@ -296,27 +328,74 @@ def _writes_sensitive(
     return False
 
 
-def _sensitive_defaults(label: str, schema: Mapping[str, Any]) -> list[Diagnostic]:
-    """A `default` at a position the schema marks sensitive, or holding a part it does (engine 2b spec §3.8): a
-    secret written into the version, even null or empty: an omitted default is what's allowed."""
-    found: list[str] = []
+_SCHEMA_LITERALS = ("default", "enum", "const", "examples")  # what a schema writes of its instances
+
+
+def _sensitive_schema_literals(label: str, schema: Mapping[str, Any]) -> list[Diagnostic]:
+    """A literal a schema writes — a `default`, an `enum`'s values, a `const`, `examples` — at a position it marks
+    sensitive, or holding a part it does (engine 2b spec §3.8): a secret written into the version, even null or empty;
+    an omitted one is what's allowed. Each is found where it's written: nested, in a union's branch, or in a definition
+    that a sensitive position reaches through a local `$ref`. A start form masks a sensitive field's enum and default,
+    but that never protected the published graph; versions published before this rule keep their masking."""
+    found: dict[tuple[str, str], None] = {}  # (where, keyword), in document order
+    seen: set[tuple[str, bool]] = set()
+
+    def instances(node: Mapping[str, Any], key: str) -> list[Any]:
+        value = node[key]
+        return list(value) if key in ("enum", "examples") and isinstance(value, list) else [value]
 
     def walk(node: Any, path: str, inherited: bool) -> None:
-        if not isinstance(node, Mapping):
+        if not isinstance(node, Mapping) or (path, inherited) in seen:
             return
-        branches = expand(node, schema)
-        here = inherited or any(b.get(SENSITIVE) is True for b in branches)
-        defaults = [b["default"] for b in branches if "default" in b]
-        if defaults and (here or any(marked_positions(d, node, schema) for d in defaults)):
-            found.append(path)
+        seen.add((path, inherited))
+        here = inherited or any(b.get(SENSITIVE) is True for b in expand(node, schema))
+        for key in _SCHEMA_LITERALS:
+            if key in node and (here or any(marked_positions(v, node, schema) for v in instances(node, key))):
+                found[(path, key)] = None
         for suffix, sub in subschemas(node):
             walk(sub, path + suffix, here)
+        ref = node.get("$ref")
+        if here and isinstance(ref, str) and ref.startswith(REF_PREFIX):  # the definition, sensitive from here
+            walk(resolve(schema, ref), ref[1:], True)
 
     walk(schema, "", False)
     return [
         Diagnostic(code="sensitive.default", field=f"/settings/{label}{where}", message=_SENSITIVE_LITERAL)
-        for where in found
+        if key == "default"
+        else Diagnostic(code="sensitive.literal", field=f"/settings/{label}{where}/{key}", message=_SCHEMA_LITERAL)
+        for where, key in found
     ]
+
+
+def _csv_declaration(csv: CsvSettings | None) -> list[Diagnostic]:
+    """A CSV declaration's columns (engine 2b spec §8.1): unique headers and identifier names, an enum's values, and a
+    default that's its type's canonical value, never on a sensitive column (§3.8) nor beside `required`."""
+    out: list[Diagnostic] = []
+    headers: set[str] = set()
+    names: set[str] = set()
+    for i, c in enumerate(csv.columns if csv else ()):
+        where = f"/settings/csv/columns/{i}"
+        if c.header in headers:
+            out.append(Diagnostic(code="csv.duplicate_header", field=f"{where}/header", message=_CSV_HEADER))
+        if c.name in names:
+            out.append(Diagnostic(code="csv.duplicate_name", field=f"{where}/name", message=_CSV_NAME))
+        elif not IDENT.match(c.name) or c.name in CEL_KEYWORDS:
+            out.append(Diagnostic(code="csv.invalid_name", field=f"{where}/name", message=_CSV_IDENT))
+        headers.add(c.header)
+        names.add(c.name)
+        if (c.type == "enum") != (c.values is not None):
+            out.append(Diagnostic(code="csv.enum_values", field=f"{where}/values", message=_CSV_VALUES))
+        elif c.sensitive and c.values is not None:  # literals in the published graph (§3.8)
+            out.append(Diagnostic(code="sensitive.literal", field=f"{where}/values", message=_CSV_SENSITIVE_VALUES))
+        if "default" not in c.model_fields_set:
+            continue
+        if c.sensitive:
+            out.append(Diagnostic(code="sensitive.default", field=f"{where}/default", message=_SENSITIVE_LITERAL))
+        elif c.required:
+            out.append(Diagnostic(code="csv.required_default", field=f"{where}/default", message=_CSV_REQUIRED))
+        elif not is_canonical(c.type, c.default, c.values):
+            out.append(Diagnostic(code="csv.bad_default", field=f"{where}/default", message=_CSV_DEFAULT))
+    return out
 
 
 def _settings(graph: Graph) -> list[Diagnostic]:
@@ -357,7 +436,19 @@ def _settings(graph: Graph) -> list[Diagnostic]:
         ]
     for label, schema in (("input_schema", st.input_schema), ("vars_schema", st.vars_schema)):
         if not any((d.field or "").startswith(f"/settings/{label}") for d in out):
-            out += _sensitive_defaults(label, schema)
+            out += _sensitive_schema_literals(label, schema)
+    out += _csv_declaration(st.csv)
+    props = st.input_schema.get("properties")
+    out += [
+        Diagnostic(code="settings.reserved_name", field=f"/settings/input_schema/properties/{name}", message=_RESERVED)
+        for name in CSV_RESERVED
+        if isinstance(props, Mapping) and name in props
+    ]
+    out += [  # a schema that could refuse the generated `rows` would publish a CSV no start can satisfy
+        Diagnostic(code="csv.input_schema", field=f"/settings/input_schema/{key}", message=_CSV_INPUT_ROOT)
+        for key in st.input_schema
+        if st.csv is not None and key not in CSV_INPUT_ROOT
+    ]
     if any((d.field or "").startswith("/settings/vars_schema") for d in out):  # never run defaults through it
         return out
     props = st.vars_schema.get("properties", {})
@@ -439,7 +530,8 @@ class _Validator:
         self.availability: dict[tuple[Any, ...], bool] = {}
         self.expressions: list[ExpressionRecord] = []
         # taint (2b spec §4.1): its sources, each node's output, each loop's element, and what this pass learns
-        self.trigger_shape = from_schema(graph.settings.input_schema) if settings_ok else TAINTED
+        self.trigger_root = trigger_schema(graph.settings.model_dump(mode="json")) if settings_ok else {}
+        self.trigger_shape = from_schema(self.trigger_root) if settings_ok else TAINTED
         self.vars_shape = from_schema(self.vars_root)
         self.out_taint: dict[uuid.UUID, Shape] = {}
         self.item_taint: dict[uuid.UUID, Shape] = {}
@@ -621,6 +713,8 @@ class _Validator:
                     self._schema_errors(n.id, pointer_str(("assignments", name)), schema, value, inner)
         if spec.ref == C.RUN_WORKFLOW:
             info = self._subflow(n)
+            if info is not None and info.declares_csv:
+                self.err("subflow.csv_target", _CSV_TARGET, node=n.id, fld="/workflow_id")
             if info is not None:
                 inner = [p[1:] for p in envelopes if p[:1] == ("input",)]
                 self._schema_errors(n.id, "/input", info.input_schema, stripped.get("input", {}), inner)
@@ -843,7 +937,7 @@ class _Validator:
     def _resolve_typed(self, site: _Site, p: RefPath) -> Resolved | None:
         try:
             if p.root == "trigger":
-                return navigate(self.g.settings.input_schema, p.rest)
+                return navigate(self.trigger_root, p.rest)
             if p.root == "run":
                 return Resolved(RUN_SCHEMAS[str(p.section)], False)
             if p.root == "vars":
@@ -995,7 +1089,7 @@ class _Validator:
         self, site: _Site, p: RefPath, find: Callable[[Any, Sequence[str | int], Any], tuple[int, ...]]
     ) -> tuple[int, ...]:
         if p.root == "trigger":
-            return find(self.g.settings.input_schema, p.rest, None)
+            return find(self.trigger_root, p.rest, None)
         if p.root == "vars" and p.name in self.vars:
             return find(self.vars_root, p.rest, self.vars[str(p.name)])
         if p.root in ("item", "loops") and p.section == "item":
@@ -1118,6 +1212,8 @@ class _Validator:
             )
         else:
             self.failure_handler_version_id = info.version_id
+            if info.declares_csv:
+                self.err("subflow.csv_target", _CSV_TARGET, fld="/settings/failure_handler")
 
 
 class _CelSite:

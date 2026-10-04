@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Sensitive literals are refused at publish (engine 2b spec §3.8): a value written into the workflow at a position a
-schema marks sensitive — a node's config, a variable, a sub-flow's input — and a `default` at a sensitive position of
-`input_schema` or `vars_schema`. A secret comes in through a run's input instead. Null and the empty string are
-literals too: §3.8 has no exemption. A sensitive variable has no default: it's null until a step sets it, so its type
-must allow null."""
+schema marks sensitive — a node's config, a variable, a sub-flow's input — and a `default`, `enum`, `const` or
+`examples` at a sensitive position of `input_schema` or `vars_schema`, nested or behind a local `$ref`. A secret comes
+in through a run's input instead. Null and the empty string are literals too: §3.8 has no exemption. A sensitive
+variable has no default: it's null until a step sets it, so its type must allow null."""
 
 import uuid
 from typing import Any
@@ -79,12 +79,59 @@ def test_a_literal_into_a_sub_flows_sensitive_input_is_refused() -> None:
         ("vars_schema", {"type": "object", "properties": {"key": {
             "type": ["string", "null"], "x-sensitive": True, "default": None}}},
          "/settings/vars_schema/properties/key"),  # a written default, even null: omit it instead
+        ("input_schema", {"type": "object", "properties": {"login": {"x-sensitive": True, "$ref": "#/$defs/o"}},
+                          "$defs": {"o": {"type": "object",
+                                          "properties": {"pw": {"type": "string", "default": "pa55"}}}}},
+         "/settings/input_schema/$defs/o/properties/pw"),  # nested in a definition a sensitive site reaches
     ],
 )  # fmt: skip
 def test_a_default_at_a_sensitive_position_is_refused(label: str, schema: dict[str, Any], field: str) -> None:
     g = G().node("s", SEND)
     g.settings = {label: schema}
     assert ("sensitive.default", field) in diagnostics(g)
+
+
+def obj(**properties: Any) -> dict[str, Any]:
+    return {"type": "object", "properties": properties}
+
+
+@pytest.mark.parametrize("label", ["input_schema", "vars_schema"])
+@pytest.mark.parametrize(
+    ("schema", "field"),
+    [
+        (obj(key={**SECRET, "enum": ["k3y-one", "k3y-two"]}), "/properties/key/enum"),
+        (obj(key={**SECRET, "const": "k3y-one"}), "/properties/key/const"),
+        (obj(key={**SECRET, "examples": ["k3y-one"]}), "/properties/key/examples"),
+        (obj(login={"type": "object", "x-sensitive": True, "properties": {"pw": {"type": "string", "enum": ["pa55"]}}}),
+         "/properties/login/properties/pw/enum"),  # nested under a sensitive object
+        (obj(login={"type": "object", "properties": {"pw": SECRET}, "examples": [{"pw": "pa55word"}]}),
+         "/properties/login/examples"),  # an object literal with a sensitive part
+        (obj(key={"anyOf": [SECRET, {"type": "string", "enum": ["k3y-one"]}]}),
+         "/properties/key/anyOf/1/enum"),  # sensitive in one branch, sensitive in all
+        (obj(key={"x-sensitive": True, "$ref": "#/$defs/k"})
+         | {"$defs": {"k": {"type": "string", "enum": ["k3y-one"]}}},
+         "/$defs/k/enum"),  # behind a local `$ref` from a sensitive site
+        (obj(key={"$ref": "#/$defs/k"}) | {"$defs": {"k": {**SECRET, "const": "k3y-one"}}},
+         "/$defs/k/const"),  # a sensitive definition
+        (obj(login={"x-sensitive": True, "$ref": "#/$defs/login"})
+         | {"$defs": {"login": obj(pw={"type": "string", "examples": ["pa55word"]})}},
+         "/$defs/login/properties/pw/examples"),  # nested in a definition a sensitive site reaches
+    ],
+)  # fmt: skip
+def test_an_enum_const_or_example_at_a_sensitive_position_is_refused(
+    label: str, schema: dict[str, Any], field: str
+) -> None:
+    """They're literals in the published graph as a default is (§3.8), whatever the start form masks."""
+    g = G().node("s", SEND)
+    g.settings = {label: schema}
+    assert diagnostics(g).count(("sensitive.literal", f"/settings/{label}{field}")) == 1
+
+
+def test_an_enum_const_or_example_at_a_plain_position_is_fine() -> None:
+    g = G().node("s", SEND)
+    site = {"type": "string", "enum": ["a", "b"], "examples": ["a"]}
+    g.settings = {"input_schema": obj(site=site, kind={"type": "string", "const": "ap"}, tok=SECRET)}
+    assert diagnostics(g) == []
 
 
 def test_a_sensitive_variable_has_no_default_and_is_null_until_a_step_sets_it() -> None:

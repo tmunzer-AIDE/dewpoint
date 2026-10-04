@@ -221,10 +221,17 @@ Compose runs Temporal's dev server (the `temporal` service: its state in SQLite 
 UI at <http://127.0.0.1:8233>), one `worker` and one `dispatcher`, which Compose restarts unless it's stopped.
 Production uses a Temporal cluster instead.
 
-Its `migrate` service upgrades the schema, records the environment (`DEWPOINT_ENVIRONMENT`, `production` unless set)
-with the Temporal namespace (`DEWPOINT_TEMPORAL_NAMESPACE`, `default` unless set), and gives every tenant a data key as
-`dewpoint_admin_login`. Set the namespace in `.env`: every service takes it from there, and the worker exits 2 unless
-its own matches the record. Ordinary Compose is `production`, so no run starts; CI and local development use the
+The dispatcher also runs schedules' ticks: its own Temporal worker, on the task queue `dewpoint-admission`, outside the
+engine's Worker Deployment and unversioned, admits each firing as the dispatch login; its leader keeps the Temporal
+Schedules in step with the `schedules` table. A schedule's time zone is checked against the image's IANA time zone
+data, which the shipped image holds (CI schedules a run in `Europe/Paris` through Compose to prove it). Don't edit a
+Dewpoint schedule in Temporal's UI: the dispatcher only tells its own updates apart, by the `dewpoint generation <n>`
+note it writes.
+
+Compose's `migrate` service upgrades the schema, records the environment (`DEWPOINT_ENVIRONMENT`, `production` unless
+set) with the Temporal namespace (`DEWPOINT_TEMPORAL_NAMESPACE`, `default` unless set), and gives every tenant a data
+key as `dewpoint_admin_login`. Set the namespace in `.env`: every service takes it from there, and the worker exits 2
+unless its own matches the record. Ordinary Compose is `production`, so no run starts; CI and local development use the
 development override, on a database of their own (a project's own volume), with synthetic data only:
 
 ```bash

@@ -490,3 +490,23 @@ async def test_declassifying_needs_its_permission_and_the_audit_entry_lists_each
             await s.execute(text("select details from audit_log where action = 'workflow.publish'"))
         ).scalar_one()
     assert details["declassify"] == [{"node": str(nid("c")), "field": "/condition", "reveals": "the branch taken"}]
+
+
+CSV_SETTINGS = {"csv": {"columns": [{"header": "Site", "name": "site", "type": "string"}]}}
+
+
+async def test_publish_refuses_a_sub_flow_or_failure_handler_that_declares_a_csv(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    """Only a CSV upload supplies a CSV's rows (engine 2b spec §8.1), so no parent may start a version declaring one."""
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    child = await create(api_sessionmaker, ctx, ECHO_GRAPH | {"settings": CSV_SETTINGS}, name="child")
+    assert (await publish(api_sessionmaker, ctx, child, api_settings)).version is not None
+    for name, draft in (
+        ("parent", runs(child)),
+        ("handled", ECHO_GRAPH | {"settings": {"failure_handler": str(child)}}),
+    ):
+        wf = await create(api_sessionmaker, ctx, draft, name=name)
+        refused = await publish(api_sessionmaker, ctx, wf, api_settings)
+        assert refused.version is None and [d.code for d in refused.errors] == ["subflow.csv_target"]

@@ -19,8 +19,8 @@ from tests.support.plugins.testkit import TESTKIT
 CAT = catalog(PLUGIN, TESTKIT)
 ECHO, LOOP, FILTER, SET = "testkit.echo@1", "flow.loop@1", "flow.filter@1", "flow.set_variables@1"
 SECRET = {"type": "string", "x-sensitive": True}
-ROWS = {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "integer"}, "card": SECRET},
-                                  "required": ["id", "card"], "additionalProperties": False}}  # fmt: skip
+CARD = {"header": "Card", "name": "card", "type": "string", "required": True, "sensitive": True}
+CSV = {"columns": [{"header": "ID", "name": "id", "type": "integer", "required": True}, CARD]}
 INPUT = {
     "type": "object",
     "properties": {
@@ -28,17 +28,16 @@ INPUT = {
         "token": SECRET,
         "login": {"type": "object", "properties": {"user": {"type": "string"}, "pw": SECRET},
                   "required": ["user", "pw"], "additionalProperties": False},
-        "rows": ROWS,
         "extra": {"type": "object"},
     },
-    "required": ["name", "token", "login", "rows", "extra"],
+    "required": ["name", "token", "login", "extra"],
     "additionalProperties": False,
 }  # fmt: skip
 
 
 def checked(g: G, **ctx: Any) -> ValidationResult:
     if "input_schema" not in g.settings:
-        g.settings = {**g.settings, "input_schema": INPUT}
+        g.settings = {**g.settings, "input_schema": INPUT, "csv": CSV}  # `trigger.rows`: the CSV's
     result = validate(g.build(), ValidationContext(catalog=CAT, **ctx))
     assert result.ok, result.diagnostics
     return result
@@ -150,8 +149,9 @@ def test_a_sub_flows_outputs_follow_its_versions_taint_map_and_unknown_counts_as
 
 def test_the_workflows_outputs_record_their_taint() -> None:
     g = echoes(a=1)
-    g.settings = {"input_schema": INPUT, "outputs": {"secret": ref("trigger.token"), "plain": ref("trigger.name"),
-                                                     "count": cel("size(trigger.rows)")}}  # fmt: skip
+    g.settings = {"input_schema": INPUT, "csv": CSV,
+                  "outputs": {"secret": ref("trigger.token"), "plain": ref("trigger.name"),
+                              "count": cel("size(trigger.rows)")}}  # fmt: skip
     result = checked(g)
     assert result.output_taint == {"secret": True, "plain": False, "count": True}
 

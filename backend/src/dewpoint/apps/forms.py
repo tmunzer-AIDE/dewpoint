@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """A start form's fields (engine 2b spec §7.7): the typed top-level fields of a version's `input_schema`, for the UI.
 A sensitive field shows its type and whether it's required, never a value the schema holds for it: its default and
-its enum are masked (publish refuses a sensitive literal anyway, §3.8). `x-dewpoint-picker` is passed through for
-sub-project 3's pickers."""
+its enum are masked. Publish refuses both now (§3.8, #32), but versions published before that are immutable and may
+still hold them. `x-dewpoint-picker` is passed through for
+sub-project 3's pickers. A CSV declaration (§8.1) is described with its columns: a sensitive one has no default and no
+values to show, since publish refuses them."""
 
 from collections.abc import Mapping
 from typing import Any
@@ -34,3 +36,19 @@ def form_fields(schema: Mapping[str, Any]) -> list[dict[str, Any]]:
             field["picker"] = prop[PICKER]
         fields.append(field)
     return fields
+
+
+def csv_form(csv: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """A version's CSV declaration, as the graph document holds it, for the upload and mapping step."""
+    if not csv:
+        return None
+    columns: list[dict[str, Any]] = []
+    for c in csv["columns"]:
+        column = {k: c[k] for k in ("header", "name", "type")}
+        column |= {"required": bool(c.get("required")), "sensitive": bool(c.get("sensitive"))}
+        if "default" in c:  # never on a sensitive column: publish refuses it (§3.8)
+            column["default"] = c["default"]
+        if c.get("values") is not None:  # never a sensitive column's: publish refuses them (§3.8)
+            column["values"] = c["values"]
+        columns.append(column)
+    return {"max_rows": csv["max_rows"], "max_bytes": csv["max_bytes"], "columns": columns}

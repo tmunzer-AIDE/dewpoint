@@ -128,6 +128,9 @@
     - erasure must raise the generations of the schedules it pauses, the sync's serial calls join the dispatch-latency
       gate, and the CSV reader's memory is sized before production (§7.9);
     - the codes (§9), tests (§12), earlier specs (§13), tables and grants (§14) and values (§15) follow.
+    From the owner's ruling on the whole-branch review of the 2b-3a implementation (2026-10-04): a tick past its
+    schedule's catch-up window is refused at admission, `schedule_catchup_expired`, so the window bounds the runs an
+    outage of the dispatcher or the database leaves behind (§8.2, §9).
 - **Parent specs:**
   - `2026-09-24-dewpoint-architecture-design.md` (§5, §6.1, §6.5, §6.8, §12, §15). This spec **changes** its
     workflow-id contract (§6.1), replaces its `outbox` table (§6.1), details its claim check (§6.5) and settles the
@@ -1348,6 +1351,17 @@ The owner approved 2b-2's milestones as prototype checkpoints; these stay open u
   (`ScheduleInfo.missed_catchup_window`): the leader reads the count every five minutes, records an increase on the
   schedule (`misses`), audits it (`schedule.missed`) and alerts; the API shows it.
 
+- **Admission bounds the backlog too** (the owner's ruling on 2b-3a's whole-branch review). After the deleted, paused
+  and erasing decisions, a newly decided tick whose nominal time is strictly older than its schedule's current catch-up
+  window, by the database's clock read once the tick holds the row, is a `refused` request, `schedule_catchup_expired`,
+  audited with its schedule: an outage of the dispatcher or the database longer than the window admits only the firings
+  within it, as Temporal's catch-up does after its own outages. A tick already recorded keeps its outcome, and a queued
+  request, one admitted while the gate was off included, never expires. This bounds the runs admitted, not the tick
+  executions Temporal starts or the refused requests written on recovery. These refusals are reported apart from
+  Temporal's count of the firings it missed (`misses`): each is a `refused` request, and its alert
+  (`schedule_tick_expired`) is logged once, when it's newly recorded and its transaction has committed, never for a
+  retry that finds it or an attempt rolled back.
+
 ### 8.3 Webhook ingress
 
 - **The process:** `dewpoint ingress`, with its own login (role `dewpoint_ingress`), reached at
@@ -1408,9 +1422,10 @@ The owner approved 2b-2's milestones as prototype checkpoints; these stay open u
   `sensitive.literal` for a schema's literals.
 - **Request statuses:** `queued`, `starting`, `started`, `cancelled`, `refused`, `dead`. Reasons include
   `engine_abi_changed`, `node_type_retired`, `cel_profile_retired`, `workflow_disabled`, `not_active`,
-  `schedule_paused`, `schedule_deleted`, `input_invalid`, `secret_index_limit`, `start_refused`, `id_collision`,
-  `user_cancelled`, `tenant_erasing`, `envelope_unreadable`, `environment_not_recorded`, `no_current_build`,
-  `version_unusable`. Waiting at dispatch isn't a reason: the request stays queued (a metric and an alert, §2.3).
+  `schedule_paused`, `schedule_deleted`, `schedule_catchup_expired`, `input_invalid`, `secret_index_limit`,
+  `start_refused`, `id_collision`, `user_cancelled`, `tenant_erasing`, `envelope_unreadable`,
+  `environment_not_recorded`, `no_current_build`, `version_unusable`. Waiting at dispatch isn't a reason: the request
+  stays queued (a metric and an alert, §2.3).
 - **Event statuses:** `pending`, `matched`, `unmatched`, `cancelled`, `dead`.
 - Every code is fixed and sanitized; none is derived from a sensitive value or plugin-supplied free text.
 - Audit detail keys avoid the names `core/audit` rejects (`…code…`, `…secret…`, `…token…`): reasons are recorded as

@@ -13,6 +13,7 @@ import pytest
 from sqlalchemy import text
 
 from dewpoint.apps import admission
+from dewpoint.apps.inputs import RESERVED_INPUT
 from dewpoint.core.claims import secret_index
 from dewpoint.core.claims import service as claims
 from dewpoint.core.claims.cipher import ClaimCipher
@@ -35,6 +36,10 @@ SCHEMA = {
     "additionalProperties": False,
 }
 TOKEN_GRAPH = G().node("a", "testkit.echo@1", {"value": 1}).data() | {"settings": {"input_schema": SCHEMA}}
+OPEN_GRAPH = G().node("a", "testkit.echo@1", {"value": 1}).data() | {"settings": {"input_schema": {"type": "object"}}}
+CSV_GRAPH = TOKEN_GRAPH | {
+    "settings": {"input_schema": SCHEMA, "csv": {"columns": [{"header": "Site", "name": "site", "type": "string"}]}}
+}
 
 
 async def published(owner: Any, api: Any, admin: Any, settings: Any, graph: Any = TOKEN_GRAPH) -> tuple[Any, uuid.UUID]:
@@ -267,3 +272,35 @@ async def test_the_build_record_ages_with_the_clock_not_the_callers_transaction(
                 source="manual", mode="live", input={"token": TOKEN},
             )  # fmt: skip
     assert stale.value.reason == "no_current_build"
+
+
+@pytest.mark.parametrize("name", ["rows", "row_count"])
+@pytest.mark.parametrize("source", ["manual", "schedule"])
+async def test_no_caller_supplies_rows_or_row_count(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings, name, source
+) -> None:
+    """Only admission writes `rows` and `row_count`, from a CSV upload (engine 2b spec §8.1): a caller's input holding
+    either is refused, even where the workflow's input schema would take it."""
+    ctx, wf = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, OPEN_GRAPH)
+    await current(dispatch_sessionmaker)
+    request = {"source": source, "input": {name: 1}}
+    if source == "manual":
+        with pytest.raises(admission.AdmissionRefusedError) as refused:
+            await admit(api_sessionmaker, ctx, wf, **request)
+        assert (refused.value.reason, refused.value.messages) == ("input_invalid", [RESERVED_INPUT])
+    else:
+        r = (await admit(api_sessionmaker, ctx, wf, **request)).request
+        assert (r.status, r.reason) == ("refused", "input_invalid")
+    assert await count(owner_sessionmaker, "run_inputs") == 0
+
+
+async def test_a_workflow_declaring_a_csv_isnt_started_without_one(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """Its trigger schema requires `rows` and `row_count` (engine 2b spec §8.1), which only a CSV upload supplies."""
+    ctx, wf = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, CSV_GRAPH)
+    await current(dispatch_sessionmaker)
+    with pytest.raises(admission.AdmissionRefusedError) as refused:
+        await admit(api_sessionmaker, ctx, wf)
+    assert refused.value.reason == "input_invalid"
+    assert any("its root: it breaks `required`" in m for m in refused.value.messages)

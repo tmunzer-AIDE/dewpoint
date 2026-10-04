@@ -12,13 +12,18 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.client import Client
 from temporalio.service import RPCError, RPCStatusCode
+from temporalio.worker import Worker
 
 from dewpoint.apps.codec import KeyringKeys, data_converter
 from dewpoint.apps.dispatcher.cancels import send_cancels
 from dewpoint.apps.dispatcher.dispatch import Rotation, dispatch_once
 from dewpoint.apps.dispatcher.observe import observe, report
 from dewpoint.apps.dispatcher.reconcile import Leader, reconcile_once
+from dewpoint.apps.dispatcher.schedule_sync import check_misses, sync_schedules
+from dewpoint.apps.dispatcher.tick import ADMISSION_QUEUE, Ticker
+from dewpoint.apps.dispatcher.tick_workflow import ScheduleTick
 from dewpoint.apps.environment import verify_environment
+from dewpoint.apps.worker import logs
 from dewpoint.apps.worker.deployment import describe, this_build
 from dewpoint.core.config import Settings
 from dewpoint.core.crypto.kek import KekSet
@@ -44,9 +49,10 @@ async def cycle(
     sessionmaker: async_sessionmaker[AsyncSession], client: Client, keys: KeySource, settings: Settings, *,
     instance: uuid.UUID, reconciler: uuid.UUID, leader: Leader, rotation: Rotation,
 ) -> None:  # fmt: skip
-    """One cycle: observe the current build, dispatch what's due, report; the leader also reconciles and sends
-    cancels. An observation that fails (Temporal, or the database, briefly unavailable) dispatches nothing this cycle,
-    and the next one asks again; the record it didn't refresh ages out for admission (§7.2)."""
+    """One cycle: observe the current build, dispatch what's due, report; the leader also reconciles, sends cancels,
+    keeps the Temporal Schedules in step with their rows and reads their missed firings. An observation that fails
+    (Temporal, or the database, briefly unavailable) dispatches nothing this cycle, and the next one asks again; the
+    record it didn't refresh ages out for admission (§7.2)."""
     try:
         build = await observe(sessionmaker, await current_build(client))
     except Exception as e:
@@ -58,6 +64,8 @@ async def cycle(
     if await leader.leading():
         settled = await reconcile_once(sessionmaker, client, keys, settings)
         settled.update({f"cancel_{k}": v for k, v in (await send_cancels(sessionmaker, client)).items()})
+        settled.update({f"schedule_{k}": v for k, v in (await sync_schedules(sessionmaker, client, leader)).items()})
+        settled.update({f"misses_{k}": v for k, v in (await check_misses(sessionmaker, client)).items()})
         await report(sessionmaker, reconciler, build_id, {**settled}, kind="reconciler")
 
 
@@ -72,6 +80,16 @@ async def serve(one: Callable[[], Awaitable[None]], *, cycles: int | None = None
             log.error("dispatcher_cycle_failed", error=type(e).__name__)
         done += 1
         await asyncio.sleep(CYCLE_S)
+
+
+def admission_worker(client: Client, sessionmaker: async_sessionmaker[AsyncSession], keys: KeySource) -> Worker:
+    """The dispatcher's own worker for `ScheduleTick` (engine 2b spec §8.2): `dewpoint-admission`, unversioned, outside
+    the engine's Worker Deployment, admitting each tick as the dispatch role. Temporal's records of its failed attempts
+    keep no error text, as the engine worker's don't (engine 2b spec §12)."""
+    logs.withhold_activity_errors()
+    return Worker(
+        client, task_queue=ADMISSION_QUEUE, workflows=[ScheduleTick], activities=[Ticker(sessionmaker, keys).tick]
+    )
 
 
 async def run(settings: Settings) -> None:
@@ -94,7 +112,10 @@ async def run(settings: Settings) -> None:
                         rotation=rotation)  # fmt: skip
 
         try:
-            await serve(one)
+            async with admission_worker(
+                client, sessionmaker, keys
+            ):  # ends the process if it fails: Compose restarts it
+                await serve(one)
         finally:
             await leader.close()
     finally:
