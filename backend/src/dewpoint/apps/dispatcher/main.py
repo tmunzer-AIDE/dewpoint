@@ -23,6 +23,7 @@ from dewpoint.apps.dispatcher.schedule_sync import check_misses, sync_schedules
 from dewpoint.apps.dispatcher.tick import ADMISSION_QUEUE, Ticker
 from dewpoint.apps.dispatcher.tick_workflow import ScheduleTick
 from dewpoint.apps.environment import verify_environment
+from dewpoint.apps.worker import logs
 from dewpoint.apps.worker.deployment import describe, this_build
 from dewpoint.core.config import Settings
 from dewpoint.core.crypto.kek import KekSet
@@ -83,7 +84,9 @@ async def serve(one: Callable[[], Awaitable[None]], *, cycles: int | None = None
 
 def admission_worker(client: Client, sessionmaker: async_sessionmaker[AsyncSession], keys: KeySource) -> Worker:
     """The dispatcher's own worker for `ScheduleTick` (engine 2b spec §8.2): `dewpoint-admission`, unversioned, outside
-    the engine's Worker Deployment, admitting each tick as the dispatch role."""
+    the engine's Worker Deployment, admitting each tick as the dispatch role. Temporal's records of its failed attempts
+    keep no error text, as the engine worker's don't (engine 2b spec §12)."""
+    logs.withhold_activity_errors()
     return Worker(
         client, task_queue=ADMISSION_QUEUE, workflows=[ScheduleTick], activities=[Ticker(sessionmaker, keys).tick]
     )

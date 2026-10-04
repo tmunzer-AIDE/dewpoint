@@ -10,6 +10,7 @@ The Temporal Schedules here are created directly: the sync that keeps them in st
 
 import asyncio
 import dataclasses
+import logging
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -34,6 +35,7 @@ from temporalio.testing import ActivityEnvironment, WorkflowEnvironment
 
 from dewpoint.apps import schedules
 from dewpoint.apps.dispatcher import main, tick
+from dewpoint.apps.worker import logs as worker_logs
 from dewpoint.core.db import tenant_scope
 from dewpoint.engine.runtime.ids import schedule_workflow_id
 from tests.apps.test_admission import KEYS, TOKEN, count, current, published
@@ -182,3 +184,25 @@ async def test_a_tick_still_failing_ten_minutes_after_its_time_alerts() -> None:
                 ticker.tick, tick.TickInput(schedule_id, key, stamp)
             )
         assert [entry["event"] for entry in logs if entry["log_level"] == "error"] == alerts
+
+
+async def test_the_admission_worker_keeps_no_error_text_in_temporals_activity_records(
+    server, dispatch_sessionmaker, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The whole-branch review: a failed tick attempt is recorded through Temporal's activity loggers, which keep no
+    error text only once the worker's filter is on them (engine 2b spec §12); the dispatcher's own worker installs it,
+    as the engine worker does."""
+    for name in ("temporalio.activity", "temporalio.worker._activity"):
+        logging.getLogger(name).removeFilter(worker_logs._WITHHOLD)  # as in a dispatcher, which runs no engine worker
+    main.admission_worker(server.client, dispatch_sessionmaker, KEYS)
+    caplog.set_level(logging.DEBUG)
+    try:
+        raise RuntimeError(f"failed holding {TOKEN}")
+    except RuntimeError:
+        logging.getLogger("temporalio.activity").warning(
+            "Completing activity as failed ({'activity_type': 'schedule.tick'})", exc_info=True
+        )
+    assert [r.getMessage() for r in caplog.records if r.name == "temporalio.activity"] == [
+        "Completing activity as failed"
+    ]
+    assert TOKEN not in caplog.text
