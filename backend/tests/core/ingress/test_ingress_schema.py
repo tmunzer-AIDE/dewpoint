@@ -237,3 +237,29 @@ async def test_the_api_still_makes_endpoints_and_changes_what_it_manages(owner_s
         "renamed", False, 600, 5242880,
     )  # fmt: skip
     assert (changed["events_pointer"], changed["bearer_digest"], changed["byte_burst"]) == ("/events", digest, 26278400)
+
+
+async def test_an_endpoints_default_event_rate_is_below_one_dispatchers_measured_drain(owner_sessionmaker) -> None:
+    """The owner's M4 review: an endpoint's default event rate stays below what one dispatcher's own loop drains
+    (`tests/probes/ingress_load.py drain`: 12.6 events/s at a fan-out of 5, 15.9 at 3, 22.9 at 1), so a sender keeping
+    to it isn't refused for a backlog the platform can't clear. Its burst still admits a whole 500-event batch. A
+    pending quota's 429 is backpressure, never a throughput promise."""
+    _, endpoint_id = await endpoint(owner_sessionmaker)
+    async with owner_sessionmaker() as s:
+        rate, burst = (await s.execute(text("select event_per_s, event_burst from webhook_endpoints where id = :e"),
+                                       {"e": endpoint_id})).one()  # fmt: skip
+    assert (rate, burst) == (10, 1000)
+
+
+async def test_a_tenants_default_event_rate_is_below_what_its_endpoints_drain_together(owner_sessionmaker) -> None:
+    """The owner's M4 review: every match holds the tenant's counter row, so a tenant's endpoints are matched one at a
+    time. `tests/probes/ingress_load.py tenant-drain` measured one tenant's four endpoints draining no faster than one
+    (23.8 events/s against 22.9, 24.7 with two dispatchers), and `drain` 13.0 events/s at a fan-out of 5: the tenant's
+    rate stays below that, whatever its number of endpoints. Its burst (5,000) is the abuse budget for a spike, which
+    the pending quota then holds back; a 429 there is backpressure, never a throughput promise."""
+    tenant, _ = await endpoint(owner_sessionmaker)
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("insert into tenant_event_counters (tenant_id) values (:t)"), {"t": tenant})
+        rate, burst = (await s.execute(text("select event_per_s, event_burst from tenant_event_counters "
+                                            "where tenant_id = :t"), {"t": tenant})).one()  # fmt: skip
+    assert (rate, burst) == (10, 5000)

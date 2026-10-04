@@ -259,7 +259,8 @@ def upgrade() -> None:
         sa.Column("events_pointer", sa.Text, nullable=True),  # none: the body is one event
         sa.Column("dedupe_key", sa.LargeBinary, nullable=False),  # sealed under the ingress key
         *_bucket("request", 20, 100),
-        *_bucket("event", 200, 1000),
+        # 10 events/s, below one dispatcher's measured drain (tests/probes/ingress_load.py drain); a burst for a batch.
+        *_bucket("event", 10, 1000),
         *_bucket("byte", 2 * MIB, 10 * MIB),
         sa.Column("refilled_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         *_counters(),
@@ -300,7 +301,9 @@ def upgrade() -> None:
     op.create_table(
         "tenant_event_counters",
         sa.Column("tenant_id", pg.UUID(as_uuid=True), sa.ForeignKey("tenants.id"), primary_key=True),
-        *_bucket("event", 1000, 5000),
+        # 10 events/s: a tenant's endpoints are matched one at a time (each match holds this row), and drain no faster
+        # than one (tests/probes/ingress_load.py tenant-drain); the burst is a spike's budget.
+        *_bucket("event", 10, 5000),
         *_bucket("byte", 10 * MIB, 50 * MIB),
         sa.Column("refilled_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         *_counters(),

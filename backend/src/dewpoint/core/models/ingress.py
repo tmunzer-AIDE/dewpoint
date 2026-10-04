@@ -48,7 +48,7 @@ class WebhookEndpoint(Base):
     dedupe_key: Mapped[bytes] = mapped_column(LargeBinary)
     request_per_s: Mapped[float] = mapped_column(Float, server_default="20")
     request_burst: Mapped[int] = mapped_column(BigInteger, server_default="100")
-    event_per_s: Mapped[float] = mapped_column(Float, server_default="200")
+    event_per_s: Mapped[float] = mapped_column(Float, server_default="10")
     event_burst: Mapped[int] = mapped_column(BigInteger, server_default="1000")
     byte_per_s: Mapped[float] = mapped_column(Float, server_default=str(2 * 1024 * 1024))
     byte_burst: Mapped[int] = mapped_column(BigInteger, server_default=str(10 * 1024 * 1024))
