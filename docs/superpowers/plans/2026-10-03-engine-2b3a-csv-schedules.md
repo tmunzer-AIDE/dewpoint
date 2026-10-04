@@ -193,6 +193,14 @@ dependency.
       past a 1-minute window.
     - A failure is recorded with a fixed code, retried, and alerted on.
 
+**From the owner's M3 review (2026-10-04):** a tick decides under its schedule's row lock (the workflow's admission
+lock first, shared, the order a workflow's change takes them in), so a disable or a delete either decides it or waits
+for its request; a PATCH's null is refused except for `cron` and `every_s`; a tick's `run.request` audit entry names
+the schedule. **Erasure (ruling, outside 2b-3a):** the transition that sets a tenant `erasing` must raise its
+schedules' generations in the same transaction, with a regression proving they pause; until it exists, nothing
+claims the sync pauses a schedule because its tenant's status changed (the tick skips an erasing tenant's, audited).
+The sync's two serial batches, of up to 50 Temporal calls of at most 10 s each, join §7.9's dispatch-latency gate.
+
 **M4. Proofs, Compose and docs**
 11. On the dev server: a tick becomes a request and a run; a catch-up after downtime admits each missed time once, and
     an outage past the window records the misses; a backfill over a fired time admits nothing new; a disable racing a

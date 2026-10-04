@@ -114,7 +114,9 @@
     owner's review of the 2b-3a prototype's milestone 1 (2026-10-04): every literal a schema writes at a sensitive
     position is refused, as a default is, nested and behind a local `$ref` (§3.8, #32). From the owner's ruling on the
     milestone-3 gate: a stale schedule update is discarded, not refused, and only a read-back of the generation marker
-    in the schedule's note completes a change (§8.2, §4.6).
+    in the schedule's note completes a change (§8.2, §4.6). From the owner's M3 review: a tick decides under its
+    schedule's row lock; erasure must raise the schedules' generations it pauses, and the sync's batches join the
+    dispatch-latency gate (§7.9).
 - **Parent specs:**
   - `2026-09-24-dewpoint-architecture-design.md` (§5, §6.1, §6.5, §6.8, §12, §15). This spec **changes** its
     workflow-id contract (§6.1), replaces its `outbox` table (§6.1), details its claim check (§6.5) and settles the
@@ -1190,7 +1192,10 @@ transition out of `starting` says what happens to both, in the same transaction 
 
 The owner approved 2b-2's milestones as prototype checkpoints; these stay open until production sign-off (§10.6):
 - **Bound the serial dispatch cycle.** A cycle starts its candidates one after another, so 50 slow starts take about
-  500 seconds: the one-second interval is no throughput guarantee.
+  500 seconds: the one-second interval is no throughput guarantee. 2b-3a's leader adds two more serial batches each
+  cycle, the schedule sync and the misses check, of up to 50 Temporal calls of at most 10 seconds each.
+- **Erasure pauses schedules** (2b-3a): the transition that sets a tenant `erasing` raises its schedules' generations
+  in the same transaction, with a regression proving they pause; a tenant's status changing alone queues nothing.
 - **Bounded retry and alerting for a deterministic per-request failure,** the dispatcher's and the reconciler's: a
   bug is retried every cycle (the reconciler's every recheck interval) and holds the head of its tenant's queue.
 - **An operator's recovery path** for a run or a slot whose history Temporal no longer has, and for a `starting`
