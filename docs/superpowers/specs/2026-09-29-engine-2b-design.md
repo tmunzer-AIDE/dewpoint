@@ -1,9 +1,10 @@
 # Dewpoint — Engine 2b Design (payload protection, admission, triggers, retention)
 
-- **Status:** revision 8, a draft pending the owner's approval with the 2b-3a plan. Revisions 6 and 7 (2026-10-03) are
-  approved. Revision 4 (2026-09-30) was approved by the owner: every section was approved in conversation before it was
-  written here, and this document is their written form. Revision 5 (2026-10-01) was approved for implementation by the
-  2b-1b plan, which isn't production readiness: nothing runs in production before 2b-4 lifts the gate (§2).
+- **Status:** revision 9, a draft pending the owner's approval with the 2b-3b plan. Revision 8 (2026-10-04) is approved
+  (#33); revisions 6 and 7 (2026-10-03) are approved. Revision 4 (2026-09-30) was approved by the owner: every section
+  was approved in conversation before it was written here, and this document is their written form. Revision 5
+  (2026-10-01) was approved for implementation by the 2b-1b plan, which isn't production readiness: nothing runs in
+  production before 2b-4 lifts the gate (§2).
   - Revision 2 folds in the owner's review of revision 1: a claim is owned by the run that produced it, with the
     root run id kept for retention and the secret index (§3.4); passing a secret-index bound is a fixed,
     non-retryable error, and matching work is bounded (§3.7); an idempotency retry is compared under its stored
@@ -131,6 +132,21 @@
     From the owner's ruling on the whole-branch review of the 2b-3a implementation (2026-10-04): a tick past its
     schedule's catch-up window is refused at admission, `schedule_catchup_expired`, so the window bounds the runs an
     outage of the dispatcher or the database leaves behind (§8.2, §9).
+  - Revision 9 (draft, for the owner's approval with the 2b-3b plan), written from the 2b-3b prototype, whose four
+    milestones the owner approved as prototype checkpoints (2026-10-04), not production sign-off:
+    - webhook ingress as §8.3 now describes it: a gated prototype that records nothing outside a development deployment
+      until 2b-4; its own process and login with no table privilege, only three SECURITY DEFINER functions; secrets
+      under the ingress key; events sealed to the tenant's versioned X25519 keypairs, each private key checked against
+      its public key on every load;
+    - deduplication by a typed id or a header id (never by body bytes), canonical JSON for content, and an id reused for
+      other content refused; one lock order for every path that touches events or their counters, with the tenant's
+      lifecycle lock that 2b-4's erasure takes exclusively (§6.5); refusals that pay their rate budget; pending quotas
+      and retained caps that fail closed;
+    - every dispatcher matches while the gate is on, fairly across tenants; `dead` only when confirmed or after five
+      attempts; the leader's recount under its locks; endpoints, bindings and events through the API, cancels by admins;
+    - the load probe's measurements set both event rates to 10/s; matching doesn't yet scale with dispatchers, a
+      required decision of 2b-4 (§7.9);
+    - the codes (§9), tests (§12), earlier specs (§13), tables and grants (§14) and values (§15) follow.
 - **Parent specs:**
   - `2026-09-24-dewpoint-architecture-design.md` (§5, §6.1, §6.5, §6.8, §12, §15). This spec **changes** its
     workflow-id contract (§6.1), replaces its `outbox` table (§6.1), details its claim check (§6.5) and settles the
@@ -239,7 +255,8 @@ lifts, so publishing every workflow again after each ABI change costs only that.
 ### 2.5 Durable work while the gate is off
 
 - Interactive starts are refused (§2.3).
-- `ScheduleTick` still records its request (§8.2); ingress still accepts and records webhook events (§8.3).
+- `ScheduleTick` still records its request (§8.2); ingress still accepts and records webhook events (§8.3). Until
+  2b-4, ingress records only in a development deployment, which skips the gate (§2.3).
 - The dispatcher neither matches events nor starts requests. Queued requests, pending events and ticks wait.
 - **Waiting isn't failing.** Backoff and dead-letter counters don't advance while the gate is off, or while any
   dispatch-time critical check fails. Work resumes FIFO per tenant once they hold again. Dead-lettering is only for
@@ -907,7 +924,9 @@ largest container when the budget requires.
 
 1. **Mark the tenant `erasing`,** atomically, under its lock. From then on these refuse the tenant: admission,
    dispatch, ingress recording, webhook matching, and the `ScheduleTick` activity (in the transaction that would
-   insert its request). The dispatcher's `starting` transaction takes the tenant's lock shared, as it does the gate's.
+   insert its request). The dispatcher's `starting` transaction takes the tenant's lock shared, as it does the gate's;
+   so do ingress's recording, the matcher, an event's cancel and the recount, which the transition, taking the
+   lock (`dewpoint:tenant:<id>`) exclusively, waits for (§8.3).
 2. **Synchronize with starts:** every `starting` request of the tenant is reconciled (§7.6) — started, or confirmed
    absent — before anything is deleted.
 3. Pause its schedules.
@@ -1228,7 +1247,18 @@ The owner approved 2b-2's milestones as prototype checkpoints; these stay open u
   request whose run already ended (§7.6, §7.8).
 - **Bounded retry and alerting for a cancel that keeps failing to send** (§7.7).
 - **The disable command's audit identifies the operator** (§2.4): a prototype's admin CLI records no actor.
-- **The Compose proof** (§12) passes in CI.
+- **Matching scaling with dispatchers** (2b-3b; a required decision of 2b-4, before production): a second dispatcher
+  adds almost nothing today, since both take the same candidates in the same order and the second waits for each
+  endpoint's row the first holds. Changing the candidates' order or the matcher's locks reopens §8.3's fairness and its
+  races; once it's changed, the load probe's separate-tenant control is measured again.
+- **Ingress's limits** (2b-3b): the event rates (10/s an endpoint and a tenant) are a development value, below one
+  dispatcher's measured drain with a fake Temporal and up to five bindings, not a promise with a real Temporal or twenty
+  bindings. The failure limit is best-effort past 65,536 failing addresses in a minute. Parsing and sealing run on
+  ingress's event loop (about 150 to 195 ms for the largest bodies). `event_candidates()` ranks the whole pending
+  backlog (about 60 ms at 200,000).
+- **A Mist webhook's bearer token** (2b-3b): whether Mist lets a webhook set `Authorization` is unverified until a real
+  delivery confirms it.
+- **The Compose proofs** (§12) pass in CI: the run, the schedule and the webhook.
 
 ## 8. Triggers (2b-3)
 
@@ -1364,43 +1394,91 @@ The owner approved 2b-2's milestones as prototype checkpoints; these stay open u
 
 ### 8.3 Webhook ingress
 
-- **The process:** `dewpoint ingress`, with its own login (role `dewpoint_ingress`), reached at
-  `/hooks/<endpoint_id>` and routed apart from `/api/`. The ingress role has no grant on `data_keys`.
-- **Endpoints** (`webhook_endpoints`, managed with `trigger.manage`): an unguessable id; authentication by HMAC-SHA256
-  with a timestamp tolerance, or by bearer token; an optional IP allowlist; a size limit (1 MiB default); a rate
-  limit (token buckets in Postgres); where to find the event id (a JSON pointer or a header); an optional pointer to
-  an array of events.
-- **Secrets without tenant keys:** bearer tokens are high-entropy and stored as SHA-256 hashes. HMAC secrets, and
-  each endpoint's dedupe-digest key (used when an event has no id), are encrypted under a separate ingress key,
-  `DEWPOINT_INGRESS_KEY`, which only ingress and the API have.
-- **Events are sealed to the tenant:** each tenant has an X25519 keypair for inbound events, its private key wrapped
-  by the tenant's data key. Ingress reads only the public key, through `resolve_webhook_endpoint()` (SECURITY DEFINER,
-  which also returns the endpoint's tenant — never taken from the payload), and seals each event (X25519 + HKDF +
-  AES-256-GCM, with the tenant, endpoint and event id in the associated data). Each event records its keypair
-  version. Only the dispatcher opens events.
-- **Each request:** check size, IP, rate and authentication (constant time); split into events; in one transaction
-  insert `inbound_events` (sealed payload; unique on `(tenant_id, endpoint_id, dedupe_key)`; `pending`); answer 2xx
-  only after the commit. An `erasing` tenant is refused and nothing is recorded.
-- **Bounded backlog:** pending events are bounded per endpoint (10,000 events, 64 MiB) and per tenant (50,000 events,
-  256 MiB), all configurable. Past a bound, ingress answers 429 with `Retry-After` before inserting. An
-  authenticated duplicate is a no-op acknowledgment even at quota, since it consumes nothing. Counters on the
-  endpoint and tenant rows are kept under their row locks by insert, matching, cancellation and dead-lettering, and
-  a periodic recount corrects drift.
-- **Matching (dispatcher, only while the gate is on):** it claims a `pending` event with `SKIP LOCKED` and, in one
-  transaction that it alone commits, calls `admit_request` (§7.2) for each matching binding (source `webhook`, key `evt:<event_id>:<workflow_id>`,
-  the event as the trigger input) — each yields a frozen request or a `refused` one — and records the event's
-  progress: `matched` with its request count, or `unmatched` when no binding matches. A crash before the commit
-  leaves the event pending.
-- **Bindings** (`trigger_bindings`): an endpoint, a workflow, and an optional filter of bounded, typed JSON-pointer
-  equality on the event. No CEL.
-- **Event outcomes:** `pending` → `matched`, `unmatched`, `cancelled` (an admin, singly or per endpoint, audited,
-  counters released; or tenant erasure), or `dead`. `dead` is only for a confirmed event-specific, unrecoverable
-  failure — its ciphertext fails authentication while its key version is present and works for other events; its
-  payload isn't valid JSON — or an exhausted event-specific retry policy (5 attempts, backing off). A platform-wide
-  failure (keyring or database unavailable, a missing key version) keeps the event pending with backoff and an alert.
-  Admins see dead events and can cancel them.
+A gated prototype until 2b-4 (the owner's rulings 8 and 13 on the 2b-3b outline): ingress records nothing outside a
+development deployment, and 2b-4 lifts that with retention, erasure and key rotation. `docs/operations/ingress.md` is
+its guide.
+
+- **The process:** `dewpoint ingress`, with its own login, `dewpoint_ingress_login` (role `dewpoint_ingress`), reached
+  at `/hooks/<endpoint_id>` and routed apart from `/api/`. Its settings come from its environment only, and it refuses
+  to start with a key-encryption key there: it never holds a tenant's data key. It has **no table privilege**: it
+  executes three SECURITY DEFINER functions, each with its `search_path` pinned and closed to PUBLIC:
+  `ingress_environment()`, `resolve_webhook_endpoint()` and `record_inbound_events()`. It starts, and the recording
+  function records, only when `ingress_environment()` returns `development`.
+- **Endpoints** (`webhook_endpoints`, written with `trigger.manage` and read with `workflow.view`): a random id;
+  authentication by HMAC-SHA256 of `<timestamp>.<the raw body>` within a tolerance (300 s by default, 60 to 900), in
+  headers it names (`x-dewpoint-timestamp` and `x-dewpoint-signature` by default), or by bearer token; an optional
+  address allowlist; a body limit (1 MiB by default, at most 5 MiB); where its events' ids are (`id_source`: a JSON
+  pointer, a header, or none); an optional pointer to an array of events; its rate buckets and counters. How it
+  authenticates and where its ids are never change.
+- **Secrets without tenant keys:** bearer tokens are high-entropy, made by Dewpoint and kept as SHA-256 digests. HMAC
+  secrets, and each endpoint's dedupe-digest key, are sealed under a separate ingress key, `DEWPOINT_INGRESS_KEY_B64`
+  with its id, which only ingress and the API hold, each bound to its purpose and the endpoint's id. A secret is shown
+  once, when it's made or rotated; rotating keeps the dedupe-digest key.
+- **Events are sealed to the tenant:** each tenant has versioned X25519 keypairs (`tenant_event_keys`), the private key
+  sealed with the tenant's data key (`event.private`) and checked against its public key on every load. Ingress reads
+  only the public key, through `resolve_webhook_endpoint()`, which also returns the endpoint's tenant (never taken from
+  the payload), and seals each event's canonical bytes (X25519 + HKDF-SHA256 + AES-256-GCM, the tenant, endpoint, event
+  id and keypair version in the associated data). Only the dispatcher opens events.
+- **Each request,** in this order: at most 32 in flight in an ingress process (503, before the body is read); an
+  address's failures, 30 a minute in a process (an IPv6 client by its /64), counting 401s and, before authentication,
+  408s and 413s (429, before any database call); the body within a global 5 MiB cap (413) and a 10 s deadline (408);
+  then the endpoint, the address against its allowlist (from `X-Forwarded-For` only through configured proxies, read
+  from the trusted end) and the authentication, in constant time, every failure the same bodiless 401. After it: the
+  endpoint's body limit; strict parsing (UTF-8 JSON; a duplicate key, NaN or an infinity, a number past binary64, an
+  escaped unpaired surrogate, an integer past 4,300 digits or nesting past 64 levels refuses the body, 400); the events
+  (the body, or 1 to 500 objects at the pointer); each one's id; sealing; then `record_inbound_events`, whose outcome is
+  the answer, a 2xx only once it has committed.
+- **Deduplication** (never by body bytes): a `pointer` id is typed (an integer and a string are two ids); a `header` id
+  names the batch, each event by its index; `none` deduplicates nothing, so a sender's retry records its events twice.
+  The dedupe key is an HMAC of the id under the endpoint's dedupe-digest key, never the id; the content digest an HMAC
+  of the canonical bytes (keys sorted, no whitespace, floats shortest, UTF-8). A repeated id with the same content is
+  acknowledged; with other content, the whole request is refused (409 `event_id_reused`). Events are unique on
+  `(tenant_id, endpoint_id, dedupe_key)`.
+- **One lock order** for every path that touches events or their counters: the gate's lock (the matcher), the tenant's
+  lifecycle lock (`dewpoint:tenant:<id>`, shared; exclusively only by 2b-4's erasure, §6.5), endpoint rows in id order,
+  the tenant's counter row, then event rows.
+- **Recording:** `record_inbound_events` takes the tenant from the endpoint's row, checks the batch itself (its count,
+  alignment, digests and keypair version, and a sealed size within 5 times the body limit plus 128 bytes an event),
+  reads its clock after the locks, and spends the endpoint's rate budget (requests, events, bytes) and the tenant's
+  (events, bytes) before it decides anything else: a refusal pays, and an attempt short of tokens spends nothing (429
+  with the wait). Then it refuses a reused id, a full retained cap (429 `retained_full`, no wait) or a full pending
+  quota (429 `quota_exceeded`, 30 s), and inserts all or nothing. Every byte burst covers the largest charge its row
+  permits. An `erasing` tenant, or a disabled endpoint, is refused and nothing is recorded.
+- **Bounded backlog and storage:** pending events per endpoint (10,000, 64 MiB) and per tenant (50,000, 256 MiB); stored
+  events, whatever their status, per endpoint (100,000, 512 MiB) and per tenant (250,000, 1 GiB), which nothing frees
+  before 2b-4's retention, so ingress fails closed. An authenticated duplicate bypasses the quotas, not the rate. The
+  counters are kept under their rows' locks by insert, matching, cancellation and dead-lettering, and the dispatcher's
+  leader recounts each tenant at most every 10 minutes, its locks taken before it counts. The quotas are backpressure,
+  never a throughput promise.
+- **Matching (every dispatcher, only while the gate is on):** `event_candidates()` returns pending, due events' ids,
+  every tenant's oldest before any tenant's second, at most 50 a cycle, and only in a cycle that observed the current
+  build. Each event, in one transaction under the lock order: the gate, the environment and the tenant rechecked under
+  their locks; the event's row last, `SKIP LOCKED`, rechecked pending; opened; `admit_request` (§7.2) for each enabled
+  binding whose filter holds, in workflow-id order (source `webhook`, key `evt:<event_id>:<workflow_id>`, mode `live`,
+  the event as the trigger input), each a frozen request or a `refused` one; the event `matched` with its request count,
+  or `unmatched`; its pending counters released. A crash before the commit leaves the event pending. Its alerts are
+  logged once it commits.
+- **Bindings** (`trigger_bindings`, written with `trigger.manage`): an endpoint, a workflow of the endpoint's tenant
+  (once per endpoint, at most 20 an endpoint) and a filter of at most 8 typed JSON-pointer equalities on the event, each
+  value a string of at most 1,024 characters, a 64-bit integer, a boolean or null. No CEL.
+- **Event outcomes:** `pending` → `matched`, `unmatched`, `cancelled` (an admin's, singly or an endpoint's pending ones,
+  audited, counters released; or tenant erasure), or `dead`. `dead` is only for a confirmed event-specific,
+  unrecoverable failure (its ciphertext fails under a keypair version that has opened another event; its payload isn't a
+  JSON object) or an exhausted event-specific retry policy (5 attempts, backing off from 30 s, doubling); each is
+  audited and alerted on. A platform-wide failure (the keyring, or a keypair version missing or not pairing with its
+  public key) keeps the event pending, waiting a minute with an alert, its attempts untouched (§10.5). Admins
+  (`tenant.manage`) list dead events and cancel pending or dead ones; an event's metadata, never its payload, is read
+  with `workflow.view`, its dead ones only by admins.
 - **Keypair rotation** keeps every private-key version that any retained event ciphertext still needs, or re-encrypts
   those events first.
+- **Deployment:** Compose runs ingress only under its `ingress` profile, and it starts only in a development deployment.
+  nginx streams each body to it as it arrives, so the deadline and the in-flight limit hold through nginx, on a network
+  of their own, the one range ingress believes `X-Forwarded-For` from.
+- **Measured** (the load probe, `backend/tests/probes/ingress_load.py`, run by hand on one machine, not production
+  capacity): one dispatcher's loop drained 23.0, 16.6 and 13.0 events/s at a fan-out of 1, 3 and 5 bindings; one
+  tenant's four endpoints drained no faster than one, since every match holds the tenant's counter row; a second
+  dispatcher added almost nothing (§7.9); every rate bucket and quota held at its value. Both event rates are therefore
+  10/s (§15).
 
 ## 9. Errors, statuses and codes
 
@@ -1426,7 +1504,13 @@ The owner approved 2b-2's milestones as prototype checkpoints; these stay open u
   `start_refused`, `id_collision`, `user_cancelled`, `tenant_erasing`, `envelope_unreadable`,
   `environment_not_recorded`, `no_current_build`, `version_unusable`. Waiting at dispatch isn't a reason: the request
   stays queued (a metric and an alert, §2.3).
-- **Event statuses:** `pending`, `matched`, `unmatched`, `cancelled`, `dead`.
+- **Event statuses:** `pending`, `matched`, `unmatched`, `cancelled`, `dead`; a dead event's reason `event_unreadable`,
+  `event_not_json` or `event_not_object`, a cancelled one's `cancelled`.
+- **2b-3b's ingress answers:** `malformed` (400), the bodiless 401, 408, `event_id_reused` (409), `too_large` (413),
+  `rate_limited`, `quota_exceeded` and `retained_full` (429), `busy` and `unavailable` (503). **Its API errors:**
+  `endpoint_invalid` (422, with each field), `filter_invalid` (422), `workflow_not_found` (404), `binding_exists` and
+  `binding_cap` (409), `not_cancellable` (409), `ingress_key_missing` (503). **Its alerts:** `inbound_event_dead`,
+  `event_key_unavailable`, `event_fan_out_exceeded`, `event_counters_drifted`.
 - Every code is fixed and sanitized; none is derived from a sensitive value or plugin-supplied free text.
 - Audit detail keys avoid the names `core/audit` rejects (`…code…`, `…secret…`, `…token…`): reasons are recorded as
   `reason`.
@@ -2053,6 +2137,13 @@ Beyond each task's own tests:
   ticks of a tombstone, and concurrent starts with one upload; a catch-up after an outage shorter than the window admits
   each missed time once; ticks while the gate is off wait queued; a work-unit test counts a claimed CSV loop's
   `cel.evaluate`; and the Compose proof schedules a run in a non-UTC zone through the Compose dispatcher in CI.
+  2b-3b's part: an event's canary, an HMAC secret and a bearer token appear in no execution's whole raw history, no
+  projection, stored row in plain, log line or audit entry, with the keyring's real keys, end to end through the API,
+  ingress, the matcher, the dispatcher and a versioned worker; a replay outside the tolerance and a crash before
+  matching commits; the races of two dispatchers, a duplicate's insertion, the exclusive tenant lock, the recount and a
+  cancel against matching, each way; a slow body through nginx gets its 408 within the deadline; the load probe, by
+  hand, measures each limit on its own; and the Compose proof posts a signed event through nginx to ingress, and its
+  retry, then waits for its run in CI.
 - **Size invariants:** no workflow task's commands pass the per-task byte budget, at the largest configs, fan-outs
   and spills; an outgoing payload over the limit fails its step, loop or run (2b-1a) or is spilled (2b-1b), never a
   retried task; a result over the limit fails where it's produced; if the
@@ -2068,7 +2159,9 @@ Each plan updates the older specs as it lands, as the engine-core 5.x revisions 
 - **Parent spec:** §6.1's workflow id (`t:<tenant>:run:<run_id>`, §6.1 here) and its idempotency and lookup rules; the
   `outbox` replaced by `run_requests` (§7.1); §6.5's claim check detailed by §3–§5; §15's open defaults settled — 5
   concurrent root runs per tenant, 30 days of tenant retention, 7 days of Temporal retention (at most 30); §6.8's "rows
-  load in pages through an activity" superseded by §8.1 (revision 8): a size-claimed rows list is iterated by handle.
+  load in pages through an activity" superseded by §8.1 (revision 8): a size-claimed rows list is iterated by handle;
+  §4.4's endpoint resolver returns more than it names (the authentication material, the allowlist, the limits, the
+  id source and the tenant's public key, §8.3); §12's ingress load tests are a probe run by hand, not in CI.
 - **Engine-core spec:** the "hard rule until 2b ships" (lifted by §10.6); §9 (starting runs: admission and the
   dispatcher, in its revision 5.10 with this spec's revision 7); §8 (the new codes, the cutoff on read paths, the
   `(queued_at, id)` ordering); §4.5 (dispatch as §7.3 describes it); §5.6 (the per-task byte budget); §6 (claims,
@@ -2082,14 +2175,15 @@ Each plan updates the older specs as it lands, as the engine-core 5.x revisions 
 
 - **New tables:** `platform_settings`, `worker_instances`, `run_inputs`, `step_outputs`, `claim_grants`,
   `run_secret_index`, `run_requests`, `tenant_run_limits`, `run_slots`, `csv_uploads`, `csv_mappings`, `schedules`,
-  `webhook_endpoints`, `trigger_bindings`, `inbound_events`, `tenant_event_keys`, `tenant_retention`,
+  `webhook_endpoints`, `tenant_event_counters`, `trigger_bindings`, `inbound_events`, `tenant_event_keys`,
+  `tenant_retention`,
   `retention_sweeps`, `current_build`, `dispatcher_reports`. `tenants` gains a status (`active`, `erasing`). `runs`
   gains `queued_at` (existing rows backfilled from `started_at`), and `runs.started_at` becomes nullable with no
   default: existing rows keep their values, a row pre-created at dispatch has none until the start is confirmed (§7.8),
   and every read path and the cursor order by `queued_at` (§7.7). 2b-1's `admit` keeps setting `started_at` as it does
   today.
 - **Roles:** `dewpoint_dispatch` gains `SELECT` on `data_keys` and the admission tables; `dewpoint_ingress` gets a
-  login and only `resolve_webhook_endpoint()` plus event inserts and counters; `dewpoint_retention` is new; the
+  login and no table privilege, only its three functions (§8.3); `dewpoint_retention` is new; the
   worker gains the claim tables and `worker_instances`. The plans give the exact grants. 2b-2's:
   - the tenant-scoped policies on the admission tables are the API's, the dispatcher's and the worker's only; the
     key admin has a platform-wide read of `run_requests` and a narrow `queued` → `cancelled` update, for retirement;
@@ -2104,6 +2198,12 @@ Each plan updates the older specs as it lands, as the engine-core 5.x revisions 
     and records its sync's progress (`synced_generation`, which a tick of a tombstone lowers to queue it again), its
     errors and the misses; its cross-tenant reads are `schedule_candidates()` and `schedule_miss_candidates()`, ids
     only. A CSV record is a `run_inputs` row of the role `csv` (§7.1).
+  - 2b-3b's: the API makes and changes endpoints and bindings (bindings may be deleted), makes a tenant's counter row
+    and inbound keypair (the key admin too makes keypairs, for `keys ensure-tenants`), reads events, and cancels an
+    event (its status, reason and end, and the pending counters it releases); the dispatcher reads them all, moves an
+    event's status (its reason, attempts, next attempt, request count and end) and the counters, and records a recount;
+    its cross-tenant reads are `event_candidates()` and `recount_candidates()`, ids only. Ingress executes
+    `ingress_environment()`, `resolve_webhook_endpoint()` and `record_inbound_events()`, and nothing else.
 - **Permissions:** `run.cancel` (operators and above), `trigger.manage` (editors and above), `workflow.declassify`
   (admins and owners).
 - **Processes:** `dewpoint dispatcher` (dispatch, reconciler, schedule sync, `ScheduleTick` worker), `dewpoint
@@ -2122,6 +2222,17 @@ upload kept for 1 hour; 100 errors kept in detail, five named in a refusal, five
 s to 366 days and catch-up window 60 s to 24 hours (10 minutes by default); a Temporal call's deadline 10 s; 50
 schedules a sync pass and a misses pass; a failed sync retried after 60 s; misses read every 5 minutes; a tick alerting
 once it's 10 minutes late.
+
+**2b-3b's prototype values,** provisional, measured by its load probe where they say so: 32 requests in flight in an
+ingress process; 30 failed requests an address (an IPv6 /64) a minute, in a table of 65,536; a global body cap of 5 MiB,
+an endpoint's body limit of 1 MiB by default (at most 5 MiB) and a body deadline of 10 s; 500 events a request; an
+endpoint's buckets of 20 requests/s (burst 100), 10 events/s (burst 1,000; measured: below one dispatcher's drain) and 2
+MiB/s (a burst of 10 MiB, or the largest charge it permits); a tenant's of 10 events/s (burst 5,000; measured likewise)
+and 10 MiB/s (burst 50 MiB); pending quotas of 10,000 events and 64 MiB an endpoint and 50,000 events and 256 MiB a
+tenant; retained caps of 100,000 events and 512 MiB and of 250,000 events and 1 GiB; a tolerance of 300 s (60 to 900);
+50 events a matcher's cycle; 20 bindings an endpoint and 8 clauses a filter; an event's retries from 30 s, doubling,
+`dead` at the 5th; a platform failure's wait of 60 s; a recount at most every 10 minutes, 20 tenants a pass; ids of at
+most 255 characters, nesting of at most 64 levels.
 
 These numbers are starting points. Each stays provisional until the go/no-go experiments (§11) or the owning plan's
 measurements establish it; the spec is revised with the measured value when that plan lands.
@@ -2151,6 +2262,7 @@ measurements establish it; the spec is revised with the measured value when that
   within 5 minutes (§10.6); the retention SLO's 24 hours (§10.3).
 - **Configurable defaults** (policy, not measurement): 5 concurrent root runs per tenant, raised only after capacity
   tests (§7.5); dispatch backoff 5 s doubling to 10 min and 10 confirmed refusals (§7.4); ingress quotas of 10,000
-  events and 64 MiB per endpoint and 50,000 events and 256 MiB per tenant (§8.3); 5 event-specific retries (§8.3);
+  events and 64 MiB per endpoint and 50,000 events and 256 MiB per tenant, and retained caps of 100,000 events and
+  512 MiB and of 250,000 events and 1 GiB (§8.3); 5 event-specific retries (§8.3);
   the schedule catch-up window of 10 minutes and the 60 s minimum interval (§8.2); retention of 30 days for tenant data,
   7 days (at most 30) for Temporal, 400 days for audit (§10).
