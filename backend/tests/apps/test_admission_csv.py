@@ -19,6 +19,7 @@ from sqlalchemy import text
 
 from dewpoint.apps import admission, csv_uploads
 from dewpoint.apps.inputs import RESERVED_INPUT
+from dewpoint.core.claims import secret_index
 from dewpoint.core.claims import service as claims
 from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.db import tenant_scope
@@ -245,6 +246,21 @@ async def test_a_row_that_breaks_a_rule_refuses_the_start_unless_invalid_rows_ar
     kept = await record(api_sessionmaker, ctx, r.id)
     assert (kept["skipped"], kept["error_count"]) == ([{"row": 1, "code": "not_integer"}], 1)
     assert kept["errors"] == [{"row": 1, "column": "vlan", "code": "not_integer"}]
+
+
+async def test_sensitive_cells_past_the_secret_index_bound_refuse_the_start_and_keep_nothing(
+    csv_ready, owner_sessionmaker, api_sessionmaker, monkeypatch
+) -> None:
+    """Each sensitive cell joins the run tree's index (2b-3a task 18): a file whose cells pass its bound is refused with
+    `secret_index_limit`, its claims discarded and its upload left for another start."""
+    ctx, wf = csv_ready
+    upload = await staged(api_sessionmaker, ctx, wf, b"Site,VLAN,PSK\nparis,10,psk-one-1\nlyon,2,psk-two-2\n")
+    monkeypatch.setattr(secret_index, "MAX_STRINGS", 2)  # the input's token and one cell fit; the second cell doesn't
+    with pytest.raises(admission.AdmissionRefusedError) as refused:
+        await admit(api_sessionmaker, ctx, wf, csv=start(upload))
+    assert refused.value.reason == "secret_index_limit"
+    assert await count(owner_sessionmaker, "run_inputs") == 0
+    assert (await upload_row(owner_sessionmaker, upload))["consumed_by"] is None
 
 
 async def test_a_csv_start_still_refuses_rows_in_its_input(csv_ready, api_sessionmaker) -> None:
