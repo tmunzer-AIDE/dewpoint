@@ -1,9 +1,9 @@
 # Dewpoint — Engine 2b Design (payload protection, admission, triggers, retention)
 
-- **Status:** revision 7, a draft pending the owner's approval with the 2b-2 plan. Revision 6 (2026-10-03) is
-  approved. Revision 4 (2026-09-30) was approved by the owner: every section was approved in conversation before it
-  was written here, and this document is their written form. Revision 5 (2026-10-01) was approved for implementation
-  by the 2b-1b plan, which isn't production readiness: nothing runs in production before 2b-4 lifts the gate (§2).
+- **Status:** revision 8, a draft pending the owner's approval with the 2b-3a plan. Revisions 6 and 7 (2026-10-03) are
+  approved. Revision 4 (2026-09-30) was approved by the owner: every section was approved in conversation before it was
+  written here, and this document is their written form. Revision 5 (2026-10-01) was approved for implementation by the
+  2b-1b plan, which isn't production readiness: nothing runs in production before 2b-4 lifts the gate (§2).
   - Revision 2 folds in the owner's review of revision 1: a claim is owned by the run that produced it, with the
     root run id kept for retention and the secret index (§3.4); passing a secret-index bound is a fixed,
     non-retryable error, and matching work is bounded (§3.7); an idempotency retry is compared under its stored
@@ -89,7 +89,7 @@
     From the owner's ruling on the revision 6 review (2026-10-03): the claims activities keep their sites' codes when
     the claim store doesn't answer; a bug before a plugin's node runs fails the step `internal_error`, never as the
     store's outage (§3.7); the evaluator holds `engine.handles`, which `engine.cel`'s binding imports (§13).
-  - Revision 7 (draft, for the owner's approval with the 2b-2 plan), from the owner's rulings on the 2b-2 outline
+  - Revision 7 (approved with the 2b-2 plan, #29), from the owner's rulings on the 2b-2 outline
     (2026-10-03): a request's trigger envelope is stored, encrypted, beside its claims, never served as a claim, read
     only through its own request-scoped reader, and kept and deleted with its request (§3.1, §7.1, §10.1); a re-run
     resolves the old request, not a run, and is refused with `input_not_retained` when its input is gone (§7.7, §9);
@@ -110,6 +110,24 @@
       take new input whatever was retained, a run from before 2b-2 included (§7.2, §7.7);
     - a forced retirement ends the rows of the requests it cancels (§7.8);
     - what stays open before production is listed in §7.9.
+  - Revision 8 (draft, for the owner's approval with the 2b-3a plan), written from the 2b-3a prototype, whose four
+    milestones the owner approved as prototype checkpoints (2026-10-04), not production sign-off:
+    - a CSV is declared, uploaded, mapped and started as §8.1 now describes; a loop over its rows iterates a
+      size-claimed list by handle, which replaces the page activity, so `ENGINE_ABI` stays 6; the measured cost is
+      recorded, and 10,000 rows only as an estimate: the owner's milestone-4 waiver (2026-10-04) lifted ruling 3's
+      condition that the prototype measure them;
+    - `rows` and `row_count` are reserved names, and the no-declassify exception for a loop over `trigger.rows` needs a
+      CSV declaration (#31, §4.3);
+    - every literal a schema writes at a sensitive position is refused, as a default is, nested and behind a local
+      `$ref` (§3.8, #32);
+    - a CSV start's record is a third role of `run_inputs`, `csv`, never a claim (§7.1);
+    - schedules: cron as Temporal reads it; a stale update is discarded, not refused, and only a read-back of the
+      generation marker in the schedule's note completes a change (§8.2, §4.6); a tick decides under its schedule's row,
+      held exclusively; a deletion keeps a tombstone; no tick within the catch-up window is dropped, and firings missed
+      past it are counted and reported (§8.2);
+    - erasure must raise the generations of the schedules it pauses, the sync's serial calls join the dispatch-latency
+      gate, and the CSV reader's memory is sized before production (§7.9);
+    - the codes (§9), tests (§12), earlier specs (§13), tables and grants (§14) and values (§15) follow.
 - **Parent specs:**
   - `2026-09-24-dewpoint-architecture-design.md` (§5, §6.1, §6.5, §6.8, §12, §15). This spec **changes** its
     workflow-id contract (§6.1), replaces its `outbox` table (§6.1), details its claim check (§6.5) and settles the
@@ -402,10 +420,14 @@ secret and a sub-flow's refusal is an activity result, in history.
 
 ### 3.8 Sensitive literals are refused
 
-- Publish refuses a literal at a sensitive config position, a `default` at a sensitive position of `input_schema`
-  or `vars_schema`, and a default on a sensitive CSV column (§8.1). Null and the empty string are literals too: an
-  omitted default is what's allowed, not a written empty one. The diagnostic points to trigger inputs now and to
-  connections in sub-project 3.
+- Publish refuses a literal at a sensitive config position, and every literal a schema writes of its instances — a
+  `default`, an `enum`'s values, a `const`, `examples` — at a sensitive position of `input_schema` or `vars_schema`,
+  or holding a part one marks: nested, in a union's branch, or in a definition a sensitive position reaches through a
+  local `$ref` (#32). A sensitive CSV column takes neither a default nor `values` (§8.1). Null and the empty string are
+  literals too: an omitted default is what's allowed, not a written empty one. The diagnostic points to trigger inputs
+  now and to connections in sub-project 3.
+- A start form still masks a sensitive field's default and enum (§7.7): versions published before this rule are
+  immutable and may hold them.
 - A sensitive variable therefore has no default: it is null until a step sets it. Publish accepts it when its type
   admits null, or when every read of it comes after a step sure to have set it (path availability, as for a step's
   output); otherwise the read is refused.
@@ -465,9 +487,10 @@ Only these sites may turn tainted input into plain output:
   admins and owners by default). The publish audit entry records every listed site and what it reveals.
 - **A decision comes back plain only as a decision:** a boolean for a condition or a case, a whole number for a
   loop's count. Any other result fails the site with `type_mismatch` and reveals nothing.
-- **The one exception:** a loop whose `items` is a direct reference to a list whose length publish can prove is
-  already public — `trigger.rows`, whose length is `trigger.row_count` — needs no entry. A derived or filtered
-  sensitive list doesn't inherit the exception.
+- **The one exception:** a loop whose `items` is a direct reference to a list whose length publish can prove is already
+  public — `trigger.rows` in a version that declares a CSV (§8.1), whose length is `trigger.row_count` — needs no entry.
+  Without a declaration no input may hold `rows`, a reserved name, so the exception never reaches a caller's list (#31).
+  A derived or filtered sensitive list doesn't inherit the exception.
 
 ### 4.4 The tainted filter
 
@@ -503,7 +526,9 @@ namespace's retention period, whatever the tenant's retention (§10.2):
 - untainted data, including values up to 64 KiB;
 - payload sizes;
 - a local activity's bookkeeping, which the SDK's core records beside its (encrypted) result, outside any codec: its
-  sequence number, attempt, activity id and type, and times.
+  sequence number, attempt, activity id and type, and times;
+- a schedule's spec and state, outside any codec (only its action's arguments are payloads): its cron or interval, time
+  zone, policies, pause state, and the note `dewpoint generation <n>`, the counter of the sync's last update (§8.2).
 
 ## 5. Sizes and snapshots
 
@@ -959,6 +984,12 @@ both need it, so admission stores it:
 - **Retention:** all three are kept while the request is `queued` or `starting`, and deleted together at the
   applicable terminal cutoff (§10.1).
 
+**A CSV start's record** (2b-3a, §8.1): its mapping, the file's header names, the row count, every skipped row's number
+and first code, and the first 100 errors in detail with their count. It's one more row of `run_inputs`, with the role
+`csv`, encrypted as a claim is, with no pointer and at most one per request. Like the envelope it's never a claim: claim
+reads and grants exclude it, its own request-scoped reader serves the run's details, and it's kept and deleted with its
+request.
+
 ### 7.2 `admit_request`
 
 **It runs inside its caller's READ COMMITTED transaction and never commits it.** The caller commits: the API handler
@@ -1178,8 +1209,16 @@ transition out of `starting` says what happens to both, in the same transaction 
 ### 7.9 Open before production sign-off
 
 The owner approved 2b-2's milestones as prototype checkpoints; these stay open until production sign-off (§10.6):
-- **Bound the serial dispatch cycle.** A cycle starts its candidates one after another, so 50 slow starts take about
-  500 seconds: the one-second interval is no throughput guarantee.
+- **Bound the serial dispatch cycle.** A cycle starts its candidates one after another, so 50 slow starts take about 500
+  seconds: the one-second interval is no throughput guarantee. 2b-3a's leader adds two more serial batches each cycle:
+  the schedule sync, up to 50 schedules of up to three calls each (a describe, the write, the read-back), and the misses
+  check, up to 50 describes. Each call takes at most 10 seconds, so a Temporal that answers slowly can hold one cycle
+  for up to 200 calls, about 33 minutes.
+- **Erasure pauses schedules** (2b-3a): the transition that sets a tenant `erasing` raises its schedules' generations
+  in the same transaction, with a regression proving they pause; a tenant's status changing alone queues nothing.
+- **The CSV reader's memory** (2b-3a): the API reads an upload whole. Reading one 5 MiB test file peaked at about 72 MB:
+  an observation for that file, not a bound. The memory concurrent uploads need stays open, for production sizing (the
+  owner's deferral, 2026-10-04).
 - **Bounded retry and alerting for a deterministic per-request failure,** the dispatcher's and the reconciler's: a
   bug is retried every cycle (the reconciler's every recheck interval) and holds the head of its tenant's queue.
 - **An operator's recovery path** for a run or a slot whose history Temporal no longer has, and for a `starting`
@@ -1192,37 +1231,105 @@ The owner approved 2b-2's milestones as prototype checkpoints; these stay open u
 
 ### 8.1 Manual input forms and CSV
 
-- **Declaration:** `graph.settings.csv` — columns (header, variable name, type among `string`, `integer`,
-  `number`, `boolean`, `mac`, `ip`, `cidr`, `enum`; required; default; sensitive), and `max_rows`/`max_bytes` at most
-  the platform's 10,000 rows and 5 MB, which a tenant may lower. Publish derives the types of `trigger.rows` and `trigger.row_count`, and
-  refuses defaults on sensitive columns.
-- **Upload:** `POST …/csv-uploads` (`run.start`). The API parses the file as data only — UTF-8 with an optional BOM,
-  the delimiter detected among comma, semicolon and tab, the caps enforced — and stages the rows encrypted in
-  `csv_uploads`, owned by the user and tenant, expiring after one hour. The response gives the headers with exact
-  matches mapped, a preview of the first rows with sensitive columns masked, and per-row errors as row, column and
-  code, never quoting values. A mapping can be saved as the trigger's default.
-- **Start:** `POST …/runs` with `csv: {upload_id, mapping, skip_invalid}`. Admission validates again, builds typed
-  rows, claims sensitive cells with taint, then the rows list for size, so the list and its count stay untainted
-  (§4.3's exception). The staged upload is consumed in the same transaction.
-- **Stored encrypted, never in plain metadata:** the mapping and the file's header names (with the upload, then in
-  `run_inputs`), and skipped rows' numbers and codes.
-- **Audit keeps:** the file's tenant-keyed digest, the validation outcome as counts, and skipped-row counts. The
-  original file isn't kept (deferred).
-- **In the graph:** a loop over a size-claimed list loads each batch's slice through one page activity: untainted
-  cells inline, sensitive cells as handles. Each row's outcome comes from the loop's iteration results in the
-  projection.
+- **Declaration:** `graph.settings.csv` — its columns, each a header, a variable name (a lowercase identifier), a type
+  among `string`, `integer`, `number`, `boolean`, `mac`, `ip`, `cidr` and `enum` (an enum's `values`, and only an
+  enum's), `required`, an optional default (its type's canonical value, never beside `required`) and `sensitive`; and
+  `max_rows` and `max_bytes`, at most the platform's 10,000 rows and 5 MiB (5,242,880 bytes), which the declaration may
+  lower. A sensitive column takes neither a default nor `values` (§3.8). A graph without a declaration serializes as
+  before.
+- **The trigger schema:** a version's `input_schema`, plus, when it declares a CSV, `rows` (closed row objects, each
+  sensitive column marked `x-sensitive`, a column with a default always filled in) and `row_count`. Publish types and
+  taints every `trigger.*` read by it; admission validates and claims by it. `rows` and `row_count` are reserved: no
+  input schema declares them, CSV or not, and admission refuses a caller's input that holds either. A CSV workflow's
+  input schema holds only `type`, `properties`, `required`, `additionalProperties`, `$defs` and annotations at its root
+  (`csv.input_schema`): any other root keyword could refuse the rows or taint their count.
+- **Started only with its file:** a version declaring a CSV is no sub-flow's or failure handler's target
+  (`subflow.csv_target`) and can't be scheduled (`csv_required`): no caller but the run API supplies its rows.
+- **Upload:** `POST …/workflows/{workflow}/csv-uploads` (`run.start`), the file as a raw `text/csv` body. The route
+  streams it past the API's buffering body limit and refuses it, as the bytes arrive, one byte past the declaration's
+  `max_bytes` (413 `too_large`). The API parses it as data only — UTF-8 with an optional BOM, the delimiter detected
+  among comma, semicolon and tab, strict quoting, unique headers, a field as long as the cap allows — and refuses a file
+  it can't read with that file's code. The upload is staged as the file's own bytes, sealed with the purpose
+  `csv.upload` (`csv_uploads`), owned by its uploader, tenant and workflow, for one hour. The answer gives the headers,
+  the proposed mapping, what keeps it from building rows, a preview of the first rows without the sensitive columns, and
+  the first 100 errors with their count, each a row, a column and a code, never a cell.
+- **The default mapping:** one per workflow (`csv_mappings`, sealed with `csv.mapping`), saved with `trigger.manage`. An
+  upload proposes it while it fits the active version's declaration; one a later version no longer fits is reported
+  `stale`, with each column's code, and never applied until a new one is saved.
+- **Start:** `POST …/runs` with `csv: {upload_id, mapping, skip_invalid}` beside `input`. The idempotency digest covers
+  the input and the `csv` object as asked, and an exact retry returns its request, to the upload's owner only, before
+  anything is rebuilt. Admission then locks the upload's row and checks its tenant, owner and workflow
+  (`upload_not_found`, one answer for all three), its expiry (`upload_expired`) and that it's unused (`upload_consumed`,
+  once the key is looked up again). It reads the file again under the caps of the version it freezes and builds typed
+  rows through the mapping (`csv_mapping_invalid` for a mapping that version refuses): an empty cell takes its default
+  or breaks `required`; with `skip_invalid` a row that breaks a rule is skipped and recorded, else the start is refused
+  (`input_invalid`, naming the first five rows, columns and codes, never a cell). Sensitive cells are claimed with
+  taint, then the rows list for size, so the list and its count stay untainted (§4.3's exception). The upload is
+  consumed by an update in the same transaction; only retention deletes it (§10.3).
+- **Stored encrypted, never in plain metadata:** the mapping, the file's header names, every skipped row's number and
+  first code, and the first 100 errors with their count, in the request's CSV record (§7.1), which the run's details
+  show (`run.view`).
+- **Audit keeps:** the file's tenant-keyed digest, the row count and the skipped-row count. The original file isn't kept
+  (deferred).
+- **A re-run** takes the original rows while they're retained, or a new file.
+- **In the graph (revision 8 replaces the page activity, the owner's ruling 3):** rows that together pass 64 KiB are one
+  size claim, and a loop over `trigger.rows` gives each iteration a handle into it, as a loop over any claimed list
+  does: a step's reference to a cell is resolved in its own activity, and CEL over a cell (a condition on `item.status`)
+  runs in `cel.evaluate`, one activity per row. There's no page activity, and `ENGINE_ABI` stays 6. Each row's outcome
+  comes from the loop's iteration results in the projection.
+- **The measured cost** (the prototype, on a development machine: Temporal's CLI dev server, one worker): a loop over
+  1,000 size-claimed rows took 133 s with a per-row condition on a plain column (1,001 `cel.evaluate`) and 54 s without
+  it (one); 2,500 rows took 340 s and 143 s, growing slightly faster than the rows, since each row's read reads the rows
+  claim again. **10,000 rows are an estimate, not a measurement:** about 23–25 minutes with the condition and 10–12
+  without (the owner waived the full-size run, 2026-10-04). Admission claims each sensitive cell: 2,500 rows with five
+  sensitive columns took 7.15 s inside the start request (12,501 claims, a 313 KB secret index), an estimated 30 s for
+  10,000. The owner kept the 10,000-row cap for v1; a page activity, in a later ABI, remains the way to cut the per-row
+  activities. A work-unit test pins the counts.
 
 ### 8.2 Schedules
 
-- `schedules` (tenant, workflow, cron or interval with a minimum of 60 s, time zone, fixed input encrypted with the
-  purpose `schedule.input`, enabled) is the source of truth; the API writes it (permission `trigger.manage`).
-- A sync loop in the dispatcher creates, updates, pauses and deletes the matching Temporal Schedules. Disabling a
-  workflow or a schedule pauses it.
+- **`schedules`** is the source of truth: the tenant, the workflow (one without a CSV, §8.1), a five-field cron or an
+  interval (60 s to 366 days, with an offset below it), an IANA time zone, a catch-up window (1 minute to 24 hours, 10
+  minutes by default), the mode, a fixed input checked against the active version and sealed with the purpose
+  `schedule.input` (the schedule's id as context), and `enabled`. The API writes it (`trigger.manage`, editors and up)
+  and reads it (`workflow.view`), never showing its input; a PATCH's null is refused except for `cron` and `every_s`,
+  which switch the timing's kind.
+- **Cron, as Temporal reads it** (contract tests pin each rule): five fields, each `*`, a number, a range, a step or a
+  list; months and days by name in any case; Sunday as 0 or 7. A day of the month and a day of the week together are
+  refused: Temporal requires both to match, where cron usually takes either. A local time a daylight-saving change skips
+  doesn't fire that day; one it repeats fires once, at its second occurrence. A time zone is accepted only by its exact
+  IANA name, from the image's own time zone data, which CI proves the shipped image holds.
+- A sync loop in the dispatcher's leader creates, updates, pauses and deletes the matching Temporal Schedules. Disabling
+  a schedule or its workflow pauses it: every change raises the schedule's generation, and so does enabling or disabling
+  its workflow. A tenant's status changing alone queues nothing (§7.9).
+- **Every change carries a generation, and only a read-back completes it** (2b-3a). Each API change raises the row's
+  generation. The sync describes the schedule, reads the row, and sends one update carrying the describe's conflict
+  token, with the spec, the action, the pause state and the note `dewpoint generation <n>` together. Temporal discards
+  an update whose token a later update made stale: the call succeeds and nothing changes (a contract test pins it), so
+  a successful answer isn't completion. A generation is marked synced only once a fresh describe shows its marker and
+  a transaction confirms that the row still has that generation and the writer still holds the leadership; a marker
+  absent or different leaves it queued for the next pass. The marker is evidence of a Dewpoint update, not of the whole
+  state: editing a schedule directly in Temporal isn't supported, and drift a direct edit leaves under an intact note
+  would take a full comparison, which the sync doesn't make.
+- **A deletion keeps a tombstone:** the row loses its input and keeps its tenant, workflow and mode, so a late tick
+  records `schedule_deleted`. A stale writer's create could bring a deleted Temporal Schedule back, so a tombstone stays
+  queued until a describe made at least one call deadline (10 s, by the database's clock) after its deletion finds
+  nothing, and a tick that finds a tombstone queues it again. 2b-4's retention deletes tombstones.
+- **A sync that fails** is recorded on the row with a fixed code, `temporal_refused` (Temporal refused the request) or
+  `sync_failed` (anything else), alerted on, and retried after 60 s; the API shows it. A pass takes at most 50
+  schedules, each call bounded at 10 s (§7.9).
 - The Temporal Schedule's action starts `ScheduleTick` with the schedule's id as its only argument (encrypted by the
   codec). Overlap: allow all. Catch-up window: 10 minutes by default, configurable.
 - `ScheduleTick` is a one-activity workflow on its own task queue, `dewpoint-admission`, in the dispatcher process
   with the dispatch role. It's unversioned and holds no engine logic; a replay test keeps its short contract
-  compatible.
+  compatible. Its activity takes the tenant and the schedule from its workflow's id (`t:<tenant>:sched:<schedule>`,
+  with Temporal's appended time), never from an argument, and checks the row against both.
+- **A tick decides under its schedule's row:** it takes the workflow's admission lock, shared (a workflow's change takes
+  it exclusively before it raises its schedules' generations), then the schedule's row, exclusively, until it commits. A
+  disable or a delete holding the row first decides the tick; one arriving later waits for the tick's request. The row
+  is never taken shared: a tick of a tombstone writes it, and two late ticks holding it shared would deadlock. A tick
+  that can't be admitted (the database, a key) is retried without limit and alerts once it's 10 minutes late. Its
+  request's `run.request` audit entry names the schedule.
 - **The tick key** is `sched:<schedule_id>:<nominal time>`: the schedule's nominal time
   (`TemporalScheduledStartTime`, never the actual start or jitter), normalized to UTC at the precision Temporal
   reports — whole seconds (experiment 1), unique per schedule because intervals are at least 60 s and cron is
@@ -1232,9 +1339,14 @@ The owner approved 2b-2's milestones as prototype checkpoints; these stay open u
 - **Dewpoint never uses a schedule's trigger-now action.** Experiment 1 showed that triggers within the same second
   share a nominal time and a workflow id, so the tick key would collapse them. "Run now" is a manual admission
   (§7.7).
-- **No tick is silently dropped.** Every tick calls `admit_request`, which records the request even while the gate
-  is off. A disabled workflow or a paused schedule (a tick fired before the pause synced) produces a `refused`
-  request with its reason. A tenant that's `erasing` produces an audited skip.
+- **No tick within the catch-up window is silently dropped.** Every firing calls `admit_request`, which records the
+  request even while the gate is off; a retry or a backfill over a time already admitted admits nothing new. A tick of a
+  disabled workflow is refused as admission refuses it (`workflow_disabled`); one of a paused schedule (fired before the
+  pause synced) is a `refused` request with `schedule_paused`, and one of a tombstone `schedule_deleted`. A tenant
+  that's `erasing` produces an audited skip. Firings missed while Temporal was down fire when it's back, each with its
+  own nominal time, within the catch-up window. **Past the window Temporal skips them and counts them**
+  (`ScheduleInfo.missed_catchup_window`): the leader reads the count every five minutes, records an increase on the
+  schedule (`misses`), audits it (`schedule.missed`) and alerts; the API shows it.
 
 ### 8.3 Webhook ingress
 
@@ -1284,11 +1396,21 @@ The owner approved 2b-2's milestones as prototype checkpoints; these stay open u
 - **API errors added:** `production_runs_disabled` (503), `idempotency_conflict` (409), `input_not_retained` (410),
   `idempotency_key_required` (428), `key_unusable` (503), `run_ended` (409), and admission's reasons with their
   statuses (§7.7).
+- **2b-3a's API errors:** `upload_not_found` (404), `upload_expired` (410), `upload_consumed` (409),
+  `csv_mapping_invalid` (422, with each column's code: `required_unmapped`, `unknown_column`, `unknown_header`,
+  `header_reused`), `csv_not_declared` (409), `csv_required` (409, a schedule of a CSV workflow), `too_large` (413),
+  `unsupported_media_type` (415), `schedule_invalid` (422, with each field's code); a file's codes `csv_encoding`,
+  `csv_empty`, `csv_duplicate_header`, `csv_malformed`, `csv_too_many_rows`, `csv_too_large` (422); a row's `required`,
+  `cell_count` and a cell's `not_integer`, `out_of_range`, `not_number`, `not_boolean`, `not_mac`, `not_ip`, `not_cidr`,
+  `not_in_enum`; a schedule's timing `cron_fields`, `cron_syntax`, `cron_range`, `cron_day_fields`, `timing_missing`,
+  `timing_both`, `interval_too_short`, `interval_too_long`, `interval_offset`, `time_zone_unknown`, `catchup_window`; a
+  schedule's sync `temporal_refused`, `sync_failed`. Publish adds `csv.*` diagnostics, `subflow.csv_target` and
+  `sensitive.literal` for a schema's literals.
 - **Request statuses:** `queued`, `starting`, `started`, `cancelled`, `refused`, `dead`. Reasons include
   `engine_abi_changed`, `node_type_retired`, `cel_profile_retired`, `workflow_disabled`, `not_active`,
-  `schedule_paused`, `input_invalid`, `secret_index_limit`, `start_refused`, `id_collision`, `user_cancelled`,
-  `tenant_erasing`, `envelope_unreadable`, `environment_not_recorded`, `no_current_build`, `version_unusable`.
-  Waiting at dispatch isn't a reason: the request stays queued (a metric and an alert, §2.3).
+  `schedule_paused`, `schedule_deleted`, `input_invalid`, `secret_index_limit`, `start_refused`, `id_collision`,
+  `user_cancelled`, `tenant_erasing`, `envelope_unreadable`, `environment_not_recorded`, `no_current_build`,
+  `version_unusable`. Waiting at dispatch isn't a reason: the request stays queued (a metric and an alert, §2.3).
 - **Event statuses:** `pending`, `matched`, `unmatched`, `cancelled`, `dead`.
 - Every code is fixed and sanitized; none is derived from a sensitive value or plugin-supplied free text.
 - Audit detail keys avoid the names `core/audit` rejects (`…code…`, `…secret…`, `…token…`): reasons are recorded as
@@ -1311,7 +1433,9 @@ The owner approved 2b-2's milestones as prototype checkpoints; these stay open u
   segments, snapshots), `run_inputs`, `run_secret_index`, `claim_grants`; terminal requests that never started (with
   their inputs). A request, its envelope and its claims are deleted together, in one transaction, and never while the
   request is `queued` or `starting`; `matched`, `unmatched`, `cancelled` and `dead` events. Nothing of a non-terminal
-  tree, and no `pending` event, is ever deleted. `csv_uploads` expire after one hour.
+  tree, and no `pending` event, is ever deleted. `csv_uploads` expire after one hour. A consumed upload keeps no staged
+  bytes; a CSV record goes with its request's inputs (§7.1); a schedule's tombstone is deleted once Temporal reports its
+  schedule gone (§8.2).
 - **Never "exactly N days":** the spec and the guide describe retention by cutoff, visibility, deletion time and the
   backup exception.
 
@@ -1907,7 +2031,13 @@ Beyond each task's own tests:
   late — confirmed later by the dispatcher or by the reconciler — leaves the request `started`, the row terminal with
   its own outcome, and no slot held.
 - **Triggers:** CSV parser fuzzing; ingress authentication, replay tolerance, quotas and sealing; ingress load tests
-  (parent §12).
+  (parent §12). 2b-3a's part: canaries in a sensitive CSV cell, in a header (so in the mapping) and in a schedule's
+  fixed input appear in no execution's whole raw history, no projection or stored row in plain and no log line, with the
+  keyring's real keys; contract tests on the dev server pin a stale schedule update discarded, the note's marker on
+  create, update and pause, and cron as Temporal reads it; the races of a tick against a disable and a delete, two late
+  ticks of a tombstone, and concurrent starts with one upload; a catch-up after an outage shorter than the window admits
+  each missed time once; ticks while the gate is off wait queued; a work-unit test counts a claimed CSV loop's
+  `cel.evaluate`; and the Compose proof schedules a run in a non-UTC zone through the Compose dispatcher in CI.
 - **Size invariants:** no workflow task's commands pass the per-task byte budget, at the largest configs, fan-outs
   and spills; an outgoing payload over the limit fails its step, loop or run (2b-1a) or is spilled (2b-1b), never a
   retried task; a result over the limit fails where it's produced; if the
@@ -1920,25 +2050,29 @@ Beyond each task's own tests:
 
 Each plan updates the older specs as it lands, as the engine-core 5.x revisions did. This spec is the authority for
 2b in the meantime.
-- **Parent spec:** §6.1's workflow id (`t:<tenant>:run:<run_id>`, §6.1 here) and its idempotency and lookup rules;
-  the `outbox` replaced by `run_requests` (§7.1); §6.5's claim check detailed by §3–§5; §15's open defaults settled —
-  5 concurrent root runs per tenant, 30 days of tenant retention, 7 days of Temporal retention (at most 30).
+- **Parent spec:** §6.1's workflow id (`t:<tenant>:run:<run_id>`, §6.1 here) and its idempotency and lookup rules; the
+  `outbox` replaced by `run_requests` (§7.1); §6.5's claim check detailed by §3–§5; §15's open defaults settled — 5
+  concurrent root runs per tenant, 30 days of tenant retention, 7 days of Temporal retention (at most 30); §6.8's "rows
+  load in pages through an activity" superseded by §8.1 (revision 8): a size-claimed rows list is iterated by handle.
 - **Engine-core spec:** the "hard rule until 2b ships" (lifted by §10.6); §9 (starting runs: admission and the
   dispatcher, in its revision 5.10 with this spec's revision 7); §8 (the new codes, the cutoff on read paths, the
   `(queued_at, id)` ordering); §4.5 (dispatch as §7.3 describes it); §5.6 (the per-task byte budget); §6 (claims,
   handles, the live-state budget, snapshots in `snapshot_format` 2, the open-iteration cap); §7 (ABI 5 and 6, ids); §5.7
   (the `cel-evaluator` also holds `engine.handles`, standard library only, which `engine.cel`'s binding imports; a test
-  checks its image holds every Dewpoint module it loads).
+  checks its image holds every Dewpoint module it loads); §7 and §11.11, in its revision 5.11 with this spec's
+  revision 8 (`dewpoint-admission`, the `ScheduleTick` worker's queue, runs outside the Worker Deployment, unversioned,
+  §8.2).
 
 ## 14. Roles, tables and permissions (summary)
 
 - **New tables:** `platform_settings`, `worker_instances`, `run_inputs`, `step_outputs`, `claim_grants`,
-  `run_secret_index`, `run_requests`, `tenant_run_limits`, `run_slots`, `csv_uploads`, `schedules`, `webhook_endpoints`,
-  `trigger_bindings`, `inbound_events`, `tenant_event_keys`, `tenant_retention`, `retention_sweeps`, `current_build`,
-  `dispatcher_reports`. `tenants` gains a status (`active`, `erasing`). `runs` gains `queued_at` (existing rows
-  backfilled from `started_at`), and `runs.started_at` becomes nullable with no default: existing rows keep their
-  values, a row pre-created at dispatch has none until the start is confirmed (§7.8), and every read path and the cursor
-  order by `queued_at` (§7.7). 2b-1's `admit` keeps setting `started_at` as it does today.
+  `run_secret_index`, `run_requests`, `tenant_run_limits`, `run_slots`, `csv_uploads`, `csv_mappings`, `schedules`,
+  `webhook_endpoints`, `trigger_bindings`, `inbound_events`, `tenant_event_keys`, `tenant_retention`,
+  `retention_sweeps`, `current_build`, `dispatcher_reports`. `tenants` gains a status (`active`, `erasing`). `runs`
+  gains `queued_at` (existing rows backfilled from `started_at`), and `runs.started_at` becomes nullable with no
+  default: existing rows keep their values, a row pre-created at dispatch has none until the start is confirmed (§7.8),
+  and every read path and the cursor order by `queued_at` (§7.7). 2b-1's `admit` keeps setting `started_at` as it does
+  today.
 - **Roles:** `dewpoint_dispatch` gains `SELECT` on `data_keys` and the admission tables; `dewpoint_ingress` gets a
   login and only `resolve_webhook_endpoint()` plus event inserts and counters; `dewpoint_retention` is new; the
   worker gains the claim tables and `worker_instances`. The plans give the exact grants. 2b-2's:
@@ -1950,6 +2084,11 @@ Each plan updates the older specs as it lands, as the engine-core 5.x revisions 
     `queued_at`), `reconcile_candidates()` and `cancel_candidates()` (ids); writes past a role's grants are functions with one narrow effect: `end_unstarted_run()`
     (the API and the key admin: a cancelled request's row in the caller's tenant) and `disable_production_runs()`
     (the key admin: the gate off, under its lock).
+  - 2b-3a's: the API stages and consumes uploads (`csv_uploads`: no delete), saves default mappings (`csv_mappings`) and
+    writes schedules' wanted state (`schedules`: no delete, a deletion is a tombstone); the dispatcher reads schedules
+    and records its sync's progress (`synced_generation`, which a tick of a tombstone lowers to queue it again), its
+    errors and the misses; its cross-tenant reads are `schedule_candidates()` and `schedule_miss_candidates()`, ids
+    only. A CSV record is a `run_inputs` row of the role `csv` (§7.1).
 - **Permissions:** `run.cancel` (operators and above), `trigger.manage` (editors and above), `workflow.declassify`
   (admins and owners).
 - **Processes:** `dewpoint dispatcher` (dispatch, reconciler, schedule sync, `ScheduleTick` worker), `dewpoint
@@ -1962,6 +2101,12 @@ a dispatch cycle every 1 s over up to 50 tenants; a throttled start due again in
 doubling to 10 min, `dead` at the 10th; a current-build record fresh for 2 minutes; a worker instance live for 90 s;
 the reconciler's grace 30 s, recheck 30 s, alert after 10 minutes and 50 requests a pass; a tenant's default limit 5
 concurrent root runs; an `Idempotency-Key` of at most 255 characters.
+
+**2b-3a's prototype values,** provisional, to be retuned with measurements: a CSV of at most 10,000 rows and 5 MiB; an
+upload kept for 1 hour; 100 errors kept in detail, five named in a refusal, five preview rows; a schedule's interval 60
+s to 366 days and catch-up window 60 s to 24 hours (10 minutes by default); a Temporal call's deadline 10 s; 50
+schedules a sync pass and a misses pass; a failed sync retried after 60 s; misses read every 5 minutes; a tick alerting
+once it's 10 minutes late.
 
 These numbers are starting points. Each stays provisional until the go/no-go experiments (§11) or the owning plan's
 measurements establish it; the spec is revised with the measured value when that plan lands.

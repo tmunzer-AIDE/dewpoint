@@ -1,7 +1,7 @@
 # Dewpoint — Engine Core Design (sub-project 2a)
 
-- **Status:** Accepted as the basis for implementation, revision 5.9 (2026-10-03, with the 2b spec's revision 6);
-  revision 5.10 is pending with the 2b spec's revision 7.
+- **Status:** Accepted as the basis for implementation, revision 5.10 (2026-10-03, with the 2b spec's revision 7);
+  revision 5.11 is pending with the 2b spec's revision 8.
   - Revision 2 addressed join scopes, the local-CEL switch, evaluator isolation, profile routing and retirement.
   - Revision 3 addresses the version lifecycle (activation, queued requests, closure), nested loops, evaluator
     aggregate memory, and Temporal membership.
@@ -120,7 +120,10 @@
     Temporal's activity records only their fixed text; a plugin's failure shows its code and message only when
     they're constants of its code, and an exception's class only when it's a builtin or its module's code names it
     (§3, §8). `engine_abi` becomes 6.
-  - Revision 5.10 (pending, with the 2b spec's revision 7): §9 describes starting runs through admission and the
+  - Revision 5.11 (pending, with the 2b spec's revision 8): `dewpoint-admission`, the queue of `ScheduleTick` and its
+    activity in the dispatcher, sits outside the engine deployment, unversioned (§7, §11.11); a CSV start and a
+    schedule's tick are admitted as any start is (§9).
+  - Revision 5.10 (with the 2b spec's revision 7): §9 describes starting runs through admission and the
     dispatcher (2b-2); §8's `GET /runs` lists requests and runs together by `(queued_at, id)`.
   - Revision 5.9 (with the 2b spec's revision 6): the `cel-evaluator` also holds `engine.handles`,
     which `engine.cel`'s binding imports (§5.7).
@@ -1112,6 +1115,9 @@ cancel while the version loads cancels the run.
     each ABI's requests reach only CEL workers of its builds (2b spec §6.6).
     - The request schema is versioned (`cel.evaluate.v1`).
     - A CEL worker serves every schema version that any undrained engine build uses.
+  - **The admission queue** (`dewpoint-admission`, 2b spec §8.2) is also outside the engine deployment: `ScheduleTick`
+    and its one activity run there, unversioned, in the dispatcher process. They hold no engine logic, only a schedule's
+    admission, and a replay test keeps their short contract compatible across builds.
   - A build registers every `type@version` that isn't `retired` (§4.5). Old builds run until Temporal reports them drained.
   - **Two-build deployment test (required).** N-1 drains while N serves new runs, and N lacks a node type retired
     in between. The N-1 runs exercise child sub-flows, loop batches, plugin activities and continue-as-new.
@@ -1218,6 +1224,9 @@ cancel while the version loads cancels the run.
   validation and claims, the envelope); `dewpoint dispatcher` starts it on Temporal within its tenant's slots, and its
   reconciler settles what a start leaves uncertain. No command starts a run directly: 2a's `start_run(version_id,
   payload, *, mode)` stays a test helper.
+- **CSV starts and schedules are admitted the same way** (2b-3a, 2b spec §8.1, §8.2): a CSV start through the run API,
+  its rows built against the version it freezes, and each tick of a schedule by the dispatcher's own `ScheduleTick`,
+  under the key `sched:<schedule>:<nominal time>`.
 - **Payloads are validated at admission** from ABI 6 (2b spec §3.5): an input that breaks the input schema is
   refused with the places and rules it breaks, never a value nor a key the data supplied (shown as `*`): an
   interactive source's refusal leaves no request, and a durable source's is kept as a `refused` request (2b spec
@@ -1333,7 +1342,7 @@ cancel while the version loads cancels the run.
     - Every transaction that creates or uses a reference takes a shared lifecycle lock on each entry of the closure. Retirement takes the exclusive lock first. Both are advisory locks.
     - Continue-as-new happens only at a quiescent checkpoint, with drain mode and an in-flight cap of 100.
     - One iteration counter per logical run, carried through continue-as-new. Children receive grants on demand, so the cap is exact.
-11. **Temporal membership.** One engine deployment whose versioned queue carries workflows, children and plugin activities, all explicitly Pinned. CEL queues sit outside it, routed by profile.
+11. **Temporal membership.** One engine deployment whose versioned queue carries workflows, children and plugin activities, all explicitly Pinned. CEL queues sit outside it, routed by profile, and so does `dewpoint-admission`, the dispatcher's unversioned queue for `ScheduleTick` (2b spec §8.2).
 12. **New `filter` node** (not in the parent's control-node list), so large collections never need a larger CEL budget.
 13. **No public run API until 2b.**
 14. **Run-time behaviour from plan 2a-3a:** a handled failure leaves no output; a failed iteration collects `null`;
