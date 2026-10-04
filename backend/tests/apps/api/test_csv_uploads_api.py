@@ -172,3 +172,36 @@ async def test_a_workflow_without_a_csv_takes_no_upload(
     client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
     answer = await client.post(uploads_url(ctx, wf), content=FILE, headers=CSV_TYPE)
     assert (answer.status_code, answer.json()) == (409, {"error": "csv_not_declared"})
+
+
+WIDE = {"columns": [{"header": f"h{i}", "name": f"c{i}", "type": "string", "required": True} for i in range(200)]}
+WIDE_FILE = (",".join(f"h{i}" for i in range(200)) + "\n" + ("," * 199 + "\n") * 10_000).encode()
+
+
+async def test_an_upload_at_the_permitted_limits_lists_100_errors_and_counts_them_all(
+    keyed_app, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    """The owner's M2 review: 200 required columns and 10,000 records of empty cells, 2 MB, break 2 million rules. The
+    answer lists the first 100 and counts every one, and the file is staged as its own bytes, sealed."""
+    graph = G().node("a", "testkit.echo@1", {"value": 1}).data() | {"settings": {"csv": WIDE}}
+    ctx, wf = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, graph)
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
+    answer = await client.post(uploads_url(ctx, wf), content=WIDE_FILE, headers=CSV_TYPE)
+    assert answer.status_code == 201, answer.text[:200]
+    body = answer.json()
+    assert (len(body["errors"]), body["error_count"], body["row_count"]) == (100, 2_000_000, 10_000)
+    row = await stored(owner_sessionmaker, body["upload_id"])
+    assert len(row["staged"]) <= len(WIDE_FILE) + 64  # the file's bytes, never a parsed form several times larger
+
+
+async def test_a_cell_longer_than_pythons_default_field_limit_uploads(
+    keyed_app, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    """The owner's M2 review: the byte cap governs a field's length, not Python's 131,072-character default."""
+    graph = G().node("a", "testkit.echo@1", {"value": 1}).data() | {"settings": {"csv": {"columns": CSV["columns"]}}}
+    ctx, wf = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, graph)
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
+    long = b"Site\n" + b"x" * 140_000 + b"\n"
+    answer = await client.post(uploads_url(ctx, wf), content=long, headers=CSV_TYPE)
+    assert answer.status_code == 201, answer.text[:200]
+    assert len(answer.json()["preview"][0]["cells"]["site"]) == 140_000

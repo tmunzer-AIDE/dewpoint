@@ -6,7 +6,14 @@ strict quoting; blank lines are skipped. Its caps are enforced: bytes, then data
 A table's rows are built through a mapping from declared column names to the file's headers: each cell converted to its
 column's canonical value (`engine.graph.csv.convert`), an empty cell absent (its column's default, or `required`). What
 breaks a rule is reported as the record's number (1 is the first after the header), the column's declared name and a
-fixed code: never a cell's text nor a header, both of which are the file's data."""
+fixed code: never a cell's text nor a header, both of which are the file's data.
+
+What the builder keeps is bounded by the records, never by records times columns (the owner's M2 review: 200 required
+columns of empty cells in 10,000 records break 2 million rules in a 2 MB file): the first `LISTED_ERRORS` errors in
+detail, each skipped record's number and the first rule it broke, and a count of every error.
+
+A field may be as long as the platform's byte cap: Python's csv module refuses one past 131,072 characters by default,
+so its process-wide limit is raised to that cap here (nothing else in the process reads CSV)."""
 
 import csv
 import io
@@ -14,7 +21,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from dewpoint.engine.graph.csv import convert
+from dewpoint.engine.graph.csv import MAX_BYTES, convert
 
 DELIMITERS = (",", ";", "\t")  # tried in this order: a tie goes to the earlier one
 FILE_CODES = frozenset(
@@ -22,6 +29,9 @@ FILE_CODES = frozenset(
 )
 ROW_CODES = frozenset({"required", "cell_count"})  # beside a cell's conversion codes (`CELL_CODES`)
 MAPPING_CODES = frozenset({"required_unmapped", "unknown_column", "unknown_header", "header_reused"})
+LISTED_ERRORS = 100  # errors kept in detail; the count is every one
+
+csv.field_size_limit(max(csv.field_size_limit(), MAX_BYTES))
 
 
 class CsvFileError(Exception):
@@ -43,6 +53,14 @@ class RowError:
     row: int  # the record's number: 1 is the first after the header
     column: str | None  # the declared column's name; None for the record as a whole
     code: str
+
+
+@dataclass(frozen=True)
+class Built:
+    rows: list[dict[str, Any]]  # every record that broke no rule
+    skipped: list[tuple[int, str]]  # every other record: its number and the first rule it broke
+    errors: list[RowError]  # the first `LISTED_ERRORS` errors, in order
+    error_count: int  # every error
 
 
 def _records(text: str, delimiter: str) -> Iterator[list[str]]:
@@ -125,36 +143,40 @@ def mapping_problems(
     return problems
 
 
-def build_rows(
-    table: Table, columns: Sequence[Mapping[str, Any]], mapping: Mapping[str, str]
-) -> tuple[list[dict[str, Any]], list[RowError]]:
-    """The rows `mapping` builds from `table` (its problems checked first, `mapping_problems`), and the errors of
-    every record that breaks a rule, which builds no row."""
+def build_rows(table: Table, columns: Sequence[Mapping[str, Any]], mapping: Mapping[str, str]) -> Built:
+    """The rows `mapping` builds from `table` (its problems checked first, `mapping_problems`); a record that breaks a
+    rule builds none, and is reported within the builder's bounds."""
     position = {header: i for i, header in enumerate(table.headers)}
     rows: list[dict[str, Any]] = []
+    skipped: list[tuple[int, str]] = []
     errors: list[RowError] = []
+    count = 0
     for number, record in enumerate(table.rows, start=1):
+        broke: list[RowError] = []
         if len(record) != len(table.headers):
-            errors.append(RowError(number, None, "cell_count"))
-            continue
+            broke.append(RowError(number, None, "cell_count"))
         row: dict[str, Any] = {}
-        broken = False
-        for c in columns:
+        for c in columns if not broke else ():
             header = mapping.get(c["name"])
             text = record[position[header]] if header is not None else ""
             if text == "":
                 if "default" in c:
                     row[c["name"]] = c["default"]
                 elif c.get("required"):
-                    errors.append(RowError(number, c["name"], "required"))
-                    broken = True
+                    broke.append(RowError(number, c["name"], "required"))
                 continue
             value, code = convert(c["type"], text, c.get("values"))
             if code is not None:
-                errors.append(RowError(number, c["name"], code))
-                broken = True
+                broke.append(RowError(number, c["name"], code))
             else:
                 row[c["name"]] = value
-        if not broken:
+            if len(broke) > LISTED_ERRORS:  # a record keeps no more detail than the whole file lists
+                broke.pop()
+                count += 1
+        if not broke:
             rows.append(row)
-    return rows, errors
+            continue
+        skipped.append((number, broke[0].code))
+        count += len(broke)
+        errors.extend(broke[: LISTED_ERRORS - len(errors)])
+    return Built(rows, skipped, errors, count)

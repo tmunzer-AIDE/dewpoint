@@ -24,7 +24,6 @@ which a concurrent start under it has taken), builds its rows against the frozen
 with the rest of the trigger, keeps the mapping, headers and skipped rows as the request's CSV record, and consumes the
 upload, all in the same savepoint."""
 
-import json
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import timedelta
@@ -35,7 +34,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps import csv_uploads
-from dewpoint.apps.csv_input import RowError, Table, build_rows, mapping_problems
+from dewpoint.apps.csv_input import CsvFileError, RowError, build_rows, mapping_problems, read_table
 from dewpoint.apps.inputs import INPUT_INVALID, RESERVED_INPUT, InputRefusedError, claim_input
 from dewpoint.apps.workflow_ops import abi_reasons
 from dewpoint.core.audit import service as audit
@@ -333,24 +332,31 @@ async def _frozen(
     envelope_id = await claims.write_envelope(s, ClaimCipher(keys), tenant_id, request_id=request_id, envelope=envelope)
     if built is None or csv is None:
         return _Frozen(version.id, envelope_id, {})
-    record = {"mapping": dict(csv.mapping), "headers": built.headers, "skipped": [asdict(e) for e in built.errors],
-              "row_count": len(built.rows)}  # fmt: skip
+    record = {
+        "mapping": dict(csv.mapping),
+        "headers": built.headers,
+        "row_count": len(built.rows),
+        "skipped": [{"row": row, "code": code} for row, code in built.skipped],  # every one, its first rule
+        "errors": [asdict(e) for e in built.errors],  # the first ones, in detail
+        "error_count": built.error_count,
+    }
     await claims.write_csv_record(s, ClaimCipher(keys), tenant_id, request_id=request_id, record=record)
     await s.execute(
         update(CsvUpload)
         .where(CsvUpload.id == csv.upload_id)
         .values(staged=None, consumed_by=request_id, consumed_at=func.now())
     )
-    skipped = len({e.row for e in built.errors})
     return _Frozen(version.id, envelope_id, {"csv_digest": built.file_digest.hex(), "csv_rows": len(built.rows),
-                                             "csv_skipped": skipped})  # fmt: skip
+                                             "csv_skipped": len(built.skipped)})  # fmt: skip
 
 
 @dataclass(frozen=True)
 class _Built:
     headers: list[str]
     rows: list[dict[str, Any]]
-    errors: list[RowError]  # every rule a skipped row broke
+    skipped: list[tuple[int, str]]  # every skipped record: its number and the first rule it broke
+    errors: list[RowError]  # the first ones, in detail
+    error_count: int
     file_digest: bytes
 
 
@@ -379,18 +385,20 @@ async def _rows(
         raise _Consumed
     if not live:
         raise _Refused(UPLOAD_EXPIRED, ["This upload has expired: upload the file again."], version_id)
-    plaintext = await ClaimCipher(keys, purpose=csv_uploads.PURPOSE).open(str(tenant_id), str(upload.id), upload.staged)
-    staged = json.loads(plaintext)
-    table = Table(staged["headers"], staged["rows"])
+    data = await ClaimCipher(keys, purpose=csv_uploads.PURPOSE).open(str(tenant_id), str(upload.id), upload.staged)
+    try:  # under the frozen version's caps, which may be lower than those it was uploaded under
+        table = read_table(data, max_rows=int(declared["max_rows"]), max_bytes=csv_uploads.byte_cap(declared))
+    except CsvFileError as e:
+        raise _Refused(INPUT_INVALID, [f"The CSV file: {e.code}."], version_id) from None
     columns = declared["columns"]
     problems = mapping_problems(columns, csv.mapping, table.headers)
     if problems:
         messages = [f"The mapping's column `{p['column']}`: {p['code']}." for p in problems[:_LISTED]]
         raise _Refused(CSV_MAPPING_INVALID, messages, version_id)
-    rows, errors = build_rows(table, columns, csv.mapping)
-    if errors and not csv.skip_invalid:
-        raise _Refused(INPUT_INVALID, [_row_message(e) for e in errors[:_LISTED]], version_id)
-    return _Built(table.headers, rows, errors, upload.file_digest)
+    built = build_rows(table, columns, csv.mapping)
+    if built.skipped and not csv.skip_invalid:
+        raise _Refused(INPUT_INVALID, [_row_message(e) for e in built.errors[:_LISTED]], version_id)
+    return _Built(table.headers, built.rows, built.skipped, built.errors, built.error_count, upload.file_digest)
 
 
 async def _insert(

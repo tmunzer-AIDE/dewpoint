@@ -13,14 +13,16 @@ from jsonschema import Draft202012Validator
 
 from dewpoint.apps.csv_input import (
     FILE_CODES,
+    LISTED_ERRORS,
     CsvFileError,
     RowError,
+    Table,
     build_rows,
     exact_mapping,
     mapping_problems,
     read_table,
 )
-from dewpoint.engine.graph.csv import CELL_CODES, trigger_schema
+from dewpoint.engine.graph.csv import CELL_CODES, MAX_BYTES, MAX_ROWS, trigger_schema
 
 COLUMNS = [
     {"header": "Site", "name": "site", "type": "string", "required": True},
@@ -90,9 +92,9 @@ def test_a_mapping_is_checked_against_the_declaration_and_the_file() -> None:
 def test_rows_are_built_typed_with_defaults_filled_and_absent_cells_omitted() -> None:
     table = read_table(b"Site,VLAN,MAC,PSK,Extra\nparis,,AA-BB-CC-DD-EE-FF,s3cret,ignored\nlyon,20,,,\n",
                        max_rows=10, max_bytes=1000)  # fmt: skip
-    rows, errors = build_rows(table, COLUMNS, MAPPING)
-    assert errors == []
-    assert rows == [
+    built = build_rows(table, COLUMNS, MAPPING)
+    assert (built.errors, built.skipped, built.error_count) == ([], [], 0)
+    assert built.rows == [
         {"site": "paris", "vlan": 1, "mac": "aa:bb:cc:dd:ee:ff", "psk": "s3cret"},
         {"site": "lyon", "vlan": 20},
     ]
@@ -100,14 +102,37 @@ def test_rows_are_built_typed_with_defaults_filled_and_absent_cells_omitted() ->
 
 def test_a_row_that_breaks_a_rule_is_its_number_column_and_code() -> None:
     table = read_table(b"Site,VLAN,MAC\n,x,zz\nok,1\nfine,2,\n", max_rows=10, max_bytes=1000)
-    rows, errors = build_rows(table, COLUMNS, {"site": "Site", "vlan": "VLAN", "mac": "MAC"})
-    assert rows == [{"site": "fine", "vlan": 2}]
-    assert errors == [
+    built = build_rows(table, COLUMNS, {"site": "Site", "vlan": "VLAN", "mac": "MAC"})
+    assert built.rows == [{"site": "fine", "vlan": 2}]
+    assert built.errors == [
         RowError(1, "site", "required"),
         RowError(1, "vlan", "not_integer"),
         RowError(1, "mac", "not_mac"),
         RowError(2, None, "cell_count"),
     ]
+    assert (built.skipped, built.error_count) == ([(1, "required"), (2, "cell_count")], 4)  # each row's first
+
+
+def test_at_the_permitted_limits_the_detail_kept_is_bounded_and_the_count_exact() -> None:
+    """The owner's M2 review: 200 required columns and 10,000 records of empty cells fit in a 2 MB file, and break 2
+    million rules. The builder keeps the first errors in detail, each skipped record's number and first code, and
+    counts every error: what it holds grows with the records, never with records times columns."""
+    columns = [{"header": f"h{i}", "name": f"c{i}", "type": "string", "required": True} for i in range(200)]
+    data = (",".join(c["header"] for c in columns) + "\n" + ("," * 199 + "\n") * MAX_ROWS).encode()
+    assert len(data) <= MAX_BYTES
+    table = read_table(data, max_rows=MAX_ROWS, max_bytes=MAX_BYTES)
+    built = build_rows(table, columns, exact_mapping(columns, table.headers))
+    assert (built.rows, built.error_count) == ([], 200 * MAX_ROWS)
+    assert built.errors == [RowError(1, f"c{i}", "required") for i in range(LISTED_ERRORS)]
+    assert built.skipped == [(n, "required") for n in range(1, MAX_ROWS + 1)]
+
+
+@pytest.mark.parametrize("length", [140_000, MAX_BYTES - 64])
+def test_a_cell_as_long_as_the_byte_cap_allows_is_read(length: int) -> None:
+    """The owner's M2 review: Python's csv module refuses a field past 131,072 characters by default; the byte cap
+    governs instead."""
+    table = read_table(b"Note\n" + b"x" * length + b"\n", max_rows=1, max_bytes=MAX_BYTES)
+    assert len(table.rows[0][0]) == length
 
 
 ROW_SCHEMA = trigger_schema({"csv": {"columns": COLUMNS, "max_rows": 10_000}})["properties"]["rows"]["items"]
@@ -129,10 +154,11 @@ def test_any_bytes_read_as_a_table_or_give_a_file_code(data: bytes) -> None:
 @settings(max_examples=300, deadline=None)
 @given(st.lists(st.lists(CELL, min_size=4, max_size=5), max_size=8))
 def test_built_rows_always_match_the_row_schema_and_errors_never_quote_a_cell(cells: list[list[str]]) -> None:
-    from dewpoint.apps.csv_input import Table
-
-    rows, errors = build_rows(Table(["Site", "VLAN", "MAC", "PSK"], cells), COLUMNS, MAPPING)
+    built = build_rows(Table(["Site", "VLAN", "MAC", "PSK"], cells), COLUMNS, MAPPING)
     validator = Draft202012Validator(ROW_SCHEMA)
-    assert all(validator.is_valid(row) for row in rows)
-    assert len(rows) + len({e.row for e in errors}) == len(cells)
-    assert all(e.code in CELL_CODES | {"required", "cell_count"} and e.column in (None, *MAPPING) for e in errors)
+    assert all(validator.is_valid(row) for row in built.rows)
+    assert len(built.rows) + len(built.skipped) == len(cells)
+    assert built.error_count >= len(built.skipped) and len(built.errors) == min(built.error_count, LISTED_ERRORS)
+    codes = CELL_CODES | {"required", "cell_count"}
+    assert all(e.code in codes and e.column in (None, *MAPPING) for e in built.errors)
+    assert all(code in codes for _, code in built.skipped)

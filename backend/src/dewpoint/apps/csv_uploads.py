@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""A CSV staged for a start (engine 2b spec §8.1): read as data only (`apps.csv_input`), its headers and cells sealed
-with the tenant's key under `csv.upload` (the upload's id the context), owned by its uploader and tenant for one hour.
-A start consumes it in its own transaction.
+"""A CSV staged for a start (engine 2b spec §8.1): read as data only (`apps.csv_input`), then its own bytes sealed with
+the tenant's key under `csv.upload` (the upload's id the context), owned by its uploader and tenant for one hour: what's
+stored is bounded by the file's cap, never a parsed form several times larger. A start reads it again under the version
+it freezes, and consumes it in its own transaction.
 
 What the uploader is told: the file's headers, the declared columns mapped to them (the workflow's saved default
 mapping, else the exact matches), what keeps that mapping from building rows, a preview of the first records' mapped
@@ -36,7 +37,6 @@ PURPOSE = "csv.upload"
 MAPPING_PURPOSE = "csv.mapping"
 TTL = timedelta(hours=1)
 PREVIEW_ROWS = 5
-LISTED_ERRORS = 100  # the response lists this many; its count is every one
 
 
 def declaration(version: WorkflowVersion) -> dict[str, Any] | None:
@@ -53,7 +53,7 @@ def byte_cap(csv: Mapping[str, Any]) -> int:
 def described(table: Table, columns: Sequence[Mapping[str, Any]], mapping: Mapping[str, str]) -> dict[str, Any]:
     """What `mapping` makes of `table`: its problems, the preview and the records' errors."""
     problems = mapping_problems(columns, mapping, table.headers)
-    errors = [] if problems else build_rows(table, columns, mapping)[1]
+    built = None if problems else build_rows(table, columns, mapping)
     position = {header: i for i, header in enumerate(table.headers)}
     shown = [c["name"] for c in columns if not c.get("sensitive") and c["name"] in mapping and not problems]
     preview = [
@@ -65,8 +65,8 @@ def described(table: Table, columns: Sequence[Mapping[str, Any]], mapping: Mappi
         "problems": problems,
         "masked_columns": [c["name"] for c in columns if c.get("sensitive")],
         "preview": preview,
-        "errors": [asdict(e) for e in errors[:LISTED_ERRORS]],
-        "error_count": len(errors),
+        "errors": [asdict(e) for e in built.errors] if built else [],
+        "error_count": built.error_count if built else 0,
     }
 
 
@@ -88,8 +88,7 @@ async def stage(
     staged nothing."""
     table = read_table(data, max_rows=int(csv["max_rows"]), max_bytes=byte_cap(csv))
     upload_id = uuid.uuid4()
-    plaintext = json.dumps({"headers": table.headers, "rows": table.rows}, ensure_ascii=False).encode()
-    staged = await ClaimCipher(keys, purpose=PURPOSE).seal(str(tenant_id), str(upload_id), plaintext)
+    staged = await ClaimCipher(keys, purpose=PURPOSE).seal(str(tenant_id), str(upload_id), data)
     key_version, file_digest = await digests.file_digest(keys, str(tenant_id), data)
     upload = CsvUpload(
         id=upload_id, tenant_id=tenant_id, owner_id=owner_id, workflow_id=workflow_id, staged=staged,

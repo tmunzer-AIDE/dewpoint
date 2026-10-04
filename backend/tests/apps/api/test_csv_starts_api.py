@@ -61,7 +61,9 @@ async def test_a_csv_start_is_admitted_and_its_run_shows_its_record(
         "mapping": MAPPING,
         "headers": ["Site", "VLAN", "PSK"],
         "row_count": 1,
-        "skipped": [{"row": 2, "column": "vlan", "code": "not_integer"}],
+        "skipped": [{"row": 2, "code": "not_integer"}],
+        "errors": [{"row": 2, "column": "vlan", "code": "not_integer"}],
+        "error_count": 1,
     }
     assert "s3cret" not in str(details)
 

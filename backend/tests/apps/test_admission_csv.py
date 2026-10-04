@@ -10,6 +10,7 @@ trigger's rows from a staged upload and consumes it in the same transaction.
   cells cleared, and the mapping, headers and skipped rows kept in a `run_inputs` row of the role `csv`."""
 
 import asyncio
+import json
 import uuid
 from typing import Any
 
@@ -25,6 +26,7 @@ from dewpoint.engine.graph.csv import MAX_BYTES
 from dewpoint.engine.handles import StoredClaim, resolve_value
 from tests.apps.api.helpers import member_client
 from tests.apps.test_admission import KEYS, SCHEMA, TOKEN, admit, count, current, published
+from tests.apps.test_workflow_ops import publish, save
 
 pytestmark = pytest.mark.usefixtures("development_deployment")
 CSV = {
@@ -106,7 +108,8 @@ async def test_a_csv_start_freezes_its_rows_and_consumes_its_upload(
     row = await upload_row(owner_sessionmaker, upload)
     assert (row["staged"], row["consumed_by"]) == (None, r.id) and row["consumed_at"] is not None
     assert await record(api_sessionmaker, ctx, r.id) == {
-        "mapping": MAPPING, "headers": ["Site", "VLAN", "PSK"], "skipped": [], "row_count": 2,
+        "mapping": MAPPING, "headers": ["Site", "VLAN", "PSK"], "row_count": 2, "skipped": [], "errors": [],
+        "error_count": 0,
     }  # fmt: skip
     assert (audit["csv_digest"], audit["csv_rows"], audit["csv_skipped"]) == (row["file_digest"].hex(), 2, 0)
 
@@ -239,8 +242,9 @@ async def test_a_row_that_breaks_a_rule_refuses_the_start_unless_invalid_rows_ar
     assert (await upload_row(owner_sessionmaker, upload))["consumed_by"] is None  # nothing commits
     r = (await admit(api_sessionmaker, ctx, wf, key="k2", csv=start(upload, skip_invalid=True))).request
     assert (await full_input(dispatch_sessionmaker, ctx, r.id))["rows"] == [{"site": "lyon", "vlan": 2}]
-    skipped = (await record(api_sessionmaker, ctx, r.id))["skipped"]
-    assert skipped == [{"row": 1, "column": "vlan", "code": "not_integer"}]
+    kept = await record(api_sessionmaker, ctx, r.id)
+    assert (kept["skipped"], kept["error_count"]) == ([{"row": 1, "code": "not_integer"}], 1)
+    assert kept["errors"] == [{"row": 1, "column": "vlan", "code": "not_integer"}]
 
 
 async def test_a_csv_start_still_refuses_rows_in_its_input(csv_ready, api_sessionmaker) -> None:
@@ -279,3 +283,51 @@ async def test_a_rerun_takes_the_original_rows_or_a_new_csv(csv_ready, api_sessi
                         rerun=admission.Rerun(first.id, {"token": TOKEN}, start(upload, {"site": "Site"})),
                         input={"token": TOKEN}, csv=start(upload, {"site": "Site"}))  # fmt: skip
     assert (await full_input(dispatch_sessionmaker, ctx, fresh.request.id))["rows"] == [{"site": "nice", "vlan": 1}]
+
+
+WIDE = {"columns": [{"header": f"h{i}", "name": f"c{i}", "type": "string", "required": True} for i in range(200)],
+        "max_rows": 10_000, "max_bytes": MAX_BYTES}  # fmt: skip
+WIDE_FILE = (",".join(f"h{i}" for i in range(200)) + "\n" + ("," * 199 + "\n") * 10_000).encode()
+
+
+async def test_a_skip_invalid_start_at_the_permitted_limits_keeps_a_bounded_record(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """The owner's M2 review: 2 million broken rules in a 2 MB file. A refused start names the first five; a start that
+    skips them keeps each skipped record's number and first code, the first 100 errors in detail and an exact count,
+    in a record that grows with the records, never with records times columns."""
+    graph = {**GRAPH, "settings": {"input_schema": SCHEMA, "csv": WIDE}}
+    ctx, wf = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, graph)
+    await current(dispatch_sessionmaker)
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        body = await csv_uploads.stage(s, KEYS, tenant_id=ctx.tenant_id, owner_id=ctx.user.id, workflow_id=wf,
+                                       csv=WIDE, data=WIDE_FILE)  # fmt: skip
+    upload = uuid.UUID(body["upload_id"])
+    mapping = {f"c{i}": f"h{i}" for i in range(200)}
+    with pytest.raises(admission.AdmissionRefusedError) as refused:
+        await admit(api_sessionmaker, ctx, wf, csv=start(upload, mapping))
+    assert refused.value.messages == [f"The CSV's row 1, column `c{i}`: required." for i in range(5)]
+    r = (await admit(api_sessionmaker, ctx, wf, key="k2", csv=start(upload, mapping, skip_invalid=True))).request
+    kept = await record(api_sessionmaker, ctx, r.id)
+    assert (kept["row_count"], kept["error_count"], len(kept["errors"])) == (0, 2_000_000, 100)
+    assert kept["skipped"] == [{"row": n, "code": "required"} for n in range(1, 10_001)]
+    assert len(json.dumps(kept)) < 400_000
+    async with owner_sessionmaker() as s:
+        audit = (await s.execute(text("select details from audit_log where action = 'run.request'"))).scalar_one()
+    assert (audit["csv_rows"], audit["csv_skipped"]) == (0, 10_000)
+
+
+async def test_the_frozen_versions_caps_govern_the_start(
+    csv_ready, owner_sessionmaker, api_sessionmaker, api_settings
+) -> None:
+    """The upload is staged as its bytes, and read again at the start under the version it freezes: one published
+    since with a lower cap refuses a file the earlier one took."""
+    ctx, wf = csv_ready
+    upload = await staged(api_sessionmaker, ctx, wf)
+    lower = {**GRAPH, "settings": {"input_schema": SCHEMA, "csv": {**CSV, "max_rows": 1}}}
+    await save(api_sessionmaker, ctx, wf, lower)
+    assert (await publish(api_sessionmaker, ctx, wf, api_settings)).version is not None
+    with pytest.raises(admission.AdmissionRefusedError) as refused:
+        await admit(api_sessionmaker, ctx, wf, csv=start(upload))
+    assert (refused.value.reason, refused.value.messages) == ("input_invalid", ["The CSV file: csv_too_many_rows."])
