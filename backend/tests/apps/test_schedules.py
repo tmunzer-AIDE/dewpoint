@@ -6,7 +6,7 @@ the week restricted together, is refused rather than accepted under a meaning of
 
 import pytest
 
-from dewpoint.apps.schedules import TIMING_CODES, cron_problems, timing_problems
+from dewpoint.apps.schedules import MAX_INTERVAL, TIMING_CODES, cron_problems, timing_problems
 from tests.apps.worker.test_temporal_contract import CRON
 
 
@@ -32,6 +32,17 @@ def test_every_pinned_form_but_both_day_fields_is_accepted(cron: str) -> None:
 def test_any_other_form_is_refused_with_its_code(cron: str, code: str) -> None:
     assert cron_problems(cron) == [code]
     assert code in TIMING_CODES
+
+
+def test_an_offset_a_schedule_cant_hold_is_refused_whatever_its_timing() -> None:
+    """The whole-branch review: only an interval's offset was checked, so a cron schedule's negative or oversized one
+    reached the database's check, a 500. Any offset is 0 to 366 days (no interval is longer), an interval's below it;
+    a cron schedule's, unused by the sync, stays accepted within that."""
+    for offset in (-1, MAX_INTERVAL + 1, 2**63):
+        assert timing_problems(cron="0 9 * * *", every_s=None, offset_s=offset, time_zone="UTC", catchup_s=600) == [
+            {"field": "offset_s", "code": "interval_offset"}
+        ]
+    assert timing_problems(cron="0 9 * * *", every_s=None, offset_s=MAX_INTERVAL, time_zone="UTC", catchup_s=600) == []
 
 
 def test_a_timing_is_a_cron_or_an_interval_in_a_known_zone_with_a_bounded_catch_up() -> None:

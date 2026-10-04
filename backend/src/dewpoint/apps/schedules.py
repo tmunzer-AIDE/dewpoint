@@ -121,6 +121,8 @@ def timing_problems(
             problems.append({"field": "every_s", "code": "interval_too_long"})
         elif not 0 <= offset_s < every_s:
             problems.append({"field": "offset_s", "code": "interval_offset"})
+    if every_s is None and not 0 <= offset_s <= MAX_INTERVAL:  # a cron's, which the sync doesn't use: never a 500
+        problems.append({"field": "offset_s", "code": "interval_offset"})
     if time_zone not in _zones():
         problems.append({"field": "time_zone", "code": "time_zone_unknown"})
     if not CATCHUP_MIN <= catchup_s <= CATCHUP_MAX:

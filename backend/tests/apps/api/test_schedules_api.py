@@ -88,6 +88,8 @@ async def test_writing_a_schedule_needs_trigger_manage(keyed_app, workflow, owne
         ({"cron": None, "every_s": 30}, [{"field": "every_s", "code": "interval_too_short"}]),
         ({"time_zone": "Mars/Olympus"}, [{"field": "time_zone", "code": "time_zone_unknown"}]),
         ({"catchup_window_s": 10}, [{"field": "catchup_window_s", "code": "catchup_window"}]),
+        ({"offset_s": -1}, [{"field": "offset_s", "code": "interval_offset"}]),  # was a 500: a cron's offset unchecked
+        ({"offset_s": 2**31}, [{"field": "offset_s", "code": "interval_offset"}]),
     ],
 )
 async def test_a_timing_temporal_wouldnt_read_as_written_is_refused(
