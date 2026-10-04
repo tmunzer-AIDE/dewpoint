@@ -13,7 +13,13 @@ The event is opened with the tenant's private key and, for each enabled binding 
 workflow-id order (§7.2), one request is admitted: source `webhook`, key `evt:<event id>:<workflow id>`, the event as
 the trigger. Admission freezes it or records it `refused`; either is a request. The event is recorded `matched` with
 its request count, or `unmatched`, and its pending counters are released, together. A recheck that fails changes
-nothing; more enabled bindings than the cap (refused when they're written) wait, with an alert."""
+nothing; more enabled bindings than the cap (refused when they're written) wait, with an alert.
+
+An event is `dead` (audited, alerted on, its counters released) only for a confirmed event-specific failure: its
+ciphertext fails under a key version that has opened another event in this process, or its payload isn't a JSON
+object; or after `EVENT_ATTEMPTS` unconfirmed failures, backing off from `BACKOFF`, doubling. A platform-wide failure
+(a key version missing, the tenant's data key unreadable) waits `WAIT` with an alert, its attempts untouched; the
+database itself failing writes nothing (§8.3, §10.5)."""
 
 import json
 import uuid
@@ -21,14 +27,16 @@ from collections import Counter
 from datetime import timedelta
 
 import structlog
+from cryptography.exceptions import InvalidTag
 from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from dewpoint.apps import admission
 from dewpoint.apps.dispatcher.dispatch import GATE_LOCK, tenant_lock
+from dewpoint.core.audit import service as audit
 from dewpoint.core.crypto import events
-from dewpoint.core.crypto.keys import KeySource
-from dewpoint.core.db import tenant_scope
+from dewpoint.core.crypto.keys import KeySource, key_unreadable
+from dewpoint.core.db import tenant_scope, unavailable
 from dewpoint.core.ingress import keys as event_keys
 from dewpoint.core.ingress.filters import matches
 from dewpoint.core.models.ingress import InboundEvent, TenantEventCounters, TriggerBinding, WebhookEndpoint
@@ -48,7 +56,16 @@ ENVIRONMENT_NOT_RECORDED = "environment_not_recorded"
 TENANT_ERASING = "tenant_erasing"
 SKIPPED = "skipped"
 FAN_OUT_EXCEEDED = "fan_out_exceeded"
+KEY_UNAVAILABLE = "key_unavailable"
+RETRYING = "retrying"
+DEAD = "dead"
+EVENT_UNREADABLE = "event_unreadable"
+EVENT_NOT_JSON = "event_not_json"
+EVENT_NOT_OBJECT = "event_not_object"
+EVENT_ATTEMPTS = 5  # event-specific attempts before an unconfirmed failure is dead (§8.3)
+BACKOFF = timedelta(seconds=30)  # after the first event-specific failure, doubling (§15, provisional)
 ROLLED_BACK = (GATE_OFF, ENVIRONMENT_NOT_RECORDED, TENANT_ERASING, SKIPPED)
+ALERTS = "dewpoint.matching.alerts"  # in the session's `info`: alerts logged once its transaction commits
 
 
 class Verified:
@@ -66,6 +83,15 @@ class Verified:
 
 async def _after_event_locked() -> None:
     """Runs once a match holds its event's row. A no-op; the race tests hold a match here."""
+
+
+async def _before_commit() -> None:
+    """Runs as a match is about to commit what it decided. A no-op; the tests fail a transaction here."""
+
+
+def _alert(s: AsyncSession, event: str, **fields: object) -> None:
+    """An alert to log once the transaction has committed, never for one rolled back."""
+    s.info.setdefault(ALERTS, []).append((event, fields))
 
 
 def gate_off(platform: PlatformSettings | None) -> str | None:
@@ -107,11 +133,17 @@ async def match_event(
     sessionmaker: async_sessionmaker[AsyncSession], keys: KeySource, verified: Verified, *, tenant_id: uuid.UUID,
     event_id: uuid.UUID, endpoint_id: uuid.UUID,
 ) -> str:  # fmt: skip
-    """One event's matching transaction: `matched`, `unmatched`, or why it waits or was passed by."""
-    async with sessionmaker() as s, s.begin():
-        outcome = await _match(s, keys, verified, tenant_id, event_id, endpoint_id)
-        if outcome in ROLLED_BACK:
-            await s.rollback()
+    """One event's matching transaction: `matched`, `unmatched`, or why it waits or was passed by. Its alerts are
+    logged once it has committed: a transaction rolled back alerts on nothing (the owner's M3 review)."""
+    async with sessionmaker() as s:
+        async with s.begin():
+            outcome = await _match(s, keys, verified, tenant_id, event_id, endpoint_id)
+            if outcome in ROLLED_BACK:
+                await s.rollback()
+            else:
+                await _before_commit()
+        for event, fields in s.info.pop(ALERTS, []):  # committed
+            log.error(event, **fields)
         return outcome
 
 
@@ -155,11 +187,30 @@ async def _match(
     if event is None:
         return SKIPPED
     await _after_event_locked()
-    private = await event_keys.private_key(s, keys, tenant_id, event.key_version)
-    plaintext = events.open_sealed(private, tenant_id=tenant_id, endpoint_id=endpoint_id, event_id=event.id,
-                                   blob=event.sealed)  # fmt: skip
+    try:
+        private = await event_keys.private_key(s, keys, tenant_id, event.key_version)
+    except Exception as e:  # no fault of the event's: a version missing, or the tenant's data key unreadable
+        if unavailable(e) or not (isinstance(e, event_keys.NoEventKeyError) or key_unreadable(e)):
+            raise  # the database itself, or a bug: nothing written, the event as it was
+        _alert(s, "event_key_unavailable", tenant_id=str(tenant_id), version=event.key_version,
+               error=type(e).__name__)  # fmt: skip
+        event.next_attempt_at = func.statement_timestamp() + WAIT
+        await s.flush()
+        return KEY_UNAVAILABLE
+    try:
+        plaintext = events.open_sealed(private, tenant_id=tenant_id, endpoint_id=endpoint_id, event_id=event.id,
+                                       blob=event.sealed)  # fmt: skip
+    except (InvalidTag, ValueError):
+        if (tenant_id, event.key_version) in verified:  # confirmed: the key is good, the event isn't
+            return await _dead(s, event, EVENT_UNREADABLE)
+        return await _retry(s, event, EVENT_UNREADABLE)
     verified.add(tenant_id, event.key_version)
-    payload = json.loads(plaintext)
+    try:
+        payload = json.loads(plaintext)
+    except ValueError:
+        return await _dead(s, event, EVENT_NOT_JSON)
+    if not isinstance(payload, dict):
+        return await _dead(s, event, EVENT_NOT_OBJECT)
     bindings = (
         await s.execute(
             select(TriggerBinding)
@@ -169,7 +220,7 @@ async def _match(
         )
     ).scalars().all()  # fmt: skip
     if len(bindings) > MAX_BINDINGS:
-        log.error("event_fan_out_exceeded", endpoint_id=str(endpoint_id), event_id=str(event.id))
+        _alert(s, "event_fan_out_exceeded", endpoint_id=str(endpoint_id), event_id=str(event.id))
         event.next_attempt_at = func.statement_timestamp() + WAIT
         await s.flush()
         return FAN_OUT_EXCEEDED
@@ -189,6 +240,28 @@ async def _match(
     await release(s, tenant_id, endpoint_id, event.size_bytes)
     await s.flush()
     return event.status
+
+
+async def _retry(s: AsyncSession, event: InboundEvent, reason: str) -> str:
+    """An event-specific failure not yet confirmed: another attempt later, backing off, dead after the last."""
+    event.attempts += 1
+    if event.attempts >= EVENT_ATTEMPTS:
+        return await _dead(s, event, reason)
+    event.next_attempt_at = func.statement_timestamp() + BACKOFF * 2 ** (event.attempts - 1)
+    await s.flush()
+    return RETRYING
+
+
+async def _dead(s: AsyncSession, event: InboundEvent, reason: str) -> str:
+    """An event that will never match: dead, its pending counters released, audited and alerted on."""
+    event.status, event.reason, event.ended_at = DEAD, reason, func.statement_timestamp()
+    await release(s, event.tenant_id, event.endpoint_id, event.size_bytes)
+    details: dict[str, object] = {"endpoint_id": str(event.endpoint_id), "reason": reason, "attempts": event.attempts}
+    await audit.record(s, tenant_id=event.tenant_id, actor_id=None, action="inbound_event.dead",
+                       target_type="inbound_event", target_id=str(event.id), details=details)  # fmt: skip
+    _alert(s, "inbound_event_dead", tenant_id=str(event.tenant_id), event_id=str(event.id), reason=reason)
+    await s.flush()
+    return DEAD
 
 
 async def release(s: AsyncSession, tenant_id: uuid.UUID, endpoint_id: uuid.UUID, size: int, events_n: int = 1) -> None:

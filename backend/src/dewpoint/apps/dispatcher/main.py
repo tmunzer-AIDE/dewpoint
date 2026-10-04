@@ -20,6 +20,7 @@ from dewpoint.apps.dispatcher.dispatch import Rotation, dispatch_once
 from dewpoint.apps.dispatcher.matching import Verified, match_once
 from dewpoint.apps.dispatcher.observe import observe, report
 from dewpoint.apps.dispatcher.reconcile import Leader, reconcile_once
+from dewpoint.apps.dispatcher.recount import recount_once
 from dewpoint.apps.dispatcher.schedule_sync import check_misses, sync_schedules
 from dewpoint.apps.dispatcher.tick import ADMISSION_QUEUE, Ticker
 from dewpoint.apps.dispatcher.tick_workflow import ScheduleTick
@@ -51,7 +52,8 @@ async def cycle(
     instance: uuid.UUID, reconciler: uuid.UUID, leader: Leader, rotation: Rotation, verified: Verified | None = None,
 ) -> None:  # fmt: skip
     """One cycle: observe the current build, dispatch what's due, match inbound events, report; the leader also
-    reconciles, sends cancels, keeps the Temporal Schedules in step with their rows and reads their missed firings. An
+    reconciles, sends cancels, keeps the Temporal Schedules in step with their rows, reads their missed firings and
+    recounts the inbound-event counters due a recount. An
     observation that fails (Temporal, or the database, briefly unavailable) dispatches and matches nothing this cycle,
     and the next one asks again: admission would refuse a matched event's requests for good without a fresh record of
     the build (§7.2), which ages out meanwhile."""
@@ -71,6 +73,7 @@ async def cycle(
         settled.update({f"cancel_{k}": v for k, v in (await send_cancels(sessionmaker, client)).items()})
         settled.update({f"schedule_{k}": v for k, v in (await sync_schedules(sessionmaker, client, leader)).items()})
         settled.update({f"misses_{k}": v for k, v in (await check_misses(sessionmaker, client)).items()})
+        settled.update({f"recount_{k}": v for k, v in (await recount_once(sessionmaker)).items()})
         await report(sessionmaker, reconciler, build_id, {**settled}, kind="reconciler")
 
 
