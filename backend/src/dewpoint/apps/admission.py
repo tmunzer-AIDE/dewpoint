@@ -222,6 +222,24 @@ async def admit_request(
     return admitted
 
 
+async def record_refused(
+    s: AsyncSession, keys: KeySource, *, tenant_id: uuid.UUID, workflow_id: uuid.UUID, source: str, mode: str,
+    idempotency_key: str, reason: str, messages: list[str],
+) -> RunRequest:  # fmt: skip
+    """A durable source's refusal decided before admission, a paused or deleted schedule's tick (§8.2): a `refused`
+    request under its key, frozen like any, never lost; an exact retry finds it. Raises IdempotencyConflictError when
+    the key holds another request."""
+    if source not in DURABLE:
+        raise ValueError(f"only a durable source's refusal is recorded: {source}")
+    await tenant_scope(s, tenant_id)
+    fields: dict[str, Any] = {"source": source, "workflow_id": workflow_id, "mode": mode, "input": {}}
+    existing = await _by_key(s, idempotency_key)
+    if existing is not None:
+        return (await _retry(keys, tenant_id, existing, fields)).request
+    refused = _Refused(reason, messages)
+    return (await _insert(s, keys, tenant_id, uuid.uuid4(), None, idempotency_key, fields, None, None, refused)).request
+
+
 async def admitted_under(
     s: AsyncSession, keys: KeySource, *, tenant_id: uuid.UUID, idempotency_key: str, source: str,
     workflow_id: uuid.UUID, mode: str, rerun: Rerun, actor_id: uuid.UUID | None = None,

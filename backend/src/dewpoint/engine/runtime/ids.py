@@ -38,6 +38,17 @@ def batch_workflow_id(tenant_id: str, run_id: str, step_id: str, iteration_key: 
     return f"{run_workflow_id(tenant_id, run_id)}/{step_id}/{iteration_key}/batch:{start}"
 
 
+def schedule_workflow_id(tenant_id: str, schedule_id: str) -> str:
+    """A schedule's Temporal Schedule id, and its action's workflow id: Temporal appends each firing's time to it."""
+    return f"t:{tenant_id}:sched:{schedule_id}"
+
+
+def schedule_of(workflow_id: str) -> tuple[str, str] | None:
+    """The tenant and the schedule a schedule's id, or one of its firings', names; None for any other string."""
+    m = _SCHEDULE.fullmatch(workflow_id)
+    return (m.group(1), m.group(2)) if m else None
+
+
 def tenant_of(workflow_id: str) -> str | None:
     """The tenant a server-built workflow id names, or None for any other string: nothing is inferred from it."""
     m = _RUN.fullmatch(workflow_id) or _SCHEDULE.fullmatch(workflow_id)

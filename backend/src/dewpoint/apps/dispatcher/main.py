@@ -12,12 +12,15 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.client import Client
 from temporalio.service import RPCError, RPCStatusCode
+from temporalio.worker import Worker
 
 from dewpoint.apps.codec import KeyringKeys, data_converter
 from dewpoint.apps.dispatcher.cancels import send_cancels
 from dewpoint.apps.dispatcher.dispatch import Rotation, dispatch_once
 from dewpoint.apps.dispatcher.observe import observe, report
 from dewpoint.apps.dispatcher.reconcile import Leader, reconcile_once
+from dewpoint.apps.dispatcher.tick import ADMISSION_QUEUE, Ticker
+from dewpoint.apps.dispatcher.tick_workflow import ScheduleTick
 from dewpoint.apps.environment import verify_environment
 from dewpoint.apps.worker.deployment import describe, this_build
 from dewpoint.core.config import Settings
@@ -74,6 +77,14 @@ async def serve(one: Callable[[], Awaitable[None]], *, cycles: int | None = None
         await asyncio.sleep(CYCLE_S)
 
 
+def admission_worker(client: Client, sessionmaker: async_sessionmaker[AsyncSession], keys: KeySource) -> Worker:
+    """The dispatcher's own worker for `ScheduleTick` (engine 2b spec §8.2): `dewpoint-admission`, unversioned, outside
+    the engine's Worker Deployment, admitting each tick as the dispatch role."""
+    return Worker(
+        client, task_queue=ADMISSION_QUEUE, workflows=[ScheduleTick], activities=[Ticker(sessionmaker, keys).tick]
+    )
+
+
 async def run(settings: Settings) -> None:
     """Raises EnvironmentNotRecordedError or EnvironmentMismatchError before connecting to Temporal."""
     engine = make_engine(settings.database_url)
@@ -94,7 +105,10 @@ async def run(settings: Settings) -> None:
                         rotation=rotation)  # fmt: skip
 
         try:
-            await serve(one)
+            async with admission_worker(
+                client, sessionmaker, keys
+            ):  # ends the process if it fails: Compose restarts it
+                await serve(one)
         finally:
             await leader.close()
     finally:
