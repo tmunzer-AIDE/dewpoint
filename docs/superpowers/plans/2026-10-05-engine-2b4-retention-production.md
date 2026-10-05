@@ -1,18 +1,19 @@
 # Engine 2b-4: Retention and Production — Outline
 
 > **Status: approved by the owner as an outline (82bfca6, finalized 3b875c0, 2026-10-05); D2, D4 and D5 accepted; D6
-> and D12 brought back below as concrete, testable choices for the owner's rulings. It was revised after the owner's
-> first review (erasure's completion, production Temporal's proof, Mist, event grouping, ingress's switch), second
-> (erasure: no reversal, durable progress, the `tenants` schema), third (the firing inventory before schedules are
-> deleted, completeness from Temporal's retention bound, audit entries described as they are, eligibility requiring
-> `active`), fourth (fencing in-flight writers, the schedule sync's included; the bound as the earliest final check)
-> fifth (late Temporal writes made unable to fire and reconciled after completion), sixth (an enforced, audited
-> namespace-change boundary for the 30-day cap; reconciliation's residual risk; missed firings recorded) and seventh
-> (which targets qualify for that boundary; both readiness paths failing closed without it; the schedule action
-> corrected). Not authorization to build anything; no gate is authorized to lift by this review, neither the
-> production gate nor ingress's development-only restriction.** As in 2b-1a through 2b-3b, once the owner rules, each
-> sub-project is built on a prototype branch from `main`, with the owner's checkpoint after each milestone; its plan
-> is then written from the replayed diffs, with a revision of the 2b spec, for the owner's review before execution.
+> and D12 approved as proof candidates, not proven production boundaries, with D12b ruled and the proofs' images and
+> `boto3` approved; no prototype, detailed plan or gate lift authorized. It was revised after the owner's first review
+> (erasure's completion, production Temporal's proof, Mist, event grouping, ingress's switch), second (erasure: no
+> reversal, durable progress, the `tenants` schema), third (the firing inventory before schedules are deleted,
+> completeness from Temporal's retention bound, audit entries described as they are, eligibility requiring `active`),
+> fourth (fencing in-flight writers, the schedule sync's included; the bound as the earliest final check) fifth (late
+> Temporal writes made unable to fire and reconciled after completion), sixth (an enforced, audited namespace-change
+> boundary for the 30-day cap; reconciliation's residual risk; missed firings recorded) and seventh (which targets
+> qualify for that boundary; both readiness paths failing closed without it; the schedule action corrected). Not
+> authorization to build anything; no gate is authorized to lift by this review, neither the production gate nor
+> ingress's development-only restriction.** As in 2b-1a through 2b-3b, once the owner rules, each sub-project is built
+> on a prototype branch from `main`, with the owner's checkpoint after each milestone; its plan is then written from
+> the replayed diffs, with a revision of the 2b spec, for the owner's review before execution.
 
 **Goal:** Dewpoint can hold tenants' production data. Data leaves on schedule, a tenant can be erased, old keys can be
 retired, the production Temporal is verified, every production blocker is fixed or bounded with the owner's explicit
@@ -366,7 +367,11 @@ answers not-found while its projection isn't terminal goes through §7.9's opera
 ## D6 and D12: concrete, testable choices
 
 Brought back before any prototype, as the owner asked (2026-10-05). Each fact below was checked on the date given; what
-couldn't be checked says so.
+couldn't be checked says so. **The owner's ruling (2026-10-05): D6 and D12 are approved as proof candidates, not as
+proven production boundaries.** Approved for the proofs: `cgr.dev/chainguard/minio` (D6's test), `boto3` with its
+`botocore` dependency (not a hand-written SigV4 client), and `golang`, `temporalio/admin-tools` and a minimal runtime
+base (D12's proof); each image pinned when its proof is specified. None of this authorizes a prototype, a detailed
+plan or either production gate's lift.
 
 ### D6: the off-host audit anchor sink (#3)
 
@@ -374,9 +379,10 @@ couldn't be checked says so.
   object version can't be overwritten or deleted by any user, including the root user", and its retention can't be
   shortened (AWS's Object Lock documentation, checked 2026-10-05). Another S3-compatible store qualifies only once the
   same proof shows the same behaviour.
-  - **Layout:** one object per anchor, a key per scope and sequence, never reused; the bucket's default retention at
-    least `audit_retention_days` (400) plus the backups' 35 days, in compliance mode; a bucket policy bounding
-    retention with `s3:object-lock-remaining-retention-days`.
+  - **Layout:** one object per anchor, a key per scope and sequence, never reused; the bucket's default retention, in
+    compliance mode, covering the configured audit-retention period plus the configured backup period (checked
+    against the settings in force, not only today's defaults of 400 and 35 days); a bucket policy bounding retention
+    with `s3:object-lock-remaining-retention-days`.
   - **Writer:** the anchor service's own put-only credentials, held apart from the database host's.
   - **Signing:** each anchor signed with an Ed25519 key the anchor service holds, not on the database host; verifying
     needs only the public keys (every key id kept, for rotation).
@@ -386,10 +392,17 @@ couldn't be checked says so.
   - **Monitoring outside Dewpoint's database:** a scheduled job, not on the database host, runs that verify and checks
     each scope's last anchor age, alerting on failure.
   - **Runbook:** a failed verify; rotating the signing key.
+- **Anchor completeness (the owner's acceptance condition).** Object Lock protects a version, not the existence of the
+  next anchor: a compromised database could erase a scope or suppress its next anchor without leaving an S3 version
+  to find. So the expected scope roster and each scope's anchor cadence and high-water mark are kept off the database
+  host, with the independent monitor, which alerts on a missing scope and on an overdue anchor. Verify reads every
+  listed version and delete marker, across every page of the listing, and checks each version's retention mode
+  (compliance) and its retain-until date.
 - **The proof:** against an S3-compatible test server with compliance-mode Object Lock: deleting a locked version
   (by version id, with the server's root credentials) is refused, shortening its retention is refused, a delete
-  marker and a rewrite are both caught by verify, and verify fails on each tampering case above. At readiness, the real
-  bucket gets the same check with a canary anchor.
+  marker and a rewrite are both caught by verify, and verify fails on each tampering case above; the monitor alerts on
+  a scope removed from the database and on an anchor withheld past its cadence; a listing longer than one page is
+  verified whole. At readiness, the real bucket gets the same check with a canary anchor.
 - **Image to approve (test only):** `cgr.dev/chainguard/minio`. MinIO stopped publishing its own community images on
   2025-10-23 (source only since); Chainguard publishes a free image built from MinIO's source. Whether its Object Lock
   enforces compliance mode as above is what the proof establishes; if not, the fallback is building MinIO from source
@@ -414,26 +427,32 @@ couldn't be checked says so.
     mapper, pinned to the server version Dewpoint targets (v1.32.0 is the latest release; CI's CLI dev server 1.9.1
     runs server 1.32.0). The authorizer refuses `RegisterNamespace` or `UpdateNamespace` with a retention above 30
     days, refuses any other API that can change a namespace's configuration (an allowlist, denying by default), and
-    records every namespace-changing decision, allowed or refused, in an independent audit trail: D6's bucket.
-  - **The change paths the proof must cover:** `RegisterNamespace` and `UpdateNamespace` from the SDK and the
-    `temporal operator namespace` CLI; every OperatorService and AdminService API, enumerated from the server's own
-    definitions, shown either unable to change a namespace's retention or refused; and the persistence store, below.
-  - **The persistence store's administrator (D12b):** writing Temporal's database directly bypasses every API, and no
-    API boundary can stop it; the same holds for Dewpoint's own database superuser. The owner decides: either that
-    administrator is inside the platform operator's trust boundary (the database reachable only by the Temporal
-    server's role, privileged sessions audited to D6's bucket), or it disqualifies the target, and then no self-hosted
-    target qualifies and production stays blocked by the fail-closed readiness.
+    records every namespace-changing decision, allowed or refused, in an independent audit trail: D6's bucket. **It
+    fails closed:** a namespace change whose audit record can't be written is refused (the owner's acceptance
+    condition).
+  - **The change paths the proof must cover (the owner's acceptance condition):** the SDK, the `temporal operator
+    namespace` CLI, every OperatorService and AdminService API (enumerated from the server's own definitions), and any
+    separately exposed administrative endpoint, each shown unable to set a retention of 31 days; plus the audit write
+    failing, which must refuse the change.
+  - **The persistence store's administrator (D12b, the owner's ruling):** privileged Temporal database administrators
+    are inside the trusted platform-operator boundary, as Dewpoint's own database superuser is, not a path the API
+    authorizer controls. Their access must be restricted and independently audited; a deployment that can't maintain
+    that boundary doesn't qualify.
   - **The verified-TLS proof, in the same environment:** the server's certificate from a test CA, verified (a wrong CA
-    refused); mTLS required (a client without a certificate refused); a bearer token through the JWT claim mapper and a
-    test key set served locally (valid accepted, invalid or expired refused); `DescribeNamespace`'s retention and
-    archival state; `DeleteWorkflowExecution`; visibility queries by workflow-id prefix on PostgreSQL visibility; and
-    D3's deleted-and-recreated schedule token test and paused creation.
+    refused); then, separately, since requiring a client certificate globally wouldn't prove the alternative (the
+    owner's acceptance condition): **mTLS only** (a client without a certificate refused), and **a bearer token only**
+    over verified TLS, without a client certificate (valid accepted, invalid or expired refused); plus
+    `DescribeNamespace`'s retention and archival state, `DeleteWorkflowExecution`, visibility queries by workflow-id
+    prefix on PostgreSQL visibility, and D3's deleted-and-recreated schedule token test and paused creation.
+  - **Naming:** on a self-hosted server the token is a JWT bearer token, validated by the server's JWT claim mapper
+    against a key set, named as such in the settings and the guide; it isn't a Temporal Cloud API key. Revision 10
+    says which of §10.4's settings each target uses.
   - **Images to approve (proof environment):** `golang` (to build our server), `temporalio/admin-tools` (schema setup)
     and a minimal runtime base for our server image (a distroless static image or `alpine`); `postgres:16-alpine` is
     already approved. Exact tags pinned at the prototype.
   - **Production:** the owner's own deployment of that server, the proof rerun there before readiness.
-- **Proposed:** prove the self-hosted authorizer, with D12b ruled first; Temporal Cloud stays unsupported unless an
-  enforced cap appears.
+- **Ruled:** the self-hosted authorizer is the candidate to prove; Temporal Cloud remains unsupported under D3g as
+  documented (retention settable from 1 to 90 days; its audit log records changes but doesn't enforce a 30-day cap).
 
 ## Milestones (first cut)
 
@@ -481,13 +500,13 @@ couldn't be checked says so.
 | D3 | Tenant erasure | As "Tenant erasure" above, with the owner's rulings: (a) no abort once `erasing` is committed, only a stop or a retry; (b) every found execution deleted and read back, the firing inventory captured before schedules are deleted, and completeness from Temporal's retention bound, never from visibility; (c) audit entries under the platform's audit-retention policy, described as they are; (d) Temporal's retention enforcement accepted as the trust boundary for executions Dewpoint can't enumerate, the bound being the earliest point for the final check, not a deadline; (e) in-flight writers fenced by the lifecycle lock, the schedule sync's transaction spanning its Temporal write; late Temporal writes made unable to fire (schedules created paused, unpaused only by a token-carrying update, relied on only once the deleted-and-recreated token test passes) and detected and repaired after completion, the residual risk between passes stated; (f) a firing due between paused creation and the unpause recorded as missed, the user's start never shifted; (g) a production Temporal target qualifies only if every namespace-change path mechanically rejects a retention above 30 days and records changes in an independently reviewable audit trail; a self-hosted authorizer is a candidate to prove; access control plus an audit log alone is unsupported; both readiness paths fail closed without a verified boundary. |
 | D4 | The read cutoff | **Accepted (2026-10-05):** filter in the shared read paths (one query helper per kind), proven by a test per user-facing path; never a database view the API could bypass. |
 | D5 | Audit pruning and #3 | **Accepted (2026-10-05):** pruning ships in 2b-4a disabled in production until #3's sink is configured; the readiness checks refuse a production gate without it. |
-| D6 | #3's first sink | As "D6" above: an S3 bucket with compliance-mode Object Lock; the test image `cgr.dev/chainguard/minio` and an S3 client dependency to approve. |
+| D6 | #3's first sink | **Approved as a proof candidate (2026-10-05):** an S3 bucket with compliance-mode Object Lock, with anchor completeness off the database host; `cgr.dev/chainguard/minio` and `boto3` approved. |
 | D7 | #16, #18, #26 | Fix each, per the issues' preferred directions: #16 bounds the snapshot (or ends the run with a fixed code before the limit); #18 bounds measuring's cost; #26 sends a shared value once, as a size claim. Bounds instead of fixes need the owner's risk decision, case by case. |
 | D8 | §7.9's items | See below. |
 | D9 | Dispatcher scaling | Required before production. Measure first on the CLI dev server (approved image), then choose: `SKIP LOCKED` on the endpoint row, or dispatchers taking disjoint candidates. Rerun the load probe's separate-tenant control after the change; §8.3's fairness and races are re-proven. |
 | D10 | 2b-3b's deferred ingress minors | (1) the matcher's endless retry: with §7.9's bounded retry and alerting (2b-4b M2); (2) the guide's warning about an empty `DEWPOINT_INGRESS_TRUSTED_PROXIES` behind a proxy: a doc fix (2b-4b M4); (3) changing `events_pointer` after deliveries changes deduplication: it becomes fixed at creation, like the id source, and a different grouping needs a new endpoint (2b-4a M1); an intentional contract change in revision 10 (§8.3), tested at the API and the database role; (4) the recording function not checking a blob's embedded key version: an added predicate (2b-4a M3). |
 | D11 | The operator's identity | `enable-` and `disable-production-runs` record the operator: an admin login (an identity the platform knows) rather than the OS user. The mechanism is the owner's choice. |
-| D12 | Production Temporal | As "Production Temporal" and "D12" above: self-hosted Temporal with a custom authorizer to prove (Temporal Cloud doesn't qualify as documented); D12b, the persistence store's administrator, to rule; the images `golang`, `temporalio/admin-tools` and a minimal runtime base to approve. |
+| D12 | Production Temporal | **Approved as a proof candidate (2026-10-05):** self-hosted Temporal with a fail-closed custom authorizer, every change path proven; mTLS-only and bearer-token-only proven separately; D12b ruled (database administrators inside the operator boundary, restricted and audited); Temporal Cloud unsupported as documented; `golang`, `temporalio/admin-tools` and a minimal runtime base approved. |
 | D13 | Mist webhooks | Supported in production only if a real Mist delivery confirms the bearer-header path. Otherwise the guide says Mist webhooks are unsupported in production: Mist signs the body alone, without a timestamp, so the timestamped HMAC scheme is no substitute for it. |
 | D14 | Ingress in production | As "Ingress in production" above: its own audited switch for first activation; the runs gate turning off keeps recording events (§2.5). |
 
