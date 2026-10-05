@@ -3,6 +3,8 @@
 - **Status:** draft for the owner's rulings, 2026-10-05; revision 2 applies the review of 4aaf8f9 (D10, D13, D17,
   D27, B4, B7–B10, B14, §7); revision 3 applies the review of 6c80fe9 (B4a/B4b, B7, B9, B14, D8, §4). Nothing is
   built before the rulings. Revision 4 corrects B4b's classification and adds `engine_abi` to B4a.
+- **Ruled 2026-10-05:** recommendations accepted with gates, npm list approved, migration slots 0043–0046; see
+  `2026-10-05-editor-ui-4-ledger.md`.
 - **Branch:** `docs/editor-ui-4-outline`, from `origin/main` 6482c53 (#37).
 - **Read:** the design export `Dewpoint UI.dc.html` (screens 1a–1i, today's UI 0a–0b, logo variants A–D), as data;
   architecture spec §3.3, §6.8, §10–§14; engine-core spec §3, §5.5, §5.7, §5.10, §8, §12; engine 2b spec §2.1, §4.1,
