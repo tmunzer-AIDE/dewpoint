@@ -73,8 +73,8 @@ Each arrow reads "needs".
   tick couldn't decode its argument once the version retires; no request's idempotency digest uses it; the tenant's
   event private keys wrapped by it are re-wrapped. So retirement needs the re-encryption
   command, retention's deletion, and a recorded maximum run duration.
-- **#28's fix → decrypt across versions.** Comparing a rewritten claim's plaintext needs the existing claim's version
-  to still open, which retirement's rules already guarantee for any record it would compare.
+- **#28's fix (merged) → decrypt across versions.** Comparing a rewritten claim's plaintext needs the existing claim's
+  version to still open, which retirement's rules already guarantee for any record it would compare.
 - **Erasure → the lifecycle lock (exists), the reconciler (exists), Temporal's deletion, then the keys, then the
   sweep.** Mark `erasing` (raising the tenant's schedules' generations in the same transaction, §7.9); reconcile every
   `starting` request; delete its Temporal schedules; cancel queued requests and pending events; cancel running runs and
@@ -104,11 +104,14 @@ Each arrow reads "needs".
 
 - **#28** (claims keep an unkeyed SHA-256 of their plaintext): remove `content_hash`; on a claim-id conflict, decrypt
   the existing claim and compare canonical plaintext; the migration drops the column, and its docs say backups taken
-  before it still hold the hashes. Idempotent across a key rotation. Proposed for 2b-4a's first milestone.
+  before it still hold the hashes. Idempotent across a key rotation. **Already on main** (found in 2b-4a's M1): eb34db9
+  (2026-10-03) did exactly this, with migration 0018, the deployment guide's note and a test across a key rotation;
+  the issue is still open, and nothing is left to change.
 - **#35** (four tables don't tie `workflow_id` to the row's tenant: `run_requests`, `csv_uploads`, `csv_mappings`,
   `schedules`): composite foreign keys to `workflows (id, tenant_id)`, as 2b-3b's bindings have, after a check for
   existing inconsistent rows that refuses to proceed if any exist; the direct-role reproduction becomes the regression.
-  `versions` and `runs` stay marked for investigation. Proposed with #28.
+  `versions` and `runs` stay marked for investigation. Proposed with #28. (2b-4a's M1 reproduced the seven keys the
+  issue lists for investigation too, and its prototype fixes all eleven, for the owner's review.)
 - **#3** (production audit anchors): an on-host anchor isn't the specified production integrity boundary. An off-host
   sink with its own retention (object storage with object lock, or a syslog or SIEM target), written by the auditor role
   only; an anchor-signing key held apart from the database host's credentials; monitoring of the sink itself; a
@@ -569,9 +572,9 @@ hosts D8's 20-binding rate tests and D9's accepted-event-to-start latency, which
 ## Milestones (first cut)
 
 **2b-4a, the data lifecycle**
-- **M1. The schema blockers and the event-grouping contract:** #28 and #35, each with its migration and regression;
-  `events_pointer` fixed at an endpoint's creation (D10), the API refusing it in a PATCH and the API's role losing its
-  `UPDATE` grant, each boundary tested.
+- **M1. The schema blockers and the event-grouping contract:** #28 (already on main) and #35, with its migration and
+  regression; `events_pointer` fixed at an endpoint's creation (D10), the API refusing it in a PATCH and the API's role
+  losing its `UPDATE` grant, each boundary tested.
 - **M2. Retention:** `tenant_retention` (default 30 days, 1 to 365, set with `tenant.manage`); the read cutoff on every
   user-facing path; the `dewpoint_retention` role (the only role with `DELETE` on retained tables) and the `dewpoint
   retention` process (batches per tenant, under tenant scope, idempotent; an audit entry per tenant per sweep, counts
