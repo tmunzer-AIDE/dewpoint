@@ -68,6 +68,7 @@
   --warn-ink: #7a4a00;
   --danger: #b42318;
   --danger-hover: #9b1e15;
+  --danger-pressed: #861a12;
   --danger-bg: #fdecea;
   --on-danger: #ffffff;
   --ok: #1c6b3a;
@@ -85,8 +86,8 @@
   --rail-ink: #c5d3da;
   --rail-ink-strong: #ffffff; /* the active item */
   --rail-dim: #7f95a1;
-  --rail-active: rgba(255, 255, 255, 0.1);
-  --rail-line: rgba(255, 255, 255, 0.08);
+  --rail-active: rgba(255, 255, 255, 0.18); /* the current item: 1.5:1 above a hovered one */
+  --rail-line: rgba(255, 255, 255, 0.05); /* hover, separators */
   --disabled-ink: #8b9199;
   --disabled-bg: #eef0ec;
   --disabled-line: #dde1dc;
@@ -122,6 +123,7 @@
     --warn-ink: #f3c878;
     --danger: #f07a70;
     --danger-hover: #f38b82;
+    --danger-pressed: #f59a92;
     --danger-bg: #3a1714;
     --on-danger: #1c0907;
     --ok: #6fcf97;
@@ -139,8 +141,8 @@
     --rail-ink: #c5d3da;
     --rail-ink-strong: #ffffff;
     --rail-dim: #7f95a1;
-    --rail-active: rgba(255, 255, 255, 0.1);
-    --rail-line: rgba(255, 255, 255, 0.08);
+    --rail-active: rgba(255, 255, 255, 0.18);
+    --rail-line: rgba(255, 255, 255, 0.05);
     --disabled-ink: #6b7178;
     --disabled-bg: #202428;
     --disabled-line: #2c3136;
@@ -176,6 +178,7 @@
   --warn-ink: #f3c878;
   --danger: #f07a70;
   --danger-hover: #f38b82;
+  --danger-pressed: #f59a92;
   --danger-bg: #3a1714;
   --on-danger: #1c0907;
   --ok: #6fcf97;
@@ -193,8 +196,8 @@
   --rail-ink: #c5d3da;
   --rail-ink-strong: #ffffff;
   --rail-dim: #7f95a1;
-  --rail-active: rgba(255, 255, 255, 0.1);
-  --rail-line: rgba(255, 255, 255, 0.08);
+  --rail-active: rgba(255, 255, 255, 0.18);
+  --rail-line: rgba(255, 255, 255, 0.05);
   --disabled-ink: #6b7178;
   --disabled-bg: #202428;
   --disabled-line: #2c3136;

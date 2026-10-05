@@ -40,6 +40,11 @@ describe.each([
     expect(COLOURS.filter((n) => !tokens.has(`--${n}`))).toEqual([]);
   });
 
+  it("sets the current rail item apart from a hovered one by 1.5:1, besides its weight and ink", () => {
+    const rail = colour("rail");
+    expect(contrast(colour("rail-active", rail), colour("rail-line", rail))).toBeGreaterThanOrEqual(1.5);
+  });
+
   it.each(PAIRS)("%s on %s reaches %s:1", (fg, bg, min) => {
     const back = colour(bg);
     expect(contrast(colour(fg, back), back)).toBeGreaterThanOrEqual(min);

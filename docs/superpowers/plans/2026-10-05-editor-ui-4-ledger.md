@@ -72,3 +72,39 @@ cover local work only: anything outward-facing (push, PR, issues) is confirmed i
 14. Ruling: the theme and base styles live in `styles/theme.css`; the app's entry (`app.css`) and the specimen's
     (`specimen/specimen.css`) each import it, and the app's scan skips the specimen - the specimen's utilities had
     grown the shipped stylesheet from 17.7 to 25.7 KB - none.
+
+### Owner, 4a token checkpoint (2026-10-06, pasted)
+
+- Token approval held for one failure: the light outline live button pressed (`live` on `surface-pressed`) was
+  4.43:1 and missing from `PAIRS`. Fix it, and cover every rendered default, hover and pressed combination.
+- The figures were stale: 50 pairs a theme then (not 49), smallest margin 2.8 % (sim on the hatch), not 8 %.
+- Migrate the MFA recovery toggle's `text-accent` to `text-accent-ink`.
+- Direction of rulings 1–7, 9–11, 13–14 accepted. Ruling 8: confirm the current rail item stays visibly apart from
+  hover (`aria-current` isn't visible). Ruling 12: install Chromium 1243 for the locked Playwright; no repinning;
+  build 1234 only for provisional screenshots.
+- Final visual approval and the CSP/axe browser gate remain open.
+
+### 4a, after the token checkpoint (2026-10-06)
+
+15. Ruling: button states are data (`BUTTON_STATES` in `styles/tokenNames.ts`), drawn by the specimen and, next, the
+    Button component; every default, hover and pressed text-on-background pair joins `PAIRS` from it - the 4.43:1
+    pair escaped a hand-kept list - none.
+16. Ruling: the outline live button's pressed text is `--live-hover` (5.67:1, dark 6.99:1) - `live` on
+    `surface-pressed` was 4.43:1 - its pressed text is a shade darker than its resting text.
+17. Ruling: a new `--danger-pressed` (#861a12, dark #f59a92) - the filled danger button pressed like hover - none.
+18. Ruling (revises 8): hover on the rail is 5 % white, the current item 18 % with white ink and weight 600, a 1.5:1
+    step between the two backgrounds that tokens.test.ts holds - the design's 8 % and 10 % differed by 1.06:1 -
+    the current item is brighter than the mock's.
+19. Ruling: the hatch sits only behind slate text (`text-sim`), and a guard rule (`hatch-text`) fails a class list
+    that draws it without; a simulated node is a slate-tinted card with a hatched "fixture" tag - grey text on the
+    hatch was 4.21:1 (dark 4.20:1), a failure the review hadn't listed - less hatch on the canvas than a fully
+    hatched card.
+20. Ruling: a guard rule (`accent-text`) fails `text-accent`; the MFA recovery toggle and the old shell's logo moved
+    to `text-accent-ink` - the accent is 4.49:1 on the light ground - the logo's drop is a shade darker until the
+    shell is rebuilt.
+21. Ruling: `@axe-core/playwright` 4.13.0 installed (dev; it and `axe-core` 4.13.0 are MPL-2.0, as D22 allows for
+    dev) to cross-check the specimen: colour contrast in Chromium 1243 passes 236 rendered elements a theme with no
+    violation; the 7 hatched elements a theme are "incomplete" (axe can't read a pseudo-element background) and are
+    covered by `sim` on `sim-hatch` - none.
+22. Figures now: 59 pairs a theme (118), none under its floor; the smallest margin is `sim` on `sim-hatch`, light,
+    4.627:1 (+2.8 %).

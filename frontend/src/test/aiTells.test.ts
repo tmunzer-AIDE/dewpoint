@@ -30,6 +30,8 @@ describe("findTells", () => {
     ["raw-colour", "a.tsx", `<div className="bg-indigo-500 text-white">`],
     ["marketing-copy", "a.tsx", `<p>Seamlessly automate your network!</p>`],
     ["marketing-copy", "a.tsx", `<p>Oops, something broke</p>`],
+    ["accent-text", "a.tsx", `<button className="text-sm text-accent underline">`],
+    ["hatch-text", "a.tsx", `<div className="hatch-sim rounded-lg bg-surface">`],
   ])("flags %s in %s", (rule, path, text) => {
     expect(findTells(path, text)).toContain(rule);
   });
@@ -43,6 +45,9 @@ describe("findTells", () => {
     ["a heading's tight tracking", "a.tsx", `<h1 className="tracking-tight">`],
     ["colours in the token sheet", TOKENS, `:root { --ink: #15181c; --rail-active: rgba(255, 255, 255, 0.1); }`],
     ["a token shadow", "a.css", `.node { box-shadow: var(--shadow-node); }`],
+    ["accent ink as text, accent as a fill", "a.tsx", `<a className="text-accent-ink bg-accent text-on-accent">`],
+    ["the hatch behind slate text", "a.tsx", `<span className="hatch-sim bg-sim-bg text-sim">Simulated</span>`],
+    ["the hatch's own stylesheet", "a.css", `@import "./tokens.css";\n.hatch-sim { position: relative; }\n.x { content: ""; }`],
   ])("passes %s", (_, path, text) => {
     expect(findTells(path, text)).toEqual([]);
   });

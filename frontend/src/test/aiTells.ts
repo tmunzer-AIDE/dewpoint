@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-/** The mechanical AI design tells of outline §6; the checkpoint reviewer judges the rest on screen. */
+/** The mechanical AI design tells of outline §6, and two token-usage rules (accent as text, the hatch behind other
+ * than slate text); the checkpoint reviewer judges the rest on screen. */
 const RULES: [name: string, pattern: RegExp, tokensExempt?: boolean][] = [
   // A coloured accent stripe on one side of a card, callout or row. One-pixel separators stay.
   ["accent-border", /\bborder-[lt]-(?:[2-9]|\[)|border-(?:left|top)(?:-width)?\s*:\s*(?:[2-9]|\d{2,})(?:\.\d+)?px/],
@@ -25,7 +26,15 @@ const RULES: [name: string, pattern: RegExp, tokensExempt?: boolean][] = [
     true,
   ],
   ["marketing-copy", /\b(?:seamless(?:ly)?|supercharge[ds]?|effortless(?:ly)?|magic(?:al)?|oops)\b/i],
+  // Token usage. The accent is a fill and ring colour: as text it falls under 4.5:1 (use text-accent-ink).
+  ["accent-text", /\btext-accent(?![-\w])/],
 ];
+
+/** The hatch sits only behind slate text, the one ink held to 4.5:1 over it: a class list that draws the hatch must
+ * also set `text-sim`. */
+function hatchWithoutSimText(text: string): boolean {
+  return [...text.matchAll(/["'`]([^"'`]*\bhatch-sim\b[^"'`]*)["'`]/g)].some((m) => !/\btext-sim\b/.test(m[1]!));
+}
 
 const TOKEN_SHEET = /(?:^|\/)src\/styles\/tokens\.css$/;
 
@@ -34,7 +43,9 @@ const TOKEN_SHEET = /(?:^|\/)src\/styles\/tokens\.css$/;
 export function findTells(path: string, text: string): string[] {
   const allowed = new Set([...text.matchAll(/ai-tells-allow:\s*([a-z-]+)/g)].map((m) => m[1]));
   const isTokens = TOKEN_SHEET.test(path);
-  return RULES.filter(([name, pattern, exempt]) => !allowed.has(name) && !(exempt && isTokens) && pattern.test(text)).map(
+  const found = RULES.filter(([name, pattern, exempt]) => !allowed.has(name) && !(exempt && isTokens) && pattern.test(text)).map(
     ([name]) => name,
   );
+  if (!allowed.has("hatch-text") && /\.tsx?$/.test(path) && hatchWithoutSimText(text)) found.push("hatch-text");
+  return found;
 }

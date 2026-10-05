@@ -52,7 +52,7 @@ export function Shell() {
   return (
     <div className="flex min-h-screen flex-col">
       <header className="flex h-14 items-center gap-4 border-b border-line bg-surface px-4">
-        <span className="flex items-center gap-2 font-semibold text-accent">
+        <span className="flex items-center gap-2 font-semibold text-accent-ink">
           <Mark /> <span className="text-ink">Dewpoint</span>
         </span>
         <TenantSwitcher />

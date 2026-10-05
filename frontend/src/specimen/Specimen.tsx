@@ -4,7 +4,7 @@
 import { useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Mark, Wordmark } from "../components/Mark";
 import { contrast, over, parseColour } from "../styles/contrast";
-import { COLOURS, PAIRS } from "../styles/tokenNames";
+import { BUTTON_STATE_NAMES, BUTTON_STATES, COLOURS, PAIRS, type ButtonVariant } from "../styles/tokenNames";
 
 // Literal class names, so Tailwind generates them (it can't see `bg-${name}`).
 const BG: Record<string, string> = {
@@ -14,7 +14,7 @@ const BG: Record<string, string> = {
   "accent-hover": "bg-accent-hover", "accent-pressed": "bg-accent-pressed", "accent-ink": "bg-accent-ink",
   "accent-soft": "bg-accent-soft", "on-accent": "bg-on-accent", focus: "bg-focus", "focus-rail": "bg-focus-rail",
   "warn-bg": "bg-warn-bg", "warn-line": "bg-warn-line", "warn-ink": "bg-warn-ink", danger: "bg-danger",
-  "danger-hover": "bg-danger-hover", "danger-bg": "bg-danger-bg", "on-danger": "bg-on-danger", ok: "bg-ok",
+  "danger-hover": "bg-danger-hover", "danger-pressed": "bg-danger-pressed", "danger-bg": "bg-danger-bg", "on-danger": "bg-on-danger", ok: "bg-ok",
   "ok-bg": "bg-ok-bg", live: "bg-live", "live-hover": "bg-live-hover", "live-pressed": "bg-live-pressed",
   "live-bg": "bg-live-bg", "on-live": "bg-on-live", sim: "bg-sim", "sim-bg": "bg-sim-bg", "sim-hatch": "bg-sim-hatch",
   brand: "bg-brand", rail: "bg-rail", "rail-ink": "bg-rail-ink", "rail-ink-strong": "bg-rail-ink-strong",
@@ -25,12 +25,20 @@ const BG: Record<string, string> = {
 const FG: Record<string, string> = {
   ink: "text-ink", muted: "text-muted", "line-control": "text-line-control", focus: "text-focus", edge: "text-edge",
   "accent-ink": "text-accent-ink", "on-accent": "text-on-accent", "warn-ink": "text-warn-ink", danger: "text-danger",
-  "on-danger": "text-on-danger", ok: "text-ok", live: "text-live", "on-live": "text-on-live", sim: "text-sim",
+  "on-danger": "text-on-danger", ok: "text-ok", live: "text-live", "live-hover": "text-live-hover", "on-live": "text-on-live",
+  sim: "text-sim",
   "rail-ink": "text-rail-ink", "rail-dim": "text-rail-dim", "rail-ink-strong": "text-rail-ink-strong",
   "focus-rail": "text-focus-rail", brand: "text-brand",
 };
 
 const TRANSLUCENT = new Set(["rail-active", "rail-line", "overlay"]);
+
+const BORDER: Record<string, string> = {
+  accent: "border-accent", "accent-hover": "border-accent-hover", "accent-pressed": "border-accent-pressed",
+  "line-strong": "border-line-strong", sim: "border-sim", live: "border-live", "live-hover": "border-live-hover",
+  "live-pressed": "border-live-pressed", danger: "border-danger", "danger-hover": "border-danger-hover",
+  "danger-pressed": "border-danger-pressed",
+};
 
 type Theme = "light" | "dark";
 
@@ -141,16 +149,20 @@ function Type() {
 const BTN = "inline-flex min-h-9 items-center gap-2 rounded-lg border px-3 text-body font-medium";
 const FOCUS = "outline-2 outline-offset-2 outline-focus";
 const DISABLED = "border-disabled-line bg-disabled-bg text-disabled-ink";
-const BUTTONS: [string, string, string, string][] = [
-  // [label, default, hover, pressed]
-  ["Publish v3", "border-accent bg-accent text-on-accent", "border-accent-hover bg-accent-hover text-on-accent", "border-accent-pressed bg-accent-pressed text-on-accent"],
-  ["Cancel", "border-line-strong bg-surface text-ink", "border-line-strong bg-surface-hover text-ink", "border-line-strong bg-surface-pressed text-ink"],
-  ["Simulate step", "border-sim bg-surface text-sim", "border-sim bg-sim-bg text-sim", "border-sim bg-surface-pressed text-sim"],
-  ["Run step against Mist…", "border-live bg-surface text-live", "border-live bg-live-bg text-live", "border-live bg-surface-pressed text-live"],
-  ["Restart 1 device", "border-live bg-live text-on-live", "border-live-hover bg-live-hover text-on-live", "border-live-pressed bg-live-pressed text-on-live"],
-  ["Delete", "border-danger bg-surface text-danger", "border-danger bg-danger-bg text-danger", "border-danger bg-surface-pressed text-danger"],
-  ["Delete workflow", "border-danger bg-danger text-on-danger", "border-danger-hover bg-danger-hover text-on-danger", "border-danger-hover bg-danger-hover text-on-danger"],
-];
+const LABELS: Record<ButtonVariant, string> = {
+  primary: "Publish v3",
+  secondary: "Cancel",
+  simulate: "Simulate step",
+  "live-outline": "Run step against Mist…",
+  live: "Restart 1 device",
+  "danger-outline": "Delete",
+  danger: "Delete workflow",
+};
+
+function look(variant: ButtonVariant, state: (typeof BUTTON_STATE_NAMES)[number]): string {
+  const { fg, bg, border } = BUTTON_STATES[variant][state];
+  return `${FG[fg]} ${BG[bg]} ${BORDER[border]}`;
+}
 
 function States() {
   const field = "min-h-10 w-56 rounded-lg border bg-surface px-3 text-body";
@@ -160,13 +172,19 @@ function States() {
         {["", "default", "hover", "pressed", "focus", "disabled"].map((h) => (
           <span key={h} className="text-meta text-muted">{h}</span>
         ))}
-        {BUTTONS.map(([label, base, hover, pressed]) => (
-          <Row key={label} label={label}>
-            <span className={`${BTN} ${base}`}>{label}</span>
-            <span className={`${BTN} ${hover}`}>{label}</span>
-            <span className={`${BTN} ${pressed}`}>{label}</span>
-            <span className={`${BTN} ${base} ${FOCUS}`}>{label}</span>
-            <span className={`${BTN} ${DISABLED}`}>{label}</span>
+        {(Object.keys(BUTTON_STATES) as ButtonVariant[]).map((v) => (
+          <Row key={v} label={v}>
+            {BUTTON_STATE_NAMES.map((state) => (
+              <span key={state} data-variant={v} data-state={state} className={`${BTN} ${look(v, state)}`}>
+                {LABELS[v]}
+              </span>
+            ))}
+            <span data-variant={v} data-state="focus" className={`${BTN} ${look(v, "default")} ${FOCUS}`}>
+              {LABELS[v]}
+            </span>
+            <span data-variant={v} data-state="disabled" className={`${BTN} ${DISABLED}`}>
+              {LABELS[v]}
+            </span>
           </Row>
         ))}
       </div>
@@ -181,7 +199,7 @@ function States() {
           <span className={`${field} flex items-center border-danger`}>5c1e0a2f</span>
         </Field>
         <Field label="Name" hint="disabled">
-          <span className={`${field} flex items-center ${DISABLED}`}>Acme Prod · EU</span>
+          <span data-sample="disabled" className={`${field} flex items-center ${DISABLED}`}>Acme Prod · EU</span>
         </Field>
       </div>
       <div className="flex flex-wrap items-center gap-6 rounded-lg border border-line bg-surface p-4">
@@ -311,14 +329,14 @@ function Meaning() {
 function Node({ code, title, sub, state }: { code: string; title: string; sub: string; state?: "selected" | "failed" | "simulated" }) {
   const ring = state === "selected" ? "outline-2 outline-accent" : state === "failed" ? "outline-2 outline-danger" : "";
   return (
-    <div className={`flex w-[260px] items-center gap-3 rounded-lg border border-line-strong bg-surface px-3.5 py-3 shadow-node ${ring} ${state === "simulated" ? "hatch-sim" : ""}`}>
+    <div className={`flex w-[260px] items-center gap-3 rounded-lg border px-3.5 py-3 shadow-node ${ring} ${state === "simulated" ? "border-sim bg-sim-bg" : "border-line-strong bg-surface"}`}>
       <span className="w-10 shrink-0 font-mono text-caption font-semibold text-accent-ink">{code}</span>
       <span className="flex min-w-0 grow flex-col">
         <span className="font-semibold">{title}</span>
         <span className="text-small text-muted">{sub}</span>
       </span>
       {state === "failed" && <span className="rounded-sm bg-danger-bg px-1.5 text-caption text-danger">failed</span>}
-      {state === "simulated" && <span className="rounded-sm bg-sim-bg px-1.5 text-caption text-sim">fixture</span>}
+      {state === "simulated" && <span className="hatch-sim rounded-sm border border-sim bg-sim-bg px-1.5 text-caption text-sim">fixture</span>}
     </div>
   );
 }
@@ -371,7 +389,7 @@ function Rail() {
           </span>
           <span className={`${item} text-rail-ink`}>Home · default</span>
           <span className={`${item} bg-rail-line text-rail-ink`}>Runs · hover</span>
-          <span className={`${item} bg-rail-active font-medium text-rail-ink-strong`} aria-current="page">
+          <span className={`${item} bg-rail-active font-semibold text-rail-ink-strong`} aria-current="page">
             Workflows · current
           </span>
           <span className={`${item} text-rail-ink outline-2 outline-offset-2 outline-focus-rail`}>Connections · focus</span>

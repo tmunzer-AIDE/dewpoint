@@ -55,7 +55,7 @@ export function MfaPage() {
         <Button type="button" disabled={busy} onClick={() => void run(() => authenticatePasskey("mfa"))}>
           Use a passkey instead
         </Button>
-        <button type="button" className="text-left text-sm text-accent underline" onClick={() => setRecovery(!recovery)}>
+        <button type="button" className="text-left text-sm text-accent-ink underline" onClick={() => setRecovery(!recovery)}>
           {recovery ? "Use an authenticator code" : "Use a recovery code"}
         </button>
       </form>
