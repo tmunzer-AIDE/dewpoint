@@ -39,8 +39,10 @@ async def _run(worker: Any, owner: Any, port: int, node: type, *, host: str = "d
     cid = await add_connection(owner, tenant, config={"base_url": f"https://{host}:{port}"})
     seeded = await seed_step(owner, named=[cid], tenant=tenant, node_type=f"{node.type}@{node.version}")
     network = Network(
-        guard=guard({"dewpoint.test": ["127.0.0.1"], "private.test": ["10.0.0.9"]},
-                    [AllowEntry(ipaddress.ip_network("127.0.0.1/32"), None, tenant)]),  # fmt: skip
+        guard=guard(
+            {"dewpoint.test": ["127.0.0.1"], "private.test": ["10.0.0.9"]},
+            [AllowEntry(ipaddress.ip_network("127.0.0.1/32"), None, tenant)],
+        ),  # fmt: skip
         connections=DbConnections(worker),
         sessionmaker=worker,
         keys=FixtureKeys(),
