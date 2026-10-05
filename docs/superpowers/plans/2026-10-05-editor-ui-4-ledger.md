@@ -39,4 +39,33 @@ cover local work only: anything outward-facing (push, PR, issues) is confirmed i
 
 ## Mid-slice rulings
 
-None yet.
+### 4a, token pass (2026-10-06)
+
+1. Ruling: input, checkbox and switch boundaries and canvas edges use a new `--line-control` (#7a817b, dark #788088),
+   not the design's `--line-strong` (1.57:1) - WCAG 1.4.11 wants 3:1 for a control's boundary and for graphics that
+   carry meaning - inputs and edges look a little heavier than the mock.
+2. Ruling: text on filled live and danger buttons is dark in the dark theme (`--on-live`, `--on-danger`), not the
+   design's white (2.1:1 and 2.7:1) - AA text contrast - dark filled buttons read differently from light ones.
+3. Ruling: the accent is a fill and ring colour; accent text uses `--accent-ink` - `--accent` on the light ground is
+   4.49:1 - none visible.
+4. Ruling: the current rail item's white text is a token (`--rail-ink-strong`), not a raw colour - the guard bans
+   colours outside `tokens.css` - none.
+5. Ruling: the simulated hatch is a bundled SVG mask, never a CSS gradient, and simulated text is held to 4.5:1 over
+   it - the guard bans `gradient` outright - a mask needs an evergreen browser.
+6. Ruling: JetBrains Mono's ligatures are off for code (`code`, `kbd`, `pre`, `samp`, `.font-mono`) - the specimen
+   drew CEL's `!=` as one `≠` glyph, which misleads anyone reading or typing an expression - none.
+7. Ruling: the dialog shadow is `0 8px 24px` at 14 % (dark 50 %), not the design's `0 20px 60px` at 25 % - outline §6
+   - dialogs float a little less.
+8. Ruling: hover on the rail is `--rail-line`, the current item `--rail-active` with strong ink and weight 500 - the
+   design shows only the current item - hover and current are close; the weight and `aria-current` tell them apart.
+9. Ruling: Tailwind no longer scans test files for class names - the guard's fixtures (`bg-indigo-500`,
+   `shadow-xl`…) were shipping 6 KB of banned utilities - none.
+10. Ruling: tests read stylesheets as text through vitest's `css.include` - no `@types/node` dependency for `fs` -
+    none.
+11. Ruling: the specimen runs from a background Vite on 127.0.0.1:5181, not `.claude/launch.json` - the main
+    checkout stays untouched - it isn't in the app's preview list.
+12. Ruling: screenshots used the cached Chromium build 1234 through `executablePath`; the locked Playwright wants
+    build 1243, which isn't installed - installing it is a tool install, left for the owner - 4a's e2e harness (CSP
+    and axe checks) can't run until it's installed or pinned to a cached build.
+13. Ruling: the three font packages are saved at exact versions (pnpm 12's default) - "at their recorded versions" -
+    none.

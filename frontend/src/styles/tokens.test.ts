@@ -103,6 +103,10 @@ describe("the Tailwind theme (app.css)", () => {
     for (const glob of ["../**/*.test.ts", "../**/*.test.tsx", "../test"]) expect(app).toContain(`@source not "${glob}";`);
   });
 
+  it("turns JetBrains Mono's ligatures off, so code shows what was typed (`!=`, never `≠`)", () => {
+    expect(app).toMatch(/code,\s*kbd,\s*pre,\s*samp,\s*\.font-mono\s*\{[^}]*font-variant-ligatures:\s*none;/);
+  });
+
   it("exposes every colour token as a utility", () => {
     expect(COLOURS.filter((n) => !theme.includes(`--color-${n}: var(--${n});`))).toEqual([]);
   });

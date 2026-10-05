@@ -98,6 +98,11 @@ h3 {
   line-height: var(--leading-tight);
 }
 
+/* Code shows exactly what was typed: JetBrains Mono would draw `!=` as one `≠` glyph, `>=` as `≥`. */
+code, kbd, pre, samp, .font-mono {
+  font-variant-ligatures: none;
+}
+
 /* One focus ring everywhere: 2 px, offset, 3:1 against every surface (tokens.test.ts). The rail is dark in both
    themes, so it takes its own ring colour. */
 :focus-visible {
