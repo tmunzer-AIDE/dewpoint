@@ -18,6 +18,7 @@ from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
 from dewpoint.apps import codec
 from dewpoint.apps.worker.activities import Evaluate, RunStore, cel_activity, engine_activities
+from dewpoint.apps.worker.network import Network
 from dewpoint.core.claims import secret_index
 from dewpoint.core.claims.service import ClaimConflictError, ClaimUnavailableError, NewClaim
 from dewpoint.engine import ENGINE_ABI
@@ -233,12 +234,13 @@ async def workers(
     evaluate: Evaluate | None = in_process,
     runner: WorkflowRunner | None = None,  # tests that inject faults run the workflow outside the sandbox
     cache: int = 1000,  # 0: every workflow task replays the run's whole history
+    network: Network | None = None,  # what plugin steps reach the network with (plugins-3 D4, D7)
 ) -> AsyncIterator[None]:
     engine = Worker(
         client,
         task_queue=ENGINE_QUEUE,
         workflows=[RunGraph, LoopBatch],
-        activities=engine_activities(store, plugins),
+        activities=engine_activities(store, plugins, network=network),
         workflow_runner=runner or SandboxedWorkflowRunner(),
         max_cached_workflows=cache,
     )
