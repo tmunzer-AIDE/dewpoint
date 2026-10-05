@@ -1,19 +1,20 @@
 # Engine 2b-4: Retention and Production — Outline
 
-> **Status: approved by the owner as an outline (82bfca6, finalized 3b875c0, 2026-10-05); D2, D4 and D5 accepted; D6
-> and D12 approved as proof candidates, not proven production boundaries, with D12b ruled and the proofs' images and
-> `boto3` approved; no prototype, detailed plan or gate lift authorized. It was revised after the owner's first review
-> (erasure's completion, production Temporal's proof, Mist, event grouping, ingress's switch), second (erasure: no
-> reversal, durable progress, the `tenants` schema), third (the firing inventory before schedules are deleted,
-> completeness from Temporal's retention bound, audit entries described as they are, eligibility requiring `active`),
-> fourth (fencing in-flight writers, the schedule sync's included; the bound as the earliest final check) fifth (late
-> Temporal writes made unable to fire and reconciled after completion), sixth (an enforced, audited namespace-change
-> boundary for the 30-day cap; reconciliation's residual risk; missed firings recorded) and seventh (which targets
-> qualify for that boundary; both readiness paths failing closed without it; the schedule action corrected). Not
-> authorization to build anything; no gate is authorized to lift by this review, neither the production gate nor
-> ingress's development-only restriction.** As in 2b-1a through 2b-3b, once the owner rules, each sub-project is built
-> on a prototype branch from `main`, with the owner's checkpoint after each milestone; its plan is then written from
-> the replayed diffs, with a revision of the 2b spec, for the owner's review before execution.
+> **Status: approved by the owner as an outline (82bfca6, finalized 3b875c0, 2026-10-05); D2, D4 and D5 accepted; D7
+> to D11 adopted from the owner's recommendations (their measurement thresholds acceptance criteria, not claims); D13
+> resolved; D6 and D12 approved as proof candidates, not proven production boundaries, with D12b ruled and the proofs'
+> images and `boto3` approved; no prototype, detailed plan or gate lift authorized. It was revised after the owner's
+> first review (erasure's completion, production Temporal's proof, Mist, event grouping, ingress's switch), second
+> (erasure: no reversal, durable progress, the `tenants` schema), third (the firing inventory before schedules are
+> deleted, completeness from Temporal's retention bound, audit entries described as they are, eligibility requiring
+> `active`), fourth (fencing in-flight writers, the schedule sync's included; the bound as the earliest final check)
+> fifth (late Temporal writes made unable to fire and reconciled after completion), sixth (an enforced, audited
+> namespace-change boundary for the 30-day cap; reconciliation's residual risk; missed firings recorded) and seventh
+> (which targets qualify for that boundary; both readiness paths failing closed without it; the schedule action
+> corrected). Not authorization to build anything; no gate is authorized to lift by this review, neither the
+> production gate nor ingress's development-only restriction.** As in 2b-1a through 2b-3b, once the owner rules, each
+> sub-project is built on a prototype branch from `main`, with the owner's checkpoint after each milestone; its plan
+> is then written from the replayed diffs, with a revision of the 2b spec, for the owner's review before execution.
 
 **Goal:** Dewpoint can hold tenants' production data. Data leaves on schedule, a tenant can be erased, old keys can be
 retired, the production Temporal is verified, every production blocker is fixed or bounded with the owner's explicit
@@ -480,7 +481,7 @@ plan or either production gate's lift.
   records under the platform's audit-retention policy, and backups until they expire.
 
 **2b-4b, production hardening and the gate lift**
-- **M1. The engine blockers:** #16, #18 and #26, each fixed or bounded (D7).
+- **M1. The engine blockers:** #16, #18 and #26, each fixed, as D7 says, each reproduction finishing on the dev server.
 - **M2. §7.9's hardening:** as the ledger below rules, item by item, the dispatcher-scaling change and its measurement
   included.
 - **M3. Production Temporal and audit integrity:** "Production Temporal" above, its real verified-TLS proof included;
@@ -501,30 +502,32 @@ plan or either production gate's lift.
 | D4 | The read cutoff | **Accepted (2026-10-05):** filter in the shared read paths (one query helper per kind), proven by a test per user-facing path; never a database view the API could bypass. |
 | D5 | Audit pruning and #3 | **Accepted (2026-10-05):** pruning ships in 2b-4a disabled in production until #3's sink is configured; the readiness checks refuse a production gate without it. |
 | D6 | #3's first sink | **Approved as a proof candidate (2026-10-05):** an S3 bucket with compliance-mode Object Lock, with anchor completeness off the database host; `cgr.dev/chainguard/minio` and `boto3` approved. |
-| D7 | #16, #18, #26 | Fix each, per the issues' preferred directions: #16 bounds the snapshot (or ends the run with a fixed code before the limit); #18 bounds measuring's cost; #26 sends a shared value once, as a size claim. Bounds instead of fixes need the owner's risk decision, case by case. |
-| D8 | §7.9's items | See below. |
-| D9 | Dispatcher scaling | Required before production. Measure first on the CLI dev server (approved image), then choose: `SKIP LOCKED` on the endpoint row, or dispatchers taking disjoint candidates. Rerun the load probe's separate-tenant control after the change; §8.3's fairness and races are re-proven. |
-| D10 | 2b-3b's deferred ingress minors | (1) the matcher's endless retry: with §7.9's bounded retry and alerting (2b-4b M2); (2) the guide's warning about an empty `DEWPOINT_INGRESS_TRUSTED_PROXIES` behind a proxy: a doc fix (2b-4b M4); (3) changing `events_pointer` after deliveries changes deduplication: it becomes fixed at creation, like the id source, and a different grouping needs a new endpoint (2b-4a M1); an intentional contract change in revision 10 (§8.3), tested at the API and the database role; (4) the recording function not checking a blob's embedded key version: an added predicate (2b-4a M3). |
-| D11 | The operator's identity | `enable-` and `disable-production-runs` record the operator: an admin login (an identity the platform knows) rather than the OS user. The mechanism is the owner's choice. |
+| D7 | #16, #18, #26 | **Adopted (the owner's recommendation, 2026-10-05): fix all three.** #16: compact the snapshot and check its encoded size before continuing as new; an oversized remainder ends the run with `snapshot_too_large`, never retrying the workflow task for ever. #18: stop measuring a value once it passes the local cap, then let the real-size reproduction and gate 7b's CPU measurement decide whether binding also needs a byte-based yield budget. #26: claim a shared oversized binding once and pass its handle, with a measured per-step history budget as a backstop for other large fan-outs. Each issue's reproduction finishes on the dev server without a deadlocked task or a run the server terminates; any changed workflow commands are replayed under the right ABI. |
+| D8 | §7.9's items | **Adopted (the owner's recommendation, 2026-10-05):** the fix dispositions below, with the dispatch cycle's budgets and the CSV reader's bound made explicit. |
+| D9 | Dispatcher scaling | **Adopted (the owner's recommendation, 2026-10-05):** `SKIP LOCKED` on the endpoint's row and then the tenant's counter row, in the existing order (gate, tenant, endpoint, counter, event): a busy tenant is skipped, not waited on, and candidates page past the first batch so busy rows can't hold the top 50. Preferred over dispatcher ownership or leases unless measurement shows it can't deliver. `ingress_load.py` compares one and two dispatcher processes with equal backlogs on at least two tenants, at fan-outs 1, 5 and 20. **Acceptance criteria (proposed, not claims about today's probe):** at least 1.5 times the aggregate drain with independent tenants; no worse oldest-event age per tenant, and no starvation; correct counters; exactly-once admission under races. Accepted-event-to-start latency is measured separately against a real Temporal, and the advertised ingress rates come down if that path can't sustain them. No two-dispatcher speedup is demanded for one tenant, whose counter row serializes its matches on purpose. |
+| D10 | 2b-3b's deferred ingress minors | **Adopted (the owner's recommendation, 2026-10-05):** (1) the matcher's unexpected failures get bounded automatic retry with backoff and an alert, and an unclassified event is left pending for an operator's repair, its event-specific dead-letter attempts never spent on what may be a platform bug; (2) the guide warns about an empty `DEWPOINT_INGRESS_TRUSTED_PROXIES` behind a proxy, and a proxy-path test shows that setting is never presented as identifying the caller for allowlists or rate limits; (3) the recording function refuses a sealed blob whose embedded key version differs from the version supplied, with a regression through the ingress role directly (2b-4a M3). The `events_pointer` ruling (fixed at creation, 2b-4a M1) is unchanged. |
+| D11 | The operator's identity | **Adopted (the owner's recommendation, 2026-10-05):** the gate's and ingress switch's normal changes go through a platform-admin-authenticated API on the existing active MFA session, recording that user's immutable `actor_id`, the action, the attestation and the readiness result in the same transaction as the change; the CLI calls that API. Neither the OS user nor a caller-supplied `--operator` string proves an identity. A separately controlled, attributable break-glass procedure can disable during an API outage, never enable. The same identity rule covers every other human-operated destructive platform command, with a named service principal for bootstrap automation. |
 | D12 | Production Temporal | **Approved as a proof candidate (2026-10-05):** self-hosted Temporal with a fail-closed custom authorizer, every change path proven; mTLS-only and bearer-token-only proven separately; D12b ruled (database administrators inside the operator boundary, restricted and audited); Temporal Cloud unsupported as documented; `golang`, `temporalio/admin-tools` and a minimal runtime base approved. |
 | D13 | Mist webhooks | **Resolved (2026-10-05), from Mist's webhook guides and the owner:** an `http-post` webhook takes any custom header the Mist admin configures (Mist's security guide: custom headers "for additional authentication layers"), `Authorization` included, and Mist doesn't restrict them; so the bearer path works when the admin adds `Authorization: Bearer <token>`, optional on Mist's side. The guide documents that, replacing 2b-3b's "unverified" note, and its setup check uses Mist's Ping API and its 30-day Deliveries history (which shows the headers Mist sent). Mist's own signature, `X-Mist-Signature-v2` (HMAC-SHA256 of the body, no documented timestamp or replay protection), isn't accepted by Dewpoint's timestamped HMAC, which is no substitute for it; supporting it natively stays a later decision. Also from the guides: Mist publishes its webhook source addresses (for an endpoint's allowlist) and batches a topic's events into one message; its retry policy, timeout and event ids aren't documented, so an endpoint without an id source stays at-least-once. |
 | D14 | Ingress in production | As "Ingress in production" above: its own audited switch for first activation; the runs gate turning off keeps recording events (§2.5). |
 
-**§7.9's items (D8), proposed:**
-- *Bound the serial dispatch cycle:* fix (a time budget per cycle, with the leader's schedule batches inside it), 2b-4b
-  M2.
+**§7.9's items (D8), adopted (the owner's recommendation, 2026-10-05):**
+- *Bound the serial dispatch cycle:* fix. Dispatch, matching and the leader's schedule work each get their own
+  admission budget per cycle; a Temporal call already sent is never abandoned merely because a cycle's budget ran out.
+  2b-4b M2.
 - *Erasure pauses schedules:* fix, with erasure (2b-4a M4).
-- *The CSV reader's memory:* a measured bound for concurrent uploads and a cap on them, or a streaming reader; the
-  owner's choice, 2b-4b M2.
+- *The CSV reader's memory:* keep the 5 MiB limit; measure the worst-case parse and concurrent uploads, then cap uploads
+  before their bodies are buffered; stream the reader if no acceptable per-process memory bound can be shown. 2b-4b M2.
 - *Bounded retry and alerting for a deterministic per-request failure* (the dispatcher's, the reconciler's and, per
   D10, the matcher's): fix, 2b-4b M2.
 - *An operator's recovery path* for a run or slot whose Temporal history is gone, and for a `starting` request whose
-  run already ended: fix (a command, audited), 2b-4b M2.
+  run already ended: fix, as audited commands that never free a slot or retry a start on an uncertain Temporal
+  absence. 2b-4b M2.
 - *Bounded retry and alerting for a cancel that keeps failing to send:* fix, 2b-4b M2.
-- *The disable command's audit identifies the operator:* fix, with D11 (2b-4b M4).
+- *The disable command's audit identifies the operator:* fix, as D11 says (2b-4b M4).
 - *Matching scaling with dispatchers:* D9.
-- *Ingress's limits:* production values from measurements with a real Temporal and up to twenty bindings, or the
-  development values kept with the owner's risk decision; 2b-4b M2.
+- *Ingress's limits:* production rates set from end-to-end tests with a real Temporal and 20 bindings; neither
+  today's 10/s defaults nor the fake-Temporal drain is capacity evidence. 2b-4b M2.
 - *Mist's bearer token:* resolved (D13): a custom `Authorization` header the Mist admin configures, documented in
   the guide.
 - *The Compose proofs:* the run, the schedule and the webhook have passed in CI; they stay required on every PR.
