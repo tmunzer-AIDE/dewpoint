@@ -5,12 +5,13 @@
 > durable progress, the `tenants` schema) third (the firing inventory before schedules are deleted, completeness from
 > Temporal's retention bound, audit entries described as they are, eligibility requiring `active`) fourth (fencing
 > in-flight writers, the schedule sync's included; the bound as the earliest final check) fifth (late Temporal writes
-> made unable to fire and reconciled after completion) and sixth (an enforced, audited namespace-change boundary for
-> the 30-day cap, without which completion is blocked; reconciliation's residual risk; missed firings recorded). Not
-> authorization to build anything; no gate is authorized to lift by this review, neither the production gate nor
-> ingress's development-only restriction.** As in 2b-1a through 2b-3b, once the owner rules, each sub-project is built
-> on a prototype branch from `main`, with the owner's checkpoint after each milestone; its plan is then written from
-> the replayed diffs, with a revision of the 2b spec, for the owner's review before execution.
+> made unable to fire and reconciled after completion) sixth (an enforced, audited namespace-change boundary for the
+> 30-day cap; reconciliation's residual risk; missed firings recorded) and seventh (which targets qualify for that
+> boundary; both readiness paths failing closed without it; the schedule action corrected). Not authorization to build
+> anything; no gate is authorized to lift by this review, neither the production gate nor ingress's development-only
+> restriction.** As in 2b-1a through 2b-3b, once the owner rules, each sub-project is built on a prototype branch from
+> `main`, with the owner's checkpoint after each milestone; its plan is then written from the replayed diffs, with a
+> revision of the 2b spec, for the owner's review before execution.
 
 **Goal:** Dewpoint can hold tenants' production data. Data leaves on schedule, a tenant can be erased, old keys can be
 retired, the production Temporal is verified, every production blocker is fixed or bounded with the owner's explicit
@@ -87,8 +88,9 @@ Each arrow reads "needs".
   keypairs; the event keypairs and the ingress key can be rotated and retired; matching scales with dispatchers (D9).
   An audited switch of its own governs its first activation in production; once on, turning the runs gate off still
   lets it record events while matching waits (§2.5). "Ingress in production" below (D14).
-- **Readiness → a real verified-TLS proof.** The readiness checks pass only after the production Temporal proof
-  ("Production Temporal" below, D12).
+- **Readiness → a real verified-TLS proof and a verified namespace-change boundary.** Both readiness paths
+  (`enable-production-runs` and ingress's own switch) pass only after the production Temporal proof and fail closed
+  without a verified boundary for the 30-day cap ("Production Temporal" below, D12 and D3g).
 - **The gate lift → every blocker.** #28, #35, #3; #16, #18 and #26 fixed, or bounded with a demonstrated bound and the
   owner's explicit risk decision; each §7.9 item fixed or explicitly decided; the readiness checks passing.
 
@@ -144,8 +146,9 @@ effect marks itself in the transaction that does it.
       each `ScheduleTick` records its own workflow and run ids as its first act, a skip included), every firing the
       schedule's describe still lists (running and recent), and every execution visibility finds started by the
       schedule, each an item for step 6;
-   3. each deleted, verified by a describe that finds nothing. A schedule's action holds the tenant's encrypted input,
-      so deleting extends §6.5's "pause" (revision 10).
+   3. each deleted, verified by a describe that finds nothing. A schedule's action carries only the schedule's id (its
+      input is in Dewpoint's `schedules` row, which the sweep deletes), but a paused schedule still holds the tenant's
+      spec and identifiers in Temporal and could be unpaused, so deleting extends §6.5's "pause" (revision 10).
 
    The inventory isn't claimed complete: a firing that never ran its first activity left no record, and visibility
    may lag. Completeness comes from step 9's bound, not from the inventory.
@@ -268,15 +271,17 @@ closed, found or not:
   start, the end or on every pass, can miss a temporary increase, and Temporal's API offers no namespace version to
   prove there was none (`DescribeNamespace` reports the retention and archival configuration, and `failover_version`
   isn't a configuration version). So the cap needs an actual namespace-change boundary:
-  - **enforced and audited by the Temporal deployment:** a change that would set the retention above 30 days is
-    refused where it's made, and every namespace change is recorded where Dewpoint's operators can review it. Which
-    mechanism counts on each supported deployment (for example an authorizer on a self-hosted frontend refusing such a
-    change and logging its decisions, or a managed service's access control and audit log of namespace changes) is the
-    owner's decision (D3g), and D12's proof verifies it on the real target;
-  - `enable-production-runs` records which boundary the deployment has, with the operator's attestation; an erasure
-    records the boundary it relied on;
-  - **without such a boundary,** the bound is unproven: the erasure can't complete and stays `erasing`, alerting. A
-    supported deployment that can't guarantee the boundary leaves every erasure's completion blocked.
+  - **A production Temporal target qualifies only if every namespace-change path mechanically rejects a retention
+    above 30 days and records every change in an independently reviewable audit trail** (D3g, the owner's ruling).
+    Access control plus an audit log isn't enough while an authorized user can still set 31 days: such a target is
+    unsupported unless it provides an equivalent enforced cap. An authorizer on a self-hosted frontend that refuses
+    such a change and logs its decisions is a candidate to prove, not an assumed solution: D12's proof must show it
+    rejecting the change on every namespace-change path of the real target.
+  - **Readiness fails closed without it:** `enable-production-runs` and ingress's own switch both refuse a target whose
+    boundary hasn't been verified, so production is never enabled on a deployment where erasures couldn't complete.
+    Each records the verified boundary; an erasure records the boundary it relied on.
+  - **If a verified boundary is later lost** (the deployment changes), the bound is unproven again: an erasure relying
+    on it can't complete and stays `erasing`, alerting.
   - Archival must be disabled for the namespace (D12), so no copy outlives retention.
 - **The bound is the earliest point to attempt the final check, not a completion deadline.** Then every found
   execution is read back not-found again, every schedule the tenant had is described absent, and a visibility query for
@@ -338,14 +343,17 @@ answers not-found while its projection isn't terminal goes through §7.9's opera
   server with TLS, or another) and any image it needs approved are the owner's decisions (D12).
 - **What erasure needs of it** (D3b): `DeleteWorkflowExecution`, visibility queries by workflow-id prefix,
   `DescribeNamespace`'s retention and archival state, archival disabled for the namespace (which the readiness checks
-  verify), and a namespace-change boundary that refuses a retention above 30 days and audits every change (D3g),
-  without which erasures can't complete.
+  verify), and a verified namespace-change boundary: every path mechanically rejects a retention above 30 days, and
+  every change is recorded in an independently reviewable audit trail (D3g). Without it, both readiness paths fail
+  closed.
 
 ## Ingress in production (D14)
 
 - **Its own audited switch** (off by default; enabled and disabled by a platform admin, the operator recorded, D11)
   governs ingress's first activation in production, after its own readiness: retention sweeping, the event keypairs'
-  rotation in place, the scaling change (D9) in, the Mist decision (D13) reflected in the guide.
+  rotation in place, the scaling change (D9) in, the Mist decision (D13) reflected in the guide, the production Temporal
+  proof passed, and the namespace-change boundary verified (D3g); without the last two it fails closed, as the runs
+  gate does.
 - **Independent of the runs gate once on:** turning the runs gate off keeps §2.5's durable-source behavior: ingress
   still records webhook events, and the matcher waits until the gate is on again. Turning ingress's switch off stops
   recording (503 `unavailable`), pending events kept for matching.
@@ -383,7 +391,8 @@ answers not-found while its projection isn't terminal goes through §7.9's opera
 - **M3. Production Temporal and audit integrity:** "Production Temporal" above, its real verified-TLS proof included;
   #3's off-host anchors.
 - **M4. Readiness and the gate:** the readiness checks, `enable-production-runs` with the operator's attestation, the
-  disable command naming its operator, ingress's own switch (D14). Then the gate-lift checkpoint: the owner
+  disable command naming its operator, ingress's own switch (D14), both readiness paths failing closed without the
+  production Temporal proof and a verified namespace-change boundary (D3g). Then the gate-lift checkpoint: the owner
   rules with every blocker's evidence in front of them. Lifting the gate on a real deployment is the owner's act, not a
   plan task.
 
@@ -393,7 +402,7 @@ answers not-found while its projection isn't terminal goes through §7.9's opera
 |---|---|---|
 | D1 | The split | 2b-4a then 2b-4b, as above; one outline, two plans, two prototypes. |
 | D2 | Order inside 2b-4a | #28 and #35 first, then retention, then re-encryption and retirement, then erasure, which needs the others. |
-| D3 | Tenant erasure | As "Tenant erasure" above, with the owner's rulings: (a) no abort once `erasing` is committed, only a stop or a retry; (b) every found execution deleted and read back, the firing inventory captured before schedules are deleted, and completeness from Temporal's retention bound, never from visibility; (c) audit entries under the platform's audit-retention policy, described as they are; (d) Temporal's retention enforcement accepted as the trust boundary for executions Dewpoint can't enumerate, the bound being the earliest point for the final check, not a deadline; (e) in-flight writers fenced by the lifecycle lock, the schedule sync's transaction spanning its Temporal write; late Temporal writes made unable to fire (schedules created paused, unpaused only by a token-carrying update, relied on only once the deleted-and-recreated token test passes) and detected and repaired after completion, the residual risk between passes stated; (f) a firing due between paused creation and the unpause recorded as missed, the user's start never shifted; (g) to decide: which enforced, audited namespace-change boundary counts on each supported deployment; without one, completion is blocked. |
+| D3 | Tenant erasure | As "Tenant erasure" above, with the owner's rulings: (a) no abort once `erasing` is committed, only a stop or a retry; (b) every found execution deleted and read back, the firing inventory captured before schedules are deleted, and completeness from Temporal's retention bound, never from visibility; (c) audit entries under the platform's audit-retention policy, described as they are; (d) Temporal's retention enforcement accepted as the trust boundary for executions Dewpoint can't enumerate, the bound being the earliest point for the final check, not a deadline; (e) in-flight writers fenced by the lifecycle lock, the schedule sync's transaction spanning its Temporal write; late Temporal writes made unable to fire (schedules created paused, unpaused only by a token-carrying update, relied on only once the deleted-and-recreated token test passes) and detected and repaired after completion, the residual risk between passes stated; (f) a firing due between paused creation and the unpause recorded as missed, the user's start never shifted; (g) a production Temporal target qualifies only if every namespace-change path mechanically rejects a retention above 30 days and records changes in an independently reviewable audit trail; a self-hosted authorizer is a candidate to prove; access control plus an audit log alone is unsupported; both readiness paths fail closed without a verified boundary. |
 | D4 | The read cutoff | Filter in the shared read paths (one query helper per kind), proven by a test per user-facing path; never a database view the API could bypass. |
 | D5 | Audit pruning and #3 | Pruning ships in 2b-4a disabled in production until #3's sink is configured; the readiness checks refuse a production gate without it. |
 | D6 | #3's first sink | One target first; which one (object storage with object lock, or syslog or SIEM) is the owner's. Testing it needs an image the owner approves (for object storage, an S3-compatible server). |
@@ -402,7 +411,7 @@ answers not-found while its projection isn't terminal goes through §7.9's opera
 | D9 | Dispatcher scaling | Required before production. Measure first on the CLI dev server (approved image), then choose: `SKIP LOCKED` on the endpoint row, or dispatchers taking disjoint candidates. Rerun the load probe's separate-tenant control after the change; §8.3's fairness and races are re-proven. |
 | D10 | 2b-3b's deferred ingress minors | (1) the matcher's endless retry: with §7.9's bounded retry and alerting (2b-4b M2); (2) the guide's warning about an empty `DEWPOINT_INGRESS_TRUSTED_PROXIES` behind a proxy: a doc fix (2b-4b M4); (3) changing `events_pointer` after deliveries changes deduplication: it becomes fixed at creation, like the id source, and a different grouping needs a new endpoint (2b-4a M1); an intentional contract change in revision 10 (§8.3), tested at the API and the database role; (4) the recording function not checking a blob's embedded key version: an added predicate (2b-4a M3). |
 | D11 | The operator's identity | `enable-` and `disable-production-runs` record the operator: an admin login (an identity the platform knows) rather than the OS user. The mechanism is the owner's choice. |
-| D12 | Production Temporal | As "Production Temporal" above: mTLS and API-key auth both; a real verified-TLS integration proof before readiness can pass. The proof's target and any image approval are the owner's. |
+| D12 | Production Temporal | As "Production Temporal" above: mTLS and API-key auth both; a real verified-TLS integration proof and a verified namespace-change boundary (D3g) before either readiness path can pass. The proof's target and any image approval are the owner's. |
 | D13 | Mist webhooks | Supported in production only if a real Mist delivery confirms the bearer-header path. Otherwise the guide says Mist webhooks are unsupported in production: Mist signs the body alone, without a timestamp, so the timestamped HMAC scheme is no substitute for it. |
 | D14 | Ingress in production | As "Ingress in production" above: its own audited switch for first activation; the runs gate turning off keeps recording events (§2.5). |
 
