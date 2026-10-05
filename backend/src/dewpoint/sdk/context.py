@@ -2,6 +2,8 @@
 import uuid
 from typing import Protocol
 
+from dewpoint.sdk.net import Connection, HttpClient, Net
+
 
 class StepLogger(Protocol):
     """Logs only what the plugin's own code wrote (engine 2b spec §6.7): an event, a field's name and a field's value
@@ -17,7 +19,7 @@ class StepLogger(Protocol):
 
 
 class StepContext(Protocol):
-    """What a node sees while it runs. Sub-project 3 adds connection() and http. It is an API, not a sandbox."""
+    """What a node sees while it runs. It is an API, not a sandbox."""
 
     @property
     def tenant_id(self) -> uuid.UUID: ...
@@ -41,6 +43,21 @@ class StepContext(Protocol):
     def cancelled(self) -> bool: ...
 
     def idempotency_key(self) -> str: ...
+
+    async def connection(self, connection_id: uuid.UUID) -> Connection:
+        """A connection this step's config names (plugins-3 D4). Raises `ConnectionUnavailable` for any other, and in a
+        simulated run, which never sends."""
+        ...
+
+    @property
+    def http(self) -> HttpClient:
+        """Guarded HTTP without credentials (plugins-3 D7). Refused in a simulated run."""
+        ...
+
+    @property
+    def net(self) -> Net:
+        """Guarded TCP, TLS and UDP (plugins-3 D7). Refused in a simulated run."""
+        ...
 
     def heartbeat(self, *details: object) -> None:
         """Tells Temporal the attempt is alive. `details` aren't sent: Temporal keeps an attempt's last ones, and a

@@ -131,7 +131,13 @@ async def delete(
     ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
     db: AsyncSession = Depends(get_db, scope="function"),
 ) -> Response:
-    await service.delete_connection(db, ctx, await _get(db, ctx, connection_id))
+    conn = await service.get_for_update(db, ctx.tenant_id, connection_id)
+    if conn is None:
+        raise HTTPException(404, detail={"error": "not_found"})
+    try:
+        await service.delete_connection(db, ctx, conn)
+    except service.ConnectionInUseError:
+        raise HTTPException(409, detail={"error": "connection_in_use"}) from None
     return Response(status_code=204)
 
 

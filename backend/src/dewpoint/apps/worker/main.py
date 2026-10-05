@@ -21,11 +21,14 @@ from dewpoint.apps.worker.activities import RunStore, cel_activity, engine_activ
 from dewpoint.apps.worker.claims import ClaimStore
 from dewpoint.apps.worker.deployment import deployment_config, set_current, this_build
 from dewpoint.apps.worker.health import reporter, self_check, start_healthy, watch
+from dewpoint.apps.worker.network import DbConnections, Network
 from dewpoint.apps.worker.store import DbRunStore
 from dewpoint.core.config import Settings
 from dewpoint.core.crypto.kek import KekSet
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.db import make_engine, make_sessionmaker
+from dewpoint.core.egress import allowlist
+from dewpoint.core.egress.guard import Guard, SystemResolver
 from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, cel_queue
 from dewpoint.engine.runtime.workflow import LoopBatch, RunGraph
@@ -53,6 +56,7 @@ def engine_worker(
     build: str | None = None,
     identity: str | None = None,
     abi: int = ENGINE_ABI,
+    network: Network | None = None,
 ) -> Worker:
     """This build's version of the engine deployment, running versions of this build's engine ABI (`build` and `abi`:
     another build's, in the two-build tests). A stopping worker lets running attempts finish for
@@ -62,7 +66,7 @@ def engine_worker(
         client,
         task_queue=ENGINE_QUEUE,
         workflows=[RunGraph, LoopBatch],
-        activities=engine_activities(store, plugins, abi=abi),
+        activities=engine_activities(store, plugins, abi=abi, network=network),
         graceful_shutdown_timeout=timedelta(seconds=settings.worker_shutdown_grace_s),
         deployment_config=deployment_config(build or this_build()),
         identity=identity,
@@ -102,7 +106,9 @@ async def run(settings: Settings) -> None:
             settings.temporal_address, namespace=settings.temporal_namespace, data_converter=data_converter(keys)
         )
         store = DbRunStore(sessionmaker, keys)  # claims, sealed with the same keys (engine 2b spec §3.1)
-        workers = [engine_worker(client, store, installed_plugins(), settings)]
+        guard = Guard(resolver=SystemResolver(), allowlist=allowlist.source(sessionmaker))  # plugins-3 D7, D8
+        network = Network(guard=guard, connections=DbConnections(sessionmaker), sessionmaker=sessionmaker, keys=keys)
+        workers = [engine_worker(client, store, installed_plugins(), settings, network=network)]
         if settings.cel_socket:
             profile = await evaluator_profile(settings.cel_socket)
             log.info("cel_queue", profile=profile)

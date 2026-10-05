@@ -9,6 +9,7 @@ from pydantic_core import PydanticUndefined
 LITERAL = "x-dewpoint-literal"  # written in the graph, never computed: ports, limits, pinned ids
 KINDS = "x-dewpoint-kinds"  # value kinds a field accepts: literal, ref, template, cel
 SENSITIVE = "x-sensitive"  # output field kept out of run_steps, previews and samples
+CONNECTION = "x-dewpoint-connection"  # a top-level config field naming one of the tenant's connections of this type
 VALUE_KINDS = frozenset({"literal", "ref", "template", "cel"})
 
 
@@ -25,3 +26,9 @@ def value_kinds(*kinds: str, default: Any = PydanticUndefined, **kwargs: Any) ->
 
 def sensitive(default: Any = PydanticUndefined, **kwargs: Any) -> Any:
     return Field(default, json_schema_extra={SENSITIVE: True}, **kwargs)
+
+
+def connection_field(type_key: str, **kwargs: Any) -> Any:
+    """A config field naming a connection of `type_key` (plugins-3 D6): a literal UUID, top-level only, checked at
+    publish against the tenant's connections; the node lists `type_key` in its `credentials`."""
+    return Field(json_schema_extra={LITERAL: True, CONNECTION: type_key}, **kwargs)

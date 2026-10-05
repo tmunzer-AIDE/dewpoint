@@ -21,6 +21,7 @@ tenant-readable, so a message never quotes input: a validation error names each 
 unexpected exception names only its type. Its text goes to the worker's log."""
 
 import asyncio
+import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import replace
 from typing import Any, Protocol, get_args
@@ -58,6 +59,7 @@ from dewpoint.apps.worker.claims import (
     unforged,
 )
 from dewpoint.apps.worker.context import context
+from dewpoint.apps.worker.network import AttemptNetwork, Network
 from dewpoint.core.claims.secret_index import SECRET_INDEX_LIMIT, SECRET_INDEX_UNAVAILABLE, SecretIndexLimitError
 from dewpoint.core.claims.service import CLAIM_UNAVAILABLE
 from dewpoint.engine import ENGINE_ABI
@@ -100,14 +102,26 @@ from dewpoint.engine.runtime.execution import INTERNAL_ERROR, VERSION_UNUSABLE
 from dewpoint.engine.runtime.ids import tenant_of
 from dewpoint.engine.runtime.projection import REDACTED, location
 from dewpoint.sdk import (
+    ConnectionUnavailable,
+    Cooldown,
+    EgressRefused,
     FatalError,
+    InvalidRequest,
+    MaybeSent,
     Node,
     NodeError,
     NodeKind,
+    NotSent,
     OutcomeUnknownError,
     Plugin,
+    RateLimited,
+    RedirectRefused,
+    ResponseTooLarge,
     RetryableError,
     SideEffect,
+    SimulationSendsNothing,
+    TlsVerificationFailed,
+    TransportError,
     dump_output,
     node_manifest,
 )
@@ -186,7 +200,35 @@ def _declared(e: NodeError, node: type[Node]) -> tuple[str, str]:
     return code, (e.message if logs.proven(e.message, known) else MESSAGE_WITHHELD)
 
 
-async def _call(node: type[Node], step: StepInput, schema: Mapping[str, Any]) -> tuple[BaseModel, str]:
+# The SDK's transport failures (plugins-3 D7, D10), each shown with its own fixed code and message. Those after which
+# the request may have arrived end an ambiguous node `outcome_unknown`; a node whose requests may repeat retries
+# `MaybeSent` and `RateLimited` and fails on the others. Nothing was sent after the rest: `NotSent` and `Cooldown`
+# are retried, the others fail.
+_SENT_MAYBE = (MaybeSent, RateLimited, RedirectRefused, ResponseTooLarge)
+_RETRIED = (NotSent, Cooldown, MaybeSent, RateLimited)
+_TRANSPORT = (
+    EgressRefused, TlsVerificationFailed, InvalidRequest, ConnectionUnavailable, SimulationSendsNothing, NotSent,
+    Cooldown, MaybeSent, RateLimited, RedirectRefused, ResponseTooLarge,
+)  # fmt: skip
+
+
+def _transport_failed(e: TransportError, node: type[Node]) -> _StepFailed:
+    """The SDK class's own constants, never an instance's: a plugin's subclass can't change what's shown."""
+    ambiguous = node.side_effect == SideEffect.AMBIGUOUS
+    kind = next((k for k in _TRANSPORT if isinstance(e, k)), None)
+    if kind is None:  # as any unexpected exception: an ambiguous node's request may have been sent
+        message = "The node raised a network failure Dewpoint doesn't know."
+        if ambiguous:
+            return _StepFailed(OUTCOME_UNKNOWN, message, retryable=False, outcome=OUTCOME_UNKNOWN)
+        return _StepFailed(UNEXPECTED_ERROR, message, retryable=True)
+    if isinstance(e, _SENT_MAYBE) and ambiguous:
+        return _StepFailed(kind.code, kind.message, retryable=False, outcome=OUTCOME_UNKNOWN)
+    return _StepFailed(kind.code, kind.message, retryable=isinstance(e, _RETRIED))
+
+
+async def _call(
+    node: type[Node], step: StepInput, schema: Mapping[str, Any], network: AttemptNetwork | None = None
+) -> tuple[BaseModel, str]:
     try:
         config = node.Config.model_validate(step.config)
     except ValidationError as e:
@@ -198,7 +240,7 @@ async def _call(node: type[Node], step: StepInput, schema: Mapping[str, Any]) ->
         raise _StepFailed(CONFIG_INVALID, message, retryable=False) from None
     try:
         known = logs.literals(node.__module__)  # what its log may hold (engine 2b spec §6.7)
-        ctx = context(step.tenant_id, step.run_id, step.step_id, step.iteration_key, step.attempt, known)
+        ctx = context(step.tenant_id, step.run_id, step.step_id, step.iteration_key, step.attempt, known, network)
         instance = node()
         if step.mode == SIMULATE:
             return await instance.simulate(ctx, config), SIMULATED
@@ -213,6 +255,13 @@ async def _call(node: type[Node], step: StepInput, schema: Mapping[str, Any]) ->
         raise _StepFailed(*_declared(e, node), retryable=False) from None
     except RetryableError as e:
         raise _StepFailed(*_declared(e, node), retryable=True) from None
+    except TransportError as e:
+        raise _transport_failed(e, node) from None
+    except SecretIndexLimitError as e:  # a connection's secret couldn't join the index: nothing was sent (D5)
+        raise _StepFailed(SECRET_INDEX_LIMIT, str(e), retryable=False) from None
+    except StoreUnavailableError as e:
+        _bug("step_store_unavailable", step, e.__cause__ if isinstance(e.__cause__, Exception) else e, node)
+        raise _StepFailed(SECRET_INDEX_UNAVAILABLE, STORE_UNAVAILABLE, retryable=True) from None
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -254,7 +303,9 @@ def _masked(data: ProjectInput, secrets: Matcher) -> ProjectInput:
     return replace(data, steps=steps, run=run)
 
 
-def step_activity_for(node: type[Node], store: ClaimStore) -> Callable[[StepInput], Awaitable[StepResult]]:
+def step_activity_for(
+    node: type[Node], store: ClaimStore, network: Network | None = None
+) -> Callable[[StepInput], Awaitable[StepResult]]:
     ref = f"{node.type}@{node.version}"
     config_schema = node.Config.model_json_schema(mode="validation")
     output_schema = node_manifest(node)["output_schema"]  # what the node promises to emit: serialized and closed
@@ -311,7 +362,20 @@ def step_activity_for(node: type[Node], store: ClaimStore) -> Callable[[StepInpu
                 _bug("step_input_unprepared", step, e, node)
                 message = f"Preparing the step raised {logs.error_class(e)}; the worker's log says where."
                 raise _StepFailed(INTERNAL_ERROR, message, retryable=False) from None
-            result, outcome = await _call(node, replace(step, config=config), config_schema)
+            attempt = (
+                network.attempt(
+                    tenant_id=uuid.UUID(step.tenant_id), run_id=uuid.UUID(step.run_id),
+                    step_id=uuid.UUID(step.step_id), root_run_id=uuid.UUID(root), node=node,
+                    simulated=step.mode == SIMULATE, remember=answered.remember, beat=activity.heartbeat,
+                )
+                if network is not None
+                else None
+            )  # fmt: skip
+            try:
+                result, outcome = await _call(node, replace(step, config=config), config_schema, attempt)
+            finally:
+                if attempt is not None:
+                    await attempt.aclose()
         except _StepFailed as f:
             raise f.mapped(await secrets()) from None
         try:  # the node ran: whatever fails from here, its effect happened, so nothing is retried
@@ -342,7 +406,9 @@ def step_activity_for(node: type[Node], store: ClaimStore) -> Callable[[StepInpu
     return run_step
 
 
-def engine_activities(store: RunStore, plugins: Iterable[Plugin], *, abi: int = ENGINE_ABI) -> list[Callable[..., Any]]:
+def engine_activities(
+    store: RunStore, plugins: Iterable[Plugin], *, abi: int = ENGINE_ABI, network: Network | None = None
+) -> list[Callable[..., Any]]:
     """Everything the engine queue serves: the version loader, the projection, and one activity per action node.
     `abi` is the engine ABI this build runs (another build's in the two-build tests): a version runs only on a build
     of its ABI (spec §7). Admission already compares with the current build's; the loader refuses any other too, for
@@ -398,7 +464,10 @@ def engine_activities(store: RunStore, plugins: Iterable[Plugin], *, abi: int = 
         await spill(data, store)
 
     steps = [
-        step_activity_for(node, store) for plugin in plugins for node in plugin.nodes if node.kind == NodeKind.ACTION
+        step_activity_for(node, store, network)
+        for plugin in plugins
+        for node in plugin.nodes
+        if node.kind == NodeKind.ACTION
     ]
     return [
         load_version,

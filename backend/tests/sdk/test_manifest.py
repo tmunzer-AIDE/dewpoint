@@ -146,7 +146,7 @@ def test_plugin_manifest_checks_prefix_and_duplicates() -> None:
     ok = Plugin(name="demo", version="1.0.0", nodes=(Send,))
     manifest = ok.manifest()
     assert manifest["nodes"][0]["type"] == "demo.send"
-    assert manifest["sdk_version"] == "0.1.0"
+    assert manifest["sdk_version"] == "0.2.0"
     with pytest.raises(ManifestError, match="must start with 'other.'"):
         Plugin(name="other", version="1", nodes=(Send,)).manifest()
     with pytest.raises(ManifestError, match="duplicate"):
@@ -313,3 +313,50 @@ def test_declared_and_pydantic_serializers_match_their_schema(value: BaseModel) 
     describe what they emit through their types."""
     schema = node_manifest(_node(run=_run, Output=type(value)))["output_schema"]
     assert list(Draft202012Validator(schema).iter_errors(dump_output(value))) == []
+
+
+def _with_connection(credentials: tuple[str, ...], nested: bool = False) -> type:
+    import uuid as _uuid
+
+    from pydantic import BaseModel as _Base
+
+    from dewpoint.sdk import connection_field
+
+    class Inner(_Base):
+        connection: _uuid.UUID = connection_field("mist")
+
+    if nested:
+
+        class NestedConfig(_Base):
+            inner: Inner
+
+        config: type = NestedConfig
+    else:
+
+        class FlatConfig(_Base):
+            connection: _uuid.UUID = connection_field("mist")
+
+        config = FlatConfig
+
+    class UsesConnection(Node):
+        type = "x.uses_connection"
+        version = 1
+        title = "Uses a connection"
+        Config = config
+
+        async def run(self, ctx, config):  # type: ignore[no-untyped-def]
+            return None
+
+    UsesConnection.credentials = credentials
+    return UsesConnection
+
+
+def test_a_connection_field_is_top_level_and_its_type_is_a_credential() -> None:
+    from dewpoint.sdk.fields import CONNECTION
+
+    manifest = node_manifest(_with_connection(("mist",)))
+    assert manifest["config_schema"]["properties"]["connection"][CONNECTION] == "mist"
+    with pytest.raises(ManifestError, match="credentials"):
+        node_manifest(_with_connection(()))
+    with pytest.raises(ManifestError, match="top-level"):
+        node_manifest(_with_connection(("mist",), nested=True))

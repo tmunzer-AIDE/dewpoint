@@ -4,6 +4,7 @@
 import asyncio
 import sys
 import types
+import uuid
 from datetime import UTC, datetime
 from typing import Any, ClassVar, Literal
 
@@ -18,6 +19,7 @@ from dewpoint.sdk import (
     RetryableError,
     SideEffect,
     StepContext,
+    connection_field,
     sensitive,
 )
 
@@ -291,8 +293,59 @@ class Leaky(Node):
         return LeakyOutput(token=token)
 
 
+class HttpCallConfig(BaseModel):
+    connection: uuid.UUID = connection_field("testkit")
+    path: str = "/"
+    method: Literal["GET", "POST"] = "GET"
+    body: str | None = None
+
+
+class HttpCallOutput(BaseModel):
+    status: int
+    body: str
+
+
+class HttpCall(Node):
+    """Calls its connection's service through the runtime's guarded HTTP (plugins-3 D4, D7)."""
+
+    type = "testkit.http_call"
+    version = 1
+    title = "HTTP call"
+    Config = HttpCallConfig
+    Output = HttpCallOutput
+    credentials = ("testkit",)
+    side_effect = SideEffect.IDEMPOTENT
+
+    async def run(self, ctx: StepContext, config: HttpCallConfig) -> HttpCallOutput:
+        conn = await ctx.connection(config.connection)
+        content = config.body.encode() if config.body is not None else None
+        answer = await conn.http.request(config.method, config.path, content=content)
+        return HttpCallOutput(status=answer.status_code, body=answer.content.decode(errors="replace"))
+
+
+class AmbiguousCall(HttpCall):
+    """The same call from a node whose request may not be repeated."""
+
+    type = "testkit.ambiguous_call"
+    side_effect = SideEffect.AMBIGUOUS
+
+
 TESTKIT = Plugin(
     name="testkit",
     version="0.0.0",
-    nodes=(Echo, FailN, Slow, Sensitive, AmbiguousSend, SlowSend, Reconcile, Blob, SecretBlob, SlowEcho, Leaky),
+    nodes=(
+        Echo,
+        FailN,
+        Slow,
+        Sensitive,
+        AmbiguousSend,
+        SlowSend,
+        Reconcile,
+        Blob,
+        SecretBlob,
+        SlowEcho,
+        Leaky,
+        HttpCall,
+        AmbiguousCall,
+    ),  # fmt: skip
 )

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.authz.permissions import ROLE_PERMISSIONS, P
 from dewpoint.core.config import Settings
+from dewpoint.core.connections import service as connections
 from dewpoint.core.http import TenantContext
 from dewpoint.core.models.workflows import Workflow, WorkflowVersion
 from dewpoint.core.plugins import lifecycle, registry
@@ -149,6 +150,27 @@ def abi_reasons(version_id: uuid.UUID, stale: list[tuple[uuid.UUID, int]], curre
     ]
 
 
+_CONNECTION_UNKNOWN = "No connection of this tenant has this id."
+_CONNECTION_TYPE = "This connection isn't of the type this field needs."
+
+
+async def _connection_errors(
+    s: AsyncSession, tenant_id: uuid.UUID, sites: tuple[tuple[str, str, uuid.UUID, str], ...]
+) -> list[Diagnostic]:
+    """Each connection a node names is one of the tenant's, of the type its field declares (plugins-3 D6), locked FOR
+    SHARE until the version is inserted, so a deletion can't slip between the check and the insert."""
+    found = await connections.named(s, tenant_id, sorted({named for _, _, named, _ in sites}, key=str))
+    errors: list[Diagnostic] = []
+    for node, fld, named, wanted in sites:
+        if named not in found:
+            errors.append(Diagnostic(code="connection.unknown", message=_CONNECTION_UNKNOWN, node=uuid.UUID(node),
+                                     field=fld))  # fmt: skip
+        elif found[named] != wanted:
+            errors.append(Diagnostic(code="connection.wrong_type", message=_CONNECTION_TYPE, node=uuid.UUID(node),
+                                     field=fld))  # fmt: skip
+    return errors
+
+
 async def _pin_abi_errors(s: AsyncSession, pins: list[WorkflowVersion]) -> list[Diagnostic]:
     """Every version a new one would run must be of the ABI it's published for, this build's (spec §7): so a parent is
     published again only after its sub-flows and failure handler."""
@@ -200,6 +222,9 @@ async def publish(
     errors = _lifecycle_errors(await lifecycle.states(s, entries), refuse_deprecated=True)
     if errors:
         return Published(None, errors, warnings)
+    errors = await _connection_errors(s, ctx.tenant_id, checked.result.connections)
+    if errors:
+        return Published(None, errors, warnings)
     version_id = uuid.uuid4()
     graph_settings = checked.graph.settings
     authored = graph_hash(checked.graph)
@@ -236,6 +261,7 @@ async def publish(
             declassified=[
                 {"node": node, "field": fld, "reveals": reveals} for node, fld, reveals in checked.result.declassified
             ],
+            connection_ids=sorted({named for _, _, named, _ in checked.result.connections}, key=str),
             graph_hash=authored,
             version_hash=version_hash(
                 graph_hash=authored,

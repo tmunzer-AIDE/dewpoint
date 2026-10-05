@@ -7,14 +7,18 @@ from typing import Any
 import httpx
 from cryptography.exceptions import InvalidTag
 from pydantic import BaseModel, SecretStr
-from sqlalchemy import select, update
+from sqlalchemy import any_, literal, select, update
+from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from dewpoint.core.audit.service import record
 from dewpoint.core.connections.types import CONNECTION_TYPES, ConnectionType
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.http import TenantContext
 from dewpoint.core.models.connections import Connection
+from dewpoint.core.models.requests import RunRequest
+from dewpoint.core.models.workflows import Workflow, WorkflowVersion
 
 PURPOSE = "connection.secret"
 
@@ -114,7 +118,64 @@ async def update_connection(
     return conn
 
 
+class ConnectionInUseError(Exception):
+    """An enabled workflow's active closure, or a request that hasn't started, names the connection (plugins-3 D6)."""
+
+
+async def get_for_update(s: AsyncSession, tenant_id: uuid.UUID, connection_id: uuid.UUID) -> Connection | None:
+    found = await s.execute(
+        select(Connection).where(Connection.id == connection_id, Connection.tenant_id == tenant_id).with_for_update()
+    )
+    return found.scalar_one_or_none()
+
+
+async def named(s: AsyncSession, tenant_id: uuid.UUID, ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:
+    """The tenant's connections among `ids`, with their types, locked FOR SHARE until the transaction ends, so a
+    deletion either sees the version that names them or waits for it (plugins-3 D6)."""
+    if not ids:
+        return {}
+    rows = await s.execute(
+        select(Connection.id, Connection.type)
+        .where(Connection.tenant_id == tenant_id, Connection.id.in_(ids))
+        .with_for_update(read=True)
+    )
+    return {cid: type_key for cid, type_key in rows.all()}
+
+
+async def in_use(s: AsyncSession, tenant_id: uuid.UUID, connection_id: uuid.UUID) -> bool:
+    """Whether an enabled workflow's active closure, or a request that hasn't started, names the connection."""
+    named_here = literal(connection_id, PgUUID(as_uuid=True))
+    active, closure = aliased(WorkflowVersion), aliased(WorkflowVersion)
+    enabled = (
+        select(literal(1))
+        .select_from(Workflow)
+        .join(active, active.id == Workflow.active_version_id)
+        .join(closure, closure.id == any_(active.closure_version_ids))
+        .where(Workflow.tenant_id == tenant_id, Workflow.enabled.is_(True), named_here == any_(closure.connection_ids))
+        .limit(1)
+    )
+    frozen, frozen_closure = aliased(WorkflowVersion), aliased(WorkflowVersion)
+    unstarted = (
+        select(literal(1))
+        .select_from(RunRequest)
+        .join(frozen, frozen.id == RunRequest.workflow_version_id)
+        .join(frozen_closure, frozen_closure.id == any_(frozen.closure_version_ids))
+        .where(
+            RunRequest.tenant_id == tenant_id,
+            RunRequest.status.in_(("queued", "starting")),
+            named_here == any_(frozen_closure.connection_ids),
+        )
+        .limit(1)
+    )
+    return (await s.execute(enabled)).first() is not None or (await s.execute(unstarted)).first() is not None
+
+
 async def delete_connection(s: AsyncSession, ctx: TenantContext, conn: Connection) -> None:
+    """Refused (ConnectionInUseError) while an enabled workflow's active closure, or a request that hasn't started,
+    names the connection. The row is locked first, so a publish naming it either waits or is seen."""
+    await s.execute(select(Connection.id).where(Connection.id == conn.id).with_for_update())
+    if await in_use(s, ctx.tenant_id, conn.id):
+        raise ConnectionInUseError()
     await s.delete(conn)
     await record(
         s,
