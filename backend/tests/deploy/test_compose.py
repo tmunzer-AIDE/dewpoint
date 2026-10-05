@@ -3,9 +3,15 @@
 namespace isn't the default."""
 
 import re
+import signal
+import socket
+import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 COMPOSE = Path(__file__).parents[3] / "deploy" / "compose" / "docker-compose.yml"
@@ -175,3 +181,63 @@ def test_ci_runs_the_ingress_profile_and_proves_a_webhook_through_nginx() -> Non
     assert "http://127.0.0.1:8080/hooks/$endpoint" in proof["run"]
     assert "ci/ingress-proof.py" in proof["run"]
     assert 'test "$trickled" = 408' in proof["run"]  # a slow body's deadline holds through nginx
+
+
+def _answer_408_after(sock: socket.socket, seconds: float) -> None:
+    """A stand-in for nginx and ingress: a request's first bytes, then its 408 once the deadline passes, then the rest
+    of the body read away before closing, as nginx does."""
+    while True:
+        conn, _ = sock.accept()
+        try:
+            conn.settimeout(5)
+            conn.recv(4096)
+            time.sleep(seconds)
+            conn.sendall(b"HTTP/1.1 408 Request Timeout\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            conn.shutdown(socket.SHUT_WR)
+            conn.settimeout(1)
+            while conn.recv(4096):
+                pass
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+
+def _trickle_check(port: int) -> str:
+    """The CI step's trickled-body check, aimed at a local stand-in."""
+    e2e = yaml.safe_load(CI.read_text())["jobs"]["e2e"]
+    run = {step.get("name", ""): step for step in e2e["steps"]}[
+        "A webhook through nginx and ingress (engine 2b spec §8.3, §12)"
+    ]["run"]
+    block = run[run.index("# A body trickled") : run.index("# Matched by the Compose dispatcher")]
+    return "set -e\n" + block.replace("http://127.0.0.1:8080/hooks/$endpoint", f"http://127.0.0.1:{port}/hooks/x")
+
+
+@pytest.mark.parametrize(("bound", "passes"), [("14", True), ("1", False)])
+def test_cis_trickle_check_times_curl_even_where_sigpipe_is_ignored(bound: str, passes: bool) -> None:
+    """PR #37's first CI run: GitHub's runner ignores SIGPIPE, so the trickle kept writing (and sleeping) after curl had
+    its 408, and the step timed the whole trickle (about 60 s), not curl's answer. The check times curl itself, the
+    trickle stops at its first failed write, and the bound still bites (1 s against a 2 s answer)."""
+    sock = socket.socket()
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(4)
+    threading.Thread(target=_answer_408_after, args=(sock, 2.0), daemon=True).start()
+    check = _trickle_check(sock.getsockname()[1])
+    if bound != "14":
+        assert "took <= 14" in check
+        check = check.replace("took <= 14", f"took <= {bound}")
+    began = time.monotonic()
+    assert signal.getsignal(signal.SIGPIPE) == signal.SIG_IGN  # CPython's own; the runner's too
+    run = subprocess.run(["bash", "-c", check], capture_output=True, text=True, timeout=90, restore_signals=False)
+    assert (run.returncode == 0) is passes, run.stderr
+    assert time.monotonic() - began < 14  # the trickle stopped once curl had its answer
+
+
+def test_cis_ingress_checks_each_stop_a_failing_step() -> None:
+    """`bash -e` ignores a failure before a list's last `&&`: each check is a command of its own."""
+    e2e = yaml.safe_load(CI.read_text())["jobs"]["e2e"]
+    run = {step.get("name", ""): step for step in e2e["steps"]}[
+        "A webhook through nginx and ingress (engine 2b spec §8.3, §12)"
+    ]["run"]
+    assert [line for line in run.splitlines() if line.strip().startswith("test ") and "&&" in line] == []
