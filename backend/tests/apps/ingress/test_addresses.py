@@ -66,3 +66,10 @@ def test_an_ipv4_client_on_a_dual_stack_socket_is_its_ipv4_address() -> None:
     assert client_address("::ffff:203.0.113.9", [], ()) == ip_address("203.0.113.9")
     assert client_address("172.18.0.5", ["::ffff:203.0.113.9"], NGINX) == ip_address("203.0.113.9")
     assert client_address("::ffff:172.18.0.5", ["203.0.113.9"], NGINX) == ip_address("203.0.113.9")
+
+
+def test_a_bad_proxy_entry_is_named_by_its_position_never_quoted() -> None:
+    """The owner's ruling on the final review: a settings error quotes no value (the plan's Global Constraints)."""
+    with pytest.raises(ValueError, match="DEWPOINT_INGRESS_TRUSTED_PROXIES") as refused:
+        parse_proxies("10.0.0.0/8, not-a-proxy-7f3a")
+    assert "not-a-proxy-7f3a" not in str(refused.value) and "entry 2" in str(refused.value)

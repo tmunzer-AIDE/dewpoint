@@ -28,8 +28,9 @@ def test_its_environment_is_read_and_a_bad_proxy_refused(monkeypatch) -> None:
     monkeypatch.setenv("DEWPOINT_INGRESS_TRUSTED_PROXIES", "172.18.0.0/16")
     assert IngressSettings().ingress_trusted_proxies == "172.18.0.0/16"
     monkeypatch.setenv("DEWPOINT_INGRESS_TRUSTED_PROXIES", "172.18.0.1/16")
-    with pytest.raises(ValidationError, match="DEWPOINT_INGRESS_TRUSTED_PROXIES"):
+    with pytest.raises(ValidationError, match="DEWPOINT_INGRESS_TRUSTED_PROXIES") as refused:
         IngressSettings()
+    assert "172.18.0.1" not in str(refused.value)  # named by its position, never quoted (the final review)
 
 
 @pytest.mark.parametrize(

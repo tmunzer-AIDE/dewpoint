@@ -12,14 +12,15 @@ type Network = IPv4Network | IPv6Network
 
 
 def parse_proxies(raw: str) -> tuple[Network, ...]:
-    """Comma- or space-separated addresses and networks. Raises ValueError, naming the setting, for any entry that isn't
-    one, a network with host bits set included: a bad value must never trust the wrong peers."""
+    """Comma- or space-separated addresses and networks. Raises ValueError, naming the setting and the entry's position
+    (never the entry: a settings error quotes no value), for any entry that isn't one, a network with host bits set
+    included: a bad value must never trust the wrong peers."""
     networks = []
-    for entry in raw.replace(",", " ").split():
+    for n, entry in enumerate(raw.replace(",", " ").split(), 1):
         try:
             networks.append(ip_network(entry))
         except ValueError:
-            raise ValueError(f"DEWPOINT_INGRESS_TRUSTED_PROXIES: not an address or network: {entry!r}") from None
+            raise ValueError(f"DEWPOINT_INGRESS_TRUSTED_PROXIES: entry {n} isn't an address or a network") from None
     return tuple(networks)
 
 
