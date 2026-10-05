@@ -18,7 +18,14 @@ from typing import Any
 import httpcore
 import httpx
 
-from dewpoint.core.egress.guard import EgressRefusedError, Guard, MaybeSentError, NotSentError
+from dewpoint.core.egress.guard import (
+    EgressRefusedError,
+    Guard,
+    InvalidRequestError,
+    MaybeSentError,
+    NotSentError,
+    TlsVerificationError,
+)
 
 MIB = 1024 * 1024
 FORBIDDEN_IN_HEADERS = ("\r", "\n", "\0")
@@ -30,21 +37,6 @@ class HttpLimits:
     read_s: float = 30.0
     total_s: float = 60.0
     max_response_bytes: int = 10 * MIB
-
-
-class InvalidRequestError(Exception):
-    """The request can't be sent as given (scheme, credentials in the URL, a header with CR/LF): nothing was sent."""
-
-    def __init__(self, reason: str) -> None:
-        super().__init__("The request is invalid.")
-        self.reason = reason
-
-
-class TlsVerificationError(Exception):
-    """The destination's TLS didn't verify for its name: nothing was sent, and retrying won't change that."""
-
-    def __init__(self) -> None:
-        super().__init__("The destination's certificate didn't verify.")
 
 
 class RedirectRefusedError(Exception):

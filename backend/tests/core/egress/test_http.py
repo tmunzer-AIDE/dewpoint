@@ -8,14 +8,18 @@ import socket
 
 import pytest
 
-from dewpoint.core.egress.guard import EgressRefusedError, MaybeSentError, NotSentError
+from dewpoint.core.egress.guard import (
+    EgressRefusedError,
+    InvalidRequestError,
+    MaybeSentError,
+    NotSentError,
+    TlsVerificationError,
+)
 from dewpoint.core.egress.http import (
     GuardedHttp,
     HttpLimits,
-    InvalidRequestError,
     RedirectRefusedError,
     ResponseTooLargeError,
-    TlsVerificationError,
 )
 from tests.support.netfakes import TENANT, Request, guard, respond, serve, tls
 

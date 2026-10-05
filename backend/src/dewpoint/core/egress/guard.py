@@ -40,6 +40,22 @@ class MaybeSentError(Exception):
         self.reason = reason
 
 
+class InvalidRequestError(Exception):
+    """The request can't be sent as given (scheme, credentials in the URL, a header with CR/LF, a datagram too large):
+    nothing was sent."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__("The request is invalid.")
+        self.reason = reason
+
+
+class TlsVerificationError(Exception):
+    """The destination's TLS didn't verify for its name: nothing was sent, and retrying won't change that."""
+
+    def __init__(self) -> None:
+        super().__init__("The destination's certificate didn't verify.")
+
+
 class Resolver(Protocol):
     async def resolve(self, host: str, port: int) -> Sequence[Address]: ...
 
