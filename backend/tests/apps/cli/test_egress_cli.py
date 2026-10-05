@@ -78,3 +78,13 @@ def test_add_list_and_remove(pg_url: str) -> None:
 def test_bad_entries_are_refused(args: list[str]) -> None:
     result = CliRunner().invoke(cli.app, ["platform", "egress", "add", *args])
     assert result.exit_code == 2 and result.output.startswith("ERROR: "), result.output
+
+
+@pytest.mark.usefixtures("admin_env")
+def test_a_sensitive_network_needs_its_confirmation() -> None:
+    refused = CliRunner().invoke(cli.app, ["platform", "egress", "add", "169.254.169.254/32", "--every-tenant"])
+    assert refused.exit_code == 2 and "sensitive" in refused.output
+    confirmed = CliRunner().invoke(
+        cli.app, ["platform", "egress", "add", "169.254.169.254/32", "--every-tenant", "--allow-sensitive"]
+    )
+    assert confirmed.exit_code == 0, confirmed.output

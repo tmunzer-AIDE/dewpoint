@@ -43,7 +43,7 @@ def _ordered(scopes: Sequence[Scope]) -> list[Scope]:
     return sorted({scope.key: scope for scope in scopes}.values(), key=lambda scope: scope.key)
 
 
-async def _locked(s: AsyncSession, tenant_id: uuid.UUID, scope: Scope, now: datetime) -> RateBucket:
+async def _locked(s: AsyncSession, tenant_id: uuid.UUID, scope: Scope) -> RateBucket:
     await s.execute(
         insert(RateBucket)
         .values(
@@ -52,7 +52,7 @@ async def _locked(s: AsyncSession, tenant_id: uuid.UUID, scope: Scope, now: date
             capacity=scope.capacity,
             refill_per_s=scope.refill_per_s,
             tokens=scope.capacity,
-            refilled_at=now,
+            refilled_at=func.clock_timestamp(),
         )
         .on_conflict_do_nothing(index_elements=["tenant_id", "scope"])
     )
@@ -65,12 +65,19 @@ async def _locked(s: AsyncSession, tenant_id: uuid.UUID, scope: Scope, now: date
     return found.scalar_one()
 
 
+async def _clock(s: AsyncSession) -> datetime:
+    """The time after the locks are held (`clock_timestamp`, not the transaction's start): a transaction that started
+    earlier but locked later never writes an older refill time."""
+    clock: datetime = (await s.execute(select(func.clock_timestamp()))).scalar_one()
+    return clock
+
+
 async def _try(s: AsyncSession, tenant_id: uuid.UUID, scopes: Sequence[Scope]) -> tuple[float, datetime | None]:
-    now = (await s.execute(select(func.now()))).scalar_one()
+    rows = [(await _locked(s, tenant_id, scope), scope) for scope in _ordered(scopes)]
+    now = await _clock(s)
     planned: list[tuple[RateBucket, Scope, float]] = []
     wait, until = 0.0, None
-    for scope in _ordered(scopes):
-        row = await _locked(s, tenant_id, scope, now)
+    for row, scope in rows:
         if row.blocked_until is not None and row.blocked_until > now:
             if (row.blocked_until - now).total_seconds() > wait:
                 wait, until = (row.blocked_until - now).total_seconds(), row.blocked_until
@@ -87,7 +94,7 @@ async def _try(s: AsyncSession, tenant_id: uuid.UUID, scopes: Sequence[Scope]) -
         return wait, until
     for row, scope, available in planned:
         row.capacity, row.refill_per_s = scope.capacity, scope.refill_per_s
-        row.tokens, row.refilled_at = available - 1, now
+        row.tokens, row.refilled_at = available - 1, max(row.refilled_at, now)  # never back
     await s.flush()
     return 0.0, None
 
@@ -124,10 +131,9 @@ async def acquire(
 
 async def block(s: AsyncSession, tenant_id: uuid.UUID, scopes: Sequence[Scope], until: datetime) -> None:
     """Blocks every scope until `until` (at most an hour ahead), extending an existing block, never shortening it."""
-    now = (await s.execute(select(func.now()))).scalar_one()
-    capped = min(until, now + MAX_BLOCK)
-    for scope in _ordered(scopes):
-        row = await _locked(s, tenant_id, scope, now)
+    rows = [await _locked(s, tenant_id, scope) for scope in _ordered(scopes)]
+    capped = min(until, await _clock(s) + MAX_BLOCK)
+    for row in rows:
         if row.blocked_until is None or row.blocked_until < capped:
             row.blocked_until = capped
     await s.flush()

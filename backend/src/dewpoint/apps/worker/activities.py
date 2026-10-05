@@ -117,6 +117,7 @@ from dewpoint.sdk import (
     RateLimited,
     RedirectRefused,
     ResponseTooLarge,
+    ResponseUnreadable,
     RetryableError,
     SideEffect,
     SimulationSendsNothing,
@@ -204,12 +205,22 @@ def _declared(e: NodeError, node: type[Node]) -> tuple[str, str]:
 # the request may have arrived end an ambiguous node `outcome_unknown`; a node whose requests may repeat retries
 # `MaybeSent` and `RateLimited` and fails on the others. Nothing was sent after the rest: `NotSent` and `Cooldown`
 # are retried, the others fail.
-_SENT_MAYBE = (MaybeSent, RateLimited, RedirectRefused, ResponseTooLarge)
+_SENT_MAYBE = (MaybeSent, RateLimited, RedirectRefused, ResponseTooLarge, ResponseUnreadable)
 _RETRIED = (NotSent, Cooldown, MaybeSent, RateLimited)
 _TRANSPORT = (
     EgressRefused, TlsVerificationFailed, InvalidRequest, ConnectionUnavailable, SimulationSendsNothing, NotSent,
-    Cooldown, MaybeSent, RateLimited, RedirectRefused, ResponseTooLarge,
+    Cooldown, MaybeSent, RateLimited, RedirectRefused, ResponseTooLarge, ResponseUnreadable,
 )  # fmt: skip
+
+
+def _after_send(failure: _StepFailed, node: type[Node], network: AttemptNetwork | None) -> _StepFailed:
+    """Once a request of the attempt may have left (the review's finding 1), an ambiguous node's failure is never
+    retried and its outcome is unknown, whatever ended the attempt. Only the plugin's own `FatalError` keeps what it
+    declares: it's never retried anyway."""
+    sent = network is not None and network.may_have_sent
+    if sent and node.side_effect == SideEffect.AMBIGUOUS and failure.outcome != OUTCOME_UNKNOWN:
+        return _StepFailed(failure.code, failure.message, retryable=False, outcome=OUTCOME_UNKNOWN)
+    return failure
 
 
 def _transport_failed(e: TransportError, node: type[Node]) -> _StepFailed:
@@ -254,14 +265,15 @@ async def _call(
     except FatalError as e:
         raise _StepFailed(*_declared(e, node), retryable=False) from None
     except RetryableError as e:
-        raise _StepFailed(*_declared(e, node), retryable=True) from None
+        raise _after_send(_StepFailed(*_declared(e, node), retryable=True), node, network) from None
     except TransportError as e:
-        raise _transport_failed(e, node) from None
+        raise _after_send(_transport_failed(e, node), node, network) from None
     except SecretIndexLimitError as e:  # a connection's secret couldn't join the index: nothing was sent (D5)
-        raise _StepFailed(SECRET_INDEX_LIMIT, str(e), retryable=False) from None
+        raise _after_send(_StepFailed(SECRET_INDEX_LIMIT, str(e), retryable=False), node, network) from None
     except StoreUnavailableError as e:
         _bug("step_store_unavailable", step, e.__cause__ if isinstance(e.__cause__, Exception) else e, node)
-        raise _StepFailed(SECRET_INDEX_UNAVAILABLE, STORE_UNAVAILABLE, retryable=True) from None
+        failure = _StepFailed(SECRET_INDEX_UNAVAILABLE, STORE_UNAVAILABLE, retryable=True)
+        raise _after_send(failure, node, network) from None
     except asyncio.CancelledError:
         raise
     except Exception as e:

@@ -136,3 +136,31 @@ async def test_closing_the_net_closes_every_open_stream() -> None:
     await n.aclose()
     server.close()
     assert stream.closed
+
+
+async def test_the_default_tls_trust_ignores_the_environment(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The review's finding 8: SSL_CERT_FILE can't add a trusted CA to `ctx.net`, as it can't to `ctx.http`."""
+    ca = tmp_path / "ca.pem"
+    ca.write_bytes(tls(NAMES).ca_pem)
+    monkeypatch.setenv("SSL_CERT_FILE", str(ca))
+    server, port, seen = await _echo_server(use_tls=True)
+    n = GuardedNet(guard({"dewpoint.test": ["127.0.0.1"]}), TENANT)  # no context: the platform's default
+    try:
+        with pytest.raises(TlsVerificationError):
+            await n.open_tcp("dewpoint.test", port, tls=True)
+    finally:
+        await n.aclose()
+        server.close()
+
+
+@pytest.mark.parametrize("size", [-1, 0, 2 * 1024 * 1024])
+async def test_a_receive_is_bounded(size: int) -> None:
+    server, port, _ = await _echo_server(use_tls=False)
+    n = net({"siem.test": ["127.0.0.1"]})
+    try:
+        stream = await n.open_tcp("siem.test", port, tls=False)
+        with pytest.raises(InvalidRequestError):
+            await stream.receive(size)
+    finally:
+        await n.aclose()
+        server.close()

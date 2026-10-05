@@ -597,6 +597,9 @@ def egress_add(
     every_tenant: bool = typer.Option(False, "--every-tenant", help="an entry for every tenant, asked for explicitly"),
     ports: str | None = typer.Option(None, "--ports", help="a port or a range (default: any)"),
     note: str = typer.Option("", "--note"),
+    allow_sensitive: bool = typer.Option(
+        False, "--allow-sensitive", help="confirm a short prefix, loopback, link-local or metadata network"
+    ),
 ) -> None:
     """Let one tenant's plugins (or, explicitly, every tenant's) reach a private network; audited."""
     try:
@@ -607,8 +610,9 @@ def egress_add(
         async def _run(s: AsyncSession) -> uuid.UUID:
             async with s.begin():
                 return await allowlist.add(
-                    s, network=network, ports=_ports(ports), tenant_id=tenant_id, note=note, every_tenant=every_tenant
-                )
+                    s, network=network, ports=_ports(ports), tenant_id=tenant_id, note=note,
+                    every_tenant=every_tenant, confirm_sensitive=allow_sensitive,
+                )  # fmt: skip
 
         entry_id = asyncio.run(_in_session(_run))
     except ValueError as e:

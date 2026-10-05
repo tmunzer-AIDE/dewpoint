@@ -330,6 +330,42 @@ class AmbiguousCall(HttpCall):
     side_effect = SideEffect.AMBIGUOUS
 
 
+class WriteThenReadConfig(BaseModel):
+    connection: uuid.UUID = connection_field("testkit")
+    read_url: str | None = None  # the read through ctx.http when set, else through the connection
+
+
+class WriteThenRead(Node):
+    """Writes through its connection, then reads: a second call that fails mustn't make the write retried."""
+
+    type = "testkit.write_then_read"
+    version = 1
+    title = "Write, then read"
+    Config = WriteThenReadConfig
+    Output = HttpCallOutput
+    credentials = ("testkit",)
+    side_effect = SideEffect.AMBIGUOUS
+
+    async def run(self, ctx: StepContext, config: WriteThenReadConfig) -> HttpCallOutput:
+        conn = await ctx.connection(config.connection)
+        await conn.http.request("POST", "/write", content=b"once")
+        if config.read_url is not None:
+            answer = await ctx.http.request("GET", config.read_url)
+        else:
+            answer = await conn.http.request("GET", "/read")
+        return HttpCallOutput(status=answer.status_code, body=answer.content.decode(errors="replace"))
+
+
+class ReconcilableCall(HttpCall):
+    """The same call from a node that checks for its effect before any retry."""
+
+    type = "testkit.reconcilable_call"
+    side_effect = SideEffect.RECONCILABLE
+
+    async def reconcile(self, ctx: StepContext, config: HttpCallConfig) -> HttpCallOutput | None:
+        return None
+
+
 TESTKIT = Plugin(
     name="testkit",
     version="0.0.0",

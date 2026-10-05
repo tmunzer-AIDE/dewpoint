@@ -10,7 +10,9 @@
 - Every request through a connection takes a token from each of its quota scopes, or fails `Cooldown` having sent
   nothing. A provider's `Retry-After` blocks the scopes for every run; a node whose requests may be repeated waits out
   a short one inside the attempt, any other fails `RateLimited`.
-- A simulated step sends nothing. The attempt's connections are one pool, closed when the attempt ends."""
+- A simulated step sends nothing. The attempt's connections are one pool, closed when the attempt ends.
+- The attempt remembers once a request may have left it (`may_have_sent`): the wrapper then never lets an ambiguous
+  node's failure be retried, whatever the failure that ended it."""
 
 import asyncio
 import email.utils
@@ -22,6 +24,7 @@ from types import MappingProxyType
 from typing import Any, Protocol
 
 import httpx
+import structlog
 from pydantic import BaseModel, SecretStr, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -45,6 +48,7 @@ from dewpoint.core.egress.http import (
     HttpResponse,
     RedirectRefusedError,
     ResponseTooLargeError,
+    ResponseUnreadableError,
 )
 from dewpoint.core.egress.net import GuardedNet, GuardedStream, NetLimits
 from dewpoint.core.models.connections import Connection as ConnectionRow
@@ -63,6 +67,7 @@ from dewpoint.sdk import (
     RateLimited,
     RedirectRefused,
     ResponseTooLarge,
+    ResponseUnreadable,
     SideEffect,
     SimulationSendsNothing,
     TlsVerificationFailed,
@@ -70,7 +75,15 @@ from dewpoint.sdk import (
 )
 from dewpoint.sdk.fields import CONNECTION
 
+_log = structlog.get_logger("dewpoint.worker")
 IN_ATTEMPT_WAIT_S = 20.0  # the longest Retry-After a node whose requests may repeat waits out in its attempt (D10)
+IN_ATTEMPT_RETRIES = 3  # and how many times at most, each wait at least MIN_WAIT_S
+MIN_WAIT_S = 1.0
+MAX_RETRY_AFTER_S = 3600  # a provider's wait past an hour is read as an hour (a block's cap)
+# Nodes that may resend inside their attempt: a reconcilable node's retry checks for its effect first (`reconcile()`),
+# which only the engine's next attempt does; an ambiguous node never resends.
+RESENDS = (SideEffect.NONE, SideEffect.IDEMPOTENT, SideEffect.KEYED)
+NOTHING_SENT = (NotSentError, EgressRefusedError, InvalidRequestError, TlsVerificationError)
 SCOPE_WAIT_S = 10.0  # the longest wait for a quota token before `Cooldown` (D9)
 MIN_SECRET = 4  # the secret index's shortest string (engine 2b spec §3.7)
 URL_PART = 8  # a secret URL's path segments and query values this long are secrets too
@@ -91,6 +104,8 @@ def mapped(error: Exception) -> TransportError:
         return RedirectRefused()
     if isinstance(error, ResponseTooLargeError):
         return ResponseTooLarge()
+    if isinstance(error, ResponseUnreadableError):
+        return ResponseUnreadable()
     if isinstance(error, CooldownError):
         return Cooldown()
     return MaybeSent()
@@ -104,6 +119,7 @@ _CORE_ERRORS = (
     MaybeSentError,
     RedirectRefusedError,
     ResponseTooLargeError,
+    ResponseUnreadableError,
 )
 
 
@@ -197,19 +213,20 @@ def secret_strings(secret: BaseModel) -> list[str]:
 
 
 def retry_after_s(value: str | None, now: datetime) -> float | None:
-    """A `Retry-After` header's wait in seconds: delta-seconds or an HTTP date; None when absent or unreadable."""
+    """A `Retry-After` header's wait in seconds, at most an hour: ASCII delta-seconds or an HTTP date; None when absent
+    or unreadable. Nothing a provider sends raises."""
     if value is None:
         return None
     value = value.strip()
-    if value.isdigit():
-        return float(int(value))
+    if value.isascii() and value.isdigit():
+        return float(min(int(value[:10]), MAX_RETRY_AFTER_S)) if len(value) <= 10 else float(MAX_RETRY_AFTER_S)
     try:
         when = email.utils.parsedate_to_datetime(value)
-    except (TypeError, ValueError, IndexError):
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        return min(max(0.0, (when - now).total_seconds()), float(MAX_RETRY_AFTER_S))
+    except (TypeError, ValueError, IndexError, OverflowError):
         return None
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=UTC)
-    return max(0.0, (when - now).total_seconds())
 
 
 @dataclass(frozen=True)
@@ -254,25 +271,20 @@ class _PlainHttp:
         json: Any = None,
         follow_same_origin: int = 0,
     ) -> HttpResponse:
-        http = self._attempt.core_http()
-        try:
-            return await http.request(
+        return await self._attempt.send(
+            lambda: self._attempt.core_http().request(
                 method, url, headers=headers, params=params, content=content, json=json,
                 follow_same_origin=follow_same_origin,
-            )  # fmt: skip
-        except _CORE_ERRORS as e:
-            raise mapped(e) from None
+            )
+        )  # fmt: skip
 
 
 class _Stream:
-    def __init__(self, stream: GuardedStream) -> None:
-        self._stream = stream
+    def __init__(self, attempt: "AttemptNetwork", stream: GuardedStream) -> None:
+        self._attempt, self._stream = attempt, stream
 
     async def send(self, data: bytes) -> None:
-        try:
-            await self._stream.send(data)
-        except _CORE_ERRORS as e:
-            raise mapped(e) from None
+        await self._attempt.send(lambda: self._stream.send(data))
 
     async def receive(self, max_bytes: int = 65_536) -> bytes:
         try:
@@ -289,16 +301,13 @@ class _PlainNet:
         self._attempt = attempt
 
     async def open_tcp(self, host: str, port: int, *, tls: bool) -> _Stream:
-        try:
-            return _Stream(await self._attempt.core_net().open_tcp(host, port, tls=tls))
+        try:  # connecting sends no request: only `send` counts
+            return _Stream(self._attempt, await self._attempt.core_net().open_tcp(host, port, tls=tls))
         except _CORE_ERRORS as e:
             raise mapped(e) from None
 
     async def send_udp(self, host: str, port: int, data: bytes) -> None:
-        try:
-            await self._attempt.core_net().send_udp(host, port, data)
-        except _CORE_ERRORS as e:
-            raise mapped(e) from None
+        await self._attempt.send(lambda: self._attempt.core_net().send_udp(host, port, data))
 
 
 class _Refused:
@@ -361,8 +370,8 @@ class ConnectionHttp:
             raise InvalidRequest()
         sent_headers = {**(headers or {}), **self._credentials}
         attempt = self._attempt
-        repeatable = attempt.node.side_effect != SideEffect.AMBIGUOUS
-        waited = 0.0
+        resends = attempt.node.side_effect in RESENDS
+        waited, retries = 0.0, 0
         while True:
             try:
                 await acquire(
@@ -371,13 +380,16 @@ class ConnectionHttp:
                 )  # fmt: skip
             except CooldownError:
                 raise Cooldown() from None
-            try:
-                answer = await attempt.core_http().request(
+            except Exception as e:
+                if unavailable(e):  # the budget couldn't be read: nothing was sent
+                    raise NotSent() from None
+                raise
+            answer = await attempt.send(
+                lambda: attempt.core_http().request(
                     method, target, headers=sent_headers, params=params, content=content, json=json,
                     follow_same_origin=follow_same_origin,
-                )  # fmt: skip
-            except _CORE_ERRORS as e:
-                raise mapped(e) from None
+                )
+            )  # fmt: skip
             if answer.status_code not in (429, 503):
                 return answer
             wait = retry_after_s(answer.header("retry-after"), datetime.now(UTC))
@@ -385,20 +397,25 @@ class ConnectionHttp:
                 await self._block(wait)
             if answer.status_code == 503 and wait is None:
                 return answer  # a plain server error: the node reads it
-            if repeatable and wait is not None and waited + wait <= IN_ATTEMPT_WAIT_S:
+            pause = max(wait, MIN_WAIT_S) if wait is not None else None
+            if resends and pause is not None and retries < IN_ATTEMPT_RETRIES and waited + pause <= IN_ATTEMPT_WAIT_S:
                 attempt.beat()
-                await asyncio.sleep(wait)
-                waited += wait
+                await asyncio.sleep(pause)
+                waited, retries = waited + pause, retries + 1
                 continue
             raise RateLimited()
 
     async def _block(self, wait_s: float) -> None:
-        if not self._scopes:
+        """Best effort: a block that can't be recorded changes nothing about this request's outcome."""
+        if not self._scopes or wait_s <= 0:
             return
-        until = datetime.now(UTC) + timedelta(seconds=wait_s)
-        async with self._attempt.network.sessionmaker() as s, s.begin():
-            await tenant_scope(s, self._attempt.tenant_id)
-            await block(s, self._attempt.tenant_id, self._scopes, until)
+        until = datetime.now(UTC) + timedelta(seconds=min(wait_s, MAX_RETRY_AFTER_S))
+        try:
+            async with self._attempt.network.sessionmaker() as s, s.begin():
+                await tenant_scope(s, self._attempt.tenant_id)
+                await block(s, self._attempt.tenant_id, self._scopes, until)
+        except Exception as e:
+            _log.warning("rate_block_unrecorded", error=type(e).__name__)
 
 
 class AttemptNetwork:
@@ -419,9 +436,24 @@ class AttemptNetwork:
         self.network, self.tenant_id, self.run_id, self.step_id = network, tenant_id, run_id, step_id
         self.root_run_id, self.node, self.simulated, self.beat = root_run_id, node, simulated, beat
         self._remember = remember
+        self.may_have_sent = False  # once a request may have left this attempt (the wrapper reads it)
         self._http: GuardedHttp | None = None
         self._net: GuardedNet | None = None
         self._named: frozenset[uuid.UUID] | None = None
+
+    async def send[T](self, call: Callable[[], Awaitable[T]]) -> T:
+        """Runs a transport call; unless it failed having sent nothing, a request may now have left the attempt."""
+        try:
+            result = await call()
+        except _CORE_ERRORS as e:
+            if not isinstance(e, NOTHING_SENT):
+                self.may_have_sent = True
+            raise mapped(e) from None
+        except BaseException:
+            self.may_have_sent = True
+            raise
+        self.may_have_sent = True
+        return result
 
     def core_http(self) -> GuardedHttp:
         if self._http is None:
@@ -454,11 +486,18 @@ class AttemptNetwork:
     async def connection(self, connection_id: uuid.UUID) -> OpenedConnection:
         if self.simulated:
             raise SimulationSendsNothing()
-        if self._named is None:
-            self._named = await self.network.connections.named_by(self.tenant_id, self.run_id, self.step_id, self.node)
+        try:
+            if self._named is None:
+                self._named = await self.network.connections.named_by(
+                    self.tenant_id, self.run_id, self.step_id, self.node
+                )
+            stored = await self.network.connections.load(self.tenant_id, connection_id)
+        except Exception as e:
+            if unavailable(e):  # the database didn't answer: nothing was sent
+                raise NotSent() from None
+            raise
         if connection_id not in self._named:
             raise ConnectionUnavailable()
-        stored = await self.network.connections.load(self.tenant_id, connection_id)
         kind: ConnectionType | None = CONNECTION_TYPES.get(stored.type) if stored is not None else None
         if stored is None or kind is None or stored.type not in self.node.credentials or kind.base_url is None:
             raise ConnectionUnavailable()

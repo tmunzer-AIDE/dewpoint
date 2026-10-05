@@ -5,8 +5,9 @@ whose secret the runtime applies, so a node never holds one.
 Their failures are `TransportError`s with fixed codes. The step's outcome follows from the class: nothing was sent
 (`EgressRefused`, `TlsVerificationFailed`, `InvalidRequest`, `ConnectionUnavailable`, `SimulationSendsNothing` fail
 the step; `NotSent` and `Cooldown` are retried), or the request may have arrived (`MaybeSent`, `RateLimited`,
-`RedirectRefused`, `ResponseTooLarge`): an `ambiguous` node then ends `outcome_unknown`, any other is retried after
-`MaybeSent` or `RateLimited` and fails after the others. A node catches one only to do something else."""
+`RedirectRefused`, `ResponseTooLarge`, `ResponseUnreadable`): an `ambiguous` node then ends `outcome_unknown`, any
+other is retried after `MaybeSent` or `RateLimited` and fails after the others. Once any request of an attempt may
+have arrived, an ambiguous node's failure is never retried. A node catches one only to do something else."""
 
 import uuid
 from collections.abc import Mapping
@@ -63,6 +64,10 @@ class RedirectRefused(TransportError):
 
 class ResponseTooLarge(TransportError):
     code, message = "response_too_large", "The answer was larger than the step may read."
+
+
+class ResponseUnreadable(TransportError):
+    code, message = "response_unreadable", "The answer came in a form the step can't read."
 
 
 class HttpResponse(Protocol):

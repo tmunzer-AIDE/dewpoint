@@ -11,6 +11,7 @@ import asyncio
 import json
 import ssl
 import uuid
+import zlib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -29,6 +30,13 @@ from dewpoint.core.egress.guard import (
 
 MIB = 1024 * 1024
 FORBIDDEN_IN_HEADERS = ("\r", "\n", "\0")
+MAX_REDIRECTS = 3  # D7: a node may opt into at most 3 same-origin hops
+# What frames, routes or encodes the request is the client's own: a plugin can't set it.
+RESERVED_HEADERS = frozenset({
+    "content-length", "transfer-encoding", "host", "connection", "upgrade", "te", "trailer", "keep-alive",
+    "proxy-authorization", "proxy-connection", "accept-encoding",
+})  # fmt: skip
+INFLATABLE = {"gzip": 16 + zlib.MAX_WBITS, "x-gzip": 16 + zlib.MAX_WBITS, "deflate": zlib.MAX_WBITS}
 
 
 @dataclass(frozen=True)
@@ -52,6 +60,37 @@ class ResponseTooLargeError(Exception):
 
     def __init__(self) -> None:
         super().__init__("The response is too large.")
+
+
+class ResponseUnreadableError(Exception):
+    """The answer came in an encoding the client can't decode within its cap. The request was sent and answered."""
+
+    def __init__(self) -> None:
+        super().__init__("The response can't be read.")
+
+
+def _inflate(raw: bytes, encoding: str, cap: int) -> bytes:
+    """`raw` decoded, never holding more than the cap: each step inflates at most what's left of it."""
+    attempts = [INFLATABLE[encoding]] + ([-zlib.MAX_WBITS] if encoding == "deflate" else [])  # zlib, then raw deflate
+    for wbits in attempts:
+        inflater = zlib.decompressobj(wbits)
+        out = bytearray()
+        pending = raw
+        try:
+            while pending:
+                out += inflater.decompress(pending, cap + 1 - len(out))
+                if len(out) > cap:
+                    raise ResponseTooLargeError()
+                if inflater.unconsumed_tail == pending:  # no progress: the stream ended or is broken
+                    break
+                pending = inflater.unconsumed_tail
+            out += inflater.flush(cap + 1 - len(out))
+        except zlib.error:
+            continue
+        if len(out) > cap:
+            raise ResponseTooLargeError()
+        return bytes(out)
+    raise ResponseUnreadableError()
 
 
 @dataclass(frozen=True)
@@ -177,10 +216,13 @@ class GuardedHttp:
         return parsed
 
     @staticmethod
-    def _headers(headers: Mapping[str, str] | None) -> None:
+    def _headers(headers: Mapping[str, str] | None) -> dict[str, str]:
         for name, value in (headers or {}).items():
             if any(c in name or c in value for c in FORBIDDEN_IN_HEADERS):
                 raise InvalidRequestError("header")
+            if name.lower() in RESERVED_HEADERS:
+                raise InvalidRequestError("reserved_header")
+        return {**(headers or {}), "Accept-Encoding": "identity"}
 
     async def request(
         self,
@@ -194,14 +236,16 @@ class GuardedHttp:
         follow_same_origin: int = 0,
     ) -> HttpResponse:
         target = self._url(url)
-        self._headers(headers)
+        sent_headers = self._headers(headers)
+        if not 0 <= follow_same_origin <= MAX_REDIRECTS:
+            raise InvalidRequestError("redirects")
         hops = 0
         try:
             async with asyncio.timeout(self.limits.total_s):
                 while True:
                     try:
                         request = self._client.build_request(
-                            method, target, headers=headers, params=params, content=content, json=json
+                            method, target, headers=sent_headers, params=params, content=content, json=json
                         )
                     except (httpx.InvalidURL, TypeError, ValueError):
                         raise InvalidRequestError("request") from None
@@ -244,7 +288,7 @@ class GuardedHttp:
                 raise ResponseTooLargeError()
             chunks: list[bytes] = []
             total = 0
-            async for chunk in response.aiter_bytes():
+            async for chunk in response.aiter_raw():  # the bytes on the wire: decoded below, within the cap
                 total += len(chunk)
                 if total > self.limits.max_response_bytes:
                     raise ResponseTooLargeError()
@@ -255,4 +299,10 @@ class GuardedHttp:
             raise MaybeSentError("transport") from None
         finally:
             await response.aclose()
-        return HttpResponse(response.status_code, tuple(response.headers.multi_items()), b"".join(chunks))
+        raw = b"".join(chunks)
+        encoding = response.headers.get("content-encoding", "identity").strip().lower()
+        if encoding not in ("", "identity"):
+            if encoding not in INFLATABLE:
+                raise ResponseUnreadableError()
+            raw = _inflate(raw, encoding, self.limits.max_response_bytes)
+        return HttpResponse(response.status_code, tuple(response.headers.multi_items()), raw)

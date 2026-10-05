@@ -20,6 +20,7 @@ from dewpoint.core.egress.http import (
     HttpLimits,
     RedirectRefusedError,
     ResponseTooLargeError,
+    ResponseUnreadableError,
 )
 from tests.support.netfakes import TENANT, Request, guard, respond, serve, tls
 
@@ -233,3 +234,60 @@ async def test_errors_never_name_the_host() -> None:
     finally:
         await http.aclose()
     assert "secret-name" not in str(raised.value)
+
+
+def _gzipped(size: int) -> bytes:
+    import gzip
+
+    return gzip.compress(b"\0" * size)
+
+
+async def test_answers_are_asked_uncompressed_and_a_compressed_one_is_inflated_within_the_cap() -> None:
+    """The review's finding 6: decoding never holds more than the cap."""
+    small, huge = _gzipped(500), _gzipped(64 * 1024 * 1024)
+    async with serve(respond(200, small, [("content-encoding", "gzip")])) as server:
+        http = client({"local.test": ["127.0.0.1"]}, HttpLimits(max_response_bytes=1024))
+        try:
+            assert (await http.request("GET", f"http://local.test:{server.port}/")).content == b"\0" * 500
+        finally:
+            await http.aclose()
+    assert server.requests[0].headers["accept-encoding"] == "identity"
+    async with serve(respond(200, huge, [("content-encoding", "gzip")])) as server:
+        http = client({"local.test": ["127.0.0.1"]}, HttpLimits(max_response_bytes=1024 * 1024))
+        try:
+            with pytest.raises(ResponseTooLargeError):
+                await http.request("GET", f"http://local.test:{server.port}/")
+        finally:
+            await http.aclose()
+
+
+async def test_an_encoding_it_cant_bound_is_refused() -> None:
+    async with serve(respond(200, b"\x0b\x02\x80", [("content-encoding", "br")])) as server:
+        http = client({"local.test": ["127.0.0.1"]})
+        try:
+            with pytest.raises(ResponseUnreadableError):
+                await http.request("GET", f"http://local.test:{server.port}/")
+        finally:
+            await http.aclose()
+
+
+@pytest.mark.parametrize("name", ["Content-Length", "transfer-encoding", "Host", "Connection", "Upgrade", "TE"])
+async def test_framing_headers_are_the_clients_own(name: str) -> None:
+    """The review's finding 8: a plugin can't set what frames or routes the request."""
+    async with serve(respond()) as server:
+        http = client({"local.test": ["127.0.0.1"]})
+        try:
+            with pytest.raises(InvalidRequestError):
+                await http.request("POST", f"http://local.test:{server.port}/", headers={name: "5"}, content=b"x")
+        finally:
+            await http.aclose()
+    assert server.requests == []
+
+
+async def test_at_most_three_redirect_hops_can_be_asked_for() -> None:
+    http = client({"local.test": ["127.0.0.1"]})
+    try:
+        with pytest.raises(InvalidRequestError):
+            await http.request("GET", "http://local.test:1/", follow_same_origin=4)
+    finally:
+        await http.aclose()

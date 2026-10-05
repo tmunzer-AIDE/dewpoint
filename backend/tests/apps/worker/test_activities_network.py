@@ -6,6 +6,7 @@ request that may have arrived is `outcome_unknown` for an ambiguous node."""
 import asyncio
 import dataclasses
 import ipaddress
+import socket
 import uuid
 from typing import Any
 
@@ -23,7 +24,7 @@ from dewpoint.engine.runtime.ids import run_workflow_id
 from tests.support.connections import TESTKIT_TYPE, add_connection, seed_step
 from tests.support.keys import FixtureKeys
 from tests.support.netfakes import Request, guard, respond, serve, tls
-from tests.support.plugins.testkit import AmbiguousCall, HttpCall
+from tests.support.plugins.testkit import AmbiguousCall, HttpCall, WriteThenRead
 
 NAMES = ("dewpoint.test",)
 
@@ -33,10 +34,13 @@ def testkit_type(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(CONNECTION_TYPES, "testkit", TESTKIT_TYPE)
 
 
-async def _run(worker: Any, owner: Any, port: int, node: type, *, host: str = "dewpoint.test") -> Any:
+async def _run(
+    worker: Any, owner: Any, port: int, node: type, *, host: str = "dewpoint.test", extra: dict[str, Any] | None = None,
+    connection: dict[str, Any] | None = None,
+) -> Any:  # fmt: skip
     tenant = uuid.uuid4()
     await seed_step(owner, named=[None], tenant=tenant)
-    cid = await add_connection(owner, tenant, config={"base_url": f"https://{host}:{port}"})
+    cid = await add_connection(owner, tenant, config={"base_url": f"https://{host}:{port}", **(connection or {})})
     seeded = await seed_step(owner, named=[cid], tenant=tenant, node_type=f"{node.type}@{node.version}")
     network = Network(
         guard=guard(
@@ -51,7 +55,12 @@ async def _run(worker: Any, owner: Any, port: int, node: type, *, host: str = "d
     activity = step_activity_for(node, DbRunStore(worker, FixtureKeys()), network)
     step = StepInput(
         tenant_id=str(tenant), run_id=str(seeded.run), step_id=str(seeded.step), node_key="call", iteration_key="",
-        ref=f"{node.type}@{node.version}", config={"connection": str(cid), "path": "/", "method": "POST"},
+        ref=f"{node.type}@{node.version}",
+        config=(
+            {"connection": str(cid), **(extra or {})}
+            if node is WriteThenRead
+            else {"connection": str(cid), "path": "/", "method": "POST"}
+        ),
         root_run_id=str(seeded.run),
     )  # fmt: skip
     env = ActivityEnvironment()
@@ -104,3 +113,27 @@ async def test_maybe_sent_is_outcome_unknown_for_an_ambiguous_node(owner_session
     assert (failure.type, failure.non_retryable, failure.details[0]["outcome"]) == (
         "maybe_sent", True, OUTCOME_UNKNOWN,
     )  # fmt: skip
+
+
+async def test_a_failure_after_an_earlier_send_is_never_retried_for_an_ambiguous_node(
+    owner_sessionmaker, worker_sessionmaker
+) -> None:
+    """The review's finding 1: the second call sends nothing, but the first may have arrived."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        closed = sock.getsockname()[1]
+    async with serve(respond(201, b"made"), tls_names=NAMES) as server:
+        failure = await _failure(worker_sessionmaker, owner_sessionmaker, server.port, WriteThenRead,
+                                 extra={"read_url": f"https://dewpoint.test:{closed}/read"})  # fmt: skip
+    assert [r.method for r in server.requests] == ["POST"]
+    assert (failure.type, failure.non_retryable, failure.details[0]["outcome"]) == ("not_sent", True, OUTCOME_UNKNOWN)
+
+
+async def test_a_cooldown_after_an_earlier_send_is_never_retried_for_an_ambiguous_node(
+    owner_sessionmaker, worker_sessionmaker
+) -> None:
+    async with serve(respond(201, b"made"), tls_names=NAMES) as server:
+        failure = await _failure(worker_sessionmaker, owner_sessionmaker, server.port, WriteThenRead,
+                                 connection={"capacity": 1, "refill_per_s": 0.001})  # fmt: skip
+    assert [r.method for r in server.requests] == ["POST"]
+    assert (failure.type, failure.non_retryable, failure.details[0]["outcome"]) == ("cooldown", True, OUTCOME_UNKNOWN)

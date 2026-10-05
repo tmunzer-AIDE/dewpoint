@@ -8,6 +8,8 @@ import ssl
 import uuid
 from dataclasses import dataclass
 
+import httpx
+
 from dewpoint.core.egress.guard import (
     Guard,
     InvalidRequestError,
@@ -17,6 +19,7 @@ from dewpoint.core.egress.guard import (
 )
 
 MAX_DATAGRAM = 65_507
+MAX_RECEIVE = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -40,7 +43,9 @@ class GuardedStream:
             raise MaybeSentError("send") from None
 
     async def receive(self, max_bytes: int = 65_536) -> bytes:
-        """At most `max_bytes`; b"" once the peer closed."""
+        """At most `max_bytes` (1 to 1 MiB); b"" once the peer closed."""
+        if not 1 <= max_bytes <= MAX_RECEIVE:
+            raise InvalidRequestError("receive")
         try:
             return await asyncio.wait_for(self._reader.read(max_bytes), self._limits.read_s)
         except (OSError, TimeoutError, ssl.SSLError):
@@ -69,7 +74,8 @@ class GuardedNet:
         limits: NetLimits | None = None,
     ) -> None:
         self._guard, self._tenant = guard, tenant_id
-        self._context = ssl_context or ssl.create_default_context()
+        # the same trust as the HTTP client's: the bundled CAs, never SSL_CERT_FILE or SSL_CERT_DIR
+        self._context = ssl_context or httpx.create_ssl_context(trust_env=False)
         self.limits = limits or NetLimits()
         self._open: list[GuardedStream] = []
 

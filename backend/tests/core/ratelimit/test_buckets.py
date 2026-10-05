@@ -112,3 +112,18 @@ async def test_buckets_are_the_tenants(owner_sessionmaker, worker_sessionmaker) 
     scope = Scope("mist.org:shared-name", 1, 0.001)
     assert await _take(worker_sessionmaker, a, [scope]) == 0
     assert await _take(worker_sessionmaker, b, [scope]) == 0  # its own bucket, still full
+
+
+async def test_refill_time_never_moves_back(owner_sessionmaker, worker_sessionmaker) -> None:
+    """The review's finding 5: a transaction that started earlier but locks later never writes an older refill time."""
+    tid = await tenant(owner_sessionmaker)
+    scope = Scope("mist.org:a", 5, 1)
+    await _take(worker_sessionmaker, tid, [scope])
+    async with worker_sessionmaker() as s, s.begin():  # as a later writer would have left it
+        await tenant_scope(s, tid)
+        await s.execute(text("update rate_buckets set refilled_at = now() + interval '5 seconds'"))
+        later = (await s.execute(text("select refilled_at from rate_buckets"))).scalar_one()
+    await _take(worker_sessionmaker, tid, [scope])
+    async with worker_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tid)
+        assert (await s.execute(text("select refilled_at from rate_buckets"))).scalar_one() >= later

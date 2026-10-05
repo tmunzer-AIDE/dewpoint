@@ -268,3 +268,40 @@ async def test_the_secret_is_read_on_every_call(owner_sessionmaker, worker_sessi
         "Bearer s3cr3t-token-value",
         "Bearer r0tated-token-value",
     ]
+
+
+def _always_429(retry_after: str) -> Any:
+    async def handler(request: Request, writer: asyncio.StreamWriter) -> None:
+        await respond(429, b"slow down", [("retry-after", retry_after)])(request, writer)
+
+    return handler
+
+
+async def test_retry_after_zero_doesnt_loop(owner_sessionmaker, worker_sessionmaker) -> None:
+    """The review's finding 3: a wait of 0 still counts, and the in-attempt retries are few."""
+    async with serve(_always_429("0"), tls_names=NAMES) as server:
+        seeded, cid = await _setup(owner_sessionmaker, server.port)
+        a = attempt(worker_sessionmaker, seeded)
+        try:
+            with pytest.raises(RateLimited):
+                await (await a.connection(cid)).http.request("GET", "/")
+        finally:
+            await a.aclose()
+    assert 1 < len(server.requests) <= 4
+
+
+@pytest.mark.parametrize("value", ["²", "9" * 400, "9" * 5000, "999999999999", "Thu, 01 Jan 1970 00:00:00 GMT", "x"])
+async def test_a_strange_retry_after_is_read_safely(owner_sessionmaker, worker_sessionmaker, value: str) -> None:
+    """The review's finding 4: no value raises after the request was sent; a block is at most an hour."""
+    async with serve(_always_429(value), tls_names=NAMES) as server:
+        seeded, cid = await _setup(owner_sessionmaker, server.port)
+        a = attempt(worker_sessionmaker, seeded)
+        try:
+            with pytest.raises(RateLimited):
+                await (await a.connection(cid)).http.request("GET", "/")
+        finally:
+            await a.aclose()
+    async with worker_sessionmaker() as s, s.begin():
+        await tenant_scope(s, seeded.tenant)
+        untils = (await s.execute(text("select blocked_until from rate_buckets"))).scalars().all()
+    assert all(u is None or u - datetime.now(UTC) <= timedelta(hours=1, seconds=5) for u in untils)

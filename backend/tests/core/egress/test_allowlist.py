@@ -69,3 +69,16 @@ async def test_adding_and_removing_are_audited_and_listed(owner_sessionmaker, ad
             )
         ).scalars()
         assert list(actions) == ["egress_allowlist.add", "egress_allowlist.remove"]
+
+
+@pytest.mark.parametrize(
+    "network", ["0.0.0.0/1", "::/1", "127.0.0.0/8", "169.254.169.254/32", "fe80::/10", "10.0.0.0/7", "::1/128"]
+)
+async def test_a_sensitive_entry_must_be_confirmed(owner_sessionmaker, admin_sessionmaker, network) -> None:  # type: ignore[no-untyped-def]
+    """The review's finding 7: broad networks, loopback, link-local and cloud metadata need an explicit confirmation."""
+    a = await tenant(owner_sessionmaker)
+    async with admin_sessionmaker() as s, s.begin():
+        with pytest.raises(ValueError, match="sensitive"):
+            await allowlist.add(s, network=network, ports=None, tenant_id=a, note="")
+    async with admin_sessionmaker() as s, s.begin():
+        await allowlist.add(s, network=network, ports=None, tenant_id=a, note="", confirm_sensitive=True)

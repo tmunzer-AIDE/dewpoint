@@ -44,6 +44,19 @@ def source(sessionmaker: async_sessionmaker[AsyncSession]) -> AllowlistSource:
     return read
 
 
+SHORTEST = {4: 8, 6: 8}  # a shorter prefix covers too much to be anything but deliberate
+SENSITIVE = tuple(
+    ipaddress.ip_network(n)
+    for n in ("127.0.0.0/8", "169.254.0.0/16", "0.0.0.0/8", "224.0.0.0/4", "::1/128", "::/128", "fe80::/10", "ff00::/8")
+)  # loopback, link-local (cloud metadata), unspecified and multicast
+
+
+def sensitive(network: ipaddress.IPv4Network | ipaddress.IPv6Network) -> bool:
+    if network.prefixlen < SHORTEST[network.version]:
+        return True
+    return any(n.version == network.version and network.overlaps(n) for n in SENSITIVE)
+
+
 async def add(
     s: AsyncSession,
     *,
@@ -52,15 +65,19 @@ async def add(
     tenant_id: uuid.UUID | None,
     note: str,
     every_tenant: bool = False,
+    confirm_sensitive: bool = False,
 ) -> uuid.UUID:
     """A new entry, audited. Raises ValueError for a network that isn't strict or covers everything, a port range
-    that isn't one, or an entry for every tenant not asked for as such."""
+    that isn't one, an entry for every tenant not asked for as such, or a sensitive network (a short prefix, loopback,
+    link-local and its cloud metadata, unspecified, multicast) not confirmed."""
     try:
         parsed = ipaddress.ip_network(network, strict=True)
     except ValueError:
         raise ValueError("The network isn't a strict CIDR (no host bits set).") from None
     if parsed.prefixlen == 0:
         raise ValueError("An entry can't cover every address.")
+    if sensitive(parsed) and not confirm_sensitive:
+        raise ValueError("The network is sensitive (a short prefix, loopback, link-local or metadata): confirm it.")
     if ports is not None and not 1 <= ports[0] <= ports[1] <= 65535:
         raise ValueError("The ports must be a range within 1-65535.")
     if (tenant_id is None) != every_tenant:
