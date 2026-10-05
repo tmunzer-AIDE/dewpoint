@@ -1364,7 +1364,8 @@ export interface components {
         };
         /**
          * EndpointPatch
-         * @description Only the fields given change, never an endpoint's identity (how it authenticates, where its ids are).
+         * @description Only the fields given change, never an endpoint's identity (how it authenticates, where its events and their ids
+         *     are).
          */
         EndpointPatch: {
             /** Allowlist */
@@ -1373,8 +1374,6 @@ export interface components {
             body_limit?: number | null;
             /** Enabled */
             enabled?: boolean | null;
-            /** Events Pointer */
-            events_pointer?: string | null;
             /** Name */
             name?: string | null;
             /** Signature Header */

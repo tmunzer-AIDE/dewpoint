@@ -597,7 +597,7 @@
       },
       "EndpointPatch": {
         "additionalProperties": false,
-        "description": "Only the fields given change, never an endpoint's identity (how it authenticates, where its ids are).",
+        "description": "Only the fields given change, never an endpoint's identity (how it authenticates, where its events and their ids\nare).",
         "properties": {
           "allowlist": {
             "anyOf": [
@@ -636,17 +636,6 @@
               }
             ],
             "title": "Enabled"
-          },
-          "events_pointer": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Events Pointer"
           },
           "name": {
             "anyOf": [

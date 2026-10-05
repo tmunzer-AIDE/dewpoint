@@ -53,8 +53,8 @@ MAX_POINTER = 256
 MAX_ALLOWLIST = 32
 LISTED = 100  # events a listing shows at most
 CANCELLED = "cancelled"
-UPDATABLE = frozenset({"name", "enabled", "allowlist", "tolerance_s", "body_limit", "events_pointer",
-                       "signature_header", "timestamp_header"})  # fmt: skip
+UPDATABLE = frozenset({"name", "enabled", "allowlist", "tolerance_s", "body_limit", "signature_header",
+                       "timestamp_header"})  # fmt: skip
 
 
 class WebhookRefusedError(Exception):
@@ -191,9 +191,10 @@ async def rotate_secret(s: AsyncSession, key: IngressKey, *, endpoint: WebhookEn
 async def update_endpoint(
     s: AsyncSession, *, endpoint: WebhookEndpoint, actor_id: uuid.UUID, changes: Mapping[str, Any]
 ) -> WebhookEndpoint:
-    """Only what `UPDATABLE` names changes; an endpoint's identity never does. Raises WebhookRefusedError."""
+    """Only what `UPDATABLE` names changes; an endpoint's identity (how it authenticates, where its events and their
+    ids are) never does. Raises WebhookRefusedError."""
     fixed = sorted(set(changes) - UPDATABLE)
-    nulled = sorted(k for k in set(changes) - {"events_pointer"} if changes[k] is None)
+    nulled = sorted(k for k in changes if changes[k] is None)
     problems = fixed + nulled + _problems(changes, auth=endpoint.auth_kind, id_source=None)
     if problems:
         raise WebhookRefusedError(422, {"error": "endpoint_invalid", "fields": sorted(set(problems))})

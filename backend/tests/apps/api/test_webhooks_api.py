@@ -197,7 +197,8 @@ async def test_an_endpoint_is_updated_and_disabled_but_never_its_identity(
     assert {k: patched.json()[k] for k in ("name", "enabled", "allowlist")} == {
         "name": "renamed", "enabled": False, "allowlist": ["203.0.113.0/24"],
     }  # fmt: skip
-    for refused in ({"id_source": "pointer", "id_pointer": "/id"}, {"auth": "hmac"}, {"name": None}):
+    for refused in ({"id_source": "pointer", "id_pointer": "/id"}, {"auth": "hmac"}, {"name": None},
+                    {"events_pointer": "/events"}, {"events_pointer": None}):  # fmt: skip
         assert (await editor.patch(url(ctx, f"/webhook-endpoints/{body['id']}"), json=refused)).status_code == 422
     other = uuid.uuid4()
     assert (await editor.patch(url(ctx, f"/webhook-endpoints/{other}"), json={"name": "x"})).status_code == 404
@@ -215,8 +216,7 @@ async def test_every_field_a_patch_supports_and_a_rotation_are_written_as_the_ap
     body = await made(keyed_app, owner_sessionmaker, api_settings, ctx, auth="hmac", **ids)
     editor = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
     changes = {"name": "renamed", "enabled": False, "signature_header": "x-sig", "timestamp_header": "x-ts",
-               "tolerance_s": 600, "allowlist": ["203.0.113.0/24"], "body_limit": 5 * MIB,
-               "events_pointer": "/events"}  # fmt: skip
+               "tolerance_s": 600, "allowlist": ["203.0.113.0/24"], "body_limit": 5 * MIB}  # fmt: skip
     patched = await editor.patch(url(ctx, f"/webhook-endpoints/{body['id']}"), json=changes)
     assert patched.status_code == 200, patched.text
     assert {k: patched.json()[k] for k in changes} == changes

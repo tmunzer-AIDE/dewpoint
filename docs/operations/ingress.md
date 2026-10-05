@@ -55,12 +55,12 @@ With `trigger.manage` (editors and up), under `/api/v1/t/{tenant}`; read with `w
 |---|---|
 | `POST /webhook-endpoints` | make one; answers 201 with its `path` and its `secret`, shown this once |
 | `GET /webhook-endpoints`, `GET /webhook-endpoints/{id}` | its settings and its counters, never a secret |
-| `PATCH /webhook-endpoints/{id}` | its name, `enabled`, allowlist, tolerance, body limit, events pointer, HMAC header names |
+| `PATCH /webhook-endpoints/{id}` | its name, `enabled`, allowlist, tolerance, body limit, HMAC header names |
 | `POST /webhook-endpoints/{id}/secret` | a new secret, shown this once; deduplication carries on |
 
-How an endpoint authenticates and where its events' ids are never change: make another endpoint instead. The API needs
-the ingress key to make or rotate one (503 `ingress_key_missing` without it), and makes the tenant's inbound keypair if
-it has none.
+How an endpoint authenticates, its events pointer and where its events' ids are never change: make another endpoint
+instead. The API needs the ingress key to make or rotate one (503 `ingress_key_missing` without it), and makes the
+tenant's inbound keypair if it has none.
 
 ### Authentication
 

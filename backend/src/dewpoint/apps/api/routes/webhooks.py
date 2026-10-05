@@ -42,7 +42,8 @@ class EndpointIn(BaseModel):
 
 
 class EndpointPatch(BaseModel):
-    """Only the fields given change, never an endpoint's identity (how it authenticates, where its ids are)."""
+    """Only the fields given change, never an endpoint's identity (how it authenticates, where its events and their ids
+    are)."""
 
     model_config = ConfigDict(extra="forbid")
     name: str | None = Field(default=None, min_length=1, max_length=120)
@@ -52,7 +53,6 @@ class EndpointPatch(BaseModel):
     tolerance_s: int | None = Field(default=None, ge=60, le=900)
     allowlist: list[str] | None = None
     body_limit: int | None = Field(default=None, ge=1, le=webhooks.MAX_BODY)
-    events_pointer: str | None = None
 
 
 class BindingIn(BaseModel):
