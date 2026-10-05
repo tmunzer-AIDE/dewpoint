@@ -30,7 +30,8 @@ weight unless stated.
 - **3a-2 Plugin calls and connection types:** `options()`/`verify()` (D3); connection types from manifests (D11),
   `mist` leaving `core` with its shape unchanged; flow completion (D19). Proof: a site picker end to end.
 - **3b-1 Mist REST:** client and OAS (D1, D2), node types generated per curated operation (§5, D23, D24), any endpoint
-  (D14), nested update (D15), errors and side effects (D16), simulate (D13), options, the webhook trigger (D17).
+  (D14), the policy map (D28), nested update (D15), errors and side effects (D16), simulate (D13), options, the
+  webhook trigger (D17).
 - **3b-2 Mist device utilities:** `ctx.ws`, the guarded websocket (D26), and one node per device utility, streamed
   (D27). Proof: a ping and a bounce-port node against a local stream fake.
 - **3c Messaging:** the message model for Slack, Teams, Google Chat and webhooks (D18); SMTP (D20); syslog (D21).
@@ -43,18 +44,19 @@ Order: 3a-1, 3a-2, 3b-1, 3b-2, 3c, 3d; 3c and 3d need only 3a, so either can pre
 **D1 Mist client — B: a thin async client on `ctx.http`, with the OAS as data.** The installed mistapi 0.63.1
 (`/opt/homebrew/lib/python3.14/site-packages/mistapi`, read, not run) is sync, on `requests`, its async being
 `to_thread` (`__init__.py:85`). It builds its own session, which can't be injected, so the guard is bypassed
-(`__api_session.py:129`). Every constructor reads `MIST_HOST`, `MIST_APITOKEN`, `MIST_VAULT_*` and `HTTPS_PROXY` from
-the environment (`:360-402`), and `env_file` writes `os.environ` via `load_dotenv(override=True)` (`:354`), so a later
-session inherits another's token. It has Vault, keyring and `input`/`getpass` paths (`:508`, `:525`) and calls `GET
+(`__api_session.py:129`). Every constructor first loads `MIST_HOST`, `MIST_APITOKEN`, `MIST_VAULT_*` and `HTTPS_PROXY`
+from the environment (`:360-402`); an explicit token then overrides the loaded one (`:176-182`), but a session built
+without one silently runs on the ambient token, and `env_file` writes `os.environ` via `load_dotenv(override=True)`
+(`:354`) for every later session. It has Vault, keyring and `input`/`getpass` paths (`:508`, `:525`) and calls `GET
 /self` while constructing with a token (`:182`). It follows 30 redirects, with proxies and netrc via `trust_env`, and
 an unchecked `next` URL that can send the token elsewhere (`__pagination.py:34`). It retries 429 on every method with
 a blocking sleep, an uncapped `Retry-After` and token rotation (`__api_request.py:186-240`), and sets no timeouts
-(`:277`). It logs URLs and queries at INFO (`:211`) and bodies at DEBUG, prints to stdout, and runs `os.system("")` at
-import (`__logger.py:18`). Dependencies: requests, hvac, keyring, python-dotenv, sshkeyboard, tabulate,
-websocket-client, deprecation. Licence MIT. Against §6.7: its own session, redirects, env proxies and the unchecked
-`next` bypass the guard and pinning. Against `ctx.connection()`: env, dotenv, Vault and keyring credentials and the
-process-wide `os.environ` break "decrypted in memory only, no cross-tenant cache". Upstream fixes would still leave it
-sync.
+(`:277`). It logs URLs and queries at INFO (`:211`) and bodies at DEBUG, and prints to stdout. It calls
+`os.system("")` at import (`__logger.py:18`): a real call, an empty command, a side effect rather than an injection.
+Dependencies: requests, hvac, keyring, python-dotenv, sshkeyboard, tabulate, websocket-client, deprecation. Licence
+MIT. Against §6.7: its own session, redirects, env proxies and the unchecked `next` bypass the guard and pinning.
+Against `ctx.connection()`: env, dotenv, Vault and keyring credentials and the process-wide `os.environ` break
+"decrypted in memory only, no cross-tenant cache". Upstream fixes would still leave it sync.
 
 **D2 The OAS as data.** Vendor `mistsys/mist_openapi` `mist.openapi.json` at 0613a22 (**V**: OAS 3.1.0, 2609.1.0, 762
 paths, 3.6 MB, MIT), gzipped with its SHA-256 and a `NOTICE` entry; a test pins each curated operationId's method and
@@ -62,13 +64,19 @@ path. **Owner's call:** its README says "for documentation only, and NOT for cod
 `README.md:8`). I recommend relying on it anyway: the curated map overrides it where it's wrong, and any endpoint
 refuses what it doesn't describe.
 
-**D3 Plugin code outside runs — C: a DB-mediated call served by the worker.** The API checks `connection.use`, inserts
-a `plugin_calls` row (tenant, kind, node ref, field, connection, query, expiry) and notifies; a worker loop claims it
-(`SKIP LOCKED`, only refs its build has), runs the hook from the row alone, and writes the result encrypted under the
-tenant key, with a 60 s expiry; the API waits up to 10 s and deletes the row. Rejected: A, the API starts workflows
-(its Temporal credentials could then start `RunGraph` around admission and the gate; Temporal OSS has no per-type
-authorization); B, the dispatcher starts one (a new workflow-id kind, codec context, latency). Cost: the spec's
-"options activities" become worker-side calls.
+**D3 Plugin code outside runs — C: a DB-mediated call served by the worker.** The API checks `connection.use` and
+inserts a `plugin_calls` row: tenant, kind, node ref or connection type, field, connection id and the
+`connection.revision` it read, query, `expires_at` (now + 30 s); then notifies. A worker claims it by setting
+`claimed_by` and `lease_until` (15 s) under `SKIP LOCKED`, only for refs its build has; a lapsed lease is claimable
+again, which is safe because plugin calls are read-only: in this context `ctx.http`/`ctx.ws` refuse anything but GET
+and HEAD, so verify never sends a message (webhook-URL types get a host and syntax check only). The worker runs the
+hook from the row alone and writes the result, encrypted under the tenant key, with `UPDATE … WHERE id = :id AND
+claimed_by = :me AND state = 'claimed'`; a row the caller has abandoned or deleted takes nothing, so a late result is
+discarded. The API waits up to 10 s, then deletes the row; a worker sweep deletes expired ones. A verify result is
+applied as today, by compare-and-set on the revision it verified (`core/connections/service.py`), and a changed
+revision discards it. Rejected: A, the API starts workflows (its Temporal credentials could then start `RunGraph`
+around admission and the gate; Temporal OSS has no per-type authorization); B, the dispatcher starts one (a new
+workflow-id kind, codec context, latency). Cost: the spec's "options activities" become worker-side calls.
 
 **D4 `ctx.connection(id)` in a run.** Allowed ids are only the literal connection fields of this step's node in the
 run's version graph, read from the DB by run id (a subset of `connection_ids`). The row's tenant must be the
@@ -102,17 +110,28 @@ explicitly) and a note; managed by `dewpoint platform egress add|list|remove`, a
 (host resolved and vetted) and on every connect. Tenant-scoped, so one MSP customer's internal range never opens to
 another.
 
-**D9 Rate buckets.** `connection_rate_buckets` (tenant, connection, capacity, refill/s, tokens, `refilled_at`,
-`blocked_until`), one `UPDATE … RETURNING` per request; an empty bucket waits up to 10 s (heartbeating), then
-`RetryableError("rate_limited")`. Mist allows 5,000 calls/hour per token, and its 429 carries `Retry-After` (**V**
-`guides/api-requests/rate-limit.md`; two pages say per organization). Defaults (a §15 item): Mist capacity 50, refill
-1.25/s, and Mist streams 1,800 connections an hour (D26); Slack and Google Chat 1/s (**V**: per channel, per space;
-both answer 429).
+**D9 Rate buckets, keyed by the provider's quota scope.** `rate_buckets` (tenant, scope key, capacity, refill/s,
+tokens, `refilled_at`, `blocked_until`); a request takes one token from every bucket its connection type names, in one
+`UPDATE … RETURNING` in key order; an empty bucket waits up to 10 s (heartbeating), then
+`RetryableError("rate_limited")`. Scopes, so connections sharing credentials share budgets: Mist charges a token scope
+(an HMAC of the token under the tenant's key, never the token) and an org scope (cloud, `org_id`), because the docs
+say 5,000 calls an hour per token in one place and per organization in two others (**V**
+`guides/api-requests/rate-limit.md`; unresolved, kept so until verified); its streams charge a third (D26).
+Coordination stays within a tenant: a shared bucket across tenants would reveal that two tenants hold one token.
+Defaults (a §15 item): Mist 50 burst, 1.25/s for both scopes; Slack and Google Chat 1/s per webhook URL scope (**V**:
+per channel, per space).
 
-**D10 `Retry-After` without an ABI bump.** A 429, or a 503 with `Retry-After`, means not processed: waits up to 20 s
-happen inside the attempt; a longer one sets the bucket's `blocked_until` (capped at 1 h), holding every run on that
-connection, and raises `RetryableError`. Alternative: RunGraph honours it, at the cost of ENGINE_ABI 7, new golden
-histories and republishing every workflow.
+**D10 Rejections, `Retry-After` and long cooldowns, without an ABI bump.** A status code never makes an ambiguous send
+retryable by itself: a 503 with `Retry-After`, or a 429, doesn't prove the request wasn't applied upstream. A
+connection type may list, per operation, answers its provider documents as rejected before processing; none is
+verified yet, so an ambiguous node meeting 429 or 5xx after sending is `outcome_unknown` (cost if wrong: such a write
+needs a person instead of a retry; the buckets keep it rare). Idempotent, keyed and reconcilable nodes retry 429 and
+5xx under their policy, honouring `Retry-After`: up to 20 s inside the attempt; longer sets the scope's
+`blocked_until` (capped at 1 h) and raises `RetryableError("rate_limited")`. An attempt that starts before
+`blocked_until` fails fast without calling the provider; when the attempts run out, the step fails `rate_limited` and
+follows its error policy. That failure is intentional in 3a: a five-minute cooldown can outlast three attempts.
+Durable deferral, RunGraph sleeping until `blocked_until`, needs ENGINE_ABI 7, new golden histories and republishing
+every workflow, so it's proposed separately, not built here.
 
 **D11 Connection types from manifests.** A type declares key, label, config schema, secret schema (secret fields
 `x-sensitive`), auth (D4), host rule and whether it has `verify()`. Hosts: Mist its 12 clouds (**V** OAS `servers`)
@@ -128,12 +147,14 @@ only when set so flow@1's hashes don't move; `icon` joins `_DISPLAY`.
 synthesized from the schema, labelled a fixture. Messaging and ITSM return the exact request, secrets masked, and a
 fixture output.
 
-**D14 Any endpoint.** Method and path must match an OAS operation; path parameters are format-checked and URL-encoded;
-`org_id` comes from the connection, and a `site_id` must belong to it (one `GET /sites/{id}` per attempt). Refused:
-`/msps/…`, `/self/…` writes, login/logout/register, anything outside `/api/v1`, and operations where an empty body
-means "all" (**V**: `POST /orgs/{org_id}/psks/delete` with `[]` deletes every PSK; the ledger lists the rest). GET
-needs `mist.read`, other methods `mist.write` (the OAS has no machine-readable privileges, **V**). The body is checked
-against the OAS; the output is claimed whole with taint. GET none, PUT/DELETE idempotent, POST ambiguous.
+**D14 Any endpoint: two nodes with static policies.** RunGraph decides a lost or timed-out attempt's retry from the
+manifest's static `side_effect` (`execution.py:1567`), so one generic node can't pick it per method. `mist.api.read`:
+GET only, side effect none. `mist.api.write`: any other method, always `ambiguous`; an operation verified idempotent
+is reached through its curated node instead. Both: the method and path must match an OAS operation the policy map
+(D28) allows for that node; path parameters are format-checked and URL-encoded; `org_id` comes from the connection,
+and a `site_id` must belong to it (one `GET /sites/{id}` per attempt). The body is checked against the OAS; the output
+is undeclared, so claimed whole with taint. Capabilities: `mist.read` and `mist.write`; the OAS has no
+machine-readable privileges (**V**: no operation-level `x-`).
 
 **D15 Nested update.** Mist's PUT is a top-level merge: an omitted scalar is kept, an included object or array
 replaces that structure whole (**V** Juniper `restful-api-overview`, `updateSiteInfo`). Merge with current (default)
@@ -141,12 +162,15 @@ GETs, applies Keep / Set / Null per field rebuilding each touched structure whol
 set fields. No ETag in the OAS (**V**), so the race warning always shows. The preview is the exact body, sensitive
 fields masked. Idempotent.
 
-**D16 Mist errors and side effects.** 4xx fatal (`mist.bad_request`, `mist.unauthorized`, `mist.forbidden`,
-`mist.not_found`); 429 retryable (D10); 5xx retryable when idempotent, else `outcome_unknown` (the OAS lists no 5xx,
-**V**; unverified). get, list and search: none; update and ack: idempotent; delete: idempotent, a 404 on retry
-counting as applied; restart: ambiguous; create: ambiguous unless the ledger verifies a marker field `reconcile()` can
-search (a name could match someone else's object). Secret-named output fields (`psk`, `passphrase`, `secret`,
-`password`, `token`, `community`, `key`…) are `x-sensitive`; undeclared positions are claimed with taint.
+**D16 Mist errors and side effects, per operation with evidence.** 4xx fatal (`mist.bad_request`, `mist.unauthorized`,
+`mist.forbidden`, `mist.not_found`); 429 and 5xx per D10 (the OAS lists no 5xx, **V**; Mist's 5xx behaviour
+unverified). The HTTP method alone isn't evidence of retry safety, so each curated operation's policy is in the policy
+map (D28) with its evidence, and an operation without evidence is `ambiguous`. Proposed: get, list and search none;
+update `idempotent` (evidence: PUT is a documented top-level merge, so the same body leaves the same state, **V**);
+ack `idempotent` (evidence to record in 3b, else ambiguous); delete `idempotent`, a 404 on a retry reported as
+"applied or already absent"; restart and create `ambiguous`, unless the ledger verifies a marker field `reconcile()`
+can search (a shared name could match someone else's object). Secret-named output fields (`psk`, `passphrase`,
+`secret`, `password`, `token`, `community`, `key`…) are `x-sensitive`; undeclared positions are claimed with taint.
 
 **D17 Mist webhook trigger, on 2b-3b's ingress unchanged.** The endpoint records the whole `{topic, events}` envelope
 (**V** OAS `webhooks`, 30 topics) with no events pointer; bindings filter on `/topic`; pills are typed per topic. Auth
@@ -164,10 +188,11 @@ webhooks are verified. Webhook: the model as JSON, or a template body.
 **D19 Flow completion.** `x-widget`/`x-group` hints (display-only, no new versions), icons, and `x-dewpoint-picker`
 start-form pickers via D3. No new nodes; config migrations wait for the first vN+1. Owner: anything else?
 
-**D20 Sends are ambiguous.** Retryable only when nothing was sent or on 429; 4xx fatal; anything after the first byte
-is unknown. SMTP: stdlib `smtplib` in a thread with `_get_socket` returning the guard's pinned socket (**V** 3.12 and
-3.14); STARTTLS or implicit TLS on 465, plain only to allowlisted hosts. Alternative: aiosmtplib 5.1.3 (MIT, no
-required dependencies, **V**), a new dependency.
+**D20 Sends are ambiguous.** Retryable only when nothing was sent (`NotSent`, an empty or blocked bucket); 4xx fatal;
+anything after the first byte, a 429 or 5xx included, is unknown unless 3c verifies the provider documents it as
+rejected before processing (D10). SMTP: stdlib `smtplib` in a thread with `_get_socket` returning the guard's pinned
+socket (**V** 3.12 and 3.14); STARTTLS or implicit TLS on 465, plain only to allowlisted hosts. Alternative:
+aiosmtplib 5.1.3 (MIT, no required dependencies, **V**), a new dependency.
 
 **D21 Syslog.** RFC 5424 (**V**) with an optional CEF v27 payload and its escaping (**V**); UDP one message per
 datagram; TLS on 6514 with octet counting, TLS 1.2+, server certificate checked (RFC 5425, 9662); TCP octet-counted,
@@ -186,15 +211,16 @@ contract hashes: those types ship as new versions while the old stay until retir
 size is measured in 3b; if it's too large, Mist splits into per-scope plugins. Rejected: generic `mist.object.*` nodes
 picking the resource in config, whose outputs would be undeclared, so always claimed and tainted, with no typed pills.
 
-**D24 Held back from 3b (appendix): 13 operations.** Inventory claim (`addOrgInventory`) and assignment
+**D24 Held back means unavailable in 3b, to every node.** Held: inventory claim (`addOrgInventory`) and assignment
 (`updateOrgInventoryAssignment`, which can also delete records); rogue deauth; firmware upgrades (`upgradeDevice`,
 `upgradeSiteMxEdges`); bulk forms and the PSK list delete (empty means all); CSV PSK import; Marvis client delete;
-Mist Edge support upload; the deprecated audit log list. Recommend none in 3b; inventory assignment without its delete
-op, and device upgrade, are the first candidates afterwards (both `ambiguous`).
+Mist Edge support upload; the deprecated audit-log list; and the utilities D27 holds. The policy map (D28) refuses
+them to curated nodes, `mist.api.*` and utilities alike, at publish and again at run time. Inventory assignment
+without its delete op, and device upgrade, are the first candidates afterwards (both `ambiguous`).
 
-**D25 Migrations.** 0041 (3a-1): `egress_allowlist`, `connection_rate_buckets`; 0042 (3a-2): `plugin_calls`. Both
-chain from 0034 while 2b-4a holds 0035–0040; whichever merges second re-points its first `down_revision` to the
-other's head (linear history). Never autogenerate.
+**D25 Migrations.** 0041 (3a-1): `egress_allowlist`, `rate_buckets`; 0042 (3a-2): `plugin_calls`. Both chain from 0034
+while 2b-4a holds 0035–0040; whichever merges second re-points its first `down_revision` to the other's head (linear
+history). Never autogenerate.
 
 **D26 `ctx.ws`: a guarded websocket (added 2026-10-05 for device utilities).** wss only. The guard resolves, vets and
 pins (D7) and hands the connected socket to `websockets` (`sock=`, `server_hostname=` for SNI and the certificate,
@@ -206,23 +232,42 @@ attempt heartbeats while it reads; one connection per call, never shared. Mist (
 `Authorization: Token`; `{"subscribe": channel}` is answered `channel_subscribed` or `subscribe_failed`; a data
 message's `data` may be an object or a JSON string, itself possibly another envelope, so it's decoded strictly and
 bounded. Per token: 2,000 connections an hour and 2,000 channels a connection, a 429 past them, so opening a stream
-takes a token from a second bucket on the connection (D9; default 1,800/h). **Needs approval:** `websockets` 17.1
+takes a token from the token's stream scope (D9; default 1,800/h). **Needs approval:** `websockets` 17.1
 (BSD-3-Clause, **V**), already in `uv.lock` through `uvicorn[standard]`, becomes a direct dependency; the alternative,
 wsproto, is a new package. Stream channels as run triggers (long-lived subscriptions) stay out of scope: they'd need a
 subscriber process like ingress.
 
-**D27 Device utilities.** One node type per utility (appendix: 19 diagnostic, 11 disruptive, 13 held back; all **V**
-in the OAS); config is the connection, site, device, the OAS body and stream limits. Whether one streams comes from
-its OAS 200 response: a `session` means output on `/sites/{site_id}/devices/{device_id}/cmd` (**V** docs samples); an
-empty one means REST only. A streaming node subscribes, waits for `channel_subscribed` (10 s; a failure before the
-POST is retryable, nothing was sent), POSTs, and keeps only messages whose `data.session` matches, buffering early
-ones; mistapi does the reverse (trigger first, `__ws_wrapper.py`) and can miss output. It ends on a table command's
-`"finished": true` in `raw` (**V** docs sample), else after idle 10 s, 30 s without a first message, or its max (as
-mistapi: `__ws_wrapper.py:300-320`; ping, traceroute and cable test document no marker), and outputs `{session, lines,
-ended_by, truncated}`, ANSI stripped. Diagnostic: new capability `mist.diagnose`, idempotent. Disruptive:
-`mist.write`, ambiguous (`outcome_unknown` once the POST may have left). Held back besides shells, the ZTP password,
-config dumps and firmware or reprovision actions: monitor traffic, top and clear policy hit count, which answer a
-second `wss://…?jwt=` URL whose protocol is undocumented (**V**); that JWT is a credential and is never stored.
+**D27 Device utilities.** One node type per utility (appendix: 19 diagnostic, 11 disruptive, 13 held back; each
+operation exists and isn't deprecated in the OAS, **V**; its shape and retry safety are verified into the policy map
+in 3b). Whether one streams comes from its OAS 200 response: a `session` means output on
+`/sites/{site_id}/devices/{device_id}/cmd` (**V** docs samples); an empty one means REST only. Buffering contract: the
+node subscribes and waits for `channel_subscribed` (10 s; a failure before the POST is retryable, nothing was sent),
+POSTs, and buffers every data message (at most 256 messages and 1 MiB) until the answer names the `session`; it then
+keeps buffered and later messages whose `data.session` matches and discards the rest, and a message without a session
+is discarded, never accepted. A streaming operation whose answer has no `session` fails closed: diagnostic
+`mist.no_session`, disruptive `outcome_unknown`; so does a buffer overflow. Output: `{accepted, session, lines,
+received, ended_by, completion_known, truncated}`, ANSI stripped; `ended_by` is `finished` (a table command's
+`"finished": true` in `raw`, **V** docs sample), `idle` (10 s), `max_duration`, `cancelled` or `stream_lost`, and
+`completion_known` is true only for `finished`, so silence is never reported as completion. No first message within 30
+s fails `mist.no_output`, never an empty success. Retrigger safety is per operation with evidence (D28): proposed
+`idempotent` only for read-only CLI commands (`show_*`, ping, traceroute, arp, resolve_dns, service_ping), everything
+else `ambiguous`; disruptive ones need `mist.write`, diagnostic ones a new `mist.diagnose`. Heartbeat on every message
+and at least every 10 s, which is how Temporal delivers a cancel; RunGraph sets no heartbeat timeout (start-to-close
+only), so a lost worker shows only at the step timeout, and adding one would change commands (ABI 7, not proposed). On
+cancel or any exit the node unsubscribes and closes in `finally`; a command already started on the device runs on (no
+documented cancel, unverified), so a cancelled disruptive step is `outcome_unknown`. Held back besides shells, the ZTP
+password, config dumps and firmware or reprovision actions: monitor traffic, top and clear policy hit count, which
+answer a second `wss://…?jwt=` URL whose protocol is undocumented (**V**); that JWT is a credential and is never
+stored.
+
+**D28 One operation-policy map for Mist.** One generated data file, the single source for curated nodes,
+`mist.api.read`/`write` and utilities, checked at publish and at run time: an entry per OAS operation with its state
+(`allowed`, `held`, `denied`), the nodes that may reach it, its capability, its side effect with the evidence for it,
+and for utilities its stream mode. Deprecated operations are `denied`. **Owner's call — the default for operations
+nobody reviewed:** (a, recommended) reads allowed through `mist.api.read`, writes `held` until reviewed, so
+`mist.api.write` reaches only reviewed writes; (b) everything allowed minus a denylist, which is open to any dangerous
+operation the list misses. The appendix becomes the seed of this map; "exists and isn't deprecated" stays separate
+from "shape, scope and retry semantics verified".
 
 ## 4. Dependencies, images, tests
 
@@ -234,19 +279,19 @@ happens only with the owner's say, at 3b's checkpoint.
 
 ## 5. Initial curated Mist resources
 
-262 REST operations over 54 resources and 30 device utilities (D27), every operationId **V** and none deprecated,
-listed with method and path in `2026-10-05-plugins-3-mist-resources.md` (generated from the OAS by a script that fails
-on a missing or deprecated id). It includes the owner's additions of 2026-10-05. **Org scope:** org, sites, site
-groups, device search, inventory (read), WLANs, WLAN templates, network / RF / gateway / site templates, device
-profiles, PSKs, networks, services, service and security policies, IDP / AAMW / SecIntel profiles, NAC rules and tags,
-user MACs, guests, assets and asset filters, Mist Edges, clusters and tunnels, WxRules, WxTags, alarm templates,
-alarms (search, ack), clients and events (wireless, wired, NAC, WAN, devices, Mist Edges; search and count), audit
-logs (`listOrgAuditLogs`, not the deprecated `/logs`), stats, webhooks and topics. **Site scope:** site, settings,
-devices (list, get, update, restart), WLANs, PSKs, maps, map stacks, assets, asset filters, WxRules (and derived),
-WxTags, Mist Edges (and events), clients (four kinds), rogues, insights, stats. Full CRUD where the OAS has it.
-Pagination (**V** `guides/api-requests/pagination.md`): lists use `limit`/`page` (at most 1,000) and `X-Page-*`
-headers; searches follow the body's `next`, checked to stay on the connection's host and path; every list node takes a
-page cap.
+262 REST operations over 54 resources and 30 device utilities (D27), every operationId **V** to exist and not be
+deprecated (shape, scope and retry semantics are D28's, in 3b), listed with method and path in
+`2026-10-05-plugins-3-mist-resources.md` (generated from the OAS by a script that fails on a missing or deprecated
+id). It includes the owner's additions of 2026-10-05. **Org scope:** org, sites, site groups, device search, inventory
+(read), WLANs, WLAN templates, network / RF / gateway / site templates, device profiles, PSKs, networks, services,
+service and security policies, IDP / AAMW / SecIntel profiles, NAC rules and tags, user MACs, guests, assets and asset
+filters, Mist Edges, clusters and tunnels, WxRules, WxTags, alarm templates, alarms (search, ack), clients and events
+(wireless, wired, NAC, WAN, devices, Mist Edges; search and count), audit logs (`listOrgAuditLogs`, not the deprecated
+`/logs`), stats, webhooks and topics. **Site scope:** site, settings, devices (list, get, update, restart), WLANs,
+PSKs, maps, map stacks, assets, asset filters, WxRules (and derived), WxTags, Mist Edges (and events), clients (four
+kinds), rogues, insights, stats. Full CRUD where the OAS has it. Pagination (**V**
+`guides/api-requests/pagination.md`): lists use `limit`/`page` (at most 1,000) and `X-Page-*` headers; searches follow
+the body's `next`, checked to stay on the connection's host and path; every list node takes a page cap.
 
 ## 6. Process
 

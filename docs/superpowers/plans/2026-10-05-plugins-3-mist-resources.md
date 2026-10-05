@@ -1,8 +1,10 @@
 # Sub-project 3 — curated Mist resources (appendix to the outline)
 
 Generated from `mistsys/mist_openapi` `mist.openapi.json` at 0613a22 by a script that fails on any missing or
-deprecated operationId: every row below is **V**. Paths drop the `/api/v1` prefix; `{org_id}` always comes from the
-connection. Initial scope for the owner's ruling (outline §5, D23, D24).
+deprecated operationId: every row below **exists and isn't deprecated** (**V**). That is all it verifies: each
+operation's request/response shape, scope and retry semantics are verified into the policy map (D28) in 3b.
+Paths drop the `/api/v1` prefix; `{org_id}` always comes from the connection. Initial scope for the owner's ruling
+(outline §5, D23, D24, D27, D28).
 
 ## Org scope
 
