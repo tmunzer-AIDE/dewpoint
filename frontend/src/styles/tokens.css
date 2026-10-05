@@ -1,40 +1,208 @@
 /* SPDX-License-Identifier: Apache-2.0 */
+/* Design tokens. The values come from the Claude Design export (docs/design/2026-10-05-dewpoint-ui.dc.html); the
+   states, control borders, edges, "on-" colours, hatch, type, shape and motion fill its gaps (sub-project 4 ledger).
+   Colour means something (spec §10.1): live is orange, simulated is slate, conditional and caution are amber, error
+   is red, success is green, the accent marks interaction. tokens.test.ts holds every pair to WCAG 2.2 AA. */
+
 :root {
+  --font-sans: "Instrument Sans", system-ui, sans-serif;
+  --font-display: "Schibsted Grotesk", "Instrument Sans", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --type-caption: 11px; /* tags, type codes */
+  --type-meta: 12px; /* timestamps, hints, kbd */
+  --type-small: 13px; /* secondary text, table heads, chips */
+  --type-body: 14px; /* the UI's base */
+  --type-body-lg: 15px; /* dialog form fields, section headings */
+  --type-title: 16px; /* drawer titles */
+  --type-h3: 18px;
+  --type-h2: 20px;
+  --type-h1: 22px;
+  --leading-tight: 1.2;
+  --leading-body: 1.5;
+  --tracking-heading: -0.01em;
+
+  --radius-sm: 4px; /* tags, kbd */
+  --radius-md: 6px; /* nav items, status chips, small buttons */
+  --radius: 8px; /* controls, panels, nodes */
+  --radius-dialog: 12px;
+  --radius-pill: 999px; /* data pills only (outline §6) */
+
+  --header-h: 56px;
+  --rail-w: 224px;
+  --rail-w-collapsed: 60px;
+  --drawer-w: 440px;
+  --control-h-sm: 32px;
+  --control-h: 36px;
+  --control-h-md: 40px;
+  --control-h-lg: 44px;
+
+  --duration-fast: 100ms;
+  --duration: 150ms; /* motion only shows a change of state (outline §6) */
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+}
+
+:root, [data-theme="light"] {
+  color-scheme: light;
   --ground: #f4f5f2;
   --surface: #ffffff;
   --surface-2: #f8f9f7;
+  --surface-hover: #eef0ec;
+  --surface-pressed: #e6e9e4;
   --ink: #15181c;
   --muted: #545b64;
-  --line: #dde1dc;
-  --line-strong: #cbd0ca;
-  --accent: #0e6874;
-  --accent-ink: #0a4f58;
-  --accent-soft: #e3f0f1;
-  --on-accent: #ffffff; /* text on --accent: 6.3:1 */
+  --line: #dde1dc; /* separators */
+  --line-strong: #cbd0ca; /* separators that need weight; never a control's only boundary */
+  --line-control: #7a817b; /* input, checkbox and switch boundaries: 3:1 (WCAG 1.4.11) */
+  --edge: var(--line-control); /* canvas edges carry meaning: 3:1 */
+  --accent: #0b7c8c;
+  --accent-hover: #096a78;
+  --accent-pressed: #075e6b;
+  --accent-ink: #075e6b; /* accent as text: links, selected labels */
+  --accent-soft: #e0f2f4;
+  --on-accent: #ffffff;
+  --focus: var(--accent);
+  --focus-rail: #8fd3dc;
   --warn-bg: #fff3dc;
   --warn-line: #e5a93c;
   --warn-ink: #7a4a00;
   --danger: #b42318;
+  --danger-hover: #9b1e15;
   --danger-bg: #fdecea;
+  --on-danger: #ffffff;
   --ok: #1c6b3a;
   --ok-bg: #e5f3ea;
   --live: #b54708;
+  --live-hover: #9a3c06;
+  --live-pressed: #8f3805;
   --live-bg: #fef0e6;
-  --radius: 8px;
-  --font-sans: "IBM Plex Sans", system-ui, sans-serif;
-  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --on-live: #ffffff;
+  --sim: #4b5563;
+  --sim-bg: #eef0f3;
+  --sim-hatch: #c5cbd3;
+  --brand: #84b135; /* the mark only */
+  --rail: #0e2230;
+  --rail-ink: #c5d3da;
+  --rail-dim: #7f95a1;
+  --rail-active: rgba(255, 255, 255, 0.1);
+  --rail-line: rgba(255, 255, 255, 0.08);
+  --disabled-ink: #8b9199;
+  --disabled-bg: #eef0ec;
+  --disabled-line: #dde1dc;
+  --overlay: rgba(21, 24, 28, 0.45);
+  --shadow-node: 0 1px 2px rgba(21, 24, 28, 0.06);
+  --shadow-dialog: 0 8px 24px rgba(21, 24, 28, 0.14);
 }
+
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --ground: #111315; --surface: #1a1d20; --surface-2: #202428; --ink: #e8eae6; --muted: #a3aab2;
-    --line: #2c3136; --line-strong: #3a4046; --accent: #3fa7b4; --accent-ink: #8fd3dc; --accent-soft: #15333a; --on-accent: #08191c;
-    --warn-bg: #3a2a0c; --warn-line: #a8741b; --warn-ink: #f3c878; --danger: #f07a70; --danger-bg: #3a1714;
-    --ok: #6fcf97; --ok-bg: #12301f; --live: #f59e5b; --live-bg: #3a2210;
+    color-scheme: dark;
+    --ground: #111315;
+    --surface: #1a1d20;
+    --surface-2: #202428;
+    --surface-hover: #252a2f;
+    --surface-pressed: #2c3136;
+    --ink: #e8eae6;
+    --muted: #a3aab2;
+    --line: #2c3136;
+    --line-strong: #3a4046;
+    --line-control: #788088;
+    --edge: var(--line-control);
+    --accent: #3fa7b4;
+    --accent-hover: #5bb9c4;
+    --accent-pressed: #36979f;
+    --accent-ink: #8fd3dc;
+    --accent-soft: #15333a;
+    --on-accent: #08191c;
+    --focus: var(--accent);
+    --focus-rail: #8fd3dc;
+    --warn-bg: #3a2a0c;
+    --warn-line: #a8741b;
+    --warn-ink: #f3c878;
+    --danger: #f07a70;
+    --danger-hover: #f38b82;
+    --danger-bg: #3a1714;
+    --on-danger: #1c0907;
+    --ok: #6fcf97;
+    --ok-bg: #12301f;
+    --live: #f59e5b;
+    --live-hover: #f7ad73;
+    --live-pressed: #f8b884;
+    --live-bg: #3a2210;
+    --on-live: #1f0f03;
+    --sim: #b6bcc4;
+    --sim-bg: #252a30;
+    --sim-hatch: #3d444d;
+    --brand: #9ccb52;
+    --rail: #0a161d;
+    --rail-ink: #c5d3da;
+    --rail-dim: #7f95a1;
+    --rail-active: rgba(255, 255, 255, 0.1);
+    --rail-line: rgba(255, 255, 255, 0.08);
+    --disabled-ink: #6b7178;
+    --disabled-bg: #202428;
+    --disabled-line: #2c3136;
+    --overlay: rgba(0, 0, 0, 0.6);
+    --shadow-node: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-dialog: 0 8px 24px rgba(0, 0, 0, 0.5);
   }
 }
-:root[data-theme="dark"] {
-  --ground: #111315; --surface: #1a1d20; --surface-2: #202428; --ink: #e8eae6; --muted: #a3aab2;
-  --line: #2c3136; --line-strong: #3a4046; --accent: #3fa7b4; --accent-ink: #8fd3dc; --accent-soft: #15333a; --on-accent: #08191c;
-  --warn-bg: #3a2a0c; --warn-line: #a8741b; --warn-ink: #f3c878; --danger: #f07a70; --danger-bg: #3a1714;
-  --ok: #6fcf97; --ok-bg: #12301f; --live: #f59e5b; --live-bg: #3a2210;
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --ground: #111315;
+  --surface: #1a1d20;
+  --surface-2: #202428;
+  --surface-hover: #252a2f;
+  --surface-pressed: #2c3136;
+  --ink: #e8eae6;
+  --muted: #a3aab2;
+  --line: #2c3136;
+  --line-strong: #3a4046;
+  --line-control: #788088;
+  --edge: var(--line-control);
+  --accent: #3fa7b4;
+  --accent-hover: #5bb9c4;
+  --accent-pressed: #36979f;
+  --accent-ink: #8fd3dc;
+  --accent-soft: #15333a;
+  --on-accent: #08191c;
+  --focus: var(--accent);
+  --focus-rail: #8fd3dc;
+  --warn-bg: #3a2a0c;
+  --warn-line: #a8741b;
+  --warn-ink: #f3c878;
+  --danger: #f07a70;
+  --danger-hover: #f38b82;
+  --danger-bg: #3a1714;
+  --on-danger: #1c0907;
+  --ok: #6fcf97;
+  --ok-bg: #12301f;
+  --live: #f59e5b;
+  --live-hover: #f7ad73;
+  --live-pressed: #f8b884;
+  --live-bg: #3a2210;
+  --on-live: #1f0f03;
+  --sim: #b6bcc4;
+  --sim-bg: #252a30;
+  --sim-hatch: #3d444d;
+  --brand: #9ccb52;
+  --rail: #0a161d;
+  --rail-ink: #c5d3da;
+  --rail-dim: #7f95a1;
+  --rail-active: rgba(255, 255, 255, 0.1);
+  --rail-line: rgba(255, 255, 255, 0.08);
+  --disabled-ink: #6b7178;
+  --disabled-bg: #202428;
+  --disabled-line: #2c3136;
+  --overlay: rgba(0, 0, 0, 0.6);
+  --shadow-node: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-dialog: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+    --duration: 0ms;
+  }
 }

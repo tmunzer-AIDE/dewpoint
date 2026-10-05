@@ -1,0 +1,73 @@
+// SPDX-License-Identifier: Apache-2.0
+import { describe, expect, it } from "vitest";
+import { findTells } from "./aiTells";
+
+const TOKENS = "/src/styles/tokens.css";
+
+describe("findTells", () => {
+  it.each([
+    ["accent-border", "a.tsx", `<div className="border-l-4 border-accent">`],
+    ["accent-border", "a.tsx", `<div className="border-t-[3px]">`],
+    ["accent-border", "a.css", `.callout { border-left: 3px solid var(--live); }`],
+    ["gradient", "a.tsx", `<div className="bg-gradient-to-r">`],
+    ["gradient", "a.css", `.x { background: linear-gradient(red, blue); }`],
+    ["blur", "a.tsx", `<div className="backdrop-blur-md">`],
+    ["blur", "a.css", `.x { backdrop-filter: blur(8px); }`],
+    ["halo", "a.tsx", `<div className="ring-4 ring-accent-soft">`],
+    ["halo", "a.css", `.node { box-shadow: 0 0 0 4px var(--accent-soft); }`],
+    ["heavy-shadow", "a.tsx", `<div className="shadow-xl">`],
+    ["decorative-motion", "a.tsx", `<span className="animate-pulse">`],
+    ["decorative-motion", "a.css", `.skeleton { animation: shimmer 1s; }`],
+    ["emoji", "a.tsx", `<span>Done ✨</span>`],
+    ["emoji", "a.tsx", `<span>Ship it 🚀</span>`],
+    ["eyebrow", "a.tsx", `<p className="uppercase">Trigger</p>`],
+    ["eyebrow", "a.tsx", `<p className="tracking-widest">TRIGGER</p>`],
+    ["eyebrow", "a.tsx", `<p className="tracking-[0.12em]">TRIGGER</p>`],
+    ["large-radius", "a.tsx", `<div className="rounded-2xl">`],
+    ["large-radius", "a.css", `.card { border-radius: 16px; }`],
+    ["raw-colour", "a.tsx", `<div style={{ color: "#0b7c8c" }}>`],
+    ["raw-colour", "a.css", `.x { color: rgba(0, 0, 0, 0.5); }`],
+    ["raw-colour", "a.tsx", `<div className="bg-indigo-500 text-white">`],
+    ["marketing-copy", "a.tsx", `<p>Seamlessly automate your network!</p>`],
+    ["marketing-copy", "a.tsx", `<p>Oops, something broke</p>`],
+  ])("flags %s in %s", (rule, path, text) => {
+    expect(findTells(path, text)).toContain(rule);
+  });
+
+  it.each([
+    ["a separator and a tab underline", "a.tsx", `<div className="border-l border-b-2 border-line">`],
+    ["a focus ring", "a.tsx", `<button className="ring-2 ring-offset-2">`],
+    ["the 8 px radius and a token radius", "a.tsx", `<div className="rounded-lg rounded-dialog">`],
+    ["a loading spinner", "a.tsx", `<span className="animate-spin">`],
+    ["the UI's glyphs", "a.tsx", `<kbd>⌘K</kbd> → ▾ ✓ ◌ ＋`],
+    ["a heading's tight tracking", "a.tsx", `<h1 className="tracking-tight">`],
+    ["colours in the token sheet", TOKENS, `:root { --ink: #15181c; --rail-active: rgba(255, 255, 255, 0.1); }`],
+    ["a token shadow", "a.css", `.node { box-shadow: var(--shadow-node); }`],
+  ])("passes %s", (_, path, text) => {
+    expect(findTells(path, text)).toEqual([]);
+  });
+
+  it("lets a file opt out of one rule, by name", () => {
+    const wordmark = `// ai-tells-allow: eyebrow (the wordmark, outline §6)\n<span className="tracking-[0.12em]">FOR JUNIPER MIST</span>`;
+    expect(findTells("Wordmark.tsx", wordmark)).toEqual([]);
+    expect(findTells("Wordmark.tsx", `${wordmark}\n<div className="shadow-xl">`)).toEqual(["heavy-shadow"]);
+  });
+});
+
+describe("the frontend's sources", () => {
+  const sources = import.meta.glob<string>(
+    ["/src/**/*.{ts,tsx,css}", "!/src/**/*.test.{ts,tsx}", "!/src/test/**"],
+    { query: "?raw", import: "default", eager: true },
+  );
+
+  it("are all read, stylesheets included", () => {
+    expect(sources["/src/main.tsx"]).toContain("createRoot");
+    expect(sources["/src/styles/app.css"]).toContain("@theme");
+    expect(sources[TOKENS]).toContain("--ink");
+  });
+
+  it("carry no AI design tells", () => {
+    const found = Object.entries(sources).flatMap(([path, text]) => findTells(path, text).map((r) => `${path}: ${r}`));
+    expect(found).toEqual([]);
+  });
+});
