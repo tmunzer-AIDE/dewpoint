@@ -2,12 +2,13 @@
 
 > **Status: an outline for the owner's decisions (2026-10-05), revised after the owner's first review (erasure's
 > completion, production Temporal's proof, Mist, event grouping, ingress's switch), second (erasure: no reversal,
-> durable progress, the `tenants` schema) and third (the firing inventory before schedules are deleted, completeness
-> from Temporal's retention bound, audit entries described as they are, eligibility requiring `active`). Not
-> authorization to build anything; no gate is authorized to lift by this review, neither the production gate nor
-> ingress's development-only restriction.** As in 2b-1a through 2b-3b, once the owner rules, each sub-project is built
-> on a prototype branch from `main`, with the owner's checkpoint after each milestone; its plan is then written from
-> the replayed diffs, with a revision of the 2b spec, for the owner's review before execution.
+> durable progress, the `tenants` schema) third (the firing inventory before schedules are deleted, completeness from
+> Temporal's retention bound, audit entries described as they are, eligibility requiring `active`) and fourth (fencing
+> in-flight writers, the schedule sync's included; the bound's retention fixed; the bound as the earliest final
+> check). Not authorization to build anything; no gate is authorized to lift by this review, neither the production
+> gate nor ingress's development-only restriction.** As in 2b-1a through 2b-3b, once the owner rules, each sub-project
+> is built on a prototype branch from `main`, with the owner's checkpoint after each milestone; its plan is then
+> written from the replayed diffs, with a revision of the 2b spec, for the owner's review before execution.
 
 **Goal:** Dewpoint can hold tenants' production data. Data leaves on schedule, a tenant can be erased, old keys can be
 retired, the production Temporal is verified, every production blocker is fixed or bounded with the owner's explicit
@@ -130,7 +131,8 @@ effect marks itself in the transaction that does it.
 1. **Mark the tenant `erasing`,** under its lifecycle lock taken exclusively, raising its schedules' generations and
    creating the erasure's record, in one transaction. §6.5's refusals apply from then on, and every tenant-scoped
    write through the API is refused too, so nothing new (a schedule, an endpoint) appears mid-erasure; the schedule
-   sync only ever pauses or deletes a tenant's schedules once it isn't `active`.
+   sync only ever pauses or deletes a tenant's schedules once it isn't `active`. The exclusive lock waits for every
+   in-flight writer ("Fencing in-flight work" below).
 2. **Reconcile** every `starting` request, started or confirmed absent (§7.6), each verified by the reconciler's
    recorded outcome.
 3. **Its Temporal schedules,** in three recorded parts:
@@ -168,6 +170,40 @@ effect marks itself in the transaction that does it.
 dispatch, the matcher and ingress's two functions already do, so a retained `erased` row never becomes eligible again.
 A regression covers each of those checks against `erased`.
 
+**Fencing in-flight work.** A check made before step 1 mustn't let a write land after it. The rule: every writer of
+tenant data takes the tenant's lifecycle lock shared and checks `active` in the same transaction as its write, and a
+writer whose effect is outside PostgreSQL holds that transaction open across the outside call. Step 1's exclusive lock
+then waits for every writer that read `active` to commit or roll back, and every writer after it reads `erasing`.
+- **Already fenced:** dispatch's `starting` transaction, the matcher, the recount, an event's cancel, and ingress's
+  recording function.
+- **To fence:**
+  - admission, in the transaction that inserts a request;
+  - the `ScheduleTick` activity, in the transaction that would insert its request;
+  - a run's cancel;
+  - the API's tenant-scoped writes, through the one dependency that authorizes them (`require()` in `core/http.py`):
+    it takes the lock shared in the request's transaction and refuses a non-active tenant for every permission that
+    writes (the prototype verifies the request's transaction spans the write and its commit);
+  - the CLI's per-tenant key commands (`keys rotate-dek` for a tenant, `keys ensure-tenants`), so a key can't be
+    created after step 7;
+  - **the schedule sync:** today `sync_one` reads the row's wanted state in one transaction and calls Temporal's create
+    or update after that transaction has ended, so a sync that read `active` before step 1 could create a schedule
+    after step 3's last pause. It now holds the transaction, with the tenant's lock shared, from its read through its
+    Temporal write (each call bounded by its 10 s deadline), so step 1 waits for it to finish. Once a tenant isn't
+    `active`, the sync only pauses and deletes.
+- **What a lock can't fence:** a request Temporal received before its client's deadline could, in principle, still
+  land after the call returned. Step 3 therefore verifies only after a further call deadline has passed (as the sync
+  already does for a deletion's tombstone), and step 9's final check describes every schedule the tenant had: one
+  found then is an incident, and the erasure goes back to step 3 (pause, inventory, delete) and step 9's bound starts
+  again.
+- **Regressions,** each in both orders:
+  - a sync holding its read of `active` while step 1 waits: its create lands first, then step 3 pauses and deletes the
+    schedule; started after step 1, it only pauses or deletes;
+  - an API write holding its check of `active` while step 1 waits: it commits first and the sweep deletes its row;
+    started after step 1, it's refused;
+  - admission and a tick against step 1 likewise;
+  - final absence: once the sweep has run, no writer can insert a row of the tenant, and a schedule found at the final
+    check sends the erasure back to step 3.
+
 ### Enumerating and deleting executions (step 6)
 
 Every execution Dewpoint starts for a tenant has a server-built workflow id beginning `t:<tenant>:` (§6.1): a root, a
@@ -197,16 +233,19 @@ closed, found or not:
   its parent is cancelled and waited for in step 5). Every firing ends within the workflow execution timeout set on its
   schedule's action (the prototype verifies 2b-3a sets one, or adds it), and nothing fires after step 3's last pause.
   So the latest close is at most the later of step 5's verified ends and the last pause plus that timeout.
-- **The bound:** that latest close plus the namespace's retention, read from `DescribeNamespace` when the erasure
-  starts and again at the bound (the larger counts; the readiness checks keep it at most 30 days). Archival must be
-  disabled for the namespace (D12), so no copy outlives retention.
-- **At the bound:** every found execution is read back not-found again, and a visibility query for `t:<tenant>:`
-  finds nothing. Anything found then is an incident: the erasure stays incomplete and alerts, never reporting success.
-- **The residual trust:** the bound relies on Temporal enforcing its namespace's retention, its documented behavior,
-  which Dewpoint can't observe for an execution it never found. Accepting that trust is the owner's decision (D3d);
-  without it, an unfound firing has no defensible proof of deletion, and the erasure can't report complete.
-- **So an erasure takes up to the namespace's retention to complete** (7 days by default): its record shows Dewpoint's
-  own data and keys gone, every found execution deleted, and the date the bound passes.
+- **The bound:** that latest close plus a retention fixed for every erasure: the platform's maximum namespace retention
+  (30 days, §10.2), not the namespace's value at some moment, since reading it only at the start and the end would miss
+  an increase in between. The namespace must keep its retention within that maximum: the readiness checks verify it,
+  and every pass of the retention process reads it, alerting if it's ever above, in which case the erasure's bound
+  extends to the largest value observed. Archival must be disabled for the namespace (D12), so no copy outlives
+  retention.
+- **The bound is the earliest point to attempt the final check, not a completion deadline.** Then every found
+  execution is read back not-found again, every schedule the tenant had is described absent, and a visibility query for
+  `t:<tenant>:` finds nothing. Anything found keeps the erasure incomplete and alerting, never reporting success.
+- **The trust boundary (D3d, accepted by the owner):** for executions Dewpoint can't enumerate, the bound relies on
+  Temporal enforcing its namespace's retention, which Dewpoint can't observe for an execution it never found.
+- **So an erasure can't complete before the bound** (at least 30 days after the latest close): its record shows
+  Dewpoint's own data and keys gone, every found execution deleted, and the date the final check may first run.
 - **What this asks of the production Temporal:** `DeleteWorkflowExecution`, visibility queries by workflow-id prefix,
   `DescribeNamespace`'s retention, and archival disabled for the namespace. The readiness checks verify the last
   (D12). The prototype measures each on the CLI dev server; D12's proof covers the real target.
@@ -290,9 +329,10 @@ answers not-found while its projection isn't terminal goes through §7.9's opera
   lands here, since rotation makes versions matter.
 - **M4. Tenant erasure:** "Tenant erasure" above: its record and items, steps 1 to 9 (the firing inventory, the
   executions' enumeration and read-back, the retention bound), ticks recording their own firings, the `tenants`
-  migration (`erased`, anonymized slugs), eligibility requiring `active`, the API refusing a non-active tenant's
-  writes, completion and its final check, stopping and retrying, its command and audit, and a proof that afterwards
-  nothing of the tenant stays decodable or stored.
+  migration (`erased`, anonymized slugs), eligibility requiring `active`, fencing every in-flight writer (the schedule
+  sync's transaction spanning its Temporal write included) with its race regressions, completion and its final check,
+  stopping and retrying, its command and audit, and a proof that afterwards nothing of the tenant stays decodable or
+  stored.
 
 **2b-4b, production hardening and the gate lift**
 - **M1. The engine blockers:** #16, #18 and #26, each fixed or bounded (D7).
@@ -311,7 +351,7 @@ answers not-found while its projection isn't terminal goes through §7.9's opera
 |---|---|---|
 | D1 | The split | 2b-4a then 2b-4b, as above; one outline, two plans, two prototypes. |
 | D2 | Order inside 2b-4a | #28 and #35 first, then retention, then re-encryption and retirement, then erasure, which needs the others. |
-| D3 | Tenant erasure | As "Tenant erasure" above, with the owner's rulings: (a) no abort once `erasing` is committed, only a stop or a retry; (b) every found execution deleted and read back, the firing inventory captured before schedules are deleted, and completeness from Temporal's retention bound, never from visibility; (c) audit entries under the platform's audit-retention policy, described as they are; (d) to decide: accepting the bound's trust in Temporal's retention enforcement. |
+| D3 | Tenant erasure | As "Tenant erasure" above, with the owner's rulings: (a) no abort once `erasing` is committed, only a stop or a retry; (b) every found execution deleted and read back, the firing inventory captured before schedules are deleted, and completeness from Temporal's retention bound, never from visibility; (c) audit entries under the platform's audit-retention policy, described as they are; (d) Temporal's retention enforcement accepted as the trust boundary for executions Dewpoint can't enumerate, the bound being the earliest point for the final check, not a deadline; (e) in-flight writers fenced by the lifecycle lock, the schedule sync's transaction spanning its Temporal write; the bound's retention fixed at the platform maximum. |
 | D4 | The read cutoff | Filter in the shared read paths (one query helper per kind), proven by a test per user-facing path; never a database view the API could bypass. |
 | D5 | Audit pruning and #3 | Pruning ships in 2b-4a disabled in production until #3's sink is configured; the readiness checks refuse a production gate without it. |
 | D6 | #3's first sink | One target first; which one (object storage with object lock, or syslog or SIEM) is the owner's. Testing it needs an image the owner approves (for object storage, an S3-compatible server). |
