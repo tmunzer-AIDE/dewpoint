@@ -98,7 +98,13 @@ def test_ensure_tenants_gives_every_tenant_without_a_key_one(pg_url, _test_users
     )
     _env(monkeypatch, _url_for(pg_url, "dewpoint_admin"), DEWPOINT_KEK_B64=OLD, DEWPOINT_KEK_ID="old")
     first = r.invoke(app, ["keys", "ensure-tenants"])
-    assert (first.exit_code, first.output) == (0, "created a data key for 2 tenant(s)\n")
+    assert (first.exit_code, first.output) == (
+        0,
+        "created a data key for 2 tenant(s)\ncreated an inbound keypair for 2 tenant(s)\n",
+    )  # and an inbound keypair (2b-3b)
     again = r.invoke(app, ["keys", "ensure-tenants"])
-    assert (again.exit_code, again.output) == (0, "created a data key for 0 tenant(s)\n")
+    assert (again.exit_code, again.output) == (
+        0,
+        "created a data key for 0 tenant(s)\ncreated an inbound keypair for 0 tenant(s)\n",
+    )
     assert "old=2" in r.invoke(app, ["keys", "status"]).output

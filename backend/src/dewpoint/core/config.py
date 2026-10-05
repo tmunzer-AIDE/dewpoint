@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     kek_id: str = "env-1"
     kek_previous_b64: str | None = None  # set only during a KEK rollout (see docs/operations/key-rotation.md)
     kek_previous_id: str | None = None
+    # Sealing endpoint secrets (engine 2b spec §8.3): ingress and the API only; never a tenant's data key.
+    ingress_key_b64: str | None = None
+    ingress_key_id: str = "ingress-1"
     public_origin: str = Field(description="Browser origin, e.g. https://dewpoint.example.com")
     rp_id: str | None = None  # WebAuthn RP ID; defaults to host of public_origin
     mfa_required: bool = True

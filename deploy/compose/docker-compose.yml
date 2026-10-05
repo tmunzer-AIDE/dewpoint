@@ -30,6 +30,7 @@ services:
       DEWPOINT_AUDITOR_DB_PASSWORD: ${DEWPOINT_AUDITOR_DB_PASSWORD:?set in .env}
       DEWPOINT_WORKER_DB_PASSWORD: ${DEWPOINT_WORKER_DB_PASSWORD:?set in .env}
       DEWPOINT_DISPATCH_DB_PASSWORD: ${DEWPOINT_DISPATCH_DB_PASSWORD:?set in .env}
+      DEWPOINT_INGRESS_DB_PASSWORD: ${DEWPOINT_INGRESS_DB_PASSWORD:?set in .env}
     volumes: [pgdata:/var/lib/postgresql/data, ./initdb:/docker-entrypoint-initdb.d:ro]
     healthcheck: { test: ["CMD-SHELL", "pg_isready -U dewpoint_owner -d dewpoint"], interval: 5s, retries: 20 }
 
@@ -58,6 +59,9 @@ services:
     environment:
       <<: *appenv
       DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_api_login:${DEWPOINT_API_DB_PASSWORD}@postgres/dewpoint
+      # Webhook endpoints' secrets are sealed under it (engine 2b spec §8.3): without it, the API makes none (503).
+      DEWPOINT_INGRESS_KEY_B64: ${DEWPOINT_INGRESS_KEY_B64:-}
+      DEWPOINT_INGRESS_KEY_ID: ${DEWPOINT_INGRESS_KEY_ID:-ingress-1}
     depends_on: { migrate: { condition: service_completed_successfully } }
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/ready').status==200 else 1)"]
@@ -157,6 +161,30 @@ services:
       interval: 5s
       retries: 20
 
+  ingress:
+    <<: *app
+    # Webhook ingress (engine 2b spec §8.3; docs/operations/ingress.md): a gated prototype until engine 2b-4, so only
+    # the `ingress` profile starts it, and it refuses to start unless the deployment is `development` (the development
+    # override). Its environment is its own, never the KEK: it refuses to start with one. It publishes no port: `web`
+    # proxies /hooks/ to it on the `hooks` network.
+    profiles: [ingress]
+    command: ["dewpoint", "ingress", "--host", "0.0.0.0", "--port", "8001"]
+    environment:
+      DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_ingress_login:${DEWPOINT_INGRESS_DB_PASSWORD}@postgres/dewpoint
+      DEWPOINT_INGRESS_KEY_B64: ${DEWPOINT_INGRESS_KEY_B64:-}
+      DEWPOINT_INGRESS_KEY_ID: ${DEWPOINT_INGRESS_KEY_ID:-ingress-1}
+      # X-Forwarded-For is believed from `web` only: the `hooks` network, where it's ingress's one peer (ruling 11).
+      DEWPOINT_INGRESS_TRUSTED_PROXIES: ${DEWPOINT_HOOKS_SUBNET:-172.31.255.248/29}
+    networks:
+      default:
+      hooks: { aliases: [hooks-ingress] }
+    depends_on: { migrate: { condition: service_completed_successfully } }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8001/health/ready').status==200 else 1)"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
   web:
     image: ${DEWPOINT_WEB_IMAGE:-dewpoint-web:dev}
     build: { context: ../.., dockerfile: deploy/docker/web.Dockerfile }
@@ -167,6 +195,13 @@ services:
     environment:
       # IPs/CIDRs of the TLS proxy / load balancer in front of `web` (see README). Empty = no proxy.
       DEWPOINT_TRUSTED_PROXIES: ${DEWPOINT_TRUSTED_PROXIES:-}
+    networks: [default, hooks]
     depends_on: { api: { condition: service_healthy } }
+
+networks:
+  # `web` and ingress only: ingress believes X-Forwarded-For from this range, where `web` is its only peer. Change it
+  # (DEWPOINT_HOOKS_SUBNET) if it overlaps a network of this host's.
+  hooks:
+    ipam: { config: [{ subnet: "${DEWPOINT_HOOKS_SUBNET:-172.31.255.248/29}" }] }
 
 volumes: { pgdata: {}, anchors: {}, cel-socket: {}, temporal-data: {} }

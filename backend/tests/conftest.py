@@ -92,6 +92,13 @@ async def admin_sessionmaker(pg_url: str, _test_users: None) -> AsyncIterator[as
 
 
 @pytest.fixture(scope="session")
+async def ingress_sessionmaker(pg_url: str, _test_users: None) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    eng = make_engine(_url_for(pg_url, "dewpoint_ingress"))
+    yield make_sessionmaker(eng)
+    await eng.dispose()
+
+
+@pytest.fixture(scope="session")
 async def auditor_sessionmaker(pg_url: str, _test_users: None) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     eng = make_engine(_url_for(pg_url, "dewpoint_auditor"))
     yield make_sessionmaker(eng)

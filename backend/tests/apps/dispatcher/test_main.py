@@ -75,3 +75,63 @@ async def test_the_loop_outlives_a_cycle_that_fails(monkeypatch) -> None:
 
     await main.serve(cycle, cycles=3)
     assert calls == [0, 1, 2]
+
+
+async def test_a_cycle_matches_events_only_when_it_observed_the_current_build(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, ingress_sessionmaker,
+    api_settings,
+) -> None:  # fmt: skip
+    """Admission refuses a durable request for want of a fresh build record, for good: a cycle that couldn't observe
+    the build leaves events pending, and the next one matches them (2b-3b, M3)."""
+    from tests.apps.dispatcher.inbound import bind, event_state, inbound, send
+
+    ready = await inbound(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker,
+                          api_settings)  # fmt: skip
+    await bind(owner_sessionmaker, ready)
+    [event_id] = await send(ingress_sessionmaker, ready, {"type": "ap_down"})
+    client = FakeClient()
+    client.workflow_service = Flaky(failures=1)
+    instance, rotation = uuid.uuid4(), dispatch.Rotation()
+
+    async def cycle() -> None:
+        await main.cycle(dispatch_sessionmaker, client, KEYS, api_settings, instance=instance, reconciler=uuid.uuid4(),
+                         leader=NotLeading(), rotation=rotation)  # type: ignore[arg-type]  # fmt: skip
+
+    await cycle()
+    assert (await event_state(owner_sessionmaker, event_id))["status"] == "pending"
+    await cycle()
+    assert (await event_state(owner_sessionmaker, event_id))["status"] == "matched"
+    assert (await reported(owner_sessionmaker, instance)) == {"current_build": True, "event_matched": 1}
+
+
+async def test_the_leader_recounts_inbound_event_counters_and_reports_it(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, ingress_sessionmaker,
+    api_settings, monkeypatch,
+) -> None:  # fmt: skip
+    from tests.apps.dispatcher.inbound import inbound, send
+
+    ready = await inbound(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker,
+                          api_settings)  # fmt: skip
+    await send(ingress_sessionmaker, ready, {"type": "ap_down"})
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("update webhook_endpoints set pending_events = 5 where id = :e"), {"e": ready.endpoint_id})
+
+    async def nothing(*args: Any, **kwargs: Any) -> dict[str, int]:
+        return {}
+
+    for step in ("reconcile_once", "send_cancels", "sync_schedules", "check_misses"):
+        monkeypatch.setattr(main, step, nothing)
+
+    class Leading:
+        async def leading(self) -> bool:
+            return True
+
+    client = FakeClient()
+    client.workflow_service = Flaky(failures=0)
+    reconciler = uuid.uuid4()
+    await main.cycle(dispatch_sessionmaker, client, KEYS, api_settings, instance=uuid.uuid4(), reconciler=reconciler,
+                     leader=Leading(), rotation=dispatch.Rotation())  # type: ignore[arg-type]  # fmt: skip
+    assert await reported(owner_sessionmaker, reconciler) == {"recount_recounted": 1, "recount_drifted": 1}
+    async with owner_sessionmaker() as s:
+        assert (await s.execute(text("select pending_events from webhook_endpoints where id = :e"),
+                                {"e": ready.endpoint_id})).scalar_one() == 0  # fmt: skip

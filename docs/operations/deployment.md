@@ -240,6 +240,10 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 
 It records `development` (`DEWPOINT_ENVIRONMENT`); CI sets `COMPOSE_FILE` to both files.
 
+Webhook ingress, a development-only prototype until engine 2b-4, runs only with the `ingress` profile
+(`COMPOSE_PROFILES=ingress`, as CI sets it) and the development override; it needs `DEWPOINT_INGRESS_KEY_B64` in
+`.env`, which the API holds too ([webhook ingress](ingress.md)).
+
 Compose runs one build at a time, so its worker makes its own build current as it starts
 (`DEWPOINT_WORKER_SET_CURRENT=true`). Replacing the `worker` container with a new image removes the old build's only
 worker: **let runs end before upgrading**, or their build's worker must come back for them to finish. When the new
@@ -247,10 +251,12 @@ image has a new engine ABI, publish every workflow again after upgrading (above)
 overlap.
 
 The worker, and the dispatcher and `dewpoint dev run`, log in as `dewpoint_worker_login` and `dewpoint_dispatch_login`
-(`DEWPOINT_WORKER_DB_PASSWORD`, `DEWPOINT_DISPATCH_DB_PASSWORD`). A fresh install creates both. An install whose
-database predates them creates them once, as the database owner:
+(`DEWPOINT_WORKER_DB_PASSWORD`, `DEWPOINT_DISPATCH_DB_PASSWORD`), and webhook ingress as `dewpoint_ingress_login`
+(`DEWPOINT_INGRESS_DB_PASSWORD`), whose role holds no table, only its three functions. A fresh install creates them. An
+install whose database predates them creates them once, as the database owner:
 
 ```sql
 CREATE ROLE dewpoint_worker_login LOGIN PASSWORD '<worker password>' IN ROLE dewpoint_worker;
 CREATE ROLE dewpoint_dispatch_login LOGIN PASSWORD '<dispatch password>' IN ROLE dewpoint_dispatch;
+CREATE ROLE dewpoint_ingress_login LOGIN PASSWORD '<ingress password>' IN ROLE dewpoint_ingress;
 ```

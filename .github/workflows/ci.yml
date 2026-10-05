@@ -73,7 +73,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [backend, frontend]
     # A development deployment (engine 2b spec §2.1): every compose command below uses the override.
-    env: { COMPOSE_FILE: "docker-compose.yml:docker-compose.dev.yml" }
+    # Webhook ingress runs only under its profile (a gated prototype until 2b-4, engine 2b spec §8.3).
+    env: { COMPOSE_FILE: "docker-compose.yml:docker-compose.dev.yml", COMPOSE_PROFILES: ingress }
     steps:
       - uses: actions/checkout@v4
       - name: Write CI env
@@ -86,7 +87,9 @@ jobs:
             echo "DEWPOINT_AUDITOR_DB_PASSWORD=$(openssl rand -hex 16)"
             echo "DEWPOINT_WORKER_DB_PASSWORD=$(openssl rand -hex 16)"
             echo "DEWPOINT_DISPATCH_DB_PASSWORD=$(openssl rand -hex 16)"
+            echo "DEWPOINT_INGRESS_DB_PASSWORD=$(openssl rand -hex 16)"
             echo "DEWPOINT_KEK_B64=$(openssl rand -base64 32)"
+            echo "DEWPOINT_INGRESS_KEY_B64=$(openssl rand -base64 32)"
             echo "DEWPOINT_AUDIT_SIGNING_KEY_B64=$(openssl rand -base64 32)"
           } > .env
       - working-directory: deploy/compose
@@ -129,6 +132,39 @@ jobs:
           # only once the first scheduled run succeeded, within 150 s.
           schedule=$(docker compose run --rm -T api python - create "$tenant" "$workflow" < ci/schedule-proof.py | tail -n 1)
           docker compose run --rm -T api python - wait "$tenant" "$schedule" 150 < ci/schedule-proof.py
+      - name: A webhook through nginx and ingress (engine 2b spec §8.3, §12)
+        working-directory: deploy/compose
+        timeout-minutes: 5
+        run: |
+          set -a; . ./.env; set +a
+          read -r tenant workflow < <(docker compose run --rm -T api python - < ci/seed-workflow.py | tail -n 1)
+          # An HMAC endpoint and its binding, as the API's login; the secret, shown once, only ever in this shell.
+          read -r endpoint secret < <(docker compose run --rm -T api python - create "$tenant" "$workflow" \
+            < ci/ingress-proof.py | tail -n 1)
+          body='{"id":"ci-proof-1","type":"ci_proof"}'
+          stamp=$(date +%s)
+          signature=$(printf '%s.%s' "$stamp" "$body" | openssl dgst -sha256 -hmac "$secret" -r | cut -d' ' -f1)
+          post() {
+            curl -sS -o response.json -w '%{http_code}' -X POST "http://127.0.0.1:8080/hooks/$endpoint" \
+              -H "content-type: application/json" -H "x-dewpoint-timestamp: $stamp" \
+              -H "x-dewpoint-signature: $signature" --data-binary "$body"
+          }
+          # Signed, through nginx to ingress: recorded; the same event again (a sender's retry): acknowledged once.
+          # Each check is a command of its own: `bash -e` ignores a failure before a list's last `&&`.
+          test "$(post)" = 200
+          grep -q '"accepted":1' response.json
+          test "$(post)" = 200
+          grep -q '"duplicates":1' response.json
+          # A body trickled through nginx, a byte every 2 s (under nginx's own gap timeout), streamed to ingress: its
+          # 408 within the 10 s whole-body deadline, never minutes later. The time is curl's own, and the trickle stops
+          # at its first failed write: the runner ignores SIGPIPE, so it would otherwise outlive curl's answer.
+          read -r trickled took < <( (printf '{'; for _ in $(seq 30); do sleep 2; printf ' ' 2>/dev/null || exit 0; done
+            printf '}') | curl -sS -o /dev/null -w '%{http_code} %{time_total}\n' --max-time 40 -X POST -T - \
+            -H 'Expect:' "http://127.0.0.1:8080/hooks/$endpoint")
+          test "$trickled" = 408
+          awk -v took="$took" 'BEGIN { exit !(took <= 14) }'
+          # Matched by the Compose dispatcher, started and run: exit 0 only once its run succeeded, within 120 s.
+          docker compose run --rm -T api python - wait "$tenant" "$endpoint" 120 < ci/ingress-proof.py
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4  (version comes from package.json "packageManager")
         with: { package_json_file: frontend/package.json }
       - uses: actions/setup-node@v4

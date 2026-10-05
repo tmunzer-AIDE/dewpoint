@@ -3,9 +3,15 @@
 namespace isn't the default."""
 
 import re
+import signal
+import socket
+import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 COMPOSE = Path(__file__).parents[3] / "deploy" / "compose" / "docker-compose.yml"
@@ -16,6 +22,7 @@ ENV = {
     "DEWPOINT_AUDITOR_DB_PASSWORD": "auditor-pw",
     "DEWPOINT_WORKER_DB_PASSWORD": "worker-pw",
     "DEWPOINT_DISPATCH_DB_PASSWORD": "dispatch-pw",
+    "DEWPOINT_INGRESS_DB_PASSWORD": "ingress-pw",
     "DEWPOINT_KEK_B64": "k" * 44,
     "DEWPOINT_AUDIT_SIGNING_KEY_B64": "s" * 44,
     "DEWPOINT_TEMPORAL_NAMESPACE": "dewpoint-ci",
@@ -103,3 +110,134 @@ def test_a_dispatcher_that_exits_is_restarted() -> None:
     """The whole-branch review: a dispatcher process that ends (whatever the cause) comes back, so queued runs keep
     starting once what stopped it recovers."""
     assert service("dispatcher")["restart"] == "unless-stopped"
+
+
+def test_the_database_init_makes_an_ingress_login_from_its_password() -> None:
+    """2b-3b: ingress logs in as `dewpoint_ingress_login`, which a fresh database's init creates in the group role, from
+    `DEWPOINT_INGRESS_DB_PASSWORD`; CI writes one like every other login's."""
+    assert environment("postgres")["DEWPOINT_INGRESS_DB_PASSWORD"] == "ingress-pw"
+    init = (COMPOSE.parent / "initdb" / "10-roles.sh").read_text()
+    assert '-v ingress_pw="$DEWPOINT_INGRESS_DB_PASSWORD"' in init
+    assert "CREATE ROLE dewpoint_ingress_login LOGIN PASSWORD :'ingress_pw' IN ROLE dewpoint_ingress;" in init
+    assert "rolname='dewpoint_ingress') THEN CREATE ROLE dewpoint_ingress NOLOGIN" in init
+    ci = (COMPOSE.parents[2] / ".github" / "workflows" / "ci.yml").read_text()
+    assert 'echo "DEWPOINT_INGRESS_DB_PASSWORD=$(openssl rand -hex 16)"' in ci
+    assert "DEWPOINT_INGRESS_DB_PASSWORD=" in (COMPOSE.parent / ".env.example").read_text()
+
+
+NGINX = Path(__file__).parents[3] / "deploy" / "docker" / "nginx.conf"
+HOOKS_SUBNET = "172.31.255.248/29"
+
+
+def test_ingress_runs_behind_its_profile_as_its_own_login_without_a_key_encryption_key() -> None:
+    """2b-3b (engine 2b spec §8.3): ingress is a gated prototype until 2b-4, so plain Compose never starts it; the
+    `ingress` profile does, and it still refuses to start unless the deployment is `development`. Its environment is its
+    own (it refuses one holding the key-encryption key), its database login has no table privilege, and it publishes no
+    port: it's reached through `web` only."""
+    ingress = service("ingress")
+    assert ingress["profiles"] == ["ingress"]
+    assert ingress["command"] == ["dewpoint", "ingress", "--host", "0.0.0.0", "--port", "8001"]  # noqa: S104 - no port published
+    env = environment("ingress")
+    assert not [name for name in env if "KEK" in name]
+    assert env["DEWPOINT_DATABASE_URL"] == "postgresql+asyncpg://dewpoint_ingress_login:ingress-pw@postgres/dewpoint"
+    assert env["DEWPOINT_INGRESS_TRUSTED_PROXIES"] == HOOKS_SUBNET
+    assert "ports" not in ingress and ingress["read_only"] is True and ingress["cap_drop"] == ["ALL"]
+    assert ingress["depends_on"] == {"migrate": {"condition": "service_completed_successfully"}}
+
+
+def test_web_reaches_ingress_on_a_network_of_their_own_whose_addresses_ingress_trusts() -> None:
+    """Ruling 11: X-Forwarded-For is believed only from configured proxies. `web` and ingress share a small network
+    (`hooks`), on which ingress is `hooks-ingress`; nginx proxies there, so the peer ingress sees is `web` on that
+    network, the one range it trusts. nginx writes the client it recovered into X-Forwarded-For, never a client's own,
+    and streams a body to ingress as it arrives (chunked ones too, over HTTP/1.1), so ingress's whole-body deadline and
+    its requests-in-flight limit hold through it (the owner's M4 review); its own gap timeout matches."""
+    compose: dict[str, Any] = yaml.safe_load(COMPOSE.read_text())
+    assert rendered(compose["networks"]["hooks"]["ipam"]["config"][0]["subnet"]) == HOOKS_SUBNET
+    assert service("ingress")["networks"] == {"default": None, "hooks": {"aliases": ["hooks-ingress"]}}
+    assert service("web")["networks"] == ["default", "hooks"]
+    conf = NGINX.read_text()
+    hooks = conf[conf.index("location /hooks/") :].split("}", 1)[0]
+    assert "set $ingress http://hooks-ingress:8001;" in conf
+    assert "proxy_pass $ingress;" in hooks
+    assert "proxy_set_header X-Forwarded-For $remote_addr;" in hooks
+    assert "client_body_timeout 10s;" in hooks
+    assert "proxy_request_buffering off;" in hooks and "proxy_http_version 1.1;" in hooks
+
+
+def test_the_api_holds_the_ingress_key_only_when_one_is_set() -> None:
+    """The API seals endpoints' secrets under the ingress key: without one it writes none (503), and plain Compose
+    needs none."""
+    env = environment("api")
+    assert env["DEWPOINT_INGRESS_KEY_B64"] == "" and env["DEWPOINT_INGRESS_KEY_ID"] == "ingress-1"
+
+
+def test_ci_runs_the_ingress_profile_and_proves_a_webhook_through_nginx() -> None:
+    e2e = yaml.safe_load(CI.read_text())["jobs"]["e2e"]
+    assert e2e["env"]["COMPOSE_PROFILES"] == "ingress"
+    steps = {step.get("name", ""): step for step in e2e["steps"]}
+    assert "DEWPOINT_INGRESS_KEY_B64=$(openssl rand -base64 32)" in steps["Write CI env"]["run"]
+    proof = steps["A webhook through nginx and ingress (engine 2b spec §8.3, §12)"]
+    assert proof["timeout-minutes"] == 5
+    assert "http://127.0.0.1:8080/hooks/$endpoint" in proof["run"]
+    assert "ci/ingress-proof.py" in proof["run"]
+    assert 'test "$trickled" = 408' in proof["run"]  # a slow body's deadline holds through nginx
+
+
+def _answer_408_after(sock: socket.socket, seconds: float) -> None:
+    """A stand-in for nginx and ingress: a request's first bytes, then its 408 once the deadline passes, then the rest
+    of the body read away before closing, as nginx does."""
+    while True:
+        conn, _ = sock.accept()
+        try:
+            conn.settimeout(5)
+            conn.recv(4096)
+            time.sleep(seconds)
+            conn.sendall(b"HTTP/1.1 408 Request Timeout\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            conn.shutdown(socket.SHUT_WR)
+            conn.settimeout(1)
+            while conn.recv(4096):
+                pass
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+
+def _trickle_check(port: int) -> str:
+    """The CI step's trickled-body check, aimed at a local stand-in."""
+    e2e = yaml.safe_load(CI.read_text())["jobs"]["e2e"]
+    run = {step.get("name", ""): step for step in e2e["steps"]}[
+        "A webhook through nginx and ingress (engine 2b spec §8.3, §12)"
+    ]["run"]
+    block = run[run.index("# A body trickled") : run.index("# Matched by the Compose dispatcher")]
+    return "set -e\n" + block.replace("http://127.0.0.1:8080/hooks/$endpoint", f"http://127.0.0.1:{port}/hooks/x")
+
+
+@pytest.mark.parametrize(("bound", "passes"), [("14", True), ("1", False)])
+def test_cis_trickle_check_times_curl_even_where_sigpipe_is_ignored(bound: str, passes: bool) -> None:
+    """PR #37's first CI run: GitHub's runner ignores SIGPIPE, so the trickle kept writing (and sleeping) after curl had
+    its 408, and the step timed the whole trickle (about 60 s), not curl's answer. The check times curl itself, the
+    trickle stops at its first failed write, and the bound still bites (1 s against a 2 s answer)."""
+    sock = socket.socket()
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(4)
+    threading.Thread(target=_answer_408_after, args=(sock, 2.0), daemon=True).start()
+    check = _trickle_check(sock.getsockname()[1])
+    if bound != "14":
+        assert "took <= 14" in check
+        check = check.replace("took <= 14", f"took <= {bound}")
+    began = time.monotonic()
+    assert signal.getsignal(signal.SIGPIPE) == signal.SIG_IGN  # CPython's own; the runner's too
+    run = subprocess.run(["bash", "-c", check], capture_output=True, text=True, timeout=90, restore_signals=False)
+    assert (run.returncode == 0) is passes, run.stderr
+    assert time.monotonic() - began < 14  # the trickle stopped once curl had its answer
+
+
+def test_cis_ingress_checks_each_stop_a_failing_step() -> None:
+    """`bash -e` ignores a failure before a list's last `&&`: each check is a command of its own."""
+    e2e = yaml.safe_load(CI.read_text())["jobs"]["e2e"]
+    run = {step.get("name", ""): step for step in e2e["steps"]}[
+        "A webhook through nginx and ingress (engine 2b spec §8.3, §12)"
+    ]["run"]
+    assert [line for line in run.splitlines() if line.strip().startswith("test ") and "&&" in line] == []

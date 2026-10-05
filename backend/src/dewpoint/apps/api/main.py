@@ -22,9 +22,11 @@ from dewpoint.apps.api.routes import (
     runs,
     schedules,
     tenants,
+    webhooks,
     workflows,
 )
 from dewpoint.core.config import Settings, get_settings
+from dewpoint.core.crypto.ingress import IngressKey
 from dewpoint.core.crypto.kek import KekSet
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.crypto.keys import KeyringKeys
@@ -49,6 +51,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.sessionmaker = make_sessionmaker(app.state.engine)
     app.state.keyring = Keyring(KekSet.from_settings(settings))
     app.state.keys = KeyringKeys(app.state.sessionmaker, app.state.keyring)  # admission's: claims, envelopes, digests
+    # Webhook endpoints' secrets (engine 2b spec §8.3): without the ingress key, nothing that seals one is written.
+    app.state.ingress_key = IngressKey.from_settings(settings) if settings.ingress_key_b64 else None
     # Created eagerly (not in the lifespan) so ASGI test transports, which skip lifespan, get it too.
     app.state.http = httpx.AsyncClient(timeout=10, follow_redirects=False)
     app.add_middleware(
@@ -76,6 +80,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         csv_uploads.router,
         runs.router,
         schedules.router,
+        webhooks.router,
     ):
         app.include_router(router)
     return app
