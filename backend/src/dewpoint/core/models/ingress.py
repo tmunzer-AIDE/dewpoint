@@ -110,7 +110,9 @@ class InboundEvent(Base):
     dedupe_key: Mapped[bytes | None] = mapped_column(LargeBinary)
     content_digest: Mapped[bytes | None] = mapped_column(LargeBinary)
     key_version: Mapped[int] = mapped_column(Integer)
-    sealed: Mapped[bytes] = mapped_column(LargeBinary)
+    # Deferred: up to 4.5 times its body limit, and only the matcher opens it (it undefers it); the API reads
+    # metadata only (the final review).
+    sealed: Mapped[bytes] = mapped_column(LargeBinary, deferred=True)
     size_bytes: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(16), server_default="pending")
     reason: Mapped[str | None] = mapped_column(String(64))

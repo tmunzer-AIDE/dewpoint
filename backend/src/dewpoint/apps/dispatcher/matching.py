@@ -30,6 +30,7 @@ import structlog
 from cryptography.exceptions import InvalidTag
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import undefer
 
 from dewpoint.apps import admission
 from dewpoint.apps.dispatcher.dispatch import GATE_LOCK, tenant_lock
@@ -180,6 +181,7 @@ async def _match(
                 InboundEvent.status == "pending",
                 or_(InboundEvent.next_attempt_at.is_(None), InboundEvent.next_attempt_at <= func.statement_timestamp()),
             )
+            .options(undefer(InboundEvent.sealed))
             .with_for_update(skip_locked=True)
             .execution_options(populate_existing=True)
         )

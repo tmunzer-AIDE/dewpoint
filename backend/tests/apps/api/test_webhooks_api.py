@@ -14,7 +14,8 @@ import uuid
 from typing import Any
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
+from sqlalchemy.engine import Engine
 
 from dewpoint.apps.ingress.main import create_app
 from dewpoint.core.crypto import events
@@ -354,6 +355,34 @@ async def test_an_admin_cancels_an_endpoints_pending_events_at_once(
     assert bytes_left == 0
     [entry] = await audited(owner_sessionmaker, "webhook_endpoint.cancel_pending")
     assert entry["details"]["cancelled"] == 3
+
+
+async def test_reading_or_cancelling_events_never_loads_their_ciphertexts(
+    keyed_app, tenant, owner_sessionmaker, api_settings, ingress_sessionmaker
+) -> None:
+    """The final review: listing an endpoint's events (any viewer may), the dead ones, and cancelling one or an
+    endpoint's pending ones read metadata only. An event's sealed payload, up to 4.5 times its body limit, never leaves
+    Postgres for the API: only the matcher opens it."""
+    ctx, _ = tenant
+    endpoint = await made(keyed_app, owner_sessionmaker, api_settings, ctx)
+    one, *_ = await _events(ingress_sessionmaker, ctx, endpoint["id"], 3)
+    admin = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "admin")
+    statements: list[str] = []
+
+    def seen(conn: Any, cursor: Any, statement: str, parameters: Any, context: Any, executemany: bool) -> None:
+        statements.append(statement)
+
+    event.listen(Engine, "before_cursor_execute", seen)
+    try:
+        for path in (f"/webhook-endpoints/{endpoint['id']}/events", "/inbound-events/dead"):
+            assert (await admin.get(url(ctx, path))).status_code == 200
+        assert (await admin.post(url(ctx, f"/inbound-events/{one}/cancel"))).status_code == 200
+        cancelled = await admin.post(url(ctx, f"/webhook-endpoints/{endpoint['id']}/cancel-pending"))
+        assert cancelled.json() == {"cancelled": 2}
+    finally:
+        event.remove(Engine, "before_cursor_execute", seen)
+    read = [statement for statement in statements if "inbound_events" in statement]
+    assert read and [statement for statement in read if "sealed" in statement] == []
 
 
 async def test_two_bindings_made_at_once_never_pass_the_cap_together(
