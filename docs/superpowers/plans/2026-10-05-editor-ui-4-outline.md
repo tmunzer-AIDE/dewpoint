@@ -1,7 +1,8 @@
 # Sub-project 4 — Editor UI: outline for rulings
 
 - **Status:** draft for the owner's rulings, 2026-10-05; revision 2 applies the review of 4aaf8f9 (D10, D13, D17,
-  D27, B4, B7–B10, B14, §7). Nothing is built before the rulings.
+  D27, B4, B7–B10, B14, §7); revision 3 applies the review of 6c80fe9 (B4a/B4b, B7, B9, B14, D8, §4). Nothing is
+  built before the rulings.
 - **Branch:** `docs/editor-ui-4-outline`, from `origin/main` 6482c53 (#37).
 - **Read:** the design export `Dewpoint UI.dc.html` (screens 1a–1i, today's UI 0a–0b, logo variants A–D), as data;
   architecture spec §3.3, §6.8, §10–§14; engine-core spec §3, §5.5, §5.7, §5.10, §8, §12; engine 2b spec §2.1, §4.1,
@@ -23,7 +24,7 @@
 | 1i | Settings → Connections (Mist, LLM, MCP sections), add-connection form | 4a, Mist only (D1) |
 | 0a, 0b | Today's Connections and Tenants | restyled in 4a |
 
-**Not designed** (D8): Home; the ⌘K palette; the tenant menu; the drawer's Options and Test tabs; simulate results;
+**Not designed** (D8): the ⌘K palette; the tenant menu; the drawer's Options and Test tabs; simulate results;
 the live-step dialog; the run form with CSV mapping; the upstream data tree and pill details; the condition builder;
 the diagnostics panel and CEL class badges; trigger setup (manual form and CSV columns, schedule, webhook); the
 declassify list (2b §4.1); empty, loading and error states; login, MFA, enroll and security; the development banner.
@@ -65,9 +66,9 @@ Each slice is shippable on its own branch (D26) and ends at one checkpoint (revi
   `workflow.declassify`).
 
 **4d — test semantics.**
-- 4d-1: Simulate workflow and Simulate step (D14, B8). Every result says "Simulated · nothing was sent · results
-  don't prove the live call will succeed"; each step carries its data-origin tag; the server's checks are listed
-  apart; slate with a hatch (D2).
+- 4d-1: Simulate workflow and Simulate step (D14, B8; B4b first). Every result says "Simulated · nothing was sent ·
+  results don't prove the live call will succeed"; each step carries its data-origin tag; the server's checks are
+  listed apart; slate with a hatch (D2).
 - 4d-2, after sub-project 3 and B9: the live single-step dialog of §10.4 (connection, cloud, org, target and
   where it came from with an override, operation, retries, current → after diff, exact body; a checkbox and the
   target's name, or the count and the org's name). Results labelled Live.
@@ -78,9 +79,10 @@ Each slice is shippable on its own branch (D26) and ends at one checkpoint (revi
   preview with errors → skip invalid → "Start run for N rows"; one `Idempotency-Key` per submit, reused on retry.
 - 1f list (B10): workflow, status, trigger and time filters; the existing `before` + `before_id` cursor, taken from
   the last item; polling every 5 s while visible.
-- 1g detail: the run's version replayed from `run_steps`, live or simulated (B4): each node ran (status, attempts),
-  was skipped (a dead path), is not reached yet (run still going) or was never reached (run ended first), per loop
-  iteration; a step panel with redacted input and output previews, attempts, timing and side-effect outcome; cancel;
+- 1g detail: the run's version (B4a) replayed from `run_steps`, live or simulated (B4b), per loop iteration: each
+  node ran (status, attempts), was skipped (a branch not taken), didn't start (its scope failed or the run ended
+  first) or isn't reached yet (the run is still going); in runs recorded before B4b a node without a row is "not
+  recorded"; a step panel with redacted input and output previews, attempts, timing and side-effect outcome; cancel;
   the re-run dialog (D13).
 
 **4f — plugin widgets** (after sub-project 3's manifests; against x-widget fixtures until then): the Mist picker
@@ -115,7 +117,7 @@ Each gives my recommendation (**Rec**). D1–D7 are where the design and §10 di
   subsets; mark B as an SVG component.
 - **D8 Undesigned screens** (§1). DesignSync can't reach the project from here. Rec: before 4c, 4d and 4e you extend
   the design for their high-risk gaps (Test tab and simulate results, live dialog, run form with CSV, data tree and
-  pill details, condition builder) and export it; the low-risk ones (Home, ⌘K, empty states, auth screens) I build in
+  pill details, condition builder) and export it; the low-risk ones (⌘K, empty states, auth screens) I build in
   the design's grammar for your ruling at the checkpoint.
 - **D9 Library and templates.** 1e has no backend; the spec has only export and import of templates (§4.1); "Used by
   212 tenants" is a cross-tenant figure v1 has no level for. Rec: defer 1e and "Browse library"; 4b ships Blank and
@@ -135,7 +137,7 @@ Each gives my recommendation (**Rec**). D1–D7 are where the design and §10 di
   a `409 version_changed` reloads the form and asks again; `410 input_not_retained` offers new input.
 - **D14 Simulating a draft.** `mode: simulate` runs only the active published version (`apps/admission.py`); nothing
   simulates a draft or one step, and publishing to test would activate its triggers. Rec: a short engine design
-  before 4d (draft snapshots that can never activate, single-step runs; skipped steps come from B4), with a
+  before 4d (draft snapshots that can never activate, single-step runs; skipped steps come from B4b), with a
   migration slot from you (B8).
 - **D15 Generated client.** Rec: openapi-typescript + openapi-fetch (typed by path, so operation ids don't matter);
   the schema dumped by a CLI, committed, and CI fails on drift (B1).
@@ -169,13 +171,13 @@ Each gives my recommendation (**Rec**). D1–D7 are where the design and §10 di
   2b spec §10.4 still lists Temporal Cloud) and an approved evaluator network transport (engine-core §5.7, §12.4).
 - **D26 Branches and order.** Rec: a worktree and branch per slice (`feat/editor-4a`…), stacked on the previous one
   until it merges, then rebased on `origin/main`; rulings in `2026-10-05-editor-ui-4-ledger.md`. Order: 4a, 4b, 4c,
-  4d-1 (after D14's design), 4e (after 2b-4a), then 4d-2 and 4f (after sub-project 3).
+  4d-1 (after D14's design and B4b), 4e (after 2b-4a), then 4d-2 and 4f (after sub-project 3).
 - **D27 The design in the repo.** The outline's design claims can't be checked without the export, which lives only
   in this session's scratchpad. Rec: commit `Dewpoint UI.dc.html` (132 KB, screens only; not the old mockups,
   reference boards or the design tool's `support.js`) as `docs/design/2026-10-05-dewpoint-ui.dc.html`, so §7's line
   references can be checked; it is design data, never served.
 
-## 4. New npm dependencies (`npm view <name> version license`, 2026-10-05; transitive licences rechecked at install)
+## 4. New npm dependencies (`npm view <name>@<version> version license`, 2026-10-05; transitive licences at install)
 
 | Package | Version | Licence | Use | Slice |
 |---|---|---|---|---|
@@ -195,25 +197,26 @@ renderer), MSW, papaparse (the API parses CSV). pnpm 12.6.0 runs as the cached `
 
 ## 5. Backend work the UI needs
 
-Each is its own test-first change with its role × endpoint matrix rows and RLS tests; B4, B7, B8 and B9 may
-need a migration (a slot from you). Today no route sets `response_model`.
+Each is its own test-first change with its role × endpoint matrix rows and RLS tests; B4b, B7, B8 and B9
+need a migration (a slot from you each). Today no route sets `response_model`.
 
 | # | Slice | Change | Migration |
 |---|---|---|---|
 | B1 | 4a | OpenAPI for the client: a CLI dumps it without a server; unique component names (two `CreateIn`, two `PatchIn`); the `Graph` model on the draft PUT; `response_model` on each route as its slice adopts it; CI regenerates `frontend/src/api/schema.d.ts` and fails on drift | no |
 | B2 | 4a | `GET /api/v1/platform/status`: environment and whether production runs are on, for the banner and for explaining a refusal before a start | no |
 | B3 | 4b | Workflow list summary: last run (status, time), runs in 24 h, unpublished changes (draft hash ≠ active `graph_hash`), needs attention. Rec: "Unpublished changes" without 1c's edit count, which would need a column | no |
-| B4 | 4b, 4e | Replay: `GET …/workflows/{wid}/versions/{vid}` with the graph and expression classes (no route returns a version's graph); and the engine projects dead-path nodes as `skipped` rows, per scope, in live and simulated runs (today `NodeState.DEAD` stays inside the scheduler). With both, a node without a row is "not reached yet" while the run runs and "never reached" once it ended. An engine change under its replay and ABI rules | yes: the `run_steps_status` CHECK (0008) |
+| B4a | 4b, 4e | `GET …/workflows/{wid}/versions/{vid}` with the graph and expression classes: no route returns a version's graph | no |
+| B4b | before 4d-1 and 4e | The engine projects the nodes that never ran, per scope, in live and simulated runs, by the cause of their `NodeState.DEAD` (scheduler.py): `skipped` when `_check_ready` finds no live incoming edge (a branch not taken); `not_started` when `_fail_scope` ends a waiting node (its scope failed, or the run ended). A running node `_fail_scope` cancels keeps its `cancelled` attempt row. Runs of versions whose `engine_abi` predates B4b show a missing row as "not recorded", never "never reached". An engine change under its replay and ABI rules | yes: the `run_steps_status` CHECK (0008) |
 | B5 | 4b, 4c | `/node-types` adds side effect, credentials, capabilities, retry and timeout defaults (Options defaults, connection picker, D12) | no |
 | B6 | 4c | Draft scope: every ref available at a node, with type, always or conditional, and sensitive, from the validator's liveness analysis (today it only shows in diagnostics) | no |
-| B7 | 4c | Samples from `run_steps` previews, for a node id and the saved draft revision. Selection: the newest **succeeded** row of an ended run of this workflow; its highest attempt; the first iteration unless one is asked for. It returns run, mode (a simulated sample says so), version, iteration, attempt, captured time, and provenance from that version's graph: the node's `type@version`, the connection id and name it bound, and whether its config equals the draft's. Different type, config or connection marks it stale ("from v3, configured differently"), never representative. No sample: none shown | maybe an index |
-| B8 | 4d-1 | Draft and single-step simulation (D14), after its design; its runs replay through B4 | likely |
-| B9 | 4d-2 | Live single-step test, after sub-project 3. Preview returns the target and where it came from, the diff, the exact body and a single-use `preview_id` that expires in minutes and binds, server-side, the user, draft revision, node id, config hash, `type@version`, connection id and revision, operation, resolved target ids and body hash. Execute takes `preview_id` and the typed confirmation (target name, or count and org name); the server re-resolves everything, re-checks permission, capability, scope and connection, and executes the bound body only if all still match; any change is `409 preview_stale` and needs a new preview | yes: single use needs state |
+| B7 | 4c | Samples from `run_steps` previews, for a node id and the saved draft revision. Selection: the newest **succeeded** row of an ended run of this workflow; its highest attempt; the first iteration unless one is asked for. It returns run, mode (a simulated sample says so), version, iteration, attempt, captured time, the node's `type@version` and whether its config equals the draft's. Connection provenance can't come from the graph: a connection keeps its id while its config changes (`connections.revision`). So the credential resolver (sub-project 3) records on each attempt the resolved connection id, revision and a non-secret context (type, name, cloud, org); a sample without that record shows its connection as "unknown", and one whose revision differs from the connection's current one as "changed since". Different type, config or connection marks it stale, never representative. Flow nodes bind none. No sample: none shown | yes: the attempt's connection record (with 3); maybe an index |
+| B8 | 4d-1 | Draft and single-step simulation (D14), after its design; its runs replay through B4b | likely |
+| B9 | 4d-2 | Live single-step test, after sub-project 3. Preview returns the target and where it came from, the diff, the exact body and a single-use `preview_id` that expires in minutes and binds, server-side, the user, draft revision, node id, config hash, `type@version`, connection id and revision, operation, resolved target ids and body hash. Execute takes `preview_id` and the typed confirmation (target name, or count and org name); the server re-resolves everything, re-checks permission, capability, scope and connection, and executes the bound body only if all still match; any change is `409 preview_stale` and needs a new preview. **Once only:** in one transaction, under a lock on the preview, execute consumes it and creates a durable execution record; the worker runs it through admission, never the API (§3.3). A retry or a concurrent submit of the same `preview_id` returns that execution and its result (202 while it runs) and never executes again; a lost response is recovered the same way. Expiry applies only to unconsumed previews. An `outcome_unknown` result (the request may have been sent) is recorded as such and never retried automatically; a new attempt needs a new preview whose dialog states the unknown outcome, after `reconcile()` for a reconcilable node | yes: preview and execution records |
 | B10 | 4e | Runs list: status, mode, source and time filters, and the workflow's name per item (paging exists) | no |
 | B11 | 4e | CSV: read the saved default mapping; re-preview a staged upload under a new mapping | no |
 | B12 | 4b | Workflow export and import as JSON, connections replaced by typed placeholders and re-bound on import (D9) | no |
 | B13 | 4c | Webhook bindings per workflow, for the trigger drawer | no |
-| B14 | 4e | `expected_version_id` on `StartIn` and `RerunIn` (D13): after `lock_for_admission`, a mismatch with the active version is `409 version_changed` naming the active number; part of the idempotency digest, so an exact retry still returns its request and the same key with another version is `idempotency_conflict` | no |
+| B14 | 4e | `expected_version_id` on `StartIn` and `RerunIn` (D13). Checked in `_frozen`, after `lock_for_admission`: a mismatch is `409 version_changed` naming the active number. Exact retries are resolved by key before that (`_by_key` → `_retry`), so they return their request whatever is active now. The digest stores no format version, so `canonical()` adds `expected_version_id` as a fifth key only when it's given: every existing digest, and every request without it, keeps its exact bytes (as a CSV start's `csv` already does). With it, the same key and another version is `idempotency_conflict` | no |
 
 Seen, not proposed here: `connection.use`, `approval.decide` and `agent.grant` are defined but no route checks them;
 `/api/v1/openapi.json` is served without a session (B1 could serve it only in development).
