@@ -1,12 +1,13 @@
 # Engine 2b-4: Retention and Production — Outline
 
 > **Status: an outline for the owner's decisions (2026-10-05), revised after the owner's first review (erasure's
-> completion, production Temporal's proof, Mist, event grouping, ingress's switch) and second (erasure: no reversal,
-> executions enumerated and read back, durable progress, the `tenants` schema). Not authorization to build anything;
-> no gate is authorized to lift by this review, neither the production gate nor ingress's development-only
-> restriction.** As in 2b-1a through 2b-3b, once the owner rules, each sub-project is built on a prototype branch from
-> `main`, with the owner's checkpoint after each milestone; its plan is then written from the replayed diffs, with a
-> revision of the 2b spec, for the owner's review before execution.
+> completion, production Temporal's proof, Mist, event grouping, ingress's switch), second (erasure: no reversal,
+> durable progress, the `tenants` schema) and third (the firing inventory before schedules are deleted, completeness
+> from Temporal's retention bound, audit entries described as they are, eligibility requiring `active`). Not
+> authorization to build anything; no gate is authorized to lift by this review, neither the production gate nor
+> ingress's development-only restriction.** As in 2b-1a through 2b-3b, once the owner rules, each sub-project is built
+> on a prototype branch from `main`, with the owner's checkpoint after each milestone; its plan is then written from
+> the replayed diffs, with a revision of the 2b spec, for the owner's review before execution.
 
 **Goal:** Dewpoint can hold tenants' production data. Data leaves on schedule, a tenant can be erased, old keys can be
 retired, the production Temporal is verified, every production blocker is fixed or bounded with the owner's explicit
@@ -127,11 +128,23 @@ read-back confirms its effect. A step is marked done only once every item it own
 effect marks itself in the transaction that does it.
 
 1. **Mark the tenant `erasing`,** under its lifecycle lock taken exclusively, raising its schedules' generations and
-   creating the erasure's record, in one transaction. §6.5's refusals apply from then on.
+   creating the erasure's record, in one transaction. §6.5's refusals apply from then on, and every tenant-scoped
+   write through the API is refused too, so nothing new (a schedule, an endpoint) appears mid-erasure; the schedule
+   sync only ever pauses or deletes a tenant's schedules once it isn't `active`.
 2. **Reconcile** every `starting` request, started or confirmed absent (§7.6), each verified by the reconciler's
    recorded outcome.
-3. **Its Temporal schedules:** each paused, then deleted, verified by a describe that finds nothing. A schedule's action
-   holds the tenant's encrypted input, so deleting extends §6.5's "pause" (revision 10).
+3. **Its Temporal schedules,** in three recorded parts:
+   1. each paused, verified by a describe that shows it paused; from then on it starts nothing, and the time the last
+      one was verified paused is recorded;
+   2. **the firing inventory, captured before any schedule is deleted:** every firing Dewpoint recorded (from 2b-4a,
+      each `ScheduleTick` records its own workflow and run ids as its first act, a skip included), every firing the
+      schedule's describe still lists (running and recent), and every execution visibility finds started by the
+      schedule, each an item for step 6;
+   3. each deleted, verified by a describe that finds nothing. A schedule's action holds the tenant's encrypted input,
+      so deleting extends §6.5's "pause" (revision 10).
+
+   The inventory isn't claimed complete: a firing that never ran its first activity left no record, and visibility
+   may lag. Completeness comes from step 9's bound, not from the inventory.
 4. **Cancel** its queued requests and its pending events, their counters released.
 5. **Cancel its running runs:** each verified terminal, in Dewpoint's projection and by a describe of its execution
    that finds it closed. Their workers need the tenant's keys until then.
@@ -148,38 +161,62 @@ effect marks itself in the transaction that does it.
    and its audit chain still resolves: status `erased` (a migration widens the `tenants_status` check, which admits only
    `active` and `erasing` today), its name replaced by a fixed placeholder, and its slug by a unique anonymized one
    built from its id (`erased-<tenant id>`), since slugs are unique.
+9. **Wait out Temporal's retention bound:** "Why every execution is gone" below.
+
+**Only `active` is eligible.** Admission and the `ScheduleTick` activity refuse `status == "erasing"` today
+(`apps/admission.py`, `apps/dispatcher/tick.py`); with `erased` added they must require `status == "active"`, as
+dispatch, the matcher and ingress's two functions already do, so a retained `erased` row never becomes eligible again.
+A regression covers each of those checks against `erased`.
 
 ### Enumerating and deleting executions (step 6)
 
 Every execution Dewpoint starts for a tenant has a server-built workflow id beginning `t:<tenant>:` (§6.1): a root, a
 sub-flow or a failure handler (`…:run:<run id>`), a loop batch (`…/batch:<start>`), a schedule tick
 (`…:sched:<schedule id>-<suffix>`). A continue-as-new chain keeps its workflow id, each run with its own run id.
-Visibility can lag, so it's a source of discovery, never the proof.
 
-- **Enumerate durably, before deleting anything.** Every run of the tenant in `runs` gives a workflow id. Each one's
-  whole run chain is walked through its histories, reads of the execution store, not of visibility: a run's start event
-  names the run it continued from, its continue-as-new event the run that continues it. Every child those histories
-  started (sub-flows, loop batches) is added, and walked the same way, recursively. Schedule ticks come from each
-  schedule's recorded actions and Temporal's describe of the schedule. Visibility queries for workflow ids beginning
-  `t:<tenant>:` add anything not yet listed, which is then walked too. Each item is recorded (workflow id, run id,
-  where it was found) before any deletion, so a crash resumes from the list.
+- **Enumerate durably, before deleting anything.** Every run of the tenant in `runs`, and every request step 2
+  reconciled as started, gives a workflow id. Each one's whole run chain is walked through its histories, reads of the
+  execution store, not of visibility: a run's start event names the run it continued from, its continue-as-new event
+  the run that continues it. Every child those histories started (sub-flows, loop batches) is added and walked the
+  same way, recursively. Step 3's firing inventory adds the schedule ticks. Visibility queries for workflow ids
+  beginning `t:<tenant>:` add anything not yet listed, which is then walked too. Each item is recorded (workflow id,
+  run id, where it was found) before it's deleted, so a crash resumes from the list.
 - **Delete, then read back.** `DeleteWorkflowExecution` for each listed run; verified only when describing that exact
   run (workflow id and run id) answers not-found, a read of the execution store. Temporal deletes asynchronously, so a
-  run still present is retried later, not failed.
-- **Complete only when nothing new appears.** The list closes once every chain and every child has been walked and two
-  visibility passes, a settle period apart at least as long as the namespace's visibility lag, add nothing. The step
-  is done only when the list is closed and every item is verified gone. Otherwise the erasure stays incomplete and
-  alerts; it never reports success.
-- **What this asks of the production Temporal:** `DeleteWorkflowExecution`, visibility queries by workflow-id prefix,
-  and archival disabled for the namespace, since an archived history would outlive the erasure. The readiness checks
-  verify the archival state (D12). The prototype measures each on the CLI dev server; D12's proof covers the real
-  target.
+  run still present is retried later, not failed. The step is done once every listed item is verified gone; that
+  removes everything found at once, but proves nothing about what wasn't found.
 
-**Complete** — status `erased`, with an audit entry of per-table counts — only once steps 1 to 8 are done and a final
-check finds, for the tenant: no row in step 8's tables, no key, no Temporal schedule, and every enumerated execution
-verified gone, with the list closed. The completing transaction then deletes the erasure's item rows, its audit entry
-keeping their counts; `tenant_erasures` stays as the erasure's record, identifiers only. Until then the tenant stays
-`erasing` and the erasure's record shows the step reached and any failure; nothing reports it complete early.
+### Why every execution is gone (step 9)
+
+No Temporal API outside visibility enumerates a namespace's executions, and visibility has no guaranteed maximum lag,
+so no number of visibility passes proves every id was found, schedule firings least of all. Completeness rests instead
+on Temporal's own retention, which deletes every closed execution once the namespace's retention has passed since it
+closed, found or not:
+- **Every execution of the tenant is closed by a known time.** Runs were verified terminal in step 5, and their
+  children close with them (the prototype verifies each child kind's parent-close policy; a child that would outlive
+  its parent is cancelled and waited for in step 5). Every firing ends within the workflow execution timeout set on its
+  schedule's action (the prototype verifies 2b-3a sets one, or adds it), and nothing fires after step 3's last pause.
+  So the latest close is at most the later of step 5's verified ends and the last pause plus that timeout.
+- **The bound:** that latest close plus the namespace's retention, read from `DescribeNamespace` when the erasure
+  starts and again at the bound (the larger counts; the readiness checks keep it at most 30 days). Archival must be
+  disabled for the namespace (D12), so no copy outlives retention.
+- **At the bound:** every found execution is read back not-found again, and a visibility query for `t:<tenant>:`
+  finds nothing. Anything found then is an incident: the erasure stays incomplete and alerts, never reporting success.
+- **The residual trust:** the bound relies on Temporal enforcing its namespace's retention, its documented behavior,
+  which Dewpoint can't observe for an execution it never found. Accepting that trust is the owner's decision (D3d);
+  without it, an unfound firing has no defensible proof of deletion, and the erasure can't report complete.
+- **So an erasure takes up to the namespace's retention to complete** (7 days by default): its record shows Dewpoint's
+  own data and keys gone, every found execution deleted, and the date the bound passes.
+- **What this asks of the production Temporal:** `DeleteWorkflowExecution`, visibility queries by workflow-id prefix,
+  `DescribeNamespace`'s retention, and archival disabled for the namespace. The readiness checks verify the last
+  (D12). The prototype measures each on the CLI dev server; D12's proof covers the real target.
+
+**Complete** — status `erased`, with an audit entry of per-table counts — only once steps 1 to 9 are done and a final
+check finds, for the tenant: no row in step 8's tables, no key, no Temporal schedule, every found execution verified
+gone, and step 9's bound passed with nothing found. The completing transaction then deletes the erasure's item rows, its
+audit entry keeping their counts; `tenant_erasures` stays as the erasure's record, identifiers only. Until then the
+tenant stays `erasing` and the erasure's record shows the step reached and any failure; nothing reports it complete
+early.
 
 **A stopped or failed step resumes.** The retention process takes every `erasing` tenant an operator hasn't stopped
 and retries its recorded step and its unverified items, with backoff and an alert, never skipping either; batches
@@ -189,8 +226,20 @@ answers not-found while its projection isn't terminal goes through §7.9's opera
 **What remains (D3c, the owner's ruling):**
 - **Audit records:** the tenant's audit entries stay under the platform's audit-retention policy
   (`audit_retention_days`, 400 by default) and its integrity anchors, leaving by audit pruning, not by erasure. They
-  hold only identifiers, actions, actors' user ids and counts, never a payload or a secret. Erasure adds its own entries
-  (its start, each step, a stop, a retry, its completion).
+  never hold a run's inputs or outputs or an event's payload, and the audit service refuses detail keys naming a
+  password, a secret, a token, a code or a credential. But they aren't identifier-only. Today's entries keep:
+  - **identifiers:** actors' user ids, and the ids of workflows, versions, requests, runs, endpoints, bindings, events
+    and schedules;
+  - **tenant-supplied names and labels:** the tenant's slug (`tenant.create`) and the fields an update sent
+    (`tenant.update`), a workflow's name (`workflow.create`, `workflow.update`), a connection's name and type
+    (`connection.create`), a webhook endpoint's name (`webhook_endpoint.create`);
+  - **operational metadata:** the names of changed fields, counts, fixed reasons and outcomes, booleans, a published
+    version's number, its graph and version hashes and its declassified pointers;
+  - **personal data, platform-level** (no tenant): a failed login's email and IP address, a login's IP address.
+
+  So an erased tenant's names and labels stay in its audit records for the audit-retention period, as do its
+  identifiers. Erasure's own entries (its start, each step, a stop, a retry, its completion) hold identifiers and
+  counts only.
 - **Backups:** a backup taken before completion still holds the tenant's rows and its wrapped data keys, restorable by
   whoever holds the KEK. The erasure is complete in backups only once every such backup has expired (the guide
   recommends at most 35 days); the completion entry states that date.
@@ -209,8 +258,8 @@ answers not-found while its projection isn't terminal goes through §7.9's opera
   deployment's own settings, verifies the certificate, and calls `DescribeNamespace` (the recorded namespace, its
   retention within bounds), failing closed otherwise. The proof's target (a Temporal Cloud test namespace, a self-hosted
   server with TLS, or another) and any image it needs approved are the owner's decisions (D12).
-- **What erasure needs of it** (D3b): `DeleteWorkflowExecution`, visibility queries by workflow-id prefix, and archival
-  disabled for the namespace, which the readiness checks verify.
+- **What erasure needs of it** (D3b): `DeleteWorkflowExecution`, visibility queries by workflow-id prefix,
+  `DescribeNamespace`'s retention, and archival disabled for the namespace, which the readiness checks verify.
 
 ## Ingress in production (D14)
 
@@ -239,9 +288,11 @@ answers not-found while its projection isn't terminal goes through §7.9's opera
   re-wrapping the tenants' event keypairs; rotating the ingress key; retirement's checks (the payload floor, open
   executions, idempotency digests); a recorded maximum run duration. The ingress minor on embedded key versions (D10)
   lands here, since rotation makes versions matter.
-- **M4. Tenant erasure:** "Tenant erasure" above: its record and items, steps 1 to 8 with the executions' enumeration
-  and read-back, the `tenants` migration (`erased`, anonymized slugs), completion and its final check, stopping and
-  retrying, its command and audit, and a proof that afterwards nothing of the tenant stays decodable or stored.
+- **M4. Tenant erasure:** "Tenant erasure" above: its record and items, steps 1 to 9 (the firing inventory, the
+  executions' enumeration and read-back, the retention bound), ticks recording their own firings, the `tenants`
+  migration (`erased`, anonymized slugs), eligibility requiring `active`, the API refusing a non-active tenant's
+  writes, completion and its final check, stopping and retrying, its command and audit, and a proof that afterwards
+  nothing of the tenant stays decodable or stored.
 
 **2b-4b, production hardening and the gate lift**
 - **M1. The engine blockers:** #16, #18 and #26, each fixed or bounded (D7).
@@ -260,7 +311,7 @@ answers not-found while its projection isn't terminal goes through §7.9's opera
 |---|---|---|
 | D1 | The split | 2b-4a then 2b-4b, as above; one outline, two plans, two prototypes. |
 | D2 | Order inside 2b-4a | #28 and #35 first, then retention, then re-encryption and retirement, then erasure, which needs the others. |
-| D3 | Tenant erasure | As "Tenant erasure" above, with the owner's rulings: (a) no abort once `erasing` is committed, only a stop or a retry; (b) every execution deleted, enumerated durably and read back, never proven by visibility alone; (c) audit entries under the platform's audit-retention policy. |
+| D3 | Tenant erasure | As "Tenant erasure" above, with the owner's rulings: (a) no abort once `erasing` is committed, only a stop or a retry; (b) every found execution deleted and read back, the firing inventory captured before schedules are deleted, and completeness from Temporal's retention bound, never from visibility; (c) audit entries under the platform's audit-retention policy, described as they are; (d) to decide: accepting the bound's trust in Temporal's retention enforcement. |
 | D4 | The read cutoff | Filter in the shared read paths (one query helper per kind), proven by a test per user-facing path; never a database view the API could bypass. |
 | D5 | Audit pruning and #3 | Pruning ships in 2b-4a disabled in production until #3's sink is configured; the readiness checks refuse a production gate without it. |
 | D6 | #3's first sink | One target first; which one (object storage with object lock, or syslog or SIEM) is the owner's. Testing it needs an image the owner approves (for object storage, an S3-compatible server). |
