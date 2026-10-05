@@ -63,9 +63,11 @@ Each arrow reads "needs".
   physical state (§10.1), so the cutoff filtering lands with (or before) the first deletion.
 - **Key retirement → retention or re-encryption.** A data-key version retires only when nothing needs it (§6.4): the
   payload floor has passed and no execution that could hold its payloads is open; every stored record under it
-  (`run_inputs`, `step_outputs`, `run_secret_index`, pending `run_requests` and `inbound_events`, `csv_uploads`,
-  schedule inputs and Temporal schedule actions) is re-encrypted or deleted by retention; no request's idempotency
-  digest uses it; the tenant's event private keys wrapped by it are re-wrapped. So retirement needs the re-encryption
+  (`run_inputs`, `step_outputs`, `run_secret_index`, pending `run_requests` and `inbound_events`, `csv_uploads`, the
+  `schedules` rows' inputs) is re-encrypted or deleted by retention; each Temporal schedule's action, which carries only
+  the schedule's id but is sealed by the codec under the tenant's key, is re-sealed by updating the schedule, since a
+  tick couldn't decode its argument once the version retires; no request's idempotency digest uses it; the tenant's
+  event private keys wrapped by it are re-wrapped. So retirement needs the re-encryption
   command, retention's deletion, and a recorded maximum run duration.
 - **#28's fix → decrypt across versions.** Comparing a rewritten claim's plaintext needs the existing claim's version
   to still open, which retirement's rules already guarantee for any record it would compare.
@@ -382,7 +384,8 @@ answers not-found while its projection isn't terminal goes through §7.9's opera
   sync's transaction spanning its Temporal write included) with its race regressions, schedules created paused,
   missed firings counted, the deleted-and-recreated token test, reconciliation after completion, the namespace-change
   boundary recorded, completion and its final check, stopping and retrying, its command and audit, and a proof that
-  afterwards nothing of the tenant stays decodable or stored.
+  afterwards nothing of the tenant stays decodable, and nothing stays stored beyond the agreed exceptions: its audit
+  records under the platform's audit-retention policy, and backups until they expire.
 
 **2b-4b, production hardening and the gate lift**
 - **M1. The engine blockers:** #16, #18 and #26, each fixed or bounded (D7).
