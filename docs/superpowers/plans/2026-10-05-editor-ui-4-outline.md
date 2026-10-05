@@ -1,6 +1,7 @@
 # Sub-project 4 — Editor UI: outline for rulings
 
-- **Status:** draft for the owner's rulings, 2026-10-05. Nothing is built before them.
+- **Status:** draft for the owner's rulings, 2026-10-05; revision 2 applies the review of 4aaf8f9 (D10, D13, D17,
+  D27, B4, B7–B10, B14, §7). Nothing is built before the rulings.
 - **Branch:** `docs/editor-ui-4-outline`, from `origin/main` 6482c53 (#37).
 - **Read:** the design export `Dewpoint UI.dc.html` (screens 1a–1i, today's UI 0a–0b, logo variants A–D), as data;
   architecture spec §3.3, §6.8, §10–§14; engine-core spec §3, §5.5, §5.7, §5.10, §8, §12; engine 2b spec §2.1, §4.1,
@@ -71,13 +72,16 @@ Each slice is shippable on its own branch (D26) and ends at one checkpoint (revi
   where it came from with an override, operation, retries, current → after diff, exact body; a checkbox and the
   target's name, or the count and the org's name). Results labelled Live.
 
-**4e — runs** (after 2b-4a merges: retention cutoffs, erasure and `410 input_not_retained` change what it shows).
-- Run form from `start-form` (B11): typed fields; CSV drop zone → upload → column mapping (save as default) →
+**4e — runs.** It waits for 2b-4a, whose retention cutoffs and erasure change which runs and inputs exist;
+`410 input_not_retained` exists today and is handled either way.
+- Run form from `start-form` (B11, B14): typed fields; CSV drop zone → upload → column mapping (save as default) →
   preview with errors → skip invalid → "Start run for N rows"; one `Idempotency-Key` per submit, reused on retry.
-- 1f list (B10): workflow, status, trigger and time filters; the paging cursor; polling every 5 s while visible.
-- 1g detail: the run's version (B4) replayed from `run_steps` (status per node, loop iterations); a step panel with
-  redacted input and output previews, attempts, timing and side-effect outcome; cancel; the re-run dialog (D13).
-- Home (D10).
+- 1f list (B10): workflow, status, trigger and time filters; the existing `before` + `before_id` cursor, taken from
+  the last item; polling every 5 s while visible.
+- 1g detail: the run's version replayed from `run_steps`, live or simulated (B4): each node ran (status, attempts),
+  was skipped (a dead path), is not reached yet (run still going) or was never reached (run ended first), per loop
+  iteration; a step panel with redacted input and output previews, attempts, timing and side-effect outcome; cancel;
+  the re-run dialog (D13).
 
 **4f — plugin widgets** (after sub-project 3's manifests; against x-widget fixtures until then): the Mist picker
 (Resource → Action, live options that accept pills, Find a setting), nested update, the message composer with Slack,
@@ -117,28 +121,33 @@ Each gives my recommendation (**Rec**). D1–D7 are where the design and §10 di
   212 tenants" is a cross-tenant figure v1 has no level for. Rec: defer 1e and "Browse library"; 4b ships Blank and
   "Import from file" (B12); "From template" waits for curated templates shipped as plugin data; no usage counts.
 - **D10 Home and the rail footer.** No Home design, no summary API; "Engine healthy · worker ok" would show platform
-  health to every tenant user, and no route reads it. Rec: Home hidden until 4e, landing on Workflows; no health
-  footer in v1; the development banner (B2) stays.
+  health to every tenant user, and no route reads it. Rec: Home out of sub-project 4 (it needs its own design and
+  summary API), landing on Workflows; no health footer in v1; the development banner (B2) stays.
 - **D11 Settings tabs** (1i). Rec: Members & roles (4a) and Webhook endpoints (4c), whose APIs exist; Notification
   channels with sub-project 3; Service grants with 5; Security stays the per-user page behind the header link.
 - **D12 Live button.** 1c shows a filled orange "Run step against Mist…" first in the footer, on an AI agent step.
   Rec: Simulate step first; live as an orange outline, rendered only for node types that support a live test once
   B9 exists; no disabled teaser before that.
-- **D13 Re-run.** The API re-runs on the workflow's **active** version, which may not be the run's (2b §7.7); 1g's
-  "Re-run with same input…" hides that. Rec: a dialog naming the version, mode and input source; on
-  `410 input_not_retained` it offers new input.
+- **D13 Starting on the confirmed version.** Starts and re-runs run on whatever version is active when admitted
+  (`StartIn` and `RerunIn` take no version), so a publish between confirming and submitting changes what runs; 1g's
+  "Re-run with same input…" also hides that a re-run uses the active version, not the run's (2b §7.7). Rec: the run
+  form and the re-run dialog name the version, mode and input source, and send it as `expected_version_id` (B14);
+  a `409 version_changed` reloads the form and asks again; `410 input_not_retained` offers new input.
 - **D14 Simulating a draft.** `mode: simulate` runs only the active published version (`apps/admission.py`); nothing
   simulates a draft or one step, and publishing to test would activate its triggers. Rec: a short engine design
-  before 4d (draft snapshots that can never activate, single-step runs, skipped steps projected), with a migration
-  slot from you (B8).
+  before 4d (draft snapshots that can never activate, single-step runs; skipped steps come from B4), with a
+  migration slot from you (B8).
 - **D15 Generated client.** Rec: openapi-typescript + openapi-fetch (typed by path, so operation ids don't matter);
   the schema dumped by a CLI, committed, and CI fails on drift (B1).
 - **D16 Keyboard canvas.** Rec: roving focus over nodes in graph order; arrows follow edges; Enter opens the drawer;
   `A` adds after the focused node; Delete asks; Esc returns focus; a live region announces changes; React Flow's own
   keys kept only where they don't trap focus.
-- **D17 Draft saves.** Rec: autosave 1 s after the last change with `If-Match`; a 409 turns the editor read-only
-  ("changed elsewhere": reload, or download my version); undo and redo local. Validate runs on the saved revision,
-  the only one the API checks.
+- **D17 Draft saves.** Rec: at most one save in flight; edits made meanwhile coalesce into the next save, sent 1 s
+  after the last change with `If-Match` set to the revision the previous save returned, so the editor never
+  conflicts with itself. A 409 from someone else turns the editor read-only ("changed elsewhere": reload, or
+  download my version). Validate runs on the saved revision (the only one the API checks) and its answer carries
+  `draft_revision`: diagnostics for an older revision are dropped, never attached to newer edits. Publish first
+  flushes the pending save, then sends that revision's `If-Match`. Undo and redo stay local.
 - **D18 Condition builder.** Rec: its state is a small AST serialized to CEL in the browser; only CEL it produced
   reopens in it, anything else opens formula mode; the server alone checks and classifies.
 - **D19 Editors.** Rec: our own pill editor over the `template` value (`parts: text | ref`), pills as atomic buttons;
@@ -161,8 +170,12 @@ Each gives my recommendation (**Rec**). D1–D7 are where the design and §10 di
 - **D26 Branches and order.** Rec: a worktree and branch per slice (`feat/editor-4a`…), stacked on the previous one
   until it merges, then rebased on `origin/main`; rulings in `2026-10-05-editor-ui-4-ledger.md`. Order: 4a, 4b, 4c,
   4d-1 (after D14's design), 4e (after 2b-4a), then 4d-2 and 4f (after sub-project 3).
+- **D27 The design in the repo.** The outline's design claims can't be checked without the export, which lives only
+  in this session's scratchpad. Rec: commit `Dewpoint UI.dc.html` (132 KB, screens only; not the old mockups,
+  reference boards or the design tool's `support.js`) as `docs/design/2026-10-05-dewpoint-ui.dc.html`, so §7's line
+  references can be checked; it is design data, never served.
 
-## 4. New npm dependencies (registry versions today; transitive licences checked again at install)
+## 4. New npm dependencies (`npm view <name> version license`, 2026-10-05; transitive licences rechecked at install)
 
 | Package | Version | Licence | Use | Slice |
 |---|---|---|---|---|
@@ -182,24 +195,25 @@ renderer), MSW, papaparse (the API parses CSV). pnpm 12.6.0 runs as the cached `
 
 ## 5. Backend work the UI needs
 
-Each is its own test-first change with its role × endpoint matrix rows and RLS tests; only B7–B9 may need a
-migration (a slot from you). Today no route sets `response_model`.
+Each is its own test-first change with its role × endpoint matrix rows and RLS tests; B4, B7, B8 and B9 may
+need a migration (a slot from you). Today no route sets `response_model`.
 
 | # | Slice | Change | Migration |
 |---|---|---|---|
 | B1 | 4a | OpenAPI for the client: a CLI dumps it without a server; unique component names (two `CreateIn`, two `PatchIn`); the `Graph` model on the draft PUT; `response_model` on each route as its slice adopts it; CI regenerates `frontend/src/api/schema.d.ts` and fails on drift | no |
 | B2 | 4a | `GET /api/v1/platform/status`: environment and whether production runs are on, for the banner and for explaining a refusal before a start | no |
 | B3 | 4b | Workflow list summary: last run (status, time), runs in 24 h, unpublished changes (draft hash ≠ active `graph_hash`), needs attention. Rec: "Unpublished changes" without 1c's edit count, which would need a column | no |
-| B4 | 4b, 4e | `GET …/workflows/{wid}/versions/{vid}` with the graph and its expression classes: run detail replays the run's version, which no route returns | no |
+| B4 | 4b, 4e | Replay: `GET …/workflows/{wid}/versions/{vid}` with the graph and expression classes (no route returns a version's graph); and the engine projects dead-path nodes as `skipped` rows, per scope, in live and simulated runs (today `NodeState.DEAD` stays inside the scheduler). With both, a node without a row is "not reached yet" while the run runs and "never reached" once it ended. An engine change under its replay and ABI rules | yes: the `run_steps_status` CHECK (0008) |
 | B5 | 4b, 4c | `/node-types` adds side effect, credentials, capabilities, retry and timeout defaults (Options defaults, connection picker, D12) | no |
 | B6 | 4c | Draft scope: every ref available at a node, with type, always or conditional, and sensitive, from the validator's liveness analysis (today it only shows in diagnostics) | no |
-| B7 | 4c | Samples: a step's latest redacted output preview (by node id) with its run, mode, version and time, from `run_steps` | maybe an index |
-| B8 | 4d-1 | Draft and single-step simulation (D14), after its design | likely |
-| B9 | 4d-2 | Live single-step test, after sub-project 3: a preview call (target and source, diff, exact body) and an execute call that checks the typed target name, or count and org name, plus capability and scope **on the server** | with 3's design |
-| B10 | 4e | Runs list: status, mode, source and time filters, the workflow's name per item, a next cursor | no |
+| B7 | 4c | Samples from `run_steps` previews, for a node id and the saved draft revision. Selection: the newest **succeeded** row of an ended run of this workflow; its highest attempt; the first iteration unless one is asked for. It returns run, mode (a simulated sample says so), version, iteration, attempt, captured time, and provenance from that version's graph: the node's `type@version`, the connection id and name it bound, and whether its config equals the draft's. Different type, config or connection marks it stale ("from v3, configured differently"), never representative. No sample: none shown | maybe an index |
+| B8 | 4d-1 | Draft and single-step simulation (D14), after its design; its runs replay through B4 | likely |
+| B9 | 4d-2 | Live single-step test, after sub-project 3. Preview returns the target and where it came from, the diff, the exact body and a single-use `preview_id` that expires in minutes and binds, server-side, the user, draft revision, node id, config hash, `type@version`, connection id and revision, operation, resolved target ids and body hash. Execute takes `preview_id` and the typed confirmation (target name, or count and org name); the server re-resolves everything, re-checks permission, capability, scope and connection, and executes the bound body only if all still match; any change is `409 preview_stale` and needs a new preview | yes: single use needs state |
+| B10 | 4e | Runs list: status, mode, source and time filters, and the workflow's name per item (paging exists) | no |
 | B11 | 4e | CSV: read the saved default mapping; re-preview a staged upload under a new mapping | no |
 | B12 | 4b | Workflow export and import as JSON, connections replaced by typed placeholders and re-bound on import (D9) | no |
 | B13 | 4c | Webhook bindings per workflow, for the trigger drawer | no |
+| B14 | 4e | `expected_version_id` on `StartIn` and `RerunIn` (D13): after `lock_for_admission`, a mismatch with the active version is `409 version_changed` naming the active number; part of the idempotency digest, so an exact retry still returns its request and the same key with another version is `idempotency_conflict` | no |
 
 Seen, not proposed here: `connection.use`, `approval.decide` and `agent.grant` are defined but no route checks them;
 `/api/v1/openapi.json` is served without a session (B1 could serve it only in development).
@@ -222,3 +236,20 @@ labels on 1b's trigger cards (sentence case); filter chips as pills (a segmented
 `0 20px 60px` shadow (one restrained elevation token). Enforced twice: a vitest guard scans `src/` for the
 mechanical ones (border-left widths over 1 px, `gradient`, `backdrop-`, `shadow-lg`+, `animate-pulse|bounce`, emoji
 ranges, hex outside `tokens.css`, `uppercase tracking-wide`), and the checkpoint reviewer checks the rest on screen.
+
+## 7. Evidence for the design claims
+
+Lines of `Dewpoint UI.dc.html` as exported on 2026-10-05 (D27).
+
+| Claim | Lines |
+|---|---|
+| Google Fonts: Instrument Sans, Schibsted Grotesk, JetBrains Mono (D7) | 13 |
+| Light tokens: `--accent` declared twice, `#0e6874` then `#0b7c8c`; `--sim`, `--brand`, the rail (D2, D5, D6) | 17 |
+| Orange beyond live calls: the Approvals count, "Awaiting approval" (D3) | 48, 606 |
+| Amber beyond conditional pills (179): "requires approval", an unbound connection, drift (D4) | 187, 339, 527 |
+| Brand green as status and nav: "Engine healthy", Library's sub-nav (D5, D10) | 50, 298 |
+| Simulate controls in slate, no hatch; "Simulated with fixtures" (D2) | 133, 203, 268 |
+| Filled orange live button first in the drawer footer (D12); "Re-run with same input…" (D13) | 202, 404 |
+| `"token": "••••••••"` in a run step's input (D20); "Used by 212 tenants" (D9) | 434, 598 |
+| Settings tabs (D11) | 508 |
+| AI tells (§6): 4 px halos; tinted icon tiles; tracked eyebrows; trigger-card labels; dialog shadow | 155, 424; 151; 43; 99; 94 |
