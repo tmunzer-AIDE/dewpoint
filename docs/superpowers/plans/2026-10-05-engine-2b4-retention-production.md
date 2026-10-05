@@ -1,7 +1,9 @@
 # Engine 2b-4: Retention and Production — Outline
 
-> **Status: an outline for the owner's decisions (2026-10-05), not authorization to build anything, nor to lift the
-> production gate or ingress's development-only restriction.** As in 2b-1a through 2b-3b, once the owner rules, each
+> **Status: an outline for the owner's decisions (2026-10-05), revised after the owner's first review (erasure's
+> completion, production Temporal's proof, Mist, event grouping, ingress's switch). Not authorization to build
+> anything; no gate is authorized to lift by this review, neither the production gate nor ingress's development-only
+> restriction.** As in 2b-1a through 2b-3b, once the owner rules, each
 > sub-project is built on a prototype branch from `main`, with the owner's checkpoint after each milestone; its plan is
 > then written from the replayed diffs, with a revision of the 2b spec, for the owner's review before execution.
 
@@ -64,8 +66,9 @@ Each arrow reads "needs".
 - **Erasure → the lifecycle lock (exists), the reconciler (exists), schedule pausing, cancelling, then key deletion.**
   §6.5's order: mark `erasing` (and raise the tenant's schedules' generations in the same transaction, §7.9); reconcile
   every `starting` request; pause schedules; cancel queued requests and pending events; cancel running runs and wait
-  until they're terminal; delete the tenant's keys, data keys and event keypairs alike, last. Whether erasure also
-  deletes the rows, or relies on the deleted keys (crypto-shredding) and retention, is decision D3.
+  until they're terminal; delete the tenant's keys, data keys and event keypairs alike, last among the operations that
+  need them; then the erasure sweep deletes the tenant's rows. "Tenant erasure" below says which rows, when an erasure
+  is complete, how a failed step resumes, and what stays in audit records and backups (D3).
 - **Audit pruning → off-host anchors (#3).** Pruning anchors a checkpoint at the last entry pruned and verification
   starts from it (§10.2). With the anchor on the same host, a privileged operator could prune, rewrite and re-anchor
   undetected; the checkpoint must sit where #3 puts anchors. Decision D5.
@@ -74,10 +77,13 @@ Each arrow reads "needs".
   healthy with its capabilities; every stored data key unwrapping, and the workers' own path reading each tenant's key;
   the dispatcher and reconciler reporting; a successful retention sweep within 24 hours with lag under 24 hours. The
   retention SLO also becomes a dispatch-time critical check that pauses new production starts when breached (§10.3).
-- **Ingress in production → retention, erasure, key rotation, the scaling decision, the gate.** Retention frees the
-  retained caps (terminal events deleted); erasure cancels a tenant's pending events and deletes its event keypairs; the
-  event keypairs and the ingress key can be rotated and retired; matching scales with dispatchers (D9); and the gate
-  is on. Whether ingress's restriction lifts with the gate or by its own audited switch is decision D14.
+- **Ingress in production → retention, erasure, key rotation, the scaling decision, its own switch.** Retention frees
+  the retained caps (terminal events deleted); erasure cancels a tenant's pending events and deletes its event
+  keypairs; the event keypairs and the ingress key can be rotated and retired; matching scales with dispatchers (D9).
+  An audited switch of its own governs its first activation in production; once on, turning the runs gate off still
+  lets it record events while matching waits (§2.5). "Ingress in production" below (D14).
+- **Readiness → a real verified-TLS proof.** The readiness checks pass only after the production Temporal proof
+  ("Production Temporal" below, D12).
 - **The gate lift → every blocker.** #28, #35, #3; #16, #18 and #26 fixed, or bounded with a demonstrated bound and the
   owner's explicit risk decision; each §7.9 item fixed or explicitly decided; the readiness checks passing.
 
@@ -104,10 +110,89 @@ Each arrow reads "needs".
   Each issue lists fix directions. Engine changes here may raise `ENGINE_ABI` (7), with its own golden histories and
   replay gate. Decision D7.
 
+## Tenant erasure (D3)
+
+An erasure is recorded (`tenant_erasures`: who asked, when, the step reached, each step's completion, its attempts, the
+last failure's code) and runs as a resumable sequence. Each step is idempotent, records its completion in the
+transaction that does it, and isn't skipped.
+
+1. **Mark the tenant `erasing`,** under its lifecycle lock taken exclusively, raising its schedules' generations in the
+   same transaction (§7.9). §6.5's refusals apply from then on.
+2. **Reconcile** every `starting` request: started, or confirmed absent (§7.6).
+3. **Its Temporal schedules** paused, then deleted, each confirmed by a describe that finds nothing (§8.2's read-back):
+   a schedule's action holds the tenant's encrypted input, so deleting extends §6.5's "pause" (revision 10).
+4. **Cancel** its queued requests and its pending events, their counters released.
+5. **Cancel its running runs** and wait until every one is terminal: their workers still need the tenant's keys to
+   finish.
+6. **Its closed Temporal executions deleted** (Temporal's `DeleteWorkflowExecution`, over the tenant's server-built,
+   tenant-prefixed workflow ids), confirmed by a visibility query that finds none. Without this step, histories stay
+   until the namespace's retention after each run closed (at most 30 days), their §4.6 visible metadata readable until
+   then: the owner's choice (D3b).
+7. **Delete its keys:** every data-key version and every event keypair. Nothing after step 6 needs a key, so this is
+   last among the operations that need them; deleting them before the sweep leaves every remaining ciphertext of the
+   tenant unreadable at once, whatever the sweep's progress.
+8. **The erasure sweep** (the retention role, which holds `DELETE` on these tables) deletes, in committed batches,
+   every row of the tenant in: `runs`, `run_steps`, `step_outputs`, `run_inputs`, `run_secret_index`, `claim_grants`;
+   `run_requests` (every status), `run_slots`, `tenant_run_limits`; `csv_uploads`, `csv_mappings`, `schedules`;
+   `webhook_endpoints`, `trigger_bindings`, `inbound_events`, `tenant_event_counters`; `workflows`,
+   `workflow_versions`, `connections`; `memberships`; `tenant_retention` (`data_keys` and `tenant_event_keys` went in
+   step 7). Users aren't tenant data: a user keeps their account and loses the membership. The `tenants` row stays,
+   status `erased`, its name and slug cleared, so its id is never reused and its audit chain still resolves.
+
+**Complete** — status `erased`, with an audit entry of per-table counts — only once steps 1 to 8 are recorded done and a
+final check finds, for the tenant, no row in any table of step 8, no key, no Temporal schedule and no execution, open
+or (with step 6) closed. Until then the erasure's record shows the step reached and any failure, and the tenant stays
+`erasing`; nothing reports it complete early.
+
+**A failed step resumes:** the retention process picks up every `erasing` tenant and retries its recorded step, with
+backoff and an alert, never skipping one; batches commit their progress, so a crash resumes where it stopped. A step
+that can't progress (a run that never ends, a schedule Temporal won't delete) keeps the erasure visibly incomplete and
+alerting; §7.9's operator recovery path applies to a run whose history Temporal no longer has. Whether an erasure may
+be aborted before step 7 (back to `active`, audited) is the owner's choice (D3a); after step 7 it can't.
+
+**What remains:**
+- **Audit records:** the tenant's audit entries stay under the platform's audit policy (`audit_retention_days`, 400 by
+  default) and its integrity anchors, leaving by audit pruning, not by erasure. They hold ids, actions, actors' user ids
+  and counts, never a payload or a secret. Erasure adds its own entries (its start, each step, its completion). A
+  shorter, erasure-specific policy is the owner's choice (D3c).
+- **Backups:** a backup taken before completion still holds the tenant's rows and its wrapped data keys, restorable by
+  whoever holds the KEK. The erasure is complete in backups only once every such backup has expired (the guide
+  recommends at most 35 days); the completion entry states that date.
+- **Temporal,** without step 6: histories, and their visible metadata, until the namespace's retention; their payloads
+  unreadable once the keys are gone.
+- **Logs:** they name ids, never values; the operator's log retention applies.
+
+## Production Temporal (D12)
+
+- **Configuration (§10.4):** verified TLS always, the server's certificate checked against a configured CA or the
+  system roots; client authentication by mTLS (`DEWPOINT_TEMPORAL_TLS_CERT`, `…_KEY`, `…_CA`) or an API key over that
+  TLS; `DEWPOINT_TEMPORAL_INSECURE_DEV` only in a development deployment, refused by every process otherwise and warned
+  about when used.
+- **What the CLI dev server can show:** configuration parsing and the refusal paths, not that a real TLS, mTLS or
+  API-key connection works.
+- **So readiness needs a real verified-TLS proof:** an integration proof against a real TLS-serving Temporal, for each
+  supported auth mode, before the readiness checks may pass; and `enable-production-runs` itself connects with the
+  deployment's own settings, verifies the certificate, and calls `DescribeNamespace` (the recorded namespace, its
+  retention within bounds), failing closed otherwise. The proof's target (a Temporal Cloud test namespace, a self-hosted
+  server with TLS, or another) and any image it needs approved are the owner's decisions (D12).
+
+## Ingress in production (D14)
+
+- **Its own audited switch** (off by default; enabled and disabled by a platform admin, the operator recorded, D11)
+  governs ingress's first activation in production, after its own readiness: retention sweeping, the event keypairs'
+  rotation in place, the scaling change (D9) in, the Mist decision (D13) reflected in the guide.
+- **Independent of the runs gate once on:** turning the runs gate off keeps §2.5's durable-source behavior: ingress
+  still records webhook events, and the matcher waits until the gate is on again. Turning ingress's switch off stops
+  recording (503 `unavailable`), pending events kept for matching.
+- **In a development deployment,** unchanged: ingress records, and the gate is skipped.
+- Nothing lifts by this review.
+
 ## Milestones (first cut)
 
 **2b-4a, the data lifecycle**
-- **M1. The schema blockers:** #28 and #35, each with its migration and regression.
+- **M1. The schema blockers and the event-grouping contract:** #28 and #35, each with its migration and regression;
+  `events_pointer` fixed at an endpoint's creation (D10), the API refusing it in a PATCH and the API's role losing its
+  `UPDATE` grant, each boundary tested.
 - **M2. Retention:** `tenant_retention` (default 30 days, 1 to 365, set with `tenant.manage`); the read cutoff on every
   user-facing path; the `dewpoint_retention` role (the only role with `DELETE` on retained tables) and the `dewpoint
   retention` process (batches per tenant, under tenant scope, idempotent; an audit entry per tenant per sweep, counts
@@ -118,17 +203,17 @@ Each arrow reads "needs".
   re-wrapping the tenants' event keypairs; rotating the ingress key; retirement's checks (the payload floor, open
   executions, idempotency digests); a recorded maximum run duration. The ingress minor on embedded key versions (D10)
   lands here, since rotation makes versions matter.
-- **M4. Tenant erasure:** the transition (with the schedules' generations), §6.5's steps, its command and audit, and a
-  proof that nothing of the tenant stays decodable afterwards.
+- **M4. Tenant erasure:** "Tenant erasure" above: its record, steps 1 to 8, completion and its final check, resuming,
+  its command and audit, and a proof that afterwards nothing of the tenant stays decodable or stored (step 8's tables).
 
 **2b-4b, production hardening and the gate lift**
 - **M1. The engine blockers:** #16, #18 and #26, each fixed or bounded (D7).
 - **M2. §7.9's hardening:** as the ledger below rules, item by item, the dispatcher-scaling change and its measurement
   included.
-- **M3. Production Temporal and audit integrity:** verified TLS, mTLS or an API key, the development-only insecure
-  exception (§10.4); #3's off-host anchors.
+- **M3. Production Temporal and audit integrity:** "Production Temporal" above, its real verified-TLS proof included;
+  #3's off-host anchors.
 - **M4. Readiness and the gate:** the readiness checks, `enable-production-runs` with the operator's attestation, the
-  disable command naming its operator, enabling ingress in production (D14). Then the gate-lift checkpoint: the owner
+  disable command naming its operator, ingress's own switch (D14). Then the gate-lift checkpoint: the owner
   rules with every blocker's evidence in front of them. Lifting the gate on a real deployment is the owner's act, not a
   plan task.
 
@@ -138,18 +223,18 @@ Each arrow reads "needs".
 |---|---|---|
 | D1 | The split | 2b-4a then 2b-4b, as above; one outline, two plans, two prototypes. |
 | D2 | Order inside 2b-4a | #28 and #35 first, then retention, then re-encryption and retirement, then erasure, which needs the others. |
-| D3 | What erasure deletes | Crypto-shredding first (the keys deleted last, §6.5), then the tenant's rows deleted by an erasure sweep of the retention job; an erased tenant's audit entries follow the audit policy (D5), never the tenant's retention. |
+| D3 | Tenant erasure | As "Tenant erasure" above. Within it: (a) abort allowed before step 7, audited (proposed: yes); (b) delete closed Temporal executions (step 6, proposed) or let the namespace's retention expire them; (c) the tenant's audit entries under the platform's audit policy (proposed) or a shorter erasure policy. |
 | D4 | The read cutoff | Filter in the shared read paths (one query helper per kind), proven by a test per user-facing path; never a database view the API could bypass. |
 | D5 | Audit pruning and #3 | Pruning ships in 2b-4a disabled in production until #3's sink is configured; the readiness checks refuse a production gate without it. |
 | D6 | #3's first sink | One target first; which one (object storage with object lock, or syslog or SIEM) is the owner's. Testing it needs an image the owner approves (for object storage, an S3-compatible server). |
 | D7 | #16, #18, #26 | Fix each, per the issues' preferred directions: #16 bounds the snapshot (or ends the run with a fixed code before the limit); #18 bounds measuring's cost; #26 sends a shared value once, as a size claim. Bounds instead of fixes need the owner's risk decision, case by case. |
 | D8 | §7.9's items | See below. |
 | D9 | Dispatcher scaling | Required before production. Measure first on the CLI dev server (approved image), then choose: `SKIP LOCKED` on the endpoint row, or dispatchers taking disjoint candidates. Rerun the load probe's separate-tenant control after the change; §8.3's fairness and races are re-proven. |
-| D10 | 2b-3b's deferred ingress minors | (1) the matcher's endless retry: with §7.9's bounded retry and alerting (2b-4b M2); (2) the guide's warning about an empty `DEWPOINT_INGRESS_TRUSTED_PROXIES` behind a proxy: a doc fix (2b-4b M4); (3) changing `events_pointer` after deliveries changes deduplication: refuse the change once events exist, or document it (the owner's choice); (4) the recording function not checking a blob's embedded key version: an added predicate (2b-4a M3). |
+| D10 | 2b-3b's deferred ingress minors | (1) the matcher's endless retry: with §7.9's bounded retry and alerting (2b-4b M2); (2) the guide's warning about an empty `DEWPOINT_INGRESS_TRUSTED_PROXIES` behind a proxy: a doc fix (2b-4b M4); (3) changing `events_pointer` after deliveries changes deduplication: it becomes fixed at creation, like the id source, and a different grouping needs a new endpoint (2b-4a M1); an intentional contract change in revision 10 (§8.3), tested at the API and the database role; (4) the recording function not checking a blob's embedded key version: an added predicate (2b-4a M3). |
 | D11 | The operator's identity | `enable-` and `disable-production-runs` record the operator: an admin login (an identity the platform knows) rather than the OS user. The mechanism is the owner's choice. |
-| D12 | Production Temporal | mTLS and API-key auth both, as §10.4 says; tested against the CLI dev server for configuration and refusal paths only, since a TLS-terminating Temporal isn't an approved image. |
-| D13 | Mist's bearer token | Verified with a real Mist delivery before the guide documents it, or the guide keeps HMAC as the only documented production path. |
-| D14 | Ingress in production | Its own audited switch, after the runs gate, so ingress can stay off while runs are on. |
+| D12 | Production Temporal | As "Production Temporal" above: mTLS and API-key auth both; a real verified-TLS integration proof before readiness can pass. The proof's target and any image approval are the owner's. |
+| D13 | Mist webhooks | Supported in production only if a real Mist delivery confirms the bearer-header path. Otherwise the guide says Mist webhooks are unsupported in production: Mist signs the body alone, without a timestamp, so the timestamped HMAC scheme is no substitute for it. |
+| D14 | Ingress in production | As "Ingress in production" above: its own audited switch for first activation; the runs gate turning off keeps recording events (§2.5). |
 
 **§7.9's items (D8), proposed:**
 - *Bound the serial dispatch cycle:* fix (a time budget per cycle, with the leader's schedule batches inside it), 2b-4b
@@ -166,7 +251,7 @@ Each arrow reads "needs".
 - *Matching scaling with dispatchers:* D9.
 - *Ingress's limits:* production values from measurements with a real Temporal and up to twenty bindings, or the
   development values kept with the owner's risk decision; 2b-4b M2.
-- *Mist's bearer token:* D13.
+- *Mist's bearer token:* D13 (unsupported in production unless a real delivery confirms it).
 - *The Compose proofs:* the run, the schedule and the webhook have passed in CI; they stay required on every PR.
 
 ## Open and separate
