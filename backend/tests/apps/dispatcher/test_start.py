@@ -6,7 +6,7 @@ verified from the execution's own start before it counts, else it's an id collis
 late-safe: it never changes a run that already ended, nor reserves its slot again."""
 
 import uuid
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -53,12 +53,16 @@ async def test_a_confirmed_refusal_counts_an_attempt_and_waits_its_backoff_with_
 ) -> None:
     _, _, request = queued
     starting = await started(dispatch_sessionmaker, request, api_settings)
+    since = datetime.now(UTC)
     assert await through(dispatch_sessionmaker, starting, FakeClient(rpc(RPCStatusCode.INVALID_ARGUMENT))) == "refused"
+    until = datetime.now(UTC)
     after = await state(owner_sessionmaker, request.id)
     assert after["request"] == ("queued", None, 1) and after["slot"] == 0 and after["run"][:2] == ("running", None)
     async with owner_sessionmaker() as s:
-        wait = (await s.execute(text("select next_attempt_at - now() from run_requests"))).scalar_one()
-    assert timedelta(seconds=4) < wait <= timedelta(seconds=5)
+        due = (await s.execute(text("select next_attempt_at from run_requests"))).scalar_one()
+    # Stamped from the dispatcher's clock, this process's, so read against it: the database's own clock (a VM's on
+    # Docker Desktop) may be offset from it.
+    assert since + timedelta(seconds=5) <= due <= until + timedelta(seconds=5)
     assert await begin(dispatch_sessionmaker, request, api_settings) is None  # not due before its backoff ends
 
 
