@@ -69,3 +69,6 @@ cover local work only: anything outward-facing (push, PR, issues) is confirmed i
     and axe checks) can't run until it's installed or pinned to a cached build.
 13. Ruling: the three font packages are saved at exact versions (pnpm 12's default) - "at their recorded versions" -
     none.
+14. Ruling: the theme and base styles live in `styles/theme.css`; the app's entry (`app.css`) and the specimen's
+    (`specimen/specimen.css`) each import it, and the app's scan skips the specimen - the specimen's utilities had
+    grown the shipped stylesheet from 17.7 to 25.7 KB - none.

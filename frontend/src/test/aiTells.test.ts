@@ -62,7 +62,9 @@ describe("the frontend's sources", () => {
 
   it("are all read, stylesheets included", () => {
     expect(sources["/src/main.tsx"]).toContain("createRoot");
-    expect(sources["/src/styles/app.css"]).toContain("@theme");
+    expect(sources["/src/styles/app.css"]).toContain('@import "./theme.css"');
+    expect(sources["/src/styles/theme.css"]).toContain("@theme");
+    expect(sources["/src/specimen/specimen.css"]).toContain("@import");
     expect(sources[TOKENS]).toContain("--ink");
   });
 

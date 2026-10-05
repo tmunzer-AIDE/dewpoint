@@ -1,0 +1,127 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* The tokens as Tailwind's theme, and the base styles. Imported by the app's entry (app.css) and the specimen's. */
+@import "./tokens.css";
+
+/* Every token as a utility: bg-surface, text-muted, border-line-control, rounded-dialog, text-caption, shadow-node… */
+@theme inline {
+  --color-ground: var(--ground);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-hover: var(--surface-hover);
+  --color-surface-pressed: var(--surface-pressed);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-line-control: var(--line-control);
+  --color-edge: var(--edge);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-pressed: var(--accent-pressed);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-soft: var(--accent-soft);
+  --color-on-accent: var(--on-accent);
+  --color-focus: var(--focus);
+  --color-focus-rail: var(--focus-rail);
+  --color-warn-bg: var(--warn-bg);
+  --color-warn-line: var(--warn-line);
+  --color-warn-ink: var(--warn-ink);
+  --color-danger: var(--danger);
+  --color-danger-hover: var(--danger-hover);
+  --color-danger-bg: var(--danger-bg);
+  --color-on-danger: var(--on-danger);
+  --color-ok: var(--ok);
+  --color-ok-bg: var(--ok-bg);
+  --color-live: var(--live);
+  --color-live-hover: var(--live-hover);
+  --color-live-pressed: var(--live-pressed);
+  --color-live-bg: var(--live-bg);
+  --color-on-live: var(--on-live);
+  --color-sim: var(--sim);
+  --color-sim-bg: var(--sim-bg);
+  --color-sim-hatch: var(--sim-hatch);
+  --color-brand: var(--brand);
+  --color-rail: var(--rail);
+  --color-rail-ink: var(--rail-ink);
+  --color-rail-ink-strong: var(--rail-ink-strong);
+  --color-rail-dim: var(--rail-dim);
+  --color-rail-active: var(--rail-active);
+  --color-rail-line: var(--rail-line);
+  --color-disabled-ink: var(--disabled-ink);
+  --color-disabled-bg: var(--disabled-bg);
+  --color-disabled-line: var(--disabled-line);
+  --color-overlay: var(--overlay);
+
+  --font-sans: var(--font-sans);
+  --font-display: var(--font-display);
+  --font-mono: var(--font-mono);
+
+  --text-caption: var(--type-caption);
+  --text-meta: var(--type-meta);
+  --text-small: var(--type-small);
+  --text-body: var(--type-body);
+  --text-body-lg: var(--type-body-lg);
+  --text-title: var(--type-title);
+  --text-h3: var(--type-h3);
+  --text-h2: var(--type-h2);
+  --text-h1: var(--type-h1);
+
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius: var(--radius);
+  --radius-dialog: var(--radius-dialog);
+  --radius-pill: var(--radius-pill);
+
+  --shadow-node: var(--shadow-node);
+  --shadow-dialog: var(--shadow-dialog);
+}
+
+html,
+body {
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: var(--type-body);
+  line-height: var(--leading-body);
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  letter-spacing: var(--tracking-heading);
+  line-height: var(--leading-tight);
+}
+
+/* Code shows exactly what was typed: JetBrains Mono would draw `!=` as one `≠` glyph, `>=` as `≥`. */
+code, kbd, pre, samp, .font-mono {
+  font-variant-ligatures: none;
+}
+
+/* One focus ring everywhere: 2 px, offset, 3:1 against every surface (tokens.test.ts). The rail is dark in both
+   themes, so it takes its own ring colour. */
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+[data-surface="rail"] :focus-visible {
+  outline-color: var(--focus-rail);
+}
+
+/* Simulated results (D2): slate, with a hatch drawn through a mask so it follows the theme's colour. The text label
+   always goes with it: colour and hatch never carry the meaning alone. */
+.hatch-sim {
+  position: relative;
+  isolation: isolate;
+}
+.hatch-sim::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background-color: var(--sim-hatch);
+  mask-image: url("./hatch.svg");
+  mask-size: 6px 6px;
+  pointer-events: none;
+}

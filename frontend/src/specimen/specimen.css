@@ -1,0 +1,8 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* The specimen's own stylesheet entry (development only), so its utilities stay out of the app's. */
+@import "tailwindcss";
+@import "../styles/theme.css";
+
+@source not "../**/*.test.ts";
+@source not "../**/*.test.tsx";
+@source not "../test";

@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 import main from "../main.tsx?raw";
 import app from "./app.css?raw";
+import themeCss from "./theme.css?raw";
 import { contrast, over, parseColour, type Rgba } from "./contrast";
 import { COLOURS, PAIRS } from "./tokenNames";
 import css from "./tokens.css?raw";
@@ -95,16 +96,18 @@ describe("the bundle's fonts (D7)", () => {
   });
 });
 
-describe("the Tailwind theme (app.css)", () => {
-  const theme = app.slice(app.indexOf("@theme"), app.indexOf("}", app.indexOf("@theme")));
+describe("the Tailwind theme (theme.css, app.css)", () => {
+  const theme = themeCss.slice(themeCss.indexOf("@theme"), themeCss.indexOf("}", themeCss.indexOf("@theme")));
   const base = block(":root");
 
-  it("keeps test sources out of the class scan, so fixtures never become utilities", () => {
-    for (const glob of ["../**/*.test.ts", "../**/*.test.tsx", "../test"]) expect(app).toContain(`@source not "${glob}";`);
+  it("keeps tests and the specimen out of the app's class scan, so neither ships utilities", () => {
+    for (const glob of ["../**/*.test.ts", "../**/*.test.tsx", "../test", "../specimen"]) {
+      expect(app).toContain(`@source not "${glob}";`);
+    }
   });
 
   it("turns JetBrains Mono's ligatures off, so code shows what was typed (`!=`, never `≠`)", () => {
-    expect(app).toMatch(/code,\s*kbd,\s*pre,\s*samp,\s*\.font-mono\s*\{[^}]*font-variant-ligatures:\s*none;/);
+    expect(themeCss).toMatch(/code,\s*kbd,\s*pre,\s*samp,\s*\.font-mono\s*\{[^}]*font-variant-ligatures:\s*none;/);
   });
 
   it("exposes every colour token as a utility", () => {
