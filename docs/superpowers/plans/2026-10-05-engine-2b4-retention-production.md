@@ -4,13 +4,13 @@
 > completion, production Temporal's proof, Mist, event grouping, ingress's switch), second (erasure: no reversal,
 > durable progress, the `tenants` schema) third (the firing inventory before schedules are deleted, completeness from
 > Temporal's retention bound, audit entries described as they are, eligibility requiring `active`) fourth (fencing
-> in-flight writers, the schedule sync's included; the bound as the earliest final check) and fifth (late Temporal
-> writes made unable to fire and reconciled after completion; the retention maximum enforced at the namespace-change
-> boundary and proven by `config_version`). Not authorization to build anything; no gate is authorized to lift by this
-> review, neither the production gate nor ingress's development-only restriction.** As in 2b-1a through 2b-3b, once
-> the owner rules, each sub-project is built on a prototype branch from `main`, with the owner's checkpoint after each
-> milestone; its plan is then written from the replayed diffs, with a revision of the 2b spec, for the owner's review
-> before execution.
+> in-flight writers, the schedule sync's included; the bound as the earliest final check) fifth (late Temporal writes
+> made unable to fire and reconciled after completion) and sixth (an enforced, audited namespace-change boundary for
+> the 30-day cap, without which completion is blocked; reconciliation's residual risk; missed firings recorded). Not
+> authorization to build anything; no gate is authorized to lift by this review, neither the production gate nor
+> ingress's development-only restriction.** As in 2b-1a through 2b-3b, once the owner rules, each sub-project is built
+> on a prototype branch from `main`, with the owner's checkpoint after each milestone; its plan is then written from
+> the replayed diffs, with a revision of the 2b spec, for the owner's review before execution.
 
 **Goal:** Dewpoint can hold tenants' production data. Data leaves on schedule, a tenant can be erased, old keys can be
 retired, the production Temporal is verified, every production blocker is fixed or bounded with the owner's explicit
@@ -213,9 +213,14 @@ then waits for every writer that read `active` to commit or roll back, and every
   update carrying the schedule's conflict token unpauses it. Step 3's verified pause changes the token, and Temporal
   discards an update whose token is stale (2b-3a's contract test), so a late unpause is discarded and a late create
   lands paused: nothing of the tenant fires after the last verified pause, whatever a late request does, and step 9's
-  latest close holds. The prototype verifies paused creation, the discard, and whether a token from a deleted schedule
-  could ever match a recreated one; it also measures what creating paused costs a firing due before the unpause, and
-  either moves the spec's start past it or records the skip (D3f).
+  latest close holds. **That protection is relied on only once the prototype's test passes:** a token taken from a
+  deleted schedule must never match a recreated one, and the discard and paused creation must hold on the CLI dev
+  server and on D12's target. If it fails, paused creation doesn't protect the firing bound, and the bound stays
+  unproven, completion blocked, until another design does.
+- **A firing due between paused creation and the unpause is missed (D3f, the owner's ruling):** recorded and surfaced
+  as a missed firing, never hidden by shifting the user's schedule start. The prototype establishes how to count those
+  firings (Temporal doesn't count a paused schedule's firings as missed) and how they reach the schedule's missed count
+  and its alert.
 - **A run start in flight before step 1** (2b-2 starts after its `starting` transaction commits) could land late too.
   Its workflow id is its request's id, so it's a known id; such a run can't decrypt its input once the keys are gone,
   and the reconciler below terminates and deletes it.
@@ -224,8 +229,11 @@ then waits for every writer that read `active` to commit or roll back, and every
   identifiers only. The retention process describes every one on each pass, indefinitely. A schedule found is deleted
   after its listed firings are added to the list; an execution found is terminated and deleted; each is an incident,
   audited and alerted on, and reopens the erasure's record for it, so its firings get their own bound and final check.
-- **So the final check proves absence at the moment it runs,** and reconciliation keeps it true afterwards; a passing
-  describe is never taken to rule out a late create.
+- **What reconciliation can and can't do.** It detects and repairs a late schedule or execution on its next pass; it
+  can't keep absence continuously true between passes, and no describe establishes that a write won't arrive later. So
+  the final check proves absence only at the moment it runs. **The residual risk:** a late write landing after it
+  leaves a tenant schedule (paused) or execution in Temporal until the next pass finds it, and, should paused creation
+  ever fail to hold, a firing in between; each is an incident that reopens the erasure's record, as above.
 
 ### Enumerating and deleting executions (step 6)
 
@@ -256,21 +264,20 @@ closed, found or not:
   its parent is cancelled and waited for in step 5). Every firing ends within the workflow execution timeout set on its
   schedule's action (the prototype verifies 2b-3a sets one, or adds it), and nothing fires after step 3's last pause.
   So the latest close is at most the later of step 5's verified ends and the last pause plus that timeout.
-- **The bound:** that latest close plus the platform's maximum namespace retention (30 days, §10.2), made durable for
-  the whole erasure, since a poll, at the start, the end or every pass, can miss a temporary increase:
-  - **enforced at the namespace-change boundary** by the Temporal deployment itself: its change control keeps the
-    namespace's retention at 30 days at most (its configuration where the server offers one, or who may change the
-    namespace on Temporal Cloud); `enable-production-runs` records the operator's attestation, and the guide makes it
-    a standing requirement;
-  - **made provable, not polled:** from the gate's lift, Dewpoint keeps a ledger of the namespace's `config_version`
-    and retention, read from `DescribeNamespace`. The same `config_version` at both ends of an interval proves the
-    namespace didn't change in it, a temporary increase included, since any change raises it. An interval in which it
-    changed has an unknown maximum, unless an operator attests one (audited).
-  - **An erasure's bound** uses 30 days only if every interval covering the closes it relies on (from its schedules'
-    creation to its latest close) is proven unchanged within the cap, or attested. Otherwise it can't establish its
-    bound, and stays incomplete and alerting until it can.
-  - The prototype verifies that `config_version` rises on every retention change, on the CLI dev server; D12's proof
-    covers the real target. Archival must be disabled for the namespace (D12), so no copy outlives retention.
+- **The bound:** that latest close plus the platform's maximum namespace retention (30 days, §10.2). A poll, at the
+  start, the end or on every pass, can miss a temporary increase, and Temporal's API offers no namespace version to
+  prove there was none (`DescribeNamespace` reports the retention and archival configuration, and `failover_version`
+  isn't a configuration version). So the cap needs an actual namespace-change boundary:
+  - **enforced and audited by the Temporal deployment:** a change that would set the retention above 30 days is
+    refused where it's made, and every namespace change is recorded where Dewpoint's operators can review it. Which
+    mechanism counts on each supported deployment (for example an authorizer on a self-hosted frontend refusing such a
+    change and logging its decisions, or a managed service's access control and audit log of namespace changes) is the
+    owner's decision (D3g), and D12's proof verifies it on the real target;
+  - `enable-production-runs` records which boundary the deployment has, with the operator's attestation; an erasure
+    records the boundary it relied on;
+  - **without such a boundary,** the bound is unproven: the erasure can't complete and stays `erasing`, alerting. A
+    supported deployment that can't guarantee the boundary leaves every erasure's completion blocked.
+  - Archival must be disabled for the namespace (D12), so no copy outlives retention.
 - **The bound is the earliest point to attempt the final check, not a completion deadline.** Then every found
   execution is read back not-found again, every schedule the tenant had is described absent, and a visibility query for
   `t:<tenant>:` finds nothing. Anything found keeps the erasure incomplete and alerting, never reporting success.
@@ -330,8 +337,9 @@ answers not-found while its projection isn't terminal goes through §7.9's opera
   retention within bounds), failing closed otherwise. The proof's target (a Temporal Cloud test namespace, a self-hosted
   server with TLS, or another) and any image it needs approved are the owner's decisions (D12).
 - **What erasure needs of it** (D3b): `DeleteWorkflowExecution`, visibility queries by workflow-id prefix,
-  `DescribeNamespace`'s retention and `config_version`, archival disabled for the namespace (which the readiness checks
-  verify), and its retention capped at 30 days at its own change boundary, which the operator attests.
+  `DescribeNamespace`'s retention and archival state, archival disabled for the namespace (which the readiness checks
+  verify), and a namespace-change boundary that refuses a retention above 30 days and audits every change (D3g),
+  without which erasures can't complete.
 
 ## Ingress in production (D14)
 
@@ -364,8 +372,9 @@ answers not-found while its projection isn't terminal goes through §7.9's opera
   executions' enumeration and read-back, the retention bound), ticks recording their own firings, the `tenants`
   migration (`erased`, anonymized slugs), eligibility requiring `active`, fencing every in-flight writer (the schedule
   sync's transaction spanning its Temporal write included) with its race regressions, schedules created paused,
-  reconciliation after completion, the namespace's `config_version` ledger, completion and its final check, stopping
-  and retrying, its command and audit, and a proof that afterwards nothing of the tenant stays decodable or stored.
+  missed firings counted, the deleted-and-recreated token test, reconciliation after completion, the namespace-change
+  boundary recorded, completion and its final check, stopping and retrying, its command and audit, and a proof that
+  afterwards nothing of the tenant stays decodable or stored.
 
 **2b-4b, production hardening and the gate lift**
 - **M1. The engine blockers:** #16, #18 and #26, each fixed or bounded (D7).
@@ -384,7 +393,7 @@ answers not-found while its projection isn't terminal goes through §7.9's opera
 |---|---|---|
 | D1 | The split | 2b-4a then 2b-4b, as above; one outline, two plans, two prototypes. |
 | D2 | Order inside 2b-4a | #28 and #35 first, then retention, then re-encryption and retirement, then erasure, which needs the others. |
-| D3 | Tenant erasure | As "Tenant erasure" above, with the owner's rulings: (a) no abort once `erasing` is committed, only a stop or a retry; (b) every found execution deleted and read back, the firing inventory captured before schedules are deleted, and completeness from Temporal's retention bound, never from visibility; (c) audit entries under the platform's audit-retention policy, described as they are; (d) Temporal's retention enforcement accepted as the trust boundary for executions Dewpoint can't enumerate, the bound being the earliest point for the final check, not a deadline; (e) in-flight writers fenced by the lifecycle lock, the schedule sync's transaction spanning its Temporal write; late Temporal writes made unable to fire (schedules created paused, unpaused only by a token-carrying update) and reconciled after completion; the bound's 30-day maximum enforced at the namespace-change boundary and proven by `config_version`, never by polling; (f) to decide: creating schedules paused, and what it costs a firing due before the unpause. |
+| D3 | Tenant erasure | As "Tenant erasure" above, with the owner's rulings: (a) no abort once `erasing` is committed, only a stop or a retry; (b) every found execution deleted and read back, the firing inventory captured before schedules are deleted, and completeness from Temporal's retention bound, never from visibility; (c) audit entries under the platform's audit-retention policy, described as they are; (d) Temporal's retention enforcement accepted as the trust boundary for executions Dewpoint can't enumerate, the bound being the earliest point for the final check, not a deadline; (e) in-flight writers fenced by the lifecycle lock, the schedule sync's transaction spanning its Temporal write; late Temporal writes made unable to fire (schedules created paused, unpaused only by a token-carrying update, relied on only once the deleted-and-recreated token test passes) and detected and repaired after completion, the residual risk between passes stated; (f) a firing due between paused creation and the unpause recorded as missed, the user's start never shifted; (g) to decide: which enforced, audited namespace-change boundary counts on each supported deployment; without one, completion is blocked. |
 | D4 | The read cutoff | Filter in the shared read paths (one query helper per kind), proven by a test per user-facing path; never a database view the API could bypass. |
 | D5 | Audit pruning and #3 | Pruning ships in 2b-4a disabled in production until #3's sink is configured; the readiness checks refuse a production gate without it. |
 | D6 | #3's first sink | One target first; which one (object storage with object lock, or syslog or SIEM) is the owner's. Testing it needs an image the owner approves (for object storage, an S3-compatible server). |
