@@ -2,21 +2,20 @@
 
 > **Status: approved by the owner as an outline (82bfca6, finalized 3b875c0, 2026-10-05); D2, D4 and D5 accepted; D7
 > to D11 adopted from the owner's recommendations (their measurement thresholds acceptance criteria, not claims); D13
-> resolved; the D6 and D12 proof specifications written, their five image pins approved and the cases revised after
-> the owner's review; D6 and D12 approved as proof candidates, not proven production boundaries, with D12b ruled and
-> the proofs' images and `boto3` approved; no prototype, detailed plan or gate lift authorized. It was revised after
-> the owner's first review (erasure's completion, production Temporal's proof, Mist, event grouping, ingress's
-> switch), second (erasure: no reversal, durable progress, the `tenants` schema), third (the firing inventory before
-> schedules are deleted, completeness from Temporal's retention bound, audit entries described as they are,
-> eligibility requiring `active`), fourth (fencing in-flight writers, the schedule sync's included; the bound as the
-> earliest final check) fifth (late Temporal writes made unable to fire and reconciled after completion), sixth (an
-> enforced, audited namespace-change boundary for the 30-day cap; reconciliation's residual risk; missed firings
-> recorded) and seventh (which targets qualify for that boundary; both readiness paths failing closed without it; the
-> schedule action corrected). Not authorization to build anything; no gate is authorized to lift by this review,
-> neither the production gate nor ingress's development-only restriction.** As in 2b-1a through 2b-3b, once the owner
-> rules, each sub-project is built on a prototype branch from `main`, with the owner's checkpoint after each
-> milestone; its plan is then written from the replayed diffs, with a revision of the 2b spec, for the owner's review
-> before execution.
+> resolved; the D6 and D12 proof specifications approved, with their five image pins (no proof run authorized); D6 and
+> D12 approved as proof candidates, not proven production boundaries, with D12b ruled and the proofs' images and
+> `boto3` approved; no prototype, detailed plan or gate lift authorized. It was revised after the owner's first review
+> (erasure's completion, production Temporal's proof, Mist, event grouping, ingress's switch), second (erasure: no
+> reversal, durable progress, the `tenants` schema), third (the firing inventory before schedules are deleted,
+> completeness from Temporal's retention bound, audit entries described as they are, eligibility requiring `active`),
+> fourth (fencing in-flight writers, the schedule sync's included; the bound as the earliest final check) fifth (late
+> Temporal writes made unable to fire and reconciled after completion), sixth (an enforced, audited namespace-change
+> boundary for the 30-day cap; reconciliation's residual risk; missed firings recorded) and seventh (which targets
+> qualify for that boundary; both readiness paths failing closed without it; the schedule action corrected). Not
+> authorization to build anything; no gate is authorized to lift by this review, neither the production gate nor
+> ingress's development-only restriction.** As in 2b-1a through 2b-3b, once the owner rules, each sub-project is built
+> on a prototype branch from `main`, with the owner's checkpoint after each milestone; its plan is then written from
+> the replayed diffs, with a revision of the 2b spec, for the owner's review before execution.
 
 **Goal:** Dewpoint can hold tenants' production data. Data leaves on schedule, a tenant can be erased, old keys can be
 retired, the production Temporal is verified, every production blocker is fixed or bounded with the owner's explicit
@@ -459,9 +458,9 @@ plan or either production gate's lift.
 
 ## Proof specifications (D6 and D12)
 
-Written at the owner's request (2026-10-05) for approval of the pins and the cases; they authorize no prototype. Both
-proofs belong to 2b-4b's third milestone, run locally (not in routine CI), and are rerun against the owner's real
-bucket and Temporal deployment before readiness can pass.
+Written at the owner's request and approved by the owner (2026-10-05), pins and cases; they authorize no proof run, no
+prototype and no gate lift. Both proofs belong to 2b-4b's third milestone, run locally (not in routine CI), and are
+rerun against the owner's real bucket and Temporal deployment before readiness can pass.
 
 ### Pinned images (approved by the owner, 2026-10-05)
 
@@ -536,7 +535,8 @@ claim mapper, built in the pinned `golang` and run on the pinned distroless base
   namespace-changing path that bypasses the authorizer fails qualification: listing a path in the inventory doesn't
   cover it.
 - D12.4 **Fail-closed audit:** with the audit trail unwritable (the bucket refusing writes, then unreachable), every
-  namespace change is refused, a 30-day one included.
+  namespace change is refused, a 30-day one included. The bucket outage itself is only ever caused in this disposable
+  environment.
 - D12.5 **Verified TLS:** the server's certificate is accepted against the test CA and refused against another CA.
 - D12.6 **mTLS only** (a separate configuration): a client without a certificate is refused, with one accepted.
 - D12.7 **Bearer token only** (a separate configuration, no client certificate, verified TLS): a valid JWT bearer
@@ -552,8 +552,13 @@ claim mapper, built in the pinned `golang` and run on the pinned distroless base
 qualification**, before readiness:
 - the endpoints and the server build that deployment actually exposes are recorded, and D12.1's inventory taken there;
 - **every mutating case runs in an isolated test namespace,** never the production namespace or its schedules: the
-  30-day `RegisterNamespace` and `UpdateNamespace`, the 31-day refusals, the fail-closed audit, execution deletion
-  (D12.9) and the schedule tests (D12.11);
+  30-day `RegisterNamespace` and `UpdateNamespace`, the 31-day refusals, execution deletion (D12.9) and the schedule
+  tests (D12.11);
+- **the fail-closed audit (D12.4) without touching the shared bucket:** the production audit bucket is never made
+  unwritable or unreachable, since D6's anchor writers and every other namespace's decisions depend on it. Instead a
+  failure is injected through the authorizer's same audit-write path, scoped to the test namespace alone; that
+  namespace's change is refused, and the other audit writers (D6's anchors, other namespaces' decisions) are shown
+  unaffected during the injection;
 - D12.2 to D12.4 must hold on every endpoint that deployment exposes; a namespace-changing path that bypasses the
   authorizer there fails qualification;
 - the read-only cases may run against the production namespace: verified TLS (D12.5), the deployment's own
