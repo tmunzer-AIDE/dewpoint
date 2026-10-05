@@ -14,8 +14,6 @@
 
 import asyncio
 import email.utils
-import hashlib
-import hmac
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -24,8 +22,6 @@ from types import MappingProxyType
 from typing import Any, Protocol
 
 import httpx
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from pydantic import BaseModel, SecretStr, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -55,6 +51,7 @@ from dewpoint.core.models.connections import Connection as ConnectionRow
 from dewpoint.core.models.runs import Run
 from dewpoint.core.models.workflows import WorkflowVersion
 from dewpoint.core.ratelimit.buckets import CooldownError, Scope, acquire, block
+from dewpoint.core.ratelimit.scopes import credential_hasher
 from dewpoint.sdk import (
     ConnectionUnavailable,
     Cooldown,
@@ -452,9 +449,7 @@ class AttemptNetwork:
 
     async def _credential_key(self) -> Callable[[str], str]:
         _, digest = await self.network.keys.digest_key(str(self.tenant_id), None)
-        info = f"dewpoint|{self.tenant_id}|rate-scope".encode()
-        key = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=info).derive(digest)
-        return lambda credential: hmac.new(key, credential.encode(), hashlib.sha256).hexdigest()[:32]
+        return credential_hasher(digest, self.tenant_id)
 
     async def connection(self, connection_id: uuid.UUID) -> OpenedConnection:
         if self.simulated:
@@ -489,7 +484,7 @@ class AttemptNetwork:
             base = httpx.URL(kind.base_url(config, secret))
         except (httpx.InvalidURL, ValueError):
             raise ConnectionUnavailable() from None
-        if base.scheme != "https" and not base.host:
+        if base.scheme not in ("http", "https") or not base.host:  # plain http still needs an allowlist entry
             raise ConnectionUnavailable()
         return OpenedConnection(
             connection_id, stored.type, MappingProxyType(dict(stored.config)),

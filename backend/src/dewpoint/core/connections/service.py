@@ -15,10 +15,13 @@ from sqlalchemy.orm import aliased
 from dewpoint.core.audit.service import record
 from dewpoint.core.connections.types import CONNECTION_TYPES, ConnectionType
 from dewpoint.core.crypto.keyring import Keyring
+from dewpoint.core.crypto.keys import digest_key_of
 from dewpoint.core.http import TenantContext
 from dewpoint.core.models.connections import Connection
 from dewpoint.core.models.requests import RunRequest
 from dewpoint.core.models.workflows import Workflow, WorkflowVersion
+from dewpoint.core.ratelimit.buckets import current_cooldowns
+from dewpoint.core.ratelimit.scopes import credential_hasher
 
 PURPOSE = "connection.secret"
 
@@ -255,6 +258,29 @@ async def _audit_verify(
         target_type="connection",
         target_id=str(connection_id),
         details=details,
+    )
+
+
+async def cooldowns(s: AsyncSession, keyring: Keyring, conn: Connection) -> list[dict[str, str]] | None:
+    """Each of the connection's quota scopes now cooling down (plugins-3 D10): its kind and its current cooldown, a live
+    value that can change, not a record of a failed attempt's deadline; never the scope's key. None when the scopes
+    can't be computed (an unreadable secret)."""
+    ct = _type(conn.type)
+    if ct.rate_scopes is None:
+        return []
+    try:
+        secret = await load_secret(s, keyring, conn)
+        _, raw = await keyring.read_dek(s, conn.tenant_id)
+    except (InvalidTag, ValueError):
+        return None
+    scopes = ct.rate_scopes(
+        ct.config_model.model_validate(conn.config), credential_hasher(digest_key_of(raw, str(conn.tenant_id)),
+                                                                       conn.tenant_id), secret
+    )  # fmt: skip
+    found = await current_cooldowns(s, conn.tenant_id, [scope.key for scope in scopes])
+    return sorted(
+        ({"scope": key.split(":", 1)[0], "until": until.isoformat()} for key, until in found.items()),
+        key=lambda x: (x["scope"], x["until"]),
     )
 
 

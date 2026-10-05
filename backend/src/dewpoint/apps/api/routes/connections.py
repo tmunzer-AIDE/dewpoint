@@ -101,8 +101,10 @@ async def get_one(
     connection_id: uuid.UUID,
     ctx: TenantContext = Depends(require(P.CONNECTION_VIEW)),
     db: AsyncSession = Depends(get_db, scope="function"),
+    keyring: Keyring = Depends(get_keyring),
 ) -> dict[str, object]:
-    return service.to_out(await _get(db, ctx, connection_id))
+    conn = await _get(db, ctx, connection_id)
+    return {**service.to_out(conn), "cooldowns": await service.cooldowns(db, keyring, conn)}
 
 
 @router.patch("/t/{tenant_id}/connections/{connection_id}")

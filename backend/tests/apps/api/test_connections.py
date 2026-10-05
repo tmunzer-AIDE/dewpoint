@@ -156,3 +156,37 @@ async def test_delete_during_verification_is_not_found(app, owner_sessionmaker, 
     assert deleted.status_code == 204
     assert r.status_code == 404 and r.json() == {"error": "not_found"}
     assert actions[0] == "connection.verify_discarded"
+
+
+async def test_a_connection_shows_its_current_cooldowns(app, owner_sessionmaker, api_settings) -> None:
+    """Each quota scope's current cooldown (plugins-3 D10): a live value, the scope's kind only, never its key."""
+    from datetime import UTC, datetime, timedelta
+
+    from dewpoint.core.crypto.kek import KekSet
+    from dewpoint.core.crypto.keyring import Keyring
+    from dewpoint.core.crypto.keys import digest_key_of
+    from dewpoint.core.db import tenant_scope
+    from dewpoint.core.ratelimit.scopes import credential_hasher
+
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    async with c:
+        cid = (await c.post(f"/api/v1/t/{tid}/connections", json=BODY)).json()["id"]
+        assert (await c.get(f"/api/v1/t/{tid}/connections/{cid}")).json()["cooldowns"] == []
+        tenant = tid if isinstance(tid, uuid.UUID) else uuid.UUID(tid)
+        async with owner_sessionmaker() as s, s.begin():
+            await tenant_scope(s, tenant)
+            _, raw = await Keyring(KekSet.from_settings(api_settings)).read_dek(s, tenant)
+            hasher = credential_hasher(digest_key_of(raw, str(tenant)), tenant)
+            insert = text(
+                "insert into rate_buckets (tenant_id, scope, capacity, refill_per_s, tokens, refilled_at, "
+                "blocked_until) values (:t, :s, 50, 1.25, 50, now(), now() + make_interval(secs => :w))"
+            )
+            await s.execute(insert, {"t": tid, "s": f"mist.org:emea_01:{ORG}", "w": 120})
+            await s.execute(insert, {"t": tid, "s": f"mist.token:{hasher(BODY['secret']['api_token'])}", "w": 600})
+            await s.execute(insert, {"t": tid, "s": "mist.org:emea_01:someone-else", "w": 600})
+        r = await c.get(f"/api/v1/t/{tid}/connections/{cid}")
+    shown = {x["scope"]: datetime.fromisoformat(x["until"]) - datetime.now(UTC) for x in r.json()["cooldowns"]}
+    assert set(shown) == {"mist.org", "mist.token"}
+    assert timedelta(seconds=100) < shown["mist.org"] <= timedelta(seconds=125)
+    assert timedelta(seconds=580) < shown["mist.token"] <= timedelta(seconds=605)
+    assert "tok_" not in r.text and "someone-else" not in r.text
