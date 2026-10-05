@@ -83,6 +83,7 @@
   --brand: #84b135; /* the mark only */
   --rail: #0e2230;
   --rail-ink: #c5d3da;
+  --rail-ink-strong: #ffffff; /* the active item */
   --rail-dim: #7f95a1;
   --rail-active: rgba(255, 255, 255, 0.1);
   --rail-line: rgba(255, 255, 255, 0.08);
@@ -136,6 +137,7 @@
     --brand: #9ccb52;
     --rail: #0a161d;
     --rail-ink: #c5d3da;
+    --rail-ink-strong: #ffffff;
     --rail-dim: #7f95a1;
     --rail-active: rgba(255, 255, 255, 0.1);
     --rail-line: rgba(255, 255, 255, 0.08);
@@ -189,6 +191,7 @@
   --brand: #9ccb52;
   --rail: #0a161d;
   --rail-ink: #c5d3da;
+  --rail-ink-strong: #ffffff;
   --rail-dim: #7f95a1;
   --rail-active: rgba(255, 255, 255, 0.1);
   --rail-line: rgba(255, 255, 255, 0.08);
