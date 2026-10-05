@@ -136,10 +136,10 @@ needs a person instead of a retry; the buckets keep it rare). Idempotent, keyed 
 attempt 429 or 503; `cooldown` means this attempt sent nothing because the scope is blocked. Each attempt's own row
 keeps its outcome, so an earlier `outcome_unknown` is never hidden by a later `cooldown`. When attempts run out the
 step fails and follows its error policy, deliberately in 3a: a five-minute cooldown can outlast three attempts. The
-deadline is shown on the connection's status (each scope's `blocked_until`), not in step messages: 2b §6.7 withholds
-computed text, and a typed per-step field would change the projection. Durable deferral (RunGraph sleeping until
-`blocked_until`, with that field) needs ENGINE_ABI 7, new golden histories and republishing every workflow, so it's
-proposed separately.
+connection's status shows each scope's **current cooldown** (`blocked_until`): a live value that can change, not a
+record of a failed attempt's deadline. Step messages never carry it: 2b §6.7 withholds computed text, and a typed
+per-step field would change the projection. Durable deferral (RunGraph sleeping until `blocked_until`, with that
+field) needs ENGINE_ABI 7, new golden histories and republishing every workflow, so it's proposed separately.
 
 **D11 Connection types from manifests.** A type declares key, label, config schema, secret schema (secret fields
 `x-sensitive`), auth (D4), host rule and whether it has `verify()`. Hosts: Mist its 12 clouds (**V** OAS `servers`)
@@ -249,43 +249,50 @@ takes a token from the token's stream scope (D9; default 1,800/h). **Needs appro
 wsproto, is a new package. Stream channels as run triggers (long-lived subscriptions) stay out of scope: they'd need a
 subscriber process like ingress.
 
-**D27 Device utilities.** One node type per utility (appendix: 19 diagnostic, 11 disruptive, 13 held back; each exists
-and isn't deprecated in the OAS, **V**; its shape and retry safety are reviewed into the policy map in 3b). Its OAS
-200 response decides the mode: a `session` means output on `/sites/{site_id}/devices/{device_id}/cmd` (**V** docs
-samples); an empty one, REST only. Buffering: the node subscribes, waits for `channel_subscribed` (10 s), POSTs, and
-buffers every data message (at most 256 and 1 MiB) until the answer names the `session`; then it keeps buffered and
-later messages whose `data.session` matches and discards the rest, and a message without a session is discarded, never
-accepted. Output: `{accepted, session, lines, received, ended_by, completion_known, truncated}`, ANSI stripped;
-`ended_by` is `finished` (a table command's `"finished": true` in `raw`, **V** docs sample, or the operation's
-documented final message recorded in the map), `idle` (10 s), `max_duration`, `cancelled` or `stream_lost`;
-`completion_known` is true only for `finished`. Failure classes: before the POST (connecting, `subscribe_failed`, no
-ack, `cooldown`) nothing was sent: `RetryableError`. The POST: `NotSent` retryable, 4xx fatal, 429, 5xx and
-`MaybeSent` per D10. After an accepted POST, a reviewed repeatable diagnostic maps no session, buffer overflow, no
-first message in 30 s (`mist.no_output`) and a stream lost before any output to `RetryableError`, and ends with output
-otherwise. Every other utility, disruptive or unreviewed, maps each of those, and any end without completion evidence
-(`mist.completion_unknown`), to `OutcomeUnknownError`, never `RetryableError`, since an ambiguous manifest doesn't
-stop a mapped retryable error being retried. Owner's call: that rule drops the collected output with the failure (a
-handled failure has no output); the alternative returns it as success with `completion_known: false` for the workflow
-to branch on. Repeatable means individually reviewed in D28 with its device types, permitted parameters, execution
-bounds and repeated-execution behaviour; a `show_*` name is no evidence. Capabilities: `mist.diagnose` for
-diagnostics, `mist.write` for disruptive ones. Heartbeat on every message and at least every 10 s, which is how
-Temporal delivers a cancel; RunGraph sets no heartbeat timeout (start-to-close only), so a lost worker shows only at
-the step timeout, and adding one would change commands (ABI 7, not proposed). On cancel or any exit the node
-unsubscribes and closes in `finally`; a command already started on the device runs on (no documented cancel,
-unverified), so a cancelled disruptive step is `outcome_unknown`. Held back besides shells, the ZTP password, config
-dumps and firmware or reprovision actions: monitor traffic, top and clear policy hit count, which answer a second
-`wss://…?jwt=` URL whose protocol is undocumented (**V**); that JWT is a credential and is never stored.
+**D27 Device utilities: each node promises one outcome.** One node type per utility (appendix: 19 diagnostic, 11
+disruptive, 13 held back; each exists and isn't deprecated in the OAS, **V**; its shape and retry safety are reviewed
+into the policy map in 3b). A node's contract is its D28 success condition, one of four: **documented REST
+completion** (the 2xx answer is the result); **acceptance only** ("submit this command": success is `{accepted: true,
+completion_known: false}`, and the manifest stays `ambiguous` so an uncertain submission is never repeated); **stream
+terminal evidence** (a table command's `"finished": true` in `raw`, **V** docs sample, or the operation's documented
+final message); or **verified readback** (a later read shows the effect). Only stream-evidence operations, whose OAS
+200 answer holds a `session`, subscribe to `/sites/{site_id}/devices/{device_id}/cmd`; the REST-only ones
+(`clear_macs`, `clear_bpdu_error`, `release_dhcp_leases`, …) never enter the subscribe, session or no-output path.
+Streaming: subscribe, wait for `channel_subscribed` (10 s), POST, buffer every data message (at most 256 and 1 MiB)
+until the answer names the `session`, then keep buffered and later messages whose `data.session` matches and discard
+the rest; a message without a session is discarded, never accepted. Output: `{accepted, session, lines, received,
+ended_by, completion_known, truncated}`, ANSI stripped; `ended_by` is `finished`, `idle` (10 s), `max_duration`,
+`cancelled` or `stream_lost`. Before the POST nothing was sent, which makes a retry safe, not useful: invalid or
+forbidden credentials (401/403 at the handshake), a forbidden subscription or invalid channel, and an egress refusal
+are fatal; `subscribe_failed` is fatal unless its `detail` is a documented transient reason (none verified yet); a
+connect failure, an acknowledgement timeout, `cooldown`, or a 429 or 5xx at the handshake is retryable. The POST:
+`NotSent` retryable, 4xx fatal, 429, 5xx and `MaybeSent` per D10. After an accepted POST, a reviewed repeatable
+diagnostic maps no session, buffer overflow, no first message in 30 s (`mist.no_output`) and a stream lost before any
+output to `RetryableError`, and ends with output otherwise. A completion-oriented disruptive or unreviewed utility
+maps each of those, and any end without its success condition (`mist.completion_unknown`), to `OutcomeUnknownError`,
+never `RetryableError`: an ambiguous manifest doesn't stop a mapped retryable error being retried, and losing the
+stream never turns it into an acceptance-only success. Recommended: that failure drops the collected text, an accepted
+limitation for now; keeping it would take a separate encrypted diagnostic-artifact contract, never logs or a disguised
+success. Repeatable means individually reviewed in D28 (device types, permitted parameters, execution bounds,
+repeated-execution behaviour); a `show_*` name is no evidence. Capabilities: `mist.diagnose` for diagnostics,
+`mist.write` for disruptive ones. Heartbeat on every message and at least every 10 s, which is how Temporal delivers a
+cancel; RunGraph sets no heartbeat timeout (start-to-close only), so a lost worker shows only at the step timeout, and
+adding one would change commands (ABI 7, not proposed). On cancel or any exit the node unsubscribes and closes in
+`finally`; a command already started on the device runs on (no documented cancel, unverified), so a cancelled
+disruptive step is `outcome_unknown`. Held back besides shells, the ZTP password, config dumps and firmware or
+reprovision actions: monitor traffic, top and clear policy hit count, which answer a second `wss://…?jwt=` URL whose
+protocol is undocumented (**V**); that JWT is a credential and is never stored.
 
 **D28 One operation-policy map for Mist.** One generated data file, the single source for curated nodes,
 `mist.api.read`/`write` and utilities, checked at publish and at run time: an entry per OAS operation with its state
 (`allowed`, `held`, `denied`), the nodes that may reach it, its capability, its scope class (org, member site, or
-approved metadata; D14), its side effect with the evidence for it, and for utilities its stream mode, completion
-evidence, supported device types, permitted parameters, execution bounds and repeated-execution behaviour. Deprecated
-operations are `denied`; D14's always-refused routes can't be allowed. **Owner's call — operations nobody reviewed:**
-(a, recommended) `held`, reads included: only reviewed, scope-safe operations are allowed, the appendix's being the
-first reviewed set; (b) unreviewed reads allowed through `mist.api.read`, but only inside D14's independently enforced
-scope, never the whole OAS. "Exists and isn't deprecated" stays separate from "shape, scope and retry semantics
-verified".
+approved metadata; D14), its side effect with the evidence for it, and for utilities its success condition (documented
+REST completion, acceptance only, stream terminal evidence or verified readback; D27), stream mode, supported device
+types, permitted parameters, execution bounds and repeated-execution behaviour. Deprecated operations are `denied`;
+D14's always-refused routes can't be allowed. **Owner's call — operations nobody reviewed:** (a, recommended) `held`,
+reads included: only reviewed, scope-safe operations are allowed, the appendix's being the first reviewed set; (b)
+unreviewed reads allowed through `mist.api.read`, but only inside D14's independently enforced scope, never the whole
+OAS. "Exists and isn't deprecated" stays separate from "shape, scope and retry semantics verified".
 
 ## 4. Dependencies, images, tests
 
