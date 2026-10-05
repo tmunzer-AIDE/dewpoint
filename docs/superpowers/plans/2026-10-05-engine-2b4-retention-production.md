@@ -2,19 +2,20 @@
 
 > **Status: approved by the owner as an outline (82bfca6, finalized 3b875c0, 2026-10-05); D2, D4 and D5 accepted; D7
 > to D11 adopted from the owner's recommendations (their measurement thresholds acceptance criteria, not claims); D13
-> resolved; D6 and D12 approved as proof candidates, not proven production boundaries, with D12b ruled and the proofs'
-> images and `boto3` approved; no prototype, detailed plan or gate lift authorized. It was revised after the owner's
-> first review (erasure's completion, production Temporal's proof, Mist, event grouping, ingress's switch), second
-> (erasure: no reversal, durable progress, the `tenants` schema), third (the firing inventory before schedules are
-> deleted, completeness from Temporal's retention bound, audit entries described as they are, eligibility requiring
-> `active`), fourth (fencing in-flight writers, the schedule sync's included; the bound as the earliest final check)
-> fifth (late Temporal writes made unable to fire and reconciled after completion), sixth (an enforced, audited
-> namespace-change boundary for the 30-day cap; reconciliation's residual risk; missed firings recorded) and seventh
-> (which targets qualify for that boundary; both readiness paths failing closed without it; the schedule action
-> corrected). Not authorization to build anything; no gate is authorized to lift by this review, neither the
-> production gate nor ingress's development-only restriction.** As in 2b-1a through 2b-3b, once the owner rules, each
-> sub-project is built on a prototype branch from `main`, with the owner's checkpoint after each milestone; its plan
-> is then written from the replayed diffs, with a revision of the 2b spec, for the owner's review before execution.
+> resolved; the D6 and D12 proof specifications and their pinned images written for the owner's approval; D6 and D12
+> approved as proof candidates, not proven production boundaries, with D12b ruled and the proofs' images and `boto3`
+> approved; no prototype, detailed plan or gate lift authorized. It was revised after the owner's first review
+> (erasure's completion, production Temporal's proof, Mist, event grouping, ingress's switch), second (erasure: no
+> reversal, durable progress, the `tenants` schema), third (the firing inventory before schedules are deleted,
+> completeness from Temporal's retention bound, audit entries described as they are, eligibility requiring `active`),
+> fourth (fencing in-flight writers, the schedule sync's included; the bound as the earliest final check) fifth (late
+> Temporal writes made unable to fire and reconciled after completion), sixth (an enforced, audited namespace-change
+> boundary for the 30-day cap; reconciliation's residual risk; missed firings recorded) and seventh (which targets
+> qualify for that boundary; both readiness paths failing closed without it; the schedule action corrected). Not
+> authorization to build anything; no gate is authorized to lift by this review, neither the production gate nor
+> ingress's development-only restriction.** As in 2b-1a through 2b-3b, once the owner rules, each sub-project is built
+> on a prototype branch from `main`, with the owner's checkpoint after each milestone; its plan is then written from
+> the replayed diffs, with a revision of the 2b spec, for the owner's review before execution.
 
 **Goal:** Dewpoint can hold tenants' production data. Data leaves on schedule, a tenant can be erased, old keys can be
 retired, the production Temporal is verified, every production blocker is fixed or bounded with the owner's explicit
@@ -454,6 +455,91 @@ plan or either production gate's lift.
   - **Production:** the owner's own deployment of that server, the proof rerun there before readiness.
 - **Ruled:** the self-hosted authorizer is the candidate to prove; Temporal Cloud remains unsupported under D3g as
   documented (retention settable from 1 to 90 days; its audit log records changes but doesn't enforce a 30-day cap).
+
+## Proof specifications (D6 and D12)
+
+Written at the owner's request (2026-10-05) for approval of the pins and the cases; they authorize no prototype. Both
+proofs belong to 2b-4b's third milestone, run locally (not in routine CI), and are rerun against the owner's real
+bucket and Temporal deployment before readiness can pass.
+
+### Pinned images (for the owner's approval)
+
+Resolved from the registries on 2026-10-05 (manifest reads only; nothing pulled). Each is pinned by its index digest,
+so it can't move; refreshing a pin is a new approval.
+
+| Image | Tag | Index digest | Why this one |
+|---|---|---|---|
+| `cgr.dev/chainguard/minio` | `latest` | `sha256:4cf4831a2bbcf13ddca09c1cbcc9faff716dd3c4247e0babc32864b8ee8e0034` | D6's S3 server. Chainguard's free tier offers only `latest` (its other tags are signatures and attestations), so the digest is the pin; built 2026-10-02, with no version label, so the proof records `minio --version`. |
+| `golang` | `1.26.8` | `sha256:0f063af2d465d8dcae54cce04278ada488b96f77b42449c8d071e47d016cc65a` | Builds D12's server; Temporal v1.32.0's `go.mod` requires Go 1.26.8. |
+| `temporalio/admin-tools` | `1.32.0` | `sha256:a9f84fb9a374b2374fe2e67c8efc0468ff3f1c66c8a0b14597ec86e349e62bca` | D12's schema setup, matching server v1.32.0. |
+| `gcr.io/distroless/static-debian12` | `nonroot` | `sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab` | D12's runtime base: a static Go binary, no shell, a non-root user, CA certificates included. |
+| `postgres` | `16-alpine` | `sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea` | D12's persistence and visibility store; the image is already approved, pinned here for the proof. |
+
+Neither proof needs another image: the test CA and certificates come from `openssl` on the host, the JWT key set is
+served by Python's standard library, and tokens are signed with `cryptography`, already a dependency. If a pinned
+digest stops being served, the proof stops and asks for a new pin.
+
+### D6: the off-host audit anchor sink
+
+**Environment:** the pinned MinIO in a disposable container; a bucket created with Object Lock enabled and a default
+compliance-mode retention; the anchor writer's put-only credentials, the verifier's read-only ones and the server's root
+credentials kept apart; `boto3`; anchors signed with an Ed25519 test key; the monitor's roster and cadence in a file
+outside the test database.
+
+**Cases,** each an automated test:
+- D6.1 A written anchor is stored as a locked version: compliance mode, its retain-until date as configured.
+- D6.2 Deleting that version by its id is refused, with the writer's credentials and with the server's root
+  credentials alike.
+- D6.3 Shortening its retention, or changing its mode, is refused.
+- D6.4 A plain delete only adds a delete marker; verify fails on it.
+- D6.5 Rewriting an anchor's key adds a second version; verify fails on it.
+- D6.6 Verify fails on a bad signature, a hash mismatch, a chain break and a missing anchor, each separately, and
+  passes on an untouched sequence.
+- D6.7 A listing longer than one page (more anchors than one page holds) is verified whole: a tampered version on a
+  later page is caught.
+- D6.8 Verify checks every version's mode and retain-until date: a version written without compliance retention (by a
+  writer that skipped it, simulated) fails.
+- D6.9 The bucket's default retention is checked against the configured audit-retention plus backup periods, not the
+  defaults: a configuration whose sum exceeds the default fails readiness.
+- D6.10 The monitor, reading its roster and cadence from outside the database, alerts on a scope removed from the
+  database and on an anchor withheld past its cadence, and stays quiet on a healthy sequence.
+
+**Passes** when every case passes on the pinned image and the recorded MinIO version. **Doesn't prove** a real
+provider's compliance mode: the readiness check repeats D6.1 to D6.4 on the real bucket with a canary anchor.
+
+### D12: the real Temporal target
+
+**Environment:** our Go module running Temporal server v1.32.0 as a library, with our authorizer and Temporal's JWT
+claim mapper, built in the pinned `golang` and run on the pinned distroless base; schema set up by the pinned
+`admin-tools`; persistence and visibility on the pinned PostgreSQL; a test CA, server and client certificates from
+`openssl`; a JWT key set served locally; D6's MinIO as the authorizer's audit trail.
+
+**Cases,** each an automated test:
+- D12.1 **The API inventory:** every RPC of WorkflowService, OperatorService and AdminService in v1.32.0's own
+  definitions is listed and classed as able or unable to change a namespace's configuration; every endpoint the server
+  exposes (gRPC, its HTTP API, any internal or Nexus frontend that's enabled) is listed. The inventory is part of the
+  proof's record.
+- D12.2 Through the SDK, the `temporal operator namespace` CLI and the HTTP API, `RegisterNamespace` and
+  `UpdateNamespace` with a 31-day retention are refused, and with 30 days allowed; each decision is in the audit
+  trail.
+- D12.3 Every RPC that D12.1 classed as able to change a namespace, other than those two, is refused unless the
+  allowlist inspects it; every endpoint D12.1 listed is shown to go through the authorizer.
+- D12.4 **Fail-closed audit:** with the audit trail unwritable (the bucket refusing writes, then unreachable), every
+  namespace change is refused, a 30-day one included.
+- D12.5 **Verified TLS:** the server's certificate is accepted against the test CA and refused against another CA.
+- D12.6 **mTLS only** (a separate configuration): a client without a certificate is refused, with one accepted.
+- D12.7 **Bearer token only** (a separate configuration, no client certificate, verified TLS): a valid JWT bearer
+  token is accepted; an expired, wrongly signed or missing one is refused.
+- D12.8 `DescribeNamespace` reports the namespace's retention and its archival state (disabled).
+- D12.9 `DeleteWorkflowExecution` removes a closed execution, and describing that exact run then answers not-found.
+- D12.10 A visibility query for workflow ids beginning with a prefix finds the matching executions on PostgreSQL
+  visibility.
+- D12.11 **D3's schedule tests:** a schedule created paused fires nothing; a stale-token update is discarded; and a
+  token taken from a deleted schedule never matches a recreated one with the same id.
+
+**Passes** when every case passes on the pinned images. **Doesn't prove** the owner's deployment: the same suite runs
+there before readiness, and D12.2 to D12.4 must pass on every endpoint that deployment exposes. The environment also
+hosts D8's 20-binding rate tests and D9's accepted-event-to-start latency, which are measurements, not this proof.
 
 ## Milestones (first cut)
 
