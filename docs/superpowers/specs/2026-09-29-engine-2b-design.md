@@ -1,10 +1,12 @@
 # Dewpoint — Engine 2b Design (payload protection, admission, triggers, retention)
 
-- **Status:** revision 9, a draft pending the owner's approval with the 2b-3b plan. Revision 8 (2026-10-04) is approved
-  (#33); revisions 6 and 7 (2026-10-03) are approved. Revision 4 (2026-09-30) was approved by the owner: every section
-  was approved in conversation before it was written here, and this document is their written form. Revision 5
-  (2026-10-01) was approved for implementation by the 2b-1b plan, which isn't production readiness: nothing runs in
-  production before 2b-4 lifts the gate (§2).
+- **Status:** revision 10, a partial draft for the owner's review: the tick exception (§6.2, §8.2) and the
+  run-evidence contract of key retirement (§6.4, §10.2), written from the 2b-4a prototype's M3 before its approval,
+  at the owner's request; the rest of 2b-4's revision lands with its plans. Revision 9 is a draft pending the
+  owner's approval with the 2b-3b plan. Revision 8 (2026-10-04) is approved (#33); revisions 6 and 7 (2026-10-03) are
+  approved. Revision 4 (2026-09-30) was approved by the owner: every section was approved in conversation before it
+  was written here, and this document is their written form. Revision 5 (2026-10-01) was approved for implementation
+  by the 2b-1b plan, which isn't production readiness: nothing runs in production before 2b-4 lifts the gate (§2).
   - Revision 2 folds in the owner's review of revision 1: a claim is owned by the run that produced it, with the
     root run id kept for retention and the secret index (§3.4); passing a secret-index bound is a fixed,
     non-retryable error, and matching work is bounded (§3.7); an idempotency retry is compared under its stored
@@ -148,6 +150,25 @@
     - the load probe's measurements set both event rates to 10/s; matching doesn't yet scale with dispatchers, a
       required decision of 2b-4 (§7.9);
     - the codes (§9), tests (§12), earlier specs (§13), tables and grants (§14) and values (§15) follow.
+  - Revision 10 (partial draft, for the owner's review before the 2b-4a M3 checkpoint), from the owner's rulings on
+    the prototype's M3 (2026-10-05):
+    - **the tick exception** (§6.2, §8.2): a `ScheduleTick` execution carries no payload under a tenant's data key.
+      Its action has no argument; in its contexts only, the codec writes the tick contract's allowlist unsealed and
+      refuses anything else, and its failures carry fixed codes. Ticks keep their retry without limit; no execution
+      timeout bounds them;
+    - **the run-evidence contract** (§6.4): a terminal row isn't proof that Temporal closed an execution, and
+      retention deletes rows before Temporal deletes histories. Each run execution has durable evidence (ids and
+      times), read from Temporal's histories (its chain and its children), kept until Temporal shows it gone; a key
+      version retires only when every execution that could hold it is proven gone. A start Temporal may have taken
+      stays unproven; what Temporal doesn't show is judged against the namespace's own retention; a history gone
+      before it was read is lost, and keeps every version it could hold;
+    - **the tick cutover** (§6.4): a version made before it never retires; recorded automatically only in a genuinely
+      new deployment, otherwise on the operator's attestation;
+    - the evidence outlives the tenant's retention (§10.2), and 2b-4's erasure deletes it with the tenant's Temporal
+      histories (§6.5);
+    - still to fold in with the 2b-4a plan: §6.4's record inventory (connection secrets, CSV mappings and the
+      platform key's TOTP secrets, and `reencrypt`), §8.3's sealed layout and retryable `key_retired`, the codes (§9),
+      tables and grants (§14) and values (§15).
 - **Parent specs:**
   - `2026-09-24-dewpoint-architecture-design.md` (§5, §6.1, §6.5, §6.8, §12, §15). This spec **changes** its
     workflow-id contract (§6.1), replaces its `outbox` table (§6.1), details its claim check (§6.5) and settles the
@@ -878,8 +899,22 @@ largest container when the budget requires.
 - **Decoding:** the tenant in the metadata must equal the context's tenant; the version selects the key. Where a
   decoded payload carries a `tenant_id`, the code that uses it checks it against the workflow id (§6.1): the codec
   never reads a payload's content.
-- **Failures:** every client and worker uses `DefaultFailureConverterWithEncodedAttributes`, so failure messages and
-  stack traces are encrypted too (they're already masked).
+- **Failures:** every client and worker uses a failure converter that encodes failure messages and stack traces as
+  payloads, so they're encrypted too (they're already masked), except in a schedule tick's context (below).
+- **One exception: a schedule tick** (revision 10). In a `ScheduleTick` workflow's context (a workflow id naming a
+  schedule's firing) or a `ScheduleTick` activity's (its workflow type checked too), and nowhere else, the codec writes
+  payloads **unsealed**, under their own encoding (`binary/dewpoint-tick-plain-v1`), and only what the reviewed tick
+  contract allows, checked on every write and every read, anything else refused:
+  - the activity's input: the schedule its workflow id names, its tick key and its nominal time;
+  - outcomes, the activity's and the workflow's: fixed codes (`queued`, `recorded`, `refused:<reason>` and
+    `skipped:<reason>` from admission's and the tick's own reasons, or their status alone);
+  - nothing else: no schedule input, claim, credential, exception text or stack trace. A tick's failures carry a fixed
+    code as their message and type, with no details or stack trace; its request row keeps the full outcome, and the
+    logs the exception's type.
+
+  An activity of another type under a schedule's id gets neither the exception nor a key. A tick's payloads sealed
+  before revision 10 still decode under their tenant's key, for replay. So no tick holds a payload under a tenant's
+  data key, and a key's retirement never waits for a tick (§6.4).
 - Dewpoint never uses memo or search attributes; the codec never sees them.
 - **Conditional on experiment 1 (§11):** if any path lacks reliable context, that path is redesigned before the
   plan, never given a fallback.
@@ -907,19 +942,61 @@ largest container when the budget requires.
 - **A version's last use for payloads is bounded, not recorded.** Every process caches a tenant's active key for at
   most the key cache's TTL (5 minutes, `KeyringKeys`), so none encrypts with a version later than its successor's
   creation plus that TTL.
-  An execution holding such a payload closes within twice the maximum run duration (a run, then its failure handler),
-  and Temporal deletes it after the namespace's retention. So the **payload floor** is: the successor's creation +
-  the cache's TTL + 2 × the longest maximum run duration ever configured + the namespace's retention. (Durable
-  last-use tracking would shorten it; it isn't needed to retire safely.)
+  An execution holding such a payload normally closes within twice the maximum run duration (a run, then its failure
+  handler), and Temporal deletes it after the namespace's retention. So the **payload floor** is: the successor's
+  creation + the cache's TTL + 2 × the longest maximum run duration ever configured + the namespace's retention. The
+  floor is necessary, not sufficient: a run that closes late (its workers gone) keeps its history for the namespace's
+  retention after that, and its row may be deleted by then. Revision 10's run evidence, below, covers it.
 - **An old version is retired only when nothing needs it:**
-  - the payload floor has passed, and no execution that could hold such a payload is still open: a run stalled past
-    its deadline (its build's workers gone) keeps its history, and its payloads, until it closes;
+  - the payload floor has passed;
+  - **every run execution that could hold it is proven gone from Temporal** (revision 10, below); a running row
+    started before its successor reached every cache stays a cross-check;
   - every record Dewpoint stores under it — `run_inputs`, `step_outputs`, `run_secret_index`, pending
-    `run_requests` and `inbound_events` material, `csv_uploads`, schedule inputs and Temporal schedule actions — has
-    been re-encrypted under the current version by `dewpoint keys reencrypt` (schedules by updating them), or deleted
-    by retention;
+    `run_requests` and `inbound_events` material, `csv_uploads`, schedule inputs — has been re-encrypted under the
+    current version by `dewpoint keys reencrypt`, or deleted by retention;
+  - every schedule is synced (a deleted one's absence settled), and no live schedule's Temporal action still names it
+    (an action synced before revision 10 carries the schedule's id, sealed, until its next sync);
   - no request's idempotency digest was made with it, until retention deletes that request;
-  - the tenant's inbound X25519 private keys (§8.3), wrapped by it, have been re-wrapped under the current version.
+  - the tenant's inbound X25519 private keys (§8.3), wrapped by it, have been re-wrapped under the current version;
+  - **it was made after the tick cutover** (revision 10, below).
+- **Run execution evidence** (revision 10). A run's row isn't proof of what Temporal holds: a run whose row says it
+  ended may still be open, one closing long after its deadline keeps its history for the namespace's retention, and
+  the tenant's retention may delete its row first. So each run execution has durable evidence (`execution_evidence`:
+  its workflow id, its run id once known, times; nothing of its data), which the tenant's retention never deletes
+  (§10.2):
+  - **a root's evidence is written with each start attempt, before Temporal is asked** (a trigger on any root's row,
+    and the dispatcher at every attempt). It goes only when Temporal refused every attempt (or throttled it before
+    creating anything). An attempt Temporal may have taken leaves it **unproven**, with when that attempt settled: an
+    absence seen at one moment doesn't fence a start still in flight (§7.6), an uncertain start may be executing, and
+    a collision's execution exists. A later attempt, a refusal of it or a cancel never discards it;
+  - **the dispatcher's leader reads each closed execution's history exactly** — Temporal's own events, never its
+    visibility, whose lag nothing bounds — and records its chain's first run, the run it continued as, and every
+    child it started (sub-flows, failure handlers, loop batches), each with when it started; each is described and
+    read in turn. One Temporal shows gone after it was read is proven: its evidence goes;
+  - **an unread execution Temporal doesn't show is judged against the namespace's own retention**, as Temporal
+    reports it, never an assumed minimum: seen before, its history went unread (**lost**); never seen and not asked
+    about for as long as the retention (since its attempt, or its last check), it could have landed, closed and gone
+    unseen (**lost**); never seen and asked about more often than that, it hasn't landed (**pending**); the retention
+    unknown, it isn't judged. A lost execution is alerted on;
+  - **retiring a version proves each execution that started before its successor reached every cache** (with a margin
+    of the same again: a recorded start can follow the seal by a workflow task's latency), by describing it again.
+    The version is kept by one open, closed and still retained, closed and not yet read, lost, or not judged, and by
+    one pending if the version existed by the time its attempt settled (landing later, it opens an input the version
+    may have sealed). Temporal unreachable keeps it too. **A lost execution keeps every version it could hold**:
+    what it started is unknown, and nothing is guessed;
+  - every root that existed before revision 10's migration is its evidence's backfill, unproven: one Temporal no
+    longer shows is lost.
+- **The tick cutover** (revision 10). A tick from before §6.2's tick exception sealed its payloads under whatever
+  version was active, and nothing proves those histories gone: a version made before the cutover never retires. The
+  cutover is when the last dispatcher that sealed tick payloads had stopped, unable to restart. It's recorded once:
+  - by the migration itself, only in a genuinely new deployment, where no Dewpoint process can have run against the
+    database: no tenant, no recorded environment (§2.1: every process that talks to Temporal refuses to start without
+    one), no worker or dispatcher ever reported;
+  - anywhere else, by `dewpoint keys tick-cutover`, on the operator's attestation that every dispatcher from before
+    is stopped and can't restart, which nothing in Dewpoint can prove. The command also refuses while Temporal shows
+    the admission queue polled by a dispatcher without the tick contract's mark in its identity, a check that catches
+    one polling, not one that's down. It records the attestation in its audit entry and queues every live schedule for
+    its sync.
 
 ### 6.5 Tenant erasure
 
@@ -1352,8 +1429,11 @@ The owner approved 2b-2's milestones as prototype checkpoints; these stay open u
 - **A sync that fails** is recorded on the row with a fixed code, `temporal_refused` (Temporal refused the request) or
   `sync_failed` (anything else), alerted on, and retried after 60 s; the API shows it. A pass takes at most 50
   schedules, each call bounded at 10 s (§7.9).
-- The Temporal Schedule's action starts `ScheduleTick` with the schedule's id as its only argument (encrypted by the
-  codec). Overlap: allow all. Catch-up window: 10 minutes by default, configurable.
+- The Temporal Schedule's action starts `ScheduleTick` **with no argument** (revision 10): its workflow id names the
+  schedule. An action synced before carried the schedule's id, sealed; a tick it starts receives and ignores it, and
+  the sync records the key version such an action still names, from its read-back, so §6.4 waits for its next sync
+  (`keys reencrypt` queues it). No execution timeout: a tick retries without limit. Overlap: allow all. Catch-up
+  window: 10 minutes by default, configurable.
 - `ScheduleTick` is a one-activity workflow on its own task queue, `dewpoint-admission`, in the dispatcher process
   with the dispatch role. It's unversioned and holds no engine logic; a replay test keeps its short contract
   compatible. Its activity takes the tenant and the schedule from its workflow's id (`t:<tenant>:sched:<schedule>`,
@@ -1363,7 +1443,8 @@ The owner approved 2b-2's milestones as prototype checkpoints; these stay open u
   disable or a delete holding the row first decides the tick; one arriving later waits for the tick's request. The row
   is never taken shared: a tick of a tombstone writes it, and two late ticks holding it shared would deadlock. A tick
   that can't be admitted (the database, a key) is retried without limit and alerts once it's 10 minutes late. Its
-  request's `run.request` audit entry names the schedule.
+  request's `run.request` audit entry names the schedule. What a tick carries in Temporal is §6.2's tick contract:
+  its outcome there is a fixed code, and its request row records it in full.
 - **The tick key** is `sched:<schedule_id>:<nominal time>`: the schedule's nominal time
   (`TemporalScheduledStartTime`, never the actual start or jitter), normalized to UTC at the precision Temporal
   reports — whole seconds (experiment 1), unique per schedule because intervals are at least 60 s and cron is
@@ -1549,6 +1630,9 @@ its guide.
   checkpoint at the last entry pruned, deletes older entries, and the verifier starts from the anchored checkpoint.
 - **Backups:** the operator's policy; the guide recommends at most 35 days. Data removed by retention lasts in
   backups until they expire.
+- **Run execution evidence** (revision 10, §6.4): each execution's workflow and run ids and times, nothing of its
+  data, kept until Temporal shows the execution gone, whatever the tenant's retention: a key's retirement needs it.
+  2b-4's erasure deletes it with the tenant's Temporal histories (§6.5).
 
 ### 10.3 The retention job
 
