@@ -34,7 +34,6 @@ Rulings:
 - Ruling: a rate scope's key for a credential is an HMAC under a key derived from the tenant's active data key, so a
   data-key rotation starts fresh buckets - no new long-lived key material outside the keyring - cost if wrong: one
   extra budget's worth of calls after a rotation; the provider's 429 then applies D10.
-
 - Ruling: the guard blocks multicast, reserved, IPv6 site-local and any non-global embedded IPv4 on top of
   `is_global` - Python 3.14 calls multicast, `fec0::/10`, `::127.0.0.1` and NAT64-wrapped loopback global - cost if
   wrong: a NAT64-only deployment needs allowlist entries for its translated destinations.
@@ -65,6 +64,28 @@ Rulings:
 - Ruling: the egress allowlist and rate buckets are read on every connect/request (no cache) - exactness over a query
   per request - cost if wrong: one small query per connect and per request.
 
+- Ruling (checkpoint review): once a request of an attempt may have left, an ambiguous node's failure is never
+  retried and its outcome is unknown, except the plugin's own `FatalError`, which keeps its declared outcome (never
+  retried anyway) - the plugin knows a 4xx refused its request - cost if wrong: a fatal after an earlier write that
+  did apply shows as failed rather than unknown.
+- Ruling (checkpoint review): an allowlist entry is sensitive, and needs `--allow-sensitive`, when its prefix is
+  shorter than /8 (IPv4 or IPv6) or it overlaps loopback, link-local (cloud metadata), unspecified or multicast - cost
+  if wrong: an operator confirms a legitimate broad range explicitly.
+- Ruling (checkpoint review): responses are asked `Accept-Encoding: identity`; a gzip or deflate answer is inflated
+  within the cap; any other encoding fails `response_unreadable` (sent and answered) - cost if wrong: a provider that
+  answers br regardless can't be read.
+- Ruling (checkpoint review): `Retry-After` is read as ASCII delta-seconds or an HTTP date, clamped to an hour; inside
+  an attempt a node resends at most 3 times, waiting at least 1 s each - cost if wrong: none.
+
+Checkpoint review (fresh-context reviewer, 2026-10-06): no SSRF bypass, secret leak or cross-tenant path found. Eight
+findings, all fixed test-first in edace9b: (1, High) an ambiguous node retried after an earlier send in its attempt;
+(2) a reconcilable node resending inside its attempt; (3) `Retry-After: 0` looping; (4) strange `Retry-After` values
+raising after a send; (5) a bucket's refill time moving back; (6) gzip inflating past the cap before the check;
+(7) near-everything allowlist entries; (8) `ctx.net`'s TLS trust read from the environment, an unbounded `receive`,
+uncapped redirect hops, framing headers set by a plugin. The self-review's own four (a database outage before a send,
+best-effort blocks, and (2)) are in the same commit.
+
 Open questions:
-- The full suite's one `PytestUnraisableExceptionWarning` in `tests/apps/worker` (seen once in a parallel run; not
-  from the new tests, which pass with it turned into an error): compare with `origin/main` at the checkpoint.
+- `tests/apps/dispatcher/test_triggers_end_to_end.py::test_a_short_outage_fires_each_missed_time_and_admits_each_once`
+  failed once in the full parallel run under extra load (a 4 s tick gap on Temporal's dev server where 2 s was
+  expected) and passes alone; this slice touches no schedule or dispatcher code. Load-sensitive, not a regression.
