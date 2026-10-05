@@ -6,6 +6,7 @@ retained counters; expired uploads; tombstones Temporal reported gone. Nothing o
 queued or starting, no pending event. A crash resumes: every batch commits on its own."""
 
 import uuid
+from datetime import timedelta
 
 import pytest
 from sqlalchemy import text
@@ -216,3 +217,19 @@ async def test_a_tenant_being_erased_is_left_to_its_erasure(owner_sessionmaker, 
     await sql(owner_sessionmaker, "update tenants set status = 'erasing' where id = :t", t=ctx["t"])
     assert (await sweep.sweep_tenant(retention_sessionmaker, ctx["t"])).runs == 0
     assert await count(owner_sessionmaker, TREE_ROWS, r=old["root"]) > 0
+
+
+async def test_a_ticks_firing_record_goes_after_31_days_whatever_the_tenants_retention(
+    owner_sessionmaker, retention_sessionmaker
+) -> None:
+    """2b-4a M4: a tick's record of its own ids, the erasure's firing inventory, identifiers only: kept as long as
+    Temporal may keep the execution (the platform's longest namespace retention, 30 days, and a day), not by the
+    tenant's retention."""
+    ctx = await tenant(owner_sessionmaker, days=1)
+    firing = ("insert into schedule_firings (workflow_id, run_id, tenant_id, schedule_id, recorded_at) "
+              "values (:w, 'r', :t, :s, now() - cast(:age as interval))")  # fmt: skip
+    for name, age in (("old", timedelta(days=32)), ("kept", timedelta(days=2))):
+        await sql(owner_sessionmaker, firing, w=name, t=ctx["t"], s=uuid.uuid4(), age=age)
+    await sweep.sweep_tenant(retention_sessionmaker, ctx["t"])
+    async with owner_sessionmaker() as s:
+        assert set((await s.execute(text("select workflow_id from schedule_firings"))).scalars()) == {"kept"}

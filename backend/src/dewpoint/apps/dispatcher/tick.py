@@ -25,6 +25,9 @@ recorded one alerts once (`schedule_tick_expired`), when its transaction has com
 or an attempt rolled back.
 A platform-wide failure (the database, a key) raises, and the workflow retries it without limit (§2.5): a tick still
 unadmitted 10 minutes after its time alerts.
+Its first act, in a transaction of its own, records its workflow and run ids (`schedule_firings`), a skip included: an
+erasure's firing inventory (2b-4a M4). Past its tenant's insert fence the record is refused; the tick still skips, and
+alerts (`schedule_tick_unrecorded`).
 What the tick carries in Temporal is the tick contract's (`apps.tick_contract`), unsealed: its outcome is reduced to
 the contract's codes (`tick_contract.outcome`), its failures to its failure codes, and its request row records the
 rest."""
@@ -35,7 +38,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio import activity
 from temporalio.api.enums.v1 import TaskQueueType
@@ -170,11 +174,31 @@ async def admit_tick(
     return _outcome(admitted.request)
 
 
+_FIRING = text(
+    "INSERT INTO schedule_firings (workflow_id, run_id, tenant_id, schedule_id) SELECT :w, :r, :t, :s "
+    "WHERE EXISTS (SELECT 1 FROM schedules WHERE id = :s AND tenant_id = :t) ON CONFLICT DO NOTHING"
+)
+
+
 class Ticker:
     """`schedule.tick`, bound to the dispatcher's database and keys."""
 
     def __init__(self, sessionmaker: async_sessionmaker[AsyncSession], keys: KeySource) -> None:
         self.sessionmaker, self.keys = sessionmaker, keys
+
+    async def _recorded(self, tenant_id: uuid.UUID, schedule_id: uuid.UUID) -> None:
+        """This firing's ids, recorded once, whatever its outcome, if its tenant has the schedule it names (a tick of no
+        schedule fails right after, `schedule_unknown`); refused only past its tenant's insert fence."""
+        info = activity.info()
+        try:
+            async with self.sessionmaker() as s, s.begin():
+                await tenant_scope(s, tenant_id)
+                await s.execute(_FIRING, {"w": info.workflow_id, "r": info.workflow_run_id, "t": tenant_id,
+                                          "s": schedule_id})  # fmt: skip
+        except DBAPIError as e:
+            if getattr(e.orig, "sqlstate", None) != lifecycle.FENCED:
+                raise
+            log.error("schedule_tick_unrecorded", schedule_id=str(schedule_id))
 
     @activity.defn(name=TICK)
     async def tick(self, given: TickInput) -> str:
@@ -184,6 +208,7 @@ class Ticker:
                                    non_retryable=True)  # fmt: skip
         tenant_id, schedule_id = (uuid.UUID(part) for part in named)
         try:
+            await self._recorded(tenant_id, schedule_id)
             async with self.sessionmaker() as s, s.begin():
                 outcome = await admit_tick(s, self.keys, tenant_id=tenant_id, schedule_id=schedule_id, key=given.key)
             for expiry in s.info.pop(EXPIRED, []):  # committed: an attempt rolled back never gets here

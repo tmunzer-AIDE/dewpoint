@@ -6,7 +6,9 @@ What goes, once past the tenant's cutoff: a terminal root's whole tree (its runs
 secret index, and its request with its envelope, together), never while any run of it is running or its request is
 queued or starting; a terminal request that never started, with its inputs; a terminal event, its endpoint's and its
 tenant's retained counters freed under their rows' locks (the lock order: tenant, endpoint, counter, event). Whatever
-the cutoff: an expired upload, and a schedule's tombstone once the sync recorded Temporal's schedule gone.
+the cutoff: an expired upload, and a schedule's tombstone once the sync recorded Temporal's schedule gone. Not by the
+cutoff, and not counted: a tick's record of its own ids after 31 days (2b-4a M4; identifiers only, the erasure's firing
+inventory, kept while Temporal may keep its execution).
 
 One sweep runs at a time. Each batch counts what it deleted, in its own transaction, so a sweep that stops loses no
 count: resumed, it audits each active tenant once, with counts only, zero counts included. A sweep is recorded (start,
@@ -63,6 +65,11 @@ _TOMBSTONES = text(
     "DELETE FROM schedules WHERE id IN (SELECT id FROM schedules WHERE deleted_at IS NOT NULL "
     "AND synced_generation = generation ORDER BY id LIMIT :n) AND deleted_at IS NOT NULL "
     "AND synced_generation = generation"
+)
+FIRINGS_KEPT = timedelta(days=31)  # the platform's longest namespace retention, and a day
+_FIRINGS = text(
+    "DELETE FROM schedule_firings WHERE (workflow_id, run_id) IN (SELECT workflow_id, run_id FROM schedule_firings "
+    "WHERE recorded_at < statement_timestamp() - cast(:kept as interval) LIMIT :n)"
 )
 _LAG = text(
     "SELECT extract(epoch FROM greatest("
@@ -205,6 +212,13 @@ async def sweep_tenant(
             setattr(swept, kind, getattr(swept, kind) + done)
             if chosen == 0:
                 break
+    while True:
+        async with sessionmaker() as s, s.begin():
+            if not await _active(s, tenant_id):
+                return swept
+            pruned = (await s.execute(_FIRINGS, {"kept": FIRINGS_KEPT, "n": batch})).rowcount  # type: ignore[attr-defined]
+        if pruned < batch:
+            break
     async with sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant_id)
         swept.lag_s = float((await s.execute(_LAG, {"cutoff": await _cutoff(s, tenant_id)})).scalar_one())

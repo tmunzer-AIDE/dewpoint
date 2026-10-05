@@ -297,3 +297,42 @@ async def test_the_admission_queues_pollers_show_each_dispatchers_mark(server, d
             await asyncio.sleep(0.1)
         else:
             raise AssertionError(f"no marked poller among {found}")
+
+
+async def test_a_tick_records_its_own_ids_first_a_skip_included(
+    ready, owner_sessionmaker, dispatch_sessionmaker
+) -> None:
+    """2b-4a M4: each tick records its workflow and run ids as its first act, in a transaction of its own, so an
+    erasure's firing inventory finds every tick that ran, a skip included. Past its tenant's insert fence (the erasure
+    is deleting its executions) the record is refused: the tick still skips, and alerts."""
+    ctx, schedule_id = ready
+    ticker = tick.Ticker(dispatch_sessionmaker, KEYS)
+    workflow_id = schedule_workflow_id(str(ctx.tenant_id), str(schedule_id)) + "-2026-10-05T09:00:00Z"
+    key, stamp = tick.tick_key(str(schedule_id), datetime.now(UTC))
+    given = tick.TickInput(str(schedule_id), key, stamp)
+
+    async def ran(run_id: str) -> str:
+        env = environment(workflow_id)
+        env.info = dataclasses.replace(env.info, workflow_run_id=run_id)
+        return str(await env.run(ticker.tick, given))
+
+    async def recorded() -> list[tuple[str, str, uuid.UUID]]:
+        async with owner_sessionmaker() as s:
+            found = await s.execute(
+                text("select workflow_id, run_id, schedule_id from schedule_firings order by run_id")
+            )
+            return [tuple(row) for row in found]
+
+    assert await ran("run-1") == "queued"
+    assert await ran("run-1") == "queued"  # a retry of the same run finds its request, and records nothing more
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("update tenants set status = 'erasing' where id = :t"), {"t": ctx.tenant_id})
+    assert await ran("run-2") == "skipped:tenant_erasing"
+    assert await recorded() == [(workflow_id, "run-1", schedule_id), (workflow_id, "run-2", schedule_id)]
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("insert into tenant_erasures (tenant_id, requested_by, step) values (:t, :u, 60)"),
+                        {"t": ctx.tenant_id, "u": uuid.uuid4()})  # fmt: skip
+    with structlog.testing.capture_logs() as logs:
+        assert await ran("run-3") == "skipped:tenant_erasing"
+    assert [e["event"] for e in logs if e["log_level"] == "error"] == ["schedule_tick_unrecorded"]
+    assert len(await recorded()) == 2

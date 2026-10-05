@@ -7,16 +7,18 @@ fresh describe shows its marker and a transaction confirms that the row still ha
 holds the leadership; a marker absent or different leaves it queued. A deletion is recorded only once the schedule's
 absence is seen a call deadline after it, and a tick that finds a tombstone queues it again."""
 
+import asyncio
+import dataclasses
 import uuid
 from collections.abc import AsyncIterator
-from datetime import timedelta
+from datetime import UTC, timedelta
 from typing import Any
 
 import pytest
 from sqlalchemy import text
 from temporalio.api.workflowservice.v1 import DescribeScheduleRequest, UpdateScheduleRequest
 from temporalio.client import ScheduleActionStartWorkflow
-from temporalio.service import RPCStatusCode
+from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import WorkflowEnvironment
 
 from dewpoint.apps import schedules
@@ -26,6 +28,7 @@ from dewpoint.engine.runtime.ids import schedule_workflow_id
 from tests.apps.test_admission import KEYS, TOKEN, current, published
 from tests.apps.test_runs import rpc
 from tests.apps.test_workflow_ops import update as update_workflow
+from tests.core.erasure.test_writers import erase, erasing_first, waiting
 from tests.support.keys import FIXTURE_CONVERTER
 
 pytestmark = pytest.mark.usefixtures("development_deployment")
@@ -323,3 +326,115 @@ async def test_the_synced_action_carries_nothing_and_a_legacy_one_its_key_versio
     start = (await in_temporal(server, ctx, schedule_id)).schedule.action.start_workflow
     assert list(start.input.payloads) == [] and not start.HasField("workflow_execution_timeout")
     assert (await stored(owner_sessionmaker, schedule_id))["action_key_version"] is None
+
+
+# 2b-4a M4: schedules created paused (D3f), and the sync fenced by the tenant's lifecycle lock.
+
+
+async def test_a_new_schedule_is_created_paused_and_unpaused_only_by_a_token_bearing_update(
+    server, ready, owner_sessionmaker, dispatch_sessionmaker, monkeypatch
+) -> None:
+    """A create lands paused; only an update carrying the schedule's conflict token unpauses it, so a late create
+    fires nothing, and an erasure's verified pause makes every unpause sent before it stale (the 2b-4 outline)."""
+    ctx, _, schedule_id = ready
+
+    async def lost(*_: Any, **__: Any) -> None:
+        raise rpc(RPCStatusCode.DEADLINE_EXCEEDED)
+
+    monkeypatch.setattr(schedule_sync, "_update", lost)
+    with pytest.raises(RPCError):
+        await sync(server, dispatch_sessionmaker, ctx, schedule_id)
+    found = await in_temporal(server, ctx, schedule_id)
+    assert (found.schedule.state.paused, found.schedule.state.notes) == (True, schedule_sync.CREATED)
+    assert (await stored(owner_sessionmaker, schedule_id))["synced_generation"] == 0
+    monkeypatch.undo()
+    assert await sync(server, dispatch_sessionmaker, ctx, schedule_id) == "synced"
+    found = await in_temporal(server, ctx, schedule_id)
+    assert (found.schedule.state.paused, found.schedule.state.notes) == (False, "dewpoint generation 1")
+
+
+async def test_firings_due_while_a_new_schedule_waited_paused_are_counted_audited_and_alerted(
+    server, ready, owner_sessionmaker, dispatch_sessionmaker, monkeypatch
+) -> None:
+    """D3f (the owner's ruling): a firing due between the paused create and the unpause is missed, recorded and
+    surfaced, never hidden by shifting the schedule's start. Temporal neither catches it up nor counts it (its contract
+    test), so the sync counts the times Temporal's own spec matches between the schedule's creation and its unpause.
+    Here the create is read back as three minutes older than it is, so the schedule (every minute) waited through
+    about three firings."""
+    import structlog
+
+    ctx, _, schedule_id = ready
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("update schedules set cron = null, every_s = 60 where id = :i"), {"i": schedule_id})
+
+    async def lost(*_: Any, **__: Any) -> None:
+        raise rpc(RPCStatusCode.DEADLINE_EXCEEDED)
+
+    monkeypatch.setattr(schedule_sync, "_update", lost)
+    with pytest.raises(RPCError):
+        await sync(server, dispatch_sessionmaker, ctx, schedule_id)
+    monkeypatch.undo()
+    real = schedule_sync.described
+
+    async def older(client: Any, temporal_id: str) -> Any:
+        found = await real(client, temporal_id)
+        if found is not None and found.note == schedule_sync.CREATED:
+            return dataclasses.replace(found, created_at=found.created_at - timedelta(minutes=3))
+        return found
+
+    monkeypatch.setattr(schedule_sync, "described", older)
+    with structlog.testing.capture_logs() as logs:
+        assert await sync(server, dispatch_sessionmaker, ctx, schedule_id) == "synced"
+    after = await in_temporal(server, ctx, schedule_id)
+    created = after.info.create_time.ToDatetime(UTC) - timedelta(minutes=3)
+    unpaused = after.info.update_time.ToDatetime(UTC)
+    expected = int(unpaused.timestamp() // 60) - int(created.timestamp() // 60)  # every minute, from the epoch
+    row = await stored(owner_sessionmaker, schedule_id)
+    assert row["creation_misses"] == expected >= 3
+    assert [(e["event"], e.get("missed")) for e in logs if e["log_level"] == "error"] == [
+        ("schedule_firings_missed", expected)
+    ]
+    async with owner_sessionmaker() as s:
+        audit = (await s.execute(text("select details from audit_log where action = 'schedule.missed'"))).scalar_one()
+    assert audit == {"schedule_id": str(schedule_id), "missed": expected, "while": "created_paused"}
+    assert await sync(server, dispatch_sessionmaker, ctx, schedule_id) == "synced"  # counted once
+    assert (await stored(owner_sessionmaker, schedule_id))["creation_misses"] == expected
+
+
+async def test_a_sync_holding_its_read_commits_its_create_before_step_1(
+    server, ready, owner_sessionmaker, api_sessionmaker, dispatch_sessionmaker, monkeypatch
+) -> None:
+    """The sync holds its transaction, with the tenant's lifecycle lock shared, from its read through its Temporal
+    write: step 1 waits for it. Its create lands first; the next pass, the tenant erasing, pauses the schedule (step 3
+    then deletes it)."""
+    ctx, _, schedule_id = ready
+    started: list[asyncio.Task[None]] = []
+
+    async def step_1_meanwhile() -> None:
+        started.append(asyncio.create_task(erase(api_sessionmaker, ctx.tenant_id)))
+        await waiting(owner_sessionmaker)
+        assert not started[0].done()
+
+    monkeypatch.setattr(schedule_sync, "_after_read", step_1_meanwhile)
+    assert await sync(server, dispatch_sessionmaker, ctx, schedule_id) == "synced"
+    await started[0]
+    assert (await in_temporal(server, ctx, schedule_id)).schedule.state.paused is False
+    monkeypatch.undo()
+    assert await sync(server, dispatch_sessionmaker, ctx, schedule_id) == "synced"  # generation raised by step 1
+    assert (await in_temporal(server, ctx, schedule_id)).schedule.state.paused is True
+
+
+async def test_a_sync_after_step_1_waits_and_never_creates(
+    server, ready, owner_sessionmaker, api_sessionmaker, dispatch_sessionmaker, monkeypatch
+) -> None:
+    ctx, _, schedule_id = ready
+    erasing, hold = await erasing_first(api_sessionmaker, ctx.tenant_id, monkeypatch)
+    syncing = asyncio.create_task(sync(server, dispatch_sessionmaker, ctx, schedule_id))
+    try:
+        await waiting(owner_sessionmaker)
+    finally:
+        hold.set()
+        await erasing
+    assert await syncing == "synced"  # nothing to bring to a tenant being erased: it only pauses or deletes
+    with pytest.raises(RPCError, match="not found|NotFound|NOT_FOUND"):
+        await in_temporal(server, ctx, schedule_id)

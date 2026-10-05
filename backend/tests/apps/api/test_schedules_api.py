@@ -177,3 +177,19 @@ async def test_only_the_timings_kind_may_be_patched_to_null(
     answer = await editor.patch(schedule_url(ctx, created["id"]), json={field: None})
     assert (answer.status_code, answer.json()["error"]) == (422, "invalid")
     assert (await row(owner_sessionmaker, created["id"]))["generation"] == 1
+
+
+async def test_a_schedules_missed_count_includes_the_firings_it_missed_while_created_paused(
+    keyed_app, workflow, owner_sessionmaker, api_settings
+) -> None:
+    """D3f (the owner's ruling): missed firings are surfaced, those Temporal skipped past the catch-up window and
+    those due while the schedule, created paused, waited for its unpause (2b-4a M4)."""
+    ctx, wf = workflow
+    editor = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
+    created = (await editor.post(schedules_url(ctx, wf), json=BODY)).json()
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(
+            text("update schedules set misses = 2, creation_misses = 3 where id = :i"), {"i": created["id"]}
+        )
+    shown = (await editor.get(schedule_url(ctx, created["id"]))).json()
+    assert (shown["misses"], shown["missed_while_created"]) == (5, 3)

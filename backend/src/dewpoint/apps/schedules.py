@@ -260,7 +260,8 @@ def body(schedule: Schedule) -> dict[str, object]:
         "enabled": schedule.enabled,
         "generation": schedule.generation,
         "synced_generation": schedule.synced_generation,
-        "misses": schedule.misses,
+        "misses": schedule.misses + schedule.creation_misses,  # every firing missed, both kinds (D3f)
+        "missed_while_created": schedule.creation_misses,  # due while it waited, created paused, for its unpause
         "sync_error": schedule.sync_error,
         "created_at": schedule.created_at.isoformat(),
         "updated_at": schedule.updated_at.isoformat(),

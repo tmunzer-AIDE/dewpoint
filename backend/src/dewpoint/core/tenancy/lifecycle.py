@@ -9,6 +9,8 @@ import uuid
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+FENCED = "DPE01"  # the SQLSTATE of an insert refused by the erasure's fence (migration 0040)
+
 
 class TenantNotActiveError(Exception):
     """The tenant isn't active (erasing, or erased): it takes no new write. The message is fixed."""
