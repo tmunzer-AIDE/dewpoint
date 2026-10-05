@@ -507,7 +507,7 @@ plan or either production gate's lift.
 | D10 | 2b-3b's deferred ingress minors | (1) the matcher's endless retry: with §7.9's bounded retry and alerting (2b-4b M2); (2) the guide's warning about an empty `DEWPOINT_INGRESS_TRUSTED_PROXIES` behind a proxy: a doc fix (2b-4b M4); (3) changing `events_pointer` after deliveries changes deduplication: it becomes fixed at creation, like the id source, and a different grouping needs a new endpoint (2b-4a M1); an intentional contract change in revision 10 (§8.3), tested at the API and the database role; (4) the recording function not checking a blob's embedded key version: an added predicate (2b-4a M3). |
 | D11 | The operator's identity | `enable-` and `disable-production-runs` record the operator: an admin login (an identity the platform knows) rather than the OS user. The mechanism is the owner's choice. |
 | D12 | Production Temporal | **Approved as a proof candidate (2026-10-05):** self-hosted Temporal with a fail-closed custom authorizer, every change path proven; mTLS-only and bearer-token-only proven separately; D12b ruled (database administrators inside the operator boundary, restricted and audited); Temporal Cloud unsupported as documented; `golang`, `temporalio/admin-tools` and a minimal runtime base approved. |
-| D13 | Mist webhooks | Supported in production only if a real Mist delivery confirms the bearer-header path. Otherwise the guide says Mist webhooks are unsupported in production: Mist signs the body alone, without a timestamp, so the timestamped HMAC scheme is no substitute for it. |
+| D13 | Mist webhooks | **Resolved (2026-10-05), from Mist's webhook guides and the owner:** an `http-post` webhook takes any custom header the Mist admin configures (Mist's security guide: custom headers "for additional authentication layers"), `Authorization` included, and Mist doesn't restrict them; so the bearer path works when the admin adds `Authorization: Bearer <token>`, optional on Mist's side. The guide documents that, replacing 2b-3b's "unverified" note, and its setup check uses Mist's Ping API and its 30-day Deliveries history (which shows the headers Mist sent). Mist's own signature, `X-Mist-Signature-v2` (HMAC-SHA256 of the body, no documented timestamp or replay protection), isn't accepted by Dewpoint's timestamped HMAC, which is no substitute for it; supporting it natively stays a later decision. Also from the guides: Mist publishes its webhook source addresses (for an endpoint's allowlist) and batches a topic's events into one message; its retry policy, timeout and event ids aren't documented, so an endpoint without an id source stays at-least-once. |
 | D14 | Ingress in production | As "Ingress in production" above: its own audited switch for first activation; the runs gate turning off keeps recording events (§2.5). |
 
 **§7.9's items (D8), proposed:**
@@ -525,7 +525,8 @@ plan or either production gate's lift.
 - *Matching scaling with dispatchers:* D9.
 - *Ingress's limits:* production values from measurements with a real Temporal and up to twenty bindings, or the
   development values kept with the owner's risk decision; 2b-4b M2.
-- *Mist's bearer token:* D13 (unsupported in production unless a real delivery confirms it).
+- *Mist's bearer token:* resolved (D13): a custom `Authorization` header the Mist admin configures, documented in
+  the guide.
 - *The Compose proofs:* the run, the schedule and the webhook have passed in CI; they stay required on every PR.
 
 ## Open and separate
