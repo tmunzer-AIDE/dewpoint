@@ -29,12 +29,14 @@ weight unless stated.
   RunGraph against local fakes.
 - **3a-2 Plugin calls and connection types:** `options()`/`verify()` (D3); connection types from manifests (D11),
   `mist` leaving `core` with its shape unchanged; flow completion (D19). Proof: a site picker end to end.
-- **3b Mist:** client and OAS (D1, D2), node types generated per curated operation (§5, D23, D24), any endpoint (D14),
-  nested update (D15), errors and side effects (D16), simulate (D13), options, the webhook trigger (D17).
+- **3b-1 Mist REST:** client and OAS (D1, D2), node types generated per curated operation (§5, D23, D24), any endpoint
+  (D14), nested update (D15), errors and side effects (D16), simulate (D13), options, the webhook trigger (D17).
+- **3b-2 Mist device utilities:** `ctx.ws`, the guarded websocket (D26), and one node per device utility, streamed
+  (D27). Proof: a ping and a bounce-port node against a local stream fake.
 - **3c Messaging:** the message model for Slack, Teams, Google Chat and webhooks (D18); SMTP (D20); syslog (D21).
 - **3d ITSM:** PagerDuty and ServiceNow (D22).
 
-Order: 3a-1, 3a-2, 3b, 3c, 3d; 3c and 3d need only 3a, so either can precede 3b.
+Order: 3a-1, 3a-2, 3b-1, 3b-2, 3c, 3d; 3c and 3d need only 3a, so either can precede 3b.
 
 ## 3. Decisions (recommendation first)
 
@@ -104,7 +106,8 @@ another.
 `blocked_until`), one `UPDATE … RETURNING` per request; an empty bucket waits up to 10 s (heartbeating), then
 `RetryableError("rate_limited")`. Mist allows 5,000 calls/hour per token, and its 429 carries `Retry-After` (**V**
 `guides/api-requests/rate-limit.md`; two pages say per organization). Defaults (a §15 item): Mist capacity 50, refill
-1.25/s; Slack and Google Chat 1/s (**V**: per channel, per space; both answer 429).
+1.25/s, and Mist streams 1,800 connections an hour (D26); Slack and Google Chat 1/s (**V**: per channel, per space;
+both answer 429).
 
 **D10 `Retry-After` without an ABI bump.** A 429, or a 503 with `Retry-After`, means not processed: waits up to 20 s
 happen inside the attempt; a longer one sets the bucket's `blocked_until` (capped at 1 h), holding every run on that
@@ -112,13 +115,14 @@ connection, and raises `RetryableError`. Alternative: RunGraph honours it, at th
 histories and republishing every workflow.
 
 **D11 Connection types from manifests.** A type declares key, label, config schema, secret schema (secret fields
-`x-sensitive`), auth (D4), host rule and whether it has `verify()`. Hosts: Mist its 12 clouds (**V** OAS `servers`);
-Google Chat `chat.googleapis.com` (**V**); Slack and Teams free under D7 until 3c verifies a pattern; the rest free
-under D7 and D8. The API validates by schema only; an unknown type is refused until `plugins sync` ran.
+`x-sensitive`), auth (D4), host rule and whether it has `verify()`. Hosts: Mist its 12 clouds (**V** OAS `servers`)
+and their stream hosts (D26); Google Chat `chat.googleapis.com` (**V**); Slack and Teams free under D7 until 3c
+verifies a pattern; the rest free under D7 and D8. The API validates by schema only; an unknown type is refused until
+`plugins sync` ran.
 
-**D12 SDK 0.2.0, additive.** `ctx.connection()`, `ctx.http`, `ctx.net`, `Node.options()`, connection-type `verify()`;
-manifest keys `connection_types`, `triggers`, `icon` and `options` fields, each emitted only when set so flow@1's
-hashes don't move; `icon` joins `_DISPLAY`.
+**D12 SDK 0.2.0, additive.** `ctx.connection()`, `ctx.http`, `ctx.net`, `ctx.ws` (D26), `Node.options()`,
+connection-type `verify()`; manifest keys `connection_types`, `triggers`, `icon` and `options` fields, each emitted
+only when set so flow@1's hashes don't move; `icon` joins `_DISPLAY`.
 
 **D13 Simulate never sends.** Mist returns the 2xx OAS example (**V**: 677 of 807 operations have one), else a value
 synthesized from the schema, labelled a fixture. Messaging and ITSM return the exact request, secrets masked, and a
@@ -192,27 +196,57 @@ op, and device upgrade, are the first candidates afterwards (both `ambiguous`).
 chain from 0034 while 2b-4a holds 0035–0040; whichever merges second re-points its first `down_revision` to the
 other's head (linear history). Never autogenerate.
 
+**D26 `ctx.ws`: a guarded websocket (added 2026-10-05 for device utilities).** wss only. The guard resolves, vets and
+pins (D7) and hands the connected socket to `websockets` (`sock=`, `server_hostname=` for SNI and the certificate,
+`proxy=None`; its default `proxy=True` reads proxy settings from the environment; **V** installed 17.1
+`websockets/asyncio/client.py`). The runtime applies the connection type's auth header (D4). Limits: opening 5 s, 1
+MiB a message, 10 MiB an attempt, a duration within the step timeout; pings every 60 s with a 45 s timeout; the
+attempt heartbeats while it reads; one connection per call, never shared. Mist (**V** docs `guides/websockets/hosts`,
+`best-practices`, `rate-limits`): host = the REST host with `api.` → `api-ws.`, path `/api-ws/v1/stream`,
+`Authorization: Token`; `{"subscribe": channel}` is answered `channel_subscribed` or `subscribe_failed`; a data
+message's `data` may be an object or a JSON string, itself possibly another envelope, so it's decoded strictly and
+bounded. Per token: 2,000 connections an hour and 2,000 channels a connection, a 429 past them, so opening a stream
+takes a token from a second bucket on the connection (D9; default 1,800/h). **Needs approval:** `websockets` 17.1
+(BSD-3-Clause, **V**), already in `uv.lock` through `uvicorn[standard]`, becomes a direct dependency; the alternative,
+wsproto, is a new package. Stream channels as run triggers (long-lived subscriptions) stay out of scope: they'd need a
+subscriber process like ingress.
+
+**D27 Device utilities.** One node type per utility (appendix: 19 diagnostic, 11 disruptive, 13 held back; all **V**
+in the OAS); config is the connection, site, device, the OAS body and stream limits. Whether one streams comes from
+its OAS 200 response: a `session` means output on `/sites/{site_id}/devices/{device_id}/cmd` (**V** docs samples); an
+empty one means REST only. A streaming node subscribes, waits for `channel_subscribed` (10 s; a failure before the
+POST is retryable, nothing was sent), POSTs, and keeps only messages whose `data.session` matches, buffering early
+ones; mistapi does the reverse (trigger first, `__ws_wrapper.py`) and can miss output. It ends on a table command's
+`"finished": true` in `raw` (**V** docs sample), else after idle 10 s, 30 s without a first message, or its max (as
+mistapi: `__ws_wrapper.py:300-320`; ping, traceroute and cable test document no marker), and outputs `{session, lines,
+ended_by, truncated}`, ANSI stripped. Diagnostic: new capability `mist.diagnose`, idempotent. Disruptive:
+`mist.write`, ambiguous (`outcome_unknown` once the POST may have left). Held back besides shells, the ZTP password,
+config dumps and firmware or reprovision actions: monitor traffic, top and clear policy hit count, which answer a
+second `wss://…?jwt=` URL whose protocol is undocumented (**V**); that JWT is a credential and is never stored.
+
 ## 4. Dependencies, images, tests
 
-Nothing new: httpx 0.28.1, httpcore 1.0.9, jsonschema, cryptography and respx are locked; the Mist OAS is vendored
-data (MIT). Tests make no real external calls: SSRF through an injected resolver (rebinding as two answers) and local
-HTTP/TLS servers behind test allowlist entries; respx; asyncio SMTP and syslog fakes; contract tests (parent §12). A
-read-only Mist smoke against a test org happens only with the owner's say, at 3b's checkpoint.
+One dependency for approval: `websockets` 17.1 becomes direct (D26). Otherwise nothing new: httpx 0.28.1, httpcore
+1.0.9, jsonschema, cryptography and respx are locked; the Mist OAS is vendored data (MIT). Tests make no real external
+calls: SSRF through an injected resolver (rebinding as two answers) and local HTTP/TLS servers behind test allowlist
+entries; respx; asyncio SMTP and syslog fakes; contract tests (parent §12). A read-only Mist smoke against a test org
+happens only with the owner's say, at 3b's checkpoint.
 
 ## 5. Initial curated Mist resources
 
-262 operations over 54 resources, every operationId **V** and none deprecated, listed with method and path in
-`2026-10-05-plugins-3-mist-resources.md` (generated from the OAS by a script that fails on a missing or deprecated
-id). It includes the owner's additions of 2026-10-05. **Org scope:** org, sites, site groups, device search, inventory
-(read), WLANs, WLAN templates, network / RF / gateway / site templates, device profiles, PSKs, networks, services,
-service and security policies, IDP / AAMW / SecIntel profiles, NAC rules and tags, user MACs, guests, assets and asset
-filters, Mist Edges, clusters and tunnels, WxRules, WxTags, alarm templates, alarms (search, ack), clients and events
-(wireless, wired, NAC, WAN, devices, Mist Edges; search and count), audit logs (`listOrgAuditLogs`, not the deprecated
-`/logs`), stats, webhooks and topics. **Site scope:** site, settings, devices (list, get, update, restart), WLANs,
-PSKs, maps, map stacks, assets, asset filters, WxRules (and derived), WxTags, Mist Edges (and events), clients (four
-kinds), rogues, insights, stats. Full CRUD where the OAS has it. Pagination (**V**
-`guides/api-requests/pagination.md`): lists use `limit`/`page` (at most 1,000) and `X-Page-*` headers; searches follow
-the body's `next`, checked to stay on the connection's host and path; every list node takes a page cap.
+262 REST operations over 54 resources and 30 device utilities (D27), every operationId **V** and none deprecated,
+listed with method and path in `2026-10-05-plugins-3-mist-resources.md` (generated from the OAS by a script that fails
+on a missing or deprecated id). It includes the owner's additions of 2026-10-05. **Org scope:** org, sites, site
+groups, device search, inventory (read), WLANs, WLAN templates, network / RF / gateway / site templates, device
+profiles, PSKs, networks, services, service and security policies, IDP / AAMW / SecIntel profiles, NAC rules and tags,
+user MACs, guests, assets and asset filters, Mist Edges, clusters and tunnels, WxRules, WxTags, alarm templates,
+alarms (search, ack), clients and events (wireless, wired, NAC, WAN, devices, Mist Edges; search and count), audit
+logs (`listOrgAuditLogs`, not the deprecated `/logs`), stats, webhooks and topics. **Site scope:** site, settings,
+devices (list, get, update, restart), WLANs, PSKs, maps, map stacks, assets, asset filters, WxRules (and derived),
+WxTags, Mist Edges (and events), clients (four kinds), rogues, insights, stats. Full CRUD where the OAS has it.
+Pagination (**V** `guides/api-requests/pagination.md`): lists use `limit`/`page` (at most 1,000) and `X-Page-*`
+headers; searches follow the body's `next`, checked to stay on the connection's host and path; every list node takes a
+page cap.
 
 ## 6. Process
 
