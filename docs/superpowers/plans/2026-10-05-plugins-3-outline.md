@@ -66,17 +66,20 @@ refuses what it doesn't describe.
 
 **D3 Plugin code outside runs — C: a DB-mediated call served by the worker.** The API checks `connection.use` and
 inserts a `plugin_calls` row: tenant, kind, node ref or connection type, field, connection id and the
-`connection.revision` it read, query, `expires_at` (now + 30 s); then notifies. A worker claims it by setting
-`claimed_by` and `lease_until` (15 s) under `SKIP LOCKED`, only for refs its build has; a lapsed lease is claimable
-again, which is safe because plugin calls are read-only: in this context `ctx.http`/`ctx.ws` refuse anything but GET
-and HEAD, so verify never sends a message (webhook-URL types get a host and syntax check only). The worker runs the
-hook from the row alone and writes the result, encrypted under the tenant key, with `UPDATE … WHERE id = :id AND
-claimed_by = :me AND state = 'claimed'`; a row the caller has abandoned or deleted takes nothing, so a late result is
-discarded. The API waits up to 10 s, then deletes the row; a worker sweep deletes expired ones. A verify result is
-applied as today, by compare-and-set on the revision it verified (`core/connections/service.py`), and a changed
-revision discards it. Rejected: A, the API starts workflows (its Temporal credentials could then start `RunGraph`
-around admission and the gate; Temporal OSS has no per-type authorization); B, the dispatcher starts one (a new
-workflow-id kind, codec context, latency). Cost: the spec's "options activities" become worker-side calls.
+`connection.revision` it read, query, `expires_at` (now + 30 s); then notifies. A worker claims it under `SKIP
+LOCKED`, only for refs its build has, by writing a fresh random `claim_token` and `lease_until` (15 s). Acceptance is
+fenced: the result is written, encrypted under the tenant key, only by `UPDATE … WHERE id = :id AND claim_token =
+:token AND lease_until > now() AND expires_at > now() AND state = 'claimed'`, so an earlier execution of the same
+worker, a lapsed lease, an expired call or a row the caller abandoned takes nothing. The API applies only an accepted
+result, and a verify result additionally by compare-and-set on the revision it verified
+(`core/connections/service.py`, as today). The API waits up to 10 s, then deletes the row; a worker sweep deletes
+expired ones. Reclaiming a lapsed lease is safe because hooks outside runs are read-only by construction: they get
+`ctx.http` limited to GET and HEAD, never `ctx.ws` (a websocket's handshake is a GET but its frames can command) nor
+`ctx.net`; any other protocol goes through an explicitly read-only adapter (for example an SMTP probe: connect, EHLO,
+STARTTLS, AUTH, QUIT, never MAIL). Verify for webhook-URL types is a host and syntax check only. Rejected: A, the API
+starts workflows (its Temporal credentials could then start `RunGraph` around admission and the gate; Temporal OSS has
+no per-type authorization); B, the dispatcher starts one (a new workflow-id kind, codec context, latency). Cost: the
+spec's "options activities" become worker-side calls.
 
 **D4 `ctx.connection(id)` in a run.** Allowed ids are only the literal connection fields of this step's node in the
 run's version graph, read from the DB by run id (a subset of `connection_ids`). The row's tenant must be the
@@ -112,14 +115,16 @@ another.
 
 **D9 Rate buckets, keyed by the provider's quota scope.** `rate_buckets` (tenant, scope key, capacity, refill/s,
 tokens, `refilled_at`, `blocked_until`); a request takes one token from every bucket its connection type names, in one
-`UPDATE … RETURNING` in key order; an empty bucket waits up to 10 s (heartbeating), then
-`RetryableError("rate_limited")`. Scopes, so connections sharing credentials share budgets: Mist charges a token scope
-(an HMAC of the token under the tenant's key, never the token) and an org scope (cloud, `org_id`), because the docs
-say 5,000 calls an hour per token in one place and per organization in two others (**V**
-`guides/api-requests/rate-limit.md`; unresolved, kept so until verified); its streams charge a third (D26).
-Coordination stays within a tenant: a shared bucket across tenants would reveal that two tenants hold one token.
-Defaults (a §15 item): Mist 50 burst, 1.25/s for both scopes; Slack and Google Chat 1/s per webhook URL scope (**V**:
-per channel, per space).
+`UPDATE … RETURNING` in key order; an empty bucket waits up to 10 s (heartbeating), then fails `cooldown` (D10).
+Scopes follow the documented quota, so connections and URLs sharing it share a budget. Mist: a token scope (an HMAC of
+the token under the tenant's key, never the token) and an org scope (cloud, `org_id`), because the docs say 5,000
+calls an hour per token in one place and per organization in two others (**V** `guides/api-requests/rate-limit.md`;
+unresolved, kept so until verified); its streams charge a third (D26). Google Chat: per space, the space id read from
+the webhook URL's `spaces/{space}` path (**V** quickstart URL format; 1/s per space). Slack: per channel (**V**), but
+a webhook URL doesn't name its channel, so the scope is the workspace from the URL if 3c verifies its format, else one
+Slack scope per tenant: under-using the quota, never exceeding it. Coordination stays within a tenant: a bucket shared
+across tenants would reveal that two tenants hold one token. Defaults (a §15 item): Mist 50 burst and 1.25/s per
+scope; Slack and Google Chat 1/s.
 
 **D10 Rejections, `Retry-After` and long cooldowns, without an ABI bump.** A status code never makes an ambiguous send
 retryable by itself: a 503 with `Retry-After`, or a 429, doesn't prove the request wasn't applied upstream. A
@@ -127,11 +132,14 @@ connection type may list, per operation, answers its provider documents as rejec
 verified yet, so an ambiguous node meeting 429 or 5xx after sending is `outcome_unknown` (cost if wrong: such a write
 needs a person instead of a retry; the buckets keep it rare). Idempotent, keyed and reconcilable nodes retry 429 and
 5xx under their policy, honouring `Retry-After`: up to 20 s inside the attempt; longer sets the scope's
-`blocked_until` (capped at 1 h) and raises `RetryableError("rate_limited")`. An attempt that starts before
-`blocked_until` fails fast without calling the provider; when the attempts run out, the step fails `rate_limited` and
-follows its error policy. That failure is intentional in 3a: a five-minute cooldown can outlast three attempts.
-Durable deferral, RunGraph sleeping until `blocked_until`, needs ENGINE_ABI 7, new golden histories and republishing
-every workflow, so it's proposed separately, not built here.
+`blocked_until` (capped at 1 h). Two codes keep attempts apart: `rate_limited` means the provider answered this
+attempt 429 or 503; `cooldown` means this attempt sent nothing because the scope is blocked. Each attempt's own row
+keeps its outcome, so an earlier `outcome_unknown` is never hidden by a later `cooldown`. When attempts run out the
+step fails and follows its error policy, deliberately in 3a: a five-minute cooldown can outlast three attempts. The
+deadline is shown on the connection's status (each scope's `blocked_until`), not in step messages: 2b §6.7 withholds
+computed text, and a typed per-step field would change the projection. Durable deferral (RunGraph sleeping until
+`blocked_until`, with that field) needs ENGINE_ABI 7, new golden histories and republishing every workflow, so it's
+proposed separately.
 
 **D11 Connection types from manifests.** A type declares key, label, config schema, secret schema (secret fields
 `x-sensitive`), auth (D4), host rule and whether it has `verify()`. Hosts: Mist its 12 clouds (**V** OAS `servers`)
@@ -147,14 +155,18 @@ only when set so flow@1's hashes don't move; `icon` joins `_DISPLAY`.
 synthesized from the schema, labelled a fixture. Messaging and ITSM return the exact request, secrets masked, and a
 fixture output.
 
-**D14 Any endpoint: two nodes with static policies.** RunGraph decides a lost or timed-out attempt's retry from the
-manifest's static `side_effect` (`execution.py:1567`), so one generic node can't pick it per method. `mist.api.read`:
-GET only, side effect none. `mist.api.write`: any other method, always `ambiguous`; an operation verified idempotent
-is reached through its curated node instead. Both: the method and path must match an OAS operation the policy map
-(D28) allows for that node; path parameters are format-checked and URL-encoded; `org_id` comes from the connection,
-and a `site_id` must belong to it (one `GET /sites/{id}` per attempt). The body is checked against the OAS; the output
-is undeclared, so claimed whole with taint. Capabilities: `mist.read` and `mist.write`; the OAS has no
-machine-readable privileges (**V**: no operation-level `x-`).
+**D14 Any endpoint: two nodes with static policies, inside the connection's scope.** RunGraph decides a lost or
+timed-out attempt's retry from the manifest's static `side_effect` (`execution.py:1567`), so one generic node can't
+pick it per method. `mist.api.read`: GET only, side effect none. `mist.api.write`: any other method, always
+`ambiguous`; an operation verified idempotent is reached through its curated node instead. OAS membership and the
+method authorize nothing by themselves. Both nodes reach only an operation the policy map (D28) allows for that node,
+whose path also passes the scope rule: under `/api/v1/orgs/{org_id}/` with the connection's org forced; under
+`/api/v1/sites/{site_id}/` with a site checked to belong to that org (one `GET /sites/{id}` per attempt); or in an
+explicitly approved list of constants and metadata (for example `/api/v1/const/…`). Always refused, whatever the map
+says: `/api/v1/msps/…`, `/api/v1/self/…`, login, logout, register, recover and other account or authentication routes,
+installer and invite routes, and anything outside `/api/v1`. Path parameters are format-checked and URL-encoded; the
+body is checked against the OAS; the output is undeclared, so claimed whole with taint. Capabilities: `mist.read` and
+`mist.write`; the OAS has no machine-readable privileges (**V**: no operation-level `x-`).
 
 **D15 Nested update.** Mist's PUT is a top-level merge: an omitted scalar is kept, an included object or array
 replaces that structure whole (**V** Juniper `restful-api-overview`, `updateSiteInfo`). Merge with current (default)
@@ -237,37 +249,43 @@ takes a token from the token's stream scope (D9; default 1,800/h). **Needs appro
 wsproto, is a new package. Stream channels as run triggers (long-lived subscriptions) stay out of scope: they'd need a
 subscriber process like ingress.
 
-**D27 Device utilities.** One node type per utility (appendix: 19 diagnostic, 11 disruptive, 13 held back; each
-operation exists and isn't deprecated in the OAS, **V**; its shape and retry safety are verified into the policy map
-in 3b). Whether one streams comes from its OAS 200 response: a `session` means output on
-`/sites/{site_id}/devices/{device_id}/cmd` (**V** docs samples); an empty one means REST only. Buffering contract: the
-node subscribes and waits for `channel_subscribed` (10 s; a failure before the POST is retryable, nothing was sent),
-POSTs, and buffers every data message (at most 256 messages and 1 MiB) until the answer names the `session`; it then
-keeps buffered and later messages whose `data.session` matches and discards the rest, and a message without a session
-is discarded, never accepted. A streaming operation whose answer has no `session` fails closed: diagnostic
-`mist.no_session`, disruptive `outcome_unknown`; so does a buffer overflow. Output: `{accepted, session, lines,
-received, ended_by, completion_known, truncated}`, ANSI stripped; `ended_by` is `finished` (a table command's
-`"finished": true` in `raw`, **V** docs sample), `idle` (10 s), `max_duration`, `cancelled` or `stream_lost`, and
-`completion_known` is true only for `finished`, so silence is never reported as completion. No first message within 30
-s fails `mist.no_output`, never an empty success. Retrigger safety is per operation with evidence (D28): proposed
-`idempotent` only for read-only CLI commands (`show_*`, ping, traceroute, arp, resolve_dns, service_ping), everything
-else `ambiguous`; disruptive ones need `mist.write`, diagnostic ones a new `mist.diagnose`. Heartbeat on every message
-and at least every 10 s, which is how Temporal delivers a cancel; RunGraph sets no heartbeat timeout (start-to-close
-only), so a lost worker shows only at the step timeout, and adding one would change commands (ABI 7, not proposed). On
-cancel or any exit the node unsubscribes and closes in `finally`; a command already started on the device runs on (no
-documented cancel, unverified), so a cancelled disruptive step is `outcome_unknown`. Held back besides shells, the ZTP
-password, config dumps and firmware or reprovision actions: monitor traffic, top and clear policy hit count, which
-answer a second `wss://…?jwt=` URL whose protocol is undocumented (**V**); that JWT is a credential and is never
-stored.
+**D27 Device utilities.** One node type per utility (appendix: 19 diagnostic, 11 disruptive, 13 held back; each exists
+and isn't deprecated in the OAS, **V**; its shape and retry safety are reviewed into the policy map in 3b). Its OAS
+200 response decides the mode: a `session` means output on `/sites/{site_id}/devices/{device_id}/cmd` (**V** docs
+samples); an empty one, REST only. Buffering: the node subscribes, waits for `channel_subscribed` (10 s), POSTs, and
+buffers every data message (at most 256 and 1 MiB) until the answer names the `session`; then it keeps buffered and
+later messages whose `data.session` matches and discards the rest, and a message without a session is discarded, never
+accepted. Output: `{accepted, session, lines, received, ended_by, completion_known, truncated}`, ANSI stripped;
+`ended_by` is `finished` (a table command's `"finished": true` in `raw`, **V** docs sample, or the operation's
+documented final message recorded in the map), `idle` (10 s), `max_duration`, `cancelled` or `stream_lost`;
+`completion_known` is true only for `finished`. Failure classes: before the POST (connecting, `subscribe_failed`, no
+ack, `cooldown`) nothing was sent: `RetryableError`. The POST: `NotSent` retryable, 4xx fatal, 429, 5xx and
+`MaybeSent` per D10. After an accepted POST, a reviewed repeatable diagnostic maps no session, buffer overflow, no
+first message in 30 s (`mist.no_output`) and a stream lost before any output to `RetryableError`, and ends with output
+otherwise. Every other utility, disruptive or unreviewed, maps each of those, and any end without completion evidence
+(`mist.completion_unknown`), to `OutcomeUnknownError`, never `RetryableError`, since an ambiguous manifest doesn't
+stop a mapped retryable error being retried. Owner's call: that rule drops the collected output with the failure (a
+handled failure has no output); the alternative returns it as success with `completion_known: false` for the workflow
+to branch on. Repeatable means individually reviewed in D28 with its device types, permitted parameters, execution
+bounds and repeated-execution behaviour; a `show_*` name is no evidence. Capabilities: `mist.diagnose` for
+diagnostics, `mist.write` for disruptive ones. Heartbeat on every message and at least every 10 s, which is how
+Temporal delivers a cancel; RunGraph sets no heartbeat timeout (start-to-close only), so a lost worker shows only at
+the step timeout, and adding one would change commands (ABI 7, not proposed). On cancel or any exit the node
+unsubscribes and closes in `finally`; a command already started on the device runs on (no documented cancel,
+unverified), so a cancelled disruptive step is `outcome_unknown`. Held back besides shells, the ZTP password, config
+dumps and firmware or reprovision actions: monitor traffic, top and clear policy hit count, which answer a second
+`wss://…?jwt=` URL whose protocol is undocumented (**V**); that JWT is a credential and is never stored.
 
 **D28 One operation-policy map for Mist.** One generated data file, the single source for curated nodes,
 `mist.api.read`/`write` and utilities, checked at publish and at run time: an entry per OAS operation with its state
-(`allowed`, `held`, `denied`), the nodes that may reach it, its capability, its side effect with the evidence for it,
-and for utilities its stream mode. Deprecated operations are `denied`. **Owner's call — the default for operations
-nobody reviewed:** (a, recommended) reads allowed through `mist.api.read`, writes `held` until reviewed, so
-`mist.api.write` reaches only reviewed writes; (b) everything allowed minus a denylist, which is open to any dangerous
-operation the list misses. The appendix becomes the seed of this map; "exists and isn't deprecated" stays separate
-from "shape, scope and retry semantics verified".
+(`allowed`, `held`, `denied`), the nodes that may reach it, its capability, its scope class (org, member site, or
+approved metadata; D14), its side effect with the evidence for it, and for utilities its stream mode, completion
+evidence, supported device types, permitted parameters, execution bounds and repeated-execution behaviour. Deprecated
+operations are `denied`; D14's always-refused routes can't be allowed. **Owner's call — operations nobody reviewed:**
+(a, recommended) `held`, reads included: only reviewed, scope-safe operations are allowed, the appendix's being the
+first reviewed set; (b) unreviewed reads allowed through `mist.api.read`, but only inside D14's independently enforced
+scope, never the whole OAS. "Exists and isn't deprecated" stays separate from "shape, scope and retry semantics
+verified".
 
 ## 4. Dependencies, images, tests
 
