@@ -203,3 +203,22 @@ migration (a slot from you). Today no route sets `response_model`.
 
 Seen, not proposed here: `connection.use`, `approval.decide` and `agent.grant` are defined but no route checks them;
 `/api/v1/openapi.json` is served without a session (B1 could serve it only in development).
+
+## 6. Standing rule: no AI tells (owner, 2026-10-05)
+
+Nothing ships with these, whatever a mock or a gap screen shows:
+- coloured left (or top) border accents on cards, callouts, alerts, list rows or the active nav item;
+- gradients (fills, text, washes), glows and soft coloured halos, glassmorphism, backdrop blur;
+- sparkle or magic icons, emoji, "AI" badges; icons in tinted circles or squares as decoration;
+- uppercase, wide-tracked eyebrow labels (the wordmark's "FOR JUNIPER MIST" excepted);
+- the pill shape on anything but data pills; shadows on every card, nested cards, radii over 8 px (dialogs 12 px);
+- KPI card rows, hero headers, illustrated empty states, toasts for routine success, decorative motion (pulse,
+  bounce, shimmer); motion only shows a state change, at most 150 ms, and honours reduced motion;
+- raw colours or Tailwind palette classes outside `tokens.css`; marketing copy ("seamlessly", "Oops!", "!").
+
+The design's own tells, stripped in 4a/4b: the 4 px halo on selected and failed nodes (a crisp 2 px outline
+instead); tinted icon tiles on nodes (a plain glyph or the mono type code it already uses, `GET`, `HOOK`); eyebrow
+labels on 1b's trigger cards (sentence case); filter chips as pills (a segmented control with counts); the dialog's
+`0 20px 60px` shadow (one restrained elevation token). Enforced twice: a vitest guard scans `src/` for the
+mechanical ones (border-left widths over 1 px, `gradient`, `backdrop-`, `shadow-lg`+, `animate-pulse|bounce`, emoji
+ranges, hex outside `tokens.css`, `uppercase tracking-wide`), and the checkpoint reviewer checks the rest on screen.
