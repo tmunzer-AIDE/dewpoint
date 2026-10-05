@@ -160,10 +160,11 @@
       retention deletes rows before Temporal deletes histories. Each run execution has durable evidence (ids and
       times), read from Temporal's histories (its chain and its children), kept until Temporal shows it gone; a key
       version retires only when every execution that could hold it is proven gone. A start Temporal may have taken
-      stays unproven; what Temporal doesn't show is judged against the namespace's own retention; a history gone
-      before it was read is lost, and keeps every version it could hold;
-    - **the tick cutover** (§6.4): a version made before it never retires; recorded automatically only in a genuinely
-      new deployment, otherwise on the operator's attestation;
+      stays unproven; one Temporal never showed is pending, never judged (nothing proves the namespace's retention
+      over the time it went unchecked); one seen and gone before it was read is lost. Both keep every version they
+      could hold;
+    - **the tick cutover** (§6.4): a version made before it never retires; never recorded automatically, only on the
+      operator's attestation, a fresh deployment's included;
     - the evidence outlives the tenant's retention (§10.2), and 2b-4's erasure deletes it with the tenant's Temporal
       histories (§6.5);
     - still to fold in with the 2b-4a plan: §6.4's record inventory (connection secrets, CSV mappings and the
@@ -966,37 +967,36 @@ largest container when the budget requires.
   (§10.2):
   - **a root's evidence is written with each start attempt, before Temporal is asked** (a trigger on any root's row,
     and the dispatcher at every attempt). It goes only when Temporal refused every attempt (or throttled it before
-    creating anything). An attempt Temporal may have taken leaves it **unproven**, with when that attempt settled: an
-    absence seen at one moment doesn't fence a start still in flight (§7.6), an uncertain start may be executing, and
-    a collision's execution exists. A later attempt, a refusal of it or a cancel never discards it;
+    creating anything). An attempt Temporal may have taken leaves it **unproven**: an absence seen at one moment
+    doesn't fence a start still in flight (§7.6), an uncertain start may be executing, and a collision's execution
+    exists. A later attempt, a refusal of it or a cancel never discards it;
   - **the dispatcher's leader reads each closed execution's history exactly** — Temporal's own events, never its
     visibility, whose lag nothing bounds — and records its chain's first run, the run it continued as, and every
     child it started (sub-flows, failure handlers, loop batches), each with when it started; each is described and
     read in turn. One Temporal shows gone after it was read is proven: its evidence goes;
-  - **an unread execution Temporal doesn't show is judged against the namespace's own retention**, as Temporal
-    reports it, never an assumed minimum: seen before, its history went unread (**lost**); never seen and not asked
-    about for as long as the retention (since its attempt, or its last check), it could have landed, closed and gone
-    unseen (**lost**); never seen and asked about more often than that, it hasn't landed (**pending**); the retention
-    unknown, it isn't judged. A lost execution is alerted on;
+  - **an unread execution Temporal doesn't show is never judged by retention.** Seen before, its history went unread:
+    **lost**, alerted on. Never seen, it's **pending**: it may still land, or it may have landed while the namespace's
+    retention was short, closed and gone unseen, after starting children no one recorded. The retention Temporal
+    reports now can't prove what it was over the time the start went unchecked (D12's change boundary bounds it
+    above, not below), so only Temporal showing it settles it;
   - **retiring a version proves each execution that started before its successor reached every cache** (with a margin
     of the same again: a recorded start can follow the seal by a workflow task's latency), by describing it again.
-    The version is kept by one open, closed and still retained, closed and not yet read, lost, or not judged, and by
-    one pending if the version existed by the time its attempt settled (landing later, it opens an input the version
-    may have sealed). Temporal unreachable keeps it too. **A lost execution keeps every version it could hold**:
-    what it started is unknown, and nothing is guessed;
+    The version is kept by one open, closed and still retained, closed and not yet read, lost or pending, and when
+    Temporal can't be asked. **A lost or pending execution keeps every version it could hold**: what it started is
+    unknown, and nothing is guessed. So a start Temporal never showed keeps every version from before its attempt
+    on, until Temporal shows it (without a fence proving a start can't land, the owner's ruling for 2b-4a);
   - every root that existed before revision 10's migration is its evidence's backfill, unproven: one Temporal no
-    longer shows is lost.
+    longer shows stays pending.
 - **The tick cutover** (revision 10). A tick from before §6.2's tick exception sealed its payloads under whatever
   version was active, and nothing proves those histories gone: a version made before the cutover never retires. The
-  cutover is when the last dispatcher that sealed tick payloads had stopped, unable to restart. It's recorded once:
-  - by the migration itself, only in a genuinely new deployment, where no Dewpoint process can have run against the
-    database: no tenant, no recorded environment (§2.1: every process that talks to Temporal refuses to start without
-    one), no worker or dispatcher ever reported;
-  - anywhere else, by `dewpoint keys tick-cutover`, on the operator's attestation that every dispatcher from before
-    is stopped and can't restart, which nothing in Dewpoint can prove. The command also refuses while Temporal shows
-    the admission queue polled by a dispatcher without the tick contract's mark in its identity, a check that catches
-    one polling, not one that's down. It records the attestation in its audit entry and queues every live schedule for
-    its sync.
+  cutover is when the last dispatcher that sealed tick payloads had stopped, unable to restart; until it's recorded,
+  no tenant version retires. **It's never recorded automatically**, not even by a fresh deployment's migration: no
+  database state proves that an older dispatcher image can't start later and seal a tick under a version made after
+  the boundary. `dewpoint keys tick-cutover` records it once, on the operator's attestation that every dispatcher
+  from before is stopped and can't restart, and that no image from before can be deployed against the database,
+  which nothing in Dewpoint can prove. The command also refuses while Temporal shows the admission queue polled by a
+  dispatcher without the tick contract's mark in its identity, a check that catches one polling, not one that's
+  down. It records the attestation in its audit entry and queues every live schedule for its sync.
 
 ### 6.5 Tenant erasure
 
