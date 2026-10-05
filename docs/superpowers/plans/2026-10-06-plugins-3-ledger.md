@@ -35,4 +35,36 @@ Rulings:
   data-key rotation starts fresh buckets - no new long-lived key material outside the keyring - cost if wrong: one
   extra budget's worth of calls after a rotation; the provider's 429 then applies D10.
 
-Open questions: none yet.
+- Ruling: the guard blocks multicast, reserved, IPv6 site-local and any non-global embedded IPv4 on top of
+  `is_global` - Python 3.14 calls multicast, `fec0::/10`, `::127.0.0.1` and NAT64-wrapped loopback global - cost if
+  wrong: a NAT64-only deployment needs allowlist entries for its translated destinations.
+- Ruling: plain TCP and UDP (`ctx.net`) need an allowlist entry, as plain http does - D7 states it for http; the same
+  exposure applies - cost if wrong: a public syslog/UDP target needs an entry.
+- Ruling: a TLS verification failure is fatal, not retried - nothing was sent, but retrying can't fix a certificate
+  - cost if wrong: a certificate fixed mid-run needs a new run.
+- Ruling: `ResponseTooLarge` and `RedirectRefused` end an ambiguous node `outcome_unknown` and fail any other - the
+  request was sent and answered, and a retry gets the same answer - cost if wrong: a flaky oversized answer fails.
+- Ruling: an unknown `TransportError` subclass is treated as any unexpected exception (retryable, `outcome_unknown`
+  for an ambiguous node), and only the SDK's own class constants are ever shown - a plugin can't widen what's shown
+  - cost if wrong: none.
+- Ruling: a plugin that sets its connection's credential header (`Authorization`) is refused (`invalid_request`), not
+  silently overridden - fail closed - cost if wrong: a node needing a second Authorization-like header can't.
+- Ruling: a `Retry-After` (429, or 503 with one) blocks the connection's scopes for every node, whatever its side
+  effect, and a plain 503 is returned to the node - D10's block is about the provider, not the node - cost if wrong:
+  none; the block is capped at an hour.
+- Ruling: until 3a-2, only header auth (`HeaderAuth`) is implemented; `url`, `basic`, `body_field` and `smtp_login`
+  land with the slices that need them (3c, 3d) - YAGNI - cost if wrong: none.
+- Ruling: a connection's allowed ids are read by the worker from the run's version graph, intersected with the
+  version's `connection_ids`, and the graph node's type must equal the step's node type - nothing from the workflow's
+  input is trusted - cost if wrong: none.
+- Ruling: publish checks connections (not the validate endpoint), locking them FOR SHARE; re-enabling a workflow whose
+  active version names a connection deleted while it was disabled isn't refused - its runs fail
+  `connection_unavailable` before sending - cost if wrong: a confusing failure instead of a refusal at enable time.
+- Ruling: the allowlist audit goes to the tenant's chain (an entry for every tenant to the platform's), actor NULL as
+  for other CLI actions - cost if wrong: none.
+- Ruling: the egress allowlist and rate buckets are read on every connect/request (no cache) - exactness over a query
+  per request - cost if wrong: one small query per connect and per request.
+
+Open questions:
+- The full suite's one `PytestUnraisableExceptionWarning` in `tests/apps/worker` (seen once in a parallel run; not
+  from the new tests, which pass with it turned into an error): compare with `origin/main` at the checkpoint.
