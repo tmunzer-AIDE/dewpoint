@@ -2,20 +2,21 @@
 
 > **Status: approved by the owner as an outline (82bfca6, finalized 3b875c0, 2026-10-05); D2, D4 and D5 accepted; D7
 > to D11 adopted from the owner's recommendations (their measurement thresholds acceptance criteria, not claims); D13
-> resolved; the D6 and D12 proof specifications and their pinned images written for the owner's approval; D6 and D12
-> approved as proof candidates, not proven production boundaries, with D12b ruled and the proofs' images and `boto3`
-> approved; no prototype, detailed plan or gate lift authorized. It was revised after the owner's first review
-> (erasure's completion, production Temporal's proof, Mist, event grouping, ingress's switch), second (erasure: no
-> reversal, durable progress, the `tenants` schema), third (the firing inventory before schedules are deleted,
-> completeness from Temporal's retention bound, audit entries described as they are, eligibility requiring `active`),
-> fourth (fencing in-flight writers, the schedule sync's included; the bound as the earliest final check) fifth (late
-> Temporal writes made unable to fire and reconciled after completion), sixth (an enforced, audited namespace-change
-> boundary for the 30-day cap; reconciliation's residual risk; missed firings recorded) and seventh (which targets
-> qualify for that boundary; both readiness paths failing closed without it; the schedule action corrected). Not
-> authorization to build anything; no gate is authorized to lift by this review, neither the production gate nor
-> ingress's development-only restriction.** As in 2b-1a through 2b-3b, once the owner rules, each sub-project is built
-> on a prototype branch from `main`, with the owner's checkpoint after each milestone; its plan is then written from
-> the replayed diffs, with a revision of the 2b spec, for the owner's review before execution.
+> resolved; the D6 and D12 proof specifications written, their five image pins approved and the cases revised after
+> the owner's review; D6 and D12 approved as proof candidates, not proven production boundaries, with D12b ruled and
+> the proofs' images and `boto3` approved; no prototype, detailed plan or gate lift authorized. It was revised after
+> the owner's first review (erasure's completion, production Temporal's proof, Mist, event grouping, ingress's
+> switch), second (erasure: no reversal, durable progress, the `tenants` schema), third (the firing inventory before
+> schedules are deleted, completeness from Temporal's retention bound, audit entries described as they are,
+> eligibility requiring `active`), fourth (fencing in-flight writers, the schedule sync's included; the bound as the
+> earliest final check) fifth (late Temporal writes made unable to fire and reconciled after completion), sixth (an
+> enforced, audited namespace-change boundary for the 30-day cap; reconciliation's residual risk; missed firings
+> recorded) and seventh (which targets qualify for that boundary; both readiness paths failing closed without it; the
+> schedule action corrected). Not authorization to build anything; no gate is authorized to lift by this review,
+> neither the production gate nor ingress's development-only restriction.** As in 2b-1a through 2b-3b, once the owner
+> rules, each sub-project is built on a prototype branch from `main`, with the owner's checkpoint after each
+> milestone; its plan is then written from the replayed diffs, with a revision of the 2b spec, for the owner's review
+> before execution.
 
 **Goal:** Dewpoint can hold tenants' production data. Data leaves on schedule, a tenant can be erased, old keys can be
 retired, the production Temporal is verified, every production blocker is fixed or bounded with the owner's explicit
@@ -462,15 +463,15 @@ Written at the owner's request (2026-10-05) for approval of the pins and the cas
 proofs belong to 2b-4b's third milestone, run locally (not in routine CI), and are rerun against the owner's real
 bucket and Temporal deployment before readiness can pass.
 
-### Pinned images (for the owner's approval)
+### Pinned images (approved by the owner, 2026-10-05)
 
-Resolved from the registries on 2026-10-05 (manifest reads only; nothing pulled). Each is pinned by its index digest,
-so it can't move; refreshing a pin is a new approval.
+Resolved from the registries on 2026-10-05 (manifest reads only; nothing pulled), and matched independently by the
+owner. Each is pinned by its index digest, so it can't move; refreshing a pin is a new approval.
 
 | Image | Tag | Index digest | Why this one |
 |---|---|---|---|
 | `cgr.dev/chainguard/minio` | `latest` | `sha256:4cf4831a2bbcf13ddca09c1cbcc9faff716dd3c4247e0babc32864b8ee8e0034` | D6's S3 server. Chainguard's free tier offers only `latest` (its other tags are signatures and attestations), so the digest is the pin; built 2026-10-02, with no version label, so the proof records `minio --version`. |
-| `golang` | `1.26.8` | `sha256:0f063af2d465d8dcae54cce04278ada488b96f77b42449c8d071e47d016cc65a` | Builds D12's server; Temporal v1.32.0's `go.mod` requires Go 1.26.8. |
+| `golang` | `1.26.8` | `sha256:0f063af2d465d8dcae54cce04278ada488b96f77b42449c8d071e47d016cc65a` | Builds D12's server; Temporal v1.32.0's `go.mod` sets Go 1.26.8 as its minimum, which this release meets. |
 | `temporalio/admin-tools` | `1.32.0` | `sha256:a9f84fb9a374b2374fe2e67c8efc0468ff3f1c66c8a0b14597ec86e349e62bca` | D12's schema setup, matching server v1.32.0. |
 | `gcr.io/distroless/static-debian12` | `nonroot` | `sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab` | D12's runtime base: a static Go binary, no shell, a non-root user, CA certificates included. |
 | `postgres` | `16-alpine` | `sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea` | D12's persistence and visibility store; the image is already approved, pinned here for the proof. |
@@ -497,15 +498,23 @@ outside the test database.
   passes on an untouched sequence.
 - D6.7 A listing longer than one page (more anchors than one page holds) is verified whole: a tampered version on a
   later page is caught.
-- D6.8 Verify checks every version's mode and retain-until date: a version written without compliance retention (by a
-  writer that skipped it, simulated) fails.
+- D6.8 Verify checks every version's mode and retain-until date. A writer can't produce an unprotected version while
+  the bucket's default applies to its write, so the unprotected version comes from a separate fixture (a bucket with
+  Object Lock but no default retention), or is injected into the verifier's input; verify rejects it either way.
 - D6.9 The bucket's default retention is checked against the configured audit-retention plus backup periods, not the
   defaults: a configuration whose sum exceeds the default fails readiness.
 - D6.10 The monitor, reading its roster and cadence from outside the database, alerts on a scope removed from the
   database and on an anchor withheld past its cadence, and stays quiet on a healthy sequence.
+- D6.11 The monitor alerts when a scope's high-water mark is lost, or rolled back to an earlier anchor.
 
-**Passes** when every case passes on the pinned image and the recorded MinIO version. **Doesn't prove** a real
-provider's compliance mode: the readiness check repeats D6.1 to D6.4 on the real bucket with a canary anchor.
+**Passes** when every case passes on the pinned image and the recorded MinIO version. **Doesn't prove** the real
+target. **Real-target acceptance**, before readiness, on the actual bucket and monitor:
+- D6.1 to D6.4 with a canary anchor;
+- the scope roster, each scope's cadence and its high-water mark held off the database host, with the independent
+  monitor that runs against the bucket;
+- complete paginated version verification of the real bucket;
+- its default retention checked against the configured audit-retention and backup periods;
+- the monitor alerting on a missing scope, an overdue anchor, and a lost or rolled-back high-water mark (D6.10, D6.11).
 
 ### D12: the real Temporal target
 
@@ -523,7 +532,9 @@ claim mapper, built in the pinned `golang` and run on the pinned distroless base
   `UpdateNamespace` with a 31-day retention are refused, and with 30 days allowed; each decision is in the audit
   trail.
 - D12.3 Every RPC that D12.1 classed as able to change a namespace, other than those two, is refused unless the
-  allowlist inspects it; every endpoint D12.1 listed is shown to go through the authorizer.
+  allowlist inspects it, and every endpoint D12.1 listed is exercised to show it goes through the authorizer. A
+  namespace-changing path that bypasses the authorizer fails qualification: listing a path in the inventory doesn't
+  cover it.
 - D12.4 **Fail-closed audit:** with the audit trail unwritable (the bucket refusing writes, then unreachable), every
   namespace change is refused, a 30-day one included.
 - D12.5 **Verified TLS:** the server's certificate is accepted against the test CA and refused against another CA.
@@ -537,8 +548,17 @@ claim mapper, built in the pinned `golang` and run on the pinned distroless base
 - D12.11 **D3's schedule tests:** a schedule created paused fires nothing; a stale-token update is discarded; and a
   token taken from a deleted schedule never matches a recreated one with the same id.
 
-**Passes** when every case passes on the pinned images. **Doesn't prove** the owner's deployment: the same suite runs
-there before readiness, and D12.2 to D12.4 must pass on every endpoint that deployment exposes. The environment also
+**Passes** when every case passes on the pinned images. **Doesn't prove** the owner's deployment. **Real-target
+qualification**, before readiness:
+- the endpoints and the server build that deployment actually exposes are recorded, and D12.1's inventory taken there;
+- **every mutating case runs in an isolated test namespace,** never the production namespace or its schedules: the
+  30-day `RegisterNamespace` and `UpdateNamespace`, the 31-day refusals, the fail-closed audit, execution deletion
+  (D12.9) and the schedule tests (D12.11);
+- D12.2 to D12.4 must hold on every endpoint that deployment exposes; a namespace-changing path that bypasses the
+  authorizer there fails qualification;
+- the read-only cases may run against the production namespace: verified TLS (D12.5), the deployment's own
+  authentication mode (D12.6 or D12.7, whichever it runs; the other mode is proven only in the local environment),
+  `DescribeNamespace` (D12.8) and the prefix query (D12.10). The environment also
 hosts D8's 20-binding rate tests and D9's accepted-event-to-start latency, which are measurements, not this proof.
 
 ## Milestones (first cut)
