@@ -24,7 +24,9 @@ file:
 | `DEWPOINT_INGRESS_TRUSTED_PROXIES` | the proxies whose `X-Forwarded-For` it believes, as addresses or networks; none by default |
 
 It never holds a tenant's key: it refuses to start with `DEWPOINT_KEK_B64` (or `DEWPOINT_KEK_PREVIOUS_B64`) in its
-environment. It seals each event to the tenant's public key; only the dispatcher opens events.
+environment. It seals each event to the tenant's public key; only the dispatcher opens events. The API's database role
+can't read an event's sealed payload or a keypair's sealed private key either (migration 0034). That's read-access
+hardening, no more: the API still makes keypairs, and its process holds the tenants' keyring.
 
 In Docker Compose it runs only with the `ingress` profile and the development override:
 

@@ -239,6 +239,33 @@ async def test_the_api_still_makes_endpoints_and_changes_what_it_manages(owner_s
     assert (changed["events_pointer"], changed["bearer_digest"], changed["byte_burst"]) == ("/events", digest, 26278400)
 
 
+@pytest.mark.parametrize(
+    ("table", "ciphertext"), [("inbound_events", "sealed"), ("tenant_event_keys", "private_sealed")]
+)
+async def test_the_apis_role_reads_every_column_but_a_ciphertext(
+    owner_sessionmaker, api_sessionmaker, table: str, ciphertext: str
+) -> None:
+    """The owner's ruling on the final review: only the dispatcher opens events, so the API's role can't select an
+    event's sealed payload or a keypair's sealed private key, and reads every other column. Read-access hardening, not
+    more: the role still inserts keypairs, and the API process holds the keyring."""
+    tenant, _ = await endpoint(owner_sessionmaker)  # the tenant's keypair, version 1
+    async with owner_sessionmaker() as s:
+        columns = set((await s.execute(text("select column_name from information_schema.columns where table_name = :t"),
+                                       {"t": table})).scalars())  # fmt: skip
+        readable = set((await s.execute(
+            text("select column_name from information_schema.column_privileges where grantee = 'dewpoint_api' "
+                 "and table_name = :t and privilege_type = 'SELECT'"), {"t": table})).scalars())  # fmt: skip
+    assert readable == columns - {ciphertext}
+    with pytest.raises(DBAPIError, match="permission denied"):
+        async with api_sessionmaker() as s, s.begin():
+            await tenant_scope(s, tenant)
+            await s.execute(text(f"select {ciphertext} from {table}"))  # noqa: S608
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        rows = (await s.execute(text(f"select {', '.join(sorted(readable))} from {table}"))).all()  # noqa: S608
+    assert len(rows) == (1 if table == "tenant_event_keys" else 0)
+
+
 async def test_an_endpoints_default_event_rate_is_below_one_dispatchers_measured_drain(owner_sessionmaker) -> None:
     """The owner's M4 review: an endpoint's default event rate stays below what one dispatcher's own loop drains
     (`tests/probes/ingress_load.py drain`: 12.6 events/s at a fan-out of 5, 15.9 at 3, 22.9 at 1), so a sender keeping
