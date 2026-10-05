@@ -72,7 +72,7 @@ Paths drop the `/api/v1` prefix; `{org_id}` always comes from the connection. In
 
 ## Device utilities over the stream (D27)
 
-Each is a POST under `/sites/{site_id}/devices/{device_id}/`. "stream": the OAS 200 response holds a `session` and output arrives on `/sites/{site_id}/devices/{device_id}/cmd` (D26). "REST only": the OAS response is empty and the node never subscribes. Each node's success condition (REST completion, acceptance only, stream terminal evidence or verified readback) is set per operation in the policy map (D27, D28). Bounce port's docs sample streams although its OAS answer is empty, so its node is acceptance-only until 3b verifies which.
+Each is a POST under `/sites/{site_id}/devices/{device_id}/`. "stream": the OAS 200 response holds a `session` and output arrives on `/sites/{site_id}/devices/{device_id}/cmd` (D26). "REST only": the OAS response is empty and the node never subscribes. Each node's success condition (REST completion, acceptance only, stream terminal evidence, verified readback or bounded collection) is set per operation in the policy map (D27, D28). Bounce port's docs sample streams although its OAS answer is empty, so its node is acceptance-only until 3b verifies which.
 
 | Class | Operations (operationId — path suffix) |
 |---|---|
