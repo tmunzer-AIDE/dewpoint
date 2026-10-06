@@ -10,6 +10,7 @@ from collections.abc import Iterable
 from datetime import timedelta
 
 import structlog
+from sqlalchemy.ext.asyncio import AsyncEngine
 from temporalio.client import Client
 from temporalio.worker import Worker
 
@@ -27,7 +28,7 @@ from dewpoint.apps.worker.store import DbRunStore
 from dewpoint.core.config import Settings
 from dewpoint.core.crypto.kek import KekSet
 from dewpoint.core.crypto.keyring import Keyring
-from dewpoint.core.db import make_engine, make_sessionmaker
+from dewpoint.core.db import MAX_OVERFLOW, POOL_SIZE, make_engine, make_sessionmaker
 from dewpoint.core.egress import allowlist
 from dewpoint.core.egress.guard import Guard, SystemResolver
 from dewpoint.engine import ENGINE_ABI
@@ -89,13 +90,27 @@ async def promote(client: Client) -> None:
     log.info("deployment_current", build=this_build())
 
 
+# A worker process's database connections, at most (the final review's I4): its shared pool (its activities, its
+# reports, LISTEN for plugin calls and their own short transactions) and its plugin calls' guards, one connection for
+# each call in flight across its hook, in a pool of their own so a full house of calls never starves its activities.
+SHARED_POOL, SHARED_OVERFLOW = POOL_SIZE, MAX_OVERFLOW
+PLUGIN_CALLS = 8  # plugin calls in flight at once
+CONNECTIONS = SHARED_POOL + SHARED_OVERFLOW + PLUGIN_CALLS
+
+
+def engines(url: str) -> tuple[AsyncEngine, AsyncEngine]:
+    """The worker's shared engine and its plugin-call guards' engine: CONNECTIONS connections at most."""
+    return (make_engine(url, pool_size=SHARED_POOL, max_overflow=SHARED_OVERFLOW),
+            make_engine(url, pool_size=PLUGIN_CALLS, max_overflow=0))  # fmt: skip
+
+
 async def run(settings: Settings) -> None:
     """Raises EnvironmentNotRecordedError or EnvironmentMismatchError before connecting to Temporal: a worker never
     serves a namespace its database wasn't recorded with (engine 2b spec §2.1). Every payload it sends or reads is
     encrypted with its tenant's key, read through the worker's role (§6.2–6.3). It records itself as an instance of
     its build, with its capabilities, and raises WorkerUnhealthyError once a self-check fails, at startup before it
     polls or later after its workers stop polling (§2.7). It also serves plugin calls for the API (plugins-3 D3)."""
-    engine = make_engine(settings.database_url)
+    engine, guard_engine = engines(settings.database_url)
     try:
         sessionmaker = make_sessionmaker(engine)
         await verify_environment(sessionmaker, settings)
@@ -121,7 +136,8 @@ async def run(settings: Settings) -> None:
                 cel_worker(client, settings.cel_socket, profile, store, max_concurrent=settings.cel_max_concurrent)
             )
 
-        plugin_calls = PluginCallServer(sessionmaker, network, plugins, engine=engine)  # plugins-3 D3
+        plugin_calls = PluginCallServer(sessionmaker, network, plugins, engine=engine, concurrency=PLUGIN_CALLS,
+                                        guards=make_sessionmaker(guard_engine))  # plugins-3 D3  # fmt: skip
 
         async def stop() -> None:
             plugin_calls.stop()
@@ -135,3 +151,4 @@ async def run(settings: Settings) -> None:
         await asyncio.gather(*tasks)
     finally:
         await engine.dispose()
+        await guard_engine.dispose()

@@ -204,8 +204,12 @@ class PluginCallServer:
         poll_s: float = 1.0,
         call_timeout_s: float = CALL_TIMEOUT_S,
         engine: AsyncEngine | None = None,
+        guards: async_sessionmaker[AsyncSession] | None = None,
     ) -> None:
+        """`guards`: a pool of its own for the connection each call in flight holds across its hook (the final
+        review's I4), sized to `concurrency`; the shared `sessionmaker` without one."""
         self._sessionmaker, self._network = sessionmaker, network
+        self._guards = guards if guards is not None else sessionmaker
         self._nodes: dict[str, type[Node]] = {
             f"{node.type}@{node.version}": node for p in plugins for node in p.nodes if options_fields(node)
         }
@@ -305,7 +309,7 @@ class PluginCallServer:
                 # claim, the hook and the answer (the owner's review of 2b-4a v5): an erasure's step 1 waits for this
                 # call, and once it has committed a call is never run. Only the hook has a deadline: the claim, the key
                 # lookup and sealing, and the answer's transaction have none of their own, so neither has the wait.
-                async with self._sessionmaker() as guard, guard.begin():
+                async with self._guards() as guard, guard.begin():
                     if not await lifecycle.calls_allowed(guard, tenant_id):
                         return  # the tenant is being erased: its call is left for the erasure
                     await self._run(tenant_id, call_id)

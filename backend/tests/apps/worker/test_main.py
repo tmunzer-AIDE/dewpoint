@@ -75,7 +75,7 @@ async def test_the_worker_connects_with_the_tenant_codec(monkeypatch: pytest.Mon
         raise Connected
 
     monkeypatch.setattr(main.Client, "connect", connect)
-    monkeypatch.setattr(main, "make_engine", lambda url: Engine())
+    monkeypatch.setattr(main, "make_engine", lambda url, **pool: Engine())
     monkeypatch.setattr(main, "make_sessionmaker", lambda engine: None)
     monkeypatch.setattr(main, "verify_environment", recorded)
     monkeypatch.setattr(main, "reporter", lambda *args: unrecorded)
@@ -117,7 +117,7 @@ async def test_a_worker_that_fails_its_self_check_never_polls(monkeypatch: pytes
         raise AssertionError("it connected")
 
     monkeypatch.setattr(main.Client, "connect", connect)
-    monkeypatch.setattr(main, "make_engine", lambda url: Engine())
+    monkeypatch.setattr(main, "make_engine", lambda url, **pool: Engine())
     monkeypatch.setattr(main, "make_sessionmaker", lambda engine: None)
     monkeypatch.setattr(main, "verify_environment", recorded)
     monkeypatch.setattr(main, "reporter", lambda *args: report)

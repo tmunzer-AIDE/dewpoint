@@ -215,6 +215,12 @@ KEK configured under the right id passes it, and passes `dewpoint keys status`, 
 ([`key-rotation.md`](key-rotation.md)). Lifting the production gate (sub-project 2b-4) unwraps every stored data key
 and reads each tenant's key the way the workers do, first.
 
+A worker process opens at most 23 database connections: a pool of 5 with an overflow of 10 for its activities, its
+health check and its other work, and a pool of 8 for plugin calls, one per call in flight, each held for the whole
+call so that erasure can't start beneath it. A call waits for a guard rather than taking an activity's connection.
+Size PostgreSQL's `max_connections` for 23 per worker process, plus the API's, dispatcher's and retention process's
+pools, plus headroom for migrations and operators.
+
 ## Docker Compose (evaluation)
 
 Compose runs Temporal's dev server (the `temporal` service: its state in SQLite on the `temporal-data` volume, its Web
