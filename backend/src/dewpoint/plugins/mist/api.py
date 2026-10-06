@@ -28,8 +28,9 @@ from dewpoint.plugins.mist import oas, policy, routing
 from dewpoint.plugins.mist.client import SEGMENT, InvalidPathValue, MistClient
 from dewpoint.plugins.mist.nodes import OperationUnavailable, _example
 from dewpoint.plugins.mist.routing import UUID, Route, filled, matched, reaches, value_pattern
+from dewpoint.plugins.mist.schemas import secret_fields
 from dewpoint.sdk import FatalError, Node, SideEffect, StepContext, declared_model
-from dewpoint.sdk.fields import CONNECTION, LITERAL
+from dewpoint.sdk.fields import CONNECTION, LITERAL, SENSITIVE
 
 READ, WRITE = "mist.api.read", "mist.api.write"
 WRITE_METHODS = ("DELETE", "POST", "PUT")
@@ -168,9 +169,18 @@ def _config(node: str, write: bool) -> dict[str, Any]:
     }
     props["query"] = {"type": "object", "title": "Query", "additionalProperties": {"type": SCALARS}}
     if write:
-        props["body"] = {"title": "Body"}
+        props["body"] = {"title": "Body", "$ref": "#/$defs/body"}
     required = ["connection", "method", "path"] if write else ["connection", "path"]
-    return {"type": "object", "properties": props, "required": required, "additionalProperties": False}
+    out: dict[str, Any] = {"type": "object", "properties": props, "required": required, "additionalProperties": False}
+    if write:  # its operation is known only at run time: Mist's secret-named fields are sensitive at any depth (M3)
+        out["$defs"] = {
+            "body": {
+                "properties": {name: {SENSITIVE: True} for name in secret_fields(oas.document())},
+                "additionalProperties": {"$ref": "#/$defs/body"},
+                "items": {"$ref": "#/$defs/body"},
+            }
+        }
+    return out
 
 
 OUTPUT = {

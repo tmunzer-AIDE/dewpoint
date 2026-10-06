@@ -40,13 +40,29 @@ SECRET_WORDS = frozenset(
     {"psk", "passphrase", "secret", "password", "token", "community", "key", "keys", "apitoken", "keypair", "kek",
      "mack"}
 )  # fmt: skip
-SECRET_NAMES = frozenset({"community_name"})
+SECRET_NAMES = frozenset({"community_name", "magic"})  # an SNMP community, a device's claim code
 _WORDS = re.compile(r"[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])")
 
 
 def secret_name(name: str) -> bool:
     words = [w.lower() for part in name.split("_") for w in _WORDS.findall(part)]
     return name in SECRET_NAMES or (bool(words) and words[-1] in SECRET_WORDS)
+
+
+def secret_fields(doc: Mapping[str, Any]) -> list[str]:
+    """Every property name the description's schemas use that `secret_name` calls a secret, sorted."""
+    found: set[str] = set()
+    stack: list[Any] = [doc.get("components", {}).get("schemas", {})]
+    while stack:
+        here = stack.pop()
+        if isinstance(here, Mapping):
+            props = here.get("properties")
+            if isinstance(props, Mapping):
+                found.update(name for name in props if isinstance(name, str) and secret_name(name))
+            stack.extend(here.values())
+        elif isinstance(here, list):
+            stack.extend(here)
+    return sorted(found)
 
 
 def _converted(node: Any, *, output: bool, partial: bool) -> Any:

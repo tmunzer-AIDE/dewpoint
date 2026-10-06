@@ -536,3 +536,11 @@ each fixed test-first and mutation-checked:
   as a probe has an ambiguous node retried after it (first-party code's declaration: the SDK is an API, not a sandbox).
 - Ruling (M2): a delete's retry whose site check finds the site gone answers `already_absent` - the object can't
   outlive its site (D16) - cost if wrong: none.
+- (M3, Medium) `mist.api.write`'s body declared nothing, so a PSK written there as a literal published (the curated
+  node refuses it) and showed in previews. Fixed with the Ruling below; (L1) `magic`, a device's claim code, is now a
+  secret name.
+- Ruling (M3): the generic write's body marks, at any depth, every property name the OAS uses that the curated rule
+  calls a secret (76 names), as exact names: the engine never runs a pattern on workflow data (a sensitive
+  `patternProperties` marks its whole object), and the body's operation is known only at run time - the same reach as
+  the curated nodes' marking - cost if wrong: a secret under a name the OAS doesn't use isn't claimed, as with a
+  curated node.

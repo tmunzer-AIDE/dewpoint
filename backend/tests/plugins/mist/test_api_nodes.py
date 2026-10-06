@@ -11,9 +11,15 @@ import pytest
 from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
+from dewpoint.apps.worker.claims import config_secrets
+from dewpoint.engine.graph.validate import ValidationContext, validate
+from dewpoint.engine.sensitive import marked_positions
 from dewpoint.plugins.mist import PLUGIN, policy, routing
+from dewpoint.plugins.mist.schemas import secret_name
 from dewpoint.sdk import FatalError, Node, SideEffect, node_manifest
 from tests.plugins.mist.fakes import ORG, OTHER_ORG, SITE, FakeConnection, FakeHttp, FakeStep, Reply
+from tests.support.catalog import catalog
+from tests.support.graphs import G
 
 WLAN = "7b2c4d6e-8f10-4a2b-9c3d-4e5f6a7b8c9d"
 
@@ -174,3 +180,37 @@ async def test_a_siblings_literal_is_refused_at_publish_and_at_run_time(monkeypa
     with pytest.raises(FatalError) as e:  # even a parameter that would accept it can't reach the other operation
         await call("mist.api.write", raw, {}, validated=False)
     assert e.value.code == "mist.invalid_path_value"
+
+
+@pytest.mark.parametrize(
+    ("body", "marked"),
+    [
+        ({"passphrase": "LiteralSecret123", "ssid": "corp"}, ["/body/passphrase"]),
+        ({"auth": {"psk": "LiteralSecret123", "type": "psk"}}, ["/body/auth/psk"]),
+        ({"radius": [{"secret": "x1234", "host": "a"}]}, ["/body/radius/0/secret"]),
+        ({"settings": {"api_token": "t0k3n-value"}}, ["/body/settings/api_token"]),
+        ({"ssid": "corp", "vlan_id": 3}, []),
+    ],
+)
+def test_a_generic_writes_secret_named_fields_are_sensitive_at_any_depth(
+    body: dict[str, Any], marked: list[str]
+) -> None:
+    """The 3b-1 review's M3: the curated nodes' rule, applied to a body whose operation is known only at run time, so
+    publish refuses a literal secret and the run indexes it."""
+    raw = {"connection": str(uuid.uuid4()), "method": "POST", "path": f"/api/v1/orgs/{ORG}/psks", "body": body}
+    schema = node_manifest(node("mist.api.write"))["config_schema"]
+    assert marked_positions(raw, schema) == marked
+    g = G().node("a", "mist.api.write@1", raw)
+    found = [d for d in validate(g.build(), ValidationContext(catalog=catalog(PLUGIN))).diagnostics
+             if d.code == "sensitive.literal"]  # fmt: skip
+    assert [d.field for d in found] == marked
+    assert config_secrets(raw, schema) == sorted({v for v in ("LiteralSecret123", "x1234", "t0k3n-value")
+                                                  if v in repr(body)})  # fmt: skip
+
+
+def test_the_body_marks_every_secret_named_field_mist_uses() -> None:
+    body = node_manifest(node("mist.api.write"))["config_schema"]["$defs"]["body"]
+    marked = set(body["properties"])
+    assert {"passphrase", "psk", "secret", "password", "api_token", "community_name", "magic"} <= marked
+    assert all(secret_name(n) for n in marked) and len(marked) > 50
+    assert secret_name("magic")  # a device's claim code (the review's L1)
