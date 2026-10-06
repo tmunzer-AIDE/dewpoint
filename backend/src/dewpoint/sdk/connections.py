@@ -16,7 +16,7 @@ from dewpoint.sdk.calls import CallContext
 from dewpoint.sdk.fields import SENSITIVE
 from dewpoint.sdk.net import Connection
 
-TYPE_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,40}(\.[a-z][a-z0-9_]{0,40})?$")
+TYPE_KEY_RE = re.compile(r"^(?=.{1,64}$)[a-z][a-z0-9_]{0,40}(\.[a-z][a-z0-9_]{0,40})?$")  # `connections.type`
 SCOPE_KIND_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
 HEADER_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$")  # an RFC 9110 token
 HOST_RE = re.compile(r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
@@ -46,7 +46,8 @@ def fill(template: str, values: Mapping[str, Any]) -> str:
 
 @dataclass(frozen=True)
 class VerifyResult:
-    """`detail` is a short code (`ok`, `invalid_token`, …); `privilege` what the credentials may do, when known."""
+    """`detail` is a short code (`ok`, `invalid_token`, …, at most 40 characters); `privilege` what the credentials may
+    do, when known (at most 40)."""
 
     ok: bool
     detail: str

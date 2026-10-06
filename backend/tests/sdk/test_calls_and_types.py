@@ -260,3 +260,11 @@ def test_a_connection_type_is_checked(kind: ConnectionType, problem: str) -> Non
     with pytest.raises(ManifestError) as raised:
         Plugin("demo", "1.0.0", (), connection_types=(kind,)).manifest()
     assert any(problem in p for p in raised.value.problems), raised.value.problems
+
+
+def test_a_connection_type_key_fits_a_connections_type_column() -> None:
+    """`connections.type` is 64 characters (the 3a-2 review's finding 4)."""
+    plugin = "p" * 30
+    kind = ConnectionType(key=f"{plugin}.{'x' * 40}", label="X", Config=DemoConfig, Secret=DemoSecret)
+    with pytest.raises(ManifestError, match="connection type"):
+        Plugin(plugin, "1.0.0", (), connection_types=(kind,)).manifest()

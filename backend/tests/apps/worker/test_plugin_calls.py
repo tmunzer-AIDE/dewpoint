@@ -15,11 +15,12 @@ import structlog
 from sqlalchemy import text
 
 from dewpoint.apps.worker.network import DbConnections, Network
-from dewpoint.apps.worker.plugin_calls import PluginCallServer
+from dewpoint.apps.worker.plugin_calls import PluginCallServer, _Refused, _verify_answer
 from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.egress.addresses import AllowEntry
 from dewpoint.core.plugins import calls
+from dewpoint.sdk import VerifyResult
 from tests.support.connections import add_connection, seed_step, types_for_testkit
 from tests.support.keys import FixtureKeys
 from tests.support.netfakes import Request, guard, serve, tls
@@ -254,3 +255,19 @@ async def test_a_notification_wakes_the_server(owner_sessionmaker, api_sessionma
             server.stop()
             await asyncio.wait_for(running, 10)
     assert (await outcome(api_sessionmaker, tenant, call))[0] == "done"
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        VerifyResult(True, "x" * 41),
+        VerifyResult(True, "ok", "p" * 41),
+        VerifyResult(True, "Not_A_Code"),
+    ],
+)
+def test_a_verification_fits_what_is_stored(result: VerifyResult) -> None:
+    """`status_detail` and `privilege` are 40 characters (the 3a-2 review's finding 4): a longer one is refused as an
+    invalid result rather than failing the write and leaving an older status in place."""
+    with pytest.raises(_Refused) as raised:
+        _verify_answer(result)
+    assert raised.value.code == "invalid_result"

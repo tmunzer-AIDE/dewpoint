@@ -60,7 +60,8 @@ MAX_OPTIONS = 1000
 MAX_VALUE = 1000
 MAX_LABEL = 200
 MAX_ANSWER = 256 * 1024
-DETAIL_RE = re.compile(r"^[a-z0-9_]{1,64}$")
+DETAIL_RE = re.compile(r"^[a-z0-9_]{1,40}$")  # `connections.status_detail`
+MAX_PRIVILEGE = 40  # `connections.privilege`
 # The SDK's own transport errors: only their fixed codes are ever shown (a plugin's subclass can't widen them).
 _SDK_ERRORS = frozenset(
     cls for module in (sdk_net, sdk_calls) for cls in vars(module).values()
@@ -179,7 +180,11 @@ def _verify_answer(found: Any) -> dict[str, Any]:
         or not DETAIL_RE.match(found.detail)
         or not (
             found.privilege is None
-            or (isinstance(found.privilege, str) and len(found.privilege) <= 64 and found.privilege.isprintable())
+            or (
+                isinstance(found.privilege, str)
+                and len(found.privilege) <= MAX_PRIVILEGE
+                and found.privilege.isprintable()
+            )
         )
     ):
         raise _Refused("invalid_result")

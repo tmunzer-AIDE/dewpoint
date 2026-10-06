@@ -230,7 +230,7 @@ class VerificationUnansweredError(Exception):
 
 
 type Asker = Callable[[Callable[[AsyncSession], Awaitable[uuid.UUID]]], Awaitable[asking.Outcome]]
-DETAIL_RE = re.compile(r"^[a-z0-9_]{1,64}$")
+DETAIL_RE = re.compile(r"^[a-z0-9_]{1,40}$")  # what `status_detail` holds
 
 
 def _checked(answer: dict[str, Any] | None) -> tuple[str, str, str | None]:
@@ -240,7 +240,7 @@ def _checked(answer: dict[str, Any] | None) -> tuple[str, str, str | None]:
         not isinstance(ok, bool)
         or not isinstance(detail, str)
         or not DETAIL_RE.match(detail)
-        or not (privilege is None or (isinstance(privilege, str) and len(privilege) <= 64 and privilege.isprintable()))
+        or not (privilege is None or (isinstance(privilege, str) and len(privilege) <= 40 and privilege.isprintable()))
     ):
         return "error", "invalid_result", None
     return ("ok" if ok else "error"), detail, privilege

@@ -112,3 +112,14 @@ def test_credentials_name_fields_and_never_format_them() -> None:
     with pytest.raises(InvalidValueError) as raised:
         kind.credentials({"api_token": TOKEN})
     assert TOKEN not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [{"ok": True, "detail": "x" * 41, "privilege": None}, {"ok": True, "detail": "ok", "privilege": "p" * 41},
+     {"ok": "yes", "detail": "ok", "privilege": None}, None],
+)  # fmt: skip
+def test_the_api_records_only_a_verification_its_columns_hold(answer: object) -> None:
+    from dewpoint.core.connections.service import _checked
+
+    assert _checked(answer) == ("error", "invalid_result", None)  # type: ignore[arg-type]
