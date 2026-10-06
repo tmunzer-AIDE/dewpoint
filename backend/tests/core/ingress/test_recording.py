@@ -176,7 +176,8 @@ async def test_the_function_checks_the_batch_itself_whatever_its_caller_says(
 
 
 @pytest.mark.parametrize("change", ["update webhook_endpoints set enabled = false where id = :e",
-                                    "update tenants set status = 'erasing' where id = :t"])  # fmt: skip
+                                    "update tenants set status = 'erasing' where id = :t",
+                                    "update tenants set status = 'erased' where id = :t"])  # fmt: skip
 async def test_a_disabled_endpoint_or_an_erasing_tenant_records_and_spends_nothing(
     owner_sessionmaker, ingress_sessionmaker, change: str
 ) -> None:

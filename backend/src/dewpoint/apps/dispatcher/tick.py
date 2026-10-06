@@ -14,8 +14,8 @@ writes its schedules' generations, so both take the two in the same order.
 
 An enabled schedule's tick is admitted as any durable source is (queued, or a `refused` request with admission's
 reason); one whose schedule was disabled before its pause reached Temporal, or deleted (its tombstone), is a `refused`
-request (`schedule_paused`, `schedule_deleted`); either way its `run.request` audit entry names the schedule. An
-`erasing` tenant's tick is an audited skip, never a request.
+request (`schedule_paused`, `schedule_deleted`); either way its `run.request` audit entry names the schedule. A tick
+of a tenant that isn't active (`erasing`, or `erased`) is an audited skip, never a request.
 After those decisions, a newly decided tick strictly past its schedule's catch-up window, by the database's clock read
 once it holds the row, is a `refused` request, `schedule_catchup_expired` (the owner's ruling on the whole-branch
 review): an outage of the dispatcher or the database longer than the window admits only the firings within it, as
@@ -122,7 +122,7 @@ async def admit_tick(
     ).scalar_one()  # exclusive, held until the caller commits: never a shared lock it would upgrade  # fmt: skip
     await _after_schedule_locked()
     tenant = await s.get(Tenant, tenant_id, populate_existing=True)
-    if tenant is None or tenant.status == "erasing":
+    if tenant is None or tenant.status != "active":  # erasing, or erased: never eligible again
         details: dict[str, object] = {"schedule_id": str(schedule_id), "tick": key, "reason": admission.TENANT_ERASING}
         await audit.record(s, tenant_id=tenant_id, actor_id=None, action="schedule.tick_skipped",
                            target_type="schedule", target_id=str(schedule_id), details=details)  # fmt: skip

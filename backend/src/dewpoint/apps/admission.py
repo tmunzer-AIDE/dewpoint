@@ -7,9 +7,10 @@ In §7.2's order:
 1. the idempotency key is looked up first: an existing request is compared, with its own stored key version, and an
    exact retry returns it as it is now, whatever changed since (a rotation, the gate, the active version, a disable);
    another request under the key is a conflict;
-2. a new key passes the mutable checks: the tenant isn't erasing; the gate, for an interactive source; the workflow's
-   admission lock, enabled, its active version, the current build's ABI (as the dispatcher last recorded it: a missing
-   or stale record fails closed), the closure executable under the lifecycle locks; the input schema;
+2. a new key passes the mutable checks: the tenant is active (not erasing, nor erased); the gate, for an interactive
+   source; the workflow's admission lock, enabled, its active version, the current build's ABI (as the dispatcher last
+   recorded it: a missing or stale record fails closed), the closure executable under the lifecycle locks; the input
+   schema;
 3. it's digested with the tenant's active key version, its trigger claimed, the secret index seeded, its envelope
    stored and the request inserted, `ON CONFLICT DO NOTHING`, with one audit entry, all in one savepoint: a concurrent
    insert that won the key rolls this call back, claims and envelope included, and the winner is compared instead.
@@ -298,7 +299,7 @@ async def _frozen(
     tenant = await s.get(Tenant, tenant_id, populate_existing=True)
     if tenant is None:
         raise WorkflowNotFoundError(str(fields["workflow_id"]))
-    if tenant.status == "erasing":
+    if tenant.status != "active":  # erasing, or erased: a retained tombstone is never eligible again
         raise _Refused(TENANT_ERASING, ["This tenant is being erased: it starts no run."])
     if fields["source"] in INTERACTIVE:
         platform = await recorded(s)

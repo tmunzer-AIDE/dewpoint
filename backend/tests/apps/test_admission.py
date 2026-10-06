@@ -157,6 +157,7 @@ async def test_a_concurrent_admission_under_the_key_returns_the_winner_and_leave
     ("breaks", "reason"),
     [
         ("erasing", "tenant_erasing"),
+        ("erased", "tenant_erasing"),  # a retained tombstone is never eligible again (2b-4a M4)
         ("disabled", "workflow_disabled"),
         ("retired", "node_type_retired"),
         ("no_build", "no_current_build"),
@@ -171,8 +172,8 @@ async def test_a_refused_interactive_request_is_raised_and_leaves_nothing(
     ctx, wf = ready
     request: dict[str, Any] = {}
     async with owner_sessionmaker() as s, s.begin():
-        if breaks == "erasing":
-            await s.execute(text("update tenants set status = 'erasing' where id = :t"), {"t": ctx.tenant_id})
+        if breaks in ("erasing", "erased"):
+            await s.execute(text("update tenants set status = :b where id = :t"), {"b": breaks, "t": ctx.tenant_id})
         elif breaks == "retired":
             await s.execute(
                 text("update node_type_versions set state = 'retired' where type = 'testkit.echo' and version = 1")

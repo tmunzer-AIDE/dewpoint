@@ -11,11 +11,13 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     Integer,
     LargeBinary,
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -55,3 +57,22 @@ class Schedule(Base):
     # action synced before the tick contract carried the schedule's id, sealed; one written since carries nothing (the
     # owner's M3 ruling). Retiring a version waits while a live schedule's action names it.
     action_key_version: Mapped[int | None] = mapped_column(Integer)
+    # Firings due while the schedule, created paused, waited for its unpause (D3f): Temporal neither catches them up
+    # nor counts them, so the sync does, from Temporal's own matching times.
+    creation_misses: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+
+
+class ScheduleFiring(Base):
+    """A `ScheduleTick`'s own record of its workflow and run ids, its first act, a skip included: the erasure's firing
+    inventory (2b-4a M4). Identifiers only, kept 31 days."""
+
+    __tablename__ = "schedule_firings"
+    __table_args__ = (
+        Index("schedule_firings_tenant", "tenant_id", "schedule_id"),
+        Index("schedule_firings_recorded", "recorded_at"),
+    )
+    workflow_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    run_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"))
+    schedule_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
