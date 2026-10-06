@@ -331,3 +331,18 @@ async def test_a_notification_during_a_round_starts_another(worker_sessionmaker,
     monkeypatch.setattr(plugin_calls.calls, "candidates", candidates)
     await asyncio.wait_for(server.run(), 10)
     assert len(rounds) >= 2 and rounds[1] - rounds[0] < 5
+
+
+async def test_an_answer_holding_a_short_secret_is_refused_too(
+    owner_sessionmaker, api_sessionmaker, worker_sessionmaker
+) -> None:
+    """The run's secret index skips strings under four characters; a plugin call's answer is checked against every
+    string of the secret (the owner's review of 3a-2, finding 4)."""
+    async with serve(service, tls_names=NAMES) as fake:
+        tenant = uuid.uuid4()
+        await seed_step(owner_sessionmaker, named=[None], tenant=tenant)
+        cid = await add_connection(owner_sessionmaker, tenant, config={"base_url": f"https://dewpoint.test:{fake.port}"},
+                                   secret={"token": "abc"})  # fmt: skip
+        call = await ask(api_sessionmaker, tenant, cid, "echo")
+        await server_for(worker_sessionmaker, tenant).serve_once()
+    assert await outcome(api_sessionmaker, tenant, call) == ("failed", "result_refused")

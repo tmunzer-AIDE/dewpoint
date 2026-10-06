@@ -124,7 +124,8 @@ class CallNetwork:
             self.changed = True
             raise ConnectionUnavailable()
         unsealed = await unseal(self.network, self.tenant_id, connection_id, stored, self._allowed)
-        self.secrets.extend(secret_strings(unsealed.secret))
+        # Every non-empty string: the run's index skips short ones, an answer never may (the owner's review, finding 4).
+        self.secrets.extend(secret_strings(unsealed.secret, minimum=1))
         return unsealed.opened(self, lambda: credential_key(self.network, self.tenant_id))
 
     async def aclose(self) -> None:

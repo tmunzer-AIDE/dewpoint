@@ -218,11 +218,12 @@ class DbConnections:
         return StoredConnection(row[0], dict(row[1]), row[2], row[3]) if row is not None else None
 
 
-def secret_strings(secret: Mapping[str, Any]) -> list[str]:
-    """Every string of a secret the index must know (D5): each value, and a secret URL's path and long parts."""
+def secret_strings(secret: Mapping[str, Any], minimum: int = MIN_SECRET) -> list[str]:
+    """Every string of a secret the index must know (D5): each value at least `minimum` long, and a secret URL's path
+    and long parts. A plugin call's answer is checked against every non-empty one (`minimum=1`)."""
     out: list[str] = []
     for text in secret.values():
-        if not isinstance(text, str) or len(text) < MIN_SECRET:
+        if not isinstance(text, str) or len(text) < minimum:
             continue
         out.append(text)
         if text.startswith(("http://", "https://")):
