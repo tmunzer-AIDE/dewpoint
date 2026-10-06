@@ -23,16 +23,37 @@ from pydantic import BaseModel
 from dewpoint.plugins.mist import oas, policy
 from dewpoint.plugins.mist.client import InvalidAnswer, MistClient, NotFound
 from dewpoint.plugins.mist.schemas import converted, resolved, top_properties, with_defs
-from dewpoint.sdk import FatalError, Node, SideEffect, StepContext, declared_model
-from dewpoint.sdk.fields import CONNECTION, LITERAL
+from dewpoint.sdk import (
+    CallContext,
+    FatalError,
+    Node,
+    Option,
+    OptionsQuery,
+    SideEffect,
+    StepContext,
+    declared_model,
+)
+from dewpoint.sdk.fields import CONNECTION, LITERAL, OPTIONS
 
 PAGE_CAP = 10
+OPTIONS_PAGE = 1000  # a picker reads one page of a list, filtered by the typed text
+LABEL_FIELDS = ("name", "ssid")
 JSON_TYPES = ("application/json", "application/vnd.api+json", "application/vnd.json+api")
 
 
 class OperationUnavailable(FatalError):
     def __init__(self) -> None:
         super().__init__("mist.operation_unavailable", "This Mist operation isn't allowed in this build.")
+
+
+class NoOptions(FatalError):
+    def __init__(self) -> None:
+        super().__init__("mist.no_options", "This field has no choices to list.")
+
+
+class ConnectionRequired(FatalError):
+    def __init__(self) -> None:
+        super().__init__("mist.connection_required", "Choose the node's Mist connection first.")
 
 
 class ConflictingChange(FatalError):
@@ -62,7 +83,35 @@ class MistOperation(Node):
     shape: ClassVar[str]  # object, list, search, empty, delete
     paging: ClassVar[str | None] = None  # headers, next
     merge_with: ClassVar[str | None] = None  # the operation reading the object an update merges into
+    pickers: ClassVar[Mapping[str, str]] = {}  # an options field and the list operation it reads
     credentials = ("mist",)
+
+    async def options(self, ctx: CallContext, field: str, query: OptionsQuery) -> list[Option]:
+        """A path value's choices: one page of the list the map allows at its collection's path, through the
+        connection's read-only HTTP, filtered by the typed text, which never enters the request."""
+        listed = self.pickers.get(field)
+        if listed is None:
+            raise NoOptions()
+        found = policy.load()
+        entry = found.entries.get(listed)
+        if found.allowed(self.operation, self.type) is None or entry is None or entry.state != "allowed":
+            raise OperationUnavailable()
+        if query.connection_id is None:
+            raise ConnectionRequired()
+        client = MistClient(await ctx.connection(query.connection_id))
+        answer = await client.call("GET", client.path(entry.path, {}), query={"limit": OPTIONS_PAGE})
+        if not isinstance(answer.body, list):
+            raise InvalidAnswer()
+        key, text = ("mac" if field.endswith("_mac") else "id"), query.text.lower()
+        out: list[Option] = []
+        for item in answer.body:
+            value = item.get(key) if isinstance(item, Mapping) else None
+            if not isinstance(value, str) or not 0 < len(value) <= 1000:
+                continue
+            label = next((item[k] for k in LABEL_FIELDS if isinstance(item.get(k), str) and item[k].strip()), value)
+            if text in label.lower() or text in value.lower():
+                out.append(Option(value, label[:200]))
+        return sorted(out, key=lambda o: (o.label.lower(), o.value))
 
     def _checked(self, config: Any) -> tuple[dict[str, Any], Any, list[str]]:
         """The config's values once nothing in them stops the request, and the map still allows the operation."""
@@ -271,7 +320,12 @@ def _query_values(doc: Mapping[str, Any], op: oas.Operation, paging: str | None)
 
 
 def config_schema(
-    doc: Mapping[str, Any], op: oas.Operation, shape: str, paging: str | None, merge: bool
+    doc: Mapping[str, Any],
+    op: oas.Operation,
+    shape: str,
+    paging: str | None,
+    merge: bool,
+    pickers: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     update = op.method == "PUT"
     props: dict[str, Any] = {
@@ -282,6 +336,8 @@ def config_schema(
     for p in op.parameters:
         if p["in"] == "path" and p["name"] != "org_id":
             props[p["name"]] = {"title": _title(p["name"]), **converted(p.get("schema", {}), output=False)}
+            if p["name"] in (pickers or {}):
+                props[p["name"]][OPTIONS] = True
             required.append(p["name"])
             roots.append(p.get("schema", {}))
     query = _query_values(doc, op, paging)
@@ -351,6 +407,20 @@ def output_schema(doc: Mapping[str, Any], answer: Any, shape: str) -> dict[str, 
     return with_defs(doc, top, [resolved(doc, answer)], output=True, partial=False)
 
 
+def _pickers(doc: Mapping[str, Any], op: oas.Operation, scope: str | None, lists: Mapping[str, str]) -> dict[str, str]:
+    """A node's options fields and the list each reads: a site-scope node's site from the org's sites; an org
+    resource's id (or MAC) from the list the map allows at its collection's path."""
+    out: dict[str, str] = {}
+    segments = op.path.split("/")
+    if scope == "site" and "/api/v1/orgs/{org_id}/sites" in lists:
+        out["site_id"] = lists["/api/v1/orgs/{org_id}/sites"]
+    if scope == "org" and len(segments) > 6 and segments[6].startswith("{"):
+        name, collection = segments[6][1:-1], "/".join(segments[:6])
+        if collection in lists and name.endswith(("_id", "_mac")):
+            out[name] = lists[collection]
+    return out
+
+
 def _class_name(type_: str) -> str:
     return "".join(part.title() for part in re.split(r"[._]", type_))
 
@@ -359,6 +429,10 @@ def build() -> tuple[type[Node], ...]:
     """Every allowed operation's curated node, in the map's order."""
     doc, ops, entries = oas.document(), oas.operations(), policy.load().entries
     by_path = {(e.method, e.path): op_id for op_id, e in entries.items() if e.state == "allowed"}
+    lists = {
+        e.path: op_id for op_id, e in entries.items() if e.state == "allowed" and e.method == "GET"
+        and _shape(doc, ops[op_id], _answer(doc, ops[op_id]))[0] == "list"
+    }  # fmt: skip
     out: list[type[Node]] = []
     for op_id, entry in sorted(entries.items()):
         if entry.state != "allowed" or entry.side_effect is None:
@@ -367,6 +441,7 @@ def build() -> tuple[type[Node], ...]:
         answer = _answer(doc, op)
         shape, paging = _shape(doc, op, answer)
         merge_with = by_path.get(("GET", op.path)) if op.method == "PUT" else None
+        pickers = _pickers(doc, op, entry.scope, lists)
         name = _class_name(type_)
         attrs: dict[str, Any] = {
             "__module__": __name__,
@@ -377,7 +452,7 @@ def build() -> tuple[type[Node], ...]:
             "description": _description(op),
             "Config": declared_model(
                 f"{name}Config",
-                config_schema(doc, op, shape, paging, merge_with is not None),
+                config_schema(doc, op, shape, paging, merge_with is not None, pickers),
                 formats=(),
                 checked=False,
             ),
@@ -392,6 +467,7 @@ def build() -> tuple[type[Node], ...]:
             "shape": shape,
             "paging": paging,
             "merge_with": merge_with,
+            "pickers": pickers,
         }
         out.append(type(name, (MistOperation,), attrs))
     return tuple(out)

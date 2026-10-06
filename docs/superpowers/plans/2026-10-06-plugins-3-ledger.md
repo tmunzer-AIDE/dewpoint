@@ -467,3 +467,11 @@ Rulings:
   `{}`. The map and an update's config are checked as in a run. The step's `simulated` outcome is the fixture's label
   - an output must match its schema, so it can't carry one - cost if wrong: none. Counts: 182 from examples (every
   example present fits), 39 made from the schema (the OAS has no example), 41 fixed.
+- Ruling: pickers list a site-scope node's `site_id` (the org's sites) and an org resource's id or MAC where the map
+  allows a list at its collection's path (27 fields, 169 nodes); a site's resources (devices, maps…) get none - a hook
+  sees the typed text and the connection, never the rest of the config, so it can't know the site - cost if wrong: a
+  device id is typed or referenced, not picked.
+- Ruling: a picker reads one page of 1,000 (`limit=1000`) and filters it by the typed text locally; the text never
+  enters a path or a query (3a-2's open question); labels are `name`, else `ssid`, else the value; the node's own
+  operation and the list's must both be allowed - cost if wrong: an org with more than 1,000 sites shows its first
+  1,000, by Mist's order.
