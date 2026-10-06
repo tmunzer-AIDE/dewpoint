@@ -96,3 +96,18 @@ async def test_a_held_list_stops_its_picker(monkeypatch: pytest.MonkeyPatch) -> 
 def test_the_reads_are_the_descriptions_operations() -> None:
     ops = oas.operations()
     assert all(r in ops and ops[r].method == "GET" for e in policy.load().entries.values() for r in e.reads)
+
+
+async def test_a_held_merge_read_stops_a_merge_simulation_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The owner's second review of the checkpoint: a simulation refuses what its run would, so a merge (by default or
+    asked) is refused, a replace simulated."""
+    holding(monkeypatch, "getOrgWLAN")
+    connection = FakeConnection(FakeHttp({}))
+    kind = node("mist.org_wlans.update")
+    base = {"connection": str(connection.id), "wlan_id": WLAN, "body": {"ssid": "x"}}
+    for config in (base, {**base, "mode": "merge"}):
+        with pytest.raises(FatalError) as e:
+            await kind().simulate(FakeStep(connection), kind.Config.model_validate(config))
+        assert e.value.code == "mist.operation_unavailable"
+    await kind().simulate(FakeStep(connection), kind.Config.model_validate({**base, "mode": "replace"}))
+    assert connection.http.sent == []

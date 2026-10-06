@@ -602,3 +602,9 @@ Runs after the owner's three findings, at `839d733` (2026-10-06): the full backe
 Python or JavaScript/TypeScript. Still open for the owner: the rulings, the fixture redesign and the catalog's size (the
 owner recommends bounded schema-built fixtures with validated example overlays, generic nodes included, and catalog
 compression before a schema-on-demand redesign), the Compose proof, the read-only Mist smoke test, push and PR.
+
+The owner's second review of the checkpoint (`6c7e2bc`, 2026-10-07, pasted): O1-O3 closed (override-bearing probes
+refused on both channels; holding `getSiteInfo` stops curated and generic nodes; generic fixtures validate against every
+allowed operation's answer schema). One Low remained: (O4) with an update's merge read held, a merge simulated
+successfully (by default or asked), its authorization living only in the run's merge. The mode-aware check now sits in
+the preflight a run and a simulation share; `replace` reads nothing and stays available.

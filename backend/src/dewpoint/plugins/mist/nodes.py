@@ -114,6 +114,10 @@ class MistOperation(Node):
                 out.append(Option(value, label[:200]))
         return sorted(out, key=lambda o: (o.label.lower(), o.value))
 
+    def _merges(self, mode: Any) -> bool:
+        """Whether an update reads the object first: `merge` asked, or by default when it may."""
+        return self.method == "PUT" and (mode or ("merge" if self.merge_with else "replace")) == "merge"
+
     def _checked(self, config: Any) -> tuple[dict[str, Any], Any, list[str]]:
         """The config's values once nothing in them stops the request, and the map still allows the operation."""
         values: dict[str, Any] = dict(config.root)
@@ -128,6 +132,10 @@ class MistOperation(Node):
             raise OperationUnavailable()
         if self.scope == "site" and found.read(self.operation, self.type, routing.SITE_CHECK) is None:
             raise OperationUnavailable()  # the site check is a read the map must allow (the owner's review, O2)
+        if self._merges(values.get("mode")) and (
+            self.merge_with is None or found.read(self.operation, self.type, self.merge_with) is None
+        ):
+            raise OperationUnavailable()  # so is a merge's read, in a run and a simulation alike; replace reads nothing
         checks = routing.checkers(self.operation).path
         for name, check in checks.items():
             value = values.get(name)
@@ -197,7 +205,7 @@ class MistOperation(Node):
         self, client: MistClient, path: str, body: Mapping[str, Any], clear: list[str], mode: str | None
     ) -> dict[str, Any]:
         cleared = dict.fromkeys(clear)
-        if (mode or ("merge" if self.merge_with else "replace")) == "replace":
+        if not self._merges(mode):
             return {**body, **cleared}
         if self.merge_with is None or policy.load().read(self.operation, self.type, self.merge_with) is None:
             raise OperationUnavailable()
