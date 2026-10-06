@@ -233,3 +233,8 @@ tenant erasure removes calls by their foreign key (cascade).
   `stop`, `alert`, `workflow`, `transform`) and marks `if.condition`, a switch case's `when` and `filter.predicate`
   `x-widget: cel`; no `x-group` (the flow nodes have one to three fields) - both are display metadata, so the editor
   (sub-project 4, slice 4f) can rename them without a new version - cost if wrong: none.
+- 3a-2's first full run (2026-10-06, 11 min on a machine another session was loading): 2802 passed, 3 failed. Two were
+  2b-2's start-form tests, whose fixture used a placeholder picker (`{"kind": "site"}`) that 3a-2's validation now
+  refuses: the fixture now uses a real picker. The third, `tests/engine/cel/test_gate_cost.py::
+  test_local_latency_and_the_cpu_between_two_yield_points` (0.90 s against a 0.2 s budget), passes alone: a timing
+  gate CI runs in its own container; 3a-2 changes no CEL code.
