@@ -465,7 +465,8 @@ async def _settle(s: AsyncSession, starting: Target, outcome: Outcome) -> str:
         return "throttled"
     if outcome.kind == "absent":  # a trustworthy absence (§7.6): back in the queue, due at once, no attempt
         log.warning("start_absent", request_id=str(request.id))
-        request.status, request.next_attempt_at = "queued", datetime.now(UTC)
+        # by the clock `begin` reads, the database's: this process's may run ahead of it
+        request.status, request.next_attempt_at = "queued", func.statement_timestamp()
         return "absent"
     if outcome.kind == "collision":
         log.error("start_id_collision", request_id=str(request.id))
