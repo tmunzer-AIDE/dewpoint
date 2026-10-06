@@ -58,13 +58,13 @@ export function TotpSetup({
   return (
     <form onSubmit={(e) => void confirm(e)} className="flex flex-col gap-4">
       {qr && <img src={qr} alt="QR code for your authenticator app" width={192} height={192} />}
-      <p className="text-sm text-muted">
+      <p className="text-body text-muted">
         Or enter this key manually:{" "}
         <code className="font-mono text-ink" data-testid="totp-secret">{secret}</code>
       </p>
       <Field label="Code from the app" inputMode="numeric" autoComplete="one-time-code" required value={code}
         onChange={(e) => setCode(e.target.value)} data-testid="totp-code" />
-      {error && <p role="alert" className="text-sm text-danger">{error}</p>}
+      {error && <p role="alert" className="text-body text-danger">{error}</p>}
       <Button variant="primary" type="submit" data-testid="totp-submit">Confirm</Button>
     </form>
   );
@@ -80,14 +80,14 @@ export function RecoveryCodes({ codes, onDone }: { codes: string[]; onDone: () =
   }
   return (
     <div className="flex flex-col gap-4">
-      <h2 className="text-lg font-semibold">Save your recovery codes</h2>
-      <p className="text-sm text-muted">Each code works once if you lose your authenticator. They won't be shown again.</p>
-      <ul data-testid="recovery-codes" className="grid grid-cols-2 gap-2 rounded-lg border border-line bg-surface-2 p-4 font-mono text-sm">
+      <h2 className="text-h3 font-semibold">Save your recovery codes</h2>
+      <p className="text-body text-muted">Each code works once if you lose your authenticator. They won't be shown again.</p>
+      <ul data-testid="recovery-codes" className="grid grid-cols-2 gap-2 rounded-lg border border-line bg-surface-2 p-4 font-mono text-body">
         {codes.map((c) => <li key={c}>{c}</li>)}
       </ul>
       <Button type="button" onClick={download}>Download .txt</Button>
-      <label className="flex items-center gap-2 text-sm">
-        <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} data-testid="recovery-ack" />
+      <label className="flex items-center gap-2 text-body">
+        <input type="checkbox" className="h-4 w-4 accent-accent" checked={ack} onChange={(e) => setAck(e.target.checked)} data-testid="recovery-ack" />
         I saved these codes
       </label>
       <Button variant="primary" disabled={!ack} onClick={onDone}>Continue</Button>
@@ -117,12 +117,12 @@ export function EnrollPage() {
         ) : (
           <>
             <div>
-              <h1 className="text-2xl font-semibold">Set up a second factor</h1>
-              <p className="mt-1 text-sm text-muted">Required for every account.</p>
+              <h1 className="text-h1 font-semibold">Set up a second factor</h1>
+              <p className="mt-1 text-small text-muted">Required for every account.</p>
             </div>
             <Button variant="primary" onClick={() => void passkey()}>Passkey (recommended)</Button>
             <TotpSetup onConfirmed={(list, state) => setCodes({ list, state })} />
-            {error && <p role="alert" className="text-sm text-danger">{error}</p>}
+            {error && <p role="alert" className="text-body text-danger">{error}</p>}
           </>
         )}
       </div>

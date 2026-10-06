@@ -2,8 +2,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Button } from "../components/Button";
-import { Field } from "../components/Field";
+import { Field, Select } from "../components/Field";
 import { StatusBadge } from "../components/StatusBadge";
+import { Table, Td, Th } from "../components/Table";
 import { ApiError, api } from "../lib/api";
 
 interface Conn {
@@ -54,53 +55,64 @@ export function ConnectionsPage({ tenantId }: { tenantId: string }) {
 
   return (
     <section className="flex flex-col gap-4 p-6">
-      <header className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Connections</h1>
-        <Button variant="primary" onClick={() => setOpen(true)} data-testid="conn-add">Add Mist connection</Button>
-      </header>
-      {verifyError && <p role="alert" className="text-sm text-danger">{verifyError}</p>}
-      <table className="w-full border-collapse rounded-lg border border-line bg-surface text-sm">
-        <thead className="bg-surface-2 text-left text-muted">
-          <tr><th className="p-3">Name</th><th className="p-3">Cloud</th><th className="p-3">Org ID</th>
-            <th className="p-3">Status</th><th className="p-3"><span className="sr-only">Actions</span></th></tr>
-        </thead>
-        <tbody>
-          {list.data?.map((c) => (
-            <tr key={c.id} className="border-t border-line" data-testid="conn-row">
-              <td className="p-3 font-medium">{c.name}</td>
-              <td className="p-3 font-mono text-[13px]">{clouds[c.config.cloud] ?? c.config.cloud}</td>
-              <td className="p-3 font-mono text-[13px]">{c.config.org_id}</td>
-              <td className="p-3"><StatusBadge status={c.status} detail={c.status_detail} privilege={c.privilege} /></td>
-              <td className="p-3 text-right">
-                <Button onClick={() => verify.mutate(c.id)} disabled={verify.isPending}>Verify</Button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {open && (
-        <form role="dialog" aria-label="Add Mist connection" className="flex max-w-lg flex-col gap-4 rounded-lg border border-line bg-surface p-5"
-          onSubmit={(e) => { e.preventDefault(); setError(null); create.mutate(); }}>
-          <Field label="Name" required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} data-testid="conn-name" />
-          <div className="flex flex-col gap-1.5">
-            <label htmlFor="cloud" className="text-sm font-semibold">Mist cloud</label>
-            <select id="cloud" className="min-h-11 rounded-lg border border-line-strong bg-surface px-3" value={form.cloud}
-              onChange={(e) => setForm({ ...form, cloud: e.target.value })} data-testid="conn-cloud">
+      <h1 className="text-h1 font-semibold">Connections</h1>
+      {verifyError && <p role="alert" className="text-body text-danger">{verifyError}</p>}
+      <div className={`grid gap-5 ${open ? "grid-cols-[minmax(0,1fr)_400px]" : "grid-cols-1"}`}>
+        <div className="flex min-w-0 flex-col gap-2.5">
+          <div className="flex items-end justify-between gap-4">
+            <div>
+              <h2 className="text-body-lg font-semibold">Mist connections</h2>
+              <p className="mt-0.5 text-small text-muted">Org-scoped API tokens. Privilege is read from Mist at verification.</p>
+            </div>
+            <Button variant="primary" size="md" onClick={() => setOpen(true)} disabled={open} data-testid="conn-add">
+              Add Mist connection
+            </Button>
+          </div>
+          <Table>
+            <thead>
+              <tr><Th>Name</Th><Th>Cloud</Th><Th>Org ID</Th><Th>Status</Th><Th><span className="sr-only">Actions</span></Th></tr>
+            </thead>
+            <tbody>
+              {list.data?.map((c) => (
+                <tr key={c.id} data-testid="conn-row">
+                  <Td className="font-medium">{c.name}</Td>
+                  <Td className="font-mono text-small">{clouds[c.config.cloud] ?? c.config.cloud}</Td>
+                  <Td className="font-mono text-small">{c.config.org_id}</Td>
+                  <Td><StatusBadge status={c.status} detail={c.status_detail} privilege={c.privilege} /></Td>
+                  <Td className="text-right">
+                    <Button size="sm" onClick={() => verify.mutate(c.id)} disabled={verify.isPending}>Verify</Button>
+                  </Td>
+                </tr>
+              ))}
+              {list.data?.length === 0 && (
+                <tr><Td colSpan={5} className="text-muted">No Mist connection yet.</Td></tr>
+              )}
+            </tbody>
+          </Table>
+        </div>
+        {open && (
+          <form aria-label="Add Mist connection" className="flex flex-col gap-3.5 self-start rounded-lg border border-line bg-surface p-5"
+            onSubmit={(e) => { e.preventDefault(); setError(null); create.mutate(); }}>
+            <h2 className="text-body-lg font-semibold">Add Mist connection</h2>
+            <Field label="Name" required autoFocus value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })}
+              data-testid="conn-name" />
+            <Select label="Mist cloud" value={form.cloud} onChange={(e) => setForm({ ...form, cloud: e.target.value })}
+              data-testid="conn-cloud">
               {Object.entries(clouds).map(([k, host]) => <option key={k} value={k}>{host}</option>)}
-            </select>
-          </div>
-          <Field label="Organization ID" required pattern="[0-9a-fA-F\-]{36}" value={form.org_id}
-            onChange={(e) => setForm({ ...form, org_id: e.target.value })} data-testid="conn-org" />
-          <Field label="API token" type="password" autoComplete="off" required value={form.api_token}
-            hint="Stored encrypted. It is never shown again." onChange={(e) => setForm({ ...form, api_token: e.target.value })}
-            data-testid="conn-token" />
-          {error && <p role="alert" className="text-sm text-danger">{error}</p>}
-          <div className="flex gap-2">
-            <Button variant="primary" type="submit" disabled={create.isPending} data-testid="conn-save">Save</Button>
-            <Button type="button" onClick={() => setOpen(false)}>Cancel</Button>
-          </div>
-        </form>
-      )}
+            </Select>
+            <Field label="Organization ID" required pattern="[0-9a-fA-F\-]{36}" placeholder="36-character UUID"
+              value={form.org_id} onChange={(e) => setForm({ ...form, org_id: e.target.value })} data-testid="conn-org" />
+            <Field label="API token" type="password" autoComplete="off" required value={form.api_token}
+              hint="Stored encrypted. It is never shown again. Use a token from a dedicated service account with the least privilege the workflows need."
+              onChange={(e) => setForm({ ...form, api_token: e.target.value })} data-testid="conn-token" />
+            {error && <p role="alert" className="text-body text-danger">{error}</p>}
+            <div className="flex gap-2">
+              <Button variant="primary" type="submit" disabled={create.isPending} data-testid="conn-save">Save</Button>
+              <Button onClick={() => setOpen(false)}>Cancel</Button>
+            </div>
+          </form>
+        )}
+      </div>
     </section>
   );
 }

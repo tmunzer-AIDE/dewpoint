@@ -28,6 +28,8 @@ const RULES: [name: string, pattern: RegExp, tokensExempt?: boolean][] = [
   ["marketing-copy", /\b(?:seamless(?:ly)?|supercharge[ds]?|effortless(?:ly)?|magic(?:al)?|oops)\b/i],
   // Token usage. The accent is a fill and ring colour: as text it falls under 4.5:1 (use text-accent-ink).
   ["accent-text", /\btext-accent(?![-\w])/],
+  // Type comes from the scale in tokens.css (text-caption … text-h1), never Tailwind's defaults or a pixel size.
+  ["type-scale", /\btext-(?:xs|sm|base|lg|xl|[2-9]xl)\b|\btext-\[\d+(?:\.\d+)?px\]/],
 ];
 
 /** The hatch sits only behind slate text, the one ink held to 4.5:1 over it: a class list that draws the hatch must

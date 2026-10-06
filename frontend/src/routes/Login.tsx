@@ -2,6 +2,7 @@
 import { useState, type FormEvent } from "react";
 import { Button } from "../components/Button";
 import { Field } from "../components/Field";
+import { Mark } from "../components/Mark";
 import { ApiError, api } from "../lib/api";
 import { authenticatePasskey } from "../lib/webauthn";
 
@@ -40,7 +41,7 @@ export function LoginForm({ onDone }: { onDone: (state: string) => void }) {
         onChange={(e) => setEmail(e.target.value)} data-testid="login-email" />
       <Field label="Password" type="password" autoComplete="current-password" required value={password}
         onChange={(e) => setPassword(e.target.value)} data-testid="login-password" />
-      {error && <p role="alert" className="text-sm text-danger">{error}</p>}
+      {error && <p role="alert" className="text-body text-danger">{error}</p>}
       <Button variant="primary" type="submit" disabled={busy} data-testid="login-submit">Sign in</Button>
       <Button type="button" disabled={busy} onClick={() => void run(() => authenticatePasskey("login"))}
         data-testid="login-passkey">Sign in with a passkey</Button>
@@ -52,7 +53,8 @@ export function LoginPage({ navigateByState }: { navigateByState: (s: string) =>
   return (
     <main className="grid min-h-screen place-items-center px-4">
       <div className="flex w-full max-w-sm flex-col gap-6">
-        <h1 className="text-2xl font-semibold">Sign in to Dewpoint</h1>
+        <Mark seam="ground" />
+        <h1 className="text-h1 font-semibold">Sign in to Dewpoint</h1>
         <LoginForm onDone={navigateByState} />
       </div>
     </main>

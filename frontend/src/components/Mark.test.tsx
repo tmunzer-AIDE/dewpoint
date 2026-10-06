@@ -15,3 +15,10 @@ it("names the product and what it is for, as text", () => {
   expect(screen.getByText("Dewpoint")).toBeTruthy();
   expect(screen.getByText("for Juniper Mist")).toBeTruthy();
 });
+
+it("seams the small circle with the colour behind it: the rail, or the ground on the sign-in screens", () => {
+  const { container, rerender } = render(<Mark />);
+  expect(container.querySelectorAll("circle")[1]?.getAttribute("class")).toContain("stroke-rail");
+  rerender(<Mark seam="ground" />);
+  expect(container.querySelectorAll("circle")[1]?.getAttribute("class")).toContain("stroke-ground");
+});

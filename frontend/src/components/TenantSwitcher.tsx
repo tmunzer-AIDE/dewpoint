@@ -12,6 +12,9 @@ export interface TenantRow {
   require_passkey: boolean;
 }
 
+// Pointer hover and keyboard focus both highlight; keyboard focus also draws the global focus ring.
+const ITEM = "flex cursor-pointer justify-between gap-4 rounded-md px-3 py-2 text-body data-[highlighted]:bg-accent-soft data-[highlighted]:text-accent-ink";
+
 export function TenantSwitcher() {
   const navigate = useNavigate();
   const params = useParams({ strict: false });
@@ -23,7 +26,7 @@ export function TenantSwitcher() {
     <Dropdown.Root modal={false}>
       <Dropdown.Trigger
         data-testid="tenant-switcher"
-        className="inline-flex min-h-9 items-center gap-2 rounded-lg border border-line-strong bg-surface px-3 text-sm"
+        className="inline-flex min-h-9 items-center gap-2 rounded-lg border border-line-strong bg-surface px-3 text-body text-ink hover:bg-surface-hover"
       >
         {current?.name ?? "Choose tenant"}
         <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
@@ -31,18 +34,22 @@ export function TenantSwitcher() {
         </svg>
       </Dropdown.Trigger>
       <Dropdown.Portal>
-        <Dropdown.Content sideOffset={6} className="min-w-56 rounded-lg border border-line bg-surface p-1 shadow-sm">
+        <Dropdown.Content sideOffset={6} align="start" className="min-w-56 rounded-lg border border-line bg-surface p-1 shadow-dialog">
           {tenants.data?.map((t) => (
             <Dropdown.Item
               key={t.id}
               onSelect={() => void navigate({ to: "/t/$tenantId/connections", params: { tenantId: t.id } })}
-              className="flex cursor-pointer justify-between gap-4 rounded-md px-3 py-2 text-sm outline-none data-[highlighted]:bg-accent-soft"
+              className={ITEM}
             >
               <span>{t.name}</span>
               <span className="text-muted">{t.role}</span>
             </Dropdown.Item>
           ))}
-          {tenants.data?.length === 0 && <div className="px-3 py-2 text-sm text-muted">No tenants yet</div>}
+          {tenants.data?.length === 0 && <div className="px-3 py-2 text-body text-muted">No tenants yet</div>}
+          <Dropdown.Separator className="my-1 h-px bg-line" />
+          <Dropdown.Item onSelect={() => void navigate({ to: "/tenants" })} className={ITEM}>
+            All tenants
+          </Dropdown.Item>
         </Dropdown.Content>
       </Dropdown.Portal>
     </Dropdown.Root>

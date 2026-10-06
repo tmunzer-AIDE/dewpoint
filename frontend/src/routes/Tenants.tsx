@@ -4,6 +4,7 @@ import { Link } from "@tanstack/react-router";
 import { useState, type FormEvent } from "react";
 import { Button } from "../components/Button";
 import { Field } from "../components/Field";
+import { Table, Td, Th } from "../components/Table";
 import type { TenantRow } from "../components/TenantSwitcher";
 import { ApiError, api } from "../lib/api";
 import { useSession } from "../lib/session";
@@ -34,35 +35,35 @@ export function TenantsPage() {
 
   return (
     <section className="flex flex-col gap-6 p-6">
-      <h1 className="text-xl font-semibold">Tenants</h1>
-      <table className="w-full max-w-3xl border-collapse rounded-lg border border-line bg-surface text-sm">
-        <thead className="bg-surface-2 text-left text-muted">
-          <tr><th className="p-3">Name</th><th className="p-3">Slug</th><th className="p-3">Your role</th></tr>
+      <h1 className="text-h1 font-semibold">Tenants</h1>
+      <Table className="max-w-3xl">
+        <thead>
+          <tr><Th>Name</Th><Th>Slug</Th><Th>Your role</Th></tr>
         </thead>
         <tbody>
           {tenants.data?.map((t) => (
-            <tr key={t.id} className="border-t border-line">
-              <td className="p-3">
+            <tr key={t.id}>
+              <Td>
                 <Link to="/t/$tenantId/connections" params={{ tenantId: t.id }} className="font-medium text-accent-ink">
                   {t.name}
                 </Link>
-              </td>
-              <td className="p-3 font-mono text-[13px]">{t.slug}</td>
-              <td className="p-3">{t.role}</td>
+              </Td>
+              <Td className="font-mono text-small">{t.slug}</Td>
+              <Td>{t.role}</Td>
             </tr>
           ))}
           {tenants.data?.length === 0 && (
-            <tr><td colSpan={3} className="p-3 text-muted">You're not a member of any tenant yet.</td></tr>
+            <tr><Td colSpan={3} className="text-muted">You're not a member of any tenant yet.</Td></tr>
           )}
         </tbody>
-      </table>
+      </Table>
       {session.data?.user.is_platform_admin && (
         <form onSubmit={submit} className="flex max-w-lg flex-col gap-4 rounded-lg border border-line bg-surface p-5">
-          <h2 className="font-semibold">Create tenant</h2>
+          <h2 className="text-body-lg font-semibold">Create tenant</h2>
           <Field label="Name" required value={name} onChange={(e) => setName(e.target.value)} data-testid="tenant-name" />
           <Field label="Slug" required pattern="[a-z0-9][a-z0-9\-]{1,61}[a-z0-9]" hint="Lowercase letters, digits and dashes."
             value={slug} onChange={(e) => setSlug(e.target.value)} data-testid="tenant-slug" />
-          {error && <p role="alert" className="text-sm text-danger">{error}</p>}
+          {error && <p role="alert" className="text-body text-danger">{error}</p>}
           <Button variant="primary" type="submit" disabled={create.isPending} data-testid="tenant-create">Create tenant</Button>
         </form>
       )}

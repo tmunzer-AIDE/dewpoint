@@ -40,10 +40,10 @@ function ReauthPrompt({ onDone, onCancel }: { onDone: () => void; onCancel: () =
   return (
     <form onSubmit={(e) => void viaTotp(e)} role="dialog" aria-label="Confirm it's you"
       className="flex max-w-md flex-col gap-3 rounded-lg border border-line bg-surface p-5">
-      <p className="text-sm">Confirm it's you before changing sign-in methods.</p>
+      <p className="text-body">Confirm it's you before changing sign-in methods.</p>
       <Field label="Authenticator code" inputMode="numeric" autoComplete="one-time-code" value={code}
         onChange={(e) => setCode(e.target.value)} data-testid="reauth-code" />
-      {error && <p role="alert" className="text-sm text-danger">{error}</p>}
+      {error && <p role="alert" className="text-body text-danger">{error}</p>}
       <div className="flex gap-2">
         <Button variant="primary" type="submit">Confirm</Button>
         <Button type="button" onClick={() => void viaPasskey()}>Use passkey</Button>
@@ -96,8 +96,8 @@ export function SecurityPage() {
   return (
     <section className="flex max-w-3xl flex-col gap-8 p-6">
       <div>
-        <h1 className="text-xl font-semibold">Security</h1>
-        <p className="mt-1 text-sm text-muted">
+        <h1 className="text-h1 font-semibold">Security</h1>
+        <p className="mt-1 text-small text-muted">
           This session signed in with: {session.data?.auth_methods.join(", ") ?? "…"}
         </p>
       </div>
@@ -111,24 +111,24 @@ export function SecurityPage() {
           }}
         />
       )}
-      {message && <p role="status" className="text-sm">{message}</p>}
+      {message && <p role="status" className="text-body">{message}</p>}
 
       <div className="flex flex-col gap-3">
-        <h2 className="font-semibold">Passkeys</h2>
+        <h2 className="text-body-lg font-semibold">Passkeys</h2>
         <ul className="divide-y divide-line rounded-lg border border-line bg-surface">
           {passkeys.data?.map((p) => (
-            <li key={p.id} className="flex justify-between p-3 text-sm">
+            <li key={p.id} className="flex justify-between p-3 text-body">
               <span>{p.name}</span>
               <span className="text-muted">added {new Date(p.created_at).toLocaleDateString()}</span>
             </li>
           ))}
-          {passkeys.data?.length === 0 && <li className="p-3 text-sm text-muted">No passkeys yet.</li>}
+          {passkeys.data?.length === 0 && <li className="p-3 text-body text-muted">No passkeys yet.</li>}
         </ul>
         <Button onClick={() => void guarded(addPasskey)} data-testid="passkey-add" className="self-start">Add a passkey</Button>
       </div>
 
       <div className="flex flex-col gap-3">
-        <h2 className="font-semibold">Authenticator app</h2>
+        <h2 className="text-body-lg font-semibold">Authenticator app</h2>
         {codes ? (
           <RecoveryCodes codes={codes} onDone={() => setCodes(null)} />
         ) : totpOpen ? (
@@ -145,7 +145,7 @@ export function SecurityPage() {
       </div>
 
       <form onSubmit={(e) => void changePassword(e)} className="flex max-w-md flex-col gap-4">
-        <h2 className="font-semibold">Change password</h2>
+        <h2 className="text-body-lg font-semibold">Change password</h2>
         <Field label="Current password" type="password" autoComplete="current-password" required value={pw.current}
           onChange={(e) => setPw({ ...pw, current: e.target.value })} />
         <Field label="New password" type="password" autoComplete="new-password" required minLength={12} value={pw.next}

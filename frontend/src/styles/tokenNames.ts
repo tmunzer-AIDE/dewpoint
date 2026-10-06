@@ -77,7 +77,7 @@ export const PAIRS: [string, string, number][] = ([
   ["rail-ink", "rail", 4.5], ["rail-dim", "rail", 4.5], ["rail-ink-strong", "rail-active", 4.5], ["focus-rail", "rail", 3],
   ["brand", "rail", 3],
   // Text the specimen renders elsewhere: the error callout's body, a hovered rail item, a simulated node's text.
-  ["ink", "danger-bg", 4.5], ["rail-ink", "rail-line", 4.5],
+  ["ink", "danger-bg", 4.5], ["rail-ink", "rail-line", 4.5], ["muted", "accent-soft", 4.5], // a highlighted menu item's detail
   ["ink", "sim-bg", 4.5], ["muted", "sim-bg", 4.5], ["accent-ink", "sim-bg", 4.5],
   ...BUTTON_PAIRS,
 ] as [string, string, number][]).filter(([fg, bg], i, all) => all.findIndex(([f, b]) => f === fg && b === bg) === i);

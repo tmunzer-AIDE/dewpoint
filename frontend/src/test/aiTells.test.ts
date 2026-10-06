@@ -32,6 +32,8 @@ describe("findTells", () => {
     ["marketing-copy", "a.tsx", `<p>Oops, something broke</p>`],
     ["accent-text", "a.tsx", `<button className="text-sm text-accent underline">`],
     ["hatch-text", "a.tsx", `<div className="hatch-sim rounded-lg bg-surface">`],
+    ["type-scale", "a.tsx", `<h1 className="text-2xl font-semibold">`],
+    ["type-scale", "a.tsx", `<td className="p-3 font-mono text-[13px]">`],
   ])("flags %s in %s", (rule, path, text) => {
     expect(findTells(path, text)).toContain(rule);
   });
@@ -47,6 +49,7 @@ describe("findTells", () => {
     ["a token shadow", "a.css", `.node { box-shadow: var(--shadow-node); }`],
     ["accent ink as text, accent as a fill", "a.tsx", `<a className="text-accent-ink bg-accent text-on-accent">`],
     ["the hatch behind slate text", "a.tsx", `<span className="hatch-sim bg-sim-bg text-sim">Simulated</span>`],
+    ["the type tokens", "a.tsx", `<p className="text-small text-body-lg text-h1 text-caption">`],
     ["the hatch's own stylesheet", "a.css", `@import "./tokens.css";\n.hatch-sim { position: relative; }\n.x { content: ""; }`],
   ])("passes %s", (_, path, text) => {
     expect(findTells(path, text)).toEqual([]);

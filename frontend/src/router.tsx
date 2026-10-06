@@ -13,7 +13,7 @@ import { TenantsPage } from "./routes/Tenants";
 /** Sends each session state to its screen; renders children only for fully signed-in sessions. */
 function RequireActive() {
   const session = useSession();
-  if (session.isPending) return <p className="p-6 text-sm text-muted">Loading…</p>;
+  if (session.isPending) return <p className="p-6 text-body text-muted">Loading…</p>;
   if (!session.data) return <Navigate to="/login" />;
   if (session.data.state === "mfa_pending") return <Navigate to="/mfa" />;
   if (session.data.state === "enroll_required") return <Navigate to="/enroll" />;

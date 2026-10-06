@@ -40,7 +40,7 @@ export function MfaPage() {
   return (
     <main className="grid min-h-screen place-items-center px-4">
       <form onSubmit={submit} className="flex w-full max-w-sm flex-col gap-4">
-        <h1 className="text-2xl font-semibold">Confirm it's you</h1>
+        <h1 className="text-h1 font-semibold">Confirm it's you</h1>
         <Field
           label={recovery ? "Recovery code" : "Authenticator code"}
           inputMode={recovery ? "text" : "numeric"}
@@ -50,12 +50,12 @@ export function MfaPage() {
           onChange={(e) => setCode(e.target.value)}
           data-testid="totp-code"
         />
-        {error && <p role="alert" className="text-sm text-danger">{error}</p>}
+        {error && <p role="alert" className="text-body text-danger">{error}</p>}
         <Button variant="primary" type="submit" disabled={busy} data-testid="totp-submit">Verify</Button>
         <Button type="button" disabled={busy} onClick={() => void run(() => authenticatePasskey("mfa"))}>
           Use a passkey instead
         </Button>
-        <button type="button" className="text-left text-sm text-accent-ink underline" onClick={() => setRecovery(!recovery)}>
+        <button type="button" className="self-start text-body text-accent-ink underline" onClick={() => setRecovery(!recovery)}>
           {recovery ? "Use an authenticator code" : "Use a recovery code"}
         </button>
       </form>

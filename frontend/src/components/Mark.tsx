@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // ai-tells-allow: eyebrow (the wordmark's tracked "for Juniper Mist" is the one exception, outline §6)
+// ai-tells-allow: type-scale (the wordmark's 17 px and 10 px are the design's lockup, outside the UI scale)
 
 /** The mark, variant B "Condensation": two circles meeting, vapour becoming a drop (D7). */
-export function Mark({ size = 28 }: { size?: number }) {
+export function Mark({ size = 28, seam = "rail" }: { size?: number; seam?: "rail" | "ground" }) {
   return (
     <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden="true">
       <circle cx="13" cy="18" r="10" className="fill-accent" />
-      <circle cx="22.5" cy="11.5" r="6" strokeWidth="2" className="fill-brand stroke-rail" />
+      <circle cx="22.5" cy="11.5" r="6" strokeWidth="2" className={`fill-brand ${seam === "rail" ? "stroke-rail" : "stroke-ground"}`} />
     </svg>
   );
 }
