@@ -320,4 +320,6 @@ options routes answer a named `OptionsOut`, and the web client's `openapi.json` 
 3 min 50 s; ruff, format, mypy, import contracts, licences, the replay gate and the schema drift check pass. Pushed
 with `[skip ci]` (Actions minutes are exhausted).
 
-**Checkpoint:** awaiting the owner's rulings on 3a-2's rulings above. CodeQL and a new Compose proof remain on hold.
+**Checkpoint:** the owner approved every 3a-2 ruling above as recommended (2026-10-06), including the stricter
+revision fencing of options (the owner's finding 3). The owner also decided to make the repository public (which
+settles the CodeQL licence question once done), authorized a new Compose proof, and merged the outline (#39).
