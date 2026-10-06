@@ -91,8 +91,9 @@ exercise. Each stays open past this plan, and the reviewer weighs each deliberat
 - **Many executions, incarnations and plugin calls.** `keys retire` describes and reads the history of every execution
   with evidence (its worst-case time is an operational measurement still to make, the owner's M3 ruling), and every
   incarnation that isn't current is described every hour, for good: both add Temporal calls to the leader's serial
-  cycle (§7.9, 2b-4b). Each plugin call in flight holds one of the worker's pooled connections for its hook (at most 10
-  seconds, up to its concurrency of 8), beside the worker's activities, and an erasure's start waits for them.
+  cycle (§7.9, 2b-4b). Each plugin call in flight holds one of the worker's pooled connections across its claim, hook,
+  sealing and answer (up to its concurrency of 8), beside the worker's activities, and an erasure's start waits for
+  them: only the hook has a deadline (10 seconds), so that wait has no fixed bound.
 
 ## File structure
 
@@ -134,11 +135,11 @@ end of pytest's output: the tail of the last failure and the short summary, whos
 longer, with the count of those left out. The replay ran 2 to 4 pytest-xdist workers; the count changes no result.
 
 The diffs are exact, as git wrote them. Git writes a blank line of context as a single space, so `git diff --check`
-reports each of those 532 lines in this file as trailing whitespace; they're part of the patches, and no line a diff
+reports each of those 534 lines in this file as trailing whitespace; they're part of the patches, and no line a diff
 adds ends in whitespace. A diff that holds a Markdown fence is fenced with four backticks. The 2b-2, 2b-3a and 2b-3b
 plans carry the same lines.
 
-The commits are the local branch `proto/2b4a-v6`, cut from `main` at `f65c6f9`, one commit per task:
+The commits are the local branch `proto/2b4a-v7`, cut from `main` at `f65c6f9`, one commit per task:
 - `proto/2b4a-v1`, cut from `main` at `6482c53`, was built milestone by milestone, with the owner's checkpoint after
   each; all four milestones were approved as prototype checkpoints (below), its last at `7d5b20b`.
 - `main` then moved: plugins-3a-1 (migration 0041: `egress_allowlist`, whose `tenant_id` is null for an exception for
@@ -181,7 +182,11 @@ The commits are the local branch `proto/2b4a-v6`, cut from `main` at `f65c6f9`, 
   lifecycle rule. Task 8 now fences them at step 1 (the ask rechecks `active`; a worker holds the tenant's plugin-call
   lock from its check through the claim, the hook and the answer; step 1 takes it first), made test-first on
   `proto/2b4a-int` and recorded again; Task 11's guide describes it. Tasks 1 to 7 are `proto/2b4a-v5`'s commits, and
-  Tasks 9, 10 and 12 its patches, keeping their records, as does Task 11, whose patch differs only in the guide. Its
+  Tasks 9, 10 and 12 its patches, keeping their records, as does Task 11, whose patch differs only in the guide.
+- `proto/2b4a-v7` folds in the owner's review of v6 (milestone ruling 9): workers take only an active tenant's calls,
+  so calls an erasure left queued can't hold an active tenant's back, and nothing claims step 1's wait is bounded by
+  the hook's deadline. Both go to Task 8 (the candidate function redefined in 0040, placed where no later task edits),
+  made test-first on `proto/2b4a-int` and recorded again; Task 11's guide says so. Tasks 9 to 12 are v6's patches. Its
   last tree is `proto/2b4a-int`'s.
 
 Each commit was verified this way:
@@ -200,12 +205,12 @@ Each commit was verified this way:
 
 Per the owner's ruling on the outline, the whole suite runs once, at the end, not at every task. The prototype's last
 whole-suite run (`3fda97c`, whose code is `7d5b20b`'s) passed: 2,742 passed, 8 skipped, in about 13 minutes locally.
-On `proto/2b4a-v6`'s last tree (run as `proto/2b4a-int`'s at `e5c2998`, the same tree), the whole suite passed: 3,237
-passed, 8 skipped, in 9 minutes 14 seconds locally with `-n auto`. Earlier runs: on `proto/2b4a-v3`'s last tree
+On `proto/2b4a-v7`'s last tree (run as `proto/2b4a-int`'s at `1754d1e`, the same tree), the whole suite passed: 3,238
+passed, 8 skipped, in 8 minutes 58 seconds locally with `-n auto`. Earlier runs: on `proto/2b4a-v3`'s last tree
 (`215e559`), only #42's naming test failed, which Task 11 now passes; on `proto/2b4a-v4`'s (`4c3c696`), 3,011 passed;
 on `proto/2b4a-int` once it had merged `f65c6f9` and followed 0042, only the fence's inventory and the models'
 comparison failed, both for #44's tables, which milestone ruling 7's fixes answer; on `proto/2b4a-v5`'s (`6eae38c`),
-3,231 passed.
+3,231 passed; on `proto/2b4a-v6`'s (`2754be7`), 3,237 passed.
 
 ## Executing this plan
 
@@ -332,6 +337,13 @@ tasks named.
    The owner asked for plugin-call admission and execution serialized with step 1, with race regressions for a queued
    and an in-flight call; Task 8's fence answers it. The no-push, no-Compose, `ALLOW_ALL` and `firing_bound_unproven`
    gates remain.
+9. **The review of v6 (2026-10-06).** v6 closes the erasure race, but prototype approval was held for availability:
+   `plugin_call_candidates()` still offered an erasing tenant's queued calls, which the worker skips, so eight older
+   ones could take every slot of every poll and an active tenant's newer call never reach a worker within its API's
+   ten-second wait. Candidate selection now leaves inactive tenants out, the worker's locked check staying the final
+   fence, with a multi-tenant regression (Task 8). And the documents claimed step 1 waits at most ten seconds, while the
+   guard also covers the claim, the key lookup and sealing and the answer's transaction: that maximum is gone from the
+   guide and the spec. The gates are unchanged.
 
 **Open and separate:** issues #16, #18 and #26; §7.9's other items; 2b-4b (production Temporal and its proofs, #3's
 anchor sink, the readiness checks and the gate lift); the deferred minors of 2b-3a, 2b-3b and this prototype; the firing
@@ -341,7 +353,7 @@ bound's design.
 
 ### Task 1: Every key between two tenant tables carries the tenant, and the models declare every key (#35)
 
-**Commit:** `3e15fd6` (`proto/2b4a-v6`), replayed as it is: on `f65c6f9`, 0035 following 0042 and plugin calls modelled
+**Commit:** `3e15fd6` (`proto/2b4a-v7`), replayed as it is: on `f65c6f9`, 0035 following 0042 and plugin calls modelled
 (milestone ruling 7). It folds `proto/2b4a-v1`'s `588a058` and `3e60a74`; `1b16227`, but for `retention.py`, the runs'
 root key and `AuditCheckpoint`, which Tasks 3 and 4 add; and `8adb1a8`. From `proto/2b4a-int`: `a6aac25` and `599315c`
 (0035 follows 0042, after 0041, plugins-3 D25), `40467ad` (0041's rate models declare their keys' cascade) and `ec0d6d5`
@@ -1224,7 +1236,7 @@ index b58fffc..489da51 100644
 
 ### Task 2: An endpoint's events pointer is fixed when it's made (D10)
 
-**Commit:** `2bcf934` (`proto/2b4a-v6`), replayed as it is: the schema regenerated on #44's. It folds `proto/2b4a-v1`'s
+**Commit:** `2bcf934` (`proto/2b4a-v7`), replayed as it is: the schema regenerated on #44's. It folds `proto/2b4a-v1`'s
 `93c3c2b`; the web client's schema regenerated (a PATCH's body no longer names `events_pointer`).
 
 **Create:** `backend/migrations/versions/0036_events_pointer_fixed.py`
@@ -1530,7 +1542,7 @@ downgrade. The owner approved it as a prototype checkpoint with milestone 2 (mil
 
 ### Task 3: A tenant's retention, the cutoff on every read, the sweep, its role and process, and the SLO gate
 
-**Commit:** `7ab3079` (`proto/2b4a-v6`), replayed as it is: the schema regenerated on #44's. It folds `proto/2b4a-v1`'s
+**Commit:** `7ab3079` (`proto/2b4a-v7`), replayed as it is: the schema regenerated on #44's. It folds `proto/2b4a-v1`'s
 run from `5e89a64` to `3d3219c` but for audit pruning's `19d907a` and `ad4cfaa`, which are Task 4's: `5e89a64`,
 `acfbabc`, `daf01f0`, `de68976`, `f810aa8`, `b223b4e`, `27b66e9`, `8265ddc`, `b1ceedf`, `fb17846`, `30142d9`, `722cc1e`,
 `058ff71` and `3d3219c`; with `1b16227`'s `retention.py` and the runs' root key. The retention router joins `ROUTERS`,
@@ -4783,7 +4795,7 @@ index 1213f9f..9a3a90d 100644
 
 ### Task 4: Audit pruning through an anchored checkpoint, off in production until #3
 
-**Commit:** `b964ef6` (`proto/2b4a-v6`). The replay ran `proto/2b4a-v3`'s `3daa44d`, the same patch, on the tree before
+**Commit:** `b964ef6` (`proto/2b4a-v7`). The replay ran `proto/2b4a-v3`'s `3daa44d`, the same patch, on the tree before
 #44. It folds `proto/2b4a-v1`'s `19d907a` and `ad4cfaa`, `1b16227`'s `AuditCheckpoint` model, and the guide's
 audit-pruning section.
 
@@ -5444,7 +5456,7 @@ after the downgrade. The owner held it twice (milestone ruling 2) and approved i
 
 ### Task 5: Re-encryption, rotating keypairs and the ingress key, and retiring a data-key version nothing needs
 
-**Commit:** `b233bb6` (`proto/2b4a-v6`). The replay ran `proto/2b4a-v3`'s `e5bef26`, the same patch, on the tree before
+**Commit:** `b233bb6` (`proto/2b4a-v7`). The replay ran `proto/2b4a-v3`'s `e5bef26`, the same patch, on the tree before
 #44. It folds `proto/2b4a-v1`'s run from `f5f7190` to `a66a227` but for `75aabea`, which is Task 6's: `f5f7190`,
 `8ce3a48`, `8c45a2d`, `d877b1c`, `c149064`, `b13dac9`, `688ce5e`, `77a1b71`, `22b123d`, `58bd65f`, `912abbd`, `88bc3a1`
 and `a66a227`. Where two commits' text in 0039's docstring met, it takes this task's, without `75aabea`'s.
@@ -7961,7 +7973,7 @@ index 8aace2a..cea20da 100644
 
 ### Task 6: What retiring a version waits on: the tick contract and every run's execution evidence
 
-**Commit:** `8187008` (`proto/2b4a-v6`), replayed as it is: `proto/2b4a-v4`'s `0f517a9` (its message corrected,
+**Commit:** `8187008` (`proto/2b4a-v7`), replayed as it is: `proto/2b4a-v4`'s `0f517a9` (its message corrected,
 milestone ruling 6) with plugin calls' answers sealed again and counted (milestone ruling 7). It folds `proto/2b4a-v1`'s
 `75aabea`, `25a13d7`, `62eceac`, `92e4b59`, `f5d5a9d` and `92df94d`; from `proto/2b4a-int`, `d30555e` (a tenant's
 credential scope key sealed again, the same key, and counted by retirement) and `cc2810c` (a plugin call's answer,
@@ -11399,7 +11411,7 @@ owner held it four times (milestone ruling 3) and approved it as a prototype che
 
 ### Task 7: Erased tenants are never eligible; the erasure's record, items and known ids; the insert fence
 
-**Commit:** `5ba075d` (`proto/2b4a-v6`), replayed as it is: `proto/2b4a-v4`'s `60c83b8` with plugin calls fenced
+**Commit:** `5ba075d` (`proto/2b4a-v7`), replayed as it is: `proto/2b4a-v4`'s `60c83b8` with plugin calls fenced
 (milestone ruling 7). It folds `proto/2b4a-v1`'s `9eaf0dc`; from `proto/2b4a-int`'s `4f36296` and `cef6823`, 0041's
 tenant tables and 0042's plugin calls under the fence, and an egress exception naming no tenant let through it.
 
@@ -12174,10 +12186,12 @@ index cc5ff74..842177d 100644
 
 ### Task 8: Step 1 and the writers it fences
 
-**Commit:** `bba110e` (`proto/2b4a-v6`), replayed as it is: `proto/2b4a-v5`'s `cf8cdff` with plugin calls fenced at step
-1 (milestone ruling 8). It folds `proto/2b4a-v1`'s `b7d85ba`; from `proto/2b4a-int`, `e5c2998` (a plugin call fenced at
-step 1: the ask rechecks `active`, and a worker holds the tenant's plugin-call lock from its check through the claim,
-the hook and the answer).
+**Commit:** `2a9af92` (`proto/2b4a-v7`), replayed as it is: `proto/2b4a-v5`'s `cf8cdff` with plugin calls fenced at step
+1 (milestone ruling 8), and workers taking only an active tenant's calls (milestone ruling 9). It folds
+`proto/2b4a-v1`'s `b7d85ba`; from `proto/2b4a-int`, `e5c2998` (a plugin call fenced at step 1: the ask rechecks
+`active`, and a worker holds the tenant's plugin-call lock from its check through the claim, the hook and the answer)
+and `1cdb827` (workers take only an active tenant's calls; the wait has no fixed bound), laid out as `1754d1e` places
+it, where no later task edits.
 
 **Create:** `backend/src/dewpoint/core/erasure/__init__.py`, `backend/src/dewpoint/core/erasure/service.py`,
 `backend/src/dewpoint/core/tenancy/lifecycle.py`, `backend/tests/core/erasure/conftest.py`,
@@ -12208,6 +12222,12 @@ fence's trigger and would queue behind step 1. Race regressions: a queued call n
 step 1 commits, a fenced write meanwhile not stuck; an ask after step 1 refused, through both routes; one holding its
 check committed first.
 
+Workers take only an active tenant's plugin calls (migration 0040 redefines plugin_call_candidates(), its downgrade
+restoring 0042's; the owner's review of v6): a call an erasure left queued would otherwise be taken and skipped every
+round, as many as a worker has slots, holding an active tenant's call back; the worker's locked check stays the final
+fence. Only the hook has a deadline: the guard also holds across the claim, the key lookup and sealing and the answer's
+transaction, so step 1's wait has no fixed bound.
+
 - [ ] **Step 1: its tests alone, before its code.** Run (in `backend/`): `uv run pytest -q -n 4
   tests/apps/api/test_plugin_calls_api.py tests/apps/cli/test_keys.py tests/core/erasure/test_writers.py`. Replay result
   on `5ba075d` with this task's tests (exit 1), shortened:
@@ -12228,31 +12248,32 @@ E   ModuleNotFoundError: No module named 'dewpoint.core.erasure'
 =========================== short test summary info ============================
 ERROR tests/apps/api/test_plugin_calls_api.py - ImportError while importing t...
 ERROR tests/core/erasure/test_writers.py - ImportError while importing test m...
-8 passed, 2 errors in 89.80s (0:01:29)
+8 passed, 2 errors in 10.71s
 ```
 
-- [ ] **Step 2: its code, then the same tests.** Replay result on `bba110e` (exit 0), shortened:
+- [ ] **Step 2: its code, then the same tests.** Replay result on `2a9af92` (exit 0), shortened:
 
 ```
-..........................................................               [100%]
-58 passed in 154.18s (0:02:34)
+...........................................................              [100%]
+59 passed in 16.81s
 ```
 
 Evidence beyond the replay: `e5c2998` was made test-first on `proto/2b4a-int` (6 failed: the queued call answered,
 nothing waited for a lock twice, both routes 504 instead of 409, the ask after step 1 not refused). With the worker's
 guard moved to the lifecycle lock itself and step 1 no longer taking the plugin-call lock, the in-flight test's fenced
-write, made while step 1 waits, times out: queued behind step 1, which waits for the hook.
+write, made while step 1 waits, times out: queued behind step 1, which waits for the hook. `1cdb827`'s regression failed
+first too: the active tenant's call stayed pending behind eight erasing tenants' older calls.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit bba110e && git commit -C bba110e`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 2a9af92 && git commit -C 2a9af92`
 
 The diff:
 
 ```diff
 diff --git a/backend/migrations/versions/0040_tenant_erasure.py b/backend/migrations/versions/0040_tenant_erasure.py
-index 049c183..c0bb1e6 100644
+index 049c183..fc2e413 100644
 --- a/backend/migrations/versions/0040_tenant_erasure.py
 +++ b/backend/migrations/versions/0040_tenant_erasure.py
-@@ -61,6 +61,26 @@ END $$""",
+@@ -61,6 +61,62 @@ END $$""",
      "REVOKE ALL ON FUNCTION tenant_insert_fence() FROM PUBLIC",
  ]
  
@@ -12270,6 +12291,42 @@ index 049c183..c0bb1e6 100644
 +    "REVOKE ALL ON FUNCTION tenant_status(uuid) FROM PUBLIC",
 +    f"GRANT EXECUTE ON FUNCTION tenant_status(uuid) TO {', '.join(ROLES)}",
 +]
++# Plugin calls (0042, plugins-3a-2): a worker takes only an active tenant's calls (the owner's review of 2b-4a v6).
++# A call an erasure left queued is never run (the worker's locked check, `lifecycle.calls_allowed`, stays the final
++# fence), so it mustn't stay a candidate: as many of them as a worker has free slots would be taken and skipped every
++# round, holding a newer call of an active tenant back past its API's wait.
++CALL_CANDIDATES = """
++CREATE OR REPLACE FUNCTION plugin_call_candidates(refs text[], types text[], hashes text[], max_calls integer)
++RETURNS TABLE (tenant_id uuid, id uuid)
++LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
++  SELECT due.tenant_id, due.id FROM (
++    SELECT c.tenant_id, c.id, c.created_at,
++           row_number() OVER (PARTITION BY c.tenant_id ORDER BY c.created_at, c.id) AS turn
++    FROM plugin_calls c JOIN tenants t ON t.id = c.tenant_id AND t.status = 'active'
++    WHERE c.expires_at > now()
++      AND (c.state = 'pending' OR (c.state = 'claimed' AND c.lease_until <= now()))
++      AND ((c.kind = 'options' AND c.node_ref = ANY(refs)) OR (c.kind = 'verify' AND c.connection_type = ANY(types)))
++      AND (c.type_hash IS NULL OR c.type_hash = ANY(hashes))
++  ) due
++  ORDER BY due.turn, due.created_at, due.id
++  LIMIT max_calls
++$$"""
++CALL_CANDIDATES_0042 = """
++CREATE OR REPLACE FUNCTION plugin_call_candidates(refs text[], types text[], hashes text[], max_calls integer)
++RETURNS TABLE (tenant_id uuid, id uuid)
++LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
++  SELECT due.tenant_id, due.id FROM (
++    SELECT c.tenant_id, c.id, c.created_at,
++           row_number() OVER (PARTITION BY c.tenant_id ORDER BY c.created_at, c.id) AS turn
++    FROM plugin_calls c
++    WHERE c.expires_at > now()
++      AND (c.state = 'pending' OR (c.state = 'claimed' AND c.lease_until <= now()))
++      AND ((c.kind = 'options' AND c.node_ref = ANY(refs)) OR (c.kind = 'verify' AND c.connection_type = ANY(types)))
++      AND (c.type_hash IS NULL OR c.type_hash = ANY(hashes))
++  ) due
++  ORDER BY due.turn, due.created_at, due.id
++  LIMIT max_calls
++$$"""
 +ERASURES = [  # a platform admin starts, stops and retries an erasure through the API (as its role)
 +    "GRANT SELECT, INSERT ON tenant_erasures TO dewpoint_api",
 +    "GRANT UPDATE (stopped_at, stopped_by, attempts, next_attempt_at) ON tenant_erasures TO dewpoint_api",
@@ -12279,7 +12336,7 @@ index 049c183..c0bb1e6 100644
  FIRINGS = [
      "ALTER TABLE schedule_firings ENABLE ROW LEVEL SECURITY",
      "ALTER TABLE schedule_firings FORCE ROW LEVEL SECURITY",
-@@ -138,7 +158,7 @@ def upgrade() -> None:
+@@ -138,7 +194,7 @@ def upgrade() -> None:
      )
      op.create_index("schedule_firings_tenant", "schedule_firings", ["tenant_id", "schedule_id"])
      op.create_index("schedule_firings_recorded", "schedule_firings", ["recorded_at"])
@@ -12288,7 +12345,15 @@ index 049c183..c0bb1e6 100644
          op.execute(statement)
      op.add_column("schedules", sa.Column("creation_misses", sa.Integer, nullable=False, server_default="0"))
      op.execute("GRANT UPDATE (creation_misses) ON schedules TO dewpoint_dispatch")
-@@ -153,6 +173,7 @@ def downgrade() -> None:
+@@ -147,12 +203,15 @@ def upgrade() -> None:
+     for table in FENCED:
+         op.execute(f"CREATE TRIGGER {table}_fence BEFORE INSERT ON {table} FOR EACH ROW "
+                    "EXECUTE FUNCTION tenant_insert_fence()")  # fmt: skip
++    op.execute(CALL_CANDIDATES)
+ 
+ 
+ def downgrade() -> None:
++    op.execute(CALL_CANDIDATES_0042)
      for table in FENCED:
          op.execute(f"DROP TRIGGER {table}_fence ON {table}")
      op.execute("DROP FUNCTION tenant_insert_fence()")
@@ -12447,7 +12512,7 @@ index 3b16c0a..85ecd14 100644
      if found is None:
          raise ScheduleUnknownError(str(schedule_id))
 diff --git a/backend/src/dewpoint/apps/worker/plugin_calls.py b/backend/src/dewpoint/apps/worker/plugin_calls.py
-index ff3873d..bd053d0 100644
+index ff3873d..2807207 100644
 --- a/backend/src/dewpoint/apps/worker/plugin_calls.py
 +++ b/backend/src/dewpoint/apps/worker/plugin_calls.py
 @@ -37,6 +37,7 @@ from dewpoint.core.claims.cipher import ClaimCipher
@@ -12458,7 +12523,7 @@ index ff3873d..bd053d0 100644
  from dewpoint.sdk import (
      ConnectionUnavailable,
      Node,
-@@ -300,27 +301,39 @@ class PluginCallServer:
+@@ -300,27 +301,40 @@ class PluginCallServer:
      async def _serve(self, tenant_id: uuid.UUID, call_id: uuid.UUID) -> None:
          async with self._slots:
              try:
@@ -12467,7 +12532,8 @@ index ff3873d..bd053d0 100644
 -                    claimed = await calls.claim(s, tenant_id, call_id)
 +                # The tenant's plugin-call lock, shared, held from the check that the tenant is active through the
 +                # claim, the hook and the answer (the owner's review of 2b-4a v5): an erasure's step 1 waits for this
-+                # call, and once it has committed a call is never run. The hook's deadline bounds the wait.
++                # call, and once it has committed a call is never run. Only the hook has a deadline: the claim, the key
++                # lookup and sealing, and the answer's transaction have none of their own, so neither has the wait.
 +                async with self._sessionmaker() as guard, guard.begin():
 +                    if not await lifecycle.calls_allowed(guard, tenant_id):
 +                        return  # the tenant is being erased: its call is left for the erasure
@@ -12919,10 +12985,10 @@ index 0000000..c6cff17
 +from tests.apps.test_admission import ready  # noqa: F401
 diff --git a/backend/tests/core/erasure/test_writers.py b/backend/tests/core/erasure/test_writers.py
 new file mode 100644
-index 0000000..81be9f2
+index 0000000..318655b
 --- /dev/null
 +++ b/backend/tests/core/erasure/test_writers.py
-@@ -0,0 +1,500 @@
+@@ -0,0 +1,518 @@
 +# SPDX-License-Identifier: Apache-2.0
 +"""Step 1 and the writers it fences (the 2b-4 outline's "Fencing in-flight work"): every writer of tenant data takes
 +the tenant's lifecycle lock shared and checks `active` in the same transaction as its write, so step 1, which takes it
@@ -13349,6 +13415,24 @@ index 0000000..81be9f2
 +    assert (await _state(api_sessionmaker, tenant, call), fake.requests) == (("pending", False), [])
 +
 +
++async def test_queued_calls_of_erasing_tenants_never_hold_an_active_tenants_call_back(
++    owner_sessionmaker, api_sessionmaker, worker_sessionmaker
++) -> None:
++    """The owner's review of 2b-4a v6: a worker takes at most its free slots' worth of candidates, oldest first. Calls
++    an erasure left queued are never run, so if they stayed candidates, as many of them as a worker has slots would be
++    taken and skipped every round, and a newer call of an active tenant would never reach a worker."""
++    async with serve(provider, tls_names=NAMES) as fake:
++        for _ in range(8):  # a worker's concurrency: every slot
++            erased, erased_cid = await setup(owner_sessionmaker, fake.port)
++            await ask_call(api_sessionmaker, erased, erased_cid)
++            await erase(api_sessionmaker, erased)
++        tenant, cid = await setup(owner_sessionmaker, fake.port)
++        call = await ask_call(api_sessionmaker, tenant, cid)
++        await server_for(worker_sessionmaker, tenant, concurrency=8).serve_once()
++    assert (await outcome(api_sessionmaker, tenant, call))[0] == "done"
++    assert len(fake.requests) == 1  # the active tenant's call only
++
++
 +async def test_a_plugin_call_in_flight_answers_before_step_1_commits(
 +    owner_sessionmaker, api_sessionmaker, worker_sessionmaker
 +) -> None:
@@ -13427,7 +13511,7 @@ index 0000000..81be9f2
 
 ### Task 9: Schedules created paused and unpaused by a token update; ticks record their own ids; the sync fenced
 
-**Commit:** `b066908` (`proto/2b4a-v6`). The replay ran `proto/2b4a-v3`'s `159c066`, the same patch, on the tree before
+**Commit:** `75fc623` (`proto/2b4a-v7`). The replay ran `proto/2b4a-v3`'s `159c066`, the same patch, on the tree before
 #44 and Task 8's plugin-call fence. It folds `proto/2b4a-v1`'s `4140a33`.
 
 **Create:** `backend/tests/apps/worker/test_temporal_erasure_contract.py`
@@ -13486,7 +13570,7 @@ Evidence beyond the replay: the contract tests run on the dev server and pin wha
 deleted and recreated under one id restarts its conflict token at 1, and a stale unpause lands on the recreation. That
 failed the outline's premise (D3e), and Task 12 answers it.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit b066908 && git commit -C b066908`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 75fc623 && git commit -C 75fc623`
 
 The diff:
 
@@ -14355,7 +14439,7 @@ index d632bf8..8592892 100644
 
 ### Task 10: The retention process carries an erasure through stages 20 to 80
 
-**Commit:** `090047c` (`proto/2b4a-v6`). The replay ran `proto/2b4a-v5`'s `4e21f6b`, the same patch, on the tree before
+**Commit:** `3e78978` (`proto/2b4a-v7`). The replay ran `proto/2b4a-v5`'s `4e21f6b`, the same patch, on the tree before
 Task 8's plugin-call fence. It folds `proto/2b4a-v1`'s `17ba406`; from `proto/2b4a-int`'s `4f36296` and `cef6823`,
 0041's tenant tables and 0042's plugin calls swept (the retention role's policies, reads and deletes; plugin calls
 before the connections a verify call names), an egress exception naming no tenant kept.
@@ -14411,16 +14495,16 @@ ERROR tests/apps/erasure/test_stages.py - ImportError while importing test mo...
 Evidence beyond the replay: `4f36296` and `cef6823` were made test-first on `proto/2b4a-int`: 0041's rows, then a plugin
 call, were left after stage 80.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 090047c && git commit -C 090047c`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 3e78978 && git commit -C 3e78978`
 
 The diff:
 
 ```diff
 diff --git a/backend/migrations/versions/0040_tenant_erasure.py b/backend/migrations/versions/0040_tenant_erasure.py
-index c0bb1e6..b2adf57 100644
+index fc2e413..8507cc1 100644
 --- a/backend/migrations/versions/0040_tenant_erasure.py
 +++ b/backend/migrations/versions/0040_tenant_erasure.py
-@@ -81,6 +81,93 @@ ERASURES = [  # a platform admin starts, stops and retries an erasure through th
+@@ -117,6 +117,93 @@ ERASURES = [  # a platform admin starts, stops and retries an erasure through th
      "GRANT SELECT ON tenant_erasure_items, tenant_erasure_known TO dewpoint_api",
  ]
  
@@ -14514,7 +14598,7 @@ index c0bb1e6..b2adf57 100644
  FIRINGS = [
      "ALTER TABLE schedule_firings ENABLE ROW LEVEL SECURITY",
      "ALTER TABLE schedule_firings FORCE ROW LEVEL SECURITY",
-@@ -158,7 +245,7 @@ def upgrade() -> None:
+@@ -194,7 +281,7 @@ def upgrade() -> None:
      )
      op.create_index("schedule_firings_tenant", "schedule_firings", ["tenant_id", "schedule_id"])
      op.create_index("schedule_firings_recorded", "schedule_firings", ["recorded_at"])
@@ -14523,7 +14607,7 @@ index c0bb1e6..b2adf57 100644
          op.execute(statement)
      op.add_column("schedules", sa.Column("creation_misses", sa.Integer, nullable=False, server_default="0"))
      op.execute("GRANT UPDATE (creation_misses) ON schedules TO dewpoint_dispatch")
-@@ -174,6 +261,26 @@ def downgrade() -> None:
+@@ -212,6 +299,26 @@ def downgrade() -> None:
          op.execute(f"DROP TRIGGER {table}_fence ON {table}")
      op.execute("DROP FUNCTION tenant_insert_fence()")
      op.execute("DROP FUNCTION tenant_status(uuid)")
@@ -15780,12 +15864,12 @@ index 9a12e24..65268e9 100644
 
 ### Task 11: Stage 90's hold, completion, reconciliation, the admin API, the retention wiring and the proof
 
-**Commit:** `3d56d94` (`proto/2b4a-v6`). The replay ran `proto/2b4a-v5`'s `535a020`, the same patch but for the guide's
-paragraph on the plugin-call fence (milestone ruling 8), on the tree before Task 8's fence. It folds `proto/2b4a-v1`'s
-`927ba31`, `97ef5e9`, `949a638`, `87aaaf9` and `c890763`; the erasure router joins `ROUTERS`, after the admin users',
-the schema regenerated; the guide's row for 0041's tables and 0042's plugin calls; the erasure route's body named
-`ErasureStartIn`, its own name (milestone ruling 6); and the guide's paragraph on the plugin-call fence (milestone
-ruling 8).
+**Commit:** `f2ce1c2` (`proto/2b4a-v7`). The replay ran `proto/2b4a-v5`'s `535a020`, the same patch but for the guide's
+paragraph on the plugin-call fence (milestone rulings 8 and 9), on the tree before Task 8's fence. It folds
+`proto/2b4a-v1`'s `927ba31`, `97ef5e9`, `949a638`, `87aaaf9` and `c890763`; the erasure router joins `ROUTERS`, after
+the admin users', the schema regenerated; the guide's row for 0041's tables and 0042's plugin calls; the erasure route's
+body named `ErasureStartIn`, its own name (milestone ruling 6); and the guide's paragraph on the plugin-call fence
+(milestone rulings 8 and 9).
 
 **Create:** `backend/src/dewpoint/apps/api/routes/erasure.py`, `backend/src/dewpoint/apps/erasure/bound.py`,
 `backend/tests/apps/api/test_erasure_api.py`, `backend/tests/apps/erasure/conftest.py`,
@@ -15871,13 +15955,13 @@ Evidence beyond the replay: the rename was made test-first, on the first draft's
 requests' shared a name, and FastAPI named both components by module path, renaming the run requests' published one.
 Here it passes, and the schema only gains the erasure route's components.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 3d56d94 && git commit -C 3d56d94`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit f2ce1c2 && git commit -C f2ce1c2`
 
 The diff:
 
 ```diff
 diff --git a/backend/migrations/versions/0040_tenant_erasure.py b/backend/migrations/versions/0040_tenant_erasure.py
-index b2adf57..b1c37d5 100644
+index 8507cc1..8186041 100644
 --- a/backend/migrations/versions/0040_tenant_erasure.py
 +++ b/backend/migrations/versions/0040_tenant_erasure.py
 @@ -23,10 +23,16 @@ erasure's firing inventory; identifiers only, kept 31 days (the platform's longe
@@ -15925,7 +16009,7 @@ index b2adf57..b1c37d5 100644
      RAISE EXCEPTION 'tenant_erased' USING ERRCODE = 'DPE01';
    END IF;
    RETURN NEW;
-@@ -178,6 +183,15 @@ FIRINGS = [
+@@ -214,6 +219,15 @@ FIRINGS = [
  ]
  
  
@@ -15941,7 +16025,7 @@ index b2adf57..b1c37d5 100644
  def upgrade() -> None:
      op.drop_constraint("tenants_status", "tenants", type_="check")
      op.create_check_constraint("tenants_status", "tenants", "status IN ('active', 'erasing', 'erased')")
-@@ -187,12 +201,14 @@ def upgrade() -> None:
+@@ -223,12 +237,14 @@ def upgrade() -> None:
          sa.Column("requested_by", sa.Uuid, nullable=False),  # a platform admin's user id
          sa.Column("requested_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
          sa.Column("step", sa.SmallInteger, nullable=False, server_default="20"),
@@ -15956,7 +16040,7 @@ index b2adf57..b1c37d5 100644
          sa.Column("paused_at", sa.DateTime(timezone=True), nullable=True),  # the last schedule verified paused
          sa.Column("latest_close", sa.DateTime(timezone=True), nullable=True),  # every found execution verified gone
          sa.Column("check_after", sa.DateTime(timezone=True), nullable=True),  # the bound: the final check's earliest
-@@ -215,14 +231,13 @@ def upgrade() -> None:
+@@ -251,14 +267,13 @@ def upgrade() -> None:
          sa.Column("state", sa.Text, nullable=False, server_default="found"),
          sa.Column("attempts", sa.Integer, nullable=False, server_default="0"),
          sa.Column("failure", sa.Text, nullable=True),
@@ -15972,7 +16056,7 @@ index b2adf57..b1c37d5 100644
                      postgresql_where=sa.text("state <> 'verified'"))  # fmt: skip
      op.create_table(
          "tenant_erasure_known",
-@@ -245,7 +260,16 @@ def upgrade() -> None:
+@@ -281,7 +296,16 @@ def upgrade() -> None:
      )
      op.create_index("schedule_firings_tenant", "schedule_firings", ["tenant_id", "schedule_id"])
      op.create_index("schedule_firings_recorded", "schedule_firings", ["recorded_at"])
@@ -15990,7 +16074,7 @@ index b2adf57..b1c37d5 100644
          op.execute(statement)
      op.add_column("schedules", sa.Column("creation_misses", sa.Integer, nullable=False, server_default="0"))
      op.execute("GRANT UPDATE (creation_misses) ON schedules TO dewpoint_dispatch")
-@@ -261,6 +285,7 @@ def downgrade() -> None:
+@@ -299,6 +323,7 @@ def downgrade() -> None:
          op.execute(f"DROP TRIGGER {table}_fence ON {table}")
      op.execute("DROP FUNCTION tenant_insert_fence()")
      op.execute("DROP FUNCTION tenant_status(uuid)")
@@ -15998,7 +16082,7 @@ index b2adf57..b1c37d5 100644
      op.execute(VERSIONS_0007)
      op.execute(EVIDENCE_DUE_0039)
      op.execute("ALTER FUNCTION workflow_versions_immutable() RESET search_path")
-@@ -283,6 +308,7 @@ def downgrade() -> None:
+@@ -321,6 +346,7 @@ def downgrade() -> None:
          op.execute(statement)
      op.execute("REVOKE UPDATE (creation_misses) ON schedules FROM dewpoint_dispatch")
      op.drop_column("schedules", "creation_misses")
@@ -17553,7 +17637,7 @@ index 65268e9..f45b31e 100644
              await hold.wait()
  
 diff --git a/backend/tests/core/erasure/test_writers.py b/backend/tests/core/erasure/test_writers.py
-index 81be9f2..979097d 100644
+index 318655b..277e272 100644
 --- a/backend/tests/core/erasure/test_writers.py
 +++ b/backend/tests/core/erasure/test_writers.py
 @@ -307,13 +307,21 @@ def _routes(routes: Any) -> list[APIRoute]:
@@ -17630,10 +17714,10 @@ index 1b3318e..a487fa4 100644
      image: ${DEWPOINT_CEL_EVALUATOR_IMAGE:-dewpoint-cel-evaluator:dev}
 diff --git a/docs/operations/erasure.md b/docs/operations/erasure.md
 new file mode 100644
-index 0000000..bfddc01
+index 0000000..e9cc4ba
 --- /dev/null
 +++ b/docs/operations/erasure.md
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,124 @@
 +# Tenant erasure
 +
 +Spec: `docs/superpowers/specs/2026-09-29-engine-2b-design.md` §6.5 (with §6.4, §10); the 2b-4 outline's "Tenant
@@ -17677,8 +17761,10 @@ index 0000000..bfddc01
 +A plugin call (a node's options, a connection's verification) is fenced the same way, by a lock of its own: the API's
 +ask checks the tenant is active in its insert's transaction, and a worker holds the tenant's plugin-call lock shared
 +from that check through the claim, the hook's requests and the answer. Starting takes it exclusively, before the
-+lifecycle lock, so it waits for a call in flight (at most its 10-second deadline), and a call it finds queued is never
-+run, its row left to be deleted. A hook's own writes, on other connections, take the lifecycle lock in the fence's
++lifecycle lock, so it waits for a call in flight: its hook has a 10-second deadline, but its claim, key lookup and
++sealing, and answer have none of their own, so the wait has no fixed bound. A call it finds queued is never run, nor
++offered to a worker again (workers take only an active tenant's calls, so such calls can't hold an active tenant's
++back), its row left to be deleted. A hook's own writes, on other connections, take the lifecycle lock in the fence's
 +trigger: holding that lock instead would leave them queued behind the start, which waits for the hook.
 +
 +From stage 60 a database fence refuses any insert of a row of the tenant into any table holding tenant data (SQLSTATE
@@ -18238,7 +18324,7 @@ index 9a3a90d..e70ff45 100644
 
 ### Task 12: An incarnation per create, and missed firings accounted over persisted spans
 
-**Commit:** `2754be7` (`proto/2b4a-v6`). The replay ran `proto/2b4a-v5`'s `6eae38c`, the same patch, on the tree before
+**Commit:** `1d82da3` (`proto/2b4a-v7`). The replay ran `proto/2b4a-v5`'s `6eae38c`, the same patch, on the tree before
 Task 8's plugin-call fence. It folds `proto/2b4a-v1`'s `906a1d6`, `7b92fb4`, `f844769`, `4d670c8` (but for `dispatch.py`
 and `test_transitions.py`: #43 merged the same fix), `050919d`, `cfba762`, `5159cc2`, `63b4877`, `3fda97c` and
 `7d5b20b`. Where the fence's table lists met, they take the union of their names, plugin calls included. And the
@@ -18335,13 +18421,13 @@ fails, and without the currency check,
 race tests' `holds` fixture: before it, this task's tests run on Task 11's code gave no result in 900 seconds; with it,
 they fail in 81.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 2754be7 && git commit -C 2754be7`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 1d82da3 && git commit -C 1d82da3`
 
 The diff:
 
 ```diff
 diff --git a/backend/migrations/versions/0040_tenant_erasure.py b/backend/migrations/versions/0040_tenant_erasure.py
-index b1c37d5..53e4f8f 100644
+index 8186041..9b4dc13 100644
 --- a/backend/migrations/versions/0040_tenant_erasure.py
 +++ b/backend/migrations/versions/0040_tenant_erasure.py
 @@ -20,6 +20,35 @@ record.
@@ -18392,7 +18478,7 @@ index b1c37d5..53e4f8f 100644
  
  FENCE = [
      """CREATE FUNCTION tenant_insert_fence() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
-@@ -183,6 +213,49 @@ FIRINGS = [
+@@ -219,6 +249,49 @@ FIRINGS = [
  ]
  
  
@@ -18442,7 +18528,7 @@ index b1c37d5..53e4f8f 100644
  # The retention process checks the deployment's recorded namespace before erasure reaches Temporal (§2.1).
  RECORD = "GRANT SELECT ON platform_settings TO dewpoint_retention"
  BOUNDARIES = [
-@@ -271,6 +344,55 @@ def upgrade() -> None:
+@@ -307,6 +380,55 @@ def upgrade() -> None:
      )
      for statement in BOUNDARIES:
          op.execute(statement)
@@ -18498,7 +18584,7 @@ index b1c37d5..53e4f8f 100644
      op.add_column("schedules", sa.Column("creation_misses", sa.Integer, nullable=False, server_default="0"))
      op.execute("GRANT UPDATE (creation_misses) ON schedules TO dewpoint_dispatch")
      for statement in FENCE:
-@@ -308,6 +430,9 @@ def downgrade() -> None:
+@@ -346,6 +468,9 @@ def downgrade() -> None:
          op.execute(statement)
      op.execute("REVOKE UPDATE (creation_misses) ON schedules FROM dewpoint_dispatch")
      op.drop_column("schedules", "creation_misses")
@@ -20996,7 +21082,7 @@ index 0000000..23d0fb1
 +                raise
 +    raise AssertionError("unreachable")
 diff --git a/docs/operations/erasure.md b/docs/operations/erasure.md
-index bfddc01..f7460e8 100644
+index e9cc4ba..0c21843 100644
 --- a/docs/operations/erasure.md
 +++ b/docs/operations/erasure.md
 @@ -8,11 +8,11 @@ undone.** Once started, an erasure can be stopped and retried, never reversed; t
@@ -21016,7 +21102,7 @@ index bfddc01..f7460e8 100644
  
  ## Starting, stopping, retrying
  
-@@ -57,9 +57,9 @@ a schedule, a run, an execution), each found, requested, then verified by readin
+@@ -59,9 +59,9 @@ a schedule, a run, an execution), each found, requested, then verified by readin
  | Stage | |
  |---|---|
  | 20 reconcile | waits until no request is `starting` (the dispatcher's reconciler resolves each) |
@@ -21117,7 +21203,7 @@ index d0b4ae4..27bc381 100644
 
 **Checkpoint (milestone 4).** Focused: the 25 test modules Tasks 7 to 12 add or change, in `tests/apps`,
 `tests/apps/api`, `tests/apps/cli`, `tests/apps/dispatcher`, `tests/apps/erasure`, `tests/apps/ingress`,
-`tests/apps/worker`, `tests/core/erasure`, `tests/core/ingress`, `tests/core/retention` and `tests/deploy` (334 passed
+`tests/apps/worker`, `tests/core/erasure`, `tests/core/ingress`, `tests/core/retention` and `tests/deploy` (335 passed
 on Task 12's tree, and the whole suite on the same tree); the migrations 0042 → 0040 → 0042 → 0040 over existing rows,
 every constraint, function, trigger, policy, role, grant and column the same after the downgrade. The owner ruled on it,
 reviewed it six times and accepted it as a prototype checkpoint (milestone ruling 4, 2026-10-06), which doesn't claim
