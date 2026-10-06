@@ -41,7 +41,17 @@ def test_in_development_it_serves_without_the_servers_proxy_headers(served, pg_u
     _record(pg_url, DEVELOPMENT)
     result = CliRunner().invoke(app, ["ingress", "--port", "8100"])
     assert result.exit_code == 0, result.output
-    assert served == [{"host": "127.0.0.1", "port": 8100, "proxy_headers": False, "server_header": False}]
+    # uvicorn's own logging configuration stays off: it would replace the process's
+    assert served == [
+        {
+            "host": "127.0.0.1",
+            "port": 8100,
+            "proxy_headers": False,
+            "server_header": False,
+            "log_config": None,
+            "log_level": "info",
+        }
+    ]
 
 
 def test_outside_development_it_refuses_to_start(served, pg_url) -> None:

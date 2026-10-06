@@ -9,14 +9,17 @@ from temporalio.converter import DefaultFailureConverterWithEncodedAttributes
 from temporalio.testing import WorkflowEnvironment
 
 import dewpoint
+from dewpoint.apps import cel_client
 from dewpoint.apps.codec import TenantCodec
 from dewpoint.apps.worker import main
 from dewpoint.apps.worker.health import WorkerUnhealthyError
 from dewpoint.apps.worker.main import engine_worker
+from dewpoint.core import logs
 from dewpoint.core.config import Settings
 from dewpoint.engine.runtime.build import build_id
 from dewpoint.engine.runtime.workflow import LoopBatch, RunGraph
 from tests.apps.worker.harness import MemoryStore
+from tests.support.logs import records, rendered
 from tests.support.plugins.testkit import TESTKIT
 
 
@@ -121,3 +124,23 @@ async def test_a_worker_that_fails_its_self_check_never_polls(monkeypatch: pytes
     with pytest.raises(WorkerUnhealthyError):
         await main.run(settings())
     assert reports == [False]
+
+
+async def test_an_unavailable_evaluator_is_logged_by_its_type_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """EvaluatorUnavailable carries another error's text, or the evaluator's reply."""
+    secret = "reply-secret-2c71"
+    answers: list[str | Exception] = [cel_client.EvaluatorUnavailable(f"bad reply {secret}"), "cel-1"]
+
+    async def identity(socket_path: str) -> str:
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(cel_client, "identity", identity)
+    with rendered() as lines:
+        logs.configure()
+        assert await main.evaluator_profile("/run/cel.sock", wait_s=0) == "cel-1"
+    assert secret not in "\n".join(lines())
+    [record] = records(lines())
+    assert (record["event"], record["error"]) == ("cel_evaluator_unavailable", "EvaluatorUnavailable")
