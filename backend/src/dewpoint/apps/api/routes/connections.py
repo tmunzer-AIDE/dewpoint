@@ -118,6 +118,8 @@ async def patch(
         )
     except service.UnknownTypeError:
         raise HTTPException(422, detail={"error": "unknown_type"}) from None
+    except service.SecretRequiredError:
+        raise HTTPException(422, detail={"error": "secret_required"}) from None
     except (ValidationError, InvalidValueError) as e:
         raise _invalid(e) from None
     except IntegrityError:

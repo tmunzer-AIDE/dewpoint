@@ -344,3 +344,16 @@ async def test_an_unpublished_workflow_has_no_start_form(app, owner_sessionmaker
         r = await c.post(f"/api/v1/t/{tid}/workflows/{made.json()['id']}/input-options",
                          json={"field": "site", "query": ""})  # fmt: skip
     assert (r.status_code, r.json()) == (404, {"error": "not_published"})
+
+
+async def test_a_stored_secret_never_follows_a_moved_base_url(
+    app, owner_sessionmaker, api_settings, worker, fake
+) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    async with c:
+        cid = await _connection(c, tid, fake[1].port)
+        moved = await c.patch(f"/api/v1/t/{tid}/connections/{cid}",
+                              json={"config": {"base_url": "https://dewpoint.test:1/"}})  # fmt: skip
+        after = (await c.get(f"/api/v1/t/{tid}/connections/{cid}")).json()
+    assert (moved.status_code, moved.json()) == (422, {"error": "secret_required"})
+    assert after["config"]["base_url"] == f"https://dewpoint.test:{fake[1].port}"

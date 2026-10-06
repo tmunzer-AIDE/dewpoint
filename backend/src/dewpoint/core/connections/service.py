@@ -29,6 +29,10 @@ PURPOSE = "connection.secret"
 class UnknownTypeError(ValueError): ...
 
 
+class SecretRequiredError(ValueError):
+    """The edit moves the connection to another host: its secret must be written again (the 3a-2 review's finding 1)."""
+
+
 async def declared(s: AsyncSession, key: str) -> DeclaredType:
     """The type as the synced manifests declare it (plugins-3 D11): unknown until `plugins sync` registered it."""
     found = (await declared_types(s)).get(key)
@@ -89,12 +93,22 @@ async def update_connection(
     secret: dict[str, Any] | None,
 ) -> Connection:
     kind = await declared(s, conn.type)
+    new_config = kind.config(config) if config is not None else None
+    field = kind.host.get("field") if kind.host is not None else None
+    if (
+        new_config is not None
+        and secret is None
+        and field is not None
+        and kind.secret_schema.get("properties")
+        and new_config.get(field) != (conn.config or {}).get(field)
+    ):
+        raise SecretRequiredError()  # the stored secret never follows a host the person who wrote it didn't choose
     changed: list[str] = []
     if name is not None:
         conn.name = name
         changed.append("name")
-    if config is not None:
-        conn.config = kind.config(config)
+    if new_config is not None:
+        conn.config = new_config
         changed.append("config")
     if secret is not None:
         conn.secret_ct = await keyring.encrypt(

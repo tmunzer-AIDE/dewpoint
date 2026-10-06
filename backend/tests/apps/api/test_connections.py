@@ -141,3 +141,22 @@ async def test_a_connection_shows_its_current_cooldowns(app, owner_sessionmaker,
     assert timedelta(seconds=100) < shown["mist.org"] <= timedelta(seconds=125)
     assert timedelta(seconds=580) < shown["mist.token"] <= timedelta(seconds=605)
     assert "tok_" not in r.text and "someone-else" not in r.text
+
+
+async def test_moving_a_connection_to_another_host_needs_its_secret_again(
+    app, owner_sessionmaker, api_settings
+) -> None:
+    """The stored secret is never sent to a host the person who wrote it didn't choose (the 3a-2 review's finding 1):
+    changing the field a type's host comes from needs the secret in the same request."""
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    async with c:
+        cid = (await c.post(f"/api/v1/t/{tid}/connections", json=BODY)).json()["id"]
+        moved = {"config": {"cloud": "global_01", "org_id": ORG}}
+        refused = await c.patch(f"/api/v1/t/{tid}/connections/{cid}", json=moved)
+        same_host = await c.patch(f"/api/v1/t/{tid}/connections/{cid}",
+                                  json={"config": {"cloud": "emea_01", "org_id": str(uuid.uuid4())}})  # fmt: skip
+        with_secret = await c.patch(f"/api/v1/t/{tid}/connections/{cid}",
+                                    json={**moved, "secret": {"api_token": "tok_" + "c" * 36}})  # fmt: skip
+    assert (refused.status_code, refused.json()) == (422, {"error": "secret_required"})
+    assert same_host.status_code == 200
+    assert with_secret.status_code == 200 and with_secret.json()["config"]["cloud"] == "global_01"
