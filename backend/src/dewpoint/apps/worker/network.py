@@ -115,7 +115,7 @@ def mapped(error: Exception) -> TransportError:
     return MaybeSent()
 
 
-_CORE_ERRORS = (
+CORE_ERRORS = (
     EgressRefusedError,
     TlsVerificationError,
     InvalidRequestError,
@@ -312,7 +312,7 @@ def _check_method(channel: Channel, method: str) -> None:
         raise ReadOnly()
 
 
-class _PlainHttp:
+class PlainHttp:
     def __init__(self, attempt: Channel) -> None:
         self._attempt = attempt
 
@@ -346,7 +346,7 @@ class _Stream:
     async def receive(self, max_bytes: int = 65_536) -> bytes:
         try:
             return await self._stream.receive(max_bytes)
-        except _CORE_ERRORS as e:
+        except CORE_ERRORS as e:
             raise mapped(e) from None
 
     async def close(self) -> None:
@@ -360,7 +360,7 @@ class _PlainNet:
     async def open_tcp(self, host: str, port: int, *, tls: bool) -> _Stream:
         try:  # connecting sends no request: only `send` counts
             return _Stream(self._attempt, await self._attempt.core_net().open_tcp(host, port, tls=tls))
-        except _CORE_ERRORS as e:
+        except CORE_ERRORS as e:
             raise mapped(e) from None
 
     async def send_udp(self, host: str, port: int, data: bytes) -> None:
@@ -594,7 +594,7 @@ class AttemptNetwork:
         self._in_flight += 1
         try:
             result = await call()
-        except _CORE_ERRORS as e:
+        except CORE_ERRORS as e:
             if not isinstance(e, NOTHING_SENT):
                 self.may_have_sent = True
             raise mapped(e) from None
@@ -624,7 +624,7 @@ class AttemptNetwork:
 
     @property
     def http(self) -> Any:
-        return _Refused() if self.simulated else _PlainHttp(self)
+        return _Refused() if self.simulated else PlainHttp(self)
 
     @property
     def net(self) -> Any:

@@ -18,6 +18,8 @@ from dewpoint.sdk import (
     FatalError,
     HeaderAuth,
     Node,
+    Option,
+    OptionsQuery,
     OutcomeUnknownError,
     Plugin,
     RateScope,
@@ -27,6 +29,7 @@ from dewpoint.sdk import (
     UrlField,
     VerifyResult,
     connection_field,
+    options_field,
     sensitive,
 )
 
@@ -383,6 +386,48 @@ class ReconcilableCall(HttpCall):
         return None
 
 
+class PickConfig(BaseModel):
+    connection: uuid.UUID = connection_field("testkit")
+    site_id: str = options_field()
+    note: str = ""
+
+
+class Pick(Node):
+    """Lists its connection's sites as options (plugins-3 D3). The typed text steers it, for tests: `post` writes,
+    `plain` posts through ctx.http, `echo` returns what the service echoed, `many` too many options, `boom` fails,
+    `slow` takes its time, `other:<id>` opens that connection; anything else is the search."""
+
+    type = "testkit.pick"
+    version = 1
+    title = "Pick a site"
+    icon = "map-pin"
+    Config = PickConfig
+    credentials = ("testkit",)
+
+    async def run(self, ctx: StepContext, config: PickConfig) -> Empty:
+        return Empty()
+
+    async def options(self, ctx: CallContext, field: str, query: OptionsQuery) -> list[Option]:
+        assert query.connection_id is not None
+        if query.text.startswith("other:"):
+            await ctx.connection(uuid.UUID(query.text.removeprefix("other:")))
+        conn = await ctx.connection(query.connection_id)
+        if query.text == "post":
+            await conn.http.request("POST", "/sites")
+        if query.text == "plain":
+            await ctx.http.request("POST", conn.config["base_url"] + "/sites")
+        if query.text == "boom":
+            raise RuntimeError("the plugin broke, with a message that must not be logged")
+        if query.text == "slow":
+            await asyncio.sleep(5)
+        if query.text == "many":
+            return [Option(value=str(i), label=f"Site {i}") for i in range(1001)]
+        answer = await conn.http.request("GET", "/sites", params={"q": query.text})
+        if query.text == "echo":
+            return [Option(value="echo", label=answer.content.decode())]
+        return [Option(value=site["id"], label=site["name"]) for site in answer.json()]
+
+
 class TestkitConnectionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     base_url: str
@@ -427,6 +472,7 @@ TESTKIT = Plugin(
         Leaky,
         HttpCall,
         AmbiguousCall,
+        Pick,
     ),  # fmt: skip
     connection_types=(TESTKIT_CONNECTION,),
 )
