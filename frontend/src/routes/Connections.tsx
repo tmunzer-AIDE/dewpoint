@@ -89,7 +89,7 @@ export function ConnectionsPage({ tenantId }: { tenantId: string }) {
               {Object.entries(clouds).map(([k, host]) => <option key={k} value={k}>{host}</option>)}
             </select>
           </div>
-          <Field label="Organization ID" required pattern="[0-9a-fA-F-]{36}" value={form.org_id}
+          <Field label="Organization ID" required pattern="[0-9a-fA-F\-]{36}" value={form.org_id}
             onChange={(e) => setForm({ ...form, org_id: e.target.value })} data-testid="conn-org" />
           <Field label="API token" type="password" autoComplete="off" required value={form.api_token}
             hint="Stored encrypted. It is never shown again." onChange={(e) => setForm({ ...form, api_token: e.target.value })}

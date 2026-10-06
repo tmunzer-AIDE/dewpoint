@@ -108,3 +108,28 @@ cover local work only: anything outward-facing (push, PR, issues) is confirmed i
     covered by `sim` on `sim-hatch` - none.
 22. Figures now: 59 pairs a theme (118), none under its floor; the smallest margin is `sim` on `sim-hatch`, light,
     4.627:1 (+2.8 %).
+
+### Owner, tokens approved (2026-10-06, pasted)
+
+- Tokens and visual direction approved at 4de186f, with rulings 15–22. Next: wire them into 4a, and the real-app
+  CSP/axe gate behind nginx: estimate before Compose, an isolated Compose project, the CSP unchanged. Token approval
+  doesn't close the 4a checkpoint or authorize a push or PR.
+
+### 4a, the browser gate (2026-10-06)
+
+23. Ruling: the gate is a Playwright fixture every e2e test runs under (`e2e/gate.ts`): a test fails on a CSP violation,
+    a console error, a page error or a request to another origin; `expectAccessible` runs axe (WCAG 2.2 AA tags) on
+    each screen; three self-tests prove each catch under the served CSP. The browser's console line for an API's 4xx
+    answer is ignored (it's the API's contract: a wrong password, no session); 5xx stays a problem - a 4xx the UI
+    mishandles would surface elsewhere - a 4xx the UI should never trigger isn't flagged by the gate.
+24. Ruling: the isolated stack is the 4a worktree's Compose files plus a scratchpad-only override: project
+    `dewpoint-ui4a`, web on 127.0.0.1:18080, Temporal's port unpublished, images tagged `:ui4a`, the hooks subnet
+    172.31.254.248/29, no ingress profile (nginx resolves it lazily; /hooks answers 502), fresh secrets in a 0600
+    scratchpad file, the CSP unchanged. A gate run (rebuild, fresh database, admin, e2e) takes about 1.5 minutes -
+    nothing is shared with other stacks - none.
+25. Ruling: the tenant menu is non-modal (`modal={false}`). The gate's first run caught both faults of the modal
+    one: its scroll lock injects a `<style>` the CSP refuses, and axe's `aria-hidden-focus` (it hides the page while
+    it stays focusable). This is D23's library configuration, no CSP change - the menu no longer locks page scroll.
+26. Ruling: input patterns escape a class's `-` (the tenant slug and the org ID): browsers compile `pattern` with the
+    `v` flag, where the old patterns were invalid, so the fields validated nothing; a unit guard compiles every
+    pattern that way - none.

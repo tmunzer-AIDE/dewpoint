@@ -1,0 +1,33 @@
+// SPDX-License-Identifier: Apache-2.0
+/* The gate's own tests: each provokes the problem it must catch, under the CSP nginx really serves, then clears it. */
+import { axeViolations, expect, test } from "./gate";
+
+test("the served CSP refuses an injected stylesheet, and the gate sees it", async ({ page, gate }) => {
+  await page.goto("/login");
+  await page.evaluate(() => {
+    const style = document.createElement("style");
+    style.textContent = "body { outline: 1px solid; }";
+    document.head.append(style);
+  });
+  await expect.poll(() => gate.problems.join("\n")).toMatch(/csp: style-src/);
+  gate.clear();
+});
+
+test("the served CSP refuses a request to another origin, and the gate sees it", async ({ page, gate }) => {
+  await page.goto("/login");
+  await page.evaluate(() => fetch("https://example.invalid/probe").catch(() => undefined));
+  await expect.poll(() => gate.problems.join("\n")).toMatch(/csp: connect-src https:\/\/example\.invalid/);
+  gate.clear();
+});
+
+test("axe reports text below 4.5:1", async ({ page }) => {
+  await page.goto("/login");
+  await page.evaluate(() => {
+    const p = document.createElement("p");
+    p.textContent = "Too faint to read";
+    // The separator colour as text: 1.4:1 on the ground. Set through the CSSOM, which the CSP allows.
+    p.style.color = getComputedStyle(document.documentElement).getPropertyValue("--line-strong");
+    document.body.append(p);
+  });
+  expect((await axeViolations(page)).join("\n")).toMatch(/^color-contrast/m);
+});

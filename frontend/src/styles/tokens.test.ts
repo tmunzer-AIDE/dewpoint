@@ -106,7 +106,7 @@ describe("the Tailwind theme (theme.css, app.css)", () => {
   const base = block(":root");
 
   it("keeps tests and the specimen out of the app's class scan, so neither ships utilities", () => {
-    for (const glob of ["../**/*.test.ts", "../**/*.test.tsx", "../test", "../specimen"]) {
+    for (const glob of ["../**/*.test.ts", "../**/*.test.tsx", "../test", "../specimen", "../../e2e"]) {
       expect(app).toContain(`@source not "${glob}";`);
     }
   });

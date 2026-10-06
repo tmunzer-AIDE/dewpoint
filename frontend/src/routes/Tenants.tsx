@@ -60,7 +60,7 @@ export function TenantsPage() {
         <form onSubmit={submit} className="flex max-w-lg flex-col gap-4 rounded-lg border border-line bg-surface p-5">
           <h2 className="font-semibold">Create tenant</h2>
           <Field label="Name" required value={name} onChange={(e) => setName(e.target.value)} data-testid="tenant-name" />
-          <Field label="Slug" required pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]" hint="Lowercase letters, digits and dashes."
+          <Field label="Slug" required pattern="[a-z0-9][a-z0-9\-]{1,61}[a-z0-9]" hint="Lowercase letters, digits and dashes."
             value={slug} onChange={(e) => setSlug(e.target.value)} data-testid="tenant-slug" />
           {error && <p role="alert" className="text-sm text-danger">{error}</p>}
           <Button variant="primary" type="submit" disabled={create.isPending} data-testid="tenant-create">Create tenant</Button>

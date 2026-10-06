@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-import { expect, test, type Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
+import { expect, expectAccessible, test } from "./gate";
 import * as OTPAuth from "otpauth";
 
 const EMAIL = process.env.E2E_ADMIN_EMAIL ?? "admin@example.com";
@@ -12,6 +13,7 @@ function code(secret: string, offsetSeconds = 0): string {
 
 async function passwordLogin(page: Page) {
   await page.goto("/login");
+  await expectAccessible(page, "login");
   await page.getByTestId("login-email").fill(EMAIL);
   await page.getByTestId("login-password").fill(PASSWORD);
   await page.getByTestId("login-submit").click();
@@ -21,20 +23,27 @@ test.describe.serial("foundations", () => {
   test("first login enrolls TOTP, creates a tenant and a Mist connection", async ({ page }) => {
     await passwordLogin(page);
     await expect(page).toHaveURL(/\/enroll/);
+    await expectAccessible(page, "enroll: choose a method");
     await page.getByRole("button", { name: "Authenticator app" }).click();
     totpSecret = (await page.getByTestId("totp-secret").textContent())!.replace(/\s/g, "");
+    await expectAccessible(page, "enroll: authenticator app");
     await page.getByTestId("totp-code").fill(code(totpSecret));
     await page.getByTestId("totp-submit").click();
     await expect(page.getByTestId("recovery-codes")).toBeVisible();
+    await expectAccessible(page, "enroll: recovery codes");
     await page.getByTestId("recovery-ack").check();
     await page.getByRole("button", { name: "Continue" }).click();
 
     await expect(page).toHaveURL(/\/tenants/);
+    await expectAccessible(page, "tenants");
     await page.getByTestId("tenant-name").fill("Acme Retail");
     await page.getByTestId("tenant-slug").fill("acme-retail");
     await page.getByTestId("tenant-create").click();
     await page.getByTestId("tenant-switcher").click();
+    await expect(page.getByRole("menuitem", { name: /Acme Retail/ })).toBeVisible();
+    await expectAccessible(page, "tenant menu");
     await page.getByRole("menuitem", { name: /Acme Retail/ }).click();
+    await expectAccessible(page, "connections");
 
     await page.getByTestId("conn-add").click();
     await page.getByTestId("conn-name").fill("Acme Prod");
@@ -46,6 +55,7 @@ test.describe.serial("foundations", () => {
     await expect(row).toContainText("api.eu.mist.com");
     await expect(row).toContainText("Not verified");
     await expect(page.locator("body")).not.toContainText("tok_");
+    await expectAccessible(page, "connections, with a connection");
   });
 
   test("passkey added with a virtual authenticator signs in without a password", async ({ page }) => {
@@ -57,10 +67,12 @@ test.describe.serial("foundations", () => {
     });
     await passwordLogin(page);
     await expect(page).toHaveURL(/\/mfa/);
+    await expectAccessible(page, "mfa");
     await page.getByTestId("totp-code").fill(code(totpSecret, 30)); // next step: the current one was consumed
     await page.getByTestId("totp-submit").click();
     await expect(page).toHaveURL(/\/tenants/); // wait: the MFA response rotates the session cookie
     await page.goto("/account/security");
+    await expectAccessible(page, "security");
     page.once("dialog", (d) => void d.accept("E2E key"));
     await page.getByTestId("passkey-add").click();
     await expect(page.getByText("E2E key")).toBeVisible();

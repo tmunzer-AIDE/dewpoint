@@ -18,7 +18,9 @@ export function TenantSwitcher() {
   const tenants = useQuery({ queryKey: ["tenants"], queryFn: () => api<TenantRow[]>("GET", "/api/v1/tenants") });
   const current = tenants.data?.find((t) => t.id === params.tenantId);
   return (
-    <Dropdown.Root>
+    // Non-modal: a modal menu locks scrolling by injecting a <style>, which the CSP refuses, and hides the page from
+    // assistive technology while it stays focusable (D23; the 4a browser gate caught both).
+    <Dropdown.Root modal={false}>
       <Dropdown.Trigger
         data-testid="tenant-switcher"
         className="inline-flex min-h-9 items-center gap-2 rounded-lg border border-line-strong bg-surface px-3 text-sm"
