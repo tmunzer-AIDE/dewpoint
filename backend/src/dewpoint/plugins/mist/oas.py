@@ -16,6 +16,7 @@ from typing import Any
 COMMIT = "0613a22acd8d627c938a74dbf2f0f80167bdcb93"
 SHA256 = "22f55432535ab38f6c0539392a729b8fd515a9ccae9df693fbd4ff23d40b8fac"
 METHODS = ("get", "put", "post", "delete", "patch")
+JSON_TYPES = ("application/json", "application/vnd.api+json", "application/vnd.json+api")
 
 
 class OasUnreadableError(Exception):
@@ -81,3 +82,18 @@ def operations() -> Mapping[str, Operation]:
                 spec["operationId"], method.upper(), path, bool(spec.get("deprecated")), spec, shared + own
             )
     return out
+
+
+def media(doc: Mapping[str, Any], op: Operation) -> Mapping[str, Any] | None:
+    """An operation's 2xx answer's JSON media object, or None when it answers nothing."""
+    responses = op.spec.get("responses", {})
+    found = resolve(doc, responses.get("200") or responses.get("201") or {})
+    content = found.get("content") or {}
+    chosen = next((content[t] for t in JSON_TYPES if t in content), None)
+    return chosen if isinstance(chosen, Mapping) else None
+
+
+def answer(doc: Mapping[str, Any], op: Operation) -> Any:
+    """An operation's 2xx answer's JSON schema, or None when it answers nothing."""
+    found = media(doc, op)
+    return found.get("schema") if found is not None else None

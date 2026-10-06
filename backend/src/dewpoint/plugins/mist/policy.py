@@ -71,9 +71,12 @@ class Entry:
     side_effect: str | None = None
     evidence: str | None = None
     reason: str | None = None
+    reads: tuple[str, ...] = ()  # the other operations its node may read first: a site check, a merge, a picker
 
 
-_ALLOWED_KEYS = frozenset({"method", "path", "state", "nodes", "capability", "scope", "side_effect", "evidence"})
+_ALLOWED_KEYS = frozenset(
+    {"method", "path", "state", "nodes", "capability", "scope", "side_effect", "evidence", "reads"}
+)
 _OTHER_KEYS = frozenset({"method", "path", "state", "reason"})
 
 
@@ -81,19 +84,21 @@ def _entry(op_id: str, raw: Any) -> Entry:
     if not isinstance(raw, Mapping) or raw.get("state") not in STATES:
         raise PolicyUnreadableError(f"{op_id}: not an entry")
     if raw["state"] == "allowed":
-        nodes = raw.get("nodes")
+        nodes, reads = raw.get("nodes"), raw.get("reads")
         if (
             set(raw) != _ALLOWED_KEYS
             or not isinstance(nodes, list)
             or not nodes
             or not all(isinstance(n, str) for n in nodes)
+            or not isinstance(reads, list)
+            or not all(isinstance(r, str) for r in reads)
             or raw["scope"] not in SCOPES
             or raw["side_effect"] not in SIDE_EFFECTS
             or not all(isinstance(raw[k], str) and raw[k] for k in ("method", "path", "capability", "evidence"))
         ):
             raise PolicyUnreadableError(f"{op_id}: not an allowed entry")
-        values = {k: v for k, v in raw.items() if k != "nodes"}
-        return Entry(**values, nodes=tuple(nodes))
+        values = {k: v for k, v in raw.items() if k not in ("nodes", "reads")}
+        return Entry(**values, nodes=tuple(nodes), reads=tuple(reads))
     if set(raw) != _OTHER_KEYS or not all(isinstance(raw[k], str) and raw[k] for k in _OTHER_KEYS):
         raise PolicyUnreadableError(f"{op_id}: not a held or denied entry")
     return Entry(**raw)
@@ -122,6 +127,16 @@ class PolicyMap:
         if entry is None or entry.state != "allowed" or node not in entry.nodes or refused(entry.path):
             return None
         return entry
+
+    def read(self, operation: str, node: str, other: str) -> Entry | None:
+        """`other`'s entry when `node` may read it before or for `operation` (a site check, a merge, a picker): the map
+        allows `operation` to `node`, lists `other` among its reads, and allows `other`; else None. Checked before
+        anything is sent (the owner's review of the 3b-1 checkpoint, O2)."""
+        own = self.allowed(operation, node)
+        found = self.entries.get(other)
+        if own is None or other not in own.reads or found is None or found.state != "allowed" or refused(found.path):
+            return None
+        return found
 
 
 @cache

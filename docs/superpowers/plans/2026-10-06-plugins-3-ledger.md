@@ -583,3 +583,11 @@ output outcome are closed. Fixed test-first:
 - (O1, Medium) a probe accepted method-override headers (`X-HTTP-Method-Override: DELETE`): a GET the runtime took for
   a read could apply an effect on a server honouring them. A probe now passes exactly the read-only channel's check
   (GET or HEAD, no body, none of the three override headers), refused before sending otherwise.
+- (O2, Medium) the site check's `GET /sites/{id}` bypassed the map: with `getSiteInfo` held, a site-scope node still
+  sent it, then its own request; picker lists were checked, merge reads by state only.
+- Ruling (O2): every request a node makes for an operation other than its own is an auxiliary read the map lists for
+  that operation (`reads`: the site check's `getSiteInfo`, the same-path GET an update merges into, the lists its
+  pickers read) and allows, checked before anything is sent, in a run, a simulation and an options call; a site-scope
+  operation can't be allowed unless its site check is (the map's build fails); a merge read the map doesn't list or
+  allow leaves `replace` available - the map stays the single source (D28), its diff showing every read - cost if
+  wrong: holding `getSiteInfo` makes every site-scope node unavailable, as intended.

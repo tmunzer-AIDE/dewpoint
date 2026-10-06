@@ -8,7 +8,7 @@ import json
 import sys
 from typing import Any
 
-from dewpoint.plugins.mist import oas, policy
+from dewpoint.plugins.mist import oas, policy, routing
 
 # The curated operations (the outline's appendix, 0613a22): (operationId, its node type). Each is allowed to that node
 # and to the any-endpoint node of its method (D14): `mist.api.read` for a GET, `mist.api.write` for any other.
@@ -355,9 +355,31 @@ def make_map() -> dict[str, Any]:
         if reviewed and entry["state"] != "allowed":
             problems.append(f"{op_id}: reviewed, but {entry['state']} ({entry['reason']})")
         entries[op_id] = entry
+    problems += _reads(entries)
     if problems:
         raise ReviewError(problems)
     return {"version": policy.VERSION, "oas_sha256": oas.SHA256, "operations": entries}
+
+
+def _reads(entries: dict[str, dict[str, Any]]) -> list[str]:
+    """Each allowed operation's reads: its site check (a site-scope operation can't be allowed without it), the
+    same-path GET an update merges into, and the lists its pickers read; every one allowed itself."""
+    doc, ops = oas.document(), oas.operations()
+    allowed = {op_id for op_id, e in entries.items() if e["state"] == "allowed"}
+    lists = {ops[o].path: o for o in sorted(allowed) if routing.is_list(doc, ops[o])}
+    gets = {ops[o].path: o for o in allowed if ops[o].method == "GET"}
+    problems: list[str] = []
+    for op_id in sorted(allowed):
+        op, entry = ops[op_id], entries[op_id]
+        reads = set(routing.pickers(op.path, entry["scope"], lists).values())
+        if entry["scope"] == "site":
+            if routing.SITE_CHECK not in allowed:
+                problems.append(f"{op_id}: its site check reads {routing.SITE_CHECK}, which isn't allowed")
+            reads.add(routing.SITE_CHECK)
+        if op.method == "PUT" and op.path in gets:
+            reads.add(gets[op.path])
+        entry["reads"] = sorted(reads)
+    return problems
 
 
 def render(made: dict[str, Any]) -> str:

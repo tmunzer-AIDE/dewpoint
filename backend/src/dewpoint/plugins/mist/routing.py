@@ -20,6 +20,8 @@ from dewpoint.plugins.mist.schemas import converted, resolved, with_defs
 UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 ORG_STANDIN = "00000000-0000-4000-8000-000000000000"  # an org id, to resolve a path before the connection is opened
 PLACEHOLDER = re.compile(r"\{([a-z_]+)\}")
+SITE_CHECK = "getSiteInfo"  # the operation a site check reads (D14): an auxiliary read the map must allow
+SITES = "/api/v1/orgs/{org_id}/sites"
 
 
 @dataclass(frozen=True)
@@ -116,3 +118,23 @@ def value_pattern(operation: str, name: str) -> str:
             if isinstance(own, str) and own.startswith("^") and own.endswith("$"):
                 return own[1:-1]
     return "[A-Za-z0-9_.~-]+"
+
+
+def is_list(doc: Mapping[str, Any], op: oas.Operation) -> bool:
+    """A GET whose 2xx answer is an array."""
+    found = oas.answer(doc, op)
+    return op.method == "GET" and found is not None and resolved(doc, found).get("type") == "array"
+
+
+def pickers(path: str, scope: str | None, lists: Mapping[str, str]) -> dict[str, str]:
+    """An operation's options fields and the list each reads: a site-scope operation's site from the org's sites; an
+    org resource's id (or MAC) from the list at its collection's path (`lists`: those allowed, by path)."""
+    out: dict[str, str] = {}
+    segments = path.split("/")
+    if scope == "site" and SITES in lists:
+        out["site_id"] = lists[SITES]
+    if scope == "org" and len(segments) > 6 and segments[6].startswith("{"):
+        name, collection = segments[6][1:-1], "/".join(segments[:6])
+        if collection in lists and name.endswith(("_id", "_mac")):
+            out[name] = lists[collection]
+    return out

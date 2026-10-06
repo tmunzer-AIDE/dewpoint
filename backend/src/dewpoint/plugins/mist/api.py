@@ -104,6 +104,8 @@ class MistApi(Node):
             raise OperationUnavailable()
         if reaches(method, filled("/".join(route.segments), path_values)) != route.operation:
             raise InvalidPathValue()  # a value that is another operation's literal, or ties with one (review H1)
+        if route.scope == "site" and policy.load().read(route.operation, self.type, routing.SITE_CHECK) is None:
+            raise OperationUnavailable()  # the site check is a read the map must allow (the owner's review, O2)
         return values, method, route, path_values
 
     def _checked(

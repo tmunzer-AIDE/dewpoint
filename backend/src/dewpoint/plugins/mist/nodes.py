@@ -40,7 +40,6 @@ OPTIONS_PAGE = 1000  # a picker reads one page of a list, filtered by the typed 
 LABEL_FIELDS = ("name", "ssid")
 # D15: Mist's PUT has no version check (no ETag in the OAS), so a merge update always says so.
 RACE = " Merging reads the object first: a change made to it between that read and this write is overwritten."
-JSON_TYPES = ("application/json", "application/vnd.api+json", "application/vnd.json+api")
 
 
 class OperationUnavailable(FatalError):
@@ -95,14 +94,8 @@ class MistOperation(Node):
         listed = self.pickers.get(field)
         if listed is None:
             raise NoOptions()
-        found = policy.load()
-        entry = found.entries.get(listed)
-        if (
-            found.allowed(self.operation, self.type) is None
-            or entry is None
-            or not entry.nodes
-            or found.allowed(listed, entry.nodes[0]) is None  # as its own node would be (the review's L10)
-        ):
+        entry = policy.load().read(self.operation, self.type, listed)  # a read the map must allow (O2, L10)
+        if entry is None:
             raise OperationUnavailable()
         if query.connection_id is None:
             raise ConnectionRequired()
@@ -130,8 +123,11 @@ class MistOperation(Node):
                 raise ConflictingChange()
             if not body and not clear:
                 raise NothingToChange()
-        if policy.load().allowed(self.operation, self.type) is None:
+        found = policy.load()
+        if found.allowed(self.operation, self.type) is None:
             raise OperationUnavailable()
+        if self.scope == "site" and found.read(self.operation, self.type, routing.SITE_CHECK) is None:
+            raise OperationUnavailable()  # the site check is a read the map must allow (the owner's review, O2)
         checks = routing.checkers(self.operation).path
         for name, check in checks.items():
             value = values.get(name)
@@ -203,7 +199,7 @@ class MistOperation(Node):
         cleared = dict.fromkeys(clear)
         if (mode or ("merge" if self.merge_with else "replace")) == "replace":
             return {**body, **cleared}
-        if self.merge_with is None or policy.load().entries[self.merge_with].state != "allowed":
+        if self.merge_with is None or policy.load().read(self.operation, self.type, self.merge_with) is None:
             raise OperationUnavailable()
         current = await client.call("GET", path)
         if not isinstance(current.body, dict):
@@ -222,24 +218,9 @@ def _description(op: oas.Operation) -> str:
     return text if len(text) <= 300 else text[:297].rstrip() + "..."
 
 
-def _media(doc: Mapping[str, Any], op: oas.Operation) -> Mapping[str, Any] | None:
-    """The 2xx answer's JSON media object, or None when the operation answers nothing."""
-    responses = op.spec.get("responses", {})
-    found = oas.resolve(doc, responses.get("200") or responses.get("201") or {})
-    content = found.get("content") or {}
-    media = next((content[t] for t in JSON_TYPES if t in content), None)
-    return media if isinstance(media, Mapping) else None
-
-
-def _answer(doc: Mapping[str, Any], op: oas.Operation) -> Any:
-    """The 2xx answer's JSON schema, or None when the operation answers nothing."""
-    media = _media(doc, op)
-    return media.get("schema") if media is not None else None
-
-
 def _example(doc: Mapping[str, Any], op: oas.Operation) -> Any:
     """The 2xx answer's first example in the OAS, or None."""
-    media = _media(doc, op)
+    media = oas.media(doc, op)
     if media is None:
         return None
     if "example" in media:
@@ -435,20 +416,6 @@ def output_schema(doc: Mapping[str, Any], answer: Any, shape: str) -> dict[str, 
     return with_defs(doc, top, [resolved(doc, answer)], output=True, partial=False)
 
 
-def _pickers(doc: Mapping[str, Any], op: oas.Operation, scope: str | None, lists: Mapping[str, str]) -> dict[str, str]:
-    """A node's options fields and the list each reads: a site-scope node's site from the org's sites; an org
-    resource's id (or MAC) from the list the map allows at its collection's path."""
-    out: dict[str, str] = {}
-    segments = op.path.split("/")
-    if scope == "site" and "/api/v1/orgs/{org_id}/sites" in lists:
-        out["site_id"] = lists["/api/v1/orgs/{org_id}/sites"]
-    if scope == "org" and len(segments) > 6 and segments[6].startswith("{"):
-        name, collection = segments[6][1:-1], "/".join(segments[:6])
-        if collection in lists and name.endswith(("_id", "_mac")):
-            out[name] = lists[collection]
-    return out
-
-
 def _class_name(type_: str) -> str:
     return "".join(part.title() for part in re.split(r"[._]", type_))
 
@@ -457,19 +424,18 @@ def build() -> tuple[type[Node], ...]:
     """Every allowed operation's curated node, in the map's order."""
     doc, ops, entries = oas.document(), oas.operations(), policy.load().entries
     by_path = {(e.method, e.path): op_id for op_id, e in entries.items() if e.state == "allowed"}
-    lists = {
-        e.path: op_id for op_id, e in entries.items() if e.state == "allowed" and e.method == "GET"
-        and _shape(doc, ops[op_id], _answer(doc, ops[op_id]))[0] == "list"
-    }  # fmt: skip
+    lists = {e.path: op_id for op_id, e in sorted(entries.items()) if e.state == "allowed"
+             and routing.is_list(doc, ops[op_id])}  # fmt: skip
     out: list[type[Node]] = []
     for op_id, entry in sorted(entries.items()):
         if entry.state != "allowed" or entry.side_effect is None:
             continue
         op, type_ = ops[op_id], entry.nodes[0]
-        answer = _answer(doc, op)
+        answer = oas.answer(doc, op)
         shape, paging = _shape(doc, op, answer)
         merge_with = by_path.get(("GET", op.path)) if op.method == "PUT" else None
-        pickers = _pickers(doc, op, entry.scope, lists)
+        merge_with = merge_with if merge_with in entry.reads else None  # the map lists every read (O2)
+        pickers = {f: o for f, o in routing.pickers(op.path, entry.scope, lists).items() if o in entry.reads}
         name = _class_name(type_)
         attrs: dict[str, Any] = {
             "__module__": __name__,
