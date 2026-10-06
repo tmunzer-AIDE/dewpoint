@@ -3,7 +3,7 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +16,7 @@ from dewpoint.apps.api.responses import (
     OptionsOut,
     PublishedOut,
     ValidationOut,
+    VersionDetailOut,
     VersionOut,
     WorkflowDetailOut,
     WorkflowOut,
@@ -50,6 +51,14 @@ class WorkflowPatchIn(BaseModel):
 
 class ActivateIn(BaseModel):
     version_id: uuid.UUID
+
+
+class PublishIn(BaseModel):
+    """What the editor showed when it asked to publish (4b ruling 17). Extra keys are refused: a misspelt expectation
+    must never be dropped silently, publishing what nobody confirmed."""
+
+    model_config = ConfigDict(extra="forbid")
+    expected_latest_version: int | None = Field(default=None, ge=0, strict=True)  # 0: no version yet
 
 
 def _revision(if_match: str | None) -> int:
@@ -132,6 +141,7 @@ def _version_out(v: WorkflowVersion, active_id: uuid.UUID | None, blocked: list[
         "graph_hash": v.graph_hash,
         "version_hash": v.version_hash,
         "cel_profile": v.cel_profile,
+        "engine_abi": v.engine_abi,
         "node_refs": v.node_refs,
         "active": v.id == active_id,
         "executable": not blocked,
@@ -245,6 +255,7 @@ async def validate_draft(
 @router.post("/t/{tenant_id}/workflows/{workflow_id}/publish", status_code=201, response_model=PublishedOut)
 async def publish(
     workflow_id: uuid.UUID,
+    body: PublishIn | None = None,
     if_match: str | None = Header(default=None, alias="If-Match"),
     ctx: TenantContext = Depends(require(P.WORKFLOW_PUBLISH)),
     db: AsyncSession = Depends(get_db, scope="function"),
@@ -253,9 +264,18 @@ async def publish(
     expected = _revision(if_match)
     wf = await _get(db, ctx, workflow_id, for_update=True)
     try:
-        out = await workflow_ops.publish(db, ctx, wf, expected_revision=expected, settings=settings)
+        out = await workflow_ops.publish(
+            db,
+            ctx,
+            wf,
+            expected_revision=expected,
+            settings=settings,
+            expected_latest_version=body.expected_latest_version if body else None,
+        )
     except service.DraftConflictError as e:
         raise HTTPException(409, detail={"error": "draft_conflict", "draft_revision": e.current_revision}) from None
+    except service.VersionChangedError as e:
+        raise HTTPException(409, detail={"error": "version_changed", "latest_version": e.latest}) from None
     if out.version is None:
         diagnostics = [d.to_json() for d in [*out.errors, *out.warnings]]
         raise HTTPException(422, detail={"error": "invalid", "diagnostics": diagnostics})
@@ -277,6 +297,27 @@ async def versions(
         _version_out(v, wf.active_version_id, await service.blocked_by(db, v))
         for v in await service.list_versions(db, wf.id)
     ]
+
+
+@router.get("/t/{tenant_id}/workflows/{workflow_id}/versions/{version_id}", response_model=VersionDetailOut)
+async def version(
+    workflow_id: uuid.UUID,
+    version_id: uuid.UUID,
+    ctx: TenantContext = Depends(require(P.WORKFLOW_VIEW)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+) -> dict[str, object]:
+    wf = await _get(db, ctx, workflow_id)
+    v = await service.get_version(db, wf.id, version_id)
+    if v is None:
+        raise HTTPException(404, detail={"error": "not_found"})
+    return {
+        **_version_out(v, wf.active_version_id, await service.blocked_by(db, v)),
+        "graph": v.graph,
+        "expressions": [
+            {"node": e.get("node"), "field": e["field"], "mode": e["mode"], "reason": e.get("reason")}
+            for e in v.expressions
+        ],
+    }
 
 
 @router.post("/t/{tenant_id}/workflows/{workflow_id}/activate", response_model=ActivatedOut)

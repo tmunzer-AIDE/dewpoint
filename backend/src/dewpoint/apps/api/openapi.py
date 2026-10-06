@@ -56,7 +56,7 @@ GRAPH_REF = "#/components/schemas/Graph"
 # numbers, depth, value count) that a body model would turn into `{"error": "invalid", "fields": [...]}`.
 GRAPH_BODIES: tuple[tuple[str, str], ...] = (("/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft", "put"),)
 # Answers that carry a graph verbatim, as saved, rather than re-serialized with defaults its author never wrote.
-GRAPH_PROPERTIES: tuple[tuple[str, str], ...] = (("WorkflowDetailOut", "draft"),)
+GRAPH_PROPERTIES: tuple[tuple[str, str], ...] = (("WorkflowDetailOut", "draft"), ("VersionDetailOut", "graph"))
 
 
 def refine(spec: dict[str, Any]) -> dict[str, Any]:

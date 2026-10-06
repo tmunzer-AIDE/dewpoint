@@ -1077,6 +1077,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/versions/{version_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Version */
+        get: operations["version_api_v1_t__tenant_id__workflows__workflow_id__versions__version_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tenants": {
         parameters: {
             query?: never;
@@ -1818,6 +1835,15 @@ export interface components {
              */
             y?: number;
         };
+        /**
+         * PublishIn
+         * @description What the editor showed when it asked to publish (4b ruling 17). Extra keys are refused: a misspelt expectation
+         *     must never be dropped silently, publishing what nobody confirmed.
+         */
+        PublishIn: {
+            /** Expected Latest Version */
+            expected_latest_version?: number | null;
+        };
         /** PublishedOut */
         PublishedOut: {
             /** Number */
@@ -2084,6 +2110,40 @@ export interface components {
              */
             name?: string;
         };
+        /**
+         * VersionDetailOut
+         * @description One version whole (B4a): its graph, verbatim as published (documented as a Graph), and how each of its
+         *     expressions runs.
+         */
+        VersionDetailOut: {
+            /** Active */
+            active: boolean;
+            /** Blocked By */
+            blocked_by: string[];
+            /** Cel Profile */
+            cel_profile: string;
+            /** Engine Abi */
+            engine_abi: number;
+            /** Executable */
+            executable: boolean;
+            /** Expressions */
+            expressions: components["schemas"]["ExpressionOut"][];
+            graph: components["schemas"]["Graph"];
+            /** Graph Hash */
+            graph_hash: string;
+            /** Id */
+            id: string;
+            /** Node Refs */
+            node_refs: string[];
+            /** Number */
+            number: number;
+            /** Published At */
+            published_at: string;
+            /** Published By */
+            published_by: string | null;
+            /** Version Hash */
+            version_hash: string;
+        };
         /** VersionOut */
         VersionOut: {
             /** Active */
@@ -2092,6 +2152,8 @@ export interface components {
             blocked_by: string[];
             /** Cel Profile */
             cel_profile: string;
+            /** Engine Abi */
+            engine_abi: number;
             /** Executable */
             executable: boolean;
             /** Graph Hash */
@@ -4344,7 +4406,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["PublishIn"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             201: {
@@ -4563,6 +4629,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["VersionOut"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    version_api_v1_t__tenant_id__workflows__workflow_id__versions__version_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workflow_id: string;
+                version_id: string;
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VersionDetailOut"];
                 };
             };
             /** @description Validation Error */

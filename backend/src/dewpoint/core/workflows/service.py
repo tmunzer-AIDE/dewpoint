@@ -21,6 +21,14 @@ class DraftConflictError(Exception):
         self.current_revision = current_revision
 
 
+class VersionChangedError(Exception):
+    """A publish named the newest version it expected, and another is newest now."""
+
+    def __init__(self, latest: int) -> None:
+        super().__init__(f"the newest version is {latest}")
+        self.latest = latest
+
+
 async def create_workflow(s: AsyncSession, ctx: TenantContext, *, name: str, draft: dict[str, Any]) -> Workflow:
     wf = Workflow(
         id=uuid.uuid4(),
@@ -188,10 +196,7 @@ class NewVersion:
 
 async def insert_version(s: AsyncSession, ctx: TenantContext, wf: Workflow, new: NewVersion) -> WorkflowVersion:
     """Insert the next version and make it active. The caller holds the workflow row lock."""
-    latest = await s.execute(
-        select(func.coalesce(func.max(WorkflowVersion.number), 0)).where(WorkflowVersion.workflow_id == wf.id)
-    )
-    number = int(latest.scalar_one()) + 1
+    number = await latest_version_number(s, wf.id) + 1
     version = WorkflowVersion(
         id=new.id,
         tenant_id=wf.tenant_id,
@@ -257,6 +262,14 @@ async def set_active(s: AsyncSession, ctx: TenantContext, wf: Workflow, version:
         target_id=str(wf.id),
         details={"version": version.number, "version_id": str(version.id)},
     )
+
+
+async def latest_version_number(s: AsyncSession, workflow_id: uuid.UUID) -> int:
+    """The newest version's number, 0 when none: the caller holds the workflow's row lock, so it can't change."""
+    latest = await s.execute(
+        select(func.coalesce(func.max(WorkflowVersion.number), 0)).where(WorkflowVersion.workflow_id == workflow_id)
+    )
+    return int(latest.scalar_one())
 
 
 async def get_version(s: AsyncSession, workflow_id: uuid.UUID, version_id: uuid.UUID) -> WorkflowVersion | None:

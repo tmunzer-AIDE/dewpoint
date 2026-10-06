@@ -81,6 +81,7 @@ SLICE_4B = [
     ("post", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/validate"),
     ("post", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/publish"),
     ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/versions"),
+    ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/versions/{version_id}"),
     ("post", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/activate"),
 ]
 
@@ -104,6 +105,20 @@ def test_the_draft_put_documents_its_body_as_a_graph() -> None:
 
 def test_a_workflow_answer_documents_its_draft_as_a_graph() -> None:
     assert schema()["components"]["schemas"]["WorkflowDetailOut"]["properties"]["draft"] == GRAPH
+
+
+def test_a_versions_graph_is_documented_as_a_graph() -> None:
+    assert schema()["components"]["schemas"]["VersionDetailOut"]["properties"]["graph"] == GRAPH
+
+
+def test_publishs_body_is_optional() -> None:
+    """Verified against FastAPI 0.141.1: an optional body model is documented as itself or null, not required."""
+    body = schema()["paths"]["/api/v1/t/{tenant_id}/workflows/{workflow_id}/publish"]["post"]["requestBody"]
+    assert "required" not in body
+    assert body["content"]["application/json"]["schema"]["anyOf"] == [
+        {"$ref": "#/components/schemas/PublishIn"},
+        {"type": "null"},
+    ]
 
 
 def test_the_graph_components_are_the_models_own() -> None:

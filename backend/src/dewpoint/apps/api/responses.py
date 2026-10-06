@@ -259,10 +259,19 @@ class VersionOut(_Answer):
     graph_hash: str
     version_hash: str
     cel_profile: str
+    engine_abi: int
     node_refs: list[str]
     active: bool
     executable: bool
     blocked_by: list[str]
+
+
+class VersionDetailOut(VersionOut):
+    """One version whole (B4a): its graph, verbatim as published (documented as a Graph), and how each of its
+    expressions runs."""
+
+    graph: dict[str, Any]
+    expressions: list[ExpressionOut]
 
 
 class ActivatedOut(_Answer):

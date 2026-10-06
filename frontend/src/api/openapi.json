@@ -1769,6 +1769,26 @@
         "title": "Position",
         "type": "object"
       },
+      "PublishIn": {
+        "additionalProperties": false,
+        "description": "What the editor showed when it asked to publish (4b ruling 17). Extra keys are refused: a misspelt expectation\nmust never be dropped silently, publishing what nobody confirmed.",
+        "properties": {
+          "expected_latest_version": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Latest Version"
+          }
+        },
+        "title": "PublishIn",
+        "type": "object"
+      },
       "PublishedOut": {
         "additionalProperties": false,
         "properties": {
@@ -2516,6 +2536,101 @@
         "title": "VerifyIn",
         "type": "object"
       },
+      "VersionDetailOut": {
+        "additionalProperties": false,
+        "description": "One version whole (B4a): its graph, verbatim as published (documented as a Graph), and how each of its\nexpressions runs.",
+        "properties": {
+          "active": {
+            "title": "Active",
+            "type": "boolean"
+          },
+          "blocked_by": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Blocked By",
+            "type": "array"
+          },
+          "cel_profile": {
+            "title": "Cel Profile",
+            "type": "string"
+          },
+          "engine_abi": {
+            "title": "Engine Abi",
+            "type": "integer"
+          },
+          "executable": {
+            "title": "Executable",
+            "type": "boolean"
+          },
+          "expressions": {
+            "items": {
+              "$ref": "#/components/schemas/ExpressionOut"
+            },
+            "title": "Expressions",
+            "type": "array"
+          },
+          "graph": {
+            "$ref": "#/components/schemas/Graph"
+          },
+          "graph_hash": {
+            "title": "Graph Hash",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "node_refs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Node Refs",
+            "type": "array"
+          },
+          "number": {
+            "title": "Number",
+            "type": "integer"
+          },
+          "published_at": {
+            "title": "Published At",
+            "type": "string"
+          },
+          "published_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published By"
+          },
+          "version_hash": {
+            "title": "Version Hash",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "number",
+          "published_at",
+          "published_by",
+          "graph_hash",
+          "version_hash",
+          "cel_profile",
+          "engine_abi",
+          "node_refs",
+          "active",
+          "executable",
+          "blocked_by",
+          "graph",
+          "expressions"
+        ],
+        "title": "VersionDetailOut",
+        "type": "object"
+      },
       "VersionOut": {
         "additionalProperties": false,
         "properties": {
@@ -2533,6 +2648,10 @@
           "cel_profile": {
             "title": "Cel Profile",
             "type": "string"
+          },
+          "engine_abi": {
+            "title": "Engine Abi",
+            "type": "integer"
           },
           "executable": {
             "title": "Executable",
@@ -2585,6 +2704,7 @@
           "graph_hash",
           "version_hash",
           "cel_profile",
+          "engine_abi",
           "node_refs",
           "active",
           "executable",
@@ -6364,6 +6484,23 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/PublishIn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "201": {
             "content": {
@@ -6753,6 +6890,69 @@
           }
         },
         "summary": "Versions",
+        "tags": [
+          "workflows"
+        ]
+      }
+    },
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/versions/{version_id}": {
+      "get": {
+        "operationId": "version_api_v1_t__tenant_id__workflows__workflow_id__versions__version_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Version Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VersionDetailOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Version",
         "tags": [
           "workflows"
         ]
