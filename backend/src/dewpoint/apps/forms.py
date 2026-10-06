@@ -3,8 +3,8 @@
 A sensitive field shows its type and whether it's required, never a value the schema holds for it: its default and
 its enum are masked. Publish refuses both now (§3.8, #32), but versions published before that are immutable and may
 still hold them. A picker (`x-dewpoint-picker`, plugins-3 D19: a node's options field and a connection, checked at
-publish) is shown as published; its choices come from `POST …/input-options`. A CSV declaration (§8.1) is described with its columns: a sensitive one has no default and no
-values to show, since publish refuses them."""
+publish) is shown as published; its choices come from `POST …/input-options`. A CSV declaration (§8.1) is described
+with its columns: a sensitive one has no default and no values to show, since publish refuses them."""
 
 from collections.abc import Mapping
 from typing import Any

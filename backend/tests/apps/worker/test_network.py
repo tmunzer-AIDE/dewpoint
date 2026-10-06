@@ -351,3 +351,23 @@ async def test_a_stored_config_its_type_refuses_is_unavailable(owner_sessionmake
         finally:
             await a.aclose()
     assert server.requests == []
+
+
+async def test_credentials_that_cant_be_filled_are_unavailable(owner_sessionmaker, worker_sessionmaker) -> None:
+    """A declaration the catalog would refuse (a format spec in the template) never reaches a plugin as an error
+    quoting the secret: the connection is unavailable (the 3a-2 review's finding 3)."""
+    import dataclasses
+
+    kit = types_for_testkit()["testkit"]
+    broken = dataclasses.replace(
+        kit.declared, auth={"kind": "header", "header": "Authorization", "template": "{token:>9}"}
+    )
+    async with serve(respond(), tls_names=NAMES) as server:
+        seeded, cid = await _setup(owner_sessionmaker, server.port)
+        a = attempt(worker_sessionmaker, seeded, types={"testkit": dataclasses.replace(kit, declared=broken)})
+        try:
+            with pytest.raises(ConnectionUnavailable):
+                await a.connection(cid)
+        finally:
+            await a.aclose()
+    assert server.requests == []

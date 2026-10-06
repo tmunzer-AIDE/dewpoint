@@ -22,6 +22,28 @@ HEADER_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$")  # an RFC 9110 tok
 HOST_RE = re.compile(r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
 
 
+FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def template_parts(template: str) -> list[tuple[str, str | None]]:
+    """An auth template as (literal text, field name or None) pairs. Only plain `{field}` placeholders: a format spec
+    or a conversion (`{token:>9}`, `{token!r}`) raises ValueError, so filling a template never formats a secret (the
+    3a-2 review's finding 3)."""
+    out: list[tuple[str, str | None]] = []
+    for literal, name, spec, conversion in string.Formatter().parse(template):
+        if name is not None and (spec or conversion is not None):
+            raise ValueError("an auth template may only name fields")
+        out.append((literal, name))
+    return out
+
+
+def fill(template: str, values: Mapping[str, Any]) -> str:
+    """The template with each named field's value substituted, never formatted."""
+    return "".join(
+        literal + (str(values[name]) if name is not None else "") for literal, name in template_parts(template)
+    )
+
+
 @dataclass(frozen=True)
 class VerifyResult:
     """`detail` is a short code (`ok`, `invalid_token`, …); `privilege` what the credentials may do, when known."""
@@ -112,7 +134,7 @@ class ConnectionType:
             out.append(f"{name}: host field {self.host.field!r} must be required")
         if self.auth is not None:
             try:
-                named = [p[1] for p in string.Formatter().parse(self.auth.template) if p[1] is not None]
+                named = [n for _, n in template_parts(self.auth.template) if n is not None]
             except ValueError:
                 named = []
             out += [f"{name}: auth template names {n!r}, which must be required" for n in named
@@ -131,9 +153,9 @@ class ConnectionType:
         if not HEADER_RE.match(self.auth.header):
             out.append(f"{name}: auth header {self.auth.header!r} must be a header name")
         try:
-            named = [part[1] for part in string.Formatter().parse(self.auth.template) if part[1] is not None]
+            named = [n for _, n in template_parts(self.auth.template) if n is not None]
         except ValueError:
-            return [*out, f"{name}: auth template must be a format string"]
+            return [*out, f"{name}: auth template may only name fields ({{field}}), with no format spec or conversion"]
         out += [f"{name}: auth template names {n!r}, not a secret field" for n in named if n not in secret_fields]
         if any(c in self.auth.template for c in "\r\n\0"):
             out.append(f"{name}: auth template must be one line")

@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.models.plugins import PluginManifest
 from dewpoint.core.ratelimit.buckets import Scope
+from dewpoint.sdk.connections import fill
 
 _FORMATS = FormatChecker(formats=())
 
@@ -101,7 +102,10 @@ class DeclaredType:
         """The header the runtime sends (plugins-3 D4); the plugin never sees it."""
         if self.auth is None:
             return {}
-        return {self.auth["header"]: self.auth["template"].format(**secret)}
+        try:
+            return {self.auth["header"]: fill(self.auth["template"], secret)}
+        except (KeyError, ValueError):
+            raise InvalidValueError(["auth"]) from None
 
     def scopes(self, config: Mapping[str, Any], secret: Mapping[str, Any], mac: Callable[[str], str]) -> list[Scope]:
         """Each quota scope (plugins-3 D9): its kind, the named config values, then a MAC of the named secret field

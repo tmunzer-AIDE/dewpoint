@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import math
 import re
-import string
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, TypeGuard
@@ -12,7 +11,7 @@ from jsonschema.exceptions import SchemaError
 from dewpoint.engine.canonical import sha256_hex
 from dewpoint.engine.registry.control import CONTROL_TYPES
 from dewpoint.engine.schema_refs import SCHEMA_LIST, SCHEMA_MAP, SCHEMA_ONE, ref_problems
-from dewpoint.sdk.connections import HEADER_RE, HOST_RE, SCOPE_KIND_RE, TYPE_KEY_RE
+from dewpoint.sdk.connections import HEADER_RE, HOST_RE, SCOPE_KIND_RE, TYPE_KEY_RE, template_parts
 from dewpoint.sdk.fields import OPTIONS, SENSITIVE
 from dewpoint.sdk.node import ICON_RE, MAX_RETRY_ATTEMPTS, PORT_RE, RESERVED_PORTS, TYPE_RE, NodeKind, SideEffect
 from dewpoint.sdk.version import SDK_MAJOR
@@ -263,9 +262,9 @@ def _auth_problems(name: str, auth: Any, secret_fields: Mapping[str, Any]) -> li
     ):
         return [f"{name}: auth must be {{kind: header, header: a header name, template: one line}}"]
     try:
-        named = [part[1] for part in string.Formatter().parse(template) if part[1] is not None]
+        named = [n for _, n in template_parts(template) if n is not None]
     except ValueError:
-        return [f"{name}: auth template must be a format string"]
+        return [f"{name}: auth template may only name fields ({{field}}), with no format spec or conversion"]
     return [f"{name}: auth template names {n!r}, not a secret field" for n in named if n not in secret_fields]
 
 
@@ -328,7 +327,7 @@ def _required_problems(name: str, t: Mapping[str, Any]) -> list[str]:
     template = auth.get("template") if isinstance(auth, Mapping) else None
     if isinstance(template, str):
         try:
-            named = [p[1] for p in string.Formatter().parse(template) if p[1] is not None]
+            named = [n for _, n in template_parts(template) if n is not None]
         except ValueError:
             named = []
         out += [f"{name}: auth template names {n!r}, which must be required" for n in named

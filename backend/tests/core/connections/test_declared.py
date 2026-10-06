@@ -102,3 +102,13 @@ def test_a_uuid_format_is_checked_only_where_declared() -> None:
     upper = str(uuid.uuid4()).upper()
     assert kind.config({"name": upper}) == {"name": upper}
     assert kind.base_url({"name": "x"}) is None and kind.credentials({}) == {}
+
+
+def test_credentials_name_fields_and_never_format_them() -> None:
+    """A template is filled field by field (plugins-3, the 3a-2 review's finding 3): a format spec or a conversion is
+    refused at sync, and filling never formats, so no failure can quote the secret."""
+    auth = {"kind": "header", "header": "X", "template": "{api_token:>9}"}
+    kind = DeclaredType.from_manifest("mist", {**PLUGIN.manifest()["connection_types"][0], "auth": auth})
+    with pytest.raises(InvalidValueError) as raised:
+        kind.credentials({"api_token": TOKEN})
+    assert TOKEN not in str(raised.value)

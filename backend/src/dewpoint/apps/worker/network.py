@@ -528,6 +528,7 @@ async def unseal(
         )
         secret = kind.declared.secret(json.loads(raw))
         stored_config = kind.declared.config(stored.config)
+        credentials = kind.declared.credentials(secret)  # never a raw error quoting the secret (review, finding 3)
         config = kind.code.Config.model_validate(stored_config).model_dump(mode="json")
     except (ClaimUnreadableError, InvalidValueError, ValidationError, ValueError):
         raise ConnectionUnavailable() from None
@@ -542,9 +543,7 @@ async def unseal(
         base = None
     if base is None or base.scheme not in ("http", "https") or not base.host:  # plain http still needs an entry
         raise ConnectionUnavailable()
-    return Unsealed(
-        connection_id, stored.type, kind, stored_config, config, secret, base, kind.declared.credentials(secret)
-    )
+    return Unsealed(connection_id, stored.type, kind, stored_config, config, secret, base, credentials)
 
 
 class AttemptNetwork:
