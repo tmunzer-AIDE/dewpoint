@@ -48,6 +48,16 @@ class DispatcherReport(Base):
     details: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
 
 
+class TickCutover(Base):
+    """The tick cutover (the owner's M3 ruling): after it, no dispatcher seals a schedule tick's payload under a
+    tenant's key. Recorded once, by migration 0039 in a database without tenants, else by `keys tick-cutover` after the
+    last dispatcher from before stopped; a tenant's key made before it never retires."""
+
+    __tablename__ = "tick_cutover"
+    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, default=1)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class RunDurationLimit(Base):
     """A maximum run duration the dispatcher has set deadlines with (engine 2b spec §6.4): the longest is the payload
     floor's."""

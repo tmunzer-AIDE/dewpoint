@@ -64,6 +64,20 @@ async def row(owner: Any, run_id: uuid.UUID) -> tuple[Any, ...] | None:
         return tuple(first) if first else None
 
 
+async def evidence(owner: Any, ctx: Any, run_id: uuid.UUID) -> list[Any]:
+    """The root's execution evidence (the owner's M3 rulings): written with each start attempt, before Temporal is
+    asked; gone only once Temporal refused every attempt. An attempt Temporal may have taken (an absence seen at one
+    moment, an uncertain start) stays unproven: it may still land. A collision's execution exists: its evidence
+    stays. Each row: (unproven,)."""
+    from dewpoint.engine.runtime.ids import run_workflow_id
+
+    async with owner() as s:
+        workflow_id = run_workflow_id(str(ctx.tenant_id), str(run_id))
+        found = await s.execute(text("select unproven from execution_evidence where workflow_id = :w"),
+                                {"w": workflow_id})  # fmt: skip
+        return [tuple(r) for r in found]
+
+
 async def end_write(worker: Any, ctx: Any, run_id: uuid.UUID, status: str = "succeeded") -> None:
     summary = RunSummary(str(run_id), status, datetime.now(UTC).isoformat())
     await DbRunStore(worker, KEYS).project(ProjectInput(str(ctx.tenant_id), [], summary))
@@ -72,11 +86,12 @@ async def end_write(worker: Any, ctx: Any, run_id: uuid.UUID, status: str = "suc
 async def test_queued_to_starting_reserves_the_slot_and_writes_the_row(
     limited, owner_sessionmaker, dispatch_sessionmaker, api_settings
 ) -> None:
-    _, _, first, second = limited
+    ctx, _, first, second = limited
     await started(dispatch_sessionmaker, first, api_settings)
     assert await state(owner_sessionmaker, first.id) == {
         "request": ("starting", None, 0), "run": ("running", None, first.queued_at), "slot": 1,
     }  # fmt: skip
+    assert await evidence(owner_sessionmaker, ctx, first.id) == [(False,)]  # before Temporal is asked
     await due(owner_sessionmaker, second.id)
     assert not await second_starts(dispatch_sessionmaker, second, api_settings)
 
@@ -106,20 +121,56 @@ async def test_an_uncertain_start_keeps_its_slot(
 async def test_back_to_the_queue_frees_the_slot_at_once_and_keeps_the_row_hidden(
     limited, owner_sessionmaker, dispatch_sessionmaker, api_settings, outcome
 ) -> None:
-    _, _, first, second = limited
+    ctx, _, first, second = limited
     found = await started(dispatch_sessionmaker, first, api_settings)
     assert await dispatch.settle(dispatch_sessionmaker, found, dispatch.Outcome(outcome)) == outcome
+    expected = [] if outcome == "refused" else [(True,)]  # an absence seen once doesn't fence a late start
+    assert await evidence(owner_sessionmaker, ctx, first.id) == expected
     after = await state(owner_sessionmaker, first.id)
     assert (after["request"][0], after["slot"], after["run"][0]) == ("queued", 0, "running")
     assert after["request"][2] == (1 if outcome == "refused" else 0)  # only a confirmed refusal is an attempt
     assert await second_starts(dispatch_sessionmaker, second, api_settings)
 
 
+async def test_each_start_attempt_writes_its_evidence_again(
+    limited, owner_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """A request back in the queue after an attempt Temporal refused has no evidence while it waits, however long;
+    its next attempt, which reuses its row, writes it again before Temporal is asked."""
+    ctx, _, first, _ = limited
+    found = await started(dispatch_sessionmaker, first, api_settings)
+    assert await dispatch.settle(dispatch_sessionmaker, found, dispatch.Outcome("throttled")) == "throttled"
+    assert await evidence(owner_sessionmaker, ctx, first.id) == []
+    await due(owner_sessionmaker, first.id)
+    await started(dispatch_sessionmaker, first, api_settings)
+    assert await evidence(owner_sessionmaker, ctx, first.id) == [(False,)]
+
+
+async def test_an_unproven_attempt_keeps_its_evidence_through_later_attempts_and_a_cancel(
+    limited, owner_sessionmaker, api_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """The owner's M3 review: an absence seen at one moment doesn't prove an in-flight start can't land later. The
+    request goes back to the queue, its evidence unproven; a later attempt, one Temporal refuses, and the user's
+    cancel leave it so: only a start proven unable to land would discard it."""
+    ctx, _, first, _ = limited
+    found = await started(dispatch_sessionmaker, first, api_settings)
+    assert await dispatch.settle(dispatch_sessionmaker, found, dispatch.Outcome("absent")) == "absent"
+    assert await evidence(owner_sessionmaker, ctx, first.id) == [(True,)]
+    found = await started(dispatch_sessionmaker, first, api_settings)
+    assert await evidence(owner_sessionmaker, ctx, first.id) == [(True,)]  # another attempt in flight: still unproven
+    assert await dispatch.settle(dispatch_sessionmaker, found, dispatch.Outcome("refused")) == "refused"
+    assert await evidence(owner_sessionmaker, ctx, first.id) == [(True,)]
+    async with api_sessionmaker() as s, s.begin():
+        assert await cancels.cancel_request(s, tenant_id=ctx.tenant_id, request_id=first.id,
+                                            actor_id=ctx.user.id) == "cancelled"  # fmt: skip
+    assert await evidence(owner_sessionmaker, ctx, first.id) == [(True,)]
+
+
 @pytest.mark.parametrize("cause", ["tenth_refusal", "collision"])
 async def test_dead_frees_the_slot_and_fails_the_row(
     limited, owner_sessionmaker, dispatch_sessionmaker, api_settings, cause
 ) -> None:
-    _, _, first, second = limited
+    ctx, _, first, second = limited
     found = await started(dispatch_sessionmaker, first, api_settings)
     if cause == "tenth_refusal":
         async with owner_sessionmaker() as s, s.begin():
@@ -129,6 +180,8 @@ async def test_dead_frees_the_slot_and_fails_the_row(
     reason = "start_refused" if cause == "tenth_refusal" else "id_collision"
     assert (await state(owner_sessionmaker, first.id))["request"][:2] == ("dead", reason)
     assert (await row(owner_sessionmaker, first.id))[:2] == ("failed", "start_failed")
+    expected = [] if cause == "tenth_refusal" else [(True,)]  # a collision's execution exists
+    assert await evidence(owner_sessionmaker, ctx, first.id) == expected
     assert await second_starts(dispatch_sessionmaker, second, api_settings)
 
 
@@ -142,6 +195,7 @@ async def test_a_users_cancel_of_a_queued_request_ends_an_earlier_attempts_row(
         assert await cancels.cancel_request(s, tenant_id=ctx.tenant_id, request_id=first.id,
                                             actor_id=ctx.user.id) == "cancelled"  # fmt: skip
     assert (await row(owner_sessionmaker, first.id))[:2] == ("cancelled", "user_cancelled")
+    assert await evidence(owner_sessionmaker, ctx, first.id) == []  # its only attempt, Temporal refused
     assert await second_starts(dispatch_sessionmaker, second, api_settings)
 
 
@@ -172,6 +226,7 @@ async def test_a_forced_retirement_cancels_a_queued_request_and_an_earlier_attem
     after = await state(owner_sessionmaker, first.id)
     assert (after["request"][:2], after["slot"]) == (("cancelled", "node_type_retired"), 0)
     assert (await row(owner_sessionmaker, first.id))[:2] == ("cancelled", "node_type_retired")
+    assert await evidence(owner_sessionmaker, ctx, first.id) == []
 
 
 async def test_a_durable_sources_refusal_holds_no_slot_and_writes_no_row(

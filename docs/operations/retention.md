@@ -86,6 +86,9 @@ older than a few intervals, an unsuccessful one, or a lag approaching a day.
 - **Temporal** keeps histories (their visible metadata and codec-encrypted payloads) for the namespace's retention: 7
   days by default, 30 at most. A tenant whose retention is shorter has histories that outlive its data.
 - **Audit records** follow the platform's audit retention (below), not the tenant's.
+- **Run execution evidence** (`execution_evidence`: workflow and run ids and times, nothing more) stays until Temporal
+  shows the execution gone, whatever the tenant's retention: a key's retirement needs it ([key
+  rotation](key-rotation.md)).
 - **Backups** keep deleted data until they expire: keep them at most 35 days.
 
 ## Audit pruning

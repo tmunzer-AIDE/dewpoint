@@ -30,6 +30,8 @@ TENANT_FIELDS = [
     ("schedules", "id", "input", "schedule.input", "id"),
     ("connections", "id", "secret_ct", "connection.secret", "id"),
     ("tenant_event_keys", "version", "private_sealed", "event.private", "version"),
+    ("rate_scope_keys", "tenant_id", "sealed", "rate.scope", "tenant_id"),  # plugins-3 D9: the tenant's id as context
+    ("plugin_calls", "id", "result_ct", "plugin.call", "id"),  # plugins-3a-2: a call's answer, its id as context
 ]
 
 
@@ -68,7 +70,7 @@ async def stored(owner_sessionmaker, admin_sessionmaker, keyring) -> dict[str, A
         await ensure_event_key(s, keyring, t)
     ids = {"run_inputs": uuid.uuid4(), "step_outputs": uuid.uuid4(), "run_secret_index": uuid.uuid4(),
            "csv_uploads": uuid.uuid4(), "csv_mappings": w, "schedules": uuid.uuid4(), "connections": uuid.uuid4(),
-           "tenant_event_keys": 1}  # fmt: skip
+           "tenant_event_keys": 1, "rate_scope_keys": t, "plugin_calls": uuid.uuid4()}  # fmt: skip
     plain = {table: f"{table}-plaintext".encode() for table in ids}
 
     async def seal(table: str, purpose: str) -> bytes:
@@ -92,7 +94,7 @@ async def stored(owner_sessionmaker, admin_sessionmaker, keyring) -> dict[str, A
                "values (:w, :t, :c, :u, :v)", w=w, t=t, u=user, v=v,
                c=await seal("csv_mappings", "csv.mapping"))  # fmt: skip
     await _sql(owner, "insert into schedules (id, tenant_id, workflow_id, every_s, mode, input, created_by, "
-               "generation, synced_generation) values (:i, :t, :w, 60, 'live', :c, :u, 3, 3)",
+               "generation, synced_generation, action_key_version) values (:i, :t, :w, 60, 'live', :c, :u, 3, 3, 1)",
                i=ids["schedules"], t=t, w=w, u=user, c=await seal("schedules", "schedule.input"))  # fmt: skip
     tombstone = uuid.uuid4()
     await _sql(owner, "insert into schedules (id, tenant_id, workflow_id, every_s, mode, input, created_by, "
@@ -101,6 +103,18 @@ async def stored(owner_sessionmaker, admin_sessionmaker, keyring) -> dict[str, A
     await _sql(owner, "insert into connections (id, tenant_id, type, name, config, secret_ct, revision, status) "
                "values (:i, :t, 'mist', 'c', '{}', :c, 5, 'verified')",
                i=ids["connections"], t=t, c=await seal("connections", "connection.secret"))  # fmt: skip
+    await _sql(
+        owner,
+        "insert into rate_scope_keys (tenant_id, sealed) values (:t, :c)",
+        t=t,
+        c=await seal("rate_scope_keys", "rate.scope"),
+    )  # the tenant's id as context, as scopes.py seals it
+    await _sql(owner, "insert into plugin_calls (id, tenant_id, kind, node_ref, field, state, expires_at, result_ct) "
+               "values (:i, :t, 'options', 'flow.x@1', 'f', 'done', now() + interval '1 hour', :c)",
+               i=ids["plugin_calls"], t=t, c=await seal("plugin_calls", "plugin.call"))  # fmt: skip
+    # a call not answered yet: nothing sealed
+    await _sql(owner, "insert into plugin_calls (tenant_id, kind, node_ref, field, expires_at) "
+               "values (:t, 'options', 'flow.x@1', 'f', now() + interval '1 hour')", t=t)  # fmt: skip
     async with owner() as s:  # the keypair's private key, as ensure_event_key sealed it
         plain["tenant_event_keys"] = await keyring.decrypt(
             s, tenant_id=t, purpose="event.private", context="1",
@@ -144,8 +158,16 @@ async def test_every_record_under_an_older_version_is_sealed_again_under_the_act
 
 async def test_nothing_else_of_a_record_changes(stored, owner_sessionmaker, admin_sessionmaker, keyring) -> None:
     """A connection keeps its revision and verification, a secret index its content version, a tombstone its empty
-    input and generation; a live schedule's generation is raised, so its sync seals its Temporal action again."""
+    input and generation. A live schedule whose Temporal action, as its sync last read it back, still carries a sealed
+    argument (synced before the tick contract) has its generation raised, so its sync writes it without one; a
+    schedule whose action carries nothing is left alone."""
     t = stored["t"]
+    migrated = uuid.uuid4()
+    sealed = await _sealed(admin_sessionmaker, keyring, t, "schedule.input", str(migrated), b"its input")
+    await _sql(owner_sessionmaker, "insert into schedules (id, tenant_id, workflow_id, every_s, mode, input, "
+               "created_by, generation, synced_generation) select :i, tenant_id, workflow_id, 60, 'live', :c, "
+               "created_by, 5, 5 from schedules where id = :s", i=migrated, c=sealed,
+               s=stored["ids"]["schedules"])  # fmt: skip
     await reencrypt.tenant(admin_sessionmaker, keyring, t)
     async with owner_sessionmaker() as s:
         connection = (await s.execute(text("select revision, status from connections where id = :i"),
@@ -155,7 +177,7 @@ async def test_nothing_else_of_a_record_changes(stored, owner_sessionmaker, admi
         schedules = dict((await s.execute(text("select id, (generation, input is null) from schedules "
                                                "where tenant_id = :t"), {"t": t})).all())  # fmt: skip
     assert tuple(connection) == (5, "verified") and index == 7
-    assert schedules == {stored["ids"]["schedules"]: (4, False), stored["tombstone"]: (4, True)}
+    assert schedules == {stored["ids"]["schedules"]: (4, False), stored["tombstone"]: (4, True), migrated: (5, False)}
 
 
 async def test_the_platform_keys_records_are_sealed_again(stored, owner_sessionmaker, admin_sessionmaker,
@@ -202,7 +224,7 @@ async def test_the_key_admin_rewrites_ciphertexts_only(owner_sessionmaker) -> No
     assert {k: v for k, v in updatable.items() if k not in ("connections", "user_mfa")} == {
         "run_inputs": "ciphertext", "step_outputs": "ciphertext", "run_secret_index": "ciphertext",
         "csv_uploads": "staged", "csv_mappings": "mapping", "schedules": "generation,input",
-        "tenant_event_keys": "private_sealed",
+        "tenant_event_keys": "private_sealed", "rate_scope_keys": "sealed", "plugin_calls": "result_ct",
     }  # fmt: skip
 
 
@@ -256,3 +278,32 @@ async def test_a_version_never_retires_under_a_batch_sealing_records_with_it(
         assert await keyring.decrypt(s, tenant_id=None, purpose="user.totp", context=str(user), blob=blob) == (
             b"totp-secret"
         )  # its version still exists  # fmt: skip
+
+
+async def test_a_tenants_rate_scope_key_is_sealed_again_the_same_key_never_a_new_one(
+    stored, owner_sessionmaker, admin_sessionmaker, keyring
+) -> None:
+    """Plugins-3 (D9, its ledger's 2b-4a dependency): every credential's scope key derives from it, so re-encryption
+    keeps its plaintext; a new key would split each credential's budget and cooldown again."""
+    t = stored["t"]
+    await reencrypt.tenant(admin_sessionmaker, keyring, t)
+    blob = await _blob(owner_sessionmaker, "rate_scope_keys", "sealed", "tenant_id", t, t)
+    async with owner_sessionmaker() as s:
+        opened = await keyring.decrypt(s, tenant_id=t, purpose="rate.scope", context=str(t), blob=blob)
+    assert (version_of(blob), opened) == (2, stored["plain"]["rate_scope_keys"])
+
+
+async def test_a_plugin_calls_answer_is_sealed_again_and_a_pending_call_is_left_alone(
+    stored, owner_sessionmaker, admin_sessionmaker, keyring
+) -> None:
+    """Plugins-3a-2's ledger (its 2b-4a dependency): a call's answer is sealed under the tenant's data key, and a call
+    can outlive its expiry without a sweeper, so re-encryption seals it again (the owner's ruling on the rebase); a
+    call not answered yet has nothing to seal."""
+    t, call = stored["t"], stored["ids"]["plugin_calls"]
+    counts = await reencrypt.tenant(admin_sessionmaker, keyring, t)
+    blob = await _blob(owner_sessionmaker, "plugin_calls", "result_ct", "id", call, t)
+    async with owner_sessionmaker() as s:
+        opened = await keyring.decrypt(s, tenant_id=t, purpose="plugin.call", context=str(call), blob=blob)
+        pending = (await s.execute(text("select count(*) from plugin_calls where tenant_id = :t and "
+                                        "result_ct is null"), {"t": t})).scalar_one()  # fmt: skip
+    assert (counts["plugin_calls"], version_of(blob), opened, pending) == (1, 2, stored["plain"]["plugin_calls"], 1)

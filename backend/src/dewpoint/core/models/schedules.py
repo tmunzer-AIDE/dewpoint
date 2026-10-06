@@ -51,6 +51,7 @@ class Schedule(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # The data-key version the sync last wrote its Temporal action under (engine 2b spec §6.4): retiring a version
-    # waits until every live schedule's is the active one.
+    # The data-key version its Temporal action still names, as the sync last read it back (engine 2b spec §6.4): an
+    # action synced before the tick contract carried the schedule's id, sealed; one written since carries nothing (the
+    # owner's M3 ruling). Retiring a version waits while a live schedule's action names it.
     action_key_version: Mapped[int | None] = mapped_column(Integer)

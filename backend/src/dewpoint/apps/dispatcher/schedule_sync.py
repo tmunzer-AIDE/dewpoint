@@ -16,7 +16,12 @@ queued for an update. A deletion's tombstone stays queued until a describe made 
 finds nothing, so a stale writer's create, started before the tombstone, can't bring the schedule back unseen; a tick
 that finds a tombstone queues it again. The marker is evidence of a Dewpoint update, not of the whole state: editing a
 schedule directly in Temporal isn't supported. Missed firings past the catch-up window are Temporal's own count, read
-every five minutes, recorded, audited and alerted on."""
+every five minutes, recorded, audited and alerted on.
+
+An action carries no argument: its tick takes its schedule from its workflow id, and holds no payload under a tenant's
+data key (the owner's M3 ruling, `apps.tick_contract`). The sync records the data-key version an action synced before
+still names, from its own read-back (none for an action it wrote): `keys reencrypt` queues such a schedule, and its
+next sync writes the action without its argument."""
 
 import uuid
 from dataclasses import dataclass
@@ -70,7 +75,8 @@ class Described:
 
 
 def _action_key_version(answer: Any) -> int | None:
-    """The data-key version the schedule's action is sealed under, from its payload's metadata, undecoded."""
+    """The data-key version the schedule's action is sealed under, from its payload's metadata, undecoded: an action
+    synced before the tick contract carried the schedule's id, sealed; one written since carries nothing."""
     for payload in answer.schedule.action.start_workflow.input.payloads:
         raw = payload.metadata.get(KEY_VERSION, b"")
         if raw.isdigit() and len(raw) <= 9:  # what the codec writes, and refuses otherwise
@@ -141,9 +147,8 @@ def temporal(row: Row, *, paused: bool) -> Schedule:
         spec = ScheduleSpec(intervals=[ScheduleIntervalSpec(every=every, offset=timedelta(seconds=row.offset_s))])
     return Schedule(
         action=ScheduleActionStartWorkflow(
-            "ScheduleTick", str(row.id), id=schedule_workflow_id(str(row.tenant_id), str(row.id)),
-            task_queue=ADMISSION_QUEUE,
-        ),
+            "ScheduleTick", id=schedule_workflow_id(str(row.tenant_id), str(row.id)), task_queue=ADMISSION_QUEUE,
+        ),  # no argument: the tick's workflow id names its schedule
         spec=spec,
         policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.ALLOW_ALL,
                               catchup_window=timedelta(seconds=row.catchup_window_s)),
@@ -170,8 +175,8 @@ async def _record(
     sessionmaker: async_sessionmaker[AsyncSession], leader: _Leader, tenant_id: uuid.UUID, schedule_id: uuid.UUID,
     generation: int, action_key_version: int | None = None,
 ) -> str:  # fmt: skip
-    """The generation marked synced, with the key version its action was read back under (a live schedule's), if the
-    row still has it and this writer still leads."""
+    """The generation marked synced, with the key version its action was read back under (a live schedule's, if it
+    still names one), if the row still has it and this writer still leads."""
     async with sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant_id)
         if not await leader.leading():

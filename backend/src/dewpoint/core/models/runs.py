@@ -3,7 +3,22 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, ForeignKeyConstraint, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Identity,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    false,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -76,3 +91,32 @@ class RunStep(Base):
     error_message: Mapped[str | None] = mapped_column(Text)
     outcome: Mapped[str | None] = mapped_column(String(16))
     cel_mode: Mapped[str | None] = mapped_column(String(16))
+
+
+class ExecutionEvidence(Base):
+    """What Temporal may still hold of a run execution (the owner's M3 rulings), kept until Temporal shows it gone,
+    whatever retention deletes from `runs`. A root's is written with each start attempt, before Temporal is asked
+    (`run_id` none: its chain not yet read); an attempt Temporal may have taken leaves it `unproven`. The dispatcher's
+    leader records each run of its chain and each child it started, from their histories (`read_at`). One whose
+    history went before it was read is `lost_at`: what it started is unknown."""
+
+    __tablename__ = "execution_evidence"
+    __table_args__ = (
+        Index("execution_evidence_root", "workflow_id", unique=True, postgresql_where=text("run_id IS NULL")),
+        Index(
+            "execution_evidence_run", "workflow_id", "run_id", unique=True, postgresql_where=text("run_id IS NOT NULL")
+        ),  # fmt: skip
+        Index("execution_evidence_due", "next_check_at", postgresql_where=text("lost_at IS NULL")),
+        Index("execution_evidence_tenant", "tenant_id", "started_at"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=False), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"))
+    workflow_id: Mapped[str] = mapped_column(Text)
+    run_id: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # Temporal first showed it
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # Temporal last asked about it
+    unproven: Mapped[bool] = mapped_column(Boolean, server_default=false())  # an attempt Temporal may have taken
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lost_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_check_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

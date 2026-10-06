@@ -11,21 +11,24 @@ from pathlib import Path
 
 import typer
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest
 from temporalio.client import Client
 
-from dewpoint.apps import admission, dev_run
+from dewpoint.apps import admission, dev_run, tick_contract
 from dewpoint.apps.codec import KeyringKeys, data_converter
+from dewpoint.apps.dispatcher import evidence
 from dewpoint.apps.dispatcher.dispatch import START_DEADLINE
 from dewpoint.apps.dispatcher.gate import disable_and_wait
+from dewpoint.apps.dispatcher.tick import admission_pollers
 from dewpoint.apps.environment import verify_environment
 from dewpoint.apps.plugin_loader import PluginLoadError, installed_plugins, prepare
 from dewpoint.apps.worker.deployment import Deployment, describe, set_current, this_build
 from dewpoint.apps.worker.health import WorkerUnhealthyError
 from dewpoint.apps.worker.main import run as run_worker
 from dewpoint.core import logs
+from dewpoint.core.audit import service as audit_log
 from dewpoint.core.audit.anchor import FileAnchorSink, anchor_all, anchor_freshness, verify_anchors
 from dewpoint.core.auth.users import PasswordPolicyError, create_user
 from dewpoint.core.config import Settings, get_settings
@@ -412,6 +415,19 @@ async def _namespace_retention(settings: Settings) -> timedelta | None:
     return timedelta(seconds=ttl.seconds, microseconds=ttl.nanos // 1000)
 
 
+async def _run_histories(settings: Settings, s: AsyncSession, tenant_id: uuid.UUID,
+                         version: int) -> retire.RunProof | None:  # fmt: skip
+    """What Temporal shows of the tenant's run executions that could hold `version` (the owner's M3 rulings), in the
+    caller's transaction; None when Temporal can't be asked."""
+    try:
+        client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
+        before = await retire.candidates_before(s, tenant_id, version)
+        return await evidence.prove(s, client, tenant_id, before=before)
+    except Exception as e:  # unreachable, refused: unknown, never assumed
+        typer.echo(f"WARNING: the run executions couldn't be asked about ({type(e).__name__})")
+        return None
+
+
 @keys.command("retire")
 def keys_retire(
     version: int = typer.Option(..., min=1, help="the data-key version to retire"),
@@ -421,7 +437,8 @@ def keys_retire(
 ) -> None:
     """Retire a data-key version nothing needs (engine 2b spec §6.4): print every check, and with --confirm delete the
     version, audited, if all pass. Exit 1 when a dry run finds a check failing, 4 when --confirm does. A tenant's
-    version reads the Temporal namespace's retention. Run as dewpoint_admin."""
+    version reads the Temporal namespace's retention, and asks Temporal about each run execution that could hold it.
+    Run as dewpoint_admin."""
     if (tenant is None) != platform:
         typer.echo("pass exactly one of --tenant or --platform")
         raise typer.Exit(2)
@@ -436,10 +453,14 @@ def keys_retire(
         retention = await _namespace_retention(settings) if tenant_id else None
         async with s.begin():
             await tenant_scope(s, tenant_id)
+            histories = await _run_histories(settings, s, tenant_id, version) if tenant_id else None
             if not confirm:
-                return await retire.checks(s, tenant_id, version, namespace_retention=retention), False
+                found = await retire.checks(s, tenant_id, version, namespace_retention=retention,
+                                            run_histories=histories)  # fmt: skip
+                return found, False
             try:
-                return await retire.retire(s, tenant_id, version, namespace_retention=retention), True
+                return await retire.retire(s, tenant_id, version, namespace_retention=retention,
+                                           run_histories=histories), True  # fmt: skip
             except retire.NotRetiredError as e:
                 return e.checks, False
 
@@ -452,6 +473,77 @@ def keys_retire(
     if not all(c.ok for c in found):
         raise typer.Exit(4 if confirm else 1)
     typer.echo("not retired (a dry run: pass --confirm)")
+
+
+ATTESTED = "every dispatcher from before 0039 stopped and unable to restart; no image from before 0039 deployable"
+
+
+async def _admission_pollers(settings: Settings) -> list[str] | None:
+    """The identities polling the admission queue, as Temporal shows them; None when it can't be asked."""
+    try:
+        client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
+        return await admission_pollers(client)
+    except Exception as e:  # unreachable, refused: unknown, never assumed
+        typer.echo(f"WARNING: the admission queue's pollers couldn't be read ({type(e).__name__})")
+        return None
+
+
+@keys.command("tick-cutover")
+def keys_tick_cutover(
+    attest: bool = typer.Option(False, "--attest", help="no dispatcher from before 0039 runs or can run again"),
+    confirm: bool = typer.Option(False, "--confirm", help="record it (else a dry run)"),
+) -> None:
+    """Record the tick cutover (the owner's M3 rulings): from it, no dispatcher seals a schedule tick's payload under a
+    tenant's key, so a key made after it can retire. No migration records it, not even a fresh deployment's: it needs
+    the operator's attestation (`--attest`, required) that every dispatcher from before migration 0039 has stopped and
+    can't restart, and that no dispatcher image from before 0039 can be deployed against this database. Nothing here
+    can prove that. It also refuses (exit 1) while Temporal shows one still polling the admission queue, and when
+    Temporal can't be asked (exit 3). It records once, audited with the attestation, and queues every live schedule,
+    so its sync writes the action without the argument the old one sealed. A key made before it never retires. Run as
+    dewpoint_admin."""
+    if not attest:
+        typer.echo("pass --attest: no dispatcher from before migration 0039 runs, or can be deployed again")
+        raise typer.Exit(2)
+    settings = get_settings()
+
+    async def _run(s: AsyncSession) -> str:
+        async with s.begin():
+            existing = (await s.execute(text("SELECT at FROM tick_cutover"))).scalar_one_or_none()
+        if existing is not None:
+            return f"already recorded at {existing.isoformat()}"
+        pollers = await _admission_pollers(settings)
+        if pollers is None:
+            raise typer.Exit(3)
+        old = [p for p in pollers if tick_contract.IDENTITY not in p]
+        if old:
+            typer.echo(f"{len(old)} poller(s) of the admission queue without the tick contract's mark: stop every "
+                       "dispatcher from before migration 0039 first")  # fmt: skip
+            raise typer.Exit(1)
+        if not confirm:
+            return "not recorded (a dry run: pass --confirm)"
+        async with s.begin():
+            recorded = (await s.execute(text("INSERT INTO tick_cutover (at) VALUES (now()) ON CONFLICT DO NOTHING "
+                                             "RETURNING at"))).scalar_one_or_none()  # fmt: skip
+            if recorded is None:
+                return "already recorded"
+            queued = 0
+            for t in list((await s.execute(select(Tenant.id).order_by(Tenant.id))).scalars()):
+                await tenant_scope(s, t)
+                done = await s.execute(
+                    text(
+                        "UPDATE schedules SET generation = generation + 1 WHERE tenant_id = :t "
+                        "AND deleted_at IS NULL AND synced_generation = generation"
+                    ),
+                    {"t": t},
+                )
+                queued += int(done.rowcount)
+            await tenant_scope(s, None)
+            details: dict[str, object] = {"schedules": queued, "attested": ATTESTED}
+            await audit_log.record(s, tenant_id=None, actor_id=None, action="keys.tick_cutover", target_type="platform",
+                               target_id="tick_cutover", details=details)  # fmt: skip
+        return f"recorded the tick cutover at {recorded.isoformat()}; {queued} schedule(s) queued"
+
+    typer.echo(asyncio.run(_in_session(_run)))
 
 
 @keys.command("ensure-tenants")

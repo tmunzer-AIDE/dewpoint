@@ -3,8 +3,8 @@
 the dispatcher's own unversioned worker. It reads `TemporalScheduledStartTime` once and passes its tick key to its
 activity, which takes its authority from the workflow's own id only: an argument naming another schedule, or an id
 naming a schedule its tenant doesn't have, records nothing. A firing becomes a request under its key, and a backfill
-over a time that already fired admits nothing new. A failing tick is retried without limit, and one still unadmitted
-10 minutes after its time alerts.
+over a time that already fired admits nothing new. A failing tick is retried within the tick bound (its execution
+timeout), and one still unadmitted 10 minutes after its time alerts.
 
 The Temporal Schedules here are created directly: the sync that keeps them in step with `schedules` is task 15's."""
 
@@ -64,13 +64,17 @@ async def ready(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispat
     return ctx, created.id
 
 
-async def temporal_schedule(client: Client, schedule_id: str, *, argument: str) -> Any:
-    """A Temporal Schedule as the sync will create it, paused so that only backfills fire."""
+async def temporal_schedule(client: Client, schedule_id: str, *, argument: Any = None) -> Any:
+    """A Temporal Schedule as the sync creates it (no argument), paused so that only backfills fire; `argument`: the
+    sealed one an action synced before the tick contract carried."""
     return await client.create_schedule(
         schedule_id,
         Schedule(
             action=ScheduleActionStartWorkflow(
-                "ScheduleTick", argument, id=schedule_id, task_queue=tick.ADMISSION_QUEUE
+                "ScheduleTick",
+                args=[] if argument is None else [argument],
+                id=schedule_id,
+                task_queue=tick.ADMISSION_QUEUE,
             ),  # fmt: skip
             spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(minutes=1))]),
             state=ScheduleState(paused=True),
@@ -99,13 +103,19 @@ async def fired(client: Client, handle: Any, at: datetime) -> list[Any]:
     raise AssertionError("no tick ended")
 
 
+@pytest.mark.parametrize("legacy", [False, True])
 async def test_a_firing_is_a_request_under_its_tick_key_and_a_repeat_admits_nothing_new(
-    server, ready, owner_sessionmaker, dispatch_sessionmaker
+    server, ready, owner_sessionmaker, dispatch_sessionmaker, legacy: bool
 ) -> None:
+    """`legacy`: an action synced before the tick contract, carrying the schedule's id sealed, still fires (its
+    argument opens, and is ignored: the workflow id names the schedule)."""
+    from tests.support.keys import sealed_as_before
+
     ctx, schedule_id = ready
     client = server.client
     temporal_id = schedule_workflow_id(str(ctx.tenant_id), str(schedule_id))
-    handle = await temporal_schedule(client, temporal_id, argument=str(schedule_id))
+    argument = await sealed_as_before(str(ctx.tenant_id), str(schedule_id)) if legacy else None
+    handle = await temporal_schedule(client, temporal_id, argument=argument)
     at = datetime.now(UTC).replace(second=0, microsecond=0)
     async with main.admission_worker(client, dispatch_sessionmaker, KEYS):
         [first] = await fired(client, handle, at)
@@ -125,7 +135,7 @@ async def test_an_id_naming_a_schedule_its_tenant_doesnt_have_records_nothing(
     _, schedule_id = ready
     client = server.client
     elsewhere = schedule_workflow_id(str(uuid.uuid4()), str(schedule_id))
-    handle = await temporal_schedule(client, elsewhere, argument=str(schedule_id))
+    handle = await temporal_schedule(client, elsewhere)
     async with main.admission_worker(client, dispatch_sessionmaker, KEYS):
         [failed] = await fired(client, handle, datetime.now(UTC).replace(second=0, microsecond=0))
         with pytest.raises(WorkflowFailureError) as e:
@@ -140,8 +150,7 @@ async def test_a_tick_without_its_nominal_time_fails_before_its_activity(server,
     client = server.client
     workflow_id = schedule_workflow_id(str(ctx.tenant_id), str(schedule_id)) + "-by-hand"
     async with main.admission_worker(client, dispatch_sessionmaker, KEYS):
-        handle = await client.start_workflow("ScheduleTick", str(schedule_id), id=workflow_id,
-                                             task_queue=tick.ADMISSION_QUEUE)  # fmt: skip
+        handle = await client.start_workflow("ScheduleTick", id=workflow_id, task_queue=tick.ADMISSION_QUEUE)
         with pytest.raises(WorkflowFailureError) as e:
             await handle.result()
     assert isinstance(e.value.cause, ApplicationError) and e.value.cause.type == "tick_no_nominal_time"
@@ -235,3 +244,56 @@ async def test_an_expiry_alerts_once_when_it_commits_never_for_a_retry_or_a_roll
         alerts.append(sum(entry["event"] == "schedule_tick_expired" for entry in logs))
         assert outcome == ("rolled back" if failing else "refused:schedule_catchup_expired")
     assert alerts == [0, 1, 0]
+
+
+async def test_a_ticks_history_holds_nothing_under_a_tenant_key(server, ready, dispatch_sessionmaker) -> None:
+    """The owner's M3 ruling: every payload a tick's execution leaves in Temporal (its activity's input and result, its
+    own result) is the tick contract's, unsealed under the tick's marker: no key version, nothing a key retirement
+    waits for."""
+    from temporalio.api.common.v1 import Payload
+
+    from dewpoint.apps import tick_contract
+    from dewpoint.apps.codec import KEY_VERSION, TICK_ENCODING
+
+    ctx, schedule_id = ready
+    target = server.client.service_client.config.target_host  # its own client: another test's worker may linger
+    client = await Client.connect(target, namespace=server.client.namespace, data_converter=FIXTURE_CONVERTER)
+    handle = await temporal_schedule(client, schedule_workflow_id(str(ctx.tenant_id), str(schedule_id)))
+    async with main.admission_worker(client, dispatch_sessionmaker, KEYS):
+        [first] = await fired(client, handle, datetime.now(UTC).replace(second=0, microsecond=0))
+        assert await first.result() == "queued"
+    payloads = []
+    async for event in first.fetch_history_events():
+        for attributes, field in (
+            (event.workflow_execution_started_event_attributes, "input"),
+            (event.activity_task_scheduled_event_attributes, "input"),
+            (event.activity_task_completed_event_attributes, "result"),
+            (event.workflow_execution_completed_event_attributes, "result"),
+        ):
+            if attributes.HasField(field):  # type: ignore[arg-type]
+                payloads.extend(getattr(attributes, field).payloads)
+    assert len(payloads) == 3  # the activity's input and result, the workflow's result: no input of its own
+    for p in payloads:
+        assert p.metadata["encoding"] == TICK_ENCODING and KEY_VERSION not in p.metadata
+        assert tick_contract.allowed(Payload.FromString(p.data), str(schedule_id))
+    await handle.delete()
+
+
+async def test_the_admission_queues_pollers_show_each_dispatchers_mark(server, dispatch_sessionmaker) -> None:
+    """`keys tick-cutover` reads who polls the admission queue: a dispatcher's identity carries the tick contract's
+    mark (its own client, as `dispatcher.main` connects it). Other tests' workers, unmarked, may still be listed."""
+    import asyncio
+
+    from dewpoint.apps import tick_contract
+
+    target = server.client.service_client.config.target_host
+    marked = await Client.connect(target, namespace=server.client.namespace, data_converter=FIXTURE_CONVERTER,
+                                  identity=f"7@host {tick_contract.IDENTITY}")  # fmt: skip
+    async with main.admission_worker(marked, dispatch_sessionmaker, KEYS):
+        for _ in range(100):
+            found = await tick.admission_pollers(server.client)
+            if any(tick_contract.IDENTITY in identity for identity in found):
+                break
+            await asyncio.sleep(0.1)
+        else:
+            raise AssertionError(f"no marked poller among {found}")

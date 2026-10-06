@@ -6,9 +6,9 @@ guarantee: the key admin's grants let it write these columns, and no grant can c
 review). A tenant at a time under its scope (or the platform's records), in batches
 that each commit, each under the scope's key lifecycle lock from reading the active version to committing (no
 rotation or retirement interleaves: the owner's M3 review), each write a compare-and-swap on the blob it read: a
-record the application rewrote meanwhile (already under the active version) is never overwritten. A schedule's
-Temporal action is sealed again by its sync: its generation is raised when the version the sync last wrote it under
-isn't the active one."""
+record the application rewrote meanwhile (already under the active version) is never overwritten. A schedule whose
+Temporal action, as its sync last read it back, still names a version (synced before the tick contract, carrying the
+schedule's id sealed) has its generation raised: its next sync writes the action without it."""
 
 import os
 import struct
@@ -46,6 +46,11 @@ TENANT_FIELDS = (
     Field("schedules", "id", "input", "schedule.input"),
     Field("connections", "id", "secret_ct", "connection.secret"),
     Field("tenant_event_keys", "version", "private_sealed", "event.private"),  # its keypair version
+    # the tenant's credential scope key (plugins-3 D9): the same key sealed again, never a new one, so no credential's
+    # budget or cooldown splits; its context is the tenant's id
+    Field("rate_scope_keys", "tenant_id", "sealed", "rate.scope"),
+    # a plugin call's answer (plugins-3a-2), its id as context: a call can outlive its expiry without a sweeper
+    Field("plugin_calls", "id", "result_ct", "plugin.call"),
 )
 PLATFORM_FIELDS = (
     Field("user_mfa", "user_id", "totp_secret_ct", "user.totp"),
@@ -108,21 +113,16 @@ async def _field(sessionmaker: async_sessionmaker[AsyncSession], keyring: Keyrin
 
 async def tenant(sessionmaker: async_sessionmaker[AsyncSession], keyring: Keyring, tenant_id: uuid.UUID, *,
                  batch: int = BATCH) -> dict[str, int]:  # fmt: skip
-    """A tenant's records sealed again under its active version, and its schedules whose Temporal action was last
-    written under another queued for their sync: how many of each."""
+    """A tenant's records sealed again under its active version, and its schedules whose Temporal action still names a
+    version queued for their sync: how many of each."""
     counts = {field.table: await _field(sessionmaker, keyring, tenant_id, field, batch) for field in TENANT_FIELDS}
     async with sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant_id)
         await lock_scope(s, tenant_id)
-        try:
-            active, _ = await keyring.versions(s, tenant_id)
-        except NoKeyError:  # no key: no schedule could hold an action sealed under one
-            return counts | {"schedule_actions": 0}
         # Only once the sync caught up: a schedule queued already isn't queued again.
         queued = await s.execute(text(
             "UPDATE schedules SET generation = generation + 1 WHERE tenant_id = :t AND deleted_at IS NULL "
-            "AND synced_generation = generation AND action_key_version IS DISTINCT FROM :v"),
-            {"t": tenant_id, "v": active})  # fmt: skip
+            "AND synced_generation = generation AND action_key_version IS NOT NULL"), {"t": tenant_id})  # fmt: skip
     counts["schedule_actions"] = queued.rowcount  # type: ignore[attr-defined]
     return counts
 

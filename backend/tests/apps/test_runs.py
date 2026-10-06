@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 from temporalio.api.workflowservice.v1 import (
     DescribeWorkerDeploymentRequest,
     DescribeWorkerDeploymentResponse,
@@ -339,6 +339,15 @@ async def only_run(owner: Any, tenant: uuid.UUID) -> Any:
     return row
 
 
+async def evidence_of(owner: Any, tenant: uuid.UUID) -> list[tuple[str, bool]]:
+    """The tenant's execution evidence (the owner's M3 rulings): each root's workflow id, and whether its start is
+    unproven (Temporal may have taken it)."""
+    async with owner() as s:
+        found = await s.execute(text("select workflow_id, unproven from execution_evidence where tenant_id = :t"),
+                                {"t": tenant})  # fmt: skip
+        return [tuple(r) for r in found]  # type: ignore[misc]
+
+
 @pytest.mark.parametrize(
     ("answers", "calls"),
     [
@@ -364,6 +373,7 @@ async def test_a_confirmed_refusal_records_the_run_as_failed(
         )  # fmt: skip
     row = await only_run(owner_sessionmaker, ctx.tenant_id)
     assert (row.status, row.error_code, len(client.calls)) == ("failed", START_FAILED, calls)
+    assert await evidence_of(owner_sessionmaker, ctx.tenant_id) == []  # certainly never started
 
 
 async def test_a_lost_acknowledgement_is_reconciled_by_the_workflow_id(
@@ -413,6 +423,7 @@ async def test_a_start_the_client_cant_encrypt_after_its_check_is_refused_and_it
         )  # fmt: skip
     row = await only_run(owner_sessionmaker, ctx.tenant_id)
     assert (row.status, row.error_code, service.sent) == ("failed", START_FAILED, [])
+    assert await evidence_of(owner_sessionmaker, ctx.tenant_id) == []
 
 
 async def test_a_start_that_cant_be_encrypted_after_an_uncertain_attempt_stays_uncertain(
@@ -433,6 +444,9 @@ async def test_a_start_that_cant_be_encrypted_after_an_uncertain_attempt_stays_u
         None,
         [run_workflow_id(str(ctx.tenant_id), str(row.id))],
     )
+    assert await evidence_of(owner_sessionmaker, ctx.tenant_id) == [
+        (run_workflow_id(str(ctx.tenant_id), str(row.id)), True)
+    ]  # it may be executing, or land later: kept
 
 
 async def test_retirement_first_makes_admission_refuse(

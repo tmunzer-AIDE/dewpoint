@@ -11,12 +11,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, literal, null, or_, select, tuple_, union_all, update
+from sqlalchemy import delete, func, literal, null, or_, select, text, tuple_, union_all, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.models.requests import RunRequest
-from dewpoint.core.models.runs import Run, RunStep
+from dewpoint.core.models.runs import ExecutionEvidence, Run, RunStep
 from dewpoint.core.retention.cutoff import Cutoff, kept
 
 MESSAGE_LIMIT = 500
@@ -142,6 +142,38 @@ async def ensure_run(
         parent_iteration_key=parent_iteration_key,
     )
     await s.execute(statement.on_conflict_do_nothing(index_elements=["id"]))
+
+
+async def record_attempt(s: AsyncSession, tenant_id: uuid.UUID, run_id: uuid.UUID) -> None:
+    """A root's execution evidence for a start attempt, in the caller's transaction, before Temporal is asked (the
+    owner's M3 rulings): when it was written is no later than any payload the attempt seals. An attempt reusing its row
+    (a retried dispatch) writes it again; one already there stays as it is."""
+    await s.execute(
+        insert(ExecutionEvidence)
+        .values(tenant_id=tenant_id, workflow_id=_root(tenant_id, run_id), started_at=func.statement_timestamp())
+        .on_conflict_do_nothing(index_elements=["workflow_id"], index_where=text("run_id IS NULL"))
+    )
+
+
+async def settle_attempt(s: AsyncSession, tenant_id: uuid.UUID, run_id: uuid.UUID, outcome: str) -> None:
+    """What a root's start attempt left, in the caller's tenant scope (the owner's M3 rulings):
+    - `refused`: Temporal refused it (or throttled it before creating anything): its evidence goes, unless an earlier
+      attempt is unproven;
+    - `unproven`: Temporal may have taken it (an absence seen at one moment, an uncertain start, a collision's
+      execution): kept, unproven. A point-in-time absence doesn't fence a start still in flight, and nothing proves
+      a start Temporal never showed didn't land and go unseen: only Temporal showing it, then reading it, settles it."""
+    where = (ExecutionEvidence.tenant_id == tenant_id, ExecutionEvidence.workflow_id == _root(tenant_id, run_id),
+             ExecutionEvidence.run_id.is_(None))  # fmt: skip
+    if outcome == "refused":
+        await s.execute(delete(ExecutionEvidence).where(*where, ExecutionEvidence.unproven.is_(False)))
+    elif outcome == "unproven":
+        await s.execute(update(ExecutionEvidence).where(*where).values(unproven=True))
+    else:
+        raise ValueError(f"no such attempt outcome: {outcome}")
+
+
+def _root(tenant_id: uuid.UUID, run_id: uuid.UUID) -> str:
+    return f"t:{tenant_id}:run:{run_id}"  # engine.runtime.ids.run_workflow_id, as migration 0039's trigger builds it
 
 
 async def finish_run(

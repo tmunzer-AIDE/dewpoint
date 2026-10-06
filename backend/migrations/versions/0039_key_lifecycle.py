@@ -9,7 +9,25 @@ a secret index's, a staged upload's, a saved mapping's, a schedule's input, a ke
 schedule's generation, which queues its sync to seal its Temporal action again; each tenant's under its scope. The
 grants limit which columns it writes, not what: that the command keeps each record's plaintext is its own behaviour,
 which no grant enforces (the owner's M3 review).
-`schedules.action_key_version`: the data-key version the sync last wrote the schedule's Temporal action under.
+`schedules.action_key_version`: the data-key version the schedule's Temporal action still names, as the sync last read
+it back: an action synced before the tick contract carried the schedule's id, sealed; one written since carries
+nothing (the owner's M3 ruling).
+
+`tick_cutover` (the owner's M3 rulings): when the last dispatcher that sealed a schedule tick's payloads under its
+tenant's key had stopped, unable to restart. A tenant's key made before it never retires: a tick from before may hold
+it, and nothing proves its history gone. No migration records it, not even a fresh deployment's: no database state
+proves that a dispatcher from before can't start later. `dewpoint keys tick-cutover --attest` records it, on the
+operator's attestation.
+
+`execution_evidence` (the owner's M3 rulings): what Temporal may still hold of each run execution, kept until Temporal
+shows it gone, whatever retention deletes from `runs` (a terminal row isn't proof that Temporal closed it). A root's
+evidence is written with each start attempt, before Temporal is asked: by a trigger whatever process inserts its row,
+and by the dispatcher at every attempt. It goes only once Temporal refused every attempt (`unproven` false), or showed
+the execution gone after its history was read; an attempt Temporal may have taken (an absence seen at one moment, an
+uncertain start, a collision) leaves it `unproven`. The dispatcher's leader describes each, reads each closed
+execution's history and records its chain's runs and its children (`execution_evidence_due()` lists what's due, across
+tenants); `keys retire` proves each one gone. Every root already here is backfilled, unproven: what its attempts did is
+unknown.
 
 `record_inbound_events()`, derived from 0032's text, the rest of the function unchanged:
 - (2b-4 ruling D10; the owner's M3 review) every event must be in the sealed layout (core/crypto/events.py: its format
@@ -41,6 +59,8 @@ SEALED = {  # table: the sealed column the key admin may rewrite (connections an
     "csv_mappings": "mapping",
     "schedules": "input, generation",
     "tenant_event_keys": "private_sealed",
+    "rate_scope_keys": "sealed",  # 0041's (plugins-3 D9): re-sealed, the same key
+    "plugin_calls": "result_ct",  # 0042's (plugins-3a-2): a call's answer
 }
 NAMED = "OR x.v NOT IN (SELECT k.version FROM public.tenant_event_keys k WHERE k.tenant_id = v_tenant))"
 AGREES = (
@@ -68,7 +88,40 @@ KEYPAIRS = {  # then the tenant's keypair lock (core/ingress/keys.py), shared: r
     LIFECYCLE: LIFECYCLE
     + "\n    PERFORM pg_advisory_xact_lock_shared(hashtextextended('dewpoint:event-key:' || v_tenant::text, 0));",
 }
-SCOPED = ("csv_uploads", "csv_mappings", "schedules")  # their policies name their roles: the key admin's added
+SCOPED = ("csv_uploads", "csv_mappings", "schedules", "rate_scope_keys", "plugin_calls")  # their policies name their
+# roles: the key admin's added
+
+
+EVIDENCE = [
+    "ALTER TABLE execution_evidence ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE execution_evidence FORCE ROW LEVEL SECURITY",
+    "CREATE POLICY execution_evidence_scope ON execution_evidence TO dewpoint_dispatch, dewpoint_admin, dewpoint_api "
+    "USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id())",
+    "GRANT SELECT, INSERT, UPDATE, DELETE ON execution_evidence TO dewpoint_dispatch",
+    "GRANT USAGE ON SEQUENCE execution_evidence_id_seq TO dewpoint_dispatch",
+    "GRANT SELECT, UPDATE (lost_at, seen_at, checked_at), DELETE ON execution_evidence TO dewpoint_admin",  # a proof
+    "GRANT SELECT, UPDATE (unproven), DELETE ON execution_evidence TO dewpoint_api",  # a direct start
+    """CREATE FUNCTION runs_evidence() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public, pg_temp AS $$
+BEGIN
+  INSERT INTO execution_evidence (tenant_id, workflow_id, started_at)
+  VALUES (NEW.tenant_id, 't:' || NEW.tenant_id || ':run:' || NEW.id, statement_timestamp())
+  ON CONFLICT (workflow_id) WHERE run_id IS NULL DO NOTHING;
+  RETURN NEW;
+END $$""",
+    "REVOKE ALL ON FUNCTION runs_evidence() FROM PUBLIC",
+    "CREATE TRIGGER runs_evidence AFTER INSERT ON runs FOR EACH ROW WHEN (NEW.parent_run_id IS NULL) "
+    "EXECUTE FUNCTION runs_evidence()",
+    """CREATE FUNCTION execution_evidence_due(max_rows integer) RETURNS TABLE (tenant_id uuid, id bigint)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+    SELECT e.tenant_id, e.id FROM execution_evidence e
+    WHERE e.lost_at IS NULL AND e.next_check_at <= statement_timestamp()
+    ORDER BY e.next_check_at, e.id
+    LIMIT max_rows
+$$""",
+    "REVOKE ALL ON FUNCTION execution_evidence_due(integer) FROM PUBLIC",
+    "GRANT EXECUTE ON FUNCTION execution_evidence_due(integer) TO dewpoint_dispatch",
+]
 
 
 def _recorder() -> str:
@@ -106,6 +159,41 @@ def upgrade() -> None:
     op.execute(recorder)
     op.add_column("schedules", sa.Column("action_key_version", sa.Integer, nullable=True))
     op.execute("GRANT UPDATE (action_key_version) ON schedules TO dewpoint_dispatch")
+    op.create_table(
+        "tick_cutover",
+        sa.Column("id", sa.SmallInteger, primary_key=True, server_default="1"),
+        sa.Column("at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.CheckConstraint("id = 1", name="tick_cutover_once"),
+    )
+    op.execute("GRANT SELECT, INSERT ON tick_cutover TO dewpoint_admin")
+    op.create_table(
+        "execution_evidence",
+        sa.Column("id", sa.BigInteger, sa.Identity(always=False), primary_key=True),
+        sa.Column("tenant_id", sa.Uuid, sa.ForeignKey("tenants.id"), nullable=False),
+        sa.Column("workflow_id", sa.Text, nullable=False),
+        sa.Column("run_id", sa.Text, nullable=True),  # none: a root recorded before its start, its chain unread
+        sa.Column("started_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("seen_at", sa.DateTime(timezone=True), nullable=True),  # Temporal first showed it
+        sa.Column("checked_at", sa.DateTime(timezone=True), nullable=True),  # Temporal last asked about it
+        sa.Column("unproven", sa.Boolean, nullable=False, server_default=sa.false()),
+        sa.Column("read_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("lost_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("next_check_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+    )
+    op.create_index("execution_evidence_root", "execution_evidence", ["workflow_id"], unique=True,
+                    postgresql_where=sa.text("run_id IS NULL"))  # fmt: skip
+    op.create_index("execution_evidence_run", "execution_evidence", ["workflow_id", "run_id"], unique=True,
+                    postgresql_where=sa.text("run_id IS NOT NULL"))  # fmt: skip
+    op.create_index("execution_evidence_due", "execution_evidence", ["next_check_at"],
+                    postgresql_where=sa.text("lost_at IS NULL"))  # fmt: skip
+    op.create_index("execution_evidence_tenant", "execution_evidence", ["tenant_id", "started_at"])
+    for statement in EVIDENCE:
+        op.execute(statement)
+    op.execute(  # every root already here: what its attempts did is unknown, so it's unproven
+        "INSERT INTO execution_evidence (tenant_id, workflow_id, started_at, unproven) SELECT tenant_id, "
+        "'t:' || tenant_id || ':run:' || id, coalesce(started_at, queued_at), true FROM runs "
+        "WHERE parent_run_id IS NULL ON CONFLICT (workflow_id) WHERE run_id IS NULL DO NOTHING"
+    )
     for table, columns in SEALED.items():
         op.execute(f"GRANT SELECT, UPDATE ({columns}) ON {table} TO dewpoint_admin")
     for table in SCOPED:
@@ -148,6 +236,11 @@ def downgrade() -> None:
         op.execute(f"REVOKE UPDATE ({columns}) ON {table} FROM dewpoint_admin")
         if table != "tenant_event_keys":  # the key admin read keypairs before
             op.execute(f"REVOKE SELECT ON {table} FROM dewpoint_admin")
+    op.execute("DROP TRIGGER runs_evidence ON runs")
+    op.execute("DROP FUNCTION runs_evidence()")
+    op.execute("DROP FUNCTION execution_evidence_due(integer)")
+    op.drop_table("execution_evidence")
+    op.drop_table("tick_cutover")
     op.execute("REVOKE UPDATE (action_key_version) ON schedules FROM dewpoint_dispatch")
     op.drop_column("schedules", "action_key_version")
     op.execute(_recorder())

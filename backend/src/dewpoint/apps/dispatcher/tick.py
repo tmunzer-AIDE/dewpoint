@@ -24,7 +24,10 @@ never expires. These refusals are reported apart from Temporal's count of the fi
 recorded one alerts once (`schedule_tick_expired`), when its transaction has committed, never for a retry that finds it
 or an attempt rolled back.
 A platform-wide failure (the database, a key) raises, and the workflow retries it without limit (§2.5): a tick still
-unadmitted 10 minutes after its time alerts."""
+unadmitted 10 minutes after its time alerts.
+What the tick carries in Temporal is the tick contract's (`apps.tick_contract`), unsealed: its outcome is reduced to
+the contract's codes (`tick_contract.outcome`), its failures to its failure codes, and its request row records the
+rest."""
 
 import json
 import uuid
@@ -35,9 +38,13 @@ import structlog
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio import activity
+from temporalio.api.enums.v1 import TaskQueueType
+from temporalio.api.taskqueue.v1 import TaskQueue
+from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
+from temporalio.client import Client
 from temporalio.exceptions import ApplicationError
 
-from dewpoint.apps import admission, schedules
+from dewpoint.apps import admission, schedules, tick_contract
 from dewpoint.core.audit import service as audit
 from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.crypto.keys import KeySource
@@ -56,13 +63,13 @@ SCHEDULE_DELETED = "schedule_deleted"
 SCHEDULE_CATCHUP_EXPIRED = "schedule_catchup_expired"
 EXPIRED = "dewpoint.tick.expired"  # in the session's `info`: the expiries newly recorded, alerted on commit
 LATE = timedelta(minutes=10)  # §15: provisional
-TICK_IDENTITY = "tick_identity"
-SCHEDULE_UNKNOWN = "schedule_unknown"
+TICK_IDENTITY = tick_contract.TICK_IDENTITY
+SCHEDULE_UNKNOWN = tick_contract.SCHEDULE_UNKNOWN
 
 
 @dataclass(frozen=True)
 class TickInput:
-    schedule_id: str  # the action's argument, which must name the schedule the workflow id does
+    schedule_id: str  # the schedule the workflow id names (the workflow derives it from its id)
     key: str  # `sched:<schedule_id>:<nominal time>`
     nominal: str  # the nominal time, UTC, whole seconds: `2026-10-04T09:00:00Z`
 
@@ -179,7 +186,7 @@ class Ticker:
                 outcome = await admit_tick(s, self.keys, tenant_id=tenant_id, schedule_id=schedule_id, key=given.key)
             for expiry in s.info.pop(EXPIRED, []):  # committed: an attempt rolled back never gets here
                 log.error("schedule_tick_expired", **expiry)
-            return outcome
+            return tick_contract.outcome(outcome)  # its request row records the reason in full
         except ScheduleUnknownError:
             raise ApplicationError("A tick of no schedule of its tenant.", type=SCHEDULE_UNKNOWN,
                                    non_retryable=True) from None  # fmt: skip
@@ -188,6 +195,20 @@ class Ticker:
                 log.error("schedule_tick_late", schedule_id=str(schedule_id), attempt=activity.info().attempt,
                           error=type(e).__name__)  # fmt: skip
             raise
+
+
+async def admission_pollers(client: Client) -> list[str]:
+    """The identities Temporal shows polling the admission queue, for workflows and for activities: each dispatcher's.
+    One without the tick contract's mark (`tick_contract.IDENTITY`) runs ticks as before it."""
+    found: list[str] = []
+    for kind in (TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW, TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY):
+        answer = await client.workflow_service.describe_task_queue(
+            DescribeTaskQueueRequest(
+                namespace=client.namespace, task_queue=TaskQueue(name=ADMISSION_QUEUE), task_queue_type=kind
+            )  # fmt: skip
+        )
+        found.extend(poller.identity for poller in answer.pollers)
+    return found
 
 
 def _parsed(stamp: str) -> datetime:

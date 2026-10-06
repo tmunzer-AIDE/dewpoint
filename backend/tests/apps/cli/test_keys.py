@@ -202,7 +202,13 @@ def test_retire_lists_its_checks_and_retires_only_with_confirm(pg_url, monkeypat
     async def one_day(settings: object) -> timedelta:
         return timedelta(days=1)
 
+    async def proven(settings: object, s: object, tenant: object, version: int) -> object:
+        from dewpoint.core.crypto.retire import RunProof
+
+        return RunProof()  # Temporal shows none of its run executions (here, a stand-in)
+
     monkeypatch.setattr(cli, "_namespace_retention", one_day)
+    monkeypatch.setattr(cli, "_run_histories", proven)
     r = CliRunner()
     _env(monkeypatch, pg_url, DEWPOINT_KEK_B64=OLD, DEWPOINT_KEK_ID="old")
     t = str(uuid.uuid4())
@@ -217,11 +223,91 @@ def test_retire_lists_its_checks_and_retires_only_with_confirm(pg_url, monkeypat
     assert r.invoke(app, ["keys", "rotate-dek", "--tenant", t]).exit_code == 0  # 1, then 2
     dry = r.invoke(app, ["keys", "retire", "--tenant", t, "--version", "1"])
     assert dry.exit_code == 1 and "payload_floor: no" in dry.output, dry.output
-    asyncio.run(seed("update data_keys set created_at = now() - interval '4 days' where tenant_id = cast(:t as uuid) "
+    asyncio.run(seed("update data_keys set created_at = now() - interval '9 days' where tenant_id = cast(:t as uuid) "
                      "and version = 2"))  # fmt: skip
     asyncio.run(seed("insert into run_duration_limits (days) values (1) on conflict do nothing"))
     assert r.invoke(app, ["keys", "retire", "--tenant", t, "--version", "2", "--confirm"]).exit_code == 4  # active
     dry = r.invoke(app, ["keys", "retire", "--tenant", t, "--version", "1"])
     assert dry.exit_code == 0 and "payload_floor: yes" in dry.output and "not retired" in dry.output, dry.output
+
+    async def unknown(settings: object, s: object, tenant: object, version: int) -> None:
+        return None
+
+    monkeypatch.setattr(cli, "_run_histories", unknown)  # Temporal can't be asked: never assumed gone
+    dry = r.invoke(app, ["keys", "retire", "--tenant", t, "--version", "1"])
+    assert dry.exit_code == 1 and "run_histories: no (Temporal couldn't be asked)" in dry.output, dry.output
+    monkeypatch.setattr(cli, "_run_histories", proven)
+
     done = r.invoke(app, ["keys", "retire", "--tenant", t, "--version", "1", "--confirm"])
     assert done.exit_code == 0 and "retired version 1" in done.output, done.output
+
+
+def test_the_tick_cutover_is_recorded_once_and_never_while_an_old_dispatcher_polls(pg_url, monkeypatch) -> None:
+    """The owner's M3 rulings: `keys tick-cutover` records the boundary after which no dispatcher seals a tick's
+    payload under a tenant's key. The operator attests (`--attest`) that every dispatcher from before 0039 has stopped
+    and can't restart: a poller snapshot can't prove that, it only refuses while Temporal shows one still polling the
+    admission queue (its identity lacks the tick contract's mark). With --confirm it records the boundary once,
+    audited with the attestation, and queues every live schedule, so its sync writes its action without the argument
+    the old one sealed. Without, it's a dry run."""
+    from dewpoint.apps import tick_contract
+    from dewpoint.apps.cli import main as cli
+    from tests.support.workflows import seed_workflow
+
+    pollers: list[str] = ["4242@an-old-dispatcher"]
+
+    async def admission_pollers(settings: object) -> list[str]:
+        return pollers
+
+    monkeypatch.setattr(cli, "_admission_pollers", admission_pollers)
+    r = CliRunner()
+    _env(monkeypatch, pg_url, DEWPOINT_KEK_B64=OLD, DEWPOINT_KEK_ID="old")
+
+    async def run(statement: str, **params: object) -> list[object]:
+        engine = make_engine(pg_url)
+        try:
+            async with make_sessionmaker(engine)() as s, s.begin():
+                found = await s.execute(text(statement), params)
+                return list(found.scalars()) if found.returns_rows else []
+        finally:
+            await engine.dispose()
+
+    def sql(statement: str, **params: object) -> list[object]:
+        return asyncio.run(run(statement, **params))
+
+    async def scheduled() -> object:
+        engine = make_engine(pg_url)
+        try:
+            tenant, workflow, _ = await seed_workflow(make_sessionmaker(engine))
+        finally:
+            await engine.dispose()
+        [user] = await run("insert into users (id, email, password_hash) values (gen_random_uuid(), :e, 'x') "
+                           "returning id", e=f"{uuid.uuid4().hex[:10]}@corp.test")  # fmt: skip
+        [found] = await run("insert into schedules (id, tenant_id, workflow_id, every_s, mode, input, created_by, "
+                            "generation, synced_generation) values (gen_random_uuid(), :t, :w, 60, 'live', "
+                            "'\\x01', :u, 2, 2) returning id", t=tenant, w=workflow, u=user)  # fmt: skip
+        return found
+
+    [kept] = sql("select at from tick_cutover")
+    sql("delete from tick_cutover")  # as a database that had tenants when 0039 ran
+    try:
+        schedule = asyncio.run(scheduled())
+        unattested = r.invoke(app, ["keys", "tick-cutover", "--confirm"])
+        assert unattested.exit_code == 2 and "--attest" in unattested.output, unattested.output
+        refused = r.invoke(app, ["keys", "tick-cutover", "--attest", "--confirm"])
+        assert refused.exit_code == 1 and "1 poller" in refused.output, refused.output
+        pollers[:] = [f"4243@a-new-dispatcher {tick_contract.IDENTITY}"]
+        dry = r.invoke(app, ["keys", "tick-cutover", "--attest"])
+        assert dry.exit_code == 0 and "a dry run" in dry.output, dry.output
+        assert sql("select count(*) from tick_cutover") == [0]
+        done = r.invoke(app, ["keys", "tick-cutover", "--attest", "--confirm"])
+        assert done.exit_code == 0 and "recorded" in done.output, done.output
+        [at] = sql("select at from tick_cutover")
+        assert sql("select generation from schedules where id = :i", i=schedule) == [3]
+        audited = sql("select details from audit_log where action = 'keys.tick_cutover'")
+        assert audited == [{"schedules": 1, "attested": cli.ATTESTED}]
+        again = r.invoke(app, ["keys", "tick-cutover", "--attest", "--confirm"])
+        assert again.exit_code == 0 and "already recorded" in again.output, again.output
+        assert sql("select at from tick_cutover") == [at]
+    finally:
+        sql("delete from tick_cutover")
+        sql("insert into tick_cutover (at) values (:a)", a=kept)

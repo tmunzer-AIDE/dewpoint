@@ -10,7 +10,7 @@ from temporalio.testing import WorkflowEnvironment
 
 import dewpoint
 from dewpoint.apps import cel_client
-from dewpoint.apps.codec import TenantCodec
+from dewpoint.apps.codec import FailureConverter, TenantCodec
 from dewpoint.apps.worker import main
 from dewpoint.apps.worker.health import WorkerUnhealthyError
 from dewpoint.apps.worker.main import engine_worker
@@ -84,7 +84,8 @@ async def test_the_worker_connects_with_the_tenant_codec(monkeypatch: pytest.Mon
         await main.run(settings())
     converter = connected["data_converter"]
     assert isinstance(converter.payload_codec, TenantCodec)
-    assert converter.failure_converter_class is DefaultFailureConverterWithEncodedAttributes
+    assert converter.failure_converter_class is FailureConverter  # encoded attributes, a tick's reduced to codes
+    assert issubclass(FailureConverter, DefaultFailureConverterWithEncodedAttributes)
 
 
 async def unrecorded(healthy: bool) -> None:

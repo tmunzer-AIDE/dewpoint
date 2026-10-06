@@ -315,6 +315,7 @@ async def _begin(
         s, run_id=request.id, tenant_id=tenant_id, workflow_id=request.workflow_id, version_id=version.id,
         mode=request.mode, started_by=request.actor_id, queued_at=request.queued_at,
     )  # fmt: skip
+    await runs.record_attempt(s, tenant_id, request.id)  # its execution's evidence, before Temporal is asked
     request.status = "starting"
     request.starting_at = func.statement_timestamp()  # the reconciler's grace runs from here, slot or not (§7.6)
     await s.flush()
@@ -349,6 +350,7 @@ async def _cancel(s: AsyncSession, request: RunRequest, reason: str, details: di
     request.status, request.reason, request.ended_at = "cancelled", reason, datetime.now(UTC)
     await runs.finish_run(s, request.id, status="cancelled", ended_at=datetime.now(UTC), error_code=reason,
                           if_running=True)  # fmt: skip
+
     await audit.record(s, tenant_id=request.tenant_id, actor_id=None, action="run.request.cancel",
                        target_type="run_request", target_id=str(request.id), details=details)  # fmt: skip
     await s.flush()
@@ -460,6 +462,10 @@ async def _settle(s: AsyncSession, starting: Target, outcome: Outcome) -> str:
         # history is gone. Never queued or started again; left as it is for an operator (the owner's M3 reviews).
         return "history_missing"
     await release(s, request.id)
+    if outcome.kind in ("refused", "throttled"):  # Temporal refused this attempt: it created nothing
+        await runs.settle_attempt(s, request.tenant_id, request.id, "refused")
+    elif outcome.kind in ("absent", "collision"):  # an absence seen once fences nothing; a collision's exists
+        await runs.settle_attempt(s, request.tenant_id, request.id, "unproven")
     if outcome.kind in ("refused", "throttled", "absent") and request.cancel_requested_at is not None:
         # A cancel recorded while it was starting, applied now that it didn't start (§7.8). A 10th refusal is
         # cancelled too: the user asked first.
@@ -517,6 +523,7 @@ async def _dead(s: AsyncSession, request: RunRequest, reason: str, message: str)
     request.status, request.reason, request.ended_at = "dead", reason, datetime.now(UTC)
     await runs.finish_run(s, request.id, status="failed", ended_at=datetime.now(UTC), error_code=START_FAILED,
                           error_message=message, if_running=True)  # fmt: skip
+
     await audit.record(s, tenant_id=request.tenant_id, actor_id=None, action="run.request.dead",
                        target_type="run_request", target_id=str(request.id), details={"reason": reason})  # fmt: skip
 

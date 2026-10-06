@@ -217,8 +217,7 @@ async def test_a_short_outage_fires_each_missed_time_and_admits_each_once(
     ) as env:
         async with main.admission_worker(env.client, dispatch_sessionmaker, KEYS):
             await env.client.create_schedule(temporal_id, Schedule(
-                action=ScheduleActionStartWorkflow("ScheduleTick", str(created.id), id=temporal_id,
-                                                   task_queue=tick.ADMISSION_QUEUE),
+                action=ScheduleActionStartWorkflow("ScheduleTick", id=temporal_id, task_queue=tick.ADMISSION_QUEUE),
                 spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(seconds=2))]),
                 policy=SchedulePolicy(catchup_window=timedelta(minutes=1), overlap=ScheduleOverlapPolicy.ALLOW_ALL),
             ))  # fmt: skip

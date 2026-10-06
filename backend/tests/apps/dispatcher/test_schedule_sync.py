@@ -26,7 +26,7 @@ from dewpoint.engine.runtime.ids import schedule_workflow_id
 from tests.apps.test_admission import KEYS, TOKEN, current, published
 from tests.apps.test_runs import rpc
 from tests.apps.test_workflow_ops import update as update_workflow
-from tests.support.keys import FIXTURE_CONVERTER, opened
+from tests.support.keys import FIXTURE_CONVERTER
 
 pytestmark = pytest.mark.usefixtures("development_deployment")
 TIMING = {"cron": "0 9 * * 1-5", "every_s": None, "offset_s": 0, "time_zone": "Europe/Paris", "catchup_window_s": 600}
@@ -100,7 +100,7 @@ async def test_a_new_schedule_is_created_and_recorded_only_after_its_read_back(
     handle = server.client.get_schedule_handle(schedule_workflow_id(str(ctx.tenant_id), str(schedule_id)))
     action = (await handle.describe()).schedule.action
     assert isinstance(action, ScheduleActionStartWorkflow) and action.task_queue == tick.ADMISSION_QUEUE
-    assert action.workflow == "ScheduleTick" and await opened(action.args[0]) == str(schedule_id)  # sealed
+    assert action.workflow == "ScheduleTick" and list(action.args) == []  # its tick's workflow id names it
     assert (await stored(owner_sessionmaker, schedule_id))["synced_generation"] == 1
     async with dispatch_sessionmaker() as s:
         candidates = (await s.execute(text("select schedule_id from schedule_candidates(50)"))).scalars().all()
@@ -268,8 +268,7 @@ async def test_firings_missed_past_the_catch_up_window_are_recorded_audited_and_
         data_converter=FIXTURE_CONVERTER, dev_server_extra_args=args
     ) as env:
         await env.client.create_schedule(temporal_id, Schedule(
-            action=ScheduleActionStartWorkflow("ScheduleTick", str(schedule_id), id=temporal_id,
-                                               task_queue=tick.ADMISSION_QUEUE),
+            action=ScheduleActionStartWorkflow("ScheduleTick", id=temporal_id, task_queue=tick.ADMISSION_QUEUE),
             spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(seconds=2))]),
             policy=SchedulePolicy(catchup_window=timedelta(seconds=10), overlap=ScheduleOverlapPolicy.ALLOW_ALL),
         ))  # fmt: skip
@@ -296,15 +295,31 @@ async def test_firings_missed_past_the_catch_up_window_are_recorded_audited_and_
     assert audit == {"schedule_id": str(schedule_id), "missed": row["misses"]}
 
 
-async def test_the_sync_records_the_key_version_its_temporal_action_names(
-    server, ready, owner_sessionmaker, dispatch_sessionmaker
+async def test_the_synced_action_carries_nothing_and_a_legacy_one_its_key_version(
+    server, ready, owner_sessionmaker, api_sessionmaker, dispatch_sessionmaker, monkeypatch
 ) -> None:
-    """Engine 2b spec §6.4: retiring a data-key version waits until every live schedule's Temporal action is sealed
-    under the active one. The sync records the version the action's payload names, from its own read-back."""
+    """The owner's M3 ruling: a schedule's action carries no argument (its tick's workflow id names the schedule) and
+    no execution timeout, so it holds nothing under a tenant's key. An action synced before still carries the schedule's
+    id, sealed: the sync records the version it names, from its own read-back, and `keys retire` waits for the
+    schedule's next sync (which `keys reencrypt` queues) to write it without."""
+    import dataclasses
+
+    from tests.support.keys import sealed_as_before
+
     ctx, _, schedule_id = ready
-    assert (await stored(owner_sessionmaker, schedule_id))["action_key_version"] is None
+    real = schedule_sync.temporal
+
+    def as_before(row: Any, *, paused: bool) -> Any:
+        wanted = real(row, paused=paused)
+        return dataclasses.replace(wanted, action=dataclasses.replace(wanted.action, args=[legacy]))
+
+    legacy = await sealed_as_before(str(ctx.tenant_id), str(schedule_id))
+    monkeypatch.setattr(schedule_sync, "temporal", as_before)
     assert await sync(server, dispatch_sessionmaker, ctx, schedule_id) == "synced"
-    found = await in_temporal(server, ctx, schedule_id)
-    [payload] = found.schedule.action.start_workflow.input.payloads
-    assert payload.metadata["dewpoint-key-version"] == b"1"  # the fixture keys' active version
-    assert (await stored(owner_sessionmaker, schedule_id))["action_key_version"] == 1
+    assert (await stored(owner_sessionmaker, schedule_id))["action_key_version"] == 1  # the fixture keys' version
+    monkeypatch.setattr(schedule_sync, "temporal", real)
+    await changed(api_sessionmaker, ctx, schedule_id, cron="30 8 * * *")
+    assert await sync(server, dispatch_sessionmaker, ctx, schedule_id) == "synced"
+    start = (await in_temporal(server, ctx, schedule_id)).schedule.action.start_workflow
+    assert list(start.input.payloads) == [] and not start.HasField("workflow_execution_timeout")
+    assert (await stored(owner_sessionmaker, schedule_id))["action_key_version"] is None
