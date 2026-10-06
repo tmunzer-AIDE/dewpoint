@@ -13,7 +13,7 @@ from dewpoint.apps.api.deps import get_keyring
 from dewpoint.apps.api.responses import ConnectionDetailOut, ConnectionOut, ConnectionTypeOut
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.connections import service
-from dewpoint.core.connections.types import CONNECTION_TYPES, MIST_CLOUDS
+from dewpoint.core.connections.declared import InvalidValueError, declared_types
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.http import TenantContext, active_session, get_db, require
 from dewpoint.core.models.connections import Connection
@@ -38,7 +38,9 @@ def _http(request: Request) -> httpx.AsyncClient:
     return request.app.state.http  # type: ignore[no-any-return]
 
 
-def _invalid(exc: ValidationError) -> HTTPException:
+def _invalid(exc: ValidationError | InvalidValueError) -> HTTPException:
+    if isinstance(exc, InvalidValueError):
+        return HTTPException(422, detail={"error": "invalid", "fields": exc.fields})
     return HTTPException(
         422, detail={"error": "invalid", "fields": [".".join(map(str, e["loc"])) for e in exc.errors()]}
     )
@@ -61,17 +63,9 @@ async def _get(db: AsyncSession, ctx: TenantContext, connection_id: uuid.UUID) -
     response_model=list[ConnectionTypeOut],
     response_model_exclude_unset=True,
 )
-async def connection_types() -> list[dict[str, object]]:
-    return [
-        {
-            "key": t.key,
-            "label": t.label,
-            "config_schema": t.config_model.model_json_schema(),
-            "secret_fields": list(t.secret_model.model_fields),
-            **({"clouds": MIST_CLOUDS} if t.key == "mist" else {}),
-        }
-        for t in CONNECTION_TYPES.values()
-    ]
+async def connection_types(db: AsyncSession = Depends(get_db, scope="function")) -> list[dict[str, object]]:
+    """The types the synced plugins declare (plugins-3 D11), by key."""
+    return [t.listing() for _, t in sorted((await declared_types(db)).items())]
 
 
 @router.get("/t/{tenant_id}/connections", response_model=list[ConnectionOut])
@@ -95,7 +89,7 @@ async def create(
         )
     except service.UnknownTypeError:
         raise HTTPException(422, detail={"error": "unknown_type"}) from None
-    except ValidationError as e:
+    except (ValidationError, InvalidValueError) as e:
         raise _invalid(e) from None
     except IntegrityError:
         raise HTTPException(409, detail={"error": "name_taken"}) from None
@@ -126,7 +120,9 @@ async def patch(
         conn = await service.update_connection(
             db, keyring, ctx, conn, name=body.name, config=body.config, secret=body.secret
         )
-    except ValidationError as e:
+    except service.UnknownTypeError:
+        raise HTTPException(422, detail={"error": "unknown_type"}) from None
+    except (ValidationError, InvalidValueError) as e:
         raise _invalid(e) from None
     except IntegrityError:
         raise HTTPException(409, detail={"error": "name_taken"}) from None

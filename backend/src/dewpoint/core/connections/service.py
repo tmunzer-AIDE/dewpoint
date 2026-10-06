@@ -6,13 +6,14 @@ from typing import Any
 
 import httpx
 from cryptography.exceptions import InvalidTag
-from pydantic import BaseModel, SecretStr
+from pydantic import BaseModel
 from sqlalchemy import any_, literal, select, update
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from dewpoint.core.audit.service import record
+from dewpoint.core.connections.declared import DeclaredType, declared_types
 from dewpoint.core.connections.types import CONNECTION_TYPES, ConnectionType
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.http import TenantContext
@@ -34,9 +35,16 @@ def _type(key: str) -> ConnectionType:
     return CONNECTION_TYPES[key]
 
 
-def _secret_json(model: BaseModel) -> bytes:
-    data = {k: (v.get_secret_value() if isinstance(v, SecretStr) else v) for k, v in model}
-    return json.dumps(data).encode()
+async def declared(s: AsyncSession, key: str) -> DeclaredType:
+    """The type as the synced manifests declare it (plugins-3 D11): unknown until `plugins sync` registered it."""
+    found = (await declared_types(s)).get(key)
+    if found is None:
+        raise UnknownTypeError(key)
+    return found
+
+
+def _secret_json(secret: dict[str, Any]) -> bytes:
+    return json.dumps(secret).encode()
 
 
 async def create_connection(
@@ -49,14 +57,14 @@ async def create_connection(
     config: dict[str, Any],
     secret: dict[str, Any],
 ) -> Connection:
-    ct = _type(type_key)
-    cfg, sec = ct.config_model.model_validate(config), ct.secret_model.model_validate(secret)
+    kind = await declared(s, type_key)
+    cfg, sec = kind.config(config), kind.secret(secret)
     conn = Connection(
         id=uuid.uuid4(),
         tenant_id=ctx.tenant_id,
         type=type_key,
         name=name,
-        config=cfg.model_dump(mode="json"),
+        config=cfg,
         created_by=ctx.user.id,
     )
     conn.secret_ct = await keyring.encrypt(
@@ -86,13 +94,13 @@ async def update_connection(
     config: dict[str, Any] | None,
     secret: dict[str, Any] | None,
 ) -> Connection:
-    ct = _type(conn.type)
+    kind = await declared(s, conn.type)
     changed: list[str] = []
     if name is not None:
         conn.name = name
         changed.append("name")
     if config is not None:
-        conn.config = ct.config_model.model_validate(config).model_dump(mode="json")
+        conn.config = kind.config(config)
         changed.append("config")
     if secret is not None:
         conn.secret_ct = await keyring.encrypt(
@@ -100,7 +108,7 @@ async def update_connection(
             tenant_id=ctx.tenant_id,
             purpose=PURPOSE,
             context=str(conn.id),
-            plaintext=_secret_json(ct.secret_model.model_validate(secret)),
+            plaintext=_secret_json(kind.secret(secret)),
         )
         changed.append("secret")
     if {"config", "secret"} & set(changed):
@@ -280,18 +288,24 @@ class _KeyringSealer:
 async def cooldowns(s: AsyncSession, keyring: Keyring, conn: Connection) -> list[dict[str, str]] | None:
     """Each of the connection's quota scopes now cooling down (plugins-3 D10): its kind and its current cooldown, a live
     value that can change, not a record of a failed attempt's deadline; never the scope's key. None when the scopes
-    can't be computed (an unreadable secret)."""
-    ct = _type(conn.type)
-    if ct.rate_scopes is None:
+    can't be computed (an unknown type, an unreadable secret)."""
+    try:
+        kind = await declared(s, conn.type)
+    except UnknownTypeError:
+        return None
+    if not kind.rate_scopes:
         return []
     try:
-        secret = await load_secret(s, keyring, conn)
+        raw = await keyring.decrypt(
+            s, tenant_id=conn.tenant_id, purpose=PURPOSE, context=str(conn.id), blob=conn.secret_ct or b""
+        )
+        secret = kind.secret(json.loads(raw))
         key = await rate_scopes.scope_key(s, _KeyringSealer(s, keyring), conn.tenant_id, create=False)
     except (InvalidTag, ValueError):
         return None
     # No scope key yet: no worker has charged a credential scope, so none can be cooling down; the others still count.
     hasher = rate_scopes.credential_hasher(key) if key is not None else (lambda credential: "-")
-    scopes = ct.rate_scopes(ct.config_model.model_validate(conn.config), hasher, secret)
+    scopes = kind.scopes(conn.config, secret, hasher)
     found = await current_cooldowns(s, conn.tenant_id, [scope.key for scope in scopes])
     return sorted(
         ({"scope": key.split(":", 1)[0], "until": until.isoformat()} for key, until in found.items()),

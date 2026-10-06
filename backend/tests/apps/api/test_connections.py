@@ -3,9 +3,12 @@ import asyncio
 import uuid
 
 import httpx
+import pytest
 import respx
 from sqlalchemy import text
 
+from dewpoint.apps.plugin_loader import sync_installed
+from dewpoint.plugins.mist import PLUGIN as MIST
 from tests.apps.api.helpers import session_client
 
 ORG = str(uuid.uuid4())
@@ -15,6 +18,40 @@ BODY = {
     "config": {"cloud": "emea_01", "org_id": ORG},
     "secret": {"api_token": "tok_" + "a" * 36},
 }
+
+
+@pytest.fixture(autouse=True)
+async def mist_synced(owner_sessionmaker) -> None:  # type: ignore[no-untyped-def]
+    """The API knows the types `dewpoint plugins sync` registered (plugins-3 D11)."""
+    async with owner_sessionmaker() as s, s.begin():
+        await sync_installed(s, [MIST])
+
+
+async def test_connection_types_come_from_synced_manifests(app, owner_sessionmaker, api_settings) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    async with c:
+        listed = (await c.get("/api/v1/connection-types")).json()
+    assert [t["key"] for t in listed] == ["mist"]
+    assert listed[0]["clouds"]["emea_01"] == "api.eu.mist.com" and listed[0]["secret_fields"] == ["api_token"]
+
+
+async def test_a_type_no_synced_plugin_declares_is_unknown(app, owner_sessionmaker, api_settings) -> None:
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("delete from plugin_manifests where name = 'mist'"))
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    async with c:
+        assert (await c.get("/api/v1/connection-types")).json() == []
+        r = await c.post(f"/api/v1/t/{tid}/connections", json=BODY)
+    assert r.status_code == 422 and r.json() == {"error": "unknown_type"}
+
+
+async def test_an_invalid_config_names_fields_not_values(app, owner_sessionmaker, api_settings) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    async with c:
+        bad = {**BODY, "config": {"cloud": "emea_01", "org_id": ORG.upper()}, "secret": {"api_token": "short-secret"}}
+        r = await c.post(f"/api/v1/t/{tid}/connections", json=bad)
+    assert r.status_code == 422 and r.json() == {"error": "invalid", "fields": ["org_id"]}
+    assert "short-secret" not in r.text
 
 
 async def test_create_list_never_returns_secret(app, owner_sessionmaker, api_settings) -> None:
