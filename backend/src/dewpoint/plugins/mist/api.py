@@ -150,7 +150,11 @@ class MistApi(Node):
         """The matched operation's fixture (`answer_fixture`), never a request."""
         values, _, route, path_values = self._target(config)
         self._checked(route, path_values, None, values)
-        out: Any = {"status": 200, "body": copy.deepcopy(answer_fixture(route.operation))}
+        try:
+            body = answer_fixture(route.operation)
+        except fixtures.FixtureUnavailable:
+            raise NotImplementedError from None  # the runtime's `simulation_unavailable`: no fixture fits
+        out: Any = {"status": 200, "body": copy.deepcopy(body)}
         return self.Output.model_construct(out)
 
 

@@ -149,7 +149,11 @@ class MistOperation(Node):
     async def simulate(self, ctx: StepContext, config: Any) -> BaseModel:
         """The operation's fixture (D13), never a request: the connection isn't even opened."""
         self._checked(config)
-        return self.Output.model_construct(copy.deepcopy(fixture_of(type(self))[0]))
+        try:
+            found = fixture_of(type(self))[0]
+        except fixtures.FixtureUnavailable:
+            raise NotImplementedError from None  # the runtime's `simulation_unavailable`: no fixture fits
+        return self.Output.model_construct(copy.deepcopy(found))
 
     async def run(self, ctx: StepContext, config: Any) -> BaseModel:
         values, body, clear = self._checked(config)

@@ -12,7 +12,7 @@ from jsonschema import Draft202012Validator
 
 from dewpoint.plugins.mist import PLUGIN, oas, policy
 from dewpoint.plugins.mist.api import answer_fixture
-from dewpoint.plugins.mist.fixtures import BUDGET, built, fixture
+from dewpoint.plugins.mist.fixtures import BUDGET, FixtureUnavailable, built, fixture
 from dewpoint.plugins.mist.nodes import MistOperation, fixture_of
 from dewpoint.sdk import node_manifest
 
@@ -103,3 +103,64 @@ def test_a_fixture_past_its_budget_is_built_shallower_and_stays_valid() -> None:
     value, source = fixture(SCHEMA, None, budget=40)
     assert source == "schema" and len(json.dumps(value)) <= 40 and value == {"a": ""}  # only the required field
     assert Draft202012Validator(SCHEMA).is_valid(value)
+
+
+OVERLAPPING = {
+    "type": "object",
+    "allOf": [
+        {"type": "object", "properties": {"a": {"type": "string"}}},
+        {"type": "object", "properties": {"a": {"type": "string", "minLength": 2}}},
+    ],
+}
+IMPOSSIBLE = {
+    "type": "object",
+    "allOf": [
+        {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]},
+        {"type": "object", "properties": {"a": {"type": "integer"}}},
+    ],
+}
+
+
+def test_an_overlapping_all_of_falls_back_to_a_value_the_schema_accepts() -> None:
+    """The owner's review of the redesign: a merged `allOf` can break one branch; every return is checked."""
+    value, source = fixture(OVERLAPPING, None)
+    assert Draft202012Validator(OVERLAPPING).is_valid(value) and source == "schema"
+
+
+def test_a_default_that_cant_shrink_gives_way_to_the_types_empty_value() -> None:
+    big = {"type": "string", "default": "x" * 100_000}
+    assert fixture(big, None, budget=1_000) == ("", "schema")
+    nested = {"type": "object", "properties": {"s": big}, "required": ["s"]}
+    value, _ = fixture(nested, None, budget=1_000)
+    assert value == {"s": ""} and Draft202012Validator(nested).is_valid(value)
+
+
+def test_a_schema_no_value_within_budget_satisfies_has_no_fixture() -> None:
+    with pytest.raises(FixtureUnavailable):
+        fixture(IMPOSSIBLE, None)
+    with pytest.raises(FixtureUnavailable):
+        fixture({"type": "string", "minLength": 2000}, None, budget=1_000)
+
+
+@pytest.mark.parametrize("example", [None, {"a": "ok"}, {"a": 3}, {"a": "x" * 100_000}, "wrong"])
+@pytest.mark.parametrize("schema", [SCHEMA, OVERLAPPING])
+def test_every_return_is_valid_and_within_budget(schema: dict[str, Any], example: Any) -> None:
+    value, _ = fixture(schema, example, budget=4_096)
+    assert Draft202012Validator(schema).is_valid(value) and len(json.dumps(value)) <= 4_096
+
+
+async def test_a_node_without_a_fixture_cant_be_simulated(monkeypatch: pytest.MonkeyPatch) -> None:
+    from dewpoint.plugins.mist import fixtures as module
+    from dewpoint.plugins.mist import nodes
+
+    def none(*args: Any, **kwargs: Any) -> Any:
+        raise FixtureUnavailable()
+
+    monkeypatch.setattr(module, "fixture", none)
+    monkeypatch.setattr(nodes, "_FIXTURES", {})
+    kind = next(n for n in curated() if n.type == "mist.org_wlans.get")
+    value = kind.Config.model_validate(
+        {"connection": "6a1d6e2f-3c4b-4a5d-9e8f-0123456789ab", "wlan_id": "7b2c4d6e-8f10-4a2b-9c3d-4e5f6a7b8c9d"}
+    )
+    with pytest.raises(NotImplementedError):  # the runtime's `simulation_unavailable`
+        await kind().simulate(None, value)  # type: ignore[arg-type]

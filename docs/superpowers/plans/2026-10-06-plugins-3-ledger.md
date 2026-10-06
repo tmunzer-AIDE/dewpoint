@@ -624,7 +624,9 @@ The owner approved the fixture redesign and catalog compression (2026-10-07), bo
   operation's answer schema, relaxed as an output's; null only when the operation answers nothing) - the OAS's examples
   are incomplete (the owner's remark), so the schema gives the shape and the example values - cost if wrong: a fixture
   fills optional properties a real answer may lack, so a simulation takes the "present" branch of a reference to one;
-  publish already requires such a reference to carry a default, so no failure hides behind it. Measured: all 262
+  publish requires such a reference to carry a default, which prevents a missing-reference error, but the absent
+  (default) branch goes untested, and a failure there stays hidden until a real answer lacks the field (wording
+  corrected on the owner's review). Measured: all 262
   curated fixtures in 0.2 s, the largest 30 KB (site settings), none past the budget; 182 take example values, 39 have
   none, 41 are a delete's or an action's fixed answer.
 - Ruling (catalog): `GET /api/v1/node-types` and `GET /api/v1/trigger-types` answer gzipped (level 5) to a client that
@@ -638,3 +640,10 @@ The owner approved the fixture redesign and catalog compression (2026-10-07), bo
 Runs after both, at `d09db0c` (2026-10-07): the full backend suite, 3235 passed, 8 skipped, in 9 min 7 s; ruff (one
 test line, fixed after), format, mypy, import contracts and the OpenAPI drift check pass; the web client's
 `check:api`, typecheck and 292 tests pass; CodeQL locally: no findings in Python or JavaScript/TypeScript.
+
+The owner's review of the redesign (`45d2245`, 2026-10-07, pasted): two Low findings and a wording correction.
+- (R1, Low) a fixture could be returned invalid or over budget: a merged `allOf` breaking one of its parts, or a default
+  too large to shrink. Every fixture returned is now one the schema accepts within the budget: shallower, then
+  without defaults, and when none is, the operation has no fixture and its simulation fails `simulation_unavailable`.
+- The ruling's wording claimed no failure hides behind a "present" fixture; corrected above: the default prevents a
+  missing-reference error, but the absent branch goes untested.
