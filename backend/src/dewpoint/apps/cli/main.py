@@ -24,6 +24,7 @@ from dewpoint.apps.plugin_loader import PluginLoadError, installed_plugins, prep
 from dewpoint.apps.worker.deployment import Deployment, describe, set_current, this_build
 from dewpoint.apps.worker.health import WorkerUnhealthyError
 from dewpoint.apps.worker.main import run as run_worker
+from dewpoint.core import logs
 from dewpoint.core.audit.anchor import FileAnchorSink, anchor_all, anchor_freshness, verify_anchors
 from dewpoint.core.auth.users import PasswordPolicyError, create_user
 from dewpoint.core.config import get_settings
@@ -46,6 +47,15 @@ from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.sdk import ManifestError
 
 app = typer.Typer(no_args_is_help=True)
+
+
+@app.callback()
+def _process() -> None:
+    # Each command runs as a process of its own (the worker, the dispatcher, ingress, an admin command): it logs as
+    # every process does, an exception by its type and where it was raised, never a value.
+    logs.configure()
+
+
 admin = typer.Typer(no_args_is_help=True)
 app.add_typer(admin, name="admin")
 audit = typer.Typer(no_args_is_help=True)
