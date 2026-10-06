@@ -94,8 +94,11 @@ accepted and only the first gzip member decoded; (3) publish didn't check connec
 recommendations on rulings 4, 7 and 8 (above, revised) were taken as the fail-closed options, for the owner's ruling.
 
 Dependency for 2b-4a (data lifecycle): `rate_scope_keys.sealed` is sealed under a tenant's data key (purpose
-`rate.scope`, the tenant id as context). Re-encryption and key retirement must re-seal it like any sealed column; tenant
-erasure removes it by its foreign key (cascade).
+`rate.scope`, the tenant id as context). Re-encryption must re-seal the same plaintext key under the new data key,
+never generate a new one (a new key splits every credential's budget and cooldown again), and key retirement must
+count it among the ciphertexts that still need a version; tenant erasure removes it by its foreign key (cascade).
+The fix review (2026-10-06) also checked that workers on different data-key versions converge on one stored key on
+first use, which the API opens.
 
 Open questions:
 - `tests/apps/dispatcher/test_triggers_end_to_end.py::test_a_short_outage_fires_each_missed_time_and_admits_each_once`
