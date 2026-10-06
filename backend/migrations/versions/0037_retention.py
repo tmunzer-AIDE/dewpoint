@@ -4,7 +4,9 @@ set it (`tenant.manage`) within the platform's bounds, 1 to 365; no row means th
 
 A run tree's data is due after its root ended, so every run records its root, `runs.root_run_id`: a root run is its
 own, a sub-run its parent's. The database sets it on insert, whatever the writer gives, and refuses any change to a
-run's root or parent; existing runs are backfilled from their trees.
+run's root or parent; existing runs are backfilled from their trees. A sub-run its root's end left `running` holds
+its tree: the reconciler describes its own execution, at most once a recheck (`runs.checked_at`), through
+`orphan_subruns()`, ids only (the final review's M5).
 
 The retention job's role, `dewpoint_retention` (§10.3): `DELETE` on the retained tables, which no other role has (a
 run's steps go with it), under each tenant's scope; the reads it needs; the retained counters of the endpoints and
@@ -44,6 +46,20 @@ BEGIN
 END $$""",
     "CREATE TRIGGER runs_tree BEFORE UPDATE OF root_run_id, parent_run_id ON runs FOR EACH ROW "
     "EXECUTE FUNCTION runs_tree_fixed()",
+]
+ORPHANS = [
+    """CREATE FUNCTION orphan_subruns(grace interval, recheck interval, max_rows integer)
+RETURNS TABLE (tenant_id uuid, run_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT c.tenant_id, c.id FROM runs c JOIN runs r ON r.id = c.root_run_id AND r.tenant_id = c.tenant_id
+  WHERE c.status = 'running' AND c.parent_run_id IS NOT NULL AND r.status <> 'running'
+    AND r.ended_at < statement_timestamp() - grace
+    AND (c.checked_at IS NULL OR c.checked_at < statement_timestamp() - recheck)
+  ORDER BY c.checked_at NULLS FIRST, r.ended_at, c.id
+  LIMIT max_rows
+$$""",
+    "REVOKE ALL ON FUNCTION orphan_subruns(interval, interval, integer) FROM PUBLIC",
+    "GRANT EXECUTE ON FUNCTION orphan_subruns(interval, interval, integer) TO dewpoint_dispatch",
 ]
 COUNTED = ("runs", "requests", "events", "csv_uploads", "schedules")  # what a sweep deletes, per tenant
 RETAINED = ("runs", "step_outputs", "run_inputs", "run_secret_index", "claim_grants", "run_requests", "inbound_events",
@@ -141,6 +157,11 @@ def upgrade() -> None:
     op.create_index("runs_tree", "runs", ["tenant_id", "root_run_id"])
     for statement in ROOTS:
         op.execute(statement)
+    op.add_column("runs", sa.Column("checked_at", sa.DateTime(timezone=True), nullable=True))
+    op.create_index("runs_open_subruns", "runs", ["checked_at", "id"],
+                    postgresql_where=sa.text("status = 'running' AND parent_run_id IS NOT NULL"))  # fmt: skip
+    for statement in ORPHANS:
+        op.execute(statement)
     op.create_table(
         "retention_sweeps",
         sa.Column("id", sa.BigInteger, sa.Identity(), primary_key=True),
@@ -173,6 +194,9 @@ def downgrade() -> None:
     op.drop_table("retention_sweeps")
     for statement in UNROLE:
         op.execute(statement)
+    op.execute("DROP FUNCTION orphan_subruns(interval, interval, integer)")
+    op.drop_index("runs_open_subruns", "runs")
+    op.drop_column("runs", "checked_at")
     op.execute("DROP TRIGGER runs_tree ON runs")
     op.execute("DROP FUNCTION runs_tree_fixed()")
     op.execute("DROP TRIGGER runs_root ON runs")

@@ -229,8 +229,13 @@ over when it goes). It asks Temporal about each request at most once every 30 se
   timed out, `failed` with `internal_error`, and an alert. Its slot is released in the same transaction. This is how a
   run whose end write was lost, or refused, ends.
 - **A slot whose run's row has ended:** released once its execution is closed.
-- **History Temporal no longer has**, for a started run or a held slot: left as it is, with an error
-  (`run_history_missing`, `slot_history_missing`); no outcome is invented and no slot released. Recover it by hand.
+- **A sub-run still `running` 30 seconds after its root ended** (a child its root's close asked to cancel, or one whose
+  parent went before writing its end): once its own execution is closed, the end Temporal reports is recorded, as for
+  a root; while it still runs, it's left alone. Until then it keeps its tree from retention and holds a key
+  retirement's `open_runs` check and an erasure's stage 50.
+- **History Temporal no longer has**, for a started run, such a sub-run or a held slot: left as it is, with an error
+  (`run_history_missing`, `subrun_history_missing`, `slot_history_missing`); no outcome is invented and no slot
+  released. Recover it by hand.
 - **Cancels:** it sends each recorded cancel to Temporal, once.
 
 ## Cancelling and re-running

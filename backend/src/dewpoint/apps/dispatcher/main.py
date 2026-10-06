@@ -23,7 +23,7 @@ from dewpoint.apps.dispatcher.cancels import send_cancels
 from dewpoint.apps.dispatcher.dispatch import Rotation, dispatch_once
 from dewpoint.apps.dispatcher.matching import Verified, match_once
 from dewpoint.apps.dispatcher.observe import observe, report
-from dewpoint.apps.dispatcher.reconcile import Leader, reconcile_once
+from dewpoint.apps.dispatcher.reconcile import Leader, reconcile_once, reconcile_subruns
 from dewpoint.apps.dispatcher.recount import recount_once
 from dewpoint.apps.dispatcher.schedule_sync import check_misses, check_strays, sync_schedules
 from dewpoint.apps.dispatcher.tick import ADMISSION_QUEUE, Ticker
@@ -77,6 +77,7 @@ async def cycle(
     await report(sessionmaker, instance, build_id, {"current_build": bool(build), **done})
     if await leader.leading():
         settled = await reconcile_once(sessionmaker, client, keys, settings)
+        settled.update({f"subrun_{k}": v for k, v in (await reconcile_subruns(sessionmaker, client)).items()})
         settled.update({f"cancel_{k}": v for k, v in (await send_cancels(sessionmaker, client)).items()})
         settled.update({f"schedule_{k}": v for k, v in (await sync_schedules(sessionmaker, client, leader)).items()})
         settled.update({f"misses_{k}": v for k, v in (await check_misses(sessionmaker, client)).items()})

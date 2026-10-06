@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The reconciler (engine 2b spec §7.6): inside the dispatcher, one leader at a time, it settles what starts left
-uncertain, records the end of runs whose workflow closed without their end write, and releases leaked slots.
+uncertain, records the end of runs whose workflow closed without their end write, and releases leaked slots; it ends
+the sub-runs their root's close left running, once their own execution has closed (`reconcile_subruns`).
 
 It reads across tenants only through `reconcile_candidates()` (ids and a kind), then works tenant-scoped, one
 request per transaction, with no transaction open across a call to Temporal. It asks about each request at most once
@@ -292,3 +293,70 @@ async def _checked_alone(
     async with sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant_id)
         await _checked(s, request_id)
+
+
+# --- sub-runs their root's end left running (the final review's M5) --------------------------------------------------
+
+
+async def reconcile_subruns(sessionmaker: async_sessionmaker[AsyncSession], client: Client) -> dict[str, int]:
+    """Sub-runs still `running` once their root has been ended for GRACE: a parent writes its children's ends, so these
+    are what a root's close left (a child it asked to cancel, or a parent gone before writing one). Each one's own
+    execution is described, at most once per RECHECK, across tenants through `orphan_subruns()` (ids only)."""
+    async with sessionmaker() as s:
+        picked = (
+            await s.execute(
+                text("select tenant_id, run_id from orphan_subruns(:grace, :recheck, :n)"),
+                {"grace": GRACE, "recheck": RECHECK, "n": BATCH},
+            )
+        ).all()
+    counts: Counter[str] = Counter()
+    for tenant_id, run_id in picked:
+        try:
+            happened = await _subrun(sessionmaker, client, tenant_id, run_id)
+        except Exception as e:  # a bug or an outage: left as it was, asked about again after RECHECK
+            log.error("reconcile_failed", tenant_id=str(tenant_id), run_id=str(run_id), kind="subrun",
+                      error=type(e).__name__)  # fmt: skip
+            counts["error"] += 1
+            await _subrun_checked_alone(sessionmaker, tenant_id, run_id)
+            continue
+        counts[happened] += 1
+    return dict(counts)
+
+
+async def _subrun(
+    sessionmaker: async_sessionmaker[AsyncSession], client: Client, tenant_id: uuid.UUID, run_id: uuid.UUID
+) -> str:
+    """Closed: the end Temporal reports, recorded unless the row ended meanwhile. Still live: left running. Its history
+    gone: an alert and no end, as for a root (the owner's ruling)."""
+    handle = client.get_workflow_handle(run_workflow_id(str(tenant_id), str(run_id)), result_type=RunResult)
+    try:
+        described = await handle.describe()
+    except Exception as e:
+        await _missing_or_unanswered(client, e, run_id, "subrun_history_missing")
+        await _subrun_checked_alone(sessionmaker, tenant_id, run_id)
+        return "unresolved"
+    if described.status is None or described.status in LIVE:
+        await _subrun_checked_alone(sessionmaker, tenant_id, run_id)
+        return "running"
+    ended = await _ended(handle, described.status, run_id)
+    async with sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant_id)
+        await runs.finish_run(
+            s, run_id, status=ended.status, ended_at=described.close_time or datetime.now(UTC),
+            error_code=ended.error_code, error_message=ended.error_message, iterations=ended.iterations,
+            if_running=True,
+        )  # fmt: skip
+        await _subrun_checked(s, run_id)
+    return "ended"
+
+
+async def _subrun_checked(s: AsyncSession, run_id: uuid.UUID) -> None:
+    await s.execute(text("update runs set checked_at = statement_timestamp() where id = :i"), {"i": run_id})
+
+
+async def _subrun_checked_alone(
+    sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, run_id: uuid.UUID
+) -> None:
+    async with sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant_id)
+        await _subrun_checked(s, run_id)

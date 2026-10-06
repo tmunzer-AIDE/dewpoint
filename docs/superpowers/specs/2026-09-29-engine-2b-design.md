@@ -1334,9 +1334,16 @@ dispatcher's are.
     `GRPC_MESSAGE_TOO_LARGE` cause before the termination — and a test proves it; otherwise it stays `terminated`;
   - `FAILED`, or `TIMED_OUT` (Dewpoint sets no execution timeout, so it's unexpected) → `failed` with
     `internal_error`, and an alert.
-- **History Temporal no longer has** — for a started run whose row is still `running`, or a slot whose row has ended
-  — isn't evidence that the latest execution is terminal: the row and the slot stay as they are, with an alert, for
-  an operator's recovery (§7.9). No outcome is inferred and no slot released from missing history alone.
+- **Sub-runs a root's close left `running`** (2b-4a; the final review's M5): a parent writes its children's ends, so a
+  sub-run still `running` 30 seconds after its root ended is one its root's close left (a child asked to cancel, or a
+  parent gone before writing it). Through `orphan_subruns()` (ids only), at most once per recheck interval
+  (`runs.checked_at`), the reconciler describes the sub-run's own execution: closed, it records the outcome Temporal
+  reports, as above (no slot: a sub-run holds none); still running, it's left as it is. Until then it holds its tree
+  from retention (§10.1), a key retirement's `open_runs` check and an erasure's stage 50.
+- **History Temporal no longer has** — for a started run whose row is still `running`, a sub-run as above, or a slot
+  whose row has ended — isn't evidence that the latest execution is terminal: the row and the slot stay as they are,
+  with an alert, for an operator's recovery (§7.9). No outcome is inferred and no slot released from missing history
+  alone.
 - **Cancels:** it sends each recorded cancel of a running run to Temporal once (§7.7).
 - The synchronization that disabling the gate (§2.4) and erasing a tenant (§6.5) wait for.
 
@@ -2527,7 +2534,8 @@ Each plan updates the older specs as it lands, as the engine-core 5.x revisions 
     and records the tick cutover. The API starts, stops, retries and reads an erasure, and reads a tenant's retention
     and its schedules' spans and incarnations. The auditor's login prunes through `audit_prune()`. The dispatcher
     records run evidence, incarnations and spans; a tick records its firing. A tenant's status is read through
-    `tenant_status()`, whatever the reader's scope; the strays are `stray_incarnations()`, ids only. From stage 60 of an
+    `tenant_status()`, whatever the reader's scope; the strays are `stray_incarnations()`, and the sub-runs a root's
+    close left running `orphan_subruns()`, ids only (§7.6). From stage 60 of an
     erasure, a trigger on every table holding tenant data refuses an insert of the tenant's rows (§6.5).
   - 2b-4a's tables holding a tenant's rows force row-level security scoped to that tenant: an erasure's record, items
     and known ids (the API's and the retention role's), a sweep's counts per tenant (the retention role's), and an
