@@ -333,3 +333,9 @@ after 10.09 s) through the Compose dispatcher; the 8 browser tests. All passed i
 passkey test failed only because the browser used 127.0.0.1 while the stack's origin was localhost (WebAuthn binds
 the origin); with `DEWPOINT_PUBLIC_ORIGIN` matching, it passed. The stack, its volumes, images and secrets were
 removed afterwards.
+
+The owner made the repository public (2026-10-06), after a pre-flight (no secret patterns in the full history of every
+branch; `.env.example` held placeholders in all its revisions); this settles the CodeQL licence question. CodeQL
+then ran locally at `0812e14` with CI's versions (CLI 2.27.1, `python-queries` 1.8.11, `javascript-queries` 2.4.6) and
+query filter, over the whole tree: no findings in Python (45 queries) or JavaScript/TypeScript (89 queries). The
+`codeql` workflow is still disabled on GitHub.
