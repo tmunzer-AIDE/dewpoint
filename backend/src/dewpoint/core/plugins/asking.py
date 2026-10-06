@@ -53,6 +53,11 @@ async def _ask(
 ) -> uuid.UUID:
     async with sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant_id)
+        # One admission at a time per tenant, across API processes: counting then inserting is otherwise a race (the
+        # owner's review of 3a-2, finding 2). The lock ends with this short transaction.
+        await s.execute(
+            text("select pg_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": f"dewpoint:plugin-calls:{tenant_id}"}
+        )
         outstanding = await s.execute(
             text(
                 "select count(*) from plugin_calls where tenant_id = :t and expires_at > now() "
