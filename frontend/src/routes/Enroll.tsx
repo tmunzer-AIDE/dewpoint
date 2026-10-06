@@ -3,7 +3,7 @@ import QRCode from "qrcode";
 import { useState, type FormEvent } from "react";
 import { Button } from "../components/Button";
 import { Field } from "../components/Field";
-import { ApiError, api } from "../lib/api";
+import { ApiError, client, ok } from "../lib/client";
 import { useAfterAuth } from "../lib/useAfterAuth";
 import { registerPasskey } from "../lib/webauthn";
 
@@ -25,7 +25,7 @@ export function TotpSetup({
   async function start() {
     setError(null);
     try {
-      const r = await api<{ otpauth_uri: string }>("POST", "/api/v1/auth/mfa/totp/enroll");
+      const r = await ok(client.POST("/api/v1/auth/mfa/totp/enroll"));
       setUri(r.otpauth_uri);
       setQr(await QRCode.toDataURL(r.otpauth_uri, { margin: 1, width: 192 }));
     } catch (e) {
@@ -38,9 +38,7 @@ export function TotpSetup({
     e?.preventDefault();
     setError(null);
     try {
-      const r = await api<{ recovery_codes: string[]; state: string }>("POST", "/api/v1/auth/mfa/totp/confirm", {
-        code: code.trim(),
-      });
+      const r = await ok(client.POST("/api/v1/auth/mfa/totp/confirm", { body: { code: code.trim() } }));
       onConfirmed(r.recovery_codes, r.state);
     } catch (err) {
       if (onReauth && err instanceof ApiError && err.code === "reauth_required") onReauth(() => confirm());

@@ -3,18 +3,11 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
 import { Button } from "../components/Button";
 import { Field } from "../components/Field";
-import { ApiError, api } from "../lib/api";
+import { ApiError, client, ok } from "../lib/client";
 import { needsReauth } from "../lib/reauth";
 import { useSession } from "../lib/session";
 import { authenticatePasskey, registerPasskey } from "../lib/webauthn";
 import { RecoveryCodes, TotpSetup } from "./Enroll";
-
-interface Passkey {
-  id: string;
-  name: string;
-  created_at: string;
-  last_used_at: string | null;
-}
 
 /** Prove a second factor again, then retry the action that asked for it. */
 function ReauthPrompt({ onDone, onCancel }: { onDone: () => void; onCancel: () => void }) {
@@ -23,7 +16,7 @@ function ReauthPrompt({ onDone, onCancel }: { onDone: () => void; onCancel: () =
   async function viaTotp(e: FormEvent) {
     e.preventDefault();
     try {
-      await api("POST", "/api/v1/auth/mfa/totp/reauth", { code: code.trim() });
+      await ok(client.POST("/api/v1/auth/mfa/totp/reauth", { body: { code: code.trim() } }));
       onDone();
     } catch (err) {
       setError(err instanceof ApiError && err.code === "locked" ? "Too many attempts." : "That code didn't work.");
@@ -56,7 +49,7 @@ function ReauthPrompt({ onDone, onCancel }: { onDone: () => void; onCancel: () =
 export function SecurityPage() {
   const qc = useQueryClient();
   const session = useSession();
-  const passkeys = useQuery({ queryKey: ["passkeys"], queryFn: () => api<Passkey[]>("GET", "/api/v1/auth/passkeys") });
+  const passkeys = useQuery({ queryKey: ["passkeys"], queryFn: () => ok(client.GET("/api/v1/auth/passkeys")) });
   const [pending, setPending] = useState<(() => Promise<void>) | null>(null);
   const [totpOpen, setTotpOpen] = useState(false);
   const [codes, setCodes] = useState<string[] | null>(null);
@@ -85,7 +78,7 @@ export function SecurityPage() {
     e.preventDefault();
     setMessage(null);
     try {
-      await api("POST", "/api/v1/auth/password", { current_password: pw.current, new_password: pw.next });
+      await ok(client.POST("/api/v1/auth/password", { body: { current_password: pw.current, new_password: pw.next } }));
       setPw({ current: "", next: "" });
       setMessage("Password changed. Other sessions were signed out.");
     } catch (err) {

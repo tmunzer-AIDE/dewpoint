@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dewpoint.apps.api.responses import MemberOut, MemberRoleOut
 from dewpoint.core.audit.service import record
 from dewpoint.core.auth.users import Email
 from dewpoint.core.authz.permissions import P
@@ -51,7 +52,7 @@ def _map(exc: Exception) -> HTTPException:
     return HTTPException(404, detail={"error": "user_not_found"})
 
 
-@router.get("")
+@router.get("", response_model=list[MemberOut])
 async def list_members(
     ctx: TenantContext = Depends(require(P.MEMBER_VIEW)), db: AsyncSession = Depends(get_db, scope="function")
 ) -> list[dict[str, str]]:
@@ -64,7 +65,7 @@ async def list_members(
     return [{"user_id": str(m.user_id), "email": e, "role": m.role} for m, e in rows.all()]
 
 
-@router.post("", status_code=201)
+@router.post("", status_code=201, response_model=MemberRoleOut)
 async def add(
     body: AddIn,
     ctx: TenantContext = Depends(require(P.MEMBER_MANAGE)),
@@ -81,7 +82,7 @@ async def add(
     return {"user_id": str(m.user_id), "role": m.role}
 
 
-@router.patch("/{user_id}")
+@router.patch("/{user_id}", response_model=MemberRoleOut)
 async def change(
     user_id: uuid.UUID,
     body: RoleChange,

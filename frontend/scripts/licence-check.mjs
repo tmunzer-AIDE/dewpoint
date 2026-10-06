@@ -10,6 +10,19 @@ const PROD = ["MIT", "ISC", "BSD-2-Clause", "BSD-3-Clause", "Apache-2.0", "0BSD"
 const ALLOWED = { prod: PROD, all: [...PROD, "MPL-2.0"] };
 
 /**
+ * Whether an SPDX expression is within `list`: `A OR B` when either is (the package may be used under it), `A AND B`
+ * when both are. Parentheses only group; no expression here nests deeper than one level.
+ * @param {string} expression
+ * @param {string[]} list
+ */
+function allowed(expression, list) {
+  const bare = expression.replace(/^\((.*)\)$/, "$1").trim();
+  if (/\sOR\s/.test(bare)) return bare.split(/\s+OR\s+/).some((e) => allowed(e, list));
+  if (/\sAND\s/.test(bare)) return bare.split(/\s+AND\s+/).every((e) => allowed(e, list));
+  return list.includes(bare);
+}
+
+/**
  * The licences outside the scope's list, each with its packages.
  * @param {Record<string, { name: string, versions: string[] }[]>} listing pnpm's JSON: licence → packages
  * @param {"prod" | "all"} scope
@@ -17,7 +30,7 @@ const ALLOWED = { prod: PROD, all: [...PROD, "MPL-2.0"] };
  */
 export function unexpected(listing, scope) {
   return Object.entries(listing)
-    .filter(([licence]) => !ALLOWED[scope].includes(licence))
+    .filter(([licence]) => !allowed(licence, ALLOWED[scope]))
     .map(([licence, packages]) => `${licence}: ${packages.map((p) => `${p.name}@${p.versions.join("|")}`).join(", ")}`)
     .sort();
 }
@@ -30,6 +43,10 @@ function selfTest() {
     [{ "MPL-2.0": pkg("axe-core") }, "prod", 1],
     [{ "MPL-2.0": pkg("axe-core") }, "all", 0],
     [{ Unlicense: pkg("isbot") }, "prod", 1],
+    [{ "(MIT OR CC0-1.0)": pkg("type-fest") }, "prod", 0],
+    [{ "(GPL-3.0 OR CC0-1.0)": pkg("neither") }, "all", 1],
+    [{ "(MIT AND CC-BY-4.0)": pkg("both") }, "all", 1],
+    [{ "(MIT AND ISC)": pkg("both") }, "prod", 0],
   ];
   for (const [listing, scope, count] of cases) {
     const found = unexpected(/** @type {any} */ (listing), /** @type {"prod" | "all"} */ (scope));

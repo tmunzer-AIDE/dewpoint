@@ -6,8 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { Command } from "cmdk";
 import { useEffect, useRef, useState } from "react";
-import { api } from "../lib/api";
-import type { TenantRow } from "./TenantSwitcher";
+import { client, ok } from "../lib/client";
 
 const ITEM =
   "flex cursor-pointer items-center justify-between gap-4 rounded-md px-3 py-2 text-body " +
@@ -20,7 +19,7 @@ export function CommandPalette() {
   const dialog = useRef<HTMLDialogElement>(null);
   const navigate = useNavigate();
   const params = useParams({ strict: false });
-  const tenants = useQuery({ queryKey: ["tenants"], queryFn: () => api<TenantRow[]>("GET", "/api/v1/tenants") });
+  const tenants = useQuery({ queryKey: ["tenants"], queryFn: () => ok(client.GET("/api/v1/tenants")) });
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

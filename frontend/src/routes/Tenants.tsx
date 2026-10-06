@@ -5,19 +5,18 @@ import { useState, type FormEvent } from "react";
 import { Button } from "../components/Button";
 import { Field } from "../components/Field";
 import { Table, Td, Th } from "../components/Table";
-import type { TenantRow } from "../components/TenantSwitcher";
-import { ApiError, api } from "../lib/api";
+import { ApiError, client, ok } from "../lib/client";
 import { useSession } from "../lib/session";
 
 export function TenantsPage() {
   const qc = useQueryClient();
   const session = useSession();
-  const tenants = useQuery({ queryKey: ["tenants"], queryFn: () => api<TenantRow[]>("GET", "/api/v1/tenants") });
+  const tenants = useQuery({ queryKey: ["tenants"], queryFn: () => ok(client.GET("/api/v1/tenants")) });
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
   const [error, setError] = useState<string | null>(null);
   const create = useMutation({
-    mutationFn: () => api<TenantRow>("POST", "/api/v1/tenants", { name, slug }),
+    mutationFn: () => ok(client.POST("/api/v1/tenants", { body: { name, slug } })),
     onSuccess: async () => {
       setName("");
       setSlug("");

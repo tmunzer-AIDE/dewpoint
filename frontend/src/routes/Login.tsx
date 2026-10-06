@@ -3,7 +3,7 @@ import { useState, type FormEvent } from "react";
 import { Button } from "../components/Button";
 import { Field } from "../components/Field";
 import { Mark } from "../components/Mark";
-import { ApiError, api } from "../lib/api";
+import { ApiError, client, ok } from "../lib/client";
 import { authenticatePasskey } from "../lib/webauthn";
 
 const MESSAGES: Record<string, string> = {
@@ -32,7 +32,7 @@ export function LoginForm({ onDone }: { onDone: (state: string) => void }) {
 
   function submit(e: FormEvent) {
     e.preventDefault();
-    void run(() => api("POST", "/api/v1/auth/login", { email, password }));
+    void run(() => ok(client.POST("/api/v1/auth/login", { body: { email, password } })));
   }
 
   return (

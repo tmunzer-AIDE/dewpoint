@@ -26,6 +26,12 @@ jobs:
           BEFORE: ${{ github.event.before }}
         run: uv run python -m tests.engine.replay.gate --event "$EVENT" --ref "$REF" --pr-base "$PR_BASE" --before "$BEFORE"
       - run: uv run pip-licenses --fail-on="GPL;AGPL;LGPL;SSPL;BUSL" --partial-match
+      # The web client is generated from the API's schema (sub-project 4, B1): the committed copy must be what the API
+      # serves. Regenerate with `uv run dewpoint api openapi > ../frontend/src/api/openapi.json`, then `pnpm gen:api`.
+      - name: The web client's API schema is current
+        run: |
+          uv run dewpoint api openapi > "$RUNNER_TEMP/openapi.json"
+          diff -u ../frontend/src/api/openapi.json "$RUNNER_TEMP/openapi.json"
   cel-gates:
     # The CEL gates (spec §5.9) in a pinned Linux container: rlimits, fork and cgroup behaviour are Linux's. The
     # engine and evaluator tests need no database, so this job runs without Docker.
@@ -74,6 +80,8 @@ jobs:
           node scripts/licence-check.mjs --self-test
           pnpm licenses list --json --prod | node scripts/licence-check.mjs prod
           pnpm licenses list --json | node scripts/licence-check.mjs all
+      - name: The generated API types match the committed schema
+        run: pnpm check:api
       - run: pnpm lint && pnpm typecheck && pnpm test && pnpm build
   e2e:
     runs-on: ubuntu-latest

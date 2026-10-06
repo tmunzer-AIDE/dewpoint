@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dewpoint.apps.api.responses import CsrfOut, SessionOut, StateOut
 from dewpoint.core.audit.service import record
 from dewpoint.core.auth import throttle, totp
 from dewpoint.core.auth.passwords import hash_password, policy_violations, verify_password
@@ -43,7 +44,7 @@ async def initial_state(db: AsyncSession, user: User, settings: Settings) -> str
     return "enroll_required" if settings.mfa_required else "active"
 
 
-@router.post("/login")
+@router.post("/login", response_model=StateOut)
 async def login(
     body: LoginIn,
     request: Request,
@@ -84,7 +85,7 @@ async def login(
     return {"state": state, "csrf_token": sess.csrf_token}
 
 
-@router.get("/session")
+@router.get("/session", response_model=SessionOut)
 async def session_info(
     sess: AuthSession = Depends(current_session), db: AsyncSession = Depends(get_db, scope="function")
 ) -> dict[str, object]:
@@ -111,7 +112,7 @@ async def logout(
     return response
 
 
-@router.post("/password")
+@router.post("/password", response_model=CsrfOut)
 async def change_password(
     body: PasswordIn,
     response: Response,

@@ -2,7 +2,7 @@
 import { useState, type FormEvent } from "react";
 import { Button } from "../components/Button";
 import { Field } from "../components/Field";
-import { ApiError, api } from "../lib/api";
+import { ApiError, client, ok } from "../lib/client";
 import { useAfterAuth } from "../lib/useAfterAuth";
 import { authenticatePasskey } from "../lib/webauthn";
 
@@ -33,8 +33,10 @@ export function MfaPage() {
 
   function submit(e: FormEvent) {
     e.preventDefault();
-    const path = recovery ? "/api/v1/auth/mfa/recovery" : "/api/v1/auth/mfa/totp";
-    void run(() => api("POST", path, { code: code.trim() }));
+    const body = { code: code.trim() };
+    void run(() =>
+      ok(recovery ? client.POST("/api/v1/auth/mfa/recovery", { body }) : client.POST("/api/v1/auth/mfa/totp", { body })),
+    );
   }
 
   return (

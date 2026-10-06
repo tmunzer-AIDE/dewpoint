@@ -11,7 +11,7 @@ import { QueryCache, QueryClient, QueryClientProvider } from "@tanstack/react-qu
 import { RouterProvider } from "@tanstack/react-router";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { ApiError } from "./lib/api";
+import { ApiError } from "./lib/client";
 import { raiseStepUpRequired } from "./lib/events";
 import { router } from "./router";
 

@@ -19,12 +19,12 @@ router = APIRouter(prefix="/api/v1", tags=["workflows"])
 EMPTY_DRAFT: dict[str, Any] = {"graph_format": 1, "nodes": [], "edges": []}
 
 
-class CreateIn(BaseModel):
+class WorkflowCreateIn(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     draft: dict[str, Any] | None = None
 
 
-class PatchIn(BaseModel):
+class WorkflowPatchIn(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     enabled: bool | None = None
 
@@ -101,7 +101,7 @@ async def list_workflows(
 
 @router.post("/t/{tenant_id}/workflows", status_code=201)
 async def create(
-    body: CreateIn,
+    body: WorkflowCreateIn,
     ctx: TenantContext = Depends(require(P.WORKFLOW_EDIT)),
     db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, object]:
@@ -145,7 +145,7 @@ async def put_draft(
 @router.patch("/t/{tenant_id}/workflows/{workflow_id}")
 async def patch(
     workflow_id: uuid.UUID,
-    body: PatchIn,
+    body: WorkflowPatchIn,
     ctx: TenantContext = Depends(require(P.WORKFLOW_PUBLISH)),
     db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, object]:

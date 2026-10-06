@@ -2,13 +2,14 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dewpoint.apps.api.responses import PlatformStatusOut
 from dewpoint.core.http import active_session, get_db
 from dewpoint.core.platform.service import recorded
 
 router = APIRouter(prefix="/api/v1/platform", tags=["platform"])
 
 
-@router.get("/status", dependencies=[Depends(active_session)])
+@router.get("/status", dependencies=[Depends(active_session)], response_model=PlatformStatusOut)
 async def platform_status(db: AsyncSession = Depends(get_db, scope="function")) -> dict[str, object]:
     """What this deployment is, for the UI's banner (engine 2b spec §2.1: a development deployment says so on every
     screen): its environment, or null before it's recorded, and whether production runs are on. Never the Temporal

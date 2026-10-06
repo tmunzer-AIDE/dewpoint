@@ -2,15 +2,9 @@
 import * as Dropdown from "@radix-ui/react-dropdown-menu";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import { api } from "../lib/api";
+import { client, ok, type Schemas } from "../lib/client";
 
-export interface TenantRow {
-  id: string;
-  name: string;
-  slug: string;
-  role: string;
-  require_passkey: boolean;
-}
+export type TenantRow = Schemas["TenantOut"];
 
 // Pointer hover and keyboard focus both highlight; keyboard focus also draws the global focus ring.
 const ITEM = "flex cursor-pointer justify-between gap-4 rounded-md px-3 py-2 text-body data-[highlighted]:bg-accent-soft data-[highlighted]:text-accent-ink";
@@ -18,7 +12,7 @@ const ITEM = "flex cursor-pointer justify-between gap-4 rounded-md px-3 py-2 tex
 export function TenantSwitcher() {
   const navigate = useNavigate();
   const params = useParams({ strict: false });
-  const tenants = useQuery({ queryKey: ["tenants"], queryFn: () => api<TenantRow[]>("GET", "/api/v1/tenants") });
+  const tenants = useQuery({ queryKey: ["tenants"], queryFn: () => ok(client.GET("/api/v1/tenants")) });
   const current = tenants.data?.find((t) => t.id === params.tenantId);
   return (
     // Non-modal: a modal menu locks scrolling by injecting a <style>, which the CSP refuses, and hides the page from

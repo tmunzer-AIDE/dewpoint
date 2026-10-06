@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps.api.deps import get_keyring
+from dewpoint.apps.api.responses import RecoveryCodesOut, StateOut, TotpEnrollOut
 from dewpoint.core.audit.service import record
 from dewpoint.core.auth import throttle, totp
 from dewpoint.core.auth.sessions import elevate, set_session_cookie
@@ -67,7 +68,7 @@ async def _second_factor(
     return await _complete(db, sess, response, settings, kind)
 
 
-@router.post("/totp")
+@router.post("/totp", response_model=StateOut)
 async def mfa_totp(
     body: CodeIn,
     response: Response,
@@ -79,7 +80,7 @@ async def mfa_totp(
     return await _second_factor("totp", body, response, sess, db, keyring, settings)
 
 
-@router.post("/recovery")
+@router.post("/recovery", response_model=StateOut)
 async def mfa_recovery(
     body: CodeIn,
     response: Response,
@@ -91,7 +92,7 @@ async def mfa_recovery(
     return await _second_factor("recovery", body, response, sess, db, keyring, settings)
 
 
-@router.post("/totp/enroll")
+@router.post("/totp/enroll", response_model=TotpEnrollOut)
 async def enroll(
     sess: AuthSession = Depends(current_session),
     db: AsyncSession = Depends(get_db, scope="function"),
@@ -104,7 +105,7 @@ async def enroll(
     return {"otpauth_uri": await totp.start_enrollment(db, keyring, await _user(db, sess), settings)}
 
 
-@router.post("/totp/reauth")
+@router.post("/totp/reauth", response_model=StateOut)
 async def reauth(
     body: CodeIn,
     response: Response,
@@ -126,7 +127,7 @@ async def reauth(
     return await _complete(db, sess, response, settings, "totp")
 
 
-@router.post("/totp/confirm")
+@router.post("/totp/confirm", response_model=RecoveryCodesOut)
 async def confirm(
     body: CodeIn,
     response: Response,

@@ -5,19 +5,22 @@ import { Button } from "../components/Button";
 import { Field, Select } from "../components/Field";
 import { StatusBadge } from "../components/StatusBadge";
 import { Table, Td, Th } from "../components/Table";
-import { ApiError, api } from "../lib/api";
+import { ApiError, client, ok } from "../lib/client";
 
-interface Conn {
-  id: string; type: string; name: string; revision: number; config: { cloud: string; org_id: string };
-  secret_set: boolean; status: "ok" | "error" | "unverified"; status_detail: string; privilege: string | null;
+/** A Mist connection's config, as the Mist connection type declares it. */
+interface MistConfig {
+  cloud: string;
+  org_id: string;
 }
-interface ConnType { key: string; label: string; clouds?: Record<string, string> }
 
 export function ConnectionsPage({ tenantId }: { tenantId: string }) {
   const qc = useQueryClient();
-  const base = `/api/v1/t/${tenantId}/connections`;
-  const list = useQuery({ queryKey: ["connections", tenantId], queryFn: () => api<Conn[]>("GET", base) });
-  const types = useQuery({ queryKey: ["connection-types"], queryFn: () => api<ConnType[]>("GET", "/api/v1/connection-types") });
+  const path = { tenant_id: tenantId };
+  const list = useQuery({
+    queryKey: ["connections", tenantId],
+    queryFn: () => ok(client.GET("/api/v1/t/{tenant_id}/connections", { params: { path } })),
+  });
+  const types = useQuery({ queryKey: ["connection-types"], queryFn: () => ok(client.GET("/api/v1/connection-types")) });
   const clouds = types.data?.find((t) => t.key === "mist")?.clouds ?? {};
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ name: "", cloud: "global_01", org_id: "", api_token: "" });
@@ -25,10 +28,14 @@ export function ConnectionsPage({ tenantId }: { tenantId: string }) {
   const refresh = () => qc.invalidateQueries({ queryKey: ["connections", tenantId] });
 
   const create = useMutation({
-    mutationFn: () => api<Conn>("POST", base, {
-      type: "mist", name: form.name, config: { cloud: form.cloud, org_id: form.org_id },
-      secret: { api_token: form.api_token },
-    }),
+    mutationFn: () =>
+      ok(client.POST("/api/v1/t/{tenant_id}/connections", {
+        params: { path },
+        body: {
+          type: "mist", name: form.name, config: { cloud: form.cloud, org_id: form.org_id },
+          secret: { api_token: form.api_token },
+        },
+      })),
     onSuccess: async () => {
       setOpen(false);
       setForm({ name: "", cloud: "global_01", org_id: "", api_token: "" });
@@ -40,7 +47,10 @@ export function ConnectionsPage({ tenantId }: { tenantId: string }) {
   });
   const [verifyError, setVerifyError] = useState<string | null>(null);
   const verify = useMutation({
-    mutationFn: (id: string) => api<Conn>("POST", `${base}/${id}/verify`),
+    mutationFn: (id: string) =>
+      ok(client.POST("/api/v1/t/{tenant_id}/connections/{connection_id}/verify", {
+        params: { path: { ...path, connection_id: id } },
+      })),
     onMutate: () => setVerifyError(null),
     onSuccess: refresh,
     onError: async (e) => {
@@ -76,8 +86,8 @@ export function ConnectionsPage({ tenantId }: { tenantId: string }) {
               {list.data?.map((c) => (
                 <tr key={c.id} data-testid="conn-row">
                   <Td className="font-medium">{c.name}</Td>
-                  <Td className="font-mono text-small">{clouds[c.config.cloud] ?? c.config.cloud}</Td>
-                  <Td className="font-mono text-small">{c.config.org_id}</Td>
+                  <Td className="font-mono text-small">{clouds[(c.config as unknown as MistConfig).cloud] ?? (c.config as unknown as MistConfig).cloud}</Td>
+                  <Td className="font-mono text-small">{(c.config as unknown as MistConfig).org_id}</Td>
                   <Td><StatusBadge status={c.status} detail={c.status_detail} privilege={c.privilege} /></Td>
                   <Td className="text-right">
                     <Button size="sm" onClick={() => verify.mutate(c.id)} disabled={verify.isPending}>Verify</Button>

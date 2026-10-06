@@ -62,6 +62,8 @@ deployment_cli = typer.Typer(no_args_is_help=True)
 app.add_typer(deployment_cli, name="deployment")
 platform_cli = typer.Typer(no_args_is_help=True)
 app.add_typer(platform_cli, name="platform")
+api_cli = typer.Typer(no_args_is_help=True)
+app.add_typer(api_cli, name="api")
 
 
 async def _init(email: str, password: str) -> None:
@@ -574,3 +576,12 @@ def dev_run_command(
     typer.echo(f"{end.what} {request_id} {end.status}" + (f": {detail}" if detail else ""))
     if (end.what, end.status) != ("run", "succeeded"):
         raise typer.Exit(1)
+
+
+@api_cli.command("openapi")
+def api_openapi() -> None:
+    """Print the API's OpenAPI schema, exactly as the API serves it, with no server or settings (the web client is
+    generated from it)."""
+    from dewpoint.apps.api.openapi import schema
+
+    typer.echo(json.dumps(schema(), indent=2, sort_keys=True))

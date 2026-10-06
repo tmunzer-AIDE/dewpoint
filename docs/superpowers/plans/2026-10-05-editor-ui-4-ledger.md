@@ -174,3 +174,18 @@ cover local work only: anything outward-facing (push, PR, issues) is confirmed i
     "Development deployment", on every signed-in screen of a development deployment; the browser gate checks it on
     the dev stack. The sign-in screens (login, MFA, enrolment) don't show it: that would take an unauthenticated
     endpoint - the label is missing there until the owner wants one.
+39. Ruling (B1): the routes live in one tuple (`apps/api/openapi.py`) that the app and `dewpoint api openapi` share;
+    a test holds the printed schema to the served one. The two `CreateIn` and `PatchIn` pairs are renamed per module
+    (`Connection…`, `Workflow…`). Slice 4a's routes (auth, MFA, passkeys, tenants, members, connections, platform
+    status) declare response models (`apps/api/responses.py`) that forbid extra keys; where an answer omits a key
+    (a tenant's `role`, a type's `clouds`) `response_model_exclude_unset` keeps the JSON as it was - the existing
+    API and core suites (434 tests) pass unchanged - routes of later slices get theirs as those slices adopt them.
+40. Ruling (D15): the client is openapi-fetch 0.17.0 over types from openapi-typescript 7.13.0 (both approved),
+    generated with `--default-non-nullable false` so request fields the server defaults stay optional. `src/api/
+    openapi.json` and `schema.d.ts` are committed; CI fails when either drifts (backend: the dump against the copy;
+    frontend: `pnpm check:api`). `ok()` keeps ApiError and the CSRF handling; `src/lib/api.ts` is gone. A
+    connection's `config` is free-form per type in the API, so Connections reads a Mist one through a local
+    `MistConfig` - none.
+41. Ruling: the licence check reads SPDX expressions: `A OR B` passes when either is allowed, `A AND B` when both are.
+    `type-fest` (via openapi-typescript, dev) is `(MIT OR CC0-1.0)` and passes under MIT - the owner may want such
+    choices listed for review instead.
