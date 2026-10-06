@@ -73,6 +73,15 @@ def test_slice_4a_routes_name_their_answer(method: str, path: str) -> None:
 # What the web client calls in slice 4b: each answers a named model.
 SLICE_4B = [
     ("get", "/api/v1/node-types"),
+    ("get", "/api/v1/t/{tenant_id}/workflows"),
+    ("post", "/api/v1/t/{tenant_id}/workflows"),
+    ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}"),
+    ("patch", "/api/v1/t/{tenant_id}/workflows/{workflow_id}"),
+    ("put", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft"),
+    ("post", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/validate"),
+    ("post", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/publish"),
+    ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/versions"),
+    ("post", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/activate"),
 ]
 
 
@@ -82,6 +91,30 @@ def test_slice_4b_routes_name_their_answer(method: str, path: str) -> None:
     ok = next(code for code in responses if code.startswith("2"))
     body = responses[ok]["content"]["application/json"]["schema"]
     assert "$ref" in body or "$ref" in body.get("items", {}), body
+
+
+GRAPH = {"$ref": "#/components/schemas/Graph"}
+
+
+def test_the_draft_put_documents_its_body_as_a_graph() -> None:
+    """The route parses a plain object itself, for its `graph.format` diagnostics (ledger ruling 47, 4b ruling 8)."""
+    body = schema()["paths"]["/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft"]["put"]["requestBody"]
+    assert body["content"]["application/json"]["schema"] == GRAPH
+
+
+def test_a_workflow_answer_documents_its_draft_as_a_graph() -> None:
+    assert schema()["components"]["schemas"]["WorkflowDetailOut"]["properties"]["draft"] == GRAPH
+
+
+def test_the_graph_components_are_the_models_own() -> None:
+    """No other component shares a name with one of the graph's models (a clash would mix two shapes)."""
+    from dewpoint.engine.graph.model import Graph
+
+    own = Graph.model_json_schema(mode="validation", ref_template="#/components/schemas/{model}")
+    components = schema()["components"]["schemas"]
+    for name, sub in own.pop("$defs").items():
+        assert components[name] == sub, name
+    assert components["Graph"] == own
 
 
 def test_options_answer_a_named_model() -> None:

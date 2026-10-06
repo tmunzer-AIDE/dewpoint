@@ -25,6 +25,7 @@ from dewpoint.apps.api.routes import (
     webhooks,
     workflows,
 )
+from dewpoint.engine.graph.model import Graph
 
 TITLE = "Dewpoint API"
 OPENAPI_URL = "/api/v1/openapi.json"
@@ -50,9 +51,46 @@ ROUTERS: tuple[APIRouter, ...] = (
 )
 
 
+GRAPH_REF = "#/components/schemas/Graph"
+# Bodies a route parses itself, so it can answer `graph.format` diagnostics and its admission checks (non-finite
+# numbers, depth, value count) that a body model would turn into `{"error": "invalid", "fields": [...]}`.
+GRAPH_BODIES: tuple[tuple[str, str], ...] = (("/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft", "put"),)
+# Answers that carry a graph verbatim, as saved, rather than re-serialized with defaults its author never wrote.
+GRAPH_PROPERTIES: tuple[tuple[str, str], ...] = (("WorkflowDetailOut", "draft"),)
+
+
+def refine(spec: dict[str, Any]) -> dict[str, Any]:
+    """Document as `Graph` what travels as a plain object (ledger ruling 47; 4b ruling 8). FastAPI ignores
+    `WithJsonSchema` on a body and merges `openapi_extra` into the object schema it generates, so the schema is
+    refined here, once, for the API and `dewpoint api openapi` alike."""
+    schemas = spec.setdefault("components", {}).setdefault("schemas", {})
+    graph = Graph.model_json_schema(mode="validation", ref_template="#/components/schemas/{model}")
+    for name, sub in graph.pop("$defs", {}).items():
+        schemas.setdefault(name, sub)
+    schemas.setdefault("Graph", graph)
+    for path, method in GRAPH_BODIES:
+        spec["paths"][path][method]["requestBody"]["content"]["application/json"]["schema"] = {"$ref": GRAPH_REF}
+    for model, prop in GRAPH_PROPERTIES:
+        schemas[model]["properties"][prop] = {"$ref": GRAPH_REF}
+    return spec
+
+
+def serve_refined(app: FastAPI) -> None:
+    """Make `app` serve the refined schema at OPENAPI_URL."""
+    generate = app.openapi
+
+    def openapi() -> dict[str, Any]:
+        if app.openapi_schema is None:
+            app.openapi_schema = refine(generate())
+        return app.openapi_schema
+
+    app.openapi = openapi  # type: ignore[method-assign]
+
+
 def schema() -> dict[str, Any]:
-    """The schema the API serves at OPENAPI_URL: the same title and routes, in the same order."""
+    """The schema the API serves at OPENAPI_URL: the same title and routes, in the same order, refined alike."""
     app = FastAPI(title=TITLE, docs_url=None, redoc_url=None, openapi_url=OPENAPI_URL)
     for router in ROUTERS:
         app.include_router(router)
+    serve_refined(app)
     return app.openapi()

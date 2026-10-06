@@ -1141,6 +1141,15 @@ export interface components {
              */
             version_id: string;
         };
+        /** ActivatedOut */
+        ActivatedOut: {
+            /** Active Version Id */
+            active_version_id: string;
+            /** Number */
+            number: number;
+            /** Warnings */
+            warnings: components["schemas"]["DiagnosticOut"][];
+        };
         /** AddIn */
         AddIn: {
             /** Email */
@@ -1298,6 +1307,42 @@ export interface components {
             csrf_token: string;
         };
         /**
+         * CsvColumn
+         * @description One column of a CSV declaration (engine 2b spec §8.1). Its `default` is omitted unless written: an omitted
+         *     default is allowed on a sensitive column, a written one (even null) isn't (§3.8), so the two stay distinct.
+         */
+        CsvColumn: {
+            /**
+             * Default
+             * @default null
+             */
+            default?: unknown;
+            /** Header */
+            header: string;
+            /** Name */
+            name: string;
+            /**
+             * Required
+             * @default false
+             */
+            required?: boolean;
+            /**
+             * Sensitive
+             * @default false
+             */
+            sensitive?: boolean;
+            /**
+             * Type
+             * @enum {string}
+             */
+            type: "string" | "integer" | "number" | "boolean" | "mac" | "ip" | "cidr" | "enum";
+            /**
+             * Values
+             * @default null
+             */
+            values?: string[] | null;
+        };
+        /**
          * CsvIn
          * @description A staged upload (`POST …/csv-uploads`), the mapping from declared column names to its headers, and whether rows
          *     that break a rule are skipped (and recorded) rather than refusing the start (engine 2b spec §8.1).
@@ -1317,6 +1362,96 @@ export interface components {
              * Format: uuid
              */
             upload_id: string;
+        };
+        /** CsvSettings */
+        CsvSettings: {
+            /** Columns */
+            columns: components["schemas"]["CsvColumn"][];
+            /**
+             * Max Bytes
+             * @default 5242880
+             */
+            max_bytes?: number;
+            /**
+             * Max Rows
+             * @default 10000
+             */
+            max_rows?: number;
+        };
+        /** DeclassifiedOut */
+        DeclassifiedOut: {
+            /** Field */
+            field: string;
+            /** Node */
+            node: string;
+            /** Reveals */
+            reveals: string;
+        };
+        /**
+         * DeclassifySite
+         * @description A decision that may turn tainted input into plain output (engine 2b spec §4.3): a node and its field.
+         */
+        DeclassifySite: {
+            /** Field */
+            field: string;
+            /**
+             * Node
+             * Format: uuid
+             */
+            node: string;
+        };
+        /**
+         * DiagnosticOut
+         * @description A problem with a graph: `node` is a node's id, or null for the workflow; `field` is a JSON pointer inside the
+         *     node's config, `/settings/...` for the workflow's, or into the whole document for `graph.format`.
+         */
+        DiagnosticOut: {
+            /** Code */
+            code: string;
+            /** Field */
+            field: string | null;
+            /** Fix */
+            fix: string | null;
+            /** Message */
+            message: string;
+            /** Node */
+            node: string | null;
+            /**
+             * Severity
+             * @enum {string}
+             */
+            severity: "error" | "warning";
+        };
+        /** DraftSavedOut */
+        DraftSavedOut: {
+            /** Draft Revision */
+            draft_revision: number;
+        };
+        /** Edge */
+        Edge: {
+            from: components["schemas"]["EdgeFrom"];
+            to: components["schemas"]["EdgeTo"];
+        };
+        /** EdgeFrom */
+        EdgeFrom: {
+            /**
+             * Node
+             * Format: uuid
+             */
+            node: string;
+            /**
+             * Port
+             * @default out
+             */
+            port?: string;
+        };
+        /** EdgeTo */
+        EdgeTo: {
+            /**
+             * Node
+             * Format: uuid
+             */
+            node: string;
         };
         /** EndpointIn */
         EndpointIn: {
@@ -1383,6 +1518,85 @@ export interface components {
             timestamp_header?: string | null;
             /** Tolerance S */
             tolerance_s?: number | null;
+        };
+        /**
+         * ExpressionOut
+         * @description How one CEL value runs (engine-core §5.10): "local" inline, "activity" as a separate step, with why.
+         */
+        ExpressionOut: {
+            /** Field */
+            field: string;
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "local" | "activity";
+            /** Node */
+            node: string | null;
+            /** Reason */
+            reason: string | null;
+        };
+        /** Graph */
+        Graph: {
+            /**
+             * Edges
+             * @default []
+             */
+            edges?: components["schemas"]["Edge"][];
+            /**
+             * Graph Format
+             * @default 1
+             * @constant
+             */
+            graph_format?: 1;
+            /**
+             * Nodes
+             * @default []
+             */
+            nodes?: components["schemas"]["GraphNode"][];
+            settings?: components["schemas"]["GraphSettings"];
+        };
+        /** GraphNode */
+        GraphNode: {
+            /** Config */
+            config?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Key */
+            key: string;
+            options?: components["schemas"]["Options"];
+            position?: components["schemas"]["Position"];
+            /** Type */
+            type: string;
+        };
+        /** GraphSettings */
+        GraphSettings: {
+            /** @default null */
+            csv?: components["schemas"]["CsvSettings"] | null;
+            /** Declassify */
+            declassify?: components["schemas"]["DeclassifySite"][];
+            /**
+             * Failure Handler
+             * @default null
+             */
+            failure_handler?: string | null;
+            /** Input Schema */
+            input_schema?: {
+                [key: string]: unknown;
+            };
+            /** Outputs */
+            outputs?: {
+                [key: string]: unknown;
+            };
+            /** Vars Schema */
+            vars_schema?: {
+                [key: string]: unknown;
+            };
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -1500,6 +1714,25 @@ export interface components {
             /** Value */
             value: string;
         };
+        /** Options */
+        Options: {
+            /**
+             * Max Attempts
+             * @default null
+             */
+            max_attempts?: number | null;
+            /**
+             * On Error
+             * @default fail
+             * @enum {string}
+             */
+            on_error?: "fail" | "continue" | "port";
+            /**
+             * Timeout S
+             * @default null
+             */
+            timeout_s?: number | null;
+        };
         /** OptionsIn */
         OptionsIn: {
             /** Connection Id */
@@ -1553,6 +1786,28 @@ export interface components {
             environment: ("production" | "development") | null;
             /** Production Runs */
             production_runs: boolean;
+        };
+        /** Position */
+        Position: {
+            /**
+             * X
+             * @default 0
+             */
+            x?: number;
+            /**
+             * Y
+             * @default 0
+             */
+            y?: number;
+        };
+        /** PublishedOut */
+        PublishedOut: {
+            /** Number */
+            number: number;
+            /** Version Id */
+            version_id: string;
+            /** Warnings */
+            warnings: components["schemas"]["DiagnosticOut"][];
         };
         /** RecoveryCodesOut */
         RecoveryCodesOut: {
@@ -1705,6 +1960,20 @@ export interface components {
              */
             state: "mfa_pending" | "enroll_required" | "active";
         };
+        /** TaintOut */
+        TaintOut: {
+            /** Declassified */
+            declassified: components["schemas"]["DeclassifiedOut"][];
+            /** Sites */
+            sites: components["schemas"]["TaintSiteOut"][];
+        };
+        /** TaintSiteOut */
+        TaintSiteOut: {
+            /** Field */
+            field: string;
+            /** Node */
+            node: string;
+        };
         /** TenantIn */
         TenantIn: {
             /** Name */
@@ -1757,6 +2026,22 @@ export interface components {
             /** Error Type */
             type: string;
         };
+        /**
+         * ValidationOut
+         * @description The saved draft's diagnostics, at the revision they were computed for: an editor shows an answer for an older
+         *     revision as stale, never as current (D17; 4b ruling 24).
+         */
+        ValidationOut: {
+            /** Diagnostics */
+            diagnostics: components["schemas"]["DiagnosticOut"][];
+            /** Draft Revision */
+            draft_revision: number;
+            /** Expressions */
+            expressions: components["schemas"]["ExpressionOut"][];
+            taint: components["schemas"]["TaintOut"];
+            /** Valid */
+            valid: boolean;
+        };
         /** VerifyIn */
         VerifyIn: {
             /**
@@ -1774,6 +2059,31 @@ export interface components {
              */
             name?: string;
         };
+        /** VersionOut */
+        VersionOut: {
+            /** Active */
+            active: boolean;
+            /** Blocked By */
+            blocked_by: string[];
+            /** Cel Profile */
+            cel_profile: string;
+            /** Executable */
+            executable: boolean;
+            /** Graph Hash */
+            graph_hash: string;
+            /** Id */
+            id: string;
+            /** Node Refs */
+            node_refs: string[];
+            /** Number */
+            number: number;
+            /** Published At */
+            published_at: string;
+            /** Published By */
+            published_by: string | null;
+            /** Version Hash */
+            version_hash: string;
+        };
         /** WorkflowCreateIn */
         WorkflowCreateIn: {
             /** Draft */
@@ -1783,12 +2093,84 @@ export interface components {
             /** Name */
             name: string;
         };
+        /** WorkflowDetailOut */
+        WorkflowDetailOut: {
+            /** Active Version Id */
+            active_version_id: string | null;
+            /** Active Version Number */
+            active_version_number: number | null;
+            /** Blocked By */
+            blocked_by: string[];
+            /** Created At */
+            created_at: string;
+            draft: components["schemas"]["Graph"];
+            /** Draft Revision */
+            draft_revision: number;
+            /** Enabled */
+            enabled: boolean;
+            /** Executable */
+            executable: boolean | null;
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /** Updated At */
+            updated_at: string;
+        };
+        /** WorkflowOut */
+        WorkflowOut: {
+            /** Active Version Id */
+            active_version_id: string | null;
+            /** Active Version Number */
+            active_version_number: number | null;
+            /** Blocked By */
+            blocked_by: string[];
+            /** Created At */
+            created_at: string;
+            /** Draft Revision */
+            draft_revision: number;
+            /** Enabled */
+            enabled: boolean;
+            /** Executable */
+            executable: boolean | null;
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /** Updated At */
+            updated_at: string;
+        };
         /** WorkflowPatchIn */
         WorkflowPatchIn: {
             /** Enabled */
             enabled?: boolean | null;
             /** Name */
             name?: string | null;
+        };
+        /** WorkflowUpdatedOut */
+        WorkflowUpdatedOut: {
+            /** Active Version Id */
+            active_version_id: string | null;
+            /** Active Version Number */
+            active_version_number: number | null;
+            /** Blocked By */
+            blocked_by: string[];
+            /** Created At */
+            created_at: string;
+            /** Draft Revision */
+            draft_revision: number;
+            /** Enabled */
+            enabled: boolean;
+            /** Executable */
+            executable: boolean | null;
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /** Updated At */
+            updated_at: string;
+            /** Warnings */
+            warnings: components["schemas"]["DiagnosticOut"][];
         };
     };
     responses: never;
@@ -3599,9 +3981,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    }[];
+                    "application/json": components["schemas"]["WorkflowOut"][];
                 };
             };
             /** @description Validation Error */
@@ -3636,9 +4016,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["WorkflowDetailOut"];
                 };
             };
             /** @description Validation Error */
@@ -3670,9 +4048,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["WorkflowDetailOut"];
                 };
             };
             /** @description Validation Error */
@@ -3708,9 +4084,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["WorkflowUpdatedOut"];
                 };
             };
             /** @description Validation Error */
@@ -3746,9 +4120,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ActivatedOut"];
                 };
             };
             /** @description Validation Error */
@@ -3848,9 +4220,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": {
-                    [key: string]: unknown;
-                };
+                "application/json": components["schemas"]["Graph"];
             };
         };
         responses: {
@@ -3860,9 +4230,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["DraftSavedOut"];
                 };
             };
             /** @description Validation Error */
@@ -3932,9 +4300,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["PublishedOut"];
                 };
             };
             /** @description Validation Error */
@@ -4112,9 +4478,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ValidationOut"];
                 };
             };
             /** @description Validation Error */
@@ -4146,9 +4510,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    }[];
+                    "application/json": components["schemas"]["VersionOut"][];
                 };
             };
             /** @description Validation Error */

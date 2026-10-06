@@ -152,6 +152,105 @@ class NodeTypeOut(_Answer):
     timeout_s: float
 
 
+class DiagnosticOut(_Answer):
+    """A problem with a graph: `node` is a node's id, or null for the workflow; `field` is a JSON pointer inside the
+    node's config, `/settings/...` for the workflow's, or into the whole document for `graph.format`."""
+
+    code: str
+    message: str
+    node: str | None
+    field: str | None
+    fix: str | None
+    severity: Literal["error", "warning"]
+
+
+class WorkflowOut(_Answer):
+    id: str
+    name: str
+    enabled: bool
+    draft_revision: int
+    active_version_id: str | None
+    active_version_number: int | None
+    executable: bool | None  # null when nothing is published
+    blocked_by: list[str]  # the lifecycle entries that keep the active version from running
+    created_at: str
+    updated_at: str
+
+
+class WorkflowDetailOut(WorkflowOut):
+    draft: dict[str, Any]  # verbatim, as saved; the schema documents it as a Graph (openapi.refine)
+
+
+class WorkflowUpdatedOut(WorkflowOut):
+    warnings: list[DiagnosticOut]
+
+
+class DraftSavedOut(_Answer):
+    draft_revision: int
+
+
+class ExpressionOut(_Answer):
+    """How one CEL value runs (engine-core §5.10): "local" inline, "activity" as a separate step, with why."""
+
+    node: str | None  # null for a workflow output
+    field: str
+    mode: Literal["local", "activity"]
+    reason: str | None
+
+
+class TaintSiteOut(_Answer):
+    node: str
+    field: str
+
+
+class DeclassifiedOut(_Answer):
+    node: str
+    field: str
+    reveals: str
+
+
+class TaintOut(_Answer):
+    sites: list[TaintSiteOut]
+    declassified: list[DeclassifiedOut]
+
+
+class ValidationOut(_Answer):
+    """The saved draft's diagnostics, at the revision they were computed for: an editor shows an answer for an older
+    revision as stale, never as current (D17; 4b ruling 24)."""
+
+    draft_revision: int
+    valid: bool
+    diagnostics: list[DiagnosticOut]
+    expressions: list[ExpressionOut]
+    taint: TaintOut
+
+
+class PublishedOut(_Answer):
+    version_id: str
+    number: int
+    warnings: list[DiagnosticOut]
+
+
+class VersionOut(_Answer):
+    id: str
+    number: int
+    published_at: str
+    published_by: str | None
+    graph_hash: str
+    version_hash: str
+    cel_profile: str
+    node_refs: list[str]
+    active: bool
+    executable: bool
+    blocked_by: list[str]
+
+
+class ActivatedOut(_Answer):
+    active_version_id: str
+    number: int
+    warnings: list[DiagnosticOut]
+
+
 class OptionOut(_Answer):
     value: str
     label: str

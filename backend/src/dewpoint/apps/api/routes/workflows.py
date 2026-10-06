@@ -10,7 +10,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps import workflow_ops
 from dewpoint.apps.api.deps import get_keyring
-from dewpoint.apps.api.responses import OptionsOut
+from dewpoint.apps.api.responses import (
+    ActivatedOut,
+    DraftSavedOut,
+    OptionsOut,
+    PublishedOut,
+    ValidationOut,
+    VersionOut,
+    WorkflowDetailOut,
+    WorkflowOut,
+    WorkflowUpdatedOut,
+)
 from dewpoint.apps.api.routes.node_types import ask_and_wait, options_reply, still_current
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.config import Settings
@@ -101,14 +111,14 @@ def _version_out(v: WorkflowVersion, active_id: uuid.UUID | None, blocked: list[
     }
 
 
-@router.get("/t/{tenant_id}/workflows")
+@router.get("/t/{tenant_id}/workflows", response_model=list[WorkflowOut])
 async def list_workflows(
     ctx: TenantContext = Depends(require(P.WORKFLOW_VIEW)), db: AsyncSession = Depends(get_db, scope="function")
 ) -> list[dict[str, object]]:
     return [await _summary(db, wf) for wf in await service.list_workflows(db, ctx.tenant_id)]
 
 
-@router.post("/t/{tenant_id}/workflows", status_code=201)
+@router.post("/t/{tenant_id}/workflows", status_code=201, response_model=WorkflowDetailOut)
 async def create(
     body: WorkflowCreateIn,
     ctx: TenantContext = Depends(require(P.WORKFLOW_EDIT)),
@@ -123,7 +133,7 @@ async def create(
     return {**await _summary(db, wf), "draft": wf.draft}
 
 
-@router.get("/t/{tenant_id}/workflows/{workflow_id}")
+@router.get("/t/{tenant_id}/workflows/{workflow_id}", response_model=WorkflowDetailOut)
 async def get_one(
     workflow_id: uuid.UUID,
     ctx: TenantContext = Depends(require(P.WORKFLOW_VIEW)),
@@ -133,7 +143,7 @@ async def get_one(
     return {**await _summary(db, wf), "draft": wf.draft}
 
 
-@router.put("/t/{tenant_id}/workflows/{workflow_id}/draft")
+@router.put("/t/{tenant_id}/workflows/{workflow_id}/draft", response_model=DraftSavedOut)
 async def put_draft(
     workflow_id: uuid.UUID,
     draft: dict[str, Any] = Body(...),
@@ -151,7 +161,7 @@ async def put_draft(
     return {"draft_revision": revision}
 
 
-@router.patch("/t/{tenant_id}/workflows/{workflow_id}")
+@router.patch("/t/{tenant_id}/workflows/{workflow_id}", response_model=WorkflowUpdatedOut)
 async def patch(
     workflow_id: uuid.UUID,
     body: WorkflowPatchIn,
@@ -169,7 +179,7 @@ async def patch(
     return {**await _summary(db, wf), "warnings": [w.to_json() for w in warnings]}
 
 
-@router.post("/t/{tenant_id}/workflows/{workflow_id}/validate")
+@router.post("/t/{tenant_id}/workflows/{workflow_id}/validate", response_model=ValidationOut)
 async def validate_draft(
     workflow_id: uuid.UUID,
     ctx: TenantContext = Depends(require(P.WORKFLOW_EDIT)),
@@ -196,7 +206,7 @@ async def validate_draft(
     }
 
 
-@router.post("/t/{tenant_id}/workflows/{workflow_id}/publish", status_code=201)
+@router.post("/t/{tenant_id}/workflows/{workflow_id}/publish", status_code=201, response_model=PublishedOut)
 async def publish(
     workflow_id: uuid.UUID,
     if_match: str | None = Header(default=None, alias="If-Match"),
@@ -220,7 +230,7 @@ async def publish(
     }
 
 
-@router.get("/t/{tenant_id}/workflows/{workflow_id}/versions")
+@router.get("/t/{tenant_id}/workflows/{workflow_id}/versions", response_model=list[VersionOut])
 async def versions(
     workflow_id: uuid.UUID,
     ctx: TenantContext = Depends(require(P.WORKFLOW_VIEW)),
@@ -233,7 +243,7 @@ async def versions(
     ]
 
 
-@router.post("/t/{tenant_id}/workflows/{workflow_id}/activate")
+@router.post("/t/{tenant_id}/workflows/{workflow_id}/activate", response_model=ActivatedOut)
 async def activate(
     workflow_id: uuid.UUID,
     body: ActivateIn,
