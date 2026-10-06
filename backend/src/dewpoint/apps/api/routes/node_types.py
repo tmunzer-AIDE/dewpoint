@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps.api.deps import get_keyring
+from dewpoint.apps.api.responses import OptionsOut
 from dewpoint.core.authz.permissions import ROLE_PERMISSIONS, P
 from dewpoint.core.connections.declared import declared_types
 from dewpoint.core.crypto.keyring import Keyring
@@ -104,7 +105,7 @@ async def still_current(request: Request, tenant_id: uuid.UUID, connection_id: u
         raise HTTPException(409, detail={"error": "connection_changed"})
 
 
-@router.post("/t/{tenant_id}/node-types/{ref}/options")
+@router.post("/t/{tenant_id}/node-types/{ref}/options", response_model=OptionsOut)
 async def node_options(
     ref: str,
     body: OptionsIn,

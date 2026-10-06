@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps import workflow_ops
 from dewpoint.apps.api.deps import get_keyring
+from dewpoint.apps.api.responses import OptionsOut
 from dewpoint.apps.api.routes.node_types import ask_and_wait, options_reply, still_current
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.config import Settings
@@ -256,7 +257,7 @@ class InputOptionsIn(BaseModel):
     query: str = Field(default="", max_length=200)
 
 
-@router.post("/t/{tenant_id}/workflows/{workflow_id}/input-options")
+@router.post("/t/{tenant_id}/workflows/{workflow_id}/input-options", response_model=OptionsOut)
 async def input_options(
     workflow_id: uuid.UUID,
     body: InputOptionsIn,

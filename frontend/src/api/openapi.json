@@ -715,6 +715,27 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "InputOptionsIn": {
+        "properties": {
+          "field": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Field",
+            "type": "string"
+          },
+          "query": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Query",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field"
+        ],
+        "title": "InputOptionsIn",
+        "type": "object"
+      },
       "LoginIn": {
         "properties": {
           "email": {
@@ -816,6 +837,76 @@
           "role"
         ],
         "title": "MemberRoleOut",
+        "type": "object"
+      },
+      "OptionOut": {
+        "additionalProperties": false,
+        "properties": {
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "label"
+        ],
+        "title": "OptionOut",
+        "type": "object"
+      },
+      "OptionsIn": {
+        "properties": {
+          "connection_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Connection Id"
+          },
+          "field": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Field",
+            "type": "string"
+          },
+          "query": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Query",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field"
+        ],
+        "title": "OptionsIn",
+        "type": "object"
+      },
+      "OptionsOut": {
+        "additionalProperties": false,
+        "description": "A node's options, from its `options()` on a worker (plugins-3 D3), for the editor or a start form's picker.",
+        "properties": {
+          "options": {
+            "items": {
+              "$ref": "#/components/schemas/OptionOut"
+            },
+            "title": "Options",
+            "type": "array"
+          }
+        },
+        "required": [
+          "options"
+        ],
+        "title": "OptionsOut",
         "type": "object"
       },
       "PasskeyOptionsOut": {
@@ -2198,6 +2289,7 @@
     },
     "/api/v1/connection-types": {
       "get": {
+        "description": "The types the synced plugins declare (plugins-3 D11), by key.",
         "operationId": "connection_types_api_v1_connection_types_get",
         "responses": {
           "200": {
@@ -2698,6 +2790,7 @@
     },
     "/api/v1/t/{tenant_id}/connections/{connection_id}/verify": {
       "post": {
+        "description": "Verified by the type's `verify()` on a worker (plugins-3 D3): the API sends nothing itself.",
         "operationId": "verify_api_v1_t__tenant_id__connections__connection_id__verify_post",
         "parameters": [
           {
@@ -3096,6 +3189,69 @@
         "summary": "Change",
         "tags": [
           "members"
+        ]
+      }
+    },
+    "/api/v1/t/{tenant_id}/node-types/{ref}/options": {
+      "post": {
+        "description": "The choices for one of a node type's options fields, from its `options()` on a worker (plugins-3 D3), through\nthe connection the editor names, which the person must be allowed to use.",
+        "operationId": "node_options_api_v1_t__tenant_id__node_types__ref__options_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ref",
+            "required": true,
+            "schema": {
+              "title": "Ref",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OptionsIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OptionsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Node Options",
+        "tags": [
+          "node-types"
         ]
       }
     },
@@ -4689,6 +4845,70 @@
           }
         },
         "summary": "Put Draft",
+        "tags": [
+          "workflows"
+        ]
+      }
+    },
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/input-options": {
+      "post": {
+        "description": "A start form's choices for one of its pickers (plugins-3 D19): the picker's node's `options()` on a worker,\nthrough the connection the active version's publisher wrote, which anyone who may start the workflow may list.",
+        "operationId": "input_options_api_v1_t__tenant_id__workflows__workflow_id__input_options_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InputOptionsIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OptionsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Input Options",
         "tags": [
           "workflows"
         ]

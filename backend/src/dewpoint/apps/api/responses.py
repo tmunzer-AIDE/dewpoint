@@ -115,3 +115,14 @@ class ConnectionDetailOut(ConnectionOut):
 class PlatformStatusOut(_Answer):
     environment: Literal["production", "development"] | None
     production_runs: bool
+
+
+class OptionOut(_Answer):
+    value: str
+    label: str
+
+
+class OptionsOut(_Answer):
+    """A node's options, from its `options()` on a worker (plugins-3 D3), for the editor or a start form's picker."""
+
+    options: list[OptionOut]
