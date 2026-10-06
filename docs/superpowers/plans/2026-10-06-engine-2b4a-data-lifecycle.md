@@ -47,8 +47,9 @@ outline (`docs/superpowers/plans/2026-10-05-engine-2b4-retention-production.md`)
   on, and schedules keep `ALLOW_ALL` overlap (the owner's M4 rulings).
 - An erasure can't be undone: once `erasing` is committed, it can be stopped and retried, never reversed (D3a).
 - Every writer of tenant data takes the tenant's lifecycle lock shared and checks `active` in its write's transaction;
-  step 1 takes the lock exclusively. From stage 60, an insert fence refuses the tenant's rows in every table holding
-  tenant data (SQLSTATE `DPE01`), whatever the writer.
+  step 1 takes the lock exclusively. A plugin call holds a lock of its own, the tenant's plugin-call lock, from its
+  check of `active` through its claim, hook and answer, and step 1 takes that one first. From stage 60, an insert fence
+  refuses the tenant's rows in every table holding tenant data (SQLSTATE `DPE01`), whatever the writer.
 - Only `dewpoint_retention` deletes retained rows; only `audit_prune()` deletes audit entries; the key admin rewrites
   sealed columns only.
 - `keys reencrypt` keeps each record's plaintext, purpose and context: that's the command's behaviour, not a grant's
@@ -87,9 +88,11 @@ exercise. Each stays open past this plan, and the reviewer weighs each deliberat
 - **A Temporal namespace whose retention is unknown, above 30 days, or changed.** Retirement fails closed, and an
   erasure holds (`retention_unread`, `retention_above_bound`). No namespace-change boundary is verified until 2b-4b's
   proof records one (D3g), so every erasure also holds on `boundary_unverified`.
-- **Many executions and incarnations.** `keys retire` describes and reads the history of every execution with evidence
-  (its worst-case time is an operational measurement still to make, the owner's M3 ruling), and every incarnation that
-  isn't current is described every hour, for good. Both add Temporal calls to the leader's serial cycle (§7.9, 2b-4b).
+- **Many executions, incarnations and plugin calls.** `keys retire` describes and reads the history of every execution
+  with evidence (its worst-case time is an operational measurement still to make, the owner's M3 ruling), and every
+  incarnation that isn't current is described every hour, for good: both add Temporal calls to the leader's serial
+  cycle (§7.9, 2b-4b). Each plugin call in flight holds one of the worker's pooled connections for its hook (at most 10
+  seconds, up to its concurrency of 8), beside the worker's activities, and an erasure's start waits for them.
 
 ## File structure
 
@@ -106,12 +109,13 @@ New:
 - Docs: `docs/operations/retention.md`, `docs/operations/erasure.md`; and the tests listed in each task.
 
 Changed:
-- The API: `apps/api/openapi.py` (the routers), `routes/run_requests.py`, `routes/runs.py`, `routes/schedules.py`,
-  `routes/webhooks.py`, `core/http.py`; the web client's `frontend/src/api/openapi.json` and `schema.d.ts`.
+- The API: `apps/api/openapi.py` (the routers), `routes/connections.py`, `routes/node_types.py`,
+  `routes/run_requests.py`, `routes/runs.py`, `routes/schedules.py`, `routes/webhooks.py`, `core/http.py`; the web
+  client's `frontend/src/api/openapi.json` and `schema.d.ts`.
 - Writers and the dispatcher: `apps/admission.py`, `apps/cancels.py`, `apps/dev_run.py`, `apps/runs.py`,
   `apps/schedules.py`, `apps/webhooks.py`, `apps/codec.py`, `apps/dispatcher/` (`dispatch.py`, `main.py`,
   `schedule_sync.py`, `tick.py`, `tick_workflow.py`), `apps/ingress/` (`config.py`, `main.py`, `recording.py`),
-  `apps/cli/main.py`.
+  `apps/worker/plugin_calls.py`, `core/plugins/asking.py`, `apps/cli/main.py`.
 - The core: `core/config.py`, `core/audit/anchor.py` and `service.py`, `core/crypto/ingress.py` and `keyring.py`,
   `core/ingress/keys.py`, `core/platform/service.py`, `core/runs/service.py`, `core/tenancy/service.py`, and the models
   (`core/models/`: `__init__.py`, `audit.py`, `claims.py`, `connections.py`, `egress.py`, `ingress.py`, `platform.py`,
@@ -130,11 +134,11 @@ end of pytest's output: the tail of the last failure and the short summary, whos
 longer, with the count of those left out. The replay ran 2 to 4 pytest-xdist workers; the count changes no result.
 
 The diffs are exact, as git wrote them. Git writes a blank line of context as a single space, so `git diff --check`
-reports each of those 524 lines in this file as trailing whitespace; they're part of the patches, and no line a diff
+reports each of those 532 lines in this file as trailing whitespace; they're part of the patches, and no line a diff
 adds ends in whitespace. A diff that holds a Markdown fence is fenced with four backticks. The 2b-2, 2b-3a and 2b-3b
 plans carry the same lines.
 
-The commits are the local branch `proto/2b4a-v5`, cut from `main` at `f65c6f9`, one commit per task:
+The commits are the local branch `proto/2b4a-v6`, cut from `main` at `f65c6f9`, one commit per task:
 - `proto/2b4a-v1`, cut from `main` at `6482c53`, was built milestone by milestone, with the owner's checkpoint after
   each; all four milestones were approved as prototype checkpoints (below), its last at `7d5b20b`.
 - `main` then moved: plugins-3a-1 (migration 0041: `egress_allowlist`, whose `tenant_id` is null for an exception for
@@ -172,8 +176,13 @@ The commits are the local branch `proto/2b4a-v5`, cut from `main` at `f65c6f9`, 
   that owns its code: Task 1 the re-chain and the models, Task 6 the answers' re-encryption, Task 7 the fence, Task 10
   the sweep, Task 11 the guide's row; Tasks 2, 3 and 11 regenerate the schema on #44's, and Task 12's fence lists take
   the union of their names again. Tasks 1, 2, 3, 6, 7, 10, 11 and 12 were recorded again on it; Tasks 4, 5, 8 and 9,
-  whose patches are `proto/2b4a-v3`'s but for git's index lines, keep its records, which each names. Its last tree is
-  `proto/2b4a-int`'s.
+  whose patches are `proto/2b4a-v3`'s but for git's index lines, keep its records, which each names.
+- `proto/2b4a-v6` folds in the owner's review of v5 (milestone ruling 8): plugin calls weren't fenced by the tenant's
+  lifecycle rule. Task 8 now fences them at step 1 (the ask rechecks `active`; a worker holds the tenant's plugin-call
+  lock from its check through the claim, the hook and the answer; step 1 takes it first), made test-first on
+  `proto/2b4a-int` and recorded again; Task 11's guide describes it. Tasks 1 to 7 are `proto/2b4a-v5`'s commits, and
+  Tasks 9, 10 and 12 its patches, keeping their records, as does Task 11, whose patch differs only in the guide. Its
+  last tree is `proto/2b4a-int`'s.
 
 Each commit was verified this way:
 - its diff in this file is exact: the twelve, taken from this file and applied in order on `f65c6f9`, give Task 12's
@@ -191,11 +200,12 @@ Each commit was verified this way:
 
 Per the owner's ruling on the outline, the whole suite runs once, at the end, not at every task. The prototype's last
 whole-suite run (`3fda97c`, whose code is `7d5b20b`'s) passed: 2,742 passed, 8 skipped, in about 13 minutes locally.
-On `proto/2b4a-v5`'s last tree (run as `proto/2b4a-int`'s at `cef6823`, the same tree), the whole suite passed: 3,231
-passed, 8 skipped, in 9 minutes 5 seconds locally with `-n auto`. Earlier runs: on `proto/2b4a-v3`'s last tree
+On `proto/2b4a-v6`'s last tree (run as `proto/2b4a-int`'s at `e5c2998`, the same tree), the whole suite passed: 3,237
+passed, 8 skipped, in 9 minutes 14 seconds locally with `-n auto`. Earlier runs: on `proto/2b4a-v3`'s last tree
 (`215e559`), only #42's naming test failed, which Task 11 now passes; on `proto/2b4a-v4`'s (`4c3c696`), 3,011 passed;
 on `proto/2b4a-int` once it had merged `f65c6f9` and followed 0042, only the fence's inventory and the models'
-comparison failed, both for #44's tables, which milestone ruling 7's fixes answer.
+comparison failed, both for #44's tables, which milestone ruling 7's fixes answer; on `proto/2b4a-v5`'s (`6eae38c`),
+3,231 passed.
 
 ## Executing this plan
 
@@ -314,6 +324,14 @@ tasks named.
    owner ruled to rebase first and review the delta, and that plugin calls' answers are sealed again by `keys
    reencrypt` and counted by `keys retire`, as their plugins-3 correction requires (never relying on a call's
    duration). Erasure fences and sweeps them in any case.
+8. **The review of v5 (2026-10-06).** Not approved for prototype execution: the migration, key inventory, models and
+   stage 80's sweep account for plugin calls, but their path wasn't fenced by the tenant's lifecycle rule. A call
+   queued before step 1 could still be claimed and its hook run, reaching the tenant's connection, and a hook in flight
+   could write its answer after the tenant was `erasing`: neither the claim nor the answer took the lifecycle lock, and
+   the fence refuses inserts only. The API's ask, in a transaction of its own, inserted without rechecking `active`.
+   The owner asked for plugin-call admission and execution serialized with step 1, with race regressions for a queued
+   and an in-flight call; Task 8's fence answers it. The no-push, no-Compose, `ALLOW_ALL` and `firing_bound_unproven`
+   gates remain.
 
 **Open and separate:** issues #16, #18 and #26; §7.9's other items; 2b-4b (production Temporal and its proofs, #3's
 anchor sink, the readiness checks and the gate lift); the deferred minors of 2b-3a, 2b-3b and this prototype; the firing
@@ -323,7 +341,7 @@ bound's design.
 
 ### Task 1: Every key between two tenant tables carries the tenant, and the models declare every key (#35)
 
-**Commit:** `3e15fd6` (`proto/2b4a-v5`), replayed as it is: on `f65c6f9`, 0035 following 0042 and plugin calls modelled
+**Commit:** `3e15fd6` (`proto/2b4a-v6`), replayed as it is: on `f65c6f9`, 0035 following 0042 and plugin calls modelled
 (milestone ruling 7). It folds `proto/2b4a-v1`'s `588a058` and `3e60a74`; `1b16227`, but for `retention.py`, the runs'
 root key and `AuditCheckpoint`, which Tasks 3 and 4 add; and `8adb1a8`. From `proto/2b4a-int`: `a6aac25` and `599315c`
 (0035 follows 0042, after 0041, plugins-3 D25), `40467ad` (0041's rate models declare their keys' cascade) and `ec0d6d5`
@@ -1206,7 +1224,7 @@ index b58fffc..489da51 100644
 
 ### Task 2: An endpoint's events pointer is fixed when it's made (D10)
 
-**Commit:** `2bcf934` (`proto/2b4a-v5`), replayed as it is: the schema regenerated on #44's. It folds `proto/2b4a-v1`'s
+**Commit:** `2bcf934` (`proto/2b4a-v6`), replayed as it is: the schema regenerated on #44's. It folds `proto/2b4a-v1`'s
 `93c3c2b`; the web client's schema regenerated (a PATCH's body no longer names `events_pointer`).
 
 **Create:** `backend/migrations/versions/0036_events_pointer_fixed.py`
@@ -1512,7 +1530,7 @@ downgrade. The owner approved it as a prototype checkpoint with milestone 2 (mil
 
 ### Task 3: A tenant's retention, the cutoff on every read, the sweep, its role and process, and the SLO gate
 
-**Commit:** `7ab3079` (`proto/2b4a-v5`), replayed as it is: the schema regenerated on #44's. It folds `proto/2b4a-v1`'s
+**Commit:** `7ab3079` (`proto/2b4a-v6`), replayed as it is: the schema regenerated on #44's. It folds `proto/2b4a-v1`'s
 run from `5e89a64` to `3d3219c` but for audit pruning's `19d907a` and `ad4cfaa`, which are Task 4's: `5e89a64`,
 `acfbabc`, `daf01f0`, `de68976`, `f810aa8`, `b223b4e`, `27b66e9`, `8265ddc`, `b1ceedf`, `fb17846`, `30142d9`, `722cc1e`,
 `058ff71` and `3d3219c`; with `1b16227`'s `retention.py` and the runs' root key. The retention router joins `ROUTERS`,
@@ -4765,7 +4783,7 @@ index 1213f9f..9a3a90d 100644
 
 ### Task 4: Audit pruning through an anchored checkpoint, off in production until #3
 
-**Commit:** `b964ef6` (`proto/2b4a-v5`). The replay ran `proto/2b4a-v3`'s `3daa44d`, the same patch, on the tree before
+**Commit:** `b964ef6` (`proto/2b4a-v6`). The replay ran `proto/2b4a-v3`'s `3daa44d`, the same patch, on the tree before
 #44. It folds `proto/2b4a-v1`'s `19d907a` and `ad4cfaa`, `1b16227`'s `AuditCheckpoint` model, and the guide's
 audit-pruning section.
 
@@ -5426,7 +5444,7 @@ after the downgrade. The owner held it twice (milestone ruling 2) and approved i
 
 ### Task 5: Re-encryption, rotating keypairs and the ingress key, and retiring a data-key version nothing needs
 
-**Commit:** `b233bb6` (`proto/2b4a-v5`). The replay ran `proto/2b4a-v3`'s `e5bef26`, the same patch, on the tree before
+**Commit:** `b233bb6` (`proto/2b4a-v6`). The replay ran `proto/2b4a-v3`'s `e5bef26`, the same patch, on the tree before
 #44. It folds `proto/2b4a-v1`'s run from `f5f7190` to `a66a227` but for `75aabea`, which is Task 6's: `f5f7190`,
 `8ce3a48`, `8c45a2d`, `d877b1c`, `c149064`, `b13dac9`, `688ce5e`, `77a1b71`, `22b123d`, `58bd65f`, `912abbd`, `88bc3a1`
 and `a66a227`. Where two commits' text in 0039's docstring met, it takes this task's, without `75aabea`'s.
@@ -7943,7 +7961,7 @@ index 8aace2a..cea20da 100644
 
 ### Task 6: What retiring a version waits on: the tick contract and every run's execution evidence
 
-**Commit:** `8187008` (`proto/2b4a-v5`), replayed as it is: `proto/2b4a-v4`'s `0f517a9` (its message corrected,
+**Commit:** `8187008` (`proto/2b4a-v6`), replayed as it is: `proto/2b4a-v4`'s `0f517a9` (its message corrected,
 milestone ruling 6) with plugin calls' answers sealed again and counted (milestone ruling 7). It folds `proto/2b4a-v1`'s
 `75aabea`, `25a13d7`, `62eceac`, `92e4b59`, `f5d5a9d` and `92df94d`; from `proto/2b4a-int`, `d30555e` (a tenant's
 credential scope key sealed again, the same key, and counted by retirement) and `cc2810c` (a plugin call's answer,
@@ -11381,7 +11399,7 @@ owner held it four times (milestone ruling 3) and approved it as a prototype che
 
 ### Task 7: Erased tenants are never eligible; the erasure's record, items and known ids; the insert fence
 
-**Commit:** `5ba075d` (`proto/2b4a-v5`), replayed as it is: `proto/2b4a-v4`'s `60c83b8` with plugin calls fenced
+**Commit:** `5ba075d` (`proto/2b4a-v6`), replayed as it is: `proto/2b4a-v4`'s `60c83b8` with plugin calls fenced
 (milestone ruling 7). It folds `proto/2b4a-v1`'s `9eaf0dc`; from `proto/2b4a-int`'s `4f36296` and `cef6823`, 0041's
 tenant tables and 0042's plugin calls under the fence, and an egress exception naming no tenant let through it.
 
@@ -12156,17 +12174,22 @@ index cc5ff74..842177d 100644
 
 ### Task 8: Step 1 and the writers it fences
 
-**Commit:** `cf8cdff` (`proto/2b4a-v5`). The replay ran `proto/2b4a-v3`'s `e7ae590`, the same patch, on the tree before
-#44. It folds `proto/2b4a-v1`'s `b7d85ba`.
+**Commit:** `bba110e` (`proto/2b4a-v6`), replayed as it is: `proto/2b4a-v5`'s `cf8cdff` with plugin calls fenced at step
+1 (milestone ruling 8). It folds `proto/2b4a-v1`'s `b7d85ba`; from `proto/2b4a-int`, `e5c2998` (a plugin call fenced at
+step 1: the ask rechecks `active`, and a worker holds the tenant's plugin-call lock from its check through the claim,
+the hook and the answer).
 
 **Create:** `backend/src/dewpoint/core/erasure/__init__.py`, `backend/src/dewpoint/core/erasure/service.py`,
 `backend/src/dewpoint/core/tenancy/lifecycle.py`, `backend/tests/core/erasure/conftest.py`,
 `backend/tests/core/erasure/test_writers.py`
 
 **Modify:** `backend/migrations/versions/0040_tenant_erasure.py`, `backend/src/dewpoint/apps/admission.py`,
+`backend/src/dewpoint/apps/api/routes/connections.py`, `backend/src/dewpoint/apps/api/routes/node_types.py`,
 `backend/src/dewpoint/apps/cancels.py`, `backend/src/dewpoint/apps/cli/main.py`,
-`backend/src/dewpoint/apps/dispatcher/tick.py`, `backend/src/dewpoint/core/http.py`,
-`backend/src/dewpoint/core/tenancy/service.py`, `backend/tests/apps/cli/test_keys.py`
+`backend/src/dewpoint/apps/dispatcher/tick.py`, `backend/src/dewpoint/apps/worker/plugin_calls.py`,
+`backend/src/dewpoint/core/http.py`, `backend/src/dewpoint/core/plugins/asking.py`,
+`backend/src/dewpoint/core/tenancy/service.py`, `backend/tests/apps/api/test_plugin_calls_api.py`,
+`backend/tests/apps/cli/test_keys.py`
 
 **What it does:**
 
@@ -12177,12 +12200,21 @@ require() for every non-safe method (409 tenant_erasing, reads still answer), ke
 keys ensure-tenants (skips a tenant that isn't active). tenant_status() reads any tenant's status whatever the role's
 scope. Race regressions in both orders; a test lists every tenant-scoped write route and requires require() on each.
 
+A plugin call (plugins-3a-2; the owner's review of 2b-4a v5): the API's ask rechecks active in its insert's transaction
+(409 tenant_erasing), and a worker holds the tenant's plugin-call lock shared from its check of active through the
+claim, the hook and the answer; step 1 takes it exclusively before the lifecycle lock, so it waits for a call in flight
+and a queued one is never run. A lock of its own: a hook's writes on other connections take the lifecycle lock in the
+fence's trigger and would queue behind step 1. Race regressions: a queued call never run; one in flight answered before
+step 1 commits, a fenced write meanwhile not stuck; an ask after step 1 refused, through both routes; one holding its
+check committed first.
+
 - [ ] **Step 1: its tests alone, before its code.** Run (in `backend/`): `uv run pytest -q -n 4
-  tests/apps/cli/test_keys.py tests/core/erasure/test_writers.py`. Replay result on `45bdb44` with this task's tests
-  (exit 1), shortened:
+  tests/apps/api/test_plugin_calls_api.py tests/apps/cli/test_keys.py tests/core/erasure/test_writers.py`. Replay result
+  on `5ba075d` with this task's tests (exit 1), shortened:
 
   The key commands' tests pass before the code: their change is a fixture's, making the tenants a key rotates for, since
-  rotation now needs an active one.
+  rotation now needs an active one. The other two modules fail to collect: they import `core.erasure`, which this task
+  creates.
 
 ```
 Hint: make sure your test modules/packages have valid Python names.
@@ -12194,18 +12226,24 @@ tests/core/erasure/test_writers.py:27: in <module>
     from dewpoint.core.erasure import service
 E   ModuleNotFoundError: No module named 'dewpoint.core.erasure'
 =========================== short test summary info ============================
+ERROR tests/apps/api/test_plugin_calls_api.py - ImportError while importing t...
 ERROR tests/core/erasure/test_writers.py - ImportError while importing test m...
-8 passed, 1 error in 12.66s
+8 passed, 2 errors in 89.80s (0:01:29)
 ```
 
-- [ ] **Step 2: its code, then the same tests.** Replay result on `e7ae590` (exit 0), shortened:
+- [ ] **Step 2: its code, then the same tests.** Replay result on `bba110e` (exit 0), shortened:
 
 ```
-.....................                                                    [100%]
-21 passed in 12.85s
+..........................................................               [100%]
+58 passed in 154.18s (0:02:34)
 ```
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit cf8cdff && git commit -C cf8cdff`
+Evidence beyond the replay: `e5c2998` was made test-first on `proto/2b4a-int` (6 failed: the queued call answered,
+nothing waited for a lock twice, both routes 504 instead of 409, the ask after step 1 not refused). With the worker's
+guard moved to the lifecycle lock itself and step 1 no longer taking the plugin-call lock, the in-flight test's fenced
+write, made while step 1 waits, times out: queued behind step 1, which waits for the hook.
+
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit bba110e && git commit -C bba110e`
 
 The diff:
 
@@ -12278,6 +12316,48 @@ index a3134ad..7a4ae09 100644
      tenant = await s.get(Tenant, tenant_id, populate_existing=True)
      if tenant is None:
          raise WorkflowNotFoundError(str(fields["workflow_id"]))
+diff --git a/backend/src/dewpoint/apps/api/routes/connections.py b/backend/src/dewpoint/apps/api/routes/connections.py
+index 942a181..f0c0473 100644
+--- a/backend/src/dewpoint/apps/api/routes/connections.py
++++ b/backend/src/dewpoint/apps/api/routes/connections.py
+@@ -17,6 +17,7 @@ from dewpoint.core.crypto.keyring import Keyring
+ from dewpoint.core.http import TenantContext, active_session, get_db, require
+ from dewpoint.core.models.connections import Connection
+ from dewpoint.core.plugins import asking
++from dewpoint.core.tenancy import lifecycle
+ 
+ router = APIRouter(prefix="/api/v1", tags=["connections"])
+ 
+@@ -164,6 +165,8 @@ async def verify(
+             raise HTTPException(503, detail={"error": "plugin_calls_busy"}) from None
+         except asking.TooManyCallsError:
+             raise HTTPException(429, detail={"error": "too_many_plugin_calls"}) from None
++        except lifecycle.TenantNotActiveError:  # an erasure started after the request's check (2b-4a)
++            raise HTTPException(409, detail={"error": "tenant_erasing"}) from None
+ 
+     try:
+         conn = await service.verify_connection(
+diff --git a/backend/src/dewpoint/apps/api/routes/node_types.py b/backend/src/dewpoint/apps/api/routes/node_types.py
+index b05aaeb..6e55cf0 100644
+--- a/backend/src/dewpoint/apps/api/routes/node_types.py
++++ b/backend/src/dewpoint/apps/api/routes/node_types.py
+@@ -16,6 +16,7 @@ from dewpoint.core.db import tenant_scope
+ from dewpoint.core.http import TenantContext, active_session, get_db, require
+ from dewpoint.core.models.connections import Connection
+ from dewpoint.core.plugins import asking, calls, registry
++from dewpoint.core.tenancy import lifecycle
+ 
+ router = APIRouter(prefix="/api/v1", tags=["node-types"])
+ MAX_OPTIONS, MAX_VALUE, MAX_LABEL = 1000, 1000, 200  # the ruled limits, checked again on the API's side
+@@ -90,6 +91,8 @@ async def ask_and_wait(
+         raise HTTPException(503, detail={"error": "plugin_calls_busy"}) from None
+     except asking.TooManyCallsError:
+         raise HTTPException(429, detail={"error": "too_many_plugin_calls"}) from None
++    except lifecycle.TenantNotActiveError:  # an erasure started after the request's check (2b-4a)
++        raise HTTPException(409, detail={"error": "tenant_erasing"}) from None
+ 
+ 
+ async def still_current(request: Request, tenant_id: uuid.UUID, connection_id: uuid.UUID, revision: int) -> None:
 diff --git a/backend/src/dewpoint/apps/cancels.py b/backend/src/dewpoint/apps/cancels.py
 index 0e58ffc..81e0747 100644
 --- a/backend/src/dewpoint/apps/cancels.py
@@ -12366,15 +12446,87 @@ index 3b16c0a..85ecd14 100644
      found = await s.get(Schedule, schedule_id, populate_existing=True)  # row-level security: that tenant's only
      if found is None:
          raise ScheduleUnknownError(str(schedule_id))
+diff --git a/backend/src/dewpoint/apps/worker/plugin_calls.py b/backend/src/dewpoint/apps/worker/plugin_calls.py
+index ff3873d..bd053d0 100644
+--- a/backend/src/dewpoint/apps/worker/plugin_calls.py
++++ b/backend/src/dewpoint/apps/worker/plugin_calls.py
+@@ -37,6 +37,7 @@ from dewpoint.core.claims.cipher import ClaimCipher
+ from dewpoint.core.db import tenant_scope, unavailable
+ from dewpoint.core.egress.http import GuardedHttp
+ from dewpoint.core.plugins import calls
++from dewpoint.core.tenancy import lifecycle
+ from dewpoint.sdk import (
+     ConnectionUnavailable,
+     Node,
+@@ -300,27 +301,39 @@ class PluginCallServer:
+     async def _serve(self, tenant_id: uuid.UUID, call_id: uuid.UUID) -> None:
+         async with self._slots:
+             try:
+-                async with self._sessionmaker() as s, s.begin():
+-                    await tenant_scope(s, tenant_id)
+-                    claimed = await calls.claim(s, tenant_id, call_id)
++                # The tenant's plugin-call lock, shared, held from the check that the tenant is active through the
++                # claim, the hook and the answer (the owner's review of 2b-4a v5): an erasure's step 1 waits for this
++                # call, and once it has committed a call is never run. The hook's deadline bounds the wait.
++                async with self._sessionmaker() as guard, guard.begin():
++                    if not await lifecycle.calls_allowed(guard, tenant_id):
++                        return  # the tenant is being erased: its call is left for the erasure
++                    await self._run(tenant_id, call_id)
+             except Exception as e:
+-                log.warning("plugin_call_claim_failed", error=type(e).__name__)
+-                return
+-            if claimed is None:
+-                return  # another worker has it, or it's no longer due
+-            try:
+-                answer = await self._answer(claimed)
+-                sealed = await ClaimCipher(self._network.keys, purpose=calls.PURPOSE).seal(
+-                    str(claimed.tenant_id), str(claimed.id), answer
+-                )
+-            except _Refused as e:
+-                await self._finish(claimed, None, e.code)
+-                return
+-            except Exception as e:
+-                log.warning("plugin_call_unsealed", kind=claimed.kind, error=logs.error_class(e))
+-                await self._finish(claimed, None, "unavailable")
+-                return
+-            await self._finish(claimed, sealed, None)
++                log.warning("plugin_call_unguarded", error=type(e).__name__)
++
++    async def _run(self, tenant_id: uuid.UUID, call_id: uuid.UUID) -> None:
++        try:
++            async with self._sessionmaker() as s, s.begin():
++                await tenant_scope(s, tenant_id)
++                claimed = await calls.claim(s, tenant_id, call_id)
++        except Exception as e:
++            log.warning("plugin_call_claim_failed", error=type(e).__name__)
++            return
++        if claimed is None:
++            return  # another worker has it, or it's no longer due
++        try:
++            answer = await self._answer(claimed)
++            sealed = await ClaimCipher(self._network.keys, purpose=calls.PURPOSE).seal(
++                str(claimed.tenant_id), str(claimed.id), answer
++            )
++        except _Refused as e:
++            await self._finish(claimed, None, e.code)
++            return
++        except Exception as e:
++            log.warning("plugin_call_unsealed", kind=claimed.kind, error=logs.error_class(e))
++            await self._finish(claimed, None, "unavailable")
++            return
++        await self._finish(claimed, sealed, None)
+ 
+     async def _finish(self, claimed: calls.Claimed, sealed: bytes | None, error: str | None) -> None:
+         try:
 diff --git a/backend/src/dewpoint/core/erasure/__init__.py b/backend/src/dewpoint/core/erasure/__init__.py
 new file mode 100644
 index 0000000..e69de29
 diff --git a/backend/src/dewpoint/core/erasure/service.py b/backend/src/dewpoint/core/erasure/service.py
 new file mode 100644
-index 0000000..1b4211c
+index 0000000..0710d51
 --- /dev/null
 +++ b/backend/src/dewpoint/core/erasure/service.py
-@@ -0,0 +1,95 @@
+@@ -0,0 +1,96 @@
 +# SPDX-License-Identifier: Apache-2.0
 +"""A tenant's erasure, its start, stop and retry (engine 2b spec §6.5; the 2b-4 outline's "Tenant erasure", D3).
 +
@@ -12415,6 +12567,7 @@ index 0000000..1b4211c
 +
 +async def start(s: AsyncSession, *, tenant_id: uuid.UUID, requested_by: uuid.UUID) -> TenantErasure:
 +    """Step 1, in the caller's transaction (which must commit it): raises TenantNotFoundError, NotErasableError."""
++    await lifecycle.hold_calls_exclusive(s, tenant_id)  # waits for plugin calls in flight, before the lifecycle lock
 +    await lifecycle.hold_exclusive(s, tenant_id)
 +    await _after_lock()
 +    status = (await s.execute(text("select tenant_status(:t)"), {"t": tenant_id})).scalar()
@@ -12532,12 +12685,35 @@ index aeddf43..efa38ac 100644
          return TenantContext(tenant_id=tenant_id, user=user, role=role, session=sess)
  
      return _dep
+diff --git a/backend/src/dewpoint/core/plugins/asking.py b/backend/src/dewpoint/core/plugins/asking.py
+index 22ec3e8..96d0061 100644
+--- a/backend/src/dewpoint/core/plugins/asking.py
++++ b/backend/src/dewpoint/core/plugins/asking.py
+@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+ from dewpoint.core.crypto.keyring import Keyring
+ from dewpoint.core.db import tenant_scope
+ from dewpoint.core.plugins import calls
++from dewpoint.core.tenancy import lifecycle
+ 
+ WAIT_S = 10.0  # how long the API waits for a worker's answer (D3)
+ FIRST_POLL_S, LAST_POLL_S = 0.05, 0.5  # the wait between reads grows from the first to the last
+@@ -52,6 +53,10 @@ async def _ask(
+     ask: Callable[[AsyncSession], Awaitable[uuid.UUID]],
+ ) -> uuid.UUID:
+     async with sessionmaker() as s, s.begin():
++        # The tenant's lifecycle lock, shared, and `active` read after it, in the insert's own transaction: the
++        # request's check (`require`) ended with its transaction, and an erasure started since must refuse the call
++        # (TenantNotActiveError; the owner's review of 2b-4a v5).
++        await lifecycle.require_active(s, tenant_id)
+         await tenant_scope(s, tenant_id)
+         # One admission at a time per tenant, across API processes: counting then inserting is otherwise a race (the
+         # owner's review of 3a-2, finding 2). The lock ends with this short transaction.
 diff --git a/backend/src/dewpoint/core/tenancy/lifecycle.py b/backend/src/dewpoint/core/tenancy/lifecycle.py
 new file mode 100644
-index 0000000..fa0c4f3
+index 0000000..ae97454
 --- /dev/null
 +++ b/backend/src/dewpoint/core/tenancy/lifecycle.py
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,62 @@
 +# SPDX-License-Identifier: Apache-2.0
 +"""A tenant's lifecycle lock (engine 2b spec §6.5; the 2b-4 outline's "Fencing in-flight work"): a transaction-scoped
 +advisory lock every writer of tenant data takes shared, checking `active` in the same transaction as its write (one
@@ -12564,6 +12740,27 @@ index 0000000..fa0c4f3
 +
 +async def hold_exclusive(s: AsyncSession, tenant_id: uuid.UUID) -> None:
 +    await s.execute(text("select pg_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": key(tenant_id)})
++
++
++def calls_key(tenant_id: uuid.UUID) -> str:
++    return f"dewpoint:tenant-calls:{tenant_id}"
++
++
++async def hold_calls_exclusive(s: AsyncSession, tenant_id: uuid.UUID) -> None:
++    """The tenant's plugin-call lock, exclusively: an erasure's step 1 takes it before the lifecycle lock, so it waits
++    for every plugin call in flight (`calls_allowed`)."""
++    await s.execute(text("select pg_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": calls_key(tenant_id)})
++
++
++async def calls_allowed(s: AsyncSession, tenant_id: uuid.UUID) -> bool:
++    """The tenant's plugin-call lock, shared, then whether the tenant is `active`: a worker holds this transaction open
++    from the check through a call's claim, its hook's requests outside PostgreSQL and its answer, so an erasure's step
++    1 waits for a call in flight, and a call it finds queued is never run (the owner's review of 2b-4a v5). A lock of
++    its own, not the lifecycle lock: a hook's own writes on other connections (a tenant's first rate budget, or key, as
++    its answer is sealed) take the lifecycle lock shared in the fence's trigger, and would otherwise queue behind step
++    1's exclusive request, which waits for the hook."""
++    await s.execute(text("select pg_advisory_xact_lock_shared(hashtextextended(:k, 0))"), {"k": calls_key(tenant_id)})
++    return (await s.execute(text("select tenant_status(:t)"), {"t": tenant_id})).scalar() == "active"
 +
 +
 +async def is_active(s: AsyncSession, tenant_id: uuid.UUID) -> bool:
@@ -12625,6 +12822,48 @@ index 0d3db87..4b04dae 100644
      return created
  
  
+diff --git a/backend/tests/apps/api/test_plugin_calls_api.py b/backend/tests/apps/api/test_plugin_calls_api.py
+index 2ed9ba0..2e877dd 100644
+--- a/backend/tests/apps/api/test_plugin_calls_api.py
++++ b/backend/tests/apps/api/test_plugin_calls_api.py
+@@ -20,6 +20,7 @@ from dewpoint.apps.worker.plugin_calls import PluginCallServer
+ from dewpoint.core.crypto.kek import KekSet
+ from dewpoint.core.crypto.keyring import Keyring
+ from dewpoint.core.egress.addresses import AllowEntry
++from dewpoint.core.erasure import service
+ from dewpoint.core.plugins import asking
+ from dewpoint.plugins.flow import PLUGIN as FLOW
+ from dewpoint.plugins.mist import PLUGIN as MIST
+@@ -493,3 +494,29 @@ async def test_options_whose_connection_changed_before_they_return_are_refused(
+         monkeypatch.setattr(asking, "ask_and_wait", answered_then_edited)
+         r = await c.post(_options(tid), json={"field": "site_id", "connection_id": cid, "query": ""})
+     assert (r.status_code, r.json()) == (409, {"error": "connection_changed"})
++
++
++@pytest.mark.parametrize("asked", ["options", "verify"])
++async def test_an_ask_after_an_erasure_started_is_refused_and_records_nothing(
++    app, owner_sessionmaker, api_sessionmaker, api_settings, unserved, fake, monkeypatch, asked: str
++) -> None:
++    """The owner's review of 2b-4a v5: a write's check (`require`) and the call's insert are two transactions, the
++    request's ending before the ask. An erasure started between them is seen by the ask itself: 409 `tenant_erasing`,
++    nothing recorded."""
++    real = asking._ask
++
++    async def erased_first(sessionmaker: Any, tenant_id: Any, ask: Any) -> Any:
++        async with api_sessionmaker() as s, s.begin():
++            await service.start(s, tenant_id=tenant_id, requested_by=uuid.uuid4())
++        return await real(sessionmaker, tenant_id, ask)
++
++    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
++    async with c:
++        cid = await _connection(c, tid, fake[1].port)
++        monkeypatch.setattr(asking, "_ask", erased_first)
++        if asked == "options":
++            r = await c.post(_options(tid), json={"field": "site_id", "connection_id": cid, "query": ""})
++        else:
++            r = await c.post(f"/api/v1/t/{tid}/connections/{cid}/verify")
++    assert (r.status_code, r.json()) == (409, {"error": "tenant_erasing"})
++    assert await _calls_left(owner_sessionmaker) == 0
 diff --git a/backend/tests/apps/cli/test_keys.py b/backend/tests/apps/cli/test_keys.py
 index 563cb3e..64c3b79 100644
 --- a/backend/tests/apps/cli/test_keys.py
@@ -12680,10 +12919,10 @@ index 0000000..c6cff17
 +from tests.apps.test_admission import ready  # noqa: F401
 diff --git a/backend/tests/core/erasure/test_writers.py b/backend/tests/core/erasure/test_writers.py
 new file mode 100644
-index 0000000..9e7bd32
+index 0000000..81be9f2
 --- /dev/null
 +++ b/backend/tests/core/erasure/test_writers.py
-@@ -0,0 +1,394 @@
+@@ -0,0 +1,500 @@
 +# SPDX-License-Identifier: Apache-2.0
 +"""Step 1 and the writers it fences (the 2b-4 outline's "Fencing in-flight work"): every writer of tenant data takes
 +the tenant's lifecycle lock shared and checks `active` in the same transaction as its write, so step 1, which takes it
@@ -12709,17 +12948,23 @@ index 0000000..9e7bd32
 +from dewpoint.core.config import get_settings
 +from dewpoint.core.crypto.kek import Kek, KekSet
 +from dewpoint.core.crypto.keyring import Keyring
-+from dewpoint.core.db import make_engine, make_sessionmaker
++from dewpoint.core.db import make_engine, make_sessionmaker, tenant_scope
 +from dewpoint.core.erasure import service
++from dewpoint.core.plugins import asking, calls
 +from dewpoint.core.tenancy import lifecycle
 +from dewpoint.core.tenancy.service import ensure_tenant_event_keys, ensure_tenant_keys
 +from tests.apps.api.helpers import session_client
 +from tests.apps.dispatcher.test_schedule_tick import key
 +from tests.apps.test_admission import KEYS, TOKEN, count
++from tests.apps.worker.test_plugin_calls import KIT_HASH, NAMES, outcome, server_for, setup
++from tests.apps.worker.test_plugin_calls import ask as ask_call
++from tests.apps.worker.test_plugin_calls import service as provider
 +from tests.conftest import _url_for
++from tests.support.netfakes import Request, serve
 +from tests.support.workflows import seed_workflow
 +
 +pytestmark = pytest.mark.usefixtures("development_deployment")
++KEYRING = Keyring(KekSet(Kek("k1", bytes(32))))  # an ask refused before it waits never opens an answer
 +
 +
 +async def lock_waiters(owner: Any) -> int:
@@ -13078,12 +13323,112 @@ index 0000000..9e7bd32
 +    out = CliRunner().invoke(cli, ["keys", "rotate-dek", "--tenant", str(uuid.uuid4())])  # no such tenant
 +    assert out.exit_code == 1, out.output
 +    get_settings.cache_clear()
++
++
++# A plugin call (plugins-3a-2; the owner's review of 2b-4a v5): the API asks, then a worker claims the call, runs its
++# hook, which reaches the tenant's connection outside PostgreSQL, and answers. A call queued before step 1 is never run;
++# one in flight finishes, its answer included, before step 1 commits; an ask after step 1 records nothing.
++
++
++async def _state(api: Any, tenant: uuid.UUID, call: uuid.UUID) -> tuple[str, bool]:
++    async with api() as s, s.begin():
++        await tenant_scope(s, tenant)
++        found = (await s.execute(text("select state, claim_token is not null from plugin_calls where id = :i"),
++                                 {"i": call})).one()  # fmt: skip
++    return str(found[0]), bool(found[1])
++
++
++async def test_a_plugin_call_queued_before_step_1_is_never_run(
++    owner_sessionmaker, api_sessionmaker, worker_sessionmaker
++) -> None:
++    async with serve(provider, tls_names=NAMES) as fake:
++        tenant, cid = await setup(owner_sessionmaker, fake.port)
++        call = await ask_call(api_sessionmaker, tenant, cid)
++        await erase(api_sessionmaker, tenant)
++        await server_for(worker_sessionmaker, tenant).serve_once()
++    assert (await _state(api_sessionmaker, tenant, call), fake.requests) == (("pending", False), [])
++
++
++async def test_a_plugin_call_in_flight_answers_before_step_1_commits(
++    owner_sessionmaker, api_sessionmaker, worker_sessionmaker
++) -> None:
++    arrived, release = asyncio.Event(), asyncio.Event()
++
++    async def held(request: Request, writer: asyncio.StreamWriter) -> None:
++        arrived.set()
++        await release.wait()
++        await provider(request, writer)
++
++    async with serve(held, tls_names=NAMES) as fake:
++        tenant, cid = await setup(owner_sessionmaker, fake.port)
++        call = await ask_call(api_sessionmaker, tenant, cid)
++        served = asyncio.create_task(server_for(worker_sessionmaker, tenant).serve_once())
++        erasing: asyncio.Task[None] | None = None
++        try:
++            await asyncio.wait_for(arrived.wait(), 10)  # the hook reached the provider: the call is in flight
++            erasing = asyncio.create_task(erase(api_sessionmaker, tenant))
++            await waiting(owner_sessionmaker)  # step 1 waits for the call
++            assert await status(owner_sessionmaker, tenant) == "active"
++            # A write a hook may make meanwhile, on its own connection (a tenant's first rate budget, or key, as its
++            # answer is sealed), takes the lifecycle lock shared in the fence's trigger: it isn't queued behind step 1.
++            async with owner_sessionmaker() as s, s.begin():
++                await asyncio.wait_for(s.execute(text(
++                    "insert into rate_buckets (tenant_id, scope, capacity, refill_per_s, tokens, refilled_at) "
++                    "values (:t, 'mist:org', 5, 1, 5, now())"), {"t": tenant}), 5)  # fmt: skip
++        finally:
++            release.set()
++            await asyncio.wait_for(asyncio.gather(served, *([erasing] if erasing else []), return_exceptions=True), 30)
++    assert (await outcome(api_sessionmaker, tenant, call))[0] == "done"
++    assert await status(owner_sessionmaker, tenant) == "erasing"
++
++
++async def test_an_ask_after_step_1_is_refused_and_records_nothing(owner_sessionmaker, api_sessionmaker) -> None:
++    tenant, cid = await setup(owner_sessionmaker, 443)
++    await erase(api_sessionmaker, tenant)
++
++    async def asked(s: Any) -> uuid.UUID:
++        return await calls.ask_options(s, tenant, node_ref="testkit.pick@1", field="site_id", connection_id=cid,
++                                       revision=1, query="", type_hash=KIT_HASH)  # fmt: skip
++
++    with pytest.raises(lifecycle.TenantNotActiveError):
++        await asking.ask_and_wait(api_sessionmaker, KEYRING, tenant, asked)
++    async with owner_sessionmaker() as s:
++        assert (await s.execute(text("select count(*) from plugin_calls where tenant_id = :t"), {"t": tenant})
++                ).scalar_one() == 0  # fmt: skip
++
++
++async def test_an_ask_holding_its_check_commits_before_step_1(owner_sessionmaker, api_sessionmaker) -> None:
++    tenant, cid = await setup(owner_sessionmaker, 443)
++    held, release = asyncio.Event(), asyncio.Event()
++
++    async def asked(s: Any) -> uuid.UUID:
++        held.set()
++        await release.wait()
++        return await calls.ask_options(s, tenant, node_ref="testkit.pick@1", field="site_id", connection_id=cid,
++                                       revision=1, query="", type_hash=KIT_HASH)  # fmt: skip
++
++    asked_task = asyncio.create_task(asking._ask(api_sessionmaker, tenant, asked))
++    erasing: asyncio.Task[None] | None = None
++    try:
++        await asyncio.wait_for(held.wait(), 10)
++        erasing = asyncio.create_task(erase(api_sessionmaker, tenant))
++        await waiting(owner_sessionmaker)  # step 1 waits for the ask
++        assert await status(owner_sessionmaker, tenant) == "active"
++    finally:
++        release.set()
++        done = await asyncio.wait_for(asyncio.gather(asked_task, *([erasing] if erasing else []),
++                                                     return_exceptions=True), 30)  # fmt: skip
++    call = done[0]
++    assert isinstance(call, uuid.UUID), call
++    # recorded before step 1: the erasure removes it, and no worker runs it (above)
++    assert await _state(api_sessionmaker, tenant, call) == ("pending", False)
++    assert await status(owner_sessionmaker, tenant) == "erasing"
 ```
 
 ### Task 9: Schedules created paused and unpaused by a token update; ticks record their own ids; the sync fenced
 
-**Commit:** `7dcb733` (`proto/2b4a-v5`). The replay ran `proto/2b4a-v3`'s `159c066`, the same patch, on the tree before
-#44. It folds `proto/2b4a-v1`'s `4140a33`.
+**Commit:** `b066908` (`proto/2b4a-v6`). The replay ran `proto/2b4a-v3`'s `159c066`, the same patch, on the tree before
+#44 and Task 8's plugin-call fence. It folds `proto/2b4a-v1`'s `4140a33`.
 
 **Create:** `backend/tests/apps/worker/test_temporal_erasure_contract.py`
 
@@ -13141,7 +13486,7 @@ Evidence beyond the replay: the contract tests run on the dev server and pin wha
 deleted and recreated under one id restarts its conflict token at 1, and a stale unpause lands on the recreation. That
 failed the outline's premise (D3e), and Task 12 answers it.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 7dcb733 && git commit -C 7dcb733`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit b066908 && git commit -C b066908`
 
 The diff:
 
@@ -13507,7 +13852,7 @@ index fa0b290..6fa0761 100644
          await tenant_scope(s, tenant_id)
          swept.lag_s = float((await s.execute(_LAG, {"cutoff": await _cutoff(s, tenant_id)})).scalar_one())
 diff --git a/backend/src/dewpoint/core/tenancy/lifecycle.py b/backend/src/dewpoint/core/tenancy/lifecycle.py
-index fa0c4f3..b9fd195 100644
+index ae97454..6834755 100644
 --- a/backend/src/dewpoint/core/tenancy/lifecycle.py
 +++ b/backend/src/dewpoint/core/tenancy/lifecycle.py
 @@ -9,6 +9,8 @@ import uuid
@@ -14010,10 +14355,10 @@ index d632bf8..8592892 100644
 
 ### Task 10: The retention process carries an erasure through stages 20 to 80
 
-**Commit:** `4e21f6b` (`proto/2b4a-v5`), replayed as it is: `proto/2b4a-v4`'s `2943ced` with plugin calls swept
-(milestone ruling 7). It folds `proto/2b4a-v1`'s `17ba406`; from `proto/2b4a-int`'s `4f36296` and `cef6823`, 0041's
-tenant tables and 0042's plugin calls swept (the retention role's policies, reads and deletes; plugin calls before the
-connections a verify call names), an egress exception naming no tenant kept.
+**Commit:** `090047c` (`proto/2b4a-v6`). The replay ran `proto/2b4a-v5`'s `4e21f6b`, the same patch, on the tree before
+Task 8's plugin-call fence. It folds `proto/2b4a-v1`'s `17ba406`; from `proto/2b4a-int`'s `4f36296` and `cef6823`,
+0041's tenant tables and 0042's plugin calls swept (the retention role's policies, reads and deletes; plugin calls
+before the connections a verify call names), an egress exception naming no tenant kept.
 
 **Create:** `backend/src/dewpoint/apps/erasure/__init__.py`, `backend/src/dewpoint/apps/erasure/process.py`,
 `backend/src/dewpoint/apps/erasure/stages.py`, `backend/src/dewpoint/apps/erasure/temporal.py`,
@@ -14066,7 +14411,7 @@ ERROR tests/apps/erasure/test_stages.py - ImportError while importing test mo...
 Evidence beyond the replay: `4f36296` and `cef6823` were made test-first on `proto/2b4a-int`: 0041's rows, then a plugin
 call, were left after stage 80.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 4e21f6b && git commit -C 4e21f6b`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 090047c && git commit -C 090047c`
 
 The diff:
 
@@ -15435,12 +15780,12 @@ index 9a12e24..65268e9 100644
 
 ### Task 11: Stage 90's hold, completion, reconciliation, the admin API, the retention wiring and the proof
 
-**Commit:** `535a020` (`proto/2b4a-v5`), replayed as it is: `proto/2b4a-v3`'s `0efa8ec` with the erasure route's body
-renamed and its guide corrected (milestone ruling 6), the schema regenerated on #44's and the guide's stage 80 row
-naming plugin calls (milestone ruling 7). It folds `proto/2b4a-v1`'s `927ba31`, `97ef5e9`, `949a638`, `87aaaf9` and
-`c890763`; the erasure router joins `ROUTERS`, after the admin users', the schema regenerated; the guide's row for
-0041's tables and 0042's plugin calls; and the erasure route's body named `ErasureStartIn`, its own name (milestone
-ruling 6).
+**Commit:** `3d56d94` (`proto/2b4a-v6`). The replay ran `proto/2b4a-v5`'s `535a020`, the same patch but for the guide's
+paragraph on the plugin-call fence (milestone ruling 8), on the tree before Task 8's fence. It folds `proto/2b4a-v1`'s
+`927ba31`, `97ef5e9`, `949a638`, `87aaaf9` and `c890763`; the erasure router joins `ROUTERS`, after the admin users',
+the schema regenerated; the guide's row for 0041's tables and 0042's plugin calls; the erasure route's body named
+`ErasureStartIn`, its own name (milestone ruling 6); and the guide's paragraph on the plugin-call fence (milestone
+ruling 8).
 
 **Create:** `backend/src/dewpoint/apps/api/routes/erasure.py`, `backend/src/dewpoint/apps/erasure/bound.py`,
 `backend/tests/apps/api/test_erasure_api.py`, `backend/tests/apps/erasure/conftest.py`,
@@ -15526,7 +15871,7 @@ Evidence beyond the replay: the rename was made test-first, on the first draft's
 requests' shared a name, and FastAPI named both components by module path, renaming the run requests' published one.
 Here it passes, and the schema only gains the erasure route's components.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 535a020 && git commit -C 535a020`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 3d56d94 && git commit -C 3d56d94`
 
 The diff:
 
@@ -16358,7 +16703,7 @@ index 589e60f..8599349 100644
      finally:
          await engine.dispose()
 diff --git a/backend/src/dewpoint/core/erasure/service.py b/backend/src/dewpoint/core/erasure/service.py
-index 1b4211c..b414bb7 100644
+index 0710d51..42dc1a8 100644
 --- a/backend/src/dewpoint/core/erasure/service.py
 +++ b/backend/src/dewpoint/core/erasure/service.py
 @@ -6,7 +6,7 @@ Starting it is step 1, in one transaction, under the tenant's lifecycle lock tak
@@ -17208,10 +17553,10 @@ index 65268e9..f45b31e 100644
              await hold.wait()
  
 diff --git a/backend/tests/core/erasure/test_writers.py b/backend/tests/core/erasure/test_writers.py
-index 9e7bd32..0d11c5f 100644
+index 81be9f2..979097d 100644
 --- a/backend/tests/core/erasure/test_writers.py
 +++ b/backend/tests/core/erasure/test_writers.py
-@@ -301,13 +301,21 @@ def _routes(routes: Any) -> list[APIRoute]:
+@@ -307,13 +307,21 @@ def _routes(routes: Any) -> list[APIRoute]:
      return found
  
  
@@ -17285,10 +17630,10 @@ index 1b3318e..a487fa4 100644
      image: ${DEWPOINT_CEL_EVALUATOR_IMAGE:-dewpoint-cel-evaluator:dev}
 diff --git a/docs/operations/erasure.md b/docs/operations/erasure.md
 new file mode 100644
-index 0000000..82d405f
+index 0000000..bfddc01
 --- /dev/null
 +++ b/docs/operations/erasure.md
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,122 @@
 +# Tenant erasure
 +
 +Spec: `docs/superpowers/specs/2026-09-29-engine-2b-design.md` §6.5 (with §6.4, §10); the 2b-4 outline's "Tenant
@@ -17328,6 +17673,13 @@ index 0000000..82d405f
 +tick is a skip; ingress refuses its endpoints (the same bodiless 401); every write through the API answers 409
 +`tenant_erasing` (reads still answer); a run's cancel is refused (the erasure cancels what's left); no key command
 +makes a key for it; the schedule sync only pauses or deletes its schedules.
++
++A plugin call (a node's options, a connection's verification) is fenced the same way, by a lock of its own: the API's
++ask checks the tenant is active in its insert's transaction, and a worker holds the tenant's plugin-call lock shared
++from that check through the claim, the hook's requests and the answer. Starting takes it exclusively, before the
++lifecycle lock, so it waits for a call in flight (at most its 10-second deadline), and a call it finds queued is never
++run, its row left to be deleted. A hook's own writes, on other connections, take the lifecycle lock in the fence's
++trigger: holding that lock instead would leave them queued behind the start, which waits for the hook.
 +
 +From stage 60 a database fence refuses any insert of a row of the tenant into any table holding tenant data (SQLSTATE
 +`DPE01`), whatever the writer, a straggling worker's included. It's never lifted, not even when an erasure reopens.
@@ -17886,11 +18238,11 @@ index 9a3a90d..e70ff45 100644
 
 ### Task 12: An incarnation per create, and missed firings accounted over persisted spans
 
-**Commit:** `6eae38c` (`proto/2b4a-v5`), replayed as it is: `proto/2b4a-v3`'s `215e559` on Task 11's rename, its guides
-corrected (milestone ruling 6), its fence lists naming plugin calls too (milestone ruling 7). It folds `proto/2b4a-v1`'s
-`906a1d6`, `7b92fb4`, `f844769`, `4d670c8` (but for `dispatch.py` and `test_transitions.py`: #43 merged the same fix),
-`050919d`, `cfba762`, `5159cc2`, `63b4877`, `3fda97c` and `7d5b20b`. Where the fence's table lists met, they take the
-union of their names, plugin calls included. And the replay's race-test fix ("How the steps give code").
+**Commit:** `2754be7` (`proto/2b4a-v6`). The replay ran `proto/2b4a-v5`'s `6eae38c`, the same patch, on the tree before
+Task 8's plugin-call fence. It folds `proto/2b4a-v1`'s `906a1d6`, `7b92fb4`, `f844769`, `4d670c8` (but for `dispatch.py`
+and `test_transitions.py`: #43 merged the same fix), `050919d`, `cfba762`, `5159cc2`, `63b4877`, `3fda97c` and
+`7d5b20b`. Where the fence's table lists met, they take the union of their names, plugin calls included. And the
+replay's race-test fix ("How the steps give code").
 
 **Create:** `backend/tests/apps/erasure/test_incarnations.py`, `backend/tests/apps/test_schedules_legacy.py`,
 `backend/tests/support/temporal.py`
@@ -17983,7 +18335,7 @@ fails, and without the currency check,
 race tests' `holds` fixture: before it, this task's tests run on Task 11's code gave no result in 900 seconds; with it,
 they fail in 81.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 6eae38c && git commit -C 6eae38c`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 2754be7 && git commit -C 2754be7`
 
 The diff:
 
@@ -20644,7 +20996,7 @@ index 0000000..23d0fb1
 +                raise
 +    raise AssertionError("unreachable")
 diff --git a/docs/operations/erasure.md b/docs/operations/erasure.md
-index 82d405f..ce86bca 100644
+index bfddc01..f7460e8 100644
 --- a/docs/operations/erasure.md
 +++ b/docs/operations/erasure.md
 @@ -8,11 +8,11 @@ undone.** Once started, an erasure can be stopped and retried, never reversed; t
@@ -20664,7 +21016,7 @@ index 82d405f..ce86bca 100644
  
  ## Starting, stopping, retrying
  
-@@ -50,9 +50,9 @@ a schedule, a run, an execution), each found, requested, then verified by readin
+@@ -57,9 +57,9 @@ a schedule, a run, an execution), each found, requested, then verified by readin
  | Stage | |
  |---|---|
  | 20 reconcile | waits until no request is `starting` (the dispatcher's reconciler resolves each) |
@@ -20763,9 +21115,9 @@ index d0b4ae4..27bc381 100644
    clock, is a `refused` request, `schedule_catchup_expired`, audited and alerted on once (`schedule_tick_expired`, when
 ```
 
-**Checkpoint (milestone 4).** Focused: the 24 test modules Tasks 7 to 12 add or change, in `tests/apps`,
+**Checkpoint (milestone 4).** Focused: the 25 test modules Tasks 7 to 12 add or change, in `tests/apps`,
 `tests/apps/api`, `tests/apps/cli`, `tests/apps/dispatcher`, `tests/apps/erasure`, `tests/apps/ingress`,
-`tests/apps/worker`, `tests/core/erasure`, `tests/core/ingress`, `tests/core/retention` and `tests/deploy` (297 passed
+`tests/apps/worker`, `tests/core/erasure`, `tests/core/ingress`, `tests/core/retention` and `tests/deploy` (334 passed
 on Task 12's tree, and the whole suite on the same tree); the migrations 0042 → 0040 → 0042 → 0040 over existing rows,
 every constraint, function, trigger, policy, role, grant and column the same after the downgrade. The owner ruled on it,
 reviewed it six times and accepted it as a prototype checkpoint (milestone ruling 4, 2026-10-06), which doesn't claim
