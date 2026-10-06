@@ -24,10 +24,10 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel
 
-from dewpoint.plugins.mist import oas, policy
+from dewpoint.plugins.mist import oas, policy, routing
 from dewpoint.plugins.mist.client import SEGMENT, InvalidPathValue, MistClient
 from dewpoint.plugins.mist.nodes import OperationUnavailable, _example
-from dewpoint.plugins.mist.routing import UUID, Route, checkers, filled, matched, reaches, value_pattern
+from dewpoint.plugins.mist.routing import UUID, Route, filled, matched, reaches, value_pattern
 from dewpoint.sdk import FatalError, Node, SideEffect, StepContext, declared_model
 from dewpoint.sdk.fields import CONNECTION, LITERAL
 
@@ -108,7 +108,7 @@ class MistApi(Node):
     def _checked(
         self, route: Route, path_values: dict[str, str], org: str | None, values: dict[str, Any]
     ) -> tuple[dict[str, str], dict[str, Any], Any]:
-        found = checkers(route.operation)
+        found = routing.checkers(route.operation)
         checks, query_checks, body_check = found.path, found.query, found.body
         out: dict[str, str] = {}
         for name, value in path_values.items():
