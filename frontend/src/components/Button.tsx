@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { ButtonHTMLAttributes } from "react";
+import type { ComponentProps } from "react";
 import type { ButtonVariant } from "../styles/tokenNames";
 
 // Each variant's states, as literal classes Tailwind can see. Button.test.tsx holds them to BUTTON_STATES, the data
@@ -47,7 +47,7 @@ export function Button({
   type = "button",
   className = "",
   ...rest
-}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: ButtonVariant; size?: keyof typeof SIZES }) {
+}: ComponentProps<"button"> & { variant?: ButtonVariant; size?: keyof typeof SIZES }) {
   return (
     <button
       {...rest}

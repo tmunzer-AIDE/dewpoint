@@ -84,6 +84,17 @@ export function CommandPalette() {
                     Connections
                   </Command.Item>
                 )}
+                {params.tenantId && (
+                  <Command.Item
+                    value="Members & roles"
+                    className={ITEM}
+                    onSelect={() =>
+                      go(() => navigate({ to: "/t/$tenantId/settings/members", params: { tenantId: params.tenantId! } }))
+                    }
+                  >
+                    Members &amp; roles
+                  </Command.Item>
+                )}
                 <Command.Item value="Security" className={ITEM} onSelect={() => go(() => navigate({ to: "/account/security" }))}>
                   Security
                 </Command.Item>

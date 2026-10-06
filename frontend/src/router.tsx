@@ -6,8 +6,10 @@ import { useAfterAuth } from "./lib/useAfterAuth";
 import { ConnectionsPage } from "./routes/Connections";
 import { EnrollPage } from "./routes/Enroll";
 import { LoginPage } from "./routes/Login";
+import { MembersPage } from "./routes/Members";
 import { MfaPage } from "./routes/Mfa";
 import { SecurityPage } from "./routes/Security";
+import { SettingsLayout } from "./routes/Settings";
 import { TenantsPage } from "./routes/Tenants";
 
 /** Sends each session state to its screen; renders children only for fully signed-in sessions. */
@@ -30,6 +32,21 @@ function Connections() {
   return <ConnectionsPage tenantId={tenantId} />;
 }
 
+function Settings() {
+  const { tenantId } = useParams({ from: "/app/t/$tenantId/settings" });
+  return <SettingsLayout tenantId={tenantId} />;
+}
+
+function SettingsIndex() {
+  const { tenantId } = useParams({ from: "/app/t/$tenantId/settings" });
+  return <Navigate to="/t/$tenantId/settings/members" params={{ tenantId }} />;
+}
+
+function Members() {
+  const { tenantId } = useParams({ from: "/app/t/$tenantId/settings/members" });
+  return <MembersPage tenantId={tenantId} />;
+}
+
 const rootRoute = createRootRoute({ component: Outlet });
 const loginRoute = createRoute({ getParentRoute: () => rootRoute, path: "/login", component: Login });
 const mfaRoute = createRoute({ getParentRoute: () => rootRoute, path: "/mfa", component: MfaPage });
@@ -44,11 +61,21 @@ const connectionsRoute = createRoute({
   component: Connections,
 });
 
+const settingsRoute = createRoute({ getParentRoute: () => appRoute, path: "/t/$tenantId/settings", component: Settings });
+const settingsIndexRoute = createRoute({ getParentRoute: () => settingsRoute, path: "/", component: SettingsIndex });
+const membersRoute = createRoute({ getParentRoute: () => settingsRoute, path: "members", component: Members });
+
 const routeTree = rootRoute.addChildren([
   loginRoute,
   mfaRoute,
   enrollRoute,
-  appRoute.addChildren([indexRoute, tenantsRoute, securityRoute, connectionsRoute]),
+  appRoute.addChildren([
+    indexRoute,
+    tenantsRoute,
+    securityRoute,
+    connectionsRoute,
+    settingsRoute.addChildren([settingsIndexRoute, membersRoute]),
+  ]),
 ]);
 
 export const router = createRouter({ routeTree });

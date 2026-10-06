@@ -10,7 +10,7 @@ import { signOut } from "../lib/signOut";
 import { authenticatePasskey } from "../lib/webauthn";
 import { Button } from "./Button";
 import { CommandPalette } from "./CommandPalette";
-import { ConnectionsIcon } from "./icons";
+import { ConnectionsIcon, SettingsIcon } from "./icons";
 import { Wordmark } from "./Mark";
 import { TenantSwitcher } from "./TenantSwitcher";
 
@@ -69,6 +69,18 @@ export function Shell() {
             >
               <ConnectionsIcon />
               Connections
+            </Link>
+          )}
+          {params.tenantId && (
+            <Link
+              to="/t/$tenantId/settings"
+              params={{ tenantId: params.tenantId }}
+              className={ITEM}
+              activeProps={{ className: CURRENT }}
+              inactiveProps={{ className: INACTIVE }}
+            >
+              <SettingsIcon />
+              Settings
             </Link>
           )}
         </nav>

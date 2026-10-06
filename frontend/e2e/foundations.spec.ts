@@ -59,6 +59,22 @@ test.describe.serial("foundations", () => {
     await expect(page.locator("body")).not.toContainText("tok_");
     await expectAccessible(page, "connections, with a connection");
 
+    // Settings → Members & roles: the platform admin created the tenant, so owns it.
+    await page.getByRole("link", { name: "Settings" }).click();
+    await expect(page.getByRole("heading", { name: /Settings · Acme Retail/ })).toBeVisible();
+    await expect(page.getByLabel(`Role of ${EMAIL}`)).toHaveValue("owner");
+    await expectAccessible(page, "settings: members");
+    await page.getByLabel("Email").fill("nobody@example.com");
+    await page.getByRole("button", { name: "Add member" }).click();
+    await expect(page.getByRole("alert")).toContainText("No Dewpoint account has that email");
+    await page.getByRole("button", { name: `Remove ${EMAIL}` }).click();
+    const confirm = page.getByRole("dialog", { name: "Remove a member" });
+    await expect(confirm).toBeVisible();
+    await expect(confirm.getByRole("button", { name: "Cancel" })).toBeFocused(); // the safe choice first
+    await expectAccessible(page, "settings: confirm a removal");
+    await page.keyboard.press("Escape");
+    await expect(confirm).toBeHidden();
+
     // The ⌘K palette: a native modal dialog, keyboard only. Escape closes it; a choice goes there.
     await page.keyboard.press("ControlOrMeta+k");
     const palette = page.getByRole("dialog", { name: "Search or jump to" });

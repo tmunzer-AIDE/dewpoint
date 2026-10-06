@@ -29,7 +29,7 @@ beforeEach(() => {
 async function renderAt(path: string) {
   const root = createRootRoute({ component: Shell });
   const page = () => <p>page</p>;
-  const children = ["/t/$tenantId/connections", "/tenants", "/account/security"].map((p) =>
+  const children = ["/t/$tenantId/connections", "/t/$tenantId/settings/members", "/tenants", "/account/security"].map((p) =>
     createRoute({ getParentRoute: () => root, path: p, component: page }),
   );
   const router = createRouter({
@@ -85,5 +85,12 @@ it("shows no deployment note in production", async () => {
   await renderAt("/t/t1/connections");
   await screen.findByTestId("tenant-switcher");
   expect(screen.queryByRole("note", { name: "Deployment" })).toBeNull();
+});
+
+it("offers Settings beside Connections, current on its pages", async () => {
+  await renderAt("/t/t1/settings/members");
+  const settings = screen.getByRole("link", { name: "Settings" });
+  expect(settings.getAttribute("aria-current")).toBe("page");
+  expect(screen.getByRole("link", { name: "Connections" }).getAttribute("aria-current")).toBeNull();
 });
 

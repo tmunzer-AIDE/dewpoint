@@ -189,3 +189,11 @@ cover local work only: anything outward-facing (push, PR, issues) is confirmed i
 41. Ruling: the licence check reads SPDX expressions: `A OR B` passes when either is allowed, `A AND B` when both are.
     `type-fest` (via openapi-typescript, dev) is `(MIT OR CC0-1.0)` and passes under MIT - the owner may want such
     choices listed for review instead.
+42. Ruling (D11): Settings is a rail item; its tabs are links, as in 1i, with one tab in 4a (Members & roles), and
+    `/t/$tenantId/settings` goes to it. Every member reads the list; only admins and owners see the add form, the
+    role selectors and Remove, and the API decides every write. Its refusals read plainly (no such account, the last
+    owner, owner-only). An admin's role selector offers "owner", which the API refuses (`owner_only`) - one refused
+    click before the message explains it.
+43. Ruling: removing a member asks first, in a native modal dialog (D23) whose focus starts on Cancel, naming who
+    loses access to which tenant; the browser gate opens it, runs axe and closes it with Escape. `Button` takes a ref
+    (React 19's `ComponentProps<"button">`) - none.
