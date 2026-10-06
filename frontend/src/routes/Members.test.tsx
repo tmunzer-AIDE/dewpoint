@@ -108,3 +108,28 @@ it("says so when the members can't be loaded, rather than showing an empty table
   expect((await screen.findByRole("alert")).textContent).toContain("The members couldn't be loaded");
   expect(screen.queryByRole("table")).toBeNull();
 });
+
+it("puts focus on the list's heading when a removal ends after its dialog was escaped, and only then", async () => {
+  let finish!: (r: Response) => void;
+  const fetch = globalThis.fetch;
+  vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+    const request = input as Request;
+    if (request.method === "DELETE") return new Promise<Response>((resolve) => (finish = resolve));
+    return fetch(input);
+  });
+  show();
+  const row = (await screen.findByText("ed@corp.test")).closest("tr")!;
+  await userEvent.click(within(row).getByRole("button", { name: "Remove ed@corp.test" }));
+  const confirm = screen.getByRole<HTMLDialogElement>("dialog", { name: "Remove a member" });
+  await userEvent.click(within(confirm).getByRole("button", { name: "Remove" }));
+  confirm.close(); // Escape while the removal is on its way: the browser closes the dialog
+  routes["GET /api/v1/t/t1/members"] = { status: 200, body: MEMBERS.filter((m) => m.user_id !== "u2") };
+  finish(new Response(null, { status: 204 }));
+  const heading = screen.getByRole("heading", { name: "Members" });
+  await vi.waitFor(() => expect(document.activeElement).toBe(heading));
+  // A later removal, cancelled, leaves focus where it was: nothing left over pulls it to the heading.
+  const owner = screen.getByRole("button", { name: "Remove owner@corp.test" });
+  await userEvent.click(owner);
+  await userEvent.click(within(confirm).getByRole("button", { name: "Cancel" }));
+  expect(document.activeElement).not.toBe(heading);
+});

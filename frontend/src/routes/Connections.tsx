@@ -90,7 +90,7 @@ export function ConnectionsPage({ tenantId }: { tenantId: string }) {
               Add Mist connection
             </Button>
           </div>
-          {list.isError ? <LoadError what="The connections" /> : <Table>
+          {list.isError ? <LoadError what="The connections" /> : <Table label="Mist connections">
             <thead>
               <tr><Th>Name</Th><Th>Cloud</Th><Th>Org ID</Th><Th>Status</Th><Th><span className="sr-only">Actions</span></Th></tr>
             </thead>

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
 import { ReauthPrompt, SecurityPage } from "./Security";
 
@@ -17,14 +18,18 @@ const SESSION = {
   state: "active",
   user: { id: "u1", email: "admin@example.com", is_platform_admin: true },
 };
+const json = (body: unknown, status = 200) => Promise.resolve(new Response(JSON.stringify(body), { status }));
 
-/** The page, with the passkeys call answered by `passkeys` (a pending promise holds it in flight). */
-function showSecurity(passkeys: () => Promise<Response>) {
+/** The page, its calls answered by `answers` ("METHOD /path"); the session is signed in, there are no passkeys. */
+function showSecurity(answers: Record<string, () => Promise<Response>> = {}) {
   vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
-    const path = new URL((input as Request).url).pathname;
-    if (path === "/api/v1/auth/passkeys") return passkeys();
-    if (path === "/api/v1/auth/session") return Promise.resolve(new Response(JSON.stringify(SESSION), { status: 200 }));
-    return Promise.resolve(new Response(JSON.stringify({ error: "unexpected" }), { status: 500 }));
+    const request = input as Request;
+    const key = `${request.method} ${new URL(request.url).pathname}`;
+    const answer = answers[key];
+    if (answer) return answer();
+    if (key === "GET /api/v1/auth/session") return json(SESSION);
+    if (key === "GET /api/v1/auth/passkeys") return json([]);
+    return json({ error: "unexpected" }, 500);
   });
   render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
@@ -34,18 +39,46 @@ function showSecurity(passkeys: () => Promise<Response>) {
 }
 
 it("draws no empty passkey list while the list loads", () => {
-  showSecurity(() => new Promise<Response>(() => {}));
+  showSecurity({ "GET /api/v1/auth/passkeys": () => new Promise<Response>(() => {}) });
   expect(screen.getByRole("heading", { name: "Passkeys" })).toBeTruthy();
   expect(screen.queryByRole("list")).toBeNull();
 });
 
 it("says so when there are no passkeys yet", async () => {
-  showSecurity(() => Promise.resolve(new Response("[]", { status: 200 })));
+  showSecurity();
   expect((await screen.findByRole("list")).textContent).toBe("No passkeys yet.");
 });
 
 it("says so when the passkeys can't be loaded, rather than showing an empty list", async () => {
-  showSecurity(() => Promise.resolve(new Response(JSON.stringify({ error: "boom" }), { status: 500 })));
+  showSecurity({ "GET /api/v1/auth/passkeys": () => json({ error: "boom" }, 500) });
   expect((await screen.findByRole("alert")).textContent).toContain("Your passkeys couldn't be loaded");
   expect(screen.queryByRole("list")).toBeNull();
+});
+
+// The button that opens a step goes away with it: focus moves to the step, never to the page's body.
+it("keeps focus with the authenticator setup when its button gives way to it", async () => {
+  showSecurity();
+  await userEvent.click(screen.getByRole("button", { name: "Set up or replace authenticator app" }));
+  expect(document.activeElement).toBe(screen.getByTestId("totp-start"));
+});
+
+it("puts focus on the code field once the authenticator setup starts", async () => {
+  showSecurity({
+    "POST /api/v1/auth/mfa/totp/enroll": () =>
+      json({ otpauth_uri: "otpauth://totp/Dewpoint:admin@example.com?secret=JBSWY3DPEHPK3PXP&issuer=Dewpoint" }),
+  });
+  await userEvent.click(screen.getByRole("button", { name: "Set up or replace authenticator app" }));
+  await userEvent.click(screen.getByTestId("totp-start"));
+  expect(document.activeElement).toBe(await screen.findByLabelText("Code from the app"));
+});
+
+it("gives focus back to the button that asked for re-authentication when the prompt is cancelled", async () => {
+  showSecurity({ "POST /api/v1/auth/mfa/totp/enroll": () => json({ error: "reauth_required" }, 403) });
+  await userEvent.click(screen.getByRole("button", { name: "Set up or replace authenticator app" }));
+  const start = screen.getByTestId("totp-start");
+  await userEvent.click(start);
+  await screen.findByRole("form", { name: "Confirm it's you" });
+  await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(screen.queryByRole("form", { name: "Confirm it's you" })).toBeNull();
+  expect(document.activeElement).toBe(start);
 });

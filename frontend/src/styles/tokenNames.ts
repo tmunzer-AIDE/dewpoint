@@ -7,7 +7,7 @@ export const COLOURS = [
   "line-control", "edge", "accent", "accent-hover", "accent-pressed", "accent-ink", "accent-soft", "on-accent",
   "focus", "focus-rail", "warn-bg", "warn-line", "warn-ink", "danger", "danger-hover", "danger-pressed", "danger-bg", "on-danger", "ok",
   "ok-bg", "live", "live-hover", "live-pressed", "live-bg", "on-live", "sim", "sim-bg", "sim-hatch", "brand", "rail",
-  "rail-ink", "rail-ink-strong", "rail-dim", "rail-active", "rail-line", "disabled-ink", "disabled-bg",
+  "rail-ink", "rail-ink-strong", "rail-dim", "rail-active", "rail-current", "rail-line", "disabled-ink", "disabled-bg",
   "disabled-line", "overlay",
 ];
 
@@ -76,6 +76,8 @@ export const PAIRS: [string, string, number][] = ([
   ["edge", "ground", 3], ["edge", "surface", 3],
   ["rail-ink", "rail", 4.5], ["rail-dim", "rail", 4.5], ["rail-ink-strong", "rail-active", 4.5], ["focus-rail", "rail", 3],
   ["brand", "rail", 3],
+  // The icon rail (below lg) marks the current item by its fill alone: 3:1 off the rail, and the icon 3:1 on it.
+  ["rail-current", "rail", 3], ["rail-ink-strong", "rail-current", 3],
   // Text the specimen renders elsewhere: the error callout's body, a hovered rail item, a simulated node's text.
   ["ink", "danger-bg", 4.5], ["rail-ink", "rail-line", 4.5], ["muted", "accent-soft", 4.5], // a highlighted menu item's detail
   ["ink", "sim-bg", 4.5], ["muted", "sim-bg", 4.5], ["accent-ink", "sim-bg", 4.5],

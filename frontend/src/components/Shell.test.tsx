@@ -60,7 +60,9 @@ it("marks the current page by weight, ink and background, not by colour alone", 
   await renderAt("/t/t1/connections");
   const current = screen.getByRole("link", { name: "Connections" });
   expect(current.getAttribute("aria-current")).toBe("page");
-  expect(current.className).toMatch(/\bbg-rail-active\b/);
+  // Below lg the rail shows icons only, so the fill carries the mark: rail-current is 3:1 off the rail (PAIRS).
+  expect(current.className).toMatch(/(?:^|\s)bg-rail-current\b/);
+  expect(current.className).toMatch(/\blg:bg-rail-active\b/);
   expect(current.className).toMatch(/\bfont-semibold\b/);
   expect(current.className).toMatch(/\btext-rail-ink-strong\b/);
 });

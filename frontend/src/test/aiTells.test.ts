@@ -45,6 +45,23 @@ describe("findTells", () => {
     ["hatch-text", "a.tsx", `<div className="hatch-sim rounded-lg bg-surface">`],
     ["type-scale", "a.tsx", `<h1 className="text-2xl font-semibold">`],
     ["type-scale", "a.tsx", `<td className="p-3 font-mono text-[13px]">`],
+    // What the checkpoint review found the guard missing (Tailwind 4.3.3 generates each).
+    ["heavy-shadow", "a.tsx", `<div className="shadow rounded-lg">`],
+    ["blur", "a.tsx", `<img className="blur" />`],
+    ["decorative-motion", "a.tsx", `<div className="transition duration-[400ms]">`],
+    ["decorative-motion", "a.tsx", `<div className="transition duration-175">`],
+    ["accent-border", "a.tsx", `<div className="border-r-4 border-accent">`],
+    ["accent-border", "a.tsx", `<div className="border-x-4 border-accent">`],
+    ["gradient", "a.tsx", `<div className="mask-b-from-50%">`],
+    ["gradient", "a.tsx", `<div className="mask-radial-from-40%">`],
+    ["halo", "a.tsx", `<div className="outline-4 outline-accent-soft">`],
+    ["heavy-shadow", "a.css", `.card { box-shadow: 0 12px 32px var(--line); }`],
+    ["heavy-shadow", "a.css", `.row { box-shadow: inset 3px 0 0 var(--accent); }`],
+    ["accent-border", "a.css", `.callout { border-right: 3px solid var(--live); }`],
+    ["accent-border", "a.css", `.callout { border-left: solid 3px var(--live); }`],
+    ["decorative-motion", "a.css", `.x { transition: opacity 400ms ease; }`],
+    ["decorative-motion", "a.css", `.x { animation: spin 2s linear infinite; }`],
+    ["decorative-motion", "a.css", `@keyframes float { to { transform: translateY(-4px); } }`],
   ])("flags %s in %s", (rule, path, text) => {
     expect(findTells(path, text)).toContain(rule);
   });
@@ -63,6 +80,10 @@ describe("findTells", () => {
     ["the hatch behind slate text", "a.tsx", `<span className="hatch-sim bg-sim-bg text-sim">Simulated</span>`],
     ["the type tokens", "a.tsx", `<p className="text-small text-body-lg text-h1 text-caption">`],
     ["the hatch's own stylesheet", "a.css", `@import "./tokens.css";\n.hatch-sim { position: relative; }\n.x { content: ""; }`],
+    ["a quick transition", "a.css", `.x { transition: background-color 150ms; }`],
+    ["the hatch's mask", "a.css", `.hatch-sim::before { mask-image: url("./hatch.svg"); mask-size: 6px 6px; }`],
+    ["a 2 px outline in the focus colour", "a.tsx", `<li className="outline-2 -outline-offset-2 outline-focus">`],
+    ["no shadow, and the word in prose", "a.tsx", `// The dialog's shadow is a token.\n<div className="shadow-none">`],
   ])("passes %s", (_, path, text) => {
     expect(findTells(path, text)).toEqual([]);
   });

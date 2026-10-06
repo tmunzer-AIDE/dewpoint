@@ -8,6 +8,19 @@ import { COLOURS, PAIRS } from "./tokenNames";
 import css from "./tokens.css?raw";
 
 /** The declarations of the first rule whose selector is exactly `selector`, with `var()` references resolved. */
+/** The body of `@layer <name> { … }`, braces matched: what sits inside the layer, and nothing after it. */
+function layerBody(sheet: string, name: string): string {
+  const open = sheet.indexOf(`@layer ${name} {`);
+  if (open < 0) throw new Error(`no @layer ${name}`);
+  const start = sheet.indexOf("{", open) + 1;
+  let depth = 1;
+  for (let i = start; i < sheet.length; i++) {
+    if (sheet[i] === "{") depth++;
+    else if (sheet[i] === "}" && --depth === 0) return sheet.slice(start, i);
+  }
+  throw new Error(`@layer ${name} never closes`);
+}
+
 function block(selector: string): Map<string, string> {
   const start = css.indexOf(`${selector} {`);
   if (start < 0) throw new Error(`no rule for ${selector}`);
@@ -112,9 +125,11 @@ describe("the Tailwind theme (theme.css, app.css)", () => {
   });
 
   it("keeps its base rules in the base layer, so utilities can override them", () => {
-    const layer = themeCss.slice(themeCss.indexOf("@layer base {"));
-    expect(themeCss).toContain("@layer base {");
+    const layer = layerBody(themeCss, "base");
     for (const rule of [":focus-visible {", "html,", "h1,", "code, kbd, pre, samp, .font-mono {"]) expect(layer).toContain(rule);
+    // ...and only there: a copy outside the layer would beat every utility.
+    const outside = themeCss.replace(`@layer base {${layer}}`, "");
+    for (const rule of [":focus-visible {", "code, kbd, pre, samp, .font-mono {"]) expect(outside).not.toContain(rule);
   });
 
   it("turns JetBrains Mono's ligatures off, so code shows what was typed (`!=`, never `≠`)", () => {

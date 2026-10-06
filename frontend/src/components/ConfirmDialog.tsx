@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // A confirmation for an action that can't be undone: a native modal <dialog> (focus moves in and back, Escape cancels,
-// the page behind is inert, no injected styles: D23). Focus starts on Cancel, the safe choice.
+// the page behind is inert, no injected styles: D23). Focus starts on Cancel, the safe choice. While its action runs
+// (`busy`) it holds: Escape is refused and Cancel is off, so a cancel never races the action it can't stop.
 import { useEffect, useRef, type ReactNode } from "react";
 import { Button } from "./Button";
 
@@ -32,6 +33,9 @@ export function ConfirmDialog({ open, title, confirmLabel, busy = false, onConfi
     <dialog
       ref={dialog}
       aria-label={title}
+      onCancel={(e) => {
+        if (busy) e.preventDefault();
+      }}
       onClose={() => {
         // Escape closes the dialog itself: that's a cancel. A close the caller asked for (after its confirm) isn't.
         if (closing.current) closing.current = false;
@@ -42,7 +46,7 @@ export function ConfirmDialog({ open, title, confirmLabel, busy = false, onConfi
       <h2 className="text-h3 font-semibold">{title}</h2>
       <div className="mt-2 text-body text-muted">{children}</div>
       <div className="mt-6 flex justify-end gap-2">
-        <Button ref={cancel} onClick={onCancel}>Cancel</Button>
+        <Button ref={cancel} onClick={onCancel} disabled={busy}>Cancel</Button>
         <Button variant="danger" onClick={onConfirm} disabled={busy}>{confirmLabel}</Button>
       </div>
     </dialog>

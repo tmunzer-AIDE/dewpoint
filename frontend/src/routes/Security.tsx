@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import { Button } from "../components/Button";
 import { Field } from "../components/Field";
 import { LoadError } from "../components/LoadError";
@@ -58,6 +58,18 @@ export function SecurityPage() {
   const [codes, setCodes] = useState<string[] | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [pw, setPw] = useState({ current: "", next: "" });
+  const opener = useRef<HTMLElement | null>(null);
+
+  /** Ask for a fresh second factor before `retry`, remembering what asked: the prompt hands focus back to it. */
+  function askReauth(retry: () => Promise<void>) {
+    opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setPending(() => retry);
+  }
+  function closeReauth() {
+    setPending(null);
+    if (opener.current?.isConnected) opener.current.focus();
+    opener.current = null;
+  }
 
   /** Run a factor change; if the server wants fresh reauth, ask for it and retry once confirmed. */
   async function guarded(action: () => Promise<void>) {
@@ -65,7 +77,7 @@ export function SecurityPage() {
     try {
       await action();
     } catch (e) {
-      if (needsReauth(e)) setPending(() => action);
+      if (needsReauth(e)) askReauth(action);
       else setMessage("That didn't work. Try again.");
     }
   }
@@ -99,10 +111,10 @@ export function SecurityPage() {
       </div>
       {pending && (
         <ReauthPrompt
-          onCancel={() => setPending(null)}
+          onCancel={closeReauth}
           onDone={() => {
             const retry = pending;
-            setPending(null);
+            closeReauth();
             void guarded(retry);
           }}
         />
@@ -134,7 +146,8 @@ export function SecurityPage() {
               setTotpOpen(false);
               setCodes(list);
             }}
-            onReauth={(retry) => setPending(() => retry)}
+            onReauth={askReauth}
+            focusStart
           />
         ) : (
           <Button className="self-start" onClick={() => setTotpOpen(true)}>Set up or replace authenticator app</Button>

@@ -87,6 +87,7 @@
   --rail-ink-strong: #ffffff; /* the active item */
   --rail-dim: #7f95a1;
   --rail-active: rgba(255, 255, 255, 0.18); /* the current item: 1.5:1 above a hovered one */
+  --rail-current: rgba(255, 255, 255, 0.4); /* the current item on the icon rail, where no label is bold: 3:1 */
   --rail-line: rgba(255, 255, 255, 0.05); /* hover, separators */
   --disabled-ink: #8b9199;
   --disabled-bg: #eef0ec;
@@ -142,6 +143,7 @@
     --rail-ink-strong: #ffffff;
     --rail-dim: #7f95a1;
     --rail-active: rgba(255, 255, 255, 0.18);
+    --rail-current: rgba(255, 255, 255, 0.4);
     --rail-line: rgba(255, 255, 255, 0.05);
     --disabled-ink: #6b7178;
     --disabled-bg: #202428;
@@ -197,6 +199,7 @@
   --rail-ink-strong: #ffffff;
   --rail-dim: #7f95a1;
   --rail-active: rgba(255, 255, 255, 0.18);
+  --rail-current: rgba(255, 255, 255, 0.4);
   --rail-line: rgba(255, 255, 255, 0.05);
   --disabled-ink: #6b7178;
   --disabled-bg: #202428;

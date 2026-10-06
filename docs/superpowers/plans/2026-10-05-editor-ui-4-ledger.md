@@ -239,3 +239,33 @@ thirteen minor findings. What became of each:
 52. Ruling: the development banner appears when the platform status answers, so a development deployment's first
     full page load moves the page down once; production shows no banner, so it never moves - a one-time shift on
     development stacks.
+
+### 4a, a second fresh-context review (2026-10-06)
+
+A second reviewer read the fixes (e8e9bf4, ae52c6c) against rulings 44-50: nothing critical, six minor findings and
+three gaps in what the fixes claimed. What became of each:
+
+53. Fixed (finding 3, WCAG 1.4.11): below `lg` the rail shows icons only, so no bold label marks the current item; its
+    fill there is a new `--rail-current` (40 % white: 3.72:1 off the rail, dark 3.81:1; the white icon on it 4.38:1,
+    dark 4.81:1), held in PAIRS. From `lg` up, ruling 18's 18 % fill and weight stay - a heavier tile on the icon
+    rail; a different cue (a ring) would be one token.
+54. Fixed (finding 2, WCAG 2.1.1): a table's scrolling frame is a named region that takes focus, so the keyboard can
+    scroll a table that holds nothing focusable (an empty list, Members as a viewer sees it) - one more Tab stop per
+    table.
+55. Fixed (finding 1): Security gives focus back to the button that asked for re-authentication, when the prompt is
+    cancelled or done; the authenticator setup's start button takes focus when the button that opened it gives way,
+    and its code field when the setup appears (in enrolment too) - focus never falls to the page's body there.
+56. Fixed (finding 4): ConfirmDialog holds while its action runs - Escape is refused, Cancel is off - and Members moves
+    focus to the list's heading once a removal is done, however the dialog closed (Chrome closes it on a second
+    Escape regardless); the flag that outlived it is gone.
+57. Fixed (finding 5): the AI-tells guard also catches bare `shadow` and `blur`, durations over 150 ms or arbitrary,
+    stripes on the right or on facing sides, Tailwind's mask fades, outlines over 2 px or in a soft colour, and in a
+    stylesheet any box-shadow but a token's, side borders over 1 px, long transitions and animations, and keyframes of
+    our own. `shadow-none` now passes. Each has a test case; the sources pass unchanged.
+58. Fixed (finding 6): each axe check in the e2e waits for its screen's own content (the login form, the QR code, the
+    tenant and connection lists, Security past its session check); the 320 px check waits for each screen's data
+    and banner rather than for the network to settle; the saved token is looked for in field values too.
+59. Fixed (gaps in 44 and 46): the remembered theme is applied by `public/theme.js`, a classic script in `<head>`
+    served from 'self' (the CSP is unchanged), so it is set before the first paint rather than after the deferred
+    bundle; a gate self-test proves a 4xx console line from anything but the API is a problem (it fails against the
+    old exemption); the base-layer test checks its rules sit inside the layer and nowhere else.

@@ -12,10 +12,13 @@ import { useDocumentTitle } from "../lib/title";
 export function TotpSetup({
   onConfirmed,
   onReauth,
+  focusStart = false,
 }: {
   onConfirmed: (codes: string[], state: string) => void;
   /** Called with a retry when the server wants a fresh second factor first (active sessions only). */
   onReauth?: (retry: () => Promise<void>) => void;
+  /** Take focus on the start button: for a caller whose own button gave way to this setup. */
+  focusStart?: boolean;
 }) {
   const [uri, setUri] = useState<string | null>(null);
   const [qr, setQr] = useState<string | null>(null);
@@ -49,7 +52,7 @@ export function TotpSetup({
 
   if (!uri) {
     return (
-      <Button onClick={() => void start()} data-testid="totp-start">
+      <Button onClick={() => void start()} autoFocus={focusStart} data-testid="totp-start">
         Authenticator app
       </Button>
     );
@@ -61,7 +64,8 @@ export function TotpSetup({
         Or enter this key manually:{" "}
         <code className="font-mono text-ink" data-testid="totp-secret">{secret}</code>
       </p>
-      <Field label="Code from the app" inputMode="numeric" autoComplete="one-time-code" required value={code}
+      {/* The start button gave way to this form: focus moves to its one field rather than to the page's body. */}
+      <Field label="Code from the app" inputMode="numeric" autoComplete="one-time-code" required value={code} autoFocus
         onChange={(e) => setCode(e.target.value)} data-testid="totp-code" />
       {error && <p role="alert" className="text-body text-danger">{error}</p>}
       <Button variant="primary" type="submit" data-testid="totp-submit">Confirm</Button>

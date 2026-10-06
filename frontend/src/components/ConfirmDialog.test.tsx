@@ -39,3 +39,28 @@ it("never reports a cancel when the caller closes it after confirming", async ()
   expect(onConfirm).toHaveBeenCalledOnce();
   expect(onCancel).not.toHaveBeenCalled();
 });
+
+it("holds while its action runs: Escape is refused and Cancel is off", () => {
+  const onCancel = vi.fn();
+  render(
+    <ConfirmDialog open busy title="Remove a member" confirmLabel="Remove" onConfirm={vi.fn()} onCancel={onCancel}>
+      ed@corp.test loses access.
+    </ConfirmDialog>,
+  );
+  const escape = new Event("cancel", { cancelable: true }); // what the browser fires on Escape, before closing
+  screen.getByRole("dialog").dispatchEvent(escape);
+  expect(escape.defaultPrevented).toBe(true);
+  expect(screen.getByRole("button", { name: "Cancel" })).toHaveProperty("disabled", true);
+  expect(onCancel).not.toHaveBeenCalled();
+});
+
+it("lets Escape cancel when nothing runs", () => {
+  render(
+    <ConfirmDialog open title="Remove a member" confirmLabel="Remove" onConfirm={vi.fn()} onCancel={vi.fn()}>
+      ed@corp.test loses access.
+    </ConfirmDialog>,
+  );
+  const escape = new Event("cancel", { cancelable: true });
+  screen.getByRole("dialog").dispatchEvent(escape);
+  expect(escape.defaultPrevented).toBe(false);
+});

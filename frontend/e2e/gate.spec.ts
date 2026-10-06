@@ -30,6 +30,13 @@ test("a resource that fails to load is a problem, unlike an API's 4xx answer", a
   expect(gate.problems).toEqual([]);
 });
 
+test("a 4xx console line is exempt only from the API: from anything else it is a problem", async ({ page, gate }) => {
+  await page.goto("/login");
+  await page.evaluate(() => console.error("Failed to load resource: the server responded with a status of 404 (Not Found)"));
+  await expect.poll(() => gate.problems.join("\n")).toMatch(/console: Failed to load resource/);
+  gate.clear();
+});
+
 test("axe reports text below 4.5:1", async ({ page }) => {
   await page.goto("/login");
   await page.evaluate(() => {

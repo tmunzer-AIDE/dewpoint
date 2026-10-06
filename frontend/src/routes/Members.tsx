@@ -2,7 +2,7 @@
 // Settings → Members & roles (D11; the design names the tab in 1i, the tab itself is built in its grammar). Anyone in
 // the tenant reads the list; admins and owners add, change and remove members. The API decides every write.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import { Button } from "../components/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { Field, Select } from "../components/Field";
@@ -41,14 +41,7 @@ export function MembersPage({ tenantId }: { tenantId: string }) {
   const [removing, setRemoving] = useState<Member | null>(null);
   const refresh = () => qc.invalidateQueries({ queryKey: ["members", tenantId] });
   const heading = useRef<HTMLHeadingElement>(null);
-  const refocus = useRef(false); // after a removal, the row and its button are gone: focus goes to the list's heading
   useDocumentTitle("Members & roles");
-  useEffect(() => {
-    if (removing === null && refocus.current) {
-      refocus.current = false;
-      heading.current?.focus();
-    }
-  }, [removing]);
 
   const add = useMutation({
     mutationFn: () => ok(client.POST("/api/v1/t/{tenant_id}/members", { params: { path }, body: { email, role } })),
@@ -73,14 +66,17 @@ export function MembersPage({ tenantId }: { tenantId: string }) {
     mutationFn: (user_id: string) =>
       ok(client.DELETE("/api/v1/t/{tenant_id}/members/{user_id}", { params: { path: { ...path, user_id } } })),
     onMutate: () => setError(null),
-    onSuccess: () => {
-      refocus.current = true;
-    },
-    onSettled: async () => {
+    // The row and its button are gone once the list is fresh: focus goes to the list's heading, however the dialog
+    // closed (the browser may close it on a second Escape even while it holds).
+    onSuccess: async () => {
       setRemoving(null);
       await refresh();
+      heading.current?.focus();
     },
-    onError: (e) => setError(message(e)),
+    onError: (e) => {
+      setRemoving(null);
+      setError(message(e));
+    },
   });
 
   function submit(e: FormEvent) {
@@ -97,7 +93,7 @@ export function MembersPage({ tenantId }: { tenantId: string }) {
         </p>
       </div>
       {error && <p role="alert" className="text-body text-danger">{error}</p>}
-      {members.isError ? <LoadError what="The members" /> : <Table className="max-w-3xl">
+      {members.isError ? <LoadError what="The members" /> : <Table label="Members" className="max-w-3xl">
         <thead>
           <tr><Th>Email</Th><Th>Role</Th>{canManage && <Th><span className="sr-only">Actions</span></Th>}</tr>
         </thead>

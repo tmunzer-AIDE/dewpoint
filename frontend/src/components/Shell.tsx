@@ -16,9 +16,10 @@ import { TenantSwitcher } from "./TenantSwitcher";
 import { ThemeSelect } from "./ThemeSelect";
 
 // The current item stands apart from a hovered one by weight, ink and a 1.5:1 background step (ledger, ruling 18).
-// Below lg the rail is the design's 60 px icon rail (screens 1c, 1g): labels stay, for assistive technology.
+// Below lg the rail is the design's 60 px icon rail (screens 1c, 1g): labels stay, for assistive technology, and with
+// no bold label to see, the current item's fill stands 3:1 off the rail (rail-current, ruling 53).
 const ITEM = "flex items-center justify-center gap-2.5 rounded-md px-2 py-2.5 text-body text-rail-ink lg:justify-start lg:px-3 lg:py-2";
-const CURRENT = "bg-rail-active font-semibold text-rail-ink-strong";
+const CURRENT = "bg-rail-current font-semibold text-rail-ink-strong lg:bg-rail-active";
 const INACTIVE = "hover:bg-rail-line";
 
 export function Shell() {

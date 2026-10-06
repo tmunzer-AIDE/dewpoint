@@ -38,7 +38,7 @@ export function TenantsPage() {
   return (
     <section className="flex flex-col gap-6 p-6">
       <h1 className="text-h1 font-semibold">Tenants</h1>
-      {tenants.isError ? <LoadError what="Your tenants" /> : <Table className="max-w-3xl">
+      {tenants.isError ? <LoadError what="Your tenants" /> : <Table label="Tenants" className="max-w-3xl">
         <thead>
           <tr><Th>Name</Th><Th>Slug</Th><Th>Your role</Th></tr>
         </thead>

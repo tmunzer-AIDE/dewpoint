@@ -13,6 +13,7 @@ function code(secret: string, offsetSeconds = 0): string {
 
 async function passwordLogin(page: Page) {
   await page.goto("/login");
+  await expect(page.getByTestId("login-submit")).toBeVisible(); // axe checks the form, not the page before it
   await expectAccessible(page, "login");
   await page.getByTestId("login-email").fill(EMAIL);
   await page.getByTestId("login-password").fill(PASSWORD);
@@ -26,6 +27,7 @@ test.describe.serial("foundations", () => {
     await expectAccessible(page, "enroll: choose a method");
     await page.getByRole("button", { name: "Authenticator app" }).click();
     totpSecret = (await page.getByTestId("totp-secret").textContent())!.replace(/\s/g, "");
+    await expect(page.getByRole("img", { name: "QR code for your authenticator app" })).toBeVisible();
     await expectAccessible(page, "enroll: authenticator app");
     await page.getByTestId("totp-code").fill(code(totpSecret));
     await page.getByTestId("totp-submit").click();
@@ -35,6 +37,7 @@ test.describe.serial("foundations", () => {
     await page.getByRole("button", { name: "Continue" }).click();
 
     await expect(page).toHaveURL(/\/tenants/);
+    await expect(page.getByText("You're not a member of any tenant yet.")).toBeVisible();
     await expectAccessible(page, "tenants");
     await page.getByTestId("tenant-name").fill("Acme Retail");
     await page.getByTestId("tenant-slug").fill("acme-retail");
@@ -47,6 +50,7 @@ test.describe.serial("foundations", () => {
     const connectionsPath = new URL(page.url()).pathname;
     // This stack is a development deployment (Compose's dev override): every signed-in screen says so.
     await expect(page.getByRole("note", { name: "Deployment" })).toContainText("Development deployment");
+    await expect(page.getByText("No Mist connection yet.")).toBeVisible();
     await expectAccessible(page, "connections");
 
     await page.getByTestId("conn-add").click();
@@ -60,6 +64,10 @@ test.describe.serial("foundations", () => {
     await expect(row).toContainText("api.eu.mist.com");
     await expect(row).toContainText("Not verified");
     await expect(page.locator("body")).not.toContainText("tok_");
+    const tokenInAField = await page.evaluate(() =>
+      [...document.querySelectorAll("input, textarea")].some((f) => (f as HTMLInputElement).value.includes("tok_")),
+    );
+    expect(tokenInAField, "the saved token stays in a field").toBe(false);
     await expectAccessible(page, "connections, with a connection");
 
     // Settings → Members & roles: the platform admin created the tenant, so owns it.
@@ -94,10 +102,15 @@ test.describe.serial("foundations", () => {
     // Reflow (WCAG 1.4.10): at 320 CSS pixels (1280 at 400 % zoom), no screen scrolls sideways, and each stays AA.
     await page.setViewportSize({ width: 320, height: 640 });
     const membersPath = connectionsPath.replace("/connections", "/settings/members");
-    for (const path of [connectionsPath, membersPath, "/account/security", "/tenants"]) {
+    // Each screen is measured with its data in (a table widens a screen only once it has rows) and its banner shown.
+    const screens: [string, string][] = [
+      [connectionsPath, "Acme Prod"], [membersPath, EMAIL], ["/account/security", "No passkeys yet."], ["/tenants", "acme-retail"],
+    ];
+    for (const [path, content] of screens) {
       await page.goto(path);
       await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
-      await page.waitForLoadState("networkidle"); // measure with the data in: tables come with it
+      await expect(page.getByText(content).first()).toBeVisible();
+      await expect(page.getByRole("note", { name: "Deployment" })).toBeVisible();
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
       expect(overflow, `${path} scrolls sideways at 320 px`).toBeLessThanOrEqual(0);
       await expectAccessible(page, `${path} at 320 px`);
@@ -119,11 +132,13 @@ test.describe.serial("foundations", () => {
     await page.getByTestId("totp-submit").click();
     await expect(page).toHaveURL(/\/tenants/); // wait: the MFA response rotates the session cookie
     await page.goto("/account/security");
+    await expect(page.getByText("No passkeys yet.")).toBeVisible(); // past the session check, with the list in
     await expectAccessible(page, "security");
     // Setting up an authenticator: its QR code and key, or the re-authentication it asks for first.
     await page.getByRole("button", { name: "Set up or replace authenticator app" }).click();
     await page.getByTestId("totp-start").click();
-    await expect(page.getByTestId("totp-secret").or(page.getByRole("form", { name: "Confirm it's you" }))).toBeVisible();
+    // Sign-in was moments ago, inside the re-authentication window: the setup shows its QR code and key.
+    await expect(page.getByRole("img", { name: "QR code for your authenticator app" })).toBeVisible();
     await expectAccessible(page, "security: authenticator setup");
     page.once("dialog", (d) => void d.accept("E2E key"));
     await page.getByTestId("passkey-add").click();
