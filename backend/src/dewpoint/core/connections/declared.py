@@ -4,6 +4,8 @@ connection's config and secret against the declared JSON Schemas, lists the type
 this data alone; the worker computes base URLs, credentials and scope keys with the same functions from its own
 plugins' manifests, so the two always agree."""
 
+import hashlib
+import json
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -49,6 +51,12 @@ def _fields(schema: Mapping[str, Any], value: Any) -> list[str]:
     return sorted(found)
 
 
+def declaration_hash(m: Mapping[str, Any]) -> str:
+    """The identity of a type's declaration: a worker serves a call through a connection only when its own declaration
+    of the type is the synced one (the 3a-2 review's finding 8)."""
+    return hashlib.sha256(json.dumps(m, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 @dataclass(frozen=True)
 class DeclaredType:
     plugin: str
@@ -60,6 +68,7 @@ class DeclaredType:
     host: Mapping[str, Any] | None
     rate_scopes: tuple[Mapping[str, Any], ...]
     verify: bool
+    hash: str = ""
 
     @classmethod
     def from_manifest(cls, plugin: str, m: Mapping[str, Any]) -> "DeclaredType":
@@ -73,6 +82,7 @@ class DeclaredType:
             host=m.get("host"),
             rate_scopes=tuple(m.get("rate_scopes", ())),
             verify=bool(m.get("verify")),
+            hash=declaration_hash(m),
         )
 
     def _checked(self, schema: Mapping[str, Any], value: Any) -> dict[str, Any]:

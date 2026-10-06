@@ -281,8 +281,13 @@ async def verify_connection(
     await s.commit()
     outcome = await ask(
         lambda inner: calls.ask_verify(
-            inner, ctx.tenant_id, connection_type=conn.type, connection_id=conn.id, revision=loaded_revision
-        )
+            inner,
+            ctx.tenant_id,
+            connection_type=conn.type,
+            connection_id=conn.id,
+            revision=loaded_revision,
+            type_hash=kind.hash,
+        )  # fmt: skip
     )
     if outcome.timed_out:
         raise VerificationUnansweredError()

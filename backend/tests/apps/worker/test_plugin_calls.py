@@ -29,6 +29,7 @@ from tests.support.plugins.testkit import TESTKIT
 NAMES = ("dewpoint.test",)
 TOKEN = "s3cr3t-token-value"
 SITES = [{"id": "s1", "name": "Site 1"}, {"id": "s2", "name": "Site 2"}]
+KIT_HASH = types_for_testkit()["testkit"].declared.hash
 
 
 async def service(request: Request, writer: asyncio.StreamWriter) -> None:
@@ -68,8 +69,9 @@ async def ask(api: Any, tenant: uuid.UUID, cid: uuid.UUID | None, q: str = "pa",
     async with api() as s, s.begin():
         await tenant_scope(s, tenant)
         return await calls.ask_options(
-            s, tenant, node_ref=ref, field=field, connection_id=cid, revision=revision if cid else None, query=q
-        )
+            s, tenant, node_ref=ref, field=field, connection_id=cid, revision=revision if cid else None, query=q,
+            type_hash=KIT_HASH if cid else None,
+        )  # fmt: skip
 
 
 async def outcome(api: Any, tenant: uuid.UUID, call: uuid.UUID) -> tuple[str, Any]:
@@ -175,9 +177,12 @@ async def test_another_tenants_connection_is_unavailable(
         mine, _ = await setup(owner_sessionmaker, fake.port)
         call = await ask(api_sessionmaker, mine, None)
         async with owner_sessionmaker() as s, s.begin():  # a call naming another tenant's connection
+            await s.execute(text("SET LOCAL session_replication_role = replica"))  # past the tenant-scoped key
             await s.execute(
-                text("update plugin_calls set connection_id = :c, connection_revision = 1 where id = :i"),
-                {"c": theirs, "i": call},
+                text(
+                    "update plugin_calls set connection_id = :c, connection_revision = 1, type_hash = :h where id = :i"
+                ),
+                {"c": theirs, "i": call, "h": KIT_HASH},
             )
         await server_for(worker_sessionmaker, mine).serve_once()
     assert await outcome(api_sessionmaker, mine, call) == ("failed", "connection_unavailable")
@@ -229,7 +234,9 @@ async def test_a_connection_type_is_verified(owner_sessionmaker, api_sessionmake
         tenant, cid = await setup(owner_sessionmaker, fake.port)
         async with api_sessionmaker() as s, s.begin():
             await tenant_scope(s, tenant)
-            call = await calls.ask_verify(s, tenant, connection_type="testkit", connection_id=cid, revision=1)
+            call = await calls.ask_verify(
+                s, tenant, connection_type="testkit", connection_id=cid, revision=1, type_hash=KIT_HASH
+            )
         await server_for(worker_sessionmaker, tenant).serve_once()
     assert await outcome(api_sessionmaker, tenant, call) == ("done", {"ok": True, "detail": "ok", "privilege": None})
     assert [(r.method, r.target) for r in fake.requests] == [("GET", "/verify")]
@@ -244,8 +251,10 @@ async def test_a_notification_wakes_the_server(owner_sessionmaker, api_sessionma
             await asyncio.wait_for(server.listening.wait(), 10)
             async with api_sessionmaker() as s, s.begin():
                 await tenant_scope(s, tenant)
-                call = await calls.ask_options(s, tenant, node_ref="testkit.pick@1", field="site_id",
-                                               connection_id=cid, revision=1, query="pa")  # fmt: skip
+                call = await calls.ask_options(
+                    s, tenant, node_ref="testkit.pick@1", field="site_id", connection_id=cid, revision=1, query="pa",
+                    type_hash=KIT_HASH,
+                )  # fmt: skip
                 await calls.notify(s)
             for _ in range(100):
                 if (await outcome(api_sessionmaker, tenant, call))[0] == "done":
@@ -285,3 +294,18 @@ def test_an_option_is_plain_text() -> None:
     with pytest.raises(_Refused) as raised:
         _options_answer([Option(value="v", label=Sly("Site 1"))])
     assert raised.value.code == "invalid_result"
+
+
+async def test_a_worker_with_another_declaration_of_the_type_leaves_the_call(
+    owner_sessionmaker, api_sessionmaker, worker_sessionmaker
+) -> None:
+    """A worker of another build, whose `testkit` type is declared differently, never serves a call through it (the
+    3a-2 review's finding 8)."""
+    async with serve(service, tls_names=NAMES) as fake:
+        tenant, cid = await setup(owner_sessionmaker, fake.port)
+        call = await ask(api_sessionmaker, tenant, cid)
+        other_build = types_for_testkit(capacity=7)
+        assert other_build["testkit"].declared.hash != KIT_HASH
+        assert await server_for(worker_sessionmaker, tenant, types=other_build).serve_once() == 0
+    assert await outcome(api_sessionmaker, tenant, call) == ("pending", None)
+    assert fake.requests == []

@@ -13,6 +13,7 @@ from dewpoint.apps.api.deps import get_keyring
 from dewpoint.apps.api.routes.node_types import ask_and_wait, options_reply
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.config import Settings
+from dewpoint.core.connections.declared import declared_types
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.http import TenantContext, get_db, get_settings_dep, require
 from dewpoint.core.models.connections import Connection
@@ -292,14 +293,15 @@ async def input_options(
     ).scalar_one_or_none()
     # Only a connection publish checked and recorded: a version published before pickers were checked may name any.
     recorded = connection_id in (version.connection_ids or [])
-    if conn is None or not recorded or conn.type not in row.manifest.get("credentials", []):
+    kind = (await declared_types(db)).get(conn.type) if conn is not None else None
+    if conn is None or kind is None or not recorded or conn.type not in row.manifest.get("credentials", []):
         raise HTTPException(422, detail={"error": "connection_unavailable"})
-    revision = conn.revision
+    revision, type_hash = conn.revision, kind.hash
 
     async def ask(s: AsyncSession) -> uuid.UUID:
         return await calls.ask_options(
             s, ctx.tenant_id, node_ref=row.ref, field=picker["field"], connection_id=connection_id, revision=revision,
-            query=body.query,
+            query=body.query, type_hash=type_hash,
         )  # fmt: skip
 
     return options_reply(await ask_and_wait(request, db, keyring, ctx.tenant_id, ask))

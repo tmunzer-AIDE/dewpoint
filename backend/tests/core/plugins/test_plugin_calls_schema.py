@@ -110,10 +110,12 @@ async def test_the_worker_changes_only_the_claim_and_the_answer(
     assert claimed.rowcount == 1
 
 
-async def _candidates(maker: Any, refs: list[str], types: list[str]) -> set[uuid.UUID]:
+async def _candidates(maker: Any, refs: list[str], types: list[str], hashes: list[str] | None = None) -> set[uuid.UUID]:
+    hashes = ["h"] if hashes is None else hashes
     async with maker() as s, s.begin():
         rows = await s.execute(
-            text("select tenant_id, id from plugin_call_candidates(:r, :t, 50)"), {"r": refs, "t": types}
+            text("select tenant_id, id from plugin_call_candidates(:r, :t, :h, 50)"),
+            {"r": refs, "t": types, "h": hashes},
         )
         return {row[1] for row in rows}
 
@@ -147,7 +149,7 @@ async def test_candidates_are_the_due_calls_of_the_refs_and_types_a_build_has(
         await s.execute(
             text(
                 "insert into plugin_calls (id, tenant_id, kind, connection_type, connection_id, connection_revision, "
-                "expires_at) values (:i, :t, 'verify', 'demo', :c, 1, now() + interval '30 seconds')"
+                "type_hash, expires_at) values (:i, :t, 'verify', 'demo', :c, 1, 'h', now() + interval '30 seconds')"
             ),
             {"i": verify, "t": a, "c": conn},
         )
@@ -159,7 +161,7 @@ async def test_candidates_are_the_due_calls_of_the_refs_and_types_a_build_has(
 
 async def test_only_the_worker_finds_candidates_or_sweeps(api_sessionmaker, dispatch_sessionmaker) -> None:
     for maker in (api_sessionmaker, dispatch_sessionmaker):
-        for statement in ("select * from plugin_call_candidates(array['x@1'], array['x'], 1)",
+        for statement in ("select * from plugin_call_candidates(array['x@1'], array['x'], array['h'], 1)",
                           "select plugin_calls_sweep()"):  # fmt: skip
             with pytest.raises(DBAPIError, match="permission denied"):
                 async with maker() as s, s.begin():
@@ -181,8 +183,8 @@ async def test_the_sweep_deletes_calls_a_minute_past_their_expiry(
 
 BASE = {
     "kind": "options", "node_ref": "demo.pick@1", "field": "site_id", "connection_type": None, "connection_id": None,
-    "connection_revision": None, "state": "pending", "claim_token": None, "lease_until": None, "result_ct": None,
-    "error": None,
+    "connection_revision": None, "type_hash": None, "state": "pending", "claim_token": None, "lease_until": None,
+    "result_ct": None, "error": None,
 }  # fmt: skip
 CONN = "the connection"
 
@@ -195,6 +197,8 @@ CONN = "the connection"
         {"kind": "verify", "node_ref": None, "field": None, "connection_type": "demo"},
         {"kind": "verify", "node_ref": None, "field": None, "connection_type": "demo", "connection_id": CONN},
         {"connection_id": CONN},
+        {"connection_id": CONN, "connection_revision": 1},
+        {"type_hash": "h"},
         {"kind": "other"},
         {"state": "claimed"},
         {"state": "done"},
@@ -212,9 +216,10 @@ async def test_a_calls_shape_follows_its_kind_and_state(owner_sessionmaker, chan
             await s.execute(
                 text(
                     "insert into plugin_calls (tenant_id, expires_at, kind, node_ref, field, connection_type, "
-                    "connection_id, connection_revision, state, claim_token, lease_until, result_ct, error) "
+                    "connection_id, connection_revision, type_hash, state, claim_token, lease_until, result_ct, error) "
                     "values (:t, now() + interval '30 seconds', :kind, :node_ref, :field, :connection_type, "
-                    ":connection_id, :connection_revision, :state, :claim_token, :lease_until, :result_ct, :error)"
+                    ":connection_id, :connection_revision, :type_hash, :state, :claim_token, :lease_until, :result_ct, "
+                    ":error)"
                 ),
                 {"t": a, **row},
             )
@@ -241,9 +246,59 @@ async def test_deleting_a_connection_deletes_its_calls(owner_sessionmaker) -> No
         await s.execute(
             text(
                 "insert into plugin_calls (tenant_id, kind, connection_type, connection_id, connection_revision, "
-                "expires_at) values (:t, 'verify', 'demo', :c, 1, now() + interval '30 seconds')"
+                "type_hash, expires_at) values (:t, 'verify', 'demo', :c, 1, 'h', now() + interval '30 seconds')"
             ),
             {"t": a, "c": conn},
         )
         await s.execute(text("delete from connections where id = :c"), {"c": conn})
         assert (await s.execute(text("select count(*) from plugin_calls"))).scalar_one() == 0
+
+
+async def test_a_call_names_only_its_tenants_connection(owner_sessionmaker) -> None:
+    """The foreign key is the tenant's (the 3a-2 review's finding 10): another tenant's connection can't be named."""
+    a, b = await tenant(owner_sessionmaker), await tenant(owner_sessionmaker)
+    theirs = await add_connection(owner_sessionmaker, b, type_key="demo")
+    with pytest.raises(IntegrityError, match="foreign key"):
+        async with owner_sessionmaker() as s, s.begin():
+            await s.execute(
+                text(
+                    "insert into plugin_calls (tenant_id, kind, connection_type, connection_id, connection_revision, "
+                    "type_hash, expires_at) values (:t, 'verify', 'demo', :c, 1, 'h', now() + interval '30 seconds')"
+                ),
+                {"t": a, "c": theirs},
+            )
+
+
+async def test_candidates_take_turns_across_tenants(owner_sessionmaker, api_sessionmaker, worker_sessionmaker) -> None:
+    """One tenant's queue never fills a round (the 3a-2 review's finding 9): each tenant's oldest call comes first."""
+    a, b = await tenant(owner_sessionmaker), await tenant(owner_sessionmaker)
+    first_a = await add_call(api_sessionmaker, a)
+    await add_call(api_sessionmaker, a)
+    await add_call(api_sessionmaker, a)
+    first_b = await add_call(api_sessionmaker, b)
+    async with worker_sessionmaker() as s, s.begin():
+        rows = await s.execute(text("select id from plugin_call_candidates(array['demo.pick@1'], array[]::text[], "
+                                    "array[]::text[], 2)"))  # fmt: skip
+        assert set(rows.scalars()) == {first_a, first_b}
+
+
+async def test_candidates_are_only_of_the_declarations_a_build_has(
+    owner_sessionmaker, api_sessionmaker, worker_sessionmaker
+) -> None:
+    """A worker whose connection type's declaration differs from the synced one never claims a call through it (the
+    3a-2 review's finding 8); a call without a connection isn't fenced by one."""
+    a = await tenant(owner_sessionmaker)
+    conn = await add_connection(owner_sessionmaker, a, type_key="demo")
+    plain = await add_call(api_sessionmaker, a)
+    through = uuid.uuid4()
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(
+            text(
+                "insert into plugin_calls (id, tenant_id, kind, node_ref, field, connection_id, connection_revision, "
+                "type_hash, expires_at) values (:i, :t, 'options', 'demo.pick@1', 'site_id', :c, 1, 'new', "
+                "now() + interval '30 seconds')"
+            ),
+            {"i": through, "t": a, "c": conn},
+        )
+    assert await _candidates(worker_sessionmaker, ["demo.pick@1"], [], ["old"]) == {plain}
+    assert await _candidates(worker_sessionmaker, ["demo.pick@1"], [], ["new"]) == {plain, through}

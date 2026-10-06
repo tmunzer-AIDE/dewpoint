@@ -28,7 +28,7 @@ async def ask(api: Any, tid: uuid.UUID, *, expires_s: float = 30) -> uuid.UUID:
         await tenant_scope(s, tid)
         return await calls.ask_options(
             s, tid, node_ref="demo.pick@1", field="site_id", connection_id=None, revision=None, query="pa",
-            expires_s=expires_s,
+            type_hash=None, expires_s=expires_s,
         )  # fmt: skip
 
 
@@ -144,8 +144,9 @@ async def test_the_worker_finds_the_due_calls_of_its_refs_and_types(
     options = await ask(api_sessionmaker, tid)
     async with api_sessionmaker() as s, s.begin():
         await tenant_scope(s, tid)
-        verify = await calls.ask_verify(s, tid, connection_type="demo", connection_id=conn, revision=1)
+        verify = await calls.ask_verify(s, tid, connection_type="demo", connection_id=conn, revision=1, type_hash="h")
     async with worker_sessionmaker() as s, s.begin():
-        assert await calls.candidates(s, ["demo.pick@1"], ["demo"], 10) == [(tid, options), (tid, verify)]
-        assert await calls.candidates(s, ["demo.pick@1"], [], 10) == [(tid, options)]
-        assert await calls.candidates(s, [], ["demo"], 1) == [(tid, verify)]
+        assert await calls.candidates(s, ["demo.pick@1"], ["demo"], ["h"], 10) == [(tid, options), (tid, verify)]
+        assert await calls.candidates(s, ["demo.pick@1"], [], ["h"], 10) == [(tid, options)]
+        assert await calls.candidates(s, [], ["demo"], ["h"], 1) == [(tid, verify)]
+        assert await calls.candidates(s, [], ["demo"], ["other"], 1) == []

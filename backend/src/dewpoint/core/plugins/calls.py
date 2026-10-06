@@ -72,16 +72,18 @@ async def ask_options(
     connection_id: uuid.UUID | None,
     revision: int | None,
     query: str,
+    type_hash: str | None,
     expires_s: float = EXPIRES_S,
 ) -> uuid.UUID:
+    """`type_hash`: the synced declaration of the connection's type, when a connection is named."""
     found = await s.execute(
         text(
             "insert into plugin_calls (tenant_id, kind, node_ref, field, connection_id, connection_revision, query, "
-            "expires_at) values (:t, 'options', :ref, :field, :c, :rev, :q, now() + make_interval(secs => :ttl)) "
-            "returning id"
+            "type_hash, expires_at) values (:t, 'options', :ref, :field, :c, :rev, :q, :h, "
+            "now() + make_interval(secs => :ttl)) returning id"
         ),
         {"t": tenant_id, "ref": node_ref, "field": field, "c": connection_id, "rev": revision, "q": query,
-         "ttl": expires_s},
+         "h": type_hash, "ttl": expires_s},
     )  # fmt: skip
     return uuid.UUID(str(found.scalar_one()))
 
@@ -93,15 +95,18 @@ async def ask_verify(
     connection_type: str,
     connection_id: uuid.UUID,
     revision: int,
+    type_hash: str,
     expires_s: float = EXPIRES_S,
 ) -> uuid.UUID:
     found = await s.execute(
         text(
             "insert into plugin_calls (tenant_id, kind, connection_type, connection_id, connection_revision, "
-            "expires_at) values (:t, 'verify', :type, :c, :rev, now() + make_interval(secs => :ttl)) returning id"
+            "type_hash, expires_at) values (:t, 'verify', :type, :c, :rev, :h, now() + make_interval(secs => :ttl)) "
+            "returning id"
         ),
-        {"t": tenant_id, "type": connection_type, "c": connection_id, "rev": revision, "ttl": expires_s},
-    )
+        {"t": tenant_id, "type": connection_type, "c": connection_id, "rev": revision, "h": type_hash,
+         "ttl": expires_s},
+    )  # fmt: skip
     return uuid.UUID(str(found.scalar_one()))
 
 
@@ -124,12 +129,13 @@ async def forget(s: AsyncSession, tenant_id: uuid.UUID, call_id: uuid.UUID) -> N
 
 
 async def candidates(
-    s: AsyncSession, refs: list[str], types: list[str], limit: int
+    s: AsyncSession, refs: list[str], types: list[str], hashes: list[str], limit: int
 ) -> list[tuple[uuid.UUID, uuid.UUID]]:
-    """The due calls of these node refs and connection types, oldest first, across tenants: (tenant, call) only."""
+    """The due calls of these node refs and connection types, through connection types declared as `hashes` say,
+    across tenants, each tenant's oldest first: (tenant, call) only."""
     rows = await s.execute(
-        text("select tenant_id, id from plugin_call_candidates(:refs, :types, :n)"),
-        {"refs": refs, "types": types, "n": limit},
+        text("select tenant_id, id from plugin_call_candidates(:refs, :types, :hashes, :n)"),
+        {"refs": refs, "types": types, "hashes": hashes, "n": limit},
     )
     return [(uuid.UUID(str(t)), uuid.UUID(str(i))) for t, i in rows.all()]
 

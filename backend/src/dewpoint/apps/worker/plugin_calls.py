@@ -252,8 +252,9 @@ class PluginCallServer:
         free = self._concurrency - len(self._busy)
         if free <= 0 or (not self._nodes and not self._types):
             return 0
+        hashes = sorted(kind.declared.hash for kind in self._network.types.values())
         async with self._sessionmaker() as s, s.begin():
-            due = await calls.candidates(s, sorted(self._nodes), self._types, free)
+            due = await calls.candidates(s, sorted(self._nodes), self._types, hashes, free)
         for tenant_id, call_id in due:
             task = asyncio.create_task(self._serve(tenant_id, call_id))
             self._busy.add(task)

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps.api.deps import get_keyring
 from dewpoint.core.authz.permissions import ROLE_PERMISSIONS, P
+from dewpoint.core.connections.declared import declared_types
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.http import TenantContext, active_session, get_db, require
 from dewpoint.core.models.connections import Connection
@@ -110,6 +111,7 @@ async def node_options(
     if body.field not in row.manifest.get("options", []):
         raise HTTPException(422, detail={"error": "not_an_options_field"})
     revision: int | None = None
+    type_hash: str | None = None
     if body.connection_id is not None:
         if P.CONNECTION_USE not in ROLE_PERMISSIONS[ctx.role]:
             raise HTTPException(403, detail={"error": "forbidden"})
@@ -118,14 +120,15 @@ async def node_options(
                 select(Connection).where(Connection.id == body.connection_id, Connection.tenant_id == ctx.tenant_id)
             )
         ).scalar_one_or_none()
-        if conn is None or conn.type not in row.manifest.get("credentials", []):
+        kind = (await declared_types(db)).get(conn.type) if conn is not None else None
+        if conn is None or kind is None or conn.type not in row.manifest.get("credentials", []):
             raise HTTPException(422, detail={"error": "connection_unavailable"})
-        revision = conn.revision
+        revision, type_hash = conn.revision, kind.hash
 
     async def ask(s: AsyncSession) -> uuid.UUID:
         return await calls.ask_options(
             s, ctx.tenant_id, node_ref=row.ref, field=body.field, connection_id=body.connection_id, revision=revision,
-            query=body.query,
+            query=body.query, type_hash=type_hash,
         )  # fmt: skip
 
     return options_reply(await ask_and_wait(request, db, keyring, ctx.tenant_id, ask))
