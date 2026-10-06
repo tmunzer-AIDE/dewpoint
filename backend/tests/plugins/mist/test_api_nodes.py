@@ -226,3 +226,24 @@ async def test_a_generic_site_path_of_another_org_sends_nothing_more() -> None:
             {("GET", f"/api/v1/sites/{SITE}"): Reply(200, {"org_id": OTHER_ORG})},
         )  # fmt: skip
     assert e.value.code == "mist.site_outside_org"
+
+
+async def simulated(type_: str, config: dict[str, Any]) -> Any:
+    kind = node(type_)
+    connection = FakeConnection(FakeHttp({}))
+    value = kind.Config.model_validate({"connection": str(connection.id), **config})
+    out = (await kind().simulate(FakeStep(connection), value)).model_dump(mode="json")  # type: ignore[arg-type]
+    assert connection.http.sent == []
+    return out
+
+
+async def test_a_generic_simulation_answers_a_value_its_operations_answer_schema_accepts() -> None:
+    """The owner's review of the checkpoint (O3): with no example in the OAS (`getOrgPsk`), the body is made from the
+    answer's schema, never null; an operation that answers nothing simulates a null body."""
+    psk = str(uuid.uuid4())
+    out = await simulated("mist.api.read", {"path": f"/api/v1/orgs/{ORG}/psks/{psk}"})
+    schema = node_manifest(next(n for n in PLUGIN.nodes if n.type == "mist.org_psks.get"))["output_schema"]
+    assert out["status"] == 200 and isinstance(out["body"], dict)
+    assert list(Draft202012Validator(schema).iter_errors(out["body"])) == []
+    deleted = await simulated("mist.api.write", {"method": "DELETE", "path": f"/api/v1/orgs/{ORG}/psks/{psk}"})
+    assert deleted == {"status": 200, "body": None}

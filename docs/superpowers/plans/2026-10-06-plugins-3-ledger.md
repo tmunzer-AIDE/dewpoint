@@ -591,3 +591,8 @@ output outcome are closed. Fixed test-first:
   operation can't be allowed unless its site check is (the map's build fails); a merge read the map doesn't list or
   allow leaves `replace` available - the map stays the single source (D28), its diff showing every read - cost if
   wrong: holding `getSiteInfo` makes every site-scope node unavailable, as intended.
+- (O3, Low) a generic simulation answered `body: null` where the OAS has no example (`getOrgPsk`): it now answers the
+  example when the answer's schema (relaxed as an output's) accepts it, else the smallest value that schema accepts,
+  and null only for an operation that answers nothing - as the curated nodes do today. The fixture redesign the owner
+  recommends (bounded schema-built fixtures with validated example overlays, generic nodes included) is still the
+  open ruling above; it would replace both.

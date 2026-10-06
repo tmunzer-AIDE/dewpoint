@@ -20,15 +20,17 @@ import re
 import uuid
 from collections.abc import Mapping
 from datetime import timedelta
+from functools import cache
 from typing import Any, ClassVar
 
+from jsonschema import Draft202012Validator
 from pydantic import BaseModel
 
 from dewpoint.plugins.mist import oas, policy, routing
 from dewpoint.plugins.mist.client import SEGMENT, InvalidPathValue, MistClient
-from dewpoint.plugins.mist.nodes import OperationUnavailable, _example
+from dewpoint.plugins.mist.nodes import OperationUnavailable, _example, synthesized
 from dewpoint.plugins.mist.routing import UUID, Route, filled, matched, reaches, value_pattern
-from dewpoint.plugins.mist.schemas import secret_fields
+from dewpoint.plugins.mist.schemas import converted, resolved, secret_fields, with_defs
 from dewpoint.sdk import FatalError, Node, SideEffect, StepContext, declared_model
 from dewpoint.sdk.fields import CONNECTION, LITERAL, SENSITIVE
 
@@ -146,12 +148,28 @@ class MistApi(Node):
         return self.Output.model_construct(out)  # a declared model's value; the runtime checks it
 
     async def simulate(self, ctx: StepContext, config: Any) -> BaseModel:
-        """The matched operation's 2xx example from the OAS, never a request."""
+        """The matched operation's fixture (`answer_fixture`), never a request."""
         values, _, route, path_values = self._target(config)
         self._checked(route, path_values, None, values)
-        example = _example(oas.document(), oas.operations()[route.operation])
-        out: Any = {"status": 200, "body": copy.deepcopy(example)}
+        out: Any = {"status": 200, "body": copy.deepcopy(answer_fixture(route.operation))}
         return self.Output.model_construct(out)
+
+
+@cache
+def answer_fixture(operation: str) -> Any:
+    """What a simulated generic request answers (D13; the owner's review of the checkpoint, O3): the OAS's 2xx example
+    when the answer's schema (relaxed as an output's) accepts it, else the smallest value it accepts; null only for an
+    operation that answers nothing."""
+    doc, op = oas.document(), oas.operations()[operation]
+    found = oas.answer(doc, op)
+    if found is None:
+        return None
+    top = resolved(doc, found)
+    schema = with_defs(doc, converted(top, output=True), [top], output=True, partial=False)
+    example = _example(doc, op)
+    if example is not None and Draft202012Validator(schema).is_valid(example):
+        return example
+    return synthesized(schema)
 
 
 def _config(node: str, write: bool) -> dict[str, Any]:
