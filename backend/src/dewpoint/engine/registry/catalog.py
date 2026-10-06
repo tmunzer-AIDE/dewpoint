@@ -307,6 +307,40 @@ def _scope_problems(name: str, key: str, scope: Any, config_fields: Mapping[str,
     return out
 
 
+def _required(schema: Any) -> set[str]:
+    found = schema.get("required") if isinstance(schema, Mapping) else None
+    return {r for r in found if isinstance(r, str)} if isinstance(found, list) else set()
+
+
+def _required_problems(name: str, t: Mapping[str, Any]) -> list[str]:
+    """The fields the host, the auth template and the rate scopes read are required (see the SDK's rule)."""
+    config, secret = _required(t.get("config_schema")), _required(t.get("secret_schema"))
+    config_fields, secret_fields = _props(t.get("config_schema")), _props(t.get("secret_schema"))
+    out: list[str] = []
+    host, auth, scopes = t.get("host"), t.get("auth"), t.get("rate_scopes")
+    field = host.get("field") if isinstance(host, Mapping) else None
+    if field in config_fields and field not in config:
+        out.append(f"{name}: host field {field!r} must be required")
+    template = auth.get("template") if isinstance(auth, Mapping) else None
+    if isinstance(template, str):
+        try:
+            named = [p[1] for p in string.Formatter().parse(template) if p[1] is not None]
+        except ValueError:
+            named = []
+        out += [f"{name}: auth template names {n!r}, which must be required" for n in named
+                if n in secret_fields and n not in secret]  # fmt: skip
+    for scope in scopes if isinstance(scopes, list) else []:
+        if not isinstance(scope, Mapping):
+            continue
+        kind, names = scope.get("kind"), scope.get("config")
+        names = names if isinstance(names, list) else []
+        out += [f"{name}: rate scope {kind!r} names {n!r}, which must be required" for n in names
+                if n in config_fields and n not in config]  # fmt: skip
+        if scope.get("secret") in secret_fields and scope.get("secret") not in secret:
+            out.append(f"{name}: rate scope {kind!r} names {scope.get('secret')!r}, which must be required")
+    return out
+
+
 def _connection_type_problems(plugin: str, t: Any, seen: set[str]) -> list[str]:
     """The same rules the SDK applies to a ConnectionType (plugins-3 D11), for one received as data."""
     key = t.get("key") if isinstance(t, Mapping) else None
@@ -344,6 +378,7 @@ def _connection_type_problems(plugin: str, t: Any, seen: set[str]) -> list[str]:
             out += _scope_problems(name, key, scope, config_fields, secret_fields)
     if not isinstance(t.get("verify"), bool):
         out.append(f"{name}: verify must be true or false")
+    out += _required_problems(name, t)
     return out
 
 

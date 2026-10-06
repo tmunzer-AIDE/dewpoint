@@ -119,6 +119,17 @@ class FreeRegionConfig(BaseModel):
     region: str
 
 
+class OptionalConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    region: Literal["eu", "us"] = "eu"
+    org_id: uuid.UUID | None = None
+
+
+class OptionalSecret(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    token: SecretStr = SecretStr("default-token")
+
+
 class DemoSecret(BaseModel):
     model_config = ConfigDict(extra="forbid")
     token: SecretStr = Field(min_length=4)
@@ -222,6 +233,16 @@ class PlainSecret(BaseModel):
          "rate scope 'demo.x' names 'nope'"),
         (ConnectionType("demo", "D", DemoConfig, DemoSecret, rate_scopes=(RateScope("demo.x", secret="nope"),)),
          "rate scope 'demo.x' names 'nope'"),
+        (ConnectionType("demo", "D", OptionalConfig, DemoSecret,
+                        host=HostMap("region", {"eu": "api.eu.example.com", "us": "api.example.com"})),
+         "host field 'region' must be required"),
+        (ConnectionType("demo", "D", OptionalConfig, DemoSecret,
+                        rate_scopes=(RateScope("demo.x", config=("org_id",)),)),
+         "rate scope 'demo.x' names 'org_id', which must be required"),
+        (ConnectionType("demo", "D", DemoConfig, OptionalSecret, auth=HeaderAuth("Authorization", "Token {token}")),
+         "auth template names 'token', which must be required"),
+        (ConnectionType("demo", "D", DemoConfig, OptionalSecret, rate_scopes=(RateScope("demo.x", secret="token"),)),
+         "rate scope 'demo.x' names 'token', which must be required"),
         (ConnectionType("demo", "D", DemoConfig, DemoSecret, rate_scopes=(RateScope("other.x"),)),
          "rate scope 'other.x' must start with 'demo.'"),
         (ConnectionType("demo", "D", DemoConfig, DemoSecret,

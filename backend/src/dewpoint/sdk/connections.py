@@ -92,6 +92,7 @@ class ConnectionType:
             if model.model_config.get("extra") != "forbid":
                 out.append(f"{name}: the {label} model must forbid extra fields")
         config_fields, secret_fields = set(self.Config.model_fields), set(self.Secret.model_fields)
+        out += self._required_problems(name)
         for prop, info in self.Secret.model_fields.items():
             if info.annotation is not SecretStr:
                 out.append(f"{name}: secret field {prop!r} must be a SecretStr")
@@ -99,6 +100,28 @@ class ConnectionType:
         out += self._host_problems(name, config_fields)
         for scope in self.rate_scopes:
             out += self._scope_problems(name, scope, config_fields, secret_fields)
+        return out
+
+    def _required_problems(self, name: str) -> list[str]:
+        """Every field the host, the auth template or a rate scope reads is required: the API computes them from the
+        stored config as written, the worker from the validated one, and a default would make the two differ."""
+        config = {f for f, info in self.Config.model_fields.items() if info.is_required()}
+        secret = {f for f, info in self.Secret.model_fields.items() if info.is_required()}
+        out: list[str] = []
+        if self.host is not None and self.host.field in self.Config.model_fields and self.host.field not in config:
+            out.append(f"{name}: host field {self.host.field!r} must be required")
+        if self.auth is not None:
+            try:
+                named = [p[1] for p in string.Formatter().parse(self.auth.template) if p[1] is not None]
+            except ValueError:
+                named = []
+            out += [f"{name}: auth template names {n!r}, which must be required" for n in named
+                    if n in self.Secret.model_fields and n not in secret]  # fmt: skip
+        for scope in self.rate_scopes:
+            out += [f"{name}: rate scope {scope.kind!r} names {n!r}, which must be required" for n in scope.config
+                    if n in self.Config.model_fields and n not in config]  # fmt: skip
+            if scope.secret in self.Secret.model_fields and scope.secret not in secret:
+                out.append(f"{name}: rate scope {scope.kind!r} names {scope.secret!r}, which must be required")
         return out
 
     def _auth_problems(self, name: str, secret_fields: set[str]) -> list[str]:
