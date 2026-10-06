@@ -97,7 +97,7 @@ The input classes and conditions most likely to bite a person using this, which 
   the rail, the palette, the tenant switcher, sign-out and an ended session all wait for the save, and ask when it
   can't be made, before anything is revoked or cleared; a background failure never closes the editor (Task 13:
   `saves before leaving through a link`, `asks before leaving work it couldn't save`, `answers sign-out's question`,
-  `stays open … when the step types fail to refresh or the cache is cleared`; Shell: `signs out only once every
+  `asks once`, `stays open … when the step types fail to refresh`; Shell: `signs out only once every
   open editor has had its say`; router: `leaves unsaved editor work on screen when the session ends`; Task 16).
 - **A check that doesn't describe what's on the screen.** An answer for an older revision, edits since, or a failed
   request: never "No problems", never badges on the steps (Task 14: `calls an answer for an older revision stale`,
@@ -195,7 +195,8 @@ amended. 27–28 are new in revision 3.
     in come from steps that aren't there) joins the start card's children, topmost first, so every item drawn is
     reached. A step joined from two places is a child of both, so the keys carry the path they came by (revision 3, the
     owner's correction 3): Down goes to the first child, Up back the way the keys came, Left and Right among the
-    children of the item they came from (at a join, the branch taken); a click, Tab or a change starts the path afresh
+    children of the item they came from (at a join, the branch taken), each passing over items already on the path (a
+    cycle's way back, a self edge), so a path never repeats an item; a click, Tab or a change starts the path afresh
     from the walk's own. Home goes to the start card. Enter on a step opens its panel (read-only in 4b; 4c's drawer
     replaces it), on an edge or a free port the picker; `A` opens the picker after the focused step's first port; `C`
     connects from it; Delete asks; Escape closes the picker or panel and returns focus; Ctrl or Cmd+Z undoes, Shift+Ctrl
@@ -241,19 +242,21 @@ amended. 27–28 are new in revision 3.
     memory, cleared when the editor closes. Undo is off after a conflict (the editor is read-only), and while a
     publication or an activation runs. - D17. - None.
 22. **Accepted (owner, with revision 2); extended in revision 3. Leaving the editor saves first.** One decision, the
-    editor's: save what's pending; when that can't be done (a failed save, a conflict), ask: stay, download my
-    version, or leave without saving. It answers every way out: router navigations (the breadcrumb, the rail, the
-    palette, the tenant switcher) through the router's blocker; sign-out, which asks it before revoking the session
-    or clearing the query cache; and an ended session, which keeps the shell and the unsaved work on screen with a
-    notice instead of swapping it for the sign-in page. Closing the tab gets the browser's prompt. Reload after a
-    conflict asks before discarding the local version. The saver is disposed when the editor closes: a save still in
-    flight that answers afterwards sends nothing more. - The debounce and a conflict both leave work only on the
-    screen, and a revoked session or a cleared cache must not take it first. - Leaving waits as long as a save takes;
-    an ended session waits for the person's choice.
+    editor's: save what's pending; when that can't be done (a failed save, a conflict), ask: stay, download my version,
+    or leave without saving. It answers every way out: router navigations (the breadcrumb, the rail, the palette, the
+    tenant switcher) through the router's blocker; sign-out, which asks it before revoking the session or clearing the
+    query cache; and an ended session, which keeps the shell and the unsaved work on screen with a notice instead of
+    swapping it for the sign-in page. "Leave without saving", once chosen, stands until the next edit, so the navigation
+    that follows (sign-out's to the sign-in page) doesn't ask again. Closing the tab gets the browser's prompt. Reload
+    after a conflict asks before discarding the local version. The saver is disposed when the editor closes: a save
+    still in flight that answers afterwards sends nothing more. - The debounce and a conflict both leave work only on
+    the screen, and a revoked session or a cleared cache must not take it first. - Leaving waits as long as a save
+    takes; an ended session waits for the person's choice.
 23. **Accepted (owner, with revision 2); extended in revision 3. The editor opens on a fresh snapshot, and stays
     open.** It waits for the workflow read made after it mounted (never a cached copy, which would conflict on the
-    first edit), and keeps what it opened with (the workflow, the step types, the role): a later read, a failed
-    refresh of an auxiliary query or a cleared cache neither replaces nor closes it, and a failure shows beside it. -
+    first edit), and keeps what it opened with (the workflow, the step types, the role): a later read or a failed
+    refresh of an auxiliary query neither replaces nor closes it, and a failure shows beside it; the query cache is
+    cleared only at sign-out, after the editor's decision. -
     A stale draft turns the first edit into a conflict; a background failure must not discard local work. - One read,
     and a moment of "Loading…", on every entry; step types refreshed elsewhere may lag in an open editor.
 24. **Accepted (owner, with revision 2); extended in revision 3. A check is current only for what's on the screen.**
@@ -286,10 +289,11 @@ amended. 27–28 are new in revision 3.
     `active_version_number`) beside `unpublished_changes` and the saved draft's `graph_hash`; the editor labels the
     active version from that same answer. - The route reads the workflow without a lock, so an activation can land
     between that read and the swap (the owner's correction 5). - Two fields more on each save's answer, and one read.
-28. **New in revision 3. Bindings are chosen from what was read.** While this tenant's connections and workflows are
-    loading, or when they couldn't be read, the import offers no choice and can't be submitted; "Leave unbound" is a
-    choice among what was read, and a binding with nothing to offer says so. - An empty list standing in for a
-    failed lookup would make "unbound" look chosen. - An import waits for two lists.
+28. **New in revision 3. Bindings are chosen, from what was read.** Each binding starts at "Choose…", and the import
+    waits for a choice for every one: one of this tenant's, or "Leave unbound" (left out of what's sent). While this
+    tenant's connections and workflows are loading, or when they couldn't be read, no choice is offered; a binding
+    with nothing to offer says to choose "Leave unbound". - Unbound must be a deliberate choice, never a default nor
+    a failed lookup. - One choice more per binding before an import.
 
 ## Revision 2
 
@@ -337,12 +341,12 @@ What changed from revision 2 (089c004), by the owner's review of it (five correc
 2. **Destructive exits and background failures** (Task 13; rulings 22, 23): leaving is one decision the editor
    makes, awaited by the router's blocker and asked by sign-out (`mayLeave`, before the session is revoked or the
    cache cleared) and by an ended session (`RequireActive` keeps the shell and the work on screen, with a notice).
-   `EditorPage` keeps what it opened with: a failed step-type refresh, or a cleared cache, shows beside the editor,
-   never in its place.
+   `EditorPage` keeps what it opened with: a failed step-type refresh shows beside the editor, never in its place.
 3. **Keyboard reach at joins** (Tasks 12, 15; ruling 15): the keys carry the path they came by (`step`, `pathTo`,
-   `isPath`), so at a join Left and Right stay in the branch taken and Up goes back that way; the reachability tests
-   walk paths, and the owner's case (a → b, c; b → d, e; c → d, f) is tested in the model, editable and read only,
-   and through the editor for a viewer, a conflict and a viewed version.
+   `isPath`), so at a join Left and Right stay in the branch taken and Up goes back that way; Down, Left and Right pass
+   over items already on the path; the reachability tests walk paths, and the owner's case (a → b, c; b → d, e; c → d,
+   f) is tested in the model, editable and read only, and through the editor for a viewer, a conflict and a viewed
+   version.
 4. **Publish findings' snapshot** (Tasks 14, 15; ruling 24): `PublishProblems` carries the revision and the generation
    it was found in, and is current only on the same terms as a check; a stale finding stays in "Found at publish",
    marked, and never in a step's problems, the badges or an unqualified count.
@@ -350,8 +354,24 @@ What changed from revision 2 (089c004), by the owner's review of it (five correc
    row lock the swap took (`service.locked_active_version`), and answers it with the comparison; the editor's
    active-version label comes from that same answer. A test interleaves an activation between the route's read and
    its swap.
-6. **Binding choices** (Task 8; ruling 28): `useBindingChoices` says loading, failed (with Try again) or ready; the
-   import can't be submitted until each needed list is read, and a binding with nothing to offer says so.
+6. **Binding choices** (Task 8; ruling 28): `useBindingChoices` says loading, failed (with Try again) or ready; each
+   binding starts at "Choose…", and the import can't be submitted until each needed list is read and each binding
+   chosen ("Leave unbound" included); a binding with nothing to offer says so.
+
+A fresh-context review of this revision found seven defects, fixed here:
+- sign-out asked twice, the second time after revoking the session ("Leave without saving" now stands until the
+  next edit, Task 13);
+- read-only navigation still stranded steps, or grew the path without end, on graphs with self edges, a cycle's way
+  back beside a branch, or two ports to one step. Read-only children are now listed once, and Down, Left and Right
+  pass over items already on the path, so paths stay simple and every item is reached (Task 12). The model and its
+  tests, extracted from this plan and run under Node 26 in the scratchpad: 19 passed, 0 failed, the reviewer's four
+  graphs included;
+- "Leave unbound" was still the default (Task 8);
+- `async` test stubs that `require-await` refuses (Task 13);
+- a failed versions read discarded a successful workflow read (now `allSettled`, Task 15);
+- a "cleared cache" test that couldn't fail (removed; the cache is cleared only at sign-out, after the decision, Task
+  13);
+- an activation that didn't wait for a save in flight (it settles the saver first, Task 15).
 
 ## File structure
 
@@ -4164,7 +4184,7 @@ git commit -m "feat(web): the workflows list (1a): state at a glance, filters, t
 - Produces: `<NewWorkflow tenantId onClose />` (a native modal dialog, D23), `parseDocument(text) ->
   WorkflowDocument | null`, `useBindingChoices(tenantId, bindings) -> Choices` (`state: "ready" | "loading" |
   "failed"`, the lists, `retry`), `<ImportBindings bindings choices chosen onChange />`, `type Chosen = Record<string,
-  string>`.
+  string>` (a binding's id, or `UNBOUND`; absent: not chosen yet), `UNBOUND`.
 
 `parseDocument` checks the whole envelope as the API's model does (the owner's review of 325fc14, correction 5):
 exactly its five keys; a `name` of at most 100 characters; `graph` an object (never `null` or a list); at most 10,000
@@ -4252,7 +4272,8 @@ it("imports a file, binding each placeholder to one of this tenant's of its type
   await userEvent.upload(screen.getByLabelText("Workflow file"), file);
   expect(await screen.findByDisplayValue("Nightly report")).toBeTruthy(); // the file's name, editable
   const binding = await screen.findByLabelText("Acme Prod (mist connection)");
-  expect([...(binding as HTMLSelectElement).options].map((o) => o.text)).toEqual(["Leave unbound", "Lab Mist"]);
+  expect([...(binding as HTMLSelectElement).options].map((o) => o.text)).toEqual(["Choose…", "Leave unbound", "Lab Mist"]);
+  expect(screen.getByRole("button", { name: "Import and open" }).hasAttribute("disabled")).toBe(true); // nothing chosen
   await userEvent.selectOptions(binding, "c1");
   await userEvent.click(screen.getByRole("button", { name: "Import and open" }));
   expect(sent.find((r) => r.method === "POST")).toEqual({
@@ -4269,8 +4290,20 @@ it("refuses a file that isn't a workflow, and names a refused binding", async ()
   expect((await screen.findByText(/isn't a Dewpoint workflow/)).textContent).toBeTruthy();
   answer = { status: 422, body: { error: "bad_binding", binding: "b1", reason: "wrong_type" } };
   await userEvent.upload(screen.getByLabelText("Workflow file"), new File([JSON.stringify(DOC)], "n.json", { type: "application/json" }));
-  await userEvent.click(await screen.findByRole("button", { name: "Import and open" }));
+  await userEvent.selectOptions(await screen.findByLabelText("Acme Prod (mist connection)"), "c1");
+  await userEvent.click(screen.getByRole("button", { name: "Import and open" }));
   expect((await screen.findByRole("alert")).textContent).toContain("Acme Prod is of another type");
+});
+
+it("imports a binding left unbound only when the person chooses so", async () => {
+  await show();
+  await userEvent.click(screen.getByRole("radio", { name: /Import from file/ }));
+  await userEvent.upload(screen.getByLabelText("Workflow file"), new File([JSON.stringify(DOC)], "n.json", { type: "application/json" }));
+  const binding = await screen.findByLabelText("Acme Prod (mist connection)");
+  expect(screen.getByRole("button", { name: "Import and open" }).hasAttribute("disabled")).toBe(true);
+  await userEvent.selectOptions(binding, "Leave unbound");
+  await userEvent.click(screen.getByRole("button", { name: "Import and open" }));
+  expect((sent.find((r) => r.method === "POST")!.body as { bind: object }).bind).toEqual({});
 });
 
 it("closes on Cancel", async () => {
@@ -4322,7 +4355,7 @@ it("offers no choice until this tenant's connections are read, and says when the
   expect(screen.getByRole("button", { name: "Import and open" }).hasAttribute("disabled")).toBe(true);
   connectionsAnswer = () => new Response(JSON.stringify(CONNECTIONS));
   await userEvent.click(screen.getByRole("button", { name: "Try again" }));
-  expect(await screen.findByLabelText("Acme Prod (mist connection)")).toBeTruthy();
+  await userEvent.selectOptions(await screen.findByLabelText("Acme Prod (mist connection)"), "c1");
   expect(screen.getByRole("button", { name: "Import and open" }).hasAttribute("disabled")).toBe(false);
 });
 
@@ -4331,8 +4364,8 @@ it("says when this tenant has no connection of a binding's type", async () => {
   await show();
   await importDoc();
   const binding = await screen.findByLabelText("Acme Prod (mist connection)");
-  expect([...(binding as HTMLSelectElement).options].map((o) => o.text)).toEqual(["Leave unbound"]);
-  expect(screen.getByText("No mist connection in this tenant: it stays unbound.")).toBeTruthy();
+  expect([...(binding as HTMLSelectElement).options].map((o) => o.text)).toEqual(["Choose…", "Leave unbound"]);
+  expect(screen.getByText("No mist connection in this tenant: choose Leave unbound.")).toBeTruthy();
 });
 
 it("refuses a file with a null binding without breaking the dialog", async () => {
@@ -4349,7 +4382,8 @@ it("says why the server refused the file", async () => {
   await show();
   await userEvent.click(screen.getByRole("radio", { name: /Import from file/ }));
   await userEvent.upload(screen.getByLabelText("Workflow file"), new File([JSON.stringify(DOC)], "n.json", { type: "application/json" }));
-  await userEvent.click(await screen.findByRole("button", { name: "Import and open" }));
+  await userEvent.selectOptions(await screen.findByLabelText("Acme Prod (mist connection)"), "Leave unbound");
+  await userEvent.click(screen.getByRole("button", { name: "Import and open" }));
   expect((await screen.findByRole("alert")).textContent).toBe(
     "The file can't be imported: it holds a connection or workflow id where a binding goes. Export it again from Dewpoint.",
   );
@@ -4386,15 +4420,17 @@ Expected: FAIL: `NewWorkflow` doesn't exist; the list has no "New workflow".
 // SPDX-License-Identifier: Apache-2.0
 // Each id a workflow file names (a connection, a workflow) bound to one of this tenant's, or left unbound (B12; 4b
 // ruling 18). A connection binding offers only connections of its type. Leaving one unbound is a choice the person
-// makes from what was read (ruling 28): while this tenant's connections and workflows are loading, or when they
-// couldn't be read, no choice is offered and nothing can be imported.
+// makes, from what was read (ruling 28): each binding starts at "Choose…", the import waits for every one, and while
+// this tenant's connections and workflows are loading, or when they couldn't be read, no choice is offered.
 import { useQuery } from "@tanstack/react-query";
 import { Button } from "../components/Button";
 import { Select } from "../components/Field";
 import { client, ok } from "../lib/client";
 import { workflowsQuery, type WorkflowDocument } from "../lib/workflows";
 
+/** Each binding's choice: one of this tenant's ids, or UNBOUND. A binding without one hasn't been chosen. */
 export type Chosen = Record<string, string>;
+export const UNBOUND = "unbound"; // never an id: ids are UUIDs
 
 export type Choices = {
   state: "ready" | "loading" | "failed";
@@ -4459,19 +4495,17 @@ export function ImportBindings({
             ? choices.connections.filter((c) => c.type === b.type)
             : choices.workflows;
         const places = `${b.sites.length} place${b.sites.length === 1 ? "" : "s"} in the graph`;
-        const none = b.kind === "connection" ? `No ${b.type} connection in this tenant: it stays unbound.` : "No workflow in this tenant: it stays unbound.";
+        const none = b.kind === "connection" ? `No ${b.type} connection in this tenant: choose Leave unbound.` : "No workflow in this tenant: choose Leave unbound.";
         return (
           <Select
             key={b.id}
             label={`${b.label} (${b.kind === "connection" ? `${b.type} connection` : "workflow"})`}
             hint={options.length === 0 ? none : places}
             value={chosen[b.id] ?? ""}
-            onChange={(e) => {
-              const { [b.id]: _, ...rest } = chosen;
-              onChange(e.target.value ? { ...rest, [b.id]: e.target.value } : rest);
-            }}
+            onChange={(e) => onChange({ ...chosen, [b.id]: e.target.value })}
           >
-            <option value="">Leave unbound</option>
+            <option value="" disabled>Choose…</option>
+            <option value={UNBOUND}>Leave unbound</option>
             {options.map((o) => (
               <option key={o.id} value={o.id}>{o.name}</option>
             ))}
@@ -4500,7 +4534,7 @@ import { Field } from "../components/Field";
 import { announce } from "../lib/announce";
 import { ApiError, client, ok } from "../lib/client";
 import type { WorkflowDocument } from "../lib/workflows";
-import { ImportBindings, useBindingChoices, type Chosen } from "./ImportBindings";
+import { ImportBindings, UNBOUND, useBindingChoices, type Chosen } from "./ImportBindings";
 
 type Start = "blank" | "import";
 
@@ -4581,6 +4615,10 @@ function explain(e: unknown, doc: WorkflowDocument | null): string {
   return "The workflow couldn't be created. Try again.";
 }
 
+/** What the import binds: each chosen id; a binding left unbound is left out (the API leaves its sites empty). */
+const bound = (chosen: Chosen): Record<string, string> =>
+  Object.fromEntries(Object.entries(chosen).filter(([, value]) => value !== UNBOUND));
+
 const CHOICE = "flex cursor-pointer flex-col gap-1 rounded-lg border border-line-strong bg-surface p-4 has-[:checked]:border-accent has-[:checked]:bg-accent-soft";
 
 export function NewWorkflow({ tenantId, onClose }: { tenantId: string; onClose: () => void }) {
@@ -4608,7 +4646,7 @@ export function NewWorkflow({ tenantId, onClose }: { tenantId: string; onClose: 
       const path = { params: { path: { tenant_id: tenantId } } };
       return start === "blank"
         ? ok(client.POST("/api/v1/t/{tenant_id}/workflows", { ...path, body: { name: name.trim() } }))
-        : ok(client.POST("/api/v1/t/{tenant_id}/workflows/import", { ...path, body: { name: name.trim(), document: doc!, bind: chosen } }));
+        : ok(client.POST("/api/v1/t/{tenant_id}/workflows/import", { ...path, body: { name: name.trim(), document: doc!, bind: bound(chosen) } }));
     },
     onMutate: () => setError(null),
     onSuccess: async (wf) => {
@@ -4639,8 +4677,10 @@ export function NewWorkflow({ tenantId, onClose }: { tenantId: string; onClose: 
     create.mutate();
   }
 
-  // An import waits for what its bindings are chosen from: unbound is a choice, never a lookup that failed.
-  const ready = name.trim().length > 0 && (start === "blank" || (doc !== null && choices.state === "ready"));
+  // An import waits for what its bindings are chosen from, and for a choice for each: unbound is chosen, never the
+  // default, nor a lookup that failed (ruling 28).
+  const chosenAll = doc !== null && doc.bindings.every((b) => chosen[b.id] !== undefined);
+  const ready = name.trim().length > 0 && (start === "blank" || (chosenAll && choices.state === "ready"));
 
   return (
     <dialog
@@ -6513,8 +6553,8 @@ it("offers the start card's own '+' before any step, and links a cycle no entry 
   const nav = navModel(loop, ports({}), false);
   expect(nav.children.get("start")).toEqual(["node:a"]);
   expect(press(nav, ["start"], "ArrowDown", "ArrowDown")).toEqual(["start", "node:a", "node:b"]);
-  // Down from b follows its edge back to a: the path returns to a, never growing round the cycle.
-  expect(press(nav, ["start"], "ArrowDown", "ArrowDown", "ArrowDown")).toEqual(["start", "node:a"]);
+  // Down from b finds only a, already on the path: it stays, and the path never grows round the cycle.
+  expect(press(nav, ["start"], "ArrowDown", "ArrowDown", "ArrowDown")).toEqual(["start", "node:a", "node:b"]);
 });
 
 // a → b, c; b → d, e; c → d, f: d is reached from b and from c (the owner's review of revision 2).
@@ -6610,6 +6650,30 @@ const CASES: [string, GraphDoc, Record<string, string[]>][] = [
     "a step of an unknown type, reached from a port its source's type lacks",
     { graph_format: 1, nodes: [node("a"), node("odd")], edges: [edge("a", "odd", "gone")] },
     { odd: [] },
+  ],
+  // The revision's review: graphs on which revision 3's first `step` stranded a step, or grew the path without end.
+  [
+    "a cycle's way back beside a branch",
+    { graph_format: 1, nodes: [node("s"), node("a"), node("b"), node("c", 300)],
+      edges: [edge("s", "a"), edge("a", "b"), edge("b", "a"), edge("b", "c")] },
+    {},
+  ],
+  [
+    "a self edge beside a branch",
+    { graph_format: 1, nodes: [node("s"), node("a"), node("b", 300)], edges: [edge("s", "a"), edge("a", "a"), edge("a", "b")] },
+    {},
+  ],
+  [
+    "two ports to one step, a third to another",
+    { graph_format: 1, nodes: [node("if"), node("b"), node("c", 300)],
+      edges: [edge("if", "b", "true"), edge("if", "b", "false"), edge("if", "c", "error")] },
+    { if: ["true", "false", "error"] },
+  ],
+  [
+    "a self edge, and a step left of it",
+    { graph_format: 1, nodes: [node("s"), node("a", 300), node("b"), node("c")],
+      edges: [edge("s", "a"), edge("a", "b"), edge("a", "a"), edge("b", "c")] },
+    {},
   ],
 ];  // prettier-ignore
 
@@ -6766,7 +6830,8 @@ export function navModel(doc: GraphDoc, portsOf: (nodeId: string) => string[], e
     for (const port of ports) {
       const here = leaving.filter((e) => portOf(e) === port).sort(byPlace);
       if (!editable) {
-        out.push(...here.map((e) => item.node(e.to.node)));
+        // Read only, a step's children are the steps it leads to, each once (two ports may lead to one step).
+        for (const id of here.map((e) => item.node(e.to.node))) if (!out.includes(id)) out.push(id);
         continue;
       }
       for (const e of here) {
@@ -6828,20 +6893,24 @@ export function pathTo(nav: Nav, id: string): string[] {
 
 /** One key, from the path the keys came by: Down to the first child, Up back the way it came, Left and Right among
  * the children of the item it came from (at a join, the branch it came by: the owner's review of revision 2), Home
- * to the start card. Down onto an item already on the path goes back to it there, so a cycle never grows the path. */
+ * to the start card. Down, Left and Right pass over items already on the path (a cycle's way back, a self edge), so
+ * a path never repeats an item: it stays finite, and the walk's own path reaches every item (the revision's review). */
 export function step(nav: Nav, path: string[], key: NavKey): string[] {
   if (key === "Home") return [item.start];
   const here = path.at(-1)!;
   if (key === "ArrowDown") {
-    const child = nav.children.get(here)?.[0];
-    if (child === undefined) return path;
-    const back = path.indexOf(child);
-    return back >= 0 ? path.slice(0, back + 1) : [...path, child];
+    const child = (nav.children.get(here) ?? []).find((c) => !path.includes(c));
+    return child === undefined ? path : [...path, child];
   }
   if (key === "ArrowUp") return path.length > 1 ? path.slice(0, -1) : path;
-  const siblings = path.length > 1 ? (nav.children.get(path.at(-2)!) ?? [here]) : [here];
-  const next = siblings[siblings.indexOf(here) + (key === "ArrowLeft" ? -1 : 1)];
-  return next === undefined ? path : [...path.slice(0, -1), next];
+  if (path.length < 2) return path;
+  const above = path.slice(0, -1);
+  const siblings = nav.children.get(path.at(-2)!) ?? [];
+  const by = key === "ArrowLeft" ? -1 : 1;
+  for (let i = siblings.indexOf(here) + by; i >= 0 && i < siblings.length; i += by) {
+    if (!above.includes(siblings[i]!)) return [...above, siblings[i]!];
+  }
+  return path;
 }
 ```
 
@@ -7513,7 +7582,8 @@ What this task guards (the owner's reviews of 325fc14, correction 1, and of revi
 - **Opening, and staying open.** The editor never opens on a cached draft (it would conflict on the first edit): it
   waits for the read made after it mounted, then owns its document; a later read of the workflow neither replaces nor
   closes it. It keeps what it opened with (the workflow, the step types, the role): a failed refresh of the step
-  types, or a cleared cache, shows beside it, never in its place (4b ruling 23).
+  types shows beside it, never in its place (4b ruling 23). The query cache is cleared only at sign-out, after the
+  editor's decision; even then the editor renders from what it opened with, not from the cache.
 - **A conflict's work.** The local version since the last save can't be saved; leaving asks, and Reload asks before
   discarding it.
 
@@ -7735,9 +7805,9 @@ import { guardLeaving, mayLeave, unsavedWork } from "./leaving";
 
 it("lets leaving go on only when every open editor agrees, asking each in turn", async () => {
   expect(await mayLeave()).toBe(true); // nothing open
-  const first = vi.fn(async () => true);
-  const second = vi.fn(async () => false);
-  const third = vi.fn(async () => true);
+  const first = vi.fn(() => Promise.resolve(true));
+  const second = vi.fn(() => Promise.resolve(false));
+  const third = vi.fn(() => Promise.resolve(true));
   const stops = [first, second, third].map((decide) => guardLeaving({ unsaved: () => false, decide }));
   expect(await mayLeave()).toBe(false);
   expect([first, second, third].map((f) => f.mock.calls.length)).toEqual([1, 1, 0]); // stops at the first "stay"
@@ -7747,7 +7817,7 @@ it("lets leaving go on only when every open editor agrees, asking each in turn",
 
 it("says whether any open editor holds unsaved work", () => {
   let dirty = false;
-  const stop = guardLeaving({ unsaved: () => dirty, decide: async () => true });
+  const stop = guardLeaving({ unsaved: () => dirty, decide: () => Promise.resolve(true) });
   expect(unsavedWork()).toBe(false);
   dirty = true;
   expect(unsavedWork()).toBe(true);
@@ -7763,11 +7833,11 @@ const loggedOut = () => vi.mocked(globalThis.fetch).mock.calls.some(([input]) =>
 
 it("signs out only once every open editor has had its say", async () => {
   await renderAt("/t/t1/connections");
-  const stop = guardLeaving({ unsaved: () => true, decide: async () => false }); // the person chose to stay
+  const stop = guardLeaving({ unsaved: () => true, decide: () => Promise.resolve(false) }); // the person chose to stay
   await userEvent.click(screen.getByRole("button", { name: "Sign out" }));
   expect(loggedOut()).toBe(false);
   stop();
-  const go = guardLeaving({ unsaved: () => true, decide: async () => true });
+  const go = guardLeaving({ unsaved: () => true, decide: () => Promise.resolve(true) });
   await userEvent.click(screen.getByRole("button", { name: "Sign out" }));
   await vi.waitFor(() => expect(loggedOut()).toBe(true));
   go();
@@ -7781,7 +7851,7 @@ json(SESSION);`), and:
 
 ```tsx
 it("leaves unsaved editor work on screen when the session ends, and says so", async () => {
-  const stop = guardLeaving({ unsaved: () => true, decide: async () => true });
+  const stop = guardLeaving({ unsaved: () => true, decide: () => Promise.resolve(true) });
   try {
     const router = showApp("/t/t1/connections");
     await screen.findByRole("button", { name: "Add Mist connection" });
@@ -7900,14 +7970,25 @@ it("answers sign-out's question with the same decision: staying keeps the work",
   expect(screen.getByRole("button", { name: "transform" })).toBeTruthy();
 });
 
-it("stays open, with its edits, when the step types fail to refresh or the cache is cleared", async () => {
+it("asks once: a navigation after sign-out's \"leave\" goes without asking again", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "http_error" }, 500));
+  await show();
+  await addTransform();
+  const decision = mayLeave();
+  const ask = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
+  await userEvent.click(within(ask).getByRole("button", { name: "Leave without saving" }));
+  await expect(decision).resolves.toBe(true);
+  await userEvent.click(screen.getByRole("link", { name: "Workflows" })); // as sign-out's navigation to /login
+  await screen.findByText("list");
+  expect(screen.queryByRole("dialog", { name: "Your latest changes aren't saved" })).toBeNull();
+});
+
+it("stays open, with its edits, when the step types fail to refresh", async () => {
   const { qc } = await show();
   await addTransform();
   answers.set("GET /api/v1/node-types", () => json({ error: "http_error" }, 500));
   await act(() => qc.refetchQueries({ queryKey: ["node-types"] }));
   expect(await screen.findByText(/The step types couldn't be refreshed/)).toBeTruthy();
-  expect(screen.getByRole("button", { name: "transform" })).toBeTruthy();
-  act(() => qc.clear());
   expect(screen.getByRole("button", { name: "transform" })).toBeTruthy();
   expect(screen.getByRole("group", { name: "Workflow steps" })).toBeTruthy();
 });
@@ -8327,10 +8408,13 @@ In `Editor` (which takes `trouble` and `onReload`; imports: `useBlocker`, `useRe
   // ask the person, and answer with their choice. The router's blocker awaits it for every navigation (the
   // breadcrumb, the rail, the palette, the tenant switcher); sign-out and an ended session ask it through `leaving`.
   const [leaveQuestion, setLeaveQuestion] = useState<((leave: boolean) => void) | null>(null);
-  const decide = useRef(async (): Promise<boolean> => true);
+  // "Leave without saving", once said, stands until the next edit: sign-out asks, then its navigation reaches the
+  // router's blocker, which must not ask again (by then the session is revoked: the revision's review).
+  const leaveAccepted = useRef(false);
+  const decide = useRef((): Promise<boolean> => Promise.resolve(true));
   decide.current = async () => {
     const s = saver.current;
-    if (!s?.unsaved) return true;
+    if (!s?.unsaved || leaveAccepted.current) return true;
     try {
       await s.flush();
       return true;
@@ -8344,6 +8428,7 @@ In `Editor` (which takes `trouble` and `onReload`; imports: `useBlocker`, `useRe
     enableBeforeUnload: () => saver.current?.unsaved ?? false,
   });
   const answer = (leave: boolean) => {
+    leaveAccepted.current = leave;
     leaveQuestion?.(leave);
     setLeaveQuestion(null);
   };
@@ -8356,6 +8441,7 @@ In `Editor` (which takes `trouble` and `onReload`; imports: `useBlocker`, `useRe
   function change(next: GraphDoc, message: string, then?: string) {
     setHistory((h) => record(h, next));
     saver.current?.change(next);
+    leaveAccepted.current = false; // a new edit is new work: leaving asks again
     announce(message);
     if (then) focus(then);
   }
@@ -8366,6 +8452,7 @@ In `Editor` (which takes `trouble` and `onReload`; imports: `useBlocker`, `useRe
     if (next === history) return;
     setHistory(next);
     saver.current?.change(next.present);
+    leaveAccepted.current = false;
     announce(e.shiftKey ? "Redone" : "Undone");
 ```
 
@@ -9181,12 +9268,25 @@ it("takes the active version from the read, never from the number it hoped for",
 it("never calls a lost publish a failure when what happened can't be read", async () => {
   answers.set(`POST ${BASE}/publish`, () => {
     answers.set(`GET ${BASE}/versions`, () => json({ error: "http_error" }, 502));
+    answers.set(`GET ${BASE}`, () => json({ error: "http_error" }, 502));
     return json({ error: "http_error" }, 504);
   });
   await show();
   await confirmPublish(1);
   expect((await screen.findByRole("alert")).textContent).toContain("It isn't known whether version 1 was published");
   expect(screen.getByText("Saved · the active version isn't known")).toBeTruthy();
+});
+
+it("keeps what the workflow's read says when only the versions' read fails", async () => {
+  answers.set(`POST ${BASE}/publish`, () => {
+    answers.set(`GET ${BASE}/versions`, () => json({ error: "http_error" }, 502));
+    answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, active_version_id: "v3", active_version_number: 3, unpublished_changes: true }));
+    return Promise.reject(new TypeError("Failed to fetch"));
+  });
+  await show();
+  await confirmPublish(1);
+  expect((await screen.findByRole("alert")).textContent).toContain("It isn't known whether version 1 was published");
+  expect(screen.getByText("Saved · unpublished changes since v3")).toBeTruthy(); // the active version, as read
 });
 
 it("keeps an activation made when the read after it fails", async () => {
@@ -9573,10 +9673,14 @@ In `Editor`:
    * it holds this draft only if that hash is the one the server gave for the draft submitted. The active version and
    * the draft's comparison come from the read, never from the number hoped for. */
   async function reconcilePublish(number: number, hash: string | null) {
-    try {
-      const [listed, now] = await Promise.all([readVersions(), readWorkflow()]);
-      saver.current?.compared(now);
-      const made = listed.find((v) => v.number === number);
+    // Each read stands on its own: the workflow's says which version is active, the versions' what this publish did.
+    const [listedRead, nowRead] = await Promise.allSettled([readVersions(), readWorkflow()]);
+    if (nowRead.status === "fulfilled") saver.current?.compared(nowRead.value);
+    else saver.current?.lostTrack();
+    if (listedRead.status === "rejected") {
+      setNotice({ tone: "danger", text: `It isn't known whether version ${number} was published: its answer was lost. Open Versions to see before publishing again.` });
+    } else {
+      const made = listedRead.value.find((v) => v.number === number);
       if (made && hash !== null && made.graph_hash === hash) {
         setPublishProblems(null);
         announce(`Version ${number} holds your draft`);
@@ -9590,9 +9694,6 @@ In `Editor`:
           text: `Version ${number} isn't published, as far as the server can tell now. If the first attempt is still finishing it may appear: open Versions before publishing again.`,
         });
       }
-    } catch {
-      saver.current?.lostTrack();
-      setNotice({ tone: "danger", text: `It isn't known whether version ${number} was published: its answer was lost. Open Versions to see before publishing again.` });
     }
     refresh();
   }
@@ -9613,6 +9714,9 @@ In `Editor`:
   async function activate(version: VersionRow) {
     setBusy("activating");
     setNotice(null);
+    // No save may answer after the activation with the version it compared against before it (the revision's review):
+    // what's pending or in flight settles first. A save that fails keeps its own state; the activation doesn't need it.
+    await saver.current?.flush().catch(() => undefined);
     try {
       await ok(client.POST("/api/v1/t/{tenant_id}/workflows/{workflow_id}/activate", { ...path, body: { version_id: version.id } }));
       await activatedAs(version);
