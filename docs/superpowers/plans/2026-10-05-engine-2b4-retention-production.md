@@ -16,6 +16,10 @@
 > ingress's development-only restriction.** As in 2b-1a through 2b-3b, once the owner rules, each sub-project is built
 > on a prototype branch from `main`, with the owner's checkpoint after each milestone; its plan is then written from
 > the replayed diffs, with a revision of the 2b spec, for the owner's review before execution.
+>
+> **2b-4a:** its four milestones were approved as prototype checkpoints (2026-10-05 and 2026-10-06), with no erasure
+> completing (`firing_bound_unproven`). Its plan, `2026-10-06-engine-2b4a-data-lifecycle.md`, and the 2b spec's
+> revision 10 are drafts for the owner's review; neither authorizes execution, a push or a gate lift.
 
 **Goal:** Dewpoint can hold tenants' production data. Data leaves on schedule, a tenant can be erased, old keys can be
 retired, the production Temporal is verified, every production blocker is fixed or bounded with the owner's explicit
