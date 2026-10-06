@@ -652,3 +652,6 @@ The owner's review of the redesign (`45d2245`, 2026-10-07, pasted): two Low find
   gzip, `*` for whatever isn't named, identity acceptable unless refused by name or by `*` (then, unnamed, yielding to
   any coding accepted), the higher weight chosen (gzip on a tie), and 406 `not_acceptable` when neither gzip nor
   identity is acceptable.
+Targeted runs at `3beacb5` (2026-10-07): the API tests (276), the plugin, SDK and end-to-end Mist proof tests (385),
+ruff, format, mypy, import contracts and the OpenAPI drift check pass; each of R1's and R2's fixes was also checked by
+disabling it (the tests fail). The last full run is `d09db0c`'s (3235 passed).
