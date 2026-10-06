@@ -133,9 +133,11 @@ class DeclaredType:
 
 async def declared_types(s: AsyncSession) -> dict[str, DeclaredType]:
     """Every connection type the synced manifests declare, by key. A type no plugin declares any more is unknown."""
-    rows = await s.execute(select(PluginManifest.name, PluginManifest.manifest).order_by(PluginManifest.name))
+    # Only the declarations, never the whole manifest (every node's schemas): the review's finding 13.
+    declared = PluginManifest.manifest["connection_types"]
+    rows = await s.execute(select(PluginManifest.name, declared).order_by(PluginManifest.name))
     out: dict[str, DeclaredType] = {}
-    for name, manifest in rows.all():
-        for m in manifest.get("connection_types", []) if isinstance(manifest, dict) else []:
+    for name, kinds in rows.all():
+        for m in kinds if isinstance(kinds, list) else []:
             out[m["key"]] = DeclaredType.from_manifest(name, m)
     return out
