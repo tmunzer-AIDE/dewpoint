@@ -8,7 +8,13 @@ Plugin steps reach the network only through Dewpoint's guard (plugins-3 D7). It 
    - every IANA special-purpose range that isn't globally reachable (the guard keeps its own table, so the
      verdict doesn't depend on the Python version), including loopback, private, link-local and CGNAT ranges;
    - multicast, reserved and site-local addresses;
-   - IPv4 addresses embedded in IPv6 (mapped, compatible, 6to4, Teredo and NAT64), checked as IPv4.
+   - IPv4-mapped addresses (`::ffff:a.b.c.d`), checked as the IPv4 address they carry;
+   - the IPv6 forms that wrap an IPv4 address (IPv4-compatible, 6to4, Teredo, NAT64 `64:ff9b::/96` and
+     `64:ff9b:1::/48`), refused even when the IPv4 address is public.
+
+   A NAT64-only deployment therefore needs allowlist entries for its translated destinations. Prefer one entry per
+   destination (`64:ff9b::808:808/128`): an entry for the whole NAT64 prefix reaches every IPv4 address the
+   translator reaches, private ranges included.
 2. **Connect to the checked address.** The guard connects to the exact address it checked, so a later DNS change
    can't redirect the request. TLS is still verified against the hostname.
 3. **No proxies.** The guard ignores proxy, certificate and netrc settings in the environment.
