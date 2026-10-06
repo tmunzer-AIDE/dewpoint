@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { Navigate, Outlet, createRootRoute, createRoute, createRouter, useParams } from "@tanstack/react-router";
 import { Shell } from "./components/Shell";
+import { unsavedWork } from "./lib/leaving";
 import { useSession } from "./lib/session";
 import { useAfterAuth } from "./lib/useAfterAuth";
 import { ConnectionsPage } from "./routes/Connections";
@@ -25,7 +26,9 @@ declare module "@tanstack/react-router" {
 function RequireActive() {
   const session = useSession();
   if (session.isPending) return <p className="p-6 text-body text-muted">Loading…</p>;
-  if (!session.data) return <Navigate to="/login" />;
+  // Work an editor couldn't save stays on screen when the session ends (4b ruling 22): never swapped for the sign-in
+  // page under it. "Sign in again" is a router navigation, so the editor has its say first.
+  if (!session.data) return unsavedWork() ? <Shell sessionEnded /> : <Navigate to="/login" />;
   if (session.data.state === "mfa_pending") return <Navigate to="/mfa" />;
   if (session.data.state === "enroll_required") return <Navigate to="/enroll" />;
   return <Shell />;

@@ -64,3 +64,12 @@ it("lets Escape cancel when nothing runs", () => {
   screen.getByRole("dialog").dispatchEvent(escape);
   expect(escape.defaultPrevented).toBe(false);
 });
+
+it("names its cancel when asked", () => {
+  render(
+    <ConfirmDialog open title="Your latest changes aren't saved" confirmLabel="Leave without saving" cancelLabel="Stay" onConfirm={vi.fn()} onCancel={vi.fn()}>
+      They couldn&apos;t be saved.
+    </ConfirmDialog>,
+  );
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "Stay" }));
+});

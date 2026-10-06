@@ -5,10 +5,11 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import { Button } from "./Button";
 
-export function ConfirmDialog({ open, title, confirmLabel, busy = false, onConfirm, onCancel, children }: {
+export function ConfirmDialog({ open, title, confirmLabel, cancelLabel = "Cancel", busy = false, onConfirm, onCancel, children }: {
   open: boolean;
   title: string;
   confirmLabel: string;
+  cancelLabel?: string;
   busy?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
@@ -46,7 +47,7 @@ export function ConfirmDialog({ open, title, confirmLabel, busy = false, onConfi
       <h2 className="text-h3 font-semibold">{title}</h2>
       <div className="mt-2 text-body text-muted">{children}</div>
       <div className="mt-6 flex justify-end gap-2">
-        <Button ref={cancel} onClick={onCancel} disabled={busy}>Cancel</Button>
+        <Button ref={cancel} onClick={onCancel} disabled={busy}>{cancelLabel}</Button>
         <Button variant="danger" onClick={onConfirm} disabled={busy}>{confirmLabel}</Button>
       </div>
     </dialog>

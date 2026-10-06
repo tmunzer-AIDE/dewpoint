@@ -7,8 +7,10 @@ import {
   createRoute,
   createRouter,
 } from "@tanstack/react-router";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
+import { guardLeaving } from "../lib/leaving";
 import { Shell } from "./Shell";
 
 const TENANTS = [{ id: "t1", name: "Acme Retail", slug: "acme-retail", role: "admin", require_passkey: false }];
@@ -140,4 +142,59 @@ it("keeps the editor's rail to icons at every width (outline §2)", async () => 
   const label = screen.getByRole("link", { name: "Workflows" }).querySelector("span")!;
   expect(label.className).toMatch(/(?:^|\s)sr-only(?:\s|$)/);
   expect(label.className).not.toMatch(/lg:not-sr-only/);
+});
+
+const loggedOut = () => vi.mocked(globalThis.fetch).mock.calls.some(([input]) => (input as Request).url.endsWith("/api/v1/auth/logout"));
+
+it("signs out only once every open editor has had its say", async () => {
+  await renderAt("/t/t1/connections");
+  const stop = guardLeaving({ unsaved: () => true, decide: () => Promise.resolve(false) }); // the person chose to stay
+  const button = screen.getByRole("button", { name: "Sign out" });
+  await userEvent.click(button);
+  await vi.waitFor(() => expect(button.hasAttribute("disabled")).toBe(false)); // that sign-out is over
+  expect(loggedOut()).toBe(false);
+  stop();
+  const stayed = vi.fn();
+  const go = guardLeaving({ unsaved: () => true, decide: () => Promise.resolve(true), stayed });
+  await userEvent.click(screen.getByRole("button", { name: "Sign out" }));
+  await vi.waitFor(() => expect(loggedOut()).toBe(true));
+  // This mock answers logout 200, not 204: the sign-out fails, so the editor's "leave" is withdrawn.
+  await screen.findByText(/Sign-out failed/);
+  expect(stayed).toHaveBeenCalledOnce();
+  go();
+});
+
+it("signs out once at a time: a click while one is deciding does nothing, and a Stay settles it", async () => {
+  await renderAt("/t/t1/connections");
+  let answer!: (leave: boolean) => void;
+  const decide = vi.fn(() => new Promise<boolean>((resolve) => (answer = resolve)));
+  const stop = guardLeaving({ unsaved: () => true, decide });
+  const button = screen.getByRole("button", { name: "Sign out" });
+  await userEvent.click(button);
+  expect(button.hasAttribute("disabled")).toBe(true);
+  fireEvent.click(button); // a second click, while the editor's question is open
+  expect(decide).toHaveBeenCalledOnce();
+  answer(false); // Stay
+  await vi.waitFor(() => expect(button.hasAttribute("disabled")).toBe(false));
+  expect(loggedOut()).toBe(false);
+  stop();
+});
+
+it("sends one logout while its answer is held", async () => {
+  await renderAt("/t/t1/connections");
+  const base = vi.mocked(globalThis.fetch).getMockImplementation()!;
+  let release!: (answer: Response) => void;
+  vi.mocked(globalThis.fetch).mockImplementation((input) =>
+    (input as Request).url.endsWith("/api/v1/auth/logout") ? new Promise<Response>((r) => (release = r)) : base(input));
+  const stop = guardLeaving({ unsaved: () => false, decide: () => Promise.resolve(true) });
+  const button = screen.getByRole("button", { name: "Sign out" });
+  await userEvent.click(button);
+  await vi.waitFor(() => expect(loggedOut()).toBe(true));
+  fireEvent.click(button);
+  const logouts = () => vi.mocked(globalThis.fetch).mock.calls.filter(([i]) => (i as Request).url.endsWith("/api/v1/auth/logout"));
+  expect(logouts()).toHaveLength(1);
+  release(new Response(JSON.stringify({ error: "http_error" }), { status: 502 })); // it fails: still signed in
+  await screen.findByText(/Sign-out failed/);
+  expect(logouts()).toHaveLength(1);
+  stop();
 });

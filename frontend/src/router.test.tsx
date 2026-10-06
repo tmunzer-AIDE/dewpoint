@@ -5,6 +5,7 @@ import { RouterProvider, createMemoryHistory, createRouter } from "@tanstack/rea
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
+import { guardLeaving } from "./lib/leaving";
 import { routeTree } from "./router";
 
 const SESSION = {
@@ -23,11 +24,14 @@ let sent: { method: string; path: string; body: unknown }[];
 /** Answers to hold back, by "METHOD /path": the test settles them. */
 let held: Map<string, (r: Response) => void>;
 let holding: Set<string>;
+let sessionGone: boolean;
+let client: QueryClient;
 
 beforeEach(() => {
   sent = [];
   held = new Map();
   holding = new Set();
+  sessionGone = false;
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const request = input as Request;
     const path = new URL(request.url).pathname;
@@ -36,7 +40,7 @@ beforeEach(() => {
     sent.push({ method: request.method, path, body: text ? JSON.parse(text) : null });
     if (holding.has(key)) return new Promise<Response>((resolve) => held.set(key, resolve));
     const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
-    if (key === "GET /api/v1/auth/session") return json(SESSION);
+    if (key === "GET /api/v1/auth/session") return sessionGone ? json({ error: "unauthorized" }, 401) : json(SESSION);
     if (key === "GET /api/v1/tenants") return json(TENANTS);
     if (key === "GET /api/v1/platform/status") return json({ environment: "production", production_runs: false });
     if (key === "GET /api/v1/connection-types") return json(TYPES);
@@ -51,8 +55,9 @@ beforeEach(() => {
 
 function showApp(path: string) {
   const router = createRouter({ routeTree, history: createMemoryHistory({ initialEntries: [path] }) });
+  client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
-    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <QueryClientProvider client={client}>
       <RouterProvider router={router} />
     </QueryClientProvider>,
   );
@@ -141,4 +146,26 @@ it("never opens a workflow whose creation answers after its tenant was left", as
   await new Promise((r) => setTimeout(r, 100));
   expect(router.state.location.pathname).toBe("/t/t2/workflows");
   expect(screen.getAllByRole("status").map((s) => s.textContent ?? "").join(" ")).not.toContain("Created");
+});
+
+it("leaves unsaved editor work on screen when the session ends, and says so", async () => {
+  const stop = guardLeaving({ unsaved: () => true, decide: () => Promise.resolve(true) });
+  try {
+    const router = showApp("/t/t1/connections");
+    await screen.findByRole("button", { name: "Add Mist connection" });
+    sessionGone = true;
+    await act(() => client.invalidateQueries({ queryKey: ["session"] }));
+    expect((await screen.findByRole("alert", { name: "Session ended" })).textContent).toContain("Your session has ended");
+    expect(router.state.location.pathname).toBe("/t/t1/connections");
+  } finally {
+    stop();
+  }
+});
+
+it("goes to sign-in when the session ends with nothing unsaved", async () => {
+  const router = showApp("/t/t1/connections");
+  await screen.findByRole("button", { name: "Add Mist connection" });
+  sessionGone = true;
+  await act(() => client.invalidateQueries({ queryKey: ["session"] }));
+  await vi.waitFor(() => expect(router.state.location.pathname).toBe("/login"));
 });

@@ -3,8 +3,9 @@
 // tenant switcher, Security and Sign out, and the page.
 import { useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useMatches, useNavigate, useParams } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { onStepUpRequired } from "../lib/events";
+import { cancelLeaving, mayLeave } from "../lib/leaving";
 import { usePlatformStatus } from "../lib/platform";
 import { signOut } from "../lib/signOut";
 import { authenticatePasskey } from "../lib/webauthn";
@@ -27,7 +28,7 @@ const INACTIVE = "hover:bg-rail-line";
 const ITEM_COMPACT = "flex items-center justify-center rounded-md px-2 py-2.5 text-body text-rail-ink";
 const CURRENT_COMPACT = "bg-rail-current font-semibold text-rail-ink-strong";
 
-export function Shell() {
+export function Shell({ sessionEnded = false }: { sessionEnded?: boolean }) {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const params = useParams({ strict: false });
@@ -42,9 +43,32 @@ export function Shell() {
   const [signOutError, setSignOutError] = useState<string | null>(null);
   const platform = usePlatformStatus();
 
-  async function handleSignOut() {
+  const [signingOut, setSigningOut] = useState(false);
+  const signOutRun = useRef<Promise<void> | null>(null);
+
+  /** One sign-out at a time (the owner's review of revision 3): a click while one decides or waits on the server
+   * joins it, never starting another. */
+  function handleSignOut(): Promise<void> {
+    signOutRun.current ??= (async () => {
+      setSigningOut(true);
+      try {
+        await signOutOnce();
+      } finally {
+        setSigningOut(false);
+        signOutRun.current = null;
+      }
+    })();
+    return signOutRun.current;
+  }
+
+  async function signOutOnce() {
     setSignOutError(null);
+    // An open editor has its say first (4b ruling 22): it saves what's pending, or asks, and holds its document from
+    // then. Only then is the session revoked and the cache cleared, which would leave a pending save unable to
+    // authenticate.
+    if (!(await mayLeave())) return;
     if ((await signOut()) === "failed") {
+      cancelLeaving(); // still signed in, still on the page: the editor's document is the person's again
       // The server session may still be valid: never pretend otherwise.
       setSignOutError("Sign-out failed. You are still signed in; check your connection and try again.");
       return;
@@ -117,7 +141,7 @@ export function Shell() {
         <div className="grow" />
         <ThemeSelect />
         <Link to="/account/security" className="text-body text-muted hover:text-ink">Security</Link>
-        <Button size="md" onClick={() => void handleSignOut()}>Sign out</Button>
+        <Button size="md" disabled={signingOut} onClick={() => void handleSignOut()}>Sign out</Button>
       </header>
       <main className="col-start-2 flex min-w-0 flex-col">
         {platform.isError && (
@@ -131,6 +155,15 @@ export function Shell() {
           <div role="note" aria-label="Deployment" className="border-b border-warn-line bg-warn-bg px-6 py-2 text-small text-warn-ink">
             <strong className="font-semibold">Development deployment.</strong> Runs start without the production gate.
             Use synthetic data only.
+          </div>
+        )}
+        {sessionEnded && (
+          <div role="alert" aria-label="Session ended" className="flex flex-wrap items-center gap-3 border-b border-danger bg-danger-bg px-5 py-2.5 text-small text-ink">
+            <span className="grow">
+              Your session has ended, and this page holds changes that aren&apos;t saved. Download them from the editor,
+              then sign in again.
+            </span>
+            <Button size="sm" onClick={() => void navigate({ to: "/login" })}>Sign in again</Button>
           </div>
         )}
         {signOutError && (

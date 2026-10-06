@@ -1,18 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
-// The editor (screen 1c): the draft, on a canvas, by pointer or keyboard alone (D16). Task 13 adds saving, Task 14
-// problems, Task 15 publishing and versions.
-import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState, type KeyboardEvent } from "react";
+// The editor (screen 1c): the draft, on a canvas, by pointer or keyboard alone (D16), saved as it changes (D17). Task 14
+// adds problems, Task 15 publishing and versions.
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useBlocker } from "@tanstack/react-router";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Button } from "../../components/Button";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { LoadError } from "../../components/LoadError";
 import { announce } from "../../lib/announce";
+import { ApiError, client, ok } from "../../lib/client";
+import { downloadJson, fileName } from "../../lib/download";
+import { ConflictError, DraftSync, type SyncState } from "../../lib/draftSync";
 import {
   START, addAfter, asGraph, connect, deleteEdge, deleteNode, edgesOf, findNode, idKey, insertBeforeEntry, insertOnEdge,
   moveNodes, nodesOf, portsOf, sameId, type PortRef,
 } from "../../lib/graph";  // prettier-ignore
 import { begin, record, redo, undo, type History } from "../../lib/history";
 import { CARD, layout } from "../../lib/layout";
+import { guardLeaving } from "../../lib/leaving";
 import { useDocumentTitle } from "../../lib/title";
 import {
   canEdit, nodeTypesQuery, tenantQuery, workflowQuery, type GraphDoc, type GraphEdge, type NodeType,
@@ -22,26 +27,158 @@ import { Canvas } from "./Canvas";
 import { NAV_KEYS, isPath, navModel, pathTo, step, type NavKey } from "./canvasNav";
 import { ConnectDialog } from "./ConnectDialog";
 import { item, type ItemAction } from "./items";
+import { SaveState } from "./SaveState";
 import { StepPanel } from "./StepPanel";
 import { StepPicker, type PickMode } from "./StepPicker";
 import { Toolbar } from "./Toolbar";
 
+type Opened = { workflow: WorkflowDetail; types: NodeType[]; role: string | null };
+
 export function EditorPage({ tenantId, workflowId }: { tenantId: string; workflowId: string }) {
-  const workflow = useQuery(workflowQuery(tenantId, workflowId));
+  const qc = useQueryClient();
+  // A draft cached from an earlier visit would conflict on the first edit (4b ruling 23): the editor waits for the read
+  // made after this page mounted. Once open it owns its document and keeps what it opened with: a later read, a
+  // failed refresh or a cleared cache neither replaces nor closes it.
+  const workflow = useQuery({
+    ...workflowQuery(tenantId, workflowId),
+    refetchOnMount: "always",
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
   const types = useQuery(nodeTypesQuery);
   const tenant = useQuery(tenantQuery(tenantId));
-  useDocumentTitle(workflow.data?.name ?? "Workflow");
-  if (workflow.isError) return <section className="p-6"><LoadError what="This workflow" /></section>;
-  if (types.isError) return <section className="p-6"><LoadError what="The step types" /></section>;
-  if (!workflow.data || !types.data || !tenant.data) return <p className="p-6 text-body text-muted">Loading…</p>;
-  return <Editor tenantId={tenantId} workflow={workflow.data} types={types.data} role={tenant.data.role ?? null} />;
+  const [opened, setOpened] = useState<Opened | null>(null);
+  const [loads, setLoads] = useState(0);
+  useEffect(() => {
+    if (opened !== null || !workflow.isFetchedAfterMount || !workflow.isSuccess || !types.data || !tenant.data) return;
+    setOpened({ workflow: workflow.data, types: types.data, role: tenant.data.role ?? null });
+  }, [opened, workflow.isFetchedAfterMount, workflow.isSuccess, workflow.data, types.data, tenant.data]);
+  useDocumentTitle(opened?.workflow.name ?? "Workflow");
+
+  /** After a conflict: the saved draft, read afresh, in a new editor. */
+  const reload = async () => {
+    await qc.invalidateQueries({ queryKey: ["workflow", tenantId, workflowId] });
+    setOpened(null);
+    setLoads((n) => n + 1);
+  };
+
+  if (opened === null) {
+    if (workflow.isError) return <section className="p-6"><LoadError what="This workflow" /></section>;
+    if (types.isError && !types.data) return <section className="p-6"><LoadError what="The step types" /></section>;
+    if (tenant.isError && !tenant.data) return <section className="p-6"><LoadError what="This tenant" /></section>;
+    return <p className="p-6 text-body text-muted">Loading…</p>;
+  }
+  const trouble = types.isError ? "The step types couldn't be refreshed: the editor keeps the ones it opened with." : null;
+  return (
+    <Editor
+      key={loads}
+      tenantId={tenantId}
+      workflow={opened.workflow}
+      types={types.data ?? opened.types}
+      role={opened.role}
+      trouble={trouble}
+      onReload={() => void reload()}
+    />
+  );
 }
 
-function Editor({ tenantId, workflow, types, role }: { tenantId: string; workflow: WorkflowDetail; types: NodeType[]; role: string | null }) {
+function Editor({
+  tenantId, workflow, types, role, trouble, onReload,
+}: {
+  tenantId: string; workflow: WorkflowDetail; types: NodeType[]; role: string | null; trouble: string | null;
+  onReload: () => void;
+}) {  // prettier-ignore
   const typeMap = useMemo(() => new Map(types.map((t) => [t.ref, t])), [types]);
   const [history, setHistory] = useState<History<GraphDoc>>(() => begin(asGraph(workflow.draft)));
   const doc = history.present;
-  const editable = canEdit(role);
+  const [sync, setSyncState] = useState<SyncState>({
+    status: "saved", revision: workflow.draft_revision, unpublished: workflow.unpublished_changes, generation: 0,
+    savedGeneration: 0, savedHash: workflow.draft_graph_hash, activeNumber: workflow.active_version_number,
+  });  // prettier-ignore
+  const saver = useRef<DraftSync | null>(null);
+  // Made in an effect, so StrictMode's second mount (main.tsx) gets a live saver: its cleanup disposes the first.
+  useEffect(() => {
+    const s = new DraftSync({
+      revision: workflow.draft_revision,
+      unpublished: workflow.unpublished_changes,
+      savedHash: workflow.draft_graph_hash,
+      activeNumber: workflow.active_version_number,
+      onChange: setSyncState,
+      save: async (next, revision) => {
+        try {
+          return await ok(
+            client.PUT("/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft", {
+              params: { path: { tenant_id: tenantId, workflow_id: workflow.id }, header: { "If-Match": String(revision) } },
+              body: next,
+            }),
+          );
+        } catch (e) {
+          if (e instanceof ApiError && e.status === 409) throw new ConflictError();
+          throw e;
+        }
+      },
+    });
+    saver.current = s;
+    return () => s.dispose();
+  }, [tenantId, workflow]);
+  const [held, setHeld] = useState(false); // an exit was agreed to: no edit until it completes or is withdrawn
+  const editable = canEdit(role) && sync.status !== "conflict" && !held;
+  const downloadMine = () => downloadJson(fileName(workflow.name, ".draft.json"), doc);
+
+  // Leaving is one transaction (4b ruling 22; the owner's review of revision 3). Its one decision: save what's
+  // pending; when that can't be done (a failed save, a conflict), ask the person. The router's blocker awaits it for
+  // every navigation (the breadcrumb, the rail, the palette, the tenant switcher); sign-out and an ended session ask
+  // it through `leaving`. Exits that overlap share the decision in flight, so one answer settles every one of them.
+  // Once an exit is agreed to, the document is held (`agreed`, `held`) until the exit completes (the editor unmounts)
+  // or is withdrawn (`stayed`: a sign-out that failed): no edit can land after the consent and be discarded under it,
+  // and the navigation that follows sign-out doesn't ask again.
+  const [leaveQuestion, setLeaveQuestion] = useState<((leave: boolean) => void) | null>(null);
+  const deciding = useRef<Promise<boolean> | null>(null);
+  const agreed = useRef(false);
+  const decide = useRef((): Promise<boolean> => Promise.resolve(true));
+  decide.current = () => {
+    if (deciding.current) return deciding.current;
+    const run = (async () => {
+      const s = saver.current;
+      if (agreed.current || !s?.unsaved) return true;
+      try {
+        await s.flush();
+        return true;
+      } catch {
+        return new Promise<boolean>((resolve) => setLeaveQuestion(() => resolve));
+      }
+    })().then((leave) => {
+      deciding.current = null;
+      if (leave) {
+        agreed.current = true;
+        setHeld(true);
+      }
+      return leave;
+    });
+    deciding.current = run;
+    return run;
+  };
+  useEffect(
+    () =>
+      guardLeaving({
+        unsaved: () => saver.current?.unsaved ?? false,
+        decide: () => decide.current(),
+        stayed: () => {
+          agreed.current = false; // the sign-out it agreed to failed: the document is the person's again
+          setHeld(false);
+        },
+      }),
+    [],
+  );
+  useBlocker({
+    shouldBlockFn: async () => !(await decide.current()),
+    enableBeforeUnload: () => saver.current?.unsaved ?? false,
+  });
+  const answer = (leave: boolean) => {
+    leaveQuestion?.(leave);
+    setLeaveQuestion(null);
+  };
+  const [reloading, setReloading] = useState(false);
   const [focusId, setFocusId] = useState<string>(START);
   const [focusRequest, setFocusRequest] = useState<{ id: string; n: number } | null>(null);
   const [trail, setTrail] = useState<string[] | null>(null); // the path the keys came by to the focused item
@@ -67,7 +204,9 @@ function Editor({ tenantId, workflow, types, role }: { tenantId: string; workflo
   }
 
   function change(next: GraphDoc, message: string, then?: string) {
+    if (agreed.current) return; // held: an exit was agreed to (the state behind `editable` may not have rendered yet)
     setHistory((h) => record(h, next));
+    saver.current?.change(next);
     announce(message);
     if (then) focus(then);
   }
@@ -187,9 +326,11 @@ function Editor({ tenantId, workflow, types, role }: { tenantId: string; workflo
     const t = e.target as HTMLElement;
     if (t.closest("input, textarea, select, dialog")) return;
     e.preventDefault();
+    if (agreed.current) return;
     const next = e.shiftKey ? redo(history) : undo(history);
     if (next === history) return;
     setHistory(next);
+    saver.current?.change(next.present);
     announce(e.shiftKey ? "Redone" : "Undone");
     const after = next.present;
     const nextNav = navModel(after, (id) => {
@@ -245,14 +386,29 @@ function Editor({ tenantId, workflow, types, role }: { tenantId: string; workflo
   return (
     <div className="flex min-h-0 flex-1 flex-col" onKeyDown={onEditorKey} onKeyDownCapture={onEditorKeyCapture}>
       <Toolbar tenantId={tenantId} name={workflow.name}>
+        <SaveState state={sync} />
+        {sync.status === "error" && (
+          <Button size="md" onClick={() => saver.current?.retry()}>Retry</Button>
+        )}
         {editable ? (
           <Button size="md" aria-keyshortcuts="A" onClick={() => addFrom(shown)}>
             ＋ Add step <kbd className="rounded-sm border border-line-strong px-1 font-mono text-meta">A</kbd>
           </Button>
-        ) : (
+        ) : !canEdit(role) ? (
           <span className="text-small text-muted">Read only: your role can&apos;t edit workflows</span>
-        )}
+        ) : null}
       </Toolbar>
+      {trouble && <p role="status" className="border-b border-line bg-surface px-5 py-2.5 text-small text-muted">{trouble}</p>}
+      {sync.status === "conflict" && (
+        <div role="alert" className="flex flex-wrap items-center gap-3 border-b border-danger bg-danger-bg px-5 py-2.5 text-small text-ink">
+          <span className="grow">
+            This draft was changed elsewhere, so your changes since then aren&apos;t saved. Reload to see the saved draft, or
+            download your version to keep it.
+          </span>
+          <Button size="sm" onClick={downloadMine}>Download my version</Button>
+          <Button size="sm" variant="primary" onClick={() => setReloading(true)}>Reload</Button>
+        </div>
+      )}
       <div className="flex min-h-0 flex-1">
         <div className="relative flex min-h-0 min-w-0 flex-1">
           {placing && editable && (
@@ -341,6 +497,31 @@ function Editor({ tenantId, workflow, types, role }: { tenantId: string; workflo
           </>
         )}
         {asking?.kind === "edge" && `${keyOf(asking.edge.to.node)} will no longer follow ${keyOf(asking.edge.from.node)}.`}
+      </ConfirmDialog>
+      <ConfirmDialog
+        open={leaveQuestion !== null}
+        title="Your latest changes aren't saved"
+        confirmLabel="Leave without saving"
+        cancelLabel="Stay"
+        onConfirm={() => answer(true)}
+        onCancel={() => answer(false)}
+      >
+        {sync.status === "conflict"
+          ? "This draft was changed elsewhere, so your changes since then can't be saved here. "
+          : "They couldn't be saved. Stay to try again, or keep a copy before you leave. "}
+        <Button size="sm" onClick={downloadMine}>Download my version</Button>
+      </ConfirmDialog>
+      <ConfirmDialog
+        open={reloading}
+        title="Reload the saved draft"
+        confirmLabel="Discard my version and reload"
+        onConfirm={() => {
+          setReloading(false);
+          onReload();
+        }}
+        onCancel={() => setReloading(false)}
+      >
+        Your version since the conflict is discarded. Download it first to keep it.
       </ConfirmDialog>
     </div>
   );

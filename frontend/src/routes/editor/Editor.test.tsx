@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Outlet, RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { GraphDoc } from "../../lib/workflows";
+import { cancelLeaving, mayLeave } from "../../lib/leaving";
 import type { CanvasProps } from "./Canvas";
 import { EditorPage } from "./Editor";
 
@@ -77,6 +78,8 @@ beforeEach(() => {
     ["GET /api/v1/node-types", () => json(TYPES)],
     ["GET /api/v1/t/t1", () => json({ id: "t1", name: "Acme", slug: "acme", require_passkey: false, role })],
     [`GET ${BASE}`, () => json(WORKFLOW)],
+    [`PUT ${BASE}/draft`, () =>
+      json({ draft_revision: 2, unpublished_changes: true, graph_hash: "h2", active_version_id: null, active_version_number: null })],
     [`POST ${BASE}/validate`, () => json({ draft_revision: 1, valid: true, diagnostics: [], expressions: [], taint: { sites: [], declassified: [] } })],
   ]);
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
@@ -246,4 +249,170 @@ it("leaves focus in a step's panel when undo keeps its step", async () => {
   await userEvent.keyboard("{Control>}z{/Control}"); // the second step's addition undone; transform stays
   expect(screen.getByRole("complementary", { name: "transform" })).toBeTruthy();
   expect(document.activeElement).toBe(heading);
+});
+
+const steps = () => screen.getByRole("group", { name: "Workflow steps" });
+
+async function addTransform() {
+  await userEvent.click(screen.getByRole("button", { name: "Start" }));
+  await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
+  await screen.findByRole("button", { name: "transform" });
+}
+
+it("saves an edit with the revision it was loaded at, and says so", async () => {
+  await show();
+  await addTransform();
+  expect(screen.getByText("Unsaved changes")).toBeTruthy();
+  await vi.waitFor(() => expect(sent.find((r) => r.method === "PUT")).toBeTruthy(), { timeout: 3000 });
+  const put = sent.find((r) => r.method === "PUT")!;
+  expect(put.headers.get("If-Match")).toBe("1");
+  expect((put.body as GraphDoc).nodes!.map((n) => n.key)).toEqual(["transform"]);
+  await screen.findByText("Saved · not published");
+});
+
+it("opens on the server's draft, never a cached one", async () => {
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft_revision: 7, draft: draftWith("fresh") }));
+  await show({ seed: (qc) => qc.setQueryData(["workflow", "t1", "w1"], { ...WORKFLOW, draft: draftWith("old") }) });
+  expect(screen.getByRole("button", { name: "fresh" })).toBeTruthy();
+  expect(drawn.some((d) => d.doc.nodes?.some((n) => n.key === "old"))).toBe(false);
+});
+
+it("keeps its own document when the workflow is read again while it's open", async () => {
+  const { qc } = await show();
+  await addTransform();
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft_revision: 9, draft: draftWith("other") }));
+  await qc.refetchQueries({ queryKey: ["workflow", "t1", "w1"] });
+  expect(screen.getByRole("button", { name: "transform" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "other" })).toBeNull();
+});
+
+it("saves before leaving through a link, then leaves", async () => {
+  const { router } = await show();
+  await addTransform();
+  expect(screen.getByText("Unsaved changes")).toBeTruthy(); // inside the debounce
+  await userEvent.click(screen.getByRole("link", { name: "Workflows" }));
+  await screen.findByText("list");
+  expect(sent.filter((r) => r.method === "PUT")).toHaveLength(1);
+  expect(router.state.location.pathname).toBe("/t/t1/workflows");
+});
+
+it("asks before leaving work it couldn't save; staying keeps it", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "http_error" }, 500));
+  await show();
+  await addTransform();
+  await userEvent.click(screen.getByRole("link", { name: "Workflows" }));
+  const ask = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
+  expect(within(ask).getByRole("button", { name: "Download my version" })).toBeTruthy();
+  await userEvent.click(within(ask).getByRole("button", { name: "Stay" }));
+  expect(screen.getByRole("button", { name: "transform" })).toBeTruthy();
+  await userEvent.click(screen.getByRole("link", { name: "Workflows" }));
+  const again = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
+  await userEvent.click(within(again).getByRole("button", { name: "Leave without saving" }));
+  await screen.findByText("list");
+});
+
+it("turns read-only on a conflict, keeping the work downloadable and leaving guarded", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "draft_conflict", draft_revision: 5 }, 409));
+  await show();
+  await addTransform();
+  const alert = await screen.findByRole("alert", {}, { timeout: 3000 });
+  expect(alert.textContent).toContain("changed elsewhere");
+  expect(screen.queryByRole("button", { name: /Add step/ })).toBeNull();
+  expect(within(alert).getByRole("button", { name: "Download my version" })).toBeTruthy();
+  await userEvent.click(screen.getByRole("link", { name: "Workflows" }));
+  const ask = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
+  expect(ask.textContent).toContain("changed elsewhere");
+  await userEvent.click(within(ask).getByRole("button", { name: "Stay" }));
+});
+
+it("answers sign-out's question with the same decision: staying keeps the work", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "http_error" }, 500));
+  await show();
+  await addTransform();
+  const decision = mayLeave(); // what the shell's Sign out asks before it revokes anything
+  const ask = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
+  await userEvent.click(within(ask).getByRole("button", { name: "Stay" }));
+  await expect(decision).resolves.toBe(false);
+  expect(screen.getByRole("button", { name: "transform" })).toBeTruthy();
+});
+
+it("asks once: a navigation after sign-out's \"leave\" goes without asking again", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "http_error" }, 500));
+  await show();
+  await addTransform();
+  const decision = mayLeave();
+  const ask = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
+  await userEvent.click(within(ask).getByRole("button", { name: "Leave without saving" }));
+  await expect(decision).resolves.toBe(true);
+  await userEvent.click(screen.getByRole("link", { name: "Workflows" })); // as sign-out's navigation to /login
+  await screen.findByText("list");
+  expect(screen.queryByRole("dialog", { name: "Your latest changes aren't saved" })).toBeNull();
+});
+
+it("lets overlapping exits share one question, and a Stay settles every one", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "http_error" }, 500));
+  await show();
+  await addTransform();
+  const first = mayLeave();
+  const second = mayLeave(); // a second Sign out, or the router's blocker, while the first waits
+  const ask = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
+  expect(screen.getAllByRole("dialog", { name: "Your latest changes aren't saved" })).toHaveLength(1);
+  await userEvent.click(within(ask).getByRole("button", { name: "Stay" }));
+  await expect(first).resolves.toBe(false);
+  await expect(second).resolves.toBe(false);
+  expect(sent.filter((r) => r.method === "PUT")).toHaveLength(1); // one decision, one save tried
+  expect(steps().dataset.editable).toBe("true"); // staying holds nothing
+});
+
+it("holds the document from an exit's consent until the exit is withdrawn", async () => {
+  await show();
+  await addTransform();
+  await expect(mayLeave()).resolves.toBe(true); // saved first: sign-out may go on, and now awaits logout's answer
+  await vi.waitFor(() => expect(steps().dataset.editable).toBe("false"));
+  await userEvent.click(screen.getByRole("button", { name: "after transform" })); // an edit, under that consent
+  expect(screen.queryByRole("dialog", { name: "Add a step" })).toBeNull();
+  await userEvent.keyboard("{Control>}z{/Control}");
+  expect(screen.getByRole("button", { name: "transform" })).toBeTruthy(); // undo is held too
+  act(() => cancelLeaving()); // logout failed: still signed in
+  await vi.waitFor(() => expect(steps().dataset.editable).toBe("true"));
+  await userEvent.click(screen.getByRole("button", { name: "after transform" }));
+  expect(await screen.findByRole("dialog", { name: "Add a step" })).toBeTruthy();
+});
+
+it("asks again after a sign-out that failed", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "http_error" }, 500));
+  await show();
+  await addTransform();
+  const decision = mayLeave();
+  await userEvent.click(
+    within(await screen.findByRole("dialog", { name: "Your latest changes aren't saved" })).getByRole("button", { name: "Leave without saving" }),
+  );
+  await expect(decision).resolves.toBe(true);
+  act(() => cancelLeaving()); // what the shell does when signOut() fails
+  await userEvent.click(screen.getByRole("link", { name: "Workflows" }));
+  expect(await screen.findByRole("dialog", { name: "Your latest changes aren't saved" })).toBeTruthy();
+  expect(screen.queryByText("list")).toBeNull();
+});
+
+it("stays open, with its edits, when the step types fail to refresh", async () => {
+  const { qc } = await show();
+  await addTransform();
+  answers.set("GET /api/v1/node-types", () => json({ error: "http_error" }, 500));
+  await act(() => qc.refetchQueries({ queryKey: ["node-types"] }));
+  expect(await screen.findByText(/The step types couldn't be refreshed/)).toBeTruthy();
+  expect(screen.getByRole("button", { name: "transform" })).toBeTruthy();
+  expect(screen.getByRole("group", { name: "Workflow steps" })).toBeTruthy();
+});
+
+it("asks before Reload discards the version a conflict kept", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "draft_conflict", draft_revision: 5 }, 409));
+  await show();
+  await addTransform();
+  const alert = await screen.findByRole("alert", {}, { timeout: 3000 });
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft_revision: 5, draft: draftWith("theirs") }));
+  await userEvent.click(within(alert).getByRole("button", { name: "Reload" }));
+  const ask = screen.getByRole("dialog", { name: "Reload the saved draft" });
+  await userEvent.click(within(ask).getByRole("button", { name: "Discard my version and reload" }));
+  expect(await screen.findByRole("button", { name: "theirs" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "transform" })).toBeNull();
 });
