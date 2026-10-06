@@ -149,23 +149,41 @@ async def test_another_tenants_workflow_isnt_found(
     assert (answer.status_code, answer.json()["error"]) == (404, "not_found")
 
 
-FORM_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "token": {"type": "string", "x-sensitive": True, "title": "API token"},
-        "site": {"type": "string", "enum": ["a", "b"], "default": "a", "x-dewpoint-picker": {"kind": "site"}},
-        "count": {"type": "integer", "description": "How many"},
-    },
-    "required": ["token", "site"],
-    "additionalProperties": False,
-}
+def form_schema(connection_id: uuid.UUID) -> dict[str, Any]:
+    picker = {"node": "testkit.pick@1", "field": "site_id", "connection": str(connection_id)}
+    return {
+        "type": "object",
+        "properties": {
+            "token": {"type": "string", "x-sensitive": True, "title": "API token"},
+            "site": {"type": "string", "enum": ["a", "b"], "default": "a", "x-dewpoint-picker": picker},
+            "count": {"type": "integer", "description": "How many"},
+        },
+        "required": ["token", "site"],
+        "additionalProperties": False,
+    }
+
+
+async def published_with_a_picker(owner: Any, api: Any, admin: Any, settings: Any, extra: Any = None) -> Any:
+    """A version whose start form has a picker (plugins-3 D19): its connection is one of the tenant's."""
+    from tests.apps.test_connection_fields import connection
+    from tests.apps.test_workflow_ops import actor, create, publish
+    from tests.support.registry import sync_test_plugins
+
+    await sync_test_plugins(admin)
+    ctx = await actor(owner)
+    cid = await connection(owner, ctx.tenant_id)
+    graph = G().node("a", "testkit.echo@1", {"value": 1}).data() | {
+        "settings": {"input_schema": form_schema(cid), **(extra or {})}
+    }
+    wf = await create(api, ctx, graph)
+    assert (await publish(api, ctx, wf, settings)).version is not None
+    return ctx, wf, cid
 
 
 async def test_the_start_form_describes_the_active_versions_input(
     keyed_app, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
 ) -> None:
-    graph = G().node("a", "testkit.echo@1", {"value": 1}).data() | {"settings": {"input_schema": FORM_SCHEMA}}
-    ctx, wf = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, graph)
+    ctx, wf, cid = await published_with_a_picker(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings)
     client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
     answer = await client.get(f"/api/v1/t/{ctx.tenant_id}/workflows/{wf}/start-form")
     assert answer.status_code == 200, answer.text
@@ -174,7 +192,7 @@ async def test_the_start_form_describes_the_active_versions_input(
     assert {f["name"]: f for f in form["fields"]} == {
         "token": {"name": "token", "type": "string", "required": True, "sensitive": True, "title": "API token"},
         "site": {"name": "site", "type": "string", "required": True, "sensitive": False, "enum": ["a", "b"],
-                 "default": "a", "picker": {"kind": "site"}},
+                 "default": "a", "picker": {"node": "testkit.pick@1", "field": "site_id", "connection": str(cid)}},
         "count": {"name": "count", "type": "integer", "required": False, "sensitive": False,
                   "description": "How many"},
     }  # fmt: skip
@@ -193,9 +211,9 @@ async def test_the_start_form_describes_a_csv_declaration(
         ],
         "max_rows": 100,
     }
-    settings = {"input_schema": FORM_SCHEMA, "csv": csv}
-    graph = G().node("a", "testkit.echo@1", {"value": 1}).data() | {"settings": settings}
-    ctx, wf = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, graph)
+    ctx, wf, _ = await published_with_a_picker(
+        owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, {"csv": csv}
+    )
     client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
     form = (await client.get(f"/api/v1/t/{ctx.tenant_id}/workflows/{wf}/start-form")).json()
     assert form["csv"] == {
