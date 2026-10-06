@@ -8,6 +8,10 @@ owner rules on at the checkpoint, and open questions.
 
 Branch `feat/plugins-3a1` from `origin/main` 6482c53.
 
+**Checkpoint:** the owner approved every 3a-1 ruling below as recommended (at 33a29b4, 2026-10-06), including the
+revised rulings on a failure after a send, quota identity across a key rotation, and missing connections in a
+closure. Pushing, a PR, 3a-2 and the flaky-test issues are not yet approved.
+
 Tasks (test-first, in order):
 1. `core/egress`: address classification, the allowlist, the guard's vetting (D7, D8).
 2. Migration 0041: `egress_allowlist`, `rate_buckets` (D25).
