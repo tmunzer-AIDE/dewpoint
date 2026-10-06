@@ -146,8 +146,12 @@ live schedule, so the sync writes each action without the old argument. A new de
 An attestation made while an older dispatcher can still run lets a key it sealed ticks under retire: the poller check
 catches one that's polling, not one that's down and restarts later.
 
-Exit codes: 1 when a dry run finds a check failing, 4 when `--confirm` does. A platform key version (users' TOTP
-secrets, never a payload) checks `not_active` and `records` only.
+Exit codes: 1 when a dry run finds a check failing, 4 when `--confirm` does; 2 when this process's Temporal namespace
+isn't the deployment's recorded one, or none is recorded: `keys retire --tenant` and `keys tick-cutover` check that
+before they ask Temporal anything, and connect to nothing until it holds. A dry run changes nothing: it reads what
+Temporal shows in a read-only transaction, and only `--confirm` records it (evidence of executions shown gone deleted,
+histories lost marked). A platform key version (users' TOTP secrets, never a payload) checks `not_active` and `records`
+only.
 
 ## Rotating a tenant's inbound keypair
 

@@ -195,9 +195,12 @@ async def _check(sessionmaker: async_sessionmaker[AsyncSession], client: Client,
     return "read"
 
 
-async def _unshown(s: AsyncSession, row: ExecutionEvidence) -> str:
+async def _unshown(s: AsyncSession, row: ExecutionEvidence, *, record: bool = True) -> str:
     """An unread execution Temporal doesn't show, in the caller's transaction: `lost` (seen before: its history went
-    unread), or `pending` (never seen: it may still land, or have landed and gone unseen; never judged)."""
+    unread), or `pending` (never seen: it may still land, or have landed and gone unseen; never judged). Recorded on
+    its row unless `record` is false."""
+    if not record:
+        return "lost" if row.seen_at is not None else "pending"
     now: datetime = (await s.execute(select(func.statement_timestamp()))).scalar_one()
     if row.seen_at is not None:
         row.lost_at = now
@@ -231,11 +234,12 @@ async def check_evidence(sessionmaker: async_sessionmaker[AsyncSession], client:
     return counts
 
 
-async def prove(s: AsyncSession, client: Client, tenant_id: uuid.UUID, *, before: datetime | None) -> RunProof:
+async def prove(s: AsyncSession, client: Client, tenant_id: uuid.UUID, *, before: datetime | None,
+                record: bool = True) -> RunProof:  # fmt: skip
     """What Temporal shows of the tenant's run executions that started before `before` (all, None), in the caller's
     transaction and tenant scope (the key admin's): each shown gone, read, is proven and its evidence deleted; each
     unshown and unread is lost (seen before) or pending (never seen), as the leader finds it. Raises when Temporal can't
-    be asked."""
+    be asked. With `record` false (a dry run) the same proof, writing nothing."""
     query = select(ExecutionEvidence).where(ExecutionEvidence.tenant_id == tenant_id).order_by(ExecutionEvidence.id)
     if before is not None:
         query = query.where(ExecutionEvidence.started_at < before)
@@ -247,13 +251,14 @@ async def prove(s: AsyncSession, client: Client, tenant_id: uuid.UUID, *, before
             continue
         described = await _described(client, row.workflow_id, row.run_id)
         if described is None:
-            if row.read_at is not None:
+            if row.read_at is None:
+                counts[await _unshown(s, row, record=record)] += 1
+            elif record:
                 await s.delete(row)
-            else:
-                counts[await _unshown(s, row)] += 1
             continue
-        now = await _after(s, timedelta(0))
-        row.seen_at, row.checked_at = row.seen_at or now, now
+        if record:
+            now = await _after(s, timedelta(0))
+            row.seen_at, row.checked_at = row.seen_at or now, now
         if _open(described):
             counts["open"] += 1
         else:

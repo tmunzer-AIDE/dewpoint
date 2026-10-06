@@ -4,12 +4,14 @@ import base64
 import os
 import uuid
 
+import pytest
 from sqlalchemy import text
 from typer.testing import CliRunner
 
 from dewpoint.apps.cli.main import app
 from dewpoint.core.config import get_settings
 from dewpoint.core.db import make_engine, make_sessionmaker
+from dewpoint.core.platform.service import DEVELOPMENT, record_environment
 from tests.conftest import _url_for
 
 OLD, NEW = base64.b64encode(os.urandom(32)).decode(), base64.b64encode(os.urandom(32)).decode()
@@ -38,6 +40,18 @@ def _tenants(pg_url: str, n: int) -> list[str]:
 
     asyncio.run(_make())
     return [str(t) for t in made]
+
+
+def _recorded(pg_url: str, namespace: str = "default") -> None:
+    """The deployment's record: its environment and Temporal namespace (engine 2b spec §2.1)."""
+
+    async def _record() -> None:
+        engine = make_engine(pg_url)
+        async with make_sessionmaker(engine)() as s, s.begin():
+            await record_environment(s, environment=DEVELOPMENT, namespace=namespace)
+        await engine.dispose()
+
+    asyncio.run(_record())
 
 
 def test_status_rewrap_and_rotate(pg_url, monkeypatch) -> None:
@@ -218,7 +232,7 @@ def test_retire_lists_its_checks_and_retires_only_with_confirm(pg_url, monkeypat
     async def one_day(settings: object) -> timedelta:
         return timedelta(days=1)
 
-    async def proven(settings: object, s: object, tenant: object, version: int) -> object:
+    async def proven(settings: object, s: object, tenant: object, version: int, **_: object) -> object:
         from dewpoint.core.crypto.retire import RunProof
 
         return RunProof()  # Temporal shows none of its run executions (here, a stand-in)
@@ -227,6 +241,7 @@ def test_retire_lists_its_checks_and_retires_only_with_confirm(pg_url, monkeypat
     monkeypatch.setattr(cli, "_run_histories", proven)
     r = CliRunner()
     _env(monkeypatch, pg_url, DEWPOINT_KEK_B64=OLD, DEWPOINT_KEK_ID="old")
+    _recorded(pg_url)
     t = str(uuid.uuid4())
 
     async def seed(sql: str) -> None:
@@ -246,7 +261,7 @@ def test_retire_lists_its_checks_and_retires_only_with_confirm(pg_url, monkeypat
     dry = r.invoke(app, ["keys", "retire", "--tenant", t, "--version", "1"])
     assert dry.exit_code == 0 and "payload_floor: yes" in dry.output and "not retired" in dry.output, dry.output
 
-    async def unknown(settings: object, s: object, tenant: object, version: int) -> None:
+    async def unknown(settings: object, s: object, tenant: object, version: int, **_: object) -> None:
         return None
 
     monkeypatch.setattr(cli, "_run_histories", unknown)  # Temporal can't be asked: never assumed gone
@@ -277,6 +292,7 @@ def test_the_tick_cutover_is_recorded_once_and_never_while_an_old_dispatcher_pol
     monkeypatch.setattr(cli, "_admission_pollers", admission_pollers)
     r = CliRunner()
     _env(monkeypatch, pg_url, DEWPOINT_KEK_B64=OLD, DEWPOINT_KEK_ID="old")
+    _recorded(pg_url)
 
     async def run(statement: str, **params: object) -> list[object]:
         engine = make_engine(pg_url)
@@ -327,3 +343,86 @@ def test_the_tick_cutover_is_recorded_once_and_never_while_an_old_dispatcher_pol
     finally:
         sql("delete from tick_cutover")
         sql("insert into tick_cutover (at) values (:a)", a=kept)
+
+
+@pytest.mark.parametrize("recorded", ["another-namespace", None])
+def test_key_commands_that_ask_temporal_refuse_a_namespace_not_the_recorded_one_before_connecting(
+    pg_url, monkeypatch, recorded: str | None
+) -> None:
+    """The final review's I1 (engine 2b spec §2.1): `keys retire` and `keys tick-cutover` ask Temporal, so each checks
+    first that this process's namespace is the deployment's recorded one. A mismatch, or none recorded, ends it (exit
+    2) before any connection: never read as Temporal being unreachable, an unknown answer."""
+    from dewpoint.apps.cli import main as cli
+
+    attempts: list[object] = []
+
+    class Unreached:
+        @staticmethod
+        async def connect(*args: object, **kwargs: object) -> object:
+            attempts.append(args)
+            raise AssertionError("connected to Temporal")
+
+    monkeypatch.setattr(cli, "Client", Unreached)
+    r = CliRunner()
+    _env(monkeypatch, pg_url, DEWPOINT_KEK_B64=OLD, DEWPOINT_KEK_ID="old")
+    if recorded is not None:
+        _recorded(pg_url, recorded)
+    [t] = _tenants(pg_url, 1)
+    assert r.invoke(app, ["keys", "rotate-dek", "--tenant", t]).exit_code == 0
+    retire = r.invoke(app, ["keys", "retire", "--tenant", t, "--version", "1"])
+    cutover = r.invoke(app, ["keys", "tick-cutover", "--attest"])
+    assert (retire.exit_code, cutover.exit_code, attempts) == (2, 2, []), (retire.output, cutover.output)
+
+
+def test_a_retire_dry_run_changes_nothing(pg_url, monkeypatch) -> None:
+    """The final review's I1: proving a version's run executions deletes the evidence of those Temporal shows gone and
+    marks what it reads (seen, lost); a dry run proves the same in a read-only transaction, so only --confirm acts on
+    what Temporal showed."""
+    from datetime import timedelta
+
+    from dewpoint.apps.cli import main as cli
+    from dewpoint.apps.dispatcher import evidence
+
+    async def one_day(settings: object) -> timedelta:
+        return timedelta(days=1)
+
+    class Connected:
+        @staticmethod
+        async def connect(*args: object, **kwargs: object) -> object:
+            return object()
+
+    async def gone(client: object, workflow_id: str, run_id: str | None) -> None:
+        return None  # Temporal shows none of them
+
+    monkeypatch.setattr(cli, "_namespace_retention", one_day)
+    monkeypatch.setattr(cli, "Client", Connected)
+    monkeypatch.setattr(evidence, "_described", gone)
+    r = CliRunner()
+    _env(monkeypatch, pg_url, DEWPOINT_KEK_B64=OLD, DEWPOINT_KEK_ID="old")
+    _recorded(pg_url)
+    [t] = _tenants(pg_url, 1)
+    assert r.invoke(app, ["keys", "rotate-dek", "--tenant", t]).exit_code == 0
+
+    async def sql(statement: str) -> list[tuple[object, ...]]:
+        engine = make_engine(pg_url)
+        try:
+            async with make_sessionmaker(engine)() as s, s.begin():
+                found = await s.execute(text(statement), {"t": t})
+                return [tuple(row) for row in found.all()] if found.returns_rows else []
+        finally:
+            await engine.dispose()
+
+    for read, seen in ((True, True), (False, True), (False, False)):  # proven gone, lost, pending
+        run, at, read_at = ("gen_random_uuid()" if read else "null"), ("now()" if seen else "null"), (
+            "now()" if read else "null")  # fmt: skip
+        asyncio.run(sql(
+            "insert into execution_evidence (tenant_id, workflow_id, run_id, started_at, seen_at, read_at) values "
+            f"(cast(:t as uuid), 't:' || :t || ':run:' || gen_random_uuid(), {run}, now() - interval '30 days', {at}, "
+            f"{read_at})"
+        ))  # fmt: skip
+    snapshot = ("select id, seen_at, checked_at, read_at, lost_at from execution_evidence where tenant_id = :t "
+                "order by id")  # fmt: skip
+    before = asyncio.run(sql(snapshot))
+    dry = r.invoke(app, ["keys", "retire", "--tenant", t, "--version", "1"])
+    assert dry.exit_code in (0, 1) and "Traceback" not in dry.output, dry.output
+    assert asyncio.run(sql(snapshot)) == before

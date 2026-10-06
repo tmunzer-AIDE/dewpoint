@@ -42,7 +42,12 @@ from dewpoint.core.ingress import secrets_reseal
 from dewpoint.core.ingress.keys import retire_event_keys, rotate_event_key
 from dewpoint.core.models.identity import User
 from dewpoint.core.models.tenancy import Tenant
-from dewpoint.core.platform.service import EnvironmentMismatchError, EnvironmentNotRecordedError, record_environment
+from dewpoint.core.platform.service import (
+    EnvironmentMismatchError,
+    EnvironmentNotRecordedError,
+    check_namespace,
+    record_environment,
+)
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.plugins.lifecycle import Entry
 from dewpoint.core.plugins.registry import (
@@ -412,6 +417,18 @@ def keys_reseal_ingress(batch_size: int = typer.Option(100, min=1, max=1000)) ->
     typer.echo("resealed " + " ".join(f"{k}={v}" for k, v in asyncio.run(_run()).items()))
 
 
+async def _verified_namespace(s: AsyncSession, settings: Settings) -> None:
+    """Engine 2b spec §2.1, before a key command asks Temporal anything: this process's namespace is the deployment's
+    recorded one. A mismatch, or none recorded, ends the command (exit 2) before any connection: never read as Temporal
+    being unreachable, an unknown answer (the final review's I1)."""
+    async with s.begin():
+        try:
+            await check_namespace(s, settings.temporal_namespace)
+        except (EnvironmentNotRecordedError, EnvironmentMismatchError) as e:
+            typer.echo(f"ERROR: {e}")
+            raise typer.Exit(2) from None
+
+
 async def _namespace_retention(settings: Settings) -> timedelta | None:
     """The Temporal namespace's retention, as it reports it (engine 2b spec §6.4's payload floor); None when it can't
     be read: the floor then can't be reckoned, and nothing retires."""
@@ -427,14 +444,14 @@ async def _namespace_retention(settings: Settings) -> timedelta | None:
     return timedelta(seconds=ttl.seconds, microseconds=ttl.nanos // 1000)
 
 
-async def _run_histories(settings: Settings, s: AsyncSession, tenant_id: uuid.UUID,
-                         version: int) -> retire.RunProof | None:  # fmt: skip
+async def _run_histories(settings: Settings, s: AsyncSession, tenant_id: uuid.UUID, version: int, *,
+                         record: bool) -> retire.RunProof | None:  # fmt: skip
     """What Temporal shows of the tenant's run executions that could hold `version` (the owner's M3 rulings), in the
-    caller's transaction; None when Temporal can't be asked."""
+    caller's transaction (`record`: whether to record what it shows); None when Temporal can't be asked."""
     try:
         client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
         before = await retire.candidates_before(s, tenant_id, version)
-        return await evidence.prove(s, client, tenant_id, before=before)
+        return await evidence.prove(s, client, tenant_id, before=before, record=record)
     except Exception as e:  # unreachable, refused: unknown, never assumed
         typer.echo(f"WARNING: the run executions couldn't be asked about ({type(e).__name__})")
         return None
@@ -462,10 +479,14 @@ def keys_retire(
     settings = get_settings()
 
     async def _run(s: AsyncSession) -> tuple[list[retire.Check], bool]:
+        if tenant_id:
+            await _verified_namespace(s, settings)
         retention = await _namespace_retention(settings) if tenant_id else None
         async with s.begin():
+            if not confirm:  # a dry run changes nothing, what it reads of Temporal included (the final review's I1)
+                await s.execute(text("SET TRANSACTION READ ONLY"))
             await tenant_scope(s, tenant_id)
-            histories = await _run_histories(settings, s, tenant_id, version) if tenant_id else None
+            histories = await _run_histories(settings, s, tenant_id, version, record=confirm) if tenant_id else None
             if not confirm:
                 found = await retire.checks(s, tenant_id, version, namespace_retention=retention,
                                             run_histories=histories)  # fmt: skip
@@ -519,6 +540,7 @@ def keys_tick_cutover(
     settings = get_settings()
 
     async def _run(s: AsyncSession) -> str:
+        await _verified_namespace(s, settings)
         async with s.begin():
             existing = (await s.execute(text("SELECT at FROM tick_cutover"))).scalar_one_or_none()
         if existing is not None:
