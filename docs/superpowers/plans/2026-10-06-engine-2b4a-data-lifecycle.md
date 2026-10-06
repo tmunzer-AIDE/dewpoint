@@ -5,8 +5,8 @@
 **Goal:** Dewpoint forgets what it must. A tenant's data leaves every user-facing read at its retention cutoff and is
 then deleted; audit entries are pruned through anchored checkpoints; every sealed record can be sealed again and a
 data-key version retired once nothing could need it; and a platform admin can erase a tenant: its data, its keys and
-everything Dewpoint started for it in Temporal. No erasure completes yet: each holds at its last stage while the firing
-bound is unproven (`firing_bound_unproven`), and the production gate stays off until 2b-4b.
+everything Dewpoint started for it in Temporal. No erasure completes yet: one that reaches stage 90 holds there while
+the firing bound is unproven (`firing_bound_unproven`), and the production gate stays off until 2b-4b.
 
 **Architecture:**
 - **The schema blockers (milestone 1).** #35: every key between two tenant tables carries the tenant (migration 0035,
@@ -71,10 +71,11 @@ outline (`docs/superpowers/plans/2026-10-05-engine-2b4-retention-production.md`)
 
 These are the input classes and failure modes most likely to bite a person running this that no task's tests
 exercise. Each stays open past this plan, and the reviewer weighs each deliberately:
-- **A tenant erased today.** Every erasure holds at stage 90 (`firing_bound_unproven`, alerted on), its data, keys and
-  executions gone: ticks retry without limit, and under `ALLOW_ALL` a schedule doesn't list its running ticks, so
-  nothing yet bounds when the last tick closes. Nothing may present a held erasure as complete; the proof test takes the
-  bound as proven only inside the test.
+- **A tenant erased today.** Every erasure that reaches stage 90 stays held there (`firing_bound_unproven`, alerted
+  on), its data, keys and executions gone; a stopped or failing one stays at an earlier stage. Ticks retry without
+  limit, and under `ALLOW_ALL` a schedule doesn't list its running ticks, so nothing yet bounds when the last tick
+  closes. Nothing may present a held erasure as complete; the proof test takes the bound as proven only inside the
+  test.
 - **The Compose deployment.** Task 3 adds the retention service, its login and its role to Compose and to CI's
   end-to-end job, and Task 11 has it reach Temporal for erasures; no Compose proof has run (GitHub Actions minutes are
   exhausted, and no push is authorized). Exhausted minutes don't waive that proof.
@@ -131,7 +132,7 @@ reports each of those 521 lines in this file as trailing whitespace; they're par
 adds ends in whitespace. A diff that holds a Markdown fence is fenced with four backticks. The 2b-2, 2b-3a and 2b-3b
 plans carry the same lines.
 
-The commits are the local branch `proto/2b4a-v3`, cut from `main` at `ff1536e`, one commit per task:
+The commits are the local branch `proto/2b4a-v4`, cut from `main` at `ff1536e`, one commit per task:
 - `proto/2b4a-v1`, cut from `main` at `6482c53`, was built milestone by milestone, with the owner's checkpoint after
   each; all four milestones were approved as prototype checkpoints (below), its last at `7d5b20b`.
 - `main` then moved: plugins-3a-1 (migration 0041: `egress_allowlist`, whose `tenant_id` is null for an exception for
@@ -151,6 +152,15 @@ The commits are the local branch `proto/2b4a-v3`, cut from `main` at `ff1536e`, 
   then awaited a second sync that waited for it, so the module hung. A `holds` fixture now releases each race test's
   held events and syncs at teardown, before the database's cleanup, and every await made while a sync is held is
   bounded to 60 seconds (folded into Task 12, and the same change made on `proto/2b4a-int`).
+- `proto/2b4a-v4` folds in the owner's review of this plan's first draft (milestone ruling 6). Task 6's message no
+  longer says ticks are bounded: the tick contract removes their dependence on a tenant's data key, and their closing
+  time stays unbounded. The guides Tasks 11 and 12 write no longer say every erasure reaches stage 90, or that every
+  unknown span is alerted on: migration 0040's `before_migration` spans aren't. And the whole suite's first run, on
+  `proto/2b4a-v3`'s last tree, failed one test, #42's: Task 11's erasure route named its body `StartIn`, the run
+  requests' name, so FastAPI named both components by module path, renaming a published one. Task 11 names it
+  `ErasureStartIn` now, test-first, the schema regenerated. Tasks 1 to 5 are `proto/2b4a-v3`'s commits and Tasks 6 to
+  10 its trees, and their records are its runs, which each task names; Tasks 11 and 12 were replayed again on
+  `proto/2b4a-v4`. The same changes were made on `proto/2b4a-int`, whose tree is Task 12's again.
 
 Each commit was verified this way:
 - its diff in this file is exact: the twelve, taken from this file and applied in order on `ff1536e`, give Task 12's
@@ -158,13 +168,19 @@ Each commit was verified this way:
 - its tests failed before its code and passed after, as its record shows, with the exceptions each record explains;
 - CI's static checks passed on every task's tree: ruff and its formatter (with and without their caches), mypy and
   import-linter; and #42's check of the web client's schema (`dewpoint api openapi` equal to `openapi.json`, and
-  `pnpm run check:api`);
-- at each checkpoint, the milestone's focused tests passed (the counts the checkpoints give), and the migrations went
-  up, down and up again over existing rows, every constraint, function, trigger, policy, role, grant and column the
-  same after the downgrade.
+  `pnpm run check:api`); on Task 12's tree, CI's other frontend steps too (lint, typecheck, tests and build);
+- gitleaks found nothing in the branch's commits or this plan's, with CI's version (8.24.3, the default of the action
+  CI pins) and 8.30.1, with the repository's allowlist and without it; the same scan finds the leak CI once flagged in
+  `5ab4e12`;
+- at each checkpoint, the milestone's focused tests passed (the counts the checkpoints give, on `proto/2b4a-v3`'s
+  trees), and the migrations went up, down and up again over existing rows, every constraint, function, trigger,
+  policy, role, grant and column the same after the downgrade (0040 is unchanged since).
 
 Per the owner's ruling on the outline, the whole suite runs once, at the end, not at every task. The prototype's last
 whole-suite run (`3fda97c`, whose code is `7d5b20b`'s) passed: 2,742 passed, 8 skipped, in about 13 minutes locally.
+On `proto/2b4a-v4`'s last tree (`4c3c696`), the whole suite passed: 3,011 passed, 8 skipped, in 8 minutes 53 seconds
+locally with `-n auto`. Its first run, on `proto/2b4a-v3`'s (`215e559`), failed only #42's naming test, which Task 11
+now passes.
 
 ## Executing this plan
 
@@ -180,7 +196,7 @@ task.
 **Checkpoints:** after Task 2 (the schema blockers), Task 4 (retention), Task 6 (re-encryption and retirement) and
 Task 12 (tenant erasure), run the milestone's focused tests and its round trip, then stop for the owner's review. Group
 pytest's arguments by directory: pytest 9.1.1 loses a directory's conftest fixtures when the arguments revisit it after
-a file of its parent. After Task 12, run the whole suite (about 13 minutes on the prototype's machine) and the static
+a file of its parent. After Task 12, run the whole suite (about 9 minutes on the prototype's machine) and the static
 checks once, then a fresh reviewer reviews the whole branch.
 
 **Open conditions:** the Compose end-to-end proof, which now starts the retention service, runs only in CI, and GitHub
@@ -269,6 +285,13 @@ tasks named.
      push, CI or Compose proof, or change to `ALLOW_ALL`.
 5. **The replay (2026-10-06).** Rebased onto `ff1536e` (#42) before the plan; pnpm installed locally to regenerate the
    web client's schema types in each task that changes the API.
+6. **The review of this plan's first draft (`0118ca5`, 2026-10-06).** It captures the approved prototype, with three
+   claims corrected: ticks aren't bounded (the tick contract removes their dependence on a tenant's data key; their
+   closing time stays unbounded: Task 6's message); an erasure that reaches stage 90 holds there, and a stopped or
+   failing one stays earlier (the Review Focus, Tasks 11 and 12's guide, §6.5); migration 0040's `before_migration`
+   spans are neither audited nor alerted on, an exception rather than a bulk alert (Task 12's guide, §8.2). The whole
+   suite was allowed to run locally on the replayed tree, and gitleaks, at CI's version, to scan it; neither authorizes
+   a push, CI, `act`, a Compose proof or a gate change. That run found #42's naming failure, fixed in Task 11 (above).
 
 **Open and separate:** issues #16, #18 and #26; §7.9's other items; 2b-4b (production Temporal and its proofs, #3's
 anchor sink, the readiness checks and the gate lift); the deferred minors of 2b-3a, 2b-3b and this prototype; the firing
@@ -278,9 +301,10 @@ bound's design.
 
 ### Task 1: Every key between two tenant tables carries the tenant, and the models declare every key (#35)
 
-**Commit:** `66ad202` (`proto/2b4a-v3`). It folds `proto/2b4a-v1`'s `588a058` and `3e60a74`; `1b16227`, but for
-`retention.py`, the runs' root key and `AuditCheckpoint`, which Tasks 3 and 4 add; and `8adb1a8`. From `proto/2b4a-int`:
-`a6aac25` (0035 follows 0041, plugins-3 D25) and `40467ad` (0041's rate models declare their keys' cascade).
+**Commit:** `66ad202` (`proto/2b4a-v4`, as on `proto/2b4a-v3`). It folds `proto/2b4a-v1`'s `588a058` and `3e60a74`;
+`1b16227`, but for `retention.py`, the runs' root key and `AuditCheckpoint`, which Tasks 3 and 4 add; and `8adb1a8`.
+From `proto/2b4a-int`: `a6aac25` (0035 follows 0041, plugins-3 D25) and `40467ad` (0041's rate models declare their
+keys' cascade).
 
 **Create:** `backend/migrations/versions/0035_tenant_keys.py`, `backend/tests/core/tenancy/test_workflow_tenant.py`,
 `backend/tests/core/test_model_schema.py`
@@ -1086,8 +1110,8 @@ index b58fffc..489da51 100644
 
 ### Task 2: An endpoint's events pointer is fixed when it's made (D10)
 
-**Commit:** `a0dba46` (`proto/2b4a-v3`). It folds `proto/2b4a-v1`'s `93c3c2b`; the web client's schema regenerated (a
-PATCH's body no longer names `events_pointer`).
+**Commit:** `a0dba46` (`proto/2b4a-v4`, as on `proto/2b4a-v3`). It folds `proto/2b4a-v1`'s `93c3c2b`; the web client's
+schema regenerated (a PATCH's body no longer names `events_pointer`).
 
 **Create:** `backend/migrations/versions/0036_events_pointer_fixed.py`
 
@@ -1392,11 +1416,11 @@ downgrade. The owner approved it as a prototype checkpoint with milestone 2 (mil
 
 ### Task 3: A tenant's retention, the cutoff on every read, the sweep, its role and process, and the SLO gate
 
-**Commit:** `6ec93c5` (`proto/2b4a-v3`). It folds `proto/2b4a-v1`'s run from `5e89a64` to `3d3219c` but for audit
-pruning's `19d907a` and `ad4cfaa`, which are Task 4's: `5e89a64`, `acfbabc`, `daf01f0`, `de68976`, `f810aa8`, `b223b4e`,
-`27b66e9`, `8265ddc`, `b1ceedf`, `fb17846`, `30142d9`, `722cc1e`, `058ff71` and `3d3219c`; with `1b16227`'s
-`retention.py` and the runs' root key. The retention router joins `ROUTERS`, the schema regenerated; the guide's
-audit-pruning section waits for Task 4.
+**Commit:** `6ec93c5` (`proto/2b4a-v4`, as on `proto/2b4a-v3`). It folds `proto/2b4a-v1`'s run from `5e89a64` to
+`3d3219c` but for audit pruning's `19d907a` and `ad4cfaa`, which are Task 4's: `5e89a64`, `acfbabc`, `daf01f0`,
+`de68976`, `f810aa8`, `b223b4e`, `27b66e9`, `8265ddc`, `b1ceedf`, `fb17846`, `30142d9`, `722cc1e`, `058ff71` and
+`3d3219c`; with `1b16227`'s `retention.py` and the runs' root key. The retention router joins `ROUTERS`, the schema
+regenerated; the guide's audit-pruning section waits for Task 4.
 
 **Create:** `backend/migrations/versions/0037_retention.py`, `backend/src/dewpoint/apps/api/routes/retention.py`,
 `backend/src/dewpoint/apps/retention.py`, `backend/src/dewpoint/core/models/retention.py`,
@@ -4645,8 +4669,8 @@ index f4b7415..599e0a8 100644
 
 ### Task 4: Audit pruning through an anchored checkpoint, off in production until #3
 
-**Commit:** `3daa44d` (`proto/2b4a-v3`). It folds `proto/2b4a-v1`'s `19d907a` and `ad4cfaa`, `1b16227`'s
-`AuditCheckpoint` model, and the guide's audit-pruning section.
+**Commit:** `3daa44d` (`proto/2b4a-v4`, as on `proto/2b4a-v3`). It folds `proto/2b4a-v1`'s `19d907a` and `ad4cfaa`,
+`1b16227`'s `AuditCheckpoint` model, and the guide's audit-pruning section.
 
 **Create:** `backend/migrations/versions/0038_audit_pruning.py`, `backend/src/dewpoint/core/audit/prune.py`,
 `backend/tests/core/audit/test_prune.py`
@@ -5305,10 +5329,10 @@ after the downgrade. The owner held it twice (milestone ruling 2) and approved i
 
 ### Task 5: Re-encryption, rotating keypairs and the ingress key, and retiring a data-key version nothing needs
 
-**Commit:** `e5bef26` (`proto/2b4a-v3`). It folds `proto/2b4a-v1`'s run from `f5f7190` to `a66a227` but for `75aabea`,
-which is Task 6's: `f5f7190`, `8ce3a48`, `8c45a2d`, `d877b1c`, `c149064`, `b13dac9`, `688ce5e`, `77a1b71`, `22b123d`,
-`58bd65f`, `912abbd`, `88bc3a1` and `a66a227`. Where two commits' text in 0039's docstring met, it takes this task's,
-without `75aabea`'s.
+**Commit:** `e5bef26` (`proto/2b4a-v4`, as on `proto/2b4a-v3`). It folds `proto/2b4a-v1`'s run from `f5f7190` to
+`a66a227` but for `75aabea`, which is Task 6's: `f5f7190`, `8ce3a48`, `8c45a2d`, `d877b1c`, `c149064`, `b13dac9`,
+`688ce5e`, `77a1b71`, `22b123d`, `58bd65f`, `912abbd`, `88bc3a1` and `a66a227`. Where two commits' text in 0039's
+docstring met, it takes this task's, without `75aabea`'s.
 
 **Create:** `backend/migrations/versions/0039_key_lifecycle.py`, `backend/src/dewpoint/core/crypto/reencrypt.py`,
 `backend/src/dewpoint/core/crypto/retire.py`, `backend/src/dewpoint/core/ingress/secrets_reseal.py`,
@@ -7822,9 +7846,10 @@ index 8aace2a..cea20da 100644
 
 ### Task 6: What retiring a version waits on: the tick contract and every run's execution evidence
 
-**Commit:** `4caed45` (`proto/2b4a-v3`). It folds `proto/2b4a-v1`'s `75aabea`, `25a13d7`, `62eceac`, `92e4b59`,
-`f5d5a9d` and `92df94d`; from `proto/2b4a-int`, `d30555e` (a tenant's credential scope key sealed again, the same key,
-and counted by retirement).
+**Commit:** `0f517a9` (`proto/2b4a-v4`). The replay ran `proto/2b4a-v3`'s `4caed45`, the same tree, under the message
+milestone ruling 6 corrected. It folds `proto/2b4a-v1`'s `75aabea`, `25a13d7`, `62eceac`, `92e4b59`, `f5d5a9d` and
+`92df94d`; from `proto/2b4a-int`, `d30555e` (a tenant's credential scope key sealed again, the same key, and counted by
+retirement).
 
 **Create:** `backend/src/dewpoint/apps/dispatcher/evidence.py`, `backend/src/dewpoint/apps/tick_contract.py`,
 `backend/tests/apps/dispatcher/histories/schedule_tick_plain.json`,
@@ -7849,13 +7874,14 @@ and counted by retirement).
 
 **What it does:**
 
-Every schedule tick is bounded, and retiring a data-key version waits for the ticks that may hold it. Ticks carry no
-payload under a tenant's key (the tick contract: a tick takes its schedule from its workflow id); a schedule synced
-before still names its key version, which the sync records from its read-back and `keys reencrypt` re-queues, and keys
-made before the attested tick cutover are kept. Each start attempt Temporal may have taken keeps its execution evidence
-until Temporal shows that execution gone; retiring a version proves each against the namespace's retention, and a start
-Temporal never showed stays pending for every key. A tenant's credential scope key (0041, plugins-3 D9) is sealed again
-under the active version, the same key, and holds its version from retiring until then.
+The tick contract removes a schedule tick's dependence on a tenant's data key: a tick carries no payload under it and
+takes its schedule from its workflow id. Ticks still retry without limit, with no execution timeout, so when the last
+one closes stays unbounded. A schedule synced before still names its key version, which the sync records from its
+read-back and `keys reencrypt` re-queues, and keys made before the attested tick cutover are kept. Each start attempt
+Temporal may have taken keeps its execution evidence until Temporal shows that execution gone; retiring a version proves
+each against the namespace's retention, and a start Temporal never showed stays pending for every key. A tenant's
+credential scope key (0041, plugins-3 D9) is sealed again under the active version, the same key, and holds its version
+from retiring until then.
 
 - [ ] **Step 1: its tests alone, before its code.** Run (in `backend/`): `uv run pytest -q -n 4
   tests/apps/cli/test_keys.py tests/apps/dispatcher/test_run_evidence.py tests/apps/dispatcher/test_schedule_sync.py
@@ -7917,7 +7943,7 @@ ERROR tests/apps/dispatcher/test_schedule_tick_server.py::test_a_firing_is_a_req
 Evidence beyond the replay: `d30555e` was made test-first on `proto/2b4a-int`: after `keys reencrypt`, the scope key was
 still sealed under version 1, and `keys retire` didn't count it.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 4caed45 && git commit -C 4caed45`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 0f517a9 && git commit -C 0f517a9`
 
 The diff:
 
@@ -11220,8 +11246,9 @@ owner held it four times (milestone ruling 3) and approved it as a prototype che
 
 ### Task 7: Erased tenants are never eligible; the erasure's record, items and known ids; the insert fence
 
-**Commit:** `45bdb44` (`proto/2b4a-v3`). It folds `proto/2b4a-v1`'s `9eaf0dc`; from `proto/2b4a-int`'s `4f36296`, 0041's
-tenant tables under the fence, and an egress exception naming no tenant let through it.
+**Commit:** `60c83b8` (`proto/2b4a-v4`). The replay ran `proto/2b4a-v3`'s `45bdb44`, the same tree. It folds
+`proto/2b4a-v1`'s `9eaf0dc`; from `proto/2b4a-int`'s `4f36296`, 0041's tenant tables under the fence, and an egress
+exception naming no tenant let through it.
 
 **Create:** `backend/migrations/versions/0040_tenant_erasure.py`, `backend/src/dewpoint/core/models/erasure.py`,
 `backend/tests/core/erasure/__init__.py`, `backend/tests/core/erasure/test_fence.py`
@@ -11283,7 +11310,7 @@ FAILED tests/core/erasure/test_fence.py::test_an_insert_waiting_for_stage_60_is_
 Evidence beyond the replay: `4f36296` was made test-first on `proto/2b4a-int`: the fence's inventory lacked 0041's
 tables, and their rows weren't refused.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 45bdb44 && git commit -C 45bdb44`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 60c83b8 && git commit -C 60c83b8`
 
 The diff:
 
@@ -11991,7 +12018,8 @@ index cc5ff74..842177d 100644
 
 ### Task 8: Step 1 and the writers it fences
 
-**Commit:** `e7ae590` (`proto/2b4a-v3`). It folds `proto/2b4a-v1`'s `b7d85ba`.
+**Commit:** `f992832` (`proto/2b4a-v4`). The replay ran `proto/2b4a-v3`'s `e7ae590`, the same tree. It folds
+`proto/2b4a-v1`'s `b7d85ba`.
 
 **Create:** `backend/src/dewpoint/core/erasure/__init__.py`, `backend/src/dewpoint/core/erasure/service.py`,
 `backend/src/dewpoint/core/tenancy/lifecycle.py`, `backend/tests/core/erasure/conftest.py`,
@@ -12039,7 +12067,7 @@ ERROR tests/core/erasure/test_writers.py - ImportError while importing test m...
 21 passed in 12.85s
 ```
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit e7ae590 && git commit -C e7ae590`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit f992832 && git commit -C f992832`
 
 The diff:
 
@@ -12916,7 +12944,8 @@ index 0000000..9e7bd32
 
 ### Task 9: Schedules created paused and unpaused by a token update; ticks record their own ids; the sync fenced
 
-**Commit:** `159c066` (`proto/2b4a-v3`). It folds `proto/2b4a-v1`'s `4140a33`.
+**Commit:** `33ce063` (`proto/2b4a-v4`). The replay ran `proto/2b4a-v3`'s `159c066`, the same tree. It folds
+`proto/2b4a-v1`'s `4140a33`.
 
 **Create:** `backend/tests/apps/worker/test_temporal_erasure_contract.py`
 
@@ -12974,7 +13003,7 @@ Evidence beyond the replay: the contract tests run on the dev server and pin wha
 deleted and recreated under one id restarts its conflict token at 1, and a stale unpause lands on the recreation. That
 failed the outline's premise (D3e), and Task 12 answers it.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 159c066 && git commit -C 159c066`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 33ce063 && git commit -C 33ce063`
 
 The diff:
 
@@ -13843,8 +13872,9 @@ index d632bf8..8592892 100644
 
 ### Task 10: The retention process carries an erasure through stages 20 to 80
 
-**Commit:** `6acab73` (`proto/2b4a-v3`). It folds `proto/2b4a-v1`'s `17ba406`; from `proto/2b4a-int`'s `4f36296`, 0041's
-tenant tables swept (the retention role's policies, reads and deletes), an egress exception naming no tenant kept.
+**Commit:** `2943ced` (`proto/2b4a-v4`). The replay ran `proto/2b4a-v3`'s `6acab73`, the same tree. It folds
+`proto/2b4a-v1`'s `17ba406`; from `proto/2b4a-int`'s `4f36296`, 0041's tenant tables swept (the retention role's
+policies, reads and deletes), an egress exception naming no tenant kept.
 
 **Create:** `backend/src/dewpoint/apps/erasure/__init__.py`, `backend/src/dewpoint/apps/erasure/process.py`,
 `backend/src/dewpoint/apps/erasure/stages.py`, `backend/src/dewpoint/apps/erasure/temporal.py`,
@@ -13895,7 +13925,7 @@ ERROR tests/apps/erasure/test_stages.py - ImportError while importing test mo...
 
 Evidence beyond the replay: `4f36296` was made test-first on `proto/2b4a-int`: 0041's rows were left after stage 80.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 6acab73 && git commit -C 6acab73`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 2943ced && git commit -C 2943ced`
 
 The diff:
 
@@ -15258,9 +15288,10 @@ index f69cd9b..13ff38f 100644
 
 ### Task 11: Stage 90's hold, completion, reconciliation, the admin API, the retention wiring and the proof
 
-**Commit:** `0efa8ec` (`proto/2b4a-v3`). It folds `proto/2b4a-v1`'s `927ba31`, `97ef5e9`, `949a638`, `87aaaf9` and
-`c890763`; the erasure router joins `ROUTERS`, after the admin users', the schema regenerated; the guide's row for
-0041's tables.
+**Commit:** `8d4439f` (`proto/2b4a-v4`), replayed as it is: `proto/2b4a-v3`'s `0efa8ec` with the erasure route's body
+renamed and its guide corrected (milestone ruling 6). It folds `proto/2b4a-v1`'s `927ba31`, `97ef5e9`, `949a638`,
+`87aaaf9` and `c890763`; the erasure router joins `ROUTERS`, after the admin users', the schema regenerated; the guide's
+row for 0041's tables; and the erasure route's body named `ErasureStartIn`, its own name (milestone ruling 6).
 
 **Create:** `backend/src/dewpoint/apps/api/routes/erasure.py`, `backend/src/dewpoint/apps/erasure/bound.py`,
 `backend/tests/apps/api/test_erasure_api.py`, `backend/tests/apps/erasure/conftest.py`,
@@ -15291,55 +15322,62 @@ docs/operations/erasure.md; the web client's API schema regenerated.
 - [ ] **Step 1: its tests alone, before its code.** Run (in `backend/`): `uv run pytest -q -n 4
   tests/apps/api/test_erasure_api.py tests/apps/dispatcher/test_schedule_tick_server.py tests/apps/erasure/test_bound.py
   tests/apps/erasure/test_proof.py tests/apps/erasure/test_stages.py tests/apps/test_retention_job.py
-  tests/core/erasure/test_fence.py tests/core/erasure/test_writers.py tests/deploy/test_compose.py`. Replay result on
-  `6acab73` with this task's tests (exit 1), shortened:
+  tests/core/erasure/test_fence.py tests/core/erasure/test_writers.py tests/deploy/test_compose.py
+  tests/apps/api/test_openapi.py`. Replay result on `2943ced` with this task's tests (exit 1), shortened:
+
+  #42's `test_openapi.py` passes before the code, as a control: Task 10 has no erasure route.
 
 ```
-                return at
-            await asyncio.sleep(0.3)
-        async with retention() as s:
-            left = (await s.execute(text("select step, workflow_id, run_id, state, attempts from tenant_erasure_items "
-                                         "where tenant_id = :t and state <> 'verified'"), {"t": tenant})).all()  # fmt: skip
->       raise AssertionError(f"held at {at}: {[tuple(r) for r in left]}")
-E       AssertionError: held at 60: [(60, 't:ee7a2aaf-d465-4dae-9924-c78e053a0f17:run:192813c3-4a48-495b-b991-203d6c45b5b8', None, 'found', 0), (60, 't:ee7a2aaf-d465-4dae-9924-c78e053a0f17:run:c72674d2-8801-49ef-ba2b-ac11fd958ba8', None, 'found', 0), (60, 't:ee7a2aaf-d465-4dae-9924-c78e053a0f17:run:a6883c4e-0ed8-4b7a-b2aa-932f65ae0735', None, 'found', 0), (60, 't:ee7a2aaf-d465-4dae-9924-c78e053a0f17:run:a6883c4e-0ed8-4b7a-b2aa-932f65ae0735', '01a111f1-9f7a-743d-99be-3168538a4106', 'found', 0), (60, 't:ee7a2aaf-d465-4dae-9924-c78e053a0f17:run:c72674d2-8801-49ef-ba2b-ac11fd958ba8', '01a111f1-9f78-74da-8628-a7d9dcefc18d', 'found', 0), (60, 't:ee7a2aaf-d465-4dae-9924-c78e053a0f17:run:192813c3-4a48-495b-b991-203d6c45b5b8', '01a111f1-9f74-7cf4-8e0c-0771ac1c566d', 'found', 0)]
-tests/apps/erasure/test_stages.py:48: AssertionError
+        monkeypatch.undo()
+        assert await until(retention_sessionmaker, server.client, data["t"], Stage.KEYS) >= Stage.KEYS
+        async with owner_sessionmaker() as s:
+            known = (await s.execute(text("select count(*) from tenant_erasure_known where workflow_id = :w "
+                                          "and run_id = :r"), {"w": late, "r": late_run})).scalar_one()  # fmt: skip
+>       assert known == 1
+E       assert 0 == 1
+tests/apps/erasure/test_stages.py:345: AssertionError
 =========================== short test summary info ============================
 FAILED tests/apps/api/test_erasure_api.py::test_a_platform_admin_starts_an_erasure_by_typing_the_slug_and_reads_it
 FAILED tests/apps/api/test_erasure_api.py::test_an_operator_stops_and_retries_it_and_neither_reverses_it
 FAILED tests/apps/api/test_erasure_api.py::test_only_a_platform_admin_with_a_fresh_second_factor_erases
 FAILED tests/apps/dispatcher/test_schedule_tick_server.py::test_a_tick_records_its_own_ids_first_a_skip_included
-FAILED tests/apps/test_retention_job.py::test_no_erasure_work_reaches_temporal_unless_its_namespace_is_the_deployments[None-erasure_environment_unrecorded]
-FAILED tests/apps/erasure/test_stages.py::test_a_stage_that_waits_over_an_hour_alerts
+FAILED tests/apps/test_retention_job.py::test_each_interval_carries_erasures_on_and_each_sweep_reconciles_completed_ones
 FAILED tests/apps/test_retention_job.py::test_without_temporal_an_erasure_under_way_alerts_every_interval
 FAILED tests/core/erasure/test_fence.py::test_an_insert_is_refused_from_stage_60_whatever_the_role[50-True]
 FAILED tests/core/erasure/test_fence.py::test_an_insert_is_refused_from_stage_60_whatever_the_role[60-False]
-FAILED tests/apps/erasure/test_stages.py::test_a_firing_recorded_after_the_inventory_is_still_found_and_deleted
-FAILED tests/core/erasure/test_fence.py::test_an_insert_is_refused_from_stage_60_whatever_the_role[100-False]
 FAILED tests/apps/test_retention_job.py::test_no_erasure_work_reaches_temporal_unless_its_namespace_is_the_deployments[another-erasure_namespace_mismatch]
+FAILED tests/apps/test_retention_job.py::test_no_erasure_work_reaches_temporal_unless_its_namespace_is_the_deployments[None-erasure_environment_unrecorded]
+FAILED tests/core/erasure/test_fence.py::test_an_insert_is_refused_from_stage_60_whatever_the_role[100-False]
 FAILED tests/core/erasure/test_fence.py::test_a_row_for_every_tenant_is_never_fenced_and_a_fenced_tenants_own_is
-FAILED tests/apps/test_retention_job.py::test_each_interval_carries_erasures_on_and_each_sweep_reconciles_completed_ones
-FAILED tests/core/erasure/test_fence.py::test_an_insert_waiting_for_stage_60_is_refused_once_it_commits
 FAILED tests/core/erasure/test_fence.py::test_no_key_is_created_for_a_tenant_whose_keys_may_have_gone
-FAILED tests/core/erasure/test_fence.py::test_a_workflow_version_stays_immutable_but_to_its_tenants_erasure_sweep[80-True]
 FAILED tests/core/erasure/test_fence.py::test_entering_stage_60_waits_for_an_insert_in_flight
-FAILED tests/core/erasure/test_fence.py::test_a_workflow_version_stays_immutable_but_to_its_tenants_erasure_sweep[70-False]
 FAILED tests/core/erasure/test_writers.py::test_every_tenant_scoped_write_goes_through_require
+FAILED tests/core/erasure/test_fence.py::test_an_insert_waiting_for_stage_60_is_refused_once_it_commits
 FAILED tests/deploy/test_compose.py::test_retention_runs_as_its_own_login_without_a_key_and_comes_back
 FAILED tests/apps/erasure/test_stages.py::test_a_failure_backs_off_with_its_fixed_code_and_alerts_and_a_stop_is_honoured
+FAILED tests/core/erasure/test_fence.py::test_a_workflow_version_stays_immutable_but_to_its_tenants_erasure_sweep[70-False]
+FAILED tests/core/erasure/test_fence.py::test_a_workflow_version_stays_immutable_but_to_its_tenants_erasure_sweep[80-True]
 FAILED tests/apps/erasure/test_stages.py::test_more_executions_than_a_batch_are_all_reached_and_deleted
+FAILED tests/apps/erasure/test_stages.py::test_a_stage_that_waits_over_an_hour_alerts
+FAILED tests/apps/erasure/test_stages.py::test_a_firing_recorded_after_the_inventory_is_still_found_and_deleted
 ERROR tests/apps/erasure/test_bound.py - ImportError while importing test mod...
 ERROR tests/apps/erasure/test_proof.py - ImportError while importing test mod...
-23 failed, 53 passed, 2 errors in 435.10s (0:07:15)
+23 failed, 87 passed, 2 errors in 245.41s (0:04:05)
 ```
 
-- [ ] **Step 2: its code, then the same tests.** Replay result on `0efa8ec` (exit 0), shortened:
+- [ ] **Step 2: its code, then the same tests.** Replay result on `8d4439f` (exit 0), shortened:
 
 ```
-............                                                             [100%]
-84 passed in 318.53s (0:05:18)
+..............................................                           [100%]
+118 passed in 343.75s (0:05:43)
 ```
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 0efa8ec && git commit -C 0efa8ec`
+Evidence beyond the replay: the rename was made test-first, on the first draft's Task 11: there #42's
+`test_every_component_has_its_own_name` failed (1 failed, 33 passed), since the erasure route's `StartIn` and the run
+requests' shared a name, and FastAPI named both components by module path, renaming the run requests' published one.
+Here it passes, and the schema only gains the erasure route's components.
+
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 8d4439f && git commit -C 8d4439f`
 
 The diff:
 
@@ -15496,7 +15534,7 @@ index 8decac8..f46af96 100644
      node_types.router,
 diff --git a/backend/src/dewpoint/apps/api/routes/erasure.py b/backend/src/dewpoint/apps/api/routes/erasure.py
 new file mode 100644
-index 0000000..e100490
+index 0000000..86c19a5
 --- /dev/null
 +++ b/backend/src/dewpoint/apps/api/routes/erasure.py
 @@ -0,0 +1,123 @@
@@ -15525,7 +15563,7 @@ index 0000000..e100490
 +router = APIRouter(prefix="/api/v1/admin/tenants", tags=["admin"])
 +
 +
-+class StartIn(BaseModel):
++class ErasureStartIn(BaseModel):
 +    confirm: str = Field(min_length=1, max_length=63)  # the tenant's slug, typed back
 +
 +
@@ -15566,7 +15604,7 @@ index 0000000..e100490
 +@router.post("/{tenant_id}/erasure", status_code=202)
 +async def start(
 +    tenant_id: uuid.UUID,
-+    body: StartIn,
++    body: ErasureStartIn,
 +    admin: User = Depends(require_platform_admin),
 +    sess: AuthSession = Depends(active_session),
 +    settings: Settings = Depends(get_settings_dep),
@@ -17098,10 +17136,10 @@ index 1b3318e..a487fa4 100644
      image: ${DEWPOINT_CEL_EVALUATOR_IMAGE:-dewpoint-cel-evaluator:dev}
 diff --git a/docs/operations/erasure.md b/docs/operations/erasure.md
 new file mode 100644
-index 0000000..b6f39b8
+index 0000000..8ffe7a0
 --- /dev/null
 +++ b/docs/operations/erasure.md
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,115 @@
 +# Tenant erasure
 +
 +Spec: `docs/superpowers/specs/2026-09-29-engine-2b-design.md` §6.5 (with §6.4, §10); the 2b-4 outline's "Tenant
@@ -17114,8 +17152,9 @@ index 0000000..b6f39b8
 +> **No erasure completes today.** Completion needs proof that nothing of the tenant fires after its schedules were
 +> verified paused, and that proof doesn't hold yet: a Temporal schedule deleted and recreated counts its conflict
 +> token from 1 again, so an unpause sent before the deletion can land on a late create, and schedule ticks have no
-+> execution timeout. Every erasure reaches its bound and holds there (`firing_bound_unproven`), its data, keys and
-+> executions already gone, until a design that proves it is ruled on.
++> execution timeout. An erasure that reaches its bound holds there (`firing_bound_unproven`), its data, keys and
++> executions already gone, until a design that proves it is ruled on; one stopped, or failing, stays at an earlier
++> stage.
 +
 +## Starting, stopping, retrying
 +
@@ -17256,53 +17295,14 @@ index 6dccc9d..04448c4 100644
  
  ## Audit pruning
 diff --git a/frontend/src/api/openapi.json b/frontend/src/api/openapi.json
-index 11a324a..551334e 100644
+index 11a324a..2d3ceab 100644
 --- a/frontend/src/api/openapi.json
 +++ b/frontend/src/api/openapi.json
-@@ -1254,37 +1254,6 @@
-         "title": "SessionUserOut",
+@@ -691,6 +691,21 @@
+         "title": "EndpointPatch",
          "type": "object"
        },
--      "StartIn": {
--        "additionalProperties": false,
--        "properties": {
--          "csv": {
--            "anyOf": [
--              {
--                "$ref": "#/components/schemas/CsvIn"
--              },
--              {
--                "type": "null"
--              }
--            ]
--          },
--          "input": {
--            "additionalProperties": true,
--            "title": "Input",
--            "type": "object"
--          },
--          "mode": {
--            "default": "live",
--            "enum": [
--              "live",
--              "simulate"
--            ],
--            "title": "Mode",
--            "type": "string"
--          }
--        },
--        "title": "StartIn",
--        "type": "object"
--      },
-       "StateOut": {
-         "additionalProperties": false,
-         "properties": {
-@@ -1566,6 +1535,52 @@
-         },
-         "title": "WorkflowPatchIn",
-         "type": "object"
-+      },
-+      "dewpoint__apps__api__routes__erasure__StartIn": {
++      "ErasureStartIn": {
 +        "properties": {
 +          "confirm": {
 +            "maxLength": 63,
@@ -17314,42 +17314,12 @@ index 11a324a..551334e 100644
 +        "required": [
 +          "confirm"
 +        ],
-+        "title": "StartIn",
++        "title": "ErasureStartIn",
 +        "type": "object"
 +      },
-+      "dewpoint__apps__api__routes__run_requests__StartIn": {
-+        "additionalProperties": false,
-+        "properties": {
-+          "csv": {
-+            "anyOf": [
-+              {
-+                "$ref": "#/components/schemas/CsvIn"
-+              },
-+              {
-+                "type": "null"
-+              }
-+            ]
-+          },
-+          "input": {
-+            "additionalProperties": true,
-+            "title": "Input",
-+            "type": "object"
-+          },
-+          "mode": {
-+            "default": "live",
-+            "enum": [
-+              "live",
-+              "simulate"
-+            ],
-+            "title": "Mode",
-+            "type": "string"
-+          }
-+        },
-+        "title": "StartIn",
-+        "type": "object"
-       }
-     }
-   },
+       "HTTPValidationError": {
+         "properties": {
+           "detail": {
 @@ -1575,6 +1590,194 @@
    },
    "openapi": "3.1.0",
@@ -17416,7 +17386,7 @@ index 11a324a..551334e 100644
 +          "content": {
 +            "application/json": {
 +              "schema": {
-+                "$ref": "#/components/schemas/dewpoint__apps__api__routes__erasure__StartIn"
++                "$ref": "#/components/schemas/ErasureStartIn"
 +              }
 +            }
 +          },
@@ -17545,17 +17515,8 @@ index 11a324a..551334e 100644
      "/api/v1/admin/users": {
        "post": {
          "description": "Create a local account. The new user must enroll MFA at first sign-in.",
-@@ -4918,7 +5121,7 @@
-           "content": {
-             "application/json": {
-               "schema": {
--                "$ref": "#/components/schemas/StartIn"
-+                "$ref": "#/components/schemas/dewpoint__apps__api__routes__run_requests__StartIn"
-               }
-             }
-           },
 diff --git a/frontend/src/api/schema.d.ts b/frontend/src/api/schema.d.ts
-index 599e0a8..b6fb304 100644
+index 599e0a8..92dce30 100644
 --- a/frontend/src/api/schema.d.ts
 +++ b/frontend/src/api/schema.d.ts
 @@ -4,6 +4,58 @@
@@ -17617,53 +17578,18 @@ index 599e0a8..b6fb304 100644
      "/api/v1/admin/users": {
          parameters: {
              query?: never;
-@@ -1555,20 +1607,6 @@ export interface components {
-             /** Is Platform Admin */
-             is_platform_admin: boolean;
+@@ -1358,6 +1410,11 @@ export interface components {
+             /** Tolerance S */
+             tolerance_s?: number | null;
          };
--        /** StartIn */
--        StartIn: {
--            csv?: components["schemas"]["CsvIn"] | null;
--            /** Input */
--            input?: {
--                [key: string]: unknown;
--            };
--            /**
--             * Mode
--             * @default live
--             * @enum {string}
--             */
--            mode?: "live" | "simulate";
--        };
-         /** StateOut */
-         StateOut: {
-             /** Csrf Token */
-@@ -1664,6 +1702,25 @@ export interface components {
-             /** Name */
-             name?: string | null;
-         };
-+        /** StartIn */
-+        dewpoint__apps__api__routes__erasure__StartIn: {
++        /** ErasureStartIn */
++        ErasureStartIn: {
 +            /** Confirm */
 +            confirm: string;
 +        };
-+        /** StartIn */
-+        dewpoint__apps__api__routes__run_requests__StartIn: {
-+            csv?: components["schemas"]["CsvIn"] | null;
-+            /** Input */
-+            input?: {
-+                [key: string]: unknown;
-+            };
-+            /**
-+             * Mode
-+             * @default live
-+             * @enum {string}
-+             */
-+            mode?: "live" | "simulate";
-+        };
-     };
-     responses: never;
-     parameters: never;
+         /** HTTPValidationError */
+         HTTPValidationError: {
+             /** Detail */
 @@ -1673,6 +1730,142 @@ export interface components {
  }
  export type $defs = Record<string, never>;
@@ -17712,7 +17638,7 @@ index 599e0a8..b6fb304 100644
 +        };
 +        requestBody: {
 +            content: {
-+                "application/json": components["schemas"]["dewpoint__apps__api__routes__erasure__StartIn"];
++                "application/json": components["schemas"]["ErasureStartIn"];
 +            };
 +        };
 +        responses: {
@@ -17807,20 +17733,12 @@ index 599e0a8..b6fb304 100644
      create_api_v1_admin_users_post: {
          parameters: {
              query?: never;
-@@ -3836,7 +4029,7 @@ export interface operations {
-         };
-         requestBody: {
-             content: {
--                "application/json": components["schemas"]["StartIn"];
-+                "application/json": components["schemas"]["dewpoint__apps__api__routes__run_requests__StartIn"];
-             };
-         };
-         responses: {
 ```
 
 ### Task 12: An incarnation per create, and missed firings accounted over persisted spans
 
-**Commit:** `215e559` (`proto/2b4a-v3`). It folds `proto/2b4a-v1`'s `906a1d6`, `7b92fb4`, `f844769`, `4d670c8` (but for
+**Commit:** `4c3c696` (`proto/2b4a-v4`), replayed as it is: `proto/2b4a-v3`'s `215e559` on Task 11's rename, its guides
+corrected (milestone ruling 6). It folds `proto/2b4a-v1`'s `906a1d6`, `7b92fb4`, `f844769`, `4d670c8` (but for
 `dispatch.py` and `test_transitions.py`: #43 merged the same fix), `050919d`, `cfba762`, `5159cc2`, `63b4877`, `3fda97c`
 and `7d5b20b`. Where the fence's table lists met, they take the union of their names. And the replay's race-test fix
 ("How the steps give code").
@@ -17858,7 +17776,7 @@ every incarnation, and its final check describes them all.
   tests/apps/api/test_schedules_api.py tests/apps/dispatcher/test_schedule_sync.py
   tests/apps/dispatcher/test_triggers_end_to_end.py tests/apps/erasure/test_incarnations.py
   tests/apps/erasure/test_proof.py tests/apps/erasure/test_stages.py tests/apps/test_schedules_legacy.py
-  tests/apps/worker/test_temporal_erasure_contract.py tests/core/erasure/test_fence.py`. Replay result on `0efa8ec` with
+  tests/apps/worker/test_temporal_erasure_contract.py tests/core/erasure/test_fence.py`. Replay result on `8d4439f` with
   this task's tests (exit 1), shortened:
 
 ```
@@ -17881,30 +17799,30 @@ FAILED tests/apps/dispatcher/test_schedule_sync.py::test_each_change_and_a_workf
 FAILED tests/apps/dispatcher/test_schedule_sync.py::test_a_timing_edit_between_incarnations_is_unknown_never_a_complete_looking_zero
 FAILED tests/apps/dispatcher/test_schedule_sync.py::test_the_synced_action_carries_nothing_and_a_legacy_one_its_key_version
 FAILED tests/apps/dispatcher/test_schedule_sync.py::test_two_incarnations_missing_firings_in_one_check_both_count
-FAILED tests/apps/dispatcher/test_schedule_sync.py::test_a_failed_second_update_never_moves_the_creation_wait
 FAILED tests/apps/dispatcher/test_schedule_sync.py::test_a_row_changed_while_the_sync_works_stays_queued
+FAILED tests/apps/dispatcher/test_schedule_sync.py::test_a_failed_second_update_never_moves_the_creation_wait
 FAILED tests/apps/dispatcher/test_schedule_sync.py::test_a_stray_that_keeps_failing_is_retried_later_and_never_holds_the_others
 FAILED tests/apps/dispatcher/test_schedule_sync.py::test_a_new_schedule_is_created_paused_and_unpaused_only_by_a_token_bearing_update
-FAILED tests/apps/dispatcher/test_schedule_sync.py::test_a_pre_migration_incarnation_that_goes_leaves_its_span_unknown
 FAILED tests/apps/dispatcher/test_schedule_sync.py::test_a_stale_writers_update_is_discarded_and_it_records_nothing
+FAILED tests/apps/dispatcher/test_schedule_sync.py::test_a_pre_migration_incarnation_that_goes_leaves_its_span_unknown
 FAILED tests/apps/dispatcher/test_schedule_sync.py::test_a_creation_wait_with_an_unchanged_generation_is_certainly_missed_and_counted
 FAILED tests/apps/dispatcher/test_schedule_sync.py::test_a_sync_holding_its_read_commits_its_create_before_step_1
-FAILED tests/apps/dispatcher/test_schedule_sync.py::test_an_incarnation_sent_an_unpause_then_lost_is_possibly_missed_never_certain
 FAILED tests/apps/dispatcher/test_schedule_sync.py::test_a_writer_that_lost_the_leadership_records_nothing
+FAILED tests/apps/dispatcher/test_schedule_sync.py::test_an_incarnation_sent_an_unpause_then_lost_is_possibly_missed_never_certain
 FAILED tests/apps/dispatcher/test_schedule_sync.py::test_a_generation_change_while_waiting_leaves_the_creation_wait_unknown
 FAILED tests/apps/dispatcher/test_schedule_sync.py::test_a_sync_after_step_1_waits_and_never_creates
+FAILED tests/apps/dispatcher/test_schedule_sync.py::test_a_deletion_is_recorded_once_its_absence_is_seen_after_the_call_deadline
 FAILED tests/apps/dispatcher/test_schedule_sync.py::test_a_schedule_deleted_before_its_first_update_landed_leaves_that_span_unknown
 FAILED tests/apps/dispatcher/test_schedule_sync.py::test_an_incarnation_the_stray_check_deleted_after_its_schedules_deletion_was_there_until_it
-FAILED tests/apps/dispatcher/test_schedule_sync.py::test_a_deletion_is_recorded_once_its_absence_is_seen_after_the_call_deadline
 [... 28 more lines of the summary]
-53 failed, 38 passed in 81.24s (0:01:21)
+53 failed, 38 passed in 81.07s (0:01:21)
 ```
 
-- [ ] **Step 2: its code, then the same tests.** Replay result on `215e559` (exit 0), shortened:
+- [ ] **Step 2: its code, then the same tests.** Replay result on `4c3c696` (exit 0), shortened:
 
 ```
 ...................                                                      [100%]
-91 passed in 174.90s (0:02:54)
+91 passed in 180.57s (0:03:00)
 ```
 
 Evidence beyond the replay: from the prototype, with the schedule's shared lock removed,
@@ -17916,7 +17834,7 @@ fails, and without the currency check,
 race tests' `holds` fixture: before it, this task's tests run on Task 11's code gave no result in 900 seconds; with it,
 they fail in 81.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 215e559 && git commit -C 215e559`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 4c3c696 && git commit -C 4c3c696`
 
 The diff:
 
@@ -20583,26 +20501,27 @@ index 0000000..23d0fb1
 +                raise
 +    raise AssertionError("unreachable")
 diff --git a/docs/operations/erasure.md b/docs/operations/erasure.md
-index b6f39b8..563a12b 100644
+index 8ffe7a0..fe859b7 100644
 --- a/docs/operations/erasure.md
 +++ b/docs/operations/erasure.md
-@@ -8,10 +8,11 @@ undone.** Once started, an erasure can be stopped and retried, never reversed; t
+@@ -8,11 +8,11 @@ undone.** Once started, an erasure can be stopped and retried, never reversed; t
  the first moment, and its rows, its keys and its Temporal executions go in the stages below.
  
  > **No erasure completes today.** Completion needs proof that nothing of the tenant fires after its schedules were
 -> verified paused, and that proof doesn't hold yet: a Temporal schedule deleted and recreated counts its conflict
 -> token from 1 again, so an unpause sent before the deletion can land on a late create, and schedule ticks have no
--> execution timeout. Every erasure reaches its bound and holds there (`firing_bound_unproven`), its data, keys and
--> executions already gone, until a design that proves it is ruled on.
+-> execution timeout. An erasure that reaches its bound holds there (`firing_bound_unproven`), its data, keys and
+-> executions already gone, until a design that proves it is ruled on; one stopped, or failing, stays at an earlier
+-> stage.
 +> verified paused and that every schedule tick closed by a known time. The first holds: each schedule create is under
 +> its own Temporal id, recorded before the call, so a late create can't be unpaused, and the erasure covers every id.
-+> The second doesn't: schedule ticks have no execution timeout, and a schedule doesn't list its running ticks. Every
-+> erasure reaches its bound and holds there (`firing_bound_unproven`), its data, keys and executions already gone,
-+> until a design that proves it is ruled on.
++> The second doesn't: schedule ticks have no execution timeout, and a schedule doesn't list its running ticks. An
++> erasure that reaches its bound holds there (`firing_bound_unproven`), its data, keys and executions already gone,
++> until a design that proves it is ruled on; one stopped, or failing, stays at an earlier stage.
  
  ## Starting, stopping, retrying
  
-@@ -49,9 +50,9 @@ a schedule, a run, an execution), each found, requested, then verified by readin
+@@ -50,9 +50,9 @@ a schedule, a run, an execution), each found, requested, then verified by readin
  | Stage | |
  |---|---|
  | 20 reconcile | waits until no request is `starting` (the dispatcher's reconciler resolves each) |
@@ -20615,7 +20534,7 @@ index b6f39b8..563a12b 100644
  | 50 end runs | every running run cancelled in Temporal, then waited for: ended in Dewpoint and closed in Temporal |
  | 60 executions | the fence goes up; every execution enumerated from runs, started requests, the run evidence, the ticks' records and the inventory (visibility adding), each walked through its history (the run it continued from and as, every child it started), an open one terminated first, then deleted until describing that exact run answers not-found |
 diff --git a/docs/operations/runs.md b/docs/operations/runs.md
-index d0b4ae4..477a1ef 100644
+index d0b4ae4..27bc381 100644
 --- a/docs/operations/runs.md
 +++ b/docs/operations/runs.md
 @@ -90,6 +90,17 @@ by default), `mode`, a fixed `input` checked against the active version, and `en
@@ -20636,7 +20555,7 @@ index d0b4ae4..477a1ef 100644
  - **Cron, as Temporal reads it:** five fields (minute, hour, day of the month, month, day of the week), each `*`, a
    number, a range, `*/step` or `a-b/step`, or a list; months and days by name in any case; Sunday is 0 or 7. A day of
    the month and a day of the week together are refused: Temporal requires both to match, where cron usually takes
-@@ -100,14 +111,56 @@ switches the timing's kind); `DELETE` removes one.
+@@ -100,14 +111,59 @@ switches the timing's kind); `DELETE` removes one.
    workflow is disabled) and marks it synced (`synced_generation`) only once Temporal shows its `dewpoint generation
    <n>` note. Editing a schedule directly in Temporal isn't supported. A sync Temporal refuses is shown as
    `sync_error` and retried after a minute. There's no "run now": start the workflow instead.
@@ -20690,9 +20609,12 @@ index d0b4ae4..477a1ef 100644
 +    id's recording) until its first update lands, then until its count is recorded.
 +
 +  A possibly missed, unknown or pending span is never counted, and never shown as a zero: the schedule's
-+  `accounting_complete` is `false` and `uncounted_intervals` lists it. Each possibly missed or unknown one is audited
-+  (`schedule.unaccounted`, with its bounds, class and reason) and alerted on (`schedule_firings_unaccounted`); a count
-+  that keeps failing alerts as the sync's failure (`schedule_sync_failed`).
++  `accounting_complete` is `false` and `uncounted_intervals` lists it. Each possibly missed or unknown one the sync
++  records is audited (`schedule.unaccounted`, with its bounds, class and reason) and alerted on
++  (`schedule_firings_unaccounted`); a count that keeps failing alerts as the sync's failure (`schedule_sync_failed`).
++  The `before_migration` spans are the exception: migration 0040 writes one for each schedule from before 2b-4a, and
++  audits and alerts on none, rather than raising an alert for every existing schedule at the upgrade; the API still
++  lists each.
  - **A backlog past the window isn't run.** When the dispatcher or the database is down instead, Temporal keeps firing
    and the ticks wait. Once they're decided, a tick more than its schedule's catch-up window old, by the database's
    clock, is a `refused` request, `schedule_catchup_expired`, audited and alerted on once (`schedule_tick_expired`, when
@@ -20701,7 +20623,8 @@ index d0b4ae4..477a1ef 100644
 **Checkpoint (milestone 4).** Focused: the 24 test modules Tasks 7 to 12 add or change, in `tests/apps`,
 `tests/apps/api`, `tests/apps/cli`, `tests/apps/dispatcher`, `tests/apps/erasure`, `tests/apps/ingress`,
 `tests/apps/worker`, `tests/core/erasure`, `tests/core/ingress`, `tests/core/retention` and `tests/deploy` (297 passed
-on Task 12's tree); the migrations 0041 → 0040 → 0041 → 0040 over existing rows, every constraint, function, trigger,
-policy, role, grant and column the same after the downgrade. The owner ruled on it, reviewed it six times and accepted
-it as a prototype checkpoint (milestone ruling 4, 2026-10-06), which doesn't claim the Compose proof has run and leaves
-every erasure held at stage 90. Then the whole suite and the static checks once, and a fresh whole-branch review.
+on `proto/2b4a-v3`'s Task 12 tree, and the whole suite on this one); the migrations 0041 → 0040 → 0041 → 0040 over
+existing rows, every constraint, function, trigger, policy, role, grant and column the same after the downgrade. The
+owner ruled on it, reviewed it six times and accepted it as a prototype checkpoint (milestone ruling 4, 2026-10-06),
+which doesn't claim the Compose proof has run and leaves every erasure that reaches stage 90 held there. Then the whole
+suite and the static checks once, and a fresh whole-branch review.
