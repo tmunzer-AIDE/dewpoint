@@ -17,10 +17,9 @@ from collections.abc import Mapping
 from datetime import timedelta
 from typing import Any, ClassVar
 
-from jsonschema import Draft202012Validator
 from pydantic import BaseModel
 
-from dewpoint.plugins.mist import oas, policy, routing
+from dewpoint.plugins.mist import fixtures, oas, policy, routing
 from dewpoint.plugins.mist.client import SEGMENT, InvalidAnswer, InvalidPathValue, MistClient, NotFound, may_have_more
 from dewpoint.plugins.mist.schemas import converted, resolved, top_properties, with_defs
 from dewpoint.sdk import (
@@ -257,31 +256,6 @@ def _shaped(node: type["MistOperation"], answer: Any) -> Any:
     return answer
 
 
-def synthesized(schema: Mapping[str, Any], node: Any = None, depth: int = 0) -> Any:
-    """The smallest value `node` (in `schema`, whose `$defs` it may name) accepts: an object of its required fields,
-    an empty array or string, zero, false or null; a union's first branch."""
-    node = schema if node is None else node
-    if not isinstance(node, Mapping) or depth > 32:
-        return None
-    ref = node.get("$ref")
-    if isinstance(ref, str) and ref.startswith("#/$defs/"):
-        return synthesized(schema, schema.get("$defs", {}).get(ref[len("#/$defs/") :]), depth + 1)
-    for key in ("anyOf", "oneOf"):
-        if node.get(key):
-            return synthesized(schema, node[key][0], depth + 1)
-    if node.get("allOf"):
-        parts = [synthesized(schema, sub, depth + 1) for sub in node["allOf"]]
-        objects = [p for p in parts if isinstance(p, dict)]
-        return {k: v for p in objects for k, v in p.items()} if objects else parts[0]
-    kind = node.get("type")
-    if isinstance(kind, list):
-        kind = next((k for k in kind if k != "null"), "null")
-    if kind == "object" or (kind is None and "properties" in node):
-        props = node.get("properties", {})
-        return {name: synthesized(schema, props.get(name, {}), depth + 1) for name in node.get("required", ())}
-    return {"array": [], "string": "", "integer": 0, "number": 0, "boolean": False}.get(str(kind))
-
-
 _FIXTURES: dict[str, tuple[Any, str]] = {}
 
 
@@ -293,20 +267,12 @@ def fixture_of(node: type["MistOperation"]) -> tuple[Any, str]:
 
 
 def _fixture(node: type["MistOperation"]) -> tuple[Any, str]:
-    """What a simulated step of `node` answers, and where it comes from: a delete's or an action's fixed answer; the
-    OAS's example, shaped as the output, when the output schema accepts it; else a value made from the schema."""
+    """What a simulated step of `node` answers, and where its values come from: a delete's or an action's fixed
+    answer; else the output schema's fixture with the OAS example, shaped as the output, laid over (`fixtures`)."""
     if node.shape in ("empty", "delete"):
         return _shaped(node, None), "fixed"
-    doc = oas.document()
-    schema = node.Output.model_json_schema()
-    validator = Draft202012Validator(schema)
-    shaped = _shaped(node, _example(doc, oas.operations()[node.operation]))
-    if shaped is not None and validator.is_valid(shaped):
-        return shaped, "example"
-    made = synthesized(schema)
-    if not validator.is_valid(made):  # a schema no small value satisfies: the build fails, not a simulated step
-        raise ValueError(f"{node.type}: no fixture matches its output schema")
-    return made, "schema"
+    example = _shaped(node, _example(oas.document(), oas.operations()[node.operation]))
+    return fixtures.fixture(node.Output.model_json_schema(), example)
 
 
 def _shape(doc: Mapping[str, Any], op: oas.Operation, answer: Any) -> tuple[str, str | None]:

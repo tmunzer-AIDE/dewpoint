@@ -614,3 +614,16 @@ auxiliary read is held, denied or not delegated, in a run and a simulation alike
 stays available; the earlier findings stay resolved. This closes the technical review only: the rulings above, the
 fixture redesign, catalog compression, the Compose proof, the read-only Mist smoke test, and push and PR remain the
 owner's.
+
+The owner approved the fixture redesign and catalog compression (2026-10-07), both built test-first:
+- Ruling (fixtures): a fixture is built from the schema, every declared property filled to 6 levels (only the required
+  ones past them, so recursive schemas end), within 64 KB (the engine's inline limit; shallower past it): a given
+  default, an array of one element, a union's first branch, else the type's empty value. The OAS example, shaped as
+  the output, is laid over it: objects key by key, each array element over the built element; each part of the example
+  that the schema refuses is put back to the built one. Curated and generic nodes alike (a generic node over its
+  operation's answer schema, relaxed as an output's; null only when the operation answers nothing) - the OAS's examples
+  are incomplete (the owner's remark), so the schema gives the shape and the example values - cost if wrong: a fixture
+  fills optional properties a real answer may lack, so a simulation takes the "present" branch of a reference to one;
+  publish already requires such a reference to carry a default, so no failure hides behind it. Measured: all 262
+  curated fixtures in 0.2 s, the largest 30 KB (site settings), none past the budget; 182 take example values, 39 have
+  none, 41 are a delete's or an action's fixed answer.
