@@ -1057,9 +1057,11 @@ is committed an erasure can be stopped and retried, never reversed (D3a). `docs/
   (`dewpoint:tenant-calls:<tenant>`): the API's ask checks `active` under the lifecycle lock in its insert's transaction
   (409 `tenant_erasing`), and a worker holds the plugin-call lock shared from its check of `active` through the claim,
   the hook's requests and the answer. Step 1 takes it exclusively before the lifecycle lock, so it waits for a call in
-  flight (at most its 10-second deadline) and a queued one is never run. Not the lifecycle lock itself: a hook's writes
-  on other connections take that lock in the insert fence's trigger, and would queue behind step 1, which waits for the
-  hook.
+  flight, and a queued one is never run, nor offered to a worker again: workers take only an active tenant's calls, so
+  such calls can't hold an active tenant's back (the owner's review of the plan's v6). Only the hook has a deadline (10
+  seconds); the claim, the key lookup and sealing and the answer's transaction don't, so step 1's wait has no fixed
+  bound. Not the lifecycle lock itself: a hook's writes on other connections take that lock in the insert fence's
+  trigger, and would queue behind step 1, which waits for the hook.
 - **The insert fence:** from stage 60, a trigger on every table holding tenant data refuses any insert of the tenant's
   rows (SQLSTATE `DPE01`), whatever the writer, a straggling worker's projection included, under the same lock shared;
   entering stage 60 takes it exclusively. It's never lifted, not even when an erasure reopens. A row naming no tenant
