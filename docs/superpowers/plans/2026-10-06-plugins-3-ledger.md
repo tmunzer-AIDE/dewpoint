@@ -627,3 +627,10 @@ The owner approved the fixture redesign and catalog compression (2026-10-07), bo
   publish already requires such a reference to carry a default, so no failure hides behind it. Measured: all 262
   curated fixtures in 0.2 s, the largest 30 KB (site settings), none past the budget; 182 take example values, 39 have
   none, 41 are a delete's or an action's fixed answer.
+- Ruling (catalog): `GET /api/v1/node-types` and `GET /api/v1/trigger-types` answer gzipped (level 5) to a client that
+  accepts it (`Vary: Accept-Encoding`; a `q` of 0 refuses), rendered and compressed in a worker thread; no other route
+  is compressed - the catalog is the plugins' public metadata, while compressing an answer that holds a secret beside
+  what the client sent would let its length reveal the secret (BREACH); the documented response models are unchanged
+  (no OpenAPI drift) - cost if wrong: none; the schema-on-demand palette stays the editor's later redesign. Measured on
+  the installed plugins' 273 node types: 8.08 MB of JSON rendered in 26 ms, gzipped to 1.40 MB in 72 ms (level 6:
+  1.36 MB in 102 ms); returning the bytes also skips FastAPI's per-value encoding of the 8 MB.

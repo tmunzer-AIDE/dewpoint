@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+import asyncio
+import gzip
+import json
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from pydantic import BaseModel, Field, TypeAdapter
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,10 +25,39 @@ router = APIRouter(prefix="/api/v1", tags=["node-types"])
 MAX_OPTIONS, MAX_VALUE, MAX_LABEL = 1000, 1000, 200  # the ruled limits, checked again on the API's side
 
 
-@router.get("/node-types", dependencies=[Depends(active_session)])
-async def node_types(db: AsyncSession = Depends(get_db, scope="function")) -> list[dict[str, object]]:
+GZIP_LEVEL = 5  # the palette's 8 MB to 1.4 MB in about 70 ms, in a worker thread (level 6: 1.36 MB, 100 ms)
+
+
+def accepts_gzip(request: Request) -> bool:
+    """Whether the client's `Accept-Encoding` takes gzip (a `q` of 0 refuses it)."""
+    for part in request.headers.get("accept-encoding", "").split(","):
+        name, _, params = part.strip().partition(";")
+        if name.strip().lower() in ("gzip", "x-gzip"):
+            q = params.strip().removeprefix("q=").strip() if params.strip().startswith("q=") else "1"
+            try:
+                return float(q) > 0
+            except ValueError:
+                return False
+    return False
+
+
+async def catalog_answer(request: Request, content: Any) -> Response:
+    """A catalog answer, gzipped when the client takes it (the owner's ruling on the 3b-1 checkpoint). Only the
+    catalog: plugins' public metadata, no secret and nothing the client sent, so its length reveals nothing (BREACH)."""
+
+    def render() -> bytes:
+        raw = json.dumps(content, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
+        return gzip.compress(raw, compresslevel=GZIP_LEVEL, mtime=0) if zipped else raw
+
+    zipped = accepts_gzip(request)
+    headers = {"Vary": "Accept-Encoding"} | ({"Content-Encoding": "gzip"} if zipped else {})
+    return Response(await asyncio.to_thread(render), media_type="application/json", headers=headers)
+
+
+@router.get("/node-types", dependencies=[Depends(active_session)], response_model=list[dict[str, object]])
+async def node_types(request: Request, db: AsyncSession = Depends(get_db, scope="function")) -> Response:
     """The editor's palette: node types that new versions may use (active) or still carry (deprecated)."""
-    return [
+    return await catalog_answer(request, [
         {
             "ref": row.ref,
             "type": row.type,
@@ -42,14 +74,18 @@ async def node_types(db: AsyncSession = Depends(get_db, scope="function")) -> li
             "options": row.manifest.get("options", []),
         }
         for row in await registry.list_node_types(db)
-    ]
+    ])  # fmt: skip
+
+
+TRIGGER_TYPES = TypeAdapter(list[TriggerTypeOut])
 
 
 @router.get("/trigger-types", dependencies=[Depends(active_session)], response_model=list[TriggerTypeOut])
-async def trigger_types(db: AsyncSession = Depends(get_db, scope="function")) -> list[dict[str, Any]]:
+async def trigger_types(request: Request, db: AsyncSession = Depends(get_db, scope="function")) -> Response:
     """The triggers the synced plugins declare (plugins-3 D17): an endpoint for one is set up as it says, a binding
     filters on its topic pointer, and a topic's schema types a workflow's trigger."""
-    return await registry.list_triggers(db)
+    found = TRIGGER_TYPES.validate_python(await registry.list_triggers(db))  # the model, checked as FastAPI would
+    return await catalog_answer(request, TRIGGER_TYPES.dump_python(found, mode="json"))
 
 
 class OptionsIn(BaseModel):
