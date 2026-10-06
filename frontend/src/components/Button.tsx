@@ -52,7 +52,7 @@ export function Button({
     <button
       {...rest}
       type={type}
-      className={`inline-flex items-center gap-2 rounded-lg border font-medium ${SIZES[size]} ${VARIANTS[variant]} ${DISABLED} ${className}`}
+      className={`inline-flex items-center justify-center gap-2 rounded-lg border font-medium ${SIZES[size]} ${VARIANTS[variant]} ${DISABLED} ${className}`}
     />
   );
 }

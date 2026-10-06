@@ -133,3 +133,21 @@ cover local work only: anything outward-facing (push, PR, issues) is confirmed i
 26. Ruling: input patterns escape a class's `-` (the tenant slug and the org ID): browsers compile `pattern` with the
     `v` flag, where the old patterns were invalid, so the fields validated nothing; a unit guard compiles every
     pattern that way - none.
+
+### 4a, the shell and today's screens (2026-10-06)
+
+27. Ruling: the rail shows only destinations that exist: Connections now; Settings arrives with its Members tab,
+    Workflows with 4b, Runs with 4e - no empty placeholder pages - the rail looks sparse until then.
+28. Ruling: the Tenants page leaves the rail (the design has none) and is reached from the tenant menu's new "All
+    tenants" item, and as the landing page without a tenant - the design's header owns tenant choice - one more
+    step for a platform admin creating tenants.
+29. Ruling: the add-connection form is a side panel, as in 1i, with a form landmark ("Add Mist connection") rather
+    than `role="dialog"`: it is not modal and doesn't trap focus; its first field takes focus when it opens - none.
+30. Ruling: Connections has no "Used by" column (1i shows "5 workflows"): no API counts it yet - one column short of
+    the design until workflows exist.
+31. Ruling: the org ID shows in full, not truncated in the middle as in 1i - it's copied and compared whole - a wider
+    table.
+32. Ruling: off a tenant's routes (Security, Tenants), the switcher reads "Choose tenant": the current tenant lives
+    only in the URL - no stored state - one more click back to a tenant after Security.
+33. Ruling: buttons centre their label; full-width buttons stay only on the centred sign-in screens; form actions
+    elsewhere align to the start, as in 0b - none.

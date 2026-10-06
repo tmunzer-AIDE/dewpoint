@@ -64,7 +64,7 @@ export function TenantsPage() {
           <Field label="Slug" required pattern="[a-z0-9][a-z0-9\-]{1,61}[a-z0-9]" hint="Lowercase letters, digits and dashes."
             value={slug} onChange={(e) => setSlug(e.target.value)} data-testid="tenant-slug" />
           {error && <p role="alert" className="text-body text-danger">{error}</p>}
-          <Button variant="primary" type="submit" disabled={create.isPending} data-testid="tenant-create">Create tenant</Button>
+          <Button variant="primary" type="submit" disabled={create.isPending} className="self-start" data-testid="tenant-create">Create tenant</Button>
         </form>
       )}
     </section>

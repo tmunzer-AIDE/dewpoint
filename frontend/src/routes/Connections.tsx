@@ -64,7 +64,7 @@ export function ConnectionsPage({ tenantId }: { tenantId: string }) {
               <h2 className="text-body-lg font-semibold">Mist connections</h2>
               <p className="mt-0.5 text-small text-muted">Org-scoped API tokens. Privilege is read from Mist at verification.</p>
             </div>
-            <Button variant="primary" size="md" onClick={() => setOpen(true)} disabled={open} data-testid="conn-add">
+            <Button variant="primary" size="md" onClick={() => setOpen(true)} data-testid="conn-add">
               Add Mist connection
             </Button>
           </div>
