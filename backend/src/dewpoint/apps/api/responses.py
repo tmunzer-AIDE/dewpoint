@@ -6,7 +6,7 @@ instead of silently losing a field. A route whose answer omits a key (a tenant's
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 SessionState = Literal["mfa_pending", "enroll_required", "active"]
 Role = Literal["owner", "admin", "editor", "operator", "viewer"]
@@ -272,6 +272,37 @@ class VersionDetailOut(VersionOut):
 
     graph: dict[str, Any]
     expressions: list[ExpressionOut]
+
+
+BINDING_ID = r"^[a-z][a-z0-9_]{0,31}$"
+# Far above anything an export makes (500 steps, a config's top-level properties), and a bound on an import's work
+# beside the 1 MiB body cap.
+MAX_BINDINGS = 10_000
+
+
+class BindingSite(_Answer):
+    node: str | None = Field(max_length=64)  # a step's id; null for the workflow's settings
+    field: str = Field(min_length=2, max_length=200)  # `/<property>`, or `/settings/failure_handler`
+
+
+class Binding(_Answer):
+    """One id of the exporting tenant's (a connection, a workflow), as a placeholder an import binds or leaves."""
+
+    id: str = Field(pattern=BINDING_ID)
+    kind: Literal["connection", "workflow"]
+    type: str | None = Field(max_length=100)  # the connection type it takes; null for a workflow
+    label: str = Field(max_length=200)
+    sites: list[BindingSite] = Field(min_length=1, max_length=MAX_BINDINGS)
+
+
+class WorkflowDocument(_Answer):
+    """A workflow as a file (B12): its graph without the tenant's ids (documented as a Graph), and their bindings."""
+
+    format: Literal["dewpoint.workflow"]
+    format_version: Literal[1]
+    name: str = Field(max_length=100)
+    graph: dict[str, Any]
+    bindings: list[Binding] = Field(max_length=MAX_BINDINGS)
 
 
 class ActivatedOut(_Answer):

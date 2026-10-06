@@ -83,6 +83,8 @@ SLICE_4B = [
     ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/versions"),
     ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/versions/{version_id}"),
     ("post", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/activate"),
+    ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/export"),
+    ("post", "/api/v1/t/{tenant_id}/workflows/import"),
 ]
 
 
@@ -109,6 +111,10 @@ def test_a_workflow_answer_documents_its_draft_as_a_graph() -> None:
 
 def test_a_versions_graph_is_documented_as_a_graph() -> None:
     assert schema()["components"]["schemas"]["VersionDetailOut"]["properties"]["graph"] == GRAPH
+
+
+def test_a_files_graph_is_documented_as_a_graph() -> None:
+    assert schema()["components"]["schemas"]["WorkflowDocument"]["properties"]["graph"] == GRAPH
 
 
 def test_publishs_body_is_optional() -> None:

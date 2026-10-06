@@ -70,6 +70,60 @@
         "title": "AddIn",
         "type": "object"
       },
+      "Binding": {
+        "additionalProperties": false,
+        "description": "One id of the exporting tenant's (a connection, a workflow), as a placeholder an import binds or leaves.",
+        "properties": {
+          "id": {
+            "pattern": "^[a-z][a-z0-9_]{0,31}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "connection",
+              "workflow"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "label": {
+            "maxLength": 200,
+            "title": "Label",
+            "type": "string"
+          },
+          "sites": {
+            "items": {
+              "$ref": "#/components/schemas/BindingSite"
+            },
+            "maxItems": 10000,
+            "minItems": 1,
+            "title": "Sites",
+            "type": "array"
+          },
+          "type": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "type",
+          "label",
+          "sites"
+        ],
+        "title": "Binding",
+        "type": "object"
+      },
       "BindingIn": {
         "additionalProperties": false,
         "properties": {
@@ -123,6 +177,35 @@
           }
         },
         "title": "BindingPatch",
+        "type": "object"
+      },
+      "BindingSite": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "maxLength": 200,
+            "minLength": 2,
+            "title": "Field",
+            "type": "string"
+          },
+          "node": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node"
+          }
+        },
+        "required": [
+          "node",
+          "field"
+        ],
+        "title": "BindingSite",
         "type": "object"
       },
       "CodeIn": {
@@ -2880,6 +2963,75 @@
           "draft"
         ],
         "title": "WorkflowDetailOut",
+        "type": "object"
+      },
+      "WorkflowDocument": {
+        "additionalProperties": false,
+        "description": "A workflow as a file (B12): its graph without the tenant's ids (documented as a Graph), and their bindings.",
+        "properties": {
+          "bindings": {
+            "items": {
+              "$ref": "#/components/schemas/Binding"
+            },
+            "maxItems": 10000,
+            "title": "Bindings",
+            "type": "array"
+          },
+          "format": {
+            "const": "dewpoint.workflow",
+            "title": "Format",
+            "type": "string"
+          },
+          "format_version": {
+            "const": 1,
+            "title": "Format Version",
+            "type": "integer"
+          },
+          "graph": {
+            "$ref": "#/components/schemas/Graph"
+          },
+          "name": {
+            "maxLength": 100,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "format",
+          "format_version",
+          "name",
+          "graph",
+          "bindings"
+        ],
+        "title": "WorkflowDocument",
+        "type": "object"
+      },
+      "WorkflowImportIn": {
+        "additionalProperties": false,
+        "properties": {
+          "bind": {
+            "additionalProperties": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Bind",
+            "type": "object"
+          },
+          "document": {
+            "$ref": "#/components/schemas/WorkflowDocument"
+          },
+          "name": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "document"
+        ],
+        "title": "WorkflowImportIn",
         "type": "object"
       },
       "WorkflowOut": {
@@ -6001,6 +6153,60 @@
         ]
       }
     },
+    "/api/v1/t/{tenant_id}/workflows/import": {
+      "post": {
+        "description": "A new workflow from a file (B12), checked whole before anything is written (4b ruling 18): the graph's format;\neach step's type and each binding's sites against this server's schemas, with no id embedded where a binding goes;\nthen each chosen id against this tenant's own connections (of the binding's type) and workflows.",
+        "operationId": "import_workflow_api_v1_t__tenant_id__workflows_import_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowImportIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowDetailOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Import Workflow",
+        "tags": [
+          "workflows"
+        ]
+      }
+    },
     "/api/v1/t/{tenant_id}/workflows/{workflow_id}": {
       "get": {
         "operationId": "get_one_api_v1_t__tenant_id__workflows__workflow_id__get",
@@ -6374,6 +6580,60 @@
           }
         },
         "summary": "Put Draft",
+        "tags": [
+          "workflows"
+        ]
+      }
+    },
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/export": {
+      "get": {
+        "description": "The saved draft as a file, every id of this tenant's replaced by a typed placeholder (B12). Refused, never\napproximated, when that can't be done for certain (4b ruling 18).",
+        "operationId": "export_api_v1_t__tenant_id__workflows__workflow_id__export_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowDocument"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Export",
         "tags": [
           "workflows"
         ]

@@ -405,3 +405,8 @@ M3. **A run names its own workflow's version** (Task 3): `runs` carries the fore
     tenant's workflow, they find nothing, while the row is there for its own tenant. The probe seeds real workflows
     and versions (`seed_workflow`, 200 a tenant) and its runs name them. - The schema refuses what the plan's test
     inserted. - None: the database already enforces what the old test checked.
+M4. **The import's audit entry is read as the database's owner** (Task 5): the plan's test read `/audit` as the
+    importing editor, but `audit.view` is an admin's and an owner's, so the editor is refused. The test reads the
+    tenant's newest audit entry through the owner's session instead and asserts its action, its target (the new
+    workflow) and its details (`{"name", "source": "import"}`). - An editor can't read the audit log. - None: the
+    route and the entry are as planned.

@@ -29,7 +29,10 @@ class VersionChangedError(Exception):
         self.latest = latest
 
 
-async def create_workflow(s: AsyncSession, ctx: TenantContext, *, name: str, draft: dict[str, Any]) -> Workflow:
+async def create_workflow(
+    s: AsyncSession, ctx: TenantContext, *, name: str, draft: dict[str, Any], source: str | None = None
+) -> Workflow:
+    """A new workflow; `source` says where it came from when it wasn't typed in ("import"), for the audit log."""
     wf = Workflow(
         id=uuid.uuid4(),
         tenant_id=ctx.tenant_id,
@@ -49,7 +52,7 @@ async def create_workflow(s: AsyncSession, ctx: TenantContext, *, name: str, dra
         action="workflow.create",
         target_type="workflow",
         target_id=str(wf.id),
-        details={"name": name},
+        details={"name": name, **({"source": source} if source else {})},
     )
     return wf
 

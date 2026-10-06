@@ -19,6 +19,7 @@ from dewpoint.apps.api.responses import (
     VersionDetailOut,
     VersionOut,
     WorkflowDetailOut,
+    WorkflowDocument,
     WorkflowOut,
     WorkflowUpdatedOut,
 )
@@ -31,7 +32,7 @@ from dewpoint.core.http import TenantContext, get_db, get_settings_dep, require
 from dewpoint.core.models.connections import Connection
 from dewpoint.core.models.workflows import Workflow, WorkflowVersion
 from dewpoint.core.plugins import calls, registry
-from dewpoint.core.workflows import service
+from dewpoint.core.workflows import portable, service
 from dewpoint.engine.graph.model import GraphFormatError, parse_graph
 from dewpoint.engine.graph.validate import PICKER
 
@@ -337,6 +338,105 @@ async def activate(
         diagnostics = [d.to_json() for d in e.errors]
         raise HTTPException(422, detail={"error": "not_activatable", "diagnostics": diagnostics}) from None
     return {"active_version_id": str(version.id), "number": version.number, "warnings": [w.to_json() for w in warnings]}
+
+
+class WorkflowImportIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # a misspelt `bind` must never import with every binding left open
+    name: str = Field(min_length=1, max_length=100)
+    document: WorkflowDocument
+    bind: dict[str, uuid.UUID] = Field(default_factory=dict)  # binding id -> one of this tenant's; absent: unbound
+
+
+def _bad_binding(binding: str, reason: str) -> HTTPException:
+    return HTTPException(422, detail={"error": "bad_binding", "binding": binding, "reason": reason})
+
+
+async def _config_schemas(db: AsyncSession, graph: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """The config schema of each step type the graph names that this server knows, in any state: a retired type's
+    schema still says where its ids are. Called on a graph whose format is checked (each type a valid ref)."""
+    refs = {n["type"] for n in graph.get("nodes") or [] if isinstance(n, dict) and isinstance(n.get("type"), str)}
+    return {row.ref: row.manifest.get("config_schema") or {} for row in await registry.load_node_types(db, refs)}
+
+
+async def _labels(
+    db: AsyncSession, tenant_id: uuid.UUID, found: list[tuple[portable.Site, str]]
+) -> dict[tuple[str, str], str]:
+    """Each (kind, canonical id) the draft holds, to its name in this tenant; an id it doesn't name gets none."""
+    wanted: dict[str, set[uuid.UUID]] = {"connection": set(), "workflow": set()}
+    for site, value in found:
+        wanted[site.kind].add(uuid.UUID(value))
+    labels: dict[tuple[str, str], str] = {}
+    for model, kind in ((Connection, "connection"), (Workflow, "workflow")):
+        if wanted[kind]:
+            ids = sorted(wanted[kind], key=str)
+            rows = await db.execute(select(model.id, model.name).where(model.tenant_id == tenant_id, model.id.in_(ids)))
+            labels.update({(kind, str(row.id)): row.name for row in rows})
+    return labels
+
+
+def _not_portable(e: portable.NotPortableError) -> HTTPException:
+    return HTTPException(422, detail={"error": "not_portable", "problems": [p.to_json() for p in e.problems]})
+
+
+@router.get("/t/{tenant_id}/workflows/{workflow_id}/export", response_model=WorkflowDocument)
+async def export(
+    workflow_id: uuid.UUID,
+    ctx: TenantContext = Depends(require(P.WORKFLOW_VIEW)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+) -> dict[str, object]:
+    """The saved draft as a file, every id of this tenant's replaced by a typed placeholder (B12). Refused, never
+    approximated, when that can't be done for certain (4b ruling 18)."""
+    wf = await _get(db, ctx, workflow_id)
+    schemas = await _config_schemas(db, wf.draft)
+    try:
+        labels = await _labels(db, ctx.tenant_id, portable.held(wf.draft, schemas))
+        return portable.export_document(wf.name, wf.draft, schemas, labels)
+    except portable.NotPortableError as e:
+        raise _not_portable(e) from None
+
+
+@router.post("/t/{tenant_id}/workflows/import", status_code=201, response_model=WorkflowDetailOut)
+async def import_workflow(
+    body: WorkflowImportIn,
+    ctx: TenantContext = Depends(require(P.WORKFLOW_EDIT)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+) -> dict[str, object]:
+    """A new workflow from a file (B12), checked whole before anything is written (4b ruling 18): the graph's format;
+    each step's type and each binding's sites against this server's schemas, with no id embedded where a binding goes;
+    then each chosen id against this tenant's own connections (of the binding's type) and workflows."""
+    graph = body.document.graph
+    _check_format(graph)
+    schemas = await _config_schemas(db, graph)
+    bindings = [b.model_dump() for b in body.document.bindings]
+    problems = portable.check_document(graph, bindings, schemas)
+    if problems:
+        raise HTTPException(422, detail={"error": "bad_document", "problems": [p.to_json() for p in problems]})
+    by_id = {b.id: b for b in body.document.bindings}
+    for key, chosen in body.bind.items():
+        binding = by_id.get(key)
+        if binding is None:
+            raise _bad_binding(key, "unexpected")
+        if binding.kind == "connection":
+            found = (
+                await db.execute(
+                    select(Connection.type).where(Connection.tenant_id == ctx.tenant_id, Connection.id == chosen)
+                )
+            ).scalar_one_or_none()
+            if found is None:
+                raise _bad_binding(key, "unknown")
+            if found != binding.type:
+                raise _bad_binding(key, "wrong_type")
+        elif (
+            await db.execute(select(Workflow.id).where(Workflow.tenant_id == ctx.tenant_id, Workflow.id == chosen))
+        ).scalar_one_or_none() is None:
+            raise _bad_binding(key, "unknown")
+    draft = portable.apply(graph, bindings, {key: str(value) for key, value in body.bind.items()}, schemas)
+    _check_format(draft)
+    try:
+        wf = await service.create_workflow(db, ctx, name=body.name, draft=draft, source="import")
+    except IntegrityError:
+        raise HTTPException(409, detail={"error": "name_taken"}) from None
+    return {**await _summary(db, wf), "draft": wf.draft}
 
 
 class InputOptionsIn(BaseModel):

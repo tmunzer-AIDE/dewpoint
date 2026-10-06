@@ -855,6 +855,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/t/{tenant_id}/workflows/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Import Workflow
+         * @description A new workflow from a file (B12), checked whole before anything is written (4b ruling 18): the graph's format;
+         *     each step's type and each binding's sites against this server's schemas, with no id embedded where a binding goes;
+         *     then each chosen id against this tenant's own connections (of the binding's type) and workflows.
+         */
+        post: operations["import_workflow_api_v1_t__tenant_id__workflows_import_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/t/{tenant_id}/workflows/{workflow_id}": {
         parameters: {
             query?: never;
@@ -940,6 +962,27 @@ export interface paths {
         get?: never;
         /** Put Draft */
         put: operations["put_draft_api_v1_t__tenant_id__workflows__workflow_id__draft_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Export
+         * @description The saved draft as a file, every id of this tenant's replaced by a typed placeholder (B12). Refused, never
+         *     approximated, when that can't be done for certain (4b ruling 18).
+         */
+        get: operations["export_api_v1_t__tenant_id__workflows__workflow_id__export_get"];
+        put?: never;
         post?: never;
         delete?: never;
         options?: never;
@@ -1177,6 +1220,25 @@ export interface components {
              */
             role: "owner" | "admin" | "editor" | "operator" | "viewer";
         };
+        /**
+         * Binding
+         * @description One id of the exporting tenant's (a connection, a workflow), as a placeholder an import binds or leaves.
+         */
+        Binding: {
+            /** Id */
+            id: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "connection" | "workflow";
+            /** Label */
+            label: string;
+            /** Sites */
+            sites: components["schemas"]["BindingSite"][];
+            /** Type */
+            type: string | null;
+        };
         /** BindingIn */
         BindingIn: {
             /**
@@ -1198,6 +1260,13 @@ export interface components {
             enabled?: boolean | null;
             /** Filter */
             filter?: unknown[] | null;
+        };
+        /** BindingSite */
+        BindingSite: {
+            /** Field */
+            field: string;
+            /** Node */
+            node: string | null;
         };
         /** CodeIn */
         CodeIn: {
@@ -2212,6 +2281,37 @@ export interface components {
             unpublished_changes: boolean;
             /** Updated At */
             updated_at: string;
+        };
+        /**
+         * WorkflowDocument
+         * @description A workflow as a file (B12): its graph without the tenant's ids (documented as a Graph), and their bindings.
+         */
+        WorkflowDocument: {
+            /** Bindings */
+            bindings: components["schemas"]["Binding"][];
+            /**
+             * Format
+             * @constant
+             */
+            format: "dewpoint.workflow";
+            /**
+             * Format Version
+             * @constant
+             */
+            format_version: 1;
+            graph: components["schemas"]["Graph"];
+            /** Name */
+            name: string;
+        };
+        /** WorkflowImportIn */
+        WorkflowImportIn: {
+            /** Bind */
+            bind?: {
+                [key: string]: string;
+            };
+            document: components["schemas"]["WorkflowDocument"];
+            /** Name */
+            name: string;
         };
         /** WorkflowOut */
         WorkflowOut: {
@@ -4144,6 +4244,41 @@ export interface operations {
             };
         };
     };
+    import_workflow_api_v1_t__tenant_id__workflows_import_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WorkflowImportIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowDetailOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_one_api_v1_t__tenant_id__workflows__workflow_id__get: {
         parameters: {
             query?: never;
@@ -4345,6 +4480,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DraftSavedOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    export_api_v1_t__tenant_id__workflows__workflow_id__export_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workflow_id: string;
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowDocument"];
                 };
             };
             /** @description Validation Error */
