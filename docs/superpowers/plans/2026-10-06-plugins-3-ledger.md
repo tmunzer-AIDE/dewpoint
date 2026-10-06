@@ -475,3 +475,23 @@ Rulings:
   enters a path or a query (3a-2's open question); labels are `name`, else `ssid`, else the value; the node's own
   operation and the list's must both be allowed - cost if wrong: an org with more than 1,000 sites shows its first
   1,000, by Mist's order.
+- Ruling: `mist.api.read` and `mist.api.write` take a concrete path whose org is written as the connection's id or as
+  `{org_id}` (another org fails `mist.org_mismatch`); the config's `path` is an `anyOf` of one pattern per path the
+  map allows the node, so a version's reach is pinned in its contract (a later map that allows more makes a new
+  version; one that allows less refuses at run time) and publish refuses a literal path outside it - D28's check at
+  publish and at run time - cost if wrong: every map review that widens the generic nodes ships them as a new version.
+- Ruling: a generic request matches the most specific allowed template (most literal segments; a tie is refused), its
+  method must be the operation's, each path value must pass its parameter's schema (UUIDs and MAC patterns checked),
+  the query may name only the operation's (non-array) parameters, each value checked, and the body must pass the
+  operation's request body (an update's without required fields), or no body at all; everything is checked before
+  the connection is opened - D14 - cost if wrong: a parameter the OAS describes wrongly can't be sent until the map
+  overrides it.
+- Ruling: a generic node answers `{status, body}`, the body undeclared and so tainted; its simulation answers the
+  matched operation's OAS example with status 200 - D14, D13 - cost if wrong: none.
+- Open question (from the owner's remark, 2026-10-06: the OAS's examples are incomplete and may be outdated; the
+  schemas are the complete payloads): node schemas come only from the OAS's `schema` objects; examples are used only
+  as simulate fixtures (D13, recommended there). A fixture taken from an incomplete example can lack fields a real
+  answer has, so a later step referencing them could fail only in simulation. Alternative: build every fixture from
+  the schema (each declared property filled, to a bounded depth), with the example's values laid over where they
+  fit. Recommendation: switch to schema-built fixtures with example values laid over - the schema is the complete
+  shape - for the owner's ruling at the checkpoint.

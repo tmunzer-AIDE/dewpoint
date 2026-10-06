@@ -125,7 +125,9 @@ def test_outputs_keep_the_shape_and_drop_what_a_provider_outgrows() -> None:
         for s in walk(out):
             assert not {"format", "enum", "pattern", "oneOf", "minimum", "maxLength", "const", "examples"} & set(s)
             if s.get("additionalProperties") is False:  # only the wrappers the nodes make are closed
-                assert set(s.get("properties", {})) in (set(), {"already_absent"}, {"results", "total", "truncated"})
+                assert set(s.get("properties", {})) in (
+                    set(), {"already_absent"}, {"results", "total", "truncated"}, {"status", "body"}
+                )
 
 
 def test_a_list_answers_its_results_total_and_whether_it_was_cut() -> None:
