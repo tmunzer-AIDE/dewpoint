@@ -11,6 +11,7 @@ export default defineConfig({
     environment: "jsdom",
     globals: false,
     include: ["src/**/*.test.{ts,tsx}"],
+    setupFiles: ["src/test/setup.ts"],
     // Tests read the stylesheets as text (`?raw`): the token sheet's contrast, and the AI-tells guard.
     css: { include: [/\/src\/.+\.css(?:\?|$)/] }, // an id may end in `?raw`
   },
