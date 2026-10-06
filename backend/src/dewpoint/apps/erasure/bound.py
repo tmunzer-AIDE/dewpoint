@@ -77,6 +77,7 @@ async def _now(s: AsyncSession) -> datetime:
 
 async def _boundary(ctx: stages.Context, record: TenantErasure) -> str:
     async with ctx.sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
         current = (await s.execute(select(NamespaceBoundary.name).where(NamespaceBoundary.lost_at.is_(None))
                                    .order_by(NamespaceBoundary.id.desc()).limit(1))).scalar()  # fmt: skip
         if record.boundary is not None:
@@ -93,6 +94,7 @@ async def found(ctx: stages.Context) -> Found:
     """What Temporal still shows of the tenant: every schedule and execution the erasure found or keeps, and anything
     visibility lists under its prefix."""
     async with ctx.sessionmaker() as s:
+        await tenant_scope(s, ctx.tenant_id)
         items = [(i.kind, i.workflow_id, i.run_id) for i in (await s.execute(
             select(TenantErasureItem).where(TenantErasureItem.tenant_id == ctx.tenant_id,
                                             TenantErasureItem.kind.in_(("schedule", "execution")))
@@ -124,6 +126,7 @@ async def reopen(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid
     rows += [{"tenant_id": tenant_id, "step": int(Stage.EXECUTIONS), "kind": "execution", "workflow_id": w,
               "run_id": r, "source": during} for w, r in shown.executions]  # fmt: skip
     async with sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant_id)
         for at in range(0, len(rows), stages.ITEMS_PER_STATEMENT):  # the driver's argument limit (C1)
             chunk = rows[at : at + stages.ITEMS_PER_STATEMENT]
             await s.execute(insert(TenantErasureItem).values(chunk).on_conflict_do_update(
@@ -138,7 +141,6 @@ async def reopen(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid
             incidents=TenantErasure.incidents + 1, latest_close=None, check_after=None, failure=None, failed_at=None,
             attempts=0, next_attempt_at=now,
         ))  # fmt: skip
-        await tenant_scope(s, tenant_id)
         await audit.record(s, tenant_id=tenant_id, actor_id=None, action="tenant.erasure.incident",
                            target_type="tenant", target_id=str(tenant_id),
                            details={"schedules": len(shown.schedules), "executions": len(shown.executions),
@@ -149,6 +151,7 @@ async def reopen(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid
 
 async def _complete(ctx: stages.Context, record: TenantErasure, boundary: str) -> None:
     async with ctx.sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
         now = await _now(s)
         items = (await s.execute(select(func.count()).select_from(TenantErasureItem)
                                  .where(TenantErasureItem.tenant_id == ctx.tenant_id))).scalar_one()  # fmt: skip
@@ -158,7 +161,6 @@ async def _complete(ctx: stages.Context, record: TenantErasure, boundary: str) -
             step=int(Stage.COMPLETE), completed_at=now, failure=None, failed_at=None, attempts=0,
         ))  # fmt: skip
         await s.execute(text("DELETE FROM tenant_erasure_items WHERE tenant_id = :t"), {"t": ctx.tenant_id})
-        await tenant_scope(s, ctx.tenant_id)
         await s.execute(text("UPDATE tenants SET status = 'erased' WHERE id = :t"), {"t": ctx.tenant_id})
         details: dict[str, object] = {
             "tables": sorted([table, int(n)] for table, n in record.counts.items()),  # pairs: a name isn't a key
@@ -173,6 +175,7 @@ async def _complete(ctx: stages.Context, record: TenantErasure, boundary: str) -
 async def check(ctx: stages.Context) -> str:
     """Step 9: `complete`, or `reopened` for what the final check found. Raises Held while it may not run."""
     async with ctx.sessionmaker() as s:
+        await tenant_scope(s, ctx.tenant_id)
         record = (await s.execute(select(TenantErasure).where(TenantErasure.tenant_id == ctx.tenant_id))).scalar_one()
         now = await _now(s)
     if FIRING_BOUND is None:
@@ -200,9 +203,8 @@ async def check(ctx: stages.Context) -> str:
 async def reconcile_erased(sessionmaker: async_sessionmaker[AsyncSession], client: Client) -> dict[str, int]:
     """Every completed erasure's ids described again, and its prefix listed: anything found reopens it. On every pass,
     for good: it detects and repairs a late write on its next pass, never keeps absence true between passes."""
-    async with sessionmaker() as s:
-        done = list((await s.execute(select(TenantErasure.tenant_id).where(TenantErasure.completed_at.is_not(None))
-                                     .order_by(TenantErasure.tenant_id))).scalars())  # fmt: skip
+    async with sessionmaker() as s:  # ids only, across tenants (M3)
+        done: list[uuid.UUID] = list((await s.execute(text("SELECT erasures_completed()"))).scalars())
     counts: dict[str, int] = {}
     for tenant_id in done:
         try:

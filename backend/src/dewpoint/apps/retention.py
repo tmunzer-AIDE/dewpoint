@@ -16,14 +16,13 @@ import asyncio
 import structlog
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from sqlalchemy import func, select
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.client import Client
 
 from dewpoint.apps.erasure.bound import reconcile_erased
 from dewpoint.apps.erasure.process import erase_pass
 from dewpoint.core.db import make_engine, make_sessionmaker
-from dewpoint.core.models.erasure import TenantErasure
 from dewpoint.core.platform.service import EnvironmentMismatchError, EnvironmentNotRecordedError, check_namespace
 from dewpoint.core.retention.sweep import BATCH, Sweep
 from dewpoint.core.retention.sweep import sweep as sweep_all
@@ -67,8 +66,7 @@ async def _erasure_client(sessionmaker: async_sessionmaker[AsyncSession], settin
 
 async def _unattended(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
     async with sessionmaker() as s:
-        waiting = (await s.execute(select(func.count()).select_from(TenantErasure)
-                                   .where(TenantErasure.completed_at.is_(None)))).scalar_one()  # fmt: skip
+        waiting: int = (await s.execute(text("SELECT erasures_unfinished()"))).scalar_one()  # a count (M3)
     if waiting:
         log.error("erasures_unattended", erasures=int(waiting))
 

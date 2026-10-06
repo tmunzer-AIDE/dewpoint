@@ -206,6 +206,35 @@ ERASER = [
     "GRANT UPDATE (status, name, slug) ON tenants TO dewpoint_retention",
     "CREATE POLICY tenants_erasure ON tenants FOR UPDATE TO dewpoint_retention USING (id = app_tenant_id())",
 ]
+# An erasure's record, items and known ids are its tenant's (the final review's M3): read and written in its scope. The
+# retention process finds the erasures to carry on, the completed ones, and how many are unfinished, across tenants,
+# through functions returning ids or a count only. `namespace_boundaries` holds no tenant's rows: a platform table.
+SCOPED = ("tenant_erasures", "tenant_erasure_items", "tenant_erasure_known")
+LISTS = ("erasures_due()", "erasures_completed()", "erasures_unfinished()")
+SCOPE = [
+    *(statement for t in SCOPED for statement in (
+        f"ALTER TABLE {t} ENABLE ROW LEVEL SECURITY",
+        f"ALTER TABLE {t} FORCE ROW LEVEL SECURITY",
+        f"CREATE POLICY {t}_scope ON {t} TO dewpoint_api, dewpoint_retention USING (tenant_id = app_tenant_id()) "
+        "WITH CHECK (tenant_id = app_tenant_id())",
+    )),
+    """CREATE FUNCTION erasures_due() RETURNS SETOF uuid LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = public, pg_temp AS $$
+  SELECT tenant_id FROM tenant_erasures
+  WHERE stopped_at IS NULL AND completed_at IS NULL AND next_attempt_at <= statement_timestamp()
+  ORDER BY next_attempt_at, tenant_id
+$$""",
+    """CREATE FUNCTION erasures_completed() RETURNS SETOF uuid LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = public, pg_temp AS $$
+  SELECT tenant_id FROM tenant_erasures WHERE completed_at IS NOT NULL ORDER BY tenant_id
+$$""",
+    """CREATE FUNCTION erasures_unfinished() RETURNS bigint LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = public, pg_temp AS $$
+  SELECT count(*) FROM tenant_erasures WHERE completed_at IS NULL
+$$""",
+    f"REVOKE ALL ON FUNCTION {', '.join(LISTS)} FROM PUBLIC",
+    f"GRANT EXECUTE ON FUNCTION {', '.join(LISTS)} TO dewpoint_retention",
+]  # fmt: skip
 
 # A workflow version stays immutable (0007), deletes included, but to its tenant's erasure sweep (stage 80).
 VERSIONS = """CREATE OR REPLACE FUNCTION workflow_versions_immutable() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
@@ -400,7 +429,7 @@ def upgrade() -> None:
     )
     op.create_index("schedule_firings_tenant", "schedule_firings", ["tenant_id", "schedule_id"])
     op.create_index("schedule_firings_recorded", "schedule_firings", ["recorded_at"])
-    for statement in [*FIRINGS, *STATUS, *ERASURES, *ERASER, VERSIONS, EVIDENCE_DUE, RECORD, *GATE]:
+    for statement in [*FIRINGS, *STATUS, *ERASURES, *ERASER, *SCOPE, VERSIONS, EVIDENCE_DUE, RECORD, *GATE]:
         op.execute(statement)
     op.create_table(
         "namespace_boundaries",
@@ -475,6 +504,8 @@ def downgrade() -> None:
     for table, command, _, _ in GATED:
         op.execute(f"DROP POLICY {table}_erasure_{command.lower()} ON {table}")
     op.execute("DROP FUNCTION erasure_reached(uuid, integer)")
+    for listed in LISTS:
+        op.execute(f"DROP FUNCTION {listed}")
     for table in FENCED:
         op.execute(f"DROP TRIGGER {table}_fence ON {table}")
     op.execute("DROP FUNCTION tenant_insert_fence()")

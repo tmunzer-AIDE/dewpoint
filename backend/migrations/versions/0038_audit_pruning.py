@@ -29,6 +29,11 @@ UPGRADE = [
     "REVOKE ALL ON audit_checkpoints FROM PUBLIC",
     "GRANT SELECT ON audit_checkpoints TO dewpoint_api, dewpoint_admin, dewpoint_auditor",
     "GRANT INSERT ON audit_checkpoints TO dewpoint_auditor",
+    # a tenant's chain's checkpoints are its tenant's, as its entries are (0005): the auditor's are every scope's (M3)
+    "ALTER TABLE audit_checkpoints ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE audit_checkpoints FORCE ROW LEVEL SECURITY",
+    "CREATE POLICY audit_checkpoints_tenant_read ON audit_checkpoints FOR SELECT USING (scope = app_tenant_id()::text)",
+    "CREATE POLICY audit_checkpoints_auditor ON audit_checkpoints TO dewpoint_auditor USING (true) WITH CHECK (true)",
     """CREATE OR REPLACE FUNCTION audit_reject() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   -- audit_prune() alone deletes, as the owner, with its flag set for its own statement: no other role may delete

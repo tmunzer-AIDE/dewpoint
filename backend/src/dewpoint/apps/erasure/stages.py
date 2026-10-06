@@ -80,6 +80,7 @@ async def _known(s: AsyncSession, ctx: Context, kind: str, workflow_id: str, run
 
 async def _open(ctx: Context, step: Stage, after: int = 0) -> list[TenantErasureItem]:
     async with ctx.sessionmaker() as s:
+        await tenant_scope(s, ctx.tenant_id)
         found = await s.execute(
             select(TenantErasureItem).where(TenantErasureItem.tenant_id == ctx.tenant_id,
                                             TenantErasureItem.step == int(step),
@@ -101,6 +102,7 @@ async def _each_open(ctx: Context, step: Stage) -> AsyncIterator[TenantErasureIt
 
 async def _items(ctx: Context, step: Stage) -> list[TenantErasureItem]:
     async with ctx.sessionmaker() as s:
+        await tenant_scope(s, ctx.tenant_id)
         found = await s.execute(select(TenantErasureItem).where(
             TenantErasureItem.tenant_id == ctx.tenant_id, TenantErasureItem.step == int(step)
         ).order_by(TenantErasureItem.id))  # fmt: skip
@@ -108,7 +110,7 @@ async def _items(ctx: Context, step: Stage) -> list[TenantErasureItem]:
 
 
 async def _mark(ctx: Context, item: TenantErasureItem, state: str, *, known: str | None = None) -> None:
-    async with ctx.sessionmaker() as s, s.begin():
+    async with _scoped(ctx) as s:
         values: dict[str, object] = {"state": state, "attempts": TenantErasureItem.attempts + 1}
         if state == "verified":
             values["verified_at"] = text("statement_timestamp()")

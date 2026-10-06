@@ -248,6 +248,7 @@ async def _audit(sessionmaker: async_sessionmaker[AsyncSession], sweep_id: int, 
 
 async def _audited(sessionmaker: async_sessionmaker[AsyncSession], sweep_id: int, tenant_id: uuid.UUID) -> bool:
     async with sessionmaker() as s:
+        await tenant_scope(s, tenant_id)
         found = await s.execute(text("SELECT 1 FROM retention_sweep_tenants WHERE sweep_id = :s AND tenant_id = :t "
                                      "AND audited_at IS NOT NULL"), {"s": sweep_id, "t": tenant_id})  # fmt: skip
         return found.first() is not None
@@ -256,9 +257,8 @@ async def _audited(sessionmaker: async_sessionmaker[AsyncSession], sweep_id: int
 async def _leftovers(sessionmaker: async_sessionmaker[AsyncSession], sweep_id: int) -> None:
     """Counts its batches kept that aren't audited yet, a tenant's no longer active included (erasing, say): audited
     as they are, nothing more deleted. Not a failure: what retention still owed that tenant is erasure's now."""
-    async with sessionmaker() as s:
-        unaudited = text("SELECT tenant_id FROM retention_sweep_tenants WHERE sweep_id = :s AND audited_at IS NULL "
-                         "ORDER BY tenant_id")  # fmt: skip
+    async with sessionmaker() as s:  # ids only, across tenants (M3)
+        unaudited = text("SELECT retention_sweep_unaudited(:s)")
         pending: list[uuid.UUID] = list((await s.execute(unaudited, {"s": sweep_id})).scalars())
     for tenant_id in pending:
         await _audit(sessionmaker, sweep_id, tenant_id, None)
@@ -268,9 +268,7 @@ async def _close(sessionmaker: async_sessionmaker[AsyncSession], sweep_id: int, 
     """The sweep ended: successful only if no tenant's sweep failed, as kept with its counts (and it wasn't abandoned);
     its tenants and lag from what was audited. Never while counts await their entry. Records older than KEPT go."""
     async with sessionmaker() as s, s.begin():
-        audited = text("SELECT count(*) FILTER (WHERE audited_at IS NOT NULL), count(*) FILTER (WHERE audited_at IS "
-                       "NULL), coalesce(bool_or(failed), false), coalesce(max(lag_s), 0) FROM retention_sweep_tenants "
-                       "WHERE sweep_id = :s")  # fmt: skip
+        audited = text("SELECT * FROM retention_sweep_summary(:s)")  # a summary, across tenants (M3)
         tenants, unaudited, failed, lag = (await s.execute(audited, {"s": sweep_id})).one()
         if unaudited:
             raise RuntimeError("A sweep's kept counts await their audit entries.")

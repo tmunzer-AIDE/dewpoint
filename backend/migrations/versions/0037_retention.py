@@ -72,6 +72,29 @@ ROLE = [
     "GRANT USAGE ON SEQUENCE retention_sweeps_id_seq TO dewpoint_retention",
     "GRANT SELECT ON retention_sweeps TO dewpoint_dispatch, dewpoint_admin",
 ]
+# A sweep's counts per tenant are that tenant's (the final review's M3): read and written in its scope. The sweep's end
+# reads them across tenants through functions returning ids or a summary only. `retention_sweeps` holds no tenant's
+# rows: a platform table, its grants its boundary. An old sweep's record takes its counts with it: the key's cascade
+# runs as the table's owner, which the policies don't hold.
+SWEEP_SCOPE = [
+    "ALTER TABLE retention_sweep_tenants ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE retention_sweep_tenants FORCE ROW LEVEL SECURITY",
+    "CREATE POLICY retention_sweep_tenants_scope ON retention_sweep_tenants TO dewpoint_retention "
+    "USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id())",
+    """CREATE FUNCTION retention_sweep_unaudited(p_sweep bigint) RETURNS SETOF uuid LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = public, pg_temp AS $$
+  SELECT tenant_id FROM retention_sweep_tenants WHERE sweep_id = p_sweep AND audited_at IS NULL ORDER BY tenant_id
+$$""",
+    """CREATE FUNCTION retention_sweep_summary(p_sweep bigint, OUT tenants bigint, OUT unaudited bigint,
+  OUT failed boolean, OUT lag_s double precision) LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = public, pg_temp AS $$
+  SELECT count(*) FILTER (WHERE audited_at IS NOT NULL), count(*) FILTER (WHERE audited_at IS NULL),
+         coalesce(bool_or(failed), false), coalesce(max(lag_s), 0)
+  FROM retention_sweep_tenants WHERE sweep_id = p_sweep
+$$""",
+    "REVOKE ALL ON FUNCTION retention_sweep_unaudited(bigint), retention_sweep_summary(bigint) FROM PUBLIC",
+    "GRANT EXECUTE ON FUNCTION retention_sweep_unaudited(bigint), retention_sweep_summary(bigint) TO dewpoint_retention",
+]
 UNROLE = [  # after retention_sweeps is dropped, with its sequence and their grants
     "REVOKE EXECUTE ON FUNCTION audit_append(uuid, uuid, text, text, text, jsonb) FROM dewpoint_retention",
     *(f"DROP POLICY {t}_retention ON {t}" for t in SCOPED),
@@ -139,11 +162,13 @@ def upgrade() -> None:
         sa.Column("failed", sa.Boolean, nullable=False, server_default=sa.false()),  # its sweep failed: kept, so a
         sa.Column("audited_at", sa.DateTime(timezone=True)),  # resumed sweep still ends unsuccessful
     )
-    for statement in ROLE:
+    for statement in [*ROLE, *SWEEP_SCOPE]:
         op.execute(statement)
 
 
 def downgrade() -> None:
+    op.execute("DROP FUNCTION retention_sweep_summary(bigint)")
+    op.execute("DROP FUNCTION retention_sweep_unaudited(bigint)")
     op.drop_table("retention_sweep_tenants")
     op.drop_table("retention_sweeps")
     for statement in UNROLE:

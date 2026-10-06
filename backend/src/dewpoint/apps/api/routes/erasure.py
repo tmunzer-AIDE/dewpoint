@@ -54,6 +54,7 @@ async def _shown(db: AsyncSession, record: TenantErasure) -> dict[str, object]:
 
 
 async def _record(db: AsyncSession, tenant_id: uuid.UUID) -> TenantErasure:
+    await tenant_scope(db, tenant_id)  # its tenant's row (the final review's M3)
     found = (await db.execute(select(TenantErasure).where(TenantErasure.tenant_id == tenant_id)
                               .execution_options(populate_existing=True))).scalar_one_or_none()  # fmt: skip
     if found is None:

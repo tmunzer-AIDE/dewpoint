@@ -45,6 +45,7 @@ def failure_code(e: BaseException) -> str:
 
 
 async def _record(s: AsyncSession, tenant_id: uuid.UUID) -> TenantErasure | None:
+    await tenant_scope(s, tenant_id)  # its tenant's row (the final review's M3)
     return (await s.execute(select(TenantErasure).where(TenantErasure.tenant_id == tenant_id)
                             .execution_options(populate_existing=True))).scalar_one_or_none()  # fmt: skip
 
@@ -53,6 +54,7 @@ async def _moved(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid
     """The erasure moved on from `done`, audited, if it's still there (a compare-and-set on its stage)."""
     following = ORDER[ORDER.index(done) + 1]
     async with sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant_id)
         if following == Stage.EXECUTIONS:  # waits for every writer holding the lock shared; each later one sees it
             await lifecycle.hold_exclusive(s, tenant_id)
         now: datetime = (await s.execute(select(func.statement_timestamp()))).scalar_one()
@@ -77,7 +79,6 @@ async def _moved(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid
         ).group_by(TenantErasureItem.state))  # fmt: skip
         details: dict[str, object] = {"step": int(done), "next": int(following),
                                       **{f"items_{state}": n for state, n in items}}  # fmt: skip
-        await tenant_scope(s, tenant_id)
         await audit.record(s, tenant_id=tenant_id, actor_id=None, action="tenant.erasure.step", target_type="tenant",
                            target_id=str(tenant_id), details=details)  # fmt: skip
     return following
@@ -107,6 +108,7 @@ async def _held(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.
     """Step 9 may not run yet: its fixed reason recorded (no attempt counted), its next look, an alert unless it's only
     waiting for the bound."""
     async with sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant_id)
         now: datetime = (await s.execute(select(func.statement_timestamp()))).scalar_one()
         await s.execute(update(TenantErasure).where(TenantErasure.tenant_id == tenant_id).values(
             failure=held.reason, failed_at=now, next_attempt_at=held.until or now + bound.HOLD,
@@ -167,13 +169,8 @@ async def erase_pass(sessionmaker: async_sessionmaker[AsyncSession], client: Cli
         if not (await holder.execute(_LOCK)).scalar():
             return {"busy": 1}
         try:
-            async with sessionmaker() as s:
-                due = list((await s.execute(
-                    select(TenantErasure.tenant_id).where(
-                        TenantErasure.stopped_at.is_(None), TenantErasure.completed_at.is_(None),
-                        TenantErasure.next_attempt_at <= func.statement_timestamp(),
-                    ).order_by(TenantErasure.next_attempt_at)
-                )).scalars())  # fmt: skip
+            async with sessionmaker() as s:  # ids only, across tenants (M3)
+                due: list[uuid.UUID] = list((await s.execute(text("SELECT erasures_due()"))).scalars())
             counts: dict[str, int] = {}
             for tenant_id in due:
                 at = await advance(sessionmaker, client, tenant_id, batch=batch)

@@ -2528,6 +2528,14 @@ Each plan updates the older specs as it lands, as the engine-core 5.x revisions 
     records run evidence, incarnations and spans; a tick records its firing. A tenant's status is read through
     `tenant_status()`, whatever the reader's scope; the strays are `stray_incarnations()`, ids only. From stage 60 of an
     erasure, a trigger on every table holding tenant data refuses an insert of the tenant's rows (§6.5).
+  - 2b-4a's tables holding a tenant's rows force row-level security scoped to that tenant: an erasure's record, items
+    and known ids (the API's and the retention role's), a sweep's counts per tenant (the retention role's), and an
+    audit chain's checkpoints (read in the tenant's scope, as its entries are; the auditor's are every scope's). The
+    retention process reads them across tenants only through `erasures_due()` and `erasures_completed()` (ids),
+    `erasures_unfinished()` (a count), `retention_sweep_unaudited()` (ids) and `retention_sweep_summary()` (a sweep's
+    totals). An old sweep's record still takes its counts with it: the key's cascade runs as the table's owner. The
+    exceptions are platform tables that hold no tenant's rows, so they have no policy and their grants are their
+    boundary: `retention_sweeps`, `run_duration_limits`, `tick_cutover` and `namespace_boundaries`.
 - **Permissions:** `run.cancel` (operators and above), `trigger.manage` (editors and above), `workflow.declassify`
   (admins and owners).
 - **Processes:** `dewpoint dispatcher` (dispatch, reconciler, schedule sync, `ScheduleTick` worker), `dewpoint

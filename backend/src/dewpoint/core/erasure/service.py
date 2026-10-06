@@ -61,6 +61,7 @@ async def start(s: AsyncSession, *, tenant_id: uuid.UUID, requested_by: uuid.UUI
 
 
 async def _record(s: AsyncSession, tenant_id: uuid.UUID) -> TenantErasure:
+    await tenant_scope(s, tenant_id)  # its tenant's row (the final review's M3); its audit entries are the tenant's too
     found = (
         await s.execute(
             select(TenantErasure).where(TenantErasure.tenant_id == tenant_id).with_for_update()
@@ -69,7 +70,6 @@ async def _record(s: AsyncSession, tenant_id: uuid.UUID) -> TenantErasure:
     ).scalar_one_or_none()  # fmt: skip
     if found is None or found.completed_at is not None:
         raise NoErasureError("This tenant has no erasure under way.")
-    await tenant_scope(s, tenant_id)  # its audit entries are the tenant's
     return found
 
 

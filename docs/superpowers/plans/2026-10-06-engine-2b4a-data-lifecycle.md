@@ -59,8 +59,10 @@ outline (`docs/superpowers/plans/2026-10-05-engine-2b4-retention-production.md`)
   start Temporal never showed, a history lost before it was read).
 - No value from a record, a secret or a key appears in a log, a code or a message: codes are fixed, a log names an
   exception's type, and the audit entries of sweeps and erasure stages carry counts only.
-- Every new table forces row-level security; cross-tenant reads are functions returning ids or a status only
-  (`tenant_status()`, `stray_incarnations()`).
+- Every new table holding a tenant's rows forces row-level security, scoped to the tenant; cross-tenant reads are
+  functions returning ids or a status only (`tenant_status()`, `stray_incarnations()`, and the final review's M3
+  added the retention process's). The platform tables `retention_sweeps`, `run_duration_limits`, `tick_cutover`
+  and `namespace_boundaries` hold no tenant's rows and have no policy; their grants are their boundary (spec §14).
 - Migrations 0035 to 0040 follow 0042, after 0041 (plugins-3 D25), and upgrade, downgrade and upgrade again over
   existing rows.
   Alembic's autogenerate isn't used: the models' remaining column and index drift is unresolved (the owner's M2
