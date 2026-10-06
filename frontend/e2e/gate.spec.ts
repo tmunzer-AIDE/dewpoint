@@ -37,6 +37,18 @@ test("a 4xx console line is exempt only from the API: from anything else it is a
   gate.clear();
 });
 
+test("the served app carries its third-party notices: code, styles and fonts, with licence texts", async ({ request }) => {
+  const answer = await request.get("/third-party-notices.txt");
+  expect(answer.status()).toBe(200);
+  expect(answer.headers()["content-type"]).toMatch(/^text\/plain/);
+  const text = await answer.text();
+  for (const entry of [/^react \d/m, /^react-dom \d/m, /^tailwindcss \d/m, /^@fontsource\/instrument-sans \d/m, /^vite \d/m]) {
+    expect(text).toMatch(entry);
+  }
+  expect(text).toContain("Permission is hereby granted, free of charge"); // the MIT text, in full
+  expect(text).toMatch(/SIL OPEN FONT LICENSE/i); // the fonts' licence
+});
+
 test("axe reports text below 4.5:1", async ({ page }) => {
   await page.goto("/login");
   await page.evaluate(() => {

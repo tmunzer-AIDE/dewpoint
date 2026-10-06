@@ -93,6 +93,7 @@ jobs:
         run: |
           set -o pipefail
           node scripts/licence-check.mjs --self-test
+          node scripts/third-party-notices.mjs --self-test
           pnpm licenses list --json --prod | node scripts/licence-check.mjs prod
           pnpm licenses list --json | node scripts/licence-check.mjs all
   e2e:
