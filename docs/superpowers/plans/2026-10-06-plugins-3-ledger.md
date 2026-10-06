@@ -564,3 +564,15 @@ each fixed test-first and mutation-checked:
   `output_schema_violation`, now with `applied` recorded, so nobody takes a created object for one never made; the
   read-only smoke test at the checkpoint is where a wrong `required` shows - cost if wrong: such a step fails after
   its effect until the map overrides that schema.
+
+Runs after the review's fixes, at `5edee45` (2026-10-06): a first full run gave 3212 passed and 6 setup errors in
+`tests/sdk/test_manifest.py`, while another session's 14-worker suite loaded the machine (load average 36; the file
+passes alone, serial and parallel); the rerun: 3212 passed, 8 skipped, in 10 min 13 s, with that session's next run
+alongside. Ruff, format, mypy, import contracts and the OpenAPI drift check pass. CodeQL locally (CI's CLI 2.27.1 and
+query filter): no findings in Python or JavaScript/TypeScript.
+
+**Checkpoint (3b-1), for the owner:** every ruling above; the open question on simulate fixtures (the owner's remark on
+examples); the palette's 8 MB (D23); the `probe` the SDK gained for M1, a runtime change (`apps/worker/network.py`);
+an output check failing after a node ran now records `applied` for every node (L6, `apps/worker/activities.py`);
+`plugins sync` checks Mist's manifest in about 12 s. Not run: the Compose proof (needs the owner's say), the
+read-only Mist smoke test against a test org (D23's measure and L6's `required` fields; needs the owner's say).
