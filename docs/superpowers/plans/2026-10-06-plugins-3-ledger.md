@@ -121,8 +121,11 @@ so CI didn't run):
   48f427b all 170 targeted tests passed.
 - Isolated Compose proofs (2m48s): migration 0041, forced RLS on `rate_scope_keys`, worker startup, a published
   workflow's run, a non-UTC schedule, a signed webhook (duplicates handled; a trickled body answered 408 after 10.01 s).
-- Not verified: CodeQL (the reason for the CMAC change), the backend job under `act`, and the browser E2E tests (3a-1
-  changes no frontend file).
+- CodeQL (run locally with the owner's OK): CI's versions (CLI 2.27.1, `codeql/python-queries` 1.8.11), the same 45
+  queries and query filter, over the whole tree (CI's pull-request run limits some results to the diff, so this is a
+  superset). At 22d508b the one CI finding reproduced exactly (`py/weak-sensitive-data-hashing`, `scopes.py:48`); at
+  0714c2e there are no findings.
+- Not verified: the backend job under `act`, and the browser E2E tests (3a-1 changes no frontend file).
 
 Open questions:
 - `tests/apps/dispatcher/test_triggers_end_to_end.py::test_a_short_outage_fires_each_missed_time_and_admits_each_once`
