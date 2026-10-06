@@ -122,12 +122,18 @@ so CI didn't run):
 - Isolated Compose proofs (2m48s): migration 0041, forced RLS on `rate_scope_keys`, worker startup, a published
   workflow's run, a non-UTC schedule, a signed webhook (duplicates handled; a trickled body answered 408 after 10.01 s).
 - CodeQL (run locally with the owner's OK): CI's versions (CLI 2.27.1, `codeql/python-queries` 1.8.11), the same 45
-  queries and query filter, over the whole tree (CI's pull-request run limits some results to the diff, so this is a
-  superset). At 22d508b the one CI finding reproduced exactly (`py/weak-sensitive-data-hashing`, `scopes.py:48`); at
-  0714c2e there are no findings.
+  queries and query filter, over the whole tree. The baseline finding reproduced exactly at 22d508b
+  (`py/weak-sensitive-data-hashing`, `scopes.py:48`) and is absent locally at 0714c2e, with no other finding. That is
+  not a guarantee of zero in CI: the platform (macOS arm64 here, Linux x64 there) and extraction can differ. Whether
+  CodeQL's licence covers this repository is unconfirmed (open questions).
 - Not verified: the backend job under `act`, and the browser E2E tests (3a-1 changes no frontend file).
 
 Open questions:
+- CodeQL licensing (the owner's to confirm): the CLI's terms (`LICENSE.md` in 2.27.1) allow use with a codebase not
+  released under an OSI-approved licence, the terms' example being code in a private GitHub repository, only under a
+  paid GitHub Advanced Security licence. This repository is private (it has an Apache-2.0 `LICENSE`), and the CI
+  CodeQL log says code scanning isn't enabled for it. The question covers the local run above and the `codeql`
+  workflow. No further local CodeQL run until it's confirmed.
 - `tests/apps/dispatcher/test_triggers_end_to_end.py::test_a_short_outage_fires_each_missed_time_and_admits_each_once`
   failed once in the full parallel run under extra load (a 4 s tick gap on Temporal's dev server where 2 s was
   expected) and passes alone; this slice touches no schedule or dispatcher code. Load-sensitive, not a regression.
