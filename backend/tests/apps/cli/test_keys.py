@@ -428,3 +428,15 @@ def test_a_retire_dry_run_changes_nothing(pg_url, monkeypatch) -> None:
     assert dry.exception is None or isinstance(dry.exception, SystemExit), dry.output
     assert dry.exit_code == 1 and "run_histories: no (1 lost, 1 pending)" in dry.output.splitlines(), dry.output
     assert asyncio.run(sql(snapshot)) == before
+
+
+@pytest.mark.parametrize("command", ["retire", "tick-cutover"])
+def test_the_help_of_a_key_command_that_asks_temporal_names_its_namespace_exit(command: str) -> None:
+    """The fix-pass review's R7: both refuse (exit 2) before any connection when the configured namespace isn't the
+    recorded one, or none is; an operator reads that in `--help`."""
+    import re
+
+    shown = CliRunner().invoke(app, ["keys", command, "--help"], env={"COLUMNS": "200"})
+    assert shown.exit_code == 0, shown.output
+    text_only = re.sub(r"[\s│╭╮╰╯─]+", " ", shown.output)
+    assert "Exit 2 when no Temporal namespace is recorded or the configured one isn't it" in text_only, shown.output

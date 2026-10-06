@@ -467,7 +467,8 @@ def keys_retire(
     """Retire a data-key version nothing needs (engine 2b spec §6.4): print every check, and with --confirm delete the
     version, audited, if all pass. Exit 1 when a dry run finds a check failing, 4 when --confirm does. A tenant's
     version reads the Temporal namespace's retention, and asks Temporal about each run execution that could hold it.
-    Run as dewpoint_admin."""
+    Exit 2 when no Temporal namespace is recorded or the configured one isn't it, before any connection. Run as
+    dewpoint_admin."""
     if (tenant is None) != platform:
         typer.echo("pass exactly one of --tenant or --platform")
         raise typer.Exit(2)
@@ -532,8 +533,9 @@ def keys_tick_cutover(
     can't restart, and that no dispatcher image from before 0039 can be deployed against this database. Nothing here
     can prove that. It also refuses (exit 1) while Temporal shows one still polling the admission queue, and when
     Temporal can't be asked (exit 3). It records once, audited with the attestation, and queues every live schedule,
-    so its sync writes the action without the argument the old one sealed. A key made before it never retires. Run as
-    dewpoint_admin."""
+    so its sync writes the action without the argument the old one sealed. A key made before it never retires. Exit 2
+    without --attest. Exit 2 when no Temporal namespace is recorded or the configured one isn't it, before any
+    connection. Run as dewpoint_admin."""
     if not attest:
         typer.echo("pass --attest: no dispatcher from before migration 0039 runs, or can be deployed again")
         raise typer.Exit(2)
