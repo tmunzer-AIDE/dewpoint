@@ -4,13 +4,13 @@ share a budget without the token, or a plain hash of it, being stored. The scope
 and sealed under its data key: a data-key rotation, during which workers may hold either version for a while, never
 splits a scope. The worker makes it; the API only reads it."""
 
-import hashlib
-import hmac
 import os
 import uuid
 from collections.abc import Callable
 from typing import Protocol
 
+from cryptography.hazmat.primitives.ciphers import algorithms
+from cryptography.hazmat.primitives.cmac import CMAC
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,4 +45,13 @@ async def scope_key(s: AsyncSession, sealer: Sealer, tenant_id: uuid.UUID, *, cr
 
 
 def credential_hasher(key: bytes) -> Callable[[str], str]:
-    return lambda credential: hmac.new(key, credential.encode(), hashlib.sha256).hexdigest()[:32]
+    """A keyed MAC (CMAC-AES-256, NIST SP 800-38B) of the credential under the tenant's random sealed key: no one
+    without that key can test a guess, unlike an unkeyed digest. Not password hashing: nothing is verified against
+    it."""
+
+    def mac(credential: str) -> str:
+        signer = CMAC(algorithms.AES(key))
+        signer.update(credential.encode())
+        return signer.finalize().hex()
+
+    return mac

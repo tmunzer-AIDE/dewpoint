@@ -5,7 +5,8 @@ Plugin steps reach the network only through Dewpoint's guard (plugins-3 D7). It 
 1. **Resolve and check every address.** For each connection, the guard resolves the destination's name and checks
    every address it gets back. If any address is not a public one, the guard refuses the destination, unless an
    allowlist entry covers that address. Addresses that count as non-public:
-   - loopback, private, link-local and CGNAT ranges;
+   - every IANA special-purpose range that isn't globally reachable (the guard keeps its own table, so the
+     verdict doesn't depend on the Python version), including loopback, private, link-local and CGNAT ranges;
    - multicast, reserved and site-local addresses;
    - IPv4 addresses embedded in IPv6 (mapped, compatible, 6to4, Teredo and NAT64), checked as IPv4.
 2. **Connect to the checked address.** The guard connects to the exact address it checked, so a later DNS change

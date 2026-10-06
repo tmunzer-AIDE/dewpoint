@@ -104,6 +104,17 @@ count it among the ciphertexts that still need a version; tenant erasure removes
 The fix review (2026-10-06) also checked that workers on different data-key versions converge on one stored key on
 first use, which the API opens.
 
+CI on PR #40 (2026-10-06), two fixes:
+- Ruling: the guard keeps its own table of IANA special-purpose ranges and reads an IPv4-mapped address as its IPv4;
+  `ipaddress`'s flags can only add a refusal - CI's CPython 3.12.3 called `::ffff:8.8.8.8` reserved, and 3.12.4
+  changed the stdlib's tables (CVE-2024-4032), so the verdict depended on the interpreter's patch level - cost if
+  wrong: a few globally reachable special-purpose addresses (6to4, `192.0.0.9`, parts of `2001::/23`) need an
+  allowlist entry.
+- Ruling: a credential's scope is a CMAC-AES-256 of it under the tenant's scope key, not an HMAC-SHA256 - CodeQL's
+  `py/weak-sensitive-data-hashing` fails the private-repository gate on any digest of a credential, though a keyed MAC
+  under a random sealed key can't be guessed offline; CMAC (NIST SP 800-38B) is the equivalent keyed PRF - cost if
+  wrong: none; nothing was stored under the old function (unmerged).
+
 Open questions:
 - `tests/apps/dispatcher/test_triggers_end_to_end.py::test_a_short_outage_fires_each_missed_time_and_admits_each_once`
   failed once in the full parallel run under extra load (a 4 s tick gap on Temporal's dev server where 2 s was

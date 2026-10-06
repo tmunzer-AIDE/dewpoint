@@ -127,3 +127,13 @@ async def test_refill_time_never_moves_back(owner_sessionmaker, worker_sessionma
     async with worker_sessionmaker() as s, s.begin():
         await tenant_scope(s, tid)
         assert (await s.execute(text("select refilled_at from rate_buckets"))).scalar_one() >= later
+
+
+def test_a_credentials_scope_is_a_keyed_mac() -> None:
+    """Deterministic for one tenant's key, different under another, never the credential itself."""
+    from dewpoint.core.ratelimit.scopes import credential_hasher
+
+    one, other = credential_hasher(b"k" * 32), credential_hasher(b"j" * 32)
+    assert one("tok-123456") == one("tok-123456") != one("tok-123457")
+    assert one("tok-123456") != other("tok-123456")
+    assert len(one("tok-123456")) == 32 and "tok" not in one("tok-123456")

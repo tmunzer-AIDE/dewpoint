@@ -69,3 +69,23 @@ def test_a_mapped_address_is_matched_as_its_ipv4() -> None:
 
 def test_versions_never_cross() -> None:
     assert not allowed(ipaddress.ip_address("::1"), 443, TENANT, [_entry("127.0.0.0/8")])
+
+
+def test_the_verdict_doesnt_depend_on_the_pythons_patch_level(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CI's CPython 3.12.3 called `::ffff:8.8.8.8` reserved; 3.12.4 changed how `ipaddress` classifies special ranges
+    (CVE-2024-4032). The guard keeps its own table of non-global ranges and reads a mapped address as its IPv4: even an
+    `ipaddress` that calls every address global and none special refuses every special one."""
+    for cls in (ipaddress.IPv4Address, ipaddress.IPv6Address):
+        monkeypatch.setattr(cls, "is_global", property(lambda self: True))
+        for flag in ("is_multicast", "is_reserved", "is_private", "is_loopback", "is_link_local"):
+            monkeypatch.setattr(cls, flag, property(lambda self: False))
+    monkeypatch.setattr(ipaddress.IPv6Address, "is_site_local", property(lambda self: False))
+    for address in BLOCKED:
+        assert blocked_reason(ipaddress.ip_address(address)) is not None, address
+    for address in GLOBAL:
+        assert blocked_reason(ipaddress.ip_address(address)) is None, address
+
+
+def test_a_mapped_address_is_read_as_its_ipv4() -> None:
+    assert blocked_reason(ipaddress.ip_address("::ffff:8.8.8.8")) is None
+    assert blocked_reason(ipaddress.ip_address("::ffff:10.0.0.1")) is not None
