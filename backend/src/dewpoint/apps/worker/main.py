@@ -21,7 +21,8 @@ from dewpoint.apps.worker.activities import RunStore, cel_activity, engine_activ
 from dewpoint.apps.worker.claims import ClaimStore
 from dewpoint.apps.worker.deployment import deployment_config, set_current, this_build
 from dewpoint.apps.worker.health import reporter, self_check, start_healthy, watch
-from dewpoint.apps.worker.network import DbConnections, Network
+from dewpoint.apps.worker.network import DbConnections, Network, worker_types
+from dewpoint.apps.worker.plugin_calls import PluginCallServer
 from dewpoint.apps.worker.store import DbRunStore
 from dewpoint.core.config import Settings
 from dewpoint.core.crypto.kek import KekSet
@@ -93,7 +94,7 @@ async def run(settings: Settings) -> None:
     serves a namespace its database wasn't recorded with (engine 2b spec §2.1). Every payload it sends or reads is
     encrypted with its tenant's key, read through the worker's role (§6.2–6.3). It records itself as an instance of
     its build, with its capabilities, and raises WorkerUnhealthyError once a self-check fails, at startup before it
-    polls or later after its workers stop polling (§2.7)."""
+    polls or later after its workers stop polling (§2.7). It also serves plugin calls for the API (plugins-3 D3)."""
     engine = make_engine(settings.database_url)
     try:
         sessionmaker = make_sessionmaker(engine)
@@ -107,8 +108,12 @@ async def run(settings: Settings) -> None:
         )
         store = DbRunStore(sessionmaker, keys)  # claims, sealed with the same keys (engine 2b spec §3.1)
         guard = Guard(resolver=SystemResolver(), allowlist=allowlist.source(sessionmaker))  # plugins-3 D7, D8
-        network = Network(guard=guard, connections=DbConnections(sessionmaker), sessionmaker=sessionmaker, keys=keys)
-        workers = [engine_worker(client, store, installed_plugins(), settings, network=network)]
+        plugins = installed_plugins()
+        network = Network(
+            guard=guard, connections=DbConnections(sessionmaker), sessionmaker=sessionmaker, keys=keys,
+            types=worker_types(plugins),  # the installed plugins' connection types (D11)
+        )  # fmt: skip
+        workers = [engine_worker(client, store, plugins, settings, network=network)]
         if settings.cel_socket:
             profile = await evaluator_profile(settings.cel_socket)
             log.info("cel_queue", profile=profile)
@@ -116,10 +121,14 @@ async def run(settings: Settings) -> None:
                 cel_worker(client, settings.cel_socket, profile, store, max_concurrent=settings.cel_max_concurrent)
             )
 
+        plugin_calls = PluginCallServer(sessionmaker, network, plugins, engine=engine)  # plugins-3 D3
+
         async def stop() -> None:
+            plugin_calls.stop()
             await asyncio.gather(*(w.shutdown() for w in workers))
 
         tasks = [w.run() for w in workers]
+        tasks.append(plugin_calls.run())
         tasks.append(watch(lambda: self_check(keyring, sessionmaker), report, stop))
         if settings.worker_set_current:
             tasks.append(promote(client))

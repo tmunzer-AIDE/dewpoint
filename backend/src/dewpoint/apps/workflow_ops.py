@@ -24,12 +24,15 @@ from dewpoint.engine.graph.diagnostics import Diagnostic
 from dewpoint.engine.graph.model import Graph, GraphFormatError, graph_hash, graph_json, parse_graph, version_hash
 from dewpoint.engine.graph.validate import (
     MAX_SUBFLOW_DEPTH,
+    PICKER,
     SubflowInfo,
     ValidationContext,
     ValidationResult,
+    picker_refs,
     referenced_workflows,
     validate,
 )
+from dewpoint.engine.graph.values import pointer_str
 from dewpoint.engine.registry.catalog import Catalog, spec_from_manifest
 from dewpoint.engine.runtime.bounds import BoundError, pinned
 from dewpoint.engine.runtime.program import compile_program
@@ -57,7 +60,7 @@ async def check_draft(s: AsyncSession, tenant_id: uuid.UUID, draft: Any, setting
         graph = parse_graph(draft)
     except GraphFormatError as e:
         return Checked(None, list(e.diagnostics), {}, None)
-    rows = await registry.load_node_types(s, {n.type for n in graph.nodes})
+    rows = await registry.load_node_types(s, {n.type for n in graph.nodes} | picker_refs(graph))
     catalog = Catalog(spec_from_manifest(r.manifest, r.state) for r in rows)
     pins = await service.active_versions(s, tenant_id, referenced_workflows(graph))
     ctx = ValidationContext(
@@ -192,6 +195,26 @@ async def _connection_errors(
     return errors
 
 
+_PICKER_UNKNOWN = "No connection of this tenant has that id: a picker lists options through one."
+_PICKER_TYPE = "This connection isn't of a type the picker's node may use."
+
+
+async def _picker_errors(
+    s: AsyncSession, tenant_id: uuid.UUID, pickers: tuple[tuple[str, str, str, uuid.UUID, tuple[str, ...]], ...]
+) -> list[Diagnostic]:
+    """Each start-form picker's connection is one of the tenant's, of a type its node may use (plugins-3 D19), locked
+    FOR SHARE as a node's are."""
+    found = await connections.named(s, tenant_id, sorted({named for _, _, _, named, _ in pickers}, key=str))
+    errors: list[Diagnostic] = []
+    for name, _, _, named, allowed in pickers:
+        where = f"/settings/input_schema/properties{pointer_str((name, PICKER))}"
+        if named not in found:
+            errors.append(Diagnostic(code="picker.connection_unknown", message=_PICKER_UNKNOWN, field=where))
+        elif found[named] not in allowed:
+            errors.append(Diagnostic(code="picker.connection_wrong_type", message=_PICKER_TYPE, field=where))
+    return errors
+
+
 async def _pin_abi_errors(s: AsyncSession, pins: list[WorkflowVersion]) -> list[Diagnostic]:
     """Every version a new one would run must be of the ABI it's published for, this build's (spec §7): so a parent is
     published again only after its sub-flows and failure handler."""
@@ -244,6 +267,7 @@ async def publish(
     if errors:
         return Published(None, errors, warnings)
     errors = await _connection_errors(s, ctx.tenant_id, checked.result.connections)
+    errors += await _picker_errors(s, ctx.tenant_id, checked.result.pickers)
     errors += await _closure_connection_errors(
         s, ctx.tenant_id, sorted({i for v in pins for i in v.closure_version_ids}, key=str)
     )
@@ -285,7 +309,11 @@ async def publish(
             declassified=[
                 {"node": node, "field": fld, "reveals": reveals} for node, fld, reveals in checked.result.declassified
             ],
-            connection_ids=sorted({named for _, _, named, _ in checked.result.connections}, key=str),
+            connection_ids=sorted(
+                {named for _, _, named, _ in checked.result.connections}
+                | {named for _, _, _, named, _ in checked.result.pickers},
+                key=str,
+            ),
             graph_hash=authored,
             version_hash=version_hash(
                 graph_hash=authored,

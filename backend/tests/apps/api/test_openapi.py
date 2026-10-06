@@ -68,3 +68,14 @@ def test_slice_4a_routes_name_their_answer(method: str, path: str) -> None:
     ok = next(code for code in responses if code.startswith("2"))
     body = responses[ok]["content"]["application/json"]["schema"]
     assert "$ref" in body or "$ref" in body.get("items", {}), body
+
+
+def test_options_answer_a_named_model() -> None:
+    """Plugin-call options (plugins-3 D3, D19), which the editor's slice 4f calls, answer `OptionsOut`."""
+    paths = schema()["paths"]
+    for path in (
+        "/api/v1/t/{tenant_id}/node-types/{ref}/options",
+        "/api/v1/t/{tenant_id}/workflows/{workflow_id}/input-options",
+    ):
+        answer = paths[path]["post"]["responses"]["200"]["content"]["application/json"]["schema"]
+        assert answer == {"$ref": "#/components/schemas/OptionsOut"}

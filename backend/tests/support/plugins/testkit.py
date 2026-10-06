@@ -8,18 +8,28 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, ClassVar, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from dewpoint.sdk import (
+    CallContext,
+    Connection,
+    ConnectionType,
     Empty,
     FatalError,
+    HeaderAuth,
     Node,
+    Option,
+    OptionsQuery,
     OutcomeUnknownError,
     Plugin,
+    RateScope,
     RetryableError,
     SideEffect,
     StepContext,
+    UrlField,
+    VerifyResult,
     connection_field,
+    options_field,
     sensitive,
 )
 
@@ -376,6 +386,107 @@ class ReconcilableCall(HttpCall):
         return None
 
 
+class PickConfig(BaseModel):
+    connection: uuid.UUID = connection_field("testkit")
+    site_id: str = options_field()
+    note: str = ""
+
+
+class Pick(Node):
+    """Lists its connection's sites as options (plugins-3 D3). The typed text steers it, for tests: `post` writes,
+    `plain` posts through ctx.http, `getbody` sends a GET with a body, `override` a GET
+    that asks to be a DELETE, `echo` returns what the service echoed, `many` too many options, `boom` fails,
+    `slow` takes its time, `other:<id>` opens that connection; anything else is the search."""
+
+    type = "testkit.pick"
+    version = 1
+    title = "Pick a site"
+    icon = "map-pin"
+    Config = PickConfig
+    credentials = ("testkit",)
+
+    async def run(self, ctx: StepContext, config: PickConfig) -> Empty:
+        return Empty()
+
+    async def options(self, ctx: CallContext, field: str, query: OptionsQuery) -> list[Option]:
+        assert query.connection_id is not None
+        if query.text.startswith("other:"):
+            await ctx.connection(uuid.UUID(query.text.removeprefix("other:")))
+        conn = await ctx.connection(query.connection_id)
+        if query.text == "post":
+            await conn.http.request("POST", "/sites")
+        if query.text == "plain":
+            await ctx.http.request("POST", conn.config["base_url"] + "/sites")
+        if query.text == "getbody":
+            await conn.http.request("GET", "/sites", content=b"delete everything")
+        if query.text == "override":
+            await conn.http.request("GET", "/sites", headers={"X-HTTP-Method-Override": "DELETE"})
+        if query.text == "boom":
+            raise RuntimeError("the plugin broke, with a message that must not be logged")
+        if query.text == "slow":
+            await asyncio.sleep(5)
+        if query.text == "many":
+            return [Option(value=str(i), label=f"Site {i}") for i in range(1001)]
+        answer = await conn.http.request("GET", "/sites", params={"q": query.text})
+        if query.text == "echo":
+            return [Option(value="echo", label=answer.content.decode())]
+        return [Option(value=site["id"], label=site["name"]) for site in answer.json()]
+
+
+class MistSitesConfig(BaseModel):
+    connection: uuid.UUID = connection_field("mist")
+    site_id: str = options_field()
+
+
+class MistSites(Node):
+    """A Mist site picker for the 3a-2 proof (plugins-3 D3): the org's sites (`listOrgSites`, `GET
+    /api/v1/orgs/{org_id}/sites`, an array of `site` with `id` and `name`, per the Mist OAS), filtered by the typed
+    text. Test-only: Mist's own nodes come with 3b."""
+
+    type = "testkit.mist_sites"
+    version = 1
+    title = "Pick a Mist site"
+    Config = MistSitesConfig
+    credentials = ("mist",)
+
+    async def run(self, ctx: StepContext, config: MistSitesConfig) -> Empty:
+        return Empty()
+
+    async def options(self, ctx: CallContext, field: str, query: OptionsQuery) -> list[Option]:
+        assert query.connection_id is not None
+        conn = await ctx.connection(query.connection_id)
+        answer = await conn.http.request("GET", f"/api/v1/orgs/{conn.config['org_id']}/sites", params={"limit": 1000})
+        text = query.text.lower()
+        return [Option(value=site["id"], label=site["name"]) for site in answer.json() if text in site["name"].lower()]
+
+
+class TestkitConnectionConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    base_url: str
+
+
+class TestkitSecret(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    token: SecretStr
+
+
+async def _verify_testkit(ctx: CallContext, connection: Connection) -> VerifyResult:
+    answer = await connection.http.request("GET", "/verify")
+    return VerifyResult(answer.status_code == 200, "ok" if answer.status_code == 200 else "unexpected_status")
+
+
+TESTKIT_CONNECTION = ConnectionType(
+    key="testkit",
+    label="Testkit",
+    Config=TestkitConnectionConfig,
+    Secret=TestkitSecret,
+    auth=HeaderAuth("Authorization", "Bearer {token}"),
+    host=UrlField("base_url"),
+    rate_scopes=(RateScope("testkit.token", secret="token", capacity=50, refill_per_s=50),),  # noqa: S106 - a field
+    verify=_verify_testkit,
+)
+
+
 TESTKIT = Plugin(
     name="testkit",
     version="0.0.0",
@@ -393,5 +504,8 @@ TESTKIT = Plugin(
         Leaky,
         HttpCall,
         AmbiguousCall,
+        Pick,
+        MistSites,
     ),  # fmt: skip
+    connection_types=(TESTKIT_CONNECTION,),
 )

@@ -20,8 +20,8 @@ def cli_env(pg_url, monkeypatch):  # type: ignore[no-untyped-def]
     get_settings.cache_clear()
 
 
-def test_entry_points_expose_the_flow_plugin() -> None:
-    assert [p.name for p in installed_plugins()] == ["flow"]
+def test_entry_points_expose_the_first_party_plugins() -> None:
+    assert [p.name for p in installed_plugins()] == ["flow", "mist"]
 
 
 def test_plugins_sync_is_idempotent(cli_env) -> None:  # type: ignore[no-untyped-def]

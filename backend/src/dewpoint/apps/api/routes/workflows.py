@@ -2,18 +2,27 @@
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps import workflow_ops
+from dewpoint.apps.api.deps import get_keyring
+from dewpoint.apps.api.responses import OptionsOut
+from dewpoint.apps.api.routes.node_types import ask_and_wait, options_reply, still_current
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.config import Settings
+from dewpoint.core.connections.declared import declared_types
+from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.http import TenantContext, get_db, get_settings_dep, require
+from dewpoint.core.models.connections import Connection
 from dewpoint.core.models.workflows import Workflow, WorkflowVersion
+from dewpoint.core.plugins import calls, registry
 from dewpoint.core.workflows import service
 from dewpoint.engine.graph.model import GraphFormatError, parse_graph
+from dewpoint.engine.graph.validate import PICKER
 
 router = APIRouter(prefix="/api/v1", tags=["workflows"])
 EMPTY_DRAFT: dict[str, Any] = {"graph_format": 1, "nodes": [], "edges": []}
@@ -241,3 +250,61 @@ async def activate(
         diagnostics = [d.to_json() for d in e.errors]
         raise HTTPException(422, detail={"error": "not_activatable", "diagnostics": diagnostics}) from None
     return {"active_version_id": str(version.id), "number": version.number, "warnings": [w.to_json() for w in warnings]}
+
+
+class InputOptionsIn(BaseModel):
+    field: str = Field(min_length=1, max_length=200)
+    query: str = Field(default="", max_length=200)
+
+
+@router.post("/t/{tenant_id}/workflows/{workflow_id}/input-options", response_model=OptionsOut)
+async def input_options(
+    workflow_id: uuid.UUID,
+    body: InputOptionsIn,
+    request: Request,
+    ctx: TenantContext = Depends(require(P.RUN_START)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+    keyring: Keyring = Depends(get_keyring),
+) -> dict[str, Any]:
+    """A start form's choices for one of its pickers (plugins-3 D19): the picker's node's `options()` on a worker,
+    through the connection the active version's publisher wrote, which anyone who may start the workflow may list."""
+    wf = await _get(db, ctx, workflow_id)
+    version = await service.get_version(db, wf.id, wf.active_version_id) if wf.active_version_id else None
+    if version is None:
+        raise HTTPException(404, detail={"error": "not_published"})
+    if not wf.enabled:  # no wider than a run (the 3a-2 review's finding 5): a disabled workflow can't be started
+        raise HTTPException(409, detail={"error": "workflow_disabled"})
+    props = version.input_schema.get("properties")
+    prop = props.get(body.field) if isinstance(props, dict) else None
+    picker = prop.get(PICKER) if isinstance(prop, dict) else None
+    if not isinstance(picker, dict) or not all(isinstance(picker.get(k), str) for k in ("node", "field", "connection")):
+        raise HTTPException(422, detail={"error": "not_a_picker"})
+    rows = await registry.load_node_types(db, [picker["node"]])
+    row = next((r for r in rows if r.state != "retired"), None)
+    if row is None or picker["field"] not in row.manifest.get("options", []):
+        raise HTTPException(404, detail={"error": "unknown_node_type"})
+    try:
+        connection_id = uuid.UUID(picker["connection"])
+    except ValueError:
+        raise HTTPException(422, detail={"error": "not_a_picker"}) from None
+    conn = (
+        await db.execute(
+            select(Connection).where(Connection.id == connection_id, Connection.tenant_id == ctx.tenant_id)
+        )
+    ).scalar_one_or_none()
+    # Only a connection publish checked and recorded: a version published before pickers were checked may name any.
+    recorded = connection_id in (version.connection_ids or [])
+    kind = (await declared_types(db)).get(conn.type) if conn is not None else None
+    if conn is None or kind is None or not recorded or conn.type not in row.manifest.get("credentials", []):
+        raise HTTPException(422, detail={"error": "connection_unavailable"})
+    revision, type_hash = conn.revision, kind.hash
+
+    async def ask(s: AsyncSession) -> uuid.UUID:
+        return await calls.ask_options(
+            s, ctx.tenant_id, node_ref=row.ref, field=picker["field"], connection_id=connection_id, revision=revision,
+            query=body.query, type_hash=type_hash,
+        )  # fmt: skip
+
+    reply = options_reply(await ask_and_wait(request, db, keyring, ctx.tenant_id, ask))
+    await still_current(request, ctx.tenant_id, connection_id, revision)
+    return reply

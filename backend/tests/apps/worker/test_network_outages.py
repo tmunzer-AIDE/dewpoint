@@ -14,20 +14,14 @@ import pytest
 
 from dewpoint.apps.worker.network import DbConnections, Network
 from dewpoint.apps.worker.store import DbRunStore
-from dewpoint.core.connections.types import CONNECTION_TYPES
 from dewpoint.core.egress.addresses import AllowEntry
 from dewpoint.sdk import NotSent, RateLimited
-from tests.support.connections import TESTKIT_TYPE, add_connection, seed_step
+from tests.support.connections import add_connection, seed_step, types_for_testkit
 from tests.support.keys import FixtureKeys
 from tests.support.netfakes import Request, guard, respond, serve, tls
 from tests.support.plugins.testkit import AmbiguousCall, ReconcilableCall
 
 NAMES = ("dewpoint.test",)
-
-
-@pytest.fixture(autouse=True)
-def testkit_type(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(CONNECTION_TYPES, "testkit", TESTKIT_TYPE)
 
 
 class _Down:
@@ -58,6 +52,7 @@ def _attempt(worker: Any, seeded: Any, node: type, *, connections: Any = None, b
         sessionmaker=buckets or worker,
         keys=FixtureKeys(),
         ssl_context=tls(NAMES).client_context(),
+        types=types_for_testkit(),
     )
     return network.attempt(
         tenant_id=seeded.tenant, run_id=seeded.run, step_id=seeded.step, root_run_id=seeded.run, node=node,

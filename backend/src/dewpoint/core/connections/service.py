@@ -1,24 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
+import re
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
-import httpx
 from cryptography.exceptions import InvalidTag
-from pydantic import BaseModel, SecretStr
 from sqlalchemy import any_, literal, select, update
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
 from dewpoint.core.audit.service import record
-from dewpoint.core.connections.types import CONNECTION_TYPES, ConnectionType
+from dewpoint.core.connections.declared import DeclaredType, declared_types
 from dewpoint.core.crypto.keyring import Keyring
+from dewpoint.core.db import tenant_scope
 from dewpoint.core.http import TenantContext
 from dewpoint.core.models.connections import Connection
 from dewpoint.core.models.requests import RunRequest
 from dewpoint.core.models.workflows import Workflow, WorkflowVersion
+from dewpoint.core.plugins import asking, calls
 from dewpoint.core.ratelimit import scopes as rate_scopes
 from dewpoint.core.ratelimit.buckets import current_cooldowns
 
@@ -28,15 +30,20 @@ PURPOSE = "connection.secret"
 class UnknownTypeError(ValueError): ...
 
 
-def _type(key: str) -> ConnectionType:
-    if key not in CONNECTION_TYPES:
+class SecretRequiredError(ValueError):
+    """The edit moves the connection to another host: its secret must be written again (the 3a-2 review's finding 1)."""
+
+
+async def declared(s: AsyncSession, key: str) -> DeclaredType:
+    """The type as the synced manifests declare it (plugins-3 D11): unknown until `plugins sync` registered it."""
+    found = (await declared_types(s)).get(key)
+    if found is None:
         raise UnknownTypeError(key)
-    return CONNECTION_TYPES[key]
+    return found
 
 
-def _secret_json(model: BaseModel) -> bytes:
-    data = {k: (v.get_secret_value() if isinstance(v, SecretStr) else v) for k, v in model}
-    return json.dumps(data).encode()
+def _secret_json(secret: dict[str, Any]) -> bytes:
+    return json.dumps(secret).encode()
 
 
 async def create_connection(
@@ -49,14 +56,14 @@ async def create_connection(
     config: dict[str, Any],
     secret: dict[str, Any],
 ) -> Connection:
-    ct = _type(type_key)
-    cfg, sec = ct.config_model.model_validate(config), ct.secret_model.model_validate(secret)
+    kind = await declared(s, type_key)
+    cfg, sec = kind.config(config), kind.secret(secret)
     conn = Connection(
         id=uuid.uuid4(),
         tenant_id=ctx.tenant_id,
         type=type_key,
         name=name,
-        config=cfg.model_dump(mode="json"),
+        config=cfg,
         created_by=ctx.user.id,
     )
     conn.secret_ct = await keyring.encrypt(
@@ -86,13 +93,24 @@ async def update_connection(
     config: dict[str, Any] | None,
     secret: dict[str, Any] | None,
 ) -> Connection:
-    ct = _type(conn.type)
+    """`conn` is locked (`get_for_update`): the host rule compares with the config this edit replaces."""
+    kind = await declared(s, conn.type)
+    new_config = kind.config(config) if config is not None else None
+    field = kind.host.get("field") if kind.host is not None else None
+    if (
+        new_config is not None
+        and secret is None
+        and field is not None
+        and kind.secret_schema.get("properties")
+        and new_config.get(field) != (conn.config or {}).get(field)
+    ):
+        raise SecretRequiredError()  # the stored secret never follows a host the person who wrote it didn't choose
     changed: list[str] = []
     if name is not None:
         conn.name = name
         changed.append("name")
-    if config is not None:
-        conn.config = ct.config_model.model_validate(config).model_dump(mode="json")
+    if new_config is not None:
+        conn.config = new_config
         changed.append("config")
     if secret is not None:
         conn.secret_ct = await keyring.encrypt(
@@ -100,7 +118,7 @@ async def update_connection(
             tenant_id=ctx.tenant_id,
             purpose=PURPOSE,
             context=str(conn.id),
-            plaintext=_secret_json(ct.secret_model.model_validate(secret)),
+            plaintext=_secret_json(kind.secret(secret)),
         )
         changed.append("secret")
     if {"config", "secret"} & set(changed):
@@ -125,8 +143,12 @@ class ConnectionInUseError(Exception):
 
 
 async def get_for_update(s: AsyncSession, tenant_id: uuid.UUID, connection_id: uuid.UUID) -> Connection | None:
+    """The connection, locked until the transaction ends, as it is once the lock is held."""
     found = await s.execute(
-        select(Connection).where(Connection.id == connection_id, Connection.tenant_id == tenant_id).with_for_update()
+        select(Connection)
+        .where(Connection.id == connection_id, Connection.tenant_id == tenant_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     return found.scalar_one_or_none()
 
@@ -189,11 +211,15 @@ async def delete_connection(s: AsyncSession, ctx: TenantContext, conn: Connectio
     )
 
 
-async def load_secret(s: AsyncSession, keyring: Keyring, conn: Connection) -> BaseModel:
-    raw = await keyring.decrypt(
-        s, tenant_id=conn.tenant_id, purpose=PURPOSE, context=str(conn.id), blob=conn.secret_ct or b""
-    )
-    return _type(conn.type).secret_model.model_validate_json(raw)
+async def _secret_readable(s: AsyncSession, keyring: Keyring, conn: Connection, kind: DeclaredType) -> bool:
+    try:
+        raw = await keyring.decrypt(
+            s, tenant_id=conn.tenant_id, purpose=PURPOSE, context=str(conn.id), blob=conn.secret_ct or b""
+        )
+        kind.secret(json.loads(raw))
+    except (InvalidTag, ValueError):
+        return False
+    return True
 
 
 class StaleVerificationError(Exception):
@@ -204,30 +230,110 @@ class ConnectionGoneError(Exception):
     """The connection was deleted while it was being verified; the result was discarded."""
 
 
+class VerificationUnansweredError(Exception):
+    """No worker answered in time: nothing was recorded."""
+
+
+type Asker = Callable[[Callable[[AsyncSession], Awaitable[uuid.UUID]]], Awaitable[asking.Outcome]]
+DETAIL_RE = re.compile(r"^[a-z0-9_]{1,40}$")  # what `status_detail` holds
+
+
+def shown_code(code: str | None) -> str:
+    """A worker's failure code as a connection's status shows it: one of the fixed codes, else `unavailable`."""
+    return calls.shown(code)
+
+
+def _checked(answer: dict[str, Any] | None) -> tuple[str, str, str | None]:
+    """A worker's verification answer, checked again: (status, detail, privilege)."""
+    ok, detail, privilege = (answer or {}).get("ok"), (answer or {}).get("detail"), (answer or {}).get("privilege")
+    if (
+        not isinstance(ok, bool)
+        or not isinstance(detail, str)
+        or not DETAIL_RE.match(detail)
+        or not (privilege is None or (isinstance(privilege, str) and len(privilege) <= 40 and privilege.isprintable()))
+    ):
+        return "error", "invalid_result", None
+    return ("ok" if ok else "error"), detail, privilege
+
+
 async def verify_connection(
-    s: AsyncSession, keyring: Keyring, ctx: TenantContext, conn: Connection, http: httpx.AsyncClient
+    s: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    keyring: Keyring,
+    ctx: TenantContext,
+    conn: Connection,
+    ask: Asker,
 ) -> Connection:
-    """Verify the credentials as loaded, then record the result only if they are still the current revision.
-    Raises StaleVerificationError (after auditing it) when an edit committed while the check was in flight."""
-    ct, loaded_revision = _type(conn.type), conn.revision
-    try:
-        secret = await load_secret(s, keyring, conn)
-    except (InvalidTag, ValueError):
-        status, detail, privilege = "error", "secret_unreadable", None
-    else:
-        result = await ct.verify(ct.config_model.model_validate(conn.config), secret, http)
-        status, detail, privilege = ("ok" if result.ok else "error"), result.detail, result.privilege
-    applied = await s.execute(
-        update(Connection)
-        .where(Connection.id == conn.id, Connection.revision == loaded_revision)
-        .values(status=status, status_detail=detail, privilege=privilege, last_verified_at=datetime.now(UTC))
-        .execution_options(synchronize_session=False)
+    """Asks a worker to verify the credentials (plugins-3 D3), then records the result only if they are still the
+    revision verified. Raises StaleVerificationError (after auditing it) when an edit committed while the check was in
+    flight, ConnectionGoneError when the connection was deleted, VerificationUnansweredError when no worker
+    answered.
+
+    Before asking, it ends the request's transaction (`s`), so the wait holds no pooled connection and no lock (the
+    3a-2 review's finding 2); the result is then recorded in a transaction of its own."""
+    kind, loaded_revision = await declared(s, conn.type), conn.revision
+    local: tuple[str, str, str | None] | None = None
+    if not await _secret_readable(s, keyring, conn, kind):
+        local = ("error", "secret_unreadable", None)
+    elif not kind.verify:
+        local = ("error", "unverifiable", None)
+    if local is not None:  # nothing to ask: recorded in the request's own transaction
+        try:
+            return await _record(s, ctx, conn, loaded_revision, local, discarded=False)
+        except (StaleVerificationError, ConnectionGoneError):
+            await s.commit()  # keep the verify_discarded audit entry
+            raise
+    await s.commit()
+    outcome = await ask(
+        lambda inner: calls.ask_verify(
+            inner,
+            ctx.tenant_id,
+            connection_type=conn.type,
+            connection_id=conn.id,
+            revision=loaded_revision,
+            type_hash=kind.hash,
+        )  # fmt: skip
     )
-    if getattr(applied, "rowcount", 0) == 1:
-        # Our UPDATE holds the row lock until commit, so the row can't vanish before this refresh.
-        await s.refresh(conn)  # current row, including concurrent non-credential edits such as a rename
+    if outcome.timed_out:
+        raise VerificationUnansweredError()
+    discarded = outcome.gone or outcome.error == "connection_changed"
+    result = ("error", shown_code(outcome.error), None) if outcome.error is not None else _checked(outcome.answer)
+    failure: Exception | None = None
+    async with sessionmaker() as fresh, fresh.begin():
+        await tenant_scope(fresh, ctx.tenant_id)
+        try:
+            return await _record(fresh, ctx, conn, loaded_revision, result, discarded=discarded)
+        except (StaleVerificationError, ConnectionGoneError) as e:
+            failure = e  # raised once the discard's audit entry is committed
+    assert failure is not None  # noqa: S101 - set whenever the block didn't return
+    raise failure
+
+
+async def _record(
+    s: AsyncSession,
+    ctx: TenantContext,
+    conn: Connection,
+    loaded_revision: int,
+    result: tuple[str, str, str | None],
+    *,
+    discarded: bool,
+) -> Connection:
+    """The verification's result, applied only to the revision verified (compare-and-set), and audited either way."""
+    status, detail, privilege = result
+    applied = None
+    if not discarded:
+        applied = await s.execute(
+            update(Connection)
+            .where(Connection.id == conn.id, Connection.revision == loaded_revision)
+            .values(status=status, status_detail=detail, privilege=privilege, last_verified_at=datetime.now(UTC))
+            .execution_options(synchronize_session=False)
+        )
+    if applied is not None and getattr(applied, "rowcount", 0) == 1:
+        # Our UPDATE holds the row lock until commit, so the row can't vanish before this read.
+        current = (await s.execute(select(Connection).where(Connection.id == conn.id))).scalar_one()
+        await s.refresh(current)  # current row, including concurrent non-credential edits such as a rename
         await _audit_verify(s, ctx, conn.id, "connection.verify", status, loaded_revision, None)
-        return conn
+        return current
     # Not applied: the connection was deleted, or its credentials changed, while the check was in flight.
     exists = (await s.execute(select(Connection.id).where(Connection.id == conn.id))).first() is not None
     reason = "edited" if exists else "deleted"
@@ -280,18 +386,25 @@ class _KeyringSealer:
 async def cooldowns(s: AsyncSession, keyring: Keyring, conn: Connection) -> list[dict[str, str]] | None:
     """Each of the connection's quota scopes now cooling down (plugins-3 D10): its kind and its current cooldown, a live
     value that can change, not a record of a failed attempt's deadline; never the scope's key. None when the scopes
-    can't be computed (an unreadable secret)."""
-    ct = _type(conn.type)
-    if ct.rate_scopes is None:
+    can't be computed (an unknown type, an unreadable secret)."""
+    try:
+        kind = await declared(s, conn.type)
+    except UnknownTypeError:
+        return None
+    if not kind.rate_scopes:
         return []
     try:
-        secret = await load_secret(s, keyring, conn)
+        config = kind.config(conn.config)  # first: a config the declaration refuses never meets the secret
+        raw = await keyring.decrypt(
+            s, tenant_id=conn.tenant_id, purpose=PURPOSE, context=str(conn.id), blob=conn.secret_ct or b""
+        )
+        secret = kind.secret(json.loads(raw))
         key = await rate_scopes.scope_key(s, _KeyringSealer(s, keyring), conn.tenant_id, create=False)
-    except (InvalidTag, ValueError):
+        # No scope key yet: no worker has charged a credential scope, so none can be cooling down; others still count.
+        hasher = rate_scopes.credential_hasher(key) if key is not None else (lambda credential: "-")
+        scopes = kind.scopes(config, secret, hasher)
+    except (InvalidTag, ValueError, KeyError, TypeError):
         return None
-    # No scope key yet: no worker has charged a credential scope, so none can be cooling down; the others still count.
-    hasher = rate_scopes.credential_hasher(key) if key is not None else (lambda credential: "-")
-    scopes = ct.rate_scopes(ct.config_model.model_validate(conn.config), hasher, secret)
     found = await current_cooldowns(s, conn.tenant_id, [scope.key for scope in scopes])
     return sorted(
         ({"scope": key.split(":", 1)[0], "until": until.isoformat()} for key, until in found.items()),

@@ -8,8 +8,9 @@ from pydantic import BaseModel
 from pydantic.json_schema import GenerateJsonSchema
 from pydantic_core import core_schema
 
-from dewpoint.sdk.fields import CONNECTION
-from dewpoint.sdk.node import MAX_RETRY_ATTEMPTS, PORT_RE, RESERVED_PORTS, TYPE_RE, Node, NodeKind, SideEffect
+from dewpoint.sdk.connections import ConnectionType
+from dewpoint.sdk.fields import CONNECTION, OPTIONS
+from dewpoint.sdk.node import ICON_RE, MAX_RETRY_ATTEMPTS, PORT_RE, RESERVED_PORTS, TYPE_RE, Node, NodeKind, SideEffect
 from dewpoint.sdk.version import SDK_VERSION
 
 PLUGIN_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
@@ -159,27 +160,49 @@ def _retry_problems(name: str, node: type[Node]) -> list[str]:
     return out
 
 
-def _connection_problems(name: str, node: type[Node]) -> list[str]:
-    """A connection field (plugins-3 D6) is a top-level config property whose type the node lists in `credentials`:
-    publish and the worker look for connections only there."""
-    schema = node.Config.model_json_schema(mode="validation")
+def _nested(schema: dict[str, Any], marker: str) -> bool:
+    """Whether `marker` appears anywhere but on a top-level property."""
     top = schema.get("properties", {})
-    out: list[str] = []
-    for prop, sub in top.items():
-        wanted = sub.get(CONNECTION) if isinstance(sub, dict) else None
-        if wanted is not None and wanted not in node.credentials:
-            out.append(f"{name}: connection field {prop!r} needs {wanted!r} in credentials")
     stack: list[Any] = [(k, v) for k, v in schema.items() if k != "properties"]
-    stack += [(k, v) for sub in top.values() if isinstance(sub, dict) for k, v in sub.items() if k != CONNECTION]
+    stack += [(k, v) for sub in top.values() if isinstance(sub, dict) for k, v in sub.items() if k != marker]
     while stack:
         key, value = stack.pop()
-        if key == CONNECTION:
-            out.append(f"{name}: a connection field must be a top-level config property")
-            break
+        if key == marker:
+            return True
         if isinstance(value, dict):
             stack.extend(value.items())
         elif isinstance(value, list):
             stack.extend(("", item) for item in value)
+    return False
+
+
+def _connection_problems(name: str, node: type[Node]) -> list[str]:
+    """A connection field (plugins-3 D6) is a top-level config property whose type the node lists in `credentials`:
+    publish and the worker look for connections only there."""
+    schema = node.Config.model_json_schema(mode="validation")
+    out: list[str] = []
+    for prop, sub in schema.get("properties", {}).items():
+        wanted = sub.get(CONNECTION) if isinstance(sub, dict) else None
+        if wanted is not None and wanted not in node.credentials:
+            out.append(f"{name}: connection field {prop!r} needs {wanted!r} in credentials")
+    if _nested(schema, CONNECTION):
+        out.append(f"{name}: a connection field must be a top-level config property")
+    return out
+
+
+def options_fields(node: type[Node]) -> list[str]:
+    """The node's options fields (plugins-3 D3): top-level config properties marked `options_field`."""
+    props = node.Config.model_json_schema(mode="validation").get("properties", {})
+    return sorted(prop for prop, sub in props.items() if isinstance(sub, dict) and sub.get(OPTIONS) is True)
+
+
+def _options_problems(name: str, node: type[Node]) -> list[str]:
+    """The API asks for options only for a top-level field the manifest lists, and the node answers them."""
+    out: list[str] = []
+    if _nested(node.Config.model_json_schema(mode="validation"), OPTIONS):
+        out.append(f"{name}: an options field must be a top-level config property")
+    if options_fields(node) and node.options is Node.options:
+        out.append(f"{name}: a node with options fields must implement options()")
     return out
 
 
@@ -202,6 +225,9 @@ def _problems(node: type[Node]) -> list[str]:
         out.append(f"{name}: dynamic_ports names unknown config field {node.dynamic_ports!r}")
     out += _retry_problems(name, node)
     out += _connection_problems(name, node)
+    out += _options_problems(name, node)
+    if node.icon is not None and (not isinstance(node.icon, str) or not ICON_RE.match(node.icon)):
+        out.append(f"{name}: icon must name a first-party icon (lowercase letters, digits and dashes)")
     out += [f"{name}: {problem}" for problem in _serializer_problems(node.Output.__pydantic_core_schema__)]
     if node.timeout.total_seconds() <= 0:
         out.append(f"{name}: timeout must be positive")
@@ -218,7 +244,7 @@ def node_manifest(node: type[Node]) -> dict[str, Any]:
     if problems:
         raise ManifestError(problems)
     r = node.retry
-    return {
+    out: dict[str, Any] = {
         "type": node.type,
         "version": node.version,
         "kind": node.kind.value,
@@ -242,6 +268,12 @@ def node_manifest(node: type[Node]) -> dict[str, Any]:
         },
         "timeout_s": node.timeout.total_seconds(),
     }
+    # Each only when set, so the hashes of nodes without them don't move (plugins-3 D12).
+    if node.icon is not None:
+        out["icon"] = node.icon
+    if fields := options_fields(node):
+        out["options"] = fields
+    return out
 
 
 @dataclass(frozen=True)
@@ -249,6 +281,7 @@ class Plugin:
     name: str
     version: str
     nodes: tuple[type[Node], ...]
+    connection_types: tuple[ConnectionType, ...] = ()
 
     def manifest(self) -> dict[str, Any]:
         problems: list[str] = []
@@ -269,6 +302,21 @@ class Plugin:
                 problems.append(f"{ref}: duplicate node type version")
             seen.add(ref)
             nodes.append(m)
+        kinds: list[dict[str, Any]] = []
+        for kind in self.connection_types:
+            found = kind.problems()
+            if kind.key != self.name and not kind.key.startswith(f"{self.name}."):
+                found.append(f"connection type {kind.key!r} must be named {self.name!r} or start with '{self.name}.'")
+            if any(k["key"] == kind.key for k in kinds):
+                found.append(f"duplicate connection type {kind.key!r}")
+            problems += found
+            if not found:
+                kinds.append(kind.manifest())
+        if not self.nodes and not self.connection_types:
+            problems.append(f"plugin {self.name!r} declares nothing: no node and no connection type")
         if problems:
             raise ManifestError(problems)
-        return {"name": self.name, "version": self.version, "sdk_version": SDK_VERSION, "nodes": nodes}
+        out: dict[str, Any] = {"name": self.name, "version": self.version, "sdk_version": SDK_VERSION, "nodes": nodes}
+        if kinds:
+            out["connection_types"] = kinds
+        return out

@@ -10,9 +10,11 @@ Run `plugins sync` with the `dewpoint_admin` database credentials, before the ne
 DEWPOINT_DATABASE_URL=postgresql+asyncpg://dewpoint_admin_login:...@postgres/dewpoint dewpoint plugins sync
 ```
 
-It registers every node type version the build contains, and this build's CEL profile. It refuses to proceed (exit 2) when:
+It registers every node type version the build contains, the connection types its plugins declare (the API knows a
+connection type, `mist` included, only once a sync registered it: until then, creating one is refused as
+`unknown_type`), and this build's CEL profile. It refuses to proceed (exit 2) when:
 
-- **a registered version's contract changed.** Anything other than its title, description or schema annotations (`title`, `description`, `examples`, `x-widget`, `x-group`) differs from what was registered: schemas, ports, kind, side effect, credentials, capabilities, retry policy or timeout. Ship the change as a new version (`type@N+1`) with a config migration. Display-only changes are stored in place.
+- **a registered version's contract changed.** Anything other than its title, description, icon or schema annotations (`title`, `description`, `examples`, `x-widget`, `x-group`) differs from what was registered: schemas, ports, kind, side effect, credentials, capabilities, retry policy or timeout. Ship the change as a new version (`type@N+1`) with a config migration. Display-only changes are stored in place.
 - **the build lacks a node type that isn't retired.** Published versions may still need it. Retire it first (below).
 
 ## Deprecate, migrate, retire

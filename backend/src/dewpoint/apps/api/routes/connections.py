@@ -2,7 +2,6 @@
 import uuid
 from typing import Any
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select
@@ -13,10 +12,11 @@ from dewpoint.apps.api.deps import get_keyring
 from dewpoint.apps.api.responses import ConnectionDetailOut, ConnectionOut, ConnectionTypeOut
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.connections import service
-from dewpoint.core.connections.types import CONNECTION_TYPES, MIST_CLOUDS
+from dewpoint.core.connections.declared import InvalidValueError, declared_types
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.http import TenantContext, active_session, get_db, require
 from dewpoint.core.models.connections import Connection
+from dewpoint.core.plugins import asking
 
 router = APIRouter(prefix="/api/v1", tags=["connections"])
 
@@ -34,11 +34,9 @@ class ConnectionPatchIn(BaseModel):
     secret: dict[str, Any] | None = None
 
 
-def _http(request: Request) -> httpx.AsyncClient:
-    return request.app.state.http  # type: ignore[no-any-return]
-
-
-def _invalid(exc: ValidationError) -> HTTPException:
+def _invalid(exc: ValidationError | InvalidValueError) -> HTTPException:
+    if isinstance(exc, InvalidValueError):
+        return HTTPException(422, detail={"error": "invalid", "fields": exc.fields})
     return HTTPException(
         422, detail={"error": "invalid", "fields": [".".join(map(str, e["loc"])) for e in exc.errors()]}
     )
@@ -61,17 +59,9 @@ async def _get(db: AsyncSession, ctx: TenantContext, connection_id: uuid.UUID) -
     response_model=list[ConnectionTypeOut],
     response_model_exclude_unset=True,
 )
-async def connection_types() -> list[dict[str, object]]:
-    return [
-        {
-            "key": t.key,
-            "label": t.label,
-            "config_schema": t.config_model.model_json_schema(),
-            "secret_fields": list(t.secret_model.model_fields),
-            **({"clouds": MIST_CLOUDS} if t.key == "mist" else {}),
-        }
-        for t in CONNECTION_TYPES.values()
-    ]
+async def connection_types(db: AsyncSession = Depends(get_db, scope="function")) -> list[dict[str, object]]:
+    """The types the synced plugins declare (plugins-3 D11), by key."""
+    return [t.listing() for _, t in sorted((await declared_types(db)).items())]
 
 
 @router.get("/t/{tenant_id}/connections", response_model=list[ConnectionOut])
@@ -95,7 +85,7 @@ async def create(
         )
     except service.UnknownTypeError:
         raise HTTPException(422, detail={"error": "unknown_type"}) from None
-    except ValidationError as e:
+    except (ValidationError, InvalidValueError) as e:
         raise _invalid(e) from None
     except IntegrityError:
         raise HTTPException(409, detail={"error": "name_taken"}) from None
@@ -121,12 +111,20 @@ async def patch(
     db: AsyncSession = Depends(get_db, scope="function"),
     keyring: Keyring = Depends(get_keyring),
 ) -> dict[str, object]:
-    conn = await _get(db, ctx, connection_id)
+    # Locked, and so read as it is now: the host rule compares with the stored config an edit will replace (the
+    # owner's review of 3a-2, finding 1), never with a copy a concurrent edit has since changed.
+    conn = await service.get_for_update(db, ctx.tenant_id, connection_id)
+    if conn is None:
+        raise HTTPException(404, detail={"error": "not_found"})
     try:
         conn = await service.update_connection(
             db, keyring, ctx, conn, name=body.name, config=body.config, secret=body.secret
         )
-    except ValidationError as e:
+    except service.UnknownTypeError:
+        raise HTTPException(422, detail={"error": "unknown_type"}) from None
+    except service.SecretRequiredError:
+        raise HTTPException(422, detail={"error": "secret_required"}) from None
+    except (ValidationError, InvalidValueError) as e:
         raise _invalid(e) from None
     except IntegrityError:
         raise HTTPException(409, detail={"error": "name_taken"}) from None
@@ -157,12 +155,26 @@ async def verify(
     db: AsyncSession = Depends(get_db, scope="function"),
     keyring: Keyring = Depends(get_keyring),
 ) -> dict[str, object]:
+    """Verified by the type's `verify()` on a worker (plugins-3 D3): the API sends nothing itself."""
+
+    async def ask(call: Any) -> asking.Outcome:
+        try:
+            return await asking.ask_and_wait(request.app.state.sessionmaker, keyring, ctx.tenant_id, call)
+        except asking.BusyError:
+            raise HTTPException(503, detail={"error": "plugin_calls_busy"}) from None
+        except asking.TooManyCallsError:
+            raise HTTPException(429, detail={"error": "too_many_plugin_calls"}) from None
+
     try:
-        conn = await service.verify_connection(db, keyring, ctx, await _get(db, ctx, connection_id), _http(request))
-    except service.StaleVerificationError:
-        await db.commit()  # keep the verify_discarded audit entry
+        conn = await service.verify_connection(
+            db, request.app.state.sessionmaker, keyring, ctx, await _get(db, ctx, connection_id), ask
+        )
+    except service.UnknownTypeError:
+        raise HTTPException(422, detail={"error": "unknown_type"}) from None
+    except service.VerificationUnansweredError:
+        raise HTTPException(504, detail={"error": "plugin_call_timeout"}) from None
+    except service.StaleVerificationError:  # its verify_discarded audit entry is committed
         raise HTTPException(409, detail={"error": "changed_during_verification"}) from None
     except service.ConnectionGoneError:
-        await db.commit()  # keep the verify_discarded audit entry
         raise HTTPException(404, detail={"error": "not_found"}) from None
     return service.to_out(conn)

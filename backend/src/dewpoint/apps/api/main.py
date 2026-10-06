@@ -2,7 +2,6 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-import httpx
 from fastapi import FastAPI
 
 from dewpoint.apps.api.errors import install_error_handlers
@@ -26,7 +25,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
-        await app.state.http.aclose()
         await app.state.engine.dispose()
 
     app = FastAPI(title=TITLE, docs_url=None, redoc_url=None, openapi_url=OPENAPI_URL, lifespan=lifespan)
@@ -38,7 +36,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Webhook endpoints' secrets (engine 2b spec §8.3): without the ingress key, nothing that seals one is written.
     app.state.ingress_key = IngressKey.from_settings(settings) if settings.ingress_key_b64 else None
     # Created eagerly (not in the lifespan) so ASGI test transports, which skip lifespan, get it too.
-    app.state.http = httpx.AsyncClient(timeout=10, follow_redirects=False)
     app.add_middleware(
         BodyLimitMiddleware,
         max_bytes=settings.max_request_body_bytes,

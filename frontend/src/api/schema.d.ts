@@ -352,7 +352,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Connection Types */
+        /**
+         * Connection Types
+         * @description The types the synced plugins declare (plugins-3 D11), by key.
+         */
         get: operations["connection_types_api_v1_connection_types_get"];
         put?: never;
         post?: never;
@@ -485,7 +488,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Verify */
+        /**
+         * Verify
+         * @description Verified by the type's `verify()` on a worker (plugins-3 D3): the API sends nothing itself.
+         */
         post: operations["verify_api_v1_t__tenant_id__connections__connection_id__verify_post"];
         delete?: never;
         options?: never;
@@ -578,6 +584,27 @@ export interface paths {
         head?: never;
         /** Change */
         patch: operations["change_api_v1_t__tenant_id__members__user_id__patch"];
+        trace?: never;
+    };
+    "/api/v1/t/{tenant_id}/node-types/{ref}/options": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Node Options
+         * @description The choices for one of a node type's options fields, from its `options()` on a worker (plugins-3 D3), through
+         *     the connection the editor names, which the person must be allowed to use.
+         */
+        post: operations["node_options_api_v1_t__tenant_id__node_types__ref__options_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/t/{tenant_id}/runs": {
@@ -914,6 +941,27 @@ export interface paths {
         /** Put Draft */
         put: operations["put_draft_api_v1_t__tenant_id__workflows__workflow_id__draft_put"];
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/input-options": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Input Options
+         * @description A start form's choices for one of its pickers (plugins-3 D19): the picker's node's `options()` on a worker,
+         *     through the connection the active version's publisher wrote, which anyone who may start the workflow may list.
+         */
+        post: operations["input_options_api_v1_t__tenant_id__workflows__workflow_id__input_options_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1341,6 +1389,16 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
+        /** InputOptionsIn */
+        InputOptionsIn: {
+            /** Field */
+            field: string;
+            /**
+             * Query
+             * @default
+             */
+            query?: string;
+        };
         /** LoginIn */
         LoginIn: {
             /** Email */
@@ -1379,6 +1437,33 @@ export interface components {
             role: "owner" | "admin" | "editor" | "operator" | "viewer";
             /** User Id */
             user_id: string;
+        };
+        /** OptionOut */
+        OptionOut: {
+            /** Label */
+            label: string;
+            /** Value */
+            value: string;
+        };
+        /** OptionsIn */
+        OptionsIn: {
+            /** Connection Id */
+            connection_id?: string | null;
+            /** Field */
+            field: string;
+            /**
+             * Query
+             * @default
+             */
+            query?: string;
+        };
+        /**
+         * OptionsOut
+         * @description A node's options, from its `options()` on a worker (plugins-3 D3), for the editor or a start form's picker.
+         */
+        OptionsOut: {
+            /** Options */
+            options: components["schemas"]["OptionOut"][];
         };
         /** PasskeyOptionsOut */
         PasskeyOptionsOut: {
@@ -2761,6 +2846,42 @@ export interface operations {
             };
         };
     };
+    node_options_api_v1_t__tenant_id__node_types__ref__options_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                ref: string;
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OptionsIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OptionsOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_runs_api_v1_t__tenant_id__runs_get: {
         parameters: {
             query?: {
@@ -3676,6 +3797,42 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    input_options_api_v1_t__tenant_id__workflows__workflow_id__input_options_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workflow_id: string;
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InputOptionsIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OptionsOut"];
                 };
             };
             /** @description Validation Error */

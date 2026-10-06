@@ -60,7 +60,7 @@ from dewpoint.engine.graph.values import (
 )
 from dewpoint.engine.handles import RESERVED, contains_marker
 from dewpoint.engine.registry import control as C
-from dewpoint.engine.registry.catalog import Catalog, NodeTypeSpec
+from dewpoint.engine.registry.catalog import Catalog, NodeTypeSpec, marked_below_top
 from dewpoint.engine.schema_refs import PREFIX as REF_PREFIX
 from dewpoint.engine.schema_refs import ref_problems, subschemas
 from dewpoint.engine.sensitive import SENSITIVE, expand, is_marked, marked_positions, resolve
@@ -127,6 +127,8 @@ class ValidationResult:
     output_taint: Mapping[str, Any] = field(default_factory=dict)  # each workflow output's `Shape`, as JSON
     # (node id, field, connection id, type) of every connection a node's config names (plugins-3 D6)
     connections: tuple[tuple[str, str, uuid.UUID, str], ...] = ()
+    # (input field, node ref, options field, connection id, the types it may be) of every start-form picker (D19)
+    pickers: tuple[tuple[str, str, str, uuid.UUID, tuple[str, ...]], ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -1262,8 +1264,78 @@ class _CelSite:
         self.v.err(code, message, node=self.site.node, fld=self.site.field, fix=fix, severity=severity)
 
 
+PICKER = "x-dewpoint-picker"  # a start-form field listing a node type's options through a connection (plugins-3 D19)
+_PICKER_KEYS = frozenset({"node", "field", "connection"})
+_PICKER_INVALID = "A picker is {node: a node type version, field: one of its options fields, connection: a UUID}."
+_PICKER_NODE = "No active node type of that version: a picker needs one."
+_PICKER_FIELD = "That field isn't one the node type lists options for."
+_PICKER_STRING = "A picked value is text: the field must be of type string."
+_PICKER_TOP = "A picker is a top-level field of the input schema: the start form shows only those."
+
+type Picker = tuple[str, str, str, uuid.UUID, tuple[str, ...]]
+
+
+def picker_refs(graph: Graph) -> set[str]:
+    """The node type versions the start-form pickers name, which the catalog must hold to check them."""
+    props = graph.settings.input_schema.get("properties")
+    found: set[str] = set()
+    for prop in props.values() if isinstance(props, Mapping) else ():
+        picker = prop.get(PICKER) if isinstance(prop, Mapping) else None
+        node = picker.get("node") if isinstance(picker, Mapping) else None
+        if isinstance(node, str) and "@" in node:
+            found.add(node)
+    return found
+
+
+def _pickers(graph: Graph, catalog: Catalog) -> tuple[list[Diagnostic], list[Picker]]:
+    """Every start-form picker (plugins-3 D19): its shape and its node's options field here, its connection at
+    publish (which records it, so it can't be deleted while it's in use)."""
+    schema = graph.settings.input_schema
+    props = schema.get("properties") if isinstance(schema, Mapping) else None
+    out: list[Diagnostic] = []
+    found: list[Picker] = []
+    for name, prop in props.items() if isinstance(props, Mapping) else ():
+        if not isinstance(prop, Mapping) or PICKER not in prop:
+            continue
+        where = f"/settings/input_schema/properties{pointer_str((name, PICKER))}"
+        picker = prop[PICKER]
+        if (
+            not isinstance(picker, Mapping)
+            or set(picker) != _PICKER_KEYS
+            or not all(isinstance(picker[k], str) for k in _PICKER_KEYS)
+        ):
+            out.append(Diagnostic(code="picker.invalid", field=where, message=_PICKER_INVALID))
+            continue
+        try:
+            connection = uuid.UUID(picker["connection"])
+        except ValueError:
+            out.append(Diagnostic(code="picker.invalid", field=where, message=_PICKER_INVALID))
+            continue
+        spec = catalog.get(picker["node"])
+        if spec is None or spec.state == "retired":
+            out.append(Diagnostic(code="picker.unknown_node", field=where, message=_PICKER_NODE))
+        elif picker["field"] not in spec.options:
+            out.append(Diagnostic(code="picker.not_an_options_field", field=where, message=_PICKER_FIELD))
+        elif prop.get("type") != "string":
+            out.append(Diagnostic(code="picker.not_a_string", field=where, message=_PICKER_STRING))
+        else:
+            found.append((str(name), spec.ref, picker["field"], connection, spec.credentials))
+    if isinstance(schema, Mapping) and marked_below_top(schema, PICKER):
+        out.append(Diagnostic(code="picker.not_top_level", field="/settings/input_schema", message=_PICKER_TOP))
+    return out, found
+
+
+def picker_problems(diagnostics: Sequence[Diagnostic]) -> bool:
+    return any(d.code.startswith("picker.") for d in diagnostics)
+
+
 def validate(graph: Graph, ctx: ValidationContext) -> ValidationResult:
     settings = _settings(graph)
+    if not any((d.field or "").startswith("/settings/input_schema") for d in settings):
+        picker_diags, pickers = _pickers(graph, ctx.catalog)
+        settings += picker_diags
+    else:
+        pickers = []
     structure, structural = analyze_structure(graph, ctx.catalog)
     node_refs = tuple(sorted({n.type for n in graph.nodes}))
     if structure is None:
@@ -1295,4 +1367,5 @@ def validate(graph: Graph, ctx: ValidationContext) -> ValidationResult:
         output_taint=dict(v.output_taint),
         declassified=declassified,
         connections=tuple(sorted(v.connections, key=lambda c: (c[0], c[1]))),
+        pickers=tuple(pickers) if not picker_problems(settings) else (),
     )
