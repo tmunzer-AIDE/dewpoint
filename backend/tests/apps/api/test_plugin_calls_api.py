@@ -423,3 +423,25 @@ async def test_a_tenant_has_a_bounded_number_of_calls_outstanding(
             )
         r = await c.post(_options(tid), json={"field": "site_id", "connection_id": cid, "query": ""})
     assert (r.status_code, r.json()) == (429, {"error": "too_many_plugin_calls"})
+
+
+async def test_a_start_form_lists_nothing_a_run_couldnt_use(
+    app, owner_sessionmaker, api_settings, unserved, fake
+) -> None:
+    """No wider than a run (the 3a-2 review's finding 5): a disabled workflow's form lists nothing, nor does a picker
+    whose connection its version didn't record (one published before pickers were checked)."""
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    async with c:
+        wid = await _published_with_a_picker(c, tid, fake[1].port)
+        url = f"/api/v1/t/{tid}/workflows/{wid}/input-options"
+        async with owner_sessionmaker() as s, s.begin():
+            await s.execute(
+                text("update workflow_versions set connection_ids = '{}' where workflow_id = :w"), {"w": wid}
+            )
+        unrecorded = await c.post(url, json={"field": "site", "query": ""})
+        disabled = await c.patch(f"/api/v1/t/{tid}/workflows/{wid}", json={"enabled": False})
+        assert disabled.status_code == 200, disabled.text
+        off = await c.post(url, json={"field": "site", "query": ""})
+    assert (unrecorded.status_code, unrecorded.json()) == (422, {"error": "connection_unavailable"})
+    assert (off.status_code, off.json()) == (409, {"error": "workflow_disabled"})
+    assert await _calls_left(owner_sessionmaker) == 0

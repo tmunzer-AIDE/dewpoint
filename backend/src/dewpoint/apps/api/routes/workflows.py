@@ -270,6 +270,8 @@ async def input_options(
     version = await service.get_version(db, wf.id, wf.active_version_id) if wf.active_version_id else None
     if version is None:
         raise HTTPException(404, detail={"error": "not_published"})
+    if not wf.enabled:  # no wider than a run (the 3a-2 review's finding 5): a disabled workflow can't be started
+        raise HTTPException(409, detail={"error": "workflow_disabled"})
     props = version.input_schema.get("properties")
     prop = props.get(body.field) if isinstance(props, dict) else None
     picker = prop.get(PICKER) if isinstance(prop, dict) else None
@@ -288,7 +290,9 @@ async def input_options(
             select(Connection).where(Connection.id == connection_id, Connection.tenant_id == ctx.tenant_id)
         )
     ).scalar_one_or_none()
-    if conn is None or conn.type not in row.manifest.get("credentials", []):
+    # Only a connection publish checked and recorded: a version published before pickers were checked may name any.
+    recorded = connection_id in (version.connection_ids or [])
+    if conn is None or not recorded or conn.type not in row.manifest.get("credentials", []):
         raise HTTPException(422, detail={"error": "connection_unavailable"})
     revision = conn.revision
 
