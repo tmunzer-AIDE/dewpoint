@@ -19,14 +19,16 @@ from dewpoint.engine.graph.model import GraphFormatError, graph_hash, parse_grap
 
 ATTENTION_STATUSES = ("failed", "deadline_exceeded")
 
-# Each workflow's last root run of each mode, in one statement for every workflow (4b ruling 5): one ordered lookup
-# of `runs_workflow_last` (migration 0047) per workflow and mode, however long its history; a workflow and mode with
-# no root run give no row. The mode is a lower bound that leads the order, checked for equality outside the lookup
-# (ledger M5). As an equality inside it, the planner drops it from the order, and `runs_tenant_queued (tenant_id,
-# queued_at DESC, id DESC)` then serves the order too: on a live-only history it chose that index, reading the
-# tenant's whole history for each workflow and mode with no run. Bounded on both sides, the planner's default range
-# estimate (0.5%) made it sort each workflow's runs of the mode instead of stopping at the first. From below, only
-# `runs_workflow_last` gives the order, and the first row is the mode's newest, or another mode's when it has none.
+# Each workflow's last root run of each mode, in one statement for every workflow (4b ruling 5), meant as one ordered
+# lookup of `runs_workflow_last` (migration 0047) per workflow and mode, however long its history; a workflow and mode
+# with no root run give no row. The mode is a lower bound that leads the order, checked for equality outside the
+# lookup (ledger M5): the first row is the mode's newest, or another mode's when it has none, which the outer
+# equality drops, so the answer is the exact-mode lookup's. Why not an equality inside: the planner then drops the mode
+# from the order, and `runs_tenant_queued (tenant_id, queued_at DESC, id DESC)` serves the order too; on a live-only
+# history it chose that index and read the tenant's whole history for each workflow and mode with no run. Bounded on
+# both sides, its default range estimate (0.5%) made it sort each workflow's runs of the mode. With this form, only
+# `runs_workflow_last` gives the order without a sort, and the probe and the work-unit test observed the ordered scan
+# on every workload they tried; it's what the planner chose there, not a guarantee for every future plan.
 LAST_RUNS = text(
     "select w.id as workflow_id, m.mode, r.status, r.at"
     " from unnest(cast(:ids as uuid[])) as w(id) cross join (values ('live'), ('simulate')) as m(mode)"

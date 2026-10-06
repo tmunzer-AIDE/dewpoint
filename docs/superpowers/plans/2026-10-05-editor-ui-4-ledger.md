@@ -446,7 +446,8 @@ M5. **The last-runs read bounds the mode from below inside each lookup and check
     order but let the planner's default range estimate (0.5%) choose a bitmap scan and a sort of each workflow's runs
     of the mode (11.4 ms at 10k, against 2.5 ms). From below, the estimate is a third, only `runs_workflow_last` gives
     the order, and the first row is the mode's newest, or another mode's when it has none (dropped outside). The probe
-    shows one ordered index scan, stopping at the first row, at every size of both workloads, and the reads' whole
+    observed one ordered index scan, stopping at the first row, at every size of both workloads it tried (the
+    planner's choice there, not a guarantee for every future PostgreSQL plan), and the reads' whole
     results equal; `test_the_last_runs_read_examines_one_run_per_workflow_and_mode` pins the ordered scan on the
     skewed history (it fails on the literal form). - A plan that turns on statistics reads a tenant's whole history
     for a quiet workflow. - None in results (the reads agree whole, and the regression tests compare them); the
@@ -515,3 +516,25 @@ M14. **Two things the screenshots showed** (milestone 3's review evidence): the 
     or a webhook", truncated if a font draws it wider. The list's row menu was three middle dots, which at 13 px merge
     into what reads as a dash; it's now a drawn icon of three square dots (`MoreIcon`), the trigger keeping its name
     ("Actions for …"). - Text outside its card; a menu that didn't look like one. - None.
+
+### Owner, milestone 3 reviewed (2026-10-07, pasted)
+
+M5 accepted: the lower-bound lookup is the exact-mode lookup's answer (the requested mode sorts first when it exists,
+else the outer equality drops the other), tenant and root-run filters inside; its explanation is kept, the ordered
+scan described as observed on the tested workloads, not guaranteed. Milestone 4 approved locally, these carried into
+it; milestone 3 isn't final UI acceptance; no push or PR. Corrections found in 6471c0e: (1) the frontend matches step
+ids by spelling: a graph with lowercase node ids and uppercase edge references drops its edge on the canvas, and a
+deletion leaves an incident edge; identity is matched by UUID across rendering, navigation, connection and cycle
+checks, deletion and declassification, the authored document kept, uppercase and unhyphenated aliases covered, and
+the server's canonical diagnostic ids mapped back to their cards. (2) Undo can strand keyboard focus on a removed item;
+focus stays when its item survives, else goes to a surviving predecessor or the start card; a browser sequence undoes
+and redoes without repairing focus by hand. (3) A creation answer arriving after the dialog was dismissed (and the
+tenant switched) navigated into the abandoned tenant; the cache stays scoped to the original tenant, the abandoned
+dialog neither navigates nor announces, and nothing claims dismissal cancelled the write. (4) File reads can land out
+of order and a failed read escapes; a token keeps only the latest selection, reading and failure are shown, and a late
+read never overwrites a name typed since. Rulings: lazy-load the editor without new dependencies (React Flow and dagre
+out of the cold list and login load, an accessible loading and error state, the CSP gate repeated for lazy JS and CSS,
+the initial load measured); overlapping edge controls on a cycle fixed before final acceptance (independently
+targetable controls or an edge chooser, reciprocal edges and a valid multi-port join covered); the minimap hidden while
+a side panel is open (an accessible overview toggle if needed; the narrow canvas checked; focus never left behind an
+overlay). Proceed inline through Tasks 13-16 with these, then stop at the final checkpoint.
