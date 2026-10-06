@@ -15,13 +15,12 @@ from sqlalchemy.orm import aliased
 from dewpoint.core.audit.service import record
 from dewpoint.core.connections.types import CONNECTION_TYPES, ConnectionType
 from dewpoint.core.crypto.keyring import Keyring
-from dewpoint.core.crypto.keys import digest_key_of
 from dewpoint.core.http import TenantContext
 from dewpoint.core.models.connections import Connection
 from dewpoint.core.models.requests import RunRequest
 from dewpoint.core.models.workflows import Workflow, WorkflowVersion
+from dewpoint.core.ratelimit import scopes as rate_scopes
 from dewpoint.core.ratelimit.buckets import current_cooldowns
-from dewpoint.core.ratelimit.scopes import credential_hasher
 
 PURPOSE = "connection.secret"
 
@@ -261,6 +260,23 @@ async def _audit_verify(
     )
 
 
+class _KeyringSealer:
+    """The keyring as a `Sealer` for the scope key: the claim cipher's layout, within the API's transaction."""
+
+    def __init__(self, s: AsyncSession, keyring: Keyring) -> None:
+        self._s, self._keyring = s, keyring
+
+    async def seal(self, tenant_id: str, context: str, plaintext: bytes) -> bytes:
+        return await self._keyring.encrypt(
+            self._s, tenant_id=uuid.UUID(tenant_id), purpose=rate_scopes.PURPOSE, context=context, plaintext=plaintext
+        )
+
+    async def open(self, tenant_id: str, context: str, blob: bytes) -> bytes:
+        return await self._keyring.decrypt(
+            self._s, tenant_id=uuid.UUID(tenant_id), purpose=rate_scopes.PURPOSE, context=context, blob=blob
+        )
+
+
 async def cooldowns(s: AsyncSession, keyring: Keyring, conn: Connection) -> list[dict[str, str]] | None:
     """Each of the connection's quota scopes now cooling down (plugins-3 D10): its kind and its current cooldown, a live
     value that can change, not a record of a failed attempt's deadline; never the scope's key. None when the scopes
@@ -270,13 +286,12 @@ async def cooldowns(s: AsyncSession, keyring: Keyring, conn: Connection) -> list
         return []
     try:
         secret = await load_secret(s, keyring, conn)
-        _, raw = await keyring.read_dek(s, conn.tenant_id)
+        key = await rate_scopes.scope_key(s, _KeyringSealer(s, keyring), conn.tenant_id, create=False)
     except (InvalidTag, ValueError):
         return None
-    scopes = ct.rate_scopes(
-        ct.config_model.model_validate(conn.config), credential_hasher(digest_key_of(raw, str(conn.tenant_id)),
-                                                                       conn.tenant_id), secret
-    )  # fmt: skip
+    # No scope key yet: no worker has charged a credential scope, so none can be cooling down; the others still count.
+    hasher = rate_scopes.credential_hasher(key) if key is not None else (lambda credential: "-")
+    scopes = ct.rate_scopes(ct.config_model.model_validate(conn.config), hasher, secret)
     found = await current_cooldowns(s, conn.tenant_id, [scope.key for scope in scopes])
     return sorted(
         ({"scope": key.split(":", 1)[0], "until": until.isoformat()} for key, until in found.items()),

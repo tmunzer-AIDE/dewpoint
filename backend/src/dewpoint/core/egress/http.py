@@ -69,28 +69,48 @@ class ResponseUnreadableError(Exception):
         super().__init__("The response can't be read.")
 
 
+def _member(data: bytes, wbits: int, room: int) -> tuple[bytes, bytes]:
+    """One complete compressed stream at the start of `data`, decoded within `room` bytes: (what it decodes to, the data
+    after it). Raises ResponseTooLargeError past the room, ResponseUnreadableError for an incomplete or broken one."""
+    inflater = zlib.decompressobj(wbits)
+    out = bytearray()
+    pending = data
+    try:
+        while pending and not inflater.eof:
+            out += inflater.decompress(pending, room + 1 - len(out))
+            if len(out) > room:
+                raise ResponseTooLargeError()
+            if inflater.unconsumed_tail == pending:  # no progress without the stream ending: broken
+                break
+            pending = inflater.unconsumed_tail
+        if not inflater.eof:
+            out += inflater.flush(room + 1 - len(out))
+    except zlib.error:
+        raise ResponseUnreadableError() from None
+    if len(out) > room:
+        raise ResponseTooLargeError()
+    if not inflater.eof:  # truncated: never taken for the whole answer (the second review's finding 2)
+        raise ResponseUnreadableError()
+    return bytes(out), inflater.unused_data
+
+
 def _inflate(raw: bytes, encoding: str, cap: int) -> bytes:
-    """`raw` decoded, never holding more than the cap: each step inflates at most what's left of it."""
-    attempts = [INFLATABLE[encoding]] + ([-zlib.MAX_WBITS] if encoding == "deflate" else [])  # zlib, then raw deflate
-    for wbits in attempts:
-        inflater = zlib.decompressobj(wbits)
-        out = bytearray()
-        pending = raw
+    """`raw` decoded, never holding more than the cap. Every gzip member is decoded, within the cap together; any data
+    after a deflate stream is refused, as is a stream that doesn't end."""
+    if encoding == "deflate":
         try:
-            while pending:
-                out += inflater.decompress(pending, cap + 1 - len(out))
-                if len(out) > cap:
-                    raise ResponseTooLargeError()
-                if inflater.unconsumed_tail == pending:  # no progress: the stream ended or is broken
-                    break
-                pending = inflater.unconsumed_tail
-            out += inflater.flush(cap + 1 - len(out))
-        except zlib.error:
-            continue
-        if len(out) > cap:
-            raise ResponseTooLargeError()
-        return bytes(out)
-    raise ResponseUnreadableError()
+            out, rest = _member(raw, zlib.MAX_WBITS, cap)  # zlib-wrapped, as the RFC says
+        except ResponseUnreadableError:
+            out, rest = _member(raw, -zlib.MAX_WBITS, cap)  # raw deflate, as some servers send
+        if rest:
+            raise ResponseUnreadableError()
+        return out
+    decoded = bytearray()
+    pending = raw
+    while pending:
+        out, pending = _member(pending, INFLATABLE[encoding], cap - len(decoded))
+        decoded += out
+    return bytes(decoded)
 
 
 @dataclass(frozen=True)

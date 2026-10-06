@@ -162,11 +162,11 @@ async def test_a_connection_shows_its_current_cooldowns(app, owner_sessionmaker,
     """Each quota scope's current cooldown (plugins-3 D10): a live value, the scope's kind only, never its key."""
     from datetime import UTC, datetime, timedelta
 
+    from dewpoint.core.connections.service import _KeyringSealer
     from dewpoint.core.crypto.kek import KekSet
     from dewpoint.core.crypto.keyring import Keyring
-    from dewpoint.core.crypto.keys import digest_key_of
     from dewpoint.core.db import tenant_scope
-    from dewpoint.core.ratelimit.scopes import credential_hasher
+    from dewpoint.core.ratelimit.scopes import credential_hasher, scope_key
 
     c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
     async with c:
@@ -175,8 +175,10 @@ async def test_a_connection_shows_its_current_cooldowns(app, owner_sessionmaker,
         tenant = tid if isinstance(tid, uuid.UUID) else uuid.UUID(tid)
         async with owner_sessionmaker() as s, s.begin():
             await tenant_scope(s, tenant)
-            _, raw = await Keyring(KekSet.from_settings(api_settings)).read_dek(s, tenant)
-            hasher = credential_hasher(digest_key_of(raw, str(tenant)), tenant)
+            keyring = Keyring(KekSet.from_settings(api_settings))
+            key = await scope_key(s, _KeyringSealer(s, keyring), tenant, create=True)  # as a worker makes it
+            assert key is not None
+            hasher = credential_hasher(key)
             insert = text(
                 "insert into rate_buckets (tenant_id, scope, capacity, refill_per_s, tokens, refilled_at, "
                 "blocked_until) values (:t, :s, 50, 1.25, 50, now(), now() + make_interval(secs => :w))"

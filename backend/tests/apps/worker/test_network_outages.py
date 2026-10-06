@@ -114,14 +114,13 @@ async def test_a_reconcilable_node_never_resends_inside_its_attempt(owner_sessio
 
 
 class _FailingBlocks:
-    """Takes tokens from the real database, but fails to record a block."""
+    """Takes tokens from the real database, but fails once the server has the request: recording the block."""
 
-    def __init__(self, worker: Any) -> None:
-        self.worker, self.calls = worker, 0
+    def __init__(self, worker: Any, server: Any) -> None:
+        self.worker, self.server = worker, server
 
     def __call__(self) -> Any:
-        self.calls += 1
-        if self.calls >= 2:  # the first session takes the token; the next one records the block
+        if self.server.requests:
             raise ConnectionRefusedError("database down")
         return self.worker()
 
@@ -129,7 +128,7 @@ class _FailingBlocks:
 async def test_a_block_that_cant_be_recorded_changes_nothing(owner_sessionmaker, worker_sessionmaker) -> None:
     async with serve(_limited_once("1"), tls_names=NAMES) as server:
         seeded, cid = await _setup(owner_sessionmaker, server.port, AmbiguousCall)
-        a = _attempt(worker_sessionmaker, seeded, AmbiguousCall, buckets=_FailingBlocks(worker_sessionmaker))
+        a = _attempt(worker_sessionmaker, seeded, AmbiguousCall, buckets=_FailingBlocks(worker_sessionmaker, server))
         try:
             with pytest.raises(RateLimited):
                 await (await a.connection(cid)).http.request("POST", "/", content=b"once")

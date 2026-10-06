@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""egress_allowlist, the platform admin's exceptions to the outbound guard (plugins-3 D8), and rate_buckets, the
-per-tenant budgets of a provider's quota scopes (D9). Chained from 0034 while 2b-4a holds 0035-0040: whichever merges
+"""egress_allowlist, the platform admin's exceptions to the outbound guard (plugins-3 D8); rate_buckets, the
+per-tenant budgets of a provider's quota scopes (D9); and rate_scope_keys, each tenant's key for a credential's scope,
+sealed under its data key, so a data-key rotation never splits a scope. Chained from 0034 while 2b-4a holds 0035-0040: whichever merges
 second re-points its first down_revision to the other's head (D25)."""
 
 import sqlalchemy as sa
@@ -44,6 +45,14 @@ def upgrade() -> None:
         sa.CheckConstraint("capacity > 0 AND refill_per_s > 0", name="rate_buckets_positive"),
         sa.CheckConstraint("tokens >= 0 AND tokens <= capacity", name="rate_buckets_tokens"),
     )
+    op.create_table(
+        "rate_scope_keys",
+        sa.Column(
+            "tenant_id", pg.UUID(as_uuid=True), sa.ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+        ),
+        sa.Column("sealed", sa.LargeBinary, nullable=False),  # purpose `rate.scope`, the tenant's id as context
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+    )
     for statement in (
         "ALTER TABLE egress_allowlist ENABLE ROW LEVEL SECURITY",
         "ALTER TABLE egress_allowlist FORCE ROW LEVEL SECURITY",
@@ -58,10 +67,17 @@ def upgrade() -> None:
         "USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id())",
         "GRANT SELECT, INSERT, UPDATE ON rate_buckets TO dewpoint_worker",
         "GRANT SELECT ON rate_buckets TO dewpoint_api",
+        "ALTER TABLE rate_scope_keys ENABLE ROW LEVEL SECURITY",
+        "ALTER TABLE rate_scope_keys FORCE ROW LEVEL SECURITY",
+        "CREATE POLICY rate_scope_keys_scope ON rate_scope_keys TO dewpoint_api, dewpoint_worker "
+        "USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id())",
+        "GRANT SELECT, INSERT ON rate_scope_keys TO dewpoint_worker",
+        "GRANT SELECT ON rate_scope_keys TO dewpoint_api",
     ):
         op.execute(statement)
 
 
 def downgrade() -> None:
+    op.drop_table("rate_scope_keys")
     op.drop_table("rate_buckets")
     op.drop_table("egress_allowlist")

@@ -291,3 +291,31 @@ async def test_at_most_three_redirect_hops_can_be_asked_for() -> None:
             await http.request("GET", "http://local.test:1/", follow_same_origin=4)
     finally:
         await http.aclose()
+
+
+async def _decoded(body: bytes, encoding: str, cap: int = 1024 * 1024) -> bytes:
+    async with serve(respond(200, body, [("content-encoding", encoding)])) as server:
+        http = client({"local.test": ["127.0.0.1"]}, HttpLimits(max_response_bytes=cap))
+        try:
+            return (await http.request("GET", f"http://local.test:{server.port}/")).content
+        finally:
+            await http.aclose()
+
+
+async def test_a_truncated_gzip_answer_is_refused() -> None:
+    """The second review's finding 2: an incomplete stream is never taken for the whole answer."""
+    with pytest.raises(ResponseUnreadableError):
+        await _decoded(_gzipped(5000)[:-8], "gzip")
+
+
+async def test_every_gzip_member_is_decoded_within_the_cap() -> None:
+    assert await _decoded(_gzipped(300) + _gzipped(200), "gzip") == b"\0" * 500
+    with pytest.raises(ResponseTooLargeError):
+        await _decoded(_gzipped(800) + _gzipped(800), "gzip", cap=1024)
+
+
+async def test_data_after_a_deflate_stream_is_refused() -> None:
+    import zlib
+
+    with pytest.raises(ResponseUnreadableError):
+        await _decoded(zlib.compress(b"x" * 100) + b"trailing", "deflate")

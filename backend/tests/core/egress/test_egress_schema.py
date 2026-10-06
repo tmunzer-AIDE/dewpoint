@@ -38,7 +38,7 @@ async def add_entry(admin: Any, network: str, tid: uuid.UUID | None, ports: tupl
     return eid
 
 
-@pytest.mark.parametrize("table", ["egress_allowlist", "rate_buckets"])
+@pytest.mark.parametrize("table", ["egress_allowlist", "rate_buckets", "rate_scope_keys"])
 async def test_tables_force_row_level_security(owner_sessionmaker, table: str) -> None:
     async with owner_sessionmaker() as s:
         query = text("select relrowsecurity, relforcerowsecurity from pg_class where relname = :t")
@@ -146,3 +146,24 @@ async def test_tokens_stay_within_capacity(owner_sessionmaker, worker_sessionmak
         async with worker_sessionmaker() as s, s.begin():
             await tenant_scope(s, a)
             await s.execute(BUCKET, {"t": a, "sc": "mist.org:x", "tok": tokens})
+
+
+async def test_the_worker_makes_a_tenants_scope_key_and_the_api_only_reads_it(
+    owner_sessionmaker, api_sessionmaker, worker_sessionmaker
+) -> None:
+    a, b = await tenant(owner_sessionmaker), await tenant(owner_sessionmaker)
+    async with worker_sessionmaker() as s, s.begin():
+        await tenant_scope(s, a)
+        await s.execute(text("insert into rate_scope_keys (tenant_id, sealed) values (:t, '\\x01')"), {"t": a})
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, a)
+        assert (await s.execute(text("select count(*) from rate_scope_keys"))).scalar_one() == 1
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, b)
+        assert (await s.execute(text("select count(*) from rate_scope_keys"))).scalar_one() == 0
+    for statement in ("update rate_scope_keys set sealed = '\\x02'", "delete from rate_scope_keys"):
+        for maker in (api_sessionmaker, worker_sessionmaker):
+            with pytest.raises(DBAPIError, match="permission denied"):
+                async with maker() as s, s.begin():
+                    await tenant_scope(s, a)
+                    await s.execute(text(statement))

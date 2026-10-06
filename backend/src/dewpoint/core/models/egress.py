@@ -2,7 +2,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, func, text
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, LargeBinary, String, func, text
 from sqlalchemy.dialects.postgresql import CIDR, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -37,3 +37,12 @@ class RateBucket(Base):
     tokens: Mapped[float] = mapped_column(Float)
     refilled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     blocked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class RateScopeKey(Base):
+    """A tenant's key for credential quota scopes (plugins-3 D9), sealed under its data key (purpose `rate.scope`)."""
+
+    __tablename__ = "rate_scope_keys"
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), primary_key=True)
+    sealed: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

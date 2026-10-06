@@ -39,20 +39,22 @@ def testkit_type(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(CONNECTION_TYPES, "testkit", TESTKIT_TYPE)
 
 
-def network(worker: Any, tenant: uuid.UUID) -> Network:
+def network(worker: Any, tenant: uuid.UUID, keys: FixtureKeys | None = None) -> Network:
     loopback = AllowEntry(ipaddress.ip_network("127.0.0.1/32"), None, tenant)
     return Network(
         guard=guard({"dewpoint.test": ["127.0.0.1"]}, [loopback]),
         connections=DbConnections(worker),
         sessionmaker=worker,
-        keys=FixtureKeys(),
+        keys=keys or FixtureKeys(),
         ssl_context=tls(NAMES).client_context(),
     )
 
 
-def attempt(worker: Any, seeded: Any, node: type = HttpCall, simulated: bool = False) -> Any:
+def attempt(
+    worker: Any, seeded: Any, node: type = HttpCall, simulated: bool = False, keys: FixtureKeys | None = None
+) -> Any:
     store = DbRunStore(worker, FixtureKeys())
-    return network(worker, seeded.tenant).attempt(
+    return network(worker, seeded.tenant, keys).attempt(
         tenant_id=seeded.tenant, run_id=seeded.run, step_id=seeded.step, root_run_id=seeded.run, node=node,
         simulated=simulated, remember=store.remember, beat=lambda: None,
     )  # fmt: skip
@@ -305,3 +307,27 @@ async def test_a_strange_retry_after_is_read_safely(owner_sessionmaker, worker_s
         await tenant_scope(s, seeded.tenant)
         untils = (await s.execute(text("select blocked_until from rate_buckets"))).scalars().all()
     assert all(u is None or u - datetime.now(UTC) <= timedelta(hours=1, seconds=5) for u in untils)
+
+
+async def test_quota_identity_survives_a_data_key_rotation(owner_sessionmaker, worker_sessionmaker) -> None:
+    """The second review's ruling 7: workers holding different data-key versions (a cache lasts 300 s) charge and honour
+    the same token scope."""
+    async with serve(_limited_once("120"), tls_names=NAMES) as server:
+        seeded, cid = await _setup(owner_sessionmaker, server.port)
+        before = attempt(worker_sessionmaker, seeded, keys=FixtureKeys(version=1))
+        try:
+            with pytest.raises(RateLimited):
+                await (await before.connection(cid)).http.request("GET", "/")
+        finally:
+            await before.aclose()
+        after = attempt(worker_sessionmaker, seeded, keys=FixtureKeys(version=2))
+        try:
+            with pytest.raises(Cooldown):
+                await (await after.connection(cid)).http.request("GET", "/")
+        finally:
+            await after.aclose()
+    assert len(server.requests) == 1
+    async with worker_sessionmaker() as s, s.begin():
+        await tenant_scope(s, seeded.tenant)
+        scopes = (await s.execute(text("select scope from rate_buckets where scope like 'testkit.token:%'"))).all()
+    assert len(scopes) == 1

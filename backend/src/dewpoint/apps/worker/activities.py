@@ -214,10 +214,10 @@ _TRANSPORT = (
 
 
 def _after_send(failure: _StepFailed, node: type[Node], network: AttemptNetwork | None) -> _StepFailed:
-    """Once a request of the attempt may have left (the review's finding 1), an ambiguous node's failure is never
-    retried and its outcome is unknown, whatever ended the attempt. Only the plugin's own `FatalError` keeps what it
-    declares: it's never retried anyway."""
-    sent = network is not None and network.may_have_sent
+    """Once a request of the attempt may have left, or is still under way (the reviews' finding 1), an ambiguous node's
+    failure is never retried and its outcome is unknown, whatever ended the attempt, the node's own `FatalError`
+    included: a later failure can't establish what an earlier request did."""
+    sent = network is not None and network.uncertain
     if sent and node.side_effect == SideEffect.AMBIGUOUS and failure.outcome != OUTCOME_UNKNOWN:
         return _StepFailed(failure.code, failure.message, retryable=False, outcome=OUTCOME_UNKNOWN)
     return failure
@@ -263,7 +263,7 @@ async def _call(
     except OutcomeUnknownError as e:
         raise _StepFailed(*_declared(e, node), retryable=False, outcome=OUTCOME_UNKNOWN) from None
     except FatalError as e:
-        raise _StepFailed(*_declared(e, node), retryable=False) from None
+        raise _after_send(_StepFailed(*_declared(e, node), retryable=False), node, network) from None
     except RetryableError as e:
         raise _after_send(_StepFailed(*_declared(e, node), retryable=True), node, network) from None
     except TransportError as e:

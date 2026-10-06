@@ -9,9 +9,10 @@ from typing import Any
 import pytest
 from sqlalchemy import text
 
+from dewpoint.apps import workflow_ops
 from dewpoint.core.connections import service as connections
 from dewpoint.core.db import tenant_scope
-from tests.apps.test_workflow_ops import actor, create, publish, update
+from tests.apps.test_workflow_ops import activate, actor, create, publish, update
 from tests.core.requests.test_envelope import admitted
 from tests.support.graphs import G, ref
 from tests.support.registry import sync_test_plugins
@@ -131,3 +132,63 @@ async def test_a_connection_a_request_not_yet_started_names_cant_be_deleted(
     ctx = type("Ctx", (), {"tenant_id": tenant, "user": type("U", (), {"id": None})()})()
     with pytest.raises(connections.ConnectionInUseError):
         await _delete(api_sessionmaker, ctx, cid)
+
+
+async def _child_with_deleted_connection(owner: Any, api: Any, admin: Any, settings: Any, ctx: Any) -> uuid.UUID:
+    """A published child naming a connection, disabled, whose connection was then deleted (allowed: nothing enabled
+    names it)."""
+    await sync_test_plugins(admin)
+    cid = await connection(owner, ctx.tenant_id)
+    child = await create(api, ctx, graph(str(cid)), name="Child")
+    assert (await publish(api, ctx, child, settings)).version is not None
+    await update(api, ctx, child, enabled=False)
+    await _delete(api, ctx, cid)
+    return child
+
+
+@pytest.mark.parametrize("how", ["sub_flow", "failure_handler"])
+async def test_publish_refuses_a_closure_naming_a_deleted_connection(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, how: str
+) -> None:
+    """The second review's finding 3: a new version can't pin what can no longer run."""
+    ctx = await actor(owner_sessionmaker)
+    child = await _child_with_deleted_connection(
+        owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, ctx
+    )
+    if how == "sub_flow":
+        draft = G().node("r", "flow.run_workflow@1", {"workflow_id": str(child)}).data()
+    else:
+        draft = G().node("e", "testkit.echo@1", {"value": 1}).data() | {"settings": {"failure_handler": str(child)}}
+    parent = await create(api_sessionmaker, ctx, draft, name="Parent")
+    out = await publish(api_sessionmaker, ctx, parent, api_settings)
+    assert out.version is None
+    assert [e.code for e in out.errors] == ["connection.missing"]
+
+
+async def test_enabling_refuses_an_active_closure_naming_a_deleted_connection(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    """The second review's ruling 8: refused at enable time, not left to fail at run time."""
+    ctx = await actor(owner_sessionmaker)
+    child = await _child_with_deleted_connection(
+        owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, ctx
+    )
+    with pytest.raises(workflow_ops.NotActivatableError) as e:
+        await update(api_sessionmaker, ctx, child, enabled=True)
+    assert [d.code for d in e.value.errors] == ["connection.missing"]
+
+
+async def test_activating_refuses_a_version_naming_a_deleted_connection(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    ctx = await actor(owner_sessionmaker)
+    child = await _child_with_deleted_connection(
+        owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, ctx
+    )
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        old = (
+            await s.execute(text("select active_version_id from workflows where id = :w"), {"w": child})
+        ).scalar_one()
+    with pytest.raises(workflow_ops.NotActivatableError):
+        await activate(api_sessionmaker, ctx, child, old)

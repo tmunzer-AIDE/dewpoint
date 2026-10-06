@@ -333,6 +333,8 @@ class AmbiguousCall(HttpCall):
 class WriteThenReadConfig(BaseModel):
     connection: uuid.UUID = connection_field("testkit")
     read_url: str | None = None  # the read through ctx.http when set, else through the connection
+    concurrent: bool = False  # the write and the read at once
+    then_fail: bool = False  # after the write, the node's own FatalError
 
 
 class WriteThenRead(Node):
@@ -348,7 +350,15 @@ class WriteThenRead(Node):
 
     async def run(self, ctx: StepContext, config: WriteThenReadConfig) -> HttpCallOutput:
         conn = await ctx.connection(config.connection)
+        if config.concurrent and config.read_url is not None:
+            # the write is under way (received, its answer pending) when the read fails having sent nothing
+            write = asyncio.ensure_future(conn.http.request("POST", "/write", content=b"once"))
+            write.add_done_callback(lambda done: done.cancelled() or done.exception())
+            await asyncio.sleep(1)
+            await ctx.http.request("GET", config.read_url)
         await conn.http.request("POST", "/write", content=b"once")
+        if config.then_fail:
+            raise FatalError("testkit.refused", "The read was refused.")
         if config.read_url is not None:
             answer = await ctx.http.request("GET", config.read_url)
         else:

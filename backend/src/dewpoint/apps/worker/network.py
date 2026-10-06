@@ -54,8 +54,8 @@ from dewpoint.core.egress.net import GuardedNet, GuardedStream, NetLimits
 from dewpoint.core.models.connections import Connection as ConnectionRow
 from dewpoint.core.models.runs import Run
 from dewpoint.core.models.workflows import WorkflowVersion
+from dewpoint.core.ratelimit import scopes as rate_scopes
 from dewpoint.core.ratelimit.buckets import CooldownError, Scope, acquire, block
-from dewpoint.core.ratelimit.scopes import credential_hasher
 from dewpoint.sdk import (
     ConnectionUnavailable,
     Cooldown,
@@ -340,9 +340,10 @@ class ConnectionHttp:
         attempt: "AttemptNetwork",
         base: httpx.URL,
         credentials: Mapping[str, str],
-        scopes: Sequence[Scope],
+        scopes: Callable[[], Awaitable[list[Scope]]],
     ) -> None:
-        self._attempt, self._base, self._credentials, self._scopes = attempt, base, dict(credentials), list(scopes)
+        self._attempt, self._base, self._credentials = attempt, base, dict(credentials)
+        self._scopes_of, self._scopes = scopes, list[Scope]()  # read at the first request, with its first token
 
     def _target(self, url: str) -> str:
         try:
@@ -374,6 +375,8 @@ class ConnectionHttp:
         waited, retries = 0.0, 0
         while True:
             try:
+                if not self._scopes:
+                    self._scopes = await self._scopes_of()
                 await acquire(
                     attempt.network.sessionmaker, attempt.tenant_id, self._scopes, max_wait_s=SCOPE_WAIT_S,
                     beat=attempt.beat,
@@ -436,13 +439,21 @@ class AttemptNetwork:
         self.network, self.tenant_id, self.run_id, self.step_id = network, tenant_id, run_id, step_id
         self.root_run_id, self.node, self.simulated, self.beat = root_run_id, node, simulated, beat
         self._remember = remember
-        self.may_have_sent = False  # once a request may have left this attempt (the wrapper reads it)
+        self.may_have_sent = False  # once a request may have left this attempt
+        self._in_flight = 0  # transport calls under way: each may have sent already
         self._http: GuardedHttp | None = None
         self._net: GuardedNet | None = None
         self._named: frozenset[uuid.UUID] | None = None
 
+    @property
+    def uncertain(self) -> bool:
+        """Whether a request of this attempt may have left it: one that did, or one still under way (a concurrent call
+        may fail first while another's request has already arrived; the second review's finding 1)."""
+        return self.may_have_sent or self._in_flight > 0
+
     async def send[T](self, call: Callable[[], Awaitable[T]]) -> T:
         """Runs a transport call; unless it failed having sent nothing, a request may now have left the attempt."""
+        self._in_flight += 1
         try:
             result = await call()
         except _CORE_ERRORS as e:
@@ -452,6 +463,8 @@ class AttemptNetwork:
         except BaseException:
             self.may_have_sent = True
             raise
+        finally:
+            self._in_flight -= 1
         self.may_have_sent = True
         return result
 
@@ -480,8 +493,13 @@ class AttemptNetwork:
         return _Refused() if self.simulated else _PlainNet(self)
 
     async def _credential_key(self) -> Callable[[str], str]:
-        _, digest = await self.network.keys.digest_key(str(self.tenant_id), None)
-        return credential_hasher(digest, self.tenant_id)
+        """The tenant's scope key (made the first time): the same whichever data-key version this worker holds."""
+        sealer = ClaimCipher(self.network.keys, purpose=rate_scopes.PURPOSE)
+        async with self.network.sessionmaker() as s, s.begin():
+            await tenant_scope(s, self.tenant_id)
+            key = await rate_scopes.scope_key(s, sealer, self.tenant_id, create=True)
+        assert key is not None  # noqa: S101 - made when missing
+        return rate_scopes.credential_hasher(key)
 
     async def connection(self, connection_id: uuid.UUID) -> OpenedConnection:
         if self.simulated:
@@ -518,7 +536,10 @@ class AttemptNetwork:
         await self._remember(str(self.tenant_id), str(self.root_run_id), secret_strings(secret))
         fields = {k: (v.get_secret_value() if isinstance(v, SecretStr) else v) for k, v in secret.model_dump().items()}
         credentials = {kind.auth.header: kind.auth.template.format(**fields)} if kind.auth is not None else {}
-        scopes = kind.rate_scopes(config, await self._credential_key(), secret) if kind.rate_scopes else []
+
+        async def scopes() -> list[Scope]:
+            return kind.rate_scopes(config, await self._credential_key(), secret) if kind.rate_scopes else []
+
         try:
             base = httpx.URL(kind.base_url(config, secret))
         except (httpx.InvalidURL, ValueError):

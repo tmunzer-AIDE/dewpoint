@@ -137,3 +137,40 @@ async def test_a_cooldown_after_an_earlier_send_is_never_retried_for_an_ambiguou
                                  connection={"capacity": 1, "refill_per_s": 0.001})  # fmt: skip
     assert [r.method for r in server.requests] == ["POST"]
     assert (failure.type, failure.non_retryable, failure.details[0]["outcome"]) == ("cooldown", True, OUTCOME_UNKNOWN)
+
+
+def _slow_post(seen_post: asyncio.Event) -> Any:
+    async def handler(request: Request, writer: asyncio.StreamWriter) -> None:
+        if request.method == "POST":
+            seen_post.set()
+            await asyncio.sleep(3)  # received, its answer pending while the concurrent read fails
+        await respond(201, b"made")(request, writer)
+
+    return handler
+
+
+async def test_a_failure_while_a_write_is_in_flight_is_never_retried(owner_sessionmaker, worker_sessionmaker) -> None:
+    """The second review's finding 1: a write received but not yet answered, and a concurrent read that sent nothing."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        closed = sock.getsockname()[1]
+
+    seen_post = asyncio.Event()
+    async with serve(_slow_post(seen_post), tls_names=NAMES) as server:
+        extra = {"read_url": f"https://dewpoint.test:{closed}/read", "concurrent": True}
+        failure = await _failure(worker_sessionmaker, owner_sessionmaker, server.port, WriteThenRead, extra=extra)
+    assert [r.method for r in server.requests] == ["POST"]
+    assert (failure.non_retryable, failure.details[0]["outcome"]) == (True, OUTCOME_UNKNOWN)
+
+
+async def test_the_nodes_own_fatal_error_after_a_write_is_of_unknown_outcome(
+    owner_sessionmaker, worker_sessionmaker
+) -> None:
+    """The second review's ruling 4: a later failure can't establish what the earlier write did."""
+    async with serve(respond(201, b"made"), tls_names=NAMES) as server:
+        failure = await _failure(worker_sessionmaker, owner_sessionmaker, server.port, WriteThenRead,
+                                 extra={"then_fail": True})  # fmt: skip
+    assert [r.method for r in server.requests] == ["POST"]
+    assert (failure.type, failure.non_retryable, failure.details[0]["outcome"]) == (
+        "testkit.refused", True, OUTCOME_UNKNOWN,
+    )  # fmt: skip

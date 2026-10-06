@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.authz.permissions import ROLE_PERMISSIONS, P
@@ -151,6 +151,27 @@ def abi_reasons(version_id: uuid.UUID, stale: list[tuple[uuid.UUID, int]], curre
 
 
 _CONNECTION_UNKNOWN = "No connection of this tenant has this id."
+_CONNECTION_MISSING = (
+    "A connection that a pinned sub-flow or failure handler (or this version) names no longer exists: publish that "
+    "workflow again with another connection."
+)
+
+
+async def _closure_connection_errors(
+    s: AsyncSession, tenant_id: uuid.UUID, version_ids: list[uuid.UUID]
+) -> list[Diagnostic]:
+    """Every connection the published versions of a closure name still exists, locked FOR SHARE (plugins-3 D6; the
+    second review's finding 3): a new version never pins what can no longer run, nor does enabling or activating."""
+    if not version_ids:
+        return []
+    rows = await s.execute(select(WorkflowVersion.connection_ids).where(WorkflowVersion.id.in_(version_ids)))
+    named = sorted({c for (ids,) in rows.all() for c in ids or ()}, key=str)
+    found = await connections.named(s, tenant_id, named)
+    if all(c in found for c in named):
+        return []
+    return [Diagnostic(code="connection.missing", message=_CONNECTION_MISSING)]
+
+
 _CONNECTION_TYPE = "This connection isn't of the type this field needs."
 
 
@@ -223,6 +244,9 @@ async def publish(
     if errors:
         return Published(None, errors, warnings)
     errors = await _connection_errors(s, ctx.tenant_id, checked.result.connections)
+    errors += await _closure_connection_errors(
+        s, ctx.tenant_id, sorted({i for v in pins for i in v.closure_version_ids}, key=str)
+    )
     if errors:
         return Published(None, errors, warnings)
     version_id = uuid.uuid4()
@@ -299,6 +323,7 @@ async def _check_runnable(s: AsyncSession, version: WorkflowVersion) -> list[Dia
     await _lifecycle_locked()
     current = await lifecycle.states(s, entries)
     errors = _lifecycle_errors(current, refuse_deprecated=False)
+    errors += await _closure_connection_errors(s, version.tenant_id, list(version.closure_version_ids))
     if errors:
         raise NotActivatableError(errors)
     return [
