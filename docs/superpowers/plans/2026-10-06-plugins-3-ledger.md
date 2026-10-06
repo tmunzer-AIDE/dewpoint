@@ -191,3 +191,25 @@ Rulings:
   the fields its host, auth template and rate scopes read are required - the API validates and computes from the
   stored values as written, the worker from validated ones, so a default or an extra key would make them differ - cost
   if wrong: a provider field with a sensible default must still be written.
+- Ruling: a plugin call waits at most 2 s for a quota token and never resends after a 429 or 503 - the API waits 10 s
+  for the whole call, and nothing outside a run is retried - cost if wrong: a busy connection's picker fails `cooldown`
+  sooner.
+- Ruling: an answer holding any string of a secret the call opened is refused (`result_refused`), not masked - a hook
+  outside a run has no secret index, and the person asking may not hold `connection.manage` - cost if wrong: an option
+  that legitimately contains a token-like string can't be listed.
+- Ruling: at most 1,000 options, a value of 1,000 characters and a label of 1-200, 256 KiB in all; option values are
+  strings - cost if wrong: a long list needs the typed text to narrow it.
+- Ruling: options calls check the connection's revision too, not only verify - fail closed - cost if wrong: an options
+  list asked just before an edit fails `connection_changed` and is asked again.
+- Ruling: a call's typed text (at most 200 characters) is stored as written, its answer sealed - the text is what the
+  person typed, the answer is the provider's data - cost if wrong: none.
+- Ruling: NOTIFY carries nothing (every role may listen on a channel); workers also poll every second - cost if wrong:
+  one cheap query a second per worker.
+- Ruling: a failure shows the SDK's own transport error codes, or a fixed code (`timeout`, `plugin_failed`,
+  `connection_changed`, `invalid_field`, `invalid_result`, `result_refused`, `result_too_large`, `unavailable`) -
+  as in runs - cost if wrong: none.
+
+Dependency for 2b-4a (data lifecycle): `plugin_calls.result_ct` is sealed under a tenant's data key (purpose
+`plugin.call`, the call's id as context). It lives at most 90 s (30 s to expiry, swept a minute later), so key
+retirement may wait for the sweep rather than re-encrypt it, but must not retire a version a live call still uses;
+tenant erasure removes calls by their foreign key (cascade).
