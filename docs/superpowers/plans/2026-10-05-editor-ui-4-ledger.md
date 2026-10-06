@@ -310,11 +310,63 @@ three gaps in what the fixes claimed. What became of each:
     One textual conflict, the CLI: both command groups kept (`platform egress`, `api openapi`). One semantic break:
     3a-1's GET of one connection adds `cooldowns`, which 4a's strict `ConnectionOut` refused - main's own two tests
     failed with a 500 on the merged tree - so that route declares `ConnectionDetailOut` (`cooldowns`: a list of
-    `{scope, until}`, or null); the schema copy and the client's types are regenerated. On the merged tree: the
-    backend's parallel suite (without the serial CEL group) 2,269 passed and 2 failed under load, both passing
-    since; the dispatcher's 202 tests pass; ruff, mypy, import contracts, pip-licenses and schema drift are clean;
-    the frontend's 292 tests, lint, types, build, `check:api` and licences pass; the browser gate passes 7 of 7.
-    The flaky test (`test_reconcile.py::test_a_queued_request_whose_run_already_ended_is_never_started_again`)
-    failed 4 times while two other sessions' suites loaded the machine (load about 30 on 14 cores) and passed 5 of 5
-    at 6482c53, at `origin/main`, at f6bf190 and on the merged tree once the load fell; its code is the same in
-    all four - a load-sensitive flake that predates 4a, for a separate task.
+    `{scope, until}`, or null); the schema copy and the client's types are regenerated. On that merged tree the
+    backend's parallel suite (without the serial CEL group) had 2,269 passes and 2 failures, not a clean run: two
+    dispatcher tests failed (`test_reconcile.py::test_a_queued_request_whose_run_already_ended_is_never_started_again`,
+    `assert None == Held(reason='run_ended')` with `start_absent` logged; and
+    `test_triggers_end_to_end.py::test_a_short_outage_fires_each_missed_time_and_admits_each_once`). Reruns then
+    passed: the first test failed 3 of 5 alone, then passed 5 of 5 at 6482c53, at `origin/main`, at f6bf190 and on
+    the merged tree; the second passed 5 of 5 alone; the dispatcher's 202 tests passed. Ruff, mypy, import contracts,
+    pip-licenses and schema drift were clean; the frontend's 292 tests, lint, types, build, `check:api` and licences
+    passed; the browser gate passed 7 of 7. Corrected (owner, 2026-10-06): the load was a suspicion, not the cause,
+    and unchanged code with later passing runs supports, but doesn't prove, that the failure predates 4a. #43 then
+    established the first test's cause with a matched reproduction on main's own code: `settle` stamped "due at once"
+    with the dispatcher's clock while `begin` read the database's, which lags it on Docker Desktop's VM; CPU load
+    alone didn't reproduce it. #43 is merged (ruling 64). The outage test's failure has no established cause.
+
+### Owner, PR #42 held (2026-10-06, pasted)
+
+- The tenant-switch fix and the scoped licence exceptions with OR reporting accepted; the visual approval stands.
+- Hold the merge of #42 for: (1) an update from current `main` (#41 merged), merged without rewriting commits, keeping
+  both the logging fixes and 4a's API and schema changes, with the affected checks rerun, the logging regression
+  tests included; (2) generated third-party notices - a distribution requirement - with copyright notices and full
+  licence texts for the shipped JavaScript, CSS and fonts, in `dist` and the web image, inclusion decided from build
+  metadata and package provenance, never from searching the minified output; (3) the full serial test run, in
+  `cel-gates`' pinned Linux environment, locally, stopping to report past ten minutes; (4) the replay-history gate,
+  locally, against the updated base, and the PR's statement that it needs CI corrected.
+- Correct the verification wording: the parallel run had 2,269 passes and two failures, then passing reruns - not
+  "every check passes"; the cause stays suspected unless a matched baseline reproduction establishes it.
+
+### 4a, the PR's hold items (2026-10-06)
+
+64. `main` moved on to 717f420: #41 (the logging fix, aa33705) and #43 (the dispatcher's clock, the cause of ruling
+    63's first failure). The branch merges it (838ebc8, a merge commit). One conflict, the API's `main.py`: 4a's route
+    tuple (`openapi.py`) kept with #41's `logs.configure()` and `LifespanFailures`; the CLI merged clean, and #41's
+    callback prints nothing into `dewpoint api openapi`, whose dump is unchanged. On the merged tree: #41's logging
+    tests, #43's dispatcher tests and 4a's API tests 124 passed; the backend's parallel suite 2,305 passed, none
+    failed (3 min 27 s); ruff, format, mypy, import contracts and pip-licenses clean; the frontend's 292 tests, lint,
+    types, build, `check:api` and licence checks pass; the browser gate passes 8 of 8.
+65. Third-party notices (`frontend/scripts/third-party-notices.mjs`, a Vite plugin, no new dependency):
+    `third-party-notices.txt` is written into `dist`, so the web image's nginx serves it (the browser gate fetches it:
+    text/plain, React, Tailwind, the fonts' OFL and the MIT text). What ships is read from the build's metadata: a
+    package whose code a chunk renders (tree-shaken modules don't count), whose stylesheet the build reads (an
+    imported CSS module, or a CSS file Tailwind inlines, from its watch files), or whose file becomes an asset (each
+    font's source file); Vite's preload polyfill and its bundled CommonJS helpers are Vite's (its LICENSE.md carries
+    the bundled plugins' licences), and any other virtual module fails the build. Each entry gives the package, its
+    version, its declared licence and every licence and notice file it ships, in full; a shipped package with no
+    declared licence or no licence text fails the build. 57 packages today, the same 57 an independent probe of the
+    build's metadata found. `react-remove-scroll-bar@2.3.8` ships no licence file: its upstream repository's MIT text
+    (`LICENSE` at 8ca9ba5, retrieved 2026-10-06; v2.3.7 has none and there's no v2.3.8 tag) is under
+    `frontend/licences/`, with its source - the owner may want that reviewed. A self-test runs in CI's licence job.
+66. The serial CEL group ran in full in `cel-gates`' image, `python:3.12-slim-bookworm` (digest 34386ef0, arm64: this
+    Mac's architecture, where CI's runners are x86_64), with uv 0.12.10 and `uv sync --locked`, CI's pytest command
+    and a 10-minute cap: 406 passed, none skipped (the seven Linux-only limit tests included), in 98 s. Three
+    differences from CI's job had to be matched first, none a test failure: the repository's `deploy/` beside
+    `backend/` (`test_isolation` reads the evaluator's Dockerfile), the Docker socket (`test_gate_task_cost` starts
+    Postgres with testcontainers, reached at `host.docker.internal` from the container), and Temporal's Linux test
+    server (the container couldn't download it through this Mac's TLS interception; the host fetched the same
+    official archive, `temporal-test-server` 1.40.0, sha256 1d712f6f, and it went where the SDK looks first). The
+    gates' measurements (cost, memory, task cost) are kept with the run's log in the session's evidence.
+67. The replay-history gate ran locally against the updated base (717f420), in CI's pull-request form and with the
+    base given: no recorded history changed or removed - the branch changes none. It needs only git; the PR's
+    "needs CI's environment" is corrected.
