@@ -2,6 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Revision 2 (2026-10-06).** Revision 1 (325fc14) was reviewed by the owner, who asked for seven corrections before
+approving execution; "Revision 2" below lists what changed and where. Execution waits for the owner's approval.
+
 **Goal:** A tenant member can list workflows with their state at a glance, create one (blank or imported from a file),
 build its graph on a canvas with a pointer or the keyboard alone, have every edit saved without ever overwriting
 someone else's, see its problems on the steps they concern, and publish it with a confirmation that names the version.
@@ -9,22 +12,28 @@ someone else's, see its problems on the steps they concern, and publish it with 
 **Architecture:**
 - **The API answers what the editor needs (milestone 1).** Node types also report how each step runs: side effect,
   credentials, capabilities, retry and timeout defaults (B5). Every workflow route answers a named model, and the draft
-  PUT documents its body as `Graph` (ledger ruling 47). The list and a workflow's summary gain the last run, the runs of
-  the last 24 hours, whether the draft differs from the active version, and why it needs attention (B3). A version can
-  be read whole, graph included, with its `engine_abi` (B4a). A workflow exports to a JSON document whose connections
-  and workflow references are typed placeholders, and imports with each placeholder re-bound (B12). No migration.
+  PUT documents its body as `Graph` (ledger ruling 47). The list and a workflow's summary gain the last live run and,
+  apart, the last simulated one, the runs of the last 24 hours, whether the draft differs from the active version, and
+  why it needs attention, from live runs only (B3); the list reads a fixed number of times whatever its length, and a
+  probe measures its run-history read for the owner's ruling on an index. A version can be read whole, graph included,
+  with its `engine_abi` (B4a); publish can name the newest version it expects, checked under the lock that numbers
+  the new one. A workflow exports to a JSON document whose connections and workflow references are typed
+  placeholders, and imports with each re-bound (B12), both fail-closed: what can't be done for certain is refused. No
+  migration.
 - **The list and the chooser (milestone 2).** Workflows joins the rail and becomes a tenant's landing screen. The list
   (1a) filters by state and name, toggles a workflow on or off, and exports it. "New workflow" (1b) starts blank or
   from an imported file, asking for each binding.
 - **The canvas (milestone 3).** The draft is a document the editor changes only through pure operations, with local
   undo and redo. React Flow draws it; dagre lays it out on demand. A start card heads the graph; "+" sits on every edge
-  and every free port; `A` opens the node-type picker. One roving tab stop covers the canvas: arrows follow the edges,
-  and every action a pointer has, the keyboard has (D16).
+  and every free port; `A` opens the node-type picker. One roving tab stop covers the canvas: arrows follow the edges
+  and reach every item drawn, cycles and malformed imports included, and every action a pointer has, the keyboard has
+  (D16). A step is placed with a click as well as a drag (WCAG 2.5.7).
 - **Saving, problems and publishing (milestone 4).** At most one save in flight, edits coalesced, `If-Match` the
-  revision the last save returned; a conflict turns the editor read-only (D17). Validation runs on the saved revision
-  and drops an answer for an older one. Problems sit in a panel and on the steps; a problem focuses its step. Publish
-  flushes the save, confirms with the version number, and shows what only publish checks. A versions panel views any
-  version read-only and makes one active.
+  revision the last save returned; a conflict turns the editor read-only (D17). The editor opens on a fresh snapshot,
+  and leaving it saves first or asks. A check is of one saved revision and is called current only while it's what's
+  on the screen; problems sit in a panel and, when current, on the steps; a problem focuses its step. Publish flushes
+  the save, confirms with the version number, and binds that number at the server; outcomes are read back when an
+  answer is lost, never assumed. A versions panel views any version read-only and makes one active.
 
 **Tech Stack:** Backend: Python 3.12, FastAPI 0.141.1, pydantic 2.13.5, SQLAlchemy async (asyncpg), PostgreSQL 16 via
 testcontainers (`postgres:16-alpine`), pytest with pytest-xdist, ruff, mypy strict, import-linter, `uv`. Frontend: React
@@ -72,149 +81,242 @@ that 4a settled; 4b's own go into it as it runs. Design frames 1a, 1b and 1c of
 
 ## Review Focus
 
-The input classes and conditions most likely to bite a person using this, which the tasks below now pin with a test
+The input classes and conditions most likely to bite a person using this, which the tasks below pin with a test
 (each named where it lives):
-- **Two people edit one workflow.** The second save's `If-Match` is stale: the editor must turn read-only and keep the
-  local work downloadable, never retry over the other's draft (Task 13: `a 409 stops every save and keeps the
-  document`).
-- **Edits faster than saves.** Typing or dragging while a save is in flight must never send two saves at once nor
-  drop the last edit (Task 13: `edits during a save coalesce into exactly one next save`).
-- **A validation answer that arrives after newer edits.** It must never paint problems on the newer draft (Task 14:
-  `an answer for an older revision is dropped`).
-- **A draft from elsewhere with what the editor can't model** (an unknown node type, a retired one, a port the type
-  no longer has, a `settings` block, an imported file): the canvas must draw it, keep every field it doesn't touch
-  byte for byte, and say what's unknown (Task 9: `operations keep what they don't touch`; Task 11's e2e of an
-  imported graph with a retired type).
-- **An import whose bindings point at the wrong thing** (another tenant's connection, a connection of the wrong type,
-  a deleted workflow): the API refuses it by name, and nothing is created (Task 5: `a binding of the wrong type is
-  refused and nothing is created`).
+- **Two people at one workflow.** A second save's `If-Match` is stale: the editor turns read-only and keeps the local
+  work downloadable, never retrying over the other's draft (Task 13: `a 409 stops every save and keeps the
+  document`). A second publisher lands first: the confirmation's number is refused at the server and asked again,
+  never silently published as the next one (Task 4: `two publishers naming one version publish it once`; Task 15:
+  `asks again, with the new number`; Task 16's two-page flow).
+- **Edits faster than saves, and leaving before the save.** Typing or dragging during a save never sends two saves at
+  once nor drops the last edit (Task 13: `edits during a save coalesce into exactly one next save`); the breadcrumb,
+  the rail, the palette or the tenant switcher wait for the save, and ask when it can't be made (Task 13: `saves
+  before leaving through a link`, `asks before leaving work it couldn't save`; Task 16).
+- **A check that doesn't describe what's on the screen.** An answer for an older revision, edits since, or a failed
+  request: never "No problems", never badges on the steps (Task 14: `calls an answer for an older revision stale`,
+  `says it's checking before the first answer`, `says when a check failed`).
+- **A draft from elsewhere with what the editor can't model** (an unknown or retired type, a port the type no longer
+  has, a cycle no entry reaches, an edge to a step that isn't there, a `settings` block): the canvas draws it, keeps
+  every field it doesn't touch byte for byte, reaches every item with the keys, and export refuses what it can't make
+  portable for certain (Task 9: `keeps what it doesn't touch`; Task 12: `reaches every item … with the keys alone`;
+  Task 5: `a draft that can't be made portable isn't exported`; Task 16's imported cycle).
+- **An import that would carry or write the wrong thing** (an id kept in the file, a site its step's schema doesn't
+  mark, another tenant's connection, one of the wrong type, a malformed envelope): refused by name, nothing created
+  (Task 5: `a file embedding an id is refused`, `a binding of the wrong kind is refused`, `a malformed file is
+  refused`; Task 8: `refuses %s`).
 
 ## Rulings this plan proposes
 
-The outline leaves these open, or the code found differs from it. Each is the safest option; the owner rules on them
-with the plan, and they join the ledger as rulings 68 onward when the plan is approved. Format: what - why - cost if
-wrong.
+The outline leaves these open, or the code found differs from it. Each is the safest option; they join the ledger as
+rulings 68 onward when the plan is approved. Format: what - why - cost if wrong. The owner ruled on 1–21 with
+revision 1 (2026-10-06); each carries its status, and the amended ones read as amended. 22–26 are new in revision 2.
 
-1. **Triggers wait for 4c.** Triggers are rows (schedules, webhook bindings, CSV uploads), not graph nodes, and their
-   setup is 4c's. So 4b's chooser (1b) asks only how to start (Blank, Import from file); its first step, "What starts
-   it?", arrives with 4c's trigger setup. The list (1a) has no Trigger column until then. - Showing a trigger the
-   editor can't set up would promise what 4b can't do. - 1b's first step and 1a's column wait one slice.
-2. **A start card heads the canvas, and no end marker closes it.** The card is not a graph node: it stands for
-   whatever starts a run, and its edges reach every entry step (a step with no incoming edge). Its "+" adds a first
-   step. 1c's "End · run succeeds" marker is left out: a run ends when no step remains, and a drawn end would look
-   like a step. - The graph has no trigger node to draw. - One cue fewer than 1c.
-3. **Step badges are problems and "runs as a separate step".** 1c's "conditional" badge needs the validator's liveness
-   per step, which B6 brings in 4c; "disabled" has no meaning in the graph model (`GraphNode` has no such field). -
-   Neither can be shown truthfully in 4b. - Two of the outline's three badges wait or drop.
-4. **The list's filters and columns.** Name, Version, Last run, Last 24 h, Enabled, and a row menu (Open, Export).
-   Filters: All, Published, Unpublished changes, Needs attention, as a segmented control with counts (no pills, §6);
-   the text filter matches names (no tags exist). No delete: no route deletes a workflow, and the API's database role
-   has no DELETE grant on `workflows`. - What the API supports today. - No delete from the UI.
-5. **The last run is read without a workflow index.** `runs` has no index on `workflow_id`; one is a migration, which
-   needs a slot from the owner. B3 takes each workflow's last root run in one `DISTINCT ON` scan of the tenant's root
-   runs per list request. - No migration without a slot. - A list's cost grows with a tenant's run history until
-   2b-4a's retention bounds it, or an index (owner's slot) does.
-6. **"Unpublished changes" compares graph hashes.** The draft's `graph_hash` (parsed and hashed on read; drafts are
-   format-checked at save, so they parse) against the active version's. Never published counts as unpublished. No
-   edit count (outline B3). Positions count: moving a step is an unpublished change, as the hash says. - The hash is
-   what publish records. - Parsing and hashing each draft on each list read (bounded by the 1 MiB body cap).
-7. **Needs attention** is the last root run failed or exceeded its deadline, or the active version can't run
-   (`blocked_by`). Schedules' sync errors join with 4c. **Last 24 h** counts root runs queued in the last 24 hours,
-   live and simulated apart; the list shows the live count and "+N simulated". - Live and simulated are never
-   blended (D2). - None.
-8. **The draft PUT's schema documents `Graph` while the route parses a plain object** (ruling 47). FastAPI ignores
-   `WithJsonSchema` on a body and merges `openapi_extra` into the generated object schema (both verified against
-   FastAPI 0.141.1), so `openapi.py` refines the one schema both the API and `dewpoint api openapi` emit: the draft
-   PUT's body becomes exactly `{"$ref": "#/components/schemas/Graph"}`. The route keeps its own parsing, so its
+1. **Accepted. Triggers wait for 4c.** Triggers are rows (schedules, webhook bindings, CSV uploads), not graph nodes,
+   and their setup is 4c's. So 4b's chooser (1b) asks only how to start (Blank, Import from file); its first step,
+   "What starts it?", arrives with 4c's trigger setup. The list (1a) has no Trigger column until then. - Showing a
+   trigger the editor can't set up would promise what 4b can't do. - 1b's first step and 1a's column wait one slice.
+2. **Accepted. A start card heads the canvas, and no end marker closes it.** The card is not a graph node: it stands
+   for whatever starts a run, and its edges reach every entry step (a step with no incoming edge). Its "+" adds a
+   first step. 1c's "End · run succeeds" marker is left out: a run ends when no step remains, and a drawn end would
+   look like a step. - The graph has no trigger node to draw. - One cue fewer than 1c.
+3. **Accepted. Step badges are problems and "runs as a separate step".** 1c's "conditional" badge needs the
+   validator's liveness per step, which B6 brings in 4c; "disabled" has no meaning in the graph model (`GraphNode`
+   has no such field). - Neither can be shown truthfully in 4b. - Two of the outline's three badges wait or drop.
+4. **Accepted, with the filter correction. The list's filters and columns.** Name, Version, Last run (live; the last
+   simulation beneath it, apart), Last 24 h, Enabled, and a row menu (Open, Export). Filters: All, Published,
+   Unpublished changes (a workflow never published included: ruling 6), Needs attention, as a segmented control with
+   counts (no pills, §6); the text filter matches names (no tags exist). No delete: no route deletes a workflow, and
+   the API's database role has no DELETE grant on `workflows`. - What the API supports today. - No delete from the UI.
+5. **Held (owner, 2026-10-06) until the batching and query-plan evidence exist. The last run without a workflow
+   index.** `runs` has no index on `workflow_id`; one is a migration, which needs a slot from the owner. Task 3 reads
+   every workflow's last root runs in one `DISTINCT ON` statement over the tenant's root runs, and its probe (Task 3,
+   Step 9) explains it at 10k, 100k and 1M root runs beside another tenant's, with and without the candidate index
+   `runs (workflow_id, mode, queued_at DESC, id DESC) WHERE kind = 'run'` (and the per-workflow read it would allow).
+   The owner decides at the milestone 1 pause: accept on the numbers, or assign a slot (then a plan addendum). -
+   Retention alone isn't a demonstrated bound. - Until ruled, the list's cost grows with a tenant's run history.
+6. **Accepted, with the filter correction. "Unpublished changes" compares graph hashes.** The draft's `graph_hash`
+   (parsed and hashed on read, once per draft revision and off the event loop) against the active version's. Never
+   published counts as unpublished, in the summary and in the list's filter. No edit count (outline B3). Positions
+   count: moving a step is an unpublished change, as the hash says. - The hash is what publish records. - A list's
+   first read after a restart parses each draft once (bounded by the 1 MiB body cap; the probe measures it).
+7. **Amended (owner): live failures drive attention; simulations stay separately identified.** Needs attention is the
+   last *live* root run failed or exceeded its deadline, or the active version can't run (`blocked_by`). The last
+   simulated run is its own field (`last_simulation`) and shows apart in the simulation colour; a later successful
+   simulation never clears a live failure, and a failed one never raises attention. Schedules' sync errors join with
+   4c. **Last 24 h** counts root runs queued in the last 24 hours, live and simulated apart; the list shows the live
+   count and "+N simulated". - Live and simulated are never blended (D2). - None.
+8. **Accepted. The draft PUT's schema documents `Graph` while the route parses a plain object** (ruling 47). FastAPI
+   ignores `WithJsonSchema` on a body and merges `openapi_extra` into the generated object schema (both verified
+   against FastAPI 0.141.1), so `openapi.py` refines the one schema both the API and `dewpoint api openapi` emit: the
+   draft PUT's body becomes exactly `{"$ref": "#/components/schemas/Graph"}`. The route keeps its own parsing, so its
    `graph.format` diagnostics and admission checks (non-finite numbers, depth, value count) stay as they are. -
    Typing the body as `Graph` would route bad drafts through `{"error":"invalid","fields":[...]}` and skip those
    checks. - The documented body and the parsed one are two declarations, held together by a test.
-9. **Answers keep a draft verbatim** (`draft: object` in the schema); the client types it as `Graph` at one boundary
-   (`asGraph` in `src/lib/graph.ts`). - A response model typed `Graph` would re-serialize the stored draft with
-   defaults the author never wrote. - One cast, at one place.
-10. **Inserting on an edge offers only steps that continue the flow:** a type with an `out` port, or `flow.loop`'s
-    `done`. "+" after a port offers every type; a type with no ports (`flow.stop`, `flow.fail`) ends its branch. -
-    Inserting a branching step mid-edge would have to guess which port carries the rest of the flow. - Inserting an
-    `if` mid-flow takes two actions (add after, reconnect).
-11. **A new step** gets a random UUID, a key from its type's last segment (`transform`, then `transform_2`), a config
-    with its schema's top-level defaults (a connection field gets none), no options (the server's defaults), and a
-    place below its source; inserting on an edge moves every step at or below that place down one row. - Keys must be
-    unique and match `^[a-z][a-z0-9_]{0,62}$`. - None.
-12. **Deleting a step asks first**, and when the step has exactly one incoming and one outgoing edge, its predecessor
-    is reconnected to its successor; the dialog says so. References to the step in other steps' values stay, and the
-    validator reports them (`ref.unknown_step`). Its `settings.declassify` entries go with it. - Healing a chain is
-    what a person deleting a middle step expects; rewriting references isn't. - None.
-13. **Moving steps.** A pointer drags; Shift+arrow keys nudge the focused step by 20 px; Auto layout arranges the
-    whole graph in one click, the single-pointer alternative WCAG 2.5.7 asks for. Positions are saved in the draft. -
-    Free placement by a single pointer would need a move mode nothing in the design shows. - No single-pointer free
-    placement.
-14. **Connecting existing steps.** A port's "Connect to…" lists the steps that may follow it (not itself, not one that
-    would close a cycle, not one already connected from that port); dragging from a handle does the same with a
-    pointer. An edge is removed from its "+" item with Delete, after a confirmation. - Every pointer action has a
-    keyboard one (2.1.1). - None.
-15. **The keyboard model (D16), exactly.** The canvas is one tab stop. Its items are the start card, each step, each
-    edge (its "+"), and each free port (its "+"). Down goes to the first item below, Up to the first above, Left and
-    Right to the previous or next item sharing the same one above; Home goes to the start card. Enter on a step opens
-    its panel (read-only in 4b; 4c's drawer replaces it), on an edge or a free port the picker; `A` opens the picker
-    after the focused step's first port; Delete asks; Escape closes the picker or panel and returns focus; Ctrl or
-    Cmd+Z undoes, Shift+Ctrl or Cmd+Z redoes. A polite live region announces what changed. React Flow's own
-    keyboard handling (arrow keys moving nodes, Delete removing them, Tab through every node) is off. - D16. - None.
-16. **A problem focuses its step** on the canvas (brought into view); the field itself waits for 4c's drawer. -
-    4b has no field to focus. - None.
-17. **Publish needs `workflow.publish`;** an editor without it validates but doesn't see Publish, the enable switch,
-    or Make active. The confirmation names the next number ("Publish version 3"), from the versions list, and says it
-    becomes the active version that triggers start. A publish refused for a check only publish runs (`connection.*`,
-    `subflow.*`, `declassify.forbidden`, `lifecycle.*`, `version.unbounded`) shows those in the problems panel, marked
-    "found at publish". - Validate can say valid while publish answers 422: the panel must say which. - None.
-18. **Export and import (B12).** Export is the saved draft (never unsaved local edits), as `{"format":
-    "dewpoint.workflow", "format_version": 1, "name", "graph", "bindings"}`. `graph` is the draft with every bindable
-    value removed: each connection field (a config property marked `x-dewpoint-connection`), each `flow.run_workflow`'s
-    `workflow_id`, and `settings.failure_handler`. Each binding has an id, a kind (`connection` or `workflow`), the
-    connection type, a label (the connection's or workflow's name), and its sites (node id and pointer). Import names
-    the new workflow and binds each id to one of the tenant's connections of that type or one of its workflows, or
-    leaves it unbound (its sites stay empty, and validation says so). Schedules, webhook bindings and CSV mappings are
-    rows, not graph, and don't travel. - Never carry one tenant's ids into another's. - A file round-trips the graph
-    only.
-19. **Workflows lands a tenant.** Workflows joins the rail first; choosing a tenant (the switcher, the palette) opens
-    its workflows (D10); the palette lists the current tenant's workflows and "New workflow". The editor uses the
-    60 px icon rail at every width, and keeps the shell's header (tenant, ⌘K, Security, Sign out); its own toolbar sits
-    below it with the breadcrumb, save state and actions. - One header everywhere. - 1c's single header row becomes
-    two.
-20. **React Flow's attribution link is hidden** (`proOptions.hideAttribution`), which its MIT licence allows; the
-    third-party notices carry its licence. Only its structural `base.css` is imported: colours, borders and shadows
+9. **Accepted. Answers keep a draft verbatim** (`draft: object` in the schema); the client types it as `Graph` at one
+   boundary (`asGraph` in `src/lib/graph.ts`). - A response model typed `Graph` would re-serialize the stored draft
+   with defaults the author never wrote. - One cast, at one place.
+10. **Accepted. Inserting on an edge offers only steps that continue the flow:** a type with an `out` port, or
+    `flow.loop`'s `done`. "+" after a port offers every type; a type with no ports (`flow.stop`, `flow.fail`) ends its
+    branch. - Inserting a branching step mid-edge would have to guess which port carries the rest of the flow. -
+    Inserting an `if` mid-flow takes two actions (add after, reconnect).
+11. **Accepted. A new step** gets a random UUID, a key from its type's last segment (`transform`, then `transform_2`),
+    a config with its schema's top-level defaults (a connection field gets none), no options (the server's defaults),
+    and a place below its source; inserting on an edge moves every step at or below that place down one row. - Keys
+    must be unique and match `^[a-z][a-z0-9_]{0,62}$`. - None.
+12. **Accepted. Deleting a step asks first**, and when the step has exactly one incoming and one outgoing edge, its
+    predecessor is reconnected to its successor; the dialog says so. References to the step in other steps' values
+    stay, and the validator reports them (`ref.unknown_step`). Its `settings.declassify` entries go with it. - Healing
+    a chain is what a person deleting a middle step expects; rewriting references isn't. - None.
+13. **Amended (owner): single-pointer movement equivalent to a drag. Moving steps.** A pointer drags; a step's panel
+    also has "Place on the canvas…" (the next click on an empty place puts the step there, centred on it; Escape or
+    Cancel stops it) and four buttons that move it 20 px a click; Shift+arrow keys nudge the focused step by 20 px;
+    Auto layout arranges the whole graph. Positions are saved in the draft. - WCAG 2.5.7: auto layout doesn't put a
+    step where a person wants it, and keyboard nudging alone isn't a pointer's alternative. - A placing mode the
+    design doesn't show (a bar above the canvas says what the next click does).
+14. **Accepted. Connecting existing steps.** A port's "Connect to…" lists the steps that may follow it (not itself,
+    not one that would close a cycle, not one already connected from that port); dragging from a handle does the
+    same with a pointer. An edge is removed from its "+" item with Delete, after a confirmation. - Every pointer
+    action has a keyboard one (2.1.1). - None.
+15. **Amended (owner): demonstrably complete keyboard navigation. The keyboard model (D16), exactly.** The canvas is
+    one tab stop. Its items are the start card, each step, each edge (its "+"), and each free port (its "+"); they form
+    a tree from the start card, and a step no entry reaches (a cycle no entry leads into, a step whose only edges in
+    come from steps that aren't there) joins the start card's children, topmost first, so every item drawn is reached.
+    Down goes to the first item below, Up to the one above, Left and Right to the previous or next sibling; Home goes
+    to the start card. Enter on a step opens its panel (read-only in 4b; 4c's drawer replaces it), on an edge or a
+    free port the picker; `A` opens the picker after the focused step's first port; `C` connects from it; Delete asks;
+    Escape closes the picker or panel and returns focus; Ctrl or Cmd+Z undoes, Shift+Ctrl or Cmd+Z redoes. A polite
+    live region announces what changed. React Flow's own keyboard handling is off. Tests press every key from every
+    item reached, over chains, branches, joins, cycles, separate components and an imported draft's dangling, repeated
+    and self edges, and the browser walks an imported cycle. - D16. - None.
+16. **Accepted. A problem focuses its step** on the canvas (brought into view); the field itself waits for 4c's
+    drawer. - 4b has no field to focus. - None.
+17. **Amended (owner): server-bound publish confirmation.** Publish needs `workflow.publish`; an editor without it
+    doesn't see Publish, the enable switch, or Make active. The confirmation names the next number from the versions
+    list ("Publish version 3"), and publish sends that list's newest number as `expected_latest_version`, which the
+    API checks under the lock that numbers the new version (Task 4); a mismatch is `409 version_changed`, and the
+    editor refreshes the list and asks again with the new number. Publish names no number while the list loads,
+    refreshes or can't be read. Callers that send no expectation (the CLI, the tests) publish as before. A publish
+    refused for a check only publish runs (`connection.*`, `subflow.*`, `declassify.forbidden`, `lifecycle.*`,
+    `version.unbounded`) shows those in the problems panel, marked "found at publish". - A dialog that names a
+    number the server may not use isn't a confirmation. - One more 409 the editor handles.
+18. **Amended (owner): validated, fail-closed portable files. Export and import (B12).** Export is the saved draft
+    (never unsaved local edits: an export that would miss them stops and says so, offering the last saved draft by
+    name), as `{"format": "dewpoint.workflow", "format_version": 1, "name", "graph", "bindings"}`. `graph` is the
+    draft with every site emptied: each connection field (a top-level config property its type marks
+    `x-dewpoint-connection`, the only place the SDK allows the marker), each `flow.run_workflow`'s `workflow_id`, and
+    `settings.failure_handler`. Each binding has an id, a kind, the connection type, a label and its sites. Export
+    refuses (`422 not_portable`) a step of a type the server doesn't know, two steps sharing an id, and a site holding
+    anything but an id. Import checks the whole file first: the envelope (the model, extra keys refused), the graph's
+    format, every step's type known, no id embedded at a site (so "leave unbound" can't keep one), binding ids used
+    once, sites listed once, and each site one the server's schemas mark for that binding's kind and connection type
+    (`422 bad_document`); then each chosen id against the tenant's own (`422 bad_binding`). Schedules, webhook
+    bindings and CSV mappings are rows, not graph, and don't travel. - Never carry one tenant's ids into another's,
+    never write where nothing checked. - A workflow with a step whose plugin isn't installed here can't be exported
+    portably, or imported, until it is.
+19. **Accepted. Workflows lands a tenant.** Workflows joins the rail first; choosing a tenant (the switcher, the
+    palette) opens its workflows (D10); the palette lists the current tenant's workflows and "New workflow". The editor
+    uses the 60 px icon rail at every width, and keeps the shell's header (tenant, ⌘K, Security, Sign out); its own
+    toolbar sits below it with the breadcrumb, save state and actions. - One header everywhere. - 1c's single header
+    row becomes two.
+20. **Accepted. React Flow's attribution link is hidden** (`proOptions.hideAttribution`), which its MIT licence allows;
+    the third-party notices carry its licence. Only its structural `base.css` is imported: colours, borders and shadows
     come from our tokens. - An external link in the canvas, and a second visual language. - None.
-21. **Undo and redo stay local** (D17): a history of up to 100 documents in memory, cleared when the editor closes.
-    Undo after a conflict is off (the editor is read-only). - D17. - None.
+21. **Accepted, extended by correction 4. Undo and redo stay local** (D17): a history of up to 100 documents in
+    memory, cleared when the editor closes. Undo is off after a conflict (the editor is read-only), and while a
+    publication or an activation runs. - D17. - None.
+22. **New. Leaving the editor saves first.** Router navigations (the breadcrumb, the rail, the palette, the tenant
+    switcher) wait for the pending save (`useBlocker`); work that can't be saved (a failed save, a conflict) asks:
+    stay, download my version, or leave without saving. Closing the tab gets the browser's prompt. Reload after a
+    conflict asks before discarding the local version. The saver is disposed when the editor closes: a save still in
+    flight that answers afterwards sends nothing more. - The debounce and a conflict both leave work only on the
+    screen. - Leaving waits as long as a save takes.
+23. **New. The editor opens on a fresh snapshot.** It waits for the workflow read made after it mounted (never a
+    cached copy, which would conflict on the first edit), seeds itself once, and owns its document from then: a later
+    read neither replaces nor closes it. - A stale draft turns the first edit into a conflict. - One read, and a
+    moment of "Loading…", on every entry.
+24. **New. A check is current only for what's on the screen.** The editor says "Checking…" or "Not checked" before
+    the first answer, "Check failed" when a request fails, "… before your edits" when the answer is for an older
+    revision or edits came since; badges sit on the steps, and a step's panel lists its problems, only while the
+    check is current. Viewing a version shows none of the draft's. - The owner's correction 2: a failed or stale check
+    must not keep reassuring. - Badges disappear between an edit and the next check (about a second, plus the
+    check).
+25. **New. An outcome is said only when known.** A publish or an activation without an answer from the API (the
+    network, or a 5xx) is read back (the versions and the workflow) and reported as found, or as not known; never as
+    failed. A version made active stays made active when the read after it fails, and the draft's comparison with it
+    is "not known" until read (`Saved · v1 is active`). Only the newest "View version" answer is shown. - Lost answers
+    don't establish failure, and a retry after one is safe only because of ruling 17's expectation. - One or two reads
+    after a lost answer.
+26. **New. A draft that can't be exported portably is offered as it is, labelled.** In the editor, a refused export
+    offers "Download this draft as it is (not portable)", a `.draft.json` file the importer refuses (it isn't a
+    `dewpoint.workflow` file); the list says to open the workflow for it. - The owner's option of a separately
+    labelled recovery download: the person keeps their work, and the label says the file holds this tenant's ids. -
+    One more download path carrying the tenant's ids, as the conflict's download already does.
+
+## Revision 2
+
+What changed from revision 1 (325fc14), by the owner's seven corrections and ruling statuses, and where:
+1. **Draft lifetime** (Tasks 6, 11, 13; rulings 22, 23): leaving is guarded and saves first; the saver has a disposed
+   state; the editor waits for a fresh read and seeds itself once (`workflowQuery` loses its infinite `staleTime`);
+   a conflict's local version is guarded from leaving and from Reload.
+2. **Validation freshness** (Task 14; ruling 24): `generation`/`savedGeneration` in the saver; a check's five states;
+   badges only when current; nothing of the draft's on a version's canvas.
+3. **Publish confirmation** (Tasks 4, 15; ruling 17): `expected_latest_version` checked under the publication's lock,
+   `409 version_changed`, existing callers unchanged; the editor names no number until the list is read, and asks
+   again with the new one.
+4. **Truthful completion** (Task 15; rulings 21, 25): editing off during a publication or an activation;
+   `published(revision)` and `compared(summary)`; uncertain outcomes read back; view answers in order; export stops on
+   a failed save.
+5. **Portable files** (Tasks 5, 7, 8, 15; rulings 18, 26): export refuses what it can't make portable; import checks
+   the whole file against the server's schemas; the browser parser checks the whole envelope.
+6. **Accessibility** (Tasks 9, 11, 12, 16; rulings 13, 15): click-to-place and position buttons; the keyboard model
+   links every component and walks the edges the canvas draws; reachability tests by key presses; the browser walks
+   an imported cycle and places a step by clicks.
+7. **B3** (Tasks 3, 7; rulings 5, 6, 7): live attention apart from simulations; the list reads a fixed number of
+   times (a statement-count test); drafts hashed once per revision off the event loop; the probe for ruling 5; the
+   unpublished filter counts never-published workflows.
+
+Found while revising, outside the seven: revision 1 put the summary module in `dewpoint.core`, which import-linter's
+"core depends on neither engine nor plugins" forbids (it hashes with the engine); it lives in `dewpoint.apps` now
+(`apps/workflow_summary.py`, beside `workflow_ops.py`). And `main.tsx` runs the app in StrictMode, so the saver is made
+in an effect (a saver held from the first render would be disposed by StrictMode's first cleanup).
 
 ## File structure
 
 Backend, modified:
 - `backend/src/dewpoint/apps/api/responses.py`: the 4b answers (node types, workflows, drafts, validation, versions,
   export and import).
-- `backend/src/dewpoint/apps/api/routes/node_types.py` (B5), `routes/workflows.py` (models, B3, B4a, B12 routes).
+- `backend/src/dewpoint/apps/api/routes/node_types.py` (B5), `routes/workflows.py` (models, B3, B4a, B12 routes, the
+  publish precondition).
 - `backend/src/dewpoint/apps/api/openapi.py`: `refine()`, applied to the served and the printed schema.
 - `backend/src/dewpoint/apps/api/main.py`: serves the refined schema.
-- `backend/src/dewpoint/core/workflows/service.py`: `create_workflow(..., source=...)` for the import's audit entry.
+- `backend/src/dewpoint/apps/workflow_ops.py`: `publish(..., expected_latest_version=None)`.
+- `backend/src/dewpoint/core/workflows/service.py`: `create_workflow(..., source=...)` for the import's audit entry,
+  `blocked_by_many`, `latest_version_number`, `VersionChangedError`.
 
 Backend, new:
-- `backend/src/dewpoint/core/workflows/summary.py`: run statistics and unpublished changes per workflow (B3).
-- `backend/src/dewpoint/core/workflows/portable.py`: export's placeholders and import's bindings (B12).
+- `backend/src/dewpoint/apps/workflow_summary.py`: run statistics, attention and draft hashes per workflow (B3).
+- `backend/src/dewpoint/core/workflows/portable.py`: export's placeholders and import's checks and bindings (B12).
 - Tests: `backend/tests/apps/api/test_node_types.py`, `test_workflow_summary.py`, `test_workflow_versions.py`,
-  `test_workflow_portable.py`; `backend/tests/core/workflows/test_portable.py`; additions to `test_openapi.py`.
+  `test_workflow_portable.py`; `backend/tests/apps/test_workflow_summary.py`;
+  `backend/tests/core/workflows/test_portable.py`; additions to `test_openapi.py` and `test_workflows.py`.
+- Probe (run by hand, never in CI): `backend/tests/probes/workflow_list.py`.
 
 Frontend, new:
-- `src/lib/workflows.ts`: the workflow API's types and queries. `src/lib/graph.ts`: the document and its operations.
-  `src/lib/layout.ts`: dagre. `src/lib/canvasNav.ts`: the keyboard model. `src/lib/draftSync.ts`: saving (D17).
-  `src/lib/history.ts`: undo and redo. `src/lib/announce.ts`: the live region's store. `src/lib/download.ts`.
+- `src/lib/workflows.ts`: the workflow API's types and queries, `notPortable`. `src/lib/graph.ts`: the document and
+  its operations. `src/lib/layout.ts`: dagre. `src/lib/draftSync.ts`: saving (D17). `src/lib/history.ts`: undo and
+  redo. `src/lib/announce.ts`: the live region's store. `src/lib/download.ts`.
 - `src/components/Switch.tsx`, `src/components/Announcer.tsx`, `src/components/Segmented.tsx`.
 - `src/routes/Workflows.tsx` (1a), `src/routes/NewWorkflow.tsx` (1b), `src/routes/ImportBindings.tsx`.
-- `src/routes/editor/`: `Editor.tsx`, `Toolbar.tsx`, `Canvas.tsx`, `StepCard.tsx`, `StartCard.tsx`, `FlowEdge.tsx`,
-  `StepPicker.tsx`, `ConnectDialog.tsx`, `StepPanel.tsx`, `ProblemsPanel.tsx`, `VersionsPanel.tsx`, `canvas.css`.
-- Tests beside each (`*.test.ts(x)`), and `e2e/workflows.spec.ts`.
+- `src/routes/editor/`: `Editor.tsx`, `Toolbar.tsx`, `Canvas.tsx`, `canvasNav.ts`, `check.ts`, `items.ts`,
+  `StepCard.tsx`, `StartCard.tsx`, `FlowEdge.tsx`, `StepPicker.tsx`, `ConnectDialog.tsx`, `StepPanel.tsx`,
+  `ProblemsPanel.tsx`, `VersionsPanel.tsx`, `SaveState.tsx`, `canvas.css`.
+- Tests beside each (`*.test.ts(x)`), `e2e/workflows.spec.ts`, `e2e/state.ts`, and the fixtures
+  `e2e/fixtures/report.dewpoint.json`, `e2e/fixtures/cycle.dewpoint.json`.
 
 Frontend, modified: `package.json` and `pnpm-lock.yaml` (three packages), `src/router.tsx`, `src/components/Shell.tsx`,
-`src/components/TenantSwitcher.tsx`, `src/components/CommandPalette.tsx`, `src/components/icons.tsx`,
-`src/styles/theme.css`, `src/api/openapi.json`, `src/api/schema.d.ts`.
+`src/components/TenantSwitcher.tsx`, `src/components/CommandPalette.tsx`, `src/components/ConfirmDialog.tsx`
+(`cancelLabel`, `tone`), `src/components/icons.tsx`, `src/styles/theme.css`, `src/api/openapi.json`,
+`src/api/schema.d.ts`, `playwright.config.ts`, `e2e/foundations.spec.ts`, `e2e/gate.spec.ts`.
 
 ## How to run things
 
@@ -231,17 +333,28 @@ Frontend, modified: `package.json` and `pnpm-lock.yaml` (three packages), `src/r
 
 ## Executing this plan
 
-Inline, in one session (the owner's standing preference for coupled tasks), test-first: each task's tests are written
-and seen failing for the stated reason before its code. The code below is the target; where the installed package or
-the code base differs, the executor adapts it test-first and records the difference as a mid-slice ruling in the
-ledger (4a's practice). Branch `feat/editor-4b`, cut from `feat/editor-4a` (stacked: #42 is open) when the owner settles
-the branch point; once #42 merges, `origin/main` is merged in, never rebased (owner, 2026-10-06).
+Inline, in one session (the owner, 2026-10-06), test-first: each task's tests are written and seen failing for the
+stated reason before its code. The code below is the target; where the installed package or the code base differs,
+the executor adapts it test-first and records the difference as a mid-slice ruling in the ledger (4a's practice).
 
-Checkpoints: the owner's at the end of the slice (one per slice, outline §2), preceded by a fresh-context review of the
-whole branch against the brief's six hunts (a sensitive value reaching the DOM or a log, a live call, a write that
-skips the server's checks, a CSP violation, keyboard traps and WCAG 2.2 AA failures, visible drift from the design),
-and the one-page summary with screenshots beside frames 1a, 1b and 1c. At each milestone's end the executor runs that
-milestone's focused tests and stops only on a failure; the owner may name milestone pauses when approving the plan.
+Branch `feat/editor-4b`, cut from current `main` when execution starts (66443c3 at this revision: #42 is merged as
+ff1536e, and #39 since), in a worktree of its own; not stacked on 4a. A later `main` is merged in, never rebased.
+
+Pauses (the owner's): execution stops for the owner's review
+1. **after milestone 1:** the corrected API contracts (the regenerated `openapi.json`'s diff, and the refusals each
+   route answers), the statement-count test, and the probe's query plans and timings (Task 3, Step 9), on which ruling
+   5 is decided;
+2. **after milestone 3:** the canvas under the real CSP (the browser gate's CSP, console and remote-request checks on
+   every canvas flow) and the accessibility proof (axe on each canvas state, the keys reaching every item in the unit
+   tests and over an imported cycle in the browser, a step placed by clicks); Task 11's stop on any CSP failure stands
+   and comes first;
+3. **at the final checkpoint** (Task 16, Step 5): a fresh-context review of the whole branch against the brief's six
+   hunts (a sensitive value reaching the DOM or a log, a live call, a write that skips the server's checks, a CSP
+   violation, keyboard traps and WCAG 2.2 AA failures, visible drift from the design), and the one-page summary with
+   screenshots beside frames 1a, 1b and 1c.
+
+Between pauses, each milestone's focused tests run at its end, and a failure stops the work. Nothing is pushed and no
+PR opened (owner): the branch stays local until the owner says otherwise in chat.
 
 ---
 
@@ -577,8 +690,8 @@ class TaintOut(_Answer):
 
 
 class ValidationOut(_Answer):
-    """The saved draft's diagnostics, at the revision they were computed for: an editor drops an answer for an
-    older revision (D17)."""
+    """The saved draft's diagnostics, at the revision they were computed for: an editor shows an answer for an
+    older revision as stale, never as current (D17; 4b ruling 24)."""
 
     draft_revision: int
     valid: bool
@@ -723,47 +836,144 @@ git add backend/src/dewpoint/apps/api backend/tests/apps/api/test_openapi.py fro
 git commit -m "feat(api): every workflow route answers a named model; the draft PUT documents its body as a Graph (B1, 4b)"
 ```
 
-### Task 3: A workflow's summary says how its runs went and whether its draft is published (B3)
+### Task 3: A workflow's summary says how its live runs went, apart from its simulations, and whether its draft is published (B3)
 
 **Files:**
-- Create: `backend/src/dewpoint/core/workflows/summary.py`
+- Create: `backend/src/dewpoint/apps/workflow_summary.py` (in `apps`: it hashes with the engine, and import-linter's
+  "core depends on neither engine nor plugins" forbids that in `core`, where revision 1 put it)
+- Modify: `backend/src/dewpoint/core/workflows/service.py` (`blocked_by_many`; `blocked_by` uses it)
 - Modify: `backend/src/dewpoint/apps/api/responses.py` (`LastRunOut`, `RunCountOut`; `WorkflowOut` and `DraftSavedOut`
   gain fields)
-- Modify: `backend/src/dewpoint/apps/api/routes/workflows.py` (`_summaries`, `_summary`, `put_draft`)
-- Create: `backend/tests/apps/api/test_workflow_summary.py`
+- Modify: `backend/src/dewpoint/apps/api/routes/workflows.py` (`_summaries`, `_summary`, `list_workflows`, `put_draft`)
+- Create: `backend/tests/apps/test_workflow_summary.py`, `backend/tests/apps/api/test_workflow_summary.py`
+- Create: `backend/tests/probes/workflow_list.py` (the evidence for the milestone 1 pause; run by hand, never in CI)
 - Modify: `backend/tests/apps/api/test_workflows.py:32` (the draft PUT's answer gains `unpublished_changes`)
 - Regenerate: `frontend/src/api/openapi.json`, `frontend/src/api/schema.d.ts`
 
 **Interfaces:**
-- Consumes: `runs` (`backend/src/dewpoint/core/models/runs.py:16-39`: `workflow_id`, `mode` live|simulate, `status`
-  running|succeeded|failed|cancelled|deadline_exceeded, `queued_at`, `started_at`, `ended_at`, `kind` run|subflow|
-  failure_handler); `graph_hash`, `parse_graph` (`backend/src/dewpoint/engine/graph/model.py`); the active version's
-  `graph_hash`.
-- Produces: `summary.run_stats(s, tenant_id, workflow_ids) -> dict[uuid.UUID, RunStats]`,
-  `summary.unpublished(draft, active_graph_hash) -> bool`, `summary.ATTENTION_STATUSES`; `WorkflowOut` gains
-  `unpublished_changes: bool`, `last_run: LastRunOut | None` (`status`, `mode`, `at`), `runs_24h: RunCountOut`
-  (`live`, `simulate`), `needs_attention: list["last_run_failed" | "not_executable"]`; `DraftSavedOut` gains
-  `unpublished_changes`.
+- Consumes: `runs` (`backend/src/dewpoint/core/models/runs.py:16-39`: `workflow_id` and `workflow_version_id` without a
+  foreign key, `mode` live|simulate, `status` running|succeeded|failed|cancelled|deadline_exceeded, `queued_at`,
+  `started_at`, `ended_at`, `kind` run|subflow|failure_handler); its only index a list can use,
+  `runs_tenant_queued (tenant_id, queued_at DESC, id DESC)` (`migrations/versions/0017_admission.py:183`);
+  `service.active_versions(s, tenant_id, workflow_ids)` (`service.py:264`, one read for many workflows);
+  `lifecycle.entries_for`, `lifecycle.states` (one read for any number of entries), `lifecycle.not_executable`;
+  `graph_hash`, `parse_graph`, `GraphFormatError` (`backend/src/dewpoint/engine/graph/model.py`).
+- Produces:
+  - in `dewpoint.apps.workflow_summary`: `LAST_RUNS`, `COUNTS_24H` (the two statements, as SQL the probe explains),
+    `run_stats(s, tenant_id, workflow_ids) -> dict[uuid.UUID, RunStats]` (`RunStats(last_live,
+    last_simulated, live_24h, simulated_24h)`, `LastRun(status, at)`), `attention(stats, *, published, blocked) ->
+    list[str]`, `DraftHashes(kept)` with `async of(drafts) -> dict[uuid.UUID, str | None]` and `len()`, the
+    process's `HASHES`;
+  - `service.blocked_by_many(s, versions) -> dict[uuid.UUID, list[str]]`;
+  - `WorkflowOut` gains `unpublished_changes: bool`, `last_run: LastRunOut | None` (the last live root run),
+    `last_simulation: LastRunOut | None` (the last simulated one), `runs_24h: RunCountOut` (`live`, `simulate`),
+    `needs_attention: list["last_run_failed" | "not_executable"]`; `LastRunOut` is `status`, `at`;
+    `DraftSavedOut` gains `unpublished_changes`.
 
-- [ ] **Step 1: Write the failing tests**
+The list reads a fixed number of times whatever its length: the workflows, their active versions, the lifecycle states
+of every entry those versions use, the last runs and the 24-hour counts, each once for all (the owner's review of
+325fc14: no per-workflow refresh, version or lifecycle read). Drafts are hashed off the event loop, all at once, and
+once per revision: a draft never changes at a revision (`save_draft` is a compare-and-swap that increments it), so its
+hash is kept per (workflow, revision). Whether the last-run read needs an index is ruling 5's, held: the probe of Step 9
+measures it against representative history, with and without a candidate index, for the milestone 1 pause.
+
+- [ ] **Step 1: Write the failing unit tests**
+
+`backend/tests/apps/test_workflow_summary.py`:
+
+```python
+# SPDX-License-Identifier: Apache-2.0
+"""B3's pure parts: attention comes from live runs only, and a draft is hashed once per revision."""
+
+import uuid
+from datetime import UTC, datetime
+
+import pytest
+
+from dewpoint.apps import workflow_summary as summary
+from dewpoint.engine.graph.model import graph_hash, parse_graph
+from tests.support.graphs import G
+
+GRAPH = G().node("a", "testkit.echo@1", {"value": 1}).data()
+AT = datetime(2026, 10, 6, tzinfo=UTC)
+
+
+def stats(live: str | None, simulated: str | None) -> summary.RunStats:
+    return summary.RunStats(
+        last_live=summary.LastRun(live, AT) if live else None,
+        last_simulated=summary.LastRun(simulated, AT) if simulated else None,
+        live_24h=0,
+        simulated_24h=0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("live", "simulated", "expected"),
+    [
+        ("failed", "succeeded", ["last_run_failed"]),  # a later good simulation never clears a live failure
+        ("deadline_exceeded", None, ["last_run_failed"]),
+        ("succeeded", "failed", []),  # a failed simulation never needs attention
+        (None, "deadline_exceeded", []),
+        ("cancelled", None, []),
+        ("running", None, []),
+    ],
+)
+def test_only_a_live_run_needs_attention(live: str | None, simulated: str | None, expected: list[str]) -> None:
+    assert summary.attention(stats(live, simulated), published=True, blocked=[]) == expected
+
+
+def test_a_version_that_cant_run_needs_attention() -> None:
+    assert summary.attention(stats(None, None), published=True, blocked=["testkit.echo@1"]) == ["not_executable"]
+    assert summary.attention(stats(None, None), published=False, blocked=[]) == []
+
+
+async def test_a_draft_is_hashed_once_per_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    parsed: list[int] = []
+    real = summary.parse_graph
+    monkeypatch.setattr(summary, "parse_graph", lambda d: parsed.append(1) or real(d))
+    hashes, wid = summary.DraftHashes(kept=8), uuid.uuid4()
+    first = await hashes.of([(wid, 1, GRAPH)])
+    again = await hashes.of([(wid, 1, GRAPH)])
+    assert first == again == {wid: graph_hash(parse_graph(GRAPH))} and len(parsed) == 1
+    await hashes.of([(wid, 2, GRAPH)])
+    assert len(parsed) == 2
+
+
+async def test_a_draft_that_doesnt_parse_has_no_hash() -> None:
+    wid = uuid.uuid4()
+    assert await summary.DraftHashes(kept=8).of([(wid, 1, {"graph_format": 9})]) == {wid: None}
+
+
+async def test_the_kept_hashes_are_bounded() -> None:
+    hashes = summary.DraftHashes(kept=2)
+    drafts = [(uuid.uuid4(), 1, GRAPH) for _ in range(3)]
+    assert len(await hashes.of(drafts)) == 3  # every draft asked for is answered
+    assert len(hashes) == 2  # the oldest is forgotten
+```
+
+- [ ] **Step 2: Write the failing API tests**
 
 `backend/tests/apps/api/test_workflow_summary.py`:
 
 ```python
 # SPDX-License-Identifier: Apache-2.0
-"""What the workflows list shows of each (sub-project 4, B3): its last root run, its root runs in the last 24 hours,
-live and simulated apart, whether its draft differs from its active version, and why it needs attention."""
+"""What the workflows list shows of each (sub-project 4, B3): its last live root run and, apart, its last simulated one;
+its root runs in the last 24 hours, live and simulated apart; whether its draft differs from its active version; why it
+needs attention, from live runs only. Its reads don't grow with its workflows."""
 
 import uuid
+from typing import Any
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
+from sqlalchemy.engine import Engine
 
 from tests.apps.api.helpers import session_client
 from tests.support.graphs import G
 from tests.support.registry import sync_test_plugins
 
 GRAPH = G().node("a", "testkit.echo@1", {"value": 1}).data()
+WORKFLOW_TABLES = ("workflows", "workflow_versions", "runs", "node_type_versions", "cel_profiles")
 
 
 @pytest.fixture(autouse=True)
@@ -801,18 +1011,29 @@ async def test_the_list_says_how_each_workflows_runs_went(app, owner_sessionmake
         wid, vid = await published(c, tid)
         root = await add_run(owner_sessionmaker, tid, wid, vid, status="succeeded", hours_ago=30)  # out of the 24 h
         await add_run(owner_sessionmaker, tid, wid, vid, status="succeeded", hours_ago=2)
-        await add_run(owner_sessionmaker, tid, wid, vid, status="succeeded", mode="simulate", hours_ago=1.5)
-        await add_run(owner_sessionmaker, tid, wid, vid, status="failed", hours_ago=0.5)  # the last root run
+        await add_run(owner_sessionmaker, tid, wid, vid, status="failed", hours_ago=0.5)  # the last live root run
+        await add_run(owner_sessionmaker, tid, wid, vid, status="succeeded", mode="simulate", hours_ago=0.2)
         await add_run(owner_sessionmaker, tid, wid, vid, status="running", hours_ago=0.1, parent=root)  # a sub-run
         quiet, _ = await published(c, tid)
         rows = {w["id"]: w for w in (await c.get(f"/api/v1/t/{tid}/workflows")).json()}
     busy = rows[wid]
-    assert busy["last_run"]["status"] == "failed" and busy["last_run"]["mode"] == "live"
+    assert busy["last_run"]["status"] == "failed" and busy["last_simulation"]["status"] == "succeeded"
     assert busy["runs_24h"] == {"live": 2, "simulate": 1}
-    assert busy["needs_attention"] == ["last_run_failed"]
+    assert busy["needs_attention"] == ["last_run_failed"]  # the later successful simulation doesn't clear it
     assert busy["unpublished_changes"] is False
-    assert rows[quiet]["last_run"] is None and rows[quiet]["runs_24h"] == {"live": 0, "simulate": 0}
-    assert rows[quiet]["needs_attention"] == []
+    assert rows[quiet]["last_run"] is None and rows[quiet]["last_simulation"] is None
+    assert rows[quiet]["runs_24h"] == {"live": 0, "simulate": 0} and rows[quiet]["needs_attention"] == []
+
+
+async def test_a_failed_simulation_never_needs_attention(app, owner_sessionmaker, api_settings) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        wid, vid = await published(c, tid)
+        await add_run(owner_sessionmaker, tid, wid, vid, status="succeeded", hours_ago=2)
+        await add_run(owner_sessionmaker, tid, wid, vid, status="failed", mode="simulate", hours_ago=1)
+        row = (await c.get(f"/api/v1/t/{tid}/workflows/{wid}")).json()
+    assert row["last_run"]["status"] == "succeeded" and row["last_simulation"]["status"] == "failed"
+    assert row["needs_attention"] == []
 
 
 async def test_another_tenants_runs_never_count(app, owner_sessionmaker, api_settings) -> None:
@@ -831,7 +1052,7 @@ async def test_a_moved_step_is_an_unpublished_change(app, owner_sessionmaker, ap
     c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
     async with c:
         new = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "Never", "draft": GRAPH})).json()
-        assert new["unpublished_changes"] is True and new["active_version_number"] is None
+        assert new["unpublished_changes"] is True and new["active_version_number"] is None  # ruling 6
         wid, _ = await published(c, tid)
         base = f"/api/v1/t/{tid}/workflows/{wid}"
         same = await c.put(f"{base}/draft", json=GRAPH, headers={"If-Match": "1"})
@@ -858,10 +1079,42 @@ async def test_a_version_that_cant_run_needs_attention(
             assert (await lifecycle.retire(s, Entry("node", "testkit.echo@1"))).applied
         row = (await c.get(base)).json()
     assert row["executable"] is False and row["needs_attention"] == ["not_executable"]
-```
 
-The last test retires the node type the way `test_workflows.py:116-119` does: a type in use by an enabled workflow
-isn't retired, so the workflow is disabled first.
+
+async def statements_listing(c, tid) -> int:
+    """The statements one list request runs against a workflow's tables (the session's own reads are left out: a
+    session's bookkeeping may differ from one request to the next)."""
+    seen: list[str] = []
+
+    def on(conn: Any, cursor: Any, statement: str, parameters: Any, context: Any, executemany: bool) -> None:
+        seen.append(statement)
+
+    event.listen(Engine, "before_cursor_execute", on)
+    try:
+        assert (await c.get(f"/api/v1/t/{tid}/workflows")).status_code == 200
+    finally:
+        event.remove(Engine, "before_cursor_execute", on)
+    return len([s for s in seen if any(t in s for t in WORKFLOW_TABLES)])
+
+
+async def test_the_lists_reads_dont_grow_with_its_workflows(app, owner_sessionmaker, api_settings) -> None:
+    """Counted in statements, never time (the owner's review of 325fc14): two workflows or twelve, published or not,
+    with runs or without, the list reads as often."""
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        for _ in range(2):
+            wid, vid = await published(c, tid)
+            await add_run(owner_sessionmaker, tid, wid, vid, status="succeeded")
+        few = await statements_listing(c, tid)
+        for n in range(10):
+            if n % 2:
+                await c.post(f"/api/v1/t/{tid}/workflows", json={"name": f"Draft {n}", "draft": GRAPH})
+            else:
+                wid, vid = await published(c, tid)
+                await add_run(owner_sessionmaker, tid, wid, vid, status="failed", mode="simulate")
+        many = await statements_listing(c, tid)
+    assert few == many <= 6  # workflows, active versions, two lifecycle reads at most, last runs, counts
+```
 
 In `backend/tests/apps/api/test_workflows.py:32`, the draft PUT's answer gains the new field:
 
@@ -869,46 +1122,67 @@ In `backend/tests/apps/api/test_workflows.py:32`, the draft PUT's answer gains t
         assert saved.status_code == 200 and saved.json() == {"draft_revision": 2, "unpublished_changes": True}
 ```
 
-- [ ] **Step 2: Run the tests to see them fail**
+- [ ] **Step 3: Run the tests to see them fail**
 
-Run: `cd backend && uv run pytest -q -p no:cacheprovider tests/apps/api/test_workflow_summary.py tests/apps/api/test_workflows.py`
-Expected: FAIL: `KeyError: 'last_run'` (and `'unpublished_changes'`), and the draft PUT's answer lacks
-`unpublished_changes`.
+Run: `cd backend && uv run pytest -q -p no:cacheprovider tests/apps/test_workflow_summary.py tests/apps/api/test_workflow_summary.py tests/apps/api/test_workflows.py`
+Expected: FAIL: `ImportError: cannot import name 'workflow_summary'`, `KeyError: 'last_run'` (and
+`'unpublished_changes'`), the draft PUT's answer lacks `unpublished_changes`, and the statement count grows with the
+workflows (today's
+`_summary` refreshes each workflow and reads its version and lifecycle states one by one).
 
-- [ ] **Step 3: Implement the statistics**
+- [ ] **Step 4: Implement `workflow_summary.py`**
 
-`backend/src/dewpoint/core/workflows/summary.py`:
+`backend/src/dewpoint/apps/workflow_summary.py`:
 
 ```python
 # SPDX-License-Identifier: Apache-2.0
-"""What the workflows list shows of each workflow beyond its row (sub-project 4, B3): its last root run, its root
-runs in the last 24 hours, live and simulated apart, and whether its draft differs from its active version."""
+"""What the workflows list shows of each workflow beyond its row (sub-project 4, B3): its last live root run and, apart,
+its last simulated one; its root runs in the last 24 hours, live and simulated apart; whether its draft differs from
+its active version; and why it needs attention. Live runs alone drive attention (4b ruling 7): a simulation is a
+test, and a later successful one says nothing about the live failure before it."""
 
+import asyncio
 import uuid
-from collections.abc import Iterable
+from collections import OrderedDict
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dewpoint.core.models.runs import Run
 from dewpoint.engine.graph.model import GraphFormatError, graph_hash, parse_graph
 
 ATTENTION_STATUSES = ("failed", "deadline_exceeded")
+
+# Each workflow's last root run of each mode. `runs` has no index on `workflow_id` (4b ruling 5, held on the probe's
+# evidence): this is one scan of the tenant's root runs, sorted, whatever the number of workflows.
+LAST_RUNS = text(
+    "select distinct on (workflow_id, mode) workflow_id, mode, status, coalesce(ended_at, started_at, queued_at) as at"
+    " from runs where tenant_id = :tenant and kind = 'run' and workflow_id = any(cast(:ids as uuid[]))"
+    " order by workflow_id, mode, queued_at desc, id desc"
+)
+# Each workflow's root runs queued in the last 24 hours, by the database's clock (its clock wrote the rows): a range of
+# `runs_tenant_queued`.
+COUNTS_24H = text(
+    "select workflow_id, count(*) filter (where mode = 'live') as live,"
+    " count(*) filter (where mode = 'simulate') as simulated"
+    " from runs where tenant_id = :tenant and kind = 'run' and workflow_id = any(cast(:ids as uuid[]))"
+    " and queued_at >= now() - interval '24 hours' group by workflow_id"
+)
 
 
 @dataclass(frozen=True)
 class LastRun:
     status: str
-    mode: str
     at: datetime  # when it ended, else started, else was queued
 
 
 @dataclass(frozen=True)
 class RunStats:
-    last: LastRun | None
+    last_live: LastRun | None
+    last_simulated: LastRun | None
     live_24h: int
     simulated_24h: int
 
@@ -916,59 +1190,110 @@ class RunStats:
 async def run_stats(
     s: AsyncSession, tenant_id: uuid.UUID, workflow_ids: Iterable[uuid.UUID]
 ) -> dict[uuid.UUID, RunStats]:
-    """Each workflow's root runs: a sub-flow's or failure handler's run counts toward its parent's. `runs` has no
-    index on `workflow_id` (4b ruling 5): the last runs are one ordered scan of the tenant's root runs, the counts a
-    range of `runs_tenant_queued`. The 24 hours are the database's: its clock, not this process's, wrote the rows."""
+    """Each workflow's root runs, in two reads for any number of workflows: a sub-flow's or failure handler's run
+    counts toward its parent's, never as the workflow's own."""
     ids = sorted(set(workflow_ids), key=str)
     if not ids:
         return {}
-    root = (Run.tenant_id == tenant_id, Run.kind == "run", Run.workflow_id.in_(ids))
-    at = func.coalesce(Run.ended_at, Run.started_at, Run.queued_at).label("at")
-    last_rows = await s.execute(
-        select(Run.workflow_id, Run.status, Run.mode, at)
-        .where(*root)
-        .distinct(Run.workflow_id)
-        .order_by(Run.workflow_id, Run.queued_at.desc(), Run.id.desc())
-    )
-    last = {r.workflow_id: LastRun(status=r.status, mode=r.mode, at=r.at) for r in last_rows}
-    count_rows = await s.execute(
-        select(
-            Run.workflow_id,
-            func.count().filter(Run.mode == "live").label("live"),
-            func.count().filter(Run.mode == "simulate").label("simulated"),
-        )
-        .where(*root, Run.queued_at >= func.now() - timedelta(hours=24))
-        .group_by(Run.workflow_id)
-    )
-    counts = {r.workflow_id: (int(r.live), int(r.simulated)) for r in count_rows}
+    params = {"tenant": tenant_id, "ids": ids}
+    last = {(r.workflow_id, r.mode): LastRun(r.status, r.at) for r in await s.execute(LAST_RUNS, params)}
+    counts = {r.workflow_id: (int(r.live), int(r.simulated)) for r in await s.execute(COUNTS_24H, params)}
     return {
-        wid: RunStats(last=last.get(wid), live_24h=counts.get(wid, (0, 0))[0], simulated_24h=counts.get(wid, (0, 0))[1])
+        wid: RunStats(
+            last_live=last.get((wid, "live")),
+            last_simulated=last.get((wid, "simulate")),
+            live_24h=counts.get(wid, (0, 0))[0],
+            simulated_24h=counts.get(wid, (0, 0))[1],
+        )
         for wid in ids
     }
 
 
-def unpublished(draft: dict[str, Any], active_graph_hash: str | None) -> bool:
-    """Whether the draft differs from the active version's graph as publish hashes it (positions included); a
-    workflow never published counts as unpublished."""
-    if active_graph_hash is None:
-        return True
+def attention(stats: RunStats, *, published: bool, blocked: Sequence[str]) -> list[str]:
+    """Why a workflow needs attention: its last live root run failed or ran out of time, or its active version can't
+    run. Simulations never count (4b ruling 7)."""
+    out: list[str] = []
+    if stats.last_live is not None and stats.last_live.status in ATTENTION_STATUSES:
+        out.append("last_run_failed")
+    if published and blocked:
+        out.append("not_executable")
+    return out
+
+
+def _hash(draft: Mapping[str, Any]) -> str | None:
     try:
-        return graph_hash(parse_graph(draft)) != active_graph_hash
-    except GraphFormatError:  # every draft is format-checked when saved; one that isn't differs
-        return True
+        return graph_hash(parse_graph(draft))
+    except GraphFormatError:  # every draft is format-checked when saved; one that isn't can't equal a version
+        return None
+
+
+class DraftHashes:
+    """Each draft's graph hash as publish computes it (positions included), None for one that doesn't parse. A draft
+    never changes at its revision, so its hash is kept per (workflow, revision), the newest `kept`; the rest are parsed
+    together, off the event loop (parsing is CPU-bound, up to the 1 MiB body cap a draft)."""
+
+    def __init__(self, kept: int) -> None:
+        self._kept = kept
+        self._hashes: OrderedDict[tuple[uuid.UUID, int], str | None] = OrderedDict()
+
+    def __len__(self) -> int:
+        return len(self._hashes)
+
+    async def of(self, drafts: Sequence[tuple[uuid.UUID, int, Mapping[str, Any]]]) -> dict[uuid.UUID, str | None]:
+        missing = [(wid, rev, draft) for wid, rev, draft in drafts if (wid, rev) not in self._hashes]
+        if missing:
+            computed = await asyncio.to_thread(lambda: [_hash(draft) for _, _, draft in missing])
+            for (wid, rev, _), found in zip(missing, computed, strict=True):
+                self._hashes[(wid, rev)] = found
+        out: dict[uuid.UUID, str | None] = {}
+        for wid, rev, _ in drafts:
+            out[wid] = self._hashes[(wid, rev)]
+            self._hashes.move_to_end((wid, rev))
+        while len(self._hashes) > self._kept:
+            self._hashes.popitem(last=False)
+        return out
+
+
+HASHES = DraftHashes(kept=4096)  # about 150 bytes each: under 1 MB per API process
 ```
 
-- [ ] **Step 4: Implement the answers**
+- [ ] **Step 5: Run the unit tests to see them pass**
+
+Run: `cd backend && uv run pytest -q -p no:cacheprovider tests/apps/test_workflow_summary.py`
+Expected: PASS.
+
+- [ ] **Step 6: Implement the batched lifecycle read and the answers**
+
+In `backend/src/dewpoint/core/workflows/service.py`, replace `blocked_by` with:
+
+```python
+async def blocked_by_many(s: AsyncSession, versions: Iterable[WorkflowVersion]) -> dict[uuid.UUID, list[str]]:
+    """Each version's lifecycle entries that stop it from running (retired or missing), in one read of the states of
+    every entry any of them uses."""
+    entries = {v.id: lifecycle.entries_for(v.closure_node_refs, v.closure_cel_profiles) for v in versions}
+    current = await lifecycle.states(s, {e for used in entries.values() for e in used})
+    return {
+        version_id: [e.key for e in lifecycle.not_executable({e: current[e] for e in used})]
+        for version_id, used in entries.items()
+    }
+
+
+async def blocked_by(s: AsyncSession, version: WorkflowVersion) -> list[str]:
+    """Lifecycle entries in the version's closure that stop it from running (retired or missing)."""
+    return (await blocked_by_many(s, [version]))[version.id]
+```
+
+`lifecycle.states` answers an empty set without reading (`lifecycle.py:85-105`).
 
 In `backend/src/dewpoint/apps/api/responses.py`, before `WorkflowOut`:
 
 ```python
 class LastRunOut(_Answer):
     status: Literal["running", "succeeded", "failed", "cancelled", "deadline_exceeded"]
-    mode: Literal["live", "simulate"]
     at: str  # when it ended, else started, else was queued
+```
 
-
+```python
 class RunCountOut(_Answer):
     live: int
     simulate: int
@@ -978,7 +1303,8 @@ and add to `WorkflowOut`, after `updated_at` (B3):
 
 ```python
     unpublished_changes: bool  # the draft differs from the active version (true when nothing is published)
-    last_run: LastRunOut | None  # its last root run, of either mode
+    last_run: LastRunOut | None  # its last live root run: what attention follows
+    last_simulation: LastRunOut | None  # its last simulated root run, shown apart, never attention
     runs_24h: RunCountOut  # its root runs queued in the last 24 hours, live and simulated apart
     needs_attention: list[Literal["last_run_failed", "not_executable"]]
 ```
@@ -989,23 +1315,27 @@ and to `DraftSavedOut`:
     unpublished_changes: bool
 ```
 
-In `backend/src/dewpoint/apps/api/routes/workflows.py`, import `summary` (`from dewpoint.core.workflows import service,
-summary`), and replace `_summary` with:
+In `backend/src/dewpoint/apps/api/routes/workflows.py`, import it (`from dewpoint.apps import workflow_ops,
+workflow_summary`), and replace `_summary` with:
 
 ```python
+def _last(run: workflow_summary.LastRun | None) -> dict[str, str] | None:
+    return None if run is None else {"status": run.status, "at": run.at.isoformat()}
+
+
 async def _summaries(db: AsyncSession, tenant_id: uuid.UUID, wfs: list[Workflow]) -> list[dict[str, object]]:
-    stats = await summary.run_stats(db, tenant_id, [wf.id for wf in wfs])
+    """Each workflow's row (B3), in a fixed number of reads whatever their number: the active versions, the lifecycle
+    states of every entry they use, the last runs and the 24-hour counts, each read once for all."""
+    ids = [wf.id for wf in wfs]
+    actives = await service.active_versions(db, tenant_id, ids)
+    blocked = await service.blocked_by_many(db, actives.values())
+    stats = await workflow_summary.run_stats(db, tenant_id, ids)
+    hashes = await workflow_summary.HASHES.of([(wf.id, wf.draft_revision, wf.draft) for wf in wfs])
     out: list[dict[str, object]] = []
     for wf in wfs:
-        await db.refresh(wf)
-        active = await service.get_version(db, wf.id, wf.active_version_id) if wf.active_version_id else None
-        blocked = await service.blocked_by(db, active) if active else []
+        active = actives.get(wf.id)
+        stops = blocked[active.id] if active else []
         runs = stats[wf.id]
-        needs: list[str] = []
-        if runs.last is not None and runs.last.status in summary.ATTENTION_STATUSES:
-            needs.append("last_run_failed")
-        if active is not None and blocked:
-            needs.append("not_executable")
         out.append(
             {
                 "id": str(wf.id),
@@ -1014,27 +1344,33 @@ async def _summaries(db: AsyncSession, tenant_id: uuid.UUID, wfs: list[Workflow]
                 "draft_revision": wf.draft_revision,
                 "active_version_id": str(active.id) if active else None,
                 "active_version_number": active.number if active else None,
-                "executable": (not blocked) if active else None,
-                "blocked_by": blocked,
+                "executable": (not stops) if active else None,
+                "blocked_by": stops,
                 "created_at": wf.created_at.isoformat(),
                 "updated_at": wf.updated_at.isoformat(),
-                "unpublished_changes": summary.unpublished(wf.draft, active.graph_hash if active else None),
-                "last_run": None
-                if runs.last is None
-                else {"status": runs.last.status, "mode": runs.last.mode, "at": runs.last.at.isoformat()},
+                "unpublished_changes": active is None or hashes[wf.id] != active.graph_hash,
+                "last_run": _last(runs.last_live),
+                "last_simulation": _last(runs.last_simulated),
                 "runs_24h": {"live": runs.live_24h, "simulate": runs.simulated_24h},
-                "needs_attention": needs,
+                "needs_attention": workflow_summary.attention(runs, published=active is not None, blocked=stops),
             }
         )
     return out
 
 
 async def _summary(db: AsyncSession, wf: Workflow) -> dict[str, object]:
+    """One workflow just read, created or changed: its server-set columns (`updated_at`) are read back first."""
+    await db.refresh(wf)
     return (await _summaries(db, wf.tenant_id, [wf]))[0]
 ```
 
-`list_workflows` becomes `return await _summaries(db, ctx.tenant_id, await service.list_workflows(db, ctx.tenant_id))`.
-`put_draft` answers the comparison too:
+`list_workflows` reads each row fresh, so it needs no refresh:
+
+```python
+    return await _summaries(db, ctx.tenant_id, await service.list_workflows(db, ctx.tenant_id))
+```
+
+`put_draft` answers the comparison too, hashing the draft it just saved (and keeping its hash for the next list):
 
 ```python
     try:
@@ -1042,41 +1378,232 @@ async def _summary(db: AsyncSession, wf: Workflow) -> dict[str, object]:
     except service.DraftConflictError as e:
         raise HTTPException(409, detail={"error": "draft_conflict", "draft_revision": e.current_revision}) from None
     active = await service.get_version(db, wf.id, wf.active_version_id) if wf.active_version_id else None
-    return {"draft_revision": revision, "unpublished_changes": summary.unpublished(draft, active.graph_hash if active else None)}
+    saved = (await workflow_summary.HASHES.of([(wf.id, revision, draft)]))[wf.id]
+    return {"draft_revision": revision, "unpublished_changes": active is None or saved != active.graph_hash}
 ```
 
-- [ ] **Step 5: Run the tests to see them pass, then the workflow suites**
+- [ ] **Step 7: Run the tests to see them pass, then the workflow suites**
 
-Run: `cd backend && uv run pytest -q -p no:cacheprovider tests/apps/api/test_workflow_summary.py tests/apps/api/test_workflows.py tests/apps/api/test_openapi.py tests/core/workflows`
-Expected: PASS. If the raw `runs` insert of Step 1 trips a CHECK this plan doesn't name (a sub-run's columns), adapt
-the helper to the constraint the error names, never the code under test.
+Run: `cd backend && uv run pytest -q -p no:cacheprovider tests/apps/test_workflow_summary.py tests/core/workflows tests/apps/api/test_workflow_summary.py tests/apps/api/test_workflows.py tests/apps/api/test_openapi.py tests/apps/test_workflow_ops.py`
+Expected: PASS. If the raw `runs` insert of Step 2 trips a CHECK this plan doesn't name (a sub-run's columns), adapt
+the helper to the constraint the error names, never the code under test. If the statement count's bound of 6 is
+missed by a read the middleware makes of a workflow table, name that statement in the test's docstring and keep
+`few == many`, which is the property; never loosen the equality.
 
-- [ ] **Step 6: Regenerate the client's schema and check it.** Expected: `WorkflowOut` gains the four fields.
+- [ ] **Step 8: Regenerate the client's schema and check it.** Expected: `WorkflowOut` gains the five fields.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 9: Write the probe, and run it for the milestone 1 pause**
+
+`backend/tests/probes/workflow_list.py`:
+
+```python
+# SPDX-License-Identifier: Apache-2.0
+"""The workflows list's cost (sub-project 4, B3), the evidence 4b ruling 5 is held on: what its run statistics read
+against a tenant's run history, without an index on `workflow_id` and with a candidate one, and what hashing its
+drafts costs. Run by hand, never in CI; on a disposable Postgres 16 (testcontainers), synthetic data only. From
+`backend/`:
+
+    PYTHONPATH=$PWD/src:$PWD .venv/bin/python -m tests.probes.workflow_list <part> [sizes...]
+
+- `plans`: `workflow_summary.LAST_RUNS` and `.COUNTS_24H`, EXPLAIN (ANALYZE, BUFFERS), for a tenant of 200 workflows
+  whose root runs (one in ten simulated, one in twenty failed, spread over 30 days, as many sub-runs again) number
+  10k, 100k and 1M by default, beside another tenant's 1M; then the same with the candidate index `runs (workflow_id,
+  mode, queued_at DESC, id DESC) WHERE kind = 'run'`, made in the disposable database only (an index in the product
+  is a migration: a slot from the owner), and the per-workflow LATERAL read that index would allow;
+- `hashing`: `DraftHashes.of()` for 50, 200 and 500 drafts of 30 steps: cold (each parsed), then warm (kept).
+
+Numbers depend on the machine; record them with it."""
+
+import asyncio
+import statistics
+import sys
+import time
+import uuid
+from typing import Any
+
+from tests.probes.ingress_load import Database, ms
+
+WORKFLOWS = 200
+SIZES = (10_000, 100_000, 1_000_000)
+CANDIDATE = (
+    "create index probe_runs_workflow_last on runs (workflow_id, mode, queued_at desc, id desc) where kind = 'run'"
+)
+LATERAL = (
+    "select w.id as workflow_id, m.mode, r.status, r.at from unnest(cast(:ids as uuid[])) w(id)"
+    " cross join (values ('live'), ('simulate')) m(mode) cross join lateral ("
+    " select status, coalesce(ended_at, started_at, queued_at) as at from runs where tenant_id = :tenant"
+    " and kind = 'run' and workflow_id = w.id and mode = m.mode order by queued_at desc, id desc limit 1) r"
+)
+ROOTS = (
+    "with roots as (insert into runs (id, tenant_id, workflow_id, workflow_version_id, mode, status, queued_at,"
+    " iterations, kind) select gen_random_uuid(), :t, (cast(:w as uuid[]))[1 + g % cardinality(cast(:w as uuid[]))],"
+    " gen_random_uuid(), case when g % 10 = 0 then 'simulate' else 'live' end,"
+    " case when g % 20 = 0 then 'failed' else 'succeeded' end, now() - make_interval(secs => g % 2592000), 0, 'run'"
+    " from generate_series(:a, :b) g returning id, workflow_id, mode, queued_at)"
+    " insert into runs (id, tenant_id, workflow_id, workflow_version_id, mode, status, queued_at, iterations, kind,"
+    " parent_run_id, parent_step_id) select gen_random_uuid(), :t, workflow_id, gen_random_uuid(), mode, 'succeeded',"
+    " queued_at, 0, 'subflow', id, gen_random_uuid() from roots where :subs"
+)
+
+
+async def tenant(owner: Any) -> uuid.UUID:
+    from sqlalchemy import text
+
+    tid = uuid.uuid4()
+    async with owner() as s, s.begin():
+        await s.execute(text("insert into tenants(id,name,slug) values (:t,'T',:slug)"), {"t": tid, "slug": tid.hex[:12]})
+    return tid
+
+
+async def grow(owner: Any, tid: uuid.UUID, workflows: list[uuid.UUID], a: int, b: int, *, subs: bool) -> None:
+    from sqlalchemy import text
+
+    async with owner() as s, s.begin():
+        await s.execute(text(ROOTS), {"t": tid, "w": workflows, "a": a, "b": b, "subs": subs})
+    async with owner() as s, s.begin():
+        await s.execute(text("analyze runs"))
+
+
+async def explain(owner: Any, sql: str, params: dict[str, Any]) -> tuple[float, str]:
+    """The statement's plan, executed: (execution time in seconds, the plan's text)."""
+    from sqlalchemy import text
+
+    async with owner() as s:
+        rows = [r[0] for r in await s.execute(text(f"explain (analyze, buffers) {sql}"), params)]
+    took = next(float(r.split(":")[1].split()[0]) for r in rows if r.startswith("Execution Time"))
+    return took / 1000, "\n".join(rows)
+
+
+async def plans(db: Database, sizes: tuple[int, ...] = SIZES) -> None:
+    from dewpoint.apps import workflow_summary as summary
+
+    owner = db.sessions()
+    tid, noise = await tenant(owner), await tenant(owner)
+    workflows = [uuid.uuid4() for _ in range(WORKFLOWS)]
+    await grow(owner, noise, [uuid.uuid4() for _ in range(WORKFLOWS)], 1, max(sizes), subs=False)
+    params = {"tenant": tid, "ids": workflows}
+    reads = {"last runs (DISTINCT ON)": summary.LAST_RUNS.text, "24 h counts": summary.COUNTS_24H.text}
+    done = 0
+    for size in sizes:
+        await grow(owner, tid, workflows, done + 1, size, subs=True)
+        done = size
+        for label, sql in reads.items():
+            took = statistics.median([(await explain(owner, sql, params))[0] for _ in range(5)])
+            print(f"\n### {size:,} root runs, no index: {label}, median of 5: {ms(took)}")
+            print((await explain(owner, sql, params))[1])
+    from sqlalchemy import text
+
+    async with owner() as s, s.begin():
+        await s.execute(text(CANDIDATE))
+        await s.execute(text("analyze runs"))
+    for label, sql in {**reads, "last runs (LATERAL)": LATERAL}.items():
+        took = statistics.median([(await explain(owner, sql, params))[0] for _ in range(5)])
+        print(f"\n### {done:,} root runs, candidate index: {label}, median of 5: {ms(took)}")
+        print((await explain(owner, sql, params))[1])
+
+
+async def hashing() -> None:
+    from dewpoint.apps.workflow_summary import DraftHashes
+    from tests.support.graphs import G
+
+    def draft(n: int) -> dict[str, Any]:
+        g = G()
+        for i in range(n):
+            g.node(f"s{i}", "flow.transform@1", {"fields": {"v": i}})
+            if i:
+                g.edge(f"s{i - 1}", f"s{i}")
+        return g.data()
+
+    print("| drafts of 30 steps | cold | warm |\n|---|---|---|")
+    for count in (50, 200, 500):
+        drafts = [(uuid.uuid4(), 1, draft(30)) for _ in range(count)]
+        hashes = DraftHashes(kept=4096)
+        start = time.perf_counter()
+        await hashes.of(drafts)
+        cold = time.perf_counter() - start
+        start = time.perf_counter()
+        await hashes.of(drafts)
+        print(f"| {count} | {ms(cold)} | {ms(time.perf_counter() - start)} |")
+
+
+def run(part: str, *args: str) -> None:
+    if part == "hashing":
+        asyncio.run(hashing())
+        return
+    sizes = tuple(int(a) for a in args) or SIZES
+    with Database() as db:
+
+        async def go() -> None:
+            await db.prepared()
+            await plans(db, sizes)
+
+        asyncio.run(go())
+
+
+if __name__ == "__main__":
+    run(*sys.argv[1:])
+```
+
+`ROOTS` makes the sub-runs in the same statement as their roots (a writable CTE; `runs.parent_run_id`'s foreign key is
+checked at the statement's end). Its `where :subs` keeps the other tenant's history to root runs.
+
+Run it smallest first and extrapolate before the full size (the owner's rule: ask before anything over about ten
+minutes):
 
 ```bash
-git add backend/src/dewpoint/core/workflows/summary.py backend/src/dewpoint/apps/api \
-  backend/tests/apps/api/test_workflow_summary.py backend/tests/apps/api/test_workflows.py frontend/src/api
-git commit -m "feat(api): a workflow's summary says how its runs went and whether its draft is published (B3, 4b)"
+cd backend && PYTHONPATH=$PWD/src:$PWD .venv/bin/python -m tests.probes.workflow_list hashing
+cd backend && PYTHONPATH=$PWD/src:$PWD .venv/bin/python -m tests.probes.workflow_list plans 10000 100000
 ```
 
-### Task 4: A version can be read whole, with its graph and its `engine_abi` (B4a)
+If the second run's insert and analyze times put 1M (and the other tenant's 1M) past ten minutes, stop and ask the
+owner with the estimate; otherwise run `plans` at its default sizes. Save each run's output, with the machine's CPU,
+memory and Docker allocation, in the scratchpad's `evidence/` (never in the repo), for the pause's summary. The probe
+is committed; its numbers aren't.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add backend/src/dewpoint/apps backend/src/dewpoint/core/workflows/service.py backend/tests/apps/test_workflow_summary.py \
+  backend/tests/apps/api/test_workflow_summary.py backend/tests/apps/api/test_workflows.py \
+  backend/tests/probes/workflow_list.py frontend/src/api
+git commit -m "feat(api): a workflow's summary: live runs drive attention, simulations apart; the list reads a fixed number of times (B3, 4b)"
+```
+
+### Task 4: A version can be read whole (B4a), and publish can be bound to the version number it names
 
 **Files:**
 - Modify: `backend/src/dewpoint/apps/api/responses.py` (`VersionOut.engine_abi`; `VersionDetailOut`)
-- Modify: `backend/src/dewpoint/apps/api/routes/workflows.py` (`_version_out`; `GET …/versions/{version_id}`)
+- Modify: `backend/src/dewpoint/core/workflows/service.py` (`VersionChangedError`, `latest_version_number`)
+- Modify: `backend/src/dewpoint/apps/workflow_ops.py` (`publish(..., expected_latest_version=None)`)
+- Modify: `backend/src/dewpoint/apps/api/routes/workflows.py` (`_version_out`; `GET …/versions/{version_id}`;
+  `PublishIn`, the publish route's optional body and its `version_changed` refusal)
 - Modify: `backend/src/dewpoint/apps/api/openapi.py` (`GRAPH_PROPERTIES` gains `("VersionDetailOut", "graph")`)
 - Create: `backend/tests/apps/api/test_workflow_versions.py`
-- Modify: `backend/tests/apps/api/test_openapi.py` (`SLICE_4B` gains the route)
+- Modify: `backend/tests/apps/api/test_openapi.py` (`SLICE_4B` gains the route; the publish body)
 - Regenerate: `frontend/src/api/openapi.json`, `frontend/src/api/schema.d.ts`
 
 **Interfaces:**
 - Consumes: `WorkflowVersion.graph`, `.engine_abi`, `.expressions` (each `ExpressionRecord.to_json()`, with `node`,
-  `field`, `mode`, `reason` among its keys: `backend/src/dewpoint/engine/cel/record.py:21-40`).
-- Produces: `GET /api/v1/t/{tenant_id}/workflows/{workflow_id}/versions/{version_id}` → `VersionDetailOut` (every
-  `VersionOut` field, plus `graph` (verbatim, documented as `Graph`) and `expressions: ExpressionOut[]`); `VersionOut`
-  gains `engine_abi: int` (B4b's "not recorded" rule reads it). Permission `workflow.view`.
+  `field`, `mode`, `reason` among its keys: `backend/src/dewpoint/engine/cel/record.py:21-40`); the publish route's
+  lock: `_get(..., for_update=True)` takes the workflow's admission lock and its row lock (`service.get_workflow`,
+  `service.py:86-99`) and holds both until the publication commits; `insert_version` numbers the next version under
+  that lock (`service.py:177-182`).
+- Produces:
+  - `GET /api/v1/t/{tenant_id}/workflows/{workflow_id}/versions/{version_id}` → `VersionDetailOut` (every `VersionOut`
+    field, plus `graph` (verbatim, documented as `Graph`) and `expressions: ExpressionOut[]`); `VersionOut` gains
+    `engine_abi: int` (B4b's "not recorded" rule reads it). Permission `workflow.view`.
+  - `POST …/publish` takes an optional body `PublishIn {expected_latest_version: int | null (≥ 0)}`, extra keys
+    refused: the number of the newest version the editor showed when it asked (0: none yet). Checked under the
+    publication's own lock; a mismatch answers `409 {"error": "version_changed", "latest_version": n}` and publishes
+    nothing. A draft conflict is checked first and keeps its answer. Without a body, or with `{}` or a null, publish
+    behaves as before (every existing caller, the CLI and the tests).
+  - `service.VersionChangedError(latest)`, `service.latest_version_number(s, workflow_id) -> int`;
+    `workflow_ops.publish(s, ctx, wf, *, expected_revision, settings, expected_latest_version=None)`.
+
+Why a precondition (4b ruling 17, amended): the confirmation names a number ("Publish version 3"). Without a check
+under the same lock that numbers it, a second publisher between the dialog's opening and the click would make this one
+version 4, so the dialog would have named a version it didn't publish. With it, the editor learns of the other
+publication, refreshes, and asks again.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1084,8 +1611,10 @@ git commit -m "feat(api): a workflow's summary says how its runs went and whethe
 
 ```python
 # SPDX-License-Identifier: Apache-2.0
-"""A published version read whole (sub-project 4, B4a): its graph, how its expressions run, and its engine ABI."""
+"""A published version read whole (sub-project 4, B4a): its graph, how its expressions run, and its engine ABI. And
+publish bound to the version number the editor named (4b ruling 17)."""
 
+import asyncio
 import uuid
 
 import pytest
@@ -1136,6 +1665,71 @@ async def test_only_this_workflows_versions_are_read(app, owner_sessionmaker, ap
     async with stranger:
         path = f"/api/v1/t/{other}/workflows/{a['id']}/versions/{va['version_id']}"
         assert (await stranger.get(path)).status_code == 404
+
+
+async def new_workflow(c, tid) -> str:
+    wf = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": f"W {uuid.uuid4().hex[:6]}", "draft": GRAPH})).json()
+    return f"/api/v1/t/{tid}/workflows/{wf['id']}"
+
+
+async def test_publish_names_the_version_it_expects(app, owner_sessionmaker, api_settings) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        base = await new_workflow(c, tid)
+        first = await c.post(f"{base}/publish", headers={"If-Match": "1"}, json={"expected_latest_version": 0})
+        assert (first.status_code, first.json()["number"]) == (201, 1)
+        stale = await c.post(f"{base}/publish", headers={"If-Match": "1"}, json={"expected_latest_version": 0})
+        assert (stale.status_code, stale.json()) == (409, {"error": "version_changed", "latest_version": 1})
+        assert [v["number"] for v in (await c.get(f"{base}/versions")).json()] == [1]  # nothing published
+        second = await c.post(f"{base}/publish", headers={"If-Match": "1"}, json={"expected_latest_version": 1})
+        assert (second.status_code, second.json()["number"]) == (201, 2)
+
+
+@pytest.mark.parametrize("body", [None, {}, {"expected_latest_version": None}])
+async def test_publish_without_an_expectation_behaves_as_before(app, owner_sessionmaker, api_settings, body) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        base = await new_workflow(c, tid)
+        await c.post(f"{base}/publish", headers={"If-Match": "1"})
+        r = await c.post(f"{base}/publish", headers={"If-Match": "1"}, **({} if body is None else {"json": body}))
+    assert (r.status_code, r.json()["number"]) == (201, 2)
+
+
+@pytest.mark.parametrize(
+    "body", [{"expected_latest_version": -1}, {"expected_latest": 1}, {"expected_latest_version": "1"}, {"expected_latest_version": True}]
+)
+async def test_a_malformed_expectation_is_refused(app, owner_sessionmaker, api_settings, body) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        base = await new_workflow(c, tid)
+        r = await c.post(f"{base}/publish", headers={"If-Match": "1"}, json=body)
+        assert (await c.get(f"{base}/versions")).json() == []
+    assert r.status_code == 422 and r.json()["error"] == "invalid"
+
+
+async def test_a_draft_conflict_is_answered_before_a_version_change(app, owner_sessionmaker, api_settings) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        base = await new_workflow(c, tid)
+        await c.post(f"{base}/publish", headers={"If-Match": "1"})
+        r = await c.post(f"{base}/publish", headers={"If-Match": "7"}, json={"expected_latest_version": 0})
+    assert (r.status_code, r.json()) == (409, {"error": "draft_conflict", "draft_revision": 1})
+
+
+async def test_two_publishers_naming_one_version_publish_it_once(app, owner_sessionmaker, api_settings) -> None:
+    """The expectation is checked under the lock that numbers the version: of two editors who both saw version 1, one
+    publishes version 2 and the other is told, never silently publishing version 3."""
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        base = await new_workflow(c, tid)
+        await c.post(f"{base}/publish", headers={"If-Match": "1"})
+        both = await asyncio.gather(
+            *(c.post(f"{base}/publish", headers={"If-Match": "1"}, json={"expected_latest_version": 1}) for _ in range(2))
+        )
+        numbers = [v["number"] for v in (await c.get(f"{base}/versions")).json()]
+    assert sorted(r.status_code for r in both) == [201, 409]
+    assert next(r for r in both if r.status_code == 409).json() == {"error": "version_changed", "latest_version": 2}
+    assert numbers == [2, 1]
 ```
 
 The `/value` pointer and the `local` mode assume `testkit.echo`'s config property is `value` and `1 + 1` runs inline;
@@ -1147,14 +1741,26 @@ to `SLICE_4B`, and:
 ```python
 def test_a_versions_graph_is_documented_as_a_graph() -> None:
     assert schema()["components"]["schemas"]["VersionDetailOut"]["properties"]["graph"] == GRAPH
+
+
+def test_publishs_body_is_optional() -> None:
+    """Verified against FastAPI 0.141.1: an optional body model is documented as itself or null, not required."""
+    body = schema()["paths"]["/api/v1/t/{tenant_id}/workflows/{workflow_id}/publish"]["post"]["requestBody"]
+    assert "required" not in body
+    assert body["content"]["application/json"]["schema"]["anyOf"] == [
+        {"$ref": "#/components/schemas/PublishIn"},
+        {"type": "null"},
+    ]
 ```
 
 - [ ] **Step 2: Run the tests to see them fail**
 
 Run: `cd backend && uv run pytest -q -p no:cacheprovider tests/apps/api/test_workflow_versions.py tests/apps/api/test_openapi.py`
-Expected: FAIL: `KeyError: 'engine_abi'`, a 404 or 405 for the version route, and `KeyError: 'VersionDetailOut'`.
+Expected: FAIL: `KeyError: 'engine_abi'`, a 404 or 405 for the version route, `KeyError: 'VersionDetailOut'`, a 201
+where `version_changed` is expected (the body is ignored today), the race publishing versions 2 and 3, and no
+`requestBody` on publish.
 
-- [ ] **Step 3: Implement**
+- [ ] **Step 3: Implement the version read**
 
 In `backend/src/dewpoint/apps/api/responses.py`, add `engine_abi: int` to `VersionOut` after `cel_profile`, and after
 `VersionOut`:
@@ -1199,25 +1805,124 @@ async def version(
 GRAPH_PROPERTIES: tuple[tuple[str, str], ...] = (("WorkflowDetailOut", "draft"), ("VersionDetailOut", "graph"))
 ```
 
-- [ ] **Step 4: Run the tests to see them pass**
+- [ ] **Step 4: Implement the publish precondition**
 
-Run: `cd backend && uv run pytest -q -p no:cacheprovider tests/apps/api/test_workflow_versions.py tests/apps/api/test_openapi.py tests/apps/api/test_workflows.py`
-Expected: PASS.
+In `backend/src/dewpoint/core/workflows/service.py`, after `DraftConflictError`:
 
-- [ ] **Step 5: Regenerate the client's schema and check it.**
+```python
+class VersionChangedError(Exception):
+    """A publish named the newest version it expected, and another is newest now."""
 
-- [ ] **Step 6: Commit**
-
-```bash
-git add backend/src/dewpoint/apps/api backend/tests/apps/api/test_workflow_versions.py \
-  backend/tests/apps/api/test_openapi.py frontend/src/api
-git commit -m "feat(api): a version read whole, with its graph, expressions and engine ABI (B4a, 4b)"
+    def __init__(self, latest: int) -> None:
+        super().__init__(f"the newest version is {latest}")
+        self.latest = latest
 ```
 
-### Task 5: A workflow exports to a file with typed placeholders and imports with each re-bound (B12)
+and after `insert_version`, with `insert_version`'s own count replaced by it:
+
+```python
+async def latest_version_number(s: AsyncSession, workflow_id: uuid.UUID) -> int:
+    """The newest version's number, 0 when none: the caller holds the workflow's row lock, so it can't change."""
+    latest = await s.execute(
+        select(func.coalesce(func.max(WorkflowVersion.number), 0)).where(WorkflowVersion.workflow_id == workflow_id)
+    )
+    return int(latest.scalar_one())
+```
+
+(`insert_version` then reads `number = await latest_version_number(s, wf.id) + 1`.)
+
+In `backend/src/dewpoint/apps/workflow_ops.py`, `publish` gains the expectation, checked after the draft's revision and
+before any validation, under the lock its caller holds:
+
+```python
+async def publish(
+    s: AsyncSession,
+    ctx: TenantContext,
+    wf: Workflow,
+    *,
+    expected_revision: int,
+    settings: Settings,
+    expected_latest_version: int | None = None,
+) -> Published:
+    """Validate the draft and insert it as the new active version. `wf` must be locked FOR UPDATE. With
+    `expected_latest_version`, publish only if the newest version is still that one (0: none), so the number a
+    confirmation named is the number published (4b ruling 17); else VersionChangedError."""
+    if wf.draft_revision != expected_revision:
+        raise service.DraftConflictError(wf.draft_revision)
+    if expected_latest_version is not None:
+        latest = await service.latest_version_number(s, wf.id)
+        if latest != expected_latest_version:
+            raise service.VersionChangedError(latest)
+    checked = await check_draft(s, ctx.tenant_id, wf.draft, settings)
+```
+
+(the rest unchanged). In `backend/src/dewpoint/apps/api/routes/workflows.py`, beside the other bodies (import
+`ConfigDict` from pydantic):
+
+```python
+class PublishIn(BaseModel):
+    """What the editor showed when it asked to publish (4b ruling 17). Extra keys are refused: a misspelt expectation
+    must never be dropped silently, publishing what nobody confirmed."""
+
+    model_config = ConfigDict(extra="forbid")
+    expected_latest_version: int | None = Field(default=None, ge=0, strict=True)  # 0: no version yet
+```
+
+and the publish route takes it and answers the new refusal:
+
+```python
+async def publish(
+    workflow_id: uuid.UUID,
+    body: PublishIn | None = None,
+    if_match: str | None = Header(default=None, alias="If-Match"),
+    ctx: TenantContext = Depends(require(P.WORKFLOW_PUBLISH)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, object]:
+    expected = _revision(if_match)
+    wf = await _get(db, ctx, workflow_id, for_update=True)
+    try:
+        out = await workflow_ops.publish(
+            db,
+            ctx,
+            wf,
+            expected_revision=expected,
+            settings=settings,
+            expected_latest_version=body.expected_latest_version if body else None,
+        )
+    except service.DraftConflictError as e:
+        raise HTTPException(409, detail={"error": "draft_conflict", "draft_revision": e.current_revision}) from None
+    except service.VersionChangedError as e:
+        raise HTTPException(409, detail={"error": "version_changed", "latest_version": e.latest}) from None
+```
+
+(the rest unchanged). Verified against pydantic 2.13.5 and FastAPI 0.141.1: no body, `{}` and a null each give
+`None`; `0` and `3` pass; `-1` is refused (`greater_than_equal`), `"1"`, `1.0` and `true` (`int_type`: `strict=True`, so
+lax mode's string-to-int is off), and an extra key (`extra_forbidden`); the API's handler answers each as
+`{"error": "invalid", ...}`. The schema is `{"anyOf": [{"$ref": "#/components/schemas/PublishIn"}, {"type": "null"}]}`
+with no `required`.
+
+- [ ] **Step 5: Run the tests to see them pass**
+
+Run: `cd backend && uv run pytest -q -p no:cacheprovider tests/apps/api/test_workflow_versions.py tests/apps/api/test_openapi.py tests/apps/api/test_workflows.py tests/apps/test_workflow_ops.py tests/apps/test_admission.py`
+Expected: PASS. `test_workflow_ops.py`'s and `test_admission.py`'s `publish` helpers pass no expectation and behave
+as before.
+
+- [ ] **Step 6: Regenerate the client's schema and check it.** Expected: `PublishIn` appears; publish's
+  `requestBody` is optional; `VersionDetailOut` and `VersionOut.engine_abi` appear.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add backend/src/dewpoint/apps backend/src/dewpoint/core/workflows/service.py \
+  backend/tests/apps/api/test_workflow_versions.py backend/tests/apps/api/test_openapi.py frontend/src/api
+git commit -m "feat(api): a version read whole (B4a); publish bound to the version number the editor named (4b)"
+```
+
+### Task 5: A workflow exports to a file with typed placeholders and imports with each re-bound, fail-closed (B12)
 
 **Files:**
-- Create: `backend/src/dewpoint/core/workflows/portable.py`
+- Create: `backend/src/dewpoint/core/workflows/portable.py` (pure: no engine import, so it may live in `core`)
 - Modify: `backend/src/dewpoint/core/workflows/service.py` (`create_workflow(..., source=None)`)
 - Modify: `backend/src/dewpoint/apps/api/responses.py` (`BindingSite`, `Binding`, `WorkflowDocument`)
 - Modify: `backend/src/dewpoint/apps/api/routes/workflows.py` (`WorkflowImportIn`; `GET …/{workflow_id}/export`,
@@ -1228,17 +1933,39 @@ git commit -m "feat(api): a version read whole, with its graph, expressions and 
 - Regenerate: `frontend/src/api/openapi.json`, `frontend/src/api/schema.d.ts`
 
 **Interfaces:**
-- Consumes: the connection marker `x-dewpoint-connection: <type key>` on a node type's top-level config property
-  (`backend/src/dewpoint/sdk/fields.py:9-34`); `flow.run_workflow@1`'s literal `workflow_id`
-  (`backend/src/dewpoint/plugins/flow/nodes.py:163`); `settings.failure_handler`; `registry.list_node_types(db,
-  states)`; `Connection.type`, `.name` (`backend/src/dewpoint/core/models/connections.py:13-21`).
-- Produces: `portable.Site(kind, type, node, field)`, `portable.sites(draft, config_schemas) -> list[Site]`,
-  `portable.value_at(draft, site)`, `portable.export_document(name, draft, config_schemas, labels) -> dict`,
-  `portable.apply(graph, bindings, chosen) -> dict`, `portable.SiteError(binding)`; the routes
-  `GET /api/v1/t/{tenant_id}/workflows/{workflow_id}/export` → `WorkflowDocument` (`workflow.view`) and
-  `POST /api/v1/t/{tenant_id}/workflows/import` (`{name, document, bind: {binding id: uuid}}`) → 201
-  `WorkflowDetailOut` (`workflow.edit`); refusals `422 {"error":"bad_binding","binding":id,"reason":"unexpected"|
-  "unknown"|"wrong_type"|"site"}`, `422 {"error":"invalid","diagnostics"}` (format), `409 name_taken`.
+- Consumes: the connection marker `x-dewpoint-connection: <type key>` (`dewpoint.sdk.fields.CONNECTION`), which the SDK
+  allows on a top-level config property only (`backend/src/dewpoint/sdk/manifest.py:162-182` refuses a plugin that
+  nests it) on a literal UUID field; `flow.run_workflow@1`'s literal `workflow_id: uuid.UUID`
+  (`backend/src/dewpoint/plugins/flow/nodes.py:162-173`); `GraphSettings.failure_handler: uuid.UUID | None`
+  (`backend/src/dewpoint/engine/graph/model.py:113`); `registry.load_node_types(db, refs)` (every state: a retired
+  type's schema still says where its ids are); `Connection.type`, `.name`; `parse_graph`, which doesn't refuse two
+  steps sharing an id (`model.py:173-185`).
+- Produces: in `portable`: `Site(kind, type, node, field)`, `Problem(reason, binding, node, field)` with `to_json()`,
+  `sites(graph, config_schemas)`, `value_at(graph, site)`, `held(draft, config_schemas) -> list[tuple[Site, str]]`,
+  `export_document(name, draft, config_schemas, labels) -> dict`, `check_document(graph, bindings, config_schemas) ->
+  list[Problem]`, `apply(graph, bindings, chosen, config_schemas) -> dict`, `NotPortableError(problems)`,
+  `BadDocumentError(problems)`; the routes `GET /api/v1/t/{tenant_id}/workflows/{workflow_id}/export` →
+  `WorkflowDocument` (`workflow.view`) and `POST /api/v1/t/{tenant_id}/workflows/import` (`{name, document, bind:
+  {binding id: uuid}}`, extra keys refused) → 201 `WorkflowDetailOut` (`workflow.edit`).
+- Refusals, each writing nothing:
+  - export: `422 {"error": "not_portable", "problems": [{"reason", "binding": null, "node", "field"}]}`, reasons
+    `unknown_type` (a step of a type this server doesn't know: its config may hold an id no schema marks),
+    `duplicate_node` (two steps share an id: a site would name either), `unexpected_value` (a site holding anything
+    but an id: an expression, a number, a string that isn't a UUID);
+  - import, the file: `422 {"error": "invalid", ...}` for an envelope the model refuses (format, version, a `null`
+    graph or binding, extra keys, a binding id outside `^[a-z][a-z0-9_]{0,31}$`, a binding with no site); `422
+    {"error": "invalid", "diagnostics"}` for a graph whose format is wrong; `422 {"error": "bad_document",
+    "problems": [...]}`, reasons `unknown_type`, `duplicate_node`, `embedded_value` (an id where a binding goes:
+    "leave unbound" would keep it), `duplicate_binding`, `overlapping_site` (a site listed twice), `bad_site` (not, by
+    this server's schemas, a site of the binding's kind and connection type: no such step, a property its type
+    doesn't mark, a nested pointer, other settings);
+  - import, the choices: `422 {"error": "bad_binding", "binding", "reason": "unexpected" | "unknown" |
+    "wrong_type"}`; `409 name_taken`.
+
+4b ruling 18, amended (the owner's review of 325fc14): export refuses rather than approximates, and import checks the
+whole file against this server's node types before it writes. Revision 1 kept a connection's id in the file when its
+step's schema was missing, accepted any config property as a binding's site, and let "leave unbound" keep an id the
+file embedded.
 
 - [ ] **Step 1: Write the failing unit tests**
 
@@ -1246,41 +1973,59 @@ git commit -m "feat(api): a version read whole, with its graph, expressions and 
 
 ```python
 # SPDX-License-Identifier: Apache-2.0
-"""A workflow as a file (sub-project 4, B12): no tenant's id travels in it."""
+"""A workflow as a file (sub-project 4, B12), fail-closed: no tenant's id leaves but as a typed placeholder, and an
+import writes nothing it hasn't checked against this server's node types."""
 
+import copy
 import uuid
 
 import pytest
 
 from dewpoint.core.workflows import portable
+from tests.support.graphs import cel
 
-CALL, SUB, ODD = (str(uuid.uuid4()) for _ in range(3))
+CALL, SUB, OTHER = (str(uuid.uuid4()) for _ in range(3))
 C1, W1 = str(uuid.uuid4()), str(uuid.uuid4())
 SCHEMAS = {
     "testkit.http_call@1": {
         "properties": {"connection": {"type": "string", "x-dewpoint-connection": "testkit"}, "path": {"type": "string"}}
-    }
+    },
+    "flow.run_workflow@1": {"properties": {"workflow_id": {"type": "string"}, "input": {"type": "object"}}},
 }
+LABELS = {("connection", C1): "Acme Prod", ("workflow", W1): "Cleanup"}
 
 
-def draft(conn: str, sub: str) -> dict:
+def draft(conn: object = C1, sub: object = W1, handler: object = W1) -> dict:
     return {
         "graph_format": 1,
         "nodes": [
             {"id": CALL, "key": "call", "type": "testkit.http_call@1", "config": {"connection": conn, "path": "/x"}},
             {"id": SUB, "key": "sub", "type": "flow.run_workflow@1", "config": {"workflow_id": sub, "input": {}}},
-            {"id": ODD, "key": "odd", "type": "vendor.unknown@1", "config": {"connection": "kept as it is"}},
         ],
         "edges": [],
-        "settings": {"failure_handler": sub},
+        "settings": {"failure_handler": handler},
     }
 
 
-LABELS = {("connection", C1): "Acme Prod", ("workflow", W1): "Cleanup"}
+def exported() -> dict:
+    return portable.export_document("Nightly", draft(), SCHEMAS, LABELS)
+
+
+def problems(doc: dict) -> list[tuple[str, str | None, str | None, str | None]]:
+    found = portable.check_document(doc["graph"], doc["bindings"], SCHEMAS)
+    return [(p.reason, p.binding, p.node, p.field) for p in found]
+
+
+def test_the_markers_are_the_sdks_and_the_flow_plugins() -> None:
+    from dewpoint.plugins.flow.nodes import RunWorkflow
+    from dewpoint.sdk.fields import CONNECTION
+
+    assert portable.CONNECTION_MARKER == CONNECTION
+    assert portable.RUN_WORKFLOW == f"{RunWorkflow.type}@{RunWorkflow.version}"
 
 
 def test_export_replaces_each_tenant_id_with_a_typed_placeholder() -> None:
-    doc = portable.export_document("Nightly", draft(C1, W1), SCHEMAS, LABELS)
+    doc = exported()
     assert (doc["format"], doc["format_version"], doc["name"]) == ("dewpoint.workflow", 1, "Nightly")
     assert doc["bindings"] == [
         {"id": "b1", "kind": "connection", "type": "testkit", "label": "Acme Prod",
@@ -1289,43 +2034,128 @@ def test_export_replaces_each_tenant_id_with_a_typed_placeholder() -> None:
          "sites": [{"node": SUB, "field": "/workflow_id"}, {"node": None, "field": "/settings/failure_handler"}]},
     ]  # fmt: skip
     nodes = {n["key"]: n for n in doc["graph"]["nodes"]}
-    assert nodes["call"]["config"] == {"path": "/x"}
-    assert nodes["sub"]["config"] == {"input": {}}
+    assert nodes["call"]["config"] == {"path": "/x"} and nodes["sub"]["config"] == {"input": {}}
     assert "failure_handler" not in doc["graph"]["settings"]
-    assert nodes["odd"]["config"] == {"connection": "kept as it is"}  # an unknown type holds no known site
 
 
 def test_an_id_the_tenant_doesnt_name_is_labelled_unknown() -> None:
-    doc = portable.export_document("Nightly", draft(C1, W1), SCHEMAS, {})
+    doc = portable.export_document("Nightly", draft(), SCHEMAS, {})
     assert [b["label"] for b in doc["bindings"]] == ["Unknown connection", "Unknown workflow"]
 
 
+def test_an_empty_site_is_emptied_and_exports_no_binding() -> None:
+    doc = portable.export_document("Nightly", draft(conn=None, handler=None), SCHEMAS, LABELS)
+    assert [(b["id"], b["kind"]) for b in doc["bindings"]] == [("b1", "workflow")]
+    assert "connection" not in doc["graph"]["nodes"][0]["config"] and doc["graph"]["settings"] == {}
+
+
+def test_one_id_at_two_sites_is_one_binding() -> None:
+    two = draft()
+    two["nodes"].append({"id": OTHER, "key": "again", "type": "testkit.http_call@1", "config": {"connection": C1.upper()}})
+    doc = portable.export_document("Nightly", two, SCHEMAS, LABELS)
+    assert doc["bindings"][0]["sites"] == [{"node": CALL, "field": "/connection"}, {"node": OTHER, "field": "/connection"}]
+
+
+def test_a_step_of_a_type_this_server_doesnt_know_isnt_exported() -> None:
+    odd = draft()
+    odd["nodes"].append({"id": OTHER, "key": "odd", "type": "vendor.unknown@1", "config": {"account": C1}})
+    with pytest.raises(portable.NotPortableError) as e:
+        portable.export_document("Nightly", odd, SCHEMAS, LABELS)
+    assert [p.to_json() for p in e.value.problems] == [
+        {"reason": "unknown_type", "binding": None, "node": OTHER, "field": None}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("changed", "where"),
+    [
+        (draft(conn=cel("vars.c")), (CALL, "/connection")),  # an expression where an id goes
+        (draft(conn="not-a-uuid"), (CALL, "/connection")),
+        (draft(sub=7), (SUB, "/workflow_id")),
+        (draft(handler="nope"), (None, "/settings/failure_handler")),
+    ],
+)
+def test_a_site_holding_anything_but_an_id_isnt_exported(changed: dict, where: tuple) -> None:
+    with pytest.raises(portable.NotPortableError) as e:
+        portable.export_document("Nightly", changed, SCHEMAS, LABELS)
+    assert [(p.reason, p.node, p.field) for p in e.value.problems] == [("unexpected_value", *where)]
+
+
+def test_two_steps_sharing_an_id_arent_exported() -> None:
+    twins = draft()
+    twins["nodes"].append(copy.deepcopy(twins["nodes"][0]) | {"key": "twin"})
+    with pytest.raises(portable.NotPortableError) as e:
+        portable.export_document("Nightly", twins, SCHEMAS, LABELS)
+    assert [(p.reason, p.node) for p in e.value.problems] == [("duplicate_node", CALL)]
+
+
 def test_import_binds_each_placeholder_and_round_trips() -> None:
-    doc = portable.export_document("Nightly", draft(C1, W1), SCHEMAS, LABELS)
-    assert portable.apply(doc["graph"], doc["bindings"], {"b1": C1, "b2": W1}) == draft(C1, W1)
+    doc = exported()
+    assert problems(doc) == []
+    assert portable.apply(doc["graph"], doc["bindings"], {"b1": C1, "b2": W1}, SCHEMAS) == draft()
 
 
 def test_an_unbound_placeholder_leaves_its_sites_empty() -> None:
-    doc = portable.export_document("Nightly", draft(C1, W1), SCHEMAS, LABELS)
-    back = portable.apply(doc["graph"], doc["bindings"], {"b1": C1})
+    doc = exported()
+    back = portable.apply(doc["graph"], doc["bindings"], {"b1": C1}, SCHEMAS)
     nodes = {n["key"]: n for n in back["nodes"]}
     assert nodes["call"]["config"]["connection"] == C1
     assert "workflow_id" not in nodes["sub"]["config"] and "failure_handler" not in back["settings"]
 
 
+def test_an_embedded_id_is_refused() -> None:
+    doc = exported()
+    doc["graph"]["nodes"][0]["config"]["connection"] = C1  # left unbound, it would stay
+    doc["graph"]["settings"]["failure_handler"] = W1
+    assert problems(doc) == [
+        ("embedded_value", None, CALL, "/connection"),
+        ("embedded_value", None, None, "/settings/failure_handler"),
+    ]
+
+
 @pytest.mark.parametrize(
-    "site",
+    ("site", "kind"),
     [
-        {"node": str(uuid.uuid4()), "field": "/connection"},  # no such node
-        {"node": CALL, "field": "/nested/connection"},  # not a top-level property
-        {"node": None, "field": "/settings/outputs"},  # not the failure handler
+        ({"node": str(uuid.uuid4()), "field": "/connection"}, "connection"),  # no such step
+        ({"node": CALL, "field": "/path"}, "connection"),  # a property its type doesn't mark
+        ({"node": CALL, "field": "/nested/connection"}, "connection"),  # nested: the SDK marks top-level only
+        ({"node": None, "field": "/settings/outputs"}, "workflow"),  # settings other than the failure handler
+        ({"node": SUB, "field": "/workflow_id"}, "connection"),  # a workflow's site, bound as a connection
+        ({"node": CALL, "field": "/connection"}, "workflow"),  # a connection's site, bound as a workflow
     ],
 )
-def test_a_site_outside_what_bindings_may_write_is_refused(site: dict) -> None:
-    binding = {"id": "b7", "kind": "connection", "type": "testkit", "label": "x", "sites": [site]}
-    with pytest.raises(portable.SiteError) as e:
-        portable.apply(draft(C1, W1), [binding], {"b7": C1})
-    assert e.value.binding == "b7"
+def test_a_site_an_import_may_not_write_is_refused(site: dict, kind: str) -> None:
+    doc = exported()
+    doc["bindings"] = [
+        {"id": "b7", "kind": kind, "type": "testkit" if kind == "connection" else None, "label": "x", "sites": [site]}
+    ]
+    assert problems(doc) == [("bad_site", "b7", site["node"], site["field"])]
+
+
+def test_a_connection_binding_takes_its_sites_type() -> None:
+    doc = exported()
+    doc["bindings"][0]["type"] = "mist"
+    assert problems(doc) == [("bad_site", "b1", CALL, "/connection")]
+
+
+def test_binding_ids_and_sites_are_each_used_once() -> None:
+    doc = exported()
+    doc["bindings"].append(copy.deepcopy(doc["bindings"][0]))
+    assert problems(doc) == [("duplicate_binding", "b1", None, None), ("overlapping_site", "b1", CALL, "/connection")]
+
+
+def test_a_step_of_a_type_this_server_doesnt_know_isnt_imported() -> None:
+    doc = exported()
+    doc["graph"]["nodes"].append({"id": OTHER, "key": "odd", "type": "vendor.unknown@1", "config": {}})
+    assert problems(doc) == [("unknown_type", None, OTHER, None)]
+
+
+def test_apply_refuses_whatever_the_check_refuses() -> None:
+    doc = exported()
+    doc["graph"]["nodes"][0]["config"]["connection"] = C1
+    with pytest.raises(portable.BadDocumentError) as e:
+        portable.apply(doc["graph"], doc["bindings"], {"b1": C1}, SCHEMAS)
+    assert [p.reason for p in e.value.problems] == ["embedded_value"]
 ```
 
 - [ ] **Step 2: Run them to see them fail**
@@ -1339,20 +2169,24 @@ Expected: FAIL: `ImportError: cannot import name 'portable'`.
 
 ```python
 # SPDX-License-Identifier: Apache-2.0
-"""A workflow as a file (sub-project 4, B12). Exported, every id of the tenant's a draft holds (a connection, a
-workflow) is replaced by a typed placeholder; imported, each placeholder is bound to one of the importing tenant's
-connections or workflows, or left unbound, its sites empty. Schedules, webhook bindings and CSV mappings are rows,
-not graph: they don't travel."""
+"""A workflow as a file (sub-project 4, B12; 4b ruling 18), fail-closed. Exported, every id of the tenant's a draft
+holds where a binding goes (a connection field, a `flow.run_workflow`'s `workflow_id`, the failure handler) becomes a
+typed placeholder, and a draft that can't be made portable for certain is refused, never approximated. Imported, the
+file is checked whole against this server's node types before anything is written; each placeholder is then bound to
+one of the importing tenant's connections or workflows, or left unbound, its sites empty. Schedules, webhook bindings
+and CSV mappings are rows, not graph: they don't travel."""
 
 import copy
+import uuid
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
 FORMAT = "dewpoint.workflow"
 FORMAT_VERSION = 1
-RUN_WORKFLOW = "flow.run_workflow@1"
-CONNECTION_MARKER = "x-dewpoint-connection"
+CONNECTION_MARKER = "x-dewpoint-connection"  # dewpoint.sdk.fields.CONNECTION; the SDK allows it top-level only
+RUN_WORKFLOW = "flow.run_workflow@1"  # the flow plugin's; its `workflow_id` is a literal workflow id
 FAILURE_HANDLER = "/settings/failure_handler"
 UNKNOWN = {"connection": "Unknown connection", "workflow": "Unknown workflow"}
 
@@ -1363,53 +2197,123 @@ Kind = Literal["connection", "workflow"]
 class Site:
     kind: Kind
     type: str | None  # the connection type a connection site takes; None for a workflow
-    node: str | None  # a node's id; None for the workflow's settings
+    node: str | None  # a step's id as the graph holds it; None for the workflow's settings
     field: str  # a top-level config property (`/connection`), or FAILURE_HANDLER
 
 
-class SiteError(ValueError):
-    """A binding names a site outside what an import may write: no such node, a nested pointer, other settings."""
+@dataclass(frozen=True)
+class Problem:
+    reason: str
+    binding: str | None = None
+    node: str | None = None
+    field: str | None = None
 
-    def __init__(self, binding: str) -> None:
-        super().__init__(f"binding {binding} names a site an import can't write")
-        self.binding = binding
+    def to_json(self) -> dict[str, str | None]:
+        return {"reason": self.reason, "binding": self.binding, "node": self.node, "field": self.field}
 
 
-def sites(draft: Mapping[str, Any], config_schemas: Mapping[str, Mapping[str, Any]]) -> list[Site]:
-    """Where a draft may hold an id of the tenant's: each top-level config property its node's type marks as a
-    connection, each `flow.run_workflow`'s `workflow_id`, and the failure handler. A node of a type
-    `config_schemas` (keyed by type ref) lacks holds no known site: its config is kept as it is."""
+class NotPortableError(ValueError):
+    """The draft can't be exported without risking one of the tenant's ids in the file."""
+
+    def __init__(self, problems: list[Problem]) -> None:
+        super().__init__(", ".join(p.reason for p in problems))
+        self.problems = problems
+
+
+class BadDocumentError(ValueError):
+    """The file can't be imported as it is."""
+
+    def __init__(self, problems: list[Problem]) -> None:
+        super().__init__(", ".join(p.reason for p in problems))
+        self.problems = problems
+
+
+def _nodes(graph: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    return [n for n in graph.get("nodes") or [] if isinstance(n, Mapping)]
+
+
+def _node(graph: Mapping[str, Any], node_id: str) -> Any:
+    return next((n for n in _nodes(graph) if str(n.get("id")) == node_id), None)
+
+
+def _shape(graph: Mapping[str, Any], config_schemas: Mapping[str, Mapping[str, Any]]) -> list[Problem]:
+    """What keeps anyone from knowing where a graph's ids are: two steps sharing an id (a site would name either), or
+    a step of a type this server doesn't know (its config may hold an id no schema marks)."""
+    counted = Counter(str(n.get("id")) for n in _nodes(graph))
+    out = [Problem("duplicate_node", node=node_id) for node_id, seen in counted.items() if seen > 1]
+    for n in _nodes(graph):
+        ref = n.get("type")
+        if not isinstance(ref, str) or ref not in config_schemas:
+            out.append(Problem("unknown_type", node=str(n.get("id"))))
+    return out
+
+
+def sites(graph: Mapping[str, Any], config_schemas: Mapping[str, Mapping[str, Any]]) -> list[Site]:
+    """Every place a graph may hold an id of the tenant's, by its steps' schemas: each top-level config property a type
+    marks as a connection, each `flow.run_workflow`'s `workflow_id`, and the failure handler. Only for a graph in
+    which `_shape` finds nothing."""
     out: list[Site] = []
-    for node in draft.get("nodes", []):
-        ref, node_id = node.get("type"), str(node.get("id"))
-        properties = config_schemas.get(ref, {}).get("properties", {})
-        for prop, spec in properties.items():
-            if isinstance(spec, Mapping) and spec.get(CONNECTION_MARKER):
-                out.append(Site("connection", str(spec[CONNECTION_MARKER]), node_id, f"/{prop}"))
+    for node in _nodes(graph):
+        ref, node_id = str(node.get("type")), str(node.get("id"))
+        for prop, spec in (config_schemas[ref].get("properties") or {}).items():
+            if isinstance(spec, Mapping) and isinstance(spec.get(CONNECTION_MARKER), str):
+                out.append(Site("connection", spec[CONNECTION_MARKER], node_id, f"/{prop}"))
         if ref == RUN_WORKFLOW:
             out.append(Site("workflow", None, node_id, "/workflow_id"))
     out.append(Site("workflow", None, None, FAILURE_HANDLER))
     return out
 
 
-def _node(graph: Mapping[str, Any], node_id: str) -> Any:
-    return next((n for n in graph.get("nodes", []) if str(n.get("id")) == node_id), None)
-
-
-def value_at(draft: Mapping[str, Any], site: Site) -> Any:
+def value_at(graph: Mapping[str, Any], site: Site) -> Any:
+    """What a site holds; None when it holds nothing."""
     if site.node is None:
-        return (draft.get("settings") or {}).get("failure_handler")
-    node = _node(draft, site.node)
-    return None if node is None else (node.get("config") or {}).get(site.field[1:])
+        settings = graph.get("settings")
+        return settings.get("failure_handler") if isinstance(settings, Mapping) else None
+    node = _node(graph, site.node)
+    config = node.get("config") if node is not None else None
+    return config.get(site.field[1:]) if isinstance(config, Mapping) else None
 
 
-def _remove(graph: dict[str, Any], site: Site) -> None:
+def _empty(graph: dict[str, Any], site: Site) -> None:
     if site.node is None:
-        (graph.get("settings") or {}).pop("failure_handler", None)
+        settings = graph.get("settings")
+        if isinstance(settings, dict):
+            settings.pop("failure_handler", None)
         return
     node = _node(graph, site.node)
-    if node is not None:
-        (node.get("config") or {}).pop(site.field[1:], None)
+    if node is not None and isinstance(node.get("config"), dict):
+        node["config"].pop(site.field[1:], None)
+
+
+def _canonical(value: Any) -> str | None:
+    """The id a value names, canonical; None for anything else (an expression, a number, a string that isn't one)."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return str(uuid.UUID(value))
+    except ValueError:
+        return None
+
+
+def held(draft: Mapping[str, Any], config_schemas: Mapping[str, Mapping[str, Any]]) -> list[tuple[Site, str]]:
+    """Each site holding an id, with that id, canonical. NotPortableError when the draft can't be made portable for
+    certain: what `_shape` finds, or a site holding anything but an id."""
+    problems = _shape(draft, config_schemas)
+    if problems:
+        raise NotPortableError(problems)
+    out: list[tuple[Site, str]] = []
+    for site in sites(draft, config_schemas):
+        value = value_at(draft, site)
+        if value is None:
+            continue
+        canonical = _canonical(value)
+        if canonical is None:
+            problems.append(Problem("unexpected_value", node=site.node, field=site.field))
+        else:
+            out.append((site, canonical))
+    if problems:
+        raise NotPortableError(problems)
+    return out
 
 
 def export_document(
@@ -1418,25 +2322,24 @@ def export_document(
     config_schemas: Mapping[str, Mapping[str, Any]],
     labels: Mapping[tuple[str, str], str],
 ) -> dict[str, Any]:
-    """The file: the draft without its ids, and one binding per distinct id, in the order first met, each with every
-    site it filled. `labels` maps (kind, id as the draft holds it) to its name in the tenant."""
+    """The file: the draft with every site emptied, and one binding per distinct (kind, connection type, id), in the
+    order first met, with each site it filled. `labels` maps (kind, canonical id) to its name in the tenant."""
+    found = held(draft, config_schemas)
     graph = copy.deepcopy(dict(draft))
-    bindings: dict[tuple[str, str], dict[str, Any]] = {}
     for site in sites(draft, config_schemas):
-        value = value_at(draft, site)
-        if not isinstance(value, str) or not value:
-            continue
-        key = (site.kind, value)
+        _empty(graph, site)
+    bindings: dict[tuple[str, str | None, str], dict[str, Any]] = {}
+    for site, value in found:
+        key = (site.kind, site.type, value)
         if key not in bindings:
             bindings[key] = {
                 "id": f"b{len(bindings) + 1}",
                 "kind": site.kind,
                 "type": site.type,
-                "label": labels.get(key, UNKNOWN[site.kind]),
+                "label": labels.get((site.kind, value), UNKNOWN[site.kind]),
                 "sites": [],
             }
         bindings[key]["sites"].append({"node": site.node, "field": site.field})
-        _remove(graph, site)
     return {
         "format": FORMAT,
         "format_version": FORMAT_VERSION,
@@ -1446,32 +2349,67 @@ def export_document(
     }
 
 
-def apply(graph: Mapping[str, Any], bindings: Sequence[Mapping[str, Any]], chosen: Mapping[str, str]) -> dict[str, Any]:
-    """The graph with each chosen binding's id written at each of its sites; an unbound binding's sites stay empty.
-    A site may only be a listed node's top-level config property, or the failure handler."""
+def check_document(
+    graph: Mapping[str, Any], bindings: Sequence[Mapping[str, Any]], config_schemas: Mapping[str, Mapping[str, Any]]
+) -> list[Problem]:
+    """Every reason a file can't be imported as it is, all at once: what `_shape` finds; an id embedded where a binding
+    goes (left unbound, it would stay); a binding id used twice; a site listed twice; a site that isn't, by this
+    server's schemas, one of the binding's kind and connection type."""
+    problems = _shape(graph, config_schemas)
+    if problems:
+        return problems
+    allowed = {(s.node, s.field): s for s in sites(graph, config_schemas)}
+    problems += [
+        Problem("embedded_value", node=s.node, field=s.field) for s in allowed.values() if value_at(graph, s) is not None
+    ]
+    ids: set[str] = set()
+    listed: set[tuple[str | None, str]] = set()
+    for binding in bindings:
+        if binding["id"] in ids:
+            problems.append(Problem("duplicate_binding", binding=binding["id"]))
+        ids.add(binding["id"])
+        for site in binding["sites"]:
+            key = (site["node"], site["field"])
+            target = allowed.get(key)
+            if key in listed:
+                problems.append(Problem("overlapping_site", binding=binding["id"], node=key[0], field=key[1]))
+            elif target is None or target.kind != binding["kind"] or target.type != binding["type"]:
+                problems.append(Problem("bad_site", binding=binding["id"], node=key[0], field=key[1]))
+            listed.add(key)
+    return problems
+
+
+def apply(
+    graph: Mapping[str, Any],
+    bindings: Sequence[Mapping[str, Any]],
+    chosen: Mapping[str, str],
+    config_schemas: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """The graph with each chosen binding's id written at each of its sites; an unbound binding's stay empty. Refuses
+    (BadDocumentError) whatever `check_document` refuses, so nothing unchecked is ever written."""
+    problems = check_document(graph, bindings, config_schemas)
+    if problems:
+        raise BadDocumentError(problems)
     out = copy.deepcopy(dict(graph))
     for binding in bindings:
         value = chosen.get(binding["id"])
         if value is None:
             continue
         for site in binding["sites"]:
-            field, node_id = str(site["field"]), site["node"]
-            if node_id is None:
-                if field != FAILURE_HANDLER:
-                    raise SiteError(binding["id"])
+            if site["node"] is None:
                 out.setdefault("settings", {})["failure_handler"] = value
-                continue
-            node = _node(out, str(node_id))
-            if node is None or not field.startswith("/") or "/" in field[1:] or not field[1:]:
-                raise SiteError(binding["id"])
-            node.setdefault("config", {})[field[1:]] = value
+            else:
+                _node(out, site["node"]).setdefault("config", {})[site["field"][1:]] = value
     return out
 ```
 
+`apply` writes into a graph whose format the route has checked (`settings` and `config` are objects or absent), and
+only at sites `check_document` found in it.
+
 - [ ] **Step 4: Run the unit tests to see them pass**
 
-Run: `cd backend && uv run pytest -q -p no:cacheprovider tests/core/workflows/test_portable.py`
-Expected: PASS.
+Run: `cd backend && uv run pytest -q -p no:cacheprovider tests/core/workflows/test_portable.py && uv run lint-imports`
+Expected: PASS, and the contracts kept (`portable` imports nothing outside the standard library).
 
 - [ ] **Step 5: Write the failing API tests**
 
@@ -1479,14 +2417,16 @@ Expected: PASS.
 
 ```python
 # SPDX-License-Identifier: Apache-2.0
-"""Exporting a workflow and importing it into another tenant (sub-project 4, B12)."""
+"""Exporting a workflow and importing it into another tenant (sub-project 4, B12), fail-closed both ways."""
 
 import uuid
+from collections.abc import Callable
 
 import pytest
 
 from tests.apps.api.helpers import member_client, session_client
 from tests.support.connections import add_connection
+from tests.support.graphs import cel
 from tests.support.registry import sync_test_plugins
 
 CALL, SUB = str(uuid.uuid4()), str(uuid.uuid4())
@@ -1497,7 +2437,7 @@ async def synced(admin_sessionmaker) -> None:
     await sync_test_plugins(admin_sessionmaker)
 
 
-def draft(conn: str, sub: str) -> dict:
+def draft(conn: object, sub: str) -> dict:
     return {
         "graph_format": 1,
         "nodes": [
@@ -1518,6 +2458,16 @@ async def exported(app, owner_sessionmaker, api_settings) -> dict:
         r = await c.get(f"/api/v1/t/{tid}/workflows/{wf['id']}/export")
     assert r.status_code == 200, r.text
     return r.json()
+
+
+async def imported(app, owner_sessionmaker, api_settings, doc: dict, bind: dict | None = None) -> tuple:
+    """Import into a fresh tenant: (the answer, that tenant's workflows after it)."""
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        body = {"name": "Imported", "document": doc, **({"bind": bind} if bind else {})}
+        r = await c.post(f"/api/v1/t/{tid}/workflows/import", json=body)
+        listed = (await c.get(f"/api/v1/t/{tid}/workflows")).json()
+    return r, listed
 
 
 async def test_the_file_carries_no_tenant_id(app, owner_sessionmaker, api_settings) -> None:
@@ -1568,11 +2518,73 @@ async def test_a_binding_of_the_wrong_kind_is_refused_and_nothing_is_created(
 
 async def test_an_unbound_placeholder_imports_with_its_sites_empty(app, owner_sessionmaker, api_settings) -> None:
     doc = await exported(app, owner_sessionmaker, api_settings)
-    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
-    async with c:
-        r = await c.post(f"/api/v1/t/{tid}/workflows/import", json={"name": "Imported", "document": doc})
+    r, _ = await imported(app, owner_sessionmaker, api_settings, doc)
     assert r.status_code == 201, r.text
     assert r.json()["draft"]["nodes"][0]["config"] == {"path": "/x"}
+
+
+async def test_a_file_embedding_an_id_is_refused_and_nothing_is_created(app, owner_sessionmaker, api_settings) -> None:
+    doc = await exported(app, owner_sessionmaker, api_settings)
+    doc["graph"]["nodes"][0]["config"]["connection"] = str(uuid.uuid4())  # "leave unbound" would keep it
+    r, listed = await imported(app, owner_sessionmaker, api_settings, doc)
+    assert (r.status_code, r.json()) == (
+        422,
+        {"error": "bad_document", "problems": [{"reason": "embedded_value", "binding": None, "node": CALL, "field": "/connection"}]},
+    )  # fmt: skip
+    assert listed == []
+
+
+async def test_a_binding_naming_a_property_its_step_doesnt_mark_is_refused(app, owner_sessionmaker, api_settings) -> None:
+    doc = await exported(app, owner_sessionmaker, api_settings)
+    doc["bindings"][0]["sites"] = [{"node": CALL, "field": "/path"}]
+    r, listed = await imported(app, owner_sessionmaker, api_settings, doc, {"b1": str(uuid.uuid4())})
+    assert r.status_code == 422 and r.json()["problems"] == [
+        {"reason": "bad_site", "binding": "b1", "node": CALL, "field": "/path"}
+    ]
+    assert listed == []
+
+
+MALFORMED: list[Callable[[dict], None]] = [
+    lambda d: d.update(graph=None),
+    lambda d: d.update(bindings=[None]),
+    lambda d: d.update(format="other"),
+    lambda d: d.update(format_version=2),
+    lambda d: d.update(extra=1),
+    lambda d: d["bindings"][0].update(id="B 1"),
+    lambda d: d["bindings"][0].update(sites=[]),
+    lambda d: d["bindings"][0]["sites"][0].update(node=7),
+    lambda d: d["bindings"][0].update(kind="secret"),
+]
+
+
+@pytest.mark.parametrize("change", MALFORMED)
+async def test_a_malformed_file_is_refused_and_nothing_is_created(
+    app, owner_sessionmaker, api_settings, change
+) -> None:
+    doc = await exported(app, owner_sessionmaker, api_settings)
+    change(doc)
+    r, listed = await imported(app, owner_sessionmaker, api_settings, doc)
+    assert r.status_code == 422 and r.json()["error"] == "invalid", r.text
+    assert listed == []
+
+
+async def test_a_draft_that_cant_be_made_portable_isnt_exported(app, owner_sessionmaker, api_settings) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    odd = str(uuid.uuid4())
+    unknown = draft(str(uuid.uuid4()), str(uuid.uuid4()))
+    unknown["nodes"].append({"id": odd, "key": "odd", "type": "vendor.unknown@1", "config": {"account": str(uuid.uuid4())}})
+    async with c:
+        a = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "Odd", "draft": unknown})).json()
+        b = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "Cel", "draft": draft(cel("vars.c"), str(uuid.uuid4()))})).json()
+        first = await c.get(f"/api/v1/t/{tid}/workflows/{a['id']}/export")
+        second = await c.get(f"/api/v1/t/{tid}/workflows/{b['id']}/export")
+    assert (first.status_code, first.json()) == (
+        422, {"error": "not_portable", "problems": [{"reason": "unknown_type", "binding": None, "node": odd, "field": None}]},
+    )  # fmt: skip
+    assert (second.status_code, second.json()) == (
+        422,
+        {"error": "not_portable", "problems": [{"reason": "unexpected_value", "binding": None, "node": CALL, "field": "/connection"}]},
+    )  # fmt: skip
 
 
 async def test_viewers_export_and_only_editors_import(app, owner_sessionmaker, api_settings) -> None:
@@ -1603,22 +2615,29 @@ Expected: FAIL: the export route answers 404 or 405, the import route 405 or 422
 
 - [ ] **Step 7: Implement the models, the audit source and the routes**
 
-In `backend/src/dewpoint/apps/api/responses.py`, after `VersionDetailOut`:
+In `backend/src/dewpoint/apps/api/responses.py`, after `VersionDetailOut` (the same models describe the export's answer
+and the import's file; `_Answer` refuses extra keys either way):
 
 ```python
+BINDING_ID = r"^[a-z][a-z0-9_]{0,31}$"
+# Far above anything an export makes (500 steps, a config's top-level properties), and a bound on an import's work
+# beside the 1 MiB body cap.
+MAX_BINDINGS = 10_000
+
+
 class BindingSite(_Answer):
-    node: str | None  # a node's id; null for the workflow's settings
-    field: str  # a top-level config property (`/connection`), or `/settings/failure_handler`
+    node: str | None = Field(max_length=64)  # a step's id; null for the workflow's settings
+    field: str = Field(min_length=2, max_length=200)  # `/<property>`, or `/settings/failure_handler`
 
 
 class Binding(_Answer):
     """One id of the exporting tenant's (a connection, a workflow), as a placeholder an import binds or leaves."""
 
-    id: str
+    id: str = Field(pattern=BINDING_ID)
     kind: Literal["connection", "workflow"]
-    type: str | None  # the connection type it takes; null for a workflow
-    label: str
-    sites: list[BindingSite]
+    type: str | None = Field(max_length=100)  # the connection type it takes; null for a workflow
+    label: str = Field(max_length=200)
+    sites: list[BindingSite] = Field(min_length=1, max_length=MAX_BINDINGS)
 
 
 class WorkflowDocument(_Answer):
@@ -1626,13 +2645,13 @@ class WorkflowDocument(_Answer):
 
     format: Literal["dewpoint.workflow"]
     format_version: Literal[1]
-    name: str
+    name: str = Field(max_length=100)
     graph: dict[str, Any]
-    bindings: list[Binding]
+    bindings: list[Binding] = Field(max_length=MAX_BINDINGS)
 ```
 
-In `backend/src/dewpoint/core/workflows/service.py`, `create_workflow` records where a workflow came from when it
-wasn't typed in:
+(`Field` joins the pydantic import.) In `backend/src/dewpoint/core/workflows/service.py`, `create_workflow` records
+where a workflow came from when it wasn't typed in:
 
 ```python
 async def create_workflow(
@@ -1642,11 +2661,13 @@ async def create_workflow(
 
 and its audit call's details become `{"name": name, **({"source": source} if source else {})}`.
 
-In `backend/src/dewpoint/apps/api/routes/workflows.py`, import `portable`, `registry`, the `Connection` model,
-`select`, `Binding` is not needed by name, and add:
+In `backend/src/dewpoint/apps/api/routes/workflows.py`, import `portable` (`from dewpoint.core.workflows import
+portable, service`), `registry` (`from dewpoint.core.plugins import registry`), the `Connection` model, `select`,
+`ConfigDict`, `WorkflowDocument`, and add:
 
 ```python
 class WorkflowImportIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # a misspelt `bind` must never import with every binding left open
     name: str = Field(min_length=1, max_length=100)
     document: WorkflowDocument
     bind: dict[str, uuid.UUID] = Field(default_factory=dict)  # binding id -> one of this tenant's; absent: unbound
@@ -1656,29 +2677,30 @@ def _bad_binding(binding: str, reason: str) -> HTTPException:
     return HTTPException(422, detail={"error": "bad_binding", "binding": binding, "reason": reason})
 
 
-async def _config_schemas(db: AsyncSession) -> dict[str, dict[str, Any]]:
-    rows = await registry.list_node_types(db, states=("active", "deprecated", "retired"))
-    return {row.ref: row.manifest.get("config_schema") or {} for row in rows}
+async def _config_schemas(db: AsyncSession, graph: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """The config schema of each step type the graph names that this server knows, in any state: a retired type's
+    schema still says where its ids are. Called on a graph whose format is checked (each type a valid ref)."""
+    refs = {n["type"] for n in graph.get("nodes") or [] if isinstance(n, dict) and isinstance(n.get("type"), str)}
+    return {row.ref: row.manifest.get("config_schema") or {} for row in await registry.load_node_types(db, refs)}
 
 
-async def _labels(db: AsyncSession, tenant_id: uuid.UUID, draft: dict[str, Any], found: list[portable.Site]) -> dict[tuple[str, str], str]:
-    """Each id the draft holds at a site, as the draft holds it, to its name in this tenant."""
-    raw: dict[str, dict[uuid.UUID, str]] = {"connection": {}, "workflow": {}}
-    for site in found:
-        value = portable.value_at(draft, site)
-        if isinstance(value, str):
-            try:
-                raw[site.kind][uuid.UUID(value)] = value
-            except ValueError:
-                continue
+async def _labels(db: AsyncSession, tenant_id: uuid.UUID, found: list[tuple[portable.Site, str]]) -> dict[tuple[str, str], str]:
+    """Each (kind, canonical id) the draft holds, to its name in this tenant; an id it doesn't name gets none."""
+    wanted: dict[str, set[uuid.UUID]] = {"connection": set(), "workflow": set()}
+    for site, value in found:
+        wanted[site.kind].add(uuid.UUID(value))
     labels: dict[tuple[str, str], str] = {}
     for model, kind in ((Connection, "connection"), (Workflow, "workflow")):
-        if raw[kind]:
+        if wanted[kind]:
             rows = await db.execute(
-                select(model.id, model.name).where(model.tenant_id == tenant_id, model.id.in_(list(raw[kind])))
+                select(model.id, model.name).where(model.tenant_id == tenant_id, model.id.in_(sorted(wanted[kind], key=str)))
             )
-            labels.update({(kind, raw[kind][row.id]): row.name for row in rows})
+            labels.update({(kind, str(row.id)): row.name for row in rows})
     return labels
+
+
+def _not_portable(e: portable.NotPortableError) -> HTTPException:
+    return HTTPException(422, detail={"error": "not_portable", "problems": [p.to_json() for p in e.problems]})
 
 
 @router.get("/t/{tenant_id}/workflows/{workflow_id}/export", response_model=WorkflowDocument)
@@ -1687,11 +2709,15 @@ async def export(
     ctx: TenantContext = Depends(require(P.WORKFLOW_VIEW)),
     db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, object]:
-    """The saved draft as a file, every id of this tenant's replaced by a typed placeholder (B12)."""
+    """The saved draft as a file, every id of this tenant's replaced by a typed placeholder (B12). Refused, never
+    approximated, when that can't be done for certain (4b ruling 18)."""
     wf = await _get(db, ctx, workflow_id)
-    schemas = await _config_schemas(db)
-    labels = await _labels(db, ctx.tenant_id, wf.draft, portable.sites(wf.draft, schemas))
-    return portable.export_document(wf.name, wf.draft, schemas, labels)
+    schemas = await _config_schemas(db, wf.draft)
+    try:
+        labels = await _labels(db, ctx.tenant_id, portable.held(wf.draft, schemas))
+        return portable.export_document(wf.name, wf.draft, schemas, labels)
+    except portable.NotPortableError as e:
+        raise _not_portable(e) from None
 
 
 @router.post("/t/{tenant_id}/workflows/import", status_code=201, response_model=WorkflowDetailOut)
@@ -1700,11 +2726,19 @@ async def import_workflow(
     ctx: TenantContext = Depends(require(P.WORKFLOW_EDIT)),
     db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, object]:
-    """A new workflow from a file, each binding bound to one of this tenant's connections (of its type) or workflows,
-    or left unbound. Every binding is checked before anything is written."""
-    bindings = {b.id: b for b in body.document.bindings}
+    """A new workflow from a file (B12), checked whole before anything is written (4b ruling 18): the graph's format;
+    each step's type and each binding's sites against this server's schemas, with no id embedded where a binding goes;
+    then each chosen id against this tenant's own connections (of the binding's type) and workflows."""
+    graph = body.document.graph
+    _check_format(graph)
+    schemas = await _config_schemas(db, graph)
+    bindings = [b.model_dump() for b in body.document.bindings]
+    problems = portable.check_document(graph, bindings, schemas)
+    if problems:
+        raise HTTPException(422, detail={"error": "bad_document", "problems": [p.to_json() for p in problems]})
+    by_id = {b.id: b for b in body.document.bindings}
     for key, chosen in body.bind.items():
-        binding = bindings.get(key)
+        binding = by_id.get(key)
         if binding is None:
             raise _bad_binding(key, "unexpected")
         if binding.kind == "connection":
@@ -1721,14 +2755,7 @@ async def import_workflow(
             await db.execute(select(Workflow.id).where(Workflow.tenant_id == ctx.tenant_id, Workflow.id == chosen))
         ).scalar_one_or_none() is None:
             raise _bad_binding(key, "unknown")
-    try:
-        draft = portable.apply(
-            body.document.graph,
-            [b.model_dump() for b in body.document.bindings],
-            {key: str(value) for key, value in body.bind.items()},
-        )
-    except portable.SiteError as e:
-        raise _bad_binding(e.binding, "site") from None
+    draft = portable.apply(graph, bindings, {key: str(value) for key, value in body.bind.items()}, schemas)
     _check_format(draft)
     try:
         wf = await service.create_workflow(db, ctx, name=body.name, draft=draft, source="import")
@@ -1757,17 +2784,25 @@ Run: `cd backend && uv run pytest -q -p no:cacheprovider tests/core/workflows te
 Expected: PASS and clean.
 
 - [ ] **Step 9: Regenerate the client's schema and check it.** Expected: `WorkflowDocument`, `Binding`,
-  `BindingSite` and `WorkflowImportIn` appear; `WorkflowDocument["graph"]` is a `Graph`.
+  `BindingSite` and `WorkflowImportIn` appear; `WorkflowDocument["graph"]` is a `Graph`; `Binding.id` carries its
+  pattern.
 
 - [ ] **Step 10: Commit**
 
 ```bash
 git add backend/src/dewpoint/core/workflows backend/src/dewpoint/apps/api backend/tests/core/workflows/test_portable.py \
   backend/tests/apps/api/test_workflow_portable.py backend/tests/apps/api/test_openapi.py frontend/src/api
-git commit -m "feat(api): a workflow exports with typed placeholders and imports with each re-bound (B12, 4b)"
+git commit -m "feat(api): a workflow exports with typed placeholders and imports with each re-bound, both fail-closed (B12, 4b)"
 ```
 
-**Milestone 1's check:** `cd backend && uv run pytest -q -n 12 -p no:cacheprovider tests/apps/api tests/apps/test_workflow_ops.py tests/core/workflows`, then the static checks. All pass.
+**Milestone 1's check, then the owner's pause.** Run `cd backend && uv run pytest -q -n 12 -p no:cacheprovider
+tests/apps/api tests/apps/test_workflow_ops.py tests/apps/test_workflow_summary.py tests/core/workflows
+tests/apps/test_admission.py`, then the static checks; all pass. Then stop for the owner's review with: the API contracts as they stand (the
+regenerated `openapi.json`'s diff for milestone 1, and the refusals each route answers), the statement-count test's
+result, and the probe's evidence from Task 3, Step 9 (the plans and timings at each size, with and without the
+candidate index, and the hashing costs, with the machine). Ruling 5 is decided there: accept the list without an index
+on the measured numbers, or assign a migration slot for the index and its LATERAL read (planned then, as an addendum to
+this plan). Milestone 2 waits for the owner's word.
 
 ## Milestone 2 — The list and the chooser
 
@@ -1982,7 +3017,7 @@ export const workflowQuery = (tenantId: string, workflowId: string) =>
   queryOptions({
     queryKey: ["workflow", tenantId, workflowId],
     queryFn: () => ok(client.GET("/api/v1/t/{tenant_id}/workflows/{workflow_id}", workflowPath(tenantId, workflowId))),
-    staleTime: Infinity, // the editor owns the draft once loaded: a refetch never replaces what's being edited
+    // No staleTime: the editor reads it afresh on every entry and seeds itself once (Task 13, 4b ruling 23).
   });
 
 export const versionsQuery = (tenantId: string, workflowId: string) =>
@@ -2320,21 +3355,47 @@ git commit -m "feat(web): Workflows in the rail as a tenant's landing; the palet
 
 **Files:**
 - Create: `frontend/src/components/Switch.tsx`, `frontend/src/components/Segmented.tsx`, `frontend/src/lib/download.ts`
-- Modify: `frontend/src/routes/Workflows.tsx`
+- Modify: `frontend/src/routes/Workflows.tsx`, `frontend/src/lib/workflows.ts`, `frontend/src/lib/workflows.test.ts`
+  (`notPortable`)
 - Create: `frontend/src/routes/Workflows.test.tsx`, `frontend/src/components/Switch.test.tsx`,
   `frontend/src/components/Segmented.test.tsx`
 - Modify: `frontend/src/styles/tokenNames.ts` only if a new colour pair renders (none expected: the switch uses
   `line-control` on `surface-2` and `on-accent` on `accent`, both in PAIRS)
 
 **Interfaces:**
-- Consumes: `WorkflowRow` (B3's `unpublished_changes`, `last_run`, `runs_24h`, `needs_attention`),
-  `canPublish(role)`, `tenantQuery`, `since`, `announce`, `PATCH …/{workflow_id}` (`{enabled}`; `422 not_enableable`
-  with diagnostics), `GET …/{workflow_id}/export`.
+- Consumes: `WorkflowRow` (B3's `unpublished_changes`, `last_run` (live), `last_simulation`, `runs_24h`,
+  `needs_attention`), `canPublish(role)`, `tenantQuery`, `since`, `announce`, `PATCH …/{workflow_id}` (`{enabled}`;
+  `422 not_enableable` with diagnostics), `GET …/{workflow_id}/export` and its `422 not_portable` (Task 5).
 - Produces: `<Switch checked onCheckedChange label disabled? />`, `<Segmented label options value onChange />`
-  (`options: {value, label, count}[]`), `downloadJson(name, data)`, `fileName(name, suffix)`. Task 8 adds the
-  "New workflow" button and its dialog to this page.
+  (`options: {value, label, count}[]`), `downloadJson(name, data)`, `fileName(name, suffix)`; in `lib/workflows.ts`,
+  `type PortableProblem` and `notPortable(problems, keyOf?)` (Task 15 uses both). Task 8 adds the "New workflow"
+  button and its dialog to this page.
+
+The filters follow 4b rulings 4 and 6 as the owner amended them: "Unpublished changes" counts a workflow never
+published (revision 1 left those out), and "Needs attention" follows live runs only (ruling 7, amended); a
+workflow's last simulation shows apart, never as its last run.
 
 - [ ] **Step 1: Write the failing tests**
+
+In `frontend/src/lib/workflows.test.ts`:
+
+```ts
+it("says why a workflow isn't portable, naming its steps when it can", () => {
+  const problems = [
+    { reason: "unknown_type", binding: null, node: "n1", field: null },
+    { reason: "unexpected_value", binding: null, node: "n2", field: "/connection" },
+    { reason: "unexpected_value", binding: null, node: null, field: "/settings/failure_handler" },
+  ];
+  expect(notPortable(problems)).toBe(
+    "it has steps of a type this server doesn't know, and something other than an id where a connection or workflow goes",
+  );
+  expect(notPortable(problems, (id) => ({ n1: "odd", n2: "call" })[id] ?? id)).toBe(
+    "it has steps of a type this server doesn't know (odd), and something other than an id where a connection or workflow goes (call, the failure handler)",
+  );
+});
+```
+
+(`notPortable` joins the test's import.)
 
 `frontend/src/components/Switch.test.tsx`:
 
@@ -2402,13 +3463,14 @@ const NOW = Date.parse("2026-10-06T12:00:00Z");
 const row = (over: Record<string, unknown>) => ({
   id: "w1", name: "Nightly", enabled: true, draft_revision: 3, active_version_id: "v2", active_version_number: 2,
   executable: true, blocked_by: [], created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-06T10:00:00Z",
-  unpublished_changes: false, last_run: { status: "succeeded", mode: "live", at: "2026-10-06T11:48:00Z" },
+  unpublished_changes: false, last_run: { status: "succeeded", at: "2026-10-06T11:48:00Z" }, last_simulation: null,
   runs_24h: { live: 4, simulate: 0 }, needs_attention: [], ...over,
 });  // prettier-ignore
 const ROWS = [
   row({}),
   row({ id: "w2", name: "Triage", enabled: false, unpublished_changes: true, runs_24h: { live: 1, simulate: 2 },
-        last_run: { status: "failed", mode: "live", at: "2026-10-06T11:00:00Z" }, needs_attention: ["last_run_failed"] }),
+        last_run: { status: "failed", at: "2026-10-06T11:00:00Z" }, last_simulation: { status: "succeeded", at: "2026-10-06T11:30:00Z" },
+        needs_attention: ["last_run_failed"] }),
   row({ id: "w3", name: "Sketch", active_version_id: null, active_version_number: null, executable: null,
         unpublished_changes: true, last_run: null, runs_24h: { live: 0, simulate: 0 } }),
 ];  // prettier-ignore
@@ -2416,11 +3478,13 @@ const ROWS = [
 let role = "editor";
 let sent: { method: string; path: string; body: unknown }[];
 let patchAnswer: Response | null;
+let exportAnswer: Response | null;
 
 beforeEach(() => {
   role = "editor";
   sent = [];
   patchAnswer = null;
+  exportAnswer = null;
   vi.spyOn(Date, "now").mockReturnValue(NOW);
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const request = input as Request;
@@ -2429,7 +3493,7 @@ beforeEach(() => {
     sent.push({ method: request.method, path, body: text ? JSON.parse(text) : null });
     if (request.method === "PATCH") return patchAnswer ?? new Response(JSON.stringify({ ...ROWS[0], enabled: false, warnings: [] }));
     if (path === "/api/v1/t/t1") return new Response(JSON.stringify({ id: "t1", name: "Acme", slug: "acme", require_passkey: false, role }));
-    if (path === "/api/v1/t/t1/workflows/w2/export") return new Response(JSON.stringify({ format: "dewpoint.workflow", format_version: 1, name: "Triage", graph: {}, bindings: [] }));
+    if (path === "/api/v1/t/t1/workflows/w2/export") return exportAnswer ?? new Response(JSON.stringify({ format: "dewpoint.workflow", format_version: 1, name: "Triage", graph: {}, bindings: [] }));
     return new Response(JSON.stringify(ROWS));
   });
 });
@@ -2455,6 +3519,7 @@ it("shows each workflow's version, last run and last 24 hours in words", async (
   expect(rowOf("Nightly").textContent).toContain("Succeeded · 12 min ago");
   expect(rowOf("Triage").textContent).toContain("v2 · unpublished changes");
   expect(rowOf("Triage").textContent).toContain("Failed · 1 h ago");
+  expect(rowOf("Triage").textContent).toContain("Simulated: Succeeded · 30 min ago"); // apart, never the last run
   expect(rowOf("Triage").textContent).toContain("1 +2 simulated");
   expect(rowOf("Sketch").textContent).toContain("Not published");
   expect(rowOf("Sketch").textContent).toContain("No runs yet");
@@ -2464,8 +3529,10 @@ it("filters by state, with counts, and by name", async () => {
   await show();
   const filters = screen.getByRole("group", { name: "Show" });
   expect(within(filters).getAllByRole("button").map((b) => b.textContent)).toEqual([
-    "All 3", "Published 2", "Unpublished changes 1", "Needs attention 1",
+    "All 3", "Published 2", "Unpublished changes 2", "Needs attention 1",
   ]);  // prettier-ignore
+  await userEvent.click(within(filters).getByRole("button", { name: "Unpublished changes 2" }));
+  expect(screen.getAllByRole("link").map((l) => l.textContent)).toEqual(["Triage", "Sketch"]); // never published counts
   await userEvent.click(within(filters).getByRole("button", { name: "Needs attention 1" }));
   expect(screen.queryByRole("link", { name: "Nightly" })).toBeNull();
   expect(screen.getByRole("link", { name: "Triage" })).toBeTruthy();
@@ -2504,6 +3571,19 @@ it("exports a workflow as a file named after it", async () => {
   await userEvent.click(await screen.findByRole("menuitem", { name: "Export" }));
   await vi.waitFor(() => expect(click).toHaveBeenCalled());
   expect((click.mock.instances[0] as unknown as HTMLAnchorElement).download).toBe("triage.dewpoint.json");
+});
+
+it("says why a workflow can't be exported as a portable file", async () => {
+  exportAnswer = new Response(
+    JSON.stringify({ error: "not_portable", problems: [{ reason: "unknown_type", binding: null, node: "n1", field: null }] }),
+    { status: 422 },
+  );  // prettier-ignore
+  await show();
+  await userEvent.click(within(rowOf("Triage")).getByRole("button", { name: "Actions for Triage" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Export" }));
+  expect((await screen.findByRole("alert")).textContent).toBe(
+    "Triage can't be exported as a portable file: it has steps of a type this server doesn't know. Open it to download the draft as it is.",
+  );
 });
 ```
 
@@ -2609,6 +3689,30 @@ export function downloadJson(name: string, data: unknown): void {
 }
 ```
 
+In `frontend/src/lib/workflows.ts`:
+
+```ts
+/** One reason an export refused (B12; 4b ruling 18), as the API answers it. */
+export type PortableProblem = { reason: string; binding: string | null; node: string | null; field: string | null };
+
+/** Why a workflow can't be exported as a portable file, as a clause ("it has …"): its steps named when `keyOf`
+ * knows them (the editor), not on the list, which holds no graph. */
+export function notPortable(problems: PortableProblem[], keyOf?: (nodeId: string) => string): string {
+  const names = (reason: string) =>
+    problems.filter((p) => p.reason === reason).map((p) => (p.node === null ? "the failure handler" : keyOf ? keyOf(p.node) : p.node));
+  const clause = (text: string, reason: string) => {
+    const found = names(reason);
+    return found.length === 0 ? null : keyOf ? `${text} (${found.join(", ")})` : text;
+  };
+  const why = [
+    clause("steps of a type this server doesn't know", "unknown_type"),
+    clause("something other than an id where a connection or workflow goes", "unexpected_value"),
+    clause("two steps sharing an id", "duplicate_node"),
+  ].filter((c): c is string => c !== null);
+  return `it has ${why.join(", and ")}`;
+}
+```
+
 - [ ] **Step 4: Implement the list**
 
 Replace `frontend/src/routes/Workflows.tsx`:
@@ -2629,14 +3733,15 @@ import { announce } from "../lib/announce";
 import { ApiError, client, ok } from "../lib/client";
 import { downloadJson, fileName } from "../lib/download";
 import { useDocumentTitle } from "../lib/title";
-import { canPublish, since, tenantQuery, workflowsQuery, type WorkflowRow } from "../lib/workflows";
+import { canPublish, notPortable, since, tenantQuery, workflowsQuery, type PortableProblem, type WorkflowRow } from "../lib/workflows";
 
 type Filter = "all" | "published" | "unpublished" | "attention";
 
+// Never published counts as unpublished changes (4b ruling 6): the server says so in `unpublished_changes`.
 const FILTERS: { value: Filter; label: string; keep: (w: WorkflowRow) => boolean }[] = [
   { value: "all", label: "All", keep: () => true },
   { value: "published", label: "Published", keep: (w) => w.active_version_id !== null },
-  { value: "unpublished", label: "Unpublished changes", keep: (w) => w.active_version_id !== null && w.unpublished_changes },
+  { value: "unpublished", label: "Unpublished changes", keep: (w) => w.unpublished_changes },
   { value: "attention", label: "Needs attention", keep: (w) => w.needs_attention.length > 0 },
 ];
 
@@ -2658,14 +3763,22 @@ function Version({ w }: { w: WorkflowRow }) {
   );
 }
 
+/** The last live run, what attention follows; the last simulation apart, in the simulation colour (4b ruling 7). */
 function LastRun({ w }: { w: WorkflowRow }) {
-  if (!w.last_run) return <span className="text-muted">No runs yet</span>;
-  const s = STATUS[w.last_run.status];
+  const live = w.last_run;
+  const simulated = w.last_simulation;
+  if (!live && !simulated) return <span className="text-muted">No runs yet</span>;
   return (
-    <span className="inline-flex items-center gap-2 text-small">
-      <span aria-hidden="true" className={`size-2 rounded-sm ${s.dot}`} />
-      {s.text}
-      {w.last_run.mode === "simulate" && <span className="text-sim"> (simulated)</span>} · {since(w.last_run.at)}
+    <span className="flex flex-col gap-0.5 text-small">
+      {live ? (
+        <span className="inline-flex items-center gap-2">
+          <span aria-hidden="true" className={`size-2 rounded-sm ${STATUS[live.status].dot}`} />
+          {STATUS[live.status].text} · {since(live.at)}
+        </span>
+      ) : (
+        <span className="text-muted">No live runs yet</span>
+      )}
+      {simulated && <span className="text-sim">Simulated: {STATUS[simulated.status].text} · {since(simulated.at)}</span>}
     </span>
   );
 }
@@ -2709,7 +3822,12 @@ export function WorkflowsPage({ tenantId }: { tenantId: string; startNew?: boole
         }),
       );
       downloadJson(fileName(w.name, ".dewpoint.json"), doc);
-    } catch {
+    } catch (e) {
+      if (e instanceof ApiError && e.code === "not_portable") {
+        const problems = (e.body as { problems: PortableProblem[] }).problems;
+        setError(`${w.name} can't be exported as a portable file: ${notPortable(problems)}. Open it to download the draft as it is.`);
+        return;
+      }
       setError(`${w.name} couldn't be exported. Try again.`);
     }
   }
@@ -2845,6 +3963,13 @@ git commit -m "feat(web): the workflows list (1a): state at a glance, filters, t
   WorkflowDocument | null`, `<ImportBindings tenantId bindings chosen onChange />`, `type Chosen = Record<string,
   string>`.
 
+`parseDocument` checks the whole envelope as the API's model does (the owner's review of 325fc14, correction 5):
+exactly its five keys; `graph` an object (never `null` or a list); each binding an object of exactly `id` (the API's
+pattern, used once), `kind`, `type` (a string for a connection, `null` for a workflow), `label` and at least one site,
+each exactly `{node: string | null, field: string}`. Revision 1 let `graph: null` through and crashed on `bindings:
+[null]`. The API stays the judge: it refuses what this lets through (an embedded id, a site its schemas don't mark),
+and the dialog says why.
+
 - [ ] **Step 1: Write the failing tests**
 
 `frontend/src/routes/NewWorkflow.test.tsx`:
@@ -2953,6 +4078,45 @@ it("reads only a Dewpoint workflow file", () => {
   expect(parseDocument(JSON.stringify(DOC))?.name).toBe("Nightly report");
   expect(parseDocument("not json")).toBeNull();
   expect(parseDocument(JSON.stringify({ ...DOC, format_version: 2 }))).toBeNull();
+});
+
+const B = DOC.bindings[0]!;
+it.each([
+  ["a null graph", { ...DOC, graph: null }],
+  ["a graph that's a list", { ...DOC, graph: [] }],
+  ["a null binding", { ...DOC, bindings: [null] }],
+  ["a binding without a site", { ...DOC, bindings: [{ ...B, sites: [] }] }],
+  ["a binding id used twice", { ...DOC, bindings: [B, B] }],
+  ["a binding id the API refuses", { ...DOC, bindings: [{ ...B, id: "B 1" }] }],
+  ["a connection binding without a type", { ...DOC, bindings: [{ ...B, type: null }] }],
+  ["a workflow binding with a type", { ...DOC, bindings: [{ ...B, kind: "workflow" }] }],
+  ["a kind that isn't one", { ...DOC, bindings: [{ ...B, kind: "secret" }] }],
+  ["a site without a field", { ...DOC, bindings: [{ ...B, sites: [{ node: "n1" }] }] }],
+  ["a site's node that's a number", { ...DOC, bindings: [{ ...B, sites: [{ node: 7, field: "/connection" }] }] }],
+  ["an extra key", { ...DOC, extra: 1 }],
+  ["an extra key in a binding", { ...DOC, bindings: [{ ...B, secret: "x" }] }],
+])("refuses %s", (_, doc) => {
+  expect(parseDocument(JSON.stringify(doc))).toBeNull();
+});
+
+it("refuses a file with a null binding without breaking the dialog", async () => {
+  await show();
+  await userEvent.click(screen.getByRole("radio", { name: /Import from file/ }));
+  const bad = new File([JSON.stringify({ ...DOC, bindings: [null] })], "x.json", { type: "application/json" });
+  await userEvent.upload(screen.getByLabelText("Workflow file"), bad);
+  expect(await screen.findByText(/isn't a Dewpoint workflow/)).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Import and open" }).hasAttribute("disabled")).toBe(true);
+});
+
+it("says why the server refused the file", async () => {
+  answer = { status: 422, body: { error: "bad_document", problems: [{ reason: "embedded_value", binding: null, node: "n1", field: "/connection" }] } };
+  await show();
+  await userEvent.click(screen.getByRole("radio", { name: /Import from file/ }));
+  await userEvent.upload(screen.getByLabelText("Workflow file"), new File([JSON.stringify(DOC)], "n.json", { type: "application/json" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Import and open" }));
+  expect((await screen.findByRole("alert")).textContent).toBe(
+    "The file can't be imported: it holds a connection or workflow id where a binding goes. Export it again from Dewpoint.",
+  );
 });
 ```
 
@@ -3064,23 +4228,54 @@ import { ImportBindings, type Chosen } from "./ImportBindings";
 
 type Start = "blank" | "import";
 
-/** A workflow file, or null: only its format, version and shape are checked here; the API checks the graph. */
+const BINDING_ID = /^[a-z][a-z0-9_]{0,31}$/; // the API's `Binding.id` pattern
+
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+const keysAre = (v: Record<string, unknown>, keys: string[]) =>
+  Object.keys(v).length === keys.length && keys.every((k) => k in v);
+
+function isBinding(b: unknown): boolean {
+  if (!isObject(b) || !keysAre(b, ["id", "kind", "type", "label", "sites"])) return false;
+  if (typeof b.id !== "string" || !BINDING_ID.test(b.id) || typeof b.label !== "string") return false;
+  if (!(b.kind === "connection" ? typeof b.type === "string" && b.type !== "" : b.kind === "workflow" && b.type === null)) return false;
+  return (
+    Array.isArray(b.sites) &&
+    b.sites.length > 0 &&
+    b.sites.every((s) => isObject(s) && keysAre(s, ["node", "field"]) && (s.node === null || typeof s.node === "string") && typeof s.field === "string")
+  );
+}
+
+/** A workflow file, or null: the whole envelope is checked here, as the API's model checks it; the API then checks
+ * the graph and the bindings against its node types (4b ruling 18). */
 export function parseDocument(text: string): WorkflowDocument | null {
+  let doc: unknown;
   try {
-    const doc = JSON.parse(text) as Partial<WorkflowDocument> | null;
-    if (!doc || doc.format !== "dewpoint.workflow" || doc.format_version !== 1) return null;
-    if (typeof doc.name !== "string" || typeof doc.graph !== "object" || !Array.isArray(doc.bindings)) return null;
-    return doc as WorkflowDocument;
+    doc = JSON.parse(text);
   } catch {
     return null;
   }
+  if (!isObject(doc) || !keysAre(doc, ["format", "format_version", "name", "graph", "bindings"])) return null;
+  if (doc.format !== "dewpoint.workflow" || doc.format_version !== 1 || typeof doc.name !== "string") return null;
+  if (!isObject(doc.graph) || !Array.isArray(doc.bindings) || !doc.bindings.every(isBinding)) return null;
+  const ids = doc.bindings.map((b) => (b as { id: string }).id);
+  if (new Set(ids).size !== ids.length) return null;
+  return doc as unknown as WorkflowDocument;
 }
 
 const REASONS: Record<string, string> = {
   unknown: "isn't one of this tenant's",
   wrong_type: "is of another type",
   unexpected: "isn't in the file",
-  site: "names a place an import can't write",
+};
+
+// The API's `bad_document` reasons (Task 5), the first one said.
+const DOCUMENT: Record<string, string> = {
+  unknown_type: "it has steps of a type this server doesn't know",
+  duplicate_node: "two of its steps share an id",
+  embedded_value: "it holds a connection or workflow id where a binding goes. Export it again from Dewpoint",
+  duplicate_binding: "its bindings don't match its steps",
+  overlapping_site: "its bindings don't match its steps",
+  bad_site: "its bindings don't match its steps",
 };
 
 function explain(e: unknown, doc: WorkflowDocument | null): string {
@@ -3092,8 +4287,14 @@ function explain(e: unknown, doc: WorkflowDocument | null): string {
     const label = doc?.bindings.find((b) => b.id === body.binding)?.label ?? "A binding";
     return `${label} ${REASONS[body.reason ?? ""] ?? "can't be bound"}.`;
   }
+  if (e.code === "bad_document") {
+    const first = (e.body as { problems?: { reason: string }[] }).problems?.[0]?.reason ?? "";
+    return `The file can't be imported: ${DOCUMENT[first] ?? "it doesn't match this server's steps"}.`;
+  }
   if (e.code === "invalid") {
-    const first = (e.body as { diagnostics?: { message: string }[] }).diagnostics?.[0]?.message;
+    const body = e.body as { diagnostics?: { message: string }[] };
+    if (!body.diagnostics) return "That file isn't a Dewpoint workflow this server can read.";
+    const first = body.diagnostics[0]?.message;
     return `The file's graph isn't valid${first ? `: ${first}` : ""}.`;
   }
   return "The workflow couldn't be created. Try again.";
@@ -3274,8 +4475,9 @@ git commit -m "feat(web): New workflow (1b): a name, then Blank or Import from f
   `addAfter(doc, from: PortRef | null, type, id?) -> { doc, node }`, `insertOnEdge(doc, edge, type, id?) -> { doc,
   node } | null`, `insertBeforeEntry(doc, entryId, type, id?) -> { doc, node } | null`, `deleteNode(doc, id) -> { doc,
   healed }`, `deleteEdge(doc, edge)`, `reaches(doc, from, to)`, `canConnect(doc, from, to)`, `connect(doc, from, to)
-  -> GraphDoc | null`, `moveNodes(doc, positions: Map<string, {x, y}>)`. (`history.ts`): `type History<T>`,
-  `LIMIT = 100`, `begin(present)`, `record(h, next)`, `undo(h)`, `redo(h)`.
+  -> GraphDoc | null`, `moveNodes(doc, positions: Map<string, {x, y}>)`, `drawableEdges(doc)` (the edges the canvas
+  and the keyboard model use: both ends exist, each once; an imported draft may hold others). (`history.ts`): `type
+  History<T>`, `LIMIT = 100`, `begin(present)`, `record(h, next)`, `undo(h)`, `redo(h)`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3285,8 +4487,8 @@ git commit -m "feat(web): New workflow (1b): a name, then Blank or Import from f
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
 import {
-  ROW, addAfter, canConnect, connect, continuationPort, defaultConfig, deleteEdge, deleteNode, edgeId, entries,
-  insertBeforeEntry, insertOnEdge, keyFor, moveNodes, portsOf, startPosition,
+  ROW, addAfter, canConnect, connect, continuationPort, defaultConfig, deleteEdge, deleteNode, drawableEdges, edgeId,
+  entries, insertBeforeEntry, insertOnEdge, keyFor, moveNodes, portsOf, startPosition,
 } from "./graph";  // prettier-ignore
 import type { GraphDoc, NodeType } from "./workflows";
 
@@ -3388,6 +4590,12 @@ describe("deleting", () => {
   it("removes one edge", () => {
     expect(deleteEdge(doc(), doc().edges![0]!).edges).toEqual([]);
   });
+});
+
+it("draws only edges whose ends exist, each once", () => {
+  const edge = (from: string, to: string) => ({ from: { node: from, port: "out" }, to: { node: to } });
+  const imported: GraphDoc = { ...doc(), edges: [edge("a", "b"), edge("a", "b"), edge("a", "gone"), edge("gone", "b")] };
+  expect(drawableEdges(imported).map(edgeId)).toEqual(["a:out->b"]);
 });
 
 describe("connecting", () => {
@@ -3673,6 +4881,19 @@ export function connect(doc: GraphDoc, from: PortRef, to: string): GraphDoc | nu
   return { ...doc, edges: [...edgesOf(doc), { from: { node: from.node, port: from.port }, to: { node: to } }] };
 }
 
+/** The edges the canvas draws and the keyboard walks: both ends exist, each once. An imported draft may hold an edge
+ * to a step that isn't there, or the same edge twice; the validator reports them, and nothing draws them. */
+export function drawableEdges(doc: GraphDoc): GraphEdge[] {
+  const ids = new Set(nodesOf(doc).map((n) => n.id));
+  const seen = new Set<string>();
+  return edgesOf(doc).filter((e) => {
+    const id = edgeId(e);
+    if (!ids.has(e.from.node) || !ids.has(e.to.node) || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
 /** Steps moved to whole-pixel positions; every other step is the same object as before. */
 export function moveNodes(doc: GraphDoc, positions: Map<string, { x: number; y: number }>): GraphDoc {
   return {
@@ -3931,28 +5152,41 @@ it("offers to connect an existing step instead, after a port", async () => {
 ```
 
 `frontend/src/routes/editor/Editor.test.tsx` (the canvas itself is the browser gate's: here a stand-in draws the items
-the editor hands it, each step with a button that opens it and one that adds after it, honours focus requests and
-passes keys through, so the editor's own logic runs in jsdom; Task 12 adds tests to it):
+the editor hands it, each step with a button that opens it and one that adds after it, honours focus requests,
+passes keys through, and records each document it was handed with whether it was editable and how many steps carried
+problems, so the editor's own logic runs in jsdom. The editor sits on its route beside the list's, so leaving it is a
+real navigation. Tasks 12–15 add tests, and answers to `answers`, to it):
 
 ```tsx
 // SPDX-License-Identifier: Apache-2.0
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
+import { Outlet, RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
+import type { GraphDoc } from "../../lib/workflows";
 import type { CanvasProps } from "./Canvas";
 import { EditorPage } from "./Editor";
+
+// Every document the stand-in canvas was handed: what was drawn, and what never was.
+const { drawn } = vi.hoisted(() => ({ drawn: [] as { doc: GraphDoc; editable: boolean }[] }));
 
 vi.mock("./Canvas", async () => {
   const { useEffect } = await import("react");
   return {
     Canvas: (props: CanvasProps) => {
+      drawn.push({ doc: props.doc, editable: props.editable });
       useEffect(() => {
         if (props.focusRequest) document.querySelector<HTMLElement>(`[data-item="${props.focusRequest.id}"]`)?.focus();
       }, [props.focusRequest]);
       return (
-        <div role="group" aria-label="Workflow steps" onKeyDown={props.onKeyDown}>
+        <div
+          role="group"
+          aria-label="Workflow steps"
+          onKeyDown={props.onKeyDown}
+          data-editable={String(props.editable)}
+          data-problems={String(props.problems.size)}
+        >
           <button data-item="start" onClick={() => props.onItem({ kind: "after", from: null })}>Start</button>
           {(props.doc.nodes ?? []).map((n) => (
             <span key={n.id}>
@@ -3971,35 +5205,66 @@ const TYPES = [{
   description: "", ports: ["out"], dynamic_ports: null, config_schema: {}, output_schema: {}, side_effect: "none",
   credentials: [], capabilities: [], retry: { max_attempts: 3, initial_interval_s: 1, backoff: 2, max_interval_s: 60, non_retryable: [] }, timeout_s: 60,
 }];  // prettier-ignore
+/** A draft of transform steps with these keys, one under the other. */
+const draftWith = (...keys: string[]): GraphDoc => ({
+  graph_format: 1,
+  nodes: keys.map((key, i) => ({ id: `id-${key}`, key, type: "flow.transform@1", position: { x: 0, y: 140 * (i + 1) } })),
+  edges: [],
+});
 const WORKFLOW = {
   id: "w1", name: "Nightly", enabled: true, draft_revision: 1, active_version_id: null, active_version_number: null,
   executable: null, blocked_by: [], created_at: "", updated_at: "", unpublished_changes: true, last_run: null,
-  runs_24h: { live: 0, simulate: 0 }, needs_attention: [], draft: { graph_format: 1, nodes: [], edges: [] },
+  last_simulation: null, runs_24h: { live: 0, simulate: 0 }, needs_attention: [], draft: draftWith(),
 };  // prettier-ignore
+const BASE = "/api/v1/t/t1/workflows/w1";
+type Answer = () => Response | Promise<Response>;
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 let role = "editor";
+let answers: Map<string, Answer>; // "METHOD path" → its answer: a test sets what it needs
+let sent: { method: string; path: string; headers: Headers; body: unknown }[];
 
 beforeEach(() => {
   role = "editor";
-  vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
-    const path = new URL((input as Request).url).pathname;
-    const body = path === "/api/v1/node-types" ? TYPES
-      : path === "/api/v1/t/t1" ? { id: "t1", name: "Acme", slug: "acme", require_passkey: false, role }
-      : path.endsWith("/validate") ? { draft_revision: 1, valid: true, diagnostics: [], expressions: [], taint: { sites: [], declassified: [] } }
-      : WORKFLOW;  // prettier-ignore
-    return Promise.resolve(new Response(JSON.stringify(body)));
+  drawn.length = 0;
+  sent = [];
+  answers = new Map<string, Answer>([
+    ["GET /api/v1/node-types", () => json(TYPES)],
+    ["GET /api/v1/t/t1", () => json({ id: "t1", name: "Acme", slug: "acme", require_passkey: false, role })],
+    [`GET ${BASE}`, () => json(WORKFLOW)],
+    [`POST ${BASE}/validate`, () => json({ draft_revision: 1, valid: true, diagnostics: [], expressions: [], taint: { sites: [], declassified: [] } })],
+  ]);
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const request = input as Request;
+    const path = new URL(request.url).pathname;
+    const text = await request.text();
+    sent.push({ method: request.method, path, headers: request.headers, body: text ? JSON.parse(text) : null });
+    const answer = answers.get(`${request.method} ${path}`);
+    return answer ? answer() : json({ error: "not_found" }, 404);
   });
 });
 
-async function show() {
-  const root = createRootRoute({ component: () => <EditorPage tenantId="t1" workflowId="w1" /> });
+/** The editor on its route, beside the list's; `seed` fills the query cache first, as an earlier visit would. */
+async function show({ seed }: { seed?: (qc: QueryClient) => void } = {}) {
+  const root = createRootRoute({ component: Outlet });
   const list = createRoute({ getParentRoute: () => root, path: "/t/$tenantId/workflows", component: () => <p>list</p> });
-  const router = createRouter({ routeTree: root.addChildren([list]), history: createMemoryHistory({ initialEntries: ["/"] }) });
+  const editor = createRoute({
+    getParentRoute: () => root,
+    path: "/t/$tenantId/workflows/$workflowId",
+    component: () => <EditorPage tenantId="t1" workflowId="w1" />,
+  });
+  const router = createRouter({
+    routeTree: root.addChildren([list, editor]),
+    history: createMemoryHistory({ initialEntries: ["/t/t1/workflows/w1"] }),
+  });
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  seed?.(qc);
   render(
-    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <QueryClientProvider client={qc}>
       <RouterProvider router={router} />
     </QueryClientProvider>,
   );
   await screen.findByRole("group", { name: "Workflow steps" });
+  return { router, qc };
 }
 
 it("heads the editor with the way back and the workflow's name", async () => {
@@ -4020,7 +5285,6 @@ it("adds a first step from the start card, then one after it, through the picker
 it("offers a viewer no Add step", async () => {
   role = "viewer";
   await show();
-  await screen.findByRole("heading", { level: 1, name: "Nightly" });
   expect(screen.queryByRole("button", { name: /Add step/ })).toBeNull();
 });
 ```
@@ -4329,7 +5593,7 @@ import {
 } from "@xyflow/react";  // prettier-ignore
 import { useCallback, useEffect, useMemo, useRef, useState, type FocusEvent, type KeyboardEvent } from "react";
 import { Button } from "../../components/Button";
-import { START, edgesOf, entries, nodesOf, portOf, portsOf, pos, startPosition, type PortRef } from "../../lib/graph";
+import { START, drawableEdges, entries, nodesOf, portOf, portsOf, pos, startPosition, type PortRef } from "../../lib/graph";
 import type { GraphDoc, NodeType } from "../../lib/workflows";
 import { FlowEdge, type FlowData } from "./FlowEdge";
 import { item, type ItemAction } from "./items";
@@ -4357,9 +5621,11 @@ export interface CanvasProps {
   onKeyDown?: (e: KeyboardEvent<HTMLDivElement>) => void;
 }
 
+/** What React Flow draws: the start card, each step, an edge from the start card to each entry step, and each edge
+ * whose ends exist, once (`drawableEdges`: an imported draft may hold others, which the problems name). */
 function build(p: CanvasProps): { nodes: Node[]; edges: Edge[] } {
   const used = new Map<string, string[]>();
-  for (const e of edgesOf(p.doc)) used.set(e.from.node, [...(used.get(e.from.node) ?? []), portOf(e)]);
+  for (const e of drawableEdges(p.doc)) used.set(e.from.node, [...(used.get(e.from.node) ?? []), portOf(e)]);
   const keyOf = new Map(nodesOf(p.doc).map((n) => [n.id, n.key]));
   const start: StartData = { empty: nodesOf(p.doc).length === 0, focusId: p.focusId, editable: p.editable, onItem: p.onItem };
   const nodes: Node[] = [
@@ -4380,7 +5646,7 @@ function build(p: CanvasProps): { nodes: Node[]; edges: Edge[] } {
       id: item.entry(n.id), source: START, sourceHandle: "out", target: n.id, type: "flow",
       data: flow(item.entry(n.id), `Insert a step before ${n.key}`, { kind: "before", entry: n.id }),
     })),
-    ...edgesOf(p.doc).map((e): Edge => ({
+    ...drawableEdges(p.doc).map((e): Edge => ({
       id: item.edge(e), source: e.from.node, sourceHandle: portOf(e), target: e.to.node, type: "flow",
       data: flow(item.edge(e), `Insert a step between ${keyOf.get(e.from.node) ?? "a step"} and ${keyOf.get(e.to.node) ?? "a step"}`, { kind: "insert", edge: e }),
     })),
@@ -4869,18 +6135,39 @@ git commit -m "feat(web): the canvas: React Flow under the CSP, a start card, st
 **Files:**
 - Create: `frontend/src/routes/editor/canvasNav.ts`, `frontend/src/routes/editor/canvasNav.test.ts`
 - Create: `frontend/src/routes/editor/ConnectDialog.tsx`, `frontend/src/routes/editor/StepPanel.tsx`
+- Modify: `frontend/src/routes/editor/Canvas.tsx`, `frontend/src/routes/editor/canvas.css` (placing a step)
 - Modify: `frontend/src/routes/editor/Editor.tsx`, `frontend/src/routes/editor/Editor.test.tsx`
-- Modify: `frontend/e2e/workflows.spec.ts`
+- Modify: `frontend/e2e/workflows.spec.ts`; Create: `frontend/e2e/fixtures/cycle.dewpoint.json`
 
 **Interfaces:**
 - Consumes: `item`, `ItemAction` (Task 11); `deleteNode`, `deleteEdge`, `canConnect`, `connect`, `moveNodes`,
   `portsOf` (Task 9); `undo`, `redo` (Task 9); `ConfirmDialog` (`frontend/src/components/ConfirmDialog.tsx`).
+- Consumes too: `@xyflow/react` 12.12.0's `onPaneClick(event)` and `useReactFlow().screenToFlowPosition({x, y})`
+  (checked in the installed package first, Step 1); `CARD` (Task 10); `drawableEdges` (Task 9).
 - Produces: `type NavKey`; `navModel(doc, portsOf, editable) -> Nav` (`children`, `parent`, `order`, `edges`);
   `move(nav, from, key) -> string`; `<ConnectDialog doc types from onConnect onClose />`; `<StepPanel node type
-  ports problems expressions editable onDelete onConnectPort onClose />` (Task 14 fills `problems` and
-  `expressions`).
+  ports problems expressions editable onDelete onConnectPort onPlace onNudge onClose />` (`problems: Diagnostic[] |
+  null`, null when no current check speaks for what's on the screen: Task 14 fills it); `CanvasProps` gains
+  `placing: boolean` and `onPlace(at: {x, y})` (the click's point in the canvas's own coordinates).
 
-- [ ] **Step 1: Write the failing tests**
+4b rulings 13 and 15, as the owner amended them (the owner's review of 325fc14, correction 6):
+- **Single-pointer movement (WCAG 2.5.7).** Auto layout arranges the graph; it doesn't put a step where a person
+  wants it. A step's panel has "Place on the canvas…": the next click on an empty place puts the step there, centred
+  on the click (Escape or Cancel stops it), and four buttons move it 20 px a click. Dragging stays; it's no longer
+  the only way. Shift+arrows still nudge from the keyboard.
+- **Complete keyboard navigation.** Revision 1 listed steps no entry reaches (a cycle no entry leads into, a step whose
+  only edges in come from steps that aren't there) in `order` without linking them: the arrow keys never got there.
+  Now each such step joins the start card's children, topmost first, and is walked from there, and the tests press
+  the keys from every item reached, over chains, branches, joins, cycles, two components, and an imported draft's
+  dangling, repeated and self edges, until every item the canvas draws is reached. The model walks `drawableEdges`,
+  the edges the canvas draws.
+
+- [ ] **Step 1: Check React Flow's pane API in the installed package** (owner's rule): in
+  `frontend/node_modules/@xyflow/react/dist/`, `ReactFlowProps.onPaneClick` (a mouse event) and
+  `ReactFlowInstance.screenToFlowPosition({ x, y })` (a client point to the flow's coordinates, zoom and pan
+  included). A difference goes in a mid-slice ruling, and the installed API is used.
+
+- [ ] **Step 2: Write the failing tests**
 
 `frontend/src/routes/editor/canvasNav.test.ts`:
 
@@ -4888,7 +6175,7 @@ git commit -m "feat(web): the canvas: React Flow under the CSP, a start card, st
 // SPDX-License-Identifier: Apache-2.0
 import { expect, it } from "vitest";
 import type { GraphDoc } from "../../lib/workflows";
-import { move, navModel } from "./canvasNav";
+import { NAV_KEYS, move, navModel, type Nav, type NavKey } from "./canvasNav";
 
 const node = (id: string, x = 0) => ({ id, key: id, type: "flow.transform@1", position: { x, y: 0 } });
 const edge = (from: string, to: string, port = "out") => ({ from: { node: from, port }, to: { node: to } });
@@ -4930,10 +6217,84 @@ it("reads a read-only canvas step to step, with nothing to add", () => {
   expect(nav.order).toEqual(["start", "node:a", "node:b"]);
 });
 
-it("offers the start card's own '+' before any step, and still reaches steps a cycle hides", () => {
+it("offers the start card's own '+' before any step, and links a cycle no entry reaches under it", () => {
   expect(navModel({ graph_format: 1, nodes: [], edges: [] }, ports({}), true).order).toEqual(["start", "port:start:out"]);
   const loop: GraphDoc = { graph_format: 1, nodes: [node("a"), node("b")], edges: [edge("a", "b"), edge("b", "a")] };
-  expect(navModel(loop, ports({}), false).order).toEqual(["start", "node:a", "node:b"]);
+  const nav = navModel(loop, ports({}), false);
+  expect(nav.children.get("start")).toEqual(["node:a"]);
+  expect(move(nav, "start", "ArrowDown")).toBe("node:a");
+  expect(move(nav, "node:a", "ArrowDown")).toBe("node:b");
+});
+
+/** Every item the canvas draws for `doc`, counted from the document itself, never from the model under test. */
+function drawnItems(doc: GraphDoc, portsOf: (id: string) => string[], editable: boolean): Set<string> {
+  const nodes = doc.nodes ?? [];
+  const out = new Set<string>(["start", ...nodes.map((n) => `node:${n.id}`)]);
+  if (!editable) return out;
+  if (nodes.length === 0) out.add("port:start:out");
+  const ids = new Set(nodes.map((n) => n.id));
+  const targets = new Set((doc.edges ?? []).map((e) => e.to.node));
+  for (const n of nodes) if (!targets.has(n.id)) out.add(`entry:${n.id}`);
+  const drawn = (doc.edges ?? []).filter((e) => ids.has(e.from.node) && ids.has(e.to.node));
+  for (const e of drawn) out.add(`edge:${e.from.node}:${e.from.port ?? "out"}->${e.to.node}`);
+  for (const n of nodes) {
+    for (const p of portsOf(n.id)) {
+      if (!drawn.some((e) => e.from.node === n.id && (e.from.port ?? "out") === p)) out.add(`port:${n.id}:${p}`);
+    }
+  }
+  return out;
+}
+
+/** Every item the arrow keys and Home reach from the start card, each key pressed from each item reached. */
+function reachedByKeys(nav: Nav): Set<string> {
+  const reached = new Set(["start"]);
+  const todo = ["start"];
+  while (todo.length) {
+    const at = todo.pop()!;
+    for (const key of NAV_KEYS as NavKey[]) {
+      const to = move(nav, at, key);
+      if (!reached.has(to)) {
+        reached.add(to);
+        todo.push(to);
+      }
+    }
+  }
+  return reached;
+}
+
+const CASES: [string, GraphDoc, Record<string, string[]>][] = [
+  ["a chain", { graph_format: 1, nodes: [node("a"), node("b")], edges: [edge("a", "b")] }, {}],
+  [
+    "a branch and its join",
+    { graph_format: 1, nodes: [node("if"), node("y"), node("n", 300), node("j")],
+      edges: [edge("if", "y", "true"), edge("if", "n", "false"), edge("y", "j"), edge("n", "j")] },
+    { if: ["true", "false"] },
+  ],
+  ["a cycle no entry leads into", { graph_format: 1, nodes: [node("a"), node("b")], edges: [edge("a", "b"), edge("b", "a")] }, {}],
+  ["a cycle beside an entry", { graph_format: 1, nodes: [node("e"), node("a"), node("b")], edges: [edge("a", "b"), edge("b", "a")] }, {}],
+  [
+    "two components, one looping back into its chain",
+    { graph_format: 1, nodes: [node("a"), node("b"), node("c"), node("x"), node("y")],
+      edges: [edge("a", "b"), edge("b", "c"), edge("c", "b"), edge("x", "y"), edge("y", "x")] },
+    {},
+  ],
+  [
+    "an imported draft's dangling, repeated and self edges",
+    { graph_format: 1, nodes: [node("a"), node("b")],
+      edges: [edge("a", "b"), edge("a", "b"), edge("gone", "b"), edge("a", "gone"), edge("b", "b")] },
+    {},
+  ],
+  [
+    "a step of an unknown type, reached from a port its source's type lacks",
+    { graph_format: 1, nodes: [node("a"), node("odd")], edges: [edge("a", "odd", "gone")] },
+    { odd: [] },
+  ],
+];  // prettier-ignore
+
+it.each(CASES)("reaches every item of %s with the keys alone, editable or read only", (_, doc, map) => {
+  for (const editable of [true, false]) {
+    expect(reachedByKeys(navModel(doc, ports(map), editable))).toEqual(drawnItems(doc, ports(map), editable));
+  }
 });
 ```
 
@@ -4986,26 +6347,66 @@ it("opens a step's panel on Enter, its heading focused, and Escape gives focus b
   expect(screen.queryByRole("complementary")).toBeNull();
   expect(document.activeElement).toBe(step);
 });
+
+const at = (key: string) => drawn.at(-1)!.doc.nodes!.find((n) => n.key === key)!.position;
+
+it("places a step where a single pointer clicks, never by dragging (WCAG 2.5.7)", async () => {
+  await withTwoSteps();
+  await userEvent.click(screen.getByRole("button", { name: "transform" })); // its panel
+  await userEvent.click(screen.getByRole("button", { name: "Place on the canvas…" }));
+  expect(screen.getByText("Click an empty place on the canvas to put transform there.")).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "place here" }));
+  expect(at("transform")).toEqual({ x: 400 - 130, y: 300 - 32 }); // centred on the click
+  expect(screen.queryByText(/Click an empty place/)).toBeNull();
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "transform" }));
+});
+
+it("stops placing on Escape, leaving the step where it was", async () => {
+  await withTwoSteps();
+  const before = at("transform");
+  await userEvent.click(screen.getByRole("button", { name: "transform" }));
+  await userEvent.click(screen.getByRole("button", { name: "Place on the canvas…" }));
+  await userEvent.keyboard("{Escape}");
+  expect(screen.queryByText(/Click an empty place/)).toBeNull();
+  expect(screen.queryByRole("button", { name: "place here" })).toBeNull();
+  expect(at("transform")).toEqual(before);
+});
+
+it("moves a step 20 px a click from its panel", async () => {
+  await withTwoSteps();
+  const before = at("transform")!;
+  await userEvent.click(screen.getByRole("button", { name: "transform" }));
+  await userEvent.click(screen.getByRole("button", { name: "Move transform right" }));
+  await userEvent.click(screen.getByRole("button", { name: "Move transform down" }));
+  expect(at("transform")).toEqual({ x: before.x + 20, y: before.y + 20 });
+});
 ```
 
-(add `within` to the Testing Library import).
+(add `within` to the Testing Library import). The stand-in canvas of Task 11 gains, after its steps, the click a
+pointer would make on an empty place while placing:
 
-- [ ] **Step 2: Run them to see them fail**
+```tsx
+          {props.placing && <button onClick={() => props.onPlace({ x: 400, y: 300 })}>place here</button>}
+```
+
+- [ ] **Step 3: Run them to see them fail**
 
 Run: `cd frontend && npx -y pnpm@12.6.0 exec vitest run src/routes/editor`
 Expected: FAIL: `canvasNav.ts` doesn't exist; the editor ignores Delete, `a` and Ctrl+Z.
 
-- [ ] **Step 3: Implement the model**
+- [ ] **Step 4: Implement the model**
 
 `frontend/src/routes/editor/canvasNav.ts`:
 
 ```ts
 // SPDX-License-Identifier: Apache-2.0
-// The canvas's keyboard model (D16; 4b ruling 15). Its items form a tree from the start card down: the start card,
-// its edges to the entry steps, each step, each edge leaving it (by port, then left to right), each free port. Down
+// The canvas's keyboard model (D16; 4b ruling 15, amended). Its items form a tree from the start card down: the start
+// card, its edges to the entry steps, each step, each edge leaving it (by port, then left to right), each free port.
+// A step no entry reaches (a cycle no entry leads into, a step whose only edges in come from steps that aren't
+// there) joins the start card's children, topmost first: every item the canvas draws is reached by the keys. Down
 // goes to an item's first child, Up to its parent, Left and Right among its siblings, Home to the start card. A
 // read-only canvas (a viewer, a conflict, an old version) holds the start card and the steps only.
-import { START, edgesOf, entries, nodesOf, portOf, pos } from "../../lib/graph";
+import { START, drawableEdges, entries, nodesOf, portOf, pos } from "../../lib/graph";
 import type { GraphDoc, GraphEdge } from "../../lib/workflows";
 import { item } from "./items";
 
@@ -5023,18 +6424,17 @@ export function navModel(doc: GraphDoc, portsOf: (nodeId: string) => string[], e
   const children = new Map<string, string[]>();
   const edges = new Map<string, GraphEdge>();
   const nodes = nodesOf(doc);
+  const drawn = drawableEdges(doc);
   const x = new Map(nodes.map((n) => [n.id, pos(n).x]));
   const byPlace = (a: GraphEdge, b: GraphEdge) =>
     (x.get(a.to.node) ?? 0) - (x.get(b.to.node) ?? 0) || a.to.node.localeCompare(b.to.node);
   const first = [...entries(doc)].sort((a, b) => pos(a).x - pos(b).x || a.id.localeCompare(b.id));
-  if (editable) {
-    children.set(item.start, first.length ? first.map((n) => item.entry(n.id)) : nodes.length ? [] : [item.port(START, "out")]);
-    for (const n of first) children.set(item.entry(n.id), [item.node(n.id)]);
-  } else {
-    children.set(item.start, first.map((n) => item.node(n.id)));
-  }
+  const top = editable ? first.map((n) => item.entry(n.id)) : first.map((n) => item.node(n.id));
+  if (editable) for (const n of first) children.set(item.entry(n.id), [item.node(n.id)]);
+  if (editable && nodes.length === 0) top.push(item.port(START, "out"));
+  children.set(item.start, top);
   for (const n of nodes) {
-    const leaving = edgesOf(doc).filter((e) => e.from.node === n.id);
+    const leaving = drawn.filter((e) => e.from.node === n.id);
     const own = portsOf(n.id);
     const ports = [...own, ...new Set(leaving.map(portOf).filter((p) => !own.includes(p)))];
     const out: string[] = [];
@@ -5056,12 +6456,9 @@ export function navModel(doc: GraphDoc, portsOf: (nodeId: string) => string[], e
   }
   const parent = new Map<string, string>();
   const order: string[] = [];
-  const seen = new Set<string>();
-  const walk = (root: string, from?: string) => {
-    if (seen.has(root)) return;
-    seen.add(root);
-    if (from) parent.set(root, from);
-    const queue = [root];
+  const seen = new Set<string>([item.start]);
+  const queue = [item.start];
+  const walk = () => {
     while (queue.length) {
       const at = queue.shift()!;
       order.push(at);
@@ -5073,8 +6470,21 @@ export function navModel(doc: GraphDoc, portsOf: (nodeId: string) => string[], e
       }
     }
   };
-  walk(item.start);
-  for (const n of nodes) walk(item.node(n.id), item.start); // steps a cycle hides from the start card
+  walk();
+  // A step the start card doesn't reach becomes one of its children (so Down, Left and Right get there), topmost
+  // first, and what it reaches is walked from it; until every step is reached.
+  const unreached = () =>
+    nodes
+      .filter((n) => !seen.has(item.node(n.id)))
+      .sort((a, b) => pos(a).y - pos(b).y || pos(a).x - pos(b).x || a.id.localeCompare(b.id));
+  for (let rest = unreached(); rest.length > 0; rest = unreached()) {
+    const root = item.node(rest[0]!.id);
+    top.push(root);
+    seen.add(root);
+    parent.set(root, item.start);
+    queue.push(root);
+    walk();
+  }
   return { children, parent, order, edges };
 }
 
@@ -5089,7 +6499,7 @@ export function move(nav: Nav, from: string, key: NavKey): string {
 }
 ```
 
-- [ ] **Step 4: Implement the dialog and the panel**
+- [ ] **Step 5: Implement the dialog and the panel**
 
 `frontend/src/routes/editor/ConnectDialog.tsx`:
 
@@ -5159,8 +6569,9 @@ export function ConnectDialog({
 ```tsx
 // SPDX-License-Identifier: Apache-2.0
 // A step's panel (Enter on a step; 4b ruling 15): what the step is and how it runs, its problems and its
-// expressions. Read-only in 4b: 4c's drawer replaces it with Setup and Options. Escape closes it and gives focus
-// back to the step.
+// expressions, and, for an editor, where it sits: placed with a click on the canvas or moved 20 px a click (WCAG
+// 2.5.7, ruling 13 amended). Its config is read-only in 4b: 4c's drawer replaces it with Setup and Options. Escape
+// closes it and gives focus back to the step.
 import { useEffect, useRef } from "react";
 import { Button } from "../../components/Button";
 import type { Diagnostic, Expression, GraphNode, NodeType } from "../../lib/workflows";
@@ -5173,11 +6584,20 @@ const EFFECTS: Record<NodeType["side_effect"], string> = {
   ambiguous: "Changes things; a retry may repeat it",
 };
 
+export type Nudge = "ArrowLeft" | "ArrowUp" | "ArrowDown" | "ArrowRight";
+const NUDGES: { key: Nudge; glyph: string; word: string }[] = [
+  { key: "ArrowLeft", glyph: "←", word: "left" },
+  { key: "ArrowUp", glyph: "↑", word: "up" },
+  { key: "ArrowDown", glyph: "↓", word: "down" },
+  { key: "ArrowRight", glyph: "→", word: "right" },
+];
+
 export function StepPanel({
-  node, type, ports, problems, expressions, editable, onDelete, onConnectPort, onClose,
+  node, type, ports, problems, expressions, editable, onDelete, onConnectPort, onPlace, onNudge, onClose,
 }: {
-  node: GraphNode; type: NodeType | undefined; ports: string[]; problems: Diagnostic[]; expressions: Expression[];
-  editable: boolean; onDelete: () => void; onConnectPort: (port: string) => void; onClose: () => void;
+  node: GraphNode; type: NodeType | undefined; ports: string[]; problems: Diagnostic[] | null; expressions: Expression[];
+  editable: boolean; onDelete: () => void; onConnectPort: (port: string) => void; onPlace: () => void;
+  onNudge: (key: Nudge) => void; onClose: () => void;
 }) {  // prettier-ignore
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => heading.current?.focus(), [node.id]);
@@ -5214,7 +6634,9 @@ export function StepPanel({
       )}
       <section className="flex flex-col gap-2">
         <h3 className="text-small font-semibold">Problems</h3>
-        {problems.length === 0 ? (
+        {problems === null ? (
+          <p className="text-small text-muted">Not checked for what&apos;s on the screen.</p>
+        ) : problems.length === 0 ? (
           <p className="text-small text-muted">None found in the saved draft.</p>
         ) : (
           <ul className="flex flex-col gap-2">
@@ -5242,6 +6664,16 @@ export function StepPanel({
         </section>
       )}
       {editable && (
+        <div role="group" aria-label={`Where ${node.key} sits`} className="flex flex-wrap items-center gap-2">
+          <Button size="sm" onClick={onPlace}>Place on the canvas…</Button>
+          {NUDGES.map((n) => (
+            <Button key={n.key} size="sm" aria-label={`Move ${node.key} ${n.word}`} onClick={() => onNudge(n.key)}>
+              {n.glyph}
+            </Button>
+          ))}
+        </div>
+      )}
+      {editable && (
         <div className="flex flex-wrap gap-2">
           {ports.map((port) => (
             <Button key={port} size="sm" onClick={() => onConnectPort(port)}>
@@ -5256,7 +6688,33 @@ export function StepPanel({
 }
 ```
 
-- [ ] **Step 5: Wire the keyboard into the editor**
+In `frontend/src/routes/editor/Canvas.tsx`, `CanvasProps` gains:
+
+```tsx
+  placing: boolean; // the next click on an empty place puts a step there (WCAG 2.5.7)
+  onPlace: (at: { x: number; y: number }) => void; // the click, in the canvas's own coordinates
+```
+
+and `<ReactFlow>` gains the click and the cursor that says so:
+
+```tsx
+        onPaneClick={(e) => {
+          if (p.placing) p.onPlace(flow.screenToFlowPosition({ x: e.clientX, y: e.clientY }));
+        }}
+        className={p.placing ? "canvas-placing" : undefined}
+```
+
+with, in `canvas.css`:
+
+```css
+.canvas-placing .react-flow__pane {
+  cursor: crosshair;
+}
+```
+
+`screenToFlowPosition` takes the zoom and the pan into account, so the step lands under the pointer at any zoom.
+
+- [ ] **Step 6: Wire the keyboard into the editor**
 
 In `frontend/src/routes/editor/Editor.tsx`, add the imports (`type KeyboardEvent`, `ConfirmDialog`, `deleteEdge`,
 `deleteNode`, `edgesOf`, `portsOf`, `undo`, `redo`, `NAV_KEYS`, `move`, `navModel`, `type NavKey`, `type GraphEdge`,
@@ -5272,6 +6730,7 @@ In `frontend/src/routes/editor/Editor.tsx`, add the imports (`type KeyboardEvent
   const [connecting, setConnecting] = useState<PortRef | null>(null);
   const [asking, setAsking] = useState<{ kind: "node"; id: string } | { kind: "edge"; edge: GraphEdge } | null>(null);
   const [panel, setPanel] = useState<string | null>(null); // the step whose panel is open
+  const [placing, setPlacing] = useState<string | null>(null); // the step the next click on the canvas puts there
 
   const firstPort = (nodeId: string): PortRef | null => {
     const port = portMap.get(nodeId)?.[0];
@@ -5334,6 +6793,23 @@ In `frontend/src/routes/editor/Editor.tsx`, add the imports (`type KeyboardEvent
     change(moveNodes(doc, new Map([[nodeId, { x: (n.position?.x ?? 0) + d[0]!, y: (n.position?.y ?? 0) + d[1]! }]])), `Moved ${n.key}`);
   }
 
+  /** The click that ends "Place on the canvas…": the step, centred on it (WCAG 2.5.7). */
+  function place(at: { x: number; y: number }) {
+    if (!placing) return;
+    const id = placing;
+    setPlacing(null);
+    change(moveNodes(doc, new Map([[id, { x: at.x - CARD.width / 2, y: at.y - CARD.height / 2 }]])), `Placed ${keyOf(id)}`, item.node(id));
+  }
+
+  /** Escape stops placing first, before it closes a panel or a picker. */
+  function onEditorKeyCapture(e: KeyboardEvent<HTMLDivElement>) {
+    if (e.key !== "Escape" || !placing) return;
+    e.stopPropagation();
+    e.preventDefault();
+    setPlacing(null);
+    announce("Not placed");
+  }
+
   function onCanvasKey(e: KeyboardEvent<HTMLDivElement>) {
     const id = (e.target as HTMLElement).dataset.item;
     if (!id || e.altKey) return;
@@ -5381,8 +6857,21 @@ In `frontend/src/routes/editor/Editor.tsx`, add the imports (`type KeyboardEvent
   }
 ```
 
-The toolbar's Add step calls `addFrom(shown)`; the root `div` takes `onKeyDown={onEditorKey}`; the canvas takes
-`focusId={shown}`, `current={panel}` and `onKeyDown={onCanvasKey}`; the picker takes
+The toolbar's Add step calls `addFrom(shown)`; the root `div` takes `onKeyDown={onEditorKey}` and
+`onKeyDownCapture={onEditorKeyCapture}`; the canvas takes `focusId={shown}`, `current={panel}`,
+`onKeyDown={onCanvasKey}`, `placing={placing !== null}` and `onPlace={place}` (import `CARD` from `../../lib/layout`);
+while placing, a bar above the canvas says so and offers Cancel:
+
+```tsx
+      {placing && (
+        <div className="flex flex-wrap items-center gap-3 border-b border-line bg-surface-2 px-5 py-2.5 text-small">
+          <span className="grow">Click an empty place on the canvas to put {keyOf(placing)} there.</span>
+          <Button size="sm" onClick={() => setPlacing(null)}>Cancel</Button>
+        </div>
+      )}
+```
+
+The picker takes
 `onConnect={picker.kind === "after" && picker.from ? () => setConnecting(picker.from) : undefined}`; and after the
 canvas, inside the row:
 
@@ -5392,11 +6881,16 @@ canvas, inside the row:
             node={nodesOf(doc).find((n) => n.id === panel)!}
             type={typeMap.get(nodesOf(doc).find((n) => n.id === panel)!.type)}
             ports={portMap.get(panel) ?? []}
-            problems={[]}
+            problems={null}
             expressions={[]}
             editable={editable}
             onDelete={() => setAsking({ kind: "node", id: panel })}
             onConnectPort={(port) => setConnecting({ node: panel, port })}
+            onPlace={() => {
+              setPlacing(panel);
+              announce(`Click an empty place on the canvas to put ${keyOf(panel)} there`);
+            }}
+            onNudge={(key) => nudge(panel, key)}
             onClose={() => {
               setPanel(null);
               focus(item.node(panel));
@@ -5443,7 +6937,7 @@ with, above the component's `return`, the healing the dialog describes, computed
 
 `onConnect` focuses the new edge's "+": `change(next, …, item.edge({ from, to: { node: to } }))`.
 
-- [ ] **Step 6: The keyboard-only flow in the browser**
+- [ ] **Step 7: The keyboard-only flow in the browser**
 
 In `frontend/e2e/workflows.spec.ts`, add:
 
@@ -5499,40 +6993,154 @@ test("a workflow built with the keyboard alone: Tab in, arrows along the edges, 
 });
 ```
 
-The step picker's search field filters by title and ref: typing `transform`, `flow.if` and `stop` picks those types
-with Enter (cmdk selects the first match).
-
-- [ ] **Step 7: Run the tests to see them pass, then the gate**
-
-Run: `cd frontend && npx -y pnpm@12.6.0 exec vitest run src/routes/editor && npx -y pnpm@12.6.0 test && npx -y pnpm@12.6.0 lint && npx -y pnpm@12.6.0 typecheck`,
-then the browser gate after a reset. Expected: PASS; `workflows` 2 passed.
-
-- [ ] **Step 8: Commit**
-
-```bash
-git add frontend/src/routes/editor frontend/e2e/workflows.spec.ts
-git commit -m "feat(web): the canvas's keyboard: one tab stop, arrows along the edges, A, Delete, connect, undo (D16, 4b)"
+```ts
+test("a step is placed with single clicks, never a drag (WCAG 2.5.7)", async ({ page }) => {
+  await newWorkflow(page, "Placed flow");
+  await page.getByRole("button", { name: "Add the first step" }).click();
+  await page.getByRole("option", { name: /flow\.transform@1/ }).click();
+  const card = page.getByRole("button", { name: /^transform, Transform/ });
+  await card.click(); // its panel
+  await page.getByRole("button", { name: "Place on the canvas…" }).click();
+  await expect(page.getByText("Click an empty place on the canvas to put transform there.")).toBeVisible();
+  await expectAccessible(page, "editor: placing a step");
+  // An empty place: the canvas's top right, clear of the cards (fitted to its middle), the minimap (bottom right)
+  // and the zoom controls (bottom left).
+  const pane = (await page.locator(".react-flow__pane").boundingBox())!;
+  const target = { x: pane.x + pane.width * 0.85, y: pane.y + pane.height * 0.2 };
+  await page.mouse.click(target.x, target.y);
+  await expect(card).toBeFocused();
+  const placed = (await card.boundingBox())!;
+  expect(Math.abs(placed.x + placed.width / 2 - target.x)).toBeLessThan(4);
+  expect(Math.abs(placed.y + placed.height / 2 - target.y)).toBeLessThan(4);
+  // Its panel's buttons move it a step at a time.
+  await card.click();
+  await page.getByRole("button", { name: "Move transform left" }).click();
+  await expect.poll(async () => (await card.boundingBox())!.x).toBeLessThan(placed.x);
+});
 ```
 
-**Milestone 3's check:** the frontend suite, lint, types and build, then the browser gate after a reset. All pass.
+`frontend/e2e/fixtures/cycle.dewpoint.json` (a step no edge leads to, and two steps leading to each other that no
+entry reaches: what the keyboard model must still reach; the API imports it, its format being sound, and its
+problems say what's wrong):
+
+```json
+{
+  "format": "dewpoint.workflow",
+  "format_version": 1,
+  "name": "Cycle",
+  "graph": {
+    "graph_format": 1,
+    "nodes": [
+      { "id": "0b6c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e01", "key": "entry", "type": "flow.transform@1", "config": { "fields": { "v": 1 } }, "position": { "x": 0, "y": 140 } },
+      { "id": "0b6c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e02", "key": "a", "type": "flow.transform@1", "config": { "fields": { "v": 2 } }, "position": { "x": 300, "y": 300 } },
+      { "id": "0b6c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e03", "key": "b", "type": "flow.transform@1", "config": { "fields": { "v": 3 } }, "position": { "x": 300, "y": 440 } }
+    ],
+    "edges": [
+      { "from": { "node": "0b6c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e02", "port": "out" }, "to": { "node": "0b6c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e03" } },
+      { "from": { "node": "0b6c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e03", "port": "out" }, "to": { "node": "0b6c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e02" } }
+    ]
+  },
+  "bindings": []
+}
+```
+
+and, in `frontend/e2e/workflows.spec.ts`, a helper that imports a file through 1b (Task 8), and the walk:
+
+```ts
+async function importFile(page: Page, name: string, file: string): Promise<void> {
+  await page.goto(`/t/${await tenantId(page)}/workflows`);
+  await page.getByTestId("workflow-new").click();
+  const dialog = page.getByRole("dialog", { name: "New workflow" });
+  await dialog.getByLabel("Name").fill(name);
+  await dialog.getByRole("radio", { name: /Import from file/ }).check();
+  await dialog.getByLabel("Workflow file").setInputFiles(file);
+  await expect(dialog.getByText("The file names no connection or workflow.")).toBeVisible();
+  await expectAccessible(page, "new workflow: import");
+  await dialog.getByRole("button", { name: "Import and open" }).click();
+  await expect(page).toHaveURL(/\/workflows\/[0-9a-f-]{36}$/);
+}
+
+test("the keys reach every step of an imported cycle no entry leads into", async ({ page }) => {
+  await importFile(page, "Cycle", "e2e/fixtures/cycle.dewpoint.json");
+  const start = page.getByRole("button", { name: /^Start, where every run begins/ });
+  await start.focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(page.getByRole("button", { name: "Insert a step before entry" })).toBeFocused();
+  await page.keyboard.press("ArrowRight"); // the cycle, linked under the start card
+  await expect(page.getByRole("button", { name: /^a, Transform/ })).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await expect(page.getByRole("button", { name: "Insert a step between a and b" })).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await expect(page.getByRole("button", { name: /^b, Transform/ })).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await expect(page.getByRole("button", { name: "Insert a step between b and a" })).toBeFocused();
+  await page.keyboard.press("Home");
+  await expect(start).toBeFocused();
+  await expectAccessible(page, "editor: an imported cycle");
+});
+```
+
+The step picker's search field filters by title and ref: typing `transform`, `flow.if` and `stop` picks those types
+with Enter (cmdk selects the first match). The placed card's centre is compared on the screen: the card's size and
+its position both scale with the zoom, so the centre lands under the click at any zoom.
+
+- [ ] **Step 8: Run the tests to see them pass, then the gate**
+
+Run: `cd frontend && npx -y pnpm@12.6.0 exec vitest run src/routes/editor && npx -y pnpm@12.6.0 test && npx -y pnpm@12.6.0 lint && npx -y pnpm@12.6.0 typecheck`,
+then the browser gate after a reset. Expected: PASS; `workflows` 4 passed.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add frontend/src/routes/editor frontend/e2e/workflows.spec.ts frontend/e2e/fixtures/cycle.dewpoint.json
+git commit -m "feat(web): the canvas's keyboard reaches every item; steps placed by a click; A, Delete, connect, undo (D16, 4b)"
+```
+
+**Milestone 3's check, then the owner's pause.** The frontend suite, lint, types and build, then the browser gate after
+a reset; all pass. Stop for the owner's review with the canvas under the real CSP and the accessibility proof (see
+"Executing this plan"): the gate's results for each canvas flow, axe's for each canvas state, the reachability tests,
+and screenshots of the canvas (blank, four steps, a step's panel, placing a step, an imported cycle). Milestone 4
+waits for the owner's word.
 
 ## Milestone 4 — Saving, problems and publishing
 
-### Task 13: Saving (D17): one save in flight, edits coalesced, `If-Match`; a conflict never overwrites
+### Task 13: Saving (D17): one save in flight, edits coalesced, `If-Match`; leaving saves first; a conflict never overwrites
 
 **Files:**
 - Create: `frontend/src/lib/draftSync.ts`, `frontend/src/lib/draftSync.test.ts`
 - Create: `frontend/src/routes/editor/SaveState.tsx`
+- Modify: `frontend/src/components/ConfirmDialog.tsx`, `frontend/src/components/ConfirmDialog.test.tsx` (`cancelLabel`)
 - Modify: `frontend/src/routes/editor/Editor.tsx`, `frontend/src/routes/editor/Editor.test.tsx`
 
 **Interfaces:**
 - Consumes: `PUT /api/v1/t/{tenant_id}/workflows/{workflow_id}/draft` (`If-Match: <revision>`, body `Graph`) →
-  `DraftSavedOut` (`draft_revision`, `unpublished_changes`), `409 draft_conflict`; `downloadJson`, `fileName`.
-- Produces: `class DraftSync` (`new DraftSync({ revision, unpublished, save, onChange, onSettled?, delayMs? })`;
-  `change(doc)`, `flush(): Promise<number>`, `retry()`, `conflict()`, `dispose()`, `current: SyncState`); `type
-  SyncState = { status: "saved" | "pending" | "saving" | "conflict" | "error"; revision: number; unpublished: boolean
-  }`; `class ConflictError`; `<SaveState state activeNumber />`. Task 14 hooks `onSettled`; Task 15 calls `flush()`
-  before publishing and exporting.
+  `DraftSavedOut` (`draft_revision`, `unpublished_changes`), `409 draft_conflict`; `downloadJson`, `fileName`;
+  TanStack Router 1.170.39's `useBlocker({ shouldBlockFn, enableBeforeUnload, withResolver: true })`, whose
+  `shouldBlockFn` may answer a promise and whose resolver is `{ status: "blocked" | "idle", proceed, reset }`
+  (verified in the installed package); TanStack Query 5.103.2's `refetchOnMount: "always"` and
+  `isFetchedAfterMount` (verified).
+- Produces:
+  - `class DraftSync` (`new DraftSync({ revision, unpublished, save, onChange, onSettled?, delayMs? })`; `change(doc)`,
+    `flush(): Promise<number>`, `retry()`, `conflict()`, `dispose()`, `current: SyncState`, `unsaved: boolean`);
+    `type SyncState = { status: "saved" | "pending" | "saving" | "conflict" | "error"; revision: number; unpublished:
+    boolean | null; generation: number; savedGeneration: number }`; `class ConflictError`, `class SaveError`;
+    `onSettled(revision, generation)`.
+  - `ConfirmDialog`'s `cancelLabel?: string` (default "Cancel").
+  - `<SaveState state activeNumber />`.
+  - The editor opens on a snapshot read after it mounted, and is seeded once. Task 14 hooks `onSettled` and reads
+    `generation`/`savedGeneration`; Task 15 calls `flush()` before publishing and exporting.
+
+What this task guards (the owner's review of 325fc14, correction 1):
+- **Leaving.** `beforeunload` covers closing the tab only. The breadcrumb, the rail, the palette and the tenant
+  switcher are router navigations: a blocker saves what's pending first, and, when it can't (a failed save, a
+  conflict), asks: stay, download, or leave without saving (4b ruling 22).
+- **Closing.** Once the editor closes, its saver is disposed: a save still in flight that answers afterwards sends
+  nothing more and says nothing.
+- **Opening.** The editor never opens on a cached draft (it would conflict on the first edit): it waits for the read
+  made after it mounted, then owns its document; a later read of the workflow neither replaces nor closes it (4b
+  ruling 23).
+- **A conflict's work.** The local version since the last save can't be saved; leaving asks, and Reload asks before
+  discarding it.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -5541,15 +7149,16 @@ git commit -m "feat(web): the canvas's keyboard: one tab stop, arrows along the 
 ```ts
 // SPDX-License-Identifier: Apache-2.0
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { ConflictError, DraftSync, type SyncState } from "./draftSync";
+import { ConflictError, DraftSync, SaveError, type SyncState } from "./draftSync";
 import type { GraphDoc } from "./workflows";
 
 const doc = (n: number): GraphDoc => ({ graph_format: 1, nodes: [{ id: `n${n}`, key: `k${n}`, type: "flow.transform@1" }], edges: [] });
+type Answer = () => Promise<{ draft_revision: number; unpublished_changes: boolean }>;
 
 let calls: { doc: GraphDoc; revision: number }[];
 let inFlight: number;
 let maxInFlight: number;
-let answers: (() => Promise<{ draft_revision: number; unpublished_changes: boolean }>)[];
+let answers: Answer[];
 let states: SyncState["status"][];
 let settled: number[];
 
@@ -5573,6 +7182,13 @@ function make() {
   });
 }
 
+/** A save that answers when the test says. */
+function held(): () => void {
+  let release!: () => void;
+  answers.push(() => new Promise((r) => (release = () => r({ draft_revision: 2, unpublished_changes: true }))));
+  return () => release();
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   calls = [];
@@ -5593,13 +7209,12 @@ it("saves a second after the last change, with the revision the last save return
   expect(calls).toEqual([]);
   await vi.advanceTimersByTimeAsync(1);
   expect(calls).toEqual([{ doc: doc(2), revision: 1 }]);
-  expect(sync.current).toEqual({ status: "saved", revision: 2, unpublished: true });
+  expect(sync.current).toEqual({ status: "saved", revision: 2, unpublished: true, generation: 2, savedGeneration: 2 });
   expect(settled).toEqual([2]);
 });
 
 it("edits during a save coalesce into exactly one next save, never two at once", async () => {
-  let release!: () => void;
-  answers.push(() => new Promise((r) => (release = () => r({ draft_revision: 2, unpublished_changes: true }))));
+  const release = held();
   const sync = make();
   sync.change(doc(1));
   await vi.advanceTimersByTimeAsync(1000);
@@ -5614,16 +7229,44 @@ it("edits during a save coalesce into exactly one next save, never two at once",
   expect(settled).toEqual([3]); // settled once, when nothing was left to save
 });
 
+it("counts each change, and says which one the server holds", async () => {
+  const release = held();
+  const sync = make();
+  sync.change(doc(1));
+  expect([sync.current.generation, sync.current.savedGeneration, sync.unsaved]).toEqual([1, 0, true]);
+  await vi.advanceTimersByTimeAsync(1000); // generation 1 goes
+  sync.change(doc(2));
+  release();
+  await vi.advanceTimersByTimeAsync(0);
+  expect([sync.current.generation, sync.current.savedGeneration, sync.unsaved]).toEqual([2, 1, true]);
+  await vi.advanceTimersByTimeAsync(1000);
+  expect([sync.current.generation, sync.current.savedGeneration, sync.unsaved]).toEqual([2, 2, false]);
+});
+
 it("a 409 stops every save and keeps the document", async () => {
   answers.push(() => Promise.reject(new ConflictError()));
   const sync = make();
   sync.change(doc(1));
   await vi.advanceTimersByTimeAsync(1000);
   expect(sync.current.status).toBe("conflict");
+  expect(sync.unsaved).toBe(true); // what leaving would lose
   sync.change(doc(2));
   await vi.advanceTimersByTimeAsync(5000);
   expect(calls.length).toBe(1);
   await expect(sync.flush()).rejects.toBeInstanceOf(ConflictError);
+});
+
+it("a conflict declared during a save stays a conflict when that save answers", async () => {
+  const release = held();
+  const sync = make();
+  sync.change(doc(1));
+  await vi.advanceTimersByTimeAsync(1000);
+  sync.change(doc(2));
+  sync.conflict(); // a publish's 409
+  release();
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(sync.current.status).toBe("conflict");
+  expect(calls.length).toBe(1);
 });
 
 it("a failed save keeps the document for the next change or a retry, at the same revision", async () => {
@@ -5648,45 +7291,151 @@ it("flush saves now what's pending, and answers the revision publish must name",
   await expect(sync.flush()).resolves.toBe(2); // nothing pending: no save
   expect(calls.length).toBe(1);
 });
+
+it("flush says when the draft couldn't be saved, after trying once more", async () => {
+  answers.push(() => Promise.reject(new Error("network")), () => Promise.reject(new Error("network")));
+  const sync = make();
+  sync.change(doc(1));
+  await vi.advanceTimersByTimeAsync(1000);
+  const flushed = expect(sync.flush()).rejects.toBeInstanceOf(SaveError);
+  await vi.advanceTimersByTimeAsync(0);
+  await flushed;
+  expect(calls.length).toBe(2);
+});
+
+it("once closed, a save in flight that answers sends nothing more and says nothing", async () => {
+  const release = held();
+  const sync = make();
+  sync.change(doc(1));
+  await vi.advanceTimersByTimeAsync(1000);
+  sync.change(doc(2)); // waits for the save in flight
+  sync.dispose();
+  const said = states.length;
+  release();
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(calls.length).toBe(1);
+  expect(states.length).toBe(said);
+  expect(settled).toEqual([]);
+  await expect(sync.flush()).rejects.toBeInstanceOf(SaveError);
+});
 ```
 
-In `frontend/src/routes/editor/Editor.test.tsx`, the fetch mock records requests and answers a draft PUT from a
-variable (`let putAnswer: () => Response`, defaulting to `new Response(JSON.stringify({ draft_revision: 2,
-unpublished_changes: true }))`), and:
+In `frontend/src/components/ConfirmDialog.test.tsx`:
 
 ```tsx
-it("saves an edit with the revision it was loaded at, and says so", async () => {
-  await show();
+it("names its cancel when asked", () => {
+  render(
+    <ConfirmDialog open title="Your latest changes aren't saved" confirmLabel="Leave without saving" cancelLabel="Stay" onConfirm={vi.fn()} onCancel={vi.fn()}>
+      They couldn&apos;t be saved.
+    </ConfirmDialog>,
+  );
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "Stay" }));
+});
+```
+
+In `frontend/src/routes/editor/Editor.test.tsx` (Task 11's helpers: `answers`, `json`, `sent`, `drawn`, `draftWith`,
+`show({ seed })`), `beforeEach` gains the draft PUT's answer:
+
+```tsx
+  answers.set(`PUT ${BASE}/draft`, () => json({ draft_revision: 2, unpublished_changes: true }));
+```
+
+and:
+
+```tsx
+async function addTransform() {
   await userEvent.click(screen.getByRole("button", { name: "Start" }));
   await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
+  await screen.findByRole("button", { name: "transform" });
+}
+
+it("saves an edit with the revision it was loaded at, and says so", async () => {
+  await show();
+  await addTransform();
   expect(screen.getByText("Unsaved changes")).toBeTruthy();
   await vi.waitFor(() => expect(sent.find((r) => r.method === "PUT")).toBeTruthy(), { timeout: 3000 });
   const put = sent.find((r) => r.method === "PUT")!;
   expect(put.headers.get("If-Match")).toBe("1");
-  expect((put.body as { nodes: { key: string }[] }).nodes.map((n) => n.key)).toEqual(["transform"]);
+  expect((put.body as GraphDoc).nodes!.map((n) => n.key)).toEqual(["transform"]);
   await screen.findByText("Saved · not published");
 });
 
-it("turns read-only on a conflict, keeping the work downloadable", async () => {
-  putAnswer = () => new Response(JSON.stringify({ error: "draft_conflict", draft_revision: 5 }), { status: 409 });
+it("opens on the server's draft, never a cached one", async () => {
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft_revision: 7, draft: draftWith("fresh") }));
+  await show({ seed: (qc) => qc.setQueryData(["workflow", "t1", "w1"], { ...WORKFLOW, draft: draftWith("old") }) });
+  expect(screen.getByRole("button", { name: "fresh" })).toBeTruthy();
+  expect(drawn.some((d) => d.doc.nodes?.some((n) => n.key === "old"))).toBe(false);
+});
+
+it("keeps its own document when the workflow is read again while it's open", async () => {
+  const { qc } = await show();
+  await addTransform();
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft_revision: 9, draft: draftWith("other") }));
+  await qc.refetchQueries({ queryKey: ["workflow", "t1", "w1"] });
+  expect(screen.getByRole("button", { name: "transform" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "other" })).toBeNull();
+});
+
+it("saves before leaving through a link, then leaves", async () => {
+  const { router } = await show();
+  await addTransform();
+  expect(screen.getByText("Unsaved changes")).toBeTruthy(); // inside the debounce
+  await userEvent.click(screen.getByRole("link", { name: "Workflows" }));
+  await screen.findByText("list");
+  expect(sent.filter((r) => r.method === "PUT")).toHaveLength(1);
+  expect(router.state.location.pathname).toBe("/t/t1/workflows");
+});
+
+it("asks before leaving work it couldn't save; staying keeps it", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "http_error" }, 500));
   await show();
-  await userEvent.click(screen.getByRole("button", { name: "Start" }));
-  await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
+  await addTransform();
+  await userEvent.click(screen.getByRole("link", { name: "Workflows" }));
+  const ask = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
+  expect(within(ask).getByRole("button", { name: "Download my version" })).toBeTruthy();
+  await userEvent.click(within(ask).getByRole("button", { name: "Stay" }));
+  expect(screen.getByRole("button", { name: "transform" })).toBeTruthy();
+  await userEvent.click(screen.getByRole("link", { name: "Workflows" }));
+  const again = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
+  await userEvent.click(within(again).getByRole("button", { name: "Leave without saving" }));
+  await screen.findByText("list");
+});
+
+it("turns read-only on a conflict, keeping the work downloadable and leaving guarded", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "draft_conflict", draft_revision: 5 }, 409));
+  await show();
+  await addTransform();
   const alert = await screen.findByRole("alert", {}, { timeout: 3000 });
   expect(alert.textContent).toContain("changed elsewhere");
   expect(screen.queryByRole("button", { name: /Add step/ })).toBeNull();
-  expect(screen.getByRole("button", { name: "Download my version" })).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Reload" })).toBeTruthy();
+  expect(within(alert).getByRole("button", { name: "Download my version" })).toBeTruthy();
+  await userEvent.click(screen.getByRole("link", { name: "Workflows" }));
+  const ask = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
+  expect(ask.textContent).toContain("changed elsewhere");
+  await userEvent.click(within(ask).getByRole("button", { name: "Stay" }));
+});
+
+it("asks before Reload discards the version a conflict kept", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "draft_conflict", draft_revision: 5 }, 409));
+  await show();
+  await addTransform();
+  const alert = await screen.findByRole("alert", {}, { timeout: 3000 });
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft_revision: 5, draft: draftWith("theirs") }));
+  await userEvent.click(within(alert).getByRole("button", { name: "Reload" }));
+  const ask = screen.getByRole("dialog", { name: "Reload the saved draft" });
+  await userEvent.click(within(ask).getByRole("button", { name: "Discard my version and reload" }));
+  expect(await screen.findByRole("button", { name: "theirs" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "transform" })).toBeNull();
 });
 ```
 
-(the mock keeps each request's method, path, headers and body: `sent.push({ method, path, headers: request.headers,
-body })`).
+(`within` joins the Testing Library import; `GraphDoc` is imported for the PUT body's type.)
 
 - [ ] **Step 2: Run them to see them fail**
 
-Run: `cd frontend && npx -y pnpm@12.6.0 exec vitest run src/lib/draftSync.test.ts src/routes/editor/Editor.test.tsx`
-Expected: FAIL: `draftSync.ts` doesn't exist; the editor never saves.
+Run: `cd frontend && npx -y pnpm@12.6.0 exec vitest run src/lib/draftSync.test.ts src/components/ConfirmDialog.test.tsx src/routes/editor/Editor.test.tsx`
+Expected: FAIL: `draftSync.ts` doesn't exist; no `cancelLabel`; the editor never saves, opens on the cached draft,
+and leaves without saving.
 
 - [ ] **Step 3: Implement the saver**
 
@@ -5697,14 +7446,19 @@ Expected: FAIL: `draftSync.ts` doesn't exist; the editor never saves.
 // Saving the draft (D17). At most one save in flight; edits made meanwhile coalesce into the next save, sent a
 // second after the last change, with `If-Match` the revision the previous save returned, so the editor never
 // conflicts with itself. A 409 means someone else saved: every save stops and the document stays with the person
-// (read-only, downloadable), never sent over theirs. A failed save keeps the document for the next try.
+// (read-only, downloadable), never sent over theirs. A failed save keeps the document for the next try. Each change
+// is counted (`generation`) and the state says which one the server holds (`savedGeneration`): what leaving would
+// lose (4b ruling 22), and whether a check of the saved draft is a check of what's on the screen (ruling 24). Once
+// disposed (the editor closed), nothing more is sent or said, even when a save in flight answers.
 import type { GraphDoc } from "./workflows";
 
 export type SyncStatus = "saved" | "pending" | "saving" | "conflict" | "error";
 export interface SyncState {
   status: SyncStatus;
   revision: number; // the revision the server holds of what was last saved
-  unpublished: boolean; // that draft differs from the active version (the server's answer)
+  unpublished: boolean | null; // that draft differs from the active version (the server's word); null: not known
+  generation: number; // the editor's changes so far
+  savedGeneration: number; // the change `revision` holds: `generation` when nothing is unsaved
 }
 export interface Saved {
   draft_revision: number;
@@ -5717,36 +7471,54 @@ export class ConflictError extends Error {
   }
 }
 
+export class SaveError extends Error {
+  constructor() {
+    super("the draft isn't saved");
+  }
+}
+
 export class DraftSync {
   private state: SyncState;
-  private latest: GraphDoc | null = null; // the newest document not yet sent
+  private latest: { doc: GraphDoc; generation: number } | null = null; // the newest change not yet sent
   private timer: ReturnType<typeof setTimeout> | null = null;
   private inflight: Promise<void> | null = null;
+  private disposed = false;
 
   constructor(
     private readonly opts: {
       revision: number;
-      unpublished: boolean;
+      unpublished: boolean | null;
       save: (doc: GraphDoc, revision: number) => Promise<Saved>;
       onChange: (state: SyncState) => void;
-      onSettled?: (revision: number) => void;
+      onSettled?: (revision: number, generation: number) => void;
       delayMs?: number;
     },
   ) {
-    this.state = { status: "saved", revision: opts.revision, unpublished: opts.unpublished };
+    this.state = { status: "saved", revision: opts.revision, unpublished: opts.unpublished, generation: 0, savedGeneration: 0 };
   }
 
   get current(): SyncState {
     return this.state;
   }
 
+  /** Whether a change isn't on the server: what leaving now would lose. */
+  get unsaved(): boolean {
+    return this.state.generation !== this.state.savedGeneration;
+  }
+
   private set(patch: Partial<SyncState>) {
     this.state = { ...this.state, ...patch };
-    this.opts.onChange(this.state);
+    if (!this.disposed) this.opts.onChange(this.state);
+  }
+
+  private stopTimer() {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
   }
 
   private schedule(ms = this.opts.delayMs ?? 1000) {
-    if (this.timer) clearTimeout(this.timer);
+    if (this.disposed) return;
+    this.stopTimer();
     this.timer = setTimeout(() => {
       this.timer = null;
       void this.run();
@@ -5754,9 +7526,10 @@ export class DraftSync {
   }
 
   change(doc: GraphDoc): void {
-    if (this.state.status === "conflict") return;
-    this.latest = doc;
-    if (!this.inflight) this.set({ status: "pending" });
+    if (this.disposed || this.state.status === "conflict") return;
+    const generation = this.state.generation + 1;
+    this.latest = { doc, generation };
+    this.set(this.inflight ? { generation } : { generation, status: "pending" });
     this.schedule();
   }
 
@@ -5767,65 +7540,71 @@ export class DraftSync {
 
   /** Someone else saved (a publish's 409 says so too): stop saving. */
   conflict(): void {
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = null;
+    this.stopTimer();
     this.set({ status: "conflict" });
   }
 
   private run(): Promise<void> {
-    if (this.inflight || this.latest === null || this.state.status === "conflict") return this.inflight ?? Promise.resolve();
-    const doc = this.latest;
+    if (this.disposed || this.inflight || this.latest === null || this.state.status === "conflict") {
+      return this.inflight ?? Promise.resolve();
+    }
+    const sent = this.latest;
     this.latest = null;
     this.set({ status: "saving" });
     this.inflight = (async () => {
       try {
-        const saved = await this.opts.save(doc, this.state.revision);
-        this.state = { ...this.state, revision: saved.draft_revision, unpublished: saved.unpublished_changes };
+        const saved = await this.opts.save(sent.doc, this.state.revision);
+        this.state = {
+          ...this.state,
+          revision: saved.draft_revision,
+          unpublished: saved.unpublished_changes,
+          savedGeneration: sent.generation,
+        };
       } catch (e) {
         if (e instanceof ConflictError) {
           this.set({ status: "conflict" });
-          return;
+        } else {
+          this.latest ??= sent;
+          this.set({ status: "error" });
         }
-        this.latest ??= doc;
-        this.set({ status: "error" });
         return;
       } finally {
         this.inflight = null;
       }
+      // Closed: no further save and no news. Declared a conflict meanwhile: it stays one.
+      if (this.disposed || this.state.status === "conflict") return;
       if (this.latest !== null) {
         this.set({ status: "pending" });
         this.schedule();
       } else {
         this.set({ status: "saved" });
-        this.opts.onSettled?.(this.state.revision);
+        this.opts.onSettled?.(this.state.revision, this.state.savedGeneration);
       }
     })();
     return this.inflight;
   }
 
-  /** Save now whatever is pending; answer the revision saved (publish's `If-Match`). Rejects on a conflict or a
-   * failed save: nothing is published over what isn't saved. */
+  /** Save now whatever is pending; answer the revision saved (publish's `If-Match`). Rejects with ConflictError on a
+   * conflict, and SaveError on a failed save or a closed editor: nothing is published, exported or left behind
+   * over what isn't saved. */
   async flush(): Promise<number> {
     for (;;) {
+      if (this.disposed) throw new SaveError();
       if (this.state.status === "conflict") throw new ConflictError();
-      if (this.timer) {
-        clearTimeout(this.timer);
-        this.timer = null;
-      }
+      this.stopTimer();
       if (this.inflight) await this.inflight;
-      else if (this.latest !== null) {
-        const before = this.state.status;
-        await this.run();
-        if (before === "error" && this.state.status === "error") throw new Error("the draft isn't saved");
-      } else break;
-      if (this.state.status === "error") throw new Error("the draft isn't saved");
+      else if (this.latest !== null) await this.run();
+      else break;
+      if (this.state.status === "error") throw new SaveError();
     }
     return this.state.revision;
   }
 
+  /** The editor closed: stop, and drop whatever wasn't sent. */
   dispose(): void {
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = null;
+    this.disposed = true;
+    this.stopTimer();
+    this.latest = null;
   }
 }
 ```
@@ -5834,7 +7613,8 @@ export class DraftSync {
 
 ```tsx
 // SPDX-License-Identifier: Apache-2.0
-// The draft's state, in words, beside the workflow's name (1c's "Saved"): never a colour alone.
+// The draft's state, in words, beside the workflow's name (1c's "Saved"): never a colour alone, and never a claim
+// the editor can't back (`unpublished` is null when the comparison with the active version isn't known).
 import type { SyncState } from "../../lib/draftSync";
 
 export function SaveState({ state, activeNumber }: { state: SyncState; activeNumber: number | null }) {
@@ -5844,6 +7624,7 @@ export function SaveState({ state, activeNumber }: { state: SyncState; activeNum
     : state.status === "error" ? "Not saved"
     : state.status === "conflict" ? "Changed elsewhere"
     : activeNumber === null ? "Saved · not published"
+    : state.unpublished === null ? `Saved · v${activeNumber} is active`
     : state.unpublished ? `Saved · unpublished changes since v${activeNumber}`
     : `Saved · published as v${activeNumber}`;  // prettier-ignore
   const tone = state.status === "error" || state.status === "conflict" ? "text-danger" : state.status === "saved" ? "text-ok" : "text-muted";
@@ -5851,30 +7632,66 @@ export function SaveState({ state, activeNumber }: { state: SyncState; activeNum
 }
 ```
 
-- [ ] **Step 4: Wire it into the editor**
+In `frontend/src/components/ConfirmDialog.tsx`, the props gain `cancelLabel = "Cancel"` (`cancelLabel?: string`), and
+the cancel button reads `{cancelLabel}`.
 
-In `frontend/src/routes/editor/Editor.tsx`, import `useEffect`, `useRef`, `ApiError`, `client`, `ok`,
-`ConflictError`, `DraftSync`, `type SyncState`, `downloadJson`, `fileName`, `useQueryClient`, `SaveState`. In
-`EditorPage`, key the editor by a reload count, so Reload mounts it afresh from the server's draft:
+- [ ] **Step 4: Open on a fresh snapshot**
+
+In `frontend/src/routes/editor/Editor.tsx`, `EditorPage` seeds the editor once, from the first read made after it
+mounted (import `useEffect`, `useQueryClient`, `type WorkflowDetail`):
 
 ```tsx
+export function EditorPage({ tenantId, workflowId }: { tenantId: string; workflowId: string }) {
   const qc = useQueryClient();
+  // A draft cached from an earlier visit would conflict on the first edit (4b ruling 23): the editor waits for the read
+  // made after this page mounted. Once seeded it owns its document: a later read neither replaces nor closes it.
+  const workflow = useQuery({
+    ...workflowQuery(tenantId, workflowId),
+    refetchOnMount: "always",
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
+  const types = useQuery(nodeTypesQuery);
+  const tenant = useQuery(tenantQuery(tenantId));
+  const [seed, setSeed] = useState<WorkflowDetail | null>(null);
   const [loads, setLoads] = useState(0);
+  useEffect(() => {
+    if (seed === null && workflow.isFetchedAfterMount && workflow.isSuccess) setSeed(workflow.data);
+  }, [seed, workflow.isFetchedAfterMount, workflow.isSuccess, workflow.data]);
+  useDocumentTitle(seed?.name ?? "Workflow");
+
+  /** After a conflict: the saved draft, read afresh, in a new editor. */
   const reload = async () => {
     await qc.invalidateQueries({ queryKey: ["workflow", tenantId, workflowId] });
+    setSeed(null);
     setLoads((n) => n + 1);
   };
-  ...
-  return <Editor key={loads} tenantId={tenantId} workflow={workflow.data} types={types.data} role={tenant.data.role ?? null} onReload={() => void reload()} />;
+
+  if (types.isError) return <section className="p-6"><LoadError what="The step types" /></section>;
+  if (seed === null) {
+    return workflow.isError ? <section className="p-6"><LoadError what="This workflow" /></section> : <p className="p-6 text-body text-muted">Loading…</p>;
+  }
+  if (!types.data || !tenant.data) return <p className="p-6 text-body text-muted">Loading…</p>;
+  return <Editor key={loads} tenantId={tenantId} workflow={seed} types={types.data} role={tenant.data.role ?? null} onReload={() => void reload()} />;
+}
 ```
 
-In `Editor` (which takes `onReload`):
+A failed first read shows the error, never the cached copy: `isSuccess` is false after a failed fetch even when old
+data is cached, and `isFetchedAfterMount` is false until the read made after mounting ends.
+
+- [ ] **Step 5: Save, guard leaving, and keep a conflict's work**
+
+In `Editor` (which takes `onReload`; imports: `useBlocker`, `useRef`, `ApiError`, `client`, `ok`, `ConflictError`,
+`DraftSync`, `type SyncState`, `downloadJson`, `fileName`, `ConfirmDialog`, `SaveState`):
 
 ```tsx
-  const [sync, setSyncState] = useState<SyncState>({ status: "saved", revision: workflow.draft_revision, unpublished: workflow.unpublished_changes });
+  const [sync, setSyncState] = useState<SyncState>({
+    status: "saved", revision: workflow.draft_revision, unpublished: workflow.unpublished_changes, generation: 0, savedGeneration: 0,
+  });  // prettier-ignore
   const saver = useRef<DraftSync | null>(null);
-  if (saver.current === null) {
-    saver.current = new DraftSync({
+  // Made in an effect, so StrictMode's second mount (main.tsx) gets a live saver: its cleanup disposes the first.
+  useEffect(() => {
+    const s = new DraftSync({
       revision: workflow.draft_revision,
       unpublished: workflow.unpublished_changes,
       onChange: setSyncState,
@@ -5892,16 +7709,30 @@ In `Editor` (which takes `onReload`):
         }
       },
     });
-  }
-  useEffect(() => () => saver.current?.dispose(), []);
-  // Leaving with unsaved work asks first (the browser's own prompt).
-  useEffect(() => {
-    if (sync.status !== "pending" && sync.status !== "saving" && sync.status !== "error") return;
-    const warn = (e: BeforeUnloadEvent) => e.preventDefault();
-    window.addEventListener("beforeunload", warn);
-    return () => window.removeEventListener("beforeunload", warn);
-  }, [sync.status]);
+    saver.current = s;
+    return () => s.dispose();
+  }, [tenantId, workflow]);
   const editable = canEdit(role) && sync.status !== "conflict";
+  const downloadMine = () => downloadJson(fileName(workflow.name, ".draft.json"), doc);
+
+  // Leaving saves first (4b ruling 22). The breadcrumb, the rail, the palette and the tenant switcher are router
+  // navigations, which wait for the save; work that can't be saved (a failed save, a conflict) asks first. Closing
+  // the tab gets the browser's own prompt.
+  const leaving = useBlocker({
+    shouldBlockFn: async () => {
+      const s = saver.current;
+      if (!s?.unsaved) return false;
+      try {
+        await s.flush();
+        return false;
+      } catch {
+        return true;
+      }
+    },
+    enableBeforeUnload: () => saver.current?.unsaved ?? false,
+    withResolver: true,
+  });
+  const [reloading, setReloading] = useState(false);
 ```
 
 `change` and undo/redo hand each new document to the saver:
@@ -5909,7 +7740,7 @@ In `Editor` (which takes `onReload`):
 ```tsx
   function change(next: GraphDoc, message: string, then?: string) {
     setHistory((h) => record(h, next));
-    saver.current!.change(next);
+    saver.current?.change(next);
     announce(message);
     if (then) focus(then);
   }
@@ -5919,14 +7750,14 @@ In `Editor` (which takes `onReload`):
     const next = e.shiftKey ? redo(history) : undo(history);
     if (next === history) return;
     setHistory(next);
-    saver.current!.change(next.present);
+    saver.current?.change(next.present);
     announce(e.shiftKey ? "Redone" : "Undone");
 ```
 
 The toolbar shows `<SaveState state={sync} activeNumber={workflow.active_version_number} />` first, and a Retry
-button when `sync.status === "error"` (`onClick={() => saver.current!.retry()}`). Its "Read only" note now depends
-on the role alone (a conflict has its own banner): `{editable ? <AddStep /> : !canEdit(role) ? <span …>Read only:
-your role can't edit workflows</span> : null}`. Below the toolbar, on a conflict:
+button when `sync.status === "error"` (`onClick={() => saver.current?.retry()}`). Its "Read only" note now depends on
+the role alone (a conflict has its own banner): `{editable ? <AddStep /> : !canEdit(role) ? <span …>Read only: your
+role can't edit workflows</span> : null}`. Below the toolbar, on a conflict:
 
 ```tsx
       {sync.status === "conflict" && (
@@ -5935,40 +7766,119 @@ your role can't edit workflows</span> : null}`. Below the toolbar, on a conflict
             This draft was changed elsewhere, so your changes since then aren&apos;t saved. Reload to see the saved draft, or
             download your version to keep it.
           </span>
-          <Button size="sm" onClick={() => downloadJson(fileName(workflow.name, ".draft.json"), doc)}>Download my version</Button>
-          <Button size="sm" variant="primary" onClick={onReload}>Reload</Button>
+          <Button size="sm" onClick={downloadMine}>Download my version</Button>
+          <Button size="sm" variant="primary" onClick={() => setReloading(true)}>Reload</Button>
         </div>
       )}
 ```
 
-The banner's border is a full 1 px bottom rule, not a side stripe (outline §6); `ink` on `danger-bg` is in PAIRS.
+and, with the other dialogs:
 
-- [ ] **Step 5: Run the tests to see them pass**
-
-Run: `cd frontend && npx -y pnpm@12.6.0 exec vitest run src/lib/draftSync.test.ts src/routes/editor && npx -y pnpm@12.6.0 test && npx -y pnpm@12.6.0 lint && npx -y pnpm@12.6.0 typecheck`
-Expected: PASS and clean.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add frontend/src/lib/draftSync.ts frontend/src/lib/draftSync.test.ts frontend/src/routes/editor
-git commit -m "feat(web): the draft saves itself: one save in flight, edits coalesced, If-Match; a conflict never overwrites (D17, 4b)"
+```tsx
+      <ConfirmDialog
+        open={leaving.status === "blocked"}
+        title="Your latest changes aren't saved"
+        confirmLabel="Leave without saving"
+        cancelLabel="Stay"
+        onConfirm={() => leaving.proceed?.()}
+        onCancel={() => leaving.reset?.()}
+      >
+        {sync.status === "conflict"
+          ? "This draft was changed elsewhere, so your changes since then can't be saved here. "
+          : "They couldn't be saved. Stay to try again, or keep a copy before you leave. "}
+        <Button size="sm" onClick={downloadMine}>Download my version</Button>
+      </ConfirmDialog>
+      <ConfirmDialog
+        open={reloading}
+        title="Reload the saved draft"
+        confirmLabel="Discard my version and reload"
+        onConfirm={() => {
+          setReloading(false);
+          onReload();
+        }}
+        onCancel={() => setReloading(false)}
+      >
+        Your version since the conflict is discarded. Download it first to keep it.
+      </ConfirmDialog>
 ```
 
-### Task 14: Problems: validated on the saved revision, shown on the steps and in a panel, a problem focusing its step
+The banner's border is a full 1 px bottom rule, not a side stripe (outline §6); `ink` on `danger-bg` is in PAIRS.
+
+- [ ] **Step 6: Run the tests to see them pass**
+
+Run: `cd frontend && npx -y pnpm@12.6.0 exec vitest run src/lib/draftSync.test.ts src/components src/routes/editor && npx -y pnpm@12.6.0 test && npx -y pnpm@12.6.0 lint && npx -y pnpm@12.6.0 typecheck`
+Expected: PASS and clean (Members' removal dialog keeps its "Cancel").
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add frontend/src/lib/draftSync.ts frontend/src/lib/draftSync.test.ts frontend/src/components frontend/src/routes/editor
+git commit -m "feat(web): the draft saves itself and leaving saves first; a fresh snapshot on entry; a conflict never overwrites (D17, 4b)"
+```
+
+### Task 14: Problems: a check is of one saved revision, said to be current only while it's what's on the screen
 
 **Files:**
+- Create: `frontend/src/routes/editor/check.ts`, `frontend/src/routes/editor/check.test.ts`
 - Create: `frontend/src/routes/editor/ProblemsPanel.tsx`, `frontend/src/routes/editor/ProblemsPanel.test.tsx`
 - Modify: `frontend/src/routes/editor/Editor.tsx`, `frontend/src/routes/editor/Editor.test.tsx`
 
 **Interfaces:**
 - Consumes: `POST …/validate` → `ValidationOut` (`draft_revision`, `valid`, `diagnostics`, `expressions`); the saver's
-  `onSettled(revision)` and `current.revision` (Task 13); `StepPanel`'s `problems` and `expressions` (Task 12).
-- Produces: `<ProblemsPanel validation publishProblems revision keyOf onJump onClose />`, `type PublishProblems = {
-  revision: number; diagnostics: Diagnostic[] }` (Task 15 sets it); the editor's right column holds one panel at a
-  time: `type Side = { kind: "step"; node: string } | { kind: "problems" } | { kind: "versions" } | null`.
+  `onSettled` and `SyncState`'s `revision`, `generation`, `savedGeneration` (Task 13); `StepPanel`'s `problems:
+  Diagnostic[] | null` and `expressions` (Task 12).
+- Produces: (`check.ts`) `type Check = {status: "unchecked"} | {status: "checking", last} | {status: "failed", last}
+  | {status: "done", last}`, `type CheckState = "unchecked" | "checking" | "failed" | "stale" | "current"`,
+  `checkState(check, sync)`, `lastOf(check)`, `checkLabel(state, count)`; `<ProblemsPanel state validation
+  publishProblems revision keyOf onJump onCheck onClose />`, `type PublishProblems = { revision: number; diagnostics:
+  Diagnostic[] }` (Task 15 sets it); the editor's right column holds one panel at a time: `type Side = { kind: "step";
+  node: string } | { kind: "problems" } | { kind: "versions" } | null`.
+
+4b ruling 24 (the owner's review of 325fc14, correction 2): a check is of the saved revision it names, and is
+**current** only while that revision is the one saved and nothing was edited since (`generation ===
+savedGeneration`). Before the first answer the toolbar says "Checking…" (an editor checks on opening) or "Not
+checked", never "No problems"; a failed check says "Check failed" and offers to check again, never keeping an
+earlier answer's reassurance; an answer for an older revision, or one followed by edits, is **stale**: shown in the
+panel as of before the edits, never as badges on the steps. Revision 1 dropped older answers silently and kept
+"No problems" through a failed request.
 
 - [ ] **Step 1: Write the failing tests**
+
+`frontend/src/routes/editor/check.test.ts`:
+
+```ts
+// SPDX-License-Identifier: Apache-2.0
+import { expect, it } from "vitest";
+import type { Validation } from "../../lib/workflows";
+import { checkLabel, checkState } from "./check";
+
+const answer = (revision: number): Validation => ({
+  draft_revision: revision, valid: true, diagnostics: [], expressions: [], taint: { sites: [], declassified: [] },
+});  // prettier-ignore
+const sync = (revision: number, generation = 0, savedGeneration = generation) => ({ revision, generation, savedGeneration });
+
+it("says nothing reassuring before the first answer", () => {
+  expect(checkLabel(checkState({ status: "unchecked" }, sync(1)), 0)).toBe("Not checked");
+  expect(checkLabel(checkState({ status: "checking", last: null }, sync(1)), 0)).toBe("Checking…");
+});
+
+it("is current only for the saved revision that's on the screen", () => {
+  expect(checkState({ status: "done", last: answer(2) }, sync(2, 3))).toBe("current");
+  expect(checkState({ status: "done", last: answer(1) }, sync(2, 3))).toBe("stale"); // an older revision's
+  expect(checkState({ status: "done", last: answer(2) }, sync(2, 4, 3))).toBe("stale"); // edited since
+});
+
+it("says a failed check failed, whatever an earlier one found", () => {
+  expect(checkLabel(checkState({ status: "failed", last: answer(2) }, sync(2)), 0)).toBe("Check failed");
+});
+
+it("words a stale check by what it found then", () => {
+  expect(checkLabel("stale", 0)).toBe("Not checked since your edits");
+  expect(checkLabel("stale", 2)).toBe("Problems · 2, before your edits");
+  expect(checkLabel("current", 0)).toBe("No problems");
+  expect(checkLabel("current", 3)).toBe("Problems · 3");
+});
+```
 
 `frontend/src/routes/editor/ProblemsPanel.test.tsx`:
 
@@ -5977,6 +7887,7 @@ git commit -m "feat(web): the draft saves itself: one save in flight, edits coal
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
+import type { CheckState } from "./check";
 import { ProblemsPanel } from "./ProblemsPanel";
 
 const d = (code: string, node: string | null, severity: "error" | "warning", message = code) =>
@@ -5989,13 +7900,19 @@ const VALIDATION = {
     { node: "n1", field: "/fields/b", mode: "local" as const, reason: null },
   ],
 };  // prettier-ignore
+const CLEAN = { ...VALIDATION, valid: true, diagnostics: [], expressions: [] };
 const keyOf = (id: string) => ({ n1: "transform" })[id] ?? id;
+
+function panel(state: CheckState, validation: typeof VALIDATION | null, more: Partial<Parameters<typeof ProblemsPanel>[0]> = {}) {
+  return render(
+    <ProblemsPanel state={state} validation={validation} publishProblems={null} revision={4} keyOf={keyOf} onJump={vi.fn()} onCheck={vi.fn()} onClose={vi.fn()} {...more} />,
+  );
+}
 
 it("lists errors before warnings, each with its fix and code, a step's going to the step", async () => {
   const onJump = vi.fn();
-  render(<ProblemsPanel validation={VALIDATION} publishProblems={null} revision={4} keyOf={keyOf} onJump={onJump} onClose={vi.fn()} />);
-  const panel = screen.getByRole("complementary", { name: "Problems" });
-  const items = within(panel).getAllByRole("listitem");
+  panel("current", VALIDATION, { onJump });
+  const items = within(screen.getByRole("complementary", { name: "Problems" })).getAllByRole("listitem");
   expect(items[0]!.textContent).toContain("fields needs at least one entry");
   expect(items[0]!.textContent).toContain("fix config.invalid");
   expect(items[1]!.textContent).toContain("vars.unassigned");
@@ -6004,72 +7921,156 @@ it("lists errors before warnings, each with its fix and code, a step's going to 
 });
 
 it("says how each expression runs (engine-core §5.10)", () => {
-  render(<ProblemsPanel validation={VALIDATION} publishProblems={null} revision={4} keyOf={keyOf} onJump={vi.fn()} onClose={vi.fn()} />);
+  panel("current", VALIDATION);
   expect(screen.getByText(/Runs as a separate step: builds a message/)).toBeTruthy();
   expect(screen.getByText("1 expression runs inline.")).toBeTruthy();
 });
 
 it("shows what only publish checks apart, and says when edits came since", () => {
   const found = { revision: 3, diagnostics: [d("connection.unknown", "n1", "error", "That connection doesn't exist.")] };
-  render(<ProblemsPanel validation={VALIDATION} publishProblems={found} revision={4} keyOf={keyOf} onJump={vi.fn()} onClose={vi.fn()} />);
+  panel("current", VALIDATION, { publishProblems: found });
   const section = screen.getByRole("region", { name: "Found at publish" });
   expect(section.textContent).toContain("That connection doesn't exist.");
   expect(section.textContent).toContain("before your latest edits");
 });
+
+it("calls the saved draft clean only when the check is current", () => {
+  const { unmount } = panel("current", CLEAN);
+  expect(screen.getByText(/None found in the saved draft/)).toBeTruthy();
+  unmount();
+  panel("stale", CLEAN);
+  expect(screen.queryByText(/None found/)).toBeNull();
+  expect(screen.getByText(/before your latest edits/)).toBeTruthy();
+});
+
+it("says a failed check failed, and checks again when asked", async () => {
+  const onCheck = vi.fn();
+  panel("failed", CLEAN, { onCheck });
+  expect(screen.getByText(/The check failed/)).toBeTruthy();
+  expect(screen.queryByText(/None found/)).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "Check again" }));
+  expect(onCheck).toHaveBeenCalled();
+});
 ```
 
-In `frontend/src/routes/editor/Editor.test.tsx`, the fetch mock answers validate from a variable
-(`let validateAnswer: () => object`, defaulting to the valid answer at revision 1), and:
+In `frontend/src/routes/editor/Editor.test.tsx`:
 
 ```tsx
-it("validates the saved revision once a save settles, and counts its problems", async () => {
-  validateAnswer = () => ({
-    draft_revision: 2, valid: false, taint: { sites: [], declassified: [] }, expressions: [],
-    diagnostics: [{ code: "config.invalid", message: "fields needs at least one entry", node: "x", field: "/fields", fix: null, severity: "error" }],
-  });  // prettier-ignore
+const valid = (revision: number) => ({ draft_revision: revision, valid: true, diagnostics: [], expressions: [], taint: { sites: [], declassified: [] } });
+const invalid = (revision: number, node: string | null) => ({
+  draft_revision: revision, valid: false, expressions: [], taint: { sites: [], declassified: [] },
+  diagnostics: [{ code: "config.invalid", message: "fields needs at least one entry", node, field: "/fields", fix: null, severity: "error" }],
+});  // prettier-ignore
+const checks = () => sent.filter((r) => r.path.endsWith("/validate")).length;
+const steps = () => screen.getByRole("group", { name: "Workflow steps" });
+
+it("says it's checking before the first answer, never No problems", async () => {
+  let answer: ((r: Response) => void) | undefined;
+  answers.set(`POST ${BASE}/validate`, () => new Promise<Response>((r) => (answer = r)));
   await show();
-  await userEvent.click(screen.getByRole("button", { name: "Start" }));
-  await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
-  expect(await screen.findByRole("button", { name: "Problems · 1" }, { timeout: 3000 })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Checking…" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "No problems" })).toBeNull();
+  await vi.waitFor(() => expect(answer).toBeDefined());
+  answer!(json(valid(1)));
+  expect(await screen.findByRole("button", { name: "No problems" })).toBeTruthy();
 });
 
-it("drops an answer for an older revision (D17)", async () => {
-  let validations = 0;
-  validateAnswer = () =>
-    ++validations === 1
-      ? { draft_revision: 1, valid: true, taint: { sites: [], declassified: [] }, expressions: [], diagnostics: [] }
-      : { draft_revision: 1, valid: false, taint: { sites: [], declassified: [] }, expressions: [],
-          diagnostics: [{ code: "config.invalid", message: "stale", node: null, field: null, fix: null, severity: "error" }] };  // prettier-ignore
+it("checks the saved revision once a save settles, and counts its problems on the steps", async () => {
+  answers.set(`POST ${BASE}/validate`, () => json(invalid(2, "x")));
   await show();
-  await userEvent.click(screen.getByRole("button", { name: "Start" }));
-  await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
+  await addTransform();
+  expect(await screen.findByRole("button", { name: "Problems · 1" }, { timeout: 3000 })).toBeTruthy();
+  expect(steps().dataset.problems).toBe("1");
+});
+
+it("calls an answer for an older revision stale, and never paints it on the steps", async () => {
+  answers.set(`POST ${BASE}/validate`, () => json(invalid(1, "x"))); // even after the save made revision 2
+  await show();
+  await screen.findByRole("button", { name: "Problems · 1" }); // revision 1, on the screen: current
+  expect(steps().dataset.problems).toBe("1");
+  await addTransform();
   await screen.findByText("Saved · not published", {}, { timeout: 3000 });
-  await vi.waitFor(() => expect(validations).toBe(2)); // on load, and after the save
-  expect(screen.getByRole("button", { name: "No problems" })).toBeTruthy();
+  await vi.waitFor(() => expect(checks()).toBe(2));
+  expect(screen.getByRole("button", { name: "Problems · 1, before your edits" })).toBeTruthy();
+  expect(steps().dataset.problems).toBe("0");
+});
+
+it("says when a check failed, and checks again when asked", async () => {
+  answers.set(`POST ${BASE}/validate`, () => json({ error: "http_error" }, 500));
+  await show();
+  await userEvent.click(await screen.findByRole("button", { name: "Check failed" }));
+  answers.set(`POST ${BASE}/validate`, () => json(valid(1)));
+  const panel = screen.getByRole("complementary", { name: "Problems" });
+  await userEvent.click(within(panel).getByRole("button", { name: "Check again" }));
+  expect(await screen.findByRole("button", { name: "No problems" })).toBeTruthy();
+});
+
+it("offers a viewer no checks", async () => {
+  role = "viewer";
+  await show();
+  expect(screen.queryByRole("button", { name: /Problems|Check|Not checked/ })).toBeNull();
+  expect(checks()).toBe(0);
 });
 ```
-
-The answer on load is for revision 1, the editor's revision then: kept, and clean. The answer after the save made the
-revision 2 still says revision 1: it's dropped, never painted on the newer draft, so the toolbar still says "No
-problems".
 
 - [ ] **Step 2: Run them to see them fail**
 
 Run: `cd frontend && npx -y pnpm@12.6.0 exec vitest run src/routes/editor`
-Expected: FAIL: no panel; the editor never validates.
+Expected: FAIL: `check.ts` and the panel don't exist; the editor never checks.
 
-- [ ] **Step 3: Implement the panel**
+- [ ] **Step 3: Implement the check's state**
+
+`frontend/src/routes/editor/check.ts`:
+
+```ts
+// SPDX-License-Identifier: Apache-2.0
+// What the editor may say of its problems (4b ruling 24). A check is of one saved revision, and is current only while
+// that revision is the saved one and nothing was edited since. Before the first answer it says nothing reassuring; a
+// failed check says so; edits since a check make it stale. Steps carry badges only while it's current.
+import type { SyncState } from "../../lib/draftSync";
+import type { Validation } from "../../lib/workflows";
+
+export type Check =
+  | { status: "unchecked" }
+  | { status: "checking"; last: Validation | null }
+  | { status: "failed"; last: Validation | null }
+  | { status: "done"; last: Validation };
+
+export type CheckState = "unchecked" | "checking" | "failed" | "stale" | "current";
+
+export function checkState(check: Check, sync: Pick<SyncState, "revision" | "generation" | "savedGeneration">): CheckState {
+  if (check.status !== "done") return check.status;
+  const onScreen = sync.generation === sync.savedGeneration && check.last.draft_revision === sync.revision;
+  return onScreen ? "current" : "stale";
+}
+
+/** The newest answer, whatever its state. */
+export const lastOf = (check: Check): Validation | null => (check.status === "unchecked" ? null : check.last);
+
+/** The toolbar's words for a check, with the problems it found. */
+export function checkLabel(state: CheckState, count: number): string {
+  if (state === "unchecked") return "Not checked";
+  if (state === "checking") return "Checking…";
+  if (state === "failed") return "Check failed";
+  if (state === "stale") return count ? `Problems · ${count}, before your edits` : "Not checked since your edits";
+  return count ? `Problems · ${count}` : "No problems";
+}
+```
+
+- [ ] **Step 4: Implement the panel**
 
 `frontend/src/routes/editor/ProblemsPanel.tsx`:
 
 ```tsx
 // SPDX-License-Identifier: Apache-2.0
 // The draft's problems (outline §2's validate and publish; engine-core §5.10). The server's messages and fixes, as
-// it wrote them: there's no catalogue in the client. A step's problem goes to the step (4b ruling 16). What only
-// publish checks shows apart, marked, and dated against the edits since (4b ruling 17).
+// it wrote them: there's no catalogue in the client. A step's problem goes to the step (4b ruling 16). What the check
+// says is dated (ruling 24): "none found" only for a current check. What only publish checks shows apart, marked, and
+// dated against the edits since (ruling 17).
 import { useEffect, useRef } from "react";
 import { Button } from "../../components/Button";
 import type { Diagnostic, Validation } from "../../lib/workflows";
+import type { CheckState } from "./check";
 
 export type PublishProblems = { revision: number; diagnostics: Diagnostic[] };
 
@@ -6094,11 +8095,18 @@ function Problem({ d, keyOf, onJump }: { d: Diagnostic; keyOf: (id: string) => s
 
 const ordered = (ds: Diagnostic[]) => [...ds.filter((d) => d.severity === "error"), ...ds.filter((d) => d.severity !== "error")];
 
+const NOTES: Record<Exclude<CheckState, "current">, string> = {
+  unchecked: "Not checked yet.",
+  checking: "Checking the saved draft…",
+  failed: "The check failed, so what's below may be out of date.",
+  stale: "From a check made before your latest edits: they may have changed this.",
+};
+
 export function ProblemsPanel({
-  validation, publishProblems, revision, keyOf, onJump, onClose,
+  state, validation, publishProblems, revision, keyOf, onJump, onCheck, onClose,
 }: {
-  validation: Validation | null; publishProblems: PublishProblems | null; revision: number; keyOf: (id: string) => string;
-  onJump: (nodeId: string) => void; onClose: () => void;
+  state: CheckState; validation: Validation | null; publishProblems: PublishProblems | null; revision: number;
+  keyOf: (id: string) => string; onJump: (nodeId: string) => void; onCheck: () => void; onClose: () => void;
 }) {  // prettier-ignore
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => heading.current?.focus(), []);
@@ -6119,12 +8127,17 @@ export function ProblemsPanel({
         <h2 id="problems-title" ref={heading} tabIndex={-1} className="text-body-lg font-semibold">Problems</h2>
         <Button size="sm" onClick={onClose}>Close</Button>
       </div>
-      {validation === null ? (
-        <p className="text-small text-muted">Not checked yet.</p>
-      ) : validation.diagnostics.length === 0 ? (
-        <p className="text-small text-muted">None found in the saved draft. Publishing checks a few more things.</p>
-      ) : (
+      {state !== "current" && (
+        <p className="flex flex-wrap items-center gap-2 text-small text-muted">
+          {NOTES[state]}
+          {state === "failed" && <Button size="sm" onClick={onCheck}>Check again</Button>}
+        </p>
+      )}
+      {validation && validation.diagnostics.length > 0 && (
         <ul>{ordered(validation.diagnostics).map((d, i) => <Problem key={`${d.code}:${d.node}:${d.field}:${i}`} d={d} keyOf={keyOf} onJump={onJump} />)}</ul>
+      )}
+      {state === "current" && validation?.diagnostics.length === 0 && (
+        <p className="text-small text-muted">None found in the saved draft. Publishing checks a few more things.</p>
       )}
       {publishProblems && (
         <section aria-labelledby="publish-problems" className="flex flex-col gap-1">
@@ -6159,7 +8172,7 @@ export function ProblemsPanel({
 `role="region"` comes from a `section` with an accessible name; the test's `getByRole("region", { name: "Found at
 publish" })` relies on that.
 
-- [ ] **Step 4: Validate on the saved revision, and show the problems**
+- [ ] **Step 5: Check on opening and after each save, and show what's current**
 
 In `frontend/src/routes/editor/Editor.tsx`, the right column holds one panel at a time. Above `Editor`:
 
@@ -6170,109 +8183,141 @@ type Side = { kind: "step"; node: string } | { kind: "problems" } | { kind: "ver
 
 and it replaces Task 12's `panel` state: `setPanel(id)` becomes `setSide({ kind: "step", node: id })`, `setPanel(null)`
 becomes `setSide(null)`, and `panel === x` becomes `side?.kind === "step" && side.node === x` (in `confirmDelete`,
-the canvas's `current`, and the step panel's rendering and `onClose`). In `Editor`:
+the canvas's `current`, and the step panel's rendering and `onClose`). In `Editor` (imports: `type Check`,
+`checkLabel`, `checkState`, `lastOf`, `ProblemsPanel`, `type PublishProblems`, `type Problems`, `type Validation`,
+`type Diagnostic`):
 
 ```tsx
-  const [validation, setValidation] = useState<Validation | null>(null);
+  const [check, setCheck] = useState<Check>({ status: "unchecked" });
   const [publishProblems, setPublishProblems] = useState<PublishProblems | null>(null);
   const [side, setSide] = useState<Side>(null);
+  const asked = useRef(0); // the newest check asked for: an older one's answer or failure says nothing
 
-  /** Validate the saved draft; keep the answer only if it's for the revision saved now (D17). */
+  /** Check the saved draft (validate needs workflow.edit). Its answer names the revision it checked. */
   const validate = useRef(async () => {});
   validate.current = async () => {
-    if (!canEdit(role)) return; // validate needs workflow.edit
+    if (!canEdit(role)) return;
+    const n = ++asked.current;
+    setCheck((c) => ({ status: "checking", last: lastOf(c) }));
     try {
       const answer = await ok(
         client.POST("/api/v1/t/{tenant_id}/workflows/{workflow_id}/validate", {
           params: { path: { tenant_id: tenantId, workflow_id: workflow.id } },
         }),
       );
-      if (answer.draft_revision === saver.current!.current.revision) setValidation(answer);
+      if (n === asked.current) setCheck({ status: "done", last: answer });
     } catch {
-      // A failed check changes nothing shown: the next save checks again.
+      if (n === asked.current) setCheck((c) => ({ status: "failed", last: lastOf(c) }));
     }
   };
   useEffect(() => void validate.current(), []);
 ```
 
-The saver's options gain `onSettled: () => void validate.current()`. From the answer:
+The saver's options (Task 13's effect) gain `onSettled: () => void validate.current()`. From the check:
 
 ```tsx
+  const checked = checkState(check, sync);
+  const last = lastOf(check);
+  const trusted = checked === "current" ? last : null; // badges and the step panel's problems: current only
   const problems = useMemo(() => {
     const counts = new Map<string, Problems>();
-    for (const d of validation?.diagnostics ?? []) {
+    for (const d of trusted?.diagnostics ?? []) {
       if (!d.node) continue;
       const c = counts.get(d.node) ?? { errors: 0, warnings: 0 };
       counts.set(d.node, d.severity === "error" ? { ...c, errors: c.errors + 1 } : { ...c, warnings: c.warnings + 1 });
     }
     return counts;
-  }, [validation]);
+  }, [trusted]);
   const separate = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const x of validation?.expressions ?? []) if (x.node && x.mode === "activity") counts.set(x.node, (counts.get(x.node) ?? 0) + 1);
+    for (const x of trusted?.expressions ?? []) if (x.node && x.mode === "activity") counts.set(x.node, (counts.get(x.node) ?? 0) + 1);
     return counts;
-  }, [validation]);
-  const count = (validation?.diagnostics.length ?? 0) + (publishProblems?.diagnostics.length ?? 0);
+  }, [trusted]);
+  const count = (last?.diagnostics.length ?? 0) + (publishProblems?.diagnostics.length ?? 0);
 ```
 
-The canvas takes `problems={problems}`, `separate={separate}` and `current={side?.kind === "step" ? side.node : null}`;
-`onItem`'s `open` becomes `setSide({ kind: "step", node: action.node })`; the step panel's `problems` are
-`[...(validation?.diagnostics ?? []), ...(publishProblems?.diagnostics ?? [])].filter((d) => d.node === side.node)`
-and its `expressions` `validation?.expressions.filter((x) => x.node === side.node) ?? []`. The toolbar gains, after the
-save state:
+The canvas takes `problems={problems}`, `separate={separate}` and `current={side?.kind === "step" ? side.node :
+null}`; `onItem`'s `open` becomes `setSide({ kind: "step", node: action.node })`; the step panel's `problems` are
+`trusted ? [...trusted.diagnostics, ...(publishProblems?.diagnostics ?? [])].filter((d) => d.node === side.node) : null`
+and its `expressions` `trusted?.expressions.filter((x) => x.node === side.node) ?? []`. The toolbar gains, after the
+save state, for an editor only:
 
 ```tsx
-        <Button
-          size="md"
-          aria-expanded={side?.kind === "problems"}
-          onClick={() => setSide(side?.kind === "problems" ? null : { kind: "problems" })}
-        >
-          {count === 0 ? "No problems" : `Problems · ${count}`}
-        </Button>
+        {canEdit(role) && (
+          <Button
+            size="md"
+            aria-expanded={side?.kind === "problems"}
+            onClick={() => setSide(side?.kind === "problems" ? null : { kind: "problems" })}
+          >
+            {checkLabel(checked, count)}
+          </Button>
+        )}
 ```
 
 and the right column shows, for `side?.kind === "problems"`:
 
 ```tsx
           <ProblemsPanel
-            validation={validation}
+            state={checked}
+            validation={last}
             publishProblems={publishProblems}
             revision={sync.revision}
             keyOf={keyOf}
             onJump={(nodeId) => focus(item.node(nodeId))}
+            onCheck={() => void validate.current()}
             onClose={() => setSide(null)}
           />
 ```
 
-`Problems` is imported from `./StepCard`; `Validation` and `Diagnostic` from `../../lib/workflows`; `ProblemsPanel`
-and `type PublishProblems` from `./ProblemsPanel`.
-
-- [ ] **Step 5: Run the tests to see them pass**
+- [ ] **Step 6: Run the tests to see them pass**
 
 Run: `cd frontend && npx -y pnpm@12.6.0 exec vitest run src/routes/editor && npx -y pnpm@12.6.0 test && npx -y pnpm@12.6.0 lint && npx -y pnpm@12.6.0 typecheck`
 Expected: PASS and clean.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add frontend/src/routes/editor
-git commit -m "feat(web): problems on the saved revision, on the steps and in a panel; a problem focuses its step (4b)"
+git commit -m "feat(web): problems of the saved revision, said to be current only while it's on the screen (4b)"
 ```
 
-### Task 15: Publishing with a confirmation that names the version; versions viewed and made active; export from the editor
+### Task 15: Publishing bound to the version it names; versions viewed and made active; outcomes said truthfully; export
 
 **Files:**
 - Modify: `frontend/src/components/ConfirmDialog.tsx`, `frontend/src/components/ConfirmDialog.test.tsx` (`tone`)
-- Modify: `frontend/src/lib/draftSync.ts`, `frontend/src/lib/draftSync.test.ts` (`setUnpublished()`)
+- Modify: `frontend/src/lib/draftSync.ts`, `frontend/src/lib/draftSync.test.ts` (`published()`, `compared()`)
 - Create: `frontend/src/routes/editor/VersionsPanel.tsx`, `frontend/src/routes/editor/VersionsPanel.test.tsx`
 - Modify: `frontend/src/routes/editor/Editor.tsx`, `frontend/src/routes/editor/Editor.test.tsx`
 
 **Interfaces:**
-- Consumes: `POST …/publish` (`If-Match`) → `PublishedOut` (`number`), `422 invalid` (diagnostics, publish-only codes
-  included), `409 draft_conflict`; `versionsQuery`; `GET …/versions/{version_id}` → `VersionDetailOut`; `POST
-  …/activate` (`{version_id}`) → `ActivatedOut`, `422 not_activatable`; `GET …/export`; `flush()` (Task 13).
-- Produces: `ConfirmDialog`'s `tone?: "danger" | "primary"` (default `"danger"`); `DraftSync.setUnpublished(value)`;
-  `<VersionsPanel versions activeId publisher onView onActivate onClose />`.
+- Consumes: `POST …/publish` (`If-Match`, body `{expected_latest_version}`) → `PublishedOut` (`number`), `422 invalid`
+  (diagnostics, publish-only codes included), `409 draft_conflict`, `409 version_changed` (`latest_version`: Task 4);
+  `versionsQuery`; `GET …/versions/{version_id}` → `VersionDetailOut`; `POST …/activate` (`{version_id}`) →
+  `ActivatedOut`, `422 not_activatable`; `GET …/{workflow_id}` (`draft_revision`, `unpublished_changes`,
+  `active_version_id`); `GET …/export` and its `422 not_portable`; `notPortable(problems, keyOf)` (Task 7);
+  `flush()`, `ConflictError` (Task 13).
+- Produces: `ConfirmDialog`'s `tone?: "danger" | "primary"` (default `"danger"`); `DraftSync.published(revision)`,
+  `DraftSync.compared(summary | null)`; `<VersionsPanel versions publisher onView onActivate onClose />`;
+  `uncertain(e)` in `Editor.tsx`.
+
+What this task guards (the owner's review of 325fc14, corrections 3 and 4; 4b rulings 17 and 25):
+- **The number named is the number published.** The confirmation names `latest + 1` from the versions list, and
+  publish sends `expected_latest_version: latest`, which the API checks under the lock that numbers the version.
+  While the list is loading, refreshing or unreadable, Publish is off and names no number. A `version_changed`
+  refreshes the list and asks again with the new number; it is never a draft conflict.
+- **Nothing changes under a publication or an activation.** Editing (and undo) is off while either runs.
+- **Success is snapshot-aware.** Publish marks the draft published only if the revision it published is still the
+  saved one (`published(revision)`); activation's comparison comes from the server, taken only for the revision it
+  read, and is "not known" (`null`) until then.
+- **An outcome is said only when known.** A request that got no answer from the API (the network, or a gateway's or
+  a server error's 5xx) is uncertain: the editor reads what happened (the versions and the workflow) and says that,
+  or says it isn't known; it never says "failed" without an answer saying so. A made-active version stays made active
+  when the follow-up read fails.
+- **Views arrive in order.** Only the newest "View version" answer is shown; "Back to the draft" drops any still on
+  its way.
+- **Export never hides a failed save.** When the latest edits aren't saved, export stops and says so, and offers the
+  last saved draft by name; a draft that can't be made portable offers this draft as it is, labelled not portable.
+- **A version's canvas carries no draft diagnostics.** Viewing a version hides the draft's badges and Problems.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -6293,15 +8338,24 @@ it("confirms a constructive action in the primary colour", () => {
 In `frontend/src/lib/draftSync.test.ts`:
 
 ```ts
-it("takes the server's word on whether the saved draft differs from the active version", async () => {
+it("takes publish's word only for the revision it published", async () => {
   const sync = make();
   sync.change(doc(1));
-  await vi.advanceTimersByTimeAsync(1000);
+  await vi.advanceTimersByTimeAsync(1000); // revision 2
+  sync.published(1); // not the revision saved now
   expect(sync.current.unpublished).toBe(true);
-  sync.setUnpublished(false); // just published
+  sync.published(2);
   expect(sync.current.unpublished).toBe(false);
-  sync.setUnpublished(true); // another version made active
-  expect(sync.current.unpublished).toBe(true);
+});
+
+it("takes a summary's comparison only for the revision it read, and says when it isn't known", () => {
+  const sync = make();
+  sync.compared({ draft_revision: 1, unpublished_changes: false });
+  expect(sync.current.unpublished).toBe(false);
+  sync.compared({ draft_revision: 9, unpublished_changes: true }); // another revision's
+  expect(sync.current.unpublished).toBe(false);
+  sync.compared(null);
+  expect(sync.current.unpublished).toBeNull();
 });
 ```
 
@@ -6340,33 +8394,186 @@ it("offers a non-publisher only View", () => {
 });
 ```
 
-In `frontend/src/routes/editor/Editor.test.tsx`, the fetch mock answers `GET …/versions` with `[]` and `POST
-…/publish` from a variable (`let publishAnswer: () => Response`, defaulting to `new Response(JSON.stringify({
-version_id: "v1", number: 1, warnings: [] }), { status: 201 })`), and:
+In `frontend/src/routes/editor/Editor.test.tsx`, `beforeEach` gains:
 
 ```tsx
-it("publishes after saving, with a confirmation that names the version, and says so", async () => {
-  await show();
-  await userEvent.click(screen.getByRole("button", { name: "Start" }));
-  await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
-  await userEvent.click(screen.getByRole("button", { name: "Publish v1" }));
-  const ask = screen.getByRole("dialog", { name: "Publish version 1" });
-  expect(ask.textContent).toContain("becomes the active version");
+  answers.set(`GET ${BASE}/versions`, () => json([]));
+  answers.set(`POST ${BASE}/publish`, () => json({ version_id: "v1", number: 1, warnings: [] }, 201));
+  downloads = [];
+  Object.assign(URL, { createObjectURL: vi.fn(() => "blob:test"), revokeObjectURL: vi.fn() });
+  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+    downloads.push(this.download);
+  });
+```
+
+with, at the top level, `let downloads: string[];` and these helpers and tests:
+
+```tsx
+const version = (number: number, active: boolean) => ({
+  id: `v${number}`, number, published_at: "2026-10-06T10:00:00Z", published_by: null, graph_hash: "h", version_hash: "h",
+  cel_profile: "p", engine_abi: 6, node_refs: [], active, executable: true, blocked_by: [],
+});  // prettier-ignore
+const detail = (number: number, key: string) => ({ ...version(number, false), graph: draftWith(key), expressions: [] });
+const publishes = () => sent.filter((r) => r.path.endsWith("/publish"));
+
+async function confirmPublish(number: number) {
+  await userEvent.click(await screen.findByRole("button", { name: `Publish v${number}` }));
+  const ask = screen.getByRole("dialog", { name: `Publish version ${number}` });
   await userEvent.click(within(ask).getByRole("button", { name: "Publish" }));
+  return ask;
+}
+
+it("publishes after saving, naming the version it confirms", async () => {
+  await show();
+  await addTransform();
+  await confirmPublish(1);
   await screen.findByText("Saved · published as v1", {}, { timeout: 3000 });
   const put = sent.findIndex((r) => r.method === "PUT");
   const publish = sent.findIndex((r) => r.path.endsWith("/publish"));
   expect(put).toBeGreaterThanOrEqual(0);
   expect(publish).toBeGreaterThan(put); // flushed first
   expect(sent[publish]!.headers.get("If-Match")).toBe("2");
+  expect(sent[publish]!.body).toEqual({ expected_latest_version: 0 });
+});
+
+it("names no number until the versions are read, and says when they can't be", async () => {
+  let list: ((r: Response) => void) | undefined;
+  answers.set(`GET ${BASE}/versions`, () => new Promise<Response>((r) => (list = r)));
+  await show();
+  expect(screen.getByRole("button", { name: "Publish" }).hasAttribute("disabled")).toBe(true);
+  await vi.waitFor(() => expect(list).toBeDefined());
+  list!(json({ error: "http_error" }, 500));
+  expect(await screen.findByText("The versions couldn't be read, so publishing waits.")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Publish" }).hasAttribute("disabled")).toBe(true);
+  answers.set(`GET ${BASE}/versions`, () => json([version(1, true)]));
+  await userEvent.click(screen.getByRole("button", { name: "Read them again" }));
+  expect(await screen.findByRole("button", { name: "Publish v2" })).toBeTruthy();
+});
+
+it("asks again, with the new number, when another version was published meanwhile", async () => {
+  answers.set(`POST ${BASE}/publish`, () => {
+    answers.set(`GET ${BASE}/versions`, () => json([version(1, true)]));
+    answers.set(`POST ${BASE}/publish`, () => json({ version_id: "v2", number: 2, warnings: [] }, 201));
+    return json({ error: "version_changed", latest_version: 1 }, 409);
+  });
+  await show();
+  await confirmPublish(1);
+  const again = await screen.findByRole("dialog", { name: "Publish version 2" });
+  expect(again.textContent).toContain("Version 1 was published since you opened this");
+  expect(screen.queryByText(/changed elsewhere/)).toBeNull(); // never a draft conflict
+  await userEvent.click(within(again).getByRole("button", { name: "Publish" }));
+  await vi.waitFor(() => expect(publishes()).toHaveLength(2));
+  expect(publishes()[1]!.body).toEqual({ expected_latest_version: 1 });
+});
+
+it("keeps the draft still while it's being published", async () => {
+  let done: ((r: Response) => void) | undefined;
+  answers.set(`POST ${BASE}/publish`, () => new Promise<Response>((r) => (done = r)));
+  await show();
+  await confirmPublish(1);
+  await vi.waitFor(() => expect(done).toBeDefined());
+  expect(steps().dataset.editable).toBe("false");
+  done!(json({ version_id: "v1", number: 1, warnings: [] }, 201));
+  await vi.waitFor(() => expect(steps().dataset.editable).toBe("true"));
+});
+
+it("reads what happened when a publish's answer is lost, and says it was published", async () => {
+  answers.set(`POST ${BASE}/publish`, () => {
+    answers.set(`GET ${BASE}/versions`, () => json([version(1, true)]));
+    answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, active_version_id: "v1", active_version_number: 1, unpublished_changes: false }));
+    return Promise.reject(new TypeError("Failed to fetch"));
+  });
+  await show();
+  await confirmPublish(1);
+  await screen.findByText("Saved · published as v1");
+  expect(screen.queryByText(/wasn't published|Not published/)).toBeNull();
+});
+
+it("never calls a lost publish a failure when what happened can't be read", async () => {
+  answers.set(`POST ${BASE}/publish`, () => {
+    answers.set(`GET ${BASE}/versions`, () => json({ error: "http_error" }, 502));
+    return json({ error: "http_error" }, 504);
+  });
+  await show();
+  await confirmPublish(1);
+  expect((await screen.findByRole("alert")).textContent).toContain("It isn't known whether version 1 was published");
+});
+
+it("keeps an activation made when the read after it fails", async () => {
+  answers.set(`GET ${BASE}/versions`, () => json([version(2, true), version(1, false)]));
+  answers.set(`POST ${BASE}/activate`, () => {
+    answers.set(`GET ${BASE}`, () => json({ error: "http_error" }, 500));
+    return json({ active_version_id: "v1", number: 1, warnings: [] });
+  });
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "Versions" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Make version 1 active" }));
+  await userEvent.click(within(screen.getByRole("dialog", { name: "Make version 1 active" })).getByRole("button", { name: "Make active" }));
+  expect((await screen.findByRole("status", { name: "Notice" })).textContent).toContain("Version 1 is active.");
+  expect(screen.getByText("Saved · v1 is active")).toBeTruthy(); // the comparison isn't known: nothing claimed
+  expect(screen.queryByText(/wasn't made active/)).toBeNull();
+});
+
+it("shows the newest version asked for, whatever order the answers come in", async () => {
+  let first: ((r: Response) => void) | undefined;
+  answers.set(`GET ${BASE}/versions`, () => json([version(2, true), version(1, false)]));
+  answers.set(`GET ${BASE}/versions/v1`, () => new Promise<Response>((r) => (first = r)));
+  answers.set(`GET ${BASE}/versions/v2`, () => json(detail(2, "two")));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "Versions" }));
+  await userEvent.click(await screen.findByRole("button", { name: "View version 1" }));
+  await userEvent.click(screen.getByRole("button", { name: "View version 2" }));
+  expect(await screen.findByRole("button", { name: "two" })).toBeTruthy();
+  first!(json(detail(1, "one")));
+  await new Promise((r) => setTimeout(r, 20)); // the late answer has landed
+  expect(screen.queryByRole("button", { name: "one" })).toBeNull();
+  expect(screen.getByText("Viewing version 2, read only. The draft is unchanged.")).toBeTruthy();
+});
+
+it("carries no draft diagnostics onto a version's canvas", async () => {
+  answers.set(`POST ${BASE}/validate`, () => json(invalid(1, "x")));
+  answers.set(`GET ${BASE}/versions`, () => json([version(1, true)]));
+  answers.set(`GET ${BASE}/versions/v1`, () => json(detail(1, "one")));
+  await show();
+  await screen.findByRole("button", { name: "Problems · 1" });
+  await userEvent.click(screen.getByRole("button", { name: "Versions" }));
+  await userEvent.click(await screen.findByRole("button", { name: "View version 1" }));
+  await screen.findByRole("button", { name: "one" });
+  expect(steps().dataset.problems).toBe("0");
+  expect(screen.queryByRole("button", { name: /Problems/ })).toBeNull();
+});
+
+it("stops an export when the latest edits aren't saved, and offers the saved draft by name", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "http_error" }, 500));
+  answers.set(`GET ${BASE}/export`, () => json({ format: "dewpoint.workflow", format_version: 1, name: "Nightly", graph: {}, bindings: [] }));
+  await show();
+  await addTransform();
+  await userEvent.click(screen.getByRole("button", { name: "Export" }));
+  const stop = await screen.findByRole("alert");
+  expect(stop.textContent).toContain("Not exported: your latest edits aren't saved");
+  expect(sent.some((r) => r.path.endsWith("/export"))).toBe(false);
+  await userEvent.click(within(stop).getByRole("button", { name: "Export the last saved draft" }));
+  await vi.waitFor(() => expect(downloads).toEqual(["nightly.dewpoint.json"]));
+});
+
+it("offers a draft that can't be made portable as it is, labelled", async () => {
+  answers.set(`GET ${BASE}/export`, () =>
+    json({ error: "not_portable", problems: [{ reason: "unknown_type", binding: null, node: "id-odd", field: null }] }, 422));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: draftWith("odd") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "Export" }));
+  const stop = await screen.findByRole("alert");
+  expect(stop.textContent).toContain("can't be exported as a portable file");
+  expect(stop.textContent).toContain("odd");
+  await userEvent.click(within(stop).getByRole("button", { name: "Download this draft as it is (not portable)" }));
+  expect(downloads).toEqual(["nightly.draft.json"]);
 });
 
 it("shows what only publish checks, in the problems panel, marked", async () => {
-  publishAnswer = () =>
-    new Response(JSON.stringify({ error: "invalid", diagnostics: [{ code: "connection.unknown", message: "That connection doesn't exist.", node: null, field: null, fix: null, severity: "error" }] }), { status: 422 });
+  answers.set(`POST ${BASE}/publish`, () =>
+    json({ error: "invalid", diagnostics: [{ code: "connection.unknown", message: "That connection doesn't exist.", node: null, field: null, fix: null, severity: "error" }] }, 422));
   await show();
-  await userEvent.click(screen.getByRole("button", { name: "Publish v1" }));
-  await userEvent.click(within(screen.getByRole("dialog", { name: "Publish version 1" })).getByRole("button", { name: "Publish" }));
+  await confirmPublish(1);
   const panel = await screen.findByRole("complementary", { name: "Problems" });
   expect(within(panel).getByRole("region", { name: "Found at publish" }).textContent).toContain("That connection doesn't exist.");
 });
@@ -6374,7 +8581,6 @@ it("shows what only publish checks, in the problems panel, marked", async () => 
 it("offers no Publish to a viewer", async () => {
   role = "viewer";
   await show();
-  await screen.findByRole("heading", { level: 1, name: "Nightly" });
   expect(screen.queryByRole("button", { name: /^Publish/ })).toBeNull();
 });
 ```
@@ -6382,9 +8588,9 @@ it("offers no Publish to a viewer", async () => {
 - [ ] **Step 2: Run them to see them fail**
 
 Run: `cd frontend && npx -y pnpm@12.6.0 exec vitest run src/components/ConfirmDialog.test.tsx src/lib/draftSync.test.ts src/routes/editor`
-Expected: FAIL: no `tone`, no `setUnpublished()`, no versions panel, no Publish.
+Expected: FAIL: no `tone`, no `published()` or `compared()`, no versions panel, no Publish.
 
-- [ ] **Step 3: Implement the dialog's tone and the saver's `setUnpublished()`**
+- [ ] **Step 3: Implement the dialog's tone and the saver's word on publication**
 
 In `frontend/src/components/ConfirmDialog.tsx`, the props gain `tone = "danger"` (`tone?: "danger" | "primary"`), and
 the confirm button becomes `<Button variant={tone} onClick={onConfirm} disabled={busy}>{confirmLabel}</Button>`; the
@@ -6394,10 +8600,17 @@ on Cancel."
 In `frontend/src/lib/draftSync.ts`:
 
 ```ts
-  /** The server's word on whether the saved draft differs from the active version: false once it's published, and
-   * whatever a fresh summary says once another version is made active. */
-  setUnpublished(unpublished: boolean): void {
-    this.set({ unpublished });
+  /** Publish answered for `revision`: the active version is that draft, so it no longer differs, unless a later save
+   * came since (whose own answer said whether it differs). */
+  published(revision: number): void {
+    if (this.state.revision === revision) this.set({ unpublished: false });
+  }
+
+  /** The server's comparison after another version was made active, taken only for the revision it read; null when
+   * it couldn't be read: then nothing is claimed. */
+  compared(summary: { draft_revision: number; unpublished_changes: boolean } | null): void {
+    if (summary === null) this.set({ unpublished: null });
+    else if (summary.draft_revision === this.state.revision) this.set({ unpublished: summary.unpublished_changes });
   }
 ```
 
@@ -6467,128 +8680,218 @@ export function VersionsPanel({
 
 - [ ] **Step 5: Publish, view, activate and export from the editor**
 
-In `frontend/src/routes/editor/Editor.tsx` (imports: `useQueryClient`, `versionsQuery`, `canPublish`, `type
-VersionDetail`, `type VersionRow`, `VersionsPanel`, `downloadJson`, `fileName`):
+In `frontend/src/routes/editor/Editor.tsx` (imports: `useQueryClient`, `versionsQuery`, `canPublish`, `notPortable`,
+`type PortableProblem`, `type VersionDetail`, `type VersionRow`, `VersionsPanel`, `type Diagnostic`), above `Editor`:
+
+```tsx
+/** Whether a request's outcome is unknown: no answer reached the editor (the network), or a 5xx came in the API's
+ * place or after its commit. Such an outcome is read back, never assumed (4b ruling 25). */
+const uncertain = (e: unknown) => !(e instanceof ApiError) || e.status >= 500;
+
+type Notice = { tone: "danger" | "info"; text: string; action?: { label: string; run: () => void } };
+type Confirm = { kind: "publish"; expected: number; elsewhere?: boolean } | { kind: "activate"; version: VersionRow };
+```
+
+In `Editor`:
 
 ```tsx
   const qc = useQueryClient();
   const versions = useQuery(versionsQuery(tenantId, workflow.id));
-  const next = (versions.data?.[0]?.number ?? 0) + 1; // the list is newest first
+  // The newest version's number: what a publish expects (4b ruling 17). Unknown while the list loads or refreshes.
+  const latest = versions.isSuccess && !versions.isFetching ? (versions.data[0]?.number ?? 0) : null; // newest first
   const [activeNumber, setActiveNumber] = useState(workflow.active_version_number);
   const [viewing, setViewing] = useState<VersionDetail | null>(null);
-  const [confirm, setConfirm] = useState<{ kind: "publish" } | { kind: "activate"; version: VersionRow } | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<Confirm | null>(null);
+  const [busy, setBusy] = useState<"publishing" | "activating" | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const viewAsked = useRef(0); // the newest version view asked for
   const publisher = canPublish(role) && sync.status !== "conflict";
-  const editable = canEdit(role) && sync.status !== "conflict" && viewing === null;
+  // Replaces Task 13's `editable`: nothing changes under a version view, a publication or an activation.
+  const editable = canEdit(role) && sync.status !== "conflict" && viewing === null && busy === null;
   const shownDoc = viewing ? asGraph(viewing.graph) : doc;
+  const path = { params: { path: { tenant_id: tenantId, workflow_id: workflow.id } } };
+  const readWorkflow = () => ok(client.GET("/api/v1/t/{tenant_id}/workflows/{workflow_id}", path));
+  const readVersions = () => ok(client.GET("/api/v1/t/{tenant_id}/workflows/{workflow_id}/versions", path));
 
-  const refresh = async () => {
-    await qc.invalidateQueries({ queryKey: ["versions", tenantId, workflow.id] });
-    await qc.invalidateQueries({ queryKey: ["workflows", tenantId] });
+  /** The lists that show versions: refreshed after a change, their failure changing no outcome. */
+  const refresh = () => {
+    void qc.invalidateQueries({ queryKey: ["versions", tenantId, workflow.id] });
+    void qc.invalidateQueries({ queryKey: ["workflows", tenantId] });
   };
 
-  async function publish() {
-    setBusy(true);
+  function publishedAs(number: number, revision: number) {
+    saver.current?.published(revision);
+    setActiveNumber(number);
+    setPublishProblems(null);
+    announce(`Published version ${number}`);
+    refresh();
+  }
+
+  async function publish(expected: number) {
+    setBusy("publishing");
     setNotice(null);
-    let revision = sync.revision;
+    let revision: number;
     try {
       revision = await saver.current!.flush();
+    } catch (e) {
+      setBusy(null);
+      setConfirm(null);
+      if (!(e instanceof ConflictError)) setNotice({ tone: "danger", text: "Not published: your latest edits aren't saved. Retry the save, then publish." });
+      return; // a conflict has its own banner
+    }
+    let next: Confirm | null = null;
+    try {
       const done = await ok(
         client.POST("/api/v1/t/{tenant_id}/workflows/{workflow_id}/publish", {
           params: { path: { tenant_id: tenantId, workflow_id: workflow.id }, header: { "If-Match": String(revision) } },
+          body: { expected_latest_version: expected },
         }),
       );
-      saver.current!.setUnpublished(false);
-      setActiveNumber(done.number);
-      setPublishProblems(null);
-      announce(`Published version ${done.number}`);
-      await refresh();
+      publishedAs(done.number, revision);
     } catch (e) {
-      if (e instanceof ConflictError) return; // the saver says so: read-only, with the banner
-      if (e instanceof ApiError && e.status === 409) return saver.current!.conflict();
-      if (e instanceof ApiError && e.code === "invalid") {
+      if (e instanceof ApiError && e.code === "version_changed") {
+        // Someone (or an attempt whose answer was lost) published meanwhile: ask again, naming the new number.
+        await qc.invalidateQueries({ queryKey: ["versions", tenantId, workflow.id] });
+        next = { kind: "publish", expected: (e.body as { latest_version: number }).latest_version, elsewhere: true };
+      } else if (e instanceof ApiError && e.code === "draft_conflict") {
+        saver.current?.conflict();
+      } else if (e instanceof ApiError && e.code === "invalid") {
         const diagnostics = (e.body as { diagnostics: Diagnostic[] }).diagnostics;
         setPublishProblems({ revision, diagnostics });
         setSide({ kind: "problems" });
         announce(`Not published: ${diagnostics.filter((d) => d.severity === "error").length} problems`);
-        return;
+      } else if (uncertain(e)) {
+        await reconcilePublish(expected + 1, revision);
+      } else {
+        setNotice({ tone: "danger", text: "Not published: the server refused it. Try again." });
       }
-      setNotice("Not published. Check your connection and try again.");
     } finally {
-      setBusy(false);
-      setConfirm(null);
+      setBusy(null);
+      setConfirm(next);
     }
   }
 
-  async function view(version: VersionRow) {
+  /** A publish without an answer: version `number` exists only if a publish expecting the one before went through,
+   * and, while the draft is still at `revision`, it holds this draft. */
+  async function reconcilePublish(number: number, revision: number) {
     try {
-      const detail = await ok(
-        client.GET("/api/v1/t/{tenant_id}/workflows/{workflow_id}/versions/{version_id}", {
-          params: { path: { tenant_id: tenantId, workflow_id: workflow.id, version_id: version.id } },
-        }),
-      );
-      setViewing(detail);
-      setSide(null);
-      focus(START);
-      announce(`Viewing version ${detail.number}, read only`);
+      const [listed, now] = await Promise.all([readVersions(), readWorkflow()]);
+      if (listed.some((v) => v.number === number) && now.draft_revision === revision) return publishedAs(number, revision);
+      setNotice({
+        tone: "danger",
+        text: `Version ${number} isn't published, as far as the server can tell now. If the first attempt is still finishing it may appear: open Versions before publishing again.`,
+      });
     } catch {
-      setNotice(`Version ${version.number} couldn't be opened. Try again.`);
+      setNotice({ tone: "danger", text: `It isn't known whether version ${number} was published: its answer was lost. Open Versions to see before publishing again.` });
+    }
+    refresh();
+  }
+
+  /** Made active: so it stays, whatever the read after it says. The draft's comparison with it is the server's,
+   * and isn't claimed until read. */
+  async function activatedAs(version: VersionRow) {
+    setActiveNumber(version.number);
+    announce(`Version ${version.number} is active`);
+    refresh();
+    saver.current?.compared(null);
+    try {
+      saver.current?.compared(await readWorkflow());
+    } catch {
+      setNotice({ tone: "info", text: `Version ${version.number} is active. Whether your draft differs from it couldn't be checked: reload the page to see.` });
     }
   }
 
   async function activate(version: VersionRow) {
-    setBusy(true);
+    setBusy("activating");
+    setNotice(null);
     try {
-      await ok(
-        client.POST("/api/v1/t/{tenant_id}/workflows/{workflow_id}/activate", {
-          params: { path: { tenant_id: tenantId, workflow_id: workflow.id } },
-          body: { version_id: version.id },
-        }),
-      );
-      setActiveNumber(version.number);
-      // Only the server can say whether the draft now differs from the active version: ask it.
-      const fresh = await ok(
-        client.GET("/api/v1/t/{tenant_id}/workflows/{workflow_id}", {
-          params: { path: { tenant_id: tenantId, workflow_id: workflow.id } },
-        }),
-      );
-      saver.current!.setUnpublished(fresh.unpublished_changes);
-      announce(`Version ${version.number} is active`);
-      await refresh();
+      await ok(client.POST("/api/v1/t/{tenant_id}/workflows/{workflow_id}/activate", { ...path, body: { version_id: version.id } }));
+      await activatedAs(version);
     } catch (e) {
-      const first = e instanceof ApiError && e.code === "not_activatable"
-        ? (e.body as { diagnostics?: Diagnostic[] }).diagnostics?.[0]?.message
-        : undefined;  // prettier-ignore
-      setNotice(first ? `Version ${version.number} can't be made active: ${first}` : `Version ${version.number} wasn't made active. Try again.`);
+      if (e instanceof ApiError && e.code === "not_activatable") {
+        const first = (e.body as { diagnostics?: Diagnostic[] }).diagnostics?.[0]?.message;
+        setNotice({ tone: "danger", text: `Version ${version.number} can't be made active${first ? `: ${first}` : "."}` });
+      } else if (uncertain(e)) {
+        await reconcileActivate(version);
+      } else {
+        setNotice({ tone: "danger", text: `Version ${version.number} wasn't made active: the server refused it.` });
+      }
     } finally {
-      setBusy(false);
+      setBusy(null);
       setConfirm(null);
     }
   }
 
-  /** The saved draft as a file (B12; 4b ruling 18): what's pending is saved first. */
-  async function exportFile() {
+  async function reconcileActivate(version: VersionRow) {
     try {
-      await saver.current!.flush();
+      const now = await readWorkflow();
+      if (now.active_version_id === version.id) return await activatedAs(version);
+      setNotice({ tone: "danger", text: `Version ${version.number} isn't active, as far as the server can tell now. Open Versions before trying again.` });
     } catch {
-      // A conflict or a failed save: the file is what the server holds.
+      setNotice({ tone: "danger", text: `It isn't known whether version ${version.number} was made active: its answer was lost. Open Versions to see.` });
     }
+    refresh();
+  }
+
+  async function view(version: VersionRow) {
+    const asked = ++viewAsked.current;
     try {
-      const file = await ok(
-        client.GET("/api/v1/t/{tenant_id}/workflows/{workflow_id}/export", {
-          params: { path: { tenant_id: tenantId, workflow_id: workflow.id } },
+      const opened = await ok(
+        client.GET("/api/v1/t/{tenant_id}/workflows/{workflow_id}/versions/{version_id}", {
+          params: { path: { tenant_id: tenantId, workflow_id: workflow.id, version_id: version.id } },
         }),
       );
-      downloadJson(fileName(workflow.name, ".dewpoint.json"), file);
+      if (asked !== viewAsked.current) return; // a newer view, or Back to the draft, came since
+      setViewing(opened);
+      setSide(null);
+      focus(START);
+      announce(`Viewing version ${opened.number}, read only`);
     } catch {
-      setNotice("The workflow couldn't be exported. Try again.");
+      if (asked === viewAsked.current) setNotice({ tone: "danger", text: `Version ${version.number} couldn't be opened. Try again.` });
+    }
+  }
+
+  function backToDraft() {
+    viewAsked.current++;
+    setViewing(null);
+    focus(START);
+  }
+
+  /** The saved draft as a file (B12; 4b ruling 18). Unsaved edits stop it: the file would miss them. */
+  async function exportFile(savedOnly = false) {
+    setNotice(null);
+    if (!savedOnly) {
+      try {
+        await saver.current!.flush();
+      } catch {
+        setNotice({
+          tone: "danger",
+          text: "Not exported: your latest edits aren't saved, so the file would miss them.",
+          action: { label: "Export the last saved draft", run: () => void exportFile(true) },
+        });
+        return;
+      }
+    }
+    try {
+      downloadJson(fileName(workflow.name, ".dewpoint.json"), await ok(client.GET("/api/v1/t/{tenant_id}/workflows/{workflow_id}/export", path)));
+    } catch (e) {
+      if (e instanceof ApiError && e.code === "not_portable") {
+        setNotice({
+          tone: "danger",
+          text: `Not exported: ${notPortable((e.body as { problems: PortableProblem[] }).problems, keyOf)}, so it can't be exported as a portable file.`,
+          action: { label: "Download this draft as it is (not portable)", run: () => downloadJson(fileName(workflow.name, ".draft.json"), doc) },
+        });
+        return;
+      }
+      setNotice({ tone: "danger", text: "The workflow couldn't be exported. Try again." });
     }
   }
 ```
 
-The canvas draws `shownDoc` with `editable={editable}`; `navModel` reads `shownDoc` and `editable`; `SaveState` takes
-`activeNumber={activeNumber}`. The toolbar's actions, after Problems:
+The canvas draws `shownDoc` with `editable={editable}`; while `viewing`, it takes empty `problems` and `separate`
+(`viewing ? new Map() : problems`), and the step panel's `problems` are `null`. `navModel` reads `shownDoc` and
+`editable`; `SaveState` takes `activeNumber={activeNumber}`; the Problems button shows only when `viewing === null`.
+The toolbar's actions, after Problems:
 
 ```tsx
         <Button size="md" aria-expanded={side?.kind === "versions"} onClick={() => setSide(side?.kind === "versions" ? null : { kind: "versions" })}>
@@ -6596,22 +8899,42 @@ The canvas draws `shownDoc` with `editable={editable}`; `navModel` reads `shownD
         </Button>
         <Button size="md" onClick={() => void exportFile()}>Export</Button>
         {publisher && viewing === null && (
-          <Button variant="primary" size="md" disabled={busy} onClick={() => setConfirm({ kind: "publish" })}>
-            Publish v{next}
+          <Button
+            variant="primary"
+            size="md"
+            disabled={busy !== null || latest === null}
+            onClick={() => latest !== null && setConfirm({ kind: "publish", expected: latest })}
+          >
+            {latest === null ? "Publish" : `Publish v${latest + 1}`}
           </Button>
         )}
 ```
 
-Below the toolbar, when viewing a version, and for a notice:
+Below the toolbar, when viewing a version, when the versions can't be read, and for a notice:
 
 ```tsx
       {viewing && (
         <div className="flex flex-wrap items-center gap-3 border-b border-line bg-surface-2 px-5 py-2.5 text-small">
           <span className="grow">Viewing version {viewing.number}, read only. The draft is unchanged.</span>
-          <Button size="sm" onClick={() => { setViewing(null); focus(START); }}>Back to the draft</Button>
+          <Button size="sm" onClick={backToDraft}>Back to the draft</Button>
         </div>
       )}
-      {notice && <p role="alert" className="border-b border-line bg-surface px-5 py-2.5 text-small text-danger">{notice}</p>}
+      {publisher && versions.isError && (
+        <p className="flex flex-wrap items-center gap-3 border-b border-line bg-surface px-5 py-2.5 text-small text-danger">
+          The versions couldn&apos;t be read, so publishing waits.
+          <Button size="sm" onClick={() => void versions.refetch()}>Read them again</Button>
+        </p>
+      )}
+      {notice && (
+        <div
+          role={notice.tone === "danger" ? "alert" : "status"}
+          aria-label={notice.tone === "danger" ? undefined : "Notice"}
+          className={`flex flex-wrap items-center gap-3 border-b border-line bg-surface px-5 py-2.5 text-small ${notice.tone === "danger" ? "text-danger" : "text-ink"}`}
+        >
+          <span className="grow">{notice.text}</span>
+          {notice.action && <Button size="sm" onClick={notice.action.run}>{notice.action.label}</Button>}
+        </div>
+      )}
 ```
 
 The right column shows, for `side?.kind === "versions"`:
@@ -6619,28 +8942,36 @@ The right column shows, for `side?.kind === "versions"`:
 ```tsx
           <VersionsPanel
             versions={versions.data ?? []}
-            publisher={publisher}
+            publisher={publisher && busy === null}
             onView={(v) => void view(v)}
             onActivate={(version) => setConfirm({ kind: "activate", version })}
             onClose={() => setSide(null)}
           />
 ```
 
-and the confirmations:
+and the confirmation (it stays open, busy, while its action runs; a `version_changed` turns it into the next ask):
 
 ```tsx
       <ConfirmDialog
         open={confirm !== null}
         tone="primary"
-        busy={busy}
-        title={confirm?.kind === "activate" ? `Make version ${confirm.version.number} active` : `Publish version ${next}`}
+        busy={busy !== null}
+        title={confirm?.kind === "activate" ? `Make version ${confirm.version.number} active` : confirm ? `Publish version ${confirm.expected + 1}` : ""}
         confirmLabel={confirm?.kind === "activate" ? "Make active" : "Publish"}
-        onConfirm={() => void (confirm?.kind === "activate" ? activate(confirm.version) : publish())}
+        onConfirm={() => {
+          if (confirm?.kind === "activate") void activate(confirm.version);
+          else if (confirm) void publish(confirm.expected);
+        }}
         onCancel={() => setConfirm(null)}
       >
-        {confirm?.kind === "activate"
-          ? `Runs start on version ${confirm.version.number} from now on. The draft doesn't change.`
-          : `Your latest edits are saved first. Version ${next} of ${workflow.name} becomes the active version${workflow.enabled ? ": its triggers start runs on it" : ""}.`}
+        {confirm?.kind === "activate" && `Runs start on version ${confirm.version.number} from now on. The draft doesn't change.`}
+        {confirm?.kind === "publish" && (
+          <>
+            {confirm.elsewhere &&
+              `Version ${confirm.expected} was published since you opened this, by someone else or by an attempt whose answer was lost. `}
+            {`Your latest edits are saved first. Version ${confirm.expected + 1} of ${workflow.name} becomes the active version${workflow.enabled ? ": its triggers start runs on it" : ""}.`}
+          </>
+        )}
       </ConfirmDialog>
 ```
 
@@ -6655,10 +8986,10 @@ Expected: PASS and clean (Members' removal dialog keeps `tone="danger"` by defau
 
 ```bash
 git add frontend/src
-git commit -m "feat(web): publish with a confirmation naming the version; versions viewed and made active; export (4b)"
+git commit -m "feat(web): publish bound to the version it names; versions viewed and made active; outcomes read back, never assumed (4b)"
 ```
 
-### Task 16: The slice end to end behind nginx: saved, problems, published, versions, a conflict, a file round trip, reflow; then every check
+### Task 16: The slice end to end behind nginx: saved, left, problems, published (and raced), versions, a conflict, a file round trip, reflow; then every check
 
 **Files:**
 - Create: `frontend/e2e/fixtures/report.dewpoint.json`
@@ -6705,18 +9036,7 @@ validates and publishes there):
 In `frontend/e2e/workflows.spec.ts`, add:
 
 ```ts
-async function importReport(page: Page, name: string): Promise<void> {
-  await page.goto(`/t/${await tenantId(page)}/workflows`);
-  await page.getByTestId("workflow-new").click();
-  const dialog = page.getByRole("dialog", { name: "New workflow" });
-  await dialog.getByLabel("Name").fill(name);
-  await dialog.getByRole("radio", { name: /Import from file/ }).check();
-  await dialog.getByLabel("Workflow file").setInputFiles("e2e/fixtures/report.dewpoint.json");
-  await expect(dialog.getByText("The file names no connection or workflow.")).toBeVisible();
-  await expectAccessible(page, "new workflow: import");
-  await dialog.getByRole("button", { name: "Import and open" }).click();
-  await expect(page).toHaveURL(/\/workflows\/[0-9a-f-]{36}$/);
-}
+const importReport = (page: Page, name: string) => importFile(page, name, "e2e/fixtures/report.dewpoint.json");
 
 test("edits save themselves and survive a reload; a step's problems show on it, and a problem focuses it", async ({ page }) => {
   await newWorkflow(page, "Saved flow");
@@ -6791,7 +9111,14 @@ test("a draft changed elsewhere turns this editor read only, its work downloadab
   const download = other.waitForEvent("download");
   await alert.getByRole("button", { name: "Download my version" }).click();
   expect((await download).suggestedFilename()).toBe("report-b.draft.json");
+  // Its unsaved version is guarded: leaving asks, and Reload asks before discarding it.
+  await other.getByRole("navigation", { name: "Breadcrumb" }).getByRole("link", { name: "Workflows" }).click();
+  const leave = other.getByRole("dialog", { name: "Your latest changes aren't saved" });
+  await expect(leave).toContainText("changed elsewhere");
+  await expectAccessible(other, "editor: leaving unsaved work");
+  await leave.getByRole("button", { name: "Stay" }).click();
   await alert.getByRole("button", { name: "Reload" }).click();
+  await other.getByRole("dialog", { name: "Reload the saved draft" }).getByRole("button", { name: "Discard my version and reload" }).click();
   await expect(other.getByRole("button", { name: /^stop, Stop/ })).toBeVisible();
   await expect(other.getByRole("button", { name: /^delay, Delay/ })).toHaveCount(0);
   await other.close();
@@ -6815,6 +9142,39 @@ test("a workflow exports to a file and imports back as a new one", async ({ page
   await expect(page.getByRole("button", { name: /^t, Transform/ })).toBeVisible();
 });
 
+test("leaving through the breadcrumb saves the last edit first", async ({ page }) => {
+  await newWorkflow(page, "Leaving flow");
+  await page.getByRole("button", { name: "Add the first step" }).click();
+  await page.getByRole("option", { name: /flow\.transform@1/ }).click();
+  await expect(page.getByText("Unsaved changes")).toBeVisible(); // inside the second before it would save
+  await page.getByRole("navigation", { name: "Breadcrumb" }).getByRole("link", { name: "Workflows" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "Workflows" })).toBeVisible();
+  await page.getByRole("link", { name: "Leaving flow" }).click();
+  await expect(page.getByRole("button", { name: /^transform, Transform/ })).toBeVisible(); // the server kept it
+});
+
+test("a publish names the version it makes, even when another lands first", async ({ page, context }) => {
+  await importReport(page, "Report D");
+  const other = await context.newPage();
+  await other.goto(page.url());
+  const publish = page.getByRole("button", { name: "Publish v1" });
+  await expect(publish).toBeEnabled({ timeout: 10_000 });
+  await publish.click();
+  const ask = page.getByRole("dialog", { name: "Publish version 1" });
+  await expect(ask).toBeVisible();
+  // Meanwhile, the other editor publishes version 1.
+  await other.getByRole("button", { name: "Publish v1" }).click();
+  await other.getByRole("dialog", { name: "Publish version 1" }).getByRole("button", { name: "Publish" }).click();
+  await expect(other.getByText("Saved · published as v1")).toBeVisible({ timeout: 10_000 });
+  await other.close();
+  // This one still names version 1: the server refuses it, and the editor asks again with the new number.
+  await ask.getByRole("button", { name: "Publish" }).click();
+  const again = page.getByRole("dialog", { name: "Publish version 2" });
+  await expect(again).toContainText("Version 1 was published since you opened this", { timeout: 10_000 });
+  await again.getByRole("button", { name: "Publish" }).click();
+  await expect(page.getByText("Saved · published as v2")).toBeVisible({ timeout: 10_000 });
+});
+
 test("the list reflows at 320 px and stays AA (WCAG 1.4.10)", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 640 });
   await page.goto(`/t/${await tenantId(page)}/workflows`);
@@ -6832,8 +9192,8 @@ In `frontend/e2e/gate.spec.ts`'s notices test, the entries list gains `/^@xyflow
 
 Reset the isolated stack (`compose-ui4a/reset.sh`, which now syncs the plugins), then
 `E2E_BASE_URL=http://localhost:18080 npx -y pnpm@12.6.0 exec playwright test`.
-Expected: `foundations` 8 passed (4a's two flows, the five gate self-tests and the notices check), `workflows` 7
-passed. A failure is a finding: fix
+Expected: `foundations` 8 passed (4a's two flows, the five gate self-tests and the notices check), `workflows` 11
+passed (Task 11's one, Task 12's four, and these six). A failure is a finding: fix
 it test-first in the task that owns the code, and record what changed in the ledger.
 
 - [ ] **Step 3: Every check, locally** (the Actions minutes are spent)
@@ -6861,8 +9221,8 @@ added here. The serial CEL group is untouched by this slice; it runs in `cel-gat
 - [ ] **Step 4: Record the rulings, then commit**
 
 Add a section to the ledger, "4b plan (2026-10-06)": the owner's approval of this plan (quoted as given), its rulings
-1–21 as ledger rulings 68–88 (amended as the owner rules), and each mid-slice ruling the execution made, with its why
-and its cost if wrong. Then:
+1–26 as ledger rulings 68–93 (with the statuses and amendments the owner rules), and each mid-slice ruling the
+execution made, with its why and its cost if wrong. Then:
 
 ```bash
 git add frontend/e2e docs/superpowers/plans/2026-10-05-editor-ui-4-ledger.md
@@ -6886,43 +9246,52 @@ git commit -m "test(web): 4b end to end behind nginx: saved, problems, publish, 
 
 ## Self-review
 
-Run against the outline's slice 4b, its decisions and its backend items, with the plan in hand:
+Run against the outline's slice 4b, its decisions and its backend items, and against the owner's seven corrections,
+with the plan in hand:
 
 1. **Spec coverage.**
    - 1a, its filters and the enable toggle (B3): Tasks 3, 6, 7.
    - 1b, Blank and Import from file (D9, B12): Tasks 5, 8.
-   - The canvas: React Flow (Task 11), dagre on demand (Task 10), zoom (Task 11), minimap (Task 11).
-   - Badges on the step cards: problems (Task 14). "Conditional" and "disabled" are ruled out of 4b (ruling 3).
+   - The canvas: React Flow (Task 11), dagre on demand (Task 10), zoom and minimap (Task 11).
+   - Badges on the step cards: problems, when the check is current (Task 14). "Conditional" and "disabled" are ruled
+     out of 4b (ruling 3).
    - "+" on edges and ports, and `A` with the type picker (B5): Tasks 1, 11, 12.
-   - The keyboard (D16): Task 12.
-   - Autosave with `If-Match`, where a 409 never overwrites (D17): Task 13.
-   - Validate: the panel, per-step badges, focus jumping to the step (the field waits for 4c, ruling 16), and CEL
-     classes with their reasons: Task 14.
+   - The keyboard (D16) and single-pointer movement (WCAG 2.5.7): Task 12, in the browser in Tasks 12 and 16.
+   - Autosave with `If-Match`, where a 409 never overwrites (D17), leaving that saves first, and a fresh snapshot on
+     entry: Task 13.
+   - Validate: the panel, per-step badges, focus jumping to the step (the field waits for 4c, ruling 16), CEL classes
+     with their reasons, and the check's five states: Task 14.
    - The §5.10 messages: the server's own text, Task 14.
-   - Publish, its confirmation naming the version, and the publish-only checks: Task 15.
+   - Publish, its confirmation naming the version and binding it at the server, and the publish-only checks: Tasks 4
+     and 15.
    - B4a: Task 4, used by Task 15.
    - Ruling 47's `Graph` on the draft PUT: Task 2.
    - Workflows in the rail, the landing page and the palette (D10, outline §2): Task 6.
    - New packages, licences and notices (D22, ruling 65): Tasks 6 and 16.
    - The browser gate's CSP, console and axe checks on each new screen (D21, D23): Tasks 11, 12 and 16.
    - No AI tells (§6): stated in each component, and enforced by the guard and the reviewer.
+   - The owner's corrections 1–7: "Revision 2" maps each to its tasks and rulings.
 2. **Placeholders.** None: every step that changes code shows the code, and every test shows its assertions. Where
-   the installed package decides a detail (dagre's export shape, React Flow's class names, a CHECK on `runs`), the
-   step says to read the package first and how to adapt it. That's the owner's standing rule, not a gap.
+   the installed package decides a detail (dagre's export shape, React Flow's class names and pane API, a CHECK on
+   `runs`), the step says to read the package first and how to adapt it. That's the owner's standing rule, not a gap.
+   Ruling 5's outcome is the owner's at the milestone 1 pause; an index, if ruled, is planned then, with its slot.
 3. **Type consistency.**
    - `PortRef`, `ItemAction` and `PickMode` keep one shape across Tasks 9–15.
-   - `item.*` ids are built only in `items.ts` and read by `canvasNav.ts` and the components.
-   - `SyncState` and `DraftSync` methods: `change`, `flush`, `retry`, `conflict`, `setUnpublished` and `dispose`
-     (Tasks 13 and 15).
-   - `Problems` is `{errors, warnings}`, from Tasks 11 and 14.
-   - `Side` replaces Task 12's `panel` in Task 14, and Task 14 says so.
-   - The schema names come from Tasks 1–5: `NodeTypeOut`, `WorkflowOut`, `WorkflowDetailOut`, `DraftSavedOut`,
-     `ValidationOut`, `DiagnosticOut`, `ExpressionOut`, `VersionOut`, `VersionDetailOut`, `WorkflowDocument`, and
-     `Graph` (refined).
-4. **Review Focus.** Each of its five lines has a test in the task that owns the code:
-   - Task 13: `a 409 stops every save and keeps the document`, and `edits during a save coalesce into exactly one next
-     save`.
-   - Task 14: `drops an answer for an older revision`.
-   - Task 9: `keeps what it doesn't touch, byte for byte`, plus Task 11's unknown-type card. Task 16's import of a
-     graph with a `settings` block covers this through the browser.
-   - Task 5: `a binding of the wrong kind is refused and nothing is created`.
+   - `item.*` ids are built only in `items.ts` and read by `canvasNav.ts` and the components; the canvas and the
+     keyboard model both use `drawableEdges` (Task 9).
+   - `SyncState` (`status`, `revision`, `unpublished: boolean | null`, `generation`, `savedGeneration`) and
+     `DraftSync`'s `change`, `flush`, `retry`, `conflict`, `dispose`, `unsaved` (Task 13), `published`, `compared`
+     (Task 15); `ConflictError` and `SaveError` (Task 13).
+   - `Check`, `CheckState`, `checkState`, `lastOf`, `checkLabel` (Task 14), read by Task 15 only through the editor.
+   - `StepPanel`'s `problems: Diagnostic[] | null`, `onPlace`, `onNudge` (Task 12), filled by Task 14 and emptied
+     while viewing a version (Task 15).
+   - `CanvasProps` gains `placing` and `onPlace` in Task 12; Task 11's stand-in canvas gains the matching button there.
+   - `Problems` is `{errors, warnings}`, from Tasks 11 and 14. `Side` replaces Task 12's `panel` in Task 14, and Task
+     14 says so.
+   - `notPortable` and `PortableProblem` (Task 7), used by Task 15; the API's `not_portable` and `bad_document`
+     problem shape `{reason, binding, node, field}` (Task 5), read by Tasks 7, 8 and 15.
+   - The schema names come from Tasks 1–5: `NodeTypeOut`, `WorkflowOut` (with `last_run`, `last_simulation`),
+     `WorkflowDetailOut`, `DraftSavedOut`, `ValidationOut`, `DiagnosticOut`, `ExpressionOut`, `VersionOut`,
+     `VersionDetailOut`, `PublishIn`, `WorkflowDocument`, `Binding`, `BindingSite`, and `Graph` (refined).
+   - The summary module is `dewpoint.apps.workflow_summary` everywhere (Task 3, its tests, its probe).
+4. **Review Focus.** Each of its five lines has its tests in the task that owns the code, named in the line.
