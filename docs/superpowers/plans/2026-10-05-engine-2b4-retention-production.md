@@ -246,8 +246,10 @@ then waits for every writer that read `active` to commit or roll back, and every
   migration, or a schedule deleted before its id landed, unknown. Only certain counts reach `misses`; any possibly
   missed or unknown span makes the API's `accounting_complete` false and is listed in `uncounted_intervals`, audited
   and alerted on. Temporal's own count of firings skipped past the catch-up window is read every five minutes
-  (`misses_read_at`); an id is deleted only once it shows paused (its count then final, a contract test) and that
-  count is recorded, so a deletion loses none of it.
+  (`misses_read_at`); an id is deleted only once a describe shows the sync's own pause for the delete (which makes any
+  token a stale writer holds useless; paused, its count is final, a contract test) and that count is recorded, so a
+  deletion loses none of it. A schedule from before 2b-4a carries its life up to the migration as an unknown span
+  (`before_migration`): its accounting is never shown complete.
 - **A run start in flight before step 1** (2b-2 starts after its `starting` transaction commits) could land late too.
   Its workflow id is its request's id, so it's a known id; such a run can't decrypt its input once the keys are gone,
   and the reconciler below terminates and deletes it.
