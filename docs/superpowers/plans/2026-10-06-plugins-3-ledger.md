@@ -323,3 +323,13 @@ with `[skip ci]` (Actions minutes are exhausted).
 **Checkpoint:** the owner approved every 3a-2 ruling above as recommended (2026-10-06), including the stricter
 revision fencing of options (the owner's finding 3). The owner also decided to make the repository public (which
 settles the CodeQL licence question once done), authorized a new Compose proof, and merged the outline (#39).
+
+Compose proof (2026-10-06, at `47632f7`, on the owner's word): CI's e2e steps against an isolated project
+(`dewpoint-p3a2`, its own ports, image tags and generated secrets), with the approved images: the stack up and
+healthy, admin init, the worker's build current, `plugins sync` (flow and mist), migration 0042's table (forced RLS),
+functions and the tenant-scoped connection key, the `mist` connection type registered, no plugin-call errors in the
+worker's log; a run, a schedule and a signed webhook (a duplicate acknowledged once, a trickled body answered 408
+after 10.09 s) through the Compose dispatcher; the 8 browser tests. All passed in 1 min 35 s. A first attempt's
+passkey test failed only because the browser used 127.0.0.1 while the stack's origin was localhost (WebAuthn binds
+the origin); with `DEWPOINT_PUBLIC_ORIGIN` matching, it passed. The stack, its volumes, images and secrets were
+removed afterwards.
