@@ -65,6 +65,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )  # innermost: its 413 gets security headers
     app.add_middleware(ClientHeaderMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(logs.LifespanFailures)  # a startup or shutdown failure, by its type: never its traceback
     install_error_handlers(app)
     for router in (
         health.router,

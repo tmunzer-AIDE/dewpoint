@@ -11,7 +11,9 @@ UNAVAILABLE_STATES = ("08", "53", "57")
 
 
 def make_engine(url: str) -> AsyncEngine:
-    return create_async_engine(url, pool_pre_ping=True)
+    """An error's text never quotes a statement's parameters (a password's hash, a token, a tenant's data): it's
+    shown wherever the error is (a CLI's message, a test's report)."""
+    return create_async_engine(url, pool_pre_ping=True, hide_parameters=True)
 
 
 def make_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:

@@ -40,7 +40,7 @@ async def evaluator_profile(socket_path: str, *, wait_s: float = 2.0) -> str:
         try:
             return await cel_client.identity(socket_path)
         except cel_client.EvaluatorUnavailable as e:
-            log.warning("cel_evaluator_unavailable", error=str(e))
+            log.warning("cel_evaluator_unavailable", error=type(e).__name__)
             await asyncio.sleep(wait_s)
 
 

@@ -419,7 +419,17 @@ def ingress(host: str = typer.Option("127.0.0.1"), port: int = typer.Option(8001
     except IngressRefusedError as e:
         typer.echo(f"ERROR: {e}")
         raise typer.Exit(2) from None
-    uvicorn.run(create_app(settings), host=host, port=port, proxy_headers=False, server_header=False)
+    # log_config=None: uvicorn's own logging configuration would replace the process's (dewpoint.core.logs), its
+    # records quoting an exception's text; log_level keeps its INFO lines (startup, each request).
+    uvicorn.run(
+        create_app(settings),
+        host=host,
+        port=port,
+        proxy_headers=False,
+        server_header=False,
+        log_config=None,
+        log_level="info",
+    )
 
 
 @asynccontextmanager

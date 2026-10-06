@@ -31,6 +31,7 @@ from dewpoint.apps.ingress.config import IngressSettings
 from dewpoint.apps.ingress.endpoints import Endpoint, resolve
 from dewpoint.apps.ingress.limits import FailureLimiter, InFlight
 from dewpoint.apps.ingress.recording import UNKNOWN, record, respond
+from dewpoint.core import logs
 from dewpoint.core.crypto.ingress import DEDUPE_KEY, IngressKey, UnknownIngressKeyError
 from dewpoint.core.db import make_engine, make_sessionmaker, unavailable
 from dewpoint.core.ingress.parsing import MalformedError
@@ -118,6 +119,7 @@ def create_app(settings: IngressSettings | None = None, *, clock: Callable[[], f
         await app.state.engine.dispose()
 
     app = FastAPI(title="Dewpoint ingress", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+    app.add_middleware(logs.LifespanFailures)  # a startup or shutdown failure, by its type: never its traceback
     app.state.engine = make_engine(settings.database_url)
     app.state.sessionmaker = make_sessionmaker(app.state.engine)
     limiter = FailureLimiter(settings.ingress_address_failures, window_s=60)
