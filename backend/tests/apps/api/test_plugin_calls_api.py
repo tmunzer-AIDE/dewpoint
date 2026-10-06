@@ -434,7 +434,8 @@ async def test_a_start_form_lists_nothing_a_run_couldnt_use(
     async with c:
         wid = await _published_with_a_picker(c, tid, fake[1].port)
         url = f"/api/v1/t/{tid}/workflows/{wid}/input-options"
-        async with owner_sessionmaker() as s, s.begin():
+        async with owner_sessionmaker() as s, s.begin():  # as if published before pickers were checked
+            await s.execute(text("SET LOCAL session_replication_role = replica"))  # versions are immutable
             await s.execute(
                 text("update workflow_versions set connection_ids = '{}' where workflow_id = :w"), {"w": wid}
             )
