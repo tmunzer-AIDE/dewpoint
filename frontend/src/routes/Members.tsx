@@ -6,6 +6,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Button } from "../components/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { Field, Select } from "../components/Field";
+import { LoadError } from "../components/LoadError";
 import { Table, Td, Th } from "../components/Table";
 import { ApiError, client, ok, type Schemas } from "../lib/client";
 import { useDocumentTitle } from "../lib/title";
@@ -96,7 +97,7 @@ export function MembersPage({ tenantId }: { tenantId: string }) {
         </p>
       </div>
       {error && <p role="alert" className="text-body text-danger">{error}</p>}
-      <Table className="max-w-3xl">
+      {members.isError ? <LoadError what="The members" /> : <Table className="max-w-3xl">
         <thead>
           <tr><Th>Email</Th><Th>Role</Th>{canManage && <Th><span className="sr-only">Actions</span></Th>}</tr>
         </thead>
@@ -129,7 +130,7 @@ export function MembersPage({ tenantId }: { tenantId: string }) {
             </tr>
           ))}
         </tbody>
-      </Table>
+      </Table>}
       {canManage && (
         <form onSubmit={submit} aria-label="Add a member" className="flex max-w-3xl flex-wrap items-end gap-3 rounded-lg border border-line bg-surface p-4">
           <div className="min-w-0 grow basis-48">

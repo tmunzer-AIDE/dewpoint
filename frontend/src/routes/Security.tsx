@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
 import { Button } from "../components/Button";
 import { Field } from "../components/Field";
+import { LoadError } from "../components/LoadError";
 import { ApiError, client, ok } from "../lib/client";
 import { useDocumentTitle } from "../lib/title";
 import { needsReauth } from "../lib/reauth";
@@ -110,15 +111,16 @@ export function SecurityPage() {
 
       <div className="flex flex-col gap-3">
         <h2 className="text-body-lg font-semibold">Passkeys</h2>
-        <ul className="divide-y divide-line rounded-lg border border-line bg-surface">
-          {passkeys.data?.map((p) => (
+        {passkeys.isError && <LoadError what="Your passkeys" />}
+        {passkeys.data && <ul className="divide-y divide-line rounded-lg border border-line bg-surface">
+          {passkeys.data.map((p) => (
             <li key={p.id} className="flex justify-between p-3 text-body">
               <span>{p.name}</span>
               <span className="text-muted">added {new Date(p.created_at).toLocaleDateString()}</span>
             </li>
           ))}
-          {passkeys.data?.length === 0 && <li className="p-3 text-body text-muted">No passkeys yet.</li>}
-        </ul>
+          {passkeys.data.length === 0 && <li className="p-3 text-body text-muted">No passkeys yet.</li>}
+        </ul>}
         <Button onClick={() => void guarded(addPasskey)} data-testid="passkey-add" className="self-start">Add a passkey</Button>
       </div>
 

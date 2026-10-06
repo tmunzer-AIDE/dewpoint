@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 import { Button } from "../components/Button";
 import { Field, Select } from "../components/Field";
+import { LoadError } from "../components/LoadError";
 import { StatusBadge } from "../components/StatusBadge";
 import { Table, Td, Th } from "../components/Table";
 import { ApiError, client, ok } from "../lib/client";
@@ -89,7 +90,7 @@ export function ConnectionsPage({ tenantId }: { tenantId: string }) {
               Add Mist connection
             </Button>
           </div>
-          <Table>
+          {list.isError ? <LoadError what="The connections" /> : <Table>
             <thead>
               <tr><Th>Name</Th><Th>Cloud</Th><Th>Org ID</Th><Th>Status</Th><Th><span className="sr-only">Actions</span></Th></tr>
             </thead>
@@ -109,7 +110,7 @@ export function ConnectionsPage({ tenantId }: { tenantId: string }) {
                 <tr><Td colSpan={5} className="text-muted">No Mist connection yet.</Td></tr>
               )}
             </tbody>
-          </Table>
+          </Table>}
         </div>
         {open && (
           <form aria-label="Add Mist connection" className="flex flex-col gap-3.5 self-start rounded-lg border border-line bg-surface p-5"

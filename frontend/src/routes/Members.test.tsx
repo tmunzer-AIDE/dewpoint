@@ -36,7 +36,7 @@ beforeEach(() => {
 
 function show() {
   render(
-    <QueryClientProvider client={new QueryClient()}>
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <MembersPage tenantId="t1" />
     </QueryClientProvider>,
   );
@@ -100,4 +100,11 @@ it("names the page in the browser's title, and heads its list by what it holds",
   await screen.findByText("ed@corp.test");
   expect(document.title).toBe("Members & roles · Dewpoint");
   expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Members");
+});
+
+it("says so when the members can't be loaded, rather than showing an empty table", async () => {
+  routes["GET /api/v1/t/t1/members"] = { status: 500, body: { error: "boom" } };
+  show();
+  expect((await screen.findByRole("alert")).textContent).toContain("The members couldn't be loaded");
+  expect(screen.queryByRole("table")).toBeNull();
 });

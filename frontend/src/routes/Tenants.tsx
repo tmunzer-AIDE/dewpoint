@@ -4,6 +4,7 @@ import { Link } from "@tanstack/react-router";
 import { useState, type FormEvent } from "react";
 import { Button } from "../components/Button";
 import { Field } from "../components/Field";
+import { LoadError } from "../components/LoadError";
 import { Table, Td, Th } from "../components/Table";
 import { ApiError, client, ok } from "../lib/client";
 import { useSession } from "../lib/session";
@@ -37,7 +38,7 @@ export function TenantsPage() {
   return (
     <section className="flex flex-col gap-6 p-6">
       <h1 className="text-h1 font-semibold">Tenants</h1>
-      <Table className="max-w-3xl">
+      {tenants.isError ? <LoadError what="Your tenants" /> : <Table className="max-w-3xl">
         <thead>
           <tr><Th>Name</Th><Th>Slug</Th><Th>Your role</Th></tr>
         </thead>
@@ -57,7 +58,7 @@ export function TenantsPage() {
             <tr><Td colSpan={3} className="text-muted">You're not a member of any tenant yet.</Td></tr>
           )}
         </tbody>
-      </Table>
+      </Table>}
       {session.data?.user.is_platform_admin && (
         <form onSubmit={submit} className="flex max-w-lg flex-col gap-4 rounded-lg border border-line bg-surface p-5">
           <h2 className="text-body-lg font-semibold">Create tenant</h2>

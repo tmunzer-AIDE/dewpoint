@@ -232,3 +232,10 @@ thirteen minor findings. What became of each:
     and members 41 px. A table header's screen-reader-only label (absolutely positioned) had no positioned ancestor,
     so the page held it, not the table's scrolling frame. The frame is positioned now; the check waits for the network
     to settle before measuring and failed red on connections first.
+51. Fixed: a list that fails to load says so in its place ("… couldn't be loaded. Reload the page to try again.",
+    `LoadError`, an alert) - Connections, Members, Tenants and Security's passkeys showed an empty list, which reads
+    as "none"; Security no longer draws an empty bordered list while its passkeys load (the checkpoint screenshot
+    showed it as a stray line) - none.
+52. Ruling: the development banner appears when the platform status answers, so a development deployment's first
+    full page load moves the page down once; production shows no banner, so it never moves - a one-time shift on
+    development stacks.
