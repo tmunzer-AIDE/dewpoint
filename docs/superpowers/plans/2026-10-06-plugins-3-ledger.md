@@ -313,5 +313,11 @@ accurate; an independent run of 130 targeted tests replayed the original races, 
 return 409 for both editor and start-form options while a rename still lets the answer through. This closes the
 technical review only.
 
-**Checkpoint:** awaiting the owner's rulings on 3a-2's rulings above. CodeQL, a new Compose proof, pushing and a PR
-remain on hold. Nothing is pushed.
+The owner then asked for the push and PR (2026-10-06). Before it, the branch was rebased onto `origin/main` ff1536e
+(#42, editor UI 4a): one conflict, `/connection-types` keeping #42's response model with 3a-2's declared types; the
+options routes answer a named `OptionsOut`, and the web client's `openapi.json` and `schema.d.ts` were regenerated
+(`pnpm check:api`, lint, typecheck, 292 tests and build pass). Full run at `6f5fdce`: 2921 passed, 8 skipped, in
+3 min 50 s; ruff, format, mypy, import contracts, licences, the replay gate and the schema drift check pass. Pushed
+with `[skip ci]` (Actions minutes are exhausted).
+
+**Checkpoint:** awaiting the owner's rulings on 3a-2's rulings above. CodeQL and a new Compose proof remain on hold.
