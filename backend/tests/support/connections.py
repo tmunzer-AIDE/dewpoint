@@ -1,55 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
-"""A test-only connection type and the rows a step's connection is read from (plugins-3 D4): a tenant, a version whose
-graph names connections in a node's config, a run of it, and connections sealed as the API seals them."""
+"""The worker's test connection types and the rows a step's connection is read from (plugins-3 D4): a tenant, a
+version whose graph names connections in a node's config, a run of it, and connections sealed as the API seals them."""
 
+import dataclasses
 import json
 import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, SecretStr
 from sqlalchemy import text
 
+from dewpoint.apps.worker.network import WorkerType, worker_types
 from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.connections.service import PURPOSE
-from dewpoint.core.connections.types import ConnectionType, HeaderAuth, VerifyResult
-from dewpoint.core.ratelimit.buckets import Scope
+from dewpoint.sdk import Plugin
 from tests.support.keys import FixtureKeys
+from tests.support.plugins.testkit import TESTKIT_CONNECTION
 from tests.support.workflows import PROFILE
 
 
-class TestkitConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    base_url: str
-    capacity: float = 50
-    refill_per_s: float = 50
-
-
-class TestkitSecret(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    token: SecretStr
-
-
-async def _verify(config: BaseModel, secret: BaseModel, http: Any) -> VerifyResult:
-    return VerifyResult(True, "ok")
-
-
-def _scopes(config: BaseModel, credential: Any, secret: BaseModel) -> list[Scope]:
-    assert isinstance(config, TestkitConfig) and isinstance(secret, TestkitSecret)
-    key = f"testkit.token:{credential(secret.token.get_secret_value())}"
-    return [Scope(key, config.capacity, config.refill_per_s)]
-
-
-TESTKIT_TYPE = ConnectionType(
-    "testkit",
-    "Testkit",
-    TestkitConfig,
-    TestkitSecret,
-    _verify,  # type: ignore[arg-type]
-    base_url=lambda config, secret: config.base_url,  # type: ignore[attr-defined]
-    auth=HeaderAuth("Authorization", "Bearer {token}"),
-    rate_scopes=_scopes,
-)
+def types_for_testkit(capacity: float = 50, refill_per_s: float = 50) -> dict[str, WorkerType]:
+    """The worker's connection types for tests: testkit's, its one quota scope's budget as given."""
+    scope = dataclasses.replace(TESTKIT_CONNECTION.rate_scopes[0], capacity=capacity, refill_per_s=refill_per_s)
+    kind = dataclasses.replace(TESTKIT_CONNECTION, rate_scopes=(scope,))
+    return worker_types([Plugin("testkit", "0.0.0", (), connection_types=(kind,))])
 
 
 @dataclass(frozen=True)

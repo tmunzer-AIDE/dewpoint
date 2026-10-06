@@ -8,17 +8,24 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, ClassVar, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from dewpoint.sdk import (
+    CallContext,
+    Connection,
+    ConnectionType,
     Empty,
     FatalError,
+    HeaderAuth,
     Node,
     OutcomeUnknownError,
     Plugin,
+    RateScope,
     RetryableError,
     SideEffect,
     StepContext,
+    UrlField,
+    VerifyResult,
     connection_field,
     sensitive,
 )
@@ -376,6 +383,33 @@ class ReconcilableCall(HttpCall):
         return None
 
 
+class TestkitConnectionConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    base_url: str
+
+
+class TestkitSecret(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    token: SecretStr
+
+
+async def _verify_testkit(ctx: CallContext, connection: Connection) -> VerifyResult:
+    answer = await connection.http.request("GET", "/verify")
+    return VerifyResult(answer.status_code == 200, "ok" if answer.status_code == 200 else "unexpected_status")
+
+
+TESTKIT_CONNECTION = ConnectionType(
+    key="testkit",
+    label="Testkit",
+    Config=TestkitConnectionConfig,
+    Secret=TestkitSecret,
+    auth=HeaderAuth("Authorization", "Bearer {token}"),
+    host=UrlField("base_url"),
+    rate_scopes=(RateScope("testkit.token", secret="token", capacity=50, refill_per_s=50),),  # noqa: S106 - a field
+    verify=_verify_testkit,
+)
+
+
 TESTKIT = Plugin(
     name="testkit",
     version="0.0.0",
@@ -394,4 +428,5 @@ TESTKIT = Plugin(
         HttpCall,
         AmbiguousCall,
     ),  # fmt: skip
+    connection_types=(TESTKIT_CONNECTION,),
 )

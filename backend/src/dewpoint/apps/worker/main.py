@@ -21,7 +21,7 @@ from dewpoint.apps.worker.activities import RunStore, cel_activity, engine_activ
 from dewpoint.apps.worker.claims import ClaimStore
 from dewpoint.apps.worker.deployment import deployment_config, set_current, this_build
 from dewpoint.apps.worker.health import reporter, self_check, start_healthy, watch
-from dewpoint.apps.worker.network import DbConnections, Network
+from dewpoint.apps.worker.network import DbConnections, Network, worker_types
 from dewpoint.apps.worker.store import DbRunStore
 from dewpoint.core.config import Settings
 from dewpoint.core.crypto.kek import KekSet
@@ -107,8 +107,12 @@ async def run(settings: Settings) -> None:
         )
         store = DbRunStore(sessionmaker, keys)  # claims, sealed with the same keys (engine 2b spec §3.1)
         guard = Guard(resolver=SystemResolver(), allowlist=allowlist.source(sessionmaker))  # plugins-3 D7, D8
-        network = Network(guard=guard, connections=DbConnections(sessionmaker), sessionmaker=sessionmaker, keys=keys)
-        workers = [engine_worker(client, store, installed_plugins(), settings, network=network)]
+        plugins = installed_plugins()
+        network = Network(
+            guard=guard, connections=DbConnections(sessionmaker), sessionmaker=sessionmaker, keys=keys,
+            types=worker_types(plugins),  # the installed plugins' connection types (D11)
+        )  # fmt: skip
+        workers = [engine_worker(client, store, plugins, settings, network=network)]
         if settings.cel_socket:
             profile = await evaluator_profile(settings.cel_socket)
             log.info("cel_queue", profile=profile)

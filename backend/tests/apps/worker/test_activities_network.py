@@ -17,11 +17,10 @@ from temporalio.testing import ActivityEnvironment
 from dewpoint.apps.worker.activities import step_activity_for
 from dewpoint.apps.worker.network import DbConnections, Network
 from dewpoint.apps.worker.store import DbRunStore
-from dewpoint.core.connections.types import CONNECTION_TYPES
 from dewpoint.core.egress.addresses import AllowEntry
 from dewpoint.engine.runtime.activities import MAPPED, OUTCOME_UNKNOWN, StepInput
 from dewpoint.engine.runtime.ids import run_workflow_id
-from tests.support.connections import TESTKIT_TYPE, add_connection, seed_step
+from tests.support.connections import add_connection, seed_step, types_for_testkit
 from tests.support.keys import FixtureKeys
 from tests.support.netfakes import Request, guard, respond, serve, tls
 from tests.support.plugins.testkit import AmbiguousCall, HttpCall, WriteThenRead
@@ -29,18 +28,13 @@ from tests.support.plugins.testkit import AmbiguousCall, HttpCall, WriteThenRead
 NAMES = ("dewpoint.test",)
 
 
-@pytest.fixture(autouse=True)
-def testkit_type(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(CONNECTION_TYPES, "testkit", TESTKIT_TYPE)
-
-
 async def _run(
     worker: Any, owner: Any, port: int, node: type, *, host: str = "dewpoint.test", extra: dict[str, Any] | None = None,
-    connection: dict[str, Any] | None = None,
+    types: Any = None,
 ) -> Any:  # fmt: skip
     tenant = uuid.uuid4()
     await seed_step(owner, named=[None], tenant=tenant)
-    cid = await add_connection(owner, tenant, config={"base_url": f"https://{host}:{port}", **(connection or {})})
+    cid = await add_connection(owner, tenant, config={"base_url": f"https://{host}:{port}"})
     seeded = await seed_step(owner, named=[cid], tenant=tenant, node_type=f"{node.type}@{node.version}")
     network = Network(
         guard=guard(
@@ -51,6 +45,7 @@ async def _run(
         sessionmaker=worker,
         keys=FixtureKeys(),
         ssl_context=tls(NAMES).client_context(),
+        types=types or types_for_testkit(),
     )
     activity = step_activity_for(node, DbRunStore(worker, FixtureKeys()), network)
     step = StepInput(
@@ -134,7 +129,7 @@ async def test_a_cooldown_after_an_earlier_send_is_never_retried_for_an_ambiguou
 ) -> None:
     async with serve(respond(201, b"made"), tls_names=NAMES) as server:
         failure = await _failure(worker_sessionmaker, owner_sessionmaker, server.port, WriteThenRead,
-                                 connection={"capacity": 1, "refill_per_s": 0.001})  # fmt: skip
+                                 types=types_for_testkit(capacity=1, refill_per_s=0.001))  # fmt: skip
     assert [r.method for r in server.requests] == ["POST"]
     assert (failure.type, failure.non_retryable, failure.details[0]["outcome"]) == ("cooldown", True, OUTCOME_UNKNOWN)
 

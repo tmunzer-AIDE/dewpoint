@@ -15,7 +15,6 @@ from dewpoint.apps import dev_run
 from dewpoint.apps.dispatcher.dispatch import dispatch_once
 from dewpoint.apps.worker.network import DbConnections, Network
 from dewpoint.apps.worker.store import DbRunStore
-from dewpoint.core.connections.types import CONNECTION_TYPES
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.egress.addresses import AllowEntry
 from tests.apps.dispatcher.support import BUILD
@@ -23,18 +22,13 @@ from tests.apps.dispatcher.support import workers as ready_workers
 from tests.apps.test_admission import KEYS, current
 from tests.apps.test_workflow_ops import actor, create, publish
 from tests.apps.worker.harness import workers
-from tests.support.connections import TESTKIT_TYPE, add_connection
+from tests.support.connections import add_connection, types_for_testkit
 from tests.support.graphs import G, ref
 from tests.support.netfakes import guard, respond, serve, tls
 from tests.support.registry import sync_test_plugins
 
 pytestmark = pytest.mark.usefixtures("development_deployment")
 NAMES = ("dewpoint.test",)
-
-
-@pytest.fixture(autouse=True)
-def testkit_type(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(CONNECTION_TYPES, "testkit", TESTKIT_TYPE)
 
 
 async def _published(owner: Any, api: Any, admin: Any, dispatch: Any, settings: Any, base_url: str) -> Any:
@@ -62,6 +56,7 @@ def _network(worker: Any, tenant: uuid.UUID) -> Network:
         sessionmaker=worker,
         keys=KEYS,
         ssl_context=tls(NAMES).client_context(),
+        types=types_for_testkit(),
     )
 
 

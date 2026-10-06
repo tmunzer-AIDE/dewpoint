@@ -15,7 +15,6 @@ from sqlalchemy import text
 
 from dewpoint.apps.worker.network import DbConnections, Network
 from dewpoint.apps.worker.store import DbRunStore
-from dewpoint.core.connections.types import CONNECTION_TYPES
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.egress.addresses import AllowEntry
 from dewpoint.core.ratelimit.buckets import current_cooldowns
@@ -26,7 +25,7 @@ from dewpoint.sdk import (
     RateLimited,
     SimulationSendsNothing,
 )
-from tests.support.connections import TESTKIT_TYPE, add_connection, seal, seed_step
+from tests.support.connections import add_connection, seal, seed_step, types_for_testkit
 from tests.support.keys import FixtureKeys
 from tests.support.netfakes import Request, guard, respond, serve, tls
 from tests.support.plugins.testkit import AmbiguousCall, HttpCall
@@ -34,12 +33,7 @@ from tests.support.plugins.testkit import AmbiguousCall, HttpCall
 NAMES = ("dewpoint.test",)
 
 
-@pytest.fixture(autouse=True)
-def testkit_type(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(CONNECTION_TYPES, "testkit", TESTKIT_TYPE)
-
-
-def network(worker: Any, tenant: uuid.UUID, keys: FixtureKeys | None = None) -> Network:
+def network(worker: Any, tenant: uuid.UUID, keys: FixtureKeys | None = None, types: Any = None) -> Network:
     loopback = AllowEntry(ipaddress.ip_network("127.0.0.1/32"), None, tenant)
     return Network(
         guard=guard({"dewpoint.test": ["127.0.0.1"]}, [loopback]),
@@ -47,14 +41,16 @@ def network(worker: Any, tenant: uuid.UUID, keys: FixtureKeys | None = None) -> 
         sessionmaker=worker,
         keys=keys or FixtureKeys(),
         ssl_context=tls(NAMES).client_context(),
+        types=types_for_testkit() if types is None else types,
     )
 
 
 def attempt(
-    worker: Any, seeded: Any, node: type = HttpCall, simulated: bool = False, keys: FixtureKeys | None = None
-) -> Any:
+    worker: Any, seeded: Any, node: type = HttpCall, simulated: bool = False, keys: FixtureKeys | None = None,
+    types: Any = None,
+) -> Any:  # fmt: skip
     store = DbRunStore(worker, FixtureKeys())
-    return network(worker, seeded.tenant, keys).attempt(
+    return network(worker, seeded.tenant, keys, types).attempt(
         tenant_id=seeded.tenant, run_id=seeded.run, step_id=seeded.step, root_run_id=seeded.run, node=node,
         simulated=simulated, remember=store.remember, beat=lambda: None,
     )  # fmt: skip
@@ -181,8 +177,8 @@ async def test_the_plugin_can_change_neither_the_origin_nor_the_credentials(
 
 async def test_an_empty_scope_is_a_cooldown_and_nothing_is_sent(owner_sessionmaker, worker_sessionmaker) -> None:
     async with serve(respond(), tls_names=NAMES) as server:
-        seeded, cid = await _setup(owner_sessionmaker, server.port, capacity=1, refill_per_s=0.001)
-        a = attempt(worker_sessionmaker, seeded)
+        seeded, cid = await _setup(owner_sessionmaker, server.port)
+        a = attempt(worker_sessionmaker, seeded, types=types_for_testkit(capacity=1, refill_per_s=0.001))
         try:
             conn = await a.connection(cid)
             await conn.http.request("GET", "/")
@@ -331,3 +327,27 @@ async def test_quota_identity_survives_a_data_key_rotation(owner_sessionmaker, w
         await tenant_scope(s, seeded.tenant)
         scopes = (await s.execute(text("select scope from rate_buckets where scope like 'testkit.token:%'"))).all()
     assert len(scopes) == 1
+
+
+async def test_a_type_no_installed_plugin_declares_is_unavailable(owner_sessionmaker, worker_sessionmaker) -> None:
+    async with serve(respond(), tls_names=NAMES) as server:
+        seeded, cid = await _setup(owner_sessionmaker, server.port)
+        a = attempt(worker_sessionmaker, seeded, types={})
+        try:
+            with pytest.raises(ConnectionUnavailable):
+                await a.connection(cid)
+        finally:
+            await a.aclose()
+    assert server.requests == []
+
+
+async def test_a_stored_config_its_type_refuses_is_unavailable(owner_sessionmaker, worker_sessionmaker) -> None:
+    async with serve(respond(), tls_names=NAMES) as server:
+        seeded, cid = await _setup(owner_sessionmaker, server.port, extra="written behind the API's back")
+        a = attempt(worker_sessionmaker, seeded)
+        try:
+            with pytest.raises(ConnectionUnavailable):
+                await a.connection(cid)
+        finally:
+            await a.aclose()
+    assert server.requests == []

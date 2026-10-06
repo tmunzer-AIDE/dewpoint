@@ -16,8 +16,9 @@
 
 import asyncio
 import email.utils
+import json
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
@@ -25,13 +26,13 @@ from typing import Any, Protocol
 
 import httpx
 import structlog
-from pydantic import BaseModel, SecretStr, ValidationError
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from dewpoint.core.claims.cipher import ClaimCipher, ClaimUnreadableError
+from dewpoint.core.connections.declared import DeclaredType, InvalidValueError
 from dewpoint.core.connections.service import PURPOSE as SECRET_PURPOSE
-from dewpoint.core.connections.types import CONNECTION_TYPES, ConnectionType
 from dewpoint.core.crypto.keys import KeySource, key_unreadable
 from dewpoint.core.db import tenant_scope, unavailable
 from dewpoint.core.egress.guard import (
@@ -57,6 +58,7 @@ from dewpoint.core.models.workflows import WorkflowVersion
 from dewpoint.core.ratelimit import scopes as rate_scopes
 from dewpoint.core.ratelimit.buckets import CooldownError, Scope, acquire, block
 from dewpoint.sdk import (
+    ConnectionType,
     ConnectionUnavailable,
     Cooldown,
     EgressRefused,
@@ -64,7 +66,9 @@ from dewpoint.sdk import (
     MaybeSent,
     Node,
     NotSent,
+    Plugin,
     RateLimited,
+    ReadOnly,
     RedirectRefused,
     ResponseTooLarge,
     ResponseUnreadable,
@@ -128,6 +132,26 @@ class StoredConnection:
     type: str
     config: Mapping[str, Any]
     secret_ct: bytes | None
+    revision: int = 0
+
+
+@dataclass(frozen=True)
+class WorkerType:
+    """A connection type as the worker uses it (plugins-3 D11): the declaration the API also reads, from which base URL,
+    credentials and quota scopes are computed the same way on both sides, and the plugin's code (its models,
+    `verify()`)."""
+
+    declared: DeclaredType
+    code: ConnectionType
+
+
+def worker_types(plugins: Iterable[Plugin]) -> dict[str, WorkerType]:
+    """The connection types the installed plugins declare, by key."""
+    return {
+        kind.key: WorkerType(DeclaredType.from_manifest(plugin.name, kind.manifest()), kind)
+        for plugin in plugins
+        for kind in plugin.connection_types
+    }
 
 
 class ConnectionSource(Protocol):
@@ -186,19 +210,18 @@ class DbConnections:
         async with self.sessionmaker() as s, s.begin():
             await tenant_scope(s, tenant_id)
             found = await s.execute(
-                select(ConnectionRow.type, ConnectionRow.config, ConnectionRow.secret_ct).where(
+                select(ConnectionRow.type, ConnectionRow.config, ConnectionRow.secret_ct, ConnectionRow.revision).where(
                     ConnectionRow.id == connection_id, ConnectionRow.tenant_id == tenant_id
                 )
             )
             row = found.first()
-        return StoredConnection(row[0], dict(row[1]), row[2]) if row is not None else None
+        return StoredConnection(row[0], dict(row[1]), row[2], row[3]) if row is not None else None
 
 
-def secret_strings(secret: BaseModel) -> list[str]:
+def secret_strings(secret: Mapping[str, Any]) -> list[str]:
     """Every string of a secret the index must know (D5): each value, and a secret URL's path and long parts."""
     out: list[str] = []
-    for value in secret.model_dump().values():
-        text = value.get_secret_value() if isinstance(value, SecretStr) else value
+    for text in secret.values():
         if not isinstance(text, str) or len(text) < MIN_SECRET:
             continue
         out.append(text)
@@ -231,7 +254,9 @@ def retry_after_s(value: str | None, now: datetime) -> float | None:
 
 @dataclass(frozen=True)
 class Network:
-    """What the worker's steps reach the network with: one per process, an attempt's resources made from it."""
+    """What the worker's steps and plugin calls reach the network with: one per process, an attempt's or a call's
+    resources made from it. `types`: the installed plugins' connection types; a connection of any other is
+    unavailable."""
 
     guard: Guard
     connections: ConnectionSource
@@ -240,6 +265,7 @@ class Network:
     ssl_context: Any = None
     http_limits: HttpLimits = field(default_factory=HttpLimits)
     net_limits: NetLimits = field(default_factory=NetLimits)
+    types: Mapping[str, WorkerType] = field(default_factory=dict)
 
     def attempt(
         self,
@@ -256,8 +282,38 @@ class Network:
         return AttemptNetwork(self, tenant_id, run_id, step_id, root_run_id, node, simulated, remember, beat)
 
 
+class Channel(Protocol):
+    """What a connection's HTTP sends through: a step attempt's network, or a plugin call's (read-only)."""
+
+    network: Network
+    tenant_id: uuid.UUID
+
+    @property
+    def resends(self) -> bool: ...  # whether a request may be repeated after a short `Retry-After`
+
+    @property
+    def scope_wait_s(self) -> float: ...  # the longest wait for a quota token before `Cooldown`
+
+    @property
+    def read_only(self) -> bool: ...  # GET and HEAD only, refused before anything is sent
+
+    def beat(self) -> None: ...
+
+    async def send[T](self, call: Callable[[], Awaitable[T]]) -> T: ...
+
+    def core_http(self) -> GuardedHttp: ...
+
+
+READ_METHODS = frozenset({"GET", "HEAD"})
+
+
+def _check_method(channel: Channel, method: str) -> None:
+    if channel.read_only and (not isinstance(method, str) or method.upper() not in READ_METHODS):
+        raise ReadOnly()
+
+
 class _PlainHttp:
-    def __init__(self, attempt: "AttemptNetwork") -> None:
+    def __init__(self, attempt: Channel) -> None:
         self._attempt = attempt
 
     async def request(
@@ -271,6 +327,7 @@ class _PlainHttp:
         json: Any = None,
         follow_same_origin: int = 0,
     ) -> HttpResponse:
+        _check_method(self._attempt, method)
         return await self._attempt.send(
             lambda: self._attempt.core_http().request(
                 method, url, headers=headers, params=params, content=content, json=json,
@@ -337,7 +394,7 @@ class ConnectionHttp:
 
     def __init__(
         self,
-        attempt: "AttemptNetwork",
+        attempt: Channel,
         base: httpx.URL,
         credentials: Mapping[str, str],
         scopes: Callable[[], Awaitable[list[Scope]]],
@@ -365,20 +422,21 @@ class ConnectionHttp:
         json: Any = None,
         follow_same_origin: int = 0,
     ) -> HttpResponse:
+        _check_method(self._attempt, method)
         target = self._target(url)
         reserved = {name.lower() for name in self._credentials}
         if any(name.lower() in reserved for name in headers or {}):
             raise InvalidRequest()
         sent_headers = {**(headers or {}), **self._credentials}
         attempt = self._attempt
-        resends = attempt.node.side_effect in RESENDS
+        resends = attempt.resends
         waited, retries = 0.0, 0
         while True:
             try:
                 if not self._scopes:
                     self._scopes = await self._scopes_of()
                 await acquire(
-                    attempt.network.sessionmaker, attempt.tenant_id, self._scopes, max_wait_s=SCOPE_WAIT_S,
+                    attempt.network.sessionmaker, attempt.tenant_id, self._scopes, max_wait_s=attempt.scope_wait_s,
                     beat=attempt.beat,
                 )  # fmt: skip
             except CooldownError:
@@ -421,6 +479,74 @@ class ConnectionHttp:
             _log.warning("rate_block_unrecorded", error=type(e).__name__)
 
 
+async def credential_key(network: Network, tenant_id: uuid.UUID) -> Callable[[str], str]:
+    """The tenant's scope key (made the first time): the same whichever data-key version this worker holds."""
+    sealer = ClaimCipher(network.keys, purpose=rate_scopes.PURPOSE)
+    async with network.sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant_id)
+        key = await rate_scopes.scope_key(s, sealer, tenant_id, create=True)
+    assert key is not None  # noqa: S101 - made when missing
+    return rate_scopes.credential_hasher(key)
+
+
+@dataclass(frozen=True)
+class Unsealed:
+    """A connection opened for one use: its validated config, its secret (which only the runtime holds), and what the
+    runtime sends with it."""
+
+    id: uuid.UUID
+    type: str
+    kind: WorkerType
+    stored_config: Mapping[str, Any]
+    config: Mapping[str, Any]
+    secret: Mapping[str, Any]
+    base: httpx.URL
+    credentials: Mapping[str, str]
+
+    def opened(self, channel: Channel, mac: Callable[[], Awaitable[Callable[[str], str]]]) -> OpenedConnection:
+        async def scopes() -> list[Scope]:
+            return self.kind.declared.scopes(self.stored_config, self.secret, await mac())
+
+        return OpenedConnection(
+            self.id, self.type, MappingProxyType(dict(self.config)),
+            ConnectionHttp(channel, self.base, self.credentials, scopes),
+        )  # fmt: skip
+
+
+async def unseal(
+    network: Network, tenant_id: uuid.UUID, connection_id: uuid.UUID, stored: StoredConnection, allowed: frozenset[str]
+) -> Unsealed:
+    """The connection, if it's of a type the caller may use and the installed plugins declare, its stored values are
+    ones that type accepts, and its secret opens: else `ConnectionUnavailable`, or `NotSent` when the keyring didn't
+    answer. Nothing is sent."""
+    kind = network.types.get(stored.type)
+    if kind is None or stored.type not in allowed or stored.secret_ct is None:
+        raise ConnectionUnavailable()
+    try:
+        raw = await ClaimCipher(network.keys, purpose=SECRET_PURPOSE).open(
+            str(tenant_id), str(connection_id), stored.secret_ct
+        )
+        secret = kind.declared.secret(json.loads(raw))
+        stored_config = kind.declared.config(stored.config)
+        config = kind.code.Config.model_validate(stored_config).model_dump(mode="json")
+    except (ClaimUnreadableError, InvalidValueError, ValidationError, ValueError):
+        raise ConnectionUnavailable() from None
+    except Exception as e:
+        if key_unreadable(e) or unavailable(e):
+            raise NotSent() from None  # the keyring didn't answer: nothing was sent, a retry may succeed
+        raise
+    url = kind.declared.base_url(stored_config)
+    try:
+        base = httpx.URL(url) if url is not None else None
+    except (httpx.InvalidURL, ValueError, TypeError):
+        base = None
+    if base is None or base.scheme not in ("http", "https") or not base.host:  # plain http still needs an entry
+        raise ConnectionUnavailable()
+    return Unsealed(
+        connection_id, stored.type, kind, stored_config, config, secret, base, kind.declared.credentials(secret)
+    )
+
+
 class AttemptNetwork:
     """One attempt's network for one step of one tenant's run."""
 
@@ -444,6 +570,18 @@ class AttemptNetwork:
         self._http: GuardedHttp | None = None
         self._net: GuardedNet | None = None
         self._named: frozenset[uuid.UUID] | None = None
+
+    @property
+    def resends(self) -> bool:
+        return self.node.side_effect in RESENDS
+
+    @property
+    def scope_wait_s(self) -> float:
+        return SCOPE_WAIT_S
+
+    @property
+    def read_only(self) -> bool:
+        return False
 
     @property
     def uncertain(self) -> bool:
@@ -493,13 +631,7 @@ class AttemptNetwork:
         return _Refused() if self.simulated else _PlainNet(self)
 
     async def _credential_key(self) -> Callable[[str], str]:
-        """The tenant's scope key (made the first time): the same whichever data-key version this worker holds."""
-        sealer = ClaimCipher(self.network.keys, purpose=rate_scopes.PURPOSE)
-        async with self.network.sessionmaker() as s, s.begin():
-            await tenant_scope(s, self.tenant_id)
-            key = await rate_scopes.scope_key(s, sealer, self.tenant_id, create=True)
-        assert key is not None  # noqa: S101 - made when missing
-        return rate_scopes.credential_hasher(key)
+        return await credential_key(self.network, self.tenant_id)
 
     async def connection(self, connection_id: uuid.UUID) -> OpenedConnection:
         if self.simulated:
@@ -514,42 +646,11 @@ class AttemptNetwork:
             if unavailable(e):  # the database didn't answer: nothing was sent
                 raise NotSent() from None
             raise
-        if connection_id not in self._named:
+        if connection_id not in self._named or stored is None:
             raise ConnectionUnavailable()
-        kind: ConnectionType | None = CONNECTION_TYPES.get(stored.type) if stored is not None else None
-        if stored is None or kind is None or stored.type not in self.node.credentials or kind.base_url is None:
-            raise ConnectionUnavailable()
-        if stored.secret_ct is None:
-            raise ConnectionUnavailable()
-        try:
-            raw = await ClaimCipher(self.network.keys, purpose=SECRET_PURPOSE).open(
-                str(self.tenant_id), str(connection_id), stored.secret_ct
-            )
-            secret = kind.secret_model.model_validate_json(raw)
-            config = kind.config_model.model_validate(stored.config)
-        except (ClaimUnreadableError, ValidationError, ValueError):
-            raise ConnectionUnavailable() from None
-        except Exception as e:
-            if key_unreadable(e) or unavailable(e):
-                raise NotSent() from None  # the keyring didn't answer: nothing was sent, a retry may succeed
-            raise
-        await self._remember(str(self.tenant_id), str(self.root_run_id), secret_strings(secret))
-        fields = {k: (v.get_secret_value() if isinstance(v, SecretStr) else v) for k, v in secret.model_dump().items()}
-        credentials = {kind.auth.header: kind.auth.template.format(**fields)} if kind.auth is not None else {}
-
-        async def scopes() -> list[Scope]:
-            return kind.rate_scopes(config, await self._credential_key(), secret) if kind.rate_scopes else []
-
-        try:
-            base = httpx.URL(kind.base_url(config, secret))
-        except (httpx.InvalidURL, ValueError):
-            raise ConnectionUnavailable() from None
-        if base.scheme not in ("http", "https") or not base.host:  # plain http still needs an allowlist entry
-            raise ConnectionUnavailable()
-        return OpenedConnection(
-            connection_id, stored.type, MappingProxyType(dict(stored.config)),
-            ConnectionHttp(self, base, credentials, scopes),
-        )  # fmt: skip
+        unsealed = await unseal(self.network, self.tenant_id, connection_id, stored, frozenset(self.node.credentials))
+        await self._remember(str(self.tenant_id), str(self.root_run_id), secret_strings(unsealed.secret))
+        return unsealed.opened(self, self._credential_key)
 
     async def aclose(self) -> None:
         if self._http is not None:
