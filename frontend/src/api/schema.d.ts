@@ -1170,6 +1170,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/trigger-types": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Trigger Types
+         * @description The triggers the synced plugins declare (plugins-3 D17): an endpoint for one is set up as it says, a binding
+         *     filters on its topic pointer, and a topic's schema types a workflow's trigger.
+         */
+        get: operations["trigger_types_api_v1_trigger_types_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/health/live": {
         parameters: {
             query?: never;
@@ -1752,6 +1773,43 @@ export interface components {
         TotpEnrollOut: {
             /** Otpauth Uri */
             otpauth_uri: string;
+        };
+        /** TriggerEndpointOut */
+        TriggerEndpointOut: {
+            /**
+             * Auth
+             * @enum {string}
+             */
+            auth: "bearer" | "hmac";
+            /** Events Pointer */
+            events_pointer: string | null;
+            /**
+             * Id Source
+             * @constant
+             */
+            id_source: "none";
+        };
+        /**
+         * TriggerTypeOut
+         * @description A trigger a synced plugin declares (plugins-3 D17): how its webhook endpoint is set up, where an event names its
+         *     topic, and each topic's event schema, which types a workflow's trigger.
+         */
+        TriggerTypeOut: {
+            endpoint: components["schemas"]["TriggerEndpointOut"];
+            /** Key */
+            key: string;
+            /** Label */
+            label: string;
+            /** Plugin */
+            plugin: string;
+            /** Topic Pointer */
+            topic_pointer: string;
+            /** Topics */
+            topics: {
+                [key: string]: {
+                    [key: string]: unknown;
+                };
+            };
         };
         /** UserIn */
         UserIn: {
@@ -4435,6 +4493,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    trigger_types_api_v1_trigger_types_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TriggerTypeOut"][];
                 };
             };
         };

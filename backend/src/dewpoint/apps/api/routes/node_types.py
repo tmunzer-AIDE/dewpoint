@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps.api.deps import get_keyring
-from dewpoint.apps.api.responses import OptionsOut
+from dewpoint.apps.api.responses import OptionsOut, TriggerTypeOut
 from dewpoint.core.authz.permissions import ROLE_PERMISSIONS, P
 from dewpoint.core.connections.declared import declared_types
 from dewpoint.core.crypto.keyring import Keyring
@@ -43,6 +43,13 @@ async def node_types(db: AsyncSession = Depends(get_db, scope="function")) -> li
         }
         for row in await registry.list_node_types(db)
     ]
+
+
+@router.get("/trigger-types", dependencies=[Depends(active_session)], response_model=list[TriggerTypeOut])
+async def trigger_types(db: AsyncSession = Depends(get_db, scope="function")) -> list[dict[str, Any]]:
+    """The triggers the synced plugins declare (plugins-3 D17): an endpoint for one is set up as it says, a binding
+    filters on its topic pointer, and a topic's schema types a workflow's trigger."""
+    return await registry.list_triggers(db)
 
 
 class OptionsIn(BaseModel):

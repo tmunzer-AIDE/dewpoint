@@ -495,3 +495,10 @@ Rulings:
   the schema (each declared property filled, to a bounded depth), with the example's values laid over where they
   fit. Recommendation: switch to schema-built fixtures with example values laid over - the schema is the complete
   shape - for the owner's ruling at the checkpoint.
+- Ruling: the Mist webhook trigger (`mist.webhook`) declares a bearer endpoint, no events pointer and no event ids, its
+  topic at `/topic`, and each of the OAS's 30 topics' envelope schema, relaxed as an output is (93 KB in all), its
+  `topic` fixed to the topic's name; every one passes publish's checks as a workflow's input schema. Its production
+  support still waits for a real delivery (D17, 2b-4 D13) - cost if wrong: none until then.
+- Ruling: `GET /api/v1/trigger-types` (any active session) lists the synced plugins' triggers, with each topic's
+  schema; nothing creates the endpoint or the binding for the editor yet (the existing webhook routes do, with the
+  declared settings) - D17 asks the editor to type pills per topic, which needs the schemas - cost if wrong: none.
