@@ -473,3 +473,9 @@ M8. **The graph tests' node type carries `icon` and `options`** (Task 9; follows
     `icon: null, options: []`. Five non-null assertions on `edges` and `nodes`, which the generated `Graph` declares
     present, are dropped (typescript-eslint's `no-unnecessary-type-assertion`). - The schema the plan was written
     against had neither field. - None: test fixtures only.
+M9. **dagre's graph is typed with its own `NodeLabel`** (Task 10): checked in the installed 3.1.1 (default export
+    `{graphlib, layout, …}`; graphlib 4.0.5's `Graph<GraphLabel, NodeLabel, EdgeLabel>` with `setGraph`,
+    `setDefaultEdgeLabel`, `setNode`, `setEdge`, `hasNode`, `node`). Untyped, its labels are `any`, which
+    typescript-eslint refuses; `new dagre.graphlib.Graph<object, NodeLabel, object>()` types them, and `x`/`y`
+    (optional in `NodeLabel`) are read with a default. Positions are the offset of each card's centre from the start
+    card's, which equals the plan's top-left arithmetic for cards of one size. - Lint. - None: the layout tests hold.
