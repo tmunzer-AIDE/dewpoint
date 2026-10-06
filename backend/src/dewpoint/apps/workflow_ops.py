@@ -8,11 +8,12 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.authz.permissions import ROLE_PERMISSIONS, P
 from dewpoint.core.config import Settings
+from dewpoint.core.connections import service as connections
 from dewpoint.core.http import TenantContext
 from dewpoint.core.models.workflows import Workflow, WorkflowVersion
 from dewpoint.core.plugins import lifecycle, registry
@@ -149,6 +150,48 @@ def abi_reasons(version_id: uuid.UUID, stale: list[tuple[uuid.UUID, int]], curre
     ]
 
 
+_CONNECTION_UNKNOWN = "No connection of this tenant has this id."
+_CONNECTION_MISSING = (
+    "A connection that a pinned sub-flow or failure handler (or this version) names no longer exists: publish that "
+    "workflow again with another connection."
+)
+
+
+async def _closure_connection_errors(
+    s: AsyncSession, tenant_id: uuid.UUID, version_ids: list[uuid.UUID]
+) -> list[Diagnostic]:
+    """Every connection the published versions of a closure name still exists, locked FOR SHARE (plugins-3 D6; the
+    second review's finding 3): a new version never pins what can no longer run, nor does enabling or activating."""
+    if not version_ids:
+        return []
+    rows = await s.execute(select(WorkflowVersion.connection_ids).where(WorkflowVersion.id.in_(version_ids)))
+    named = sorted({c for (ids,) in rows.all() for c in ids or ()}, key=str)
+    found = await connections.named(s, tenant_id, named)
+    if all(c in found for c in named):
+        return []
+    return [Diagnostic(code="connection.missing", message=_CONNECTION_MISSING)]
+
+
+_CONNECTION_TYPE = "This connection isn't of the type this field needs."
+
+
+async def _connection_errors(
+    s: AsyncSession, tenant_id: uuid.UUID, sites: tuple[tuple[str, str, uuid.UUID, str], ...]
+) -> list[Diagnostic]:
+    """Each connection a node names is one of the tenant's, of the type its field declares (plugins-3 D6), locked FOR
+    SHARE until the version is inserted, so a deletion can't slip between the check and the insert."""
+    found = await connections.named(s, tenant_id, sorted({named for _, _, named, _ in sites}, key=str))
+    errors: list[Diagnostic] = []
+    for node, fld, named, wanted in sites:
+        if named not in found:
+            errors.append(Diagnostic(code="connection.unknown", message=_CONNECTION_UNKNOWN, node=uuid.UUID(node),
+                                     field=fld))  # fmt: skip
+        elif found[named] != wanted:
+            errors.append(Diagnostic(code="connection.wrong_type", message=_CONNECTION_TYPE, node=uuid.UUID(node),
+                                     field=fld))  # fmt: skip
+    return errors
+
+
 async def _pin_abi_errors(s: AsyncSession, pins: list[WorkflowVersion]) -> list[Diagnostic]:
     """Every version a new one would run must be of the ABI it's published for, this build's (spec §7): so a parent is
     published again only after its sub-flows and failure handler."""
@@ -200,6 +243,12 @@ async def publish(
     errors = _lifecycle_errors(await lifecycle.states(s, entries), refuse_deprecated=True)
     if errors:
         return Published(None, errors, warnings)
+    errors = await _connection_errors(s, ctx.tenant_id, checked.result.connections)
+    errors += await _closure_connection_errors(
+        s, ctx.tenant_id, sorted({i for v in pins for i in v.closure_version_ids}, key=str)
+    )
+    if errors:
+        return Published(None, errors, warnings)
     version_id = uuid.uuid4()
     graph_settings = checked.graph.settings
     authored = graph_hash(checked.graph)
@@ -236,6 +285,7 @@ async def publish(
             declassified=[
                 {"node": node, "field": fld, "reveals": reveals} for node, fld, reveals in checked.result.declassified
             ],
+            connection_ids=sorted({named for _, _, named, _ in checked.result.connections}, key=str),
             graph_hash=authored,
             version_hash=version_hash(
                 graph_hash=authored,
@@ -273,6 +323,7 @@ async def _check_runnable(s: AsyncSession, version: WorkflowVersion) -> list[Dia
     await _lifecycle_locked()
     current = await lifecycle.states(s, entries)
     errors = _lifecycle_errors(current, refuse_deprecated=False)
+    errors += await _closure_connection_errors(s, version.tenant_id, list(version.closure_version_ids))
     if errors:
         raise NotActivatableError(errors)
     return [

@@ -306,3 +306,15 @@ three gaps in what the fixes claimed. What became of each:
     and 1 skipped (`test_limits.py` is Linux only: its 7 tests skip on macOS) in 47 s, of which about 32 s is
     collection and imports. The slowest: the replay in five processes 5.0 s, the task cost 3.5 s setup and 2.4 s.
     Estimate for all 406 here: 2 to 5 minutes. Not run until the owner says.
+63. `main` moved on to 15084df (plugins-3a-1, #40), so the branch merges it - a merge commit; no commit rewritten.
+    One textual conflict, the CLI: both command groups kept (`platform egress`, `api openapi`). One semantic break:
+    3a-1's GET of one connection adds `cooldowns`, which 4a's strict `ConnectionOut` refused - main's own two tests
+    failed with a 500 on the merged tree - so that route declares `ConnectionDetailOut` (`cooldowns`: a list of
+    `{scope, until}`, or null); the schema copy and the client's types are regenerated. On the merged tree: the
+    backend's parallel suite (without the serial CEL group) 2,269 passed and 2 failed under load, both passing
+    since; the dispatcher's 202 tests pass; ruff, mypy, import contracts, pip-licenses and schema drift are clean;
+    the frontend's 292 tests, lint, types, build, `check:api` and licences pass; the browser gate passes 7 of 7.
+    The flaky test (`test_reconcile.py::test_a_queued_request_whose_run_already_ended_is_never_started_again`)
+    failed 4 times while two other sessions' suites loaded the machine (load about 30 on 14 cores) and passed 5 of 5
+    at 6482c53, at `origin/main`, at f6bf190 and on the merged tree once the load fell; its code is the same in
+    all four - a load-sensitive flake that predates 4a, for a separate task.

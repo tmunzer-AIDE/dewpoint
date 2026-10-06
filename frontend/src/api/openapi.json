@@ -145,6 +145,101 @@
         "title": "ConnectionCreateIn",
         "type": "object"
       },
+      "ConnectionDetailOut": {
+        "additionalProperties": false,
+        "description": "One connection, with each of its quota scopes now cooling down (plugins-3 D10); null when they can't be\ncomputed (an unreadable secret).",
+        "properties": {
+          "config": {
+            "additionalProperties": true,
+            "title": "Config",
+            "type": "object"
+          },
+          "cooldowns": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/CooldownOut"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cooldowns"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "last_verified_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Verified At"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "privilege": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Privilege"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "secret_set": {
+            "title": "Secret Set",
+            "type": "boolean"
+          },
+          "status": {
+            "enum": [
+              "unverified",
+              "ok",
+              "error"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "status_detail": {
+            "title": "Status Detail",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "name",
+          "revision",
+          "config",
+          "secret_set",
+          "status",
+          "status_detail",
+          "privilege",
+          "last_verified_at",
+          "cooldowns"
+        ],
+        "title": "ConnectionDetailOut",
+        "type": "object"
+      },
       "ConnectionOut": {
         "additionalProperties": false,
         "properties": {
@@ -312,6 +407,25 @@
           "secret_fields"
         ],
         "title": "ConnectionTypeOut",
+        "type": "object"
+      },
+      "CooldownOut": {
+        "additionalProperties": false,
+        "properties": {
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "until": {
+            "title": "Until",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "until"
+        ],
+        "title": "CooldownOut",
         "type": "object"
       },
       "CsrfOut": {
@@ -2498,7 +2612,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ConnectionOut"
+                  "$ref": "#/components/schemas/ConnectionDetailOut"
                 }
               }
             },

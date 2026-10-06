@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps.api.deps import get_keyring
-from dewpoint.apps.api.responses import ConnectionOut, ConnectionTypeOut
+from dewpoint.apps.api.responses import ConnectionDetailOut, ConnectionOut, ConnectionTypeOut
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.connections import service
 from dewpoint.core.connections.types import CONNECTION_TYPES, MIST_CLOUDS
@@ -102,13 +102,15 @@ async def create(
     return service.to_out(conn)
 
 
-@router.get("/t/{tenant_id}/connections/{connection_id}", response_model=ConnectionOut)
+@router.get("/t/{tenant_id}/connections/{connection_id}", response_model=ConnectionDetailOut)
 async def get_one(
     connection_id: uuid.UUID,
     ctx: TenantContext = Depends(require(P.CONNECTION_VIEW)),
     db: AsyncSession = Depends(get_db, scope="function"),
+    keyring: Keyring = Depends(get_keyring),
 ) -> dict[str, object]:
-    return service.to_out(await _get(db, ctx, connection_id))
+    conn = await _get(db, ctx, connection_id)
+    return {**service.to_out(conn), "cooldowns": await service.cooldowns(db, keyring, conn)}
 
 
 @router.patch("/t/{tenant_id}/connections/{connection_id}", response_model=ConnectionOut)
@@ -137,7 +139,13 @@ async def delete(
     ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
     db: AsyncSession = Depends(get_db, scope="function"),
 ) -> Response:
-    await service.delete_connection(db, ctx, await _get(db, ctx, connection_id))
+    conn = await service.get_for_update(db, ctx.tenant_id, connection_id)
+    if conn is None:
+        raise HTTPException(404, detail={"error": "not_found"})
+    try:
+        await service.delete_connection(db, ctx, conn)
+    except service.ConnectionInUseError:
+        raise HTTPException(409, detail={"error": "connection_in_use"}) from None
     return Response(status_code=204)
 
 

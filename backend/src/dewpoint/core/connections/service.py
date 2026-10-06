@@ -7,14 +7,20 @@ from typing import Any
 import httpx
 from cryptography.exceptions import InvalidTag
 from pydantic import BaseModel, SecretStr
-from sqlalchemy import select, update
+from sqlalchemy import any_, literal, select, update
+from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from dewpoint.core.audit.service import record
 from dewpoint.core.connections.types import CONNECTION_TYPES, ConnectionType
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.http import TenantContext
 from dewpoint.core.models.connections import Connection
+from dewpoint.core.models.requests import RunRequest
+from dewpoint.core.models.workflows import Workflow, WorkflowVersion
+from dewpoint.core.ratelimit import scopes as rate_scopes
+from dewpoint.core.ratelimit.buckets import current_cooldowns
 
 PURPOSE = "connection.secret"
 
@@ -114,7 +120,64 @@ async def update_connection(
     return conn
 
 
+class ConnectionInUseError(Exception):
+    """An enabled workflow's active closure, or a request that hasn't started, names the connection (plugins-3 D6)."""
+
+
+async def get_for_update(s: AsyncSession, tenant_id: uuid.UUID, connection_id: uuid.UUID) -> Connection | None:
+    found = await s.execute(
+        select(Connection).where(Connection.id == connection_id, Connection.tenant_id == tenant_id).with_for_update()
+    )
+    return found.scalar_one_or_none()
+
+
+async def named(s: AsyncSession, tenant_id: uuid.UUID, ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:
+    """The tenant's connections among `ids`, with their types, locked FOR SHARE until the transaction ends, so a
+    deletion either sees the version that names them or waits for it (plugins-3 D6)."""
+    if not ids:
+        return {}
+    rows = await s.execute(
+        select(Connection.id, Connection.type)
+        .where(Connection.tenant_id == tenant_id, Connection.id.in_(ids))
+        .with_for_update(read=True)
+    )
+    return {cid: type_key for cid, type_key in rows.all()}
+
+
+async def in_use(s: AsyncSession, tenant_id: uuid.UUID, connection_id: uuid.UUID) -> bool:
+    """Whether an enabled workflow's active closure, or a request that hasn't started, names the connection."""
+    named_here = literal(connection_id, PgUUID(as_uuid=True))
+    active, closure = aliased(WorkflowVersion), aliased(WorkflowVersion)
+    enabled = (
+        select(literal(1))
+        .select_from(Workflow)
+        .join(active, active.id == Workflow.active_version_id)
+        .join(closure, closure.id == any_(active.closure_version_ids))
+        .where(Workflow.tenant_id == tenant_id, Workflow.enabled.is_(True), named_here == any_(closure.connection_ids))
+        .limit(1)
+    )
+    frozen, frozen_closure = aliased(WorkflowVersion), aliased(WorkflowVersion)
+    unstarted = (
+        select(literal(1))
+        .select_from(RunRequest)
+        .join(frozen, frozen.id == RunRequest.workflow_version_id)
+        .join(frozen_closure, frozen_closure.id == any_(frozen.closure_version_ids))
+        .where(
+            RunRequest.tenant_id == tenant_id,
+            RunRequest.status.in_(("queued", "starting")),
+            named_here == any_(frozen_closure.connection_ids),
+        )
+        .limit(1)
+    )
+    return (await s.execute(enabled)).first() is not None or (await s.execute(unstarted)).first() is not None
+
+
 async def delete_connection(s: AsyncSession, ctx: TenantContext, conn: Connection) -> None:
+    """Refused (ConnectionInUseError) while an enabled workflow's active closure, or a request that hasn't started,
+    names the connection. The row is locked first, so a publish naming it either waits or is seen."""
+    await s.execute(select(Connection.id).where(Connection.id == conn.id).with_for_update())
+    if await in_use(s, ctx.tenant_id, conn.id):
+        raise ConnectionInUseError()
     await s.delete(conn)
     await record(
         s,
@@ -194,6 +257,45 @@ async def _audit_verify(
         target_type="connection",
         target_id=str(connection_id),
         details=details,
+    )
+
+
+class _KeyringSealer:
+    """The keyring as a `Sealer` for the scope key: the claim cipher's layout, within the API's transaction."""
+
+    def __init__(self, s: AsyncSession, keyring: Keyring) -> None:
+        self._s, self._keyring = s, keyring
+
+    async def seal(self, tenant_id: str, context: str, plaintext: bytes) -> bytes:
+        return await self._keyring.encrypt(
+            self._s, tenant_id=uuid.UUID(tenant_id), purpose=rate_scopes.PURPOSE, context=context, plaintext=plaintext
+        )
+
+    async def open(self, tenant_id: str, context: str, blob: bytes) -> bytes:
+        return await self._keyring.decrypt(
+            self._s, tenant_id=uuid.UUID(tenant_id), purpose=rate_scopes.PURPOSE, context=context, blob=blob
+        )
+
+
+async def cooldowns(s: AsyncSession, keyring: Keyring, conn: Connection) -> list[dict[str, str]] | None:
+    """Each of the connection's quota scopes now cooling down (plugins-3 D10): its kind and its current cooldown, a live
+    value that can change, not a record of a failed attempt's deadline; never the scope's key. None when the scopes
+    can't be computed (an unreadable secret)."""
+    ct = _type(conn.type)
+    if ct.rate_scopes is None:
+        return []
+    try:
+        secret = await load_secret(s, keyring, conn)
+        key = await rate_scopes.scope_key(s, _KeyringSealer(s, keyring), conn.tenant_id, create=False)
+    except (InvalidTag, ValueError):
+        return None
+    # No scope key yet: no worker has charged a credential scope, so none can be cooling down; the others still count.
+    hasher = rate_scopes.credential_hasher(key) if key is not None else (lambda credential: "-")
+    scopes = ct.rate_scopes(ct.config_model.model_validate(conn.config), hasher, secret)
+    found = await current_cooldowns(s, conn.tenant_id, [scope.key for scope in scopes])
+    return sorted(
+        ({"scope": key.split(":", 1)[0], "until": until.isoformat()} for key, until in found.items()),
+        key=lambda x: (x["scope"], x["until"]),
     )
 
 

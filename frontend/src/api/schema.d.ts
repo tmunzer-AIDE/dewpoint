@@ -1145,6 +1145,40 @@ export interface components {
             /** Type */
             type: string;
         };
+        /**
+         * ConnectionDetailOut
+         * @description One connection, with each of its quota scopes now cooling down (plugins-3 D10); null when they can't be
+         *     computed (an unreadable secret).
+         */
+        ConnectionDetailOut: {
+            /** Config */
+            config: {
+                [key: string]: unknown;
+            };
+            /** Cooldowns */
+            cooldowns: components["schemas"]["CooldownOut"][] | null;
+            /** Id */
+            id: string;
+            /** Last Verified At */
+            last_verified_at: string | null;
+            /** Name */
+            name: string;
+            /** Privilege */
+            privilege: string | null;
+            /** Revision */
+            revision: number;
+            /** Secret Set */
+            secret_set: boolean;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "unverified" | "ok" | "error";
+            /** Status Detail */
+            status_detail: string;
+            /** Type */
+            type: string;
+        };
         /** ConnectionOut */
         ConnectionOut: {
             /** Config */
@@ -1202,6 +1236,13 @@ export interface components {
             label: string;
             /** Secret Fields */
             secret_fields: string[];
+        };
+        /** CooldownOut */
+        CooldownOut: {
+            /** Scope */
+            scope: string;
+            /** Until */
+            until: string;
         };
         /** CsrfOut */
         CsrfOut: {
@@ -2376,7 +2417,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ConnectionOut"];
+                    "application/json": components["schemas"]["ConnectionDetailOut"];
                 };
             };
             /** @description Validation Error */

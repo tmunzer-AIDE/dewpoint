@@ -4,6 +4,7 @@
 import asyncio
 import sys
 import types
+import uuid
 from datetime import UTC, datetime
 from typing import Any, ClassVar, Literal
 
@@ -18,6 +19,7 @@ from dewpoint.sdk import (
     RetryableError,
     SideEffect,
     StepContext,
+    connection_field,
     sensitive,
 )
 
@@ -291,8 +293,105 @@ class Leaky(Node):
         return LeakyOutput(token=token)
 
 
+class HttpCallConfig(BaseModel):
+    connection: uuid.UUID = connection_field("testkit")
+    path: str = "/"
+    method: Literal["GET", "POST"] = "GET"
+    body: str | None = None
+
+
+class HttpCallOutput(BaseModel):
+    status: int
+    body: str
+
+
+class HttpCall(Node):
+    """Calls its connection's service through the runtime's guarded HTTP (plugins-3 D4, D7)."""
+
+    type = "testkit.http_call"
+    version = 1
+    title = "HTTP call"
+    Config = HttpCallConfig
+    Output = HttpCallOutput
+    credentials = ("testkit",)
+    side_effect = SideEffect.IDEMPOTENT
+
+    async def run(self, ctx: StepContext, config: HttpCallConfig) -> HttpCallOutput:
+        conn = await ctx.connection(config.connection)
+        content = config.body.encode() if config.body is not None else None
+        answer = await conn.http.request(config.method, config.path, content=content)
+        return HttpCallOutput(status=answer.status_code, body=answer.content.decode(errors="replace"))
+
+
+class AmbiguousCall(HttpCall):
+    """The same call from a node whose request may not be repeated."""
+
+    type = "testkit.ambiguous_call"
+    side_effect = SideEffect.AMBIGUOUS
+
+
+class WriteThenReadConfig(BaseModel):
+    connection: uuid.UUID = connection_field("testkit")
+    read_url: str | None = None  # the read through ctx.http when set, else through the connection
+    concurrent: bool = False  # the write and the read at once
+    then_fail: bool = False  # after the write, the node's own FatalError
+
+
+class WriteThenRead(Node):
+    """Writes through its connection, then reads: a second call that fails mustn't make the write retried."""
+
+    type = "testkit.write_then_read"
+    version = 1
+    title = "Write, then read"
+    Config = WriteThenReadConfig
+    Output = HttpCallOutput
+    credentials = ("testkit",)
+    side_effect = SideEffect.AMBIGUOUS
+
+    async def run(self, ctx: StepContext, config: WriteThenReadConfig) -> HttpCallOutput:
+        conn = await ctx.connection(config.connection)
+        if config.concurrent and config.read_url is not None:
+            # the write is under way (received, its answer pending) when the read fails having sent nothing
+            write = asyncio.ensure_future(conn.http.request("POST", "/write", content=b"once"))
+            write.add_done_callback(lambda done: done.cancelled() or done.exception())
+            await asyncio.sleep(1)
+            await ctx.http.request("GET", config.read_url)
+        await conn.http.request("POST", "/write", content=b"once")
+        if config.then_fail:
+            raise FatalError("testkit.refused", "The read was refused.")
+        if config.read_url is not None:
+            answer = await ctx.http.request("GET", config.read_url)
+        else:
+            answer = await conn.http.request("GET", "/read")
+        return HttpCallOutput(status=answer.status_code, body=answer.content.decode(errors="replace"))
+
+
+class ReconcilableCall(HttpCall):
+    """The same call from a node that checks for its effect before any retry."""
+
+    type = "testkit.reconcilable_call"
+    side_effect = SideEffect.RECONCILABLE
+
+    async def reconcile(self, ctx: StepContext, config: HttpCallConfig) -> HttpCallOutput | None:
+        return None
+
+
 TESTKIT = Plugin(
     name="testkit",
     version="0.0.0",
-    nodes=(Echo, FailN, Slow, Sensitive, AmbiguousSend, SlowSend, Reconcile, Blob, SecretBlob, SlowEcho, Leaky),
+    nodes=(
+        Echo,
+        FailN,
+        Slow,
+        Sensitive,
+        AmbiguousSend,
+        SlowSend,
+        Reconcile,
+        Blob,
+        SecretBlob,
+        SlowEcho,
+        Leaky,
+        HttpCall,
+        AmbiguousCall,
+    ),  # fmt: skip
 )

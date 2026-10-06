@@ -100,6 +100,18 @@ class ConnectionOut(_Answer):
     last_verified_at: str | None
 
 
+class CooldownOut(_Answer):
+    scope: str
+    until: str
+
+
+class ConnectionDetailOut(ConnectionOut):
+    """One connection, with each of its quota scopes now cooling down (plugins-3 D10); null when they can't be
+    computed (an unreadable secret)."""
+
+    cooldowns: list[CooldownOut] | None
+
+
 class PlatformStatusOut(_Answer):
     environment: Literal["production", "development"] | None
     production_runs: bool
