@@ -165,6 +165,24 @@ def test_uvicorns_own_logging_configuration_gives_way_to_the_process(capsys: pyt
     assert (access["logger"], access["event"]) == ("uvicorn.access", '127.0.0.1:50000 - "GET /x HTTP/1.1" 500')
 
 
+@pytest.mark.parametrize("access_log", [True, False], ids=["access-log", "no-access-log"])
+def test_uvicorns_access_log_stays_as_uvicorn_was_told_however_often_the_process_is_configured(
+    capsys: pytest.CaptureFixture[str], access_log: bool
+) -> None:
+    """uvicorn writes an access line only while its access logger has a handler, its own or an ancestor's:
+    `--no-access-log` leaves it none and stops its propagation. An access line names the request's path and query."""
+    with stdlib_restored():
+        uvicorn.Config("dewpoint.apps.api.main:create_app", factory=True, access_log=access_log)  # configures logging
+        logs.configure()
+        logs.configure()
+        access = logging.getLogger("uvicorn.access")
+        written = access.hasHandlers()  # what uvicorn's protocols read
+        if written:
+            access.info('%s - "%s %s HTTP/%s" %d', "127.0.0.1:50000", "GET", "/x", "1.1", 200)
+    assert written is access_log
+    assert [r["logger"] for r in records(capsys.readouterr().err.splitlines())] == ["uvicorn.access"] * access_log
+
+
 LIFESPAN: dict[str, Any] = {"type": "lifespan", "asgi": {"version": "3.0", "spec_version": "2.0"}, "state": {}}
 STARTUP_FAILED, SHUTDOWN_FAILED = {"type": "lifespan.startup.failed"}, {"type": "lifespan.shutdown.failed"}
 STARTED, STOPPED = {"type": "lifespan.startup.complete"}, {"type": "lifespan.shutdown.complete"}

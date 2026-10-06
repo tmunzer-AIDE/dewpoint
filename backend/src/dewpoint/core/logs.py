@@ -109,15 +109,18 @@ _HANDLER.setFormatter(
 
 def configure() -> None:
     """This process's logging, applied where the process starts: structlog's lines go where structlog's default puts
-    them, stdout; the standard library's records, uvicorn's included, to stderr, through the root logger."""
+    them, stdout; the standard library's records, uvicorn's included, to stderr, through the root logger. A uvicorn
+    logger with handlers of its own gives them up; one uvicorn left without any nor propagation stays silent (uvicorn
+    writes an access line only while its logger has a handler: `--no-access-log` is that)."""
     structlog.configure(processors=[*_SHARED, exception_type, structlog.processors.JSONRenderer()])
     root = logging.getLogger()
     if _HANDLER not in root.handlers:
         root.addHandler(_HANDLER)
     for name in UVICORN:
         logger = logging.getLogger(name)
-        logger.handlers.clear()
-        logger.propagate = True
+        if logger.handlers:
+            logger.handlers.clear()
+            logger.propagate = True
 
 
 _FAILED = ("lifespan.startup.failed", "lifespan.shutdown.failed")

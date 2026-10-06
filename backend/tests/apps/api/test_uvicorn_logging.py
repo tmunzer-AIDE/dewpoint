@@ -14,6 +14,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from dewpoint.apps.api.main import create_app
+from dewpoint.core import logs
 from dewpoint.core.config import Settings
 from tests.support.logs import records, rendered, stdlib_restored
 from tests.support.server import failed_start, serving
@@ -60,6 +61,14 @@ def _routed(app: FastAPI) -> None:
         _raises()
 
 
+def _reconfigured(app: FastAPI) -> None:
+    @app.get("/ok")
+    async def ok() -> dict[str, str]:
+        return {"status": "ok"}
+
+    logs.configure()  # again: the process may configure itself more than once
+
+
 def _refused(app: FastAPI) -> None:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -90,6 +99,22 @@ async def test_a_request_error_reaches_uvicorns_log_by_its_type_only(capsys: pyt
     [failure] = [record for record in server if "error_type" in record]
     assert (failure["logger"], failure["error_type"]) == ("uvicorn.error", "RuntimeError")
     assert failure["where"][-1].startswith("test_uvicorn_logging.py:_raises:")
+    [access] = [record for record in server if record["logger"] == "uvicorn.access"]
+    assert access["event"].endswith('"GET /fails HTTP/1.1" 500')
+
+
+async def test_without_an_access_log_no_request_is_logged(capsys: pytest.CaptureFixture[str]) -> None:
+    """`--no-access-log`: an access line names the request's query, a token's place in a link."""
+    made: list[FastAPI] = []
+    token = "dwp_link-token-41c9e8"  # noqa: S105 - a test's token
+    with rendered() as lines, stdlib_restored():
+        async with serving(uvicorn.Config(_factory(made, _reconfigured), factory=True, access_log=False)) as url:
+            async with httpx.AsyncClient(base_url=url) as c:
+                r = await c.get("/ok", params={"token": token})
+    err = capsys.readouterr().err
+    assert r.status_code == 200
+    assert token not in err + "\n".join(lines())
+    assert [record for record in records(err.splitlines()) if record["logger"] == "uvicorn.access"] == []
 
 
 async def test_a_failed_startup_is_logged_by_its_type_only_and_still_stops_the_server(
