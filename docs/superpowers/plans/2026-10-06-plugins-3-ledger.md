@@ -510,3 +510,8 @@ Rulings:
   same workflow simulated sends nothing. A Mist `alarms` envelope recorded by ingress's own function is matched by a
   `/topic` binding and runs a workflow typed by the topic's schema; a `device-updowns` envelope matches nothing; an
   `alarms` envelope whose events aren't a list is refused by admission (`input_invalid`).
+
+Runs at `7e81c7d` (tasks 1-10 done), 2026-10-06: the full backend suite, 3145 passed, 8 skipped, in 6 min 12 s
+(`-n auto`, with the reviewer's targeted runs alongside); ruff, format, mypy, import contracts and the OpenAPI drift
+check pass; the web client's `check:api`, lint, typecheck, 292 tests and build pass. CodeQL locally with CI's CLI
+(2.27.1) and query filter over the whole tree: no findings in Python (45 queries) or JavaScript/TypeScript (89).
