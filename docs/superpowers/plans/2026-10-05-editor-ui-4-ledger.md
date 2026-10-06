@@ -500,3 +500,13 @@ M12. **The isolated stack builds the 4b worktree** (Task 11, scratchpad only): `
     CI's e2e job does. Project, ports, images' tags, secrets file and CSP are ruling 24's, unchanged. Base images:
     the ones 4a's gate built from. A gate run (rebuild, fresh database, admin, sync, e2e) takes about 1.8 minutes. -
     None.
+M13. **The canvas moves the view for the keyboard only, and placing never moves the canvas** (Task 12; the browser
+    gate's placing flow caught both). `reveal` recentred any item not wholly inside the canvas on every focus, a
+    pointer's included: a step placed with a click near the edge (the step's panel open, the canvas narrower) was
+    recentred off the click (273 px), and a press on a half-visible card would slide it from under the press before
+    the release. It now runs only for `:focus-visible` focus (Tab, the arrows, a change made from the keyboard). The
+    "Click an empty place…" bar sat above the canvas and pushed it down; when placing ended the canvas rose by the
+    bar's height (51 px) and the card with it. The bar now lies over the canvas's top edge. The plan's keyboard flow
+    also waits for focus to settle on the step a deleted one came after (a frame after the confirm) before Control+z,
+    asserting where focus goes. - The step a person places stays under the click. - Keyboard focus to a half-visible
+    item still brings it into view; a pointer's doesn't (the person can see it).

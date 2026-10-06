@@ -1,22 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
-// The editor (screen 1c): the draft, on a canvas. Task 12 adds the keyboard, Task 13 saving, Task 14 problems, Task 15
-// publishing and versions.
+// The editor (screen 1c): the draft, on a canvas, by pointer or keyboard alone (D16). Task 13 adds saving, Task 14
+// problems, Task 15 publishing and versions.
 import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useMemo, useState, type KeyboardEvent } from "react";
 import { Button } from "../../components/Button";
+import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { LoadError } from "../../components/LoadError";
 import { announce } from "../../lib/announce";
 import {
-  START, addAfter, asGraph, connect, insertBeforeEntry, insertOnEdge, moveNodes, nodesOf, type PortRef,
+  START, addAfter, asGraph, connect, deleteEdge, deleteNode, edgesOf, insertBeforeEntry, insertOnEdge, moveNodes,
+  nodesOf, portsOf, type PortRef,
 } from "../../lib/graph";  // prettier-ignore
-import { begin, record, type History } from "../../lib/history";
-import { layout } from "../../lib/layout";
+import { begin, record, redo, undo, type History } from "../../lib/history";
+import { CARD, layout } from "../../lib/layout";
 import { useDocumentTitle } from "../../lib/title";
 import {
-  canEdit, nodeTypesQuery, tenantQuery, workflowQuery, type GraphDoc, type NodeType, type WorkflowDetail,
+  canEdit, nodeTypesQuery, tenantQuery, workflowQuery, type GraphDoc, type GraphEdge, type NodeType,
+  type WorkflowDetail,
 } from "../../lib/workflows";  // prettier-ignore
 import { Canvas } from "./Canvas";
+import { NAV_KEYS, isPath, navModel, pathTo, step, type NavKey } from "./canvasNav";
+import { ConnectDialog } from "./ConnectDialog";
 import { item, type ItemAction } from "./items";
+import { StepPanel } from "./StepPanel";
 import { StepPicker, type PickMode } from "./StepPicker";
 import { Toolbar } from "./Toolbar";
 
@@ -38,11 +44,24 @@ function Editor({ tenantId, workflow, types, role }: { tenantId: string; workflo
   const editable = canEdit(role);
   const [focusId, setFocusId] = useState<string>(START);
   const [focusRequest, setFocusRequest] = useState<{ id: string; n: number } | null>(null);
+  const [trail, setTrail] = useState<string[] | null>(null); // the path the keys came by to the focused item
   const [picker, setPicker] = useState<PickMode | null>(null);
   const keyOf = (id: string) => nodesOf(doc).find((n) => n.id === id)?.key ?? "a step";
 
-  function focus(id: string) {
+  const portMap = useMemo(
+    () => new Map(nodesOf(doc).map((n) => [n.id, portsOf(n, typeMap.get(n.type))])),
+    [doc, typeMap],
+  );
+  const nav = useMemo(() => navModel(doc, (id) => portMap.get(id) ?? [], editable), [doc, portMap, editable]);
+  const shown = nav.order.includes(focusId) ? focusId : START; // a deleted item's tab stop falls back to the start card
+  const [connecting, setConnecting] = useState<PortRef | null>(null);
+  const [asking, setAsking] = useState<{ kind: "node"; id: string } | { kind: "edge"; edge: GraphEdge } | null>(null);
+  const [panel, setPanel] = useState<string | null>(null); // the step whose panel is open
+  const [placing, setPlacing] = useState<string | null>(null); // the step the next click on the canvas puts there
+
+  function focus(id: string, path: string[] | null = null) {
     setFocusId(id);
+    setTrail(path);
     setFocusRequest((r) => ({ id, n: (r?.n ?? 0) + 1 }));
   }
 
@@ -52,7 +71,122 @@ function Editor({ tenantId, workflow, types, role }: { tenantId: string; workflo
     if (then) focus(then);
   }
 
+  const firstPort = (nodeId: string): PortRef | null => {
+    const port = portMap.get(nodeId)?.[0];
+    return port ? { node: nodeId, port } : null;
+  };
+
+  /** `A`, the toolbar's Add step, and Enter on a "+": the picker for the focused item. */
+  function addFrom(id: string) {
+    if (id === START || id === item.port(START, "out")) return setPicker({ kind: "after", from: null });
+    if (id.startsWith("node:")) {
+      const from = firstPort(id.slice(5));
+      if (from) setPicker({ kind: "after", from });
+      else announce(`${keyOf(id.slice(5))} ends its branch: there's no port to add after`);
+      return;
+    }
+    if (id.startsWith("entry:")) return setPicker({ kind: "before", entry: id.slice(6) });
+    if (id.startsWith("edge:")) return setPicker({ kind: "insert", edge: nav.edges.get(id)! });
+    if (id.startsWith("port:")) {
+      const [, node, port] = id.split(":");
+      setPicker({ kind: "after", from: { node: node!, port: port! } });
+    }
+  }
+
+  function connectFrom(id: string) {
+    if (id.startsWith("port:") && !id.startsWith(`port:${START}:`)) {
+      const [, node, port] = id.split(":");
+      return setConnecting({ node: node!, port: port! });
+    }
+    if (id.startsWith("edge:")) return setConnecting(nav.edges.get(id)!.from as PortRef);
+    if (id.startsWith("node:")) {
+      const from = firstPort(id.slice(5));
+      if (from) setConnecting(from);
+    }
+  }
+
+  function askDelete(id: string) {
+    if (id.startsWith("node:")) setAsking({ kind: "node", id: id.slice(5) });
+    if (id.startsWith("edge:")) setAsking({ kind: "edge", edge: nav.edges.get(id)! });
+  }
+
+  function confirmDelete() {
+    if (!asking) return;
+    if (asking.kind === "node") {
+      const { doc: next, healed } = deleteNode(doc, asking.id);
+      // Focus goes to the step it came after (its own items are gone with it), or to the start card.
+      const inbound = edgesOf(doc).find((e) => e.to.node === asking.id);
+      const back = inbound ? item.node(inbound.from.node) : START;
+      if (panel === asking.id) setPanel(null);
+      change(next, `Deleted ${keyOf(asking.id)}${healed ? `; ${keyOf(healed.from.node)} now leads to ${keyOf(healed.to.node)}` : ""}`, back);
+    } else {
+      change(deleteEdge(doc, asking.edge), `Deleted the edge from ${keyOf(asking.edge.from.node)} to ${keyOf(asking.edge.to.node)}`, item.node(asking.edge.from.node));
+    }
+    setAsking(null);
+  }
+
+  function nudge(nodeId: string, key: NavKey) {
+    const n = nodesOf(doc).find((m) => m.id === nodeId);
+    if (!n) return;
+    const d = { ArrowUp: [0, -20], ArrowDown: [0, 20], ArrowLeft: [-20, 0], ArrowRight: [20, 0], Home: [0, 0] }[key];
+    change(moveNodes(doc, new Map([[nodeId, { x: (n.position?.x ?? 0) + d[0]!, y: (n.position?.y ?? 0) + d[1]! }]])), `Moved ${n.key}`);
+  }
+
+  /** The click that ends "Place on the canvas…": the step, centred on it (WCAG 2.5.7). Never on a read-only canvas. */
+  function place(at: { x: number; y: number }) {
+    if (!placing || !editable) return;
+    const id = placing;
+    setPlacing(null);
+    change(moveNodes(doc, new Map([[id, { x: at.x - CARD.width / 2, y: at.y - CARD.height / 2 }]])), `Placed ${keyOf(id)}`, item.node(id));
+  }
+
+  /** Escape stops placing first, before it closes a panel or a picker. */
+  function onEditorKeyCapture(e: KeyboardEvent<HTMLDivElement>) {
+    if (e.key !== "Escape" || !placing) return;
+    e.stopPropagation();
+    e.preventDefault();
+    setPlacing(null);
+    announce("Not placed");
+  }
+
+  function onCanvasKey(e: KeyboardEvent<HTMLDivElement>) {
+    const id = (e.target as HTMLElement).dataset.item;
+    if (!id || e.altKey) return;
+    const plain = !e.ctrlKey && !e.metaKey;
+    if (NAV_KEYS.includes(e.key) && plain) {
+      e.preventDefault();
+      if (e.shiftKey && editable && id.startsWith("node:")) return nudge(id.slice(5), e.key as NavKey);
+      // The path the keys came by while it still holds (at a join, the branch taken); else the walk's own path.
+      const path = trail && trail.at(-1) === id && isPath(nav, trail) ? trail : pathTo(nav, id);
+      const next = step(nav, path, e.key as NavKey);
+      if (next.at(-1) !== id) focus(next.at(-1)!, next);
+      return;
+    }
+    if (!editable || !plain) return;
+    if (e.key === "a" || e.key === "A") {
+      e.preventDefault();
+      addFrom(id);
+    } else if (e.key === "Delete" || e.key === "Backspace") {
+      e.preventDefault();
+      askDelete(id);
+    } else if (e.key === "c" || e.key === "C") {
+      e.preventDefault();
+      connectFrom(id);
+    }
+  }
+
+  /** Ctrl or Cmd+Z undoes, with Shift redoes (D17: local). Not while typing, nor behind a dialog. */
+  function onEditorKey(e: KeyboardEvent<HTMLDivElement>) {
+    if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== "z" || !editable) return;
+    const t = e.target as HTMLElement;
+    if (t.closest("input, textarea, select, dialog")) return;
+    e.preventDefault();
+    setHistory((h) => (e.shiftKey ? redo(h) : undo(h)));
+    announce(e.shiftKey ? "Redone" : "Undone");
+  }
+
   function onItem(action: ItemAction) {
+    if (action.kind === "open") return setPanel(action.node);
     if (!editable) return;
     if (action.kind === "after") setPicker({ kind: "after", from: action.from });
     if (action.kind === "insert") setPicker({ kind: "insert", edge: action.edge });
@@ -75,15 +209,18 @@ function Editor({ tenantId, workflow, types, role }: { tenantId: string; workflo
 
   function onConnect(from: PortRef, to: string) {
     const next = connect(doc, from, to);
-    if (next) change(next, `Connected ${keyOf(from.node)} to ${keyOf(to)}`);
+    if (next) change(next, `Connected ${keyOf(from.node)} to ${keyOf(to)}`, item.edge({ from, to: { node: to } }));
     else announce(`${keyOf(from.node)} can't lead to ${keyOf(to)}: that would repeat an edge or close a loop`);
   }
 
+  const healed = asking?.kind === "node" ? deleteNode(doc, asking.id).healed : null;
+  const open = panel ? nodesOf(doc).find((n) => n.id === panel) : undefined;
+
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="flex min-h-0 flex-1 flex-col" onKeyDown={onEditorKey} onKeyDownCapture={onEditorKeyCapture}>
       <Toolbar tenantId={tenantId} name={workflow.name}>
         {editable ? (
-          <Button size="md" aria-keyshortcuts="A" onClick={() => setPicker({ kind: "after", from: null })}>
+          <Button size="md" aria-keyshortcuts="A" onClick={() => addFrom(shown)}>
             ＋ Add step <kbd className="rounded-sm border border-line-strong px-1 font-mono text-meta">A</kbd>
           </Button>
         ) : (
@@ -91,25 +228,93 @@ function Editor({ tenantId, workflow, types, role }: { tenantId: string; workflo
         )}
       </Toolbar>
       <div className="flex min-h-0 flex-1">
-        <Canvas
+        <div className="relative flex min-h-0 min-w-0 flex-1">
+          {placing && editable && (
+            // Over the canvas's top edge, never above it: the canvas doesn't move when placing starts or ends, so a
+            // step placed with a click stays under the click (ledger M13).
+            <div className="absolute inset-x-0 top-0 z-10 flex flex-wrap items-center gap-3 border-b border-line bg-surface-2 px-5 py-2.5 text-small">
+              <span className="grow">Click an empty place on the canvas to put {keyOf(placing)} there.</span>
+              <Button size="sm" onClick={() => setPlacing(null)}>Cancel</Button>
+            </div>
+          )}
+          <Canvas
           doc={doc}
           types={typeMap}
           problems={new Map()}
           separate={new Map()}
           editable={editable}
-          current={null}
-          focusId={focusId}
+          current={panel}
+          focusId={shown}
           focusRequest={focusRequest}
-          onFocusItem={setFocusId}
+          onFocusItem={(id) => {
+            setFocusId(id);
+            setTrail((t) => (t?.at(-1) === id ? t : null));
+          }}
           onItem={onItem}
           onMove={(positions) => change(moveNodes(doc, positions), "Moved")}
           onConnect={onConnect}
           onLayout={() => change(moveNodes(doc, layout(doc)), "Laid out the steps")}
-        />
+          onKeyDown={onCanvasKey}
+          placing={editable && placing !== null}
+          onPlace={place}
+          />
+        </div>
+        {open && (
+          <StepPanel
+            node={open}
+            type={typeMap.get(open.type)}
+            ports={portMap.get(open.id) ?? []}
+            problems={null}
+            expressions={[]}
+            editable={editable}
+            onDelete={() => setAsking({ kind: "node", id: open.id })}
+            onConnectPort={(port) => setConnecting({ node: open.id, port })}
+            onPlace={() => {
+              setPlacing(open.id);
+              announce(`Click an empty place on the canvas to put ${open.key} there`);
+            }}
+            onNudge={(key) => nudge(open.id, key)}
+            onClose={() => {
+              setPanel(null);
+              focus(item.node(open.id));
+            }}
+          />
+        )}
       </div>
       {picker && (
-        <StepPicker mode={picker} types={types} onPick={onPick} onClose={() => setPicker(null)} />
+        <StepPicker
+          mode={picker}
+          types={types}
+          onPick={onPick}
+          onConnect={picker.kind === "after" && picker.from ? () => setConnecting(picker.from) : undefined}
+          onClose={() => setPicker(null)}
+        />
       )}
+      {connecting && (
+        <ConnectDialog
+          doc={doc}
+          types={typeMap}
+          from={connecting}
+          onConnect={(to) => onConnect(connecting, to)}
+          onClose={() => setConnecting(null)}
+        />
+      )}
+      <ConfirmDialog
+        open={asking !== null}
+        title={asking?.kind === "edge" ? "Delete an edge" : "Delete a step"}
+        confirmLabel="Delete"
+        onConfirm={confirmDelete}
+        onCancel={() => setAsking(null)}
+      >
+        {asking?.kind === "node" && (
+          <>
+            {keyOf(asking.id)} and its edges are deleted.
+            {healed && ` ${keyOf(healed.from.node)} will lead to ${keyOf(healed.to.node)}.`} Other steps that read its
+            output will show a problem.
+          </>
+        )}
+        {asking?.kind === "edge" && `${keyOf(asking.edge.to.node)} will no longer follow ${keyOf(asking.edge.from.node)}.`}
+      </ConfirmDialog>
     </div>
   );
 }

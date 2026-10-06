@@ -29,3 +29,7 @@
 .canvas-minimap-node {
   fill: var(--line-strong);
 }
+
+.canvas-placing .react-flow__pane {
+  cursor: crosshair;
+}

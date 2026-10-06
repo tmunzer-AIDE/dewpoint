@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Outlet, RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { GraphDoc } from "../../lib/workflows";
@@ -34,6 +34,7 @@ vi.mock("./Canvas", async () => {
               <button onClick={() => props.onItem({ kind: "after", from: { node: n.id, port: "out" } })}>after {n.key}</button>
             </span>
           ))}
+          {props.placing && <button onClick={() => props.onPlace({ x: 400, y: 300 })}>place here</button>}
         </div>
       );
     },
@@ -126,4 +127,84 @@ it("offers a viewer no Add step", async () => {
   role = "viewer";
   await show();
   expect(screen.queryByRole("button", { name: /Add step/ })).toBeNull();
+});
+
+async function withTwoSteps() {
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "Start" }));
+  await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
+  await userEvent.click(await screen.findByRole("button", { name: "after transform" }));
+  await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
+  await screen.findByRole("button", { name: "transform_2" });
+}
+
+it("deletes the focused step with Delete, after asking, and heals the chain in words", async () => {
+  await withTwoSteps();
+  screen.getByRole("button", { name: "transform" }).focus();
+  await userEvent.keyboard("{Delete}");
+  const ask = screen.getByRole("dialog", { name: "Delete a step" });
+  expect(ask.textContent).toContain("transform and its edges are deleted.");
+  await userEvent.click(within(ask).getByRole("button", { name: "Delete" }));
+  expect(screen.queryByRole("button", { name: "transform" })).toBeNull();
+  expect(screen.getByRole("button", { name: "transform_2" })).toBeTruthy();
+});
+
+it("opens the picker after the focused step with A, and undoes and redoes", async () => {
+  await withTwoSteps();
+  screen.getByRole("button", { name: "transform_2" }).focus();
+  await userEvent.keyboard("a");
+  expect(screen.getByRole("dialog", { name: "Add a step" })).toBeTruthy();
+  await userEvent.keyboard("{Escape}");
+  screen.getByRole("button", { name: "transform_2" }).focus();
+  await userEvent.keyboard("{Control>}z{/Control}");
+  expect(screen.queryByRole("button", { name: "transform_2" })).toBeNull();
+  screen.getByRole("button", { name: "transform" }).focus();
+  await userEvent.keyboard("{Control>}{Shift>}z{/Shift}{/Control}");
+  expect(screen.getByRole("button", { name: "transform_2" })).toBeTruthy();
+});
+
+it("opens a step's panel on Enter, its heading focused, and Escape gives focus back to the step", async () => {
+  await withTwoSteps();
+  const step = screen.getByRole("button", { name: "transform_2" });
+  step.focus();
+  await userEvent.keyboard("{Enter}");
+  const panel = screen.getByRole("complementary", { name: "transform_2" });
+  expect(document.activeElement).toBe(within(panel).getByRole("heading", { name: "transform_2" }));
+  expect(panel.textContent).toContain("Transform · flow.transform@1");
+  await userEvent.keyboard("{Escape}");
+  expect(screen.queryByRole("complementary")).toBeNull();
+  expect(document.activeElement).toBe(step);
+});
+
+const at = (key: string) => drawn.at(-1)!.doc.nodes!.find((n) => n.key === key)!.position;
+
+it("places a step where a single pointer clicks, never by dragging (WCAG 2.5.7)", async () => {
+  await withTwoSteps();
+  await userEvent.click(screen.getByRole("button", { name: "transform" })); // its panel
+  await userEvent.click(screen.getByRole("button", { name: "Place on the canvas…" }));
+  expect(screen.getByText("Click an empty place on the canvas to put transform there.")).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "place here" }));
+  expect(at("transform")).toEqual({ x: 400 - 130, y: 300 - 32 }); // centred on the click
+  expect(screen.queryByText(/Click an empty place/)).toBeNull();
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "transform" }));
+});
+
+it("stops placing on Escape, leaving the step where it was", async () => {
+  await withTwoSteps();
+  const before = at("transform");
+  await userEvent.click(screen.getByRole("button", { name: "transform" }));
+  await userEvent.click(screen.getByRole("button", { name: "Place on the canvas…" }));
+  await userEvent.keyboard("{Escape}");
+  expect(screen.queryByText(/Click an empty place/)).toBeNull();
+  expect(screen.queryByRole("button", { name: "place here" })).toBeNull();
+  expect(at("transform")).toEqual(before);
+});
+
+it("moves a step 20 px a click from its panel", async () => {
+  await withTwoSteps();
+  const before = at("transform")!;
+  await userEvent.click(screen.getByRole("button", { name: "transform" }));
+  await userEvent.click(screen.getByRole("button", { name: "Move transform right" }));
+  await userEvent.click(screen.getByRole("button", { name: "Move transform down" }));
+  expect(at("transform")).toEqual({ x: before.x! + 20, y: before.y! + 20 });
 });

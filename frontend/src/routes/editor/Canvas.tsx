@@ -40,6 +40,8 @@ export interface CanvasProps {
   onConnect: (from: PortRef, to: string) => void;
   onLayout: () => void;
   onKeyDown?: (e: KeyboardEvent<HTMLDivElement>) => void;
+  placing: boolean; // the next click on an empty place puts a step there (WCAG 2.5.7)
+  onPlace: (at: { x: number; y: number }) => void; // the click, in the canvas's own coordinates
 }
 
 /** What React Flow draws: the start card, each step, an edge from the start card to each entry step, and each edge
@@ -100,9 +102,12 @@ function Flow(p: CanvasProps) {
     [],
   );
 
-  /** Brings an item into view when it's outside the canvas, keeping the zoom. */
+  /** Brings an item into view when it's outside the canvas, keeping the zoom; only when the keyboard moved focus there
+   * (`:focus-visible`). A pointer's focus never moves the view: it would slide the item from under a press before
+   * its release, or a step placed with a click from under the click (ledger M13). */
   const reveal = useCallback(
     (el: HTMLElement) => {
+      if (!el.matches(":focus-visible")) return;
       const box = container.current?.getBoundingClientRect();
       if (!box) return;
       const r = el.getBoundingClientRect();
@@ -165,6 +170,10 @@ function Flow(p: CanvasProps) {
         fitView
         fitViewOptions={{ padding: 0.2, maxZoom: 1 }}
         proOptions={{ hideAttribution: true }}
+        onPaneClick={(e) => {
+          if (p.placing) p.onPlace(flow.screenToFlowPosition({ x: e.clientX, y: e.clientY }));
+        }}
+        className={p.placing ? "canvas-placing" : undefined}
       >
         <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
         <MiniMap pannable zoomable ariaLabel="Overview of the steps" nodeClassName="canvas-minimap-node" />
