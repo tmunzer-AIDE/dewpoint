@@ -9,9 +9,14 @@
 import fs from "node:fs";
 import path from "node:path";
 
-/** Virtual modules whose code ships, by their owner: Vite's preload polyfill, and the CommonJS helpers of the Rollup
- * plugin Vite bundles (its LICENSE.md carries the bundled plugins' licences). Any other virtual module fails. */
-const VIRTUAL = { "\0vite/modulepreload-polyfill.js": "vite", "\0commonjsHelpers.js": "vite" };
+/** Virtual modules whose code ships, by their owner: Vite's preload polyfill and its loader for lazy chunks
+ * (`preload-helper`, Vite's `importAnalysisBuild`), and the CommonJS helpers of the Rollup plugin Vite bundles (its
+ * LICENSE.md carries the bundled plugins' licences). Any other virtual module fails. */
+const VIRTUAL = {
+  "\0vite/modulepreload-polyfill.js": "vite",
+  "\0vite/preload-helper.js": "vite",
+  "\0commonjsHelpers.js": "vite",
+};
 
 const LICENCE_FILE = /^(?:licen[cs]e|copying)(?:[.-].*)?$/i;
 const NOTICE_FILE = /^notice(?:[.-].*)?$/i;
@@ -161,6 +166,7 @@ function selfTest() {
       [`${pnpm}/seroval@1.0.0/node_modules/seroval/dist/index.mjs`]: 0, // tree-shaken away: doesn't
       [`${pnpm}/@fontsource+inter@5.0.0/node_modules/@fontsource/inter/latin-400.css`]: 0, // CSS: ships as a stylesheet
       "\0vite/modulepreload-polyfill.js": 900, // Vite's own helper
+      "\0vite/preload-helper.js": 700, // and its loader for a lazy chunk (the editor's)
       "/w/src/main.tsx": 500,
     } }],
     assets: [{ originalFileNames: [`${pnpm}/@fontsource+mono@5.0.0/node_modules/@fontsource/mono/files/a.woff2`] }],

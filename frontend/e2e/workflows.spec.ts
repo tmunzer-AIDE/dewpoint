@@ -66,7 +66,7 @@ test("a workflow built with the keyboard alone: Tab in, arrows along the edges, 
   await page.keyboard.press("Enter");
   await expect(page.getByRole("button", { name: /^stop, Stop/ })).toBeFocused();
   await page.keyboard.press("ArrowUp"); // the edge from if's false port
-  await expect(page.getByRole("button", { name: "Insert a step between if and stop" })).toBeFocused();
+  await expect(page.getByRole("button", { name: "Insert a step between if (false) and stop" })).toBeFocused();
   await page.keyboard.press("Home");
   await expect(start).toBeFocused();
   // Tab leaves the canvas at once: one tab stop.
@@ -187,4 +187,99 @@ test("undo and redo from the keyboard keep focus in the editor, never repaired b
   await page.keyboard.press("ArrowDown");
   await page.keyboard.press("ArrowDown");
   await expect(transform).toBeFocused(); // the keys still walk from where focus was kept
+});
+
+/** The JavaScript and CSS a page fetched while `act` ran, by file, with their sizes. */
+async function assetsFetched(page: Page, act: () => Promise<void>): Promise<Map<string, number>> {
+  const seen = new Map<string, number>();
+  const pending: Promise<void>[] = [];
+  const onResponse = (response: import("@playwright/test").Response) => {
+    const path = new URL(response.url()).pathname;
+    if (/\.(?:js|css)$/.test(path)) pending.push(response.body().then((b) => void seen.set(path, b.length)));
+  };
+  page.on("response", onResponse);
+  await act();
+  page.off("response", onResponse);
+  await Promise.all(pending);
+  return seen;
+}
+
+const EDITOR_CHUNK = /^\/assets\/Editor-[\w-]+\.(?:js|css)$/;
+
+test("the list and sign-in load without the editor's code, which loads when a workflow opens", async ({ page, browser }) => {
+  const total = (m: Map<string, number>) => [...m.values()].reduce((a, b) => a + b, 0);
+  const list = await assetsFetched(page, async () => {
+    await page.goto(`/t/${await tenantId(page)}/workflows`);
+    await expect(page.getByRole("heading", { level: 1, name: "Workflows" })).toBeVisible();
+  });
+  expect([...list.keys()].filter((p) => EDITOR_CHUNK.test(p))).toEqual([]);
+  const fresh = await browser.newContext({ baseURL: new URL(page.url()).origin });
+  const signIn = await fresh.newPage();
+  const login = await assetsFetched(signIn, async () => {
+    await signIn.goto("/login");
+    await expect(signIn.getByRole("button", { name: /Sign in/ }).first()).toBeVisible();
+  });
+  await fresh.close();
+  expect([...login.keys()].filter((p) => EDITOR_CHUNK.test(p))).toEqual([]);
+  const opened = await assetsFetched(page, async () => {
+    await page.getByRole("link", { name: "Cycle" }).click();
+    await expect(page.getByRole("button", { name: /^Start, where every run begins/ })).toBeVisible();
+  });
+  expect([...opened.keys()].filter((p) => EDITOR_CHUNK.test(p)).length).toBe(2); // its script and its stylesheet
+  console.log(`first load: list ${total(list)} bytes, sign-in ${total(login)} bytes; the editor adds ${total(opened)} bytes`);
+});
+
+/** Each control is clicked by a pointer (Playwright refuses a click another element would take), and no two overlap. */
+async function eachReachableByPointer(page: Page, names: string[]): Promise<void> {
+  const boxes = [];
+  for (const name of names) {
+    const control = page.getByRole("button", { name, exact: true });
+    await control.click();
+    await expect(page.getByRole("dialog", { name: "Add a step" })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog", { name: "Add a step" })).toHaveCount(0);
+    boxes.push((await control.boundingBox())!);
+  }
+  for (const [i, a] of boxes.entries()) {
+    for (const b of boxes.slice(i + 1)) {
+      const apart = a.x + a.width <= b.x || b.x + b.width <= a.x || a.y + a.height <= b.y || b.y + b.height <= a.y;
+      expect(apart, "two controls overlap").toBe(true);
+    }
+  }
+}
+
+test("each edge's + is reachable by a pointer: reciprocal edges, and a join from two ports", async ({ page }) => {
+  await importFile(page, "Reciprocal", "e2e/fixtures/cycle.dewpoint.json");
+  await eachReachableByPointer(page, ["Insert a step between a and b", "Insert a step between b and a"]);
+  await expectAccessible(page, "editor: reciprocal edges");
+  await importFile(page, "Join", "e2e/fixtures/join.dewpoint.json");
+  await eachReachableByPointer(page, ["Insert a step between if (true) and j", "Insert a step between if (false) and j"]);
+  await expectAccessible(page, "editor: a join from two ports");
+});
+
+const overlaps = (a: { x: number; y: number; width: number; height: number }, b: typeof a) =>
+  a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+
+test("the minimap never hides what the keys reach, and gives way to a panel and to a narrow canvas", async ({ page }) => {
+  await importFile(page, "Spread", "e2e/fixtures/spread.dewpoint.json");
+  const minimap = page.locator(".react-flow__minimap");
+  const far = page.getByRole("button", { name: /^far, Transform/ });
+  await expect(minimap).toBeVisible();
+  expect(overlaps((await far.boundingBox())!, (await minimap.boundingBox())!), "the fixture puts far under the minimap").toBe(true);
+  await page.getByRole("button", { name: /^Start, where every run begins/ }).focus();
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("ArrowDown");
+  await expect(far).toBeFocused();
+  await expect.poll(async () => overlaps((await far.boundingBox())!, (await minimap.boundingBox())!)).toBe(false);
+  await page.keyboard.press("Enter"); // its panel: the minimap gives way
+  await expect(page.getByRole("heading", { level: 2, name: "far" })).toBeFocused();
+  await expect(minimap).toHaveCount(0);
+  await expectAccessible(page, "editor: a panel, no minimap");
+  await page.keyboard.press("Escape");
+  await expect(minimap).toBeVisible();
+  await page.setViewportSize({ width: 640, height: 720 }); // the canvas is narrower than the minimap allows
+  await expect(minimap).toBeHidden();
+  await expectAccessible(page, "editor: a narrow canvas");
+  await page.setViewportSize({ width: 1280, height: 720 });
 });

@@ -33,3 +33,14 @@
 .canvas-placing .react-flow__pane {
   cursor: crosshair;
 }
+
+/* The canvas's own width decides the minimap, not the window's: a narrow canvas (a narrow window, or a panel beside
+   it) has no room for one over its steps. */
+.canvas-frame {
+  container-type: inline-size;
+}
+@container (max-width: 640px) {
+  .react-flow__minimap {
+    display: none;
+  }
+}

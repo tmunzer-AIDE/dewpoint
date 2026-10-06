@@ -2,12 +2,23 @@
 // An edge: a stepped line, and, when the draft is editable, a "+" at its middle to insert a step there (a 24 px
 // square with a 4 px radius: no circles, outline §6).
 import { BaseEdge, EdgeLabelRenderer, getSmoothStepPath, type Edge, type EdgeProps } from "@xyflow/react";
+import { CARD } from "../../lib/layout";
 import type { ItemAction } from "./items";
+
+/** Where an edge's middle runs. Going down, React Flow's own: halfway. One that climbs (a cycle's way back, a self
+ * edge, a step beside its source) runs its middle past the right of both cards: drawn straight it would pass behind
+ * them, and its "+" would sit on the forward edge's, out of a pointer's reach (the owner's review of milestone 3). */
+export function route(e: { sourceX: number; sourceY: number; targetX: number; targetY: number }): { centerX?: number } {
+  return e.targetY < e.sourceY ? { centerX: Math.max(e.sourceX, e.targetX) + CARD.width / 2 + 40 } : {};
+}
 
 export type FlowData = { item: string; label: string; action: ItemAction; focusId: string; editable: boolean; onItem: (action: ItemAction) => void };
 
 export function FlowEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data }: EdgeProps<Edge<FlowData, "flow">>) {
-  const [path, x, y] = getSmoothStepPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition, borderRadius: 6 });
+  const [path, x, y] = getSmoothStepPath({
+    sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition, borderRadius: 6,
+    ...route({ sourceX, sourceY, targetX, targetY }),
+  });  // prettier-ignore
   return (
     <>
       <BaseEdge id={id} path={path} />

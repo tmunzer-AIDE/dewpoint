@@ -4,7 +4,7 @@ import { Shell } from "./components/Shell";
 import { useSession } from "./lib/session";
 import { useAfterAuth } from "./lib/useAfterAuth";
 import { ConnectionsPage } from "./routes/Connections";
-import { EditorPage } from "./routes/editor/Editor";
+import { LazyEditor } from "./routes/editor/LazyEditor";
 import { EnrollPage } from "./routes/Enroll";
 import { LoginPage } from "./routes/Login";
 import { MembersPage } from "./routes/Members";
@@ -54,7 +54,7 @@ function Workflows() {
 
 function Editor() {
   const { tenantId, workflowId } = useParams({ from: "/app/t/$tenantId/workflows/$workflowId" });
-  return <EditorPage key={`${tenantId}:${workflowId}`} tenantId={tenantId} workflowId={workflowId} />;
+  return <LazyEditor key={`${tenantId}:${workflowId}`} tenantId={tenantId} workflowId={workflowId} />;
 }
 
 function Connections() {

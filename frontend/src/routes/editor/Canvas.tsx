@@ -43,6 +43,7 @@ export interface CanvasProps {
   onLayout: () => void;
   onKeyDown?: (e: KeyboardEvent<HTMLDivElement>) => void;
   placing: boolean; // the next click on an empty place puts a step there (WCAG 2.5.7)
+  overview: boolean; // the minimap: off while a side panel narrows the canvas (the owner's ruling on milestone 3)
   onPlace: (at: { x: number; y: number }) => void; // the click, in the canvas's own coordinates
 }
 
@@ -75,7 +76,8 @@ function build(p: CanvasProps): { nodes: Node[]; edges: Edge[] } {
     })),
     ...drawableEdges(p.doc).map((e): Edge => ({
       id: item.edge(e), source: idKey(e.from.node), sourceHandle: portOf(e), target: idKey(e.to.node), type: "flow",
-      data: flow(item.edge(e), `Insert a step between ${keyOf.get(idKey(e.from.node)) ?? "a step"} and ${keyOf.get(idKey(e.to.node)) ?? "a step"}`, { kind: "insert", edge: e }),
+      // Named by its port when it isn't `out`: two edges from one step to the same one (a branch's join) read apart.
+      data: flow(item.edge(e), `Insert a step between ${keyOf.get(idKey(e.from.node)) ?? "a step"}${portOf(e) === "out" ? "" : ` (${portOf(e)})`} and ${keyOf.get(idKey(e.to.node)) ?? "a step"}`, { kind: "insert", edge: e }),
     })),
   ];  // prettier-ignore
   return { nodes, edges };
@@ -112,10 +114,17 @@ function Flow(p: CanvasProps) {
   const reveal = useCallback(
     (el: HTMLElement) => {
       if (!el.matches(":focus-visible")) return;
-      const box = container.current?.getBoundingClientRect();
-      if (!box) return;
+      const frame = container.current;
+      const box = frame?.getBoundingClientRect();
+      if (!frame || !box) return;
       const r = el.getBoundingClientRect();
-      if (r.left >= box.left && r.right <= box.right && r.top >= box.top && r.bottom <= box.bottom) return;
+      // What lies over the canvas (the minimap, its controls, the placing bar) hides what's under it as surely as its
+      // edge does: an item behind one is brought into the clear (WCAG 2.4.11).
+      const over = [...(frame.parentElement ?? frame).querySelectorAll<HTMLElement>(".react-flow__minimap, [data-canvas-overlay]")]
+        .map((o) => o.getBoundingClientRect())
+        .filter((o) => o.width > 0 && o.height > 0);
+      const hidden = over.some((o) => r.left < o.right && o.left < r.right && r.top < o.bottom && o.top < r.bottom);
+      if (!hidden && r.left >= box.left && r.right <= box.right && r.top >= box.top && r.bottom <= box.bottom) return;
       const v = flow.getViewport();
       void flow.setViewport(
         { x: v.x + (box.left + box.width / 2 - (r.left + r.width / 2)), y: v.y + (box.top + box.height / 2 - (r.top + r.height / 2)), zoom: v.zoom },
@@ -146,7 +155,7 @@ function Flow(p: CanvasProps) {
   }
 
   return (
-    <div ref={container} role="group" aria-label="Workflow steps" onKeyDown={p.onKeyDown} onFocus={onFocus} className="relative min-h-0 min-w-0 flex-1">
+    <div ref={container} role="group" aria-label="Workflow steps" onKeyDown={p.onKeyDown} onFocus={onFocus} className="canvas-frame relative min-h-0 min-w-0 flex-1">
       <ReactFlow
         nodes={nodes}
         edges={built.edges}
@@ -180,9 +189,9 @@ function Flow(p: CanvasProps) {
         className={p.placing ? "canvas-placing" : undefined}
       >
         <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
-        <MiniMap pannable zoomable ariaLabel="Overview of the steps" nodeClassName="canvas-minimap-node" />
+        {p.overview && <MiniMap pannable zoomable ariaLabel="Overview of the steps" nodeClassName="canvas-minimap-node" />}
       </ReactFlow>
-      <div className="absolute bottom-4 left-4 flex items-center gap-1.5">
+      <div data-canvas-overlay className="absolute bottom-4 left-4 flex items-center gap-1.5">
         {p.editable && (
           <Button size="md" onClick={p.onLayout}>
             Auto layout

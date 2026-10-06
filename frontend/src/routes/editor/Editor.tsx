@@ -258,7 +258,7 @@ function Editor({ tenantId, workflow, types, role }: { tenantId: string; workflo
           {placing && editable && (
             // Over the canvas's top edge, never above it: the canvas doesn't move when placing starts or ends, so a
             // step placed with a click stays under the click (ledger M13).
-            <div className="absolute inset-x-0 top-0 z-10 flex flex-wrap items-center gap-3 border-b border-line bg-surface-2 px-5 py-2.5 text-small">
+            <div data-canvas-overlay className="absolute inset-x-0 top-0 z-10 flex flex-wrap items-center gap-3 border-b border-line bg-surface-2 px-5 py-2.5 text-small">
               <span className="grow">Click an empty place on the canvas to put {keyOf(placing)} there.</span>
               <Button size="sm" onClick={() => setPlacing(null)}>Cancel</Button>
             </div>
@@ -283,6 +283,7 @@ function Editor({ tenantId, workflow, types, role }: { tenantId: string; workflo
           onKeyDown={onCanvasKey}
           placing={editable && placing !== null}
           onPlace={place}
+          overview={!open}
           />
         </div>
         {open && (

@@ -570,3 +570,17 @@ M17. **New workflow speaks only while it's open, and reads only the latest file*
     tenant switch in the whole app (the new tenant's screen stays); reads answering in reverse order; a failed read
     then a good one; a name typed during a read. - A late answer opened another tenant's workflow; a late read
     replaced the file shown. - None.
+M18. **The owner's three rulings on milestone 3, built** (2026-10-07). Lazy editor: the route loads `routes/editor`
+    with React's `lazy` (no new dependency); "Loading the editor…" (a status) while it loads, and a load failure says
+    so with Try again (a new load; an error inside the editor still goes to the router's boundary). Vite's
+    `\0vite/preload-helper.js` now ships, so the notices plugin names its owner (Vite, MIT, as its other two helpers;
+    the self-test covers it). First load: JavaScript 816 kB -> 556 kB (265 -> 180 kB gzipped); the editor's chunk is
+    263 kB (86 kB) and 12 kB of CSS. In the browser the list and the sign-in page fetch 589,599 bytes of script and
+    style and never the editor's chunk; opening a workflow adds 276,065 bytes; the gate's CSP checks pass with it.
+    Edge controls: an edge that climbs (a cycle's way back, a self edge, a step beside its source) runs its middle,
+    and its "+", past the right of both cards (`route`, React Flow's `centerX`); a "+" names its port when it isn't
+    `out`, so two edges from one step to one target read apart. The gate clicks every "+" of reciprocal edges and of a
+    join from `if`'s two ports by pointer, none overlapping. Minimap: off while a side panel is open, and off on a
+    canvas under 640 px (a CSS container query); the keys' reveal treats the minimap, the zoom controls and the placing
+    bar as covering, so a step reached behind one is brought clear. The gate checks all three. No overview toggle:
+    closing the panel brings it back. - The rulings. - None.
