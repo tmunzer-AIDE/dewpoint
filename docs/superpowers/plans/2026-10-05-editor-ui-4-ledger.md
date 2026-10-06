@@ -510,3 +510,8 @@ M13. **The canvas moves the view for the keyboard only, and placing never moves 
     also waits for focus to settle on the step a deleted one came after (a frame after the confirm) before Control+z,
     asserting where focus goes. - The step a person places stays under the click. - Keyboard focus to a half-visible
     item still brings it into view; a pointer's doesn't (the person can see it).
+M14. **Two things the screenshots showed** (milestone 3's review evidence): the start card's second line ("By hand, on a
+    schedule or from a webhook") wrapped onto a third and overflowed its 64 px card; it now reads "By hand, a schedule
+    or a webhook", truncated if a font draws it wider. The list's row menu was three middle dots, which at 13 px merge
+    into what reads as a dash; it's now a drawn icon of three square dots (`MoreIcon`), the trigger keeping its name
+    ("Actions for …"). - Text outside its card; a menu that didn't look like one. - None.

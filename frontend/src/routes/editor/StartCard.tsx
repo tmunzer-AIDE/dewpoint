@@ -19,8 +19,8 @@ export function StartNode({ data }: NodeProps<Node<StartData, "start">>) {
         onClick={() => data.editable && data.onItem({ kind: "after", from: null })}
         className="pointer-events-auto flex h-16 w-[260px] flex-col justify-center rounded-lg border border-dashed border-line-strong bg-surface px-3.5 text-left"
       >
-        <span className="text-body font-semibold">Start</span>
-        <span className="text-small text-muted">By hand, on a schedule or from a webhook</span>
+        <span className="truncate text-body font-semibold">Start</span>
+        <span className="truncate text-small text-muted">By hand, a schedule or a webhook</span>
       </button>
       <Handle type="source" id="out" position={Position.Bottom} isConnectable={false} />
       {data.empty && data.editable && (

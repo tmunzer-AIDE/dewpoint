@@ -6,6 +6,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { Button } from "../components/Button";
+import { MoreIcon } from "../components/icons";
 import { LoadError } from "../components/LoadError";
 import { Segmented } from "../components/Segmented";
 import { Switch } from "../components/Switch";
@@ -191,8 +192,8 @@ export function WorkflowsPage({ tenantId, startNew = false }: { tenantId: string
                 </Td>
                 <Td className="text-right">
                   <Dropdown.Root modal={false}>
-                    <Dropdown.Trigger aria-label={`Actions for ${w.name}`} className="min-h-8 rounded-md border border-line-strong bg-surface px-2 text-small text-ink hover:bg-surface-hover">
-                      ···
+                    <Dropdown.Trigger aria-label={`Actions for ${w.name}`} className="inline-grid min-h-8 place-items-center rounded-md border border-line-strong bg-surface px-2 text-small text-ink hover:bg-surface-hover">
+                      <MoreIcon />
                     </Dropdown.Trigger>
                     <Dropdown.Portal>
                       <Dropdown.Content align="end" sideOffset={4} className="min-w-40 rounded-lg border border-line bg-surface p-1 shadow-dialog">
