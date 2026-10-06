@@ -31,9 +31,11 @@ Rulings:
   fixed codes: refused is fatal, not sent is retryable, maybe sent is `outcome_unknown` for an ambiguous node and
   retryable otherwise - D7's "the node's policy decides" made explicit, so a plugin that doesn't catch them is still
   classified safely - cost if wrong: a plugin wanting another mapping catches the error itself.
-- Ruling: a rate scope's key for a credential is an HMAC under a key derived from the tenant's active data key, so a
-  data-key rotation starts fresh buckets - no new long-lived key material outside the keyring - cost if wrong: one
-  extra budget's worth of calls after a rotation; the provider's 429 then applies D10.
+- Ruling (revised after the second review): a credential's quota scope is an HMAC under a per-tenant random scope key
+  (`rate_scope_keys`, sealed under the tenant's data key, purpose `rate.scope`), made once by the worker and read by
+  the API - workers may hold different data-key versions for 300 s, and a key derived from the active version split a
+  token's budget and bypassed its cooldown - cost if wrong: one more sealed row per tenant, which 2b-4a's
+  re-encryption and key retirement must cover (dependency, below).
 - Ruling: the guard blocks multicast, reserved, IPv6 site-local and any non-global embedded IPv4 on top of
   `is_global` - Python 3.14 calls multicast, `fec0::/10`, `::127.0.0.1` and NAT64-wrapped loopback global - cost if
   wrong: a NAT64-only deployment needs allowlist entries for its translated destinations.
@@ -56,18 +58,19 @@ Rulings:
 - Ruling: a connection's allowed ids are read by the worker from the run's version graph, intersected with the
   version's `connection_ids`, and the graph node's type must equal the step's node type - nothing from the workflow's
   input is trusted - cost if wrong: none.
-- Ruling: publish checks connections (not the validate endpoint), locking them FOR SHARE; re-enabling a workflow whose
-  active version names a connection deleted while it was disabled isn't refused - its runs fail
-  `connection_unavailable` before sending - cost if wrong: a confusing failure instead of a refusal at enable time.
+- Ruling (revised after the second review): publish checks the connections its nodes name and every connection its
+  closure's versions name (pinned sub-flows, failure handler), locked FOR SHARE; enabling and activating refuse a
+  closure naming a connection that no longer exists (`connection.missing`) - fail closed, before anything runs - cost
+  if wrong: none; a run still fails `connection_unavailable` before sending if one disappears another way.
 - Ruling: the allowlist audit goes to the tenant's chain (an entry for every tenant to the platform's), actor NULL as
   for other CLI actions - cost if wrong: none.
 - Ruling: the egress allowlist and rate buckets are read on every connect/request (no cache) - exactness over a query
   per request - cost if wrong: one small query per connect and per request.
 
-- Ruling (checkpoint review): once a request of an attempt may have left, an ambiguous node's failure is never
-  retried and its outcome is unknown, except the plugin's own `FatalError`, which keeps its declared outcome (never
-  retried anyway) - the plugin knows a 4xx refused its request - cost if wrong: a fatal after an earlier write that
-  did apply shows as failed rather than unknown.
+- Ruling (revised after the second review): once a request of an attempt may have left, or is still under way, an
+  ambiguous node's failure is never retried and its outcome is unknown, the node's own `FatalError` included - a later
+  failure can't establish what an earlier request did - cost if wrong: a definite refusal after an earlier write shows
+  as unknown, for a person to check.
 - Ruling (checkpoint review): an allowlist entry is sensitive, and needs `--allow-sensitive`, when its prefix is
   shorter than /8 (IPv4 or IPv6) or it overlaps loopback, link-local (cloud metadata), unspecified or multicast - cost
   if wrong: an operator confirms a legitimate broad range explicitly.
@@ -84,6 +87,15 @@ raising after a send; (5) a bucket's refill time moving back; (6) gzip inflating
 (7) near-everything allowlist entries; (8) `ctx.net`'s TLS trust read from the environment, an unbounded `receive`,
 uncapped redirect hops, framing headers set by a plugin. The self-review's own four (a database outage before a send,
 best-effort blocks, and (2)) are in the same commit.
+
+Second checkpoint review (2026-10-06, pasted by the owner): three findings, all fixed test-first in fd3105c: (1, High)
+a request still under way when a concurrent call failed left the attempt retryable; (2) a truncated gzip stream was
+accepted and only the first gzip member decoded; (3) publish didn't check connections named by the pinned closure. Its
+recommendations on rulings 4, 7 and 8 (above, revised) were taken as the fail-closed options, for the owner's ruling.
+
+Dependency for 2b-4a (data lifecycle): `rate_scope_keys.sealed` is sealed under a tenant's data key (purpose
+`rate.scope`, the tenant id as context). Re-encryption and key retirement must re-seal it like any sealed column; tenant
+erasure removes it by its foreign key (cascade).
 
 Open questions:
 - `tests/apps/dispatcher/test_triggers_end_to_end.py::test_a_short_outage_fires_each_missed_time_and_admits_each_once`
