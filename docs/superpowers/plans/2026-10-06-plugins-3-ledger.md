@@ -229,3 +229,7 @@ tenant erasure removes calls by their foreign key (cascade).
   cost if wrong: an operator sees option labels (site names) through a connection they couldn't name themselves.
 - Ruling: a picker's node isn't part of the version's closure: retiring it stops the start form listing choices (the
   field stays typeable), never a run - the node isn't run - cost if wrong: none.
+- Ruling: flow completion names icons (`branch`, `switch`, `repeat`, `filter`, `variable`, `timer`, `calendar-clock`,
+  `stop`, `alert`, `workflow`, `transform`) and marks `if.condition`, a switch case's `when` and `filter.predicate`
+  `x-widget: cel`; no `x-group` (the flow nodes have one to three fields) - both are display metadata, so the editor
+  (sub-project 4, slice 4f) can rename them without a new version - cost if wrong: none.
