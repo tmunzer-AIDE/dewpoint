@@ -10,12 +10,14 @@ A node's shape follows its operation: a read answers the object; a list (`X-Page
 PUT being a top-level merge) or replaces (sends only what's set); `clear` names fields sent as null; a delete
 answers `already_absent` when a retry finds the object gone; an action answers nothing."""
 
+import copy
 import re
 import uuid
 from collections.abc import Mapping
 from datetime import timedelta
 from typing import Any, ClassVar
 
+from jsonschema import Draft202012Validator
 from pydantic import BaseModel
 
 from dewpoint.plugins.mist import oas, policy
@@ -62,7 +64,8 @@ class MistOperation(Node):
     merge_with: ClassVar[str | None] = None  # the operation reading the object an update merges into
     credentials = ("mist",)
 
-    async def run(self, ctx: StepContext, config: Any) -> BaseModel:
+    def _checked(self, config: Any) -> tuple[dict[str, Any], Any, list[str]]:
+        """The config's values once nothing in them stops the request, and the map still allows the operation."""
         values: dict[str, Any] = dict(config.root)
         body, clear = values.get("body"), list(values.get("clear", ()))
         if self.method == "PUT":
@@ -72,6 +75,15 @@ class MistOperation(Node):
                 raise NothingToChange()
         if policy.load().allowed(self.operation, self.type) is None:
             raise OperationUnavailable()
+        return values, body, clear
+
+    async def simulate(self, ctx: StepContext, config: Any) -> BaseModel:
+        """The operation's fixture (D13), never a request: the connection isn't even opened."""
+        self._checked(config)
+        return self.Output.model_construct(copy.deepcopy(fixture_of(type(self))[0]))
+
+    async def run(self, ctx: StepContext, config: Any) -> BaseModel:
+        values, body, clear = self._checked(config)
         client = MistClient(await ctx.connection(uuid.UUID(values["connection"])))
         path = client.path(self.path, values)
         if self.scope == "site":
@@ -137,13 +149,102 @@ def _description(op: oas.Operation) -> str:
     return text if len(text) <= 300 else text[:297].rstrip() + "..."
 
 
-def _answer(doc: Mapping[str, Any], op: oas.Operation) -> Any:
-    """The 2xx answer's JSON schema, or None when the operation answers nothing."""
+def _media(doc: Mapping[str, Any], op: oas.Operation) -> Mapping[str, Any] | None:
+    """The 2xx answer's JSON media object, or None when the operation answers nothing."""
     responses = op.spec.get("responses", {})
     found = oas.resolve(doc, responses.get("200") or responses.get("201") or {})
     content = found.get("content") or {}
     media = next((content[t] for t in JSON_TYPES if t in content), None)
-    return media.get("schema") if isinstance(media, Mapping) else None
+    return media if isinstance(media, Mapping) else None
+
+
+def _answer(doc: Mapping[str, Any], op: oas.Operation) -> Any:
+    """The 2xx answer's JSON schema, or None when the operation answers nothing."""
+    media = _media(doc, op)
+    return media.get("schema") if media is not None else None
+
+
+def _example(doc: Mapping[str, Any], op: oas.Operation) -> Any:
+    """The 2xx answer's first example in the OAS, or None."""
+    media = _media(doc, op)
+    if media is None:
+        return None
+    if "example" in media:
+        return media["example"]
+    for example in (media.get("examples") or {}).values():
+        found = oas.resolve(doc, example)
+        if isinstance(found, Mapping) and "value" in found:
+            return found["value"]
+    return None
+
+
+def _shaped(node: type["MistOperation"], answer: Any) -> Any:
+    """An answer as the node outputs it, or None when it can't be."""
+    if node.shape == "empty":
+        return {}
+    if node.shape == "delete":
+        return {"already_absent": False}
+    if node.shape == "list":
+        if not isinstance(answer, list):
+            return None
+        return {"results": answer, "total": len(answer) if node.paging else None, "truncated": False}
+    if not isinstance(answer, dict):
+        return None
+    if node.shape == "search":
+        return {**{k: v for k, v in answer.items() if k != "next"}, "truncated": False}
+    return answer
+
+
+def synthesized(schema: Mapping[str, Any], node: Any = None, depth: int = 0) -> Any:
+    """The smallest value `node` (in `schema`, whose `$defs` it may name) accepts: an object of its required fields,
+    an empty array or string, zero, false or null; a union's first branch."""
+    node = schema if node is None else node
+    if not isinstance(node, Mapping) or depth > 32:
+        return None
+    ref = node.get("$ref")
+    if isinstance(ref, str) and ref.startswith("#/$defs/"):
+        return synthesized(schema, schema.get("$defs", {}).get(ref[len("#/$defs/") :]), depth + 1)
+    for key in ("anyOf", "oneOf"):
+        if node.get(key):
+            return synthesized(schema, node[key][0], depth + 1)
+    if node.get("allOf"):
+        parts = [synthesized(schema, sub, depth + 1) for sub in node["allOf"]]
+        objects = [p for p in parts if isinstance(p, dict)]
+        return {k: v for p in objects for k, v in p.items()} if objects else parts[0]
+    kind = node.get("type")
+    if isinstance(kind, list):
+        kind = next((k for k in kind if k != "null"), "null")
+    if kind == "object" or (kind is None and "properties" in node):
+        props = node.get("properties", {})
+        return {name: synthesized(schema, props.get(name, {}), depth + 1) for name in node.get("required", ())}
+    return {"array": [], "string": "", "integer": 0, "number": 0, "boolean": False}.get(str(kind))
+
+
+_FIXTURES: dict[str, tuple[Any, str]] = {}
+
+
+def fixture_of(node: type["MistOperation"]) -> tuple[Any, str]:
+    """`_fixture(node)`, made once per node type."""
+    if node.type not in _FIXTURES:
+        _FIXTURES[node.type] = _fixture(node)
+    return _FIXTURES[node.type]
+
+
+def _fixture(node: type["MistOperation"]) -> tuple[Any, str]:
+    """What a simulated step of `node` answers, and where it comes from: a delete's or an action's fixed answer; the
+    OAS's example, shaped as the output, when the output schema accepts it; else a value made from the schema."""
+    if node.shape in ("empty", "delete"):
+        return _shaped(node, None), "fixed"
+    doc = oas.document()
+    schema = node.Output.model_json_schema()
+    validator = Draft202012Validator(schema)
+    shaped = _shaped(node, _example(doc, oas.operations()[node.operation]))
+    if shaped is not None and validator.is_valid(shaped):
+        return shaped, "example"
+    made = synthesized(schema)
+    if not validator.is_valid(made):  # a schema no small value satisfies: the build fails, not a simulated step
+        raise ValueError(f"{node.type}: no fixture matches its output schema")
+    return made, "schema"
 
 
 def _shape(doc: Mapping[str, Any], op: oas.Operation, answer: Any) -> tuple[str, str | None]:

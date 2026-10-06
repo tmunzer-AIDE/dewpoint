@@ -461,3 +461,9 @@ Rulings:
   done. **For the owner:** `GET /node-types` answers every schema at once, 8 MB uncompressed (neither the API nor
   nginx compresses); options are trimming descriptions, compressing, or a palette without schemas plus one type's
   schemas on demand (an editor change).
+- Ruling: a simulated Mist step answers its operation's fixture without opening the connection: the OAS's first 2xx
+  example shaped as the output (a list's as `{results, total, truncated: false}`, a search's without `next`) when the
+  output schema accepts it, else the smallest value the schema accepts; a delete `{already_absent: false}`, an action
+  `{}`. The map and an update's config are checked as in a run. The step's `simulated` outcome is the fixture's label
+  - an output must match its schema, so it can't carry one - cost if wrong: none. Counts: 182 from examples (every
+  example present fits), 39 made from the schema (the OAS has no example), 41 fixed.
