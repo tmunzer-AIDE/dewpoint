@@ -309,3 +309,25 @@ async def test_a_worker_with_another_declaration_of_the_type_leaves_the_call(
         assert await server_for(worker_sessionmaker, tenant, types=other_build).serve_once() == 0
     assert await outcome(api_sessionmaker, tenant, call) == ("pending", None)
     assert fake.requests == []
+
+
+async def test_a_notification_during_a_round_starts_another(worker_sessionmaker, monkeypatch) -> None:
+    """A wake-up that arrives while the server is querying isn't lost (the owner's review of 3a-2, finding 5): the next
+    round starts at once, not at the next poll."""
+    from dewpoint.apps.worker import plugin_calls
+
+    server = server_for(worker_sessionmaker, uuid.uuid4(), poll_s=60)
+    rounds: list[float] = []
+    real = plugin_calls.calls.candidates
+
+    async def candidates(*args: Any, **kwargs: Any) -> Any:
+        rounds.append(asyncio.get_running_loop().time())
+        if len(rounds) == 1:
+            server._wake.set()  # a notification delivered while this query runs
+        elif len(rounds) == 2:
+            server.stop()
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(plugin_calls.calls, "candidates", candidates)
+    await asyncio.wait_for(server.run(), 10)
+    assert len(rounds) >= 2 and rounds[1] - rounds[0] < 5

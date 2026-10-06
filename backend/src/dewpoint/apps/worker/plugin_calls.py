@@ -228,11 +228,13 @@ class PluginCallServer:
                 if loop.time() - swept >= SWEEP_S:
                     swept = loop.time()
                     await self._sweep()
+                # Cleared before the query: a notification arriving during it starts the next round at once (the owner's
+                # review of 3a-2, finding 5).
+                self._wake.clear()
                 try:
                     await self._round()
                 except Exception as e:  # the database didn't answer: the next round tries again
                     log.warning("plugin_calls_round_failed", error=type(e).__name__)
-                self._wake.clear()
                 try:
                     await asyncio.wait_for(self._wake.wait(), self._poll_s)
                 except TimeoutError:
