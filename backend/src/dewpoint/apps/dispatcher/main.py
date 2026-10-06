@@ -25,7 +25,7 @@ from dewpoint.apps.dispatcher.matching import Verified, match_once
 from dewpoint.apps.dispatcher.observe import observe, report
 from dewpoint.apps.dispatcher.reconcile import Leader, reconcile_once
 from dewpoint.apps.dispatcher.recount import recount_once
-from dewpoint.apps.dispatcher.schedule_sync import check_misses, sync_schedules
+from dewpoint.apps.dispatcher.schedule_sync import check_misses, check_strays, sync_schedules
 from dewpoint.apps.dispatcher.tick import ADMISSION_QUEUE, Ticker
 from dewpoint.apps.dispatcher.tick_workflow import ScheduleTick
 from dewpoint.apps.environment import verify_environment
@@ -80,6 +80,7 @@ async def cycle(
         settled.update({f"cancel_{k}": v for k, v in (await send_cancels(sessionmaker, client)).items()})
         settled.update({f"schedule_{k}": v for k, v in (await sync_schedules(sessionmaker, client, leader)).items()})
         settled.update({f"misses_{k}": v for k, v in (await check_misses(sessionmaker, client)).items()})
+        settled.update({f"strays_{k}": v for k, v in (await check_strays(sessionmaker, client)).items()})
         kept = await (retention or evidence.Retention())(client)
         checked = await evidence.check_evidence(sessionmaker, client, retention=kept)
         settled.update({f"evidence_{k}": v for k, v in checked.items()})

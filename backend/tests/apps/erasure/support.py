@@ -35,6 +35,12 @@ async def populated(owner: Any, ingress: Any) -> dict[str, Any]:
          {"i": uuid.uuid4()}),
         ("insert into schedules (id, tenant_id, workflow_id, every_s, mode, input, created_by) "
          "values (:i, :t, :w, 60, 'live', :c, :u)", {"i": schedule_id, "c": CIPHER}),
+        ("insert into schedule_incarnations (temporal_id, tenant_id, schedule_id, number, backfilled) "
+         "values (:f, :t, :i, 0, true)",
+         {"f": f"t:{tenant}:sched:{schedule_id}", "i": schedule_id}),  # as a schedule from before 2b-4a
+        ("insert into schedule_intervals (tenant_id, schedule_id, temporal_id, kind, starts_at, ends_at, class, "
+         "reason) values (:t, :i, :f, 'lost', now() - interval '1 hour', now(), 'unknown', "
+         "'lost_from_before_migration')", {"f": f"t:{tenant}:sched:{schedule_id}", "i": schedule_id}),
         ("insert into schedule_firings (workflow_id, run_id, tenant_id, schedule_id) values (:f, :r, :t, :i)",
          {"f": f"t:{tenant}:sched:{schedule_id}-2026-10-05T09:00:00Z", "r": str(uuid.uuid4()), "i": schedule_id}),
         ("insert into trigger_bindings (id, tenant_id, endpoint_id, workflow_id, created_by) "

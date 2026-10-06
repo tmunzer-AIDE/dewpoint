@@ -8,11 +8,11 @@ undone.** Once started, an erasure can be stopped and retried, never reversed; t
 the first moment, and its rows, its keys and its Temporal executions go in the stages below.
 
 > **No erasure completes today.** Completion needs proof that nothing of the tenant fires after its schedules were
-> verified paused, and that proof doesn't hold yet: a Temporal schedule deleted and recreated counts its conflict
-> token from 1 again, so an unpause sent before the deletion can land on a late create, and schedule ticks have no
-> execution timeout. An erasure that reaches its bound holds there (`firing_bound_unproven`), its data, keys and
-> executions already gone, until a design that proves it is ruled on; one stopped, or failing, stays at an earlier
-> stage.
+> verified paused and that every schedule tick closed by a known time. The first holds: each schedule create is under
+> its own Temporal id, recorded before the call, so a late create can't be unpaused, and the erasure covers every id.
+> The second doesn't: schedule ticks have no execution timeout, and a schedule doesn't list its running ticks. An
+> erasure that reaches its bound holds there (`firing_bound_unproven`), its data, keys and executions already gone,
+> until a design that proves it is ruled on; one stopped, or failing, stays at an earlier stage.
 
 ## Starting, stopping, retrying
 
@@ -59,9 +59,9 @@ a schedule, a run, an execution), each found, requested, then verified by readin
 | Stage | |
 |---|---|
 | 20 reconcile | waits until no request is `starting` (the dispatcher's reconciler resolves each) |
-| 31 pause | every schedule of the tenant described paused, or absent |
+| 31 pause | every Temporal schedule the tenant may have, every id each of its schedules was ever recorded under (one per create), described paused, or absent |
 | 32 inventory | before any schedule is deleted: every execution each schedule lists (recent and running), every firing its ticks recorded, and every execution visibility lists under its prefix |
-| 33 unschedule | every schedule deleted, until a describe finds nothing |
+| 33 unschedule | every one of them deleted, until a describe finds nothing |
 | 40 cancel | queued requests and pending events cancelled (`tenant_erased`), their counters released |
 | 50 end runs | every running run cancelled in Temporal, then waited for: ended in Dewpoint and closed in Temporal |
 | 60 executions | the fence goes up; every execution enumerated from runs, started requests, the run evidence, the ticks' records and the inventory (visibility adding), each walked through its history (the run it continued from and as, every child it started), an open one terminated first, then deleted until describing that exact run answers not-found |

@@ -90,6 +90,17 @@ by default), `mode`, a fixed `input` checked against the active version, and `en
 (`workflow.view`), never with their input; `PATCH` changes any field (only `cron` and `every_s` take a null, which
 switches the timing's kind); `DELETE` removes one.
 
+A schedule as the API shows it carries its missed firings (below): `misses`, every firing certainly missed (those
+Temporal skipped past the catch-up window, as of `misses_read_at`, and those due while it waited, created paused, for
+its unpause, also shown alone as `missed_while_created`); `accounting_complete`, `false` while any span of its life is
+possibly missed, unknown or pending; and `uncounted_intervals`, each of those spans as `{"from", "to", "class",
+"reason"}` (ISO 8601 times; `to` is `null` while a span is open; `class` `possibly_missed`, `unknown` or `pending`), in
+order, never counted in `misses`. The reasons are fixed: `changed_while_waiting`, `lost_before_unpause`,
+`lost_after_unpause`, `lost_from_before_migration`, `deleted_before_landing`, `gone_before_deletion`,
+`deleted_from_before_migration`, `gone_before_counted`, `before_migration` (a schedule from before 2b-4a: its life
+until the migration, which nothing recorded as evidence); and, pending, `awaiting_first_update` (open: the schedule not
+synced yet, or its Temporal id's first update not landed) and `count_pending` (landed, its count not recorded yet).
+
 - **Cron, as Temporal reads it:** five fields (minute, hour, day of the month, month, day of the week), each `*`, a
   number, a range, `*/step` or `a-b/step`, or a list; months and days by name in any case; Sunday is 0 or 7. A day of
   the month and a day of the week together are refused: Temporal requires both to match, where cron usually takes
@@ -100,14 +111,59 @@ switches the timing's kind); `DELETE` removes one.
   workflow is disabled) and marks it synced (`synced_generation`) only once Temporal shows its `dewpoint generation
   <n>` note. Editing a schedule directly in Temporal isn't supported. A sync Temporal refuses is shown as
   `sync_error` and retried after a minute. There's no "run now": start the workflow instead.
+- **Each create is under a fresh Temporal id** (`t:<tenant>:sched:<schedule>~<n>`, recorded before the call): a schedule
+  is created paused, then unpaused by an update that names its conflict token, and one Temporal lost is created again
+  under the next id, never the same one. A create that lands late stays paused under its own id, firing nothing (a
+  successor is recorded only once a describe, under a per-schedule lock, finds the id before it still absent; the
+  dispatcher updates an id only holding that lock, after a read made after the describe its update's token comes from
+  shows it still the live schedule's current one): every id that isn't a schedule's current one, a deleted schedule's
+  included (its tombstone gone or not), is described again every hour, for good (one whose describe failed, five minutes
+  later, behind the rest), and one found is paused by the dispatcher for its delete, its count recorded, then deleted
+  (alerted on, `schedule_incarnation_stray`). Its ticks keep the schedule's own id
+  (`t:<tenant>:sched:<schedule>-<time>`). A schedule from before 2b-4a keeps the id it had as its incarnation 0.
 - **Each firing is a tick.** It's admitted as any request, under the key `sched:<schedule>:<nominal time>`, so a retry
   or a backfill over a time that already fired admits nothing new. A tick of a schedule disabled or deleted before
   Temporal heard of it is a `refused` request (`schedule_paused`, `schedule_deleted`); one of a disabled workflow is
   refused as admission refuses it; a tenant being erased skips it, audited. A tick that can't be admitted (the database,
   a key) is retried without limit, and alerts after 10 minutes. Its request's audit entry names the schedule.
-- **Missed firings.** Within the catch-up window, firings missed while Temporal was down fire when it's back, each
-  with its own time. Past it they're skipped: Temporal counts them, and the schedule's `misses` shows the count, read
-  every five minutes, audited and alerted on.
+- **Missed firings.** Within the catch-up window, firings missed while Temporal was down fire when it's back, each with
+  its own time. Past it they're skipped: Temporal counts them, and the schedule's `misses` shows the count, read every
+  five minutes for each of its Temporal ids (`misses_read_at`), each id's count added to the total, audited and alerted
+  on (`schedule_firings_missed`). A deleted schedule's count can't be read again, so the dispatcher deletes a Temporal
+  id only once it shows the dispatcher's own pause for the delete (which discards any update another writer still had in
+  flight), when its count can't grow any more, and that count is recorded: nothing it counted is lost. One that goes
+  without Dewpoint deleting it leaves a possibly missed or unknown span (below) over the time its count wasn't read.
+- **Firings due while a schedule waited for its unpause.** Each Temporal id is created paused, and Temporal neither
+  catches up nor counts the firings due before the update that unpauses it. The dispatcher accounts for every such
+  span from evidence it records before it acts, never from a guess: the schedule's generation when the id was
+  recorded; the id's first landed update (its generation, Temporal's time for it, whether it left it paused), recorded
+  before any other update is sent to it; and when an unpause was first sent to it. Each span is one of:
+  - **certainly missed**: from the schedule's creation (the id's recording, for a later id) to its first landed update,
+    when the generation, which every change of the schedule, its workflow's enabling or disabling and the tenant's
+    erasure raise, didn't move from the start through that update (the same when the id was recorded, in the update's
+    note, and when the dispatcher read the schedule once it saw the update: an edit made while a stale update was in
+    flight leaves it unknown) and that update unpaused it. Counted on that update's timing, from Temporal's own
+    matching times, in `misses` and `missed_while_created`, audited and alerted on (`schedule_firings_missed`).
+  - **intentionally disabled**: the same, but the update left it paused (the schedule or its workflow disabled all
+    along): nothing was due.
+  - **possibly missed**: an id that went (a describe found nothing, so the next id is created) after it may have fired
+    (it was sent an unpause, or its first update unpaused it), from that update (else the start of its wait) to its
+    successor's recording; or one that wasn't found again at or after its schedule's deletion. Seeing it unpaused
+    proves it could fire, not that a tick did.
+  - **unknown**: anything else: the generation moved while the id waited (an edit; a disable and a re-enable), an id
+    lost before any unpause was sent, a schedule's whole life before 2b-4a, an id from before 2b-4a that went, a
+    schedule deleted before its id's first update landed, or a wait that couldn't be counted any more because its id
+    went first.
+  - **pending**: a wait with no span yet, shown by the API, never recorded: open from the schedule's creation (or the
+    id's recording) until its first update lands, then until its count is recorded.
+
+  A possibly missed, unknown or pending span is never counted, and never shown as a zero: the schedule's
+  `accounting_complete` is `false` and `uncounted_intervals` lists it. Each possibly missed or unknown one the sync
+  records is audited (`schedule.unaccounted`, with its bounds, class and reason) and alerted on
+  (`schedule_firings_unaccounted`); a count that keeps failing alerts as the sync's failure (`schedule_sync_failed`).
+  The `before_migration` spans are the exception: migration 0040 writes one for each schedule from before 2b-4a, and
+  audits and alerts on none, rather than raising an alert for every existing schedule at the upgrade; the API still
+  lists each.
 - **A backlog past the window isn't run.** When the dispatcher or the database is down instead, Temporal keeps firing
   and the ticks wait. Once they're decided, a tick more than its schedule's catch-up window old, by the database's
   clock, is a `refused` request, `schedule_catchup_expired`, audited and alerted on once (`schedule_tick_expired`, when

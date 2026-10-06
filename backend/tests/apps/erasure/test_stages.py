@@ -134,7 +134,8 @@ async def test_schedules_are_paused_their_firings_inventoried_then_deleted_and_e
     assert await schedule_sync.sync_one(dispatch_sessionmaker, client, Leading(), data["t"], data["schedule"]) == (
         "synced"
     )  # fmt: skip
-    temporal_id = schedule_workflow_id(str(data["t"]), str(data["schedule"]))
+    base = schedule_workflow_id(str(data["t"]), str(data["schedule"]))
+    temporal_id = base + "~1"  # its first incarnation since 2b-4a (0, the bare id, was never created)
     handle = client.get_schedule_handle(temporal_id)
     now = (await handle.describe()).info.created_at.replace(second=0, microsecond=0)
     await handle.backfill(ScheduleBackfill(start_at=now - timedelta(minutes=3), end_at=now,
@@ -157,7 +158,8 @@ async def test_schedules_are_paused_their_firings_inventoried_then_deleted_and_e
                       ).scalars())  # fmt: skip
     assert len(ticks) >= 3 and set(ticks) <= set(items)  # every tick the describe listed, before the delete
     assert f"t:{data['t']}:sched:{data['schedule']}-2026-10-05T09:00:00Z" in {w for w, _ in items}  # its record
-    assert known == [temporal_id] and (await record(owner_sessionmaker, data["t"])).paused_at is not None
+    assert sorted(known) == [base, temporal_id]  # every incarnation, the one never created included
+    assert (await record(owner_sessionmaker, data["t"])).paused_at is not None
     monkeypatch.undo()
     assert await until(retention_sessionmaker, client, data["t"], Stage.BOUND) == Stage.BOUND
     for workflow_id, run_id in ticks:  # open ticks: terminated, read, deleted

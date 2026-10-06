@@ -54,7 +54,7 @@ async def test_after_completion_nothing_of_the_tenant_is_decodable_or_stored_bey
                            target_id=str(data["w"]), details={"name": mark})  # fmt: skip
     # Temporal: its schedule, ticks left open, and a run still executing with a child (its row ended long ago)
     assert await schedule_sync.sync_one(dispatch_sessionmaker, client, Leading(), tenant, data["schedule"]) == "synced"
-    schedule_id = schedule_workflow_id(str(tenant), str(data["schedule"]))
+    schedule_id = schedule_workflow_id(str(tenant), str(data["schedule"])) + "~1"  # its first incarnation
     handle = client.get_schedule_handle(schedule_id)
     at = (await handle.describe()).info.created_at.replace(second=0, microsecond=0)
     await handle.backfill(ScheduleBackfill(start_at=at - timedelta(minutes=2), end_at=at,

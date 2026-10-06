@@ -5,7 +5,8 @@ recorded. A stage with an effect outside PostgreSQL works through its items, one
 each found, then requested, then verified by a read-back (a Temporal call can't share a transaction with its marker).
 
 - 20 reconcile: no request still `starting` (the reconciler resolves each, §7.6).
-- 31 pause: every schedule of the tenant (its rows, tombstones included) described paused, or absent.
+- 31 pause: every Temporal schedule of the tenant, every incarnation each schedule was recorded under (each possible
+  create's, tombstones' included), described paused, or absent.
 - 32 inventory, before any schedule is deleted: every execution each schedule's describe lists (recent and running),
   every firing the ticks recorded, and every execution visibility finds under the schedules' prefix, each an item of 60.
 - 33 unschedule: every schedule deleted, verified by a describe that finds nothing.
@@ -38,7 +39,7 @@ from dewpoint.core.db import tenant_scope
 from dewpoint.core.ingress import keys as event_keys
 from dewpoint.core.ingress.counters import release
 from dewpoint.core.models.erasure import Stage, TenantErasureItem, TenantErasureKnown
-from dewpoint.engine.runtime.ids import run_workflow_id, schedule_workflow_id
+from dewpoint.engine.runtime.ids import run_workflow_id
 
 TENANT_ERASED = "tenant_erased"  # the reason a cancel records
 BATCH = 100
@@ -131,10 +132,11 @@ async def reconcile(ctx: Context) -> bool:
 
 
 async def _schedules(ctx: Context, step: Stage) -> None:
+    """Every Temporal schedule the tenant may have: every incarnation each schedule was ever recorded under (each
+    possible create's), its tombstones' included."""
     async with _scoped(ctx) as s:
-        ids: list[uuid.UUID] = list((await s.execute(text("SELECT id FROM schedules"))).scalars())  # tombstones too
-        found = [(schedule_workflow_id(str(ctx.tenant_id), str(i)), None) for i in ids]
-        await _found(s, ctx, step, "schedule", found, "schedules")
+        ids: list[str] = list((await s.execute(text("SELECT temporal_id FROM schedule_incarnations"))).scalars())
+        await _found(s, ctx, step, "schedule", [(i, None) for i in ids], "incarnations")
 
 
 async def pause(ctx: Context) -> bool:
@@ -309,7 +311,8 @@ async def keys(ctx: Context) -> bool:
 SWEPT: tuple[tuple[str, str], ...] = (
     ("claim_grants", "claim_id, run_id"), ("step_outputs", "id"), ("run_secret_index", "root_run_id"),
     ("run_slots", "run_id"), ("execution_evidence", "id"), ("schedule_firings", "workflow_id, run_id"),
-    ("runs", "root_run_id"), ("run_requests", "id"), ("run_inputs", "id"), ("inbound_events", "id"),
+    ("schedule_incarnations", "temporal_id"), ("schedule_intervals", "id"), ("runs", "root_run_id"),
+    ("run_requests", "id"), ("run_inputs", "id"), ("inbound_events", "id"),
     ("trigger_bindings", "id"), ("webhook_endpoints", "id"), ("tenant_event_counters", "tenant_id"),
     ("csv_mappings", "workflow_id"), ("csv_uploads", "id"), ("schedules", "id"), ("workflow_versions", "id"),
     ("workflows", "id"), ("plugin_calls", "id"),  # 0042's: an options call names no connection, so nothing cascades

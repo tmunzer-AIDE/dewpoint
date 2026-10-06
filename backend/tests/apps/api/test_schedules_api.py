@@ -179,17 +179,56 @@ async def test_only_the_timings_kind_may_be_patched_to_null(
     assert (await row(owner_sessionmaker, created["id"]))["generation"] == 1
 
 
-async def test_a_schedules_missed_count_includes_the_firings_it_missed_while_created_paused(
+async def test_a_schedules_missed_firings_are_counted_only_when_certain_and_its_accounting_says_when_its_incomplete(
     keyed_app, workflow, owner_sessionmaker, api_settings
 ) -> None:
-    """D3f (the owner's ruling): missed firings are surfaced, those Temporal skipped past the catch-up window and
-    those due while the schedule, created paused, waited for its unpause (2b-4a M4)."""
+    """D3f (the owner's ruling, B): `misses` counts what's certain, those Temporal skipped past the catch-up window and
+    those due while the schedule, created paused, waited for its first update under one generation; a span the
+    evidence can't settle is listed, possibly missed or unknown, with its bounds and its reason, uncounted, as is a wait
+    not settled yet (pending: open until the first update lands, then until its count is recorded), and the accounting
+    is said incomplete: never a complete-looking zero (2b-4a M4; the owner's reviews)."""
     ctx, wf = workflow
     editor = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
     created = (await editor.post(schedules_url(ctx, wf), json=BODY)).json()
-    async with owner_sessionmaker() as s, s.begin():
+    assert (created["accounting_complete"], created["uncounted_intervals"]) == (False, [
+        {"from": created["created_at"], "to": None, "class": "pending", "reason": "awaiting_first_update"}
+    ])  # fmt: skip
+    assert created["misses_read_at"] is None  # Temporal's count not read yet
+    first = f"t:{ctx.tenant_id}:sched:{created['id']}~1"
+    async with owner_sessionmaker() as s, s.begin():  # its first incarnation landed, its wait counted
         await s.execute(
-            text("update schedules set misses = 2, creation_misses = 3 where id = :i"), {"i": created["id"]}
+            text(
+                "update schedules set misses = 2, creation_misses = 3, "
+                "misses_checked_at = '2026-10-06T12:00:00Z' where id = :i"
+            ),
+            {"i": created["id"]},
+        )
+        await s.execute(
+            text(
+                "insert into schedule_incarnations (temporal_id, tenant_id, schedule_id, number, generation, "
+                "landed_generation, landed_row_generation, landed_at, landed_paused) "
+                "values (:f, :t, :i, 1, 1, 1, 1, now(), false)"
+            ),
+            {"f": first, "t": ctx.tenant_id, "i": created["id"]},
+        )
+        await s.execute(
+            text(
+                "insert into schedule_intervals (tenant_id, schedule_id, temporal_id, kind, starts_at, ends_at, class, "
+                "missed, reason) values (:t, :i, :f, 'creation', now() - interval '3 minutes', now(), "
+                "'certainly_missed', 3, 'created_paused')"
+            ),
+            {"f": first, "t": ctx.tenant_id, "i": created["id"]},
         )
     shown = (await editor.get(schedule_url(ctx, created["id"]))).json()
-    assert (shown["misses"], shown["missed_while_created"]) == (5, 3)
+    assert (shown["misses"], shown["missed_while_created"], shown["accounting_complete"]) == (5, 3, True)
+    assert (shown["uncounted_intervals"], shown["misses_read_at"]) == ([], "2026-10-06T12:00:00+00:00")
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text(
+            "insert into schedule_intervals (tenant_id, schedule_id, temporal_id, kind, starts_at, ends_at, class, "
+            "reason) values (:t, :i, 'x', 'lost', '2026-10-06T08:00:00Z', '2026-10-06T11:00:00Z', 'unknown', "
+            "'lost_before_unpause')"), {"t": ctx.tenant_id, "i": created["id"]})  # fmt: skip
+    for shown in ((await editor.get(schedule_url(ctx, created["id"]))).json(),
+                  (await editor.get(schedules_url(ctx, wf))).json()["schedules"][0]):  # fmt: skip
+        assert (shown["misses"], shown["accounting_complete"]) == (5, False)
+        assert shown["uncounted_intervals"] == [{"from": "2026-10-06T08:00:00+00:00", "to": "2026-10-06T11:00:00+00:00",
+                                                 "class": "unknown", "reason": "lost_before_unpause"}]  # fmt: skip

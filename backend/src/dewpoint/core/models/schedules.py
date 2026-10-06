@@ -8,14 +8,17 @@ from datetime import datetime
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
+    Identity,
     Index,
     Integer,
     LargeBinary,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -60,6 +63,65 @@ class Schedule(Base):
     # Firings due while the schedule, created paused, waited for its unpause (D3f): Temporal neither catches them up
     # nor counts them, so the sync does, from Temporal's own matching times.
     creation_misses: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+
+
+class ScheduleIncarnation(Base):
+    """A Temporal schedule id the schedule may have been created under (the owner's ruling on the M4 checkpoint):
+    recorded and committed before its one create call, never created again; with the evidence its schedule's missed
+    firings are accounted from (D3f, migration 0040). Incarnation 0, backfilled, is the id the sync gave every
+    schedule before 2b-4a."""
+
+    __tablename__ = "schedule_incarnations"
+    __table_args__ = (UniqueConstraint("schedule_id", "number", name="schedule_incarnations_number"),)
+    temporal_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"))
+    schedule_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    number: Mapped[int] = mapped_column(Integer)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    misses: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))  # Temporal's, as last read
+    backfilled: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))  # from before 2b-4a
+    generation: Mapped[int | None] = mapped_column(BigInteger)  # its schedule's, when it was recorded
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # Temporal's
+    landed_generation: Mapped[int | None] = mapped_column(BigInteger)  # its first landed update's
+    # its schedule's generation, read once that landing was seen: the same as `generation` (generations only rise)
+    # proves nothing changed from its recording through the landing (the owner's review of B)
+    landed_row_generation: Mapped[int | None] = mapped_column(BigInteger)
+    landed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # Temporal's time for it
+    landed_paused: Mapped[bool | None] = mapped_column(Boolean)
+    unpause_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # before the call
+    seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # a describe last showed it
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # the stray check described it
+
+
+class ScheduleInterval(Base):
+    """A span a schedule's missed firings are accounted over (D3f, the owner's ruling B): its boundaries, its class
+    (certainly missed, intentionally disabled, possibly missed, unknown), its count when certain, its fixed reason."""
+
+    __tablename__ = "schedule_intervals"
+    __table_args__ = (
+        UniqueConstraint("temporal_id", "kind", name="schedule_intervals_one"),
+        CheckConstraint("kind IN ('creation', 'lost', 'deleted')", name="schedule_intervals_kind"),
+        CheckConstraint(
+            "class IN ('certainly_missed', 'intentionally_disabled', 'possibly_missed', 'unknown')",
+            name="schedule_intervals_class",
+        ),  # fmt: skip
+        CheckConstraint(
+            "(missed IS NOT NULL) = (class IN ('certainly_missed', 'intentionally_disabled'))",
+            name="schedule_intervals_counted",
+        ),  # fmt: skip
+        Index("schedule_intervals_schedule", "schedule_id", "starts_at"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=False), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"))
+    schedule_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    temporal_id: Mapped[str] = mapped_column(Text)
+    kind: Mapped[str] = mapped_column(Text)
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    class_: Mapped[str] = mapped_column("class", Text)
+    missed: Mapped[int | None] = mapped_column(Integer)
+    reason: Mapped[str] = mapped_column(Text)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class ScheduleFiring(Base):

@@ -8,10 +8,12 @@ namespace's retention has passed since it closed. So the final check may run onl
 (stage 60's end) plus the platform's longest namespace retention, 30 days, the earliest point, never a deadline. It
 also needs:
 - the firing bound: that nothing of the tenant fires after the last verified pause, and every tick closed by a known
-  time. **Unproven, so no erasure completes** (`firing_bound_unproven`): a schedule deleted and recreated counts its
-  conflict token from 1 again, so an unpause computed before the deletion can land on a late create
-  (`test_temporal_erasure_contract.py`), and a tick has no execution timeout since M3 (the owner's ruling), while an
-  ALLOW_ALL schedule doesn't list its running ticks. Another design must prove it (the owner's to rule);
+  time. **Unproven, so no erasure completes** (`firing_bound_unproven`, the owner's ruling on the M4 checkpoint).
+  Its first premise now holds: a late create can't be unpaused, since each create is under its own incarnation,
+  recorded before the call, and the erasure covers every one (`test_incarnations.py`; under one id it couldn't: a
+  recreated schedule counts its conflict token from 1 again, `test_temporal_erasure_contract.py`). Its second
+  doesn't: a tick has no execution timeout since M3 (the owner's ruling), and an ALLOW_ALL schedule, which the owner
+  keeps, doesn't list its running ticks, so a tick no inventory found has no known close;
 - a verified namespace-change boundary (D3g, `namespace_boundaries`), recorded on the erasure; one lost since holds it;
 - the namespace's retention, read from Temporal, at most 30 days.
 Each hold is recorded with its fixed reason and alerted on (waiting for the bound is no alert). Then the final check:

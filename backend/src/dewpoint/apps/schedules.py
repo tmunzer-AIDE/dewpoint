@@ -15,6 +15,8 @@ import re
 import uuid
 import zoneinfo
 from collections.abc import Mapping
+from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import func, select
@@ -24,7 +26,7 @@ from dewpoint.apps.inputs import FORGED, RESERVED_INPUT, reasons
 from dewpoint.core.audit import service as audit
 from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.crypto.keys import KeySource
-from dewpoint.core.models.schedules import Schedule
+from dewpoint.core.models.schedules import Schedule, ScheduleIncarnation, ScheduleInterval
 from dewpoint.core.models.workflows import Workflow, WorkflowVersion
 from dewpoint.engine.graph.csv import RESERVED, trigger_schema
 from dewpoint.engine.handles import contains_marker
@@ -250,7 +252,52 @@ async def delete(s: AsyncSession, *, actor_id: uuid.UUID, schedule: Schedule) ->
     await _audited(s, "schedule.delete", actor_id, schedule)
 
 
-def body(schedule: Schedule) -> dict[str, object]:
+@dataclass(frozen=True)
+class Accounting:
+    """A schedule's missed-firing accounting (D3f; the owner's ruling B and its review): complete only when no span of
+    its life is possibly missed, unknown or still pending; those spans, uncounted, in order, with their bounds (`to`
+    None while one is open) and fixed reasons."""
+
+    uncounted: list[dict[str, str | None]] = field(default_factory=list)
+
+    @property
+    def complete(self) -> bool:
+        return not self.uncounted
+
+
+async def accounting(s: AsyncSession, schedule_id: uuid.UUID) -> Accounting:
+    """The recorded spans that are possibly missed or unknown, and the wait of its current Temporal id while it has no
+    span yet: pending, open until the first update lands (`awaiting_first_update`, from the schedule's creation for a
+    schedule never synced or its first id, else the id's recording), then until its count is recorded
+    (`count_pending`, to that landing)."""
+    found = await s.execute(
+        select(ScheduleInterval)
+        .where(ScheduleInterval.schedule_id == schedule_id,
+               ScheduleInterval.class_.in_(("possibly_missed", "unknown")))
+    )  # fmt: skip
+    spans: list[tuple[datetime, dict[str, str | None]]] = [
+        (i.starts_at, {"from": i.starts_at.isoformat(), "to": i.ends_at.isoformat(), "class": i.class_,
+                       "reason": i.reason}) for i in found.scalars()
+    ]  # fmt: skip
+    ids = (await s.execute(select(ScheduleIncarnation).where(ScheduleIncarnation.schedule_id == schedule_id)
+                           .order_by(ScheduleIncarnation.number))).scalars().all()  # fmt: skip
+    current = ids[-1] if ids else None
+    counted = current is not None and bool(await s.scalar(
+        select(func.count()).select_from(ScheduleInterval)
+        .where(ScheduleInterval.temporal_id == current.temporal_id, ScheduleInterval.kind == "creation")
+    ))  # fmt: skip
+    if current is None or not (current.backfilled or counted):
+        created = await s.scalar(select(Schedule.created_at).where(Schedule.id == schedule_id))
+        start = current.recorded_at if current is not None and len(ids) > 1 else created
+        landed = current.landed_at if current is not None else None
+        if start is not None:
+            spans.append((start, {"from": start.isoformat(), "to": landed.isoformat() if landed else None,
+                                  "class": "pending",
+                                  "reason": "count_pending" if landed else "awaiting_first_update"}))  # fmt: skip
+    return Accounting([span for _, span in sorted(spans, key=lambda pair: pair[0])])
+
+
+def body(schedule: Schedule, accounted: Accounting) -> dict[str, object]:
     """A schedule as the API shows it: never its input."""
     return {
         "id": str(schedule.id),
@@ -260,8 +307,12 @@ def body(schedule: Schedule) -> dict[str, object]:
         "enabled": schedule.enabled,
         "generation": schedule.generation,
         "synced_generation": schedule.synced_generation,
-        "misses": schedule.misses + schedule.creation_misses,  # every firing missed, both kinds (D3f)
+        "misses": schedule.misses + schedule.creation_misses,  # every firing certainly missed, both kinds (D3f)
         "missed_while_created": schedule.creation_misses,  # due while it waited, created paused, for its unpause
+        # Temporal's count, read every five minutes: `misses` as of then (a deletion reads it last, paused, D3f)
+        "misses_read_at": schedule.misses_checked_at.isoformat() if schedule.misses_checked_at else None,
+        "accounting_complete": accounted.complete,  # false: some span's firings are possibly missed, unknown or pending
+        "uncounted_intervals": accounted.uncounted,  # those spans, never in `misses`
         "sync_error": schedule.sync_error,
         "created_at": schedule.created_at.isoformat(),
         "updated_at": schedule.updated_at.isoformat(),

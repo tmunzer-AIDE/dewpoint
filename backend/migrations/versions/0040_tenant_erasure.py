@@ -20,6 +20,35 @@ record.
 
 `schedule_firings`: each `ScheduleTick` records its own workflow and run ids as its first act, a skip included, for the
 erasure's firing inventory; identifiers only, kept 31 days (the platform's longest namespace retention, and a day).
+`schedule_incarnations` (the owner's ruling on the M4 checkpoint): every Temporal schedule id a schedule may have
+been created under, each recorded and committed before its one create call, never created again: a create that lands
+late does so under an id no describe ever showed, so no update computed before it, an unpause included, can target it
+(a schedule deleted and recreated under one id counts its conflict token from 1 again). Its tick's identity stays the
+schedule's own (`t:<tenant>:sched:<schedule>`, the action's workflow id); an incarnation is `<that>~<n>`. Every schedule
+already here is backfilled as incarnation 0, under the id it may already have (`backfilled`: nothing about it before
+the migration is known). Each incarnation keeps: its schedule's generation when it was recorded; when Temporal created
+it; its first landed update (its generation, from its note; Temporal's update time; whether it left it paused; its
+schedule's generation, read once it was seen), committed before any later update is sent to it; when the first update that unpauses it was sent (committed before the
+call: one without it never fired); when a describe last showed it; the count of firings Temporal missed past its
+catch-up window, as last read; and when the stray check last described it (`checked_at`): every incarnation that isn't
+current, its schedule's deleted or not, is described again every hour, for good (`stray_incarnations()` lists them,
+across active tenants), and one found is deleted.
+
+`schedule_intervals` (D3f; the owner's ruling, B): the spans a schedule's missed firings are accounted over, persisted
+with their boundaries, class and fixed reason. `creation`: from an incarnation's recording (its schedule's creation,
+for a schedule's first) to its first landed update. Certainly missed, counted, only if the generation (which every
+change of the schedule's, its workflow's or its tenant's state raises, and which only rises) is the same at its
+recording, in that update's note and once the update was seen, and the update unpaused it; intentionally disabled if the same but paused; else unknown (also when it can't be counted
+any more: its incarnation went first). `lost`: from the last evidence of an incarnation that went (its first landed
+update; else the start of its wait; its recording, for one from before the migration) to its successor's recording:
+possibly missed if it may have fired (it was sent an unpause, or its first update unpaused it), else unknown; never
+counted, as seeing it unpaused proves it could fire, not that a tick did. `deleted`: a schedule deleted before its
+incarnation's first update landed, or whose incarnation no describe found at or after the deletion (`seen_at`): the
+same classes, to the deletion. `schedules.creation_misses` sums the counted ones. Anything possibly missed or unknown
+leaves the schedule's accounting incomplete, which the API shows, as does a wait with no span yet (pending: the API
+reads `schedule_incarnations` for it). Every schedule already here gets its life before the migration as an unknown
+`creation` span of its incarnation 0 (`before_migration`, from its creation to the migration): nothing about it was
+recorded as evidence (the owner's review), so no such schedule's accounting is ever shown complete.
 `schedules.creation_misses`: firings due while a newly created schedule stayed paused, before its unpause (D3f): Temporal
 neither catches them up nor counts them as missed, so the sync counts them.
 
@@ -49,8 +78,9 @@ STAGES = (20, 31, 32, 33, 40, 50, 60, 70, 80, 90, 100)
 FENCED = ("claim_grants", "connections", "csv_mappings", "csv_uploads", "data_keys", "egress_allowlist",
           "execution_evidence", "inbound_events", "memberships", "plugin_calls", "rate_buckets", "rate_scope_keys",
           "run_inputs", "run_requests", "run_secret_index", "run_slots", "run_steps", "runs", "schedule_firings",
-          "schedules", "step_outputs", "tenant_event_counters", "tenant_event_keys", "tenant_retention",
-          "tenant_run_limits", "trigger_bindings", "webhook_endpoints", "workflow_versions", "workflows")  # fmt: skip
+          "schedule_incarnations", "schedule_intervals", "schedules", "step_outputs", "tenant_event_counters",
+          "tenant_event_keys", "tenant_retention", "tenant_run_limits", "trigger_bindings", "webhook_endpoints",
+          "workflow_versions", "workflows")  # fmt: skip
 
 FENCE = [
     """CREATE FUNCTION tenant_insert_fence() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
@@ -219,6 +249,49 @@ FIRINGS = [
 ]
 
 
+INCARNATIONS = [
+    "ALTER TABLE schedule_incarnations ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE schedule_incarnations FORCE ROW LEVEL SECURITY",
+    "CREATE POLICY schedule_incarnations_scope ON schedule_incarnations TO dewpoint_api, dewpoint_dispatch, "
+    "dewpoint_retention "
+    "USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id())",
+    "GRANT SELECT, INSERT, UPDATE (misses, seen_at, checked_at, created_at, landed_generation, landed_row_generation, "
+    "landed_at, landed_paused, unpause_sent_at) ON schedule_incarnations TO dewpoint_dispatch",
+    "GRANT SELECT ON schedule_incarnations TO dewpoint_api",  # a wait not yet settled, shown as pending
+    "GRANT SELECT, DELETE ON schedule_incarnations TO dewpoint_retention",
+    # every schedule already here: incarnation 0, under the id the sync gave every schedule before
+    "INSERT INTO schedule_incarnations (temporal_id, tenant_id, schedule_id, number, misses, backfilled) "
+    "SELECT 't:' || tenant_id || ':sched:' || id, tenant_id, id, 0, misses, true FROM schedules",
+    """CREATE FUNCTION stray_incarnations(max_rows integer) RETURNS TABLE (tenant_id uuid, temporal_id text)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+    SELECT i.tenant_id, i.temporal_id FROM schedule_incarnations i
+    JOIN tenants t ON t.id = i.tenant_id AND t.status = 'active'
+    WHERE (i.checked_at IS NULL OR i.checked_at < statement_timestamp() - interval '1 hour')
+      AND NOT EXISTS (
+        SELECT 1 FROM schedules s WHERE s.id = i.schedule_id AND s.deleted_at IS NULL
+        AND i.number = (SELECT max(j.number) FROM schedule_incarnations j WHERE j.schedule_id = i.schedule_id))
+    ORDER BY i.checked_at NULLS FIRST, i.temporal_id
+    LIMIT max_rows
+$$""",
+    "REVOKE ALL ON FUNCTION stray_incarnations(integer) FROM PUBLIC",
+    "GRANT EXECUTE ON FUNCTION stray_incarnations(integer) TO dewpoint_dispatch",
+]
+
+INTERVALS = [
+    "ALTER TABLE schedule_intervals ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE schedule_intervals FORCE ROW LEVEL SECURITY",
+    "CREATE POLICY schedule_intervals_scope ON schedule_intervals TO dewpoint_api, dewpoint_dispatch, "
+    "dewpoint_retention USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id())",
+    "GRANT SELECT, INSERT ON schedule_intervals TO dewpoint_dispatch",
+    "GRANT USAGE ON SEQUENCE schedule_intervals_id_seq TO dewpoint_dispatch",
+    "GRANT SELECT ON schedule_intervals TO dewpoint_api",
+    "GRANT SELECT, DELETE ON schedule_intervals TO dewpoint_retention",
+    # every schedule already here: its life before the migration, which nothing recorded as evidence, unknown
+    "INSERT INTO schedule_intervals (tenant_id, schedule_id, temporal_id, kind, starts_at, ends_at, class, reason) "
+    "SELECT i.tenant_id, i.schedule_id, i.temporal_id, 'creation', s.created_at, i.recorded_at, 'unknown', "
+    "'before_migration' FROM schedule_incarnations i JOIN schedules s ON s.id = i.schedule_id WHERE i.backfilled",
+]
+
 # The retention process checks the deployment's recorded namespace before erasure reaches Temporal (§2.1).
 RECORD = "GRANT SELECT ON platform_settings TO dewpoint_retention"
 BOUNDARIES = [
@@ -307,6 +380,55 @@ def upgrade() -> None:
     )
     for statement in BOUNDARIES:
         op.execute(statement)
+    op.create_table(
+        "schedule_incarnations",
+        sa.Column("temporal_id", sa.Text, primary_key=True),
+        sa.Column("tenant_id", sa.Uuid, sa.ForeignKey("tenants.id"), nullable=False),
+        sa.Column("schedule_id", sa.Uuid, nullable=False),  # no key: a tombstone goes before its incarnations
+        sa.Column("number", sa.Integer, nullable=False),
+        sa.Column("recorded_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column("misses", sa.BigInteger, nullable=False, server_default="0"),  # Temporal's, as last read
+        sa.Column("backfilled", sa.Boolean, nullable=False, server_default=sa.false()),  # from before 2b-4a
+        sa.Column("generation", sa.BigInteger, nullable=True),  # its schedule's, when it was recorded
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),  # Temporal's
+        sa.Column("landed_generation", sa.BigInteger, nullable=True),  # its first landed update's
+        sa.Column("landed_row_generation", sa.BigInteger, nullable=True),  # its schedule's, once that was seen
+        sa.Column("landed_at", sa.DateTime(timezone=True), nullable=True),  # Temporal's time for it
+        sa.Column("landed_paused", sa.Boolean, nullable=True),
+        sa.Column("unpause_sent_at", sa.DateTime(timezone=True), nullable=True),  # before the call: else never fired
+        sa.Column("seen_at", sa.DateTime(timezone=True), nullable=True),  # a describe last showed it
+        sa.Column("checked_at", sa.DateTime(timezone=True), nullable=True),  # the stray check last described it
+        sa.UniqueConstraint("schedule_id", "number", name="schedule_incarnations_number"),
+    )
+    for statement in INCARNATIONS:
+        op.execute(statement)
+    op.create_table(
+        "schedule_intervals",
+        sa.Column("id", sa.BigInteger, sa.Identity(always=False), primary_key=True),
+        sa.Column("tenant_id", sa.Uuid, sa.ForeignKey("tenants.id"), nullable=False),
+        sa.Column("schedule_id", sa.Uuid, nullable=False),
+        sa.Column("temporal_id", sa.Text, nullable=False),  # the incarnation it accounts for
+        sa.Column("kind", sa.Text, nullable=False),
+        sa.Column("starts_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("ends_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("class", sa.Text, nullable=False),
+        sa.Column("missed", sa.Integer, nullable=True),  # counted only when certainly missed
+        sa.Column("reason", sa.Text, nullable=False),
+        sa.Column("recorded_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.CheckConstraint("kind IN ('creation', 'lost', 'deleted')", name="schedule_intervals_kind"),
+        sa.CheckConstraint(
+            "class IN ('certainly_missed', 'intentionally_disabled', 'possibly_missed', 'unknown')",
+            name="schedule_intervals_class",
+        ),  # fmt: skip
+        sa.CheckConstraint(
+            "(missed IS NOT NULL) = (class IN ('certainly_missed', 'intentionally_disabled'))",
+            name="schedule_intervals_counted",
+        ),  # fmt: skip
+        sa.UniqueConstraint("temporal_id", "kind", name="schedule_intervals_one"),
+    )
+    op.create_index("schedule_intervals_schedule", "schedule_intervals", ["schedule_id", "starts_at"])
+    for statement in INTERVALS:
+        op.execute(statement)
     op.add_column("schedules", sa.Column("creation_misses", sa.Integer, nullable=False, server_default="0"))
     op.execute("GRANT UPDATE (creation_misses) ON schedules TO dewpoint_dispatch")
     for statement in FENCE:
@@ -346,6 +468,9 @@ def downgrade() -> None:
         op.execute(statement)
     op.execute("REVOKE UPDATE (creation_misses) ON schedules FROM dewpoint_dispatch")
     op.drop_column("schedules", "creation_misses")
+    op.execute("DROP FUNCTION stray_incarnations(integer)")
+    op.drop_table("schedule_intervals")
+    op.drop_table("schedule_incarnations")
     op.drop_table("namespace_boundaries")
     op.drop_table("schedule_firings")
     op.drop_table("tenant_erasure_known")

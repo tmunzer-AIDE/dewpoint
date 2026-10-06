@@ -4,11 +4,15 @@ server (Temporal CLI 1.9.1, Server 1.32.0; `test_temporal_contract.py` pins the 
 of it fails a test here.
 
 - A paused schedule's due firings are neither caught up after its unpause nor counted as missed;
-  `ListScheduleMatchingTimes` counts them (D3f: the sync counts what a schedule created paused missed).
+  `ListScheduleMatchingTimes` counts them (D3f: the sync counts what a schedule created paused missed). Paused, its
+  count of firings missed past the catch-up window doesn't grow even across an outage longer than the window, where an
+  unpaused one's does: the count a paused schedule shows is final (D3f: the sync deletes an incarnation only once it
+  shows paused and that count is recorded).
 - **The deleted-and-recreated token test FAILS the outline's premise:** a schedule's conflict token counts its updates
   and patches from 1, a deleted schedule's recreation starts again at 1, and an update carrying a token taken from the
-  deleted schedule lands on the recreated one, unpausing it. So paused creation alone doesn't make a late create unable
-  to fire, and, as the outline says, step 9's bound stays unproven and completion blocked until another design does.
+  deleted schedule lands on the recreated one, unpausing it. So paused creation under one id doesn't make a late create
+  unable to fire. The sync gives each create its own incarnation id instead (the owner's ruling on the M4 checkpoint),
+  which `tests/apps/erasure/test_incarnations.py` proves against this race.
 - A schedule's describe lists its running workflows under the SKIP and BUFFER_ALL overlap policies, not under
   ALLOW_ALL (2b-3a's): with ALLOW_ALL, a running tick isn't listed by its schedule; recent actions keep the last 10.
 - `DeleteWorkflowExecution` removes a running or a closed execution: describing that exact run answers NOT_FOUND, at
@@ -126,11 +130,47 @@ async def test_a_paused_schedules_due_firings_are_neither_caught_up_nor_counted_
     assert after.info.missed_catchup_window == 0 and after.info.action_count <= 2  # none of them caught up
 
 
+async def test_a_paused_schedules_missed_count_doesnt_grow_across_an_outage_longer_than_its_window(tmp_path) -> None:
+    """Every 2 s, a 10 s catch-up window, the server down 25 s: the unpaused schedule counts the firings it skipped,
+    the paused one counts none."""
+    from tests.support.temporal import start_local
+
+    args = ["--db-filename", str(tmp_path / "temporal.db")]
+    paused_id, running_id = f"t:{A}:sched:{uuid.uuid4()}", f"t:{A}:sched:{uuid.uuid4()}"
+
+    def every_2s(schedule_id: str, *, paused: bool) -> Schedule:
+        return Schedule(
+            action=ScheduleActionStartWorkflow(Ends.run, id=schedule_id, task_queue=QUEUE),
+            spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(seconds=2))]),
+            policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.ALLOW_ALL, catchup_window=timedelta(seconds=10)),
+            state=ScheduleState(paused=paused),
+        )
+
+    async with await start_local(dev_server_extra_args=args) as env:
+        await env.client.create_schedule(paused_id, every_2s(paused_id, paused=True))
+        await env.client.create_schedule(running_id, every_2s(running_id, paused=False))
+        for _ in range(100):  # both schedulers running
+            if (await describe(env.client, running_id)).info.action_count >= 2:
+                break
+            await asyncio.sleep(0.2)
+    await asyncio.sleep(25)  # past the window
+    async with await start_local(dev_server_extra_args=args) as env:
+        for _ in range(100):
+            running = await describe(env.client, running_id)
+            if running.info.missed_catchup_window:
+                break
+            await asyncio.sleep(0.2)
+        await asyncio.sleep(2)  # the paused one's scheduler has caught up too
+        paused = await describe(env.client, paused_id)
+    assert running.info.missed_catchup_window > 0
+    assert (paused.info.missed_catchup_window, paused.info.action_count) == (0, 0)
+
+
 async def test_a_deleted_and_recreated_schedule_restarts_its_token_so_a_stale_unpause_lands_on_it(
     dev_env: WorkflowEnvironment,
 ) -> None:
-    """The outline's paused-creation protection is relied on only once a token taken from a deleted schedule never
-    matches a recreated one. It does: this pins the failure (completion blocked, `firing_bound_unproven`)."""
+    """The outline's paused-creation protection was to be relied on only once a token taken from a deleted schedule
+    never matches a recreated one. It does match: this pins Temporal's behaviour, which incarnation ids work around."""
     client = dev_env.client
     schedule_id = f"t:{A}:sched:{uuid.uuid4()}"
 
