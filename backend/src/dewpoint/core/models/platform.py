@@ -2,7 +2,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, SmallInteger, String, Text, func
+from sqlalchemy import Boolean, DateTime, Integer, SmallInteger, String, Text, func
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -46,3 +46,12 @@ class DispatcherReport(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     reported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     details: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
+
+
+class RunDurationLimit(Base):
+    """A maximum run duration the dispatcher has set deadlines with (engine 2b spec §6.4): the longest is the payload
+    floor's."""
+
+    __tablename__ = "run_duration_limits"
+    days: Mapped[int] = mapped_column(Integer, primary_key=True)
+    first_recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

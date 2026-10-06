@@ -40,6 +40,7 @@ from temporalio.client import (
 )
 from temporalio.service import RPCError, RPCStatusCode
 
+from dewpoint.apps.codec import KEY_VERSION
 from dewpoint.apps.dispatcher.tick import ADMISSION_QUEUE
 from dewpoint.core.audit import service as audit
 from dewpoint.core.db import tenant_scope
@@ -65,6 +66,16 @@ class Described:
     token: bytes
     note: str
     missed: int  # firings Temporal skipped past the catch-up window, ever
+    action_key_version: int | None = None  # the data-key version its action's payload names, as the codec wrote it
+
+
+def _action_key_version(answer: Any) -> int | None:
+    """The data-key version the schedule's action is sealed under, from its payload's metadata, undecoded."""
+    for payload in answer.schedule.action.start_workflow.input.payloads:
+        raw = payload.metadata.get(KEY_VERSION, b"")
+        if raw.isdigit() and len(raw) <= 9:  # what the codec writes, and refuses otherwise
+            return int(raw)
+    return None
 
 
 @dataclass(frozen=True)
@@ -87,7 +98,8 @@ async def described(client: Client, schedule_id: str) -> Described | None:
         if e.status == RPCStatusCode.NOT_FOUND:
             return None
         raise
-    return Described(answer.conflict_token, answer.schedule.state.notes, answer.info.missed_catchup_window)
+    return Described(answer.conflict_token, answer.schedule.state.notes, answer.info.missed_catchup_window,
+                     _action_key_version(answer))  # fmt: skip
 
 
 async def _create(client: Client, schedule_id: str, schedule: Schedule) -> bool:
@@ -156,9 +168,10 @@ async def _wanted(s: AsyncSession, tenant_id: uuid.UUID, schedule_id: uuid.UUID)
 
 async def _record(
     sessionmaker: async_sessionmaker[AsyncSession], leader: _Leader, tenant_id: uuid.UUID, schedule_id: uuid.UUID,
-    generation: int,
+    generation: int, action_key_version: int | None = None,
 ) -> str:  # fmt: skip
-    """The generation marked synced, if the row still has it and this writer still leads."""
+    """The generation marked synced, with the key version its action was read back under (a live schedule's), if the
+    row still has it and this writer still leads."""
     async with sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant_id)
         if not await leader.leading():
@@ -166,8 +179,9 @@ async def _record(
         done = await s.execute(
             update(Row)
             .where(Row.id == schedule_id, Row.generation == generation)
-            .values(synced_generation=generation, sync_error=None, sync_error_at=None)
-        )
+            .values(synced_generation=generation, sync_error=None, sync_error_at=None,
+                    action_key_version=action_key_version)
+        )  # fmt: skip
     return "synced" if done.rowcount else "pending"  # type: ignore[attr-defined]
 
 
@@ -199,7 +213,7 @@ async def sync_one(
     after = await described(client, temporal_id)  # the read-back: an OK answer proves nothing
     if after is None or after.note != mark:
         return "pending"
-    return await _record(sessionmaker, leader, tenant_id, schedule_id, wanted.generation)
+    return await _record(sessionmaker, leader, tenant_id, schedule_id, wanted.generation, after.action_key_version)
 
 
 async def _failed(

@@ -442,11 +442,12 @@ async def _call(
     ingress_: Any, endpoint_id: uuid.UUID, events: int, size: int, keyed: bool = False
 ) -> tuple[Any, float]:
     """One recording of `events` events of `size` sealed bytes each (keyed: with dedupe keys): its outcome and time."""
-    from tests.core.ingress.support import RECORD
+    from tests.core.ingress.support import RECORD, sealed_layout
 
     ids = [uuid.uuid4() for _ in range(events)]
     keys = [os.urandom(32) if keyed else None for _ in ids]
-    params = {"e": endpoint_id, "refusal": None, "read": 0, "ids": ids, "sealed": [os.urandom(size) for _ in ids],
+    sealed = [sealed_layout(os.urandom(size), 1) for _ in ids]  # the recording function stores no other layout
+    params = {"e": endpoint_id, "refusal": None, "read": 0, "ids": ids, "sealed": sealed,
               "versions": [1] * events, "dedupe": keys, "digests": [k and os.urandom(32) for k in keys]}  # fmt: skip
     start = time.perf_counter()
     async with ingress_() as s, s.begin():

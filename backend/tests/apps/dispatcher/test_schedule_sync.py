@@ -294,3 +294,17 @@ async def test_firings_missed_past_the_catch_up_window_are_recorded_audited_and_
     async with owner_sessionmaker() as s:
         audit = (await s.execute(text("select details from audit_log where action = 'schedule.missed'"))).scalar_one()
     assert audit == {"schedule_id": str(schedule_id), "missed": row["misses"]}
+
+
+async def test_the_sync_records_the_key_version_its_temporal_action_names(
+    server, ready, owner_sessionmaker, dispatch_sessionmaker
+) -> None:
+    """Engine 2b spec §6.4: retiring a data-key version waits until every live schedule's Temporal action is sealed
+    under the active one. The sync records the version the action's payload names, from its own read-back."""
+    ctx, _, schedule_id = ready
+    assert (await stored(owner_sessionmaker, schedule_id))["action_key_version"] is None
+    assert await sync(server, dispatch_sessionmaker, ctx, schedule_id) == "synced"
+    found = await in_temporal(server, ctx, schedule_id)
+    [payload] = found.schedule.action.start_workflow.input.payloads
+    assert payload.metadata["dewpoint-key-version"] == b"1"  # the fixture keys' active version
+    assert (await stored(owner_sessionmaker, schedule_id))["action_key_version"] == 1

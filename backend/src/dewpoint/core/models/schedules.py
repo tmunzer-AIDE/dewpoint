@@ -51,3 +51,6 @@ class Schedule(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The data-key version the sync last wrote its Temporal action under (engine 2b spec §6.4): retiring a version
+    # waits until every live schedule's is the active one.
+    action_key_version: Mapped[int | None] = mapped_column(Integer)

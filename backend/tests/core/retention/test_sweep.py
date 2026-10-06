@@ -71,7 +71,7 @@ async def test_terminal_events_past_the_cutoff_go_and_free_their_retained_counte
 ) -> None:
     t, endpoint_id = await endpoint(owner_sessionmaker)
     ctx = await tenant(owner_sessionmaker, tenant_id=t)
-    sizes = {"matched": 10, "unmatched": 11, "cancelled": 12, "dead": 13, "recent": 14, "pending": 15}
+    sizes = {"matched": 70, "unmatched": 71, "cancelled": 72, "dead": 73, "recent": 74, "pending": 75}
     ids = {name: uuid.uuid4() for name in sizes}
     await record(ingress_sessionmaker, endpoint_id, [(None, None, b"x" * n) for n in sizes.values()],
                  ids=list(ids.values()))  # fmt: skip

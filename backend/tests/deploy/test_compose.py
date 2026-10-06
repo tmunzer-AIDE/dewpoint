@@ -269,3 +269,11 @@ def test_cis_ingress_checks_each_stop_a_failing_step() -> None:
         "A webhook through nginx and ingress (engine 2b spec §8.3, §12)"
     ]["run"]
     assert [line for line in run.splitlines() if line.strip().startswith("test ") and "&&" in line] == []
+
+
+@pytest.mark.parametrize("name", ["api", "ingress"])
+def test_the_ingress_keys_holders_take_a_previous_key_for_its_rollout(name: str) -> None:
+    """2b-4 (engine 2b spec §8.3): the ingress key's rollout configures the previous key on every process that holds
+    it; unset, it's empty."""
+    env = environment(name)
+    assert env["DEWPOINT_INGRESS_KEY_PREVIOUS_B64"] == "" and env["DEWPOINT_INGRESS_KEY_PREVIOUS_ID"] == ""
