@@ -132,3 +132,16 @@ it("says why a workflow can't be exported as a portable file", async () => {
     "Triage can't be exported as a portable file: it has steps of a type this server doesn't know. Open it to download the draft as it is.",
   );
 });
+
+it("offers New workflow to editors, and opens it when asked by the URL", async () => {
+  await show();
+  await userEvent.click(await screen.findByRole("button", { name: "New workflow" }));
+  expect(screen.getByRole("dialog", { name: "New workflow" })).toBeTruthy();
+});
+
+it("offers no New workflow to a viewer", async () => {
+  role = "viewer";
+  await show();
+  await screen.findByRole("link", { name: "Nightly" });
+  expect(screen.queryByRole("button", { name: "New workflow" })).toBeNull();
+});

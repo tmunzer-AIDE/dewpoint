@@ -5,6 +5,7 @@ import * as Dropdown from "@radix-ui/react-dropdown-menu";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
+import { Button } from "../components/Button";
 import { LoadError } from "../components/LoadError";
 import { Segmented } from "../components/Segmented";
 import { Switch } from "../components/Switch";
@@ -13,7 +14,8 @@ import { announce } from "../lib/announce";
 import { ApiError, client, ok } from "../lib/client";
 import { downloadJson, fileName } from "../lib/download";
 import { useDocumentTitle } from "../lib/title";
-import { canPublish, notPortable, since, tenantQuery, workflowsQuery, type PortableProblem, type WorkflowRow } from "../lib/workflows";
+import { canEdit, canPublish, notPortable, since, tenantQuery, workflowsQuery, type PortableProblem, type WorkflowRow } from "../lib/workflows";
+import { NewWorkflow } from "./NewWorkflow";
 
 type Filter = "all" | "published" | "unpublished" | "attention";
 
@@ -63,7 +65,7 @@ function LastRun({ w }: { w: WorkflowRow }) {
   );
 }
 
-export function WorkflowsPage({ tenantId }: { tenantId: string; startNew?: boolean }) {
+export function WorkflowsPage({ tenantId, startNew = false }: { tenantId: string; startNew?: boolean }) {
   useDocumentTitle("Workflows");
   const qc = useQueryClient();
   const navigate = useNavigate();
@@ -72,6 +74,12 @@ export function WorkflowsPage({ tenantId }: { tenantId: string; startNew?: boole
   const [filter, setFilter] = useState<Filter>("all");
   const [text, setText] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(startNew);
+
+  function closeNew() {
+    setCreating(false);
+    if (startNew) void navigate({ to: "/t/$tenantId/workflows", params: { tenantId }, search: {} });
+  }
 
   const toggle = useMutation({
     mutationFn: (w: { id: string; name: string; enabled: boolean }) =>
@@ -121,6 +129,11 @@ export function WorkflowsPage({ tenantId }: { tenantId: string; startNew?: boole
     <section className="flex flex-col gap-4 p-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-h1 font-semibold">Workflows</h1>
+        {canEdit(tenant.data?.role) && (
+          <Button variant="primary" size="md" onClick={() => setCreating(true)} data-testid="workflow-new">
+            New workflow
+          </Button>
+        )}
       </div>
       <div className="flex flex-wrap items-center gap-3">
         <label className="flex min-w-0 flex-1 basis-56 flex-col gap-1 sm:max-w-80">
@@ -210,6 +223,7 @@ export function WorkflowsPage({ tenantId }: { tenantId: string; startNew?: boole
         </Table>
       )}
       <p className="text-small text-muted">A disabled workflow keeps its versions and its history; nothing starts it.</p>
+      {creating && <NewWorkflow tenantId={tenantId} onClose={closeNew} />}
     </section>
   );
 }

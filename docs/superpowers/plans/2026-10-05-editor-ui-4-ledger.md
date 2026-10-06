@@ -459,3 +459,9 @@ M6. **The tenants page opens a tenant on its workflows too** (Task 6; ruling 19,
     Workflows (`router.test.tsx`: from `/tenants`, choosing Acme Lab lands on `/t/t2/workflows`). The palette's
     existing "goes where the chosen item points" test now chooses Security, since a tenant lands on Workflows (its
     own new test). - Three ways to choose a tenant should land in one place. - None: the link's target only.
+M7. **Two test adaptations** (Tasks 6, 8): the plan's Announcer test advanced timers in `act(() =>
+    vi.advanceTimersByTime(50))`, whose callback returns the timer utilities, so `act` answers a promise and
+    typescript-eslint refuses it floating; a block body returns nothing. jsdom 25's `Blob` has no `text()`, which
+    every browser gives and `NewWorkflow` reads a picked file with; the test setup gains a stand-in through jsdom's
+    `FileReader`, beside its dialog and `ResizeObserver` stand-ins. - Lint and the test runtime, not the product.
+    - None: the product code is the plan's.
