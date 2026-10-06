@@ -424,5 +424,7 @@ def test_a_retire_dry_run_changes_nothing(pg_url, monkeypatch) -> None:
                 "order by id")  # fmt: skip
     before = asyncio.run(sql(snapshot))
     dry = r.invoke(app, ["keys", "retire", "--tenant", t, "--version", "1"])
-    assert dry.exit_code in (0, 1) and "Traceback" not in dry.output, dry.output
+    # it ran to its end (a crash also exits 1): every check printed, what Temporal showed counted, nothing retired
+    assert dry.exception is None or isinstance(dry.exception, SystemExit), dry.output
+    assert dry.exit_code == 1 and "run_histories: no (1 lost, 1 pending)" in dry.output.splitlines(), dry.output
     assert asyncio.run(sql(snapshot)) == before
