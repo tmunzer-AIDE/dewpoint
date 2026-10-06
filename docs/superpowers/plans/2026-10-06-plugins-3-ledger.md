@@ -381,3 +381,24 @@ Rulings:
   6.5 MB of JSON (1.1 MB gzipped), 3.0 MB (0.3 MB gzipped) without `description` and `examples`; one schema reaches
   341 KB (site settings), and device schemas about 300 KB. The palette (`GET /node-types`) returns every type's
   schemas in one answer. Measured again on the generated manifests (task 5) before ruling on a split.
+- Ruling: every allowed operation is reachable by its curated node and by the any-endpoint node of its method
+  (`mist.api.read` for a GET, `mist.api.write` otherwise, always `ambiguous`) - D14 lets the generic nodes reach only
+  what the map allows, and an idempotent operation through `mist.api.write` is only retried less - cost if wrong:
+  none for safety; such a write never retries.
+- Ruling: the always-refused routes (D14) are read broadly: the roots `msps`, `self`, `login`, `logout`, `register`,
+  `recover`, `invite`, `installer`, `mobile` and `utils` (credential tests); any path with a segment `admins`,
+  `apitokens`, `invites`, `sdkinvites`, `marvisinvites`, `ssos`, `ssoroles`, `cert`, `crl`, `ssl_proxy_cert`,
+  `link_accounts`, `unlink_account`, `mist_scep`, `mist_nac_crls`, `export_idtokens`, `register_cmd` or
+  `request_ztp_password`; anything outside `/api/v1/`, or with an empty or dot segment: 173 operations - certificates,
+  CRLs, SCEP, OAuth links, registration commands and the ZTP password are authentication material - cost if wrong: a
+  reviewed certificate read can't be allowed without changing the rule.
+- Ruling: `listOrgAuditLogsLegacy` is denied as deprecated rather than held - D28 denies every deprecated operation,
+  stricter than D24's hold - cost if wrong: none.
+- Ruling: a side effect follows the method once evidence covers that kind: GET `none`, PUT and DELETE `idempotent`,
+  POST `ambiguous` (the creates and the two actions, alarm ack and device restart: ack's repeat behaviour isn't
+  documented, so D16's "else ambiguous") - cost if wrong: an ack that fails after sending needs a person.
+- Ruling: the approved metadata outside an org or site is `/api/v1/const/webhook_topics` alone, the one curated
+  constant - fail closed - cost if wrong: another constant needs a review.
+- The map (`backend/src/dewpoint/plugins/mist/data/policy.json`, made by `python -m dewpoint.plugins.mist.reviews`):
+  1,072 operations: 262 allowed (146 reads, 78 idempotent writes, 38 ambiguous; 173 org, 88 site, 1 metadata), 632
+  held (620 unreviewed, 12 the owner's), 178 denied (173 always refused, 5 deprecated).
