@@ -233,6 +233,18 @@ then waits for every writer that read `active` to commit or roll back, and every
   as a missed firing, never hidden by shifting the user's schedule start. The prototype establishes how to count those
   firings (Temporal doesn't count a paused schedule's firings as missed) and how they reach the schedule's missed count
   and its alert.
+  **The prototype's result (the owner's ruling B on the M4 checkpoint; A, inferring firings from a schedule seen
+  unpaused, deferred to a 2b-4b design review):** every span of a schedule's life a firing could be missed in is
+  persisted (`schedule_intervals`) with its bounds, a class and a fixed reason, from durable evidence only: each
+  Temporal id's schedule generation when recorded, its first landed update (generation, Temporal's time, paused or
+  not), committed before any other update is sent to it, and when an unpause was first sent. A creation wait is
+  certainly missed, and counted on its own timing, only if the generation (raised by every schedule, workflow-enable
+  and tenant-status change) didn't move from its start to that landing and the landing unpaused it; intentionally
+  disabled if the same but paused; unknown otherwise. An id that went is possibly missed from its landing (seeing it
+  unpaused proves it could fire, not that a tick did) if it may have fired, else unknown; one from before the
+  migration, or a schedule deleted before its id landed, unknown. Only certain counts reach `misses`; any possibly
+  missed or unknown span makes the API's `accounting_complete` false and is listed in `uncounted_intervals`, audited
+  and alerted on.
 - **A run start in flight before step 1** (2b-2 starts after its `starting` transaction commits) could land late too.
   Its workflow id is its request's id, so it's a known id; such a run can't decrypt its input once the keys are gone,
   and the reconciler below terminates and deletes it.
