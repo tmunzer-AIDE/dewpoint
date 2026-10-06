@@ -38,8 +38,8 @@ def _raises() -> None:
         raise RuntimeError(f"no account accepts {SECRET}") from e
 
 
-class _Unclosable:
-    async def aclose(self) -> None:
+class _Undisposable:
+    async def dispose(self) -> None:
         _raises()
 
 
@@ -79,7 +79,8 @@ def _refused(app: FastAPI) -> None:
 
 
 def _unclosable(app: FastAPI) -> None:
-    app.state.client, app.state.http = app.state.http, _Unclosable()  # its lifespan's shutdown closes it
+    # Its lifespan's shutdown disposes the engine (the API holds no outbound client since plugins-3 3a-2).
+    app.state.real_engine, app.state.engine = app.state.engine, _Undisposable()
 
 
 def _logged(err: str, lines: list[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -124,7 +125,7 @@ async def test_a_failed_startup_is_logged_by_its_type_only_and_still_stops_the_s
     with rendered() as lines, stdlib_restored():
         code = await failed_start(uvicorn.Config(_factory(made, _refused), factory=True))
     for app in made:
-        await app.state.http.aclose()
+        await app.state.engine.dispose()
     server, structlog_lines = _logged(capsys.readouterr().err, lines())
     assert code == STARTUP_FAILURE
     assert "Application startup failed. Exiting." in [record["event"] for record in server]
@@ -141,8 +142,7 @@ async def test_a_failed_shutdown_is_logged_by_its_type_only_and_still_reported(
         async with serving(uvicorn.Config(_factory(made, _unclosable), factory=True)):
             pass
     for app in made:
-        await app.state.client.aclose()
-        await app.state.engine.dispose()
+        await app.state.real_engine.dispose()
     server, structlog_lines = _logged(capsys.readouterr().err, lines())
     assert "Application shutdown failed. Exiting." in [record["event"] for record in server]
     [failure] = [record for record in structlog_lines if record["event"] == "lifespan_failed"]

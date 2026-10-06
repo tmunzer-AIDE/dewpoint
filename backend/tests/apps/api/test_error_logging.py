@@ -44,7 +44,6 @@ async def _login(path: str, message: str) -> list[str]:
         transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
         async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as c:
             r = await c.post(path, json={"email": "ann@corp.test", "password": PASSWORD})
-        await app.state.http.aclose()
         await app.state.engine.dispose()
     assert r.status_code == 500 and r.json() == {"error": "internal_error"}
     return lines()
