@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
+import { onAnnounce } from "../lib/announce";
 import { NewWorkflow, parseDocument } from "./NewWorkflow";
 
 const DOC = {
@@ -18,6 +19,7 @@ const CONNECTIONS = [
 let sent: { method: string; path: string; body: unknown }[];
 let answer: { status: number; body: unknown };
 let connectionsAnswer: () => Response;
+let client: QueryClient;
 
 beforeEach(() => {
   sent = [];
@@ -38,8 +40,9 @@ async function show(onClose = vi.fn()) {
   const root = createRootRoute({ component: () => <NewWorkflow tenantId="t1" onClose={onClose} /> });
   const editor = createRoute({ getParentRoute: () => root, path: "/t/$tenantId/workflows/$workflowId", component: () => <p>editor</p> });
   const router = createRouter({ routeTree: root.addChildren([editor]), history: createMemoryHistory({ initialEntries: ["/"] }) });
+  client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
-    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <QueryClientProvider client={client}>
       <RouterProvider router={router} />
     </QueryClientProvider>,
   );
@@ -186,4 +189,81 @@ it("says why the server refused the file", async () => {
   expect((await screen.findByRole("alert")).textContent).toBe(
     "The file can't be imported: it holds a connection or workflow id where a binding goes. Export it again from Dewpoint.",
   );
+});
+
+it("never opens nor announces a workflow created after its dialog was dismissed; its tenant's list still learns of it", async () => {
+  let release!: (r: Response) => void;
+  const base = vi.mocked(globalThis.fetch).getMockImplementation()!;
+  vi.mocked(globalThis.fetch).mockImplementation((input) =>
+    (input as Request).method === "POST" ? new Promise<Response>((r) => (release = r)) : base(input));
+  const heard: string[] = [];
+  const stop = onAnnounce((m) => heard.push(m));
+  const onClose = vi.fn();
+  const router = await show(onClose);
+  client.setQueryData(["workflows", "t1"], []);
+  await userEvent.type(screen.getByLabelText("Name"), "Nightly report");
+  await userEvent.click(screen.getByRole("button", { name: "Create and open" }));
+  await userEvent.click(screen.getByRole("button", { name: "Cancel" })); // while the creation is on its way
+  expect(onClose).toHaveBeenCalled();
+  release(new Response(JSON.stringify({ id: "w9", name: "Nightly report" }), { status: 201 }));
+  await vi.waitFor(() => expect(client.getQueryState(["workflows", "t1"])?.isInvalidated).toBe(true));
+  expect(router.state.location.pathname).toBe("/");
+  expect(heard).toEqual([]);
+  stop();
+});
+
+/** A file whose read answers when the test says: with `content`, or failing when it's null. `settle` answers it,
+ * then waits until the read has been heard. */
+function slowFile(name: string, content: object | null) {
+  let answer!: () => void;
+  const read = new Promise<string>((resolve, reject) => {
+    answer = () => (content === null ? reject(new Error("unreadable")) : resolve(JSON.stringify(content)));
+  });
+  const file = new File(["{}"], name, { type: "application/json" });
+  Object.defineProperty(file, "text", { value: () => read });
+  const settle = () => {
+    answer();
+    return read.then(() => undefined, () => undefined);
+  };
+  return { file, settle };
+}
+
+it("keeps the latest file chosen when an earlier one finishes reading after it", async () => {
+  await show();
+  await userEvent.click(screen.getByRole("radio", { name: /Import from file/ }));
+  const a = slowFile("a.json", { ...DOC, name: "From A" });
+  const b = slowFile("b.json", { ...DOC, name: "From B", bindings: [] });
+  await userEvent.upload(screen.getByLabelText("Workflow file"), a.file);
+  expect(screen.getByText("Reading the file…")).toBeTruthy();
+  await userEvent.upload(screen.getByLabelText("Workflow file"), b.file);
+  await act(() => b.settle());
+  expect(await screen.findByDisplayValue("From B")).toBeTruthy();
+  await act(() => a.settle()); // A answers last: it changes nothing
+  expect(screen.getByDisplayValue("From B")).toBeTruthy();
+  expect(screen.getByText("The file names no connection or workflow.")).toBeTruthy(); // B's bindings, not A's
+  expect(screen.queryByText("Reading the file…")).toBeNull();
+});
+
+it("says when a file can't be read, and takes another", async () => {
+  await show();
+  await userEvent.click(screen.getByRole("radio", { name: /Import from file/ }));
+  const bad = slowFile("bad.json", null);
+  await userEvent.upload(screen.getByLabelText("Workflow file"), bad.file);
+  await act(() => bad.settle());
+  expect(await screen.findByText("That file couldn't be read. Choose it again, or another.")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Import and open" }).hasAttribute("disabled")).toBe(true);
+  await userEvent.upload(screen.getByLabelText("Workflow file"), new File([JSON.stringify(DOC)], "n.json", { type: "application/json" }));
+  expect(await screen.findByLabelText("Acme Prod (mist connection)")).toBeTruthy();
+  expect(screen.queryByText(/couldn't be read/)).toBeNull();
+});
+
+it("never overwrites a name typed while the file was read", async () => {
+  await show();
+  await userEvent.click(screen.getByRole("radio", { name: /Import from file/ }));
+  const a = slowFile("a.json", DOC);
+  await userEvent.upload(screen.getByLabelText("Workflow file"), a.file);
+  await userEvent.type(screen.getByLabelText("Name"), "My own name");
+  await act(() => a.settle());
+  expect(await screen.findByLabelText("Acme Prod (mist connection)")).toBeTruthy();
+  expect(screen.getByDisplayValue("My own name")).toBeTruthy();
 });

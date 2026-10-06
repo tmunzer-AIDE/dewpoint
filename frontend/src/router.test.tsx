@@ -2,7 +2,7 @@
 // The app's own routes, served from memory: what one tenant's screen holds never carries over to another's.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory, createRouter } from "@tanstack/react-router";
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { routeTree } from "./router";
@@ -125,4 +125,20 @@ it("opens a tenant chosen from the tenants page on its workflows (4b ruling 19; 
   await userEvent.click(await screen.findByRole("link", { name: "Acme Lab" }));
   expect(await screen.findByRole("heading", { level: 1, name: "Workflows" })).toBeTruthy();
   expect(router.state.location.pathname).toBe("/t/t2/workflows");
+});
+
+it("never opens a workflow whose creation answers after its tenant was left", async () => {
+  holding.add("POST /api/v1/t/t1/workflows");
+  const router = showApp("/t/t1/workflows?new=true");
+  const dialog = await screen.findByRole("dialog", { name: "New workflow" });
+  await userEvent.type(within(dialog).getByLabelText("Name"), "Nightly report");
+  await userEvent.click(within(dialog).getByRole("button", { name: "Create and open" }));
+  await vi.waitFor(() => expect(held.has("POST /api/v1/t/t1/workflows")).toBe(true));
+  await act(() => router.navigate({ to: "/t/$tenantId/workflows", params: { tenantId: "t2" } }));
+  act(() => {
+    held.get("POST /api/v1/t/t1/workflows")!(new Response(JSON.stringify({ id: "w9", name: "Nightly report" }), { status: 201 }));
+  });
+  await new Promise((r) => setTimeout(r, 100));
+  expect(router.state.location.pathname).toBe("/t/t2/workflows");
+  expect(screen.getAllByRole("status").map((s) => s.textContent ?? "").join(" ")).not.toContain("Created");
 });

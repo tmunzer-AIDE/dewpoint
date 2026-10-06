@@ -559,3 +559,14 @@ M16. **Undo and redo keep focus in the editor; a key acts from the item focus is
     The unit tests' stand-in canvas reports focus to the editor as the canvas does. Unit tests undo, redo and keep the
     panel without repairing focus by hand; the gate adds a keyboard undo and redo sequence. Three gate runs: 14
     passed each. - Focus on the page body after an undo, and keys heard nowhere. - None.
+M17. **New workflow speaks only while it's open, and reads only the latest file** (owner's corrections 3 and 4): once
+    the dialog is dismissed, or gone with its tenant's screen, a creation that answers late still refreshes that
+    tenant's list (`["workflows", tenantId]`, the tenant it was asked in) but neither opens the workflow nor announces
+    it; nothing claims dismissing cancelled the request (the server may create it, and the list then shows it). Each
+    file chosen takes a number: an earlier read that answers later changes nothing; "Reading the file…" shows while
+    one runs; a read that fails says so ("That file couldn't be read. Choose it again, or another.") instead of an
+    unhandled rejection; and the file's name fills the Name field only if the person hasn't typed one meanwhile.
+    Tests: a held creation then Cancel (no navigation, no announcement, the list invalidated); a held creation then a
+    tenant switch in the whole app (the new tenant's screen stays); reads answering in reverse order; a failed read
+    then a good one; a name typed during a read. - A late answer opened another tenant's workflow; a late read
+    replaced the file shown. - None.

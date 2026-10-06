@@ -108,6 +108,18 @@ export function NewWorkflow({ tenantId, onClose }: { tenantId: string; onClose: 
   const [chosen, setChosen] = useState<Chosen>({});
   const [error, setError] = useState<string | null>(null);
   const choices = useBindingChoices(tenantId, doc?.bindings ?? []);
+  const [reading, setReading] = useState(false);
+  const selection = useRef(0); // the latest file chosen: an earlier one's read, answering late, changes nothing
+  // Whether this dialog still speaks for the screen. Once it's dismissed, or gone with its tenant's screen, a creation
+  // that answers late refreshes that tenant's list but neither opens the workflow nor announces it. Dismissing never
+  // cancels the request: the server may still create the workflow (the owner's review of milestone 3).
+  const live = useRef(true);
+  useEffect(() => {
+    live.current = true;
+    return () => {
+      live.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     const d = dialog.current;
@@ -126,8 +138,9 @@ export function NewWorkflow({ tenantId, onClose }: { tenantId: string; onClose: 
     },
     onMutate: () => setError(null),
     onSuccess: async (wf) => {
-      announce(`Created ${wf.name}`);
       await qc.invalidateQueries({ queryKey: ["workflows", tenantId] });
+      if (!live.current) return;
+      announce(`Created ${wf.name}`);
       dialog.current?.close();
       await navigate({ to: "/t/$tenantId/workflows/$workflowId", params: { tenantId, workflowId: wf.id } });
     },
@@ -135,17 +148,31 @@ export function NewWorkflow({ tenantId, onClose }: { tenantId: string; onClose: 
   });
 
   async function readFile(file: File | undefined) {
+    const mine = ++selection.current;
     setDoc(null);
     setChosen({});
     setFileError(null);
+    setReading(file !== undefined);
     if (!file) return;
-    const parsed = parseDocument(await file.text());
+    let text: string;
+    try {
+      text = await file.text();
+    } catch {
+      if (mine !== selection.current) return;
+      setReading(false);
+      setFileError("That file couldn't be read. Choose it again, or another.");
+      return;
+    }
+    if (mine !== selection.current) return;
+    setReading(false);
+    const parsed = parseDocument(text);
     if (!parsed) {
       setFileError("That file isn't a Dewpoint workflow.");
       return;
     }
     setDoc(parsed);
-    if (!name.trim()) setName(parsed.name.slice(0, 100));
+    // The file's name only where the person hasn't typed one meanwhile.
+    setName((typed) => (typed.trim() ? typed : parsed.name.slice(0, 100)));
   }
 
   function submit(e: FormEvent) {
@@ -162,7 +189,10 @@ export function NewWorkflow({ tenantId, onClose }: { tenantId: string; onClose: 
     <dialog
       ref={dialog}
       aria-labelledby="new-workflow-title"
-      onClose={onClose}
+      onClose={() => {
+        live.current = false;
+        onClose();
+      }}
       className="mx-auto mt-16 w-[640px] max-w-[calc(100vw-32px)] rounded-dialog border border-line bg-surface p-6 text-ink shadow-dialog backdrop:bg-overlay"
     >
       <form onSubmit={submit} className="flex flex-col gap-5">
@@ -195,6 +225,7 @@ export function NewWorkflow({ tenantId, onClose }: { tenantId: string; onClose: 
               <span className="text-small font-semibold">Workflow file</span>
               <input type="file" accept=".json,application/json" onChange={(e) => void readFile(e.target.files?.[0])} className="text-body" />
             </label>
+            {reading && <p role="status" className="text-small text-muted">Reading the file…</p>}
             {fileError && <p className="text-small text-danger">{fileError}</p>}
             {doc && <ImportBindings bindings={doc.bindings} choices={choices} chosen={chosen} onChange={setChosen} />}
           </div>
