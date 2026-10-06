@@ -308,4 +308,10 @@ an isolated database and local fakes, all fixed test-first:
 Each of the five failed its new test before its fix. Full run after them, at `b5e076c`: 2882 passed, 8 skipped, in
 4 min 14 s; ruff, format, mypy, import contracts, licences and the replay gate pass.
 
-**Checkpoint:** awaiting the owner's rulings on 3a-2's rulings above. Nothing is pushed.
+The owner closed the technical review at `01cdcdc` (2026-10-06): no remaining blockers, both ledger corrections
+accurate; an independent run of 130 targeted tests replayed the original races, and late revision changes and deletions
+return 409 for both editor and start-form options while a rename still lets the answer through. This closes the
+technical review only.
+
+**Checkpoint:** awaiting the owner's rulings on 3a-2's rulings above. CodeQL, a new Compose proof, pushing and a PR
+remain on hold. Nothing is pushed.
