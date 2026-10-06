@@ -8,6 +8,7 @@ import { onStepUpRequired } from "../lib/events";
 import { signOut } from "../lib/signOut";
 import { authenticatePasskey } from "../lib/webauthn";
 import { Button } from "./Button";
+import { CommandPalette } from "./CommandPalette";
 import { ConnectionsIcon } from "./icons";
 import { Wordmark } from "./Mark";
 import { TenantSwitcher } from "./TenantSwitcher";
@@ -72,6 +73,7 @@ export function Shell() {
       </div>
       <header className="col-start-2 flex items-center gap-4 border-b border-line bg-surface px-5">
         <TenantSwitcher />
+        <CommandPalette />
         <div className="grow" />
         <Link to="/account/security" className="text-body text-muted hover:text-ink">Security</Link>
         <Button size="md" onClick={() => void handleSignOut()}>Sign out</Button>

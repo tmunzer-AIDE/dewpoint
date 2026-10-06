@@ -160,3 +160,12 @@ cover local work only: anything outward-facing (push, PR, issues) is confirmed i
     Router); dev `BlueOak-1.0.0` (`minimatch` 10.2.6), `CC-BY-4.0` (`caniuse-lite`), `MIT-0`
     (`@csstools/color-helpers` 5.1.0), `Python-2.0` (`argparse` 2.0.1), `Unlicense` (`isbot`) - the frontend CI job is
     red until the owner rules.
+36. Ruling: the ⌘K palette (cmdk 1.1.1, approved; MIT, no new licence) is cmdk's `Command` inside a native modal
+    `<dialog>`, never cmdk's `Command.Dialog`, which is Radix Dialog with its style-injecting scroll lock (D23). The
+    native dialog moves focus in and back, makes the page inert and closes on Escape. It lists "Go to" (Connections,
+    Security, All tenants) and every tenant; later slices add theirs. The trigger is 1a's header search box - the
+    palette itself is a D8 gap built in the design's grammar - its look is the owner's to rule at the checkpoint.
+37. Ruling: the palette focuses its search field itself, right after `showModal()`: React's `autoFocus` ran while the
+    dialog was closed, so keys went to the dialog (the browser gate's first palette run caught it; jsdom can't). Test
+    setup stands in for what jsdom lacks (a modal dialog's open and close, ResizeObserver, scrollIntoView,
+    scrollTo); the browser gate checks the real ones - none.

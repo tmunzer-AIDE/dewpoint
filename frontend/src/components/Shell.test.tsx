@@ -56,10 +56,11 @@ it("offers a tenant's pages only once a tenant is chosen", async () => {
   expect(screen.queryByRole("link", { name: "Connections" })).toBeNull();
 });
 
-it("keeps the tenant switcher, Security and Sign out in the header", async () => {
+it("keeps the tenant switcher, the ⌘K palette, Security and Sign out in the header", async () => {
   await renderAt("/t/t1/connections");
   const header = screen.getByRole("banner");
   expect(header.contains(await screen.findByTestId("tenant-switcher"))).toBe(true);
+  expect(header.contains(screen.getByRole("button", { name: /Search or jump to/ }))).toBe(true);
   expect(header.contains(screen.getByRole("link", { name: "Security" }))).toBe(true);
   expect(header.contains(screen.getByRole("button", { name: "Sign out" }))).toBe(true);
 });

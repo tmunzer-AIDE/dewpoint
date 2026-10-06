@@ -56,6 +56,18 @@ test.describe.serial("foundations", () => {
     await expect(row).toContainText("Not verified");
     await expect(page.locator("body")).not.toContainText("tok_");
     await expectAccessible(page, "connections, with a connection");
+
+    // The ⌘K palette: a native modal dialog, keyboard only. Escape closes it; a choice goes there.
+    await page.keyboard.press("ControlOrMeta+k");
+    const palette = page.getByRole("dialog", { name: "Search or jump to" });
+    await expect(palette).toBeVisible();
+    await expectAccessible(page, "command palette");
+    await page.keyboard.press("Escape");
+    await expect(palette).toBeHidden();
+    await page.keyboard.press("ControlOrMeta+k");
+    await page.keyboard.type("secur");
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/\/account\/security/);
   });
 
   test("passkey added with a virtual authenticator signs in without a password", async ({ page }) => {
