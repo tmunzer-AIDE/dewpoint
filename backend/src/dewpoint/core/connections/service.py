@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
+import re
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
-import httpx
 from cryptography.exceptions import InvalidTag
-from pydantic import BaseModel
 from sqlalchemy import any_, literal, select, update
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,12 +14,12 @@ from sqlalchemy.orm import aliased
 
 from dewpoint.core.audit.service import record
 from dewpoint.core.connections.declared import DeclaredType, declared_types
-from dewpoint.core.connections.types import CONNECTION_TYPES, ConnectionType
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.http import TenantContext
 from dewpoint.core.models.connections import Connection
 from dewpoint.core.models.requests import RunRequest
 from dewpoint.core.models.workflows import Workflow, WorkflowVersion
+from dewpoint.core.plugins import asking, calls
 from dewpoint.core.ratelimit import scopes as rate_scopes
 from dewpoint.core.ratelimit.buckets import current_cooldowns
 
@@ -27,12 +27,6 @@ PURPOSE = "connection.secret"
 
 
 class UnknownTypeError(ValueError): ...
-
-
-def _type(key: str) -> ConnectionType:
-    if key not in CONNECTION_TYPES:
-        raise UnknownTypeError(key)
-    return CONNECTION_TYPES[key]
 
 
 async def declared(s: AsyncSession, key: str) -> DeclaredType:
@@ -197,11 +191,15 @@ async def delete_connection(s: AsyncSession, ctx: TenantContext, conn: Connectio
     )
 
 
-async def load_secret(s: AsyncSession, keyring: Keyring, conn: Connection) -> BaseModel:
-    raw = await keyring.decrypt(
-        s, tenant_id=conn.tenant_id, purpose=PURPOSE, context=str(conn.id), blob=conn.secret_ct or b""
-    )
-    return _type(conn.type).secret_model.model_validate_json(raw)
+async def _secret_readable(s: AsyncSession, keyring: Keyring, conn: Connection, kind: DeclaredType) -> bool:
+    try:
+        raw = await keyring.decrypt(
+            s, tenant_id=conn.tenant_id, purpose=PURPOSE, context=str(conn.id), blob=conn.secret_ct or b""
+        )
+        kind.secret(json.loads(raw))
+    except (InvalidTag, ValueError):
+        return False
+    return True
 
 
 class StaleVerificationError(Exception):
@@ -212,26 +210,62 @@ class ConnectionGoneError(Exception):
     """The connection was deleted while it was being verified; the result was discarded."""
 
 
+class VerificationUnansweredError(Exception):
+    """No worker answered in time: nothing was recorded."""
+
+
+type Asker = Callable[[Callable[[AsyncSession], Awaitable[uuid.UUID]]], Awaitable[asking.Outcome]]
+DETAIL_RE = re.compile(r"^[a-z0-9_]{1,64}$")
+
+
+def _checked(answer: dict[str, Any] | None) -> tuple[str, str, str | None]:
+    """A worker's verification answer, checked again: (status, detail, privilege)."""
+    ok, detail, privilege = (answer or {}).get("ok"), (answer or {}).get("detail"), (answer or {}).get("privilege")
+    if (
+        not isinstance(ok, bool)
+        or not isinstance(detail, str)
+        or not DETAIL_RE.match(detail)
+        or not (privilege is None or (isinstance(privilege, str) and len(privilege) <= 64 and privilege.isprintable()))
+    ):
+        return "error", "invalid_result", None
+    return ("ok" if ok else "error"), detail, privilege
+
+
 async def verify_connection(
-    s: AsyncSession, keyring: Keyring, ctx: TenantContext, conn: Connection, http: httpx.AsyncClient
+    s: AsyncSession, keyring: Keyring, ctx: TenantContext, conn: Connection, ask: Asker
 ) -> Connection:
-    """Verify the credentials as loaded, then record the result only if they are still the current revision.
-    Raises StaleVerificationError (after auditing it) when an edit committed while the check was in flight."""
-    ct, loaded_revision = _type(conn.type), conn.revision
-    try:
-        secret = await load_secret(s, keyring, conn)
-    except (InvalidTag, ValueError):
+    """Asks a worker to verify the credentials (plugins-3 D3), then records the result only if they are still the
+    revision verified. Raises StaleVerificationError (after auditing it) when an edit committed while the check was in
+    flight, ConnectionGoneError when the connection was deleted, VerificationUnansweredError when no worker
+    answered."""
+    kind, loaded_revision = await declared(s, conn.type), conn.revision
+    discarded = False
+    if not await _secret_readable(s, keyring, conn, kind):
         status, detail, privilege = "error", "secret_unreadable", None
+    elif not kind.verify:
+        status, detail, privilege = "error", "unverifiable", None
     else:
-        result = await ct.verify(ct.config_model.model_validate(conn.config), secret, http)
-        status, detail, privilege = ("ok" if result.ok else "error"), result.detail, result.privilege
-    applied = await s.execute(
-        update(Connection)
-        .where(Connection.id == conn.id, Connection.revision == loaded_revision)
-        .values(status=status, status_detail=detail, privilege=privilege, last_verified_at=datetime.now(UTC))
-        .execution_options(synchronize_session=False)
-    )
-    if getattr(applied, "rowcount", 0) == 1:
+        outcome = await ask(
+            lambda inner: calls.ask_verify(
+                inner, ctx.tenant_id, connection_type=conn.type, connection_id=conn.id, revision=loaded_revision
+            )
+        )
+        if outcome.timed_out:
+            raise VerificationUnansweredError()
+        discarded = outcome.gone or outcome.error == "connection_changed"
+        if outcome.error is not None:
+            status, detail, privilege = "error", outcome.error, None
+        else:
+            status, detail, privilege = _checked(outcome.answer)
+    applied = None
+    if not discarded:
+        applied = await s.execute(
+            update(Connection)
+            .where(Connection.id == conn.id, Connection.revision == loaded_revision)
+            .values(status=status, status_detail=detail, privilege=privilege, last_verified_at=datetime.now(UTC))
+            .execution_options(synchronize_session=False)
+        )
+    if applied is not None and getattr(applied, "rowcount", 0) == 1:
         # Our UPDATE holds the row lock until commit, so the row can't vanish before this refresh.
         await s.refresh(conn)  # current row, including concurrent non-credential edits such as a rename
         await _audit_verify(s, ctx, conn.id, "connection.verify", status, loaded_revision, None)

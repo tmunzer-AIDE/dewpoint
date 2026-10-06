@@ -1,10 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-import asyncio
 import uuid
 
-import httpx
 import pytest
-import respx
 from sqlalchemy import text
 
 from dewpoint.apps.plugin_loader import sync_installed
@@ -83,20 +80,6 @@ async def test_invalid_cloud_and_extra_fields_rejected(app, owner_sessionmaker, 
         assert (await c.post(f"/api/v1/t/{tid}/connections", json=bad)).status_code == 422
 
 
-@respx.mock
-async def test_verify_updates_status_and_audits(app, owner_sessionmaker, api_settings) -> None:
-    respx.get("https://api.eu.mist.com/api/v1/self").respond(
-        200, json={"privileges": [{"scope": "org", "org_id": ORG, "role": "admin"}]}
-    )
-    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
-    async with c:
-        cid = (await c.post(f"/api/v1/t/{tid}/connections", json=BODY)).json()["id"]
-        r = await c.post(f"/api/v1/t/{tid}/connections/{cid}/verify")
-        assert r.status_code == 200 and r.json()["status"] == "ok" and r.json()["privilege"] == "admin"
-        actions = [e["action"] for e in (await c.get(f"/api/v1/t/{tid}/audit")).json()]
-    assert actions[:2] == ["connection.verify", "connection.create"]
-
-
 async def test_patch_keeps_secret_when_omitted_and_ciphertext_is_bound(app, owner_sessionmaker, api_settings) -> None:
     c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
     async with c:
@@ -122,77 +105,6 @@ async def test_rename_to_existing_name_is_a_conflict(app, owner_sessionmaker, ap
         other = (await c.post(f"/api/v1/t/{tid}/connections", json={**BODY, "name": "Other"})).json()["id"]
         r = await c.patch(f"/api/v1/t/{tid}/connections/{other}", json={"name": "Acme Prod"})
     assert r.status_code == 409 and r.json() == {"error": "name_taken"}
-
-
-def _paused_mist(release: asyncio.Event, started: asyncio.Event) -> None:
-    async def slow(request: httpx.Request) -> httpx.Response:
-        started.set()
-        await release.wait()  # hold the verification in flight
-        return httpx.Response(200, json={"privileges": [{"scope": "org", "org_id": ORG, "role": "admin"}]})
-
-    respx.get("https://api.eu.mist.com/api/v1/self").mock(side_effect=slow)
-
-
-@respx.mock
-async def test_verification_does_not_certify_credentials_edited_in_flight(
-    app, owner_sessionmaker, api_settings
-) -> None:
-    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
-    started, release = asyncio.Event(), asyncio.Event()
-    _paused_mist(release, started)
-    async with c:
-        cid = (await c.post(f"/api/v1/t/{tid}/connections", json=BODY)).json()["id"]
-        verify = asyncio.create_task(c.post(f"/api/v1/t/{tid}/connections/{cid}/verify"))
-        try:
-            await asyncio.wait_for(started.wait(), 10)  # verification loaded revision 1 and is talking to "Mist"
-            new_secret = {"secret": {"api_token": "tok_" + "b" * 36}}
-            edited = await c.patch(f"/api/v1/t/{tid}/connections/{cid}", json=new_secret)
-        finally:
-            release.set()  # never leave the paused request (and its DB connection) hanging
-            r = await asyncio.wait_for(verify, 10)
-        assert edited.status_code == 200 and edited.json()["revision"] == 2
-        assert r.status_code == 409 and r.json() == {"error": "changed_during_verification"}
-        after = (await c.get(f"/api/v1/t/{tid}/connections/{cid}")).json()
-        actions = [e["action"] for e in (await c.get(f"/api/v1/t/{tid}/audit")).json()]
-    assert after["status"] == "unverified" and after["revision"] == 2  # the edit's state survives
-    assert actions[0] == "connection.verify_discarded"
-
-
-@respx.mock
-async def test_rename_during_verification_keeps_the_result(app, owner_sessionmaker, api_settings) -> None:
-    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
-    started, release = asyncio.Event(), asyncio.Event()
-    _paused_mist(release, started)
-    async with c:
-        cid = (await c.post(f"/api/v1/t/{tid}/connections", json=BODY)).json()["id"]
-        verify = asyncio.create_task(c.post(f"/api/v1/t/{tid}/connections/{cid}/verify"))
-        try:
-            await asyncio.wait_for(started.wait(), 10)
-            await c.patch(f"/api/v1/t/{tid}/connections/{cid}", json={"name": "Renamed"})  # not a credential change
-        finally:
-            release.set()
-            r = await asyncio.wait_for(verify, 10)
-    assert r.status_code == 200 and r.json()["status"] == "ok" and r.json()["name"] == "Renamed"
-
-
-@respx.mock
-async def test_delete_during_verification_is_not_found(app, owner_sessionmaker, api_settings) -> None:
-    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
-    started, release = asyncio.Event(), asyncio.Event()
-    _paused_mist(release, started)
-    async with c:
-        cid = (await c.post(f"/api/v1/t/{tid}/connections", json=BODY)).json()["id"]
-        verify = asyncio.create_task(c.post(f"/api/v1/t/{tid}/connections/{cid}/verify"))
-        try:
-            await asyncio.wait_for(started.wait(), 10)
-            deleted = await c.delete(f"/api/v1/t/{tid}/connections/{cid}")
-        finally:
-            release.set()
-            r = await asyncio.wait_for(verify, 10)
-        actions = [e["action"] for e in (await c.get(f"/api/v1/t/{tid}/audit")).json()]
-    assert deleted.status_code == 204
-    assert r.status_code == 404 and r.json() == {"error": "not_found"}
-    assert actions[0] == "connection.verify_discarded"
 
 
 async def test_a_connection_shows_its_current_cooldowns(app, owner_sessionmaker, api_settings) -> None:

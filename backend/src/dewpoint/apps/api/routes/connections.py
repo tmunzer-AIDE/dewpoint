@@ -2,7 +2,6 @@
 import uuid
 from typing import Any
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select
@@ -17,6 +16,7 @@ from dewpoint.core.connections.declared import InvalidValueError, declared_types
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.http import TenantContext, active_session, get_db, require
 from dewpoint.core.models.connections import Connection
+from dewpoint.core.plugins import asking
 
 router = APIRouter(prefix="/api/v1", tags=["connections"])
 
@@ -32,10 +32,6 @@ class ConnectionPatchIn(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     config: dict[str, Any] | None = None
     secret: dict[str, Any] | None = None
-
-
-def _http(request: Request) -> httpx.AsyncClient:
-    return request.app.state.http  # type: ignore[no-any-return]
 
 
 def _invalid(exc: ValidationError | InvalidValueError) -> HTTPException:
@@ -153,8 +149,17 @@ async def verify(
     db: AsyncSession = Depends(get_db, scope="function"),
     keyring: Keyring = Depends(get_keyring),
 ) -> dict[str, object]:
+    """Verified by the type's `verify()` on a worker (plugins-3 D3): the API sends nothing itself."""
+
+    async def ask(call: Any) -> asking.Outcome:
+        return await asking.ask_and_wait(request.app.state.sessionmaker, keyring, ctx.tenant_id, call)
+
     try:
-        conn = await service.verify_connection(db, keyring, ctx, await _get(db, ctx, connection_id), _http(request))
+        conn = await service.verify_connection(db, keyring, ctx, await _get(db, ctx, connection_id), ask)
+    except service.UnknownTypeError:
+        raise HTTPException(422, detail={"error": "unknown_type"}) from None
+    except service.VerificationUnansweredError:
+        raise HTTPException(504, detail={"error": "plugin_call_timeout"}) from None
     except service.StaleVerificationError:
         await db.commit()  # keep the verify_discarded audit entry
         raise HTTPException(409, detail={"error": "changed_during_verification"}) from None
