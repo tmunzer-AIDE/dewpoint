@@ -65,7 +65,7 @@ from dewpoint.engine.schema_refs import PREFIX as REF_PREFIX
 from dewpoint.engine.schema_refs import ref_problems, subschemas
 from dewpoint.engine.sensitive import SENSITIVE, expand, is_marked, marked_positions, resolve
 from dewpoint.engine.taint import CLEAN, TAINTED, Shape, from_schema, make
-from dewpoint.sdk.fields import KINDS
+from dewpoint.sdk.fields import CONNECTION, KINDS
 
 MAX_SUBFLOW_DEPTH = 5
 IDENT = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
@@ -125,6 +125,8 @@ class ValidationResult:
     declassified: tuple[tuple[str, str, str], ...] = ()  # (node id, field, what it reveals): listed, and tainted
     tainted_sites: tuple[tuple[str | None, str], ...] = ()  # (node id, field) of every tainted value (2b spec §4.1)
     output_taint: Mapping[str, Any] = field(default_factory=dict)  # each workflow output's `Shape`, as JSON
+    # (node id, field, connection id, type) of every connection a node's config names (plugins-3 D6)
+    connections: tuple[tuple[str, str, uuid.UUID, str], ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -188,6 +190,7 @@ def _regex_keywords(schema: Any) -> list[str]:
     return sorted(found)
 
 
+_CONNECTION_INVALID = "A connection is named by its id, a UUID."
 _SENSITIVE_LITERAL = (
     "A sensitive value can't be written into the workflow: pass it in the run's input, in a field marked sensitive."
 )
@@ -529,6 +532,7 @@ class _Validator:
         self.has_stop = any(spec.ref == C.STOP for spec in s.specs.values())
         self.availability: dict[tuple[Any, ...], bool] = {}
         self.expressions: list[ExpressionRecord] = []
+        self.connections: list[tuple[str, str, uuid.UUID, str]] = []
         # taint (2b spec §4.1): its sources, each node's output, each loop's element, and what this pass learns
         self.trigger_root = trigger_schema(graph.settings.model_dump(mode="json")) if settings_ok else {}
         self.trigger_shape = from_schema(self.trigger_root) if settings_ok else TAINTED
@@ -705,6 +709,7 @@ class _Validator:
                 )
         if not isinstance(stripped, dict):
             return
+        self._connections(n, props, stripped)
         if spec.ref == C.SET_VARIABLES and isinstance(stripped.get("assignments"), dict):
             for name, value in stripped["assignments"].items():
                 if name in self.vars:
@@ -718,6 +723,23 @@ class _Validator:
             if info is not None:
                 inner = [p[1:] for p in envelopes if p[:1] == ("input",)]
                 self._schema_errors(n.id, "/input", info.input_schema, stripped.get("input", {}), inner)
+
+    def _connections(self, n: GraphNode, props: Any, stripped: Mapping[str, Any]) -> None:
+        """Every connection the node names (plugins-3 D6): a top-level field the node type marks, written as a literal
+        UUID (an envelope is refused as any literal-only field's is). Publish checks each against the tenant's."""
+        for name, prop in props.items() if isinstance(props, Mapping) else ():
+            wanted = prop.get(CONNECTION) if isinstance(prop, Mapping) else None
+            value = stripped.get(name)
+            if not isinstance(wanted, str) or value is None or is_envelope(n.config.get(name)):
+                continue
+            try:
+                named = uuid.UUID(value) if isinstance(value, str) else None
+            except ValueError:
+                named = None
+            if named is None:
+                self.err("connection.invalid", _CONNECTION_INVALID, node=n.id, fld=pointer_str((name,)))
+                continue
+            self.connections.append((str(n.id), pointer_str((name,)), named, wanted))
 
     def _sensitive_literals(self, n: GraphNode, spec: NodeTypeSpec, stripped: Any, envelopes: list[Pointer]) -> None:
         """Config written as literals where a schema marks it sensitive (engine 2b spec §3.8): the node's own config,
@@ -1272,4 +1294,5 @@ def validate(graph: Graph, ctx: ValidationContext) -> ValidationResult:
         ),
         output_taint=dict(v.output_taint),
         declassified=declassified,
+        connections=tuple(sorted(v.connections, key=lambda c: (c[0], c[1]))),
     )

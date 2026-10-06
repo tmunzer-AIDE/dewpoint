@@ -30,6 +30,7 @@ from dewpoint.core.config import get_settings
 from dewpoint.core.crypto.kek import KekSet, UnknownKekError
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.db import make_engine, make_sessionmaker
+from dewpoint.core.egress import allowlist
 from dewpoint.core.models.identity import User
 from dewpoint.core.platform.service import EnvironmentMismatchError, EnvironmentNotRecordedError, record_environment
 from dewpoint.core.plugins import lifecycle
@@ -62,6 +63,10 @@ deployment_cli = typer.Typer(no_args_is_help=True)
 app.add_typer(deployment_cli, name="deployment")
 platform_cli = typer.Typer(no_args_is_help=True)
 app.add_typer(platform_cli, name="platform")
+egress_cli = typer.Typer(
+    no_args_is_help=True, help="The outbound guard's allowlist (plugins-3 D8). Run as dewpoint_admin."
+)
+platform_cli.add_typer(egress_cli, name="egress")
 
 
 async def _init(email: str, password: str) -> None:
@@ -574,3 +579,81 @@ def dev_run_command(
     typer.echo(f"{end.what} {request_id} {end.status}" + (f": {detail}" if detail else ""))
     if (end.what, end.status) != ("run", "succeeded"):
         raise typer.Exit(1)
+
+
+def _ports(given: str | None) -> tuple[int, int] | None:
+    if given is None:
+        return None
+    low, _, high = given.partition("-")
+    if not low.isdigit() or (high and not high.isdigit()):
+        raise ValueError("--ports is a port or a range, such as 443 or 8000-8100.")
+    return int(low), int(high or low)
+
+
+@egress_cli.command("add")
+def egress_add(
+    network: str = typer.Argument(..., help="a strict CIDR, such as 10.20.0.0/16"),
+    tenant: str | None = typer.Option(None, "--tenant", help="the tenant this entry is for"),
+    every_tenant: bool = typer.Option(False, "--every-tenant", help="an entry for every tenant, asked for explicitly"),
+    ports: str | None = typer.Option(None, "--ports", help="a port or a range (default: any)"),
+    note: str = typer.Option("", "--note"),
+    allow_sensitive: bool = typer.Option(
+        False, "--allow-sensitive", help="confirm a short prefix, loopback, link-local or metadata network"
+    ),
+) -> None:
+    """Let one tenant's plugins (or, explicitly, every tenant's) reach a private network; audited."""
+    try:
+        tenant_id = uuid.UUID(tenant) if tenant is not None else None
+        if tenant_id is not None and every_tenant:
+            raise ValueError("An entry is for one tenant or for every tenant, not both.")
+
+        async def _run(s: AsyncSession) -> uuid.UUID:
+            async with s.begin():
+                return await allowlist.add(
+                    s, network=network, ports=_ports(ports), tenant_id=tenant_id, note=note,
+                    every_tenant=every_tenant, confirm_sensitive=allow_sensitive,
+                )  # fmt: skip
+
+        entry_id = asyncio.run(_in_session(_run))
+    except ValueError as e:
+        typer.echo(f"ERROR: {e}")
+        raise typer.Exit(2) from None
+    typer.echo(f"added {entry_id}")
+
+
+def _port_text(low: int | None, high: int | None) -> str:
+    if low is None or high is None:
+        return "any"
+    return str(low) if low == high else f"{low}-{high}"
+
+
+@egress_cli.command("list")
+def egress_list() -> None:
+    """Every entry: id, network, ports, tenant (* for every tenant), note."""
+
+    async def _run(s: AsyncSession) -> list[str]:
+        async with s.begin():
+            rows = await allowlist.list_all(s)
+        return [f"{r.id} {r.network} {_port_text(r.port_low, r.port_high)} {r.tenant_id or '*'} {r.note}" for r in rows]
+
+    for line in asyncio.run(_in_session(_run)):
+        typer.echo(line)
+
+
+@egress_cli.command("remove")
+def egress_remove(entry_id: str = typer.Argument(...)) -> None:
+    """Remove an entry; audited. Exit 1 when there is none."""
+
+    async def _run(s: AsyncSession) -> bool:
+        async with s.begin():
+            return await allowlist.remove(s, uuid.UUID(entry_id))
+
+    try:
+        removed = asyncio.run(_in_session(_run))
+    except ValueError:
+        typer.echo("ERROR: not an entry id")
+        raise typer.Exit(2) from None
+    if not removed:
+        typer.echo("no such entry")
+        raise typer.Exit(1)
+    typer.echo("removed")

@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from pydantic.json_schema import GenerateJsonSchema
 from pydantic_core import core_schema
 
+from dewpoint.sdk.fields import CONNECTION
 from dewpoint.sdk.node import MAX_RETRY_ATTEMPTS, PORT_RE, RESERVED_PORTS, TYPE_RE, Node, NodeKind, SideEffect
 from dewpoint.sdk.version import SDK_VERSION
 
@@ -158,6 +159,30 @@ def _retry_problems(name: str, node: type[Node]) -> list[str]:
     return out
 
 
+def _connection_problems(name: str, node: type[Node]) -> list[str]:
+    """A connection field (plugins-3 D6) is a top-level config property whose type the node lists in `credentials`:
+    publish and the worker look for connections only there."""
+    schema = node.Config.model_json_schema(mode="validation")
+    top = schema.get("properties", {})
+    out: list[str] = []
+    for prop, sub in top.items():
+        wanted = sub.get(CONNECTION) if isinstance(sub, dict) else None
+        if wanted is not None and wanted not in node.credentials:
+            out.append(f"{name}: connection field {prop!r} needs {wanted!r} in credentials")
+    stack: list[Any] = [(k, v) for k, v in schema.items() if k != "properties"]
+    stack += [(k, v) for sub in top.values() if isinstance(sub, dict) for k, v in sub.items() if k != CONNECTION]
+    while stack:
+        key, value = stack.pop()
+        if key == CONNECTION:
+            out.append(f"{name}: a connection field must be a top-level config property")
+            break
+        if isinstance(value, dict):
+            stack.extend(value.items())
+        elif isinstance(value, list):
+            stack.extend(("", item) for item in value)
+    return out
+
+
 def _problems(node: type[Node]) -> list[str]:
     missing = [a for a in ("type", "version", "title") if not hasattr(node, a)]
     if missing:
@@ -176,6 +201,7 @@ def _problems(node: type[Node]) -> list[str]:
     if node.dynamic_ports is not None and node.dynamic_ports not in node.Config.model_fields:
         out.append(f"{name}: dynamic_ports names unknown config field {node.dynamic_ports!r}")
     out += _retry_problems(name, node)
+    out += _connection_problems(name, node)
     out += [f"{name}: {problem}" for problem in _serializer_problems(node.Output.__pydantic_core_schema__)]
     if node.timeout.total_seconds() <= 0:
         out.append(f"{name}: timeout must be positive")
