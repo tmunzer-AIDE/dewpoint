@@ -38,8 +38,8 @@ def test_every_declared_property_is_filled() -> None:
 
 
 def test_a_recursive_schema_ends_at_the_depth_bound_and_stays_valid() -> None:
-    tree = {"$ref": "#/$defs/n", "$defs": {"n": {"type": "object", "properties": {"child": {"$ref": "#/$defs/n"},
-                                                                                     "v": {"type": "string"}}}}}  # fmt: skip
+    node = {"type": "object", "properties": {"child": {"$ref": "#/$defs/n"}, "v": {"type": "string"}}}
+    tree = {"$ref": "#/$defs/n", "$defs": {"n": node}}
     value = built(tree)
     depth = 0
     while isinstance(value, dict) and "child" in value:

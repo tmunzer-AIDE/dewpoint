@@ -634,3 +634,7 @@ The owner approved the fixture redesign and catalog compression (2026-10-07), bo
   (no OpenAPI drift) - cost if wrong: none; the schema-on-demand palette stays the editor's later redesign. Measured on
   the installed plugins' 273 node types: 8.08 MB of JSON rendered in 26 ms, gzipped to 1.40 MB in 72 ms (level 6:
   1.36 MB in 102 ms); returning the bytes also skips FastAPI's per-value encoding of the 8 MB.
+
+Runs after both, at `d09db0c` (2026-10-07): the full backend suite, 3235 passed, 8 skipped, in 9 min 7 s; ruff (one
+test line, fixed after), format, mypy, import contracts and the OpenAPI drift check pass; the web client's
+`check:api`, typecheck and 292 tests pass; CodeQL locally: no findings in Python or JavaScript/TypeScript.
