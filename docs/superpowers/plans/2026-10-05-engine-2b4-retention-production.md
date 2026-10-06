@@ -19,7 +19,9 @@
 >
 > **2b-4a:** its four milestones were approved as prototype checkpoints (2026-10-05 and 2026-10-06), with no erasure
 > completing (`firing_bound_unproven`). Its plan, `2026-10-06-engine-2b4a-data-lifecycle.md`, and the 2b spec's
-> revision 10 are drafts for the owner's review; neither authorizes execution, a push or a gate lift.
+> revision 10 passed the owner's re-review for prototype execution (2026-10-06); their rebase onto `main`'s plugins-3a-2
+> awaits the owner's review of its delta. Neither authorizes a push, CI, a Compose proof, erasure completion or a gate
+> lift.
 
 **Goal:** Dewpoint can hold tenants' production data. Data leaves on schedule, a tenant can be erased, old keys can be
 retired, the production Temporal is verified, every production blocker is fixed or bounded with the owner's explicit

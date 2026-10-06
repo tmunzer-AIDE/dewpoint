@@ -10,8 +10,8 @@ the firing bound is unproven (`firing_bound_unproven`), and the production gate 
 
 **Architecture:**
 - **The schema blockers (milestone 1).** #35: every key between two tenant tables carries the tenant (migration 0035,
-  after plugins-3a-1's 0041), and the models declare every key the migrations made. D10: an endpoint's events pointer
-  is fixed when it's made (0036).
+  after plugins-3a's 0041 and 0042), and the models declare every key the migrations made. D10: an endpoint's events
+  pointer is fixed when it's made (0036).
 - **Retention (milestone 2).** A tenant's retention and its cutoff on every user-facing read, one query helper per
   kind; every run records its tree's root. `dewpoint retention`, its own process and login, sweeps each tenant in
   committed batches, one sweep at a time, with durable counts and one audit entry per tenant per sweep; a breach of its
@@ -52,14 +52,16 @@ outline (`docs/superpowers/plans/2026-10-05-engine-2b4-retention-production.md`)
 - Only `dewpoint_retention` deletes retained rows; only `audit_prune()` deletes audit entries; the key admin rewrites
   sealed columns only.
 - `keys reencrypt` keeps each record's plaintext, purpose and context: that's the command's behaviour, not a grant's
-  guarantee. A tenant's credential scope key (0041's `rate_scope_keys`) is sealed again, never replaced.
+  guarantee. A tenant's credential scope key (0041's `rate_scope_keys`) is sealed again, never replaced, and so are
+  plugin calls' answers (0042's `plugin_calls`).
 - A data-key version is deleted only when every check passes; anything unknown keeps it (the namespace's retention, a
   start Temporal never showed, a history lost before it was read).
 - No value from a record, a secret or a key appears in a log, a code or a message: codes are fixed, a log names an
   exception's type, and the audit entries of sweeps and erasure stages carry counts only.
 - Every new table forces row-level security; cross-tenant reads are functions returning ids or a status only
   (`tenant_status()`, `stray_incarnations()`).
-- Migrations 0035 to 0040 follow 0041 (plugins-3 D25) and upgrade, downgrade and upgrade again over existing rows.
+- Migrations 0035 to 0040 follow 0042, after 0041 (plugins-3 D25), and upgrade, downgrade and upgrade again over
+  existing rows.
   Alembic's autogenerate isn't used: the models' remaining column and index drift is unresolved (the owner's M2
   ruling).
 - The web client's API schema (`frontend/src/api/openapi.json` and `schema.d.ts`) is regenerated in each task that
@@ -112,8 +114,8 @@ Changed:
   `apps/cli/main.py`.
 - The core: `core/config.py`, `core/audit/anchor.py` and `service.py`, `core/crypto/ingress.py` and `keyring.py`,
   `core/ingress/keys.py`, `core/platform/service.py`, `core/runs/service.py`, `core/tenancy/service.py`, and the models
-  (`core/models/`: `__init__.py`, `audit.py`, `claims.py`, `egress.py`, `ingress.py`, `platform.py`, `requests.py`,
-  `runs.py`, `schedules.py`, `tenancy.py`, `uploads.py`, `workflows.py`).
+  (`core/models/`: `__init__.py`, `audit.py`, `claims.py`, `connections.py`, `egress.py`, `ingress.py`, `platform.py`,
+  `plugins.py`, `requests.py`, `runs.py`, `schedules.py`, `tenancy.py`, `uploads.py`, `workflows.py`).
 - Compose and CI: `deploy/compose/docker-compose.yml`, `.env.example`, `initdb/10-roles.sh`,
   `.github/workflows/ci.yml`; docs: `deployment.md`, `ingress.md`, `key-rotation.md`, `runs.md`.
 
@@ -128,23 +130,29 @@ end of pytest's output: the tail of the last failure and the short summary, whos
 longer, with the count of those left out. The replay ran 2 to 4 pytest-xdist workers; the count changes no result.
 
 The diffs are exact, as git wrote them. Git writes a blank line of context as a single space, so `git diff --check`
-reports each of those 521 lines in this file as trailing whitespace; they're part of the patches, and no line a diff
+reports each of those 524 lines in this file as trailing whitespace; they're part of the patches, and no line a diff
 adds ends in whitespace. A diff that holds a Markdown fence is fenced with four backticks. The 2b-2, 2b-3a and 2b-3b
 plans carry the same lines.
 
-The commits are the local branch `proto/2b4a-v4`, cut from `main` at `ff1536e`, one commit per task:
+The commits are the local branch `proto/2b4a-v5`, cut from `main` at `f65c6f9`, one commit per task:
 - `proto/2b4a-v1`, cut from `main` at `6482c53`, was built milestone by milestone, with the owner's checkpoint after
   each; all four milestones were approved as prototype checkpoints (below), its last at `7d5b20b`.
 - `main` then moved: plugins-3a-1 (migration 0041: `egress_allowlist`, whose `tenant_id` is null for an exception for
   every tenant, `rate_buckets`, and `rate_scope_keys`, sealed under the tenant's data key), #41, #43 (the same
   dispatcher clock fix as the prototype's `4d670c8`), and #42 (the editor UI: the API's routers listed in
-  `apps/api/openapi.py`'s `ROUTERS`, and CI checks the web client's schema).
+  `apps/api/openapi.py`'s `ROUTERS`, and CI checks the web client's schema). After this plan's re-review it moved
+  again: #44 (plugins-3a-2: migration 0042 and `plugin_calls`, whose answers are sealed under the tenant's data key),
+  #45 and #39.
 - `proto/2b4a-int` merged the prototype into `main` and made what the merge needed, each test-first: 0035 follows 0041
   (plugins-3 D25); `keys reencrypt` seals a tenant's credential scope key again, the same key, and retirement counts it;
   an erasure fences and sweeps 0041's tenant tables, since it keeps the `tenants` row as a tombstone and their cascade
   never fires, keeping an egress exception that names no tenant; 0041's rate models declare their keys' cascade; and
   2b-4a's routers join `ROUTERS`, the schema regenerated. Plugins-3's ledger note that "erasure removes it by cascade"
-  doesn't hold for that reason.
+  doesn't hold for that reason. Its second merge, of `f65c6f9`, needed the same again (milestone ruling 7): 0035 follows
+  0042; `keys reencrypt` seals plugin calls' answers again and retirement counts them; an erasure fences plugin calls
+  and sweeps them before the connections a verify call names, since an options call names none; and plugin calls are
+  modelled, with the connections' (tenant, id) key they name. Plugins-3's ledger says "tenant erasure removes calls by
+  their foreign key (cascade)": that doesn't hold either.
 - `proto/2b4a-v3` replays it in 12 tasks. Each task is a run of the prototype's commits in order wherever that was
   possible, so most of its trees are states the prototype tested; each task names what it folds. Its last tree is
   `proto/2b4a-int`'s. (`proto/2b4a-v2`, cut from `717f420` before #42 merged, was dropped at Task 6 for this rebase.)
@@ -158,12 +166,17 @@ The commits are the local branch `proto/2b4a-v4`, cut from `main` at `ff1536e`, 
   unknown span is alerted on: migration 0040's `before_migration` spans aren't. And the whole suite's first run, on
   `proto/2b4a-v3`'s last tree, failed one test, #42's: Task 11's erasure route named its body `StartIn`, the run
   requests' name, so FastAPI named both components by module path, renaming a published one. Task 11 names it
-  `ErasureStartIn` now, test-first, the schema regenerated. Tasks 1 to 5 are `proto/2b4a-v3`'s commits and Tasks 6 to
-  10 its trees, and their records are its runs, which each task names; Tasks 11 and 12 were replayed again on
-  `proto/2b4a-v4`. The same changes were made on `proto/2b4a-int`, whose tree is Task 12's again.
+  `ErasureStartIn` now, test-first, the schema regenerated. Tasks 11 and 12 were replayed again on it, and the same
+  changes were made on `proto/2b4a-int`.
+- `proto/2b4a-v5` replays `proto/2b4a-v4` on `f65c6f9` (milestone ruling 7). Each integration fix folds into the task
+  that owns its code: Task 1 the re-chain and the models, Task 6 the answers' re-encryption, Task 7 the fence, Task 10
+  the sweep, Task 11 the guide's row; Tasks 2, 3 and 11 regenerate the schema on #44's, and Task 12's fence lists take
+  the union of their names again. Tasks 1, 2, 3, 6, 7, 10, 11 and 12 were recorded again on it; Tasks 4, 5, 8 and 9,
+  whose patches are `proto/2b4a-v3`'s but for git's index lines, keep its records, which each names. Its last tree is
+  `proto/2b4a-int`'s.
 
 Each commit was verified this way:
-- its diff in this file is exact: the twelve, taken from this file and applied in order on `ff1536e`, give Task 12's
+- its diff in this file is exact: the twelve, taken from this file and applied in order on `f65c6f9`, give Task 12's
   tree, byte for byte;
 - its tests failed before its code and passed after, as its record shows, with the exceptions each record explains;
 - CI's static checks passed on every task's tree: ruff and its formatter (with and without their caches), mypy and
@@ -172,15 +185,17 @@ Each commit was verified this way:
 - gitleaks found nothing in the branch's commits or this plan's, with CI's version (8.24.3, the default of the action
   CI pins) and 8.30.1, with the repository's allowlist and without it; the same scan finds the leak CI once flagged in
   `5ab4e12`;
-- at each checkpoint, the milestone's focused tests passed (the counts the checkpoints give, on `proto/2b4a-v3`'s
-  trees), and the migrations went up, down and up again over existing rows, every constraint, function, trigger,
-  policy, role, grant and column the same after the downgrade (0040 is unchanged since).
+- at each checkpoint, the milestone's focused tests passed (the counts the checkpoints give), and the migrations went
+  up, down and up again over existing rows, every constraint, function, trigger, policy, role, grant and column the
+  same after the downgrade.
 
 Per the owner's ruling on the outline, the whole suite runs once, at the end, not at every task. The prototype's last
 whole-suite run (`3fda97c`, whose code is `7d5b20b`'s) passed: 2,742 passed, 8 skipped, in about 13 minutes locally.
-On `proto/2b4a-v4`'s last tree (`4c3c696`), the whole suite passed: 3,011 passed, 8 skipped, in 8 minutes 53 seconds
-locally with `-n auto`. Its first run, on `proto/2b4a-v3`'s (`215e559`), failed only #42's naming test, which Task 11
-now passes.
+On `proto/2b4a-v5`'s last tree (run as `proto/2b4a-int`'s at `cef6823`, the same tree), the whole suite passed: 3,231
+passed, 8 skipped, in 9 minutes 5 seconds locally with `-n auto`. Earlier runs: on `proto/2b4a-v3`'s last tree
+(`215e559`), only #42's naming test failed, which Task 11 now passes; on `proto/2b4a-v4`'s (`4c3c696`), 3,011 passed;
+on `proto/2b4a-int` once it had merged `f65c6f9` and followed 0042, only the fence's inventory and the models'
+comparison failed, both for #44's tables, which milestone ruling 7's fixes answer.
 
 ## Executing this plan
 
@@ -204,7 +219,7 @@ Actions minutes are exhausted: running it, in CI or locally, takes the owner's a
 doesn't claim it passed. No erasure completes (`firing_bound_unproven`). Production sign-off stays separate (§7.9).
 
 A conflict, a failing focused test or a failing final check is a finding: stop and report it, and don't patch around
-it. If `main` has moved past `ff1536e` when this runs, a conflict there is a finding too. The diffs below remain the
+it. If `main` has moved past `f65c6f9` when this runs, a conflict there is a finding too. The diffs below remain the
 plan's record of every change.
 
 ## The owner's rulings on the outline (2026-10-05)
@@ -292,6 +307,13 @@ tasks named.
    spans are neither audited nor alerted on, an exception rather than a bulk alert (Task 12's guide, §8.2). The whole
    suite was allowed to run locally on the replayed tree, and gitleaks, at CI's version, to scan it; neither authorizes
    a push, CI, `act`, a Compose proof or a gate change. That run found #42's naming failure, fixed in Task 11 (above).
+7. **The rebase onto `f65c6f9` (2026-10-06).** The corrected plan and revision 10 passed the owner's re-review for
+   prototype execution: the three claims match the implementation, and `ErasureStartIn` is additive in OpenAPI. That
+   approval isn't erasure completion or production sign-off: `firing_bound_unproven`, `ALLOW_ALL`, the unrun Compose
+   proof and the no-push and no-CI gates remain. `main` had meanwhile moved to `f65c6f9` (#44, plugins-3a-2), so the
+   owner ruled to rebase first and review the delta, and that plugin calls' answers are sealed again by `keys
+   reencrypt` and counted by `keys retire`, as their plugins-3 correction requires (never relying on a call's
+   duration). Erasure fences and sweeps them in any case.
 
 **Open and separate:** issues #16, #18 and #26; §7.9's other items; 2b-4b (production Temporal and its proofs, #3's
 anchor sink, the readiness checks and the gate lift); the deferred minors of 2b-3a, 2b-3b and this prototype; the firing
@@ -301,16 +323,18 @@ bound's design.
 
 ### Task 1: Every key between two tenant tables carries the tenant, and the models declare every key (#35)
 
-**Commit:** `66ad202` (`proto/2b4a-v4`, as on `proto/2b4a-v3`). It folds `proto/2b4a-v1`'s `588a058` and `3e60a74`;
-`1b16227`, but for `retention.py`, the runs' root key and `AuditCheckpoint`, which Tasks 3 and 4 add; and `8adb1a8`.
-From `proto/2b4a-int`: `a6aac25` (0035 follows 0041, plugins-3 D25) and `40467ad` (0041's rate models declare their
-keys' cascade).
+**Commit:** `3e15fd6` (`proto/2b4a-v5`), replayed as it is: on `f65c6f9`, 0035 following 0042 and plugin calls modelled
+(milestone ruling 7). It folds `proto/2b4a-v1`'s `588a058` and `3e60a74`; `1b16227`, but for `retention.py`, the runs'
+root key and `AuditCheckpoint`, which Tasks 3 and 4 add; and `8adb1a8`. From `proto/2b4a-int`: `a6aac25` and `599315c`
+(0035 follows 0042, after 0041, plugins-3 D25), `40467ad` (0041's rate models declare their keys' cascade) and `ec0d6d5`
+(0042's plugin calls modelled, with the connections' (tenant, id) key they name).
 
 **Create:** `backend/migrations/versions/0035_tenant_keys.py`, `backend/tests/core/tenancy/test_workflow_tenant.py`,
 `backend/tests/core/test_model_schema.py`
 
 **Modify:** `backend/src/dewpoint/core/models/audit.py`, `backend/src/dewpoint/core/models/claims.py`,
-`backend/src/dewpoint/core/models/egress.py`, `backend/src/dewpoint/core/models/ingress.py`,
+`backend/src/dewpoint/core/models/connections.py`, `backend/src/dewpoint/core/models/egress.py`,
+`backend/src/dewpoint/core/models/ingress.py`, `backend/src/dewpoint/core/models/plugins.py`,
 `backend/src/dewpoint/core/models/requests.py`, `backend/src/dewpoint/core/models/runs.py`,
 `backend/src/dewpoint/core/models/schedules.py`, `backend/src/dewpoint/core/models/uploads.py`,
 `backend/src/dewpoint/core/models/workflows.py`, `docs/operations/deployment.md`
@@ -321,61 +345,63 @@ Row-level security checks only a row's own tenant_id, and a foreign-key check do
 policies, so a key on the referenced id alone let a role scoped to one tenant record a row naming another tenant's
 workflow, version or run. Migration 0035 makes each such key composite, including tenant_id; a key that names a version
 also names the row's workflow. Rows that already break this stop the upgrade, which names each key and its count. 0035
-follows 0041 (plugins-3a-1), which merged first (plugins-3 D25).
+follows 0042 (plugins-3a-2, after 0041), which merged first (plugins-3 D25).
 
 The models declare every foreign key and unique constraint the migrations made, so Alembic's autogenerate proposes no
-difference; a test runs its comparison. 0041's rate tables now declare the cascade their keys have.
+difference; a test runs its comparison. 0041's rate tables now declare the cascade their keys have, and 0042's plugin
+calls are modelled, with the connections' (tenant, id) key they name.
 
 - [ ] **Step 1: its tests alone, before its code.** Run (in `backend/`): `uv run pytest -q -n 4
-  tests/core/tenancy/test_workflow_tenant.py tests/core/test_model_schema.py`. Replay result on `ff1536e` with this
+  tests/core/tenancy/test_workflow_tenant.py tests/core/test_model_schema.py`. Replay result on `f65c6f9` with this
   task's tests (exit 1), shortened:
 
 ```
             connection = await s.connection()
             diffs = await connection.run_sync(lambda c: compare_metadata(MigrationContext.configure(c), Base.metadata))
 >       assert sorted(_described(d) for d in diffs if isinstance(d, tuple) and d[0] in KEYS) == []
-E       assert ['add_fk rate...potency', ...] == []
+E       assert ['add_fk rate...ope_ref', ...] == []
 E
-E         Left contains 18 more items, first extra item: "add_fk rate_buckets['tenant_id'] -> tenants (None)"
+E         Left contains 20 more items, first extra item: "add_fk rate_buckets['tenant_id'] -> tenants (None)"
 E         Use -v to get more diff
 tests/core/test_model_schema.py:31: AssertionError
 =========================== short test summary info ============================
 FAILED tests/core/tenancy/test_workflow_tenant.py::test_no_key_between_tenant_tables_leaves_the_tenant_out
 FAILED tests/core/tenancy/test_workflow_tenant.py::test_a_row_cant_name_another_tenants_object[run_requests.workflow_id-api]
 FAILED tests/core/tenancy/test_workflow_tenant.py::test_a_row_cant_name_another_tenants_object[run_requests.workflow_id-dispatch]
-FAILED tests/core/tenancy/test_workflow_tenant.py::test_a_row_cant_name_another_tenants_object[csv_uploads.workflow_id-api]
 FAILED tests/core/tenancy/test_workflow_tenant.py::test_a_row_cant_name_another_tenants_object[run_requests.workflow_version_id-dispatch]
+FAILED tests/core/tenancy/test_workflow_tenant.py::test_a_row_cant_name_another_tenants_object[csv_uploads.workflow_id-api]
 FAILED tests/core/tenancy/test_workflow_tenant.py::test_a_row_cant_name_another_tenants_object[csv_mappings.workflow_id-api]
 FAILED tests/core/tenancy/test_workflow_tenant.py::test_a_row_cant_name_another_tenants_object[csv_mappings.saved_against-api]
 FAILED tests/core/tenancy/test_workflow_tenant.py::test_a_row_cant_name_another_tenants_object[schedules.workflow_id-api]
 FAILED tests/core/tenancy/test_workflow_tenant.py::test_a_row_cant_name_another_tenants_object[workflow_versions.workflow_id-api]
 FAILED tests/core/tenancy/test_workflow_tenant.py::test_a_row_cant_name_another_tenants_object[runs.workflow_version_id-worker]
 FAILED tests/core/tenancy/test_workflow_tenant.py::test_a_row_cant_name_another_tenants_object[runs.parent_run_id-worker]
-FAILED tests/core/tenancy/test_workflow_tenant.py::test_a_row_cant_name_another_tenants_object[run_steps.run_id-worker]
 FAILED tests/core/tenancy/test_workflow_tenant.py::test_the_upgrade_refuses_rows_that_break_a_key_naming_keys_and_counts_only
+FAILED tests/core/tenancy/test_workflow_tenant.py::test_a_row_cant_name_another_tenants_object[run_steps.run_id-worker]
 FAILED tests/core/test_model_schema.py::test_the_models_declare_every_table_and_key_the_migrations_made
-14 failed, 12 passed in 10.47s
+14 failed, 12 passed in 39.36s
 ```
 
-- [ ] **Step 2: its code, then the same tests.** Replay result on `66ad202` (exit 0), shortened:
+- [ ] **Step 2: its code, then the same tests.** Replay result on `3e15fd6` (exit 0), shortened:
 
 ```
 ..........................                                               [100%]
-26 passed in 10.31s
+26 passed in 32.59s
 ```
 
 Evidence beyond the replay: the integration fixes were made test-first on `proto/2b4a-int`: the schema comparison failed
-on 0041's rate models, whose keys' `ON DELETE CASCADE` they didn't declare, before `40467ad`; with `a6aac25`, 0035
-follows 0041 and the chain keeps one head.
+on 0041's rate models, whose keys' `ON DELETE CASCADE` they didn't declare, before `40467ad`, and on 0042's unmodelled
+plugin calls and connections' key before `ec0d6d5`; before `599315c` the migrations had two heads, and the suite
+couldn't upgrade.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 66ad202 && git commit -C 66ad202`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 3e15fd6 && git commit -C 3e15fd6`
 
 The diff:
 
 ````diff
 diff --git a/backend/migrations/versions/0035_tenant_keys.py b/backend/migrations/versions/0035_tenant_keys.py
 new file mode 100644
-index 0000000..2c6efdd
+index 0000000..c2cb069
 --- /dev/null
 +++ b/backend/migrations/versions/0035_tenant_keys.py
 @@ -0,0 +1,87 @@
@@ -389,14 +415,14 @@ index 0000000..2c6efdd
 +Rows that already break this stop the upgrade, which names each key and its count, never a row's contents: an operator
 +resolves them first (the application's reads are tenant-scoped, so none is expected).
 +
-+Chained after 0041 (plugins-3a-1), which merged first while 2b-4a held 0035-0040 (plugins-3 D25)."""
++Chained after 0042 (plugins-3a-2, after 0041), which merged first while 2b-4a held 0035-0040 (plugins-3 D25)."""
 +
 +from alembic import op
 +from sqlalchemy import text
 +from sqlalchemy.engine import Connection
 +
 +revision = "0035"
-+down_revision = "0041"
++down_revision = "0042"
 +branch_labels = None
 +depends_on = None
 +
@@ -509,6 +535,23 @@ index dfa6677..9fbec46 100644
      role: Mapped[str] = mapped_column(String(16), default="claim")
      pointer: Mapped[str | None] = mapped_column(
          Text
+diff --git a/backend/src/dewpoint/core/models/connections.py b/backend/src/dewpoint/core/models/connections.py
+index 2e309dc..25cae4c 100644
+--- a/backend/src/dewpoint/core/models/connections.py
++++ b/backend/src/dewpoint/core/models/connections.py
+@@ -12,7 +12,11 @@ from dewpoint.core.models.base import Base, Timestamps, UUIDPk
+ 
+ class Connection(UUIDPk, Timestamps, Base):
+     __tablename__ = "connections"
+-    __table_args__ = (UniqueConstraint("tenant_id", "name"),)
++    # (tenant, id): what a plugin call's key names (0042, plugins-3a-2)
++    __table_args__ = (
++        UniqueConstraint("tenant_id", "name"),
++        UniqueConstraint("tenant_id", "id", name="connections_tenant_id_id"),
++    )
+     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"))
+     type: Mapped[str] = mapped_column(String(64))
+     name: Mapped[str] = mapped_column(String(100))
 diff --git a/backend/src/dewpoint/core/models/egress.py b/backend/src/dewpoint/core/models/egress.py
 index 7742131..2d8b7b4 100644
 --- a/backend/src/dewpoint/core/models/egress.py
@@ -602,6 +645,59 @@ index 26161b1..05284ad 100644
      id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
      tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
      endpoint_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+diff --git a/backend/src/dewpoint/core/models/plugins.py b/backend/src/dewpoint/core/models/plugins.py
+index d90ae27..02043cc 100644
+--- a/backend/src/dewpoint/core/models/plugins.py
++++ b/backend/src/dewpoint/core/models/plugins.py
+@@ -1,9 +1,10 @@
+ # SPDX-License-Identifier: Apache-2.0
++import uuid
+ from datetime import datetime
+ from typing import Any
+ 
+-from sqlalchemy import DateTime, ForeignKey, Integer, String, func
+-from sqlalchemy.dialects.postgresql import JSONB
++from sqlalchemy import DateTime, ForeignKey, ForeignKeyConstraint, Integer, LargeBinary, String, func, text
++from sqlalchemy.dialects.postgresql import JSONB, UUID
+ from sqlalchemy.orm import Mapped, mapped_column
+ 
+ from dewpoint.core.models.base import Base
+@@ -41,3 +42,35 @@ class CelProfile(Base):
+     state: Mapped[str] = mapped_column(String(16), default="active")
+     state_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
++
++
++class PluginCall(Base):
++    """Plugin code a worker runs for the API, outside any run (plugins-3a-2, migration 0042): a node's options or a
++    connection type's verify. Its answer is sealed under the tenant's data key (purpose `plugin.call`, its id as
++    context); a call names only its own tenant's connection."""
++
++    __tablename__ = "plugin_calls"
++    __table_args__ = (
++        ForeignKeyConstraint(
++            ["tenant_id", "connection_id"], ["connections.tenant_id", "connections.id"], ondelete="CASCADE"
++        ),
++    )
++    id: Mapped[uuid.UUID] = mapped_column(
++        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
++    )
++    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"))
++    kind: Mapped[str] = mapped_column(String(16))  # options | verify
++    node_ref: Mapped[str | None] = mapped_column(String(140))
++    field: Mapped[str | None] = mapped_column(String(64))
++    connection_type: Mapped[str | None] = mapped_column(String(83))
++    connection_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
++    connection_revision: Mapped[int | None] = mapped_column(Integer)
++    type_hash: Mapped[str | None] = mapped_column(String(64))
++    query: Mapped[str] = mapped_column(String(200), server_default="")
++    state: Mapped[str] = mapped_column(String(16), server_default="pending")  # pending | claimed | done | failed
++    claim_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
++    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
++    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
++    result_ct: Mapped[bytes | None] = mapped_column(LargeBinary)
++    error: Mapped[str | None] = mapped_column(String(64))
++    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 diff --git a/backend/src/dewpoint/core/models/requests.py b/backend/src/dewpoint/core/models/requests.py
 index 5f5913c..80b92e0 100644
 --- a/backend/src/dewpoint/core/models/requests.py
@@ -1110,8 +1206,8 @@ index b58fffc..489da51 100644
 
 ### Task 2: An endpoint's events pointer is fixed when it's made (D10)
 
-**Commit:** `a0dba46` (`proto/2b4a-v4`, as on `proto/2b4a-v3`). It folds `proto/2b4a-v1`'s `93c3c2b`; the web client's
-schema regenerated (a PATCH's body no longer names `events_pointer`).
+**Commit:** `2bcf934` (`proto/2b4a-v5`), replayed as it is: the schema regenerated on #44's. It folds `proto/2b4a-v1`'s
+`93c3c2b`; the web client's schema regenerated (a PATCH's body no longer names `events_pointer`).
 
 **Create:** `backend/migrations/versions/0036_events_pointer_fixed.py`
 
@@ -1127,7 +1223,7 @@ naming it is refused (422), and migration 0036 revokes the API role's UPDATE gra
 sets it on a new endpoint. The ingress guide says so.
 
 - [ ] **Step 1: its tests alone, before its code.** Run (in `backend/`): `uv run pytest -q -n 4
-  tests/apps/api/test_webhooks_api.py tests/core/ingress/test_ingress_schema.py`. Replay result on `66ad202` with this
+  tests/apps/api/test_webhooks_api.py tests/core/ingress/test_ingress_schema.py`. Replay result on `3e15fd6` with this
   task's tests (exit 1), shortened:
 
 ```
@@ -1141,20 +1237,20 @@ E         Use -v to get more diff
 tests/core/ingress/test_ingress_schema.py:180: AssertionError
 =========================== short test summary info ============================
 FAILED tests/apps/api/test_webhooks_api.py::test_an_endpoint_is_updated_and_disabled_but_never_its_identity
-FAILED tests/core/ingress/test_ingress_schema.py::test_the_api_cant_change_where_an_endpoints_events_and_ids_are[columns4-changed4]
 FAILED tests/core/ingress/test_ingress_schema.py::test_the_api_cant_change_where_an_endpoints_events_and_ids_are[columns5-changed5]
+FAILED tests/core/ingress/test_ingress_schema.py::test_the_api_cant_change_where_an_endpoints_events_and_ids_are[columns4-changed4]
 FAILED tests/core/ingress/test_ingress_schema.py::test_the_api_cant_change_where_an_endpoints_events_and_ids_are[columns6-changed6]
-4 failed, 48 passed in 16.26s
+4 failed, 48 passed in 40.82s
 ```
 
-- [ ] **Step 2: its code, then the same tests.** Replay result on `a0dba46` (exit 0), shortened:
+- [ ] **Step 2: its code, then the same tests.** Replay result on `2bcf934` (exit 0), shortened:
 
 ```
 ....................................................                     [100%]
-52 passed in 18.89s
+52 passed in 54.82s
 ```
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit a0dba46 && git commit -C a0dba46`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 2bcf934 && git commit -C 2bcf934`
 
 The diff:
 
@@ -1352,7 +1448,7 @@ index ee0e87b..7728fe5 100644
  ### Authentication
  
 diff --git a/frontend/src/api/openapi.json b/frontend/src/api/openapi.json
-index 14e8aee..f5cd358 100644
+index 828f4ed..5fe9947 100644
 --- a/frontend/src/api/openapi.json
 +++ b/frontend/src/api/openapi.json
 @@ -597,7 +597,7 @@
@@ -1383,10 +1479,10 @@ index 14e8aee..f5cd358 100644
              "anyOf": [
                {
 diff --git a/frontend/src/api/schema.d.ts b/frontend/src/api/schema.d.ts
-index 3d37a15..f4b7415 100644
+index 0b48b90..1213f9f 100644
 --- a/frontend/src/api/schema.d.ts
 +++ b/frontend/src/api/schema.d.ts
-@@ -1316,7 +1316,8 @@ export interface components {
+@@ -1364,7 +1364,8 @@ export interface components {
          };
          /**
           * EndpointPatch
@@ -1396,7 +1492,7 @@ index 3d37a15..f4b7415 100644
           */
          EndpointPatch: {
              /** Allowlist */
-@@ -1325,8 +1326,6 @@ export interface components {
+@@ -1373,8 +1374,6 @@ export interface components {
              body_limit?: number | null;
              /** Enabled */
              enabled?: boolean | null;
@@ -1408,19 +1504,19 @@ index 3d37a15..f4b7415 100644
 ```
 
 **Checkpoint (milestone 1).** Focused: the 4 test modules Tasks 1 and 2 add or change, in `tests/apps/api`,
-`tests/core`, `tests/core/ingress` and `tests/core/tenancy` (78 passed on Task 2's tree); the migrations 0041 → 0036 →
-0041 → 0036 over existing rows, every constraint, function, trigger, policy, role, grant and column the same after the
+`tests/core`, `tests/core/ingress` and `tests/core/tenancy` (78 passed on Task 2's tree); the migrations 0042 → 0036 →
+0042 → 0036 over existing rows, every constraint, function, trigger, policy, role, grant and column the same after the
 downgrade. The owner approved it as a prototype checkpoint with milestone 2 (milestone ruling 1).
 
 ## Milestone 2 — Retention and audit pruning
 
 ### Task 3: A tenant's retention, the cutoff on every read, the sweep, its role and process, and the SLO gate
 
-**Commit:** `6ec93c5` (`proto/2b4a-v4`, as on `proto/2b4a-v3`). It folds `proto/2b4a-v1`'s run from `5e89a64` to
-`3d3219c` but for audit pruning's `19d907a` and `ad4cfaa`, which are Task 4's: `5e89a64`, `acfbabc`, `daf01f0`,
-`de68976`, `f810aa8`, `b223b4e`, `27b66e9`, `8265ddc`, `b1ceedf`, `fb17846`, `30142d9`, `722cc1e`, `058ff71` and
-`3d3219c`; with `1b16227`'s `retention.py` and the runs' root key. The retention router joins `ROUTERS`, the schema
-regenerated; the guide's audit-pruning section waits for Task 4.
+**Commit:** `7ab3079` (`proto/2b4a-v5`), replayed as it is: the schema regenerated on #44's. It folds `proto/2b4a-v1`'s
+run from `5e89a64` to `3d3219c` but for audit pruning's `19d907a` and `ad4cfaa`, which are Task 4's: `5e89a64`,
+`acfbabc`, `daf01f0`, `de68976`, `f810aa8`, `b223b4e`, `27b66e9`, `8265ddc`, `b1ceedf`, `fb17846`, `30142d9`, `722cc1e`,
+`058ff71` and `3d3219c`; with `1b16227`'s `retention.py` and the runs' root key. The retention router joins `ROUTERS`,
+the schema regenerated; the guide's audit-pruning section waits for Task 4.
 
 **Create:** `backend/migrations/versions/0037_retention.py`, `backend/src/dewpoint/apps/api/routes/retention.py`,
 `backend/src/dewpoint/apps/retention.py`, `backend/src/dewpoint/core/models/retention.py`,
@@ -1464,7 +1560,7 @@ a day past its cutoff). Compose and CI run the process.
   tests/apps/dispatcher/test_schedule_tick_gate.py tests/apps/test_dev_run_retention.py tests/apps/test_retention_job.py
   tests/core/retention/test_cutoff.py tests/core/retention/test_run_roots.py tests/core/retention/test_sweep.py
   tests/core/retention/test_sweep_accounting.py tests/core/tenancy/test_workflow_tenant.py
-  tests/deploy/test_compose.py`. Replay result on `a0dba46` with this task's tests (exit 1), shortened:
+  tests/deploy/test_compose.py`. Replay result on `2bcf934` with this task's tests (exit 1), shortened:
 
 ```
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
@@ -1482,37 +1578,37 @@ FAILED tests/apps/api/test_retention_api.py::test_who_reads_and_who_sets_a_tenan
 FAILED tests/apps/api/test_retention_api.py::test_a_retention_outside_the_platforms_bounds_is_refused[body0]
 FAILED tests/apps/api/test_retention_api.py::test_who_reads_and_who_sets_a_tenants_retention[PUT-body1-expect1]
 FAILED tests/apps/api/test_retention_api.py::test_a_retention_outside_the_platforms_bounds_is_refused[body1]
-FAILED tests/apps/api/test_retention_api.py::test_the_api_reads_and_sets_only_its_own_tenants_retention
 FAILED tests/apps/api/test_retention_api.py::test_a_retention_outside_the_platforms_bounds_is_refused[body2]
+FAILED tests/apps/api/test_retention_api.py::test_the_api_reads_and_sets_only_its_own_tenants_retention
 FAILED tests/apps/api/test_retention_api.py::test_a_retention_outside_the_platforms_bounds_is_refused[body3]
 FAILED tests/apps/api/test_retention_api.py::test_a_retention_outside_the_platforms_bounds_is_refused[body4]
-FAILED tests/apps/cli/test_dev_run_cli.py::test_a_retry_of_a_request_past_its_cutoff_shows_nothing
 FAILED tests/apps/dispatcher/test_retention_slo.py::test_a_production_start_waits_while_retention_is_unhealthy[sweeps0-False]
-FAILED tests/apps/dispatcher/test_retention_slo.py::test_a_production_start_waits_while_retention_is_unhealthy[sweeps6-True]
+FAILED tests/apps/cli/test_dev_run_cli.py::test_a_retry_of_a_request_past_its_cutoff_shows_nothing
 FAILED tests/apps/dispatcher/test_retention_slo.py::test_a_production_start_waits_while_retention_is_unhealthy[sweeps1-False]
-FAILED tests/apps/dispatcher/test_schedule_tick_gate.py::test_a_tick_while_the_gate_is_off_is_queued_and_starts_once_it_is_on
 FAILED tests/apps/dispatcher/test_retention_slo.py::test_a_production_start_waits_while_retention_is_unhealthy[sweeps2-False]
-FAILED tests/core/retention/test_run_roots.py::test_a_root_run_is_its_own_root_and_a_sub_run_has_its_parents
-FAILED tests/apps/test_dev_run_retention.py::test_an_old_keys_retry_and_its_wait_stop_at_the_cutoff[ago0-False]
 FAILED tests/apps/dispatcher/test_retention_slo.py::test_a_production_start_waits_while_retention_is_unhealthy[sweeps3-False]
-FAILED tests/core/retention/test_run_roots.py::test_the_database_sets_the_root_whatever_the_writer_gives
-FAILED tests/core/retention/test_run_roots.py::test_a_runs_tree_never_changes[root_run_id]
-FAILED tests/apps/test_dev_run_retention.py::test_an_old_keys_retry_and_its_wait_stop_at_the_cutoff[ago1-True]
+FAILED tests/apps/dispatcher/test_retention_slo.py::test_a_production_start_waits_while_retention_is_unhealthy[sweeps6-True]
 FAILED tests/apps/dispatcher/test_retention_slo.py::test_a_production_start_waits_while_retention_is_unhealthy[sweeps4-False]
-FAILED tests/core/retention/test_run_roots.py::test_a_runs_tree_never_changes[parent_run_id]
+FAILED tests/core/retention/test_run_roots.py::test_a_root_run_is_its_own_root_and_a_sub_run_has_its_parents
 FAILED tests/apps/dispatcher/test_retention_slo.py::test_a_production_start_waits_while_retention_is_unhealthy[sweeps5-True]
+FAILED tests/core/retention/test_run_roots.py::test_the_database_sets_the_root_whatever_the_writer_gives
+FAILED tests/apps/dispatcher/test_schedule_tick_gate.py::test_a_tick_while_the_gate_is_off_is_queued_and_starts_once_it_is_on
+FAILED tests/core/retention/test_run_roots.py::test_a_runs_tree_never_changes[root_run_id]
+FAILED tests/core/retention/test_run_roots.py::test_a_runs_tree_never_changes[parent_run_id]
+FAILED tests/apps/test_dev_run_retention.py::test_an_old_keys_retry_and_its_wait_stop_at_the_cutoff[ago0-False]
+FAILED tests/apps/test_dev_run_retention.py::test_an_old_keys_retry_and_its_wait_stop_at_the_cutoff[ago1-True]
 [... 31 more lines of the summary]
-28 failed, 51 passed, 28 errors in 22.29s
+28 failed, 51 passed, 28 errors in 64.42s (0:01:04)
 ```
 
-- [ ] **Step 2: its code, then the same tests.** Replay result on `6ec93c5` (exit 0), shortened:
+- [ ] **Step 2: its code, then the same tests.** Replay result on `7ab3079` (exit 0), shortened:
 
 ```
 .................................................................        [100%]
-137 passed in 27.56s
+137 passed in 25.14s
 ```
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 6ec93c5 && git commit -C 6ec93c5`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 7ab3079 && git commit -C 7ab3079`
 
 The diff:
 
@@ -3337,7 +3433,7 @@ index 0000000..a351af7
 +    answer = CliRunner().invoke(app, ["retention", "--once"])
 +    assert answer.exit_code == 1 and "another retention sweep is running" in answer.output, answer.output
 diff --git a/backend/tests/conftest.py b/backend/tests/conftest.py
-index a69a3c4..5af942b 100644
+index e9cc909..f9b6244 100644
 --- a/backend/tests/conftest.py
 +++ b/backend/tests/conftest.py
 @@ -24,6 +24,7 @@ TEST_ROLES = [
@@ -4331,10 +4427,10 @@ index 944f8d6..d0b4ae4 100644
    wasn't admitted (each message is printed, never a value: in a `production` deployment, "Production runs are off in
    this deployment"; an input that doesn't match the workflow's input schema, each place and rule it breaks, a map's key
 diff --git a/frontend/src/api/openapi.json b/frontend/src/api/openapi.json
-index f5cd358..11a324a 100644
+index 5fe9947..bbc9969 100644
 --- a/frontend/src/api/openapi.json
 +++ b/frontend/src/api/openapi.json
-@@ -990,6 +990,22 @@
+@@ -1081,6 +1081,22 @@
          "title": "RerunIn",
          "type": "object"
        },
@@ -4357,7 +4453,7 @@ index f5cd358..11a324a 100644
        "RoleChange": {
          "properties": {
            "role": {
-@@ -3088,6 +3104,108 @@
+@@ -3244,6 +3260,108 @@
          ]
        }
      },
@@ -4466,7 +4562,7 @@ index f5cd358..11a324a 100644
      "/api/v1/t/{tenant_id}/runs": {
        "get": {
          "description": "Requests and runs, newest first by `(queued_at, id)`. The next page: `before` and `before_id`, the last item's\n`queued_at` and `id`, always together: items can be queued in the same instant, so the time alone would skip\nsome.",
-@@ -3202,7 +3320,7 @@
+@@ -3358,7 +3476,7 @@
      },
      "/api/v1/t/{tenant_id}/runs/{request_id}/cancel": {
        "post": {
@@ -4475,7 +4571,7 @@ index f5cd358..11a324a 100644
          "operationId": "cancel_run_api_v1_t__tenant_id__runs__request_id__cancel_post",
          "parameters": [
            {
-@@ -3258,7 +3376,7 @@
+@@ -3414,7 +3532,7 @@
      },
      "/api/v1/t/{tenant_id}/runs/{request_id}/rerun": {
        "post": {
@@ -4484,7 +4580,7 @@ index f5cd358..11a324a 100644
          "operationId": "rerun_api_v1_t__tenant_id__runs__request_id__rerun_post",
          "parameters": [
            {
-@@ -3347,7 +3465,7 @@
+@@ -3503,7 +3621,7 @@
      },
      "/api/v1/t/{tenant_id}/runs/{run_id}": {
        "get": {
@@ -4493,7 +4589,7 @@ index f5cd358..11a324a 100644
          "operationId": "get_run_api_v1_t__tenant_id__runs__run_id__get",
          "parameters": [
            {
-@@ -4756,7 +4874,7 @@
+@@ -4976,7 +5094,7 @@
      },
      "/api/v1/t/{tenant_id}/workflows/{workflow_id}/runs": {
        "post": {
@@ -4503,11 +4599,11 @@ index f5cd358..11a324a 100644
          "parameters": [
            {
 diff --git a/frontend/src/api/schema.d.ts b/frontend/src/api/schema.d.ts
-index f4b7415..599e0a8 100644
+index 1213f9f..9a3a90d 100644
 --- a/frontend/src/api/schema.d.ts
 +++ b/frontend/src/api/schema.d.ts
-@@ -580,6 +580,24 @@ export interface paths {
-         patch: operations["change_api_v1_t__tenant_id__members__user_id__patch"];
+@@ -607,6 +607,24 @@ export interface paths {
+         patch?: never;
          trace?: never;
      };
 +    "/api/v1/t/{tenant_id}/retention": {
@@ -4531,7 +4627,7 @@ index f4b7415..599e0a8 100644
      "/api/v1/t/{tenant_id}/runs": {
          parameters: {
              query?: never;
-@@ -614,7 +632,8 @@ export interface paths {
+@@ -641,7 +659,8 @@ export interface paths {
          /**
           * Cancel Run
           * @description 200, `cancelled`: it was queued. 202, `requested`: recorded, for the dispatcher to apply when its start resolves
@@ -4541,7 +4637,7 @@ index f4b7415..599e0a8 100644
           */
          post: operations["cancel_run_api_v1_t__tenant_id__runs__request_id__cancel_post"];
          delete?: never;
-@@ -636,9 +655,11 @@ export interface paths {
+@@ -663,9 +682,11 @@ export interface paths {
           * Rerun
           * @description A new admission (source `rerun`) on the workflow's active version, with new input, or else the old request's
           *     complete input, validated and claimed again under the new request: no old handle is reused. The key is checked
@@ -4556,7 +4652,7 @@ index f4b7415..599e0a8 100644
           */
          post: operations["rerun_api_v1_t__tenant_id__runs__request_id__rerun_post"];
          delete?: never;
-@@ -657,7 +678,8 @@ export interface paths {
+@@ -684,7 +705,8 @@ export interface paths {
          /**
           * Get Run
           * @description A run with its steps and sub-runs, or a request that hasn't started as itself; with its CSV record (engine 2b
@@ -4566,7 +4662,7 @@ index f4b7415..599e0a8 100644
           */
          get: operations["get_run_api_v1_t__tenant_id__runs__run_id__get"];
          put?: never;
-@@ -948,7 +970,8 @@ export interface paths {
+@@ -996,7 +1018,8 @@ export interface paths {
          put?: never;
          /**
           * Start Run
@@ -4576,7 +4672,7 @@ index f4b7415..599e0a8 100644
           */
          post: operations["start_run_api_v1_t__tenant_id__workflows__workflow_id__runs_post"];
          delete?: never;
-@@ -1435,6 +1458,11 @@ export interface components {
+@@ -1520,6 +1543,11 @@ export interface components {
              /** Mode */
              mode?: ("live" | "simulate") | null;
          };
@@ -4588,7 +4684,7 @@ index f4b7415..599e0a8 100644
          /** RoleChange */
          RoleChange: {
              /**
-@@ -2760,6 +2788,76 @@ export interface operations {
+@@ -2881,6 +2909,76 @@ export interface operations {
              };
          };
      };
@@ -4669,8 +4765,9 @@ index f4b7415..599e0a8 100644
 
 ### Task 4: Audit pruning through an anchored checkpoint, off in production until #3
 
-**Commit:** `3daa44d` (`proto/2b4a-v4`, as on `proto/2b4a-v3`). It folds `proto/2b4a-v1`'s `19d907a` and `ad4cfaa`,
-`1b16227`'s `AuditCheckpoint` model, and the guide's audit-pruning section.
+**Commit:** `b964ef6` (`proto/2b4a-v5`). The replay ran `proto/2b4a-v3`'s `3daa44d`, the same patch, on the tree before
+#44. It folds `proto/2b4a-v1`'s `19d907a` and `ad4cfaa`, `1b16227`'s `AuditCheckpoint` model, and the guide's
+audit-pruning section.
 
 **Create:** `backend/migrations/versions/0038_audit_pruning.py`, `backend/src/dewpoint/core/audit/prune.py`,
 `backend/tests/core/audit/test_prune.py`
@@ -4715,7 +4812,7 @@ ERROR tests/core/audit/test_prune.py - ImportError while importing test modul...
 13 passed in 8.92s
 ```
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 3daa44d && git commit -C 3daa44d`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit b964ef6 && git commit -C b964ef6`
 
 The diff:
 
@@ -5320,8 +5417,8 @@ index c430f71..8f60e5d 100644
 
 **Checkpoint (milestone 2).** Focused: the 19 test modules Tasks 1 to 4 add or change, in `tests/apps`,
 `tests/apps/api`, `tests/apps/cli`, `tests/apps/dispatcher`, `tests/core`, `tests/core/audit`, `tests/core/ingress`,
-`tests/core/retention`, `tests/core/tenancy` and `tests/deploy` (203 passed on Task 4's tree); the migrations 0041 →
-0038 → 0041 → 0038 over existing rows, every constraint, function, trigger, policy, role, grant and column the same
+`tests/core/retention`, `tests/core/tenancy` and `tests/deploy` (203 passed on Task 4's tree); the migrations 0042 →
+0038 → 0042 → 0038 over existing rows, every constraint, function, trigger, policy, role, grant and column the same
 after the downgrade. The owner held it twice (milestone ruling 2) and approved it as a prototype checkpoint
 (2026-10-05).
 
@@ -5329,10 +5426,10 @@ after the downgrade. The owner held it twice (milestone ruling 2) and approved i
 
 ### Task 5: Re-encryption, rotating keypairs and the ingress key, and retiring a data-key version nothing needs
 
-**Commit:** `e5bef26` (`proto/2b4a-v4`, as on `proto/2b4a-v3`). It folds `proto/2b4a-v1`'s run from `f5f7190` to
-`a66a227` but for `75aabea`, which is Task 6's: `f5f7190`, `8ce3a48`, `8c45a2d`, `d877b1c`, `c149064`, `b13dac9`,
-`688ce5e`, `77a1b71`, `22b123d`, `58bd65f`, `912abbd`, `88bc3a1` and `a66a227`. Where two commits' text in 0039's
-docstring met, it takes this task's, without `75aabea`'s.
+**Commit:** `b233bb6` (`proto/2b4a-v5`). The replay ran `proto/2b4a-v3`'s `e5bef26`, the same patch, on the tree before
+#44. It folds `proto/2b4a-v1`'s run from `f5f7190` to `a66a227` but for `75aabea`, which is Task 6's: `f5f7190`,
+`8ce3a48`, `8c45a2d`, `d877b1c`, `c149064`, `b13dac9`, `688ce5e`, `77a1b71`, `22b123d`, `58bd65f`, `912abbd`, `88bc3a1`
+and `a66a227`. Where two commits' text in 0039's docstring met, it takes this task's, without `75aabea`'s.
 
 **Create:** `backend/migrations/versions/0039_key_lifecycle.py`, `backend/src/dewpoint/core/crypto/reencrypt.py`,
 `backend/src/dewpoint/core/crypto/retire.py`, `backend/src/dewpoint/core/ingress/secrets_reseal.py`,
@@ -5416,7 +5513,7 @@ ERROR tests/core/keys/test_run_durations.py - ImportError while importing tes...
 143 passed in 40.49s
 ```
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit e5bef26 && git commit -C e5bef26`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit b233bb6 && git commit -C b233bb6`
 
 The diff:
 
@@ -7846,10 +7943,11 @@ index 8aace2a..cea20da 100644
 
 ### Task 6: What retiring a version waits on: the tick contract and every run's execution evidence
 
-**Commit:** `0f517a9` (`proto/2b4a-v4`). The replay ran `proto/2b4a-v3`'s `4caed45`, the same tree, under the message
-milestone ruling 6 corrected. It folds `proto/2b4a-v1`'s `75aabea`, `25a13d7`, `62eceac`, `92e4b59`, `f5d5a9d` and
-`92df94d`; from `proto/2b4a-int`, `d30555e` (a tenant's credential scope key sealed again, the same key, and counted by
-retirement).
+**Commit:** `8187008` (`proto/2b4a-v5`), replayed as it is: `proto/2b4a-v4`'s `0f517a9` (its message corrected,
+milestone ruling 6) with plugin calls' answers sealed again and counted (milestone ruling 7). It folds `proto/2b4a-v1`'s
+`75aabea`, `25a13d7`, `62eceac`, `92e4b59`, `f5d5a9d` and `92df94d`; from `proto/2b4a-int`, `d30555e` (a tenant's
+credential scope key sealed again, the same key, and counted by retirement) and `cc2810c` (a plugin call's answer,
+likewise).
 
 **Create:** `backend/src/dewpoint/apps/dispatcher/evidence.py`, `backend/src/dewpoint/apps/tick_contract.py`,
 `backend/tests/apps/dispatcher/histories/schedule_tick_plain.json`,
@@ -7881,14 +7979,15 @@ read-back and `keys reencrypt` re-queues, and keys made before the attested tick
 Temporal may have taken keeps its execution evidence until Temporal shows that execution gone; retiring a version proves
 each against the namespace's retention, and a start Temporal never showed stays pending for every key. A tenant's
 credential scope key (0041, plugins-3 D9) is sealed again under the active version, the same key, and holds its version
-from retiring until then.
+from retiring until then; so is a plugin call's answer (0042, plugins-3a-2), which can outlive its expiry when no worker
+sweeps it.
 
 - [ ] **Step 1: its tests alone, before its code.** Run (in `backend/`): `uv run pytest -q -n 4
   tests/apps/cli/test_keys.py tests/apps/dispatcher/test_run_evidence.py tests/apps/dispatcher/test_schedule_sync.py
   tests/apps/dispatcher/test_schedule_tick_replay.py tests/apps/dispatcher/test_schedule_tick_server.py
   tests/apps/dispatcher/test_transitions.py tests/apps/dispatcher/test_triggers_end_to_end.py tests/apps/test_runs.py
   tests/apps/test_tick_codec.py tests/apps/worker/test_main.py tests/core/keys/test_reencrypt.py
-  tests/core/keys/test_retire.py tests/core/keys/test_tick_cutover.py`. Replay result on `e5bef26` with this task's
+  tests/core/keys/test_retire.py tests/core/keys/test_tick_cutover.py`. Replay result on `b233bb6` with this task's
   tests (exit 1), shortened:
 
   Every test errors: the modules importing this task's code fail to collect, and the rest fail at setup, since the
@@ -7912,44 +8011,44 @@ ERROR tests/core/keys/test_retire.py - AttributeError: module 'dewpoint.core....
 ERROR tests/core/keys/test_retire.py - AttributeError: module 'dewpoint.core....
 ERROR tests/core/keys/test_retire.py - AttributeError: module 'dewpoint.core....
 ERROR tests/core/keys/test_retire.py - AttributeError: module 'dewpoint.core....
-ERROR tests/apps/cli/test_keys.py::test_status_rewrap_and_rotate - sqlalchemy...
-ERROR tests/apps/dispatcher/test_schedule_sync.py::test_a_row_changed_while_the_sync_works_stays_queued
-ERROR tests/apps/cli/test_keys.py::test_key_commands_work_as_the_admin_role
-ERROR tests/apps/dispatcher/test_schedule_sync.py::test_a_stale_writers_update_is_discarded_and_it_records_nothing
-ERROR tests/apps/cli/test_keys.py::test_ensure_tenants_gives_every_tenant_without_a_key_one
-ERROR tests/apps/dispatcher/test_schedule_sync.py::test_a_writer_that_lost_the_leadership_records_nothing
-ERROR tests/apps/cli/test_keys.py::test_reencrypt_takes_one_scope_and_reports_what_it_sealed_again
-ERROR tests/apps/dispatcher/test_schedule_sync.py::test_a_deletion_is_recorded_once_its_absence_is_seen_after_the_call_deadline
-ERROR tests/apps/cli/test_keys.py::test_event_keypairs_rotate_and_retire - sq...
-ERROR tests/apps/dispatcher/test_schedule_sync.py::test_a_tick_that_finds_a_tombstone_queues_it_again
-ERROR tests/apps/dispatcher/test_schedule_tick_replay.py::test_the_plain_tick_holds_only_its_contract_unsealed
-ERROR tests/apps/dispatcher/test_schedule_tick_server.py::test_a_tick_still_failing_ten_minutes_after_its_time_alerts
-ERROR tests/apps/dispatcher/test_schedule_tick_replay.py::test_the_recorded_tick_keyed_its_request_on_its_nominal_time
 ERROR tests/apps/cli/test_keys.py::test_the_ingress_keys_rollout_reseals_every_secret_and_status_says_when_the_old_one_can_go
 ERROR tests/apps/dispatcher/test_schedule_sync.py::test_an_update_temporal_refuses_is_recorded_and_retried_later
-ERROR tests/apps/dispatcher/test_schedule_tick_server.py::test_the_admission_worker_keeps_no_error_text_in_temporals_activity_records
-ERROR tests/apps/dispatcher/test_schedule_tick_server.py::test_a_firing_is_a_request_under_its_tick_key_and_a_repeat_admits_nothing_new[False]
-[... 68 more lines of the summary]
-93 errors in 14.81s
+ERROR tests/apps/cli/test_keys.py::test_retire_lists_its_checks_and_retires_only_with_confirm
+ERROR tests/apps/dispatcher/test_schedule_sync.py::test_firings_missed_past_the_catch_up_window_are_recorded_audited_and_alerted
+ERROR tests/apps/cli/test_keys.py::test_status_rewrap_and_rotate - sqlalchemy...
+ERROR tests/apps/dispatcher/test_schedule_sync.py::test_a_row_changed_while_the_sync_works_stays_queued
+ERROR tests/apps/cli/test_keys.py::test_the_tick_cutover_is_recorded_once_and_never_while_an_old_dispatcher_polls
+ERROR tests/apps/dispatcher/test_schedule_sync.py::test_the_synced_action_carries_nothing_and_a_legacy_one_its_key_version
+ERROR tests/apps/cli/test_keys.py::test_key_commands_work_as_the_admin_role
+ERROR tests/apps/dispatcher/test_schedule_sync.py::test_a_stale_writers_update_is_discarded_and_it_records_nothing
+ERROR tests/apps/dispatcher/test_schedule_sync.py::test_a_new_schedule_is_created_and_recorded_only_after_its_read_back
+ERROR tests/apps/dispatcher/test_schedule_tick_replay.py::test_schedule_tick_replays_its_recorded_history[legacy]
+ERROR tests/apps/cli/test_keys.py::test_ensure_tenants_gives_every_tenant_without_a_key_one
+ERROR tests/apps/dispatcher/test_schedule_sync.py::test_each_change_and_a_workflows_disable_reach_temporal_by_generation
+ERROR tests/apps/dispatcher/test_schedule_sync.py::test_a_writer_that_lost_the_leadership_records_nothing
+ERROR tests/apps/dispatcher/test_schedule_tick_replay.py::test_schedule_tick_replays_its_recorded_history[plain]
+ERROR tests/apps/cli/test_keys.py::test_reencrypt_takes_one_scope_and_reports_what_it_sealed_again
+[... 69 more lines of the summary]
+94 errors in 19.26s
 ```
 
-- [ ] **Step 2: its code, then the same tests.** Replay result on `4caed45` (exit 0), shortened:
+- [ ] **Step 2: its code, then the same tests.** Replay result on `8187008` (exit 0), shortened:
 
 ```
-..                                                                       [100%]
-146 passed in 40.46s
+....                                                                     [100%]
+148 passed in 43.39s
 ```
 
-Evidence beyond the replay: `d30555e` was made test-first on `proto/2b4a-int`: after `keys reencrypt`, the scope key was
-still sealed under version 1, and `keys retire` didn't count it.
+Evidence beyond the replay: `d30555e` and `cc2810c` were made test-first on `proto/2b4a-int`: after `keys reencrypt`,
+the scope key and a call's answer were still sealed under version 1, and `keys retire` counted neither.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 0f517a9 && git commit -C 0f517a9`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 8187008 && git commit -C 8187008`
 
 The diff:
 
 ````diff
 diff --git a/backend/migrations/versions/0039_key_lifecycle.py b/backend/migrations/versions/0039_key_lifecycle.py
-index 2d7e14c..83c306f 100644
+index 2d7e14c..1e09e24 100644
 --- a/backend/migrations/versions/0039_key_lifecycle.py
 +++ b/backend/migrations/versions/0039_key_lifecycle.py
 @@ -9,7 +9,25 @@ a secret index's, a staged upload's, a saved mapping's, a schedule's input, a ke
@@ -7979,21 +8078,22 @@ index 2d7e14c..83c306f 100644
  
  `record_inbound_events()`, derived from 0032's text, the rest of the function unchanged:
  - (2b-4 ruling D10; the owner's M3 review) every event must be in the sealed layout (core/crypto/events.py: its format
-@@ -41,6 +59,7 @@ SEALED = {  # table: the sealed column the key admin may rewrite (connections an
+@@ -41,6 +59,8 @@ SEALED = {  # table: the sealed column the key admin may rewrite (connections an
      "csv_mappings": "mapping",
      "schedules": "input, generation",
      "tenant_event_keys": "private_sealed",
 +    "rate_scope_keys": "sealed",  # 0041's (plugins-3 D9): re-sealed, the same key
++    "plugin_calls": "result_ct",  # 0042's (plugins-3a-2): a call's answer
  }
  NAMED = "OR x.v NOT IN (SELECT k.version FROM public.tenant_event_keys k WHERE k.tenant_id = v_tenant))"
  AGREES = (
-@@ -68,7 +87,40 @@ KEYPAIRS = {  # then the tenant's keypair lock (core/ingress/keys.py), shared: r
+@@ -68,7 +88,40 @@ KEYPAIRS = {  # then the tenant's keypair lock (core/ingress/keys.py), shared: r
      LIFECYCLE: LIFECYCLE
      + "\n    PERFORM pg_advisory_xact_lock_shared(hashtextextended('dewpoint:event-key:' || v_tenant::text, 0));",
  }
 -SCOPED = ("csv_uploads", "csv_mappings", "schedules")  # their policies name their roles: the key admin's added
-+SCOPED = ("csv_uploads", "csv_mappings", "schedules", "rate_scope_keys")  # their policies name their roles: the key
-+# admin's added
++SCOPED = ("csv_uploads", "csv_mappings", "schedules", "rate_scope_keys", "plugin_calls")  # their policies name their
++# roles: the key admin's added
 +
 +
 +EVIDENCE = [
@@ -8029,7 +8129,7 @@ index 2d7e14c..83c306f 100644
  
  
  def _recorder() -> str:
-@@ -106,6 +158,41 @@ def upgrade() -> None:
+@@ -106,6 +159,41 @@ def upgrade() -> None:
      op.execute(recorder)
      op.add_column("schedules", sa.Column("action_key_version", sa.Integer, nullable=True))
      op.execute("GRANT UPDATE (action_key_version) ON schedules TO dewpoint_dispatch")
@@ -8071,7 +8171,7 @@ index 2d7e14c..83c306f 100644
      for table, columns in SEALED.items():
          op.execute(f"GRANT SELECT, UPDATE ({columns}) ON {table} TO dewpoint_admin")
      for table in SCOPED:
-@@ -148,6 +235,11 @@ def downgrade() -> None:
+@@ -148,6 +236,11 @@ def downgrade() -> None:
          op.execute(f"REVOKE UPDATE ({columns}) ON {table} FROM dewpoint_admin")
          if table != "tenant_event_keys":  # the key admin read keypairs before
              op.execute(f"REVOKE SELECT ON {table} FROM dewpoint_admin")
@@ -9044,7 +9144,7 @@ index 0000000..d68657e
 +        and value["key"] == f"sched:{schedule_id}:{nominal}"
 +    )  # fmt: skip
 diff --git a/backend/src/dewpoint/core/crypto/reencrypt.py b/backend/src/dewpoint/core/crypto/reencrypt.py
-index a09128b..6aefd50 100644
+index a09128b..af74347 100644
 --- a/backend/src/dewpoint/core/crypto/reencrypt.py
 +++ b/backend/src/dewpoint/core/crypto/reencrypt.py
 @@ -6,9 +6,9 @@ guarantee: the key admin's grants let it write these columns, and no grant can c
@@ -9060,17 +9160,19 @@ index a09128b..6aefd50 100644
  
  import os
  import struct
-@@ -46,6 +46,9 @@ TENANT_FIELDS = (
+@@ -46,6 +46,11 @@ TENANT_FIELDS = (
      Field("schedules", "id", "input", "schedule.input"),
      Field("connections", "id", "secret_ct", "connection.secret"),
      Field("tenant_event_keys", "version", "private_sealed", "event.private"),  # its keypair version
 +    # the tenant's credential scope key (plugins-3 D9): the same key sealed again, never a new one, so no credential's
 +    # budget or cooldown splits; its context is the tenant's id
 +    Field("rate_scope_keys", "tenant_id", "sealed", "rate.scope"),
++    # a plugin call's answer (plugins-3a-2), its id as context: a call can outlive its expiry without a sweeper
++    Field("plugin_calls", "id", "result_ct", "plugin.call"),
  )
  PLATFORM_FIELDS = (
      Field("user_mfa", "user_id", "totp_secret_ct", "user.totp"),
-@@ -108,21 +111,16 @@ async def _field(sessionmaker: async_sessionmaker[AsyncSession], keyring: Keyrin
+@@ -108,21 +113,16 @@ async def _field(sessionmaker: async_sessionmaker[AsyncSession], keyring: Keyrin
  
  async def tenant(sessionmaker: async_sessionmaker[AsyncSession], keyring: Keyring, tenant_id: uuid.UUID, *,
                   batch: int = BATCH) -> dict[str, int]:  # fmt: skip
@@ -10692,7 +10794,7 @@ index 469660a..0c28aad 100644
  
  async def unrecorded(healthy: bool) -> None:
 diff --git a/backend/tests/conftest.py b/backend/tests/conftest.py
-index 5af942b..554f257 100644
+index f9b6244..09101df 100644
 --- a/backend/tests/conftest.py
 +++ b/backend/tests/conftest.py
 @@ -28,12 +28,27 @@ TEST_ROLES = [
@@ -10741,27 +10843,28 @@ index 5af942b..554f257 100644
              )
          ).scalar_one()
 diff --git a/backend/tests/core/keys/test_reencrypt.py b/backend/tests/core/keys/test_reencrypt.py
-index 71c506d..8ff637a 100644
+index 71c506d..f83d7c5 100644
 --- a/backend/tests/core/keys/test_reencrypt.py
 +++ b/backend/tests/core/keys/test_reencrypt.py
-@@ -30,6 +30,7 @@ TENANT_FIELDS = [
+@@ -30,6 +30,8 @@ TENANT_FIELDS = [
      ("schedules", "id", "input", "schedule.input", "id"),
      ("connections", "id", "secret_ct", "connection.secret", "id"),
      ("tenant_event_keys", "version", "private_sealed", "event.private", "version"),
 +    ("rate_scope_keys", "tenant_id", "sealed", "rate.scope", "tenant_id"),  # plugins-3 D9: the tenant's id as context
++    ("plugin_calls", "id", "result_ct", "plugin.call", "id"),  # plugins-3a-2: a call's answer, its id as context
  ]
  
  
-@@ -68,7 +69,7 @@ async def stored(owner_sessionmaker, admin_sessionmaker, keyring) -> dict[str, A
+@@ -68,7 +70,7 @@ async def stored(owner_sessionmaker, admin_sessionmaker, keyring) -> dict[str, A
          await ensure_event_key(s, keyring, t)
      ids = {"run_inputs": uuid.uuid4(), "step_outputs": uuid.uuid4(), "run_secret_index": uuid.uuid4(),
             "csv_uploads": uuid.uuid4(), "csv_mappings": w, "schedules": uuid.uuid4(), "connections": uuid.uuid4(),
 -           "tenant_event_keys": 1}  # fmt: skip
-+           "tenant_event_keys": 1, "rate_scope_keys": t}  # fmt: skip
++           "tenant_event_keys": 1, "rate_scope_keys": t, "plugin_calls": uuid.uuid4()}  # fmt: skip
      plain = {table: f"{table}-plaintext".encode() for table in ids}
  
      async def seal(table: str, purpose: str) -> bytes:
-@@ -92,7 +93,7 @@ async def stored(owner_sessionmaker, admin_sessionmaker, keyring) -> dict[str, A
+@@ -92,7 +94,7 @@ async def stored(owner_sessionmaker, admin_sessionmaker, keyring) -> dict[str, A
                 "values (:w, :t, :c, :u, :v)", w=w, t=t, u=user, v=v,
                 c=await seal("csv_mappings", "csv.mapping"))  # fmt: skip
      await _sql(owner, "insert into schedules (id, tenant_id, workflow_id, every_s, mode, input, created_by, "
@@ -10770,7 +10873,7 @@ index 71c506d..8ff637a 100644
                 i=ids["schedules"], t=t, w=w, u=user, c=await seal("schedules", "schedule.input"))  # fmt: skip
      tombstone = uuid.uuid4()
      await _sql(owner, "insert into schedules (id, tenant_id, workflow_id, every_s, mode, input, created_by, "
-@@ -101,6 +102,12 @@ async def stored(owner_sessionmaker, admin_sessionmaker, keyring) -> dict[str, A
+@@ -101,6 +103,18 @@ async def stored(owner_sessionmaker, admin_sessionmaker, keyring) -> dict[str, A
      await _sql(owner, "insert into connections (id, tenant_id, type, name, config, secret_ct, revision, status) "
                 "values (:i, :t, 'mist', 'c', '{}', :c, 5, 'verified')",
                 i=ids["connections"], t=t, c=await seal("connections", "connection.secret"))  # fmt: skip
@@ -10780,10 +10883,16 @@ index 71c506d..8ff637a 100644
 +        t=t,
 +        c=await seal("rate_scope_keys", "rate.scope"),
 +    )  # the tenant's id as context, as scopes.py seals it
++    await _sql(owner, "insert into plugin_calls (id, tenant_id, kind, node_ref, field, state, expires_at, result_ct) "
++               "values (:i, :t, 'options', 'flow.x@1', 'f', 'done', now() + interval '1 hour', :c)",
++               i=ids["plugin_calls"], t=t, c=await seal("plugin_calls", "plugin.call"))  # fmt: skip
++    # a call not answered yet: nothing sealed
++    await _sql(owner, "insert into plugin_calls (tenant_id, kind, node_ref, field, expires_at) "
++               "values (:t, 'options', 'flow.x@1', 'f', now() + interval '1 hour')", t=t)  # fmt: skip
      async with owner() as s:  # the keypair's private key, as ensure_event_key sealed it
          plain["tenant_event_keys"] = await keyring.decrypt(
              s, tenant_id=t, purpose="event.private", context="1",
-@@ -144,8 +151,16 @@ async def test_every_record_under_an_older_version_is_sealed_again_under_the_act
+@@ -144,8 +158,16 @@ async def test_every_record_under_an_older_version_is_sealed_again_under_the_act
  
  async def test_nothing_else_of_a_record_changes(stored, owner_sessionmaker, admin_sessionmaker, keyring) -> None:
      """A connection keeps its revision and verification, a secret index its content version, a tombstone its empty
@@ -10801,7 +10910,7 @@ index 71c506d..8ff637a 100644
      await reencrypt.tenant(admin_sessionmaker, keyring, t)
      async with owner_sessionmaker() as s:
          connection = (await s.execute(text("select revision, status from connections where id = :i"),
-@@ -155,7 +170,7 @@ async def test_nothing_else_of_a_record_changes(stored, owner_sessionmaker, admi
+@@ -155,7 +177,7 @@ async def test_nothing_else_of_a_record_changes(stored, owner_sessionmaker, admi
          schedules = dict((await s.execute(text("select id, (generation, input is null) from schedules "
                                                 "where tenant_id = :t"), {"t": t})).all())  # fmt: skip
      assert tuple(connection) == (5, "verified") and index == 7
@@ -10810,16 +10919,16 @@ index 71c506d..8ff637a 100644
  
  
  async def test_the_platform_keys_records_are_sealed_again(stored, owner_sessionmaker, admin_sessionmaker,
-@@ -202,7 +217,7 @@ async def test_the_key_admin_rewrites_ciphertexts_only(owner_sessionmaker) -> No
+@@ -202,7 +224,7 @@ async def test_the_key_admin_rewrites_ciphertexts_only(owner_sessionmaker) -> No
      assert {k: v for k, v in updatable.items() if k not in ("connections", "user_mfa")} == {
          "run_inputs": "ciphertext", "step_outputs": "ciphertext", "run_secret_index": "ciphertext",
          "csv_uploads": "staged", "csv_mappings": "mapping", "schedules": "generation,input",
 -        "tenant_event_keys": "private_sealed",
-+        "tenant_event_keys": "private_sealed", "rate_scope_keys": "sealed",
++        "tenant_event_keys": "private_sealed", "rate_scope_keys": "sealed", "plugin_calls": "result_ct",
      }  # fmt: skip
  
  
-@@ -256,3 +271,16 @@ async def test_a_version_never_retires_under_a_batch_sealing_records_with_it(
+@@ -256,3 +278,32 @@ async def test_a_version_never_retires_under_a_batch_sealing_records_with_it(
          assert await keyring.decrypt(s, tenant_id=None, purpose="user.totp", context=str(user), blob=blob) == (
              b"totp-secret"
          )  # its version still exists  # fmt: skip
@@ -10836,8 +10945,24 @@ index 71c506d..8ff637a 100644
 +    async with owner_sessionmaker() as s:
 +        opened = await keyring.decrypt(s, tenant_id=t, purpose="rate.scope", context=str(t), blob=blob)
 +    assert (version_of(blob), opened) == (2, stored["plain"]["rate_scope_keys"])
++
++
++async def test_a_plugin_calls_answer_is_sealed_again_and_a_pending_call_is_left_alone(
++    stored, owner_sessionmaker, admin_sessionmaker, keyring
++) -> None:
++    """Plugins-3a-2's ledger (its 2b-4a dependency): a call's answer is sealed under the tenant's data key, and a call
++    can outlive its expiry without a sweeper, so re-encryption seals it again (the owner's ruling on the rebase); a
++    call not answered yet has nothing to seal."""
++    t, call = stored["t"], stored["ids"]["plugin_calls"]
++    counts = await reencrypt.tenant(admin_sessionmaker, keyring, t)
++    blob = await _blob(owner_sessionmaker, "plugin_calls", "result_ct", "id", call, t)
++    async with owner_sessionmaker() as s:
++        opened = await keyring.decrypt(s, tenant_id=t, purpose="plugin.call", context=str(call), blob=blob)
++        pending = (await s.execute(text("select count(*) from plugin_calls where tenant_id = :t and "
++                                        "result_ct is null"), {"t": t})).scalar_one()  # fmt: skip
++    assert (counts["plugin_calls"], version_of(blob), opened, pending) == (1, 2, stored["plain"]["plugin_calls"], 1)
 diff --git a/backend/tests/core/keys/test_retire.py b/backend/tests/core/keys/test_retire.py
-index a0ec32f..345a509 100644
+index a0ec32f..d7e7387 100644
 --- a/backend/tests/core/keys/test_retire.py
 +++ b/backend/tests/core/keys/test_retire.py
 @@ -2,9 +2,12 @@
@@ -10903,7 +11028,7 @@ index a0ec32f..345a509 100644
      assert all(c.ok for c in done)
      async with owner_sessionmaker() as s:
          versions = list(
-@@ -78,14 +86,33 @@ async def test_the_active_version_never_retires(rotated, owner_sessionmaker, adm
+@@ -78,14 +86,34 @@ async def test_the_active_version_never_retires(rotated, owner_sessionmaker, adm
      assert (await _checks(admin_sessionmaker, rotated["t"], 2))["not_active"] is False
  
  
@@ -10916,7 +11041,8 @@ index a0ec32f..345a509 100644
 +
  @pytest.mark.parametrize("blocker", ["payload_floor", "no_run_duration", "no_namespace_retention", "open_runs",
 -                                     "records", "digests", "schedule_actions", "tombstones"])  # fmt: skip
-+                                     "records", "rate_scope_key", "digests", "schedule_actions", "unsynced",
++                                     "records", "rate_scope_key", "plugin_call", "digests", "schedule_actions",
++                                     "unsynced",
 +                                     "tombstones",
 +                                     "legacy_ticks", "open_execution", "retained_history", "unread_history",
 +                                     "lost_history", "pending_start", "run_histories_unknown"])  # fmt: skip
@@ -10933,13 +11059,13 @@ index a0ec32f..345a509 100644
      check = {"no_run_duration": "payload_floor", "no_namespace_retention": "payload_floor",
 -             "tombstones": "schedule_actions"}.get(blocker, blocker)  # fmt: skip
 +             "unsynced": "schedule_actions", "tombstones": "schedule_actions",
-+             "rate_scope_key": "records"}.get(blocker, blocker)  # fmt: skip
++             "rate_scope_key": "records", "plugin_call": "records"}.get(blocker, blocker)  # fmt: skip
 +    if proof is not PROVEN:
 +        check = "run_histories"
      if blocker == "payload_floor":  # its successor is only 2 days old: 5 minutes + 2 days + 1 day haven't passed
          await _sql(owner_sessionmaker, "update data_keys set created_at = now() - interval '2 days' "
                     "where tenant_id = :t and version = 2", t=t)  # fmt: skip
-@@ -96,7 +123,7 @@ async def test_a_version_something_still_needs_doesnt_retire(rotated, owner_sess
+@@ -96,7 +124,7 @@ async def test_a_version_something_still_needs_doesnt_retire(rotated, owner_sess
      elif blocker == "open_runs":  # started before its successor's cache expired: it may hold payloads under 1
          await _sql(owner_sessionmaker, "insert into runs (id, tenant_id, workflow_id, workflow_version_id, mode, "
                     "status, queued_at) values (gen_random_uuid(), :t, :w, :v, 'live', 'running', "
@@ -10948,7 +11074,7 @@ index a0ec32f..345a509 100644
                     t=t, w=w, v=v)  # fmt: skip
      elif blocker == "records":
          async with admin_sessionmaker() as s, s.begin():
-@@ -106,37 +133,87 @@ async def test_a_version_something_still_needs_doesnt_retire(rotated, owner_sess
+@@ -106,37 +134,95 @@ async def test_a_version_something_still_needs_doesnt_retire(rotated, owner_sess
          await _sql(owner_sessionmaker, "insert into run_inputs (id, tenant_id, owner_run_id, root_run_id, "
                     "sensitive_pointers, ciphertext, role, pointer) values (gen_random_uuid(), :t, :r, :r, '[]', :c, "
                     "'claim', '/x')", t=t, r=uuid.uuid4(), c=old)  # fmt: skip
@@ -10958,6 +11084,14 @@ index a0ec32f..345a509 100644
 +            blob = await keyring.encrypt(s, tenant_id=t, purpose="rate.scope", context=str(t), plaintext=b"k" * 32)
 +        old = b"\x01" + (1).to_bytes(4, "big") + blob[5:]
 +        await _sql(owner_sessionmaker, "insert into rate_scope_keys (tenant_id, sealed) values (:t, :c)", t=t, c=old)
++    elif blocker == "plugin_call":  # a call's answer under 1 (plugins-3a-2), past its expiry: no sweeper deleted it
++        async with admin_sessionmaker() as s, s.begin():
++            await tenant_scope(s, t)
++            blob = await keyring.encrypt(s, tenant_id=t, purpose="plugin.call", context="x", plaintext=b"[]")
++        old = b"\x01" + (1).to_bytes(4, "big") + blob[5:]
++        await _sql(owner_sessionmaker, "insert into plugin_calls (tenant_id, kind, node_ref, field, state, expires_at, "
++                   "result_ct) values (:t, 'options', 'flow.x@1', 'f', 'done', now() - interval '1 day', :c)",
++                   t=t, c=old)  # fmt: skip
      elif blocker == "digests":
          await _sql(owner_sessionmaker, "insert into run_requests (id, tenant_id, workflow_id, source, mode, "
                     "idempotency_key, digest, digest_key_version, status, reason, ended_at) values (gen_random_uuid(), "
@@ -11115,10 +11249,10 @@ index 69b033d..9ddab12 100644
 +    [sealed] = await codec.encode(DataConverter.default.payload_converter.to_payloads([value]))
 +    return sealed
 diff --git a/docs/operations/key-rotation.md b/docs/operations/key-rotation.md
-index cea20da..46090d0 100644
+index cea20da..a4c1d3c 100644
 --- a/docs/operations/key-rotation.md
 +++ b/docs/operations/key-rotation.md
-@@ -67,15 +67,16 @@ dewpoint keys retire --tenant <tenant-uuid> --version 1 --confirm   # deletes it
+@@ -67,15 +67,17 @@ dewpoint keys retire --tenant <tenant-uuid> --version 1 --confirm   # deletes it
  ```
  
  Run `keys reencrypt` once 5 minutes have passed since the rotation: until then, processes still seal with the older
@@ -11134,8 +11268,9 @@ index cea20da..46090d0 100644
 +version, and what they seal is left for a later run (`keys retire` won't pass its `records` check meanwhile). It seals
 +every record stored under an older version again under the active one: claims, envelopes and CSV records, step outputs,
 +secret indexes, staged uploads, saved CSV mappings, schedule inputs, connection secrets, the inbound keypairs' private
-+keys and the tenant's credential scope key (sealed again, the same key: a new one would split every credential's quota
-+budget and cooldown) (`--platform`: users' TOTP secrets). The command keeps each record's plaintext, purpose and
++keys, the tenant's credential scope key (sealed again, the same key: a new one would split every credential's quota
++budget and cooldown) and plugin calls' answers (a call can outlive its expiry when no worker sweeps it) (`--platform`:
++users' TOTP secrets). The command keeps each record's plaintext, purpose and
 +context, and leaves a record the application rewrote meanwhile as it is. This is the command's behaviour, not a
 +guarantee from the database: the key admin's grants let it rewrite these columns, and can't check what it writes. A
 +schedule's Temporal action carries nothing under a tenant's key (below); one synced before still carries the schedule's
@@ -11144,7 +11279,7 @@ index cea20da..46090d0 100644
  
  `keys retire` deletes a version only when every check passes:
  
-@@ -83,16 +84,69 @@ recorded version isn't the active one, and the sync seals it again within a cycl
+@@ -83,16 +85,69 @@ recorded version isn't the active one, and the sync seals it again within a cycl
  |---|---|
  | `not_active` | it isn't the active version |
  | `payload_floor` | its successor's creation + 5 minutes (the key cache) + twice the longest maximum run duration ever recorded + the Temporal namespace's retention has passed |
@@ -11238,7 +11373,7 @@ index 8f60e5d..6dccc9d 100644
 **Checkpoint (milestone 3).** Focused: the 38 test modules Tasks 1 to 6 add or change, in `tests/apps`,
 `tests/apps/api`, `tests/apps/cli`, `tests/apps/dispatcher`, `tests/apps/ingress`, `tests/apps/worker`, `tests/core`,
 `tests/core/audit`, `tests/core/claims`, `tests/core/ingress`, `tests/core/keys`, `tests/core/retention`,
-`tests/core/tenancy` and `tests/deploy` (424 passed on Task 6's tree); the migrations 0041 → 0039 → 0041 → 0039 over
+`tests/core/tenancy` and `tests/deploy` (426 passed on Task 6's tree); the migrations 0042 → 0039 → 0042 → 0039 over
 existing rows, every constraint, function, trigger, policy, role, grant and column the same after the downgrade. The
 owner held it four times (milestone ruling 3) and approved it as a prototype checkpoint (2026-10-05).
 
@@ -11246,9 +11381,9 @@ owner held it four times (milestone ruling 3) and approved it as a prototype che
 
 ### Task 7: Erased tenants are never eligible; the erasure's record, items and known ids; the insert fence
 
-**Commit:** `60c83b8` (`proto/2b4a-v4`). The replay ran `proto/2b4a-v3`'s `45bdb44`, the same tree. It folds
-`proto/2b4a-v1`'s `9eaf0dc`; from `proto/2b4a-int`'s `4f36296`, 0041's tenant tables under the fence, and an egress
-exception naming no tenant let through it.
+**Commit:** `5ba075d` (`proto/2b4a-v5`), replayed as it is: `proto/2b4a-v4`'s `60c83b8` with plugin calls fenced
+(milestone ruling 7). It folds `proto/2b4a-v1`'s `9eaf0dc`; from `proto/2b4a-int`'s `4f36296` and `cef6823`, 0041's
+tenant tables and 0042's plugin calls under the fence, and an egress exception naming no tenant let through it.
 
 **Create:** `backend/migrations/versions/0040_tenant_erasure.py`, `backend/src/dewpoint/core/models/erasure.py`,
 `backend/tests/core/erasure/__init__.py`, `backend/tests/core/erasure/test_fence.py`
@@ -11266,58 +11401,59 @@ A tenant's status gains `erased`; eligibility everywhere requires `active` (admi
 Migration 0040 adds the erasure's record (its stage, attempts, failure or hold, counts), its items (what each stage
 found and verified) and the Temporal ids it keeps, identifiers only. From stage 60 an insert fence refuses any row of
 the tenant in any table holding tenant data (SQLSTATE DPE01), whatever the writer, under the tenant's lifecycle lock
-shared; 0041's tables (plugins-3a-1) included, an egress exception for every tenant (no tenant's) let through.
+shared; 0041's tables (plugins-3a-1) and 0042's plugin calls (plugins-3a-2) included, an egress exception for every
+tenant (no tenant's) let through.
 
 - [ ] **Step 1: its tests alone, before its code.** Run (in `backend/`): `uv run pytest -q -n 4
   tests/apps/dispatcher/test_begin.py tests/apps/dispatcher/test_matching.py tests/apps/dispatcher/test_schedule_tick.py
   tests/apps/ingress/test_hooks.py tests/apps/test_admission.py tests/core/erasure/test_fence.py
-  tests/core/ingress/test_recording.py`. Replay result on `4caed45` with this task's tests (exit 1), shortened:
+  tests/core/ingress/test_recording.py`. Replay result on `8187008` with this task's tests (exit 1), shortened:
 
 ```
                         message, error
                     )
 >                   raise translated_error from error
-E                   sqlalchemy.exc.ProgrammingError: (sqlalchemy.dialects.postgresql.asyncpg.ProgrammingError) relation "tenant_erasures" does not exist
-E                   [SQL: insert into tenant_erasures (tenant_id, requested_by, step) values ($1, $2, $3) on conflict (tenant_id) do update set step = excluded.step]
+E                   sqlalchemy.exc.IntegrityError: (sqlalchemy.dialects.postgresql.asyncpg.CheckViolationError) new row for relation "tenants" violates check constraint "tenants_status"
+E                   [SQL: update tenants set status = 'erased' where id = $1]
 E                   [SQL parameters hidden due to hide_parameters=True]
-E                   (Background on this error at: https://sqlalche.me/e/21/f405)
-.venv/lib/python3.14/site-packages/sqlalchemy/dialects/postgresql/asyncpg.py:840: ProgrammingError
+E                   (Background on this error at: https://sqlalche.me/e/21/gkpj)
+.venv/lib/python3.14/site-packages/sqlalchemy/dialects/postgresql/asyncpg.py:840: IntegrityError
 =========================== short test summary info ============================
 FAILED tests/apps/dispatcher/test_matching.py::test_an_erasing_tenants_events_wait[erased]
 FAILED tests/apps/dispatcher/test_begin.py::test_a_condition_that_doesnt_hold_leaves_the_request_queued_without_an_attempt[tenant_erased]
 FAILED tests/apps/ingress/test_hooks.py::test_every_refusal_before_recording_is_the_same_bodiless_401
 FAILED tests/apps/dispatcher/test_schedule_tick.py::test_an_erasing_tenants_tick_is_an_audited_skip[erased]
 FAILED tests/apps/test_admission.py::test_a_refused_interactive_request_is_raised_and_leaves_nothing[erased-tenant_erasing]
-FAILED tests/core/erasure/test_fence.py::test_every_table_holding_tenant_data_is_fenced
 FAILED tests/core/erasure/test_fence.py::test_an_insert_is_refused_from_stage_60_whatever_the_role[60-False]
-FAILED tests/core/erasure/test_fence.py::test_an_insert_is_refused_from_stage_60_whatever_the_role[50-True]
+FAILED tests/core/erasure/test_fence.py::test_every_table_holding_tenant_data_is_fenced
 FAILED tests/core/erasure/test_fence.py::test_an_insert_is_refused_from_stage_60_whatever_the_role[100-False]
+FAILED tests/core/erasure/test_fence.py::test_an_insert_is_refused_from_stage_60_whatever_the_role[50-True]
 FAILED tests/core/erasure/test_fence.py::test_a_row_for_every_tenant_is_never_fenced_and_a_fenced_tenants_own_is
 FAILED tests/core/erasure/test_fence.py::test_no_key_is_created_for_a_tenant_whose_keys_may_have_gone
-FAILED tests/core/ingress/test_recording.py::test_a_disabled_endpoint_or_an_erasing_tenant_records_and_spends_nothing[update tenants set status = 'erased' where id = :t]
 FAILED tests/core/erasure/test_fence.py::test_entering_stage_60_waits_for_an_insert_in_flight
 FAILED tests/core/erasure/test_fence.py::test_an_insert_waiting_for_stage_60_is_refused_once_it_commits
-14 failed, 105 passed in 22.26s
+FAILED tests/core/ingress/test_recording.py::test_a_disabled_endpoint_or_an_erasing_tenant_records_and_spends_nothing[update tenants set status = 'erased' where id = :t]
+14 failed, 105 passed in 32.57s
 ```
 
-- [ ] **Step 2: its code, then the same tests.** Replay result on `45bdb44` (exit 0), shortened:
+- [ ] **Step 2: its code, then the same tests.** Replay result on `5ba075d` (exit 0), shortened:
 
 ```
 ...............................................                          [100%]
-119 passed in 28.17s
+119 passed in 25.19s
 ```
 
-Evidence beyond the replay: `4f36296` was made test-first on `proto/2b4a-int`: the fence's inventory lacked 0041's
-tables, and their rows weren't refused.
+Evidence beyond the replay: `4f36296` and `cef6823` were made test-first on `proto/2b4a-int`: the fence's inventory
+lacked 0041's tables, then plugin calls, and their rows weren't refused.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 60c83b8 && git commit -C 60c83b8`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 5ba075d && git commit -C 5ba075d`
 
 The diff:
 
 ```diff
 diff --git a/backend/migrations/versions/0040_tenant_erasure.py b/backend/migrations/versions/0040_tenant_erasure.py
 new file mode 100644
-index 0000000..b489bcd
+index 0000000..049c183
 --- /dev/null
 +++ b/backend/migrations/versions/0040_tenant_erasure.py
 @@ -0,0 +1,163 @@
@@ -11365,10 +11501,10 @@ index 0000000..b489bcd
 +FENCED_AT = 60
 +# Every table holding tenant data, the keys included: what the fence covers.
 +FENCED = ("claim_grants", "connections", "csv_mappings", "csv_uploads", "data_keys", "egress_allowlist",
-+          "execution_evidence", "inbound_events", "memberships", "rate_buckets", "rate_scope_keys", "run_inputs",
-+          "run_requests", "run_secret_index", "run_slots", "run_steps", "runs", "schedule_firings", "schedules",
-+          "step_outputs", "tenant_event_counters", "tenant_event_keys", "tenant_retention", "tenant_run_limits",
-+          "trigger_bindings", "webhook_endpoints", "workflow_versions", "workflows")  # fmt: skip
++          "execution_evidence", "inbound_events", "memberships", "plugin_calls", "rate_buckets", "rate_scope_keys",
++          "run_inputs", "run_requests", "run_secret_index", "run_slots", "run_steps", "runs", "schedule_firings",
++          "schedules", "step_outputs", "tenant_event_counters", "tenant_event_keys", "tenant_retention",
++          "tenant_run_limits", "trigger_bindings", "webhook_endpoints", "workflow_versions", "workflows")  # fmt: skip
 +
 +FENCE = [
 +    f"""CREATE FUNCTION tenant_insert_fence() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
@@ -11834,10 +11970,10 @@ new file mode 100644
 index 0000000..e69de29
 diff --git a/backend/tests/core/erasure/test_fence.py b/backend/tests/core/erasure/test_fence.py
 new file mode 100644
-index 0000000..f69cd9b
+index 0000000..9a12e24
 --- /dev/null
 +++ b/backend/tests/core/erasure/test_fence.py
-@@ -0,0 +1,162 @@
+@@ -0,0 +1,164 @@
 +# SPDX-License-Identifier: Apache-2.0
 +"""The erasure's insert fence (migration 0040; 2b-4a M4, "final absence"): once an erasure reaches stage 60, its
 +executions being deleted, no row of the tenant is inserted into any table holding tenant data, by any role, whatever the
@@ -11923,7 +12059,9 @@ index 0000000..f69cd9b
 +    for statement in ("insert into egress_allowlist (network, tenant_id) values ('198.51.100.0/24', :t)",
 +                      "insert into rate_buckets (tenant_id, scope, capacity, refill_per_s, tokens, refilled_at) "
 +                      "values (:t, 's', 1, 1, 1, now())",
-+                      "insert into rate_scope_keys (tenant_id, sealed) values (:t, '\\x00')"):  # fmt: skip
++                      "insert into rate_scope_keys (tenant_id, sealed) values (:t, '\\x00')",
++                      "insert into plugin_calls (tenant_id, kind, node_ref, field, expires_at) "  # 0042's
++                      "values (:t, 'options', 'flow.x@1', 'f', now() + interval '1 hour')"):  # fmt: skip
 +        async with owner_sessionmaker() as s:
 +            await s.begin()
 +            with pytest.raises(DBAPIError) as e:
@@ -12018,8 +12156,8 @@ index cc5ff74..842177d 100644
 
 ### Task 8: Step 1 and the writers it fences
 
-**Commit:** `f992832` (`proto/2b4a-v4`). The replay ran `proto/2b4a-v3`'s `e7ae590`, the same tree. It folds
-`proto/2b4a-v1`'s `b7d85ba`.
+**Commit:** `cf8cdff` (`proto/2b4a-v5`). The replay ran `proto/2b4a-v3`'s `e7ae590`, the same patch, on the tree before
+#44. It folds `proto/2b4a-v1`'s `b7d85ba`.
 
 **Create:** `backend/src/dewpoint/core/erasure/__init__.py`, `backend/src/dewpoint/core/erasure/service.py`,
 `backend/src/dewpoint/core/tenancy/lifecycle.py`, `backend/tests/core/erasure/conftest.py`,
@@ -12067,13 +12205,13 @@ ERROR tests/core/erasure/test_writers.py - ImportError while importing test m...
 21 passed in 12.85s
 ```
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit f992832 && git commit -C f992832`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit cf8cdff && git commit -C cf8cdff`
 
 The diff:
 
 ```diff
 diff --git a/backend/migrations/versions/0040_tenant_erasure.py b/backend/migrations/versions/0040_tenant_erasure.py
-index b489bcd..8868c76 100644
+index 049c183..c0bb1e6 100644
 --- a/backend/migrations/versions/0040_tenant_erasure.py
 +++ b/backend/migrations/versions/0040_tenant_erasure.py
 @@ -61,6 +61,26 @@ END $$""",
@@ -12944,8 +13082,8 @@ index 0000000..9e7bd32
 
 ### Task 9: Schedules created paused and unpaused by a token update; ticks record their own ids; the sync fenced
 
-**Commit:** `33ce063` (`proto/2b4a-v4`). The replay ran `proto/2b4a-v3`'s `159c066`, the same tree. It folds
-`proto/2b4a-v1`'s `4140a33`.
+**Commit:** `7dcb733` (`proto/2b4a-v5`). The replay ran `proto/2b4a-v3`'s `159c066`, the same patch, on the tree before
+#44. It folds `proto/2b4a-v1`'s `4140a33`.
 
 **Create:** `backend/tests/apps/worker/test_temporal_erasure_contract.py`
 
@@ -13003,7 +13141,7 @@ Evidence beyond the replay: the contract tests run on the dev server and pin wha
 deleted and recreated under one id restarts its conflict token at 1, and a stale unpause lands on the recreation. That
 failed the outline's premise (D3e), and Task 12 answers it.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 33ce063 && git commit -C 33ce063`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 7dcb733 && git commit -C 7dcb733`
 
 The diff:
 
@@ -13872,9 +14010,10 @@ index d632bf8..8592892 100644
 
 ### Task 10: The retention process carries an erasure through stages 20 to 80
 
-**Commit:** `2943ced` (`proto/2b4a-v4`). The replay ran `proto/2b4a-v3`'s `6acab73`, the same tree. It folds
-`proto/2b4a-v1`'s `17ba406`; from `proto/2b4a-int`'s `4f36296`, 0041's tenant tables swept (the retention role's
-policies, reads and deletes), an egress exception naming no tenant kept.
+**Commit:** `4e21f6b` (`proto/2b4a-v5`), replayed as it is: `proto/2b4a-v4`'s `2943ced` with plugin calls swept
+(milestone ruling 7). It folds `proto/2b4a-v1`'s `17ba406`; from `proto/2b4a-int`'s `4f36296` and `cef6823`, 0041's
+tenant tables and 0042's plugin calls swept (the retention role's policies, reads and deletes; plugin calls before the
+connections a verify call names), an egress exception naming no tenant kept.
 
 **Create:** `backend/src/dewpoint/apps/erasure/__init__.py`, `backend/src/dewpoint/apps/erasure/process.py`,
 `backend/src/dewpoint/apps/erasure/stages.py`, `backend/src/dewpoint/apps/erasure/temporal.py`,
@@ -13892,12 +14031,13 @@ firing its ticks recorded, and every execution visibility lists under the tenant
 cancels queued requests and pending events; 50 cancels running runs and waits for each to end; 60 raises the fence and
 deletes every execution found, read back until describing that exact run answers not-found; 70 deletes the data keys and
 event keypairs; 80 sweeps every row of the tenant in committed batches, 0041's egress exceptions, quota budgets and
-scope key included (an exception for every tenant, no tenant's, kept), and anonymizes the tombstone. Each stage records
-its items, backs off on failure and alerts when it stalls; the retention role gets what each needs.
+scope key and 0042's plugin calls included (an exception for every tenant, no tenant's, kept), and anonymizes the
+tombstone. Each stage records its items, backs off on failure and alerts when it stalls; the retention role gets what
+each needs.
 
 - [ ] **Step 1: its tests alone, before its code.** Run (in `backend/`): `uv run pytest -q -n 4
   tests/apps/dispatcher/test_run_evidence.py tests/apps/erasure/test_stages.py tests/core/erasure/test_fence.py`. Replay
-  result on `159c066` with this task's tests (exit 1), shortened:
+  result on `7dcb733` with this task's tests (exit 1), shortened:
 
 ```
                         message, error
@@ -13913,28 +14053,29 @@ FAILED tests/apps/dispatcher/test_run_evidence.py::test_a_tenant_being_erased_is
 FAILED tests/apps/dispatcher/test_run_evidence.py::test_a_tenant_being_erased_is_left_to_its_erasure[erasing]
 FAILED tests/core/erasure/test_fence.py::test_a_workflow_version_stays_immutable_but_to_its_tenants_erasure_sweep[80-True]
 ERROR tests/apps/erasure/test_stages.py - ImportError while importing test mo...
-3 failed, 15 passed, 1 error in 14.25s
+3 failed, 15 passed, 1 error in 13.60s
 ```
 
-- [ ] **Step 2: its code, then the same tests.** Replay result on `6acab73` (exit 0), shortened:
+- [ ] **Step 2: its code, then the same tests.** Replay result on `4e21f6b` (exit 0), shortened:
 
 ```
 .........................                                                [100%]
-25 passed in 158.71s (0:02:38)
+25 passed in 184.96s (0:03:04)
 ```
 
-Evidence beyond the replay: `4f36296` was made test-first on `proto/2b4a-int`: 0041's rows were left after stage 80.
+Evidence beyond the replay: `4f36296` and `cef6823` were made test-first on `proto/2b4a-int`: 0041's rows, then a plugin
+call, were left after stage 80.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 2943ced && git commit -C 2943ced`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 4e21f6b && git commit -C 4e21f6b`
 
 The diff:
 
 ```diff
 diff --git a/backend/migrations/versions/0040_tenant_erasure.py b/backend/migrations/versions/0040_tenant_erasure.py
-index 8868c76..9d48f98 100644
+index c0bb1e6..b2adf57 100644
 --- a/backend/migrations/versions/0040_tenant_erasure.py
 +++ b/backend/migrations/versions/0040_tenant_erasure.py
-@@ -81,6 +81,90 @@ ERASURES = [  # a platform admin starts, stops and retries an erasure through th
+@@ -81,6 +81,93 @@ ERASURES = [  # a platform admin starts, stops and retries an erasure through th
      "GRANT SELECT ON tenant_erasure_items, tenant_erasure_known TO dewpoint_api",
  ]
  
@@ -13945,6 +14086,7 @@ index 8868c76..9d48f98 100644
 +    "csv_mappings",
 +    "egress_allowlist",
 +    "execution_evidence",
++    "plugin_calls",
 +    "rate_buckets",
 +    "rate_scope_keys",
 +    "run_slots",
@@ -13952,7 +14094,8 @@ index 8868c76..9d48f98 100644
 +    "tenant_run_limits",
 +    "trigger_bindings",
 +)  # their policies name their roles: the
-+# retention role's added (0041's tables: its tenant's rows only, never an egress exception for every tenant)  # fmt: skip
++# retention role's added (0041's tables: its tenant's rows only, never an egress exception for every tenant; 0042's
++# plugin calls)  # fmt: skip
 +READS = {
 +    "connections": "id, tenant_id", "csv_mappings": "workflow_id, tenant_id", "data_keys": "id, tenant_id, version",
 +    "memberships": "id, tenant_id, user_id", "run_slots": "run_id, tenant_id", "tenant_event_keys": "tenant_id, version",
@@ -13960,12 +14103,13 @@ index 8868c76..9d48f98 100644
 +    "workflows": "id, tenant_id, active_version_id", "webhook_endpoints": "pending_events, pending_bytes",
 +    "tenant_event_counters": "pending_events, pending_bytes",  # its tenant_id: 0037
 +    "egress_allowlist": "id, tenant_id", "rate_buckets": "tenant_id, scope", "rate_scope_keys": "tenant_id",  # 0041
++    "plugin_calls": "id, tenant_id",  # 0042
 +}  # fmt: skip
 +# What the sweep deletes (step 80), as `dewpoint_retention`
 +DELETES = (
-+    "connections, csv_mappings, data_keys, egress_allowlist, execution_evidence, memberships, rate_buckets, "
-+    "rate_scope_keys, run_slots, tenant_event_counters, tenant_event_keys, tenant_retention, tenant_run_limits, "
-+    "trigger_bindings, webhook_endpoints, workflow_versions, workflows, retention_sweep_tenants"
++    "connections, csv_mappings, data_keys, egress_allowlist, execution_evidence, memberships, plugin_calls, "
++    "rate_buckets, rate_scope_keys, run_slots, tenant_event_counters, tenant_event_keys, tenant_retention, "
++    "tenant_run_limits, trigger_bindings, webhook_endpoints, workflow_versions, workflows, retention_sweep_tenants"
 +)
 +ERASER = [
 +    "GRANT SELECT, UPDATE ON tenant_erasures TO dewpoint_retention",
@@ -14025,7 +14169,7 @@ index 8868c76..9d48f98 100644
  FIRINGS = [
      "ALTER TABLE schedule_firings ENABLE ROW LEVEL SECURITY",
      "ALTER TABLE schedule_firings FORCE ROW LEVEL SECURITY",
-@@ -158,7 +242,7 @@ def upgrade() -> None:
+@@ -158,7 +245,7 @@ def upgrade() -> None:
      )
      op.create_index("schedule_firings_tenant", "schedule_firings", ["tenant_id", "schedule_id"])
      op.create_index("schedule_firings_recorded", "schedule_firings", ["recorded_at"])
@@ -14034,7 +14178,7 @@ index 8868c76..9d48f98 100644
          op.execute(statement)
      op.add_column("schedules", sa.Column("creation_misses", sa.Integer, nullable=False, server_default="0"))
      op.execute("GRANT UPDATE (creation_misses) ON schedules TO dewpoint_dispatch")
-@@ -174,6 +258,26 @@ def downgrade() -> None:
+@@ -174,6 +261,26 @@ def downgrade() -> None:
          op.execute(f"DROP TRIGGER {table}_fence ON {table}")
      op.execute("DROP FUNCTION tenant_insert_fence()")
      op.execute("DROP FUNCTION tenant_status(uuid)")
@@ -14224,10 +14368,10 @@ index 0000000..92daf64
 +            await holder.execute(_UNLOCK)
 diff --git a/backend/src/dewpoint/apps/erasure/stages.py b/backend/src/dewpoint/apps/erasure/stages.py
 new file mode 100644
-index 0000000..37ffadf
+index 0000000..9ea1198
 --- /dev/null
 +++ b/backend/src/dewpoint/apps/erasure/stages.py
-@@ -0,0 +1,356 @@
+@@ -0,0 +1,357 @@
 +# SPDX-License-Identifier: Apache-2.0
 +"""An erasure's stages (the 2b-4 outline's steps 2 to 8; `core.models.erasure.Stage`), each `async (Context) -> bool`:
 +done, or not yet (the pass tries it again later). Each is idempotent: a stage that stops anywhere resumes from what it
@@ -14524,7 +14668,8 @@ index 0000000..37ffadf
 +    ("runs", "root_run_id"), ("run_requests", "id"), ("run_inputs", "id"), ("inbound_events", "id"),
 +    ("trigger_bindings", "id"), ("webhook_endpoints", "id"), ("tenant_event_counters", "tenant_id"),
 +    ("csv_mappings", "workflow_id"), ("csv_uploads", "id"), ("schedules", "id"), ("workflow_versions", "id"),
-+    ("workflows", "id"), ("connections", "id"), ("memberships", "id"), ("tenant_retention", "tenant_id"),
++    ("workflows", "id"), ("plugin_calls", "id"),  # 0042's: an options call names no connection, so nothing cascades
++    ("connections", "id"), ("memberships", "id"), ("tenant_retention", "tenant_id"),
 +    ("tenant_run_limits", "tenant_id"), ("data_keys", "id"), ("tenant_event_keys", "tenant_id, version"),
 +    ("egress_allowlist", "id"), ("rate_buckets", "tenant_id, scope"), ("rate_scope_keys", "tenant_id"),  # 0041's
 +)  # fmt: skip
@@ -14856,10 +15001,10 @@ new file mode 100644
 index 0000000..e69de29
 diff --git a/backend/tests/apps/erasure/support.py b/backend/tests/apps/erasure/support.py
 new file mode 100644
-index 0000000..b29e105
+index 0000000..2c7c8a9
 --- /dev/null
 +++ b/backend/tests/apps/erasure/support.py
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,73 @@
 +# SPDX-License-Identifier: Apache-2.0
 +"""A tenant with a row in every table that holds tenant data, written as the table owner, and what's left of it."""
 +
@@ -14880,7 +15025,7 @@ index 0000000..b29e105
 +    """A tenant holding a row in each of its tables: its keys and keypair, a webhook endpoint with a pending event and
 +    a binding, a workflow and version, a run tree that ended (its steps, claims, grants, secret index, request and
 +    envelope, its evidence), a queued request, a schedule and a tick's record of a firing, a connection, a member, an
-+    upload and a saved mapping, its retention, limits and a slot."""
++    upload and a saved mapping, its retention, limits and a slot, and a plugin call's answer."""
 +    tenant, endpoint_id = await endpoint(owner)
 +    _, workflow_id, version_id = await seed_workflow(owner, tenant_id=tenant)
 +    async with owner() as s, s.begin():
@@ -14911,6 +15056,8 @@ index 0000000..b29e105
 +        ("insert into rate_buckets (tenant_id, scope, capacity, refill_per_s, tokens, refilled_at) "
 +         "values (:t, 'mist:org', 5, 1, 5, now())", {}),
 +        ("insert into rate_scope_keys (tenant_id, sealed) values (:t, :c)", {"c": CIPHER}),
++        ("insert into plugin_calls (tenant_id, kind, node_ref, field, state, expires_at, result_ct) values "  # 0042's:
++         "(:t, 'options', 'flow.x@1', 'f', 'done', now() + interval '1 hour', :c)", {"c": CIPHER}),  # no connection
 +        ("insert into tenant_run_limits (tenant_id, max_concurrent) values (:t, 3)", {}),
 +        ("insert into run_slots (run_id, tenant_id) values (:i, :t)", {"i": uuid.uuid4()}),
 +    ):  # fmt: skip
@@ -15230,7 +15377,7 @@ index 0000000..c78e153
 +        await sql(owner_sessionmaker, "insert into run_slots (run_id, tenant_id) values (:i, :t)", i=uuid.uuid4(),
 +                  t=data["t"])  # fmt: skip
 diff --git a/backend/tests/core/erasure/test_fence.py b/backend/tests/core/erasure/test_fence.py
-index f69cd9b..13ff38f 100644
+index 9a12e24..65268e9 100644
 --- a/backend/tests/core/erasure/test_fence.py
 +++ b/backend/tests/core/erasure/test_fence.py
 @@ -21,6 +21,13 @@ from tests.support.workflows import seed_workflow
@@ -15238,11 +15385,11 @@ index f69cd9b..13ff38f 100644
  # the retention sweep's counts (the erasure's sweep deletes them once audited), and the erasure's own record.
  UNFENCED = {"audit_log", "retention_sweep_tenants", "tenant_erasures", "tenant_erasure_items", "tenant_erasure_known"}
 +FENCED_TABLES = (
-+    "claim_grants", "connections", "csv_mappings", "csv_uploads", "data_keys", "egress_allowlist",
-+    "execution_evidence", "inbound_events", "memberships", "rate_buckets", "rate_scope_keys", "run_inputs",
-+    "run_requests", "run_secret_index", "run_slots", "run_steps", "runs", "schedule_firings", "schedules",
-+    "step_outputs", "tenant_event_counters", "tenant_event_keys", "tenant_retention", "tenant_run_limits",
-+    "trigger_bindings", "webhook_endpoints", "workflow_versions", "workflows",
++    "claim_grants", "connections", "csv_mappings", "csv_uploads", "data_keys", "egress_allowlist", "execution_evidence",
++    "inbound_events", "memberships", "plugin_calls", "rate_buckets", "rate_scope_keys", "run_inputs", "run_requests",
++    "run_secret_index", "run_slots", "run_steps", "runs", "schedule_firings", "schedules", "step_outputs",
++    "tenant_event_counters", "tenant_event_keys", "tenant_retention", "tenant_run_limits", "trigger_bindings",
++    "webhook_endpoints", "workflow_versions", "workflows",
 +)  # fmt: skip
  LIMITS = "insert into tenant_run_limits (tenant_id, max_concurrent) values (:t, 3)"
  
@@ -15256,7 +15403,7 @@ index f69cd9b..13ff38f 100644
  
  
  @pytest.mark.parametrize(("step", "inserted"), [(50, True), (60, False), (100, False)])
-@@ -160,3 +167,27 @@ async def test_an_insert_waiting_for_stage_60_is_refused_once_it_commits(owner_s
+@@ -162,3 +169,27 @@ async def test_an_insert_waiting_for_stage_60_is_refused_once_it_commits(owner_s
      with pytest.raises(DBAPIError) as e:
          await inserting
      assert refused(e)
@@ -15288,10 +15435,12 @@ index f69cd9b..13ff38f 100644
 
 ### Task 11: Stage 90's hold, completion, reconciliation, the admin API, the retention wiring and the proof
 
-**Commit:** `8d4439f` (`proto/2b4a-v4`), replayed as it is: `proto/2b4a-v3`'s `0efa8ec` with the erasure route's body
-renamed and its guide corrected (milestone ruling 6). It folds `proto/2b4a-v1`'s `927ba31`, `97ef5e9`, `949a638`,
-`87aaaf9` and `c890763`; the erasure router joins `ROUTERS`, after the admin users', the schema regenerated; the guide's
-row for 0041's tables; and the erasure route's body named `ErasureStartIn`, its own name (milestone ruling 6).
+**Commit:** `535a020` (`proto/2b4a-v5`), replayed as it is: `proto/2b4a-v3`'s `0efa8ec` with the erasure route's body
+renamed and its guide corrected (milestone ruling 6), the schema regenerated on #44's and the guide's stage 80 row
+naming plugin calls (milestone ruling 7). It folds `proto/2b4a-v1`'s `927ba31`, `97ef5e9`, `949a638`, `87aaaf9` and
+`c890763`; the erasure router joins `ROUTERS`, after the admin users', the schema regenerated; the guide's row for
+0041's tables and 0042's plugin calls; and the erasure route's body named `ErasureStartIn`, its own name (milestone
+ruling 6).
 
 **Create:** `backend/src/dewpoint/apps/api/routes/erasure.py`, `backend/src/dewpoint/apps/erasure/bound.py`,
 `backend/tests/apps/api/test_erasure_api.py`, `backend/tests/apps/erasure/conftest.py`,
@@ -15323,7 +15472,7 @@ docs/operations/erasure.md; the web client's API schema regenerated.
   tests/apps/api/test_erasure_api.py tests/apps/dispatcher/test_schedule_tick_server.py tests/apps/erasure/test_bound.py
   tests/apps/erasure/test_proof.py tests/apps/erasure/test_stages.py tests/apps/test_retention_job.py
   tests/core/erasure/test_fence.py tests/core/erasure/test_writers.py tests/deploy/test_compose.py
-  tests/apps/api/test_openapi.py`. Replay result on `2943ced` with this task's tests (exit 1), shortened:
+  tests/apps/api/test_openapi.py`. Replay result on `4e21f6b` with this task's tests (exit 1), shortened:
 
   #42's `test_openapi.py` passes before the code, as a control: Task 10 has no erasure route.
 
@@ -15344,14 +15493,14 @@ FAILED tests/apps/dispatcher/test_schedule_tick_server.py::test_a_tick_records_i
 FAILED tests/apps/test_retention_job.py::test_each_interval_carries_erasures_on_and_each_sweep_reconciles_completed_ones
 FAILED tests/apps/test_retention_job.py::test_without_temporal_an_erasure_under_way_alerts_every_interval
 FAILED tests/core/erasure/test_fence.py::test_an_insert_is_refused_from_stage_60_whatever_the_role[50-True]
-FAILED tests/core/erasure/test_fence.py::test_an_insert_is_refused_from_stage_60_whatever_the_role[60-False]
 FAILED tests/apps/test_retention_job.py::test_no_erasure_work_reaches_temporal_unless_its_namespace_is_the_deployments[another-erasure_namespace_mismatch]
 FAILED tests/apps/test_retention_job.py::test_no_erasure_work_reaches_temporal_unless_its_namespace_is_the_deployments[None-erasure_environment_unrecorded]
+FAILED tests/core/erasure/test_fence.py::test_an_insert_is_refused_from_stage_60_whatever_the_role[60-False]
 FAILED tests/core/erasure/test_fence.py::test_an_insert_is_refused_from_stage_60_whatever_the_role[100-False]
 FAILED tests/core/erasure/test_fence.py::test_a_row_for_every_tenant_is_never_fenced_and_a_fenced_tenants_own_is
 FAILED tests/core/erasure/test_fence.py::test_no_key_is_created_for_a_tenant_whose_keys_may_have_gone
-FAILED tests/core/erasure/test_fence.py::test_entering_stage_60_waits_for_an_insert_in_flight
 FAILED tests/core/erasure/test_writers.py::test_every_tenant_scoped_write_goes_through_require
+FAILED tests/core/erasure/test_fence.py::test_entering_stage_60_waits_for_an_insert_in_flight
 FAILED tests/core/erasure/test_fence.py::test_an_insert_waiting_for_stage_60_is_refused_once_it_commits
 FAILED tests/deploy/test_compose.py::test_retention_runs_as_its_own_login_without_a_key_and_comes_back
 FAILED tests/apps/erasure/test_stages.py::test_a_failure_backs_off_with_its_fixed_code_and_alerts_and_a_stop_is_honoured
@@ -15362,14 +15511,14 @@ FAILED tests/apps/erasure/test_stages.py::test_a_stage_that_waits_over_an_hour_a
 FAILED tests/apps/erasure/test_stages.py::test_a_firing_recorded_after_the_inventory_is_still_found_and_deleted
 ERROR tests/apps/erasure/test_bound.py - ImportError while importing test mod...
 ERROR tests/apps/erasure/test_proof.py - ImportError while importing test mod...
-23 failed, 87 passed, 2 errors in 245.41s (0:04:05)
+23 failed, 88 passed, 2 errors in 249.65s (0:04:09)
 ```
 
-- [ ] **Step 2: its code, then the same tests.** Replay result on `8d4439f` (exit 0), shortened:
+- [ ] **Step 2: its code, then the same tests.** Replay result on `535a020` (exit 0), shortened:
 
 ```
-..............................................                           [100%]
-118 passed in 343.75s (0:05:43)
+...............................................                          [100%]
+119 passed in 316.53s (0:05:16)
 ```
 
 Evidence beyond the replay: the rename was made test-first, on the first draft's Task 11: there #42's
@@ -15377,13 +15526,13 @@ Evidence beyond the replay: the rename was made test-first, on the first draft's
 requests' shared a name, and FastAPI named both components by module path, renaming the run requests' published one.
 Here it passes, and the schema only gains the erasure route's components.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 8d4439f && git commit -C 8d4439f`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 535a020 && git commit -C 535a020`
 
 The diff:
 
 ```diff
 diff --git a/backend/migrations/versions/0040_tenant_erasure.py b/backend/migrations/versions/0040_tenant_erasure.py
-index 9d48f98..35ab4c0 100644
+index b2adf57..b1c37d5 100644
 --- a/backend/migrations/versions/0040_tenant_erasure.py
 +++ b/backend/migrations/versions/0040_tenant_erasure.py
 @@ -23,10 +23,16 @@ erasure's firing inventory; identifiers only, kept 31 days (the platform's longe
@@ -15414,9 +15563,9 @@ index 9d48f98..35ab4c0 100644
 -FENCED_AT = 60
  # Every table holding tenant data, the keys included: what the fence covers.
  FENCED = ("claim_grants", "connections", "csv_mappings", "csv_uploads", "data_keys", "egress_allowlist",
-           "execution_evidence", "inbound_events", "memberships", "rate_buckets", "rate_scope_keys", "run_inputs",
+           "execution_evidence", "inbound_events", "memberships", "plugin_calls", "rate_buckets", "rate_scope_keys",
 @@ -48,12 +53,12 @@ FENCED = ("claim_grants", "connections", "csv_mappings", "csv_uploads", "data_ke
-           "trigger_bindings", "webhook_endpoints", "workflow_versions", "workflows")  # fmt: skip
+           "tenant_run_limits", "trigger_bindings", "webhook_endpoints", "workflow_versions", "workflows")  # fmt: skip
  
  FENCE = [
 -    f"""CREATE FUNCTION tenant_insert_fence() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
@@ -15431,7 +15580,7 @@ index 9d48f98..35ab4c0 100644
      RAISE EXCEPTION 'tenant_erased' USING ERRCODE = 'DPE01';
    END IF;
    RETURN NEW;
-@@ -175,6 +180,15 @@ FIRINGS = [
+@@ -178,6 +183,15 @@ FIRINGS = [
  ]
  
  
@@ -15447,7 +15596,7 @@ index 9d48f98..35ab4c0 100644
  def upgrade() -> None:
      op.drop_constraint("tenants_status", "tenants", type_="check")
      op.create_check_constraint("tenants_status", "tenants", "status IN ('active', 'erasing', 'erased')")
-@@ -184,12 +198,14 @@ def upgrade() -> None:
+@@ -187,12 +201,14 @@ def upgrade() -> None:
          sa.Column("requested_by", sa.Uuid, nullable=False),  # a platform admin's user id
          sa.Column("requested_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
          sa.Column("step", sa.SmallInteger, nullable=False, server_default="20"),
@@ -15462,7 +15611,7 @@ index 9d48f98..35ab4c0 100644
          sa.Column("paused_at", sa.DateTime(timezone=True), nullable=True),  # the last schedule verified paused
          sa.Column("latest_close", sa.DateTime(timezone=True), nullable=True),  # every found execution verified gone
          sa.Column("check_after", sa.DateTime(timezone=True), nullable=True),  # the bound: the final check's earliest
-@@ -212,14 +228,13 @@ def upgrade() -> None:
+@@ -215,14 +231,13 @@ def upgrade() -> None:
          sa.Column("state", sa.Text, nullable=False, server_default="found"),
          sa.Column("attempts", sa.Integer, nullable=False, server_default="0"),
          sa.Column("failure", sa.Text, nullable=True),
@@ -15478,7 +15627,7 @@ index 9d48f98..35ab4c0 100644
                      postgresql_where=sa.text("state <> 'verified'"))  # fmt: skip
      op.create_table(
          "tenant_erasure_known",
-@@ -242,7 +257,16 @@ def upgrade() -> None:
+@@ -245,7 +260,16 @@ def upgrade() -> None:
      )
      op.create_index("schedule_firings_tenant", "schedule_firings", ["tenant_id", "schedule_id"])
      op.create_index("schedule_firings_recorded", "schedule_firings", ["recorded_at"])
@@ -15496,7 +15645,7 @@ index 9d48f98..35ab4c0 100644
          op.execute(statement)
      op.add_column("schedules", sa.Column("creation_misses", sa.Integer, nullable=False, server_default="0"))
      op.execute("GRANT UPDATE (creation_misses) ON schedules TO dewpoint_dispatch")
-@@ -258,6 +282,7 @@ def downgrade() -> None:
+@@ -261,6 +285,7 @@ def downgrade() -> None:
          op.execute(f"DROP TRIGGER {table}_fence ON {table}")
      op.execute("DROP FUNCTION tenant_insert_fence()")
      op.execute("DROP FUNCTION tenant_status(uuid)")
@@ -15504,7 +15653,7 @@ index 9d48f98..35ab4c0 100644
      op.execute(VERSIONS_0007)
      op.execute(EVIDENCE_DUE_0039)
      op.execute("ALTER FUNCTION workflow_versions_immutable() RESET search_path")
-@@ -280,6 +305,7 @@ def downgrade() -> None:
+@@ -283,6 +308,7 @@ def downgrade() -> None:
          op.execute(statement)
      op.execute("REVOKE UPDATE (creation_misses) ON schedules FROM dewpoint_dispatch")
      op.drop_column("schedules", "creation_misses")
@@ -15983,7 +16132,7 @@ index 92daf64..0fba874 100644
          try:
              done = await run(ctx)
 diff --git a/backend/src/dewpoint/apps/erasure/stages.py b/backend/src/dewpoint/apps/erasure/stages.py
-index 37ffadf..83ad25e 100644
+index 9ea1198..e87a09b 100644
 --- a/backend/src/dewpoint/apps/erasure/stages.py
 +++ b/backend/src/dewpoint/apps/erasure/stages.py
 @@ -13,11 +13,13 @@ each found, then requested, then verified by a read-back (a Temporal call can't
@@ -17031,7 +17180,7 @@ index a351af7..f63ace5 100644
 +    assert calls == ["sweep", "sleep", "sweep", "sleep"]  # sweeping goes on
 +    assert [e["event"] for e in logs if e["log_level"] == "error"] == [alert, alert]
 diff --git a/backend/tests/core/erasure/test_fence.py b/backend/tests/core/erasure/test_fence.py
-index 13ff38f..29d8a67 100644
+index 65268e9..f45b31e 100644
 --- a/backend/tests/core/erasure/test_fence.py
 +++ b/backend/tests/core/erasure/test_fence.py
 @@ -33,8 +33,11 @@ LIMITS = "insert into tenant_run_limits (tenant_id, max_concurrent) values (:t,
@@ -17048,7 +17197,7 @@ index 13ff38f..29d8a67 100644
                          {"t": tenant_id, "u": uuid.uuid4(), "s": step})  # fmt: skip
  
  
-@@ -128,7 +131,8 @@ async def enter_60(owner: Any, tenant_id: uuid.UUID, *, hold: asyncio.Event | No
+@@ -130,7 +133,8 @@ async def enter_60(owner: Any, tenant_id: uuid.UUID, *, hold: asyncio.Event | No
      async with owner() as s, s.begin():
          await s.execute(text("select pg_advisory_xact_lock(hashtextextended(:k, 0))"),
                          {"k": f"dewpoint:tenant:{tenant_id}"})  # fmt: skip
@@ -17136,7 +17285,7 @@ index 1b3318e..a487fa4 100644
      image: ${DEWPOINT_CEL_EVALUATOR_IMAGE:-dewpoint-cel-evaluator:dev}
 diff --git a/docs/operations/erasure.md b/docs/operations/erasure.md
 new file mode 100644
-index 0000000..8ffe7a0
+index 0000000..82d405f
 --- /dev/null
 +++ b/docs/operations/erasure.md
 @@ -0,0 +1,115 @@
@@ -17199,7 +17348,7 @@ index 0000000..8ffe7a0
 +| 50 end runs | every running run cancelled in Temporal, then waited for: ended in Dewpoint and closed in Temporal |
 +| 60 executions | the fence goes up; every execution enumerated from runs, started requests, the run evidence, the ticks' records and the inventory (visibility adding), each walked through its history (the run it continued from and as, every child it started), an open one terminated first, then deleted until describing that exact run answers not-found |
 +| 70 keys | every data-key version and event keypair deleted: no process can unwrap one again, so every ciphertext of the tenant is unreadable once the processes' key caches (at most 5 minutes) have expired |
-+| 80 sweep | every row of the tenant deleted in committed batches, counted (its own egress exceptions, quota budgets and scope key included; an egress exception for every tenant isn't the tenant's, and stays); the tenant renamed `Erased tenant`, its slug `erased-<id>` |
++| 80 sweep | every row of the tenant deleted in committed batches, counted (its own egress exceptions, quota budgets, scope key and plugin calls included; an egress exception for every tenant isn't the tenant's, and stays); the tenant renamed `Erased tenant`, its slug `erased-<id>` |
 +| 90 bound | the holds, then the final check (below) |
 +| 100 complete | the tenant is `erased` |
 +
@@ -17295,7 +17444,7 @@ index 6dccc9d..04448c4 100644
  
  ## Audit pruning
 diff --git a/frontend/src/api/openapi.json b/frontend/src/api/openapi.json
-index 11a324a..2d3ceab 100644
+index bbc9969..62dc5f7 100644
 --- a/frontend/src/api/openapi.json
 +++ b/frontend/src/api/openapi.json
 @@ -691,6 +691,21 @@
@@ -17320,7 +17469,7 @@ index 11a324a..2d3ceab 100644
        "HTTPValidationError": {
          "properties": {
            "detail": {
-@@ -1575,6 +1590,194 @@
+@@ -1666,6 +1681,194 @@
    },
    "openapi": "3.1.0",
    "paths": {
@@ -17516,7 +17665,7 @@ index 11a324a..2d3ceab 100644
        "post": {
          "description": "Create a local account. The new user must enroll MFA at first sign-in.",
 diff --git a/frontend/src/api/schema.d.ts b/frontend/src/api/schema.d.ts
-index 599e0a8..92dce30 100644
+index 9a3a90d..e70ff45 100644
 --- a/frontend/src/api/schema.d.ts
 +++ b/frontend/src/api/schema.d.ts
 @@ -4,6 +4,58 @@
@@ -17578,7 +17727,7 @@ index 599e0a8..92dce30 100644
      "/api/v1/admin/users": {
          parameters: {
              query?: never;
-@@ -1358,6 +1410,11 @@ export interface components {
+@@ -1406,6 +1458,11 @@ export interface components {
              /** Tolerance S */
              tolerance_s?: number | null;
          };
@@ -17590,7 +17739,7 @@ index 599e0a8..92dce30 100644
          /** HTTPValidationError */
          HTTPValidationError: {
              /** Detail */
-@@ -1673,6 +1730,142 @@ export interface components {
+@@ -1758,6 +1815,142 @@ export interface components {
  }
  export type $defs = Record<string, never>;
  export interface operations {
@@ -17737,11 +17886,11 @@ index 599e0a8..92dce30 100644
 
 ### Task 12: An incarnation per create, and missed firings accounted over persisted spans
 
-**Commit:** `4c3c696` (`proto/2b4a-v4`), replayed as it is: `proto/2b4a-v3`'s `215e559` on Task 11's rename, its guides
-corrected (milestone ruling 6). It folds `proto/2b4a-v1`'s `906a1d6`, `7b92fb4`, `f844769`, `4d670c8` (but for
-`dispatch.py` and `test_transitions.py`: #43 merged the same fix), `050919d`, `cfba762`, `5159cc2`, `63b4877`, `3fda97c`
-and `7d5b20b`. Where the fence's table lists met, they take the union of their names. And the replay's race-test fix
-("How the steps give code").
+**Commit:** `6eae38c` (`proto/2b4a-v5`), replayed as it is: `proto/2b4a-v3`'s `215e559` on Task 11's rename, its guides
+corrected (milestone ruling 6), its fence lists naming plugin calls too (milestone ruling 7). It folds `proto/2b4a-v1`'s
+`906a1d6`, `7b92fb4`, `f844769`, `4d670c8` (but for `dispatch.py` and `test_transitions.py`: #43 merged the same fix),
+`050919d`, `cfba762`, `5159cc2`, `63b4877`, `3fda97c` and `7d5b20b`. Where the fence's table lists met, they take the
+union of their names, plugin calls included. And the replay's race-test fix ("How the steps give code").
 
 **Create:** `backend/tests/apps/erasure/test_incarnations.py`, `backend/tests/apps/test_schedules_legacy.py`,
 `backend/tests/support/temporal.py`
@@ -17776,7 +17925,7 @@ every incarnation, and its final check describes them all.
   tests/apps/api/test_schedules_api.py tests/apps/dispatcher/test_schedule_sync.py
   tests/apps/dispatcher/test_triggers_end_to_end.py tests/apps/erasure/test_incarnations.py
   tests/apps/erasure/test_proof.py tests/apps/erasure/test_stages.py tests/apps/test_schedules_legacy.py
-  tests/apps/worker/test_temporal_erasure_contract.py tests/core/erasure/test_fence.py`. Replay result on `8d4439f` with
+  tests/apps/worker/test_temporal_erasure_contract.py tests/core/erasure/test_fence.py`. Replay result on `535a020` with
   this task's tests (exit 1), shortened:
 
 ```
@@ -17797,8 +17946,8 @@ FAILED tests/apps/dispatcher/test_schedule_sync.py::test_firings_missed_past_the
 FAILED tests/apps/dispatcher/test_schedule_sync.py::test_a_late_create_after_its_schedule_was_deleted_is_still_found_and_deleted
 FAILED tests/apps/dispatcher/test_schedule_sync.py::test_each_change_and_a_workflows_disable_reach_temporal_by_generation
 FAILED tests/apps/dispatcher/test_schedule_sync.py::test_a_timing_edit_between_incarnations_is_unknown_never_a_complete_looking_zero
-FAILED tests/apps/dispatcher/test_schedule_sync.py::test_the_synced_action_carries_nothing_and_a_legacy_one_its_key_version
 FAILED tests/apps/dispatcher/test_schedule_sync.py::test_two_incarnations_missing_firings_in_one_check_both_count
+FAILED tests/apps/dispatcher/test_schedule_sync.py::test_the_synced_action_carries_nothing_and_a_legacy_one_its_key_version
 FAILED tests/apps/dispatcher/test_schedule_sync.py::test_a_row_changed_while_the_sync_works_stays_queued
 FAILED tests/apps/dispatcher/test_schedule_sync.py::test_a_failed_second_update_never_moves_the_creation_wait
 FAILED tests/apps/dispatcher/test_schedule_sync.py::test_a_stray_that_keeps_failing_is_retried_later_and_never_holds_the_others
@@ -17815,14 +17964,14 @@ FAILED tests/apps/dispatcher/test_schedule_sync.py::test_a_deletion_is_recorded_
 FAILED tests/apps/dispatcher/test_schedule_sync.py::test_a_schedule_deleted_before_its_first_update_landed_leaves_that_span_unknown
 FAILED tests/apps/dispatcher/test_schedule_sync.py::test_an_incarnation_the_stray_check_deleted_after_its_schedules_deletion_was_there_until_it
 [... 28 more lines of the summary]
-53 failed, 38 passed in 81.07s (0:01:21)
+53 failed, 38 passed in 80.94s (0:01:20)
 ```
 
-- [ ] **Step 2: its code, then the same tests.** Replay result on `4c3c696` (exit 0), shortened:
+- [ ] **Step 2: its code, then the same tests.** Replay result on `6eae38c` (exit 0), shortened:
 
 ```
 ...................                                                      [100%]
-91 passed in 180.57s (0:03:00)
+91 passed in 210.25s (0:03:30)
 ```
 
 Evidence beyond the replay: from the prototype, with the schedule's shared lock removed,
@@ -17834,13 +17983,13 @@ fails, and without the currency check,
 race tests' `holds` fixture: before it, this task's tests run on Task 11's code gave no result in 900 seconds; with it,
 they fail in 81.
 
-- [ ] **Step 3: commit.** `git cherry-pick --no-commit 4c3c696 && git commit -C 4c3c696`
+- [ ] **Step 3: commit.** `git cherry-pick --no-commit 6eae38c && git commit -C 6eae38c`
 
 The diff:
 
 ```diff
 diff --git a/backend/migrations/versions/0040_tenant_erasure.py b/backend/migrations/versions/0040_tenant_erasure.py
-index 35ab4c0..97d701c 100644
+index b1c37d5..53e4f8f 100644
 --- a/backend/migrations/versions/0040_tenant_erasure.py
 +++ b/backend/migrations/versions/0040_tenant_erasure.py
 @@ -20,6 +20,35 @@ record.
@@ -17879,21 +18028,19 @@ index 35ab4c0..97d701c 100644
  `schedules.creation_misses`: firings due while a newly created schedule stayed paused, before its unpause (D3f): Temporal
  neither catches them up nor counts them as missed, so the sync counts them.
  
-@@ -48,9 +77,10 @@ STAGES = (20, 31, 32, 33, 40, 50, 60, 70, 80, 90, 100)
- # Every table holding tenant data, the keys included: what the fence covers.
+@@ -49,8 +78,9 @@ STAGES = (20, 31, 32, 33, 40, 50, 60, 70, 80, 90, 100)
  FENCED = ("claim_grants", "connections", "csv_mappings", "csv_uploads", "data_keys", "egress_allowlist",
-           "execution_evidence", "inbound_events", "memberships", "rate_buckets", "rate_scope_keys", "run_inputs",
--          "run_requests", "run_secret_index", "run_slots", "run_steps", "runs", "schedule_firings", "schedules",
--          "step_outputs", "tenant_event_counters", "tenant_event_keys", "tenant_retention", "tenant_run_limits",
--          "trigger_bindings", "webhook_endpoints", "workflow_versions", "workflows")  # fmt: skip
-+          "run_requests", "run_secret_index", "run_slots", "run_steps", "runs", "schedule_firings",
+           "execution_evidence", "inbound_events", "memberships", "plugin_calls", "rate_buckets", "rate_scope_keys",
+           "run_inputs", "run_requests", "run_secret_index", "run_slots", "run_steps", "runs", "schedule_firings",
+-          "schedules", "step_outputs", "tenant_event_counters", "tenant_event_keys", "tenant_retention",
+-          "tenant_run_limits", "trigger_bindings", "webhook_endpoints", "workflow_versions", "workflows")  # fmt: skip
 +          "schedule_incarnations", "schedule_intervals", "schedules", "step_outputs", "tenant_event_counters",
 +          "tenant_event_keys", "tenant_retention", "tenant_run_limits", "trigger_bindings", "webhook_endpoints",
 +          "workflow_versions", "workflows")  # fmt: skip
  
  FENCE = [
      """CREATE FUNCTION tenant_insert_fence() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
-@@ -180,6 +210,49 @@ FIRINGS = [
+@@ -183,6 +213,49 @@ FIRINGS = [
  ]
  
  
@@ -17943,7 +18090,7 @@ index 35ab4c0..97d701c 100644
  # The retention process checks the deployment's recorded namespace before erasure reaches Temporal (§2.1).
  RECORD = "GRANT SELECT ON platform_settings TO dewpoint_retention"
  BOUNDARIES = [
-@@ -268,6 +341,55 @@ def upgrade() -> None:
+@@ -271,6 +344,55 @@ def upgrade() -> None:
      )
      for statement in BOUNDARIES:
          op.execute(statement)
@@ -17999,7 +18146,7 @@ index 35ab4c0..97d701c 100644
      op.add_column("schedules", sa.Column("creation_misses", sa.Integer, nullable=False, server_default="0"))
      op.execute("GRANT UPDATE (creation_misses) ON schedules TO dewpoint_dispatch")
      for statement in FENCE:
-@@ -305,6 +427,9 @@ def downgrade() -> None:
+@@ -308,6 +430,9 @@ def downgrade() -> None:
          op.execute(statement)
      op.execute("REVOKE UPDATE (creation_misses) ON schedules FROM dewpoint_dispatch")
      op.drop_column("schedules", "creation_misses")
@@ -18718,7 +18865,7 @@ index 3f70490..015b49a 100644
  - the namespace's retention, read from Temporal, at most 30 days.
  Each hold is recorded with its fixed reason and alerted on (waiting for the bound is no alert). Then the final check:
 diff --git a/backend/src/dewpoint/apps/erasure/stages.py b/backend/src/dewpoint/apps/erasure/stages.py
-index 83ad25e..bce2acc 100644
+index e87a09b..7d79421 100644
 --- a/backend/src/dewpoint/apps/erasure/stages.py
 +++ b/backend/src/dewpoint/apps/erasure/stages.py
 @@ -5,7 +5,8 @@ recorded. A stage with an effect outside PostgreSQL works through its items, one
@@ -18764,7 +18911,7 @@ index 83ad25e..bce2acc 100644
 +    ("run_requests", "id"), ("run_inputs", "id"), ("inbound_events", "id"),
      ("trigger_bindings", "id"), ("webhook_endpoints", "id"), ("tenant_event_counters", "tenant_id"),
      ("csv_mappings", "workflow_id"), ("csv_uploads", "id"), ("schedules", "id"), ("workflow_versions", "id"),
-     ("workflows", "id"), ("connections", "id"), ("memberships", "id"), ("tenant_retention", "tenant_id"),
+     ("workflows", "id"), ("plugin_calls", "id"),  # 0042's: an options call names no connection, so nothing cascades
 diff --git a/backend/src/dewpoint/apps/schedules.py b/backend/src/dewpoint/apps/schedules.py
 index 8ff7f5b..69268d7 100644
 --- a/backend/src/dewpoint/apps/schedules.py
@@ -20176,7 +20323,7 @@ index 7054948..7327c97 100644
      async with await WorkflowEnvironment.start_local(data_converter=FIXTURE_CONVERTER) as environment:
          yield environment
 diff --git a/backend/tests/apps/erasure/support.py b/backend/tests/apps/erasure/support.py
-index b29e105..9aa5e77 100644
+index 2c7c8a9..f84d492 100644
 --- a/backend/tests/apps/erasure/support.py
 +++ b/backend/tests/apps/erasure/support.py
 @@ -35,6 +35,12 @@ async def populated(owner: Any, ingress: Any) -> dict[str, Any]:
@@ -20453,20 +20600,16 @@ index 50d3b01..41e14ad 100644
      schedule_id = f"t:{A}:sched:{uuid.uuid4()}"
  
 diff --git a/backend/tests/core/erasure/test_fence.py b/backend/tests/core/erasure/test_fence.py
-index 29d8a67..8829b7a 100644
+index f45b31e..e0ec9b3 100644
 --- a/backend/tests/core/erasure/test_fence.py
 +++ b/backend/tests/core/erasure/test_fence.py
-@@ -22,11 +22,11 @@ from tests.support.workflows import seed_workflow
- # the retention sweep's counts (the erasure's sweep deletes them once audited), and the erasure's own record.
- UNFENCED = {"audit_log", "retention_sweep_tenants", "tenant_erasures", "tenant_erasure_items", "tenant_erasure_known"}
+@@ -24,9 +24,9 @@ UNFENCED = {"audit_log", "retention_sweep_tenants", "tenant_erasures", "tenant_e
  FENCED_TABLES = (
--    "claim_grants", "connections", "csv_mappings", "csv_uploads", "data_keys", "egress_allowlist",
--    "execution_evidence", "inbound_events", "memberships", "rate_buckets", "rate_scope_keys", "run_inputs",
--    "run_requests", "run_secret_index", "run_slots", "run_steps", "runs", "schedule_firings", "schedules",
--    "step_outputs", "tenant_event_counters", "tenant_event_keys", "tenant_retention", "tenant_run_limits",
--    "trigger_bindings", "webhook_endpoints", "workflow_versions", "workflows",
-+    "claim_grants", "connections", "csv_mappings", "csv_uploads", "data_keys", "egress_allowlist", "execution_evidence",
-+    "inbound_events", "memberships", "rate_buckets", "rate_scope_keys", "run_inputs", "run_requests",
+     "claim_grants", "connections", "csv_mappings", "csv_uploads", "data_keys", "egress_allowlist", "execution_evidence",
+     "inbound_events", "memberships", "plugin_calls", "rate_buckets", "rate_scope_keys", "run_inputs", "run_requests",
+-    "run_secret_index", "run_slots", "run_steps", "runs", "schedule_firings", "schedules", "step_outputs",
+-    "tenant_event_counters", "tenant_event_keys", "tenant_retention", "tenant_run_limits", "trigger_bindings",
+-    "webhook_endpoints", "workflow_versions", "workflows",
 +    "run_secret_index", "run_slots", "run_steps", "runs", "schedule_firings", "schedule_incarnations",
 +    "schedule_intervals", "schedules", "step_outputs", "tenant_event_counters", "tenant_event_keys", "tenant_retention",
 +    "tenant_run_limits", "trigger_bindings", "webhook_endpoints", "workflow_versions", "workflows",
@@ -20501,7 +20644,7 @@ index 0000000..23d0fb1
 +                raise
 +    raise AssertionError("unreachable")
 diff --git a/docs/operations/erasure.md b/docs/operations/erasure.md
-index 8ffe7a0..fe859b7 100644
+index 82d405f..ce86bca 100644
 --- a/docs/operations/erasure.md
 +++ b/docs/operations/erasure.md
 @@ -8,11 +8,11 @@ undone.** Once started, an erasure can be stopped and retried, never reversed; t
@@ -20623,8 +20766,8 @@ index d0b4ae4..27bc381 100644
 **Checkpoint (milestone 4).** Focused: the 24 test modules Tasks 7 to 12 add or change, in `tests/apps`,
 `tests/apps/api`, `tests/apps/cli`, `tests/apps/dispatcher`, `tests/apps/erasure`, `tests/apps/ingress`,
 `tests/apps/worker`, `tests/core/erasure`, `tests/core/ingress`, `tests/core/retention` and `tests/deploy` (297 passed
-on `proto/2b4a-v3`'s Task 12 tree, and the whole suite on this one); the migrations 0041 → 0040 → 0041 → 0040 over
-existing rows, every constraint, function, trigger, policy, role, grant and column the same after the downgrade. The
-owner ruled on it, reviewed it six times and accepted it as a prototype checkpoint (milestone ruling 4, 2026-10-06),
-which doesn't claim the Compose proof has run and leaves every erasure that reaches stage 90 held there. Then the whole
-suite and the static checks once, and a fresh whole-branch review.
+on Task 12's tree, and the whole suite on the same tree); the migrations 0042 → 0040 → 0042 → 0040 over existing rows,
+every constraint, function, trigger, policy, role, grant and column the same after the downgrade. The owner ruled on it,
+reviewed it six times and accepted it as a prototype checkpoint (milestone ruling 4, 2026-10-06), which doesn't claim
+the Compose proof has run and leaves every erasure that reaches stage 90 held there. Then the whole suite and the static
+checks once, and a fresh whole-branch review.
