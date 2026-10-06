@@ -132,8 +132,12 @@ Open questions:
 - CodeQL licensing (the owner's to confirm): the CLI's terms (`LICENSE.md` in 2.27.1) allow use with a codebase not
   released under an OSI-approved licence, the terms' example being code in a private GitHub repository, only under a
   paid GitHub Advanced Security licence. This repository is private (it has an Apache-2.0 `LICENSE`), and the CI
-  CodeQL log says code scanning isn't enabled for it. The question covers the local run above and the `codeql`
-  workflow. No further local CodeQL run until it's confirmed.
+  CodeQL log says code scanning isn't enabled for it (which doesn't establish whether a licence exists). The
+  entitlement is unconfirmed. Until it's confirmed, the hold covers local runs and CI execution (the owner,
+  2026-10-06): a push to #40 would start the `codeql` workflow, so the question must be settled before a push is
+  authorized. The workflow also starts on any push to a pull request (#39 too), on every push to `main` (a merge), and
+  on its weekly schedule (Mondays 04:23 UTC: it last ran on 2026-10-05, so the next run is due on 2026-10-12 without
+  any push). Disabling it or removing the schedule is a CI change: the owner's call.
 - `tests/apps/dispatcher/test_triggers_end_to_end.py::test_a_short_outage_fires_each_missed_time_and_admits_each_once`
   failed once in the full parallel run under extra load (a 4 s tick gap on Temporal's dev server where 2 s was
   expected) and passes alone; this slice touches no schedule or dispatcher code. Load-sensitive, not a regression.
