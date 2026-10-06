@@ -179,10 +179,11 @@
       inbound keypairs rotate and retire once no stored event names them; the ingress key rotates through a previous
       key; `keys retire` deletes a version only when every named check passes;
     - **tenant erasure** (§6.5): irreversible once `erasing` is committed; every writer fenced by the tenant's lifecycle
-      lock, and from stage 60 by an insert fence in the database; stages 20 to 100, each found, requested and verified
-      by reading Temporal back; the bound, the final check, reopening, and reconciliation after completion. **No erasure
-      completes** (`firing_bound_unproven`): ticks have no execution timeout, and a schedule whose overlap allows all
-      doesn't list its running ticks, so nothing yet bounds when the last tick closes;
+      lock, a plugin call by a lock of its own, and from stage 60 by an insert fence in the database; stages 20 to 100,
+      each found, requested and verified by reading Temporal back; the bound, the final check, reopening, and
+      reconciliation after completion. **No erasure completes** (`firing_bound_unproven`): ticks have no execution
+      timeout, and a schedule whose overlap allows all doesn't list its running ticks, so nothing yet bounds when the
+      last tick closes;
     - **schedules** (§8.2): created paused and unpaused only by a token-bearing update; a fresh Temporal id for each
       create (an incarnation), recorded before the call, never created again, ordered against updates by the schedule's
       own lock; every incarnation that isn't current found and deleted, for good, and a delete only after the sync's own
@@ -1047,11 +1048,18 @@ is committed an erasure can be stopped and retried, never reversed (D3a). `docs/
   move from stage to stage (counts only), every incident and the completion.
 - **Step 1, from the first moment:** the tenant is marked `erasing` under its lifecycle lock (`dewpoint:tenant:<id>`),
   taken exclusively, and its schedules' generations are raised. Every writer of tenant data takes that lock shared and
-  checks the tenant is `active` in the same transaction as its write, so a write in flight either commits first (and
-  the erasure removes it) or is refused: admission, dispatch, matching, ingress's recording, a tick (an audited skip),
-  a cancel, every write through the API (409 `tenant_erasing`; reads still answer), the key commands, and the schedule
-  sync, which then only pauses or deletes (§8.2). A writer whose effect is outside PostgreSQL holds its transaction,
-  and the lock, across the call: the schedule sync does, so step 1 waits for it.
+  checks the tenant is `active` in the same transaction as its write, so a write in flight either commits first (and the
+  erasure removes it) or is refused: admission, dispatch, matching, ingress's recording, a tick (an audited skip), a
+  cancel, every write through the API (409 `tenant_erasing`; reads still answer), the key commands, and the schedule
+  sync, which then only pauses or deletes (§8.2). A writer whose effect is outside PostgreSQL holds its transaction, and
+  the lock, across the call: the schedule sync does, so step 1 waits for it. A plugin call (plugins-3a-2; the owner's
+  review of the 2b-4a plan's rebase) is fenced by a lock of its own, the tenant's plugin-call lock
+  (`dewpoint:tenant-calls:<tenant>`): the API's ask checks `active` under the lifecycle lock in its insert's transaction
+  (409 `tenant_erasing`), and a worker holds the plugin-call lock shared from its check of `active` through the claim,
+  the hook's requests and the answer. Step 1 takes it exclusively before the lifecycle lock, so it waits for a call in
+  flight (at most its 10-second deadline) and a queued one is never run. Not the lifecycle lock itself: a hook's writes
+  on other connections take that lock in the insert fence's trigger, and would queue behind step 1, which waits for the
+  hook.
 - **The insert fence:** from stage 60, a trigger on every table holding tenant data refuses any insert of the tenant's
   rows (SQLSTATE `DPE01`), whatever the writer, a straggling worker's projection included, under the same lock shared;
   entering stage 60 takes it exclusively. It's never lifted, not even when an erasure reopens. A row naming no tenant
