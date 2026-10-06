@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { ApiError } from "./api";
+import { ApiError } from "./client";
 
 /** True when the server asks the user to prove a second factor again before a factor change. */
 export function needsReauth(e: unknown): boolean {

@@ -5,6 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps.api.deps import get_keyring
+from dewpoint.apps.api.responses import TenantOut
 from dewpoint.core.audit.service import record
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.crypto.keyring import Keyring
@@ -41,14 +42,14 @@ def _out(t: Tenant, role: str | None = None) -> dict[str, object]:
     return d
 
 
-@router.get("/tenants")
+@router.get("/tenants", response_model=list[TenantOut], response_model_exclude_unset=True)
 async def my_tenants(
     user: User = Depends(current_user), db: AsyncSession = Depends(get_db, scope="function")
 ) -> list[dict[str, object]]:
     return [_out(t, r) for t, r in await service.list_user_tenants(db, user.id)]
 
 
-@router.post("/tenants", status_code=201)
+@router.post("/tenants", status_code=201, response_model=TenantOut, response_model_exclude_unset=True)
 async def create(
     body: TenantIn,
     admin: User = Depends(require_platform_admin),
@@ -71,7 +72,7 @@ async def create(
     return _out(t, "owner")
 
 
-@router.get("/t/{tenant_id}")
+@router.get("/t/{tenant_id}", response_model=TenantOut, response_model_exclude_unset=True)
 async def get_tenant(
     ctx: TenantContext = Depends(require(P.TENANT_VIEW)), db: AsyncSession = Depends(get_db, scope="function")
 ) -> dict[str, object]:
@@ -79,7 +80,7 @@ async def get_tenant(
     return _out(t, ctx.role)
 
 
-@router.patch("/t/{tenant_id}")
+@router.patch("/t/{tenant_id}", response_model=TenantOut, response_model_exclude_unset=True)
 async def patch_tenant(
     body: TenantPatch,
     ctx: TenantContext = Depends(require(P.TENANT_MANAGE)),

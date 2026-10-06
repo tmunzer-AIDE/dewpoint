@@ -26,6 +26,12 @@ jobs:
           BEFORE: ${{ github.event.before }}
         run: uv run python -m tests.engine.replay.gate --event "$EVENT" --ref "$REF" --pr-base "$PR_BASE" --before "$BEFORE"
       - run: uv run pip-licenses --fail-on="GPL;AGPL;LGPL;SSPL;BUSL" --partial-match
+      # The web client is generated from the API's schema (sub-project 4, B1): the committed copy must be what the API
+      # serves. Regenerate with `uv run dewpoint api openapi > ../frontend/src/api/openapi.json`, then `pnpm gen:api`.
+      - name: The web client's API schema is current
+        run: |
+          uv run dewpoint api openapi > "$RUNNER_TEMP/openapi.json"
+          diff -u ../frontend/src/api/openapi.json "$RUNNER_TEMP/openapi.json"
   cel-gates:
     # The CEL gates (spec §5.9) in a pinned Linux container: rlimits, fork and cgroup behaviour are Linux's. The
     # engine and evaluator tests need no database, so this job runs without Docker.
@@ -68,7 +74,28 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: pnpm, cache-dependency-path: frontend/pnpm-lock.yaml }
       - run: pnpm install --frozen-lockfile
+      - name: The generated API types match the committed schema
+        run: pnpm check:api
       - run: pnpm lint && pnpm typecheck && pnpm test && pnpm build
+  # Its own job, which e2e doesn't need: a licence awaiting the owner's review keeps it red without hiding the
+  # frontend's checks or the browser gate (ledger, ruling 35).
+  frontend-licences:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: frontend } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4  (version comes from package.json "packageManager")
+        with: { package_json_file: frontend/package.json }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm, cache-dependency-path: frontend/pnpm-lock.yaml }
+      - run: pnpm install --frozen-lockfile
+      - name: Licences (D22) - production on the allowlist; dev tools may add MPL-2.0; anything else is the owner's review
+        run: |
+          set -o pipefail
+          node scripts/licence-check.mjs --self-test
+          node scripts/third-party-notices.mjs --self-test
+          pnpm licenses list --json --prod | node scripts/licence-check.mjs prod
+          pnpm licenses list --json | node scripts/licence-check.mjs all
   e2e:
     runs-on: ubuntu-latest
     needs: [backend, frontend]

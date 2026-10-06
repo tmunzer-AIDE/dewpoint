@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps.api.deps import get_keyring
+from dewpoint.apps.api.responses import ConnectionDetailOut, ConnectionOut, ConnectionTypeOut
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.connections import service
 from dewpoint.core.connections.types import CONNECTION_TYPES, MIST_CLOUDS
@@ -20,14 +21,14 @@ from dewpoint.core.models.connections import Connection
 router = APIRouter(prefix="/api/v1", tags=["connections"])
 
 
-class CreateIn(BaseModel):
+class ConnectionCreateIn(BaseModel):
     type: str
     name: str = Field(min_length=1, max_length=100)
     config: dict[str, Any]
     secret: dict[str, Any]
 
 
-class PatchIn(BaseModel):
+class ConnectionPatchIn(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     config: dict[str, Any] | None = None
     secret: dict[str, Any] | None = None
@@ -54,7 +55,12 @@ async def _get(db: AsyncSession, ctx: TenantContext, connection_id: uuid.UUID) -
     return conn
 
 
-@router.get("/connection-types", dependencies=[Depends(active_session)])
+@router.get(
+    "/connection-types",
+    dependencies=[Depends(active_session)],
+    response_model=list[ConnectionTypeOut],
+    response_model_exclude_unset=True,
+)
 async def connection_types() -> list[dict[str, object]]:
     return [
         {
@@ -68,7 +74,7 @@ async def connection_types() -> list[dict[str, object]]:
     ]
 
 
-@router.get("/t/{tenant_id}/connections")
+@router.get("/t/{tenant_id}/connections", response_model=list[ConnectionOut])
 async def list_connections(
     ctx: TenantContext = Depends(require(P.CONNECTION_VIEW)), db: AsyncSession = Depends(get_db, scope="function")
 ) -> list[dict[str, object]]:
@@ -76,9 +82,9 @@ async def list_connections(
     return [service.to_out(c) for c in rows.scalars()]
 
 
-@router.post("/t/{tenant_id}/connections", status_code=201)
+@router.post("/t/{tenant_id}/connections", status_code=201, response_model=ConnectionOut)
 async def create(
-    body: CreateIn,
+    body: ConnectionCreateIn,
     ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
     db: AsyncSession = Depends(get_db, scope="function"),
     keyring: Keyring = Depends(get_keyring),
@@ -96,7 +102,7 @@ async def create(
     return service.to_out(conn)
 
 
-@router.get("/t/{tenant_id}/connections/{connection_id}")
+@router.get("/t/{tenant_id}/connections/{connection_id}", response_model=ConnectionDetailOut)
 async def get_one(
     connection_id: uuid.UUID,
     ctx: TenantContext = Depends(require(P.CONNECTION_VIEW)),
@@ -107,10 +113,10 @@ async def get_one(
     return {**service.to_out(conn), "cooldowns": await service.cooldowns(db, keyring, conn)}
 
 
-@router.patch("/t/{tenant_id}/connections/{connection_id}")
+@router.patch("/t/{tenant_id}/connections/{connection_id}", response_model=ConnectionOut)
 async def patch(
     connection_id: uuid.UUID,
-    body: PatchIn,
+    body: ConnectionPatchIn,
     ctx: TenantContext = Depends(require(P.CONNECTION_MANAGE)),
     db: AsyncSession = Depends(get_db, scope="function"),
     keyring: Keyring = Depends(get_keyring),
@@ -143,7 +149,7 @@ async def delete(
     return Response(status_code=204)
 
 
-@router.post("/t/{tenant_id}/connections/{connection_id}/verify")
+@router.post("/t/{tenant_id}/connections/{connection_id}/verify", response_model=ConnectionOut)
 async def verify(
     connection_id: uuid.UUID,
     request: Request,

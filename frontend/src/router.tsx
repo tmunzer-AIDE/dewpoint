@@ -6,14 +6,16 @@ import { useAfterAuth } from "./lib/useAfterAuth";
 import { ConnectionsPage } from "./routes/Connections";
 import { EnrollPage } from "./routes/Enroll";
 import { LoginPage } from "./routes/Login";
+import { MembersPage } from "./routes/Members";
 import { MfaPage } from "./routes/Mfa";
 import { SecurityPage } from "./routes/Security";
+import { SettingsLayout } from "./routes/Settings";
 import { TenantsPage } from "./routes/Tenants";
 
 /** Sends each session state to its screen; renders children only for fully signed-in sessions. */
 function RequireActive() {
   const session = useSession();
-  if (session.isPending) return <p className="p-6 text-sm text-muted">Loading…</p>;
+  if (session.isPending) return <p className="p-6 text-body text-muted">Loading…</p>;
   if (!session.data) return <Navigate to="/login" />;
   if (session.data.state === "mfa_pending") return <Navigate to="/mfa" />;
   if (session.data.state === "enroll_required") return <Navigate to="/enroll" />;
@@ -25,9 +27,29 @@ function Login() {
   return <LoginPage navigateByState={(state) => void afterAuth(state)} />;
 }
 
+// A tenant's screens are keyed by the tenant: switching tenants mounts them afresh, so nothing typed for one tenant (a
+// connection's token, a member's email) can be sent to another, and an answer still on its way for the old tenant
+// lands on a screen that is gone rather than on the new tenant's form. The router alone reuses a screen whose route
+// stays the same and only its parameters change.
+
 function Connections() {
   const { tenantId } = useParams({ from: "/app/t/$tenantId/connections" });
-  return <ConnectionsPage tenantId={tenantId} />;
+  return <ConnectionsPage key={tenantId} tenantId={tenantId} />;
+}
+
+function Settings() {
+  const { tenantId } = useParams({ from: "/app/t/$tenantId/settings" });
+  return <SettingsLayout key={tenantId} tenantId={tenantId} />;
+}
+
+function SettingsIndex() {
+  const { tenantId } = useParams({ from: "/app/t/$tenantId/settings" });
+  return <Navigate to="/t/$tenantId/settings/members" params={{ tenantId }} />;
+}
+
+function Members() {
+  const { tenantId } = useParams({ from: "/app/t/$tenantId/settings/members" });
+  return <MembersPage key={tenantId} tenantId={tenantId} />;
 }
 
 const rootRoute = createRootRoute({ component: Outlet });
@@ -44,11 +66,22 @@ const connectionsRoute = createRoute({
   component: Connections,
 });
 
-const routeTree = rootRoute.addChildren([
+const settingsRoute = createRoute({ getParentRoute: () => appRoute, path: "/t/$tenantId/settings", component: Settings });
+const settingsIndexRoute = createRoute({ getParentRoute: () => settingsRoute, path: "/", component: SettingsIndex });
+const membersRoute = createRoute({ getParentRoute: () => settingsRoute, path: "members", component: Members });
+
+/** The app's routes; the router below serves them from the browser's history (tests serve them from memory). */
+export const routeTree = rootRoute.addChildren([
   loginRoute,
   mfaRoute,
   enrollRoute,
-  appRoute.addChildren([indexRoute, tenantsRoute, securityRoute, connectionsRoute]),
+  appRoute.addChildren([
+    indexRoute,
+    tenantsRoute,
+    securityRoute,
+    connectionsRoute,
+    settingsRoute.addChildren([settingsIndexRoute, membersRoute]),
+  ]),
 ]);
 
 export const router = createRouter({ routeTree });

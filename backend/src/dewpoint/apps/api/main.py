@@ -7,24 +7,8 @@ from fastapi import FastAPI
 
 from dewpoint.apps.api.errors import install_error_handlers
 from dewpoint.apps.api.middleware import BodyLimitMiddleware, ClientHeaderMiddleware, SecurityHeadersMiddleware
-from dewpoint.apps.api.routes import (
-    admin_users,
-    audit,
-    auth,
-    connections,
-    csv_uploads,
-    health,
-    members,
-    mfa,
-    node_types,
-    passkeys,
-    run_requests,
-    runs,
-    schedules,
-    tenants,
-    webhooks,
-    workflows,
-)
+from dewpoint.apps.api.openapi import OPENAPI_URL, ROUTERS, TITLE
+from dewpoint.apps.api.routes import csv_uploads
 from dewpoint.core import logs
 from dewpoint.core.config import Settings, get_settings
 from dewpoint.core.crypto.ingress import IngressKey
@@ -45,9 +29,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await app.state.http.aclose()
         await app.state.engine.dispose()
 
-    app = FastAPI(
-        title="Dewpoint API", docs_url=None, redoc_url=None, openapi_url="/api/v1/openapi.json", lifespan=lifespan
-    )
+    app = FastAPI(title=TITLE, docs_url=None, redoc_url=None, openapi_url=OPENAPI_URL, lifespan=lifespan)
     app.state.settings = settings
     app.state.engine = make_engine(settings.database_url)
     app.state.sessionmaker = make_sessionmaker(app.state.engine)
@@ -67,23 +49,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(logs.LifespanFailures)  # a startup or shutdown failure, by its type: never its traceback
     install_error_handlers(app)
-    for router in (
-        health.router,
-        auth.router,
-        mfa.router,
-        passkeys.router,
-        tenants.router,
-        members.router,
-        admin_users.router,
-        audit.router,
-        connections.router,
-        node_types.router,
-        workflows.router,
-        run_requests.router,
-        csv_uploads.router,
-        runs.router,
-        schedules.router,
-        webhooks.router,
-    ):
+    for router in ROUTERS:
         app.include_router(router)
     return app

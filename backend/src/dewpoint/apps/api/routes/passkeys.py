@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dewpoint.apps.api.responses import PasskeyOptionsOut, PasskeyOut, StateOut
 from dewpoint.core.audit.service import record
 from dewpoint.core.auth import passkeys, throttle
 from dewpoint.core.auth.sessions import create_session, elevate, rotate, set_session_cookie
@@ -49,7 +50,7 @@ async def _elevated(db: AsyncSession, sess: AuthSession, response: Response, set
     return {"state": "active", "csrf_token": sess.csrf_token}
 
 
-@router.get("")
+@router.get("", response_model=list[PasskeyOut])
 async def list_passkeys(
     sess: AuthSession = Depends(active_session), db: AsyncSession = Depends(get_db, scope="function")
 ) -> list[dict[str, Any]]:
@@ -70,7 +71,7 @@ async def list_passkeys(
     ]
 
 
-@router.post("/register/options")
+@router.post("/register/options", response_model=PasskeyOptionsOut)
 async def register_options(
     sess: AuthSession = Depends(current_session),
     db: AsyncSession = Depends(get_db, scope="function"),
@@ -86,7 +87,7 @@ async def register_options(
     return {"options": opts, "challenge_id": str(cid)}
 
 
-@router.post("/register/verify")
+@router.post("/register/verify", response_model=StateOut)
 async def register_verify(
     body: VerifyIn,
     response: Response,
@@ -109,7 +110,7 @@ async def register_verify(
     return {"state": sess.state, "csrf_token": sess.csrf_token}
 
 
-@router.post("/login/options")
+@router.post("/login/options", response_model=PasskeyOptionsOut)
 async def login_options(
     request: Request,
     db: AsyncSession = Depends(get_db, scope="function"),
@@ -127,7 +128,7 @@ async def login_options(
     return {"options": opts, "challenge_id": str(cid)}
 
 
-@router.post("/login/verify")
+@router.post("/login/verify", response_model=StateOut)
 async def login_verify(
     body: VerifyIn,
     request: Request,
@@ -185,7 +186,7 @@ async def _factor_verify(
     return await _elevated(db, sess, response, settings)
 
 
-@router.post("/mfa/options")
+@router.post("/mfa/options", response_model=PasskeyOptionsOut)
 async def mfa_options(
     sess: AuthSession = Depends(current_session),
     db: AsyncSession = Depends(get_db, scope="function"),
@@ -195,7 +196,7 @@ async def mfa_options(
     return await _factor_options(sess, db, settings)
 
 
-@router.post("/mfa/verify")
+@router.post("/mfa/verify", response_model=StateOut)
 async def mfa_verify(
     body: VerifyIn,
     response: Response,
@@ -207,7 +208,7 @@ async def mfa_verify(
     return await _factor_verify(body, response, sess, db, settings)
 
 
-@router.post("/stepup/options")
+@router.post("/stepup/options", response_model=PasskeyOptionsOut)
 async def stepup_options(
     sess: AuthSession = Depends(current_session),
     db: AsyncSession = Depends(get_db, scope="function"),
@@ -217,7 +218,7 @@ async def stepup_options(
     return await _factor_options(sess, db, settings)
 
 
-@router.post("/stepup/verify")
+@router.post("/stepup/verify", response_model=StateOut)
 async def stepup_verify(
     body: VerifyIn,
     response: Response,
