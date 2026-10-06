@@ -101,3 +101,6 @@ Open questions:
 - `tests/apps/dispatcher/test_triggers_end_to_end.py::test_a_short_outage_fires_each_missed_time_and_admits_each_once`
   failed once in the full parallel run under extra load (a 4 s tick gap on Temporal's dev server where 2 s was
   expected) and passes alone; this slice touches no schedule or dispatcher code. Load-sensitive, not a regression.
+- An intermittent `PytestUnraisableExceptionWarning` (a `GeneratorExit` in RunGraph's `_drive` while Temporal tears down
+  a terminated batch) comes from `tests/apps/worker/test_real_server.py::test_a_terminated_batch_fails_its_loop_and_its_whole_grant_stays_used`;
+  3a-1 changes no engine code. Pre-existing, worth its own issue.
