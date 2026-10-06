@@ -147,3 +147,41 @@ Open questions:
 - An intermittent `PytestUnraisableExceptionWarning` (a `GeneratorExit` in RunGraph's `_drive` while Temporal tears down
   a terminated batch) comes from `tests/apps/worker/test_real_server.py::test_a_terminated_batch_fails_its_loop_and_its_whole_grant_stays_used`;
   3a-1 changes no engine code. Pre-existing, worth its own issue.
+
+## 3a-2 Plugin calls and connection types
+
+Branch `feat/plugins-3a2` from `origin/main` 15084df (3a-1's merge), started 2026-10-06 on the owner's word. Migration
+0042 chains from 0041; 2b-4a holds 0035-0040 and the editor UI 0043-0046.
+
+Tasks (test-first, in order):
+1. SDK 0.3.0: `Option` and `Node.options(ctx, field, query)` for fields marked `options_field`; a node's `icon`;
+   `ConnectionType` declared in a plugin (key, label, config and secret models, auth, host rule, rate scopes,
+   `verify(ctx, config)`); the outside-run context (D3: read-only `http`, a connection's read-only `http`, no `net`).
+   Manifest keys `connection_types` (plugin), `icon` (node, display) and `options` (node), each emitted only when set;
+   flow@1's hashes unchanged (D12).
+2. The catalog validates the new keys as data; `icon` joins `_DISPLAY`.
+3. `mist` leaves `core` for `dewpoint.plugins.mist`, its shape unchanged: the same schemas, auth and scope keys (D11).
+4. The API reads connection types from synced manifests: schema validation, the type list, cooldowns' scope keys.
+5. Migration 0042: `plugin_calls`, its candidates and sweep functions, RLS and grants (D3, D25).
+6. The worker serves plugin calls: candidates for its build's refs and types, claim (`SKIP LOCKED`, claim token,
+   lease), the hook under the outside-run context, the fenced result write, encrypted; the sweep (D3).
+7. The API: options for a node's config (`connection.use`), verify through a plugin call (compare-and-set on the
+   revision kept), the start form's picker options; waits up to 10 s, then deletes the row (D3).
+8. Publish checks `x-dewpoint-picker` in the input schema and records its connection in `connection_ids` (D19).
+9. Flow completion (D19): icons for the 11 flow nodes, `x-widget` hints on CEL fields; flow@1's hashes unchanged.
+10. Proof: a site picker end to end (API, `plugin_calls`, worker, a test node's `options()` through a Mist connection,
+    a local Mist fake), and Mist verify end to end.
+
+Rulings:
+- Ruling: the branch starts from `origin/main` 15084df (3a-1 merged), not from the docs branch (#39 still open) - as
+  for 3a-1 - cost if wrong: one rebase.
+- Ruling: the SDK becomes 0.3.0 - 3a-1 shipped 0.2.0 with part of D12; a new surface under the same number would make
+  "0.2.0" mean two things - cost if wrong: none (the catalog checks the major only).
+- Ruling: no Mist node type ships in 3a-2; the proof's picker node is test-only - a registered node type version stays
+  until retired (sync refuses a build without it), and 3b-1 generates the Mist nodes (D23) - cost if wrong: the site
+  picker isn't usable in the product before 3b-1.
+- Ruling: the `mist` plugin declares only its connection type, and a plugin may declare connection types without
+  nodes - the type has to leave `core` now (D11) and has no node yet - cost if wrong: none.
+- Ruling: a connection type's hosts and quota scopes are declared as data, not code - the API never runs plugin code
+  (spec §3.3) yet shows each scope's cooldown (D10), so both sides compute the same keys from one declaration - cost
+  if wrong: a scope that needs computing (3c's Slack workspace from a URL) needs a new declarative form.
