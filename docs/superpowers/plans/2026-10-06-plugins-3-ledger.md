@@ -402,3 +402,11 @@ Rulings:
 - The map (`backend/src/dewpoint/plugins/mist/data/policy.json`, made by `python -m dewpoint.plugins.mist.reviews`):
   1,072 operations: 262 allowed (146 reads, 78 idempotent writes, 38 ambiguous; 173 org, 88 site, 1 metadata), 632
   held (620 unreviewed, 12 the owner's), 178 denied (173 always refused, 5 deprecated).
+- Ruling: a declared model (`declared_model(name, schema)`) is the SDK's: it reports its schema in every mode, validates
+  with it (Draft 2020-12 and the formats a step's output is checked for: date, uuid, email, ipv4, ipv6, regex) and
+  names each failing place and the schema keyword, never the value; its output schema is shown exactly as declared,
+  not closed as a pydantic model's is - a generated node's schema is the provider's, and closing it would fail every
+  answer carrying a field the description doesn't list - cost if wrong: an undeclared output field is tainted, never
+  refused.
+- Ruling: a trigger declares only `id_source: none` and bearer or HMAC endpoints - ingress offers those, and D17 needs no
+  more - cost if wrong: a provider with event ids needs the declaration widened.
