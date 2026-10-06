@@ -93,6 +93,7 @@ async def update_connection(
     config: dict[str, Any] | None,
     secret: dict[str, Any] | None,
 ) -> Connection:
+    """`conn` is locked (`get_for_update`): the host rule compares with the config this edit replaces."""
     kind = await declared(s, conn.type)
     new_config = kind.config(config) if config is not None else None
     field = kind.host.get("field") if kind.host is not None else None
@@ -142,8 +143,12 @@ class ConnectionInUseError(Exception):
 
 
 async def get_for_update(s: AsyncSession, tenant_id: uuid.UUID, connection_id: uuid.UUID) -> Connection | None:
+    """The connection, locked until the transaction ends, as it is once the lock is held."""
     found = await s.execute(
-        select(Connection).where(Connection.id == connection_id, Connection.tenant_id == tenant_id).with_for_update()
+        select(Connection)
+        .where(Connection.id == connection_id, Connection.tenant_id == tenant_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     return found.scalar_one_or_none()
 

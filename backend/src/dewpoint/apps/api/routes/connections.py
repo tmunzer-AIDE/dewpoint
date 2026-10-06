@@ -111,7 +111,11 @@ async def patch(
     db: AsyncSession = Depends(get_db, scope="function"),
     keyring: Keyring = Depends(get_keyring),
 ) -> dict[str, object]:
-    conn = await _get(db, ctx, connection_id)
+    # Locked, and so read as it is now: the host rule compares with the stored config an edit will replace (the
+    # owner's review of 3a-2, finding 1), never with a copy a concurrent edit has since changed.
+    conn = await service.get_for_update(db, ctx.tenant_id, connection_id)
+    if conn is None:
+        raise HTTPException(404, detail={"error": "not_found"})
     try:
         conn = await service.update_connection(
             db, keyring, ctx, conn, name=body.name, config=body.config, secret=body.secret

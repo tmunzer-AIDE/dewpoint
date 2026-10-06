@@ -174,3 +174,25 @@ async def test_cooldowns_of_a_config_its_type_no_longer_accepts_are_unknown(
             await s.execute(text('update connections set config = \'{"cloud": "emea_01"}\' where id = :c'), {"c": cid})
         r = await c.get(f"/api/v1/t/{tid}/connections/{cid}")
     assert r.status_code == 200 and r.json()["cooldowns"] is None
+
+
+async def test_an_edit_racing_a_move_is_checked_against_the_move(app, owner_sessionmaker, api_settings) -> None:
+    """The host rule reads the connection as it is when the edit applies, not as it was read (the owner's review of
+    3a-2, finding 1): an edit restoring the old cloud while another moves it, with a new token, needs a secret too."""
+    import asyncio
+
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    async with c:
+        cid = (await c.post(f"/api/v1/t/{tid}/connections", json=BODY)).json()["id"]
+        async with owner_sessionmaker() as s, s.begin():  # the move, holding the row until it commits
+            await s.execute(
+                text("update connections set config = jsonb_set(config, '{cloud}', '\"global_01\"'), "
+                     "revision = revision + 1 where id = :c"),
+                {"c": cid},
+            )  # fmt: skip
+            restore = asyncio.create_task(
+                c.patch(f"/api/v1/t/{tid}/connections/{cid}", json={"config": {"cloud": "emea_01", "org_id": ORG}})
+            )
+            await asyncio.sleep(0.5)  # the restore has read the connection and is waiting on the move
+        r = await restore
+    assert (r.status_code, r.json()) == (422, {"error": "secret_required"})
