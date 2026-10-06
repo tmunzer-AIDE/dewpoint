@@ -8,9 +8,10 @@ import uuid
 from typing import Any
 
 import pytest
+from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
-from dewpoint.plugins.mist import PLUGIN, policy
+from dewpoint.plugins.mist import PLUGIN, policy, routing
 from dewpoint.sdk import FatalError, Node, SideEffect, node_manifest
 from tests.plugins.mist.fakes import ORG, OTHER_ORG, SITE, FakeConnection, FakeHttp, FakeStep, Reply
 
@@ -106,8 +107,11 @@ async def test_the_most_specific_operation_wins() -> None:
 
 
 async def test_a_path_value_is_checked_against_its_description() -> None:
-    with pytest.raises(FatalError) as e:
-        await call("mist.api.read", {"path": f"/api/v1/orgs/{ORG}/wlans/not-a-uuid"}, {})
+    path = f"/api/v1/orgs/{ORG}/wlans/not-a-uuid"
+    with pytest.raises(ValidationError):  # publish refuses it as a literal
+        node("mist.api.read").Config.model_validate({"connection": str(uuid.uuid4()), "path": path})
+    with pytest.raises(FatalError) as e:  # and the run, computed
+        await call("mist.api.read", {"path": path}, {}, validated=False)
     assert e.value.code == "mist.invalid_path_value"
 
 
@@ -149,3 +153,24 @@ async def test_a_read_simulates_its_operations_example_without_sending() -> None
     value = kind.Config.model_validate({"connection": str(connection.id), "path": f"/api/v1/orgs/{ORG}/wlans/{WLAN}"})
     out = (await kind().simulate(FakeStep(connection), value)).model_dump(mode="json")  # type: ignore[arg-type]
     assert out["status"] == 200 and isinstance(out["body"], dict) and connection.http.sent == []
+
+
+async def test_a_siblings_literal_is_refused_at_publish_and_at_run_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The 3b-1 review's H1, for the generic nodes: `suppress` is `unsuppressOrgSuppressedAlarms`'s literal."""
+    raw = {"method": "DELETE", "path": f"/api/v1/orgs/{ORG}/alarmtemplates/suppress"}
+    with pytest.raises(ValidationError):
+        node("mist.api.write").Config.model_validate({"connection": str(uuid.uuid4()), **raw})
+    with pytest.raises(FatalError) as e:
+        await call("mist.api.write", raw, {}, validated=False)
+    assert e.value.code == "mist.invalid_path_value"
+    accepts_all = Draft202012Validator({})
+    real = routing.checkers
+
+    def lenient(op: str) -> routing.Checkers:
+        found = real(op)
+        return routing.Checkers({k: accepts_all for k in found.path}, found.query, found.body)
+
+    monkeypatch.setattr(routing, "checkers", lenient)
+    with pytest.raises(FatalError) as e:  # even a parameter that would accept it can't reach the other operation
+        await call("mist.api.write", raw, {}, validated=False)
+    assert e.value.code == "mist.invalid_path_value"

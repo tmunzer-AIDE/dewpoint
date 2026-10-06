@@ -20,8 +20,8 @@ from typing import Any, ClassVar
 from jsonschema import Draft202012Validator
 from pydantic import BaseModel
 
-from dewpoint.plugins.mist import oas, policy
-from dewpoint.plugins.mist.client import InvalidAnswer, MistClient, NotFound
+from dewpoint.plugins.mist import oas, policy, routing
+from dewpoint.plugins.mist.client import SEGMENT, InvalidAnswer, InvalidPathValue, MistClient, NotFound
 from dewpoint.plugins.mist.schemas import converted, resolved, top_properties, with_defs
 from dewpoint.sdk import (
     CallContext,
@@ -124,6 +124,15 @@ class MistOperation(Node):
                 raise NothingToChange()
         if policy.load().allowed(self.operation, self.type) is None:
             raise OperationUnavailable()
+        checks = routing.checkers(self.operation).path
+        for name, check in checks.items():
+            value = values.get(name)
+            if name != "org_id" and (not isinstance(value, str) or not SEGMENT.fullmatch(value)
+                                     or not check.is_valid(value)):  # fmt: skip
+                raise InvalidPathValue()
+        concrete = routing.filled(self.path, values)
+        if policy.refused(concrete) or routing.reaches(self.method, concrete) != self.operation:
+            raise InvalidPathValue()  # a value that is another operation's literal, or ties with one (review H1)
         return values, body, clear
 
     async def simulate(self, ctx: StepContext, config: Any) -> BaseModel:
@@ -335,7 +344,11 @@ def config_schema(
     roots: list[Any] = []
     for p in op.parameters:
         if p["in"] == "path" and p["name"] != "org_id":
-            props[p["name"]] = {"title": _title(p["name"]), **converted(p.get("schema", {}), output=False)}
+            props[p["name"]] = {
+                "title": _title(p["name"]),
+                **converted(p.get("schema", {}), output=False),
+                "pattern": f"^{routing.value_pattern(op.id, p['name'])}$",  # publish refuses another route's literal
+            }
             if p["name"] in (pickers or {}):
                 props[p["name"]][OPTIONS] = True
             required.append(p["name"])

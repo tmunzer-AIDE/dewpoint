@@ -19,17 +19,15 @@ import copy
 import re
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, ClassVar
 
-from jsonschema import Draft202012Validator, FormatChecker
 from pydantic import BaseModel
 
 from dewpoint.plugins.mist import oas, policy
 from dewpoint.plugins.mist.client import SEGMENT, InvalidPathValue, MistClient
 from dewpoint.plugins.mist.nodes import OperationUnavailable, _example
-from dewpoint.plugins.mist.schemas import converted, resolved, with_defs
+from dewpoint.plugins.mist.routing import UUID, Route, checkers, filled, matched, reaches, value_pattern
 from dewpoint.sdk import FatalError, Node, SideEffect, StepContext, declared_model
 from dewpoint.sdk.fields import CONNECTION, LITERAL
 
@@ -61,16 +59,6 @@ class InvalidBody(FatalError):
         super().__init__("mist.invalid_body", "The body doesn't match the operation's description.")
 
 
-@dataclass(frozen=True)
-class Route:
-    """An allowed operation as the generic nodes reach it."""
-
-    operation: str
-    method: str
-    segments: tuple[str, ...]
-    scope: str
-
-
 def routes(node: str) -> list[Route]:
     """The operations the map allows to `node`, whatever their routes: the run refuses the always-refused ones."""
     return [
@@ -80,68 +68,14 @@ def routes(node: str) -> list[Route]:
     ]
 
 
-VALUE = "[A-Za-z0-9_.~-]+"  # a path value: one segment of unreserved characters (as the client checks)
-
-
-def _pattern(path: str) -> str:
-    """A path template as the config's pattern: each value a plain segment, the org's also `{org_id}`."""
+def _pattern(route: Route) -> str:
+    """A route as the config's pattern: the org's value a UUID or `{org_id}`, every other its parameter's pattern."""
     parts = [
-        f"(?:{VALUE}|\\{{org_id\\}})" if s == ORG_PLACEHOLDER else VALUE if s.startswith("{") else re.escape(s)
-        for s in path.split("/")
-    ]
+        f"(?:{UUID}|\\{{org_id\\}})" if s == ORG_PLACEHOLDER
+        else f"(?:{value_pattern(route.operation, s[1:-1])})" if s.startswith("{") else re.escape(s)
+        for s in route.segments
+    ]  # fmt: skip
     return "^" + "/".join(parts) + "$"
-
-
-def matched(found: list[Route], method: str, segments: list[str]) -> tuple[Route, dict[str, str]] | None:
-    """The most specific route `method` and `segments` match, and its path values; None when none or two do."""
-    best: list[tuple[int, Route, dict[str, str]]] = []
-    for route in found:
-        if route.method != method or len(route.segments) != len(segments):
-            continue
-        values: dict[str, str] = {}
-        literal = 0
-        for template, value in zip(route.segments, segments, strict=True):
-            if template.startswith("{"):
-                values[template[1:-1]] = value
-            elif template == value:
-                literal += 1
-            else:
-                break
-        else:
-            best.append((literal, route, values))
-    if not best:
-        return None
-    best.sort(key=lambda b: -b[0])
-    if len(best) > 1 and best[0][0] == best[1][0]:
-        return None
-    return best[0][1], best[0][2]
-
-
-_CHECKERS: dict[str, tuple[dict[str, Draft202012Validator], dict[str, Draft202012Validator], Any]] = {}
-
-
-def _checkers(operation: str) -> tuple[dict[str, Draft202012Validator], dict[str, Draft202012Validator], Any]:
-    """An operation's path value and query validators, and its body's (None when it takes none), made once."""
-    if operation not in _CHECKERS:
-        doc, op = oas.document(), oas.operations()[operation]
-        formats = FormatChecker(formats=("uuid",))
-
-        def check(schema: Any, partial: bool = False) -> Draft202012Validator:
-            made = with_defs(doc, converted(schema, output=False, partial=partial), [schema], output=False,
-                             partial=partial)  # fmt: skip
-            return Draft202012Validator(made, format_checker=formats)
-
-        path = {p["name"]: check(p.get("schema", {})) for p in op.parameters if p["in"] == "path"}
-        query = {
-            p["name"]: check(p.get("schema", {})) for p in op.parameters
-            if p["in"] == "query" and resolved(doc, p.get("schema", {})).get("type") != "array"
-        }  # fmt: skip
-        body = None
-        if "requestBody" in op.spec:
-            media = (oas.resolve(doc, op.spec["requestBody"]).get("content") or {}).get("application/json", {})
-            body = check(media.get("schema", {}), partial=op.method == "PUT")
-        _CHECKERS[operation] = (path, query, body)
-    return _CHECKERS[operation]
 
 
 class MistApi(Node):
@@ -167,19 +101,22 @@ class MistApi(Node):
         route, path_values = found
         if policy.load().allowed(route.operation, self.type) is None or policy.refused(path):
             raise OperationUnavailable()
+        if reaches(method, filled("/".join(route.segments), path_values)) != route.operation:
+            raise InvalidPathValue()  # a value that is another operation's literal, or ties with one (review H1)
         return values, method, route, path_values
 
     def _checked(
         self, route: Route, path_values: dict[str, str], org: str | None, values: dict[str, Any]
     ) -> tuple[dict[str, str], dict[str, Any], Any]:
-        checks, query_checks, body_check = _checkers(route.operation)
+        found = checkers(route.operation)
+        checks, query_checks, body_check = found.path, found.query, found.body
         out: dict[str, str] = {}
         for name, value in path_values.items():
             if name == "org_id":
                 if org is not None and value not in (org, ORG_PLACEHOLDER):
                     raise OrgMismatch()
                 continue
-            if not checks[name].is_valid(value):
+            if not SEGMENT.fullmatch(value) or not checks[name].is_valid(value):
                 raise InvalidPathValue()
             out[name] = value
         query = values.get("query") or {}
@@ -215,7 +152,7 @@ class MistApi(Node):
 
 
 def _config(node: str, write: bool) -> dict[str, Any]:
-    paths = sorted({"/".join(r.segments) for r in routes(node)})
+    patterns = sorted({_pattern(r) for r in routes(node)})
     props: dict[str, Any] = {
         "connection": {"type": "string", "format": "uuid", "title": "Connection", LITERAL: True, CONNECTION: "mist"},
     }
@@ -227,7 +164,7 @@ def _config(node: str, write: bool) -> dict[str, Any]:
         "description": "A path the policy map allows this node, e.g. /api/v1/orgs/{org_id}/wlans; {org_id} is the "
         "connection's org.",
         "maxLength": 512,
-        "anyOf": [{"pattern": _pattern(p)} for p in paths],
+        "anyOf": [{"pattern": p} for p in patterns],
     }
     props["query"] = {"type": "object", "title": "Query", "additionalProperties": {"type": SCALARS}}
     if write:
