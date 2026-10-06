@@ -300,7 +300,7 @@ class Channel(Protocol):
 
     def beat(self) -> None: ...
 
-    async def send[T](self, call: Callable[[], Awaitable[T]]) -> T: ...
+    async def send[T](self, call: Callable[[], Awaitable[T]], *, counts: bool = True) -> T: ...  # a probe doesn't
 
     def core_http(self) -> GuardedHttp: ...
 
@@ -308,6 +308,13 @@ class Channel(Protocol):
 READ_METHODS = frozenset({"GET", "HEAD"})
 # Headers some servers read as the method itself: a read-only request sends none (the 3a-2 review's finding 11).
 METHOD_OVERRIDES = frozenset({"x-http-method-override", "x-http-method", "x-method-override"})
+
+
+def _check_probe(probe: bool, method: str, content: bytes | None, json: Any) -> None:
+    """A probe (a check before the node's effect) reads only: GET or HEAD without a body, refused before sending."""
+    if probe and (not isinstance(method, str) or method.upper() not in READ_METHODS or content is not None
+                  or json is not None):  # fmt: skip
+        raise InvalidRequest()
 
 
 def _check_read(
@@ -336,13 +343,16 @@ class PlainHttp:
         content: bytes | None = None,
         json: Any = None,
         follow_same_origin: int = 0,
+        probe: bool = False,
     ) -> HttpResponse:
+        _check_probe(probe, method, content, json)
         _check_read(self._attempt, method, headers, content, json)
         return await self._attempt.send(
             lambda: self._attempt.core_http().request(
                 method, url, headers=headers, params=params, content=content, json=json,
                 follow_same_origin=follow_same_origin,
-            )
+            ),
+            counts=not probe,
         )  # fmt: skip
 
 
@@ -431,7 +441,9 @@ class ConnectionHttp:
         content: bytes | None = None,
         json: Any = None,
         follow_same_origin: int = 0,
+        probe: bool = False,
     ) -> HttpResponse:
+        _check_probe(probe, method, content, json)
         _check_read(self._attempt, method, headers, content, json)
         target = self._target(url)
         reserved = {name.lower() for name in self._credentials}
@@ -439,7 +451,7 @@ class ConnectionHttp:
             raise InvalidRequest()
         sent_headers = {**(headers or {}), **self._credentials}
         attempt = self._attempt
-        resends = attempt.resends
+        resends = attempt.resends or probe  # a probe is a read: resending it repeats nothing
         waited, retries = 0.0, 0
         while True:
             try:
@@ -459,7 +471,8 @@ class ConnectionHttp:
                 lambda: attempt.core_http().request(
                     method, target, headers=sent_headers, params=params, content=content, json=json,
                     follow_same_origin=follow_same_origin,
-                )
+                ),
+                counts=not probe,
             )  # fmt: skip
             if answer.status_code not in (429, 503):
                 return answer
@@ -598,8 +611,14 @@ class AttemptNetwork:
         may fail first while another's request has already arrived; the second review's finding 1)."""
         return self.may_have_sent or self._in_flight > 0
 
-    async def send[T](self, call: Callable[[], Awaitable[T]]) -> T:
-        """Runs a transport call; unless it failed having sent nothing, a request may now have left the attempt."""
+    async def send[T](self, call: Callable[[], Awaitable[T]], *, counts: bool = True) -> T:
+        """Runs a transport call; unless it failed having sent nothing, a request may now have left the attempt. A
+        probe (`counts=False`, a GET or HEAD the node makes before its effect) leaves the attempt as it was."""
+        if not counts:
+            try:
+                return await call()
+            except CORE_ERRORS as e:
+                raise mapped(e) from None
         self._in_flight += 1
         try:
             result = await call()

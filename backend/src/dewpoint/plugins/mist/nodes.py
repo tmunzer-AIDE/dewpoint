@@ -145,7 +145,13 @@ class MistOperation(Node):
         client = MistClient(await ctx.connection(uuid.UUID(values["connection"])))
         path = client.path(self.path, values)
         if self.scope == "site":
-            await client.check_site(values["site_id"])
+            try:
+                await client.check_site(values["site_id"])
+            except NotFound:
+                if self.shape == "delete" and ctx.attempt > 1:  # its site gone, so is the object (review M2, D16)
+                    gone: Any = {"already_absent": True}
+                    return self.Output.model_construct(gone)
+                raise
         result = await self._send(ctx, client, path, values, body, clear)
         return self.Output.model_construct(result)  # the runtime checks it against the output schema
 

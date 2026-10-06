@@ -28,6 +28,7 @@ class Sent:
     params: Mapping[str, Any] | None
     json: Any
     headers: Mapping[str, str] | None
+    probe: bool = False
 
 
 class FakeResponse:
@@ -50,7 +51,7 @@ class FakeResponse:
         return json.loads(self.content)
 
 
-Script = Callable[[Sent], Reply]
+Script = Callable[[Sent], Reply | BaseException]
 
 
 class FakeHttp:
@@ -58,7 +59,7 @@ class FakeHttp:
         self.sent: list[Sent] = []
         self._script = script
 
-    def _reply(self, sent: Sent) -> Reply:
+    def _reply(self, sent: Sent) -> Reply | BaseException:
         if callable(self._script):
             return self._script(sent)
         found = self._script.get((sent.method, sent.url.split("?", 1)[0]))
@@ -78,10 +79,14 @@ class FakeHttp:
         content: bytes | None = None,
         json: Any = None,
         follow_same_origin: int = 0,
+        probe: bool = False,
     ) -> FakeResponse:
-        sent = Sent(method, url, dict(params) if params is not None else None, json, headers)
+        sent = Sent(method, url, dict(params) if params is not None else None, json, headers, probe)
         self.sent.append(sent)
-        return FakeResponse(self._reply(sent))
+        reply = self._reply(sent)
+        if isinstance(reply, BaseException):
+            raise reply
+        return FakeResponse(reply)
 
 
 @dataclass

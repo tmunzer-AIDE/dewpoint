@@ -18,7 +18,16 @@ from typing import Any
 from urllib.parse import quote, urlsplit
 
 from dewpoint.plugins.mist.connection import MIST_CLOUDS
-from dewpoint.sdk import Connection, FatalError, RetryableError
+from dewpoint.sdk import (
+    Connection,
+    FatalError,
+    MaybeSent,
+    RateLimited,
+    RedirectRefused,
+    ResponseTooLarge,
+    ResponseUnreadable,
+    RetryableError,
+)
 
 ACCEPT = {"Accept": "application/json"}
 SEGMENT = re.compile(r"^[A-Za-z0-9_.~-]+$")  # one path segment of unreserved characters (RFC 3986)
@@ -73,6 +82,11 @@ class InvalidQueryValue(FatalError):
 class SiteOutsideOrg(FatalError):
     def __init__(self) -> None:
         super().__init__("mist.site_outside_org", "The site isn't in the connection's org.")
+
+
+class SiteCheckFailed(RetryableError):
+    def __init__(self) -> None:
+        super().__init__("mist.site_check_failed", "The site's org couldn't be checked; nothing was changed.")
 
 
 class InvalidNext(FatalError):
@@ -140,10 +154,12 @@ class MistClient:
         *,
         query: Mapping[str, Any] | None = None,
         body: Any = None,
+        probe: bool = False,
     ) -> Answer:
-        """One request; its answer, or the fixed error its status maps to."""
+        """One request; its answer, or the fixed error its status maps to. A probe is a read before the node's effect,
+        which doesn't count as a send."""
         params = _query(query)
-        sent = await self._connection.http.request(method, path, headers=ACCEPT, params=params, json=body)
+        sent = await self._connection.http.request(method, path, headers=ACCEPT, params=params, json=body, probe=probe)
         status = sent.status_code
         if 200 <= status < 300:
             try:
@@ -165,10 +181,13 @@ class MistClient:
 
     async def check_site(self, site_id: str) -> None:
         """The site belongs to the connection's org (D14): one GET a site per client, the answer's `org_id` exactly
-        the connection's."""
+        the connection's. The GET is a probe: it changes nothing, so it never makes the node's outcome unknown."""
         if site_id in self._sites:
             return
-        found = await self.call("GET", self.path("/api/v1/sites/{site_id}", {"site_id": site_id}))
+        try:  # a probe: a read before the effect, so a failure here leaves the step retryable (the 3b-1 review's M1)
+            found = await self.call("GET", self.path("/api/v1/sites/{site_id}", {"site_id": site_id}), probe=True)
+        except (MaybeSent, RateLimited, RedirectRefused, ResponseTooLarge, ResponseUnreadable):
+            raise SiteCheckFailed() from None  # it may have reached Mist, but it's a read: retrying repeats nothing
         if not isinstance(found.body, Mapping) or found.body.get("org_id") != self.org_id:
             raise SiteOutsideOrg()
         self._sites.add(site_id)

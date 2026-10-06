@@ -515,3 +515,24 @@ Runs at `7e81c7d` (tasks 1-10 done), 2026-10-06: the full backend suite, 3145 pa
 (`-n auto`, with the reviewer's targeted runs alongside); ruff, format, mypy, import contracts and the OpenAPI drift
 check pass; the web client's `check:api`, lint, typecheck, 292 tests and build pass. CodeQL locally with CI's CLI
 (2.27.1) and query filter over the whole tree: no findings in Python (45 queries) or JavaScript/TypeScript (89).
+
+Checkpoint review (fresh-context reviewer, 2026-10-06, at `7e81c7d`): one High, three Medium and eleven Low findings,
+each fixed test-first and mutation-checked:
+- (H1, High) a curated node's id took any plain segment, so a sibling route's literal reached another operation:
+  `DELETE …/alarmtemplates/suppress` is `unsuppressOrgSuppressedAlarms` (held), and 17 such values reached held
+  operations (32 shadowings counting ties). Each path value's config pattern is now its parameter's (UUID, MAC, one
+  segment), so publish refuses it; every run and simulation checks each value against its parameter, and the concrete
+  path must resolve, among every OAS operation, to the node's own (the most literal template wins, a tie is refused),
+  for the generic nodes too: `373b731`, `75db8f8` (a test of the generic nodes' route check that the parameter
+  check masked).
+- (M1, Medium) the site check counted as a send, so an ambiguous site-scope write that never left (a restart whose
+  site check met a 503, a site of another org) ended `outcome_unknown`; (M2, Medium) a site delete's retry after the
+  delete applied found the site gone and failed `mist.not_found`.
+- Ruling (M1): a node may mark a GET or HEAD without a body as a **probe**, a read before its effect: the runtime
+  doesn't count it as a send (an ambiguous node's later failure that sent nothing stays retryable), may resend it
+  within the attempt after a short `Retry-After`, and refuses a probe of any other method or with a body before
+  sending. Mist's site check is a probe; one that may have reached Mist and failed is `mist.site_check_failed`,
+  retryable - the check D14 requires changes nothing - cost if wrong: a plugin marking a request that has an effect
+  as a probe has an ambiguous node retried after it (first-party code's declaration: the SDK is an API, not a sandbox).
+- Ruling (M2): a delete's retry whose site check finds the site gone answers `already_absent` - the object can't
+  outlive its site (D16) - cost if wrong: none.

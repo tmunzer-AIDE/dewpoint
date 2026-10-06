@@ -371,3 +371,51 @@ async def test_credentials_that_cant_be_filled_are_unavailable(owner_sessionmake
         finally:
             await a.aclose()
     assert server.requests == []
+
+
+async def test_a_probe_doesnt_count_as_a_send_for_an_ambiguous_node(owner_sessionmaker, worker_sessionmaker) -> None:
+    """A read the node makes before its effect, a scope check (the 3b-1 review's M1): GET or HEAD without a body, it
+    leaves the attempt certain, so the node's failure before its effect is still retried; any other request counts."""
+    async with serve(respond(200, b"{}"), tls_names=NAMES) as server:
+        seeded, cid = await _setup(owner_sessionmaker, server.port, node_type="testkit.ambiguous_call@1")
+        a = attempt(worker_sessionmaker, seeded, node=AmbiguousCall)
+        try:
+            http = (await a.connection(cid)).http
+            await http.request("GET", "/site", probe=True)
+            await http.request("GET", "/site/again", probe=True)
+            assert (a.may_have_sent, a.uncertain) == (False, False)
+            await http.request("GET", "/site")
+            assert a.may_have_sent
+        finally:
+            await a.aclose()
+    assert len(server.requests) == 3
+
+
+@pytest.mark.parametrize(("method", "body"), [("POST", None), ("PUT", b"x"), ("GET", b"x"), ("DELETE", None)])
+async def test_a_probe_that_could_change_something_is_refused_before_sending(
+    owner_sessionmaker, worker_sessionmaker, method: str, body: bytes | None
+) -> None:
+    async with serve(respond(200, b"{}"), tls_names=NAMES) as server:
+        seeded, cid = await _setup(owner_sessionmaker, server.port, node_type="testkit.ambiguous_call@1")
+        a = attempt(worker_sessionmaker, seeded, node=AmbiguousCall)
+        try:
+            with pytest.raises(InvalidRequest):
+                await (await a.connection(cid)).http.request(method, "/site", content=body, probe=True)
+            with pytest.raises(InvalidRequest):
+                await a.http.request(method, f"https://dewpoint.test:{server.port}/x", content=body, probe=True)
+            assert not a.uncertain
+        finally:
+            await a.aclose()
+    assert server.requests == []
+
+
+async def test_an_ambiguous_nodes_probe_waits_out_a_short_retry_after(owner_sessionmaker, worker_sessionmaker) -> None:
+    """A probe is a read: resending it within the attempt repeats nothing."""
+    async with serve(_limited_once("1"), tls_names=NAMES) as server:
+        seeded, cid = await _setup(owner_sessionmaker, server.port, node_type="testkit.ambiguous_call@1")
+        a = attempt(worker_sessionmaker, seeded, node=AmbiguousCall)
+        try:
+            answer = await (await a.connection(cid)).http.request("GET", "/site", probe=True)
+        finally:
+            await a.aclose()
+    assert answer.status_code == 200 and len(server.requests) == 2 and not a.uncertain
