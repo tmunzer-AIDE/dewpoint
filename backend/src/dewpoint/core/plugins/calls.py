@@ -180,11 +180,14 @@ async def claim(
     )
 
 
-# Both answers are fenced: this claim's token, still claimed, within its lease and the call's expiry, now.
+# Both answers are fenced: this claim's token, still claimed, within its lease and the call's expiry, now. An answer is
+# also taken only while the call's connection is still the revision the API read (the owner's review, finding 3).
 _ANSWER = text(
     "update plugin_calls set state = 'done', result_ct = :r, claim_token = null, lease_until = null "
     "where id = :i and tenant_id = :t and claim_token = :token and state = 'claimed' "
-    "and lease_until > clock_timestamp() and expires_at > clock_timestamp()"
+    "and lease_until > clock_timestamp() and expires_at > clock_timestamp() "
+    "and (connection_id is null or exists (select 1 from connections c where c.tenant_id = plugin_calls.tenant_id "
+    "and c.id = plugin_calls.connection_id and c.revision = plugin_calls.connection_revision))"
 )
 _REFUSE = text(
     "update plugin_calls set state = 'failed', error = :e, claim_token = null, lease_until = null "
@@ -203,6 +206,19 @@ async def refuse(s: AsyncSession, tenant_id: uuid.UUID, call_id: uuid.UUID, toke
     """Records why the call has no answer, fenced as `answer`."""
     done = await s.execute(_REFUSE, {"i": call_id, "t": tenant_id, "token": token, "e": shown(error)})
     return bool(getattr(done, "rowcount", 0) == 1)
+
+
+async def connection_changed(s: AsyncSession, tenant_id: uuid.UUID, call_id: uuid.UUID) -> bool:
+    """Whether the call's connection is no longer the revision the API read."""
+    found = await s.execute(
+        text(
+            "select 1 from plugin_calls p where p.id = :i and p.tenant_id = :t and p.connection_id is not null "
+            "and not exists (select 1 from connections c where c.tenant_id = p.tenant_id and c.id = p.connection_id "
+            "and c.revision = p.connection_revision)"
+        ),
+        {"i": call_id, "t": tenant_id},
+    )
+    return found.first() is not None
 
 
 async def sweep(s: AsyncSession) -> int:

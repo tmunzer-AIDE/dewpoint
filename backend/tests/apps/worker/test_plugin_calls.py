@@ -346,3 +346,29 @@ async def test_an_answer_holding_a_short_secret_is_refused_too(
         call = await ask(api_sessionmaker, tenant, cid, "echo")
         await server_for(worker_sessionmaker, tenant).serve_once()
     assert await outcome(api_sessionmaker, tenant, call) == ("failed", "result_refused")
+
+
+async def test_options_answered_after_their_connection_changed_are_refused(
+    owner_sessionmaker, api_sessionmaker, worker_sessionmaker
+) -> None:
+    """The answer is taken only while the connection is still the revision the API read (the owner's review of 3a-2,
+    finding 3): an edit landing while the provider answers fails the call `connection_changed`."""
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def held(request: Request, writer: asyncio.StreamWriter) -> None:
+        started.set()
+        await release.wait()
+        await service(request, writer)
+
+    async with serve(held, tls_names=NAMES) as fake:
+        tenant, cid = await setup(owner_sessionmaker, fake.port)
+        call = await ask(api_sessionmaker, tenant, cid)
+        serving = asyncio.create_task(server_for(worker_sessionmaker, tenant).serve_once())
+        try:
+            await asyncio.wait_for(started.wait(), 10)
+            async with owner_sessionmaker() as s, s.begin():
+                await s.execute(text("update connections set revision = revision + 1 where id = :c"), {"c": cid})
+        finally:
+            release.set()
+            await asyncio.wait_for(serving, 10)
+    assert await outcome(api_sessionmaker, tenant, call) == ("failed", "connection_changed")

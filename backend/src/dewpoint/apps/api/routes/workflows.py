@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps import workflow_ops
 from dewpoint.apps.api.deps import get_keyring
-from dewpoint.apps.api.routes.node_types import ask_and_wait, options_reply
+from dewpoint.apps.api.routes.node_types import ask_and_wait, options_reply, still_current
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.config import Settings
 from dewpoint.core.connections.declared import declared_types
@@ -304,4 +304,6 @@ async def input_options(
             query=body.query, type_hash=type_hash,
         )  # fmt: skip
 
-    return options_reply(await ask_and_wait(request, db, keyring, ctx.tenant_id, ask))
+    reply = options_reply(await ask_and_wait(request, db, keyring, ctx.tenant_id, ask))
+    await still_current(request, ctx.tenant_id, connection_id, revision)
+    return reply

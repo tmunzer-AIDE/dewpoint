@@ -328,6 +328,9 @@ class PluginCallServer:
                 await tenant_scope(s, claimed.tenant_id)
                 if sealed is not None:
                     taken = await calls.answer(s, claimed.tenant_id, claimed.id, claimed.token, sealed)
+                    if not taken and await calls.connection_changed(s, claimed.tenant_id, claimed.id):
+                        error = "connection_changed"  # edited while the provider answered: never taken as current
+                        taken = await calls.refuse(s, claimed.tenant_id, claimed.id, claimed.token, error)
                 else:
                     taken = await calls.refuse(s, claimed.tenant_id, claimed.id, claimed.token, error or "unavailable")
         except Exception as e:

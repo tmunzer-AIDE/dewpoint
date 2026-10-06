@@ -475,3 +475,21 @@ def test_a_verification_shows_only_a_fixed_code() -> None:
 
     assert shown_code("egress_refused") == "egress_refused"
     assert shown_code("whatever a worker wrote") == "unavailable"
+
+
+async def test_options_whose_connection_changed_before_they_return_are_refused(
+    app, owner_sessionmaker, api_settings, unserved, fake, monkeypatch
+) -> None:
+    """The API checks the revision again before returning a worker's options (the owner's review of 3a-2, finding 3)."""
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    async with c:
+        cid = await _connection(c, tid, fake[1].port)
+
+        async def answered_then_edited(*args: Any, **kwargs: Any) -> asking.Outcome:
+            async with owner_sessionmaker() as s, s.begin():
+                await s.execute(text("update connections set revision = revision + 1 where id = :c"), {"c": cid})
+            return asking.Outcome(answer={"options": [{"value": "s1", "label": "Site 1"}]})
+
+        monkeypatch.setattr(asking, "ask_and_wait", answered_then_edited)
+        r = await c.post(_options(tid), json={"field": "site_id", "connection_id": cid, "query": ""})
+    assert (r.status_code, r.json()) == (409, {"error": "connection_changed"})

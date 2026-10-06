@@ -11,6 +11,7 @@ from dewpoint.apps.api.deps import get_keyring
 from dewpoint.core.authz.permissions import ROLE_PERMISSIONS, P
 from dewpoint.core.connections.declared import declared_types
 from dewpoint.core.crypto.keyring import Keyring
+from dewpoint.core.db import tenant_scope
 from dewpoint.core.http import TenantContext, active_session, get_db, require
 from dewpoint.core.models.connections import Connection
 from dewpoint.core.plugins import asking, calls, registry
@@ -90,6 +91,19 @@ async def ask_and_wait(
         raise HTTPException(429, detail={"error": "too_many_plugin_calls"}) from None
 
 
+async def still_current(request: Request, tenant_id: uuid.UUID, connection_id: uuid.UUID, revision: int) -> None:
+    """Options are returned only while their connection is still the revision asked through (the owner's review of
+    3a-2, finding 3): otherwise 409 `connection_changed`."""
+    async with request.app.state.sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant_id)
+        found = await s.execute(
+            select(Connection.revision).where(Connection.id == connection_id, Connection.tenant_id == tenant_id)
+        )
+        current = found.scalar_one_or_none()
+    if current != revision:
+        raise HTTPException(409, detail={"error": "connection_changed"})
+
+
 @router.post("/t/{tenant_id}/node-types/{ref}/options")
 async def node_options(
     ref: str,
@@ -131,4 +145,7 @@ async def node_options(
             query=body.query, type_hash=type_hash,
         )  # fmt: skip
 
-    return options_reply(await ask_and_wait(request, db, keyring, ctx.tenant_id, ask))
+    reply = options_reply(await ask_and_wait(request, db, keyring, ctx.tenant_id, ask))
+    if body.connection_id is not None and revision is not None:
+        await still_current(request, ctx.tenant_id, body.connection_id, revision)
+    return reply
