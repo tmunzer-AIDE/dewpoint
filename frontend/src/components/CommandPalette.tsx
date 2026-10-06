@@ -8,9 +8,11 @@ import { Command } from "cmdk";
 import { useEffect, useRef, useState } from "react";
 import { client, ok } from "../lib/client";
 
+// The selected option never takes focus (the search field keeps it), so it carries its own 3:1 outline (WCAG 1.4.11).
 const ITEM =
   "flex cursor-pointer items-center justify-between gap-4 rounded-md px-3 py-2 text-body " +
-  "data-[selected=true]:bg-accent-soft data-[selected=true]:text-accent-ink";
+  "data-[selected=true]:bg-accent-soft data-[selected=true]:text-accent-ink " +
+  "data-[selected=true]:outline-2 data-[selected=true]:-outline-offset-2 data-[selected=true]:outline-focus";
 const GROUP = "[&_[cmdk-group-heading]]:px-3 [&_[cmdk-group-heading]]:pt-2 [&_[cmdk-group-heading]]:pb-1 " +
   "[&_[cmdk-group-heading]]:text-small [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted";
 
@@ -55,9 +57,9 @@ export function CommandPalette() {
         type="button"
         onClick={() => setOpen(true)}
         aria-keyshortcuts="Meta+K Control+K"
-        className="inline-flex min-h-9 w-80 items-center gap-2.5 rounded-lg border border-line bg-surface-2 px-3 text-small text-muted hover:bg-surface-hover"
+        className="inline-flex min-h-9 min-w-0 flex-1 basis-40 items-center gap-2.5 rounded-lg border border-line bg-surface-2 px-3 text-small text-muted hover:bg-surface-hover sm:w-80 sm:flex-none"
       >
-        Search or jump to…
+        <span className="truncate">Search or jump to…</span>
         <kbd aria-hidden="true" className="ml-auto rounded-sm border border-line-strong px-1.5 font-mono text-meta">⌘K</kbd>
       </button>
       <dialog
@@ -70,7 +72,7 @@ export function CommandPalette() {
           <Command label="Search or jump to" loop>
             <Command.Input
               placeholder="Type a page or a tenant"
-              className="w-full border-b border-line bg-transparent px-4 py-3 text-body-lg text-ink placeholder:text-muted focus-visible:outline-none"
+              className="w-full rounded-t-dialog border-b border-line bg-transparent px-4 py-3 text-body-lg text-ink placeholder:text-muted focus-visible:-outline-offset-2"
             />
             <Command.List className="max-h-80 overflow-y-auto p-1">
               <Command.Empty className="px-3 py-2 text-body text-muted">Nothing matches.</Command.Empty>

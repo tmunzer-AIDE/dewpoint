@@ -11,6 +11,7 @@ import { QueryCache, QueryClient, QueryClientProvider } from "@tanstack/react-qu
 import { RouterProvider } from "@tanstack/react-router";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { applyTheme, readTheme } from "./components/ThemeSelect";
 import { ApiError } from "./lib/client";
 import { raiseStepUpRequired } from "./lib/events";
 import { router } from "./router";
@@ -25,6 +26,8 @@ const queryClient = new QueryClient({
     queries: { retry: (count, e) => !(e instanceof ApiError && e.status < 500) && count < 2 },
   },
 });
+
+applyTheme(readTheme()); // before the first paint, so a remembered theme never flashes the other one
 
 const root = document.getElementById("root");
 if (root) {

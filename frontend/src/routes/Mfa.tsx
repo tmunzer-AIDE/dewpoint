@@ -5,6 +5,7 @@ import { Field } from "../components/Field";
 import { ApiError, client, ok } from "../lib/client";
 import { useAfterAuth } from "../lib/useAfterAuth";
 import { authenticatePasskey } from "../lib/webauthn";
+import { useDocumentTitle } from "../lib/title";
 
 const MESSAGES: Record<string, string> = {
   invalid_code: "That code didn't work.",
@@ -13,6 +14,7 @@ const MESSAGES: Record<string, string> = {
 };
 
 export function MfaPage() {
+  useDocumentTitle("Confirm it's you");
   const afterAuth = useAfterAuth();
   const [recovery, setRecovery] = useState(false);
   const [code, setCode] = useState("");

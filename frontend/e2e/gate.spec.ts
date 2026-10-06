@@ -20,6 +20,16 @@ test("the served CSP refuses a request to another origin, and the gate sees it",
   gate.clear();
 });
 
+test("a resource that fails to load is a problem, unlike an API's 4xx answer", async ({ page, gate }) => {
+  await page.goto("/login");
+  await page.evaluate(() => fetch("/assets/no-such-font.woff2").catch(() => undefined));
+  await expect.poll(() => gate.problems.join("\n")).toMatch(/http 404: \/assets\/no-such-font\.woff2/);
+  gate.clear();
+  await page.evaluate(() => fetch("/api/v1/auth/session").catch(() => undefined)); // 401: the API's contract
+  await page.waitForTimeout(300);
+  expect(gate.problems).toEqual([]);
+});
+
 test("axe reports text below 4.5:1", async ({ page }) => {
   await page.goto("/login");
   await page.evaluate(() => {

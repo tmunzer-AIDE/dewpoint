@@ -15,7 +15,7 @@ export function SettingsLayout({ tenantId }: { tenantId: string }) {
   return (
     <section className="flex flex-col gap-3.5 p-6">
       <h1 className="text-h1 font-semibold">Settings{tenant.data ? ` · ${tenant.data.name}` : ""}</h1>
-      <nav aria-label="Settings" className="flex gap-1 border-b border-line">
+      <nav aria-label="Settings" className="flex gap-1 overflow-x-auto border-b border-line">
         <Link
           to="/t/$tenantId/settings/members"
           params={{ tenantId }}

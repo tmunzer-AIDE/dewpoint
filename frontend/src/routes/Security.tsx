@@ -4,13 +4,14 @@ import { useState, type FormEvent } from "react";
 import { Button } from "../components/Button";
 import { Field } from "../components/Field";
 import { ApiError, client, ok } from "../lib/client";
+import { useDocumentTitle } from "../lib/title";
 import { needsReauth } from "../lib/reauth";
 import { useSession } from "../lib/session";
 import { authenticatePasskey, registerPasskey } from "../lib/webauthn";
 import { RecoveryCodes, TotpSetup } from "./Enroll";
 
 /** Prove a second factor again, then retry the action that asked for it. */
-function ReauthPrompt({ onDone, onCancel }: { onDone: () => void; onCancel: () => void }) {
+export function ReauthPrompt({ onDone, onCancel }: { onDone: () => void; onCancel: () => void }) {
   const [code, setCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   async function viaTotp(e: FormEvent) {
@@ -31,10 +32,10 @@ function ReauthPrompt({ onDone, onCancel }: { onDone: () => void; onCancel: () =
     }
   }
   return (
-    <form onSubmit={(e) => void viaTotp(e)} role="dialog" aria-label="Confirm it's you"
+    <form onSubmit={(e) => void viaTotp(e)} aria-label="Confirm it's you"
       className="flex max-w-md flex-col gap-3 rounded-lg border border-line bg-surface p-5">
       <p className="text-body">Confirm it's you before changing sign-in methods.</p>
-      <Field label="Authenticator code" inputMode="numeric" autoComplete="one-time-code" value={code}
+      <Field label="Authenticator code" inputMode="numeric" autoComplete="one-time-code" autoFocus value={code}
         onChange={(e) => setCode(e.target.value)} data-testid="reauth-code" />
       {error && <p role="alert" className="text-body text-danger">{error}</p>}
       <div className="flex gap-2">
@@ -47,6 +48,7 @@ function ReauthPrompt({ onDone, onCancel }: { onDone: () => void; onCancel: () =
 }
 
 export function SecurityPage() {
+  useDocumentTitle("Security");
   const qc = useQueryClient();
   const session = useSession();
   const passkeys = useQuery({ queryKey: ["passkeys"], queryFn: () => ok(client.GET("/api/v1/auth/passkeys")) });

@@ -2,7 +2,8 @@
 import { useId, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes } from "react";
 
 // A control's boundary is 3:1 against its surface (line-control, WCAG 1.4.11); red when its value is refused.
-const CONTROL = "min-h-11 rounded-lg border bg-surface px-3 text-body-lg text-ink";
+// Full width of its column, never wider: an input's own width (20 characters) would push a narrow screen sideways.
+const CONTROL = "min-h-11 w-full min-w-0 rounded-lg border bg-surface px-3 text-body-lg text-ink placeholder:text-muted";
 
 interface Labelled {
   label: string;

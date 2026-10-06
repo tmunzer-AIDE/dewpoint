@@ -12,8 +12,10 @@ declare global {
 }
 
 /** The browser logs an API's 4xx answer as a console error; those answers are the app's contract (a wrong password,
- * a missing session), not a fault. 5xx answers, and everything else, stay problems. */
+ * a missing session), not a fault. Only those are exempt: a 4xx on anything else (a font, a script, the hatch) and
+ * every 5xx stay problems. */
 const EXPECTED_HTTP = /^Failed to load resource: the server responded with a status of 4\d\d\b/;
+const isApi = (url: string) => /^\/api\//.test(new URL(url).pathname);
 
 export interface Gate {
   /** What the gate has seen so far: each a short line naming its kind. */
@@ -34,7 +36,12 @@ export const test = base.extend<{ gate: Gate }>({
         );
       });
       page.on("console", (m) => {
-        if (m.type() === "error" && !EXPECTED_HTTP.test(m.text())) problems.push(`console: ${m.text()}`);
+        if (m.type() !== "error") return;
+        const apiAnswer = EXPECTED_HTTP.test(m.text()) && !!m.location().url && isApi(m.location().url);
+        if (!apiAnswer) problems.push(`console: ${m.text()}`);
+      });
+      page.on("response", (r) => {
+        if (r.status() >= 400 && !isApi(r.url())) problems.push(`http ${r.status()}: ${new URL(r.url()).pathname}`);
       });
       page.on("pageerror", (e) => problems.push(`pageerror: ${e.name}: ${e.message}`));
       page.on("request", (r) => {

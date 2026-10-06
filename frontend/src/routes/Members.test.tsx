@@ -91,4 +91,13 @@ it("removes a member only after confirming, by name", async () => {
   expect(confirm.textContent).toContain("ed@corp.test");
   await userEvent.click(within(confirm).getByRole("button", { name: "Remove" }));
   expect(sent.find((r) => r.method === "DELETE")?.path).toBe("/api/v1/t/t1/members/u2");
+  // The row and its button are gone: focus goes to the list's heading, not to the page's body.
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Members" })));
+});
+
+it("names the page in the browser's title, and heads its list by what it holds", async () => {
+  show();
+  await screen.findByText("ed@corp.test");
+  expect(document.title).toBe("Members & roles · Dewpoint");
+  expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Members");
 });

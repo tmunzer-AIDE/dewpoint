@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Button } from "../components/Button";
 import { Field, Select } from "../components/Field";
 import { StatusBadge } from "../components/StatusBadge";
 import { Table, Td, Th } from "../components/Table";
 import { ApiError, client, ok } from "../lib/client";
+import { useDocumentTitle } from "../lib/title";
 
 /** A Mist connection's config, as the Mist connection type declares it. */
 interface MistConfig {
@@ -23,7 +24,18 @@ export function ConnectionsPage({ tenantId }: { tenantId: string }) {
   const types = useQuery({ queryKey: ["connection-types"], queryFn: () => ok(client.GET("/api/v1/connection-types")) });
   const clouds = types.data?.find((t) => t.key === "mist")?.clouds ?? {};
   const [open, setOpen] = useState(false);
-  const [form, setForm] = useState({ name: "", cloud: "global_01", org_id: "", api_token: "" });
+  const empty = { name: "", cloud: "global_01", org_id: "", api_token: "" };
+  const [form, setForm] = useState(empty);
+  const addButton = useRef<HTMLButtonElement>(null);
+  useDocumentTitle("Connections");
+
+  /** Closes the form, forgets what was typed (a token included) and gives focus back to the button that opened it. */
+  function close() {
+    setOpen(false);
+    setForm(empty);
+    setError(null);
+    addButton.current?.focus();
+  }
   const [error, setError] = useState<string | null>(null);
   const refresh = () => qc.invalidateQueries({ queryKey: ["connections", tenantId] });
 
@@ -37,8 +49,7 @@ export function ConnectionsPage({ tenantId }: { tenantId: string }) {
         },
       })),
     onSuccess: async () => {
-      setOpen(false);
-      setForm({ name: "", cloud: "global_01", org_id: "", api_token: "" });
+      close();
       await refresh();
     },
     onError: (e) => setError(e instanceof ApiError && e.code === "name_taken" ? "A connection with this name exists."
@@ -67,14 +78,14 @@ export function ConnectionsPage({ tenantId }: { tenantId: string }) {
     <section className="flex flex-col gap-4 p-6">
       <h1 className="text-h1 font-semibold">Connections</h1>
       {verifyError && <p role="alert" className="text-body text-danger">{verifyError}</p>}
-      <div className={`grid gap-5 ${open ? "grid-cols-[minmax(0,1fr)_400px]" : "grid-cols-1"}`}>
+      <div className={`grid grid-cols-1 gap-5 ${open ? "xl:grid-cols-[minmax(0,1fr)_400px]" : ""}`}>
         <div className="flex min-w-0 flex-col gap-2.5">
-          <div className="flex items-end justify-between gap-4">
+          <div className="flex flex-wrap items-end justify-between gap-4">
             <div>
               <h2 className="text-body-lg font-semibold">Mist connections</h2>
               <p className="mt-0.5 text-small text-muted">Org-scoped API tokens. Privilege is read from Mist at verification.</p>
             </div>
-            <Button variant="primary" size="md" onClick={() => setOpen(true)} data-testid="conn-add">
+            <Button ref={addButton} variant="primary" size="md" onClick={() => setOpen(true)} data-testid="conn-add">
               Add Mist connection
             </Button>
           </div>
@@ -118,7 +129,7 @@ export function ConnectionsPage({ tenantId }: { tenantId: string }) {
             {error && <p role="alert" className="text-body text-danger">{error}</p>}
             <div className="flex gap-2">
               <Button variant="primary" type="submit" disabled={create.isPending} data-testid="conn-save">Save</Button>
-              <Button onClick={() => setOpen(false)}>Cancel</Button>
+              <Button onClick={close}>Cancel</Button>
             </div>
           </form>
         )}

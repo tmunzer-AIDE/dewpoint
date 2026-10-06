@@ -197,3 +197,34 @@ cover local work only: anything outward-facing (push, PR, issues) is confirmed i
 43. Ruling: removing a member asks first, in a native modal dialog (D23) whose focus starts on Cancel, naming who
     loses access to which tenant; the browser gate opens it, runs axe and closes it with Escape. `Button` takes a ref
     (React 19's `ComponentProps<"button">`) - none.
+
+### 4a, the pre-checkpoint review (2026-10-06)
+
+A fresh-context reviewer read 3cc32fa..cfe2c14 against the owner's checklist: nothing critical; six important and
+thirteen minor findings. What became of each:
+
+44. Fixed: I1, the licence step stopped the frontend job and so the e2e browser gate; it is now its own job
+    (`frontend-licences`), still red until the owner's review. I2, the palette's selected option showed only a 1.2:1
+    fill; it now carries the 3:1 focus outline. I3, the gate exempted a 4xx on any resource; only the API's answers
+    are exempt now, and a failed font, script or image is a problem (a self-test proves it). I4, the guard missed
+    Tailwind v4's gradients (`bg-linear-*`, `bg-radial-*`, `bg-conic-*`), side stripes (`border-s-*`, `border-e-*`),
+    non-token shadows, text shadows and motion over 150 ms; it catches them now. I5, D6's theme choice was missing:
+    a header select (system, light, dark) remembered in this browser, applied before the first paint.
+45. Ruling: I6 isn't 4a's: the API (and every process) logs unhandled errors with structlog's defaults, a traceback
+    with local variables, so a password or a CSRF token can reach the logs. It is on `main` today; a separate task
+    configures logging without locals, with a regression test - the leak stays until that task merges.
+46. Fixed (minors): base rules moved into `@layer base`, so a utility can override them, and the palette's field draws
+    an inset ring (M1); placeholders in muted ink (M2); focus returns to the opener when the add-connection form
+    closes, and to the members heading after a removal (M3); Cancel forgets a typed token (M4); the licence check
+    fails closed on mixed AND/OR (M5); each screen sets its title (M6); the shell reflows to 320 px (M7: below `lg`
+    the rail is the design's 60 px icon rail, the header wraps, tables scroll in their frame, side panels stack; the
+    gate checks four screens at 320 px); an unreadable environment shows a note instead of nothing (M8); the members
+    list is headed "Members" (M9); Security's re-authentication is a named form that focuses its field (M10);
+    ConfirmDialog reports a cancel only when the user cancels (M13).
+47. Ruling (M11): the `Graph` model on the draft PUT waits for 4b, the slice that edits drafts, as ruling 39 has each
+    slice adopt its routes' models - the draft PUT's body stays a free-form object in the schema until then.
+48. Ruling (M12): axe now also checks the open add-connection form, a refused member addition and the authenticator
+    setup; the step-up banner isn't reached (it needs a tenant that requires passkeys, and a session without one) -
+    its contrast rests on the warn pair in PAIRS until a later slice's e2e reaches it.
+49. Not mechanised, left to the checkpoint reviewer's eye: the pill shape off data pills (`rounded-full`,
+    `rounded-pill`) and "!" in UI copy - the guard can't tell a data pill or a code sample from decoration.

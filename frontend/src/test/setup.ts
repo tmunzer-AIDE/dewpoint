@@ -27,3 +27,19 @@ if (!("scrollIntoView" in Element.prototype)) {
 }
 // The router restores scroll on navigation; jsdom only reports that it has no scrolling.
 window.scrollTo = () => undefined;
+// Node 26's own (experimental) localStorage global wins over jsdom's and is undefined without a storage file: an
+// in-memory Storage stands in, as a browser's would.
+if (typeof globalThis.localStorage?.getItem !== "function") {
+  const items = new Map<string, string>();
+  const storage: Storage = {
+    get length() {
+      return items.size;
+    },
+    key: (i) => [...items.keys()][i] ?? null,
+    getItem: (k) => items.get(k) ?? null,
+    setItem: (k, v) => void items.set(k, String(v)),
+    removeItem: (k) => void items.delete(k),
+    clear: () => items.clear(),
+  };
+  Object.defineProperty(globalThis, "localStorage", { value: storage, configurable: true });
+}

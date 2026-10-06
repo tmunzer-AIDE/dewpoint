@@ -24,6 +24,11 @@ it("draws its boundary at 3:1 (line-control), and red with its message when inva
   expect(described).toEqual(["36 characters.", "Enter the UUID from Mist."]);
 });
 
+it("draws its placeholder in muted ink, 4.5:1, since a placeholder may carry the format", () => {
+  render(<Field label="Org ID" placeholder="36-character UUID" />);
+  expect(screen.getByLabelText("Org ID").className).toContain("placeholder:text-muted");
+});
+
 it("gives a select the same label and boundary", () => {
   render(
     <Select label="Mist cloud" value="a" onChange={() => undefined}>

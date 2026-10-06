@@ -7,8 +7,10 @@ import { Field } from "../components/Field";
 import { Table, Td, Th } from "../components/Table";
 import { ApiError, client, ok } from "../lib/client";
 import { useSession } from "../lib/session";
+import { useDocumentTitle } from "../lib/title";
 
 export function TenantsPage() {
+  useDocumentTitle("Tenants");
   const qc = useQueryClient();
   const session = useSession();
   const tenants = useQuery({ queryKey: ["tenants"], queryFn: () => ok(client.GET("/api/v1/tenants")) });

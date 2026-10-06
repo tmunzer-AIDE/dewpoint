@@ -2,11 +2,12 @@
 // The design's table (screens 1a, 1i): a rounded frame, a surface-2 head in small muted type, a hairline per row.
 import type { ReactNode, TdHTMLAttributes } from "react";
 
+/** A narrow screen scrolls the table inside its frame, never the page (WCAG 1.4.10). */
 export function Table({ children, className = "" }: { children: ReactNode; className?: string }) {
   return (
-    <table className={`w-full border-separate border-spacing-0 overflow-hidden rounded-lg border border-line bg-surface text-body ${className}`}>
-      {children}
-    </table>
+    <div className={`max-w-full overflow-x-auto rounded-lg border border-line ${className}`}>
+      <table className="w-full border-separate border-spacing-0 bg-surface text-body">{children}</table>
+    </div>
   );
 }
 

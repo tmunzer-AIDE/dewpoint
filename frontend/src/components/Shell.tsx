@@ -13,9 +13,11 @@ import { CommandPalette } from "./CommandPalette";
 import { ConnectionsIcon, SettingsIcon } from "./icons";
 import { Wordmark } from "./Mark";
 import { TenantSwitcher } from "./TenantSwitcher";
+import { ThemeSelect } from "./ThemeSelect";
 
 // The current item stands apart from a hovered one by weight, ink and a 1.5:1 background step (ledger, ruling 18).
-const ITEM = "flex items-center gap-2.5 rounded-md px-3 py-2 text-body text-rail-ink";
+// Below lg the rail is the design's 60 px icon rail (screens 1c, 1g): labels stay, for assistive technology.
+const ITEM = "flex items-center justify-center gap-2.5 rounded-md px-2 py-2.5 text-body text-rail-ink lg:justify-start lg:px-3 lg:py-2";
 const CURRENT = "bg-rail-active font-semibold text-rail-ink-strong";
 const INACTIVE = "hover:bg-rail-line";
 
@@ -53,9 +55,9 @@ export function Shell() {
   }
 
   return (
-    <div className="grid min-h-screen grid-cols-[var(--rail-w)_minmax(0,1fr)] grid-rows-[var(--header-h)_1fr]">
-      <div data-surface="rail" className="row-span-2 flex flex-col gap-0.5 bg-rail px-3 py-4">
-        <span className="px-2 pt-2 pb-5">
+    <div className="grid min-h-screen grid-cols-[var(--rail-w-collapsed)_minmax(0,1fr)] grid-rows-[auto_1fr] lg:grid-cols-[var(--rail-w)_minmax(0,1fr)]">
+      <div data-surface="rail" className="row-span-2 flex flex-col gap-0.5 bg-rail px-2 py-4 lg:px-3">
+        <span className="flex justify-center px-0 pt-2 pb-5 lg:block lg:px-2">
           <Wordmark />
         </span>
         <nav aria-label="Main" className="flex flex-col gap-0.5">
@@ -68,7 +70,7 @@ export function Shell() {
               inactiveProps={{ className: INACTIVE }}
             >
               <ConnectionsIcon />
-              Connections
+              <span className="sr-only lg:not-sr-only">Connections</span>
             </Link>
           )}
           {params.tenantId && (
@@ -80,19 +82,26 @@ export function Shell() {
               inactiveProps={{ className: INACTIVE }}
             >
               <SettingsIcon />
-              Settings
+              <span className="sr-only lg:not-sr-only">Settings</span>
             </Link>
           )}
         </nav>
       </div>
-      <header className="col-start-2 flex items-center gap-4 border-b border-line bg-surface px-5">
+      <header className="col-start-2 flex min-h-[var(--header-h)] flex-wrap items-center gap-x-4 gap-y-2 border-b border-line bg-surface px-5 py-2.5">
         <TenantSwitcher />
         <CommandPalette />
         <div className="grow" />
+        <ThemeSelect />
         <Link to="/account/security" className="text-body text-muted hover:text-ink">Security</Link>
         <Button size="md" onClick={() => void handleSignOut()}>Sign out</Button>
       </header>
       <main className="col-start-2 flex min-w-0 flex-col">
+        {platform.isError && (
+          <div role="note" aria-label="Deployment" className="border-b border-warn-line bg-warn-bg px-6 py-2 text-small text-warn-ink">
+            This deployment&apos;s environment couldn&apos;t be read. If it&apos;s a development deployment, its runs start
+            without the production gate.
+          </div>
+        )}
         {platform.data?.environment === "development" && (
           // Engine 2b spec §2.1: a development deployment says so on every screen. Amber: check this (D4).
           <div role="note" aria-label="Deployment" className="border-b border-warn-line bg-warn-bg px-6 py-2 text-small text-warn-ink">

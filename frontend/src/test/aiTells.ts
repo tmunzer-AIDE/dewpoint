@@ -3,13 +3,16 @@
  * than slate text); the checkpoint reviewer judges the rest on screen. */
 const RULES: [name: string, pattern: RegExp, tokensExempt?: boolean][] = [
   // A coloured accent stripe on one side of a card, callout or row. One-pixel separators stay.
-  ["accent-border", /\bborder-[lt]-(?:[2-9]|\[)|border-(?:left|top)(?:-width)?\s*:\s*(?:[2-9]|\d{2,})(?:\.\d+)?px/],
-  ["gradient", /gradient/i],
+  ["accent-border", /\bborder-[ltse]-(?:[2-9]|\[)|border-(?:left|top|inline-start|inline-end)(?:-width)?\s*:\s*(?:[2-9]|\d{2,})(?:\.\d+)?px/],
+  // Tailwind v4 names its gradients bg-linear-*, bg-radial-*, bg-conic-*.
+  ["gradient", /gradient|\bbg-(?:linear|radial|conic)(?:-|\b)/i],
   ["blur", /\bbackdrop-|backdrop-filter|\bblur-|filter\s*:\s*blur/],
   // A soft ring around a selected or failed thing. Focus rings (ring-1, ring-2) stay.
-  ["halo", /\bring-(?:[3-9]|\[)|\bring-offset-(?:[3-9]|\[)|box-shadow\s*:\s*0\s+0\s+0\s+(?:[3-9]|\d{2,})px/],
-  ["heavy-shadow", /\bshadow-(?:md|lg|xl|2xl)\b|drop-shadow/],
-  ["decorative-motion", /\banimate-(?:pulse|bounce|ping)\b|shimmer|@keyframes\s+(?:pulse|bounce|ping)\b/],
+  ["halo", /\bring-(?:[3-9]|\[)|\bring-offset-(?:[3-9]|\[)|box-shadow\s*:\s*0\s+0\s+0\s+(?:[3-9]|\d{2,})px|\bshadow-\[/],
+  // Elevation comes from the two token shadows only (shadow-node, shadow-dialog); no coloured or text shadows.
+  ["heavy-shadow", /\bshadow-(?!node\b|dialog\b|\[)[a-z0-9]|drop-shadow|text-shadow/],
+  // Motion only shows a change of state, at most 150 ms (outline §6).
+  ["decorative-motion", /\banimate-(?:pulse|bounce|ping)\b|\banimate-\[|shimmer|@keyframes\s+(?:pulse|bounce|ping)\b|\bduration-(?:[2-9]\d{2}|\d{4,})\b/],
   ["emoji", /\p{Extended_Pictographic}/u],
   ["eyebrow", /\buppercase\b|text-transform\s*:\s*uppercase|\btracking-(?:wide|wider|widest)\b|\btracking-\[0?\.(?:0[5-9]|[1-9])|letter-spacing\s*:\s*0?\.(?:0[5-9]|[1-9])/],
   ["large-radius", /\brounded(?:-[a-z]{1,2})?-(?:xl|2xl|3xl)\b|\brounded(?:-[a-z]{1,2})?-\[(?:9|[1-9]\d+)px\]|border-radius\s*:\s*(?:9|[1-9]\d+)(?:\.\d+)?px/, true],

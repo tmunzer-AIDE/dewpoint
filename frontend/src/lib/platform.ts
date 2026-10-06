@@ -10,5 +10,7 @@ export function usePlatformStatus() {
     queryKey: ["platform-status"],
     queryFn: () => ok(client.GET("/api/v1/platform/status")),
     staleTime: Infinity,
+    retry: 2,
+    retryDelay: 500,
   });
 }

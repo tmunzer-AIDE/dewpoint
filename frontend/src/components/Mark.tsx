@@ -17,7 +17,7 @@ export function Wordmark() {
   return (
     <span className="flex items-center gap-2.5">
       <Mark />
-      <span className="flex flex-col gap-1.5">
+      <span className="hidden flex-col gap-1.5 lg:flex">
         <span className="font-display text-[17px] leading-none font-semibold tracking-[-0.01em] text-rail-ink-strong">
           Dewpoint
         </span>

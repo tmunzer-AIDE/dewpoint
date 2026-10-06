@@ -5,6 +5,7 @@ import { Field } from "../components/Field";
 import { Mark } from "../components/Mark";
 import { ApiError, client, ok } from "../lib/client";
 import { authenticatePasskey } from "../lib/webauthn";
+import { useDocumentTitle } from "../lib/title";
 
 const MESSAGES: Record<string, string> = {
   invalid_credentials: "Email or password is incorrect.",
@@ -50,6 +51,7 @@ export function LoginForm({ onDone }: { onDone: (state: string) => void }) {
 }
 
 export function LoginPage({ navigateByState }: { navigateByState: (s: string) => void }) {
+  useDocumentTitle("Sign in");
   return (
     <main className="grid min-h-screen place-items-center px-4">
       <div className="flex w-full max-w-sm flex-col gap-6">

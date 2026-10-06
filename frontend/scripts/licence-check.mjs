@@ -11,12 +11,13 @@ const ALLOWED = { prod: PROD, all: [...PROD, "MPL-2.0"] };
 
 /**
  * Whether an SPDX expression is within `list`: `A OR B` when either is (the package may be used under it), `A AND B`
- * when both are. Parentheses only group; no expression here nests deeper than one level.
+ * when both are. An expression mixing AND and OR, or nesting parentheses, fails closed: it goes to the owner.
  * @param {string} expression
  * @param {string[]} list
  */
 function allowed(expression, list) {
   const bare = expression.replace(/^\((.*)\)$/, "$1").trim();
+  if (/[()]/.test(bare) || (/\sOR\s/.test(bare) && /\sAND\s/.test(bare))) return false;
   if (/\sOR\s/.test(bare)) return bare.split(/\s+OR\s+/).some((e) => allowed(e, list));
   if (/\sAND\s/.test(bare)) return bare.split(/\s+AND\s+/).every((e) => allowed(e, list));
   return list.includes(bare);
@@ -47,6 +48,7 @@ function selfTest() {
     [{ "(GPL-3.0 OR CC0-1.0)": pkg("neither") }, "all", 1],
     [{ "(MIT AND CC-BY-4.0)": pkg("both") }, "all", 1],
     [{ "(MIT AND ISC)": pkg("both") }, "prod", 0],
+    [{ "(GPL-3.0 OR CC-BY-4.0) AND (Unlicense OR MIT)": pkg("mixed") }, "prod", 1], // mixed: fail closed
   ];
   for (const [listing, scope, count] of cases) {
     const found = unexpected(/** @type {any} */ (listing), /** @type {"prod" | "all"} */ (scope));

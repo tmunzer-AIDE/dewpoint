@@ -15,6 +15,7 @@ export function ConfirmDialog({ open, title, confirmLabel, busy = false, onConfi
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const cancel = useRef<HTMLButtonElement>(null);
+  const closing = useRef(false); // set while the dialog closes because `open` turned false
   useEffect(() => {
     const d = dialog.current;
     if (!d) return;
@@ -22,13 +23,20 @@ export function ConfirmDialog({ open, title, confirmLabel, busy = false, onConfi
       d.showModal();
       cancel.current?.focus();
     }
-    if (!open && d.open) d.close();
+    if (!open && d.open) {
+      closing.current = true;
+      d.close();
+    }
   }, [open]);
   return (
     <dialog
       ref={dialog}
       aria-label={title}
-      onClose={onCancel}
+      onClose={() => {
+        // Escape closes the dialog itself: that's a cancel. A close the caller asked for (after its confirm) isn't.
+        if (closing.current) closing.current = false;
+        else onCancel();
+      }}
       className="mx-auto mt-24 w-[480px] max-w-[calc(100vw-32px)] rounded-dialog border border-line bg-surface p-6 text-ink shadow-dialog backdrop:bg-overlay"
     >
       <h2 className="text-h3 font-semibold">{title}</h2>

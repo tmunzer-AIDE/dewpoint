@@ -2,12 +2,13 @@
 // Settings → Members & roles (D11; the design names the tab in 1i, the tab itself is built in its grammar). Anyone in
 // the tenant reads the list; admins and owners add, change and remove members. The API decides every write.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Button } from "../components/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { Field, Select } from "../components/Field";
 import { Table, Td, Th } from "../components/Table";
 import { ApiError, client, ok, type Schemas } from "../lib/client";
+import { useDocumentTitle } from "../lib/title";
 
 type Member = Schemas["MemberOut"];
 type Role = Member["role"];
@@ -38,6 +39,15 @@ export function MembersPage({ tenantId }: { tenantId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [removing, setRemoving] = useState<Member | null>(null);
   const refresh = () => qc.invalidateQueries({ queryKey: ["members", tenantId] });
+  const heading = useRef<HTMLHeadingElement>(null);
+  const refocus = useRef(false); // after a removal, the row and its button are gone: focus goes to the list's heading
+  useDocumentTitle("Members & roles");
+  useEffect(() => {
+    if (removing === null && refocus.current) {
+      refocus.current = false;
+      heading.current?.focus();
+    }
+  }, [removing]);
 
   const add = useMutation({
     mutationFn: () => ok(client.POST("/api/v1/t/{tenant_id}/members", { params: { path }, body: { email, role } })),
@@ -62,6 +72,9 @@ export function MembersPage({ tenantId }: { tenantId: string }) {
     mutationFn: (user_id: string) =>
       ok(client.DELETE("/api/v1/t/{tenant_id}/members/{user_id}", { params: { path: { ...path, user_id } } })),
     onMutate: () => setError(null),
+    onSuccess: () => {
+      refocus.current = true;
+    },
     onSettled: async () => {
       setRemoving(null);
       await refresh();
@@ -77,7 +90,7 @@ export function MembersPage({ tenantId }: { tenantId: string }) {
   return (
     <div className="flex flex-col gap-2.5">
       <div>
-        <h2 className="text-body-lg font-semibold">Members &amp; roles</h2>
+        <h2 ref={heading} tabIndex={-1} className="text-body-lg font-semibold">Members</h2>
         <p className="mt-0.5 text-small text-muted">
           Who can use this tenant, and what they can do. Accounts are created by a platform admin.
         </p>
@@ -118,11 +131,11 @@ export function MembersPage({ tenantId }: { tenantId: string }) {
         </tbody>
       </Table>
       {canManage && (
-        <form onSubmit={submit} aria-label="Add a member" className="flex max-w-3xl items-end gap-3 rounded-lg border border-line bg-surface p-4">
-          <div className="grow">
+        <form onSubmit={submit} aria-label="Add a member" className="flex max-w-3xl flex-wrap items-end gap-3 rounded-lg border border-line bg-surface p-4">
+          <div className="min-w-0 grow basis-48">
             <Field label="Email" type="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
           </div>
-          <div className="w-44">
+          <div className="min-w-0 basis-44">
             <Select label="Role" value={role} onChange={(e) => setRole(e.target.value as Role)}>
               {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
             </Select>

@@ -6,6 +6,7 @@ import { Field } from "../components/Field";
 import { ApiError, client, ok } from "../lib/client";
 import { useAfterAuth } from "../lib/useAfterAuth";
 import { registerPasskey } from "../lib/webauthn";
+import { useDocumentTitle } from "../lib/title";
 
 /** Two-step TOTP setup: show the QR code and secret, then confirm a code. Reused by the security page. */
 export function TotpSetup({
@@ -94,6 +95,7 @@ export function RecoveryCodes({ codes, onDone }: { codes: string[]; onDone: () =
 }
 
 export function EnrollPage() {
+  useDocumentTitle("Set up a second factor");
   const afterAuth = useAfterAuth();
   const [codes, setCodes] = useState<{ list: string[]; state: string } | null>(null);
   const [error, setError] = useState<string | null>(null);

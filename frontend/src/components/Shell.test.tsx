@@ -14,11 +14,16 @@ import { Shell } from "./Shell";
 const TENANTS = [{ id: "t1", name: "Acme Retail", slug: "acme-retail", role: "admin", require_passkey: false }];
 
 let environment: string | null = "production";
+let statusFails = false;
 
 beforeEach(() => {
   environment = "production";
+  statusFails = false;
   vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
     const url = input instanceof Request ? input.url : input.toString();
+    if (statusFails && url.endsWith("/api/v1/platform/status")) {
+      return Promise.resolve(new Response(JSON.stringify({ error: "internal_error" }), { status: 500 }));
+    }
     const body = url.endsWith("/api/v1/platform/status")
       ? { environment, production_runs: false }
       : TENANTS;
@@ -92,5 +97,18 @@ it("offers Settings beside Connections, current on its pages", async () => {
   const settings = screen.getByRole("link", { name: "Settings" });
   expect(settings.getAttribute("aria-current")).toBe("page");
   expect(screen.getByRole("link", { name: "Connections" }).getAttribute("aria-current")).toBeNull();
+});
+
+it("says so when the deployment's environment can't be read, rather than staying silent", async () => {
+  statusFails = true;
+  await renderAt("/t/t1/connections");
+  const note = await screen.findByRole("note", { name: "Deployment" }, { timeout: 4000 });
+  expect(note.textContent).toContain("couldn't be read");
+});
+
+it("offers a theme choice in the header: the OS's, light or dark (D6)", async () => {
+  await renderAt("/t/t1/connections");
+  const theme = screen.getByRole("combobox", { name: "Theme" });
+  expect(screen.getByRole("banner").contains(theme)).toBe(true);
 });
 

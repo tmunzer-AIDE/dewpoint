@@ -74,6 +74,14 @@ it("goes where the chosen item points, then closes", async () => {
   expect(dialog().hasAttribute("open")).toBe(false);
 });
 
+it("outlines the selected option, which never takes focus itself (WCAG 1.4.11)", async () => {
+  await renderAt("/t/t1/connections");
+  fireEvent.keyDown(document, { key: "k", metaKey: true });
+  const selected = (await screen.findAllByRole("option")).find((o) => o.getAttribute("data-selected") === "true")!;
+  expect(selected.className).toMatch(/data-\[selected=true\]:outline-2\b/);
+  expect(selected.className).toMatch(/data-\[selected=true\]:outline-focus\b/);
+});
+
 it("offers a tenant's pages only once a tenant is chosen", async () => {
   await renderAt("/tenants");
   fireEvent.keyDown(document, { key: "k", metaKey: true });

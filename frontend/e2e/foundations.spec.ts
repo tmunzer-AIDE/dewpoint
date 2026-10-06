@@ -43,11 +43,14 @@ test.describe.serial("foundations", () => {
     await expect(page.getByRole("menuitem", { name: /Acme Retail/ })).toBeVisible();
     await expectAccessible(page, "tenant menu");
     await page.getByRole("menuitem", { name: /Acme Retail/ }).click();
+    await expect(page).toHaveURL(/\/t\/[0-9a-f-]+\/connections/);
+    const connectionsPath = new URL(page.url()).pathname;
     // This stack is a development deployment (Compose's dev override): every signed-in screen says so.
     await expect(page.getByRole("note", { name: "Deployment" })).toContainText("Development deployment");
     await expectAccessible(page, "connections");
 
     await page.getByTestId("conn-add").click();
+    await expectAccessible(page, "connections, adding one");
     await page.getByTestId("conn-name").fill("Acme Prod");
     await page.getByTestId("conn-cloud").selectOption("emea_01");
     await page.getByTestId("conn-org").fill("6a1f6c34-6e8e-4b35-9a4c-1f0b8f1f2c11");
@@ -67,6 +70,7 @@ test.describe.serial("foundations", () => {
     await page.getByLabel("Email").fill("nobody@example.com");
     await page.getByRole("button", { name: "Add member" }).click();
     await expect(page.getByRole("alert")).toContainText("No Dewpoint account has that email");
+    await expectAccessible(page, "settings: members, a refused addition");
     await page.getByRole("button", { name: `Remove ${EMAIL}` }).click();
     const confirm = page.getByRole("dialog", { name: "Remove a member" });
     await expect(confirm).toBeVisible();
@@ -86,6 +90,18 @@ test.describe.serial("foundations", () => {
     await page.keyboard.type("secur");
     await page.keyboard.press("Enter");
     await expect(page).toHaveURL(/\/account\/security/);
+
+    // Reflow (WCAG 1.4.10): at 320 CSS pixels (1280 at 400 % zoom), no screen scrolls sideways, and each stays AA.
+    await page.setViewportSize({ width: 320, height: 640 });
+    const membersPath = connectionsPath.replace("/connections", "/settings/members");
+    for (const path of [connectionsPath, membersPath, "/account/security", "/tenants"]) {
+      await page.goto(path);
+      await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+      const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      expect(overflow, `${path} scrolls sideways at 320 px`).toBeLessThanOrEqual(0);
+      await expectAccessible(page, `${path} at 320 px`);
+    }
+    await page.setViewportSize({ width: 1280, height: 720 });
   });
 
   test("passkey added with a virtual authenticator signs in without a password", async ({ page }) => {
@@ -103,6 +119,11 @@ test.describe.serial("foundations", () => {
     await expect(page).toHaveURL(/\/tenants/); // wait: the MFA response rotates the session cookie
     await page.goto("/account/security");
     await expectAccessible(page, "security");
+    // Setting up an authenticator: its QR code and key, or the re-authentication it asks for first.
+    await page.getByRole("button", { name: "Set up or replace authenticator app" }).click();
+    await page.getByTestId("totp-start").click();
+    await expect(page.getByTestId("totp-secret").or(page.getByRole("form", { name: "Confirm it's you" }))).toBeVisible();
+    await expectAccessible(page, "security: authenticator setup");
     page.once("dialog", (d) => void d.accept("E2E key"));
     await page.getByTestId("passkey-add").click();
     await expect(page.getByText("E2E key")).toBeVisible();

@@ -111,6 +111,12 @@ describe("the Tailwind theme (theme.css, app.css)", () => {
     }
   });
 
+  it("keeps its base rules in the base layer, so utilities can override them", () => {
+    const layer = themeCss.slice(themeCss.indexOf("@layer base {"));
+    expect(themeCss).toContain("@layer base {");
+    for (const rule of [":focus-visible {", "html,", "h1,", "code, kbd, pre, samp, .font-mono {"]) expect(layer).toContain(rule);
+  });
+
   it("turns JetBrains Mono's ligatures off, so code shows what was typed (`!=`, never `≠`)", () => {
     expect(themeCss).toMatch(/code,\s*kbd,\s*pre,\s*samp,\s*\.font-mono\s*\{[^}]*font-variant-ligatures:\s*none;/);
   });
