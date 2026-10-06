@@ -269,3 +269,40 @@ three gaps in what the fixes claimed. What became of each:
     served from 'self' (the CSP is unchanged), so it is set before the first paint rather than after the deferred
     bundle; a gate self-test proves a 4xx console line from anything but the API is a problem (it fails against the
     old exemption); the base-layer test checks its rules sit inside the layer and nowhere else.
+
+### Owner, 4a checkpoint (2026-10-06, pasted)
+
+- 4a's look approved, the palette, the confirmation dialog and Members included (no separate design pass); 124
+  contrast pairs pass. The push held for one finding: a connection draft survived a tenant switch and saved to the
+  other tenant (ruling 60).
+- Licences: exceptions approved for exactly `isbot@5.2.2` (Unlicense, production and the whole tree),
+  `minimatch@10.2.6` (BlueOak-1.0.0), `caniuse-lite@1.0.30001810` (CC-BY-4.0), `@csstools/color-helpers@5.1.0`
+  (MIT-0) and `argparse@2.0.1` (Python-2.0), the last four dev-only - not the licences in general. Licence texts,
+  copyright and attribution notices are kept, with change notices if licensed material is modified; a scope
+  promotion or a version change goes back to review.
+- SPDX: `OR` passes when an allowed alternative is selected, and the check reports it (`type-fest → MIT`); `AND`
+  needs every licence; unsupported expressions fail closed.
+- The 406 serial backend tests: time about 20 representative ones, expensive fixtures included, and report the
+  timing and an estimated range before running all 406.
+- Push and PR after the tenant-switch fix and passing local checks: `[skip ci]` on the next genuine checkpoint
+  commit, no amended commits; record that Actions did not run. No merge ruling on #41 from this review.
+
+### 4a, after the checkpoint (2026-10-06)
+
+60. Fixed: a tenant's screens (Connections, Settings and Members) are keyed by the tenant in the router, so switching
+    tenants mounts them afresh - the router alone reuses a screen whose route stays and only its parameter changes.
+    Nothing typed for one tenant (a token, an email) can be saved to another, and a save still on its way for the old
+    tenant lands on a screen that is gone, never on the new tenant's form. Tests on the app's own routes cover an
+    unsaved draft, an in-flight save and a member being added; with the key removed, the two connection tests fail.
+61. The licence exceptions are in `scripts/licence-check.mjs` as the owner listed them: name, version, licence and
+    scope must all match (a dev-only package in the production list fails), and each applied exception and each OR
+    choice is reported. Notices: none of the six ships - `isbot` is imported only by TanStack Router's server-side
+    stream renderer, which this app doesn't use, and a build holds none of its code; the dev-only five are build
+    tools and data - and none is modified, so no notice or change notice is due today; if one starts to ship, it
+    goes back to review. Open, for the owner: the bundle keeps React's `@license` comments, but most MIT packages
+    carry none, so the shipped bundle doesn't reproduce their notices; a generated third-party notices file would.
+62. The serial group's sample: 23 of the 406 (each gate file's expensive test - cost, determinism, replay, hostile
+    bombs, task cost, estimator - each evaluator file, one test from each other file but four small ones): 22 passed
+    and 1 skipped (`test_limits.py` is Linux only: its 7 tests skip on macOS) in 47 s, of which about 32 s is
+    collection and imports. The slowest: the replay in five processes 5.0 s, the task cost 3.5 s setup and 2.4 s.
+    Estimate for all 406 here: 2 to 5 minutes. Not run until the owner says.

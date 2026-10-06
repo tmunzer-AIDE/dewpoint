@@ -27,14 +27,19 @@ function Login() {
   return <LoginPage navigateByState={(state) => void afterAuth(state)} />;
 }
 
+// A tenant's screens are keyed by the tenant: switching tenants mounts them afresh, so nothing typed for one tenant (a
+// connection's token, a member's email) can be sent to another, and an answer still on its way for the old tenant
+// lands on a screen that is gone rather than on the new tenant's form. The router alone reuses a screen whose route
+// stays the same and only its parameters change.
+
 function Connections() {
   const { tenantId } = useParams({ from: "/app/t/$tenantId/connections" });
-  return <ConnectionsPage tenantId={tenantId} />;
+  return <ConnectionsPage key={tenantId} tenantId={tenantId} />;
 }
 
 function Settings() {
   const { tenantId } = useParams({ from: "/app/t/$tenantId/settings" });
-  return <SettingsLayout tenantId={tenantId} />;
+  return <SettingsLayout key={tenantId} tenantId={tenantId} />;
 }
 
 function SettingsIndex() {
@@ -44,7 +49,7 @@ function SettingsIndex() {
 
 function Members() {
   const { tenantId } = useParams({ from: "/app/t/$tenantId/settings/members" });
-  return <MembersPage tenantId={tenantId} />;
+  return <MembersPage key={tenantId} tenantId={tenantId} />;
 }
 
 const rootRoute = createRootRoute({ component: Outlet });
@@ -65,7 +70,8 @@ const settingsRoute = createRoute({ getParentRoute: () => appRoute, path: "/t/$t
 const settingsIndexRoute = createRoute({ getParentRoute: () => settingsRoute, path: "/", component: SettingsIndex });
 const membersRoute = createRoute({ getParentRoute: () => settingsRoute, path: "members", component: Members });
 
-const routeTree = rootRoute.addChildren([
+/** The app's routes; the router below serves them from the browser's history (tests serve them from memory). */
+export const routeTree = rootRoute.addChildren([
   loginRoute,
   mfaRoute,
   enrollRoute,
