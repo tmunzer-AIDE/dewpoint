@@ -1087,9 +1087,9 @@ is committed an erasure can be stopped and retried, never reversed (D3a). `docs/
   needs proof that nothing of the tenant fires after its schedules were verified paused, which holds (each create is
   under its own incarnation, so a late create can't be unpaused, and the erasure covers every incarnation, §8.2), and
   that every schedule tick closed by a known time, which doesn't: ticks retry without limit, with no execution timeout
-  (§8.2), and a schedule whose overlap allows all doesn't list its running ticks (a contract test). Every erasure
-  reaches stage 90, its data, keys and executions gone, and holds there (`firing_bound_unproven`, alerted on) until a
-  design that proves it is ruled on.
+  (§8.2), and a schedule whose overlap allows all doesn't list its running ticks (a contract test). An erasure that
+  reaches stage 90, its data, keys and executions gone, holds there (`firing_bound_unproven`, alerted on) until a
+  design that proves it is ruled on; one stopped, or failing, stays at an earlier stage.
 - **The final check** describes again every schedule and execution the erasure found or kept and lists the tenant's
   prefix in visibility. Anything found **reopens** it (`tenant.erasure.incident`, alert `erasure_incident`): its
   schedules from stage 31, its executions from stage 60, each with its own bound. Nothing found, and no row or key
@@ -1603,7 +1603,10 @@ scaling by its D9):
 
   A possibly missed, unknown or pending span is never counted and never shown as a zero: the schedule's
   `accounting_complete` is false and `uncounted_intervals` lists it (`from`, `to`, null while open, `class` and
-  `reason`). A recorded one is audited (`schedule.unaccounted`) and alerted on (`schedule_firings_unaccounted`).
+  `reason`). One the sync records is audited (`schedule.unaccounted`) and alerted on (`schedule_firings_unaccounted`).
+  The `before_migration` spans are the exception: migration 0040 writes one for each schedule from before 2b-4a, and
+  audits and alerts on none, rather than raising an alert for every existing schedule at the upgrade; the API still
+  lists each.
 - **A tick records its own firing** (revision 10): its workflow and run ids (`schedule_firings`, identifiers only), as
   its first act, a skip included, for an erasure's inventory (§6.5); kept 31 days, whatever the tenant's retention.
 
