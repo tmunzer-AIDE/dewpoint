@@ -160,3 +160,17 @@ async def test_moving_a_connection_to_another_host_needs_its_secret_again(
     assert (refused.status_code, refused.json()) == (422, {"error": "secret_required"})
     assert same_host.status_code == 200
     assert with_secret.status_code == 200 and with_secret.json()["config"]["cloud"] == "global_01"
+
+
+async def test_cooldowns_of_a_config_its_type_no_longer_accepts_are_unknown(
+    app, owner_sessionmaker, api_settings
+) -> None:
+    """A stored config the synced declaration refuses (a plugin upgrade added a scope field) shows no cooldowns
+    instead of failing with the decrypted secret in scope (the 3a-2 review's finding 6)."""
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    async with c:
+        cid = (await c.post(f"/api/v1/t/{tid}/connections", json=BODY)).json()["id"]
+        async with owner_sessionmaker() as s, s.begin():
+            await s.execute(text('update connections set config = \'{"cloud": "emea_01"}\' where id = :c'), {"c": cid})
+        r = await c.get(f"/api/v1/t/{tid}/connections/{cid}")
+    assert r.status_code == 200 and r.json()["cooldowns"] is None

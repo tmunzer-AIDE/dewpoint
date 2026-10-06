@@ -379,16 +379,17 @@ async def cooldowns(s: AsyncSession, keyring: Keyring, conn: Connection) -> list
     if not kind.rate_scopes:
         return []
     try:
+        config = kind.config(conn.config)  # first: a config the declaration refuses never meets the secret
         raw = await keyring.decrypt(
             s, tenant_id=conn.tenant_id, purpose=PURPOSE, context=str(conn.id), blob=conn.secret_ct or b""
         )
         secret = kind.secret(json.loads(raw))
         key = await rate_scopes.scope_key(s, _KeyringSealer(s, keyring), conn.tenant_id, create=False)
-    except (InvalidTag, ValueError):
+        # No scope key yet: no worker has charged a credential scope, so none can be cooling down; others still count.
+        hasher = rate_scopes.credential_hasher(key) if key is not None else (lambda credential: "-")
+        scopes = kind.scopes(config, secret, hasher)
+    except (InvalidTag, ValueError, KeyError, TypeError):
         return None
-    # No scope key yet: no worker has charged a credential scope, so none can be cooling down; the others still count.
-    hasher = rate_scopes.credential_hasher(key) if key is not None else (lambda credential: "-")
-    scopes = kind.scopes(conn.config, secret, hasher)
     found = await current_cooldowns(s, conn.tenant_id, [scope.key for scope in scopes])
     return sorted(
         ({"scope": key.split(":", 1)[0], "until": until.isoformat()} for key, until in found.items()),
