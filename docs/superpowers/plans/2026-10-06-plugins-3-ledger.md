@@ -115,6 +115,15 @@ CI on PR #40 (2026-10-06), two fixes:
   under a random sealed key can't be guessed offline; CMAC (NIST SP 800-38B) is the equivalent keyed PRF - cost if
   wrong: none; nothing was stored under the old function (unmerged).
 
+Local verification of these fixes at 48f427b (reported by the owner, 2026-10-06; GitHub Actions minutes are exhausted,
+so CI didn't run):
+- CPython 3.12.3: at 22d508b the mapped-address failure reproduced exactly (166 other targeted tests passed); at
+  48f427b all 170 targeted tests passed.
+- Isolated Compose proofs (2m48s): migration 0041, forced RLS on `rate_scope_keys`, worker startup, a published
+  workflow's run, a non-UTC schedule, a signed webhook (duplicates handled; a trickled body answered 408 after 10.01 s).
+- Not verified: CodeQL (the reason for the CMAC change), the backend job under `act`, and the browser E2E tests (3a-1
+  changes no frontend file).
+
 Open questions:
 - `tests/apps/dispatcher/test_triggers_end_to_end.py::test_a_short_outage_fires_each_missed_time_and_admits_each_once`
   failed once in the full parallel run under extra load (a 4 s tick gap on Temporal's dev server where 2 s was
