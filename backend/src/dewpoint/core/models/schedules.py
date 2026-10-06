@@ -5,7 +5,18 @@ one the dispatcher's sync last completed, and the tombstone a deletion leaves.""
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, func
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -14,9 +25,14 @@ from dewpoint.core.models.base import Base
 
 class Schedule(Base):
     __tablename__ = "schedules"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["workflow_id", "tenant_id"], ["workflows.id", "workflows.tenant_id"], name="schedules_workflow"
+        ),
+    )  # of its own tenant (#35)
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"))
-    workflow_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("workflows.id"))
+    workflow_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     cron: Mapped[str | None] = mapped_column(Text)
     every_s: Mapped[int | None] = mapped_column(Integer)
     offset_s: Mapped[int] = mapped_column(Integer, default=0)

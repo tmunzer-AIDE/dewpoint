@@ -238,6 +238,13 @@ development override, on a database of their own (a project's own volume), with 
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 ```
 
+**Migrations run as a role that bypasses row-level security:** the database's superuser (as Compose's `POSTGRES_USER`
+is) or a role with `BYPASSRLS`. Migrations 0035 and 0037 read every tenant's rows (0035 checks that no row names
+another tenant's workflow, version or run; 0037 records each run's tree), and under any other role they stop with an
+error naming row-level security rather than check nothing. Migration 0035 also adds and checks its keys inside its own
+transaction, which blocks writes to `runs`, `run_steps`, `run_requests` and the other tables it changes until it ends;
+before migrating large populated tables, plan the downtime or split the check (a decision of its own).
+
 It records `development` (`DEWPOINT_ENVIRONMENT`); CI sets `COMPOSE_FILE` to both files.
 
 Webhook ingress, a development-only prototype until engine 2b-4, runs only with the `ingress` profile

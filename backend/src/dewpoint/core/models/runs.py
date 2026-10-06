@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, ForeignKeyConstraint, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -18,6 +18,15 @@ class Run(Base):
     handler's) points at the run and step that started it."""
 
     __tablename__ = "runs"
+    __table_args__ = (  # its version and its parent, both of its own tenant (#35)
+        UniqueConstraint("id", "tenant_id", name="runs_tenant"),
+        ForeignKeyConstraint(
+            ["workflow_version_id", "workflow_id", "tenant_id"],
+            ["workflow_versions.id", "workflow_versions.workflow_id", "workflow_versions.tenant_id"],
+            name="runs_version_fk",
+        ),
+        ForeignKeyConstraint(["parent_run_id", "tenant_id"], ["runs.id", "runs.tenant_id"], name="runs_parent_run"),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"))
     workflow_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
@@ -34,7 +43,7 @@ class Run(Base):
     iterations: Mapped[int] = mapped_column(Integer, default=0)
     started_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     kind: Mapped[str] = mapped_column(String(32), default="run")
-    parent_run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id"))
+    parent_run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     parent_step_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     parent_iteration_key: Mapped[str | None] = mapped_column(Text)
 
@@ -43,10 +52,13 @@ class RunStep(Base):
     """One attempt of one step in one scope: what the UI shows, never Temporal history (spec §8)."""
 
     __tablename__ = "run_steps"
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"))
-    run_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("runs.id", ondelete="CASCADE"), primary_key=True
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["run_id", "tenant_id"], ["runs.id", "runs.tenant_id"], name="run_steps_run", ondelete="CASCADE"
+        ),
     )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"))
+    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     step_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     iteration_key: Mapped[str] = mapped_column(Text, primary_key=True)  # unbounded: loops nest without a limit
     attempt: Mapped[int] = mapped_column(Integer, primary_key=True)

@@ -5,7 +5,21 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text, func, true
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    true,
+)
 from sqlalchemy.dialects.postgresql import ARRAY, CIDR, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -29,6 +43,7 @@ class WebhookEndpoint(Base):
     pending and retained counters and their quotas. Its secrets are sealed under the ingress key, never a tenant's."""
 
     __tablename__ = "webhook_endpoints"
+    __table_args__ = (UniqueConstraint("id", "tenant_id", name="webhook_endpoints_tenant"),)  # its rows' own tenant's
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"))
     name: Mapped[str] = mapped_column(Text)
@@ -90,6 +105,17 @@ class TriggerBinding(Base):
     holds (at most 8; none: every event)."""
 
     __tablename__ = "trigger_bindings"
+    __table_args__ = (  # an endpoint and a workflow of its own tenant, once each
+        UniqueConstraint("tenant_id", "endpoint_id", "workflow_id", name="trigger_bindings_one"),
+        ForeignKeyConstraint(
+            ["endpoint_id", "tenant_id"],
+            ["webhook_endpoints.id", "webhook_endpoints.tenant_id"],
+            name="trigger_bindings_endpoint",
+        ),
+        ForeignKeyConstraint(
+            ["workflow_id", "tenant_id"], ["workflows.id", "workflows.tenant_id"], name="trigger_bindings_workflow"
+        ),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     endpoint_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
@@ -104,6 +130,14 @@ class InboundEvent(Base):
     """An event as ingress recorded it, sealed to its tenant's keypair `key_version`, and what became of it."""
 
     __tablename__ = "inbound_events"
+    __table_args__ = (  # an endpoint of its own tenant; one event per id an endpoint deduplicates on
+        UniqueConstraint("tenant_id", "endpoint_id", "dedupe_key", name="inbound_events_dedupe"),
+        ForeignKeyConstraint(
+            ["endpoint_id", "tenant_id"],
+            ["webhook_endpoints.id", "webhook_endpoints.tenant_id"],
+            name="inbound_events_endpoint",
+        ),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     endpoint_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))

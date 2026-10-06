@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Integer, LargeBinary, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -32,6 +32,8 @@ class InputClaim(_Claim, Base):
     `envelope`, a request's trigger envelope (revision 7, §7.1): not a claim, never read or granted as one."""
 
     __tablename__ = "run_inputs"
+    # What a request's envelope key names: its own tenant's envelope, owned by the request (revision 7).
+    __table_args__ = (UniqueConstraint("id", "tenant_id", "owner_run_id", "role", name="run_inputs_envelope_ref"),)
     role: Mapped[str] = mapped_column(String(16), default="claim")
     pointer: Mapped[str | None] = mapped_column(
         Text

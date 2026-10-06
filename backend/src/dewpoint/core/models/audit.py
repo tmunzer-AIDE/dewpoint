@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, DateTime, LargeBinary, Text
+from sqlalchemy import BigInteger, DateTime, LargeBinary, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -29,6 +29,7 @@ class AuditEntry(Base):
 
 class AuditAnchor(Base):
     __tablename__ = "audit_anchors"
+    __table_args__ = (UniqueConstraint("scope", "seq", name="audit_anchors_scope_seq_key"),)
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     scope: Mapped[str] = mapped_column(Text)
     seq: Mapped[int] = mapped_column(BigInteger)
