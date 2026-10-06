@@ -1,12 +1,12 @@
 # Dewpoint — Engine 2b Design (payload protection, admission, triggers, retention)
 
-- **Status:** revision 10, a partial draft for the owner's review: the tick exception (§6.2, §8.2) and the
-  run-evidence contract of key retirement (§6.4, §10.2), written from the 2b-4a prototype's M3 before its approval,
-  at the owner's request; the rest of 2b-4's revision lands with its plans. Revision 9 is a draft pending the
-  owner's approval with the 2b-3b plan. Revision 8 (2026-10-04) is approved (#33); revisions 6 and 7 (2026-10-03) are
-  approved. Revision 4 (2026-09-30) was approved by the owner: every section was approved in conversation before it
-  was written here, and this document is their written form. Revision 5 (2026-10-01) was approved for implementation
-  by the 2b-1b plan, which isn't production readiness: nothing runs in production before 2b-4 lifts the gate (§2).
+- **Status:** revision 10, a draft for the owner's approval with the 2b-4a plan, written from the 2b-4a prototype, whose
+  four milestones the owner approved as prototype checkpoints (2026-10-05 and 2026-10-06), not production sign-off: no
+  tenant erasure completes yet (§6.5), and the production gate stays off until 2b-4b (§2). Revision 9 (2026-10-05) is
+  approved with the 2b-3b plan (#36). Revision 8 (2026-10-04) is approved (#33); revisions 6 and 7 (2026-10-03) are
+  approved. Revision 4 (2026-09-30) was approved by the owner: every section was approved in conversation before it was
+  written here, and this document is their written form. Revision 5 (2026-10-01) was approved for implementation by the
+  2b-1b plan, which isn't production readiness: nothing runs in production before 2b-4 lifts the gate (§2).
   - Revision 2 folds in the owner's review of revision 1: a claim is owned by the run that produced it, with the
     root run id kept for retention and the secret index (§3.4); passing a secret-index bound is a fixed,
     non-retryable error, and matching work is bounded (§3.7); an idempotency retry is compared under its stored
@@ -150,26 +150,47 @@
     - the load probe's measurements set both event rates to 10/s; matching doesn't yet scale with dispatchers, a
       required decision of 2b-4 (§7.9);
     - the codes (§9), tests (§12), earlier specs (§13), tables and grants (§14) and values (§15) follow.
-  - Revision 10 (partial draft, for the owner's review before the 2b-4a M3 checkpoint), from the owner's rulings on
-    the prototype's M3 (2026-10-05):
-    - **the tick exception** (§6.2, §8.2): a `ScheduleTick` execution carries no payload under a tenant's data key.
-      Its action has no argument; in its contexts only, the codec writes the tick contract's allowlist unsealed and
-      refuses anything else, and its failures carry fixed codes. Ticks keep their retry without limit; no execution
-      timeout bounds them;
-    - **the run-evidence contract** (§6.4): a terminal row isn't proof that Temporal closed an execution, and
-      retention deletes rows before Temporal deletes histories. Each run execution has durable evidence (ids and
-      times), read from Temporal's histories (its chain and its children), kept until Temporal shows it gone; a key
-      version retires only when every execution that could hold it is proven gone. A start Temporal may have taken
-      stays unproven; one Temporal never showed is pending, never judged (nothing proves the namespace's retention
-      over the time it went unchecked); one seen and gone before it was read is lost. Both keep every version they
-      could hold;
+  - Revision 10 (draft, for the owner's approval with the 2b-4a plan), written from the 2b-4a prototype, whose four
+    milestones the owner approved as prototype checkpoints (2026-10-05 and 2026-10-06), not production sign-off:
+    - **every key between two tenant tables carries the tenant** (#35, §14): each such key is composite, including
+      `tenant_id`, and the models declare every key the migrations made;
+    - **where an endpoint's events are is fixed when it's made** (D10, §8.3), and a sealed event must name the keypair
+      version recorded beside it;
+    - **retention** (§10): the cutoff on every user-facing read (one helper per kind, D4); an idempotency key lives as
+      long as its request; the sweep runs as its own process and login, one at a time, with exact, durable counts and
+      one audit entry per tenant per sweep; the SLO is enforced at dispatch; audit pruning goes through an anchored
+      checkpoint, refused in production until #3's off-host sink (D5);
+    - **the tick exception** (§6.2, §8.2): a `ScheduleTick` execution carries no payload under a tenant's data key. Its
+      action has no argument; in its contexts only, the codec writes the tick contract's allowlist unsealed and refuses
+      anything else, and its failures carry fixed codes. Ticks keep their retry without limit; no execution timeout
+      bounds them;
+    - **the run-evidence contract** (§6.4): a terminal row isn't proof that Temporal closed an execution, and retention
+      deletes rows before Temporal deletes histories. Each run execution has durable evidence (ids and times), read from
+      Temporal's histories (its chain and its children), kept until Temporal shows it gone; a key version retires only
+      when every execution that could hold it is proven gone. A start Temporal may have taken stays unproven; one
+      Temporal never showed is pending, never judged (nothing proves the namespace's retention over the time it went
+      unchecked); one seen and gone before it was read is lost. Both keep every version they could hold;
     - **the tick cutover** (§6.4): a version made before it never retires; never recorded automatically, only on the
       operator's attestation, a fresh deployment's included;
     - the evidence outlives the tenant's retention (§10.2), and 2b-4's erasure deletes it with the tenant's Temporal
       histories (§6.5);
-    - still to fold in with the 2b-4a plan: §6.4's record inventory (connection secrets, CSV mappings and the
-      platform key's TOTP secrets, and `reencrypt`), §8.3's sealed layout and retryable `key_retired`, the codes (§9),
-      tables and grants (§14) and values (§15).
+    - **re-encryption and rotation** (§6.4, §8.3): `keys reencrypt` seals every stored record again, its plaintext kept,
+      a tenant's credential scope key (plugins-3a-1) included; a tenant's inbound keypairs rotate and retire once no
+      stored event names them; the ingress key rotates through a previous key; `keys retire` deletes a version only when
+      every named check passes;
+    - **tenant erasure** (§6.5): irreversible once `erasing` is committed; every writer fenced by the tenant's lifecycle
+      lock, and from stage 60 by an insert fence in the database; stages 20 to 100, each found, requested and verified
+      by reading Temporal back; the bound, the final check, reopening, and reconciliation after completion. **No erasure
+      completes** (`firing_bound_unproven`): ticks have no execution timeout, and a schedule whose overlap allows all
+      doesn't list its running ticks, so nothing yet bounds when the last tick closes;
+    - **schedules** (§8.2): created paused and unpaused only by a token-bearing update; a fresh Temporal id for each
+      create (an incarnation), recorded before the call, never created again, ordered against updates by the schedule's
+      own lock; every incarnation that isn't current found and deleted, for good, and a delete only after the sync's own
+      pause and the count it then shows; ticks record their own firings;
+    - **missed firings** (D3f, §8.2): accounted over persisted spans classified from durable evidence: certainly missed,
+      and counted, only when the generation held through the first landing; intentionally disabled; possibly missed;
+      unknown, a schedule's life before 2b-4a included; and pending; the API says when the accounting is incomplete;
+    - the codes (§9), tests (§12), tables and grants (§14) and values (§15) follow.
 - **Parent specs:**
   - `2026-09-24-dewpoint-architecture-design.md` (§5, §6.1, §6.5, §6.8, §12, §15). This spec **changes** its
     workflow-id contract (§6.1), replaces its `outbox` table (§6.1), details its claim check (§6.5) and settles the
@@ -196,8 +217,10 @@
 4. **2b-2 — admission:** `run_requests`, the dispatcher, slots, the reconciler, the run API and form metadata; the
    dev CLI moves onto admission.
 5. **2b-3 — triggers:** CSV input, schedules, webhook ingress.
-6. **2b-4 — retention and production:** retention, audit pruning, production Temporal settings, the readiness
-   checks and the command that lifts the gate.
+6. **2b-4 — retention and production,** in two plans (the 2b-4 outline's D1): **2b-4a, the data lifecycle** (#35, an
+   endpoint's events pointer fixed, retention and audit pruning, re-encryption and key retirement, tenant erasure); then
+   **2b-4b, production hardening and the gate lift** (#16, #18 and #26, §7.9's items, production Temporal and its
+   proofs, the readiness checks and the command that lifts the gate).
 
 Protection comes first so admission and triggers adopt the final handle and payload contracts instead of being
 retrofitted. The gate lifts only at the end of 2b-4.
@@ -938,28 +961,39 @@ largest container when the budget requires.
 
 ### 6.4 Key rotation and retirement
 
-- Rotating a tenant's key keeps every older version able to decrypt. The codec records the version on every
-  payload.
-- **A version's last use for payloads is bounded, not recorded.** Every process caches a tenant's active key for at
-  most the key cache's TTL (5 minutes, `KeyringKeys`), so none encrypts with a version later than its successor's
-  creation plus that TTL.
-  An execution holding such a payload normally closes within twice the maximum run duration (a run, then its failure
-  handler), and Temporal deletes it after the namespace's retention. So the **payload floor** is: the successor's
-  creation + the cache's TTL + 2 × the longest maximum run duration ever configured + the namespace's retention. The
-  floor is necessary, not sufficient: a run that closes late (its workers gone) keeps its history for the namespace's
-  retention after that, and its row may be deleted by then. Revision 10's run evidence, below, covers it.
+- Rotating a tenant's key keeps every older version able to decrypt. The codec records the version on every payload.
+- **A version's last use for payloads is bounded, not recorded.** Every process caches a tenant's active key for at most
+  the key cache's TTL (5 minutes, `KeyringKeys`), so none encrypts with a version later than its successor's creation
+  plus that TTL. An execution holding such a payload normally closes within twice the maximum run duration (a run, then
+  its failure handler), and Temporal deletes it after the namespace's retention. So the **payload floor** is: the
+  successor's creation + the cache's TTL + 2 × the longest maximum run duration ever configured + the namespace's
+  retention. The floor is necessary, not sufficient: a run that closes late (its workers gone) keeps its history for the
+  namespace's retention after that, and its row may be deleted by then. Revision 10's run evidence, below, covers it.
 - **An old version is retired only when nothing needs it:**
   - the payload floor has passed;
-  - **every run execution that could hold it is proven gone from Temporal** (revision 10, below); a running row
-    started before its successor reached every cache stays a cross-check;
-  - every record Dewpoint stores under it — `run_inputs`, `step_outputs`, `run_secret_index`, pending
-    `run_requests` and `inbound_events` material, `csv_uploads`, schedule inputs — has been re-encrypted under the
-    current version by `dewpoint keys reencrypt`, or deleted by retention;
+  - **every run execution that could hold it is proven gone from Temporal** (revision 10, below); a running row started
+    before its successor reached every cache stays a cross-check;
+  - every record Dewpoint stores under it has been sealed again under the active version by `dewpoint keys reencrypt`,
+    or deleted by retention: `run_inputs` (claims, envelopes and CSV records), `step_outputs`, `run_secret_index`,
+    staged `csv_uploads`, saved `csv_mappings`, schedule inputs, connection secrets, the tenant's inbound X25519 private
+    keys (§8.3) and its credential scope key (plugins-3a-1's `rate_scope_keys`);
   - every schedule is synced (a deleted one's absence settled), and no live schedule's Temporal action still names it
     (an action synced before revision 10 carries the schedule's id, sealed, until its next sync);
   - no request's idempotency digest was made with it, until retention deletes that request;
-  - the tenant's inbound X25519 private keys (§8.3), wrapped by it, have been re-wrapped under the current version;
   - **it was made after the tick cutover** (revision 10, below).
+- **`dewpoint keys retire`** (revision 10) names each condition as a check: `not_active`, `payload_floor`, `open_runs`
+  (the running-row cross-check), `records`, `digests`, `schedule_actions`, `legacy_ticks` and `run_histories`. It
+  deletes the version, audited, only when every one passes. The longest maximum run duration is what the dispatcher
+  records as it starts (`run_duration_limits`, from `DEWPOINT_MAX_RUN_DURATION_DAYS`, never lowered by a later, shorter
+  setting), and the namespace's retention is read from Temporal: either one unknown fails the floor.
+- **Re-encryption** (`dewpoint keys reencrypt`, as the key admin; revision 10): a tenant at a time, under its scope, or
+  the platform key's records (users' TOTP secrets). Each batch holds the scope's key lifecycle lock from reading the
+  active version to committing, so no rotation or retirement interleaves, and each write is a compare-and-swap on the
+  blob it read, so a record the application rewrote meanwhile is never overwritten. It keeps each record's plaintext,
+  purpose and context and changes only its blob: that's the command's behaviour, which the key admin's grants can't
+  enforce (the owner's M3 review). A tenant's credential scope key is sealed again, the same key: a new one would split
+  every credential's quota budget and cooldown. A live schedule whose Temporal action still names a version has its
+  generation raised, so its next sync writes the action without it.
 - **Run execution evidence** (revision 10). A run's row isn't proof of what Temporal holds: a run whose row says it
   ended may still be open, one closing long after its deadline keeps its history for the namespace's retention, and
   the tenant's retention may delete its row first. So each run execution has durable evidence (`execution_evidence`:
@@ -1000,17 +1034,78 @@ largest container when the budget requires.
 
 ### 6.5 Tenant erasure
 
-1. **Mark the tenant `erasing`,** atomically, under its lock. From then on these refuse the tenant: admission,
-   dispatch, ingress recording, webhook matching, and the `ScheduleTick` activity (in the transaction that would
-   insert its request). The dispatcher's `starting` transaction takes the tenant's lock shared, as it does the gate's;
-   so do ingress's recording, the matcher, an event's cancel and the recount, which the transition, taking the
-   lock (`dewpoint:tenant:<id>`) exclusively, waits for (§8.3).
-2. **Synchronize with starts:** every `starting` request of the tenant is reconciled (§7.6) — started, or confirmed
-   absent — before anything is deleted.
-3. Pause its schedules.
-4. Cancel its queued requests and pending events.
-5. Cancel its running runs, and wait until they're terminal.
-6. Delete its keys — only once nothing is left that could decode, so no live run is left unable to read its history.
+Revision 10, from the 2b-4 outline's D3 and the owner's rulings on the 2b-4a prototype's M4. A platform admin erases a
+tenant: its data, its keys, and everything Dewpoint started for it in Temporal. **It can't be undone:** once `erasing`
+is committed an erasure can be stopped and retried, never reversed (D3a). `docs/operations/erasure.md` is its guide.
+
+- **Starting it:** `POST /api/v1/admin/tenants/{tenant}/erasure`, the tenant's slug typed as `confirm`, by a platform
+  admin on an active MFA session whose second factor was proven within the reauthentication window (D11); `…/stop`,
+  `…/retry` and a `GET` of its record under the same path. Each is audited with that admin's user id, and so is every
+  move from stage to stage (counts only), every incident and the completion.
+- **Step 1, from the first moment:** the tenant is marked `erasing` under its lifecycle lock (`dewpoint:tenant:<id>`),
+  taken exclusively, and its schedules' generations are raised. Every writer of tenant data takes that lock shared and
+  checks the tenant is `active` in the same transaction as its write, so a write in flight either commits first (and
+  the erasure removes it) or is refused: admission, dispatch, matching, ingress's recording, a tick (an audited skip),
+  a cancel, every write through the API (409 `tenant_erasing`; reads still answer), the key commands, and the schedule
+  sync, which then only pauses or deletes (§8.2). A writer whose effect is outside PostgreSQL holds its transaction,
+  and the lock, across the call: the schedule sync does, so step 1 waits for it.
+- **The insert fence:** from stage 60, a trigger on every table holding tenant data refuses any insert of the tenant's
+  rows (SQLSTATE `DPE01`), whatever the writer, a straggling worker's projection included, under the same lock shared;
+  entering stage 60 takes it exclusively. It's never lifted, not even when an erasure reopens. A row naming no tenant
+  (an egress exception for every tenant) passes it.
+- **The stages,** carried on by the retention process (§10.3) every `DEWPOINT_ERASURE_INTERVAL_S`, each from its
+  recorded stage, each stage until one isn't done yet. What a stage does outside PostgreSQL goes through items (a
+  request, a schedule, a run, an execution), each found, requested, then verified by reading Temporal back:
+  - **20** waits until no request is `starting` (the reconciler resolves each, §7.6);
+  - **31** pauses every Temporal schedule the tenant may have, every incarnation of each (§8.2), until each is described
+    paused or absent;
+  - **32**, before any schedule is deleted, inventories every execution each schedule lists (recent and running), every
+    firing its ticks recorded (§8.2) and every execution visibility lists under the tenant's prefix;
+  - **33** deletes every one of them, until a describe finds nothing;
+  - **40** cancels queued requests and pending events (`tenant_erased`), releasing their counters;
+  - **50** cancels every running run in Temporal, then waits until each has ended in Dewpoint and closed in Temporal;
+  - **60** raises the fence, then deletes every execution found, from the runs, the started requests, the run evidence
+    (§6.4), the ticks' records and the inventory (visibility adding), each walked through its history (the run it
+    continued from and as, every child it started), an open one terminated first, until describing that exact run
+    answers not-found;
+  - **70** deletes every data-key version and event keypair: nothing can unwrap one again, so every ciphertext of the
+    tenant is unreadable once the processes' key caches (at most 5 minutes, §6.3) have expired;
+  - **80** deletes every row of the tenant in committed batches, counted, and renames it (`Erased tenant`,
+    `erased-<id>`);
+  - **90** holds (below), then makes the final check; **100**: the tenant is `erased`.
+
+  A stage that fails records a fixed code (`temporal_failed`, `database_failed`, `unreachable`, `stage_failed`),
+  counts the attempt, backs off (30 s, doubling, at most an hour) and alerts; one still waiting an hour after it was
+  entered alerts on every pass (`erasure_stalled`).
+- **The bound** (D3d): for executions it never found, an erasure relies on Temporal's own retention, so the final check
+  runs only after stage 60's end plus 30 days, the longest namespace retention the platform allows: the earliest point,
+  not a deadline. Stage 90 holds, its reason recorded, while: `firing_bound_unproven` (below); `boundary_unverified`
+  (no verified namespace-change boundary is recorded, D3g, written by 2b-4b's proof of the production Temporal);
+  `boundary_lost`; `bound_not_reached`; `retention_unread` or `retention_above_bound` (the namespace's retention can't
+  be read, or is over 30 days).
+- **No erasure completes yet:** the firing bound is unproven (the owner's rulings on the M4 checkpoint). Completion
+  needs proof that nothing of the tenant fires after its schedules were verified paused, which holds (each create is
+  under its own incarnation, so a late create can't be unpaused, and the erasure covers every incarnation, §8.2), and
+  that every schedule tick closed by a known time, which doesn't: ticks retry without limit, with no execution timeout
+  (§8.2), and a schedule whose overlap allows all doesn't list its running ticks (a contract test). Every erasure
+  reaches stage 90, its data, keys and executions gone, and holds there (`firing_bound_unproven`, alerted on) until a
+  design that proves it is ruled on.
+- **The final check** describes again every schedule and execution the erasure found or kept and lists the tenant's
+  prefix in visibility. Anything found **reopens** it (`tenant.erasure.incident`, alert `erasure_incident`): its
+  schedules from stage 31, its executions from stage 60, each with its own bound. Nothing found, and no row or key
+  left, **completes** it (`tenant.erasure.complete`, with its counts per table, the boundary it relied on and when the
+  backups taken before it expire); the tenant is `erased`, and its item rows go.
+- **After completion,** every Temporal id the erasure found stays listed (identifiers only), and the retention process
+  describes each, with a visibility listing, at every sweep, for good: anything found reopens the erasure. It repairs a
+  late Temporal write on its next pass; nothing keeps absence true between passes.
+- **What remains:** the tenant's audit records, under the platform's audit retention (D3c; they keep identifiers and
+  the names and labels the tenant gave); backups taken before completion, until they expire; the tombstone (its row,
+  `erased`, anonymized, so its id is never reused and its audit chain resolves); the erasure's record and the Temporal
+  ids it keeps; identifier-only logs; late Temporal items awaiting reconciliation.
+- **Its Temporal client:** the retention process reaches Temporal with a plain client (it decodes no payload) and only
+  once its namespace is the deployment's recorded one (§2.1): on a mismatch, or with none recorded, it makes no
+  Temporal call, alerts every interval (`erasure_namespace_mismatch`, `erasure_environment_unrecorded`) and keeps
+  sweeping. Without a Temporal address, every erasure under way is alerted on every interval (`erasures_unattended`).
 
 ### 6.6 ABI 5 and draining
 
@@ -1308,14 +1403,17 @@ transition out of `starting` says what happens to both, in the same transaction 
 
 ### 7.9 Open before production sign-off
 
-The owner approved 2b-2's milestones as prototype checkpoints; these stay open until production sign-off (§10.6):
+The owner approved 2b-2's milestones as prototype checkpoints; these stay open until production sign-off (§10.6). The
+2b-4 outline's D8 assigns each to a milestone: 2b-4a closes the erasure item, and the rest are 2b-4b's (matching's
+scaling by its D9):
 - **Bound the serial dispatch cycle.** A cycle starts its candidates one after another, so 50 slow starts take about 500
   seconds: the one-second interval is no throughput guarantee. 2b-3a's leader adds two more serial batches each cycle:
   the schedule sync, up to 50 schedules of up to three calls each (a describe, the write, the read-back), and the misses
   check, up to 50 describes. Each call takes at most 10 seconds, so a Temporal that answers slowly can hold one cycle
   for up to 200 calls, about 33 minutes.
-- **Erasure pauses schedules** (2b-3a): the transition that sets a tenant `erasing` raises its schedules' generations
-  in the same transaction, with a regression proving they pause; a tenant's status changing alone queues nothing.
+- **Erasure pauses schedules** (2b-3a): closed by 2b-4a. Step 1 (§6.5) raises the tenant's schedules' generations in
+  the transaction that marks it `erasing`, and stage 31 pauses every incarnation and reads each back; regressions prove
+  both.
 - **The CSV reader's memory** (2b-3a): the API reads an upload whole. Reading one 5 MiB test file peaked at about 72 MB:
   an observation for that file, not a bound. The memory concurrent uploads need stays open, for production sizing (the
   owner's deferral, 2026-10-04).
@@ -1412,7 +1510,7 @@ The owner approved 2b-2's milestones as prototype checkpoints; these stay open u
   IANA name, from the image's own time zone data, which CI proves the shipped image holds.
 - A sync loop in the dispatcher's leader creates, updates, pauses and deletes the matching Temporal Schedules. Disabling
   a schedule or its workflow pauses it: every change raises the schedule's generation, and so does enabling or disabling
-  its workflow. A tenant's status changing alone queues nothing (§7.9).
+  its workflow, and an erasure's step 1 (§6.5).
 - **Every change carries a generation, and only a read-back completes it** (2b-3a). Each API change raises the row's
   generation. The sync describes the schedule, reads the row, and sends one update carrying the describe's conflict
   token, with the spec, the action, the pause state and the note `dewpoint generation <n>` together. Temporal discards
@@ -1422,6 +1520,27 @@ The owner approved 2b-2's milestones as prototype checkpoints; these stay open u
   absent or different leaves it queued for the next pass. The marker is evidence of a Dewpoint update, not of the whole
   state: editing a schedule directly in Temporal isn't supported, and drift a direct edit leaves under an intact note
   would take a full comparison, which the sync doesn't make.
+- **Created paused, unpaused only by a token-bearing update** (revision 10). A create (no token) follows a describe
+  that found nothing; it's created paused, its note `dewpoint created`, and only the update that follows, carrying the
+  describe's conflict token, unpauses it. An erasure's verified pause (§6.5) makes every update computed before it
+  stale.
+- **An incarnation per create** (revision 10; the owner's ruling on the 2b-4a M4 checkpoint). A schedule deleted and
+  recreated under one Temporal id counts its conflict token from 1 again, so an unpause computed before the deletion
+  lands on the recreation (a contract test pins it). Each create is therefore under a fresh id,
+  `t:<tenant>:sched:<schedule>~<n>`, recorded and committed (`schedule_incarnations`) before its one create call, and
+  never created again; a schedule from before 2b-4a keeps the id it had as its incarnation 0. A late create lands under
+  an id no describe showed, paused, firing nothing. Every incarnation's action keeps the schedule's own workflow id, so
+  a tick's identity and key are unchanged. A successor is recorded only under the schedule's own lock
+  (`dewpoint:schedule:<id>`), held exclusively, once a describe made under it finds the incarnation before still absent;
+  an update is sent only holding that lock shared, after a read made after the describe its token comes from shows the
+  incarnation current and the schedule live. So no successor is committed between that read and the update, and a token
+  taken after a pause for a delete is never used.
+- **Strays, found for good** (revision 10). Every incarnation that isn't current, a deleted schedule's included, its
+  tombstone gone or not, is described again every hour, for good (one whose describe failed, five minutes later, behind
+  the rest), and one found is deleted and alerted on (`schedule_incarnation_stray`). An incarnation is deleted, a stray
+  or a tombstone's, only once a describe shows the sync's own pause for its delete (paused, note `dewpoint deleting`),
+  which makes every earlier token stale, and the count of firings Temporal missed that it then shows is recorded:
+  paused, that count can't grow (a contract test), and a deleted schedule's can't be read again.
 - **A deletion keeps a tombstone:** the row loses its input and keeps its tenant, workflow and mode, so a late tick
   records `schedule_deleted`. A stale writer's create could bring a deleted Temporal Schedule back, so a tombstone stays
   queued until a describe made at least one call deadline (10 s, by the database's clock) after its deletion finds
@@ -1460,8 +1579,33 @@ The owner approved 2b-2's milestones as prototype checkpoints; these stay open u
   pause synced) is a `refused` request with `schedule_paused`, and one of a tombstone `schedule_deleted`. A tenant
   that's `erasing` produces an audited skip. Firings missed while Temporal was down fire when it's back, each with its
   own nominal time, within the catch-up window. **Past the window Temporal skips them and counts them**
-  (`ScheduleInfo.missed_catchup_window`): the leader reads the count every five minutes, records an increase on the
-  schedule (`misses`), audits it (`schedule.missed`) and alerts; the API shows it.
+  (`ScheduleInfo.missed_catchup_window`): the leader reads the count every five minutes, for each incarnation, adds each
+  one's increase to the schedule's (`misses`, as of `misses_read_at`), audits it (`schedule.missed`) and alerts; the
+  API shows it.
+- **Firings due while a schedule waited for its unpause** (D3f; revision 10, the owner's ruling B on the 2b-4a M4
+  checkpoint and its reviews). Temporal neither catches them up nor counts them. The sync accounts for them over
+  persisted spans (`schedule_intervals`), each with its bounds, a class and a fixed reason, from durable evidence only:
+  each incarnation's generation when it was recorded; its first landed update (the generation in its note, Temporal's
+  time for it, whether it left it paused, and the schedule's generation read once it was seen), committed before any
+  other update is sent to it; and when an unpause was first sent to it. Only one update carries the create's token, so
+  the first to land is what Temporal shows until the sync sends another. A span is:
+  - **certainly missed**, from the schedule's creation (an incarnation's recording, for a later one) to that landing,
+    when the generation is the same at the recording (1, for a schedule's first), in the note and once the landing was
+    seen (generations only rise) and the landing unpaused it: counted on that update's spec from Temporal's own matching
+    times (`creation_misses`, in `misses`), audited and alerted on;
+  - **intentionally disabled**, counting 0: the same, the landing paused;
+  - **possibly missed:** an incarnation that went, from its landing (else its wait's start) to its successor's
+    recording, after it may have fired (an unpause was sent, or it landed unpaused); or one no describe found at or
+    after its schedule's deletion. Seeing it unpaused proves it could fire, not that a tick did;
+  - **unknown:** anything else, a schedule's whole life before 2b-4a included (from its creation to the migration);
+  - **pending**, never recorded: a wait with no span yet, open until its first update lands, then until its count is
+    recorded.
+
+  A possibly missed, unknown or pending span is never counted and never shown as a zero: the schedule's
+  `accounting_complete` is false and `uncounted_intervals` lists it (`from`, `to`, null while open, `class` and
+  `reason`). A recorded one is audited (`schedule.unaccounted`) and alerted on (`schedule_firings_unaccounted`).
+- **A tick records its own firing** (revision 10): its workflow and run ids (`schedule_firings`, identifiers only), as
+  its first act, a skip included, for an erasure's inventory (§6.5); kept 31 days, whatever the tenant's retention.
 
 - **Admission bounds the backlog too** (the owner's ruling on 2b-3a's whole-branch review). After the deleted, paused
   and erasing decisions, a newly decided tick whose nominal time is strictly older than its schedule's current catch-up
@@ -1477,7 +1621,8 @@ The owner approved 2b-2's milestones as prototype checkpoints; these stay open u
 ### 8.3 Webhook ingress
 
 A gated prototype until 2b-4 (the owner's rulings 8 and 13 on the 2b-3b outline): ingress records nothing outside a
-development deployment, and 2b-4 lifts that with retention, erasure and key rotation. `docs/operations/ingress.md` is
+development deployment. 2b-4a supplies its retention, erasure and key rotation; ingress's own switch lifts with the
+gate, in 2b-4b (D14). `docs/operations/ingress.md` is
 its guide.
 
 - **The process:** `dewpoint ingress`, with its own login, `dewpoint_ingress_login` (role `dewpoint_ingress`), reached
@@ -1491,8 +1636,9 @@ its guide.
   headers it names (`x-dewpoint-timestamp` and `x-dewpoint-signature` by default), or by bearer token; an optional
   address allowlist; a body limit (1 MiB by default, at most 5 MiB); where its events' ids are (`id_source`: a JSON
   pointer, a header, or none); an optional pointer to an array of events; its rate buckets and counters. How it
-  authenticates and where its ids are never change: the API refuses a change, and its role has no grant to update those
-  columns.
+  authenticates, where its ids are and where its events are never change: the API refuses a change, and its role has
+  no grant to update those columns. The events pointer decides how a delivery splits into events, so changing it would
+  change how later deliveries are deduplicated against earlier ones (D10, revision 10).
 - **Secrets without tenant keys:** bearer tokens are high-entropy, made by Dewpoint and kept as SHA-256 digests. HMAC
   secrets, and each endpoint's dedupe-digest key, are sealed under a separate ingress key, `DEWPOINT_INGRESS_KEY_B64`
   with its id, which only ingress and the API hold, each bound to its purpose and the endpoint's id. A secret is shown
@@ -1552,8 +1698,19 @@ its guide.
   public key) keeps the event pending, waiting a minute with an alert, its attempts untouched (§10.5). Admins
   (`tenant.manage`) list dead events and cancel pending or dead ones; an event's metadata, never its payload, is read
   with `workflow.view`, its dead ones only by admins.
-- **Keypair rotation** keeps every private-key version that any retained event ciphertext still needs, or re-encrypts
-  those events first.
+- **Keypair rotation** (revision 10): `dewpoint keys rotate-event-key` makes a tenant's next version, to which new
+  events are sealed; `dewpoint keys retire-event-keys` deletes an older one once no stored event names it and a newer
+  one has existed for 10 minutes (the newest never goes). Recording and retiring take the tenant's keypair lock
+  (`dewpoint:event-key:<tenant>`; recording shared, after the lifecycle lock), so no stored event names a keypair that's
+  gone: an event sealed to one a retirement removed is refused with a retryable 503 `key_retired` (`Retry-After: 1`),
+  nothing stored. The recording function also refuses an event whose sealed layout doesn't name the keypair version
+  recorded beside it. A keypair's private key, sealed under the tenant's data key, is sealed again by `keys reencrypt`
+  (§6.4).
+- **The ingress key's rotation** (revision 10) follows the KEK's: a previous key on ingress and the API
+  (`DEWPOINT_INGRESS_KEY_PREVIOUS_B64` and its id) opens what's sealed under it; `dewpoint keys reseal-ingress` seals
+  every endpoint's secrets again under the current key, keeping their plaintext, so signatures still verify and
+  deduplication carries on; `dewpoint keys ingress-status` exits 3 while any secret is sealed under a key the
+  configuration lacks.
 - **Deployment:** Compose runs ingress only under its `ingress` profile, and it starts only in a development deployment.
   nginx streams each body to it as it arrives, so the deadline and the in-flight limit hold through nginx, on a network
   of their own, the one range ingress believes `X-Forwarded-For` from.
@@ -1594,6 +1751,21 @@ its guide.
   `endpoint_invalid` (422, with each field), `filter_invalid` (422), `workflow_not_found` (404), `binding_exists` and
   `binding_cap` (409), `not_cancellable` (409), `ingress_key_missing` (503). **Its alerts:** `inbound_event_dead`,
   `event_key_unavailable`, `event_fan_out_exceeded`, `event_counters_drifted`.
+- **2b-4a's codes** (revision 10): API errors `tenant_erasing` (409, a write to a tenant being erased),
+  `request_not_retained` (410, an exact retry past the cutoff), `confirmation_mismatch` (422), `not_erasable` (409) and
+  `reauth_required` (403) (an erasure's start); ingress's `key_retired` (503, retryable); dispatch's wait
+  `retention_unhealthy`; a request's or event's cancel reason `tenant_erased`; an erasure stage's failure
+  `temporal_failed`, `database_failed`, `unreachable`, `stage_failed`, and its holds `firing_bound_unproven`,
+  `boundary_unverified`, `boundary_lost`, `bound_not_reached`, `retention_unread`, `retention_above_bound`; the insert
+  fence's SQLSTATE `DPE01`; `keys retire`'s checks (§6.4); a missed-firings span's class (`certainly_missed`,
+  `intentionally_disabled`, `possibly_missed`, `unknown`, and in the API `pending`) and reason (`created_paused`,
+  `disabled_while_waiting`, `changed_while_waiting`, `gone_before_counted`, `lost_before_unpause`,
+  `lost_after_unpause`, `lost_from_before_migration`, `deleted_before_landing`, `gone_before_deletion`,
+  `deleted_from_before_migration`, `before_migration`; pending: `awaiting_first_update`, `count_pending`). **Its
+  alerts:** `erasure_step_failed`, `erasure_stalled`, `erasure_held`, `erasure_incident`, `erasures_unattended`,
+  `erasure_namespace_mismatch`, `erasure_environment_unrecorded`, `erasure_temporal_unreachable`,
+  `erasure_unreconciled`, `erasure_reconciliation_failed`, `erasure_pass_failed`, `retention_sweep_failed`,
+  `execution_evidence_lost`, `schedule_firings_missed`, `schedule_firings_unaccounted`, `schedule_incarnation_stray`.
 - Every code is fixed and sanitized; none is derived from a sensitive value or plugin-supplied free text.
 - Audit detail keys avoid the names `core/audit` rejects (`…code…`, `…secret…`, `…token…`): reasons are recorded as
   `reason`.
@@ -1606,10 +1778,17 @@ its guide.
   365).
 - **The cutoff:** a run tree's data is due `runs_days` after its root became terminal; terminal requests and events
   count from when they ended.
-- **At the cutoff, for users:** every user-facing read path — lists, run details, steps, sub-runs — stops returning
-  that data at once (reads filter by cutoff, whatever the physical state). Re-runs with the original input and
+- **At the cutoff, for users:** every user-facing read path — lists, run details, steps, sub-runs, a request's detail
+  and its CSV record, an endpoint's events and the dead events list — stops returning that data at once: reads filter
+  by cutoff in the shared read paths, one query helper per kind, whatever the physical state, never a database view the
+  API could bypass (D4, revision 10). A run tree's cutoff counts from its root, which every run records
+  (`runs.root_run_id`, set by the database on insert). Re-runs with the original input and
   Temporal resets stop being supported: from then on the claims may disappear, and a reset execution that resolves
   a deleted claim fails that step with `claim_unavailable`, not retried.
+- **An idempotency key lives as long as its request is stored** (revision 10): an exact retry under it admits nothing
+  new while the request is stored, and past the cutoff is refused (`request_not_retained`, 410; `dewpoint dev run`
+  likewise); once retention deletes the request, the key is free again. A started request whose run is gone fails
+  closed.
 - **Physical deletion within 24 hours after the cutoff** is an enforced operational SLO (§10.3).
 - **What's deleted:** a terminal root's whole tree, found by root run id — `runs`, `run_steps`, `step_outputs` (spills,
   segments, snapshots), `run_inputs`, `run_secret_index`, `claim_grants`; terminal requests that never started (with
@@ -1626,8 +1805,13 @@ its guide.
 - Temporal histories — §4.6's visible metadata and codec-encrypted payloads — for the namespace's retention: **7
   days by default, at most 30** (platform policy). A tenant whose retention is shorter than Temporal's has histories
   that outlive its data; resets of them won't work.
-- **Audit records:** a platform policy, `audit_retention_days` (default 400). The audit service prunes: it anchors a
-  checkpoint at the last entry pruned, deletes older entries, and the verifier starts from the anchored checkpoint.
+- **Audit records:** a platform policy, `audit_retention_days` (default 400, never under 30). `dewpoint audit prune`,
+  as the auditor's login (`dewpoint_auditor`), anchors each scope's last entry due to the external anchor sink first,
+  records it as the scope's checkpoint (`audit_checkpoints`), then deletes it and every older entry through
+  `audit_prune()`, the only path that deletes audit entries; the verifier starts each chain from its latest
+  checkpoint, which must be among the signed anchors, and a scope pruned whole goes on from it. Pruning is refused
+  outside a development deployment until #3's off-host anchor sink exists (D5, revision 10): anchors on the database's
+  own host can't show that a privileged operator hadn't pruned, rewritten and re-anchored.
 - **Backups:** the operator's policy; the guide recommends at most 35 days. Data removed by retention lasts in
   backups until they expire.
 - **Run execution evidence** (revision 10, §6.4): each execution's workflow and run ids and times, nothing of its
@@ -1636,13 +1820,20 @@ its guide.
 
 ### 10.3 The retention job
 
-- `dewpoint retention`: its own process and role, `dewpoint_retention` — `DELETE` on the retained tables plus the
-  reads it needs. No other role gains `DELETE`.
-- It deletes in batches, per tenant, under tenant scope, idempotently (a crash resumes). It writes one audit entry
-  per tenant per sweep, with counts only, and records each sweep: start, end, success and **lag** (how far past its
-  cutoff the oldest undeleted data is).
-- **The SLO:** a successful sweep within the last 24 hours and a lag under 24 hours. A breach alerts and **pauses
-  new production starts** (a dispatch-time critical check, §2.3) until retention recovers.
+- `dewpoint retention`: its own process and login (`dewpoint_retention_login`, role `dewpoint_retention`) — `DELETE` on
+  the retained tables plus the reads it needs, by column, never a key. No other role gains `DELETE`. Its settings come
+  from its environment only. It also carries tenant erasures on (§6.5).
+- **One sweep at a time** (revision 10), under a lock its connection holds. A sweep takes each active tenant in turn,
+  under its scope and its lifecycle lock, in batches that each commit, so a sweep that stops resumes where it left. It
+  deletes what §10.1 lists, and, whatever the cutoff, a tick's firing record after 31 days (§8.2). Each batch counts
+  what it deleted in its own transaction (`retention_sweep_tenants`), and each active tenant gets one audit entry per
+  sweep (`retention.sweep`, counts only, zeros included); the next start audits a stopped sweep's counts, once. A
+  tenant's failure is kept with its counts, so the sweep is unsuccessful. Each sweep is recorded (`retention_sweeps`):
+  start, end, success and **lag** (how far past its cutoff the oldest stored data is); records go after 30 days.
+- **The SLO:** a successful sweep within the last 24 hours and a lag under 24 hours. In a `production` deployment, a
+  breach **pauses new starts**: the dispatcher checks it before every start (§2.3), and requests stay queued
+  (`retention_unhealthy`), no attempt counted, until retention recovers; a new production deployment starts nothing
+  before its first successful sweep.
 - Key retirement (§6.4) waits for retention or re-encryption.
 
 ### 10.4 Production Temporal
@@ -2235,6 +2426,20 @@ Beyond each task's own tests:
   retried task; a result over the limit fails where it's produced; if the
   `TERMINATED` classification of §7.6 is adopted, a test proves it on the dev server.
 - **Retention:** cutoffs on every read path, the SLO pause, audit pruning's checkpoint.
+- **2b-4a's part** (revision 10): a row naming another tenant's object refused under each composite key, for each role
+  (#35); the API's role refused a direct update of an endpoint's events pointer (D10); the cutoff on every read path;
+  the sweep's exact, durable counts and its resumption; the SLO's wait at dispatch; pruning through its checkpoint, a
+  scope pruned whole included; re-encryption keeping every record's plaintext and never overwriting one rewritten
+  meanwhile, a credential scope key included; each retirement check refusing on its own; keypair retirement against
+  recording, in both orders; the tick contract's replay; run evidence through lost and pending starts; the erasure's
+  stages on the dev server, the insert fence for every table and role, step 1 against each writer in flight, and the
+  late-create, stale-unpause race on Temporal; contract tests on the dev server (a paused schedule's due firings neither
+  caught up nor counted, and its missed count not growing across an outage; a deleted and recreated schedule restarting
+  its conflict token; running ticks unlisted under allow-all; executions deleted, running and closed); the races of the
+  missed-firings accounting (an edit through the landing, a failed second update, a re-enable during a lost create, a
+  timing edit, a held unpause against a delete, a successor recorded around an update); and **the proof:** after a
+  completed erasure (the firing bound taken as proven in the test), nothing of the tenant is decodable or stored beyond
+  the agreed exceptions. Every migration goes up, down and up again over existing rows.
 - **RLS and roles:** the RLS matrix over the new tables and roles; the authorization matrix over `run.start`,
   `run.cancel`, `trigger.manage` and `workflow.declassify`.
 
@@ -2263,7 +2468,10 @@ Each plan updates the older specs as it lands, as the engine-core 5.x revisions 
   `run_secret_index`, `run_requests`, `tenant_run_limits`, `run_slots`, `csv_uploads`, `csv_mappings`, `schedules`,
   `webhook_endpoints`, `tenant_event_counters`, `trigger_bindings`, `inbound_events`, `tenant_event_keys`,
   `tenant_retention`,
-  `retention_sweeps`, `current_build`, `dispatcher_reports`. `tenants` gains a status (`active`, `erasing`). `runs`
+  `retention_sweeps`, `current_build`, `dispatcher_reports`; 2b-4a's `retention_sweep_tenants`, `audit_checkpoints`,
+  `run_duration_limits`, `tick_cutover`, `execution_evidence`, `tenant_erasures`, `tenant_erasure_items`,
+  `tenant_erasure_known`, `namespace_boundaries`, `schedule_firings`, `schedule_incarnations` and `schedule_intervals`.
+  `tenants` gains a status (`active`, `erasing`, and `erased` from 2b-4a). `runs` gains `root_run_id` (2b-4a). `runs`
   gains `queued_at` (existing rows backfilled from `started_at`), and `runs.started_at` becomes nullable with no
   default: existing rows keep their values, a row pre-created at dispatch has none until the start is confirmed (§7.8),
   and every read path and the cursor order by `queued_at` (§7.7). 2b-1's `admit` keeps setting `started_at` as it does
@@ -2293,10 +2501,20 @@ Each plan updates the older specs as it lands, as the engine-core 5.x revisions 
     count and end) and the counters, and records a recount; its cross-tenant reads are `event_candidates()` and
     `recount_candidates()`, ids only. Ingress executes `ingress_environment()`, `resolve_webhook_endpoint()` and
     `record_inbound_events()`, and nothing else.
+  - 2b-4a's: every key between two tenant tables includes `tenant_id` (#35); the API's role has no grant to update an
+    endpoint's events pointer (D10). `dewpoint_retention` deletes the retained tables' rows under the tenant's scope
+    and, for an erasure, every row of the tenant, through policies of its own; it reads by column, the ids a statement's
+    conditions need, never a sealed, wrapped or tenant-written value, and it anonymizes a tombstone. The key admin
+    rewrites sealed columns only (`reencrypt`), deletes data-key versions and keypairs, reads events' keypair versions
+    and records the tick cutover. The API starts, stops, retries and reads an erasure, and reads a tenant's retention
+    and its schedules' spans and incarnations. The auditor's login prunes through `audit_prune()`. The dispatcher
+    records run evidence, incarnations and spans; a tick records its firing. A tenant's status is read through
+    `tenant_status()`, whatever the reader's scope; the strays are `stray_incarnations()`, ids only. From stage 60 of an
+    erasure, a trigger on every table holding tenant data refuses an insert of the tenant's rows (§6.5).
 - **Permissions:** `run.cancel` (operators and above), `trigger.manage` (editors and above), `workflow.declassify`
   (admins and owners).
 - **Processes:** `dewpoint dispatcher` (dispatch, reconciler, schedule sync, `ScheduleTick` worker), `dewpoint
-  ingress`, `dewpoint retention`, alongside the API and the worker.
+  ingress`, `dewpoint retention` (the sweep, and from 2b-4a tenant erasures), alongside the API and the worker.
 
 ## 15. Provisional values
 
@@ -2322,6 +2540,13 @@ tenant; retained caps of 100,000 events and 512 MiB and of 250,000 events and 1 
 50 events a matcher's cycle; 20 bindings an endpoint and 8 clauses a filter; an event's retries from 30 s, doubling,
 `dead` at the 5th; a platform failure's wait of 60 s; a recount at most every 10 minutes, 20 tenants a pass; ids of at
 most 255 characters, nesting of at most 64 levels.
+
+**2b-4a's prototype values,** provisional: a tenant's retention 30 days by default (1 to 365); a sweep every hour (60 s
+to 6 hours), 100 rows (or run trees) a batch, sweep records kept 30 days, a tick's firing record 31 days; audit
+retention 400 days (never under 30); an older keypair retired 10 minutes after a newer one exists at the earliest; an
+erasure pass every 60 s (5 s to 1 hour), a failed stage backing off from 30 s, doubling to an hour, a stage stalled
+after an hour, the bound stage 60's end plus 30 days; each incarnation that isn't current described every hour, a failed
+describe again after 5 minutes; Temporal's missed count read every 5 minutes.
 
 These numbers are starting points. Each stays provisional until the go/no-go experiments (§11) or the owning plan's
 measurements establish it; the spec is revised with the measured value when that plan lands.
