@@ -502,3 +502,11 @@ Rulings:
 - Ruling: `GET /api/v1/trigger-types` (any active session) lists the synced plugins' triggers, with each topic's
   schema; nothing creates the endpoint or the binding for the editor yet (the existing webhook routes do, with the
   declared settings) - D17 asks the editor to type pills per topic, which needs the schemas - cost if wrong: none.
+- Proof (`backend/tests/apps/worker/test_run_graph_mist.py`, task 10): a workflow of two generated nodes published,
+  admitted, dispatched and run through RunGraph against a local fake standing in for `api.eu.mist.com` (vetted,
+  pinned, TLS-checked; its port 443 redirected in the test's socket layer): the site checked, its devices listed, the
+  WLAN read and merge-updated (`auth` sent whole: its type and PSK kept, `pairwise` changed), every request with the
+  runtime's `Token` header, neither the token nor the PSK in any preview, the token in the run's secret index. The
+  same workflow simulated sends nothing. A Mist `alarms` envelope recorded by ingress's own function is matched by a
+  `/topic` binding and runs a workflow typed by the topic's schema; a `device-updowns` envelope matches nothing; an
+  `alarms` envelope whose events aren't a list is refused by admission (`input_invalid`).
