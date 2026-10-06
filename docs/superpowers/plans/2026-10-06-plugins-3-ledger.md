@@ -305,4 +305,7 @@ an isolated database and local fakes, all fixed test-first:
 - (5) a notification arriving during a round was cleared without another query: the event is cleared before the
   query: `2e81380`.
 
+Each of the five failed its new test before its fix. Full run after them, at `b5e076c`: 2882 passed, 8 skipped, in
+4 min 14 s; ruff, format, mypy, import contracts, licences and the replay gate pass.
+
 **Checkpoint:** awaiting the owner's rulings on 3a-2's rulings above. Nothing is pushed.
