@@ -54,8 +54,11 @@ An erasure's record alone never erases. The retention process carries one on onl
 when an erasure reopens after its completion); a record for an active tenant is skipped and alerted on
 (`erasure_tenant_active`). The API records an erasure with its tenant and requester only. And the database draws its own
 boundary around the destructive paths: the retention login deletes a tenant's keys only once its erasure has reached
-stage 70, its other rows outside ordinary retention and its tombstone's rename only from stage 80, and cancels its
-queued work only from stage 40. Ordinary retention, for active tenants, is untouched.
+stage 70, its other rows outside ordinary retention (its schedules' incarnations and spans among them) and its
+tombstone's rename only from stage 80, and cancels its queued work only from stage 40, and each only while the tenant
+is `erasing` (or `erased`): a stray record for an active tenant opens none of them. Ordinary retention, for active
+tenants, is untouched. This guards against a stray record and a stage-skipping bug, not against the retention login
+itself, which writes the erasure's stage, and the tenant's status from stage 80.
 
 ## The stages
 

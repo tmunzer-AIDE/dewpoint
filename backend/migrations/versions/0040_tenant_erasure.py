@@ -325,13 +325,17 @@ INTERVALS = [
 # The retention process checks the deployment's recorded namespace before erasure reaches Temporal (§2.1).
 RECORD = "GRANT SELECT ON platform_settings TO dewpoint_retention"
 # The database's own boundary around the erasure's destructive paths (the final review's I2): the retention role
-# deletes a tenant's keys (stage 70) and its rows outside ordinary retention (stage 80), renames its tombstone (80) and
-# cancels its queued work (40) only once the tenant's erasure has reached that stage; a stray record (it starts at stage
-# 20) or a bug in the retention process can't reach them early. Ordinary retention (0037's tables and their retained
-# counters) is untouched. A row naming no tenant (an egress exception for every tenant) is never reached.
+# deletes a tenant's keys (stage 70) and its rows outside ordinary retention (stage 80: its schedules' incarnations and
+# spans among them), renames its tombstone (80) and cancels its queued work (40) only once the tenant is being erased
+# (`erasing`, or `erased` for a reopened erasure) and its erasure has reached that stage. A stray record (an active
+# tenant's) opens nothing, and a stage-skipping bug opens nothing early. It isn't a boundary against the retention role
+# itself, which writes the erasure's stage, and the tenant's status from stage 80. Ordinary retention (0037's tables
+# and their retained counters) is untouched. A row naming no tenant (an egress exception for every tenant) is never
+# reached.
 REACHED = """CREATE FUNCTION erasure_reached(tenant uuid, stage integer) RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER
 SET search_path = public, pg_temp AS $$
-  SELECT EXISTS (SELECT 1 FROM tenant_erasures e WHERE e.tenant_id = tenant AND e.step >= stage)
+  SELECT EXISTS (SELECT 1 FROM tenant_erasures e JOIN tenants t ON t.id = e.tenant_id
+                 WHERE e.tenant_id = tenant AND e.step >= stage AND t.status IN ('erasing', 'erased'))
 $$"""
 GATED = [  # (table, the command gated, the column naming its tenant, the stage that reaches it)
     *((t, "DELETE", "tenant_id", 70) for t in ("data_keys", "tenant_event_keys")),
@@ -339,7 +343,7 @@ GATED = [  # (table, the command gated, the column naming its tenant, the stage 
         "connections", "csv_mappings", "egress_allowlist", "execution_evidence", "memberships", "plugin_calls",
         "rate_buckets", "rate_scope_keys", "run_slots", "tenant_event_counters", "tenant_retention",
         "tenant_run_limits", "trigger_bindings", "webhook_endpoints", "workflow_versions", "workflows",
-        "retention_sweep_tenants")),
+        "retention_sweep_tenants", "schedule_incarnations", "schedule_intervals")),
     ("workflows", "UPDATE", "tenant_id", 80),  # its active version cleared, before its versions go
     ("tenants", "UPDATE", "id", 80),  # the tombstone renamed, then marked erased
     *((t, "UPDATE", "tenant_id", 40) for t in ("run_requests", "inbound_events")),  # cancelled
@@ -429,7 +433,7 @@ def upgrade() -> None:
     )
     op.create_index("schedule_firings_tenant", "schedule_firings", ["tenant_id", "schedule_id"])
     op.create_index("schedule_firings_recorded", "schedule_firings", ["recorded_at"])
-    for statement in [*FIRINGS, *STATUS, *ERASURES, *ERASER, *SCOPE, VERSIONS, EVIDENCE_DUE, RECORD, *GATE]:
+    for statement in [*FIRINGS, *STATUS, *ERASURES, *ERASER, *SCOPE, VERSIONS, EVIDENCE_DUE, RECORD]:
         op.execute(statement)
     op.create_table(
         "namespace_boundaries",
@@ -497,6 +501,8 @@ def upgrade() -> None:
         op.execute(f"CREATE TRIGGER {table}_fence BEFORE INSERT ON {table} FOR EACH ROW "
                    "EXECUTE FUNCTION tenant_insert_fence()")  # fmt: skip
     op.execute(CALL_CANDIDATES)
+    for statement in GATE:  # last: every table it gates exists by now (schedule_incarnations, schedule_intervals)
+        op.execute(statement)
 
 
 def downgrade() -> None:

@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """The database's own boundary around an erasure's destructive paths (the final review's I2). The API records an
 erasure with its tenant and requester only, never its stage. The retention role deletes a tenant's keys, and its other
-rows outside ordinary retention, renames its tombstone, and cancels its queued work only once the tenant's erasure has
-reached the stage that does so: a stray record, or a bug in the retention process, can't reach them early."""
+rows outside ordinary retention (its schedules' incarnations and spans among them), renames its tombstone, and cancels
+its queued work only once the tenant is being erased (`erasing`, or `erased` for a reopened erasure) and its erasure
+has reached the stage that does so: a stray record, an active tenant's, opens nothing, and a stage-skipping bug opens
+nothing early. It isn't a boundary against that role itself, which writes the erasure's stage, and the tenant's status
+from stage 80."""
 
 import uuid
 from typing import Any
@@ -41,6 +44,8 @@ async def _deleted(retention: Any, tenant: uuid.UUID) -> dict[str, int]:
         "tenants": "update tenants set name = 'Erased tenant' where id = :t",
         "run_requests": "update run_requests set status = 'cancelled', reason = 'tenant_erased', ended_at = now() "
         "where tenant_id = :t and status = 'queued'",
+        "schedule_incarnations": "delete from schedule_incarnations where tenant_id = :t",
+        "schedule_intervals": "delete from schedule_intervals where tenant_id = :t",
     }
     done: dict[str, int] = {}
     for name, sql in statements.items():
@@ -65,19 +70,29 @@ async def test_the_retention_role_reaches_a_tenants_keys_and_rows_only_at_its_er
                         {"t": tenant, "u": user})  # fmt: skip
         await s.execute(text("insert into connections (id, tenant_id, type, name, config) "
                              "values (gen_random_uuid(), :t, 'http', 'c', '{}')"), {"t": tenant})  # fmt: skip
+        schedule, temporal_id = uuid.uuid4(), f"t:{tenant}:sched:{uuid.uuid4()}~1"
+        await s.execute(text("insert into schedule_incarnations (temporal_id, tenant_id, schedule_id, number) "
+                             "values (:i, :t, :s, 1)"), {"i": temporal_id, "t": tenant, "s": schedule})  # fmt: skip
+        await s.execute(text("insert into schedule_intervals (tenant_id, schedule_id, temporal_id, kind, starts_at, "
+                             "ends_at, class, reason) values (:t, :s, :i, 'creation', now() - interval '1 hour', "
+                             "now(), 'unknown', 'r')"), {"i": temporal_id, "t": tenant, "s": schedule})  # fmt: skip
     await request(owner_sessionmaker, {"t": tenant, "w": workflow, "v": version, "u": user}, "queued", None)
-    none = dict.fromkeys(("data_keys", "workflows", "connections", "memberships", "tenants", "run_requests"), 0)
+    none = dict.fromkeys(("data_keys", "workflows", "connections", "memberships", "tenants", "run_requests",
+                          "schedule_incarnations", "schedule_intervals"), 0)  # fmt: skip
+    every = dict.fromkeys(none, 1)
     assert await _deleted(retention_sessionmaker, tenant) == none  # active: no erasure
 
-    async def at(stage: Stage) -> dict[str, int]:
+    async def at(stage: Stage, status: str = "erasing") -> dict[str, int]:
         async with owner_sessionmaker() as s, s.begin():
             await s.execute(text("insert into tenant_erasures (tenant_id, requested_by, step) values (:t, :u, :k) "
                                  "on conflict (tenant_id) do update set step = excluded.step"),
                             {"t": tenant, "u": user, "k": int(stage)})  # fmt: skip
+            await s.execute(text("update tenants set status = :s where id = :t"), {"s": status, "t": tenant})
         return await _deleted(retention_sessionmaker, tenant)
 
+    assert await at(Stage.SWEEP, "active") == none  # a stray record: an active tenant's opens nothing (R2)
     assert await at(Stage.RECONCILE) == none
     assert await at(Stage.CANCEL) == {**none, "run_requests": 1}
-    assert await at(Stage.KEYS) == {**none, "run_requests": 1, "data_keys": 1}
-    assert await at(Stage.SWEEP) == {"data_keys": 1, "workflows": 1, "connections": 1, "memberships": 1, "tenants": 1,
-                                     "run_requests": 1}  # fmt: skip
+    assert await at(Stage.KEYS) == {**none, "run_requests": 1, "data_keys": 1}  # its schedules' records kept until 80
+    assert await at(Stage.SWEEP) == every
+    assert await at(Stage.SWEEP, "erased") == every  # a reopened erasure

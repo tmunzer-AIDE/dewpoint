@@ -1075,10 +1075,12 @@ is committed an erasure can be stopped and retried, never reversed (D3a). `docs/
 - **A record alone never erases** (the final review's I2): the API's role inserts an erasure's tenant and requester
   only, never its stage; the retention process carries an erasure on only while its tenant is `erasing` (or `erased`,
   for a reopened one), and alerts on any other; and the database gates the retention role's erasure-only paths on the
-  stage the tenant's erasure reached (`erasure_reached()`, restrictive policies): the keys' deletes at 70, the
-  tenant's other rows' deletes, its workflows' version cleared and its tombstone renamed at 80, its queued requests
-  and events cancelled at 40. Ordinary retention (the retained tables and their counters) stays ungated: that role
-  sweeps active tenants too.
+  stage the tenant's erasure reached, while the tenant is `erasing` or `erased` (`erasure_reached()`, restrictive
+  policies): the keys' deletes at 70, the tenant's other rows' deletes (its schedules' incarnations and spans among
+  them), its workflows' version cleared and its tombstone renamed at 80, its queued requests and events cancelled at
+  40. Ordinary retention (the retained tables and their counters) stays ungated: that role sweeps active tenants too.
+  The gate guards against a stray record and a stage-skipping bug, not against the retention role itself, which
+  writes the erasure's stage, and the tenant's status from stage 80.
 - **The stages,** carried on by the retention process (§10.3) every `DEWPOINT_ERASURE_INTERVAL_S`, each from its
   recorded stage, each stage until one isn't done yet. What a stage does outside PostgreSQL goes through items (a
   request, a schedule, a run, an execution), each found, requested, then verified by reading Temporal back:
