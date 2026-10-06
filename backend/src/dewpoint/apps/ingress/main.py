@@ -32,7 +32,7 @@ from dewpoint.apps.ingress.endpoints import Endpoint, resolve
 from dewpoint.apps.ingress.limits import FailureLimiter, InFlight
 from dewpoint.apps.ingress.recording import UNKNOWN, record, respond
 from dewpoint.core import logs
-from dewpoint.core.crypto.ingress import DEDUPE_KEY, IngressKey, UnknownIngressKeyError
+from dewpoint.core.crypto.ingress import DEDUPE_KEY, IngressKey, UnknownIngressKeyError, previous_of
 from dewpoint.core.db import make_engine, make_sessionmaker, unavailable
 from dewpoint.core.ingress.parsing import MalformedError
 from dewpoint.core.platform.service import DEVELOPMENT
@@ -110,7 +110,7 @@ def create_app(settings: IngressSettings | None = None, *, clock: Callable[[], f
     refuse_key_encryption_key(os.environ)
     settings = settings or IngressSettings()  # read from the environment
     trusted = parse_proxies(settings.ingress_trusted_proxies)
-    key = IngressKey(settings.ingress_key_id, base64.b64decode(settings.ingress_key_b64))
+    key = IngressKey(settings.ingress_key_id, base64.b64decode(settings.ingress_key_b64), previous_of(settings))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:

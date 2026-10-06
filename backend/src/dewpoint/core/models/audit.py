@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, DateTime, LargeBinary, Text
+from sqlalchemy import BigInteger, DateTime, LargeBinary, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -29,6 +29,7 @@ class AuditEntry(Base):
 
 class AuditAnchor(Base):
     __tablename__ = "audit_anchors"
+    __table_args__ = (UniqueConstraint("scope", "seq", name="audit_anchors_scope_seq_key"),)
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     scope: Mapped[str] = mapped_column(Text)
     seq: Mapped[int] = mapped_column(BigInteger)
@@ -36,3 +37,16 @@ class AuditAnchor(Base):
     anchored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     sink: Mapped[str] = mapped_column(Text)
     sink_ref: Mapped[str] = mapped_column(Text)
+
+
+class AuditCheckpoint(Base):
+    """A pruned scope's checkpoint (engine 2b spec §10.2): the last entry pruned, anchored off the database first. The
+    verifier starts the scope's chain from its latest one, and the scope's next entry chains to it when none is left."""
+
+    __tablename__ = "audit_checkpoints"
+    scope: Mapped[str] = mapped_column(Text, primary_key=True)
+    seq: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    hash: Mapped[bytes] = mapped_column(LargeBinary)
+    sink: Mapped[str] = mapped_column(Text)
+    sink_ref: Mapped[str] = mapped_column(Text)
+    anchored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

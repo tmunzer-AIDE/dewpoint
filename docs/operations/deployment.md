@@ -191,8 +191,8 @@ types, task queues, timestamps, and a local activity's own bookkeeping (its type
 - **Claims** (from ABI 6) are stored in the database, encrypted with the same data keys and bound to their id and
   tenant: `run_inputs` and `step_outputs` hold sensitive and large values, `claim_grants` which run may read which, and
   `run_secret_index` each run tree's known secrets, used to mask messages and rows. The worker's role reads and writes
-  them; admission (the dispatch role) writes a run's input claims and seeds its index. No role updates or deletes a
-  claim; tenant retention will (sub-project 2b-4).
+  them; admission (the dispatch role) writes a run's input claims and seeds its index. No role updates a claim; only
+  the retention job deletes them, with their run tree ([retention](retention.md)).
 - **No digest of a claim's value is kept** (migration 0018, issue #28). Before it, each claim row held an unkeyed
   SHA-256 of its plaintext, which let anyone who read the table test guesses for a short secret offline. The migration
   drops the column from the live database, and a rewrite of a claim's id is checked by decrypting the existing claim.
@@ -214,6 +214,12 @@ The check is deliberately light: it proves a grant and a fresh key's round trip,
 KEK configured under the right id passes it, and passes `dewpoint keys status`, which compares KEK ids
 ([`key-rotation.md`](key-rotation.md)). Lifting the production gate (sub-project 2b-4) unwraps every stored data key
 and reads each tenant's key the way the workers do, first.
+
+A worker process opens at most 23 database connections: a pool of 5 with an overflow of 10 for its activities, its
+health check and its other work, and a pool of 8 for plugin calls, one per call in flight, each held for the whole
+call so that erasure can't start beneath it. A call waits for a guard rather than taking an activity's connection.
+Size PostgreSQL's `max_connections` for 23 per worker process, plus the API's, dispatcher's and retention process's
+pools, plus headroom for migrations and operators.
 
 ## Docker Compose (evaluation)
 
@@ -238,6 +244,13 @@ development override, on a database of their own (a project's own volume), with 
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 ```
 
+**Migrations run as a role that bypasses row-level security:** the database's superuser (as Compose's `POSTGRES_USER`
+is) or a role with `BYPASSRLS`. Migrations 0035 and 0037 read every tenant's rows (0035 checks that no row names
+another tenant's workflow, version or run; 0037 records each run's tree), and under any other role they stop with an
+error naming row-level security rather than check nothing. Migration 0035 also adds and checks its keys inside its own
+transaction, which blocks writes to `runs`, `run_steps`, `run_requests` and the other tables it changes until it ends;
+before migrating large populated tables, plan the downtime or split the check (a decision of its own).
+
 It records `development` (`DEWPOINT_ENVIRONMENT`); CI sets `COMPOSE_FILE` to both files.
 
 Webhook ingress, a development-only prototype until engine 2b-4, runs only with the `ingress` profile
@@ -251,12 +264,15 @@ image has a new engine ABI, publish every workflow again after upgrading (above)
 overlap.
 
 The worker, and the dispatcher and `dewpoint dev run`, log in as `dewpoint_worker_login` and `dewpoint_dispatch_login`
-(`DEWPOINT_WORKER_DB_PASSWORD`, `DEWPOINT_DISPATCH_DB_PASSWORD`), and webhook ingress as `dewpoint_ingress_login`
-(`DEWPOINT_INGRESS_DB_PASSWORD`), whose role holds no table, only its three functions. A fresh install creates them. An
-install whose database predates them creates them once, as the database owner:
+(`DEWPOINT_WORKER_DB_PASSWORD`, `DEWPOINT_DISPATCH_DB_PASSWORD`), webhook ingress as `dewpoint_ingress_login`
+(`DEWPOINT_INGRESS_DB_PASSWORD`), whose role holds no table, only its three functions, and the retention job (Compose's
+`retention` service) as `dewpoint_retention_login` (`DEWPOINT_RETENTION_DB_PASSWORD`), the only login that deletes
+retained data ([retention](retention.md)). A fresh install creates them. An install whose database predates them
+creates them once, as the database owner, after upgrading (the migrations make the group roles):
 
 ```sql
 CREATE ROLE dewpoint_worker_login LOGIN PASSWORD '<worker password>' IN ROLE dewpoint_worker;
 CREATE ROLE dewpoint_dispatch_login LOGIN PASSWORD '<dispatch password>' IN ROLE dewpoint_dispatch;
 CREATE ROLE dewpoint_ingress_login LOGIN PASSWORD '<ingress password>' IN ROLE dewpoint_ingress;
+CREATE ROLE dewpoint_retention_login LOGIN PASSWORD '<retention password>' IN ROLE dewpoint_retention;
 ```

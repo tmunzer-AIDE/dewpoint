@@ -5,7 +5,18 @@ slots a tenant's running root runs hold; its limits row; and the current build a
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, LargeBinary, SmallInteger, String, Text, func
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Integer,
+    LargeBinary,
+    SmallInteger,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -21,12 +32,27 @@ class RunRequest(Base):
     here: it's an envelope in `run_inputs`, encrypted, beside the claims it holds handles to (revision 7)."""
 
     __tablename__ = "run_requests"
+    __table_args__ = (  # a workflow and a version of the request's own tenant (#35); an envelope it owns (revision 7)
+        UniqueConstraint("tenant_id", "idempotency_key", name="run_requests_idempotency"),
+        ForeignKeyConstraint(
+            ["workflow_id", "tenant_id"], ["workflows.id", "workflows.tenant_id"], name="run_requests_workflow"
+        ),
+        ForeignKeyConstraint(
+            ["workflow_version_id", "workflow_id", "tenant_id"],
+            ["workflow_versions.id", "workflow_versions.workflow_id", "workflow_versions.tenant_id"],
+            name="run_requests_version",
+        ),
+        ForeignKeyConstraint(
+            ["envelope_id", "tenant_id", "id", "envelope_role"],
+            ["run_inputs.id", "run_inputs.tenant_id", "run_inputs.owner_run_id", "run_inputs.role"],
+            name="run_requests_envelope",
+            ondelete="RESTRICT",
+        ),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"))
-    workflow_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("workflows.id"))
-    workflow_version_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("workflow_versions.id")
-    )
+    workflow_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    workflow_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     source: Mapped[str] = mapped_column(String(16))
     actor_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     mode: Mapped[str] = mapped_column(String(16))
@@ -44,6 +70,7 @@ class RunRequest(Base):
     starting_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # when it last became starting
     checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # the reconciler's last look
     envelope_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    envelope_role: Mapped[str] = mapped_column(String(16), server_default="envelope")  # its envelope key's constant
 
 
 class TenantRunLimits(Base):

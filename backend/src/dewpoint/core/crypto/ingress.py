@@ -2,14 +2,15 @@
 """The ingress key (engine 2b spec §8.3): an endpoint's secrets — its HMAC secret and its dedupe-digest key — sealed
 under `DEWPOINT_INGRESS_KEY_B64`, which only ingress and the API hold, never under a tenant's data key, so ingress
 authenticates and deduplicates without one. A sealed secret names its key's id: one sealed under another key is
-refused by it (rotation is 2b-4's). A bearer token is high-entropy, made by Dewpoint, and kept only as its SHA-256
-digest."""
+refused, unless the process holds that key too: during a rotation, the previous one (2b-4). A bearer token is
+high-entropy, made by Dewpoint, and kept only as its SHA-256 digest."""
 
 import base64
 import hashlib
 import hmac
 import os
 import secrets
+from collections.abc import Sequence
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -34,13 +35,26 @@ class MalformedSecretError(ValueError):
     """Bytes that aren't a sealed secret's layout: format, id length, id, nonce, then at least a tag."""
 
 
+def _checked(key_id: str, key: bytes) -> AESGCM:
+    if len(key) != 32:
+        raise ValueError("the ingress key must be 32 bytes")
+    if not 0 < len(key_id.encode()) < 256:
+        raise ValueError("the ingress key's id must be 1 to 255 bytes")
+    return AESGCM(key)
+
+
 class IngressKey:
-    def __init__(self, key_id: str, key: bytes) -> None:
-        if len(key) != 32:
-            raise ValueError("the ingress key must be 32 bytes")
-        if not 0 < len(key_id.encode()) < 256:
-            raise ValueError("the ingress key's id must be 1 to 255 bytes")
-        self.key_id, self._aes = key_id, AESGCM(key)
+    """The current ingress key, which seals, and during a rotation the previous one, which only opens."""
+
+    def __init__(self, key_id: str, key: bytes, previous: Sequence[tuple[str, bytes]] = ()) -> None:
+        self.key_id, self._aes = key_id, _checked(key_id, key)
+        self._held = {key_id: self._aes} | {kid: _checked(kid, raw) for kid, raw in previous}
+        if len(self._held) != len(previous) + 1:
+            raise ValueError("ingress key ids must be unique")
+
+    @property
+    def key_ids(self) -> frozenset[str]:
+        return frozenset(self._held)
 
     @staticmethod
     def _aad(purpose: str, context: str) -> bytes:
@@ -63,16 +77,27 @@ class IngressKey:
             kid = blob[2 : 2 + size].decode()
         except UnicodeDecodeError:
             raise MalformedSecretError("a sealed secret's key id isn't UTF-8") from None
-        if kid != self.key_id:
+        held = self._held.get(kid)
+        if held is None:
             raise UnknownIngressKeyError(kid)
         rest = blob[2 + size :]
-        return self._aes.decrypt(rest[:NONCE], rest[NONCE:], self._aad(purpose, context))
+        return held.decrypt(rest[:NONCE], rest[NONCE:], self._aad(purpose, context))
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "IngressKey":
         if not settings.ingress_key_b64:
             raise IngressKeyMissingError("DEWPOINT_INGRESS_KEY_B64 is required by ingress and the API's endpoints")
-        return cls(settings.ingress_key_id, base64.b64decode(settings.ingress_key_b64))
+        return cls(settings.ingress_key_id, base64.b64decode(settings.ingress_key_b64), previous_of(settings))
+
+
+def previous_of(settings: object) -> list[tuple[str, bytes]]:
+    """The previous ingress key a rollout configures (`DEWPOINT_INGRESS_KEY_PREVIOUS_B64` and `_ID`), if any."""
+    raw, kid = getattr(settings, "ingress_key_previous_b64", None), getattr(settings, "ingress_key_previous_id", None)
+    if not raw:
+        return []
+    if not kid:
+        raise ValueError("DEWPOINT_INGRESS_KEY_PREVIOUS_ID is required with DEWPOINT_INGRESS_KEY_PREVIOUS_B64")
+    return [(kid, base64.b64decode(raw))]
 
 
 def new_bearer_token() -> str:

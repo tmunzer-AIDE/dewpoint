@@ -2,8 +2,8 @@
 """After authentication, every attempt goes through `record_inbound_events` (engine 2b spec §8.3; "Work limits" in the
 2b-3b outline): over the endpoint's body limit 413, malformed 400 (both paying their rate budget), short of tokens 429
 with `Retry-After`, an id reused for other content 409, over a pending quota 429 (`Retry-After` 30), over a retained cap
-429 without one, recorded 200 with its counts, answered only once committed. A tenant without an inbound key fails
-closed."""
+429 without one, sealed to a keypair retired before recording 503 with `Retry-After`, recorded 200 with its counts,
+answered only once committed. A tenant without an inbound key fails closed."""
 
 import json
 import os
@@ -184,6 +184,36 @@ async def test_an_endpoint_disabled_after_it_was_resolved_is_the_same_401(app, o
     response = await _post(app, endpoint_id, '{"n": 1}')
     assert (response.status_code, response.content) == (401, b"")
     assert await events_of(owner_sessionmaker, endpoint_id) == []
+
+
+async def test_a_delivery_sealed_to_a_keypair_retired_before_it_was_recorded_is_a_retryable_503(
+    app, owner_sessionmaker, admin_sessionmaker, monkeypatch
+) -> None:
+    """The owner's M3 review: a valid delivery can be sealed to a keypair that's retired before it's recorded (no
+    bound covers a whole request). It's refused whole, nothing stored, with a 503 and `Retry-After`; the retry is sealed
+    to the newest keypair and recorded."""
+    tenant, endpoint_id = await bearer_endpoint(owner_sessionmaker)
+    real = main.resolve
+
+    async def then_rotated(*args, **kwargs):  # type: ignore[no-untyped-def]
+        found = await real(*args, **kwargs)  # resolved with keypair 1
+        async with admin_sessionmaker() as s, s.begin():
+            await tenant_scope(s, tenant)
+            await event_keys.rotate_event_key(s, KEYRING, tenant)
+        async with owner_sessionmaker() as o, o.begin():
+            await o.execute(text("delete from tenant_event_keys where tenant_id = :t and version = 1"), {"t": tenant})
+        monkeypatch.setattr(main, "resolve", real)
+        return found
+
+    monkeypatch.setattr(main, "resolve", then_rotated)
+    refused = await _post(app, endpoint_id, '{"n": 1}')
+    assert (refused.status_code, refused.json(), refused.headers.get("retry-after")) == (
+        503, {"error": "key_retired"}, "1"
+    )  # fmt: skip
+    assert await events_of(owner_sessionmaker, endpoint_id) == []
+    retried = await _post(app, endpoint_id, '{"n": 1}')
+    assert (retried.status_code, retried.json()) == (200, {"accepted": 1, "duplicates": 0})
+    assert [r["key_version"] for r in await events_of(owner_sessionmaker, endpoint_id)] == [2]
 
 
 @pytest.mark.parametrize("sealed", ["malformed", "another key's"])

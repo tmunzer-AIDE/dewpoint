@@ -30,7 +30,9 @@ class RateBucket(Base):
     """One provider quota scope's budget for a tenant (plugins-3 D9)."""
 
     __tablename__ = "rate_buckets"
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
     scope: Mapped[str] = mapped_column(String(200), primary_key=True)
     capacity: Mapped[float] = mapped_column(Float)
     refill_per_s: Mapped[float] = mapped_column(Float)
@@ -43,6 +45,8 @@ class RateScopeKey(Base):
     """A tenant's key for credential quota scopes (plugins-3 D9), sealed under its data key (purpose `rate.scope`)."""
 
     __tablename__ = "rate_scope_keys"
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
     sealed: Mapped[bytes] = mapped_column(LargeBinary)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -24,6 +24,8 @@ class IngressSettings(BaseSettings):
     database_url: str  # the ingress login's: no table privilege, only ingress's functions
     ingress_key_b64: str
     ingress_key_id: str = "ingress-1"
+    ingress_key_previous_b64: str | None = None  # set only during a rollout: it opens, never seals
+    ingress_key_previous_id: str | None = None
     # Proxies whose X-Forwarded-For is believed (the owner's ruling 11): none by default.
     ingress_trusted_proxies: str = ""
     # The limits before authentication (§15, provisional; the load probe revisits them).

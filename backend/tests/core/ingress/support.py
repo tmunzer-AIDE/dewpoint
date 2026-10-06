@@ -4,12 +4,14 @@ the ingress login."""
 
 import hashlib
 import os
+import struct
 import uuid
 from typing import Any
 
 from sqlalchemy import text
 
 from dewpoint.core.auth.users import create_user
+from dewpoint.core.crypto import events
 from dewpoint.core.crypto.kek import Kek, KekSet
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.ingress.keys import ensure_event_key
@@ -47,20 +49,41 @@ def digest(n: int) -> bytes:
     return hashlib.sha256(f"digest-{n}".encode()).digest()
 
 
-async def record(
-    ingress: Any, endpoint_id: uuid.UUID, events: list[tuple[bytes | None, bytes | None, bytes]] | None = None, *,
+def sealed_layout(blob: bytes, version: int) -> bytes:
+    """A test's stand-in for a sealed event, in the sealed layout (its format byte, its keypair version, at least the
+    sealing's overhead), `blob`'s own bytes after the header: as long as `blob` once it reaches the overhead. Never a
+    real ciphertext: what the recording function checks is the layout, the dispatcher opening it. A real sealed
+    event of `version` is left as it is."""
+    body = blob[5:] if len(blob) >= events.OVERHEAD else blob.rjust(events.OVERHEAD - 5, b"\0")
+    return b"\x01" + struct.pack(">I", version) + body
+
+
+def record_params(
+    endpoint_id: uuid.UUID, given: list[tuple[bytes | None, bytes | None, bytes]] | None = None, *,
     refusal: str | None = None, read: int = 0, versions: list[int] | None = None, ids: list[uuid.UUID] | None = None,
+    layout: bool = True,
 ) -> dict[str, Any]:  # fmt: skip
-    """The recording function's outcome for `events`, each (dedupe key, content digest, sealed bytes), committed."""
-    given = events or []
-    params = {
+    """RECORD's parameters for `given` events, each (dedupe key, content digest, sealed bytes), each sealed bytes put
+    in the sealed layout (`sealed_layout`) unless `layout` is False."""
+    given = given or []
+    versions = versions or [1] * len(given)
+    named = versions + [1] * (len(given) - len(versions))  # arrays that don't line up are the function's to refuse
+    sealed = [sealed_layout(blob, v) if layout else blob for (_, _, blob), v in zip(given, named, strict=False)]
+    return {
         "e": endpoint_id, "refusal": refusal, "read": read,
         "ids": ids if ids is not None else [uuid.uuid4() for _ in given],
-        "sealed": [sealed for _, _, sealed in given], "versions": versions or [1] * len(given),
+        "sealed": sealed, "versions": versions,
         "dedupe": [dedupe for dedupe, _, _ in given], "digests": [d for _, d, _ in given],
     }  # fmt: skip
+
+
+async def record(
+    ingress: Any, endpoint_id: uuid.UUID, given: list[tuple[bytes | None, bytes | None, bytes]] | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:  # fmt: skip
+    """The recording function's outcome for `given` events (`record_params`), committed."""
     async with ingress() as s, s.begin():
-        return dict((await s.execute(RECORD, params)).scalar_one())
+        return dict((await s.execute(RECORD, record_params(endpoint_id, given, **kwargs))).scalar_one())
 
 
 async def state(owner: Any, endpoint_id: uuid.UUID) -> dict[str, Any]:

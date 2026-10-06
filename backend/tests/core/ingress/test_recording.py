@@ -16,7 +16,7 @@ from sqlalchemy.exc import IntegrityError
 
 from dewpoint.core.crypto import events
 from dewpoint.core.ingress import identity
-from tests.core.ingress.support import digest, endpoint, events_of, key, record, state, tenant_state
+from tests.core.ingress.support import digest, endpoint, events_of, key, record, sealed_layout, state, tenant_state
 
 pytestmark = pytest.mark.usefixtures("development_deployment")
 
@@ -159,7 +159,7 @@ async def test_the_function_checks_the_batch_itself_whatever_its_caller_says(
     for given, kwargs, expected in (
         ([(None, None, b"x")] * 501, {}, "malformed"),  # past 500 events
         ([(None, None, b"x" * 5200)], {}, "too_large"),  # past five times the body limit, plus 128 bytes an event
-        (one, {"versions": [2]}, "malformed"),  # a keypair version the tenant doesn't have
+        (one, {"versions": [2]}, "key_retired"),  # a keypair version the tenant doesn't have (retryable)
         (one, {"versions": [1, 1]}, "malformed"),  # arrays that don't line up
         ([(key(1), None, b"x")], {}, "malformed"),  # a dedupe key without its digest
         ([(b"short", digest(1), b"x")], {}, "malformed"),  # a digest that isn't 32 bytes
@@ -176,7 +176,8 @@ async def test_the_function_checks_the_batch_itself_whatever_its_caller_says(
 
 
 @pytest.mark.parametrize("change", ["update webhook_endpoints set enabled = false where id = :e",
-                                    "update tenants set status = 'erasing' where id = :t"])  # fmt: skip
+                                    "update tenants set status = 'erasing' where id = :t",
+                                    "update tenants set status = 'erased' where id = :t"])  # fmt: skip
 async def test_a_disabled_endpoint_or_an_erasing_tenant_records_and_spends_nothing(
     owner_sessionmaker, ingress_sessionmaker, change: str
 ) -> None:
@@ -223,8 +224,9 @@ async def test_a_recording_holds_the_tenants_lock_until_it_commits(owner_session
     async with ingress_sessionmaker() as s, s.begin():
         from tests.core.ingress.support import RECORD
 
-        params = {"e": endpoint_id, "refusal": None, "read": 0, "ids": [uuid.uuid4()], "sealed": [b"one"],
-                  "versions": [1], "dedupe": [key(1)], "digests": [digest(1)]}  # fmt: skip
+        params = {"e": endpoint_id, "refusal": None, "read": 0, "ids": [uuid.uuid4()],
+                  "sealed": [sealed_layout(b"one", 1)], "versions": [1], "dedupe": [key(1)],
+                  "digests": [digest(1)]}  # fmt: skip
         assert dict((await s.execute(RECORD, params)).scalar_one())["outcome"] == "recorded"
         with pytest.raises(Exception, match="lock timeout|canceling statement"):
             async with owner_sessionmaker() as other, other.begin():
@@ -311,3 +313,26 @@ async def test_the_refill_is_reckoned_from_after_the_locks(owner_sessionmaker, i
             raise AssertionError("the recording didn't wait for the endpoint's row")
         await asyncio.sleep(2.5)
     assert (await pending)["outcome"] == "recorded"
+
+
+V1 = b"\x01" + (1).to_bytes(4, "big")
+
+
+@pytest.mark.parametrize(("sealed", "outcome"), [
+    (V1 + b"x" * 60, "recorded"),  # the sealed layout at its smallest: an empty payload's
+    (b"\x01" + (2).to_bytes(4, "big") + b"x" * 60, "malformed"),  # naming another version than the one given
+    (b"\x02" + (1).to_bytes(4, "big") + b"x" * 60, "malformed"),  # another format
+    (V1 + b"x" * 59, "malformed"),  # shorter than any sealed event
+    (V1, "malformed"),
+    (b"one", "malformed"),  # no layout at all
+])  # fmt: skip
+async def test_a_sealed_event_must_be_in_the_sealed_layout_naming_the_keypair_version_given_with_it(
+    owner_sessionmaker, ingress_sessionmaker, sealed: bytes, outcome: str
+) -> None:
+    """2b-4 ruling D10 and the owner's M3 review: a sealed event is in the one documented layout (its format byte, the
+    version of its keypair, at least the sealing's overhead), naming the version recorded beside it; otherwise the
+    batch is refused whole, nothing recorded, as from a direct caller of the ingress role. No other layout is stored."""
+    _, endpoint_id = await endpoint(owner_sessionmaker)  # keypair 1 only
+    answer = await record(ingress_sessionmaker, endpoint_id, [(key(1), digest(1), sealed)], versions=[1], layout=False)
+    assert answer["outcome"] == outcome
+    assert len(await events_of(owner_sessionmaker, endpoint_id)) == (1 if outcome == "recorded" else 0)

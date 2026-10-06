@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Records `ScheduleTick`'s golden history (engine 2b spec §8.2): one backfilled firing on the CLI dev server, the
 activity a stub (replay never runs it), fixed ids, fixture keys. Recording again is a contract change: run it from
-`backend/` as `python -m tests.apps.dispatcher.histories.record` only with a new workflow type."""
+`backend/` as `python -m tests.apps.dispatcher.histories.record` only with a new workflow type.
+
+It records the tick as the sync starts it since the tick contract (the owner's M3 ruling): no argument, every payload
+the contract's, unsealed (`schedule_tick_plain.json`). `schedule_tick.json` was recorded before, its argument and
+payloads sealed; today's code can't write that form, and it's kept for replay."""
 
 import asyncio
 import json
@@ -41,9 +45,7 @@ async def main() -> dict[str, object]:
         handle = await client.create_schedule(
             schedule_id,
             Schedule(
-                action=ScheduleActionStartWorkflow(
-                    "ScheduleTick", SCHEDULE, id=schedule_id, task_queue=ADMISSION_QUEUE
-                ),
+                action=ScheduleActionStartWorkflow("ScheduleTick", id=schedule_id, task_queue=ADMISSION_QUEUE),
                 spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(minutes=1))]),
                 state=ScheduleState(paused=True),
             ),
@@ -66,6 +68,6 @@ async def main() -> dict[str, object]:
 
 
 if __name__ == "__main__":
-    out = Path("tests/apps/dispatcher/histories/schedule_tick.json")
+    out = Path("tests/apps/dispatcher/histories/schedule_tick_plain.json")
     out.write_text(json.dumps(asyncio.run(main()), indent=1))
     print("recorded ->", out)

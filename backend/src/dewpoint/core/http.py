@@ -13,6 +13,7 @@ from dewpoint.core.config import Settings
 from dewpoint.core.db import tenant_scope, user_scope
 from dewpoint.core.models.identity import AuthSession, User
 from dewpoint.core.models.tenancy import Membership, Tenant
+from dewpoint.core.tenancy import lifecycle
 
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
@@ -66,29 +67,47 @@ class TenantContext:
     session: AuthSession
 
 
+async def _after_require() -> None:
+    """Runs once a write's request holds the tenant's lifecycle lock and saw it active. A no-op; the race tests pause
+    here."""
+
+
 def require(permission: P) -> Callable[..., Awaitable[TenantContext]]:
+    """The caller's role in the tenant, checked for `permission`. A write (any non-safe method) takes the tenant's
+    lifecycle lock, shared, in the request's transaction (`get_db`'s, which commits before the response) before it
+    reads the tenant, and is refused unless the tenant is active (409 `tenant_erasing`): an erasure's step 1, which
+    takes it exclusively, waits for the write to commit, or the write sees `erasing` (the 2b-4 outline's fencing)."""
+
     async def _dep(
         tenant_id: uuid.UUID,
+        request: Request,
         user: User = Depends(current_user),
         sess: AuthSession = Depends(active_session),
         db: AsyncSession = Depends(get_db, scope="function"),
     ) -> TenantContext:
+        writes = request.method not in SAFE_METHODS
+        if writes:
+            await lifecycle.hold_shared(db, tenant_id)
         await user_scope(db, user.id)  # authoritative lookup of the caller's own membership
         row = (
             await db.execute(
-                select(Membership.role, Tenant.require_passkey)
+                select(Membership.role, Tenant.require_passkey, Tenant.status)
                 .join(Tenant, Tenant.id == Membership.tenant_id)
                 .where(Membership.tenant_id == tenant_id, Membership.user_id == user.id)
             )
         ).first()
         if row is None:
             raise HTTPException(404, detail={"error": "not_found"})
-        role, require_passkey = row
+        role, require_passkey, status = row
         if require_passkey and "passkey" not in sess.auth_methods:
             raise HTTPException(403, detail={"error": "step_up_required"})
         if permission not in ROLE_PERMISSIONS[role]:
             raise HTTPException(403, detail={"error": "forbidden"})
+        if writes and status != "active":
+            raise HTTPException(409, detail={"error": "tenant_erasing"})
         await tenant_scope(db, tenant_id)  # clears user scope: no widening to the caller's other tenants
+        if writes:
+            await _after_require()
         return TenantContext(tenant_id=tenant_id, user=user, role=role, session=sess)
 
     return _dep

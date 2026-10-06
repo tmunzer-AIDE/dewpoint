@@ -41,6 +41,15 @@ def _scope_filter(tenant_id: uuid.UUID | None) -> tuple[type[AnyKey], list[Any]]
     return DataKey, [DataKey.tenant_id == tenant_id]
 
 
+async def lock_scope(s: AsyncSession, tenant_id: uuid.UUID | None) -> None:
+    """A tenant's (or the platform's) key lifecycle lock, until the transaction ends: what creating, rotating and
+    retiring its key, and sealing records again under its active version, take, so none interleaves (engine 2b
+    spec §6.4; the owner's M3 review)."""
+    await s.execute(
+        text("select pg_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": f"dewpoint:dek:{_scope(tenant_id)}"}
+    )
+
+
 class Keyring:
     def __init__(self, keks: KekSet) -> None:
         self._keks = keks
@@ -48,9 +57,7 @@ class Keyring:
     async def _active(self, s: AsyncSession, tenant_id: uuid.UUID | None) -> AnyKey:
         # Serialize first-use creation and rotation per scope until commit; FOR UPDATE alone can't lock a
         # row that doesn't exist yet, so two first uses would both insert version 1.
-        await s.execute(
-            text("select pg_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": f"dewpoint:dek:{_scope(tenant_id)}"}
-        )
+        await lock_scope(s, tenant_id)
         model, where = _scope_filter(tenant_id)
         found = (
             await s.execute(select(model).where(*where, model.active.is_(True)).with_for_update())
@@ -116,6 +123,16 @@ class Keyring:
         if row is None:
             raise NoKeyError(f"tenant {tenant_id} has no data key" + ("" if version is None else f" {version}"))
         return row.version, self._keks.get(row.kek_id).unwrap(row.wrapped_key, _dek_aad(row))
+
+    async def versions(self, s: AsyncSession, tenant_id: uuid.UUID | None) -> tuple[int, dict[int, AESGCM]]:
+        """The active version of a tenant's (or the platform's) data key, and every version's cipher: what sealing a
+        record again reads (engine 2b spec §6.4). No lock, no creation: a key rotated meanwhile is caught next time."""
+        model, where = _scope_filter(tenant_id)
+        rows = cast(Sequence[AnyKey], (await s.execute(select(model).where(*where))).scalars().all())
+        active = [row.version for row in rows if row.active]
+        if not active:
+            raise NoKeyError(f"{_scope(tenant_id)} has no active data key")
+        return active[0], {row.version: self._dek(row) for row in rows}
 
     async def rotate(self, s: AsyncSession, tenant_id: uuid.UUID | None) -> int:
         current = await self._active(s, tenant_id)

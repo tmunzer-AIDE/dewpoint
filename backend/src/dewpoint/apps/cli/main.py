@@ -11,29 +11,43 @@ from pathlib import Path
 
 import typer
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest
 from temporalio.client import Client
 
-from dewpoint.apps import admission, dev_run
+from dewpoint.apps import admission, dev_run, tick_contract
 from dewpoint.apps.codec import KeyringKeys, data_converter
+from dewpoint.apps.dispatcher import evidence
 from dewpoint.apps.dispatcher.dispatch import START_DEADLINE
 from dewpoint.apps.dispatcher.gate import disable_and_wait
+from dewpoint.apps.dispatcher.tick import admission_pollers
 from dewpoint.apps.environment import verify_environment
 from dewpoint.apps.plugin_loader import PluginLoadError, installed_plugins, prepare
 from dewpoint.apps.worker.deployment import Deployment, describe, set_current, this_build
 from dewpoint.apps.worker.health import WorkerUnhealthyError
 from dewpoint.apps.worker.main import run as run_worker
 from dewpoint.core import logs
+from dewpoint.core.audit import service as audit_log
 from dewpoint.core.audit.anchor import FileAnchorSink, anchor_all, anchor_freshness, verify_anchors
 from dewpoint.core.auth.users import PasswordPolicyError, create_user
-from dewpoint.core.config import get_settings
+from dewpoint.core.config import Settings, get_settings
+from dewpoint.core.crypto import reencrypt, retire
+from dewpoint.core.crypto.ingress import IngressKey
 from dewpoint.core.crypto.kek import KekSet, UnknownKekError
 from dewpoint.core.crypto.keyring import Keyring
-from dewpoint.core.db import make_engine, make_sessionmaker
+from dewpoint.core.db import make_engine, make_sessionmaker, tenant_scope
 from dewpoint.core.egress import allowlist
+from dewpoint.core.ingress import secrets_reseal
+from dewpoint.core.ingress.keys import retire_event_keys, rotate_event_key
 from dewpoint.core.models.identity import User
-from dewpoint.core.platform.service import EnvironmentMismatchError, EnvironmentNotRecordedError, record_environment
+from dewpoint.core.models.tenancy import Tenant
+from dewpoint.core.platform.service import (
+    EnvironmentMismatchError,
+    EnvironmentNotRecordedError,
+    check_namespace,
+    record_environment,
+)
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.plugins.lifecycle import Entry
 from dewpoint.core.plugins.registry import (
@@ -43,6 +57,7 @@ from dewpoint.core.plugins.registry import (
     list_node_types,
     sync_plugins,
 )
+from dewpoint.core.tenancy import lifecycle as tenant_lifecycle
 from dewpoint.core.tenancy.service import NotKeyAdminError, ensure_tenant_event_keys, ensure_tenant_keys
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.sdk import ManifestError
@@ -137,6 +152,32 @@ def audit_anchor() -> None:
             await engine.dispose()
 
     typer.echo(f"anchored {asyncio.run(_run())} scope head(s)")
+
+
+@audit.command("prune")
+def audit_prune() -> None:
+    """Delete audit entries older than DEWPOINT_AUDIT_RETENTION_DAYS (400 unless set, never under 30) through a
+    checkpoint, the last entry pruned, anchored to the external sink first (engine 2b spec §10.2). Run as a
+    dewpoint_auditor login. Refused outside a development deployment until an off-host anchor sink exists (#3)."""
+    from dewpoint.core.audit.prune import PruningDisabledError, prune
+
+    sink = FileAnchorSink(_anchor_path(), _signing_key())
+
+    async def _run() -> dict[str, int]:
+        engine = make_engine(get_settings().database_url)
+        try:
+            async with make_sessionmaker(engine)() as s, s.begin():
+                return await prune(s, sink, older_than_days=get_settings().audit_retention_days)
+        finally:
+            await engine.dispose()
+
+    try:
+        pruned = asyncio.run(_run())
+    except PruningDisabledError:
+        typer.echo("ERROR: audit pruning is disabled outside a development deployment until an off-host anchor sink is "
+                   "configured (#3)")  # fmt: skip
+        raise typer.Exit(2) from None
+    typer.echo(f"pruned {sum(pruned.values())} entries in {len(pruned)} scope(s)")
 
 
 @audit.command("verify")
@@ -236,9 +277,307 @@ def keys_rotate_dek(tenant: str | None = typer.Option(None), platform: bool = ty
 
     async def _run(s: AsyncSession) -> int:
         async with s.begin():
+            if tenant_id is not None:  # in the transaction that writes the key (the 2b-4 outline's fencing)
+                await tenant_lifecycle.require_active(s, tenant_id)
             return await keyring.rotate(s, tenant_id)
 
-    typer.echo(f"active data key version: {asyncio.run(_in_session(_run))}")
+    try:
+        typer.echo(f"active data key version: {asyncio.run(_in_session(_run))}")
+    except tenant_lifecycle.TenantNotActiveError as e:
+        typer.echo(f"ERROR: {e} (or no such tenant)")
+        raise typer.Exit(1) from None
+
+
+@keys.command("reencrypt")
+def keys_reencrypt(
+    tenant: str | None = typer.Option(None, help="one tenant's records"),
+    all_tenants: bool = typer.Option(False, "--all", help="every tenant's records"),
+    platform: bool = typer.Option(False, "--platform", help="the platform key's records (users' TOTP secrets)"),
+    batch_size: int = typer.Option(100, min=1, max=1000),
+) -> None:
+    """Seal every record stored under an older data-key version again under the active one, and queue each schedule
+    whose Temporal action was written under another for its sync (engine 2b spec §6.4): what retiring a version waits
+    on. Idempotent: re-run until it reports nothing. Run as dewpoint_admin."""
+    if sum((tenant is not None, all_tenants, platform)) != 1:
+        typer.echo("pass exactly one of --tenant, --all or --platform")
+        raise typer.Exit(2)
+    try:
+        chosen = uuid.UUID(tenant) if tenant is not None else None
+    except ValueError:
+        typer.echo("--tenant must be a UUID")
+        raise typer.Exit(2) from None
+    keyring = Keyring(KekSet.from_settings(get_settings()))
+
+    async def _run() -> list[tuple[str, dict[str, int]]]:
+        engine = make_engine(get_settings().database_url)
+        try:
+            sessionmaker = make_sessionmaker(engine)
+            if platform:
+                return [("platform", await reencrypt.platform(sessionmaker, keyring, batch=batch_size))]
+            if chosen is not None:
+                tenants = [chosen]
+            else:
+                async with sessionmaker() as s:
+                    tenants = list((await s.execute(select(Tenant.id).order_by(Tenant.id))).scalars())
+            return [(f"tenant {t}", await reencrypt.tenant(sessionmaker, keyring, t, batch=batch_size))
+                    for t in tenants]  # fmt: skip
+        finally:
+            await engine.dispose()
+
+    for scope, counts in asyncio.run(_run()):
+        typer.echo(f"{scope}: " + " ".join(f"{k}={v}" for k, v in counts.items()))
+
+
+@keys.command("rotate-event-key")
+def keys_rotate_event_key(tenant: str = typer.Option(..., help="the tenant whose inbound keypair rotates")) -> None:
+    """Make a tenant's next inbound keypair (engine 2b spec §8.3): ingress seals each delivery after it to it; events
+    sealed to older ones still open. Run as dewpoint_admin."""
+    try:
+        tenant_id = uuid.UUID(tenant)
+    except ValueError:
+        typer.echo("--tenant must be a UUID")
+        raise typer.Exit(2) from None
+    keyring = Keyring(KekSet.from_settings(get_settings()))
+
+    async def _run(s: AsyncSession) -> int:
+        async with s.begin():
+            await tenant_scope(s, tenant_id)
+            await tenant_lifecycle.require_active(s, tenant_id)
+            return await rotate_event_key(s, keyring, tenant_id)
+
+    try:
+        typer.echo(f"inbound keypair version: {asyncio.run(_in_session(_run))}")
+    except tenant_lifecycle.TenantNotActiveError as e:
+        typer.echo(f"ERROR: {e} (or no such tenant)")
+        raise typer.Exit(1) from None
+
+
+@keys.command("retire-event-keys")
+def keys_retire_event_keys(
+    tenant: str | None = typer.Option(None, help="one tenant's keypairs"),
+    all_tenants: bool = typer.Option(False, "--all", help="every tenant's"),
+) -> None:
+    """Delete the inbound keypairs no stored event names, older than one that has existed for 10 minutes (engine 2b
+    spec §8.3). Run as dewpoint_admin."""
+    if (tenant is None) == (not all_tenants):
+        typer.echo("pass exactly one of --tenant or --all")
+        raise typer.Exit(2)
+    try:
+        chosen = uuid.UUID(tenant) if tenant is not None else None
+    except ValueError:
+        typer.echo("--tenant must be a UUID")
+        raise typer.Exit(2) from None
+
+    async def _run(s: AsyncSession) -> int:
+        async with s.begin():
+            tenants = [chosen] if chosen else list((await s.execute(select(Tenant.id).order_by(Tenant.id))).scalars())
+        retired = 0
+        for t in tenants:
+            async with s.begin():
+                await tenant_scope(s, t)
+                retired += len(await retire_event_keys(s, t))
+        return retired
+
+    typer.echo(f"retired {asyncio.run(_in_session(_run))} inbound keypair(s)")
+
+
+@keys.command("ingress-status")
+def keys_ingress_status() -> None:
+    """Endpoint secrets per ingress key id. Exit 3 if any are sealed under a key this configuration lacks: the previous
+    key retires only once none names it (engine 2b spec §8.3). Run as dewpoint_admin, with the ingress key."""
+    key = IngressKey.from_settings(get_settings())
+    usage = asyncio.run(_in_session(secrets_reseal.usage))
+    for kid, n in sorted(usage.items()):
+        typer.echo(f"{kid}={n}")
+    missing = sorted(set(usage) - key.key_ids)
+    if missing:
+        typer.echo(f"ERROR: no configured ingress key for: {', '.join(missing)}. Do not remove a key before "
+                   "reseal-ingress completes.")  # fmt: skip
+        raise typer.Exit(3)
+
+
+@keys.command("reseal-ingress")
+def keys_reseal_ingress(batch_size: int = typer.Option(100, min=1, max=1000)) -> None:
+    """Seal every endpoint's secrets again under the current ingress key, their plaintext unchanged (engine 2b spec
+    §8.3): the rollout's third phase, with the new key current and the old one previous. Re-run until it reports 0.
+    Run as dewpoint_admin, with the ingress key."""
+    st = get_settings()
+    if not st.ingress_key_previous_b64 or st.ingress_key_previous_id == st.ingress_key_id:
+        typer.echo("refusing: configure the new ingress key as current and the old one as previous first")
+        raise typer.Exit(2)
+    key = IngressKey.from_settings(st)
+
+    async def _run() -> dict[str, int]:
+        engine = make_engine(st.database_url)
+        try:
+            return await secrets_reseal.reseal(make_sessionmaker(engine), key, batch=batch_size)
+        finally:
+            await engine.dispose()
+
+    typer.echo("resealed " + " ".join(f"{k}={v}" for k, v in asyncio.run(_run()).items()))
+
+
+async def _verified_namespace(s: AsyncSession, settings: Settings) -> None:
+    """Engine 2b spec §2.1, before a key command asks Temporal anything: this process's namespace is the deployment's
+    recorded one. A mismatch, or none recorded, ends the command (exit 2) before any connection: never read as Temporal
+    being unreachable, an unknown answer (the final review's I1)."""
+    async with s.begin():
+        try:
+            await check_namespace(s, settings.temporal_namespace)
+        except (EnvironmentNotRecordedError, EnvironmentMismatchError) as e:
+            typer.echo(f"ERROR: {e}")
+            raise typer.Exit(2) from None
+
+
+async def _namespace_retention(settings: Settings) -> timedelta | None:
+    """The Temporal namespace's retention, as it reports it (engine 2b spec §6.4's payload floor); None when it can't
+    be read: the floor then can't be reckoned, and nothing retires."""
+    try:
+        client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
+        answer = await client.workflow_service.describe_namespace(
+            DescribeNamespaceRequest(namespace=settings.temporal_namespace)
+        )
+    except Exception as e:  # unreachable, refused: unknown, never assumed
+        typer.echo(f"WARNING: the namespace's retention couldn't be read ({type(e).__name__})")
+        return None
+    ttl = answer.config.workflow_execution_retention_ttl
+    return timedelta(seconds=ttl.seconds, microseconds=ttl.nanos // 1000)
+
+
+async def _run_histories(settings: Settings, s: AsyncSession, tenant_id: uuid.UUID, version: int, *,
+                         record: bool) -> retire.RunProof | None:  # fmt: skip
+    """What Temporal shows of the tenant's run executions that could hold `version` (the owner's M3 rulings), in the
+    caller's transaction (`record`: whether to record what it shows); None when Temporal can't be asked."""
+    try:
+        client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
+        before = await retire.candidates_before(s, tenant_id, version)
+        return await evidence.prove(s, client, tenant_id, before=before, record=record)
+    except Exception as e:  # unreachable, refused: unknown, never assumed
+        typer.echo(f"WARNING: the run executions couldn't be asked about ({type(e).__name__})")
+        return None
+
+
+@keys.command("retire")
+def keys_retire(
+    version: int = typer.Option(..., min=1, help="the data-key version to retire"),
+    tenant: str | None = typer.Option(None, help="a tenant's data key"),
+    platform: bool = typer.Option(False, "--platform", help="the platform's key"),
+    confirm: bool = typer.Option(False, "--confirm", help="delete it if every check passes (else a dry run)"),
+) -> None:
+    """Retire a data-key version nothing needs (engine 2b spec §6.4): print every check, and with --confirm delete the
+    version, audited, if all pass. Exit 1 when a dry run finds a check failing, 4 when --confirm does. A tenant's
+    version reads the Temporal namespace's retention, and asks Temporal about each run execution that could hold it.
+    Run as dewpoint_admin."""
+    if (tenant is None) != platform:
+        typer.echo("pass exactly one of --tenant or --platform")
+        raise typer.Exit(2)
+    try:
+        tenant_id = uuid.UUID(tenant) if tenant is not None else None
+    except ValueError:
+        typer.echo("--tenant must be a UUID")
+        raise typer.Exit(2) from None
+    settings = get_settings()
+
+    async def _run(s: AsyncSession) -> tuple[list[retire.Check], bool]:
+        if tenant_id:
+            await _verified_namespace(s, settings)
+        retention = await _namespace_retention(settings) if tenant_id else None
+        async with s.begin():
+            if not confirm:  # a dry run changes nothing, what it reads of Temporal included (the final review's I1)
+                await s.execute(text("SET TRANSACTION READ ONLY"))
+            await tenant_scope(s, tenant_id)
+            histories = await _run_histories(settings, s, tenant_id, version, record=confirm) if tenant_id else None
+            if not confirm:
+                found = await retire.checks(s, tenant_id, version, namespace_retention=retention,
+                                            run_histories=histories)  # fmt: skip
+                return found, False
+            try:
+                return await retire.retire(s, tenant_id, version, namespace_retention=retention,
+                                           run_histories=histories), True  # fmt: skip
+            except retire.NotRetiredError as e:
+                return e.checks, False
+
+    found, retired = asyncio.run(_in_session(_run))
+    for c in found:
+        typer.echo(f"{c.name}: {'yes' if c.ok else 'no'}" + (f" ({c.found})" if c.found else ""))
+    if retired:
+        typer.echo(f"retired version {version}")
+        return
+    if not all(c.ok for c in found):
+        raise typer.Exit(4 if confirm else 1)
+    typer.echo("not retired (a dry run: pass --confirm)")
+
+
+ATTESTED = "every dispatcher from before 0039 stopped and unable to restart; no image from before 0039 deployable"
+
+
+async def _admission_pollers(settings: Settings) -> list[str] | None:
+    """The identities polling the admission queue, as Temporal shows them; None when it can't be asked."""
+    try:
+        client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
+        return await admission_pollers(client)
+    except Exception as e:  # unreachable, refused: unknown, never assumed
+        typer.echo(f"WARNING: the admission queue's pollers couldn't be read ({type(e).__name__})")
+        return None
+
+
+@keys.command("tick-cutover")
+def keys_tick_cutover(
+    attest: bool = typer.Option(False, "--attest", help="no dispatcher from before 0039 runs or can run again"),
+    confirm: bool = typer.Option(False, "--confirm", help="record it (else a dry run)"),
+) -> None:
+    """Record the tick cutover (the owner's M3 rulings): from it, no dispatcher seals a schedule tick's payload under a
+    tenant's key, so a key made after it can retire. No migration records it, not even a fresh deployment's: it needs
+    the operator's attestation (`--attest`, required) that every dispatcher from before migration 0039 has stopped and
+    can't restart, and that no dispatcher image from before 0039 can be deployed against this database. Nothing here
+    can prove that. It also refuses (exit 1) while Temporal shows one still polling the admission queue, and when
+    Temporal can't be asked (exit 3). It records once, audited with the attestation, and queues every live schedule,
+    so its sync writes the action without the argument the old one sealed. A key made before it never retires. Run as
+    dewpoint_admin."""
+    if not attest:
+        typer.echo("pass --attest: no dispatcher from before migration 0039 runs, or can be deployed again")
+        raise typer.Exit(2)
+    settings = get_settings()
+
+    async def _run(s: AsyncSession) -> str:
+        await _verified_namespace(s, settings)
+        async with s.begin():
+            existing = (await s.execute(text("SELECT at FROM tick_cutover"))).scalar_one_or_none()
+        if existing is not None:
+            return f"already recorded at {existing.isoformat()}"
+        pollers = await _admission_pollers(settings)
+        if pollers is None:
+            raise typer.Exit(3)
+        old = [p for p in pollers if tick_contract.IDENTITY not in p]
+        if old:
+            typer.echo(f"{len(old)} poller(s) of the admission queue without the tick contract's mark: stop every "
+                       "dispatcher from before migration 0039 first")  # fmt: skip
+            raise typer.Exit(1)
+        if not confirm:
+            return "not recorded (a dry run: pass --confirm)"
+        async with s.begin():
+            recorded = (await s.execute(text("INSERT INTO tick_cutover (at) VALUES (now()) ON CONFLICT DO NOTHING "
+                                             "RETURNING at"))).scalar_one_or_none()  # fmt: skip
+            if recorded is None:
+                return "already recorded"
+            queued = 0
+            for t in list((await s.execute(select(Tenant.id).order_by(Tenant.id))).scalars()):
+                await tenant_scope(s, t)
+                done = await s.execute(
+                    text(
+                        "UPDATE schedules SET generation = generation + 1 WHERE tenant_id = :t "
+                        "AND deleted_at IS NULL AND synced_generation = generation"
+                    ),
+                    {"t": t},
+                )
+                queued += int(done.rowcount)
+            await tenant_scope(s, None)
+            details: dict[str, object] = {"schedules": queued, "attested": ATTESTED}
+            await audit_log.record(s, tenant_id=None, actor_id=None, action="keys.tick_cutover", target_type="platform",
+                               target_id="tick_cutover", details=details)  # fmt: skip
+        return f"recorded the tick cutover at {recorded.isoformat()}; {queued} schedule(s) queued"
+
+    typer.echo(asyncio.run(_in_session(_run)))
 
 
 @keys.command("ensure-tenants")
@@ -390,6 +729,25 @@ def worker() -> None:
     except WorkerUnhealthyError as e:  # its orchestrator restarts it (engine 2b spec §2.7)
         typer.echo(f"ERROR: {e}")
         raise typer.Exit(3) from None
+
+
+@app.command("retention")
+def retention(once: bool = typer.Option(False, "--once", help="One sweep, then exit 0 if it succeeded")) -> None:
+    """Run the retention job (engine 2b spec §10.3): every tenant's data past its retention deleted, every interval
+    (DEWPOINT_RETENTION_INTERVAL_S), as the retention login. It holds no key."""
+    from dewpoint.apps.retention import RetentionSettings
+    from dewpoint.apps.retention import run as run_retention
+
+    try:
+        done = asyncio.run(run_retention(RetentionSettings(), once=once))
+    except Exception as e:  # only --once returns: the job itself retries
+        typer.echo(f"retention sweep failed: {type(e).__name__}")
+        raise typer.Exit(1) from None
+    if done is None:
+        typer.echo("another retention sweep is running")
+        raise typer.Exit(1)
+    typer.echo(f"retention sweep {done.id}: {'succeeded' if done.succeeded else 'failed'}")
+    raise typer.Exit(0 if done.succeeded else 1)
 
 
 @app.command("ingress")
@@ -587,6 +945,10 @@ def dev_run_command(
     except admission.AdmissionRefusedError as e:
         for message in e.messages:
             typer.echo(f"ERROR: {message}")
+        raise typer.Exit(2) from None
+    except dev_run.RequestNotRetainedError:
+        typer.echo("ERROR: request_not_retained: the request under this idempotency key is past its tenant's "
+                   "retention cutoff")  # fmt: skip
         raise typer.Exit(2) from None
     except (admission.WorkflowNotFoundError, admission.IdempotencyConflictError) as e:
         typer.echo(f"ERROR: {e or type(e).__name__}")

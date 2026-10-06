@@ -51,6 +51,7 @@ from tests.apps.test_workflow_ops import create, publish
 from tests.apps.worker.test_real_server import serving
 from tests.support.graphs import G, ref
 from tests.support.keys import FIXTURE_CONVERTER
+from tests.support.temporal import start_local
 
 pytestmark = pytest.mark.usefixtures("development_deployment")
 CELL, HEADER, FIXED = "CSVcell-c4n4ry-7Q2", "Hdr-c4n4ry-K9", "Sched-c4n4ry-3Z"
@@ -132,7 +133,7 @@ async def test_a_csv_start_and_a_schedules_tick_end_to_end_with_the_keyrings_rea
         assert await schedule_sync.sync_one(dispatch_sessionmaker, dispatcher, Leading(), ctx.tenant_id,
                                             schedule_id) == "synced"  # fmt: skip
         hour = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-        handle = dispatcher.get_schedule_handle(schedule_workflow_id(str(ctx.tenant_id), str(schedule_id)))
+        handle = dispatcher.get_schedule_handle(schedule_workflow_id(str(ctx.tenant_id), str(schedule_id)) + "~1")
         async with (
             main.admission_worker(dispatcher, dispatch_sessionmaker, dispatch_keys),
             serving(
@@ -212,25 +213,23 @@ async def test_a_short_outage_fires_each_missed_time_and_admits_each_once(
         )  # fmt: skip
     temporal_id = schedule_workflow_id(str(ctx.tenant_id), str(created.id))
     args = ["--db-filename", str(tmp_path / "temporal.db")]
-    async with await WorkflowEnvironment.start_local(
-        data_converter=FIXTURE_CONVERTER, dev_server_extra_args=args
-    ) as env:
+    async with await start_local(data_converter=FIXTURE_CONVERTER, dev_server_extra_args=args) as env:
         async with main.admission_worker(env.client, dispatch_sessionmaker, KEYS):
             await env.client.create_schedule(temporal_id, Schedule(
-                action=ScheduleActionStartWorkflow("ScheduleTick", str(created.id), id=temporal_id,
-                                                   task_queue=tick.ADMISSION_QUEUE),
+                action=ScheduleActionStartWorkflow("ScheduleTick", id=temporal_id, task_queue=tick.ADMISSION_QUEUE),
                 spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(seconds=2))]),
                 policy=SchedulePolicy(catchup_window=timedelta(minutes=1), overlap=ScheduleOverlapPolicy.ALLOW_ALL),
             ))  # fmt: skip
             await admitted(owner_sessionmaker, 2)
     down = datetime.now(UTC)
     await asyncio.sleep(7)  # about three firings missed, well within the window
-    async with await WorkflowEnvironment.start_local(
-        data_converter=FIXTURE_CONVERTER, dev_server_extra_args=args
-    ) as env:
+    async with await start_local(data_converter=FIXTURE_CONVERTER, dev_server_extra_args=args) as env:
         async with main.admission_worker(env.client, dispatch_sessionmaker, KEYS):
             times = await admitted(owner_sessionmaker, 0, after=down, at_least=3)
-            await env.client.get_schedule_handle(temporal_id).delete()
+            handle = env.client.get_schedule_handle(temporal_id)
+            await handle.pause()  # it fires no more: every tick it fired is admitted before the worker stops
+            await admitted(owner_sessionmaker, (await handle.describe()).info.num_actions)
+            await handle.delete()
     stamps = await nominal_times(owner_sessionmaker)
     assert len(stamps) == len(set(stamps))  # each time admitted once
     gaps = {(b - a).total_seconds() for a, b in zip(stamps, stamps[1:], strict=False)}

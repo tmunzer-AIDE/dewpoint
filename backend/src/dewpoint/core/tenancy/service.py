@@ -12,6 +12,7 @@ from dewpoint.core.ingress.keys import ensure_event_key
 from dewpoint.core.models.ingress import TenantEventKey
 from dewpoint.core.models.keys import DataKey
 from dewpoint.core.models.tenancy import Membership, Tenant
+from dewpoint.core.tenancy import lifecycle
 
 
 class LastOwnerError(Exception): ...
@@ -53,10 +54,12 @@ async def ensure_tenant_keys(s: AsyncSession, keyring: Keyring) -> list[uuid.UUI
     if not (await s.execute(text("SELECT pg_has_role(current_user, 'dewpoint_admin', 'USAGE')"))).scalar_one():
         raise NotKeyAdminError("run it as a dewpoint_admin login: it lists every tenant under row-level security.")
     keyed = select(DataKey.id).where(DataKey.tenant_id == Tenant.id).exists()
-    created = list((await s.execute(select(Tenant.id).where(~keyed).order_by(Tenant.id))).scalars())
-    for tid in created:
-        await tenant_scope(s, tid)
-        await keyring.ensure_key(s, tid)
+    created = []
+    for tid in (await s.execute(select(Tenant.id).where(~keyed).order_by(Tenant.id))).scalars():
+        if await lifecycle.is_active(s, tid):  # never one being erased, whose keys go
+            await tenant_scope(s, tid)
+            await keyring.ensure_key(s, tid)
+            created.append(tid)
     return created
 
 
@@ -66,10 +69,12 @@ async def ensure_tenant_event_keys(s: AsyncSession, keyring: Keyring) -> list[uu
     if not (await s.execute(text("SELECT pg_has_role(current_user, 'dewpoint_admin', 'USAGE')"))).scalar_one():
         raise NotKeyAdminError("run it as a dewpoint_admin login: it lists every tenant under row-level security.")
     keyed = select(TenantEventKey.tenant_id).where(TenantEventKey.tenant_id == Tenant.id).exists()
-    created = list((await s.execute(select(Tenant.id).where(~keyed).order_by(Tenant.id))).scalars())
-    for tid in created:
-        await tenant_scope(s, tid)
-        await ensure_event_key(s, keyring, tid)
+    created = []
+    for tid in (await s.execute(select(Tenant.id).where(~keyed).order_by(Tenant.id))).scalars():
+        if await lifecycle.is_active(s, tid):  # never one being erased, whose keys go
+            await tenant_scope(s, tid)
+            await ensure_event_key(s, keyring, tid)
+            created.append(tid)
     return created
 
 

@@ -37,6 +37,7 @@ from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.db import tenant_scope, unavailable
 from dewpoint.core.egress.http import GuardedHttp
 from dewpoint.core.plugins import calls
+from dewpoint.core.tenancy import lifecycle
 from dewpoint.sdk import (
     ConnectionUnavailable,
     Node,
@@ -203,8 +204,12 @@ class PluginCallServer:
         poll_s: float = 1.0,
         call_timeout_s: float = CALL_TIMEOUT_S,
         engine: AsyncEngine | None = None,
+        guards: async_sessionmaker[AsyncSession] | None = None,
     ) -> None:
+        """`guards`: a pool of its own for the connection each call in flight holds across its hook (the final
+        review's I4), sized to `concurrency`; the shared `sessionmaker` without one."""
         self._sessionmaker, self._network = sessionmaker, network
+        self._guards = guards if guards is not None else sessionmaker
         self._nodes: dict[str, type[Node]] = {
             f"{node.type}@{node.version}": node for p in plugins for node in p.nodes if options_fields(node)
         }
@@ -300,27 +305,40 @@ class PluginCallServer:
     async def _serve(self, tenant_id: uuid.UUID, call_id: uuid.UUID) -> None:
         async with self._slots:
             try:
-                async with self._sessionmaker() as s, s.begin():
-                    await tenant_scope(s, tenant_id)
-                    claimed = await calls.claim(s, tenant_id, call_id)
+                # The tenant's plugin-call lock, shared, held from the check that the tenant is active through the
+                # claim, the hook and the answer (the owner's review of 2b-4a v5): an erasure's step 1 waits for this
+                # call, and once it has committed a call is never run. Only the hook has a deadline: the claim, the key
+                # lookup and sealing, and the answer's transaction have none of their own, so neither has the wait.
+                async with self._guards() as guard, guard.begin():
+                    if not await lifecycle.calls_allowed(guard, tenant_id):
+                        return  # the tenant is being erased: its call is left for the erasure
+                    await self._run(tenant_id, call_id)
             except Exception as e:
-                log.warning("plugin_call_claim_failed", error=type(e).__name__)
-                return
-            if claimed is None:
-                return  # another worker has it, or it's no longer due
-            try:
-                answer = await self._answer(claimed)
-                sealed = await ClaimCipher(self._network.keys, purpose=calls.PURPOSE).seal(
-                    str(claimed.tenant_id), str(claimed.id), answer
-                )
-            except _Refused as e:
-                await self._finish(claimed, None, e.code)
-                return
-            except Exception as e:
-                log.warning("plugin_call_unsealed", kind=claimed.kind, error=logs.error_class(e))
-                await self._finish(claimed, None, "unavailable")
-                return
-            await self._finish(claimed, sealed, None)
+                log.warning("plugin_call_unguarded", error=type(e).__name__)
+
+    async def _run(self, tenant_id: uuid.UUID, call_id: uuid.UUID) -> None:
+        try:
+            async with self._sessionmaker() as s, s.begin():
+                await tenant_scope(s, tenant_id)
+                claimed = await calls.claim(s, tenant_id, call_id)
+        except Exception as e:
+            log.warning("plugin_call_claim_failed", error=type(e).__name__)
+            return
+        if claimed is None:
+            return  # another worker has it, or it's no longer due
+        try:
+            answer = await self._answer(claimed)
+            sealed = await ClaimCipher(self._network.keys, purpose=calls.PURPOSE).seal(
+                str(claimed.tenant_id), str(claimed.id), answer
+            )
+        except _Refused as e:
+            await self._finish(claimed, None, e.code)
+            return
+        except Exception as e:
+            log.warning("plugin_call_unsealed", kind=claimed.kind, error=logs.error_class(e))
+            await self._finish(claimed, None, "unavailable")
+            return
+        await self._finish(claimed, sealed, None)
 
     async def _finish(self, claimed: calls.Claimed, sealed: bytes | None, error: str | None) -> None:
         try:

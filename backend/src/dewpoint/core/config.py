@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     # Sealing endpoint secrets (engine 2b spec §8.3): ingress and the API only; never a tenant's data key.
     ingress_key_b64: str | None = None
     ingress_key_id: str = "ingress-1"
+    # Set only during an ingress key rollout (see docs/operations/key-rotation.md).
+    ingress_key_previous_b64: str | None = None
+    ingress_key_previous_id: str | None = None
     public_origin: str = Field(description="Browser origin, e.g. https://dewpoint.example.com")
     rp_id: str | None = None  # WebAuthn RP ID; defaults to host of public_origin
     mfa_required: bool = True
@@ -44,6 +47,9 @@ class Settings(BaseSettings):
     worker_set_current: bool = False
     audit_signing_key_b64: str | None = None  # Ed25519 private key (raw 32 bytes, base64)
     audit_anchor_path: str | None = None
+    # The platform's audit retention (engine 2b spec §10.2): `dewpoint audit prune` deletes older entries, never newer
+    # than 30 days, and only in a development deployment until an off-host anchor sink exists (#3).
+    audit_retention_days: int = Field(default=400, ge=30)
 
 
 @lru_cache

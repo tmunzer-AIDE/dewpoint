@@ -987,7 +987,9 @@ largest container when the budget requires.
   (the running-row cross-check), `records`, `digests`, `schedule_actions`, `legacy_ticks` and `run_histories`. It
   deletes the version, audited, only when every one passes. The longest maximum run duration is what the dispatcher
   records as it starts (`run_duration_limits`, from `DEWPOINT_MAX_RUN_DURATION_DAYS`, never lowered by a later, shorter
-  setting), and the namespace's retention is read from Temporal: either one unknown fails the floor.
+  setting), and the namespace's retention is read from Temporal: either one unknown fails the floor. Without
+  `--confirm` it only reports, in a read-only transaction: proving `run_histories` records nothing then (the final
+  review's I1). Like every Temporal command, it checks the recorded namespace before connecting (§2.1).
 - **Re-encryption** (`dewpoint keys reencrypt`, as the key admin; revision 10): a tenant at a time, under its scope, or
   the platform key's records (users' TOTP secrets). Each batch holds the scope's key lifecycle lock from reading the
   active version to committing, so no rotation or retirement interleaves, and each write is a compare-and-swap on the
@@ -1024,7 +1026,11 @@ largest container when the budget requires.
     unknown, and nothing is guessed. So a start Temporal never showed keeps every version from before its attempt
     on, until Temporal shows it (without a fence proving a start can't land, the owner's ruling for 2b-4a);
   - every root that existed before revision 10's migration is its evidence's backfill, unproven: one Temporal no
-    longer shows stays pending.
+    longer shows stays pending;
+  - **its cadence** (the final review's I3): the leader takes at most 50 due rows a pass, the earliest next check
+    first. A row still retained or read is next checked at its own time, never sooner than 5 minutes on; a pending one
+    again after a backoff doubling from 5 minutes, from its last check, to a day. So a backlog larger than a pass is
+    still reached, and pending rows, a whole backfill of them, don't hold the rest back.
 - **The tick cutover** (revision 10). A tick from before §6.2's tick exception sealed its payloads under whatever
   version was active, and nothing proves those histories gone: a version made before the cutover never retires. The
   cutover is when the last dispatcher that sealed tick payloads had stopped, unable to restart; until it's recorded,
@@ -1066,6 +1072,15 @@ is committed an erasure can be stopped and retried, never reversed (D3a). `docs/
   rows (SQLSTATE `DPE01`), whatever the writer, a straggling worker's projection included, under the same lock shared;
   entering stage 60 takes it exclusively. It's never lifted, not even when an erasure reopens. A row naming no tenant
   (an egress exception for every tenant) passes it.
+- **A record alone never erases** (the final review's I2): the API's role inserts an erasure's tenant and requester
+  only, never its stage; the retention process carries an erasure on only while its tenant is `erasing` (or `erased`,
+  for a reopened one), and alerts on any other; and the database gates the retention role's erasure-only paths on the
+  stage the tenant's erasure reached, while the tenant is `erasing` or `erased` (`erasure_reached()`, restrictive
+  policies): the keys' deletes at 70, the tenant's other rows' deletes (its schedules' incarnations and spans among
+  them), its workflows' version cleared and its tombstone renamed at 80, its queued requests and events cancelled at
+  40. Ordinary retention (the retained tables and their counters) stays ungated: that role sweeps active tenants too.
+  The gate guards against a stray record and a stage-skipping bug, not against the retention role itself, which
+  writes the erasure's stage, and the tenant's status from stage 80.
 - **The stages,** carried on by the retention process (§10.3) every `DEWPOINT_ERASURE_INTERVAL_S`, each from its
   recorded stage, each stage until one isn't done yet. What a stage does outside PostgreSQL goes through items (a
   request, a schedule, a run, an execution), each found, requested, then verified by reading Temporal back:
@@ -1334,9 +1349,16 @@ dispatcher's are.
     `GRPC_MESSAGE_TOO_LARGE` cause before the termination — and a test proves it; otherwise it stays `terminated`;
   - `FAILED`, or `TIMED_OUT` (Dewpoint sets no execution timeout, so it's unexpected) → `failed` with
     `internal_error`, and an alert.
-- **History Temporal no longer has** — for a started run whose row is still `running`, or a slot whose row has ended
-  — isn't evidence that the latest execution is terminal: the row and the slot stay as they are, with an alert, for
-  an operator's recovery (§7.9). No outcome is inferred and no slot released from missing history alone.
+- **Sub-runs a root's close left `running`** (2b-4a; the final review's M5): a parent writes its children's ends, so a
+  sub-run still `running` 30 seconds after its root ended is one its root's close left (a child asked to cancel, or a
+  parent gone before writing it). Through `orphan_subruns()` (ids only), at most once per recheck interval
+  (`runs.checked_at`), the reconciler describes the sub-run's own execution: closed, it records the outcome Temporal
+  reports, as above (no slot: a sub-run holds none); still running, it's left as it is. Until then it holds its tree
+  from retention (§10.1), a key retirement's `open_runs` check and an erasure's stage 50.
+- **History Temporal no longer has** — for a started run whose row is still `running`, a sub-run as above, or a slot
+  whose row has ended — isn't evidence that the latest execution is terminal: the row and the slot stay as they are,
+  with an alert, for an operator's recovery (§7.9). No outcome is inferred and no slot released from missing history
+  alone.
 - **Cancels:** it sends each recorded cancel of a running run to Temporal once (§7.7).
 - The synchronization that disabling the gate (§2.4) and erasing a tenant (§6.5) wait for.
 
@@ -1825,7 +1847,8 @@ its guide.
   as the auditor's login (`dewpoint_auditor`), anchors each scope's last entry due to the external anchor sink first,
   records it as the scope's checkpoint (`audit_checkpoints`), then deletes it and every older entry through
   `audit_prune()`, the only path that deletes audit entries; the verifier starts each chain from its latest
-  checkpoint, which must be among the signed anchors, and a scope pruned whole goes on from it. Pruning is refused
+  checkpoint with no entry at or before it left (one followed by unpruned entries starts nothing, so every entry left
+  is verified), which must be among the signed anchors, and a scope pruned whole goes on from it. Pruning is refused
   outside a development deployment until #3's off-host anchor sink exists (D5, revision 10): anchors on the database's
   own host can't show that a privileged operator hadn't pruned, rewritten and re-anchored.
 - **Backups:** the operator's policy; the guide recommends at most 35 days. Data removed by retention lasts in
@@ -2526,8 +2549,17 @@ Each plan updates the older specs as it lands, as the engine-core 5.x revisions 
     and records the tick cutover. The API starts, stops, retries and reads an erasure, and reads a tenant's retention
     and its schedules' spans and incarnations. The auditor's login prunes through `audit_prune()`. The dispatcher
     records run evidence, incarnations and spans; a tick records its firing. A tenant's status is read through
-    `tenant_status()`, whatever the reader's scope; the strays are `stray_incarnations()`, ids only. From stage 60 of an
+    `tenant_status()`, whatever the reader's scope; the strays are `stray_incarnations()`, and the sub-runs a root's
+    close left running `orphan_subruns()`, ids only (§7.6). From stage 60 of an
     erasure, a trigger on every table holding tenant data refuses an insert of the tenant's rows (§6.5).
+  - 2b-4a's tables holding a tenant's rows force row-level security scoped to that tenant: an erasure's record, items
+    and known ids (the API's and the retention role's), a sweep's counts per tenant (the retention role's), and an
+    audit chain's checkpoints (read in the tenant's scope, as its entries are; the auditor's are every scope's). The
+    retention process reads them across tenants only through `erasures_due()` and `erasures_completed()` (ids),
+    `erasures_unfinished()` (a count), `retention_sweep_unaudited()` (ids) and `retention_sweep_summary()` (a sweep's
+    totals). An old sweep's record still takes its counts with it: the key's cascade runs as the table's owner. The
+    exceptions are platform tables that hold no tenant's rows, so they have no policy and their grants are their
+    boundary: `retention_sweeps`, `run_duration_limits`, `tick_cutover` and `namespace_boundaries`.
 - **Permissions:** `run.cancel` (operators and above), `trigger.manage` (editors and above), `workflow.declassify`
   (admins and owners).
 - **Processes:** `dewpoint dispatcher` (dispatch, reconciler, schedule sync, `ScheduleTick` worker), `dewpoint
@@ -2563,7 +2595,9 @@ to 6 hours), 100 rows (or run trees) a batch, sweep records kept 30 days, a tick
 retention 400 days (never under 30); an older keypair retired 10 minutes after a newer one exists at the earliest; an
 erasure pass every 60 s (5 s to 1 hour), a failed stage backing off from 30 s, doubling to an hour, a stage stalled
 after an hour, the bound stage 60's end plus 30 days; each incarnation that isn't current described every hour, a failed
-describe again after 5 minutes; Temporal's missed count read every 5 minutes.
+describe again after 5 minutes; Temporal's missed count read every 5 minutes; run evidence 50 rows a pass, rechecked
+no sooner than 5 minutes on, a pending row's backoff doubling from 5 minutes to a day; a worker process's database
+connections at most 23 (a pool of 5 with an overflow of 10, and 8 plugin-call guards in a pool of their own).
 
 These numbers are starting points. Each stays provisional until the go/no-go experiments (§11) or the owning plan's
 measurements establish it; the spec is revised with the measured value when that plan lands.

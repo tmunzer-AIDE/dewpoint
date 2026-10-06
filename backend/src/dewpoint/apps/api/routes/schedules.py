@@ -79,7 +79,7 @@ async def create_schedule(
         raise _refused(e) from None
     except Exception as e:
         raise key_unusable(e) from None
-    return schedules.body(created)
+    return schedules.body(created, await schedules.accounting(db, created.id))
 
 
 @router.get("/t/{tenant_id}/workflows/{workflow_id}/schedules")
@@ -93,7 +93,7 @@ async def list_schedules(
         .where(Schedule.workflow_id == workflow_id, Schedule.deleted_at.is_(None))
         .order_by(Schedule.created_at, Schedule.id)
     )
-    return {"schedules": [schedules.body(s) for s in found.scalars()]}
+    return {"schedules": [schedules.body(s, await schedules.accounting(db, s.id)) for s in found.scalars()]}
 
 
 @router.get("/t/{tenant_id}/schedules/{schedule_id}")
@@ -105,7 +105,7 @@ async def get_schedule(
     schedule = await db.get(Schedule, schedule_id)  # row-level security: the caller's tenant's only
     if schedule is None or schedule.deleted_at is not None:
         raise HTTPException(404, detail={"error": "not_found"})
-    return schedules.body(schedule)
+    return schedules.body(schedule, await schedules.accounting(db, schedule.id))
 
 
 @router.patch("/t/{tenant_id}/schedules/{schedule_id}")
@@ -124,7 +124,7 @@ async def update_schedule(
         raise _refused(e) from None
     except Exception as e:
         raise key_unusable(e) from None
-    return schedules.body(updated)
+    return schedules.body(updated, await schedules.accounting(db, updated.id))
 
 
 @router.delete("/t/{tenant_id}/schedules/{schedule_id}", status_code=204)

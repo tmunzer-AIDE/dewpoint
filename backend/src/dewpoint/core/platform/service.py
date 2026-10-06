@@ -9,7 +9,7 @@ import uuid
 from collections.abc import Sequence
 from datetime import timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -135,3 +135,14 @@ async def record_dispatcher(
             set_={"kind": kind, "build_id": build_id, "details": details, "reported_at": func.now()},
         )
     )
+
+
+async def record_run_duration(s: AsyncSession, days: int) -> None:
+    """A maximum run duration the dispatcher sets deadlines with, kept for good (engine 2b spec §6.4)."""
+    await s.execute(text("INSERT INTO run_duration_limits (days) VALUES (:d) ON CONFLICT DO NOTHING"), {"d": days})
+
+
+async def longest_run_duration_days(s: AsyncSession) -> int | None:
+    """The longest maximum run duration ever recorded, or None when none is: the payload floor can't be reckoned."""
+    found = (await s.execute(text("SELECT max(days) FROM run_duration_limits"))).scalar()
+    return None if found is None else int(found)

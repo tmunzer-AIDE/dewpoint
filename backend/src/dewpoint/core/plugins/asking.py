@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.plugins import calls
+from dewpoint.core.tenancy import lifecycle
 
 WAIT_S = 10.0  # how long the API waits for a worker's answer (D3)
 FIRST_POLL_S, LAST_POLL_S = 0.05, 0.5  # the wait between reads grows from the first to the last
@@ -52,6 +53,10 @@ async def _ask(
     ask: Callable[[AsyncSession], Awaitable[uuid.UUID]],
 ) -> uuid.UUID:
     async with sessionmaker() as s, s.begin():
+        # The tenant's lifecycle lock, shared, and `active` read after it, in the insert's own transaction: the
+        # request's check (`require`) ended with its transaction, and an erasure started since must refuse the call
+        # (TenantNotActiveError; the owner's review of 2b-4a v5).
+        await lifecycle.require_active(s, tenant_id)
         await tenant_scope(s, tenant_id)
         # One admission at a time per tenant, across API processes: counting then inserting is otherwise a race (the
         # owner's review of 3a-2, finding 2). The lock ends with this short transaction.

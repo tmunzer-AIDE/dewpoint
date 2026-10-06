@@ -6,9 +6,10 @@ A sender posts a webhook to `/hooks/<endpoint id>`. `dewpoint ingress` authentic
 records each, sealed to its tenant; the dispatcher matches each event to the endpoint's bindings and admits one run
 request per matching workflow; the run starts as any other does ([runs](runs.md)).
 
-> **A development-only prototype.** Until engine sub-project 2b-4 adds key rotation, retention and erasure,
-> `dewpoint ingress` refuses to start unless the deployment's recorded environment is `development`, and its
-> database function records nothing otherwise. Nothing here is for production data.
+> **A development-only prototype.** Until engine sub-project 2b-4 lifts it (after retention, key rotation and
+> erasure), `dewpoint ingress` refuses to start unless the deployment's recorded environment is `development`, and its
+> database function records nothing otherwise. Nothing here is for production data. Its keys rotate as
+> [key rotation](key-rotation.md) says.
 
 ## Running it
 
@@ -55,12 +56,12 @@ With `trigger.manage` (editors and up), under `/api/v1/t/{tenant}`; read with `w
 |---|---|
 | `POST /webhook-endpoints` | make one; answers 201 with its `path` and its `secret`, shown this once |
 | `GET /webhook-endpoints`, `GET /webhook-endpoints/{id}` | its settings and its counters, never a secret |
-| `PATCH /webhook-endpoints/{id}` | its name, `enabled`, allowlist, tolerance, body limit, events pointer, HMAC header names |
+| `PATCH /webhook-endpoints/{id}` | its name, `enabled`, allowlist, tolerance, body limit, HMAC header names |
 | `POST /webhook-endpoints/{id}/secret` | a new secret, shown this once; deduplication carries on |
 
-How an endpoint authenticates and where its events' ids are never change: make another endpoint instead. The API needs
-the ingress key to make or rotate one (503 `ingress_key_missing` without it), and makes the tenant's inbound keypair if
-it has none.
+How an endpoint authenticates, its events pointer and where its events' ids are never change: make another endpoint
+instead. The API needs the ingress key to make or rotate one (503 `ingress_key_missing` without it), and makes the
+tenant's inbound keypair if it has none.
 
 ### Authentication
 
@@ -111,8 +112,9 @@ stored: only keyed digests of them.
 | 413 `too_large` | past the endpoint's body limit (1 MiB by default, at most 5 MiB) or the global 5 MiB |
 | 429 `rate_limited`, `Retry-After` | short of a rate budget, or too many failures from this address |
 | 429 `quota_exceeded`, `Retry-After: 30` | the endpoint's or the tenant's pending backlog is full |
-| 429 `retained_full`, no `Retry-After` | the stored events are at their cap: nothing frees it before 2b-4 |
+| 429 `retained_full`, no `Retry-After` | the stored events are at their cap, until retention deletes ended events past the tenant's cutoff ([retention](retention.md)) |
 | 503 | too many requests in flight (`busy`, `Retry-After`), outside a development deployment, the database unavailable, or the tenant without an inbound key |
+| 503 `key_retired`, `Retry-After: 1` | the tenant's inbound keypair the delivery was sealed to was retired before it was recorded ([key rotation](key-rotation.md)); nothing is stored, and a retry is sealed to the newest |
 
 A refused attempt pays its rate budget as an accepted one does.
 

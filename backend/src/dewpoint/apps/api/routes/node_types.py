@@ -16,6 +16,7 @@ from dewpoint.core.db import tenant_scope
 from dewpoint.core.http import TenantContext, active_session, get_db, require
 from dewpoint.core.models.connections import Connection
 from dewpoint.core.plugins import asking, calls, registry
+from dewpoint.core.tenancy import lifecycle
 
 router = APIRouter(prefix="/api/v1", tags=["node-types"])
 MAX_OPTIONS, MAX_VALUE, MAX_LABEL = 1000, 1000, 200  # the ruled limits, checked again on the API's side
@@ -90,6 +91,8 @@ async def ask_and_wait(
         raise HTTPException(503, detail={"error": "plugin_calls_busy"}) from None
     except asking.TooManyCallsError:
         raise HTTPException(429, detail={"error": "too_many_plugin_calls"}) from None
+    except lifecycle.TenantNotActiveError:  # an erasure started after the request's check (2b-4a)
+        raise HTTPException(409, detail={"error": "tenant_erasing"}) from None
 
 
 async def still_current(request: Request, tenant_id: uuid.UUID, connection_id: uuid.UUID, revision: int) -> None:
