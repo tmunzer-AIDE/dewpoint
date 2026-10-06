@@ -40,7 +40,8 @@ from dewpoint.core.models.runs import ExecutionEvidence
 from dewpoint.engine.runtime.ids import tenant_of
 
 log = structlog.get_logger("dewpoint.dispatcher.evidence")
-RECHECK = timedelta(minutes=5)  # an execution open, or not yet shown, is described again after this
+RECHECK = timedelta(minutes=5)  # an execution open, or not yet shown, is described again after this, at the least
+PENDING_MAX = timedelta(days=1)  # one never shown backs off, twice its last gap each time, up to this
 RETAINED_FOR = timedelta(days=1)  # when the namespace's retention can't be read: a read one is described again after
 BATCH = 50  # rows a pass
 CALL_DEADLINE = timedelta(seconds=10)
@@ -133,6 +134,18 @@ async def _after(s: AsyncSession, gap: timedelta, since: datetime | None = None)
     return (since or now) + gap
 
 
+async def _later(s: AsyncSession, gap: timedelta, since: datetime) -> datetime:
+    """`since` + `gap`, but never sooner than RECHECK from now (the final review's I3): a read execution's close plus
+    the retention can be long past, and a row due again at once would come back on every pass, holding the rest."""
+    return max(await _after(s, gap, since), await _after(s, RECHECK))
+
+
+def _backoff(previous: datetime | None, now: datetime) -> timedelta:
+    """How long an execution Temporal didn't show waits before it's described again: RECHECK at first, then twice
+    the last gap, up to PENDING_MAX (the final review's I3; it stays pending, never judged)."""
+    return RECHECK if previous is None else min(max(RECHECK, 2 * (now - previous)), PENDING_MAX)
+
+
 async def _check(sessionmaker: async_sessionmaker[AsyncSession], client: Client, tenant_id: uuid.UUID, row_id: int,
                  retention: timedelta | None) -> str:  # fmt: skip
     async with sessionmaker() as s, s.begin():
@@ -153,10 +166,14 @@ async def _check(sessionmaker: async_sessionmaker[AsyncSession], client: Client,
             if read:
                 await s.delete(row)
                 return "gone"
+            previous = row.checked_at
             judged = await _unshown(s, row)
             if judged == "lost":
                 log.error("execution_evidence_lost", evidence=row_id)
-            row.next_check_at = await _after(s, RECHECK)
+                row.next_check_at = await _after(s, RECHECK)
+            else:
+                now = await _after(s, timedelta(0))
+                row.next_check_at = now + _backoff(previous, now)
             return judged
         asked = await _after(s, timedelta(0))
         row.seen_at, row.checked_at = row.seen_at or asked, asked
@@ -169,7 +186,7 @@ async def _check(sessionmaker: async_sessionmaker[AsyncSession], client: Client,
             row.next_check_at = await _after(s, RECHECK)
             return "open"
         if read:
-            row.next_check_at = await _after(s, kept, described.close_time)
+            row.next_check_at = await _later(s, kept, described.close_time)
             return "retained"
     run = run_id or described.raw_description.workflow_execution_info.first_run_id or described.run_id
     found = await _history(client, workflow_id, run)  # the first run, if a root's chain continued: it's closed
@@ -191,7 +208,7 @@ async def _check(sessionmaker: async_sessionmaker[AsyncSession], client: Client,
                                                              started_at=when, seen_at=seen, checked_at=seen)
                             .on_conflict_do_nothing(index_elements=target, index_where=where))  # fmt: skip
         row.run_id, row.read_at = found.run_id, await _after(s, timedelta(0))
-        row.next_check_at = await _after(s, kept, found.closed)
+        row.next_check_at = await _later(s, kept, found.closed)
     return "read"
 
 

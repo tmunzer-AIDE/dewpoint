@@ -110,6 +110,11 @@ An execution Temporal doesn't show, and that was never read:
   closed and gone unseen, after starting children no one recorded. Nothing proves the retention over the time it went
   unchecked (the value Temporal reports now can't), so it's never judged: only Temporal showing it settles it.
 
+The leader takes 50 due executions a pass, oldest due first. An open one is described again after 5 minutes; a read one
+Temporal still keeps, after its close plus the namespace's retention, but never sooner than 5 minutes on; a pending one
+backs off, each wait twice the last, from 5 minutes up to a day. So however many are due, each is described within a few
+passes, and none comes back at once to hold the rest.
+
 `keys retire` describes each execution that started before the version's successor reached every cache (with a
 margin of the same again). The version is kept by any one that is open, closed and still retained, closed and not
 yet read, lost, or pending: what each started is unknown, so nothing is guessed. A start Temporal never showed thus
