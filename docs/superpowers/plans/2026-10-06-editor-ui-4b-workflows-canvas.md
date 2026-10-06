@@ -2,9 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Revision 3 (2026-10-06).** The owner reviewed revision 1 (325fc14: seven corrections) and revision 2 (089c004:
-five corrections and one smaller); "Revision 2" and "Revision 3" below list what changed and where. Execution waits
-for the owner's approval.
+**Revision 4 (2026-10-06).** The owner reviewed revision 1 (325fc14: seven corrections), revision 2 (089c004: five
+corrections and one smaller) and revision 3 (a206ea9: one Task 13 lifecycle correction and one smaller); "Revision 2",
+"Revision 3" and "Revision 4" below list what changed and where. The owner approved local execution through milestone
+1 (pasted, 2026-10-06), then a stop for the API and probe review; milestones 2–4 wait for the owner's approval of
+this revision's Task 13 correction. No push or PR is authorized.
 
 **Goal:** A tenant member can list workflows with their state at a glance, create one (blank or imported from a file),
 build its graph on a canvas with a pointer or the keyboard alone, have every edit saved without ever overwriting
@@ -120,8 +122,8 @@ The input classes and conditions most likely to bite a person using this, which 
 
 The outline leaves these open, or the code found differs from it. Each is the safest option; they join the ledger as
 rulings 68 onward when the plan is approved. Format: what - why - cost if wrong. The owner ruled on 1–21 with
-revision 1 and on 22–26 with revision 2 (both 2026-10-06); each carries its status, and the amended ones read as
-amended. 27–28 are new in revision 3.
+revision 1, on 22–26 with revision 2 and on 25, 27–28 with revision 3 (all 2026-10-06); each carries its status, and
+the amended ones read as amended.
 
 1. **Accepted. Triggers wait for 4c.** Triggers are rows (schedules, webhook bindings, CSV uploads), not graph nodes,
    and their setup is 4c's. So 4b's chooser (1b) asks only how to start (Blank, Import from file); its first step,
@@ -241,18 +243,21 @@ amended. 27–28 are new in revision 3.
 21. **Accepted, extended by correction 4. Undo and redo stay local** (D17): a history of up to 100 documents in
     memory, cleared when the editor closes. Undo is off after a conflict (the editor is read-only), and while a
     publication or an activation runs. - D17. - None.
-22. **Accepted (owner, with revision 2); extended in revision 3. Leaving the editor saves first.** One decision, the
-    editor's: save what's pending; when that can't be done (a failed save, a conflict), ask: stay, download my version,
-    or leave without saving. It answers every way out: router navigations (the breadcrumb, the rail, the palette, the
-    tenant switcher) through the router's blocker; sign-out, which asks it before revoking the session or clearing the
-    query cache; and an ended session, which keeps the shell and the unsaved work on screen with a notice instead of
-    swapping it for the sign-in page. "Leave without saving", once chosen, stands until the next edit, or until the
-    exit it answered fails (a sign-out that didn't go through withdraws it), so the navigation that follows
-    (sign-out's to the sign-in page) doesn't ask again. Closing the tab gets the browser's prompt. Reload
-    after a conflict asks before discarding the local version. The saver is disposed when the editor closes: a save
-    still in flight that answers afterwards sends nothing more. - The debounce and a conflict both leave work only on
-    the screen, and a revoked session or a cleared cache must not take it first. - Leaving waits as long as a save
-    takes; an ended session waits for the person's choice.
+22. **Accepted (owner, with revision 2); extended in revisions 3 and 4. Leaving the editor saves first, as one
+    transaction.** One decision, the editor's: save what's pending; when that can't be done (a failed save, a
+    conflict), ask: stay, download my version, or leave without saving. It answers every way out: router navigations
+    (the breadcrumb, the rail, the palette, the tenant switcher) through the router's blocker; sign-out, which asks it
+    before revoking the session or clearing the query cache; and an ended session, which keeps the shell and the
+    unsaved work on screen with a notice instead of swapping it for the sign-in page. Exits that overlap share the
+    decision in flight, so one answer (a Stay included) settles every one of them, and Sign out runs once at a time.
+    Once an exit is agreed to, the document is held (no edit, no undo) until the exit completes or is withdrawn (a
+    sign-out that failed withdraws it): no edit lands after the consent and is discarded under it, and the navigation
+    that follows sign-out doesn't ask again. Closing the tab gets the browser's prompt. Reload after a conflict asks
+    before discarding the local version. The saver is disposed when the editor closes: a save still in flight that
+    answers afterwards sends nothing more. - The debounce and a conflict both leave work only on the screen, and a
+    revoked session or a cleared cache must not take it first; neither may an exit's consent stand for work made
+    after it (the owner's review of revision 3). - Leaving waits as long as a save takes; an ended session waits for
+    the person's choice; the editor is read only while a sign-out waits on the server.
 23. **Accepted (owner, with revision 2); extended in revision 3. The editor opens on a fresh snapshot, and stays
     open.** It waits for the workflow read made after it mounted (never a cached copy, which would conflict on the
     first edit), and keeps what it opened with (the workflow, the step types, the role): a later read or a failed
@@ -268,33 +273,34 @@ amended. 27–28 are new in revision 3.
     at publish", marked as before the latest edits, never in a step's problems or an unqualified count. Viewing a
     version shows none of the draft's. - A failed or stale check must not keep reassuring, nor a stale finding
     alarm. - Badges disappear between an edit and the next check (about a second, plus the check).
-25. **Principle accepted (owner, with revision 2); proof amended in revision 3. An outcome is said only when known.**
-    A publish or an activation without an answer from the API (the network, or a 5xx) is read back and reported as
-    found, or as not known; never as failed, and never as published without evidence. A version holds this draft
-    only if its recorded `graph_hash` is the hash the server gave for the revision submitted (the save's answer, or
-    the load's `draft_graph_hash`); a version of that number with another hash is another publication, and this one
-    was refused. The active version and the draft's comparison always come from the read (or the answer) itself,
-    never from the number hoped for. A version made active stays made active when the read after it fails, and the
-    draft's comparison with it is "not known" until read (`Saved · v1 is active`); nothing read back leaves the
-    active version "not known". Only the newest "View version" answer is shown. - A version's existence and the
-    draft's current revision don't say which revision the version holds (the owner reproduced both wrong
-    inferences). - Two reads after a lost answer; the draft's hash travels in the save's answer and the summary.
+25. **Accepted (owner, with revision 3): the non-null hash proof shows a version holds the submitted graph, not which
+    caller published it. An outcome is said only when known.** A publish or an activation without an answer from the API
+    (the network, or a 5xx) is read back and reported as found, or as not known; never as failed, and never as published
+    without evidence. A version holds this draft only if its recorded `graph_hash` is the hash the server gave for the
+    revision submitted (the save's answer, or the load's `draft_graph_hash`); a version of that number with another hash
+    is another publication, and this one was refused; with no hash for the draft submitted, nothing is proven either
+    way, and it's "not known". The active version and the draft's comparison always come from the read (or the answer)
+    itself, never from the number hoped for. A version made active stays made active when the read after it fails, and
+    the draft's comparison with it is "not known" until read (`Saved · v1 is active`); nothing read back leaves the
+    active version "not known". Only the newest "View version" answer is shown. - A version's existence and the draft's
+    current revision don't say which revision the version holds (the owner reproduced both wrong inferences). - Two
+    reads after a lost answer; the draft's hash travels in the save's answer and the summary.
 26. **Accepted (owner, with revision 2). A draft that can't be exported portably is offered as it is, labelled.** In
     the editor, a refused export offers "Download this draft as it is (not portable)", a `.draft.json` file the
     importer refuses (it isn't a `dewpoint.workflow` file); the list says to open the workflow for it. - The owner's
     option of a separately labelled recovery download: the person keeps their work, and the label says the file
     holds this tenant's ids. - One more download path carrying the tenant's ids, as the conflict's download already
     does.
-27. **New in revision 3. A save's answer names the version it compared with.** `put_draft` reads the active version
-    after its compare-and-swap, under the row lock the swap took, and answers it (`active_version_id`,
+27. **Accepted (owner, with revision 3). A save's answer names the version it compared with.** `put_draft` reads the
+    active version after its compare-and-swap, under the row lock the swap took, and answers it (`active_version_id`,
     `active_version_number`) beside `unpublished_changes` and the saved draft's `graph_hash`; the editor labels the
     active version from that same answer. - The route reads the workflow without a lock, so an activation can land
     between that read and the swap (the owner's correction 5). - Two fields more on each save's answer, and one read.
-28. **New in revision 3. Bindings are chosen, from what was read.** Each binding starts at "Choose…", and the import
-    waits for a choice for every one: one of this tenant's, or "Leave unbound" (left out of what's sent). While this
-    tenant's connections and workflows are loading, or when they couldn't be read, no choice is offered; a binding
-    with nothing to offer says to choose "Leave unbound". - Unbound must be a deliberate choice, never a default nor
-    a failed lookup. - One choice more per binding before an import.
+28. **Accepted (owner, with revision 3). Bindings are chosen, from what was read.** Each binding starts at "Choose…",
+    and the import waits for a choice for every one: one of this tenant's, or "Leave unbound" (left out of what's sent).
+    While this tenant's connections and workflows are loading, or when they couldn't be read, no choice is offered; a
+    binding with nothing to offer says to choose "Leave unbound". - Unbound must be a deliberate choice, never a default
+    nor a failed lookup. - One choice more per binding before an import.
 
 ## Revision 2
 
@@ -377,6 +383,18 @@ A fresh-context review of this revision found seven defects, fixed here:
 The reviewer's re-check confirmed the seven fixed (the keyboard model also on 400 randomised graphs, editable and
 read only) and found one gap the first fix opened: "Leave without saving" outlived a sign-out that failed. A failed
 sign-out now withdraws it (`cancelLeaving()`, each guard's `stayed()`, Task 13).
+
+## Revision 4
+
+What changed from revision 3 (a206ea9), by the owner's review of it, and where:
+1. **Leaving is one transaction** (Task 13; ruling 22): the editor's decision is single-flight (`deciding`), so
+   overlapping exits share it and one answer settles every caller; once an exit is agreed to, the document is held
+   (`agreed`, `held`: no edit, no undo, `editable` false) until the exit completes or is withdrawn (`stayed`). Sign
+   out runs once at a time (`signOutRun`; the button is disabled while it runs), and a failed one withdraws the
+   consent. New tests: overlapping exits and a Stay, an edit and an undo attempted under a held consent, a second Sign
+   out while the editor's question is open, and a second while logout's answer is held.
+2. **A missing hash proves nothing** (Task 15; ruling 25): a lost publish whose submitted draft has no hash, with a
+   version of the expected number present, is reported as not known, never as another's publication.
 
 ## File structure
 
@@ -7581,7 +7599,9 @@ What this task guards (the owner's reviews of 325fc14, correction 1, and of revi
   which awaits it; sign-out, which asks it (`mayLeave`) before it revokes the session or clears the query cache (a
   save after that could no longer authenticate, and the cleared cache must not unmount the editor first); and an
   ended session, which leaves the shell and its unsaved work on screen, with a notice, instead of swapping it for the
-  sign-in page. `beforeunload` covers closing the tab.
+  sign-in page. `beforeunload` covers closing the tab. It is one transaction (revision 4): exits that overlap share
+  the decision in flight, Sign out runs once at a time, and once an exit is agreed to the document is held until the
+  exit completes or a failed sign-out withdraws it, so no edit lands after the consent and is discarded under it.
 - **Closing.** Once the editor closes, its saver is disposed: a save still in flight that answers afterwards sends
   nothing more and says nothing.
 - **Opening, and staying open.** The editor never opens on a cached draft (it would conflict on the first edit): it
@@ -7847,7 +7867,9 @@ const loggedOut = () => vi.mocked(globalThis.fetch).mock.calls.some(([input]) =>
 it("signs out only once every open editor has had its say", async () => {
   await renderAt("/t/t1/connections");
   const stop = guardLeaving({ unsaved: () => true, decide: () => Promise.resolve(false) }); // the person chose to stay
-  await userEvent.click(screen.getByRole("button", { name: "Sign out" }));
+  const button = screen.getByRole("button", { name: "Sign out" });
+  await userEvent.click(button);
+  await vi.waitFor(() => expect(button.hasAttribute("disabled")).toBe(false)); // that sign-out is over
   expect(loggedOut()).toBe(false);
   stop();
   const stayed = vi.fn();
@@ -7859,12 +7881,47 @@ it("signs out only once every open editor has had its say", async () => {
   expect(stayed).toHaveBeenCalledOnce();
   go();
 });
+
+it("signs out once at a time: a click while one is deciding does nothing, and a Stay settles it", async () => {
+  await renderAt("/t/t1/connections");
+  let answer!: (leave: boolean) => void;
+  const decide = vi.fn(() => new Promise<boolean>((resolve) => (answer = resolve)));
+  const stop = guardLeaving({ unsaved: () => true, decide });
+  const button = screen.getByRole("button", { name: "Sign out" });
+  await userEvent.click(button);
+  expect(button.hasAttribute("disabled")).toBe(true);
+  fireEvent.click(button); // a second click, while the editor's question is open
+  expect(decide).toHaveBeenCalledOnce();
+  answer(false); // Stay
+  await vi.waitFor(() => expect(button.hasAttribute("disabled")).toBe(false));
+  expect(loggedOut()).toBe(false);
+  stop();
+});
+
+it("sends one logout while its answer is held", async () => {
+  await renderAt("/t/t1/connections");
+  const base = vi.mocked(globalThis.fetch).getMockImplementation()!;
+  let release!: (answer: Response) => void;
+  vi.mocked(globalThis.fetch).mockImplementation((input) =>
+    (input as Request).url.endsWith("/api/v1/auth/logout") ? new Promise<Response>((r) => (release = r)) : base(input));
+  const stop = guardLeaving({ unsaved: () => false, decide: () => Promise.resolve(true) });
+  const button = screen.getByRole("button", { name: "Sign out" });
+  await userEvent.click(button);
+  await vi.waitFor(() => expect(loggedOut()).toBe(true));
+  fireEvent.click(button);
+  const logouts = () => vi.mocked(globalThis.fetch).mock.calls.filter(([i]) => (i as Request).url.endsWith("/api/v1/auth/logout"));
+  expect(logouts()).toHaveLength(1);
+  release(new Response(JSON.stringify({ error: "http_error" }), { status: 502 })); // it fails: still signed in
+  await screen.findByText(/Sign-out failed/);
+  expect(logouts()).toHaveLength(1);
+  stop();
+});
 ```
 
-(`guardLeaving` from `../lib/leaving` and `userEvent` join its imports.) In `frontend/src/router.test.tsx`, `showApp`
-keeps its QueryClient in a module-level `client`, the session's answer follows a flag (`let sessionGone = false`, reset
-in `beforeEach`: `if (key === "GET /api/v1/auth/session") return sessionGone ? json({ error: "unauthorized" }, 401) :
-json(SESSION);`), and:
+(`guardLeaving` from `../lib/leaving`, `fireEvent` and `userEvent` join its imports.) In `frontend/src/router.test.tsx`,
+`showApp` keeps its QueryClient in a module-level `client`, the session's answer follows a flag (`let sessionGone =
+false`, reset in `beforeEach`: `if (key === "GET /api/v1/auth/session") return sessionGone ? json({ error:
+"unauthorized" }, 401) : json(SESSION);`), and:
 
 ```tsx
 it("leaves unsaved editor work on screen when the session ends, and says so", async () => {
@@ -7998,6 +8055,36 @@ it("asks once: a navigation after sign-out's \"leave\" goes without asking again
   await userEvent.click(screen.getByRole("link", { name: "Workflows" })); // as sign-out's navigation to /login
   await screen.findByText("list");
   expect(screen.queryByRole("dialog", { name: "Your latest changes aren't saved" })).toBeNull();
+});
+
+it("lets overlapping exits share one question, and a Stay settles every one", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "http_error" }, 500));
+  await show();
+  await addTransform();
+  const first = mayLeave();
+  const second = mayLeave(); // a second Sign out, or the router's blocker, while the first waits
+  const ask = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
+  expect(screen.getAllByRole("dialog", { name: "Your latest changes aren't saved" })).toHaveLength(1);
+  await userEvent.click(within(ask).getByRole("button", { name: "Stay" }));
+  await expect(first).resolves.toBe(false);
+  await expect(second).resolves.toBe(false);
+  expect(sent.filter((r) => r.method === "PUT")).toHaveLength(1); // one decision, one save tried
+  expect(steps().dataset.editable).toBe("true"); // staying holds nothing
+});
+
+it("holds the document from an exit's consent until the exit is withdrawn", async () => {
+  await show();
+  await addTransform();
+  await expect(mayLeave()).resolves.toBe(true); // saved first: sign-out may go on, and now awaits logout's answer
+  await vi.waitFor(() => expect(steps().dataset.editable).toBe("false"));
+  await userEvent.click(screen.getByRole("button", { name: "after transform" })); // an edit, under that consent
+  expect(screen.queryByRole("dialog", { name: "Add a step" })).toBeNull();
+  await userEvent.keyboard("{Control>}z{/Control}");
+  expect(screen.getByRole("button", { name: "transform" })).toBeTruthy(); // undo is held too
+  act(() => cancelLeaving()); // logout failed: still signed in
+  await vi.waitFor(() => expect(steps().dataset.editable).toBe("true"));
+  await userEvent.click(screen.getByRole("button", { name: "after transform" }));
+  expect(await screen.findByRole("dialog", { name: "Add a step" })).toBeTruthy();
 });
 
 it("asks again after a sign-out that failed", async () => {
@@ -8311,16 +8398,36 @@ In `frontend/src/components/Shell.tsx`, sign-out asks first, and an ended sessio
 from `../lib/leaving`; `Shell` takes `{ sessionEnded = false }: { sessionEnded?: boolean }`):
 
 ```tsx
-  async function handleSignOut() {
+  const [signingOut, setSigningOut] = useState(false);
+  const signOutRun = useRef<Promise<void> | null>(null);
+
+  /** One sign-out at a time (the owner's review of revision 3): a click while one decides or waits on the server
+   * joins it, never starting another. */
+  function handleSignOut(): Promise<void> {
+    signOutRun.current ??= (async () => {
+      setSigningOut(true);
+      try {
+        await signOutOnce();
+      } finally {
+        setSigningOut(false);
+        signOutRun.current = null;
+      }
+    })();
+    return signOutRun.current;
+  }
+
+  async function signOutOnce() {
     setSignOutError(null);
-    // An open editor has its say first (4b ruling 22): it saves what's pending, or asks. Only then is the session
-    // revoked and the cache cleared, which would leave a pending save unable to authenticate.
+    // An open editor has its say first (4b ruling 22): it saves what's pending, or asks, and holds its document from
+    // then. Only then is the session revoked and the cache cleared, which would leave a pending save unable to
+    // authenticate.
     if (!(await mayLeave())) return;
     if ((await signOut()) === "failed") {
-      cancelLeaving(); // still signed in, still on the page: an editor's "leave" must not stand for the next exit
+      cancelLeaving(); // still signed in, still on the page: the editor's document is the person's again
 ```
 
-(the rest unchanged, `cancelLeaving` imported beside `mayLeave`), and, beside the sign-out error:
+(the rest of the old `handleSignOut` unchanged, `cancelLeaving` imported beside `mayLeave`, `useRef` beside
+`useState`); the Sign out button takes `disabled={signingOut}`, and, beside the sign-out error:
 
 ```tsx
         {sessionEnded && (
@@ -8441,33 +8548,52 @@ In `Editor` (which takes `trouble` and `onReload`; imports: `useBlocker`, `useRe
     saver.current = s;
     return () => s.dispose();
   }, [tenantId, workflow]);
-  const editable = canEdit(role) && sync.status !== "conflict";
+  const [held, setHeld] = useState(false); // an exit was agreed to: no edit until it completes or is withdrawn
+  const editable = canEdit(role) && sync.status !== "conflict" && !held;
   const downloadMine = () => downloadJson(fileName(workflow.name, ".draft.json"), doc);
 
-  // Leaving's one decision (4b ruling 22): save what's pending; when that can't be done (a failed save, a conflict),
-  // ask the person, and answer with their choice. The router's blocker awaits it for every navigation (the
-  // breadcrumb, the rail, the palette, the tenant switcher); sign-out and an ended session ask it through `leaving`.
+  // Leaving is one transaction (4b ruling 22; the owner's review of revision 3). Its one decision: save what's
+  // pending; when that can't be done (a failed save, a conflict), ask the person. The router's blocker awaits it for
+  // every navigation (the breadcrumb, the rail, the palette, the tenant switcher); sign-out and an ended session ask
+  // it through `leaving`. Exits that overlap share the decision in flight, so one answer settles every one of them.
+  // Once an exit is agreed to, the document is held (`agreed`, `held`) until the exit completes (the editor unmounts)
+  // or is withdrawn (`stayed`: a sign-out that failed): no edit can land after the consent and be discarded under it,
+  // and the navigation that follows sign-out doesn't ask again.
   const [leaveQuestion, setLeaveQuestion] = useState<((leave: boolean) => void) | null>(null);
-  // "Leave without saving", once said, stands until the next edit: sign-out asks, then its navigation reaches the
-  // router's blocker, which must not ask again (by then the session is revoked: the revision's review).
-  const leaveAccepted = useRef(false);
+  const deciding = useRef<Promise<boolean> | null>(null);
+  const agreed = useRef(false);
   const decide = useRef((): Promise<boolean> => Promise.resolve(true));
-  decide.current = async () => {
-    const s = saver.current;
-    if (!s?.unsaved || leaveAccepted.current) return true;
-    try {
-      await s.flush();
-      return true;
-    } catch {
-      return new Promise<boolean>((resolve) => setLeaveQuestion(() => resolve));
-    }
+  decide.current = () => {
+    if (deciding.current) return deciding.current;
+    const run = (async () => {
+      const s = saver.current;
+      if (agreed.current || !s?.unsaved) return true;
+      try {
+        await s.flush();
+        return true;
+      } catch {
+        return new Promise<boolean>((resolve) => setLeaveQuestion(() => resolve));
+      }
+    })().then((leave) => {
+      deciding.current = null;
+      if (leave) {
+        agreed.current = true;
+        setHeld(true);
+      }
+      return leave;
+    });
+    deciding.current = run;
+    return run;
   };
   useEffect(
     () =>
       guardLeaving({
         unsaved: () => saver.current?.unsaved ?? false,
         decide: () => decide.current(),
-        stayed: () => void (leaveAccepted.current = false), // the sign-out it answered failed: ask again next time
+        stayed: () => {
+          agreed.current = false; // the sign-out it agreed to failed: the document is the person's again
+          setHeld(false);
+        },
       }),
     [],
   );
@@ -8476,7 +8602,6 @@ In `Editor` (which takes `trouble` and `onReload`; imports: `useBlocker`, `useRe
     enableBeforeUnload: () => saver.current?.unsaved ?? false,
   });
   const answer = (leave: boolean) => {
-    leaveAccepted.current = leave;
     leaveQuestion?.(leave);
     setLeaveQuestion(null);
   };
@@ -8487,20 +8612,20 @@ In `Editor` (which takes `trouble` and `onReload`; imports: `useBlocker`, `useRe
 
 ```tsx
   function change(next: GraphDoc, message: string, then?: string) {
+    if (agreed.current) return; // held: an exit was agreed to (the state behind `editable` may not have rendered yet)
     setHistory((h) => record(h, next));
     saver.current?.change(next);
-    leaveAccepted.current = false; // a new edit is new work: leaving asks again
     announce(message);
     if (then) focus(then);
   }
 ```
 
 ```tsx
+    if (agreed.current) return;
     const next = e.shiftKey ? redo(history) : undo(history);
     if (next === history) return;
     setHistory(next);
     saver.current?.change(next.present);
-    leaveAccepted.current = false;
     announce(e.shiftKey ? "Redone" : "Undone");
 ```
 
@@ -9313,6 +9438,18 @@ it("takes the active version from the read, never from the number it hoped for",
   expect(screen.getByText("Saved · unpublished changes since v2")).toBeTruthy(); // version 2 came after, and is active
 });
 
+it("says it isn't known when the draft submitted has no hash to compare", async () => {
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft_graph_hash: null }));
+  answers.set(`POST ${BASE}/publish`, () => {
+    answers.set(`GET ${BASE}/versions`, () => json([version(1, true, "h-any")]));
+    return Promise.reject(new TypeError("Failed to fetch"));
+  });
+  await show();
+  await confirmPublish(1);
+  expect((await screen.findByRole("alert")).textContent).toContain("it isn't known whether it holds your draft");
+  expect(screen.queryByText(/holds another draft|was published from your draft/)).toBeNull();
+});
+
 it("never calls a lost publish a failure when what happened can't be read", async () => {
   answers.set(`POST ${BASE}/publish`, () => {
     answers.set(`GET ${BASE}/versions`, () => json({ error: "http_error" }, 502));
@@ -9644,8 +9781,8 @@ In `Editor`:
   const [notice, setNotice] = useState<Notice | null>(null);
   const viewAsked = useRef(0); // the newest version view asked for
   const publisher = canPublish(role) && sync.status !== "conflict";
-  // Replaces Task 13's `editable`: nothing changes under a version view, a publication or an activation.
-  const editable = canEdit(role) && sync.status !== "conflict" && viewing === null && busy === null;
+  // Replaces Task 13's `editable`: nothing changes under a version view, a publication, an activation or an exit.
+  const editable = canEdit(role) && sync.status !== "conflict" && !held && viewing === null && busy === null;
   useEffect(() => {
     if (!editable) setPlacing(null); // a click on a read-only canvas places nothing, even one placing began on
   }, [editable]);
@@ -9733,9 +9870,12 @@ In `Editor`:
         setPublishProblems(null);
         announce(`Version ${number} holds your draft`);
         setNotice({ tone: "info", text: `Version ${number} was published from your draft; its answer was lost on the way.` });
-      } else if (made) {
+      } else if (made && hash !== null) {
         // Someone else's publication made version `number`: this one, expecting the one before, was refused.
         setNotice({ tone: "danger", text: `Version ${number} holds another draft: yours wasn't published. Open Versions before publishing again.` });
+      } else if (made) {
+        // No hash for the draft submitted (one that doesn't parse): nothing proves either way (the owner's review).
+        setNotice({ tone: "danger", text: `Version ${number} exists, and it isn't known whether it holds your draft. Open Versions to see before publishing again.` });
       } else {
         setNotice({
           tone: "danger",
