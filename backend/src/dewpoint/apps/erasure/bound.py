@@ -124,8 +124,9 @@ async def reopen(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid
     rows += [{"tenant_id": tenant_id, "step": int(Stage.EXECUTIONS), "kind": "execution", "workflow_id": w,
               "run_id": r, "source": during} for w, r in shown.executions]  # fmt: skip
     async with sessionmaker() as s, s.begin():
-        if rows:
-            await s.execute(insert(TenantErasureItem).values(rows).on_conflict_do_update(
+        for at in range(0, len(rows), stages.ITEMS_PER_STATEMENT):  # the driver's argument limit (C1)
+            chunk = rows[at : at + stages.ITEMS_PER_STATEMENT]
+            await s.execute(insert(TenantErasureItem).values(chunk).on_conflict_do_update(
                 index_elements=[TenantErasureItem.tenant_id, TenantErasureItem.step, TenantErasureItem.workflow_id,
                                 text("coalesce(run_id, '')")],
                 set_={"state": "found", "verified_at": None, "source": during},

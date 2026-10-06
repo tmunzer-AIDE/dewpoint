@@ -43,6 +43,9 @@ from dewpoint.engine.runtime.ids import run_workflow_id
 
 TENANT_ERASED = "tenant_erased"  # the reason a cancel records
 BATCH = 100
+# Items a statement records: six values each, far below the database driver's 32,767 arguments a statement (the
+# final review's C1). A stage can find many more: 31 days of a busy schedule's firings, every run of a tenant.
+ITEMS_PER_STATEMENT = 1_000
 PLACEHOLDER = "Erased tenant"  # the tombstone's name
 
 
@@ -66,8 +69,8 @@ async def _found(s: AsyncSession, ctx: Context, step: Stage, kind: str, found: I
                  source: str) -> None:  # fmt: skip
     rows = [{"tenant_id": ctx.tenant_id, "step": int(step), "kind": kind, "workflow_id": w, "run_id": r,
              "source": source} for w, r in dict.fromkeys(found)]  # fmt: skip
-    if rows:
-        await s.execute(insert(TenantErasureItem).values(rows).on_conflict_do_nothing())
+    for at in range(0, len(rows), ITEMS_PER_STATEMENT):
+        await s.execute(insert(TenantErasureItem).values(rows[at : at + ITEMS_PER_STATEMENT]).on_conflict_do_nothing())
 
 
 async def _known(s: AsyncSession, ctx: Context, kind: str, workflow_id: str, run_id: str | None) -> None:
