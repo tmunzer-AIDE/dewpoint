@@ -465,3 +465,11 @@ M7. **Two test adaptations** (Tasks 6, 8): the plan's Announcer test advanced ti
     every browser gives and `NewWorkflow` reads a picked file with; the test setup gains a stand-in through jsdom's
     `FileReader`, beside its dialog and `ResizeObserver` stand-ins. - Lint and the test runtime, not the product.
     - None: the product code is the plan's.
+
+### 4b, milestone 3 (2026-10-06)
+
+M8. **The graph tests' node type carries `icon` and `options`** (Task 9; follows M2): the plan's `type()` helper
+    built a `NodeType` without them, which the generated type requires since `NodeTypeOut` declares them; it adds
+    `icon: null, options: []`. Five non-null assertions on `edges` and `nodes`, which the generated `Graph` declares
+    present, are dropped (typescript-eslint's `no-unnecessary-type-assertion`). - The schema the plan was written
+    against had neither field. - None: test fixtures only.
