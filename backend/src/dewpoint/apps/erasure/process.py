@@ -122,6 +122,12 @@ async def advance(sessionmaker: async_sessionmaker[AsyncSession], client: Client
     """The erasure carried on from its recorded stage until one isn't done (or it's stopped, or past the stages this
     pass runs); its stage then, None without one."""
     ctx = stages.Context(sessionmaker, client, tenant_id, batch)
+    async with sessionmaker() as s:
+        status = (await s.execute(text("SELECT tenant_status(:t)"), {"t": tenant_id})).scalar()
+    if status not in ("erasing", "erased"):  # erased: an erasure reopened after its completion
+        # A record alone never erases (the final review's I2): one for an active tenant is a stray write or a bug.
+        log.error("erasure_tenant_active", tenant=str(tenant_id))
+        return None
     while True:
         async with sessionmaker() as s:
             record = await _record(s, tenant_id)

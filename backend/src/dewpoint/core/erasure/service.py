@@ -10,7 +10,7 @@ it on (`apps.erasure`)."""
 
 import uuid
 
-from sqlalchemy import select, text, update
+from sqlalchemy import insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.audit import service as audit
@@ -51,9 +51,9 @@ async def start(s: AsyncSession, *, tenant_id: uuid.UUID, requested_by: uuid.UUI
     raised = await s.execute(
         update(Schedule).where(Schedule.tenant_id == tenant_id).values(generation=Schedule.generation + 1)
     )
-    record = TenantErasure(tenant_id=tenant_id, requested_by=requested_by)
-    s.add(record)
-    await s.flush()
+    # its tenant and requester only, the columns the API may write (the final review's I2): every other one a default
+    record = (await s.execute(insert(TenantErasure).values(tenant_id=tenant_id, requested_by=requested_by)
+                              .returning(TenantErasure))).scalar_one()  # fmt: skip
     await audit.record(s, tenant_id=tenant_id, actor_id=requested_by, action="tenant.erasure.start",
                        target_type="tenant", target_id=str(tenant_id),
                        details={"schedules": int(raised.rowcount)})  # type: ignore[attr-defined]  # fmt: skip

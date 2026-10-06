@@ -147,7 +147,8 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
   LIMIT max_calls
 $$"""
 ERASURES = [  # a platform admin starts, stops and retries an erasure through the API (as its role)
-    "GRANT SELECT, INSERT ON tenant_erasures TO dewpoint_api",
+    # its tenant and requester only: every other column a default or the retention process's (the final review's I2)
+    "GRANT SELECT, INSERT (tenant_id, requested_by) ON tenant_erasures TO dewpoint_api",
     "GRANT UPDATE (stopped_at, stopped_by, attempts, next_attempt_at) ON tenant_erasures TO dewpoint_api",
     "GRANT SELECT ON tenant_erasure_items, tenant_erasure_known TO dewpoint_api",
 ]
@@ -294,6 +295,36 @@ INTERVALS = [
 
 # The retention process checks the deployment's recorded namespace before erasure reaches Temporal (§2.1).
 RECORD = "GRANT SELECT ON platform_settings TO dewpoint_retention"
+# The database's own boundary around the erasure's destructive paths (the final review's I2): the retention role
+# deletes a tenant's keys (stage 70) and its rows outside ordinary retention (stage 80), renames its tombstone (80) and
+# cancels its queued work (40) only once the tenant's erasure has reached that stage; a stray record (it starts at stage
+# 20) or a bug in the retention process can't reach them early. Ordinary retention (0037's tables and their retained
+# counters) is untouched. A row naming no tenant (an egress exception for every tenant) is never reached.
+REACHED = """CREATE FUNCTION erasure_reached(tenant uuid, stage integer) RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = public, pg_temp AS $$
+  SELECT EXISTS (SELECT 1 FROM tenant_erasures e WHERE e.tenant_id = tenant AND e.step >= stage)
+$$"""
+GATED = [  # (table, the command gated, the column naming its tenant, the stage that reaches it)
+    *((t, "DELETE", "tenant_id", 70) for t in ("data_keys", "tenant_event_keys")),
+    *((t, "DELETE", "tenant_id", 80) for t in (
+        "connections", "csv_mappings", "egress_allowlist", "execution_evidence", "memberships", "plugin_calls",
+        "rate_buckets", "rate_scope_keys", "run_slots", "tenant_event_counters", "tenant_retention",
+        "tenant_run_limits", "trigger_bindings", "webhook_endpoints", "workflow_versions", "workflows",
+        "retention_sweep_tenants")),
+    ("workflows", "UPDATE", "tenant_id", 80),  # its active version cleared, before its versions go
+    ("tenants", "UPDATE", "id", 80),  # the tombstone renamed, then marked erased
+    *((t, "UPDATE", "tenant_id", 40) for t in ("run_requests", "inbound_events")),  # cancelled
+]  # fmt: skip
+GATE = [
+    REACHED,
+    "REVOKE ALL ON FUNCTION erasure_reached(uuid, integer) FROM PUBLIC",
+    "GRANT EXECUTE ON FUNCTION erasure_reached(uuid, integer) TO dewpoint_retention",
+    *(
+        f"CREATE POLICY {t}_erasure_{command.lower()} ON {t} AS RESTRICTIVE FOR {command} TO dewpoint_retention "
+        f"USING (erasure_reached({column}, {stage}))"
+        for t, command, column, stage in GATED
+    ),
+]
 BOUNDARIES = [
     "GRANT SELECT, INSERT, UPDATE (lost_at) ON namespace_boundaries TO dewpoint_admin",
     "GRANT USAGE ON SEQUENCE namespace_boundaries_id_seq TO dewpoint_admin",
@@ -369,7 +400,7 @@ def upgrade() -> None:
     )
     op.create_index("schedule_firings_tenant", "schedule_firings", ["tenant_id", "schedule_id"])
     op.create_index("schedule_firings_recorded", "schedule_firings", ["recorded_at"])
-    for statement in [*FIRINGS, *STATUS, *ERASURES, *ERASER, VERSIONS, EVIDENCE_DUE, RECORD]:
+    for statement in [*FIRINGS, *STATUS, *ERASURES, *ERASER, VERSIONS, EVIDENCE_DUE, RECORD, *GATE]:
         op.execute(statement)
     op.create_table(
         "namespace_boundaries",
@@ -441,6 +472,9 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute(CALL_CANDIDATES_0042)
+    for table, command, _, _ in GATED:
+        op.execute(f"DROP POLICY {table}_erasure_{command.lower()} ON {table}")
+    op.execute("DROP FUNCTION erasure_reached(uuid, integer)")
     for table in FENCED:
         op.execute(f"DROP TRIGGER {table}_fence ON {table}")
     op.execute("DROP FUNCTION tenant_insert_fence()")

@@ -50,6 +50,13 @@ trigger: holding that lock instead would leave them queued behind the start, whi
 From stage 60 a database fence refuses any insert of a row of the tenant into any table holding tenant data (SQLSTATE
 `DPE01`), whatever the writer, a straggling worker's included. It's never lifted, not even when an erasure reopens.
 
+An erasure's record alone never erases. The retention process carries one on only for a tenant being erased (or erased,
+when an erasure reopens after its completion); a record for an active tenant is skipped and alerted on
+(`erasure_tenant_active`). The API records an erasure with its tenant and requester only. And the database draws its own
+boundary around the destructive paths: the retention login deletes a tenant's keys only once its erasure has reached
+stage 70, its other rows outside ordinary retention and its tombstone's rename only from stage 80, and cancels its
+queued work only from stage 40. Ordinary retention, for active tenants, is untouched.
+
 ## The stages
 
 The retention process carries every erasure on, every `DEWPOINT_ERASURE_INTERVAL_S` (60 s by default): each from its
