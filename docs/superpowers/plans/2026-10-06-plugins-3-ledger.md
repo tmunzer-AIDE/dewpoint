@@ -339,3 +339,45 @@ branch; `.env.example` held placeholders in all its revisions); this settles the
 then ran locally at `0812e14` with CI's versions (CLI 2.27.1, `python-queries` 1.8.11, `javascript-queries` 2.4.6) and
 query filter, over the whole tree: no findings in Python (45 queries) or JavaScript/TypeScript (89 queries). The
 `codeql` workflow is still disabled on GitHub.
+
+## 3b-1 Mist REST
+
+Branch `feat/plugins-3b1` from `origin/main` f65c6f9 (3a-2's merge), started 2026-10-06 on the owner's word. No
+migration expected: connection types, nodes and triggers all live in synced manifests.
+
+Tasks (test-first, in order):
+1. The OAS as data (D2): `mist.openapi.json` at 0613a22 vendored gzipped, its SHA-256 checked when it's read, a
+   `NOTICE` entry; a test pins each curated operation's method and path.
+2. The operation-policy map (D28, D24, D14): one generated data file with an entry per OAS operation (state, the nodes
+   that may reach it, capability, scope class, side effect and its evidence), made by a script from the OAS and the
+   reviewed table; a test regenerates it and refuses drift, and checks the invariants (deprecated and always-refused
+   routes denied, held operations reach nothing).
+3. SDK 0.4.0: models declared by a JSON Schema (validated by it, reporting it as their schema), for nodes generated
+   from data; a plugin's `triggers` (D12, D17), emitted only when set; the catalog checks both as data.
+4. The Mist client (D1, D16): requests through the connection's HTTP, path values checked and encoded, the org forced
+   to the connection's, a site checked to belong to it; status codes mapped; lists paged by `X-Page-*` headers,
+   searches by the body's `next` kept on the connection's host and path, under a page cap.
+5. One node type per curated operation (D23, D16, D15): config (connection, path values, query, body, a page cap,
+   an update's mode) and output (the 2xx answer) schemas from the OAS; side effects from the map; nested update
+   (merge by default, replace); delete's 404 on a retry. The manifest's size measured.
+6. Simulate (D13): the OAS's 2xx example when it validates, else a value made from the schema; every node checked.
+7. Options: the site picker and the org-scope resources' pickers.
+8. Any endpoint (D14): `mist.api.read` and `mist.api.write`, only what the map allows them, inside the connection's
+   scope, always-refused routes refused whatever the map says.
+9. The Mist webhook trigger (D17): the plugin declares its 30 topics' envelope schemas; the API lists trigger types;
+   an endpoint records the whole envelope (no events pointer, `id_source: none`); bindings filter on `/topic`.
+10. Proof: a curated read and a merge update through RunGraph against a local Mist fake, and a webhook delivery
+    through ingress into a run whose trigger is typed by its topic.
+
+Rulings:
+- Ruling: the branch starts from `origin/main` f65c6f9 (3a-2 merged) - as for 3a-2 - cost if wrong: one rebase.
+- Ruling: the OAS is taken from a local clone of `mistsys/mist_openapi` with `git show 0613a22:mist.openapi.json`
+  (the commit the appendix was generated from; that clone's working tree has local edits, which are not used), so
+  nothing is downloaded; SHA-256 of the file `22f55432535ab38f6c0539392a729b8fd515a9ccae9df693fbd4ff23d40b8fac`,
+  3,630,900 bytes; its `LICENSE` (MIT) comes from the same commit - cost if wrong: none (the hash pins the content).
+- Ruling: the SDK becomes 0.4.0 - 3b-1 adds schema-declared models and triggers - cost if wrong: none (the catalog
+  checks the major only).
+- Ruling (D23 measurement, before generation): the 262 curated operations' schemas, each with its own `$defs`, come to
+  6.5 MB of JSON (1.1 MB gzipped), 3.0 MB (0.3 MB gzipped) without `description` and `examples`; one schema reaches
+  341 KB (site settings), and device schemas about 300 KB. The palette (`GET /node-types`) returns every type's
+  schemas in one answer. Measured again on the generated manifests (task 5) before ruling on a split.
