@@ -8,7 +8,6 @@ and CSV mappings are rows, not graph: they don't travel."""
 
 import copy
 import uuid
-from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -66,11 +65,23 @@ def _node(graph: Mapping[str, Any], node_id: str) -> Any:
     return next((n for n in _nodes(graph) if str(n.get("id")) == node_id), None)
 
 
+def _identity(node_id: Any) -> uuid.UUID | str:
+    """A step's id as the engine reads it: one UUID whatever its spelling (case, hyphens, braces, a urn: each one the
+    graph's format accepts parses here to the same value); an id that isn't a UUID stays as written."""
+    try:
+        return uuid.UUID(str(node_id))
+    except ValueError:
+        return str(node_id)
+
+
 def _shape(graph: Mapping[str, Any], config_schemas: Mapping[str, Mapping[str, Any]]) -> list[Problem]:
-    """What keeps anyone from knowing where a graph's ids are: two steps sharing an id (a site would name either), or
-    a step of a type this server doesn't know (its config may hold an id no schema marks)."""
-    counted = Counter(str(n.get("id")) for n in _nodes(graph))
-    out = [Problem("duplicate_node", node=node_id) for node_id, seen in counted.items() if seen > 1]
+    """What keeps anyone from knowing where a graph's ids are: two steps sharing an id, by identity, not spelling (a
+    site would name either), or a step of a type this server doesn't know (its config may hold an id no schema
+    marks). A duplicate is named by its first spelling in the graph, which is left as it was."""
+    spelt: dict[uuid.UUID | str, list[str]] = {}
+    for n in _nodes(graph):
+        spelt.setdefault(_identity(n.get("id")), []).append(str(n.get("id")))
+    out = [Problem("duplicate_node", node=spellings[0]) for spellings in spelt.values() if len(spellings) > 1]
     for n in _nodes(graph):
         ref = n.get("type")
         if not isinstance(ref, str) or ref not in config_schemas:

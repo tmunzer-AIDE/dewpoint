@@ -81,9 +81,27 @@ async def test_a_failed_simulation_never_needs_attention(app, owner_sessionmaker
 
 
 async def test_another_tenants_runs_never_count(app, owner_sessionmaker, api_settings) -> None:
-    """A run names its own workflow's version (`runs_version_fk`), so no row of another tenant's can claim this
-    tenant's workflow. What's left to prove is the statements' own tenant filter, with row-level security out of the
-    way (the owner's session): asked, for this tenant, about another tenant's workflow, they find no run of it."""
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    _, otid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        wid, vid = await published(c, tid)
+        # A row in the other tenant claiming this tenant's workflow, with that workflow's own version: `runs_version_fk`
+        # holds (the version is the workflow's) and has no tenant column, so only row-level security and the
+        # statements' tenant filter keep it out.
+        await add_run(owner_sessionmaker, otid, wid, vid, status="failed")
+        row = (await c.get(f"/api/v1/t/{tid}/workflows/{wid}")).json()
+        listed = (await c.get(f"/api/v1/t/{tid}/workflows")).json()
+    assert row["last_run"] is None and row["runs_24h"] == {"live": 0, "simulate": 0}
+    assert row["needs_attention"] == [] and [w["last_run"] for w in listed] == [None]
+    async with owner_sessionmaker() as s:  # the row is there, under the other tenant
+        found = await s.execute(text("select tenant_id from runs where workflow_id = :w"), {"w": wid})
+        assert [r.tenant_id for r in found] == [otid]
+
+
+async def test_the_statements_filter_by_tenant_themselves(app, owner_sessionmaker, api_settings) -> None:
+    """Row-level security keeps another tenant's runs from the API's role; the statements also filter by tenant
+    themselves. With row-level security out of the way (the owner's session), asked for this tenant about another
+    tenant's workflow, they find no run of it, while the row is there for its own tenant."""
     from dewpoint.apps import workflow_summary
 
     c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")

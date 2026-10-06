@@ -397,16 +397,37 @@ M2. **`NodeTypeOut` also declares `icon` and `options`** (Task 1): #44's palette
     icon's name, plugins-3; the config fields `options()` lists, D3), and the named model forbids extra keys, so it
     must declare them. The test pins `flow.loop`'s icon (`repeat`) and `testkit.pick`'s options (`site_id`). - Without
     them the answer fails its own model. - Two fields the 4b plan didn't list; 4c and 4f use them.
-M3. **A run names its own workflow's version** (Task 3): `runs` carries the foreign key `runs_version_fk
-    (workflow_version_id, workflow_id) -> workflow_versions (id, workflow_id)` (migration 0008), which the ORM model
-    doesn't show and the plan missed. So no row of another tenant's can claim this tenant's workflow: the plan's
-    `test_another_tenants_runs_never_count` (such a row) can't be written. It now proves the statements' own tenant
-    filter, with row-level security out of the way (the owner's session): asked for this tenant about another
-    tenant's workflow, they find nothing, while the row is there for its own tenant. The probe seeds real workflows
-    and versions (`seed_workflow`, 200 a tenant) and its runs name them. - The schema refuses what the plan's test
-    inserted. - None: the database already enforces what the old test checked.
+M3. **The plan's cross-tenant run named the wrong version** (Task 3; corrected on the owner's milestone 1 review):
+    `runs` carries the foreign key `runs_version_fk (workflow_version_id, workflow_id) -> workflow_versions (id,
+    workflow_id)` (migration 0008), which the ORM model doesn't show. It guarantees that a run's version belongs to the
+    workflow the run names; it has no tenant column, so it doesn't prove that a run and its workflow share a tenant.
+    The plan's `test_another_tenants_runs_never_count` paired this tenant's workflow with the other tenant's version,
+    which the key refuses. Restored with the workflow's own version under the other tenant's id (the key holds; only
+    row-level security and the statements' tenant filter keep the row out), beside a second test proving the
+    statements' own tenant filter with row-level security out of the way (the owner's session). The probe seeds real
+    workflows and versions (`seed_workflow`, 200 a tenant) and its runs name them. - The schema refuses the row the
+    plan's test inserted. - None: the restored test keeps the plan's scenario.
 M4. **The import's audit entry is read as the database's owner** (Task 5): the plan's test read `/audit` as the
     importing editor, but `audit.view` is an admin's and an owner's, so the editor is refused. The test reads the
     tenant's newest audit entry through the owner's session instead and asserts its action, its target (the new
     workflow) and its details (`{"name", "source": "import"}`). - An editor can't read the audit log. - None: the
     route and the entry are as planned.
+
+### Owner, 4b milestone 1 reviewed (2026-10-06, pasted)
+
+Reviewed f550076 against f65c6f9. Revision 4's exit handling, the null-hash reconciliation, the save's authoritative
+comparison and the publish precondition match the agreed contracts. Ruling 5 (ledger 72) decided: **the index and a
+batched LATERAL read**, migration slot 0047 reserved for `runs (workflow_id, mode, queued_at DESC, id DESC) WHERE kind
+= 'run'`; one LATERAL statement for every workflow, keeping the tenant, root-run and mode filters and the `queued_at
+DESC, id DESC` order, never one query per workflow. 0043-0046 stay reserved and untouched; slot numbers are ownership,
+not order: 0047 chains from the actual head, one head, no deployed migration rewritten. The probe's 1.19 ms needs a
+workload qualification (its shared modulo made 180 workflows live-only and 20 simulate-only, so half the 400 lookups
+missed): decouple mode and status from workflow selection, rerun with both modes per workflow, and assert the two
+queries' complete results equal; quiet workflows and equal-timestamp ordering join the regression tests. Corrections:
+(1) `portable` detects duplicate steps by UUID identity, not spelling (lowercase/uppercase, hyphenated/unhyphenated
+aliases, on export and import; a refused import still creates nothing); (2) M3 overstated `runs_version_fk` (no tenant
+column): its claim is corrected and the plan's scenario restored with the target workflow's own version; (3) Task 15's
+lost-answer wording is limited to graph equivalence: "Version N holds the submitted graph. Your publish request's
+outcome wasn't received." M1, M2 and M4 accepted. Execution: incorporate these and the index addendum, then proceed
+inline through milestones 2-4; the pauses after milestone 3 and at the final checkpoint stay, and Task 11's immediate
+stop on any CSP failure. No push or PR.

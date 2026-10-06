@@ -117,6 +117,44 @@ def test_two_steps_sharing_an_id_arent_exported() -> None:
     assert [(p.reason, p.node) for p in e.value.problems] == [("duplicate_node", CALL)]
 
 
+# Spellings of one UUID the graph's format accepts: the engine reads each as the same step (the owner's review of M1).
+SPELLINGS = {
+    "upper after lower": (str.lower, str.upper),
+    "lower after upper": (str.upper, str.lower),
+    "unhyphenated": (str.lower, lambda u: u.replace("-", "")),
+    "hyphenated after unhyphenated": (lambda u: u.replace("-", "").upper(), str.lower),
+    "braces": (str.lower, lambda u: "{" + u + "}"),
+    "urn": (str.lower, lambda u: "urn:uuid:" + u),
+}
+
+
+@pytest.mark.parametrize(("first", "second"), SPELLINGS.values(), ids=SPELLINGS.keys())
+def test_two_steps_whose_ids_are_one_uuid_arent_exported(first, second) -> None:
+    twins = draft()
+    twins["nodes"][0]["id"] = first(CALL)
+    twins["nodes"].append(copy.deepcopy(twins["nodes"][0]) | {"id": second(CALL), "key": "twin"})
+    with pytest.raises(portable.NotPortableError) as e:
+        portable.export_document("Nightly", twins, SCHEMAS, LABELS)
+    assert [(p.reason, p.node) for p in e.value.problems] == [("duplicate_node", first(CALL))]
+
+
+@pytest.mark.parametrize(("first", "second"), SPELLINGS.values(), ids=SPELLINGS.keys())
+def test_a_file_whose_steps_ids_are_one_uuid_isnt_imported(first, second) -> None:
+    doc = exported()
+    doc["graph"]["nodes"][1]["id"] = first(SUB)
+    doc["bindings"][1]["sites"][0]["node"] = first(SUB)
+    doc["graph"]["nodes"].append({"id": second(SUB), "key": "twin", "type": "flow.run_workflow@1", "config": {}})
+    assert problems(doc) == [("duplicate_node", None, first(SUB), None)]
+
+
+def test_a_site_names_its_step_as_the_graph_spells_it() -> None:
+    """A binding's site names a step by the id the graph holds, spelt the same: another spelling is refused, never
+    matched (the file is written whole by export, which copies the graph's spelling)."""
+    doc = exported()
+    doc["bindings"][0]["sites"][0]["node"] = CALL.upper()
+    assert problems(doc) == [("bad_site", "b1", CALL.upper(), "/connection")]
+
+
 def test_import_binds_each_placeholder_and_round_trips() -> None:
     doc = exported()
     assert problems(doc) == []

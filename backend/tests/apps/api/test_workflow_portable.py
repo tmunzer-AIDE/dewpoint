@@ -133,6 +133,36 @@ async def test_a_binding_naming_a_property_its_step_doesnt_mark_is_refused(
     assert listed == []
 
 
+# Spellings of one UUID the graph's format accepts, which the engine reads as one step (the owner's review of M1).
+ALIASES: dict[str, Callable[[str], str]] = {"uppercase": str.upper, "unhyphenated": lambda u: u.replace("-", "")}
+
+
+@pytest.mark.parametrize("alias", ALIASES.values(), ids=ALIASES.keys())
+async def test_two_steps_whose_ids_are_one_uuid_arent_exported(app, owner_sessionmaker, api_settings, alias) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    twins = draft(str(uuid.uuid4()), str(uuid.uuid4()))
+    twins["nodes"].append({"id": alias(CALL), "key": "twin", "type": "testkit.http_call@1", "config": {"path": "/y"}})
+    async with c:
+        made = await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "Twins", "draft": twins})
+        assert made.status_code == 201, made.text  # the format allows it; validation refuses it later
+        r = await c.get(f"/api/v1/t/{tid}/workflows/{made.json()['id']}/export")
+    problem = {"reason": "duplicate_node", "binding": None, "node": CALL, "field": None}
+    assert (r.status_code, r.json()) == (422, {"error": "not_portable", "problems": [problem]})
+
+
+@pytest.mark.parametrize("alias", ALIASES.values(), ids=ALIASES.keys())
+async def test_a_file_whose_steps_ids_are_one_uuid_creates_nothing(
+    app, owner_sessionmaker, api_settings, alias
+) -> None:
+    doc = await exported(app, owner_sessionmaker, api_settings)
+    twin = {"id": alias(SUB), "key": "twin", "type": "flow.run_workflow@1", "config": {"input": {}}}
+    doc["graph"]["nodes"].append(twin)
+    r, listed = await imported(app, owner_sessionmaker, api_settings, doc)
+    problem = {"reason": "duplicate_node", "binding": None, "node": SUB, "field": None}
+    assert (r.status_code, r.json()) == (422, {"error": "bad_document", "problems": [problem]})
+    assert listed == []
+
+
 MALFORMED: list[Callable[[dict], None]] = [
     lambda d: d.update(graph=None),
     lambda d: d.update(bindings=[None]),
