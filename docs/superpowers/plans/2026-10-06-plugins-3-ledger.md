@@ -238,3 +238,45 @@ tenant erasure removes calls by their foreign key (cascade).
   refuses: the fixture now uses a real picker. The third, `tests/engine/cel/test_gate_cost.py::
   test_local_latency_and_the_cpu_between_two_yield_points` (0.90 s against a 0.2 s budget), passes alone: a timing
   gate CI runs in its own container; 3a-2 changes no CEL code.
+
+Checkpoint review (fresh-context reviewer, 2026-10-06): no High fail-open; tenant isolation, claim fencing and the
+hook's reach held. Two Medium and ten Low findings, all fixed test-first (each fix also mutation-checked), plus a
+merge prerequisite:
+- (1, Medium) a config-only edit moved a connection's host and kept its secret, so the stored secret could reach a
+  host its writer never chose: `a5d8df4`.
+- (2, Medium) the API held its request's pooled connection (and a session row lock) while waiting up to 10 s and needed
+  a second one, so about 15 concurrent waits stalled every tenant: `eefd445`.
+- (3) auth templates accepted format specs and conversions (an error quoting the secret, a 1 GB header): `85549f8`.
+- (4) a verification's detail and privilege allowed 64 characters, their columns 40 (a failed write kept an older
+  status); type keys could exceed `connections.type`: `efabe54`.
+- (5) the start form listed options for a disabled workflow, and through a picker connection its version didn't
+  record: `af91c3f`, test corrected in `15fb162`.
+- (6) a connection's cooldowns failed with the decrypted secret in scope on a config its declaration refuses:
+  `f352fda`.
+- (7) the branch predated #41 (no frame locals in logs): rebased onto `origin/main` 717f420 before the fixes.
+- (8) a worker of another build served calls with its own declaration of a connection type: calls carry the synced
+  declaration's hash and only a worker with the same one claims them; (9) the queue now takes turns across tenants;
+  (10) a call's connection key is the tenant's: `e39ffc1` (migration 0042 edited in place, unmerged; round trip
+  checked).
+- (11) read-only only restricted the method: no body, no method-override header now: `10737ba`.
+- (12) the API re-checks the ruled option limits and shows only fixed failure codes; answers are exact strings; the
+  worker logs proven class names: `863e0a4`.
+- (13) reading declared types loaded whole manifests: only the declarations now: `9616fb3`.
+
+Rulings taken with the fixes:
+- Ruling: changing the field a connection type's host comes from (Mist's `cloud`, a URL field) needs the secret in the
+  same edit (422 `secret_required`) - the secret never follows a host its writer didn't choose - cost if wrong: moving
+  a Mist connection to another cloud means pasting its token again.
+- Ruling: one API process waits for at most 16 plugin calls (503 `plugin_calls_busy`) and a tenant may have 8
+  outstanding (429 `too_many_plugin_calls`); a waiting request holds no pooled connection; reads back off from 50 ms
+  to 500 ms - cost if wrong: a burst of pickers gets 503/429 and retries.
+- Ruling: a call through a connection records the synced declaration's hash of its type, and only a worker whose own
+  declaration hashes the same claims it; without one the call times out - fail closed across a rollout - cost if
+  wrong: while builds disagree on a type, its pickers and verifications time out until the new workers are up.
+- Ruling: a start form lists options only for an enabled workflow, through a connection its active version recorded -
+  no wider than a run - cost if wrong: a disabled workflow's form shows no choices.
+
+Open question for 3b: a start form passes the operator's typed text to `options()`, through the publisher's connection.
+A hook that put that text into a URL path (relative URLs may hold `../` within the origin) would let an operator reach
+any GET the publisher's token can. 3b's Mist nodes must encode path parameters (the SDK should offer a helper) before
+any picker uses typed text in a path.
