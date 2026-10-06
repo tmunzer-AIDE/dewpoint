@@ -185,3 +185,9 @@ Rulings:
 - Ruling: a connection type's hosts and quota scopes are declared as data, not code - the API never runs plugin code
   (spec §3.3) yet shows each scope's cooldown (D10), so both sides compute the same keys from one declaration - cost
   if wrong: a scope that needs computing (3c's Slack workspace from a URL) needs a new declarative form.
+- Ruling: a connection type's key is its plugin's name or starts with it and a dot - two plugins can't then declare the
+  same key (plugin names have no dots) - cost if wrong: 3c's types are named `messaging.slack` and so on.
+- Ruling: the config and secret models of a connection type forbid extra fields, its secret fields are `SecretStr`, and
+  the fields its host, auth template and rate scopes read are required - the API validates and computes from the
+  stored values as written, the worker from validated ones, so a default or an extra key would make them differ - cost
+  if wrong: a provider field with a sensible default must still be written.
