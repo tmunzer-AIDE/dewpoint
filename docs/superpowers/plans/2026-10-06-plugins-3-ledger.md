@@ -138,6 +138,9 @@ Open questions:
   authorized. The workflow also starts on any push to a pull request (#39 too), on every push to `main` (a merge), and
   on its weekly schedule (Mondays 04:23 UTC: it last ran on 2026-10-05, so the next run is due on 2026-10-12 without
   any push). Disabling it or removing the schedule is a CI change: the owner's call.
+  The owner disabled the `codeql` workflow on GitHub on 2026-10-06 (state `disabled_manually`, no repository file
+  changed; no run queued or running). While disabled it starts on no push, pull request or schedule, and #40 keeps its
+  failed `analyze (python)` check from 22d508b. Re-enabling it waits for the licence question.
 - `tests/apps/dispatcher/test_triggers_end_to_end.py::test_a_short_outage_fires_each_missed_time_and_admits_each_once`
   failed once in the full parallel run under extra load (a 4 s tick gap on Temporal's dev server where 2 s was
   expected) and passes alone; this slice touches no schedule or dispatcher code. Load-sensitive, not a regression.
