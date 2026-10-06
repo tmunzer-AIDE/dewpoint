@@ -151,3 +151,12 @@ cover local work only: anything outward-facing (push, PR, issues) is confirmed i
     only in the URL - no stored state - one more click back to a tenant after Security.
 33. Ruling: buttons centre their label; full-width buttons stay only on the centred sign-in screens; form actions
     elsewhere align to the start, as in 0b - none.
+34. Ruling: the add-connection form's button says "Save", not 1i's "Save and verify": saving doesn't verify, and
+    verifying calls Mist with the token, which no test may do - one more click to verify a new connection.
+35. Ruling: the frontend licence gate (D22) is `frontend/scripts/licence-check.mjs` (with a self-test), run in CI's
+    frontend job. It holds production dependencies to MIT, ISC, BSD-2/3-Clause, Apache-2.0, 0BSD and OFL-1.1, and
+    the whole tree to that plus MPL-2.0, as ruled. It fails today on six licences, all from dependencies older than
+    4a, which the owner reviews; no exception was added: production `Unlicense` (`isbot` 5.2.2, from TanStack
+    Router); dev `BlueOak-1.0.0` (`minimatch` 10.2.6), `CC-BY-4.0` (`caniuse-lite`), `MIT-0`
+    (`@csstools/color-helpers` 5.1.0), `Python-2.0` (`argparse` 2.0.1), `Unlicense` (`isbot`) - the frontend CI job is
+    red until the owner rules.

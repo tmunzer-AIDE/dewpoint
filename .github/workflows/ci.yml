@@ -68,6 +68,12 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: pnpm, cache-dependency-path: frontend/pnpm-lock.yaml }
       - run: pnpm install --frozen-lockfile
+      - name: Licences (D22) - production on the allowlist; dev tools may add MPL-2.0; anything else is the owner's review
+        run: |
+          set -o pipefail
+          node scripts/licence-check.mjs --self-test
+          pnpm licenses list --json --prod | node scripts/licence-check.mjs prod
+          pnpm licenses list --json | node scripts/licence-check.mjs all
       - run: pnpm lint && pnpm typecheck && pnpm test && pnpm build
   e2e:
     runs-on: ubuntu-latest
