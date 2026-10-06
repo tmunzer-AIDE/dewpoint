@@ -23,7 +23,7 @@ def test_the_org_is_always_the_connections() -> None:
     assert client.path("/api/v1/orgs/{org_id}", {"org_id": OTHER_ORG}) == f"/api/v1/orgs/{ORG}"
 
 
-@pytest.mark.parametrize("value", ["", ".", "..", "a/b", "a?b", "a#b", "a%2Fb", "a b", "é", "a\\b", None, 1])
+@pytest.mark.parametrize("value", ["", ".", "..", "a/b", "a?b", "a#b", "a%2Fb", "a b", "é", "a\\b", "a\n", None, 1])
 def test_a_path_value_that_could_change_the_path_is_refused_before_sending(value: Any) -> None:
     client, http = make({})
     with pytest.raises(mist.InvalidPathValue) as e:
@@ -186,3 +186,16 @@ async def test_an_absolute_next_on_the_same_path_goes_to_the_connection() -> Non
     client, http = make(searches({"results": [1], "next": f"https://api.mist.com{path}?p=2"}, {"results": [2]}))
     assert await client.search_pages(path, {}, max_pages=3) == ({"results": [1, 2]}, False)
     assert http.sent[1].url == f"https://api.mist.com{path}?p=2"  # the connection's HTTP refuses another origin
+
+
+async def test_a_full_default_page_without_headers_may_have_more() -> None:
+    """The review's L3: without a `limit`, Mist answers its documented default of 100."""
+    client, _ = make({("GET", "/api/v1/x"): Reply(200, [{}] * 100)})
+    assert (await client.list_pages("/api/v1/x", {}, max_pages=1)).truncated
+
+
+async def test_a_next_never_followed_isnt_judged() -> None:
+    """The review's L8: at its cap, a search reports it was cut, whatever the next page's URL."""
+    client, http = make(searches({"results": [1], "next": "/api/v1/elsewhere"}))
+    assert await client.search_pages("/api/v1/x/search", {}, max_pages=1) == ({"results": [1]}, True)
+    assert len(http.sent) == 1

@@ -9,7 +9,8 @@ its output (the 2xx answer), each one JSON Schema with its own `$defs`, as the e
 - An output keeps its shape (types, properties, required fields, items) and drops what a provider outgrows: value
   constraints (formats, enums, patterns, bounds) and closed objects; `oneOf` becomes `anyOf`, since without their
   constraints more than one branch may match. What the answer holds beyond the schema is tainted, never refused.
-- An update's body requires nothing: a merge fills the rest from the current object (D15)."""
+- An update's body requires nothing: a merge fills the rest from the current object (D15); its `oneOf` becomes
+  `anyOf` too, since a partial body may fit every branch (an AP's, a switch's and a gateway's name alike)."""
 
 import copy
 import re
@@ -81,7 +82,7 @@ def _converted(node: Any, *, output: bool, partial: bool) -> Any:
         elif key in SCHEMA_ONE:
             out[key] = _converted(value, output=output, partial=partial)
         elif key in SCHEMA_LIST and isinstance(value, list):
-            out["anyOf" if output and key == "oneOf" else key] = [
+            out["anyOf" if (output or partial) and key == "oneOf" else key] = [  # partial: every branch may fit
                 _converted(sub, output=output, partial=partial) for sub in value
             ]
         elif key in SCHEMA_MAP and isinstance(value, Mapping):

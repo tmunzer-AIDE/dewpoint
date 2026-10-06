@@ -104,12 +104,15 @@ async def test_an_always_refused_route_is_refused_whatever_the_map_says(monkeypa
 
 
 async def test_the_most_specific_operation_wins() -> None:
+    """`…/wxrules/derived` matches `ListSiteWxRulesDerived` and `getSiteWxRule`'s `{wxrule_id}`: the literal wins
+    (`getSiteWxRule` would refuse `derived`, not a UUID)."""
+    path = f"/api/v1/sites/{SITE}/wxrules/derived"
     out, http = await call(
         "mist.api.read",
-        {"path": f"/api/v1/orgs/{ORG}/devices/search", "query": {"limit": 5}},
-        {("GET", f"/api/v1/orgs/{ORG}/devices/search"): Reply(200, {"results": []})},
+        {"path": path},
+        {("GET", f"/api/v1/sites/{SITE}"): Reply(200, {"org_id": ORG}), ("GET", path): Reply(200, [{"id": "r"}])},
     )
-    assert http.sent[0].params == {"limit": 5}
+    assert out == {"status": 200, "body": [{"id": "r"}]} and http.sent[1].url == path
 
 
 async def test_a_path_value_is_checked_against_its_description() -> None:
@@ -214,3 +217,12 @@ def test_the_body_marks_every_secret_named_field_mist_uses() -> None:
     assert {"passphrase", "psk", "secret", "password", "api_token", "community_name", "magic"} <= marked
     assert all(secret_name(n) for n in marked) and len(marked) > 50
     assert secret_name("magic")  # a device's claim code (the review's L1)
+
+
+async def test_a_generic_site_path_of_another_org_sends_nothing_more() -> None:
+    with pytest.raises(FatalError) as e:
+        await call(
+            "mist.api.read", {"path": f"/api/v1/sites/{SITE}/stats/devices"},
+            {("GET", f"/api/v1/sites/{SITE}"): Reply(200, {"org_id": OTHER_ORG})},
+        )  # fmt: skip
+    assert e.value.code == "mist.site_outside_org"

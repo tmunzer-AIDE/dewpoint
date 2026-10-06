@@ -21,7 +21,7 @@ from jsonschema import Draft202012Validator
 from pydantic import BaseModel
 
 from dewpoint.plugins.mist import oas, policy, routing
-from dewpoint.plugins.mist.client import SEGMENT, InvalidAnswer, InvalidPathValue, MistClient, NotFound
+from dewpoint.plugins.mist.client import SEGMENT, InvalidAnswer, InvalidPathValue, MistClient, NotFound, may_have_more
 from dewpoint.plugins.mist.schemas import converted, resolved, top_properties, with_defs
 from dewpoint.sdk import (
     CallContext,
@@ -38,6 +38,8 @@ from dewpoint.sdk.fields import CONNECTION, LITERAL, OPTIONS
 PAGE_CAP = 10
 OPTIONS_PAGE = 1000  # a picker reads one page of a list, filtered by the typed text
 LABEL_FIELDS = ("name", "ssid")
+# D15: Mist's PUT has no version check (no ETag in the OAS), so a merge update always says so.
+RACE = " Merging reads the object first: a change made to it between that read and this write is overwritten."
 JSON_TYPES = ("application/json", "application/vnd.api+json", "application/vnd.json+api")
 
 
@@ -84,6 +86,7 @@ class MistOperation(Node):
     paging: ClassVar[str | None] = None  # headers, next
     merge_with: ClassVar[str | None] = None  # the operation reading the object an update merges into
     pickers: ClassVar[Mapping[str, str]] = {}  # an options field and the list operation it reads
+    takes_limit: ClassVar[bool] = False  # its query takes `limit`
     credentials = ("mist",)
 
     async def options(self, ctx: CallContext, field: str, query: OptionsQuery) -> list[Option]:
@@ -94,7 +97,12 @@ class MistOperation(Node):
             raise NoOptions()
         found = policy.load()
         entry = found.entries.get(listed)
-        if found.allowed(self.operation, self.type) is None or entry is None or entry.state != "allowed":
+        if (
+            found.allowed(self.operation, self.type) is None
+            or entry is None
+            or not entry.nodes
+            or found.allowed(listed, entry.nodes[0]) is None  # as its own node would be (the review's L10)
+        ):
             raise OperationUnavailable()
         if query.connection_id is None:
             raise ConnectionRequired()
@@ -167,7 +175,8 @@ class MistOperation(Node):
             answer = await client.call("GET", path, query=query)
             if not isinstance(answer.body, list):
                 raise InvalidAnswer()
-            return {"results": answer.body, "total": None, "truncated": False}
+            cut = self.takes_limit and may_have_more(answer.body, query)  # a list that pages by `limit` alone
+            return {"results": answer.body, "total": None, "truncated": cut}
         if self.shape == "search":
             found, truncated = await client.search_pages(path, query, max_pages=pages)
             return {**found, "truncated": truncated}
@@ -468,7 +477,7 @@ def build() -> tuple[type[Node], ...]:
             "type": type_,
             "version": 1,
             "title": _title(op_id),
-            "description": _description(op),
+            "description": _description(op) + (RACE if merge_with is not None else ""),
             "Config": declared_model(
                 f"{name}Config",
                 config_schema(doc, op, shape, paging, merge_with is not None, pickers),
@@ -487,6 +496,7 @@ def build() -> tuple[type[Node], ...]:
             "paging": paging,
             "merge_with": merge_with,
             "pickers": pickers,
+            "takes_limit": any(p["in"] == "query" and p["name"] == "limit" for p in op.parameters),
         }
         out.append(type(name, (MistOperation,), attrs))
     return tuple(out)

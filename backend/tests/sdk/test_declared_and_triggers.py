@@ -76,7 +76,14 @@ def test_a_declared_model_refuses_what_its_schema_refuses(value: Any, locations:
     with pytest.raises(ValidationError) as e:
         model.model_validate(value)
     assert {tuple(err["loc"]) for err in e.value.errors()} == locations
-    assert all("input" not in err for err in e.value.errors(include_input=False))
+
+
+def test_a_declared_models_error_never_quotes_the_value() -> None:
+    """The 3b-1 review's L5: the error's text, as any log or message would print it, holds no input."""
+    model = declared_model("WlanConfig", CONFIG)
+    with pytest.raises(ValidationError) as e:
+        model.model_validate({"site_id": SITE, "body": {"ssid": "SuperSecretValue-" + "x" * 32}})
+    assert "SuperSecretValue" not in str(e.value) and "SuperSecretValue" not in repr(e.value)
 
 
 def test_an_invalid_schema_is_refused_when_declared() -> None:

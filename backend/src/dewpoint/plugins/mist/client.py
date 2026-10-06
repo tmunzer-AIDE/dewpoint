@@ -30,6 +30,7 @@ from dewpoint.sdk import (
 )
 
 ACCEPT = {"Accept": "application/json"}
+DEFAULT_LIMIT = 100  # a list's page when no `limit` is asked (guides/api-requests/pagination)
 SEGMENT = re.compile(r"^[A-Za-z0-9_.~-]+$")  # one path segment of unreserved characters (RFC 3986)
 PLACEHOLDER = re.compile(r"\{([a-z_]+)\}")
 
@@ -124,6 +125,13 @@ def _query(values: Mapping[str, Any] | None) -> dict[str, Any] | None:
     return out
 
 
+def may_have_more(results: list[Any], query: Mapping[str, Any] | None) -> bool:
+    """Whether a list answered without page headers may have more: it came back full, at the asked limit or Mist's
+    documented default (100, `guides/api-requests/pagination`)."""
+    asked = (query or {}).get("limit", DEFAULT_LIMIT)
+    return isinstance(asked, int) and not isinstance(asked, bool) and len(results) >= asked > 0
+
+
 def _int(value: str | None) -> int | None:
     return int(value) if value is not None and value.isascii() and value.isdigit() and len(value) <= 12 else None
 
@@ -141,7 +149,7 @@ class MistClient:
         def fill(match: re.Match[str]) -> str:
             name = match.group(1)
             value = self.org_id if name == "org_id" else values.get(name)
-            if not isinstance(value, str) or not SEGMENT.match(value) or value in (".", ".."):
+            if not isinstance(value, str) or not SEGMENT.fullmatch(value) or value in (".", ".."):
                 raise InvalidPathValue()
             return quote(value, safe="")
 
@@ -206,11 +214,10 @@ class MistClient:
             limit = _int(found.headers.get("x-page-limit"))
             at = _int(found.headers.get("x-page-page"))
             total = _int(found.headers.get("x-page-total"))
-            asked = (query or {}).get("limit")
             if limit is not None and at is not None and total is not None:
                 more = limit * at < total
             else:
-                more = isinstance(asked, int) and not isinstance(asked, bool) and len(found.body) >= asked > 0
+                more = may_have_more(found.body, query)
             if not more:
                 return Listed(results, total, False)
             if page >= max_pages:
@@ -241,10 +248,9 @@ class MistClient:
         results = list(first.get("results", []))
         pages, following = 1, first.pop("next", None)
         while following is not None:
-            url = self._next(following, path)
-            if pages >= max_pages:
+            if pages >= max_pages:  # a next page never followed isn't judged (the review's L8)
                 return {**first, "results": results}, True
-            found = await self.call("GET", url)
+            found = await self.call("GET", self._next(following, path))
             if not isinstance(found.body, dict) or not isinstance(found.body.get("results", []), list):
                 raise InvalidAnswer()
             results.extend(found.body.get("results", []))

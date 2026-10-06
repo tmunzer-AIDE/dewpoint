@@ -3,6 +3,7 @@
 list at its collection's path, list their choices through the connection's read-only HTTP: one page of up to 1,000,
 filtered by the typed text, which never enters a path."""
 
+import dataclasses
 import uuid
 from typing import Any
 
@@ -98,6 +99,17 @@ async def test_a_list_the_map_no_longer_allows_lists_nothing(monkeypatch: pytest
                                                                 reason="unreviewed")},
     )  # fmt: skip
     monkeypatch.setattr(policy, "load", lambda: held)
+    with pytest.raises(FatalError) as e:
+        await options("mist.site_devices.list", "site_id", "", {})
+    assert e.value.code == "mist.operation_unavailable"
+
+
+async def test_a_picker_never_reads_a_route_that_is_always_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The review's L10: the list a picker reads passes the same check as any node's operation."""
+    sites = policy.load().entries["listOrgSites"]
+    moved = dataclasses.replace(sites, path="/api/v1/self")
+    found = policy.PolicyMap(policy.load().oas_sha256, {**policy.load().entries, "listOrgSites": moved})
+    monkeypatch.setattr(policy, "load", lambda: found)
     with pytest.raises(FatalError) as e:
         await options("mist.site_devices.list", "site_id", "", {})
     assert e.value.code == "mist.operation_unavailable"

@@ -11,7 +11,7 @@ from typing import Any, ClassVar
 
 from jsonschema import Draft202012Validator, FormatChecker
 from jsonschema.exceptions import SchemaError
-from pydantic import RootModel, ValidationError, model_validator
+from pydantic import ConfigDict, RootModel, ValidationError, model_validator
 from pydantic_core import InitErrorDetails, PydanticCustomError
 
 FORMATS = ("date", "uuid", "email", "ipv4", "ipv6", "regex")  # the formats the worker checks a step's output for
@@ -21,6 +21,7 @@ ERROR = "declared_schema"  # the type of each validation error a declared model 
 class DeclaredModel(RootModel[Any]):
     """A model whose schema is declared (`declared_model`), never generated from Python types."""
 
+    model_config = ConfigDict(hide_input_in_errors=True)  # an error's text never holds the value
     declared_schema: ClassVar[Mapping[str, Any]] = {}
     declared_validator: ClassVar[Draft202012Validator | None] = None
 
@@ -44,7 +45,7 @@ class DeclaredModel(RootModel[Any]):
                 )
                 for e in errors
             ]
-            raise ValidationError.from_exception_data(cls.__name__, details)
+            raise ValidationError.from_exception_data(cls.__name__, details, hide_input=True)
         return value
 
 

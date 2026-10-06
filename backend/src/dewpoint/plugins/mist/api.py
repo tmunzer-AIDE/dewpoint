@@ -94,7 +94,7 @@ class MistApi(Node):
         if not isinstance(path, str) or policy.refused(path):
             raise RouteRefused()
         segments = path.split("/")
-        if any(not SEGMENT.match(s) and s != ORG_PLACEHOLDER for s in segments[1:]):
+        if any(not SEGMENT.fullmatch(s) and s != ORG_PLACEHOLDER for s in segments[1:]):
             raise InvalidPathValue()
         found = matched(routes(self.type), method, segments)
         if found is None:

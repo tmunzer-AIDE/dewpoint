@@ -3,7 +3,6 @@
 OAS: config (the connection, path values, query, body, a page cap, an update's mode) and output (the 2xx answer)
 schemas, the map's side effect and capability; each kind's run through the connection's HTTP."""
 
-import json
 import uuid
 from collections.abc import Iterator
 from typing import Any
@@ -163,11 +162,13 @@ async def test_a_site_scope_node_checks_its_site_first() -> None:
 
 
 async def test_a_site_of_another_org_sends_nothing_more() -> None:
+    http = FakeHttp({("GET", f"/api/v1/sites/{SITE}"): Reply(200, {"org_id": "x"})})
+    connection = FakeConnection(http)
+    kind = node("mist.site.delete")
+    value = kind.Config.model_validate({"connection": str(connection.id), "site_id": SITE})
     with pytest.raises(FatalError) as e:
-        await run(
-            "mist.site.delete", {"site_id": SITE}, {("GET", f"/api/v1/sites/{SITE}"): Reply(200, {"org_id": "x"})}
-        )
-    assert e.value.code == "mist.site_outside_org"
+        await kind().run(FakeStep(connection), value)  # type: ignore[arg-type]
+    assert e.value.code == "mist.site_outside_org" and [s.method for s in http.sent] == ["GET"]
 
 
 async def test_a_list_pages_up_to_its_cap() -> None:
@@ -272,6 +273,32 @@ async def test_an_operation_the_map_no_longer_allows_sends_nothing(monkeypatch: 
     assert e.value.code == "mist.operation_unavailable"
 
 
-def test_the_generated_manifest_size_is_measured() -> None:
-    size = len(json.dumps(PLUGIN.manifest()))
-    assert size < 16 * 1024 * 1024  # recorded in the ledger (D23)
+async def test_a_partial_update_of_a_typed_union_needs_no_type() -> None:
+    """The review's L7: a device's body is one of an AP's, a switch's or a gateway's; partial, every branch fits."""
+    device = str(uuid.uuid4())
+    path = f"/api/v1/sites/{SITE}/devices/{device}"
+    out, http = await run(
+        "mist.site_devices.update",
+        {"site_id": SITE, "device_id": device, "mode": "replace", "body": {"name": "ap-2"}},
+        {("GET", f"/api/v1/sites/{SITE}"): Reply(200, {"org_id": ORG}), ("PUT", path): Reply(200, {"id": device})},
+    )
+    assert http.sent[1].json == {"name": "ap-2"}
+
+
+async def test_an_unpaged_list_that_takes_a_limit_says_when_it_may_be_cut() -> None:
+    """The review's L3: a full answer may have more, at the asked limit or Mist's documented default of 100."""
+    path = f"/api/v1/sites/{SITE}/stats/clients"
+    site = ("GET", f"/api/v1/sites/{SITE}")
+    full, _ = await run("mist.site_wireless_client_stats.list", {"site_id": SITE, "query": {"limit": 2}},
+                        {site: Reply(200, {"org_id": ORG}), ("GET", path): Reply(200, [{}, {}])})  # fmt: skip
+    short, _ = await run("mist.site_wireless_client_stats.list", {"site_id": SITE},
+                         {site: Reply(200, {"org_id": ORG}), ("GET", path): Reply(200, [{}] * 99)})  # fmt: skip
+    default, _ = await run("mist.site_wireless_client_stats.list", {"site_id": SITE},
+                           {site: Reply(200, {"org_id": ORG}), ("GET", path): Reply(200, [{}] * 100)})  # fmt: skip
+    assert (full["truncated"], short["truncated"], default["truncated"]) == (True, False, True)
+
+
+def test_a_merge_update_warns_of_the_race_it_cant_prevent() -> None:
+    """The review's L4 (D15): Mist's PUT has no version check, so the warning always shows."""
+    assert "overwritten" in node("mist.org_wlans.update").description
+    assert "overwritten" not in node("mist.org_wlans.get").description

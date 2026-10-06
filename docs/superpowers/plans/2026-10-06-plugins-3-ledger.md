@@ -544,3 +544,23 @@ each fixed test-first and mutation-checked:
   `patternProperties` marks its whole object), and the body's operation is known only at run time - the same reach as
   the curated nodes' marking - cost if wrong: a secret under a name the OAS doesn't use isn't claimed, as with a
   curated node.
+- Low findings, fixed together: (L2) simulate didn't check path values: it does now, with H1's checks; (L3) a list
+  reported a full page without headers as cut only when `limit` was asked: Mist's documented default page (100,
+  `guides/api-requests/pagination`) counts too, and the one unpaged list that takes `limit`
+  (`mist.site_wireless_client_stats.list`) says when it may be cut; (L4) a merge update's description warns of the
+  race D15 can't prevent; (L5) a declared model's error text quoted the value, and the step's message showed
+  `custom_error`: the input is hidden, and the message names the schema keyword (`schema_maxLength`); (L6) an output
+  check failing after the node ran recorded no outcome: it records `applied` (or `simulated`), as a claim failing then
+  does; (L7) a partial update of a typed union (a device: AP, switch or gateway) failed `oneOf` without `type`: a
+  partial body's `oneOf` is `anyOf`; (L8) a search at its cap judged a next page it would never follow; (L9) a
+  trailing newline passed the path-value check (`$`): `fullmatch`; (L10) a picker's list was checked by state only:
+  by `allowed()`, as any node's operation; (L11) four tests that couldn't fail were rewritten or removed (the most
+  specific route now has two candidates; the manifest-size bound is gone, the size being the ledger's), and a test
+  for a generic site path of another org added.
+- Ruling (L4): the exact merged body isn't previewed - it depends on the object read at run time, and a simulation
+  sends nothing, so it would need a new output field or a step-level preview contract; the description carries D15's
+  race warning instead - cost if wrong: an editor showing the body must wait for that contract.
+- Ruling (L6): outputs keep the OAS's `required` fields (pills need them unguarded); a Mist answer lacking one fails
+  `output_schema_violation`, now with `applied` recorded, so nobody takes a created object for one never made; the
+  read-only smoke test at the checkpoint is where a wrong `required` shows - cost if wrong: such a step fails after
+  its effect until the map overrides that schema.
