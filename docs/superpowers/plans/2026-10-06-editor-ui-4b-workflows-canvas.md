@@ -280,6 +280,13 @@ Found while revising, outside the seven: revision 1 put the summary module in `d
 (`apps/workflow_summary.py`, beside `workflow_ops.py`). And `main.tsx` runs the app in StrictMode, so the saver is made
 in an effect (a saver held from the first render would be disposed by StrictMode's first cleanup).
 
+A fresh-context review of this revision found nine defects, fixed here: the probe's untyped binds (Postgres 16 refuses
+`generate_series(unknown, unknown)`) and its plans explained outside row-level security (Task 3); `DraftHashes`
+answering from what another read could evict, and keeping a hash from a save not yet committed (Task 3); a version's
+step panel showing the draft's step and expressions, and placing a step while a version was viewed (Tasks 12, 15);
+a lost publish's read-back calling a listed version unpublished, and a re-asked confirmation keeping the old focus
+(Task 15); the browser parser skipping the API model's bounds (Task 8); and a miscounted test total (Task 16).
+
 ## File structure
 
 Backend, modified:
@@ -860,10 +867,10 @@ git commit -m "feat(api): every workflow route answers a named model; the draft 
   `graph_hash`, `parse_graph`, `GraphFormatError` (`backend/src/dewpoint/engine/graph/model.py`).
 - Produces:
   - in `dewpoint.apps.workflow_summary`: `LAST_RUNS`, `COUNTS_24H` (the two statements, as SQL the probe explains),
-    `run_stats(s, tenant_id, workflow_ids) -> dict[uuid.UUID, RunStats]` (`RunStats(last_live,
-    last_simulated, live_24h, simulated_24h)`, `LastRun(status, at)`), `attention(stats, *, published, blocked) ->
-    list[str]`, `DraftHashes(kept)` with `async of(drafts) -> dict[uuid.UUID, str | None]` and `len()`, the
-    process's `HASHES`;
+    `hash_now(draft)` (one draft's hash, kept nowhere), `run_stats(s, tenant_id, workflow_ids) -> dict[uuid.UUID,
+    RunStats]` (`RunStats(last_live, last_simulated, live_24h, simulated_24h)`, `LastRun(status, at)`),
+    `attention(stats, *, published, blocked) -> list[str]`, `DraftHashes(kept)` with `async of(drafts) ->
+    dict[uuid.UUID, str | None]` and `len()`, the process's `HASHES`;
   - `service.blocked_by_many(s, versions) -> dict[uuid.UUID, list[str]]`;
   - `WorkflowOut` gains `unpublished_changes: bool`, `last_run: LastRunOut | None` (the last live root run),
     `last_simulation: LastRunOut | None` (the last simulated one), `runs_24h: RunCountOut` (`live`, `simulate`),
@@ -949,7 +956,39 @@ async def test_the_kept_hashes_are_bounded() -> None:
     drafts = [(uuid.uuid4(), 1, GRAPH) for _ in range(3)]
     assert len(await hashes.of(drafts)) == 3  # every draft asked for is answered
     assert len(hashes) == 2  # the oldest is forgotten
+
+
+async def test_a_read_answers_what_it_found_kept_even_when_another_evicts_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two lists at once, the bound passed between them: each answers every draft it asked for (never a KeyError)."""
+    gates: list[asyncio.Event] = []
+
+    async def held(fn: Any) -> Any:  # the thread's work, released when the test says
+        gate = asyncio.Event()
+        gates.append(gate)
+        await gate.wait()
+        return fn()
+
+    hashes = summary.DraftHashes(kept=2)
+    kept = (uuid.uuid4(), 1, GRAPH)
+    await hashes.of([kept])  # kept, with the real thread
+    monkeypatch.setattr(summary.asyncio, "to_thread", held)
+    first = asyncio.create_task(hashes.of([kept, (uuid.uuid4(), 1, GRAPH)]))  # finds `kept`, computes the other
+    second = asyncio.create_task(hashes.of([(uuid.uuid4(), 1, GRAPH), (uuid.uuid4(), 1, GRAPH)]))
+    while len(gates) < 2:
+        await asyncio.sleep(0)
+    gates[1].set()  # the second ends first: its two new hashes evict `kept`
+    await second
+    gates[0].set()
+    assert len(await first) == 2
+
+
+async def test_a_draft_being_saved_is_hashed_but_never_kept() -> None:
+    before = len(summary.HASHES)
+    assert await summary.hash_now(GRAPH) == graph_hash(parse_graph(GRAPH))
+    assert len(summary.HASHES) == before
 ```
+
+(`asyncio` and `typing.Any` join the imports.)
 
 - [ ] **Step 2: Write the failing API tests**
 
@@ -1240,18 +1279,25 @@ class DraftHashes:
         return len(self._hashes)
 
     async def of(self, drafts: Sequence[tuple[uuid.UUID, int, Mapping[str, Any]]]) -> dict[uuid.UUID, str | None]:
-        missing = [(wid, rev, draft) for wid, rev, draft in drafts if (wid, rev) not in self._hashes]
+        """Only for drafts read from committed rows: a revision's hash is kept, so it must be that revision's."""
+        # What's kept is taken before the await: another read may evict it meanwhile.
+        found = {(wid, rev): self._hashes[(wid, rev)] for wid, rev, _ in drafts if (wid, rev) in self._hashes}
+        missing = [(wid, rev, draft) for wid, rev, draft in drafts if (wid, rev) not in found]
         if missing:
             computed = await asyncio.to_thread(lambda: [_hash(draft) for _, _, draft in missing])
-            for (wid, rev, _), found in zip(missing, computed, strict=True):
-                self._hashes[(wid, rev)] = found
-        out: dict[uuid.UUID, str | None] = {}
-        for wid, rev, _ in drafts:
-            out[wid] = self._hashes[(wid, rev)]
-            self._hashes.move_to_end((wid, rev))
+            found.update({(wid, rev): h for (wid, rev, _), h in zip(missing, computed, strict=True)})
+        for key, value in found.items():
+            self._hashes[key] = value
+            self._hashes.move_to_end(key)
         while len(self._hashes) > self._kept:
             self._hashes.popitem(last=False)
-        return out
+        return {wid: found[(wid, rev)] for wid, rev, _ in drafts}
+
+
+async def hash_now(draft: Mapping[str, Any]) -> str | None:
+    """One draft's hash, off the event loop, kept nowhere: for a draft not yet committed (a save in progress could
+    still roll back, and a retry reuse its revision with another draft)."""
+    return await asyncio.to_thread(_hash, draft)
 
 
 HASHES = DraftHashes(kept=4096)  # about 150 bytes each: under 1 MB per API process
@@ -1370,7 +1416,9 @@ async def _summary(db: AsyncSession, wf: Workflow) -> dict[str, object]:
     return await _summaries(db, ctx.tenant_id, await service.list_workflows(db, ctx.tenant_id))
 ```
 
-`put_draft` answers the comparison too, hashing the draft it just saved (and keeping its hash for the next list):
+`put_draft` answers the comparison too, hashing the draft it is saving without keeping the hash: the transaction
+commits only after the handler returns, and a rolled-back save's revision can come back with another draft (found by
+the revision's review). The next list hashes it from the committed row.
 
 ```python
     try:
@@ -1378,7 +1426,7 @@ async def _summary(db: AsyncSession, wf: Workflow) -> dict[str, object]:
     except service.DraftConflictError as e:
         raise HTTPException(409, detail={"error": "draft_conflict", "draft_revision": e.current_revision}) from None
     active = await service.get_version(db, wf.id, wf.active_version_id) if wf.active_version_id else None
-    saved = (await workflow_summary.HASHES.of([(wf.id, revision, draft)]))[wf.id]
+    saved = await workflow_summary.hash_now(draft)
     return {"draft_revision": revision, "unpublished_changes": active is None or saved != active.graph_hash}
 ```
 
@@ -1436,13 +1484,14 @@ LATERAL = (
 )
 ROOTS = (
     "with roots as (insert into runs (id, tenant_id, workflow_id, workflow_version_id, mode, status, queued_at,"
-    " iterations, kind) select gen_random_uuid(), :t, (cast(:w as uuid[]))[1 + g % cardinality(cast(:w as uuid[]))],"
-    " gen_random_uuid(), case when g % 10 = 0 then 'simulate' else 'live' end,"
+    " iterations, kind) select gen_random_uuid(), cast(:t as uuid),"
+    " (cast(:w as uuid[]))[1 + g % cardinality(cast(:w as uuid[]))], gen_random_uuid(),"
+    " case when g % 10 = 0 then 'simulate' else 'live' end,"
     " case when g % 20 = 0 then 'failed' else 'succeeded' end, now() - make_interval(secs => g % 2592000), 0, 'run'"
-    " from generate_series(:a, :b) g returning id, workflow_id, mode, queued_at)"
+    " from generate_series(cast(:a as integer), cast(:b as integer)) g returning id, workflow_id, mode, queued_at)"
     " insert into runs (id, tenant_id, workflow_id, workflow_version_id, mode, status, queued_at, iterations, kind,"
-    " parent_run_id, parent_step_id) select gen_random_uuid(), :t, workflow_id, gen_random_uuid(), mode, 'succeeded',"
-    " queued_at, 0, 'subflow', id, gen_random_uuid() from roots where :subs"
+    " parent_run_id, parent_step_id) select gen_random_uuid(), cast(:t as uuid), workflow_id, gen_random_uuid(), mode,"
+    " 'succeeded', queued_at, 0, 'subflow', id, gen_random_uuid() from roots where cast(:subs as boolean)"
 )
 
 
@@ -1464,11 +1513,15 @@ async def grow(owner: Any, tid: uuid.UUID, workflows: list[uuid.UUID], a: int, b
         await s.execute(text("analyze runs"))
 
 
-async def explain(owner: Any, sql: str, params: dict[str, Any]) -> tuple[float, str]:
-    """The statement's plan, executed: (execution time in seconds, the plan's text)."""
+async def explain(api: Any, tid: uuid.UUID, sql: str, params: dict[str, Any]) -> tuple[float, str]:
+    """The statement's plan, executed as the list runs it: the API's role, in the tenant's scope, under row-level
+    security (the owner's session would bypass it). Answers (execution time in seconds, the plan's text)."""
     from sqlalchemy import text
 
-    async with owner() as s:
+    from dewpoint.core.db import tenant_scope
+
+    async with api() as s, s.begin():
+        await tenant_scope(s, tid)
         rows = [r[0] for r in await s.execute(text(f"explain (analyze, buffers) {sql}"), params)]
     took = next(float(r.split(":")[1].split()[0]) for r in rows if r.startswith("Execution Time"))
     return took / 1000, "\n".join(rows)
@@ -1477,7 +1530,7 @@ async def explain(owner: Any, sql: str, params: dict[str, Any]) -> tuple[float, 
 async def plans(db: Database, sizes: tuple[int, ...] = SIZES) -> None:
     from dewpoint.apps import workflow_summary as summary
 
-    owner = db.sessions()
+    owner, api = db.sessions(), db.sessions("dewpoint_api")
     tid, noise = await tenant(owner), await tenant(owner)
     workflows = [uuid.uuid4() for _ in range(WORKFLOWS)]
     await grow(owner, noise, [uuid.uuid4() for _ in range(WORKFLOWS)], 1, max(sizes), subs=False)
@@ -1488,18 +1541,18 @@ async def plans(db: Database, sizes: tuple[int, ...] = SIZES) -> None:
         await grow(owner, tid, workflows, done + 1, size, subs=True)
         done = size
         for label, sql in reads.items():
-            took = statistics.median([(await explain(owner, sql, params))[0] for _ in range(5)])
+            took = statistics.median([(await explain(api, tid, sql, params))[0] for _ in range(5)])
             print(f"\n### {size:,} root runs, no index: {label}, median of 5: {ms(took)}")
-            print((await explain(owner, sql, params))[1])
+            print((await explain(api, tid, sql, params))[1])
     from sqlalchemy import text
 
     async with owner() as s, s.begin():
         await s.execute(text(CANDIDATE))
         await s.execute(text("analyze runs"))
     for label, sql in {**reads, "last runs (LATERAL)": LATERAL}.items():
-        took = statistics.median([(await explain(owner, sql, params))[0] for _ in range(5)])
+        took = statistics.median([(await explain(api, tid, sql, params))[0] for _ in range(5)])
         print(f"\n### {done:,} root runs, candidate index: {label}, median of 5: {ms(took)}")
-        print((await explain(owner, sql, params))[1])
+        print((await explain(api, tid, sql, params))[1])
 
 
 async def hashing() -> None:
@@ -1545,7 +1598,11 @@ if __name__ == "__main__":
 ```
 
 `ROOTS` makes the sub-runs in the same statement as their roots (a writable CTE; `runs.parent_run_id`'s foreign key is
-checked at the statement's end). Its `where :subs` keeps the other tenant's history to root runs.
+checked at the statement's end). Its `where cast(:subs as boolean)` keeps the other tenant's history to root runs. Its
+binds carry their types: SQLAlchemy's asyncpg dialect sends `text()` binds untyped, and Postgres 16 refuses
+`generate_series(unknown, unknown)` as ambiguous (found by the revision's review, on a throwaway `postgres:16-alpine`).
+The data goes in as the container's owner; the plans are explained as the API's role, in the tenant's scope, so
+row-level security is in them as it is in the list.
 
 Run it smallest first and extrapolate before the full size (the owner's rule: ask before anything over about ten
 minutes):
@@ -2797,8 +2854,8 @@ git commit -m "feat(api): a workflow exports with typed placeholders and imports
 
 **Milestone 1's check, then the owner's pause.** Run `cd backend && uv run pytest -q -n 12 -p no:cacheprovider
 tests/apps/api tests/apps/test_workflow_ops.py tests/apps/test_workflow_summary.py tests/core/workflows
-tests/apps/test_admission.py`, then the static checks; all pass. Then stop for the owner's review with: the API contracts as they stand (the
-regenerated `openapi.json`'s diff for milestone 1, and the refusals each route answers), the statement-count test's
+tests/apps/test_admission.py`, then the static checks; all pass. Then stop for the owner's review with: the API
+contracts as they stand (the regenerated `openapi.json`'s diff for milestone 1, and the refusals each route answers), the statement-count test's
 result, and the probe's evidence from Task 3, Step 9 (the plans and timings at each size, with and without the
 candidate index, and the hashing costs, with the machine). Ruling 5 is decided there: accept the list without an index
 on the measured numbers, or assign a migration slot for the index and its LATERAL read (planned then, as an addendum to
@@ -3964,9 +4021,10 @@ git commit -m "feat(web): the workflows list (1a): state at a glance, filters, t
   string>`.
 
 `parseDocument` checks the whole envelope as the API's model does (the owner's review of 325fc14, correction 5):
-exactly its five keys; `graph` an object (never `null` or a list); each binding an object of exactly `id` (the API's
-pattern, used once), `kind`, `type` (a string for a connection, `null` for a workflow), `label` and at least one site,
-each exactly `{node: string | null, field: string}`. Revision 1 let `graph: null` through and crashed on `bindings:
+exactly its five keys; a `name` of at most 100 characters; `graph` an object (never `null` or a list); at most 10,000
+bindings, each an object of exactly `id` (the API's pattern, used once), `kind`, `type` (1–100 characters for a
+connection, `null` for a workflow), `label` (at most 200) and 1–10,000 sites, each exactly `{node: string (at most
+64) | null, field: string (2–200)}`. Revision 1 let `graph: null` through and crashed on `bindings:
 [null]`. The API stays the judge: it refuses what this lets through (an embedded id, a site its schemas don't mark),
 and the dialog says why.
 
@@ -4095,6 +4153,9 @@ it.each([
   ["a site's node that's a number", { ...DOC, bindings: [{ ...B, sites: [{ node: 7, field: "/connection" }] }] }],
   ["an extra key", { ...DOC, extra: 1 }],
   ["an extra key in a binding", { ...DOC, bindings: [{ ...B, secret: "x" }] }],
+  ["a name longer than the API takes", { ...DOC, name: "n".repeat(101) }],
+  ["a label longer than the API takes", { ...DOC, bindings: [{ ...B, label: "l".repeat(201) }] }],
+  ["a field shorter than a pointer", { ...DOC, bindings: [{ ...B, sites: [{ node: "n1", field: "/" }] }] }],
 ])("refuses %s", (_, doc) => {
   expect(parseDocument(JSON.stringify(doc))).toBeNull();
 });
@@ -4228,21 +4289,25 @@ import { ImportBindings, type Chosen } from "./ImportBindings";
 
 type Start = "blank" | "import";
 
-const BINDING_ID = /^[a-z][a-z0-9_]{0,31}$/; // the API's `Binding.id` pattern
+// The API's `WorkflowDocument`, `Binding` and `BindingSite` (Task 5), mirrored: a file that passes here passes the
+// model there, and the API's own refusals are about the graph and the bindings, not the envelope.
+const BINDING_ID = /^[a-z][a-z0-9_]{0,31}$/;
+const MAX_BINDINGS = 10_000; // bindings in a file, and sites in a binding
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const keysAre = (v: Record<string, unknown>, keys: string[]) =>
   Object.keys(v).length === keys.length && keys.every((k) => k in v);
+const sized = (v: unknown, min: number, max: number) => typeof v === "string" && v.length >= min && v.length <= max;
+
+function isSite(s: unknown): boolean {
+  return isObject(s) && keysAre(s, ["node", "field"]) && (s.node === null || sized(s.node, 0, 64)) && sized(s.field, 2, 200);
+}
 
 function isBinding(b: unknown): boolean {
   if (!isObject(b) || !keysAre(b, ["id", "kind", "type", "label", "sites"])) return false;
-  if (typeof b.id !== "string" || !BINDING_ID.test(b.id) || typeof b.label !== "string") return false;
-  if (!(b.kind === "connection" ? typeof b.type === "string" && b.type !== "" : b.kind === "workflow" && b.type === null)) return false;
-  return (
-    Array.isArray(b.sites) &&
-    b.sites.length > 0 &&
-    b.sites.every((s) => isObject(s) && keysAre(s, ["node", "field"]) && (s.node === null || typeof s.node === "string") && typeof s.field === "string")
-  );
+  if (typeof b.id !== "string" || !BINDING_ID.test(b.id) || !sized(b.label, 0, 200)) return false;
+  if (!(b.kind === "connection" ? sized(b.type, 1, 100) : b.kind === "workflow" && b.type === null)) return false;
+  return Array.isArray(b.sites) && b.sites.length > 0 && b.sites.length <= MAX_BINDINGS && b.sites.every(isSite);
 }
 
 /** A workflow file, or null: the whole envelope is checked here, as the API's model checks it; the API then checks
@@ -4255,8 +4320,9 @@ export function parseDocument(text: string): WorkflowDocument | null {
     return null;
   }
   if (!isObject(doc) || !keysAre(doc, ["format", "format_version", "name", "graph", "bindings"])) return null;
-  if (doc.format !== "dewpoint.workflow" || doc.format_version !== 1 || typeof doc.name !== "string") return null;
-  if (!isObject(doc.graph) || !Array.isArray(doc.bindings) || !doc.bindings.every(isBinding)) return null;
+  if (doc.format !== "dewpoint.workflow" || doc.format_version !== 1 || !sized(doc.name, 0, 100)) return null;
+  if (!isObject(doc.graph) || !Array.isArray(doc.bindings) || doc.bindings.length > MAX_BINDINGS) return null;
+  if (!doc.bindings.every(isBinding)) return null;
   const ids = doc.bindings.map((b) => (b as { id: string }).id);
   if (new Set(ids).size !== ids.length) return null;
   return doc as unknown as WorkflowDocument;
@@ -6793,9 +6859,9 @@ In `frontend/src/routes/editor/Editor.tsx`, add the imports (`type KeyboardEvent
     change(moveNodes(doc, new Map([[nodeId, { x: (n.position?.x ?? 0) + d[0]!, y: (n.position?.y ?? 0) + d[1]! }]])), `Moved ${n.key}`);
   }
 
-  /** The click that ends "Place on the canvas…": the step, centred on it (WCAG 2.5.7). */
+  /** The click that ends "Place on the canvas…": the step, centred on it (WCAG 2.5.7). Never on a read-only canvas. */
   function place(at: { x: number; y: number }) {
-    if (!placing) return;
+    if (!placing || !editable) return;
     const id = placing;
     setPlacing(null);
     change(moveNodes(doc, new Map([[id, { x: at.x - CARD.width / 2, y: at.y - CARD.height / 2 }]])), `Placed ${keyOf(id)}`, item.node(id));
@@ -6859,11 +6925,11 @@ In `frontend/src/routes/editor/Editor.tsx`, add the imports (`type KeyboardEvent
 
 The toolbar's Add step calls `addFrom(shown)`; the root `div` takes `onKeyDown={onEditorKey}` and
 `onKeyDownCapture={onEditorKeyCapture}`; the canvas takes `focusId={shown}`, `current={panel}`,
-`onKeyDown={onCanvasKey}`, `placing={placing !== null}` and `onPlace={place}` (import `CARD` from `../../lib/layout`);
-while placing, a bar above the canvas says so and offers Cancel:
+`onKeyDown={onCanvasKey}`, `placing={editable && placing !== null}` and `onPlace={place}` (import `CARD` from
+`../../lib/layout`); while placing, a bar above the canvas says so and offers Cancel:
 
 ```tsx
-      {placing && (
+      {placing && editable && (
         <div className="flex flex-wrap items-center gap-3 border-b border-line bg-surface-2 px-5 py-2.5 text-small">
           <span className="grow">Click an empty place on the canvas to put {keyOf(placing)} there.</span>
           <Button size="sm" onClick={() => setPlacing(null)}>Cancel</Button>
@@ -8333,6 +8399,18 @@ it("confirms a constructive action in the primary colour", () => {
   expect(screen.getByRole("button", { name: "Publish" }).className).toMatch(/\bbg-accent\b/);
   expect(document.activeElement).toBe(screen.getByRole("button", { name: "Cancel" })); // the safe choice first still
 });
+
+it("asks afresh when its question changes while open: focus goes back to Cancel", () => {
+  const ask = (title: string) => (
+    <ConfirmDialog open tone="primary" title={title} confirmLabel="Publish" onConfirm={vi.fn()} onCancel={vi.fn()}>
+      It becomes active.
+    </ConfirmDialog>
+  );
+  const { rerender } = render(ask("Publish version 1"));
+  screen.getByRole("button", { name: "Publish" }).focus();
+  rerender(ask("Publish version 2"));
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "Cancel" }));
+});
 ```
 
 In `frontend/src/lib/draftSync.test.ts`:
@@ -8460,6 +8538,7 @@ it("asks again, with the new number, when another version was published meanwhil
   await confirmPublish(1);
   const again = await screen.findByRole("dialog", { name: "Publish version 2" });
   expect(again.textContent).toContain("Version 1 was published since you opened this");
+  await vi.waitFor(() => expect(document.activeElement).toBe(within(again).getByRole("button", { name: "Cancel" })));
   expect(screen.queryByText(/changed elsewhere/)).toBeNull(); // never a draft conflict
   await userEvent.click(within(again).getByRole("button", { name: "Publish" }));
   await vi.waitFor(() => expect(publishes()).toHaveLength(2));
@@ -8543,6 +8622,24 @@ it("carries no draft diagnostics onto a version's canvas", async () => {
   expect(screen.queryByRole("button", { name: /Problems/ })).toBeNull();
 });
 
+it("shows a version's own step in the step panel, never the draft's", async () => {
+  const theirs = draftWith("one");
+  theirs.nodes![0]!.options = { timeout_s: 30 }; // the draft's "one" keeps the type's 60 s
+  const expressions = [{ node: "id-one", field: "/fields/a", mode: "activity", reason: "builds a message" }];
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: draftWith("one") }));
+  answers.set(`GET ${BASE}/versions`, () => json([version(1, true)]));
+  answers.set(`GET ${BASE}/versions/v1`, () => json({ ...version(1, true), graph: theirs, expressions }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "Versions" }));
+  await userEvent.click(await screen.findByRole("button", { name: "View version 1" }));
+  await screen.findByText("Viewing version 1, read only. The draft is unchanged.");
+  await userEvent.click(screen.getByRole("button", { name: "one" }));
+  const panel = screen.getByRole("complementary", { name: "one" });
+  expect(panel.textContent).toContain("30 s");
+  expect(panel.textContent).toContain("Runs as a separate step: builds a message");
+  expect(panel.textContent).toContain("Not checked for what's on the screen.");
+});
+
 it("stops an export when the latest edits aren't saved, and offers the saved draft by name", async () => {
   answers.set(`PUT ${BASE}/draft`, () => json({ error: "http_error" }, 500));
   answers.set(`GET ${BASE}/export`, () => json({ format: "dewpoint.workflow", format_version: 1, name: "Nightly", graph: {}, bindings: [] }));
@@ -8593,9 +8690,18 @@ Expected: FAIL: no `tone`, no `published()` or `compared()`, no versions panel, 
 - [ ] **Step 3: Implement the dialog's tone and the saver's word on publication**
 
 In `frontend/src/components/ConfirmDialog.tsx`, the props gain `tone = "danger"` (`tone?: "danger" | "primary"`), and
-the confirm button becomes `<Button variant={tone} onClick={onConfirm} disabled={busy}>{confirmLabel}</Button>`; the
-header comment adds: "A constructive action (publish, make active) confirms in the primary colour; focus still starts
-on Cancel."
+the confirm button becomes `<Button variant={tone} onClick={onConfirm} disabled={busy}>{confirmLabel}</Button>`; a
+question that changes while the dialog is open is asked afresh, focus back on Cancel (a re-ask after
+`version_changed` must never be confirmed by a key press meant for the old one):
+
+```tsx
+  useEffect(() => {
+    if (open) cancel.current?.focus();
+  }, [open, title]);
+```
+
+beside the effect that opens it. The header comment adds: "A constructive action (publish, make active) confirms in
+the primary colour; focus still starts on Cancel, and goes back there when the question changes."
 
 In `frontend/src/lib/draftSync.ts`:
 
@@ -8708,6 +8814,9 @@ In `Editor`:
   const publisher = canPublish(role) && sync.status !== "conflict";
   // Replaces Task 13's `editable`: nothing changes under a version view, a publication or an activation.
   const editable = canEdit(role) && sync.status !== "conflict" && viewing === null && busy === null;
+  useEffect(() => {
+    if (!editable) setPlacing(null); // a click on a read-only canvas places nothing, even one placing began on
+  }, [editable]);
   const shownDoc = viewing ? asGraph(viewing.graph) : doc;
   const path = { params: { path: { tenant_id: tenantId, workflow_id: workflow.id } } };
   const readWorkflow = () => ok(client.GET("/api/v1/t/{tenant_id}/workflows/{workflow_id}", path));
@@ -8752,7 +8861,9 @@ In `Editor`:
       if (e instanceof ApiError && e.code === "version_changed") {
         // Someone (or an attempt whose answer was lost) published meanwhile: ask again, naming the new number.
         await qc.invalidateQueries({ queryKey: ["versions", tenantId, workflow.id] });
-        next = { kind: "publish", expected: (e.body as { latest_version: number }).latest_version, elsewhere: true };
+        const latestNow = (e.body as { latest_version: number }).latest_version;
+        next = { kind: "publish", expected: latestNow, elsewhere: true };
+        announce(`Version ${latestNow} was published meanwhile. Confirm to publish version ${latestNow + 1}`);
       } else if (e instanceof ApiError && e.code === "draft_conflict") {
         saver.current?.conflict();
       } else if (e instanceof ApiError && e.code === "invalid") {
@@ -8772,15 +8883,24 @@ In `Editor`:
   }
 
   /** A publish without an answer: version `number` exists only if a publish expecting the one before went through,
-   * and, while the draft is still at `revision`, it holds this draft. */
+   * and, while the draft is still at `revision`, it holds this draft. Three outcomes, each said as found. */
   async function reconcilePublish(number: number, revision: number) {
     try {
       const [listed, now] = await Promise.all([readVersions(), readWorkflow()]);
-      if (listed.some((v) => v.number === number) && now.draft_revision === revision) return publishedAs(number, revision);
-      setNotice({
-        tone: "danger",
-        text: `Version ${number} isn't published, as far as the server can tell now. If the first attempt is still finishing it may appear: open Versions before publishing again.`,
-      });
+      if (!listed.some((v) => v.number === number)) {
+        setNotice({
+          tone: "danger",
+          text: `Version ${number} isn't published, as far as the server can tell now. If the first attempt is still finishing it may appear: open Versions before publishing again.`,
+        });
+      } else if (now.draft_revision === revision) {
+        return publishedAs(number, revision);
+      } else {
+        // Version `number` exists, but the draft was saved elsewhere since: which draft it holds isn't known.
+        setNotice({
+          tone: "danger",
+          text: `Version ${number} is published, but the draft changed elsewhere meanwhile, so it isn't known whether it holds your edits. Open Versions to see.`,
+        });
+      }
     } catch {
       setNotice({ tone: "danger", text: `It isn't known whether version ${number} was published: its answer was lost. Open Versions to see before publishing again.` });
     }
@@ -8844,6 +8964,7 @@ In `Editor`:
       if (asked !== viewAsked.current) return; // a newer view, or Back to the draft, came since
       setViewing(opened);
       setSide(null);
+      setPlacing(null);
       focus(START);
       announce(`Viewing version ${opened.number}, read only`);
     } catch {
@@ -8889,8 +9010,12 @@ In `Editor`:
 ```
 
 The canvas draws `shownDoc` with `editable={editable}`; while `viewing`, it takes empty `problems` and `separate`
-(`viewing ? new Map() : problems`), and the step panel's `problems` are `null`. `navModel` reads `shownDoc` and
-`editable`; `SaveState` takes `activeNumber={activeNumber}`; the Problems button shows only when `viewing === null`.
+(`viewing ? new Map() : problems`). Task 12's `portMap` and `nav` memos read `shownDoc` in place of `doc`. The step
+panel shows the step of what's on the screen, never the draft's while a version is viewed (found by the revision's
+review): it renders when `nodesOf(shownDoc)` holds the step, takes its node and type from there and its ports from
+`portMap`, and, while viewing, the version's own expressions (`viewing.expressions.filter((x) => x.node ===
+side.node)`, B4a's) and `problems={null}`. `SaveState` takes `activeNumber={activeNumber}`; the Problems button shows
+only when `viewing === null`.
 The toolbar's actions, after Problems:
 
 ```tsx
@@ -9193,7 +9318,7 @@ In `frontend/e2e/gate.spec.ts`'s notices test, the entries list gains `/^@xyflow
 Reset the isolated stack (`compose-ui4a/reset.sh`, which now syncs the plugins), then
 `E2E_BASE_URL=http://localhost:18080 npx -y pnpm@12.6.0 exec playwright test`.
 Expected: `foundations` 8 passed (4a's two flows, the five gate self-tests and the notices check), `workflows` 11
-passed (Task 11's one, Task 12's four, and these six). A failure is a finding: fix
+passed (Task 11's one, Task 12's three, and these seven). A failure is a finding: fix
 it test-first in the task that owns the code, and record what changed in the ledger.
 
 - [ ] **Step 3: Every check, locally** (the Actions minutes are spent)
