@@ -155,6 +155,9 @@ async def fetch(
     return Stored(json.loads(plain), tuple(row.sensitive_pointers))
 
 
+GRANTS_PER_STATEMENT = 1_000  # 5 arguments a grant: a loop's 10,000 claimed outputs take 10 statements
+
+
 async def grant(
     s: AsyncSession,
     tenant_id: uuid.UUID,
@@ -170,12 +173,13 @@ async def grant(
         row = await _row(s, claim_id)
         if row is None or not await _may_read(s, claim_id, granted_by, row.owner_run_id):
             raise ClaimUnavailableError("A claim this run may not grant.")
-    if claim_ids:
-        rows = [
-            {"claim_id": c, "run_id": to, "tenant_id": tenant_id, "granted_by": granted_by, "root_run_id": root_run_id}
-            for c in claim_ids
-        ]
-        await s.execute(insert(ClaimGrant).values(rows).on_conflict_do_nothing(index_elements=["claim_id", "run_id"]))
+    rows = [
+        {"claim_id": c, "run_id": to, "tenant_id": tenant_id, "granted_by": granted_by, "root_run_id": root_run_id}
+        for c in claim_ids
+    ]
+    for at in range(0, len(rows), GRANTS_PER_STATEMENT):  # the driver's limit: 32,767 arguments a statement
+        chunk = rows[at : at + GRANTS_PER_STATEMENT]
+        await s.execute(insert(ClaimGrant).values(chunk).on_conflict_do_nothing(index_elements=["claim_id", "run_id"]))
 
 
 async def write_envelope(
