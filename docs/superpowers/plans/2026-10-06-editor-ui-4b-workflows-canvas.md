@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Revision 4 (2026-10-06).** The owner reviewed revision 1 (325fc14: seven corrections), revision 2 (089c004: five
-corrections and one smaller) and revision 3 (a206ea9: one Task 13 lifecycle correction and one smaller); "Revision 2",
-"Revision 3" and "Revision 4" below list what changed and where. The owner approved local execution through milestone
-1 (pasted, 2026-10-06), then a stop for the API and probe review; milestones 2–4 wait for the owner's approval of
-this revision's Task 13 correction. No push or PR is authorized.
+**Revision 5 (2026-10-06).** The owner reviewed revision 1 (325fc14: seven corrections), revision 2 (089c004: five
+corrections and one smaller), revision 3 (a206ea9: one Task 13 lifecycle correction and one smaller) and milestone 1
+as built (f550076: ruling 5 decided, three corrections); "Revision 2" to "Revision 5" below list what changed and
+where. The owner approved local execution through milestones 2–4 (pasted, 2026-10-06), keeping the pauses after
+milestone 3 and at the final checkpoint, and Task 11's immediate stop on any CSP failure. No push or PR is authorized.
 
 **Goal:** A tenant member can list workflows with their state at a glance, create one (blank or imported from a file),
 build its graph on a canvas with a pointer or the keyboard alone, have every edit saved without ever overwriting
@@ -141,13 +141,12 @@ the amended ones read as amended.
    Unpublished changes (a workflow never published included: ruling 6), Needs attention, as a segmented control with
    counts (no pills, §6); the text filter matches names (no tags exist). No delete: no route deletes a workflow, and
    the API's database role has no DELETE grant on `workflows`. - What the API supports today. - No delete from the UI.
-5. **Held (owner, 2026-10-06) until the batching and query-plan evidence exist. The last run without a workflow
-   index.** `runs` has no index on `workflow_id`; one is a migration, which needs a slot from the owner. Task 3 reads
-   every workflow's last root runs in one `DISTINCT ON` statement over the tenant's root runs, and its probe (Task 3,
-   Step 9) explains it at 10k, 100k and 1M root runs beside another tenant's, with and without the candidate index
-   `runs (workflow_id, mode, queued_at DESC, id DESC) WHERE kind = 'run'` (and the per-workflow read it would allow).
-   The owner decides at the milestone 1 pause: accept on the numbers, or assign a slot (then a plan addendum). -
-   Retention alone isn't a demonstrated bound. - Until ruled, the list's cost grows with a tenant's run history.
+5. **Decided (owner, milestone 1 review, 2026-10-06): the index and a batched LATERAL read.** Slot 0047 holds
+   `runs_workflow_last` on `runs (workflow_id, mode, queued_at DESC, id DESC) WHERE kind = 'run'`, chained from the
+   head (0042); 0043-0046 stay reserved. The list reads every workflow's last root run of each mode in one LATERAL
+   statement, one ordered index lookup per workflow and mode, keeping the tenant, root-run and mode filters and the
+   newest-first order (the mode's form: ledger M5). See Task 5a. - The probe's history-wide scan and on-disk sort
+   (1.5 s at 1M root runs). - An index on a hot table: one more entry per root run written.
 6. **Accepted, with the filter correction. "Unpublished changes" compares graph hashes.** The draft's `graph_hash`
    (parsed and hashed on read, once per draft revision and off the event loop) against the active version's. Never
    published counts as unpublished, in the summary and in the list's filter. No edit count (outline B3). Positions
@@ -395,6 +394,24 @@ What changed from revision 3 (a206ea9), by the owner's review of it, and where:
    out while the editor's question is open, and a second while logout's answer is held.
 2. **A missing hash proves nothing** (Task 15; ruling 25): a lost publish whose submitted draft has no hash, with a
    version of the expected number present, is reported as not known, never as another's publication.
+
+## Revision 5
+
+What changed from revision 4 (5a0076f), by the owner's review of milestone 1 (f550076 against f65c6f9), and where:
+1. **Ruling 5 decided: the index and a batched LATERAL read** (Task 5a, new; ruling 5): migration 0047
+   (`runs_workflow_last`), one LATERAL statement for every workflow, the probe rerun with each workflow's runs of both
+   modes, quiet workflows and equal timestamps, the reads' whole results asserted equal; regression tests for quiet
+   workflows, equal timestamps and the reads' agreement, and a work-unit test (rows and pages, never time). The mode's
+   form in the statement is ledger M5: as an equality, the planner may serve the order from `runs_tenant_queued` and
+   read a tenant's whole history for a quiet workflow.
+2. **Duplicate steps by identity** (Task 5; ruling 18): `portable` counts steps by UUID identity, not spelling (case,
+   hyphens, braces, a urn), names a duplicate by its first spelling and leaves the saved document as it is; export
+   and import refuse such a graph, and a refused import creates nothing.
+3. **`runs_version_fk` stated exactly** (Task 3; ledger M3): it binds a run's version to the workflow the run names,
+   with no tenant column; the plan's cross-tenant run is restored with the workflow's own version, beside the test of
+   the statements' own tenant filter.
+4. **A lost publish's wording is graph equivalence only** (Task 15; ruling 25): a matching hash says "Version N holds
+   the submitted graph. Your publish request's outcome wasn't received.", never that this request published it.
 
 ## File structure
 
@@ -3048,6 +3065,66 @@ the statement-count test's result, and the probe's evidence from Task 3, Step 9 
 with and without the candidate index, and the hashing costs, with the machine). Ruling 5 is decided there: accept the
 list without an index on the measured numbers, or assign a migration slot for the index and its LATERAL read (planned
 then, as an addendum to this plan). Milestone 2 waits for the owner's word.
+
+### Task 5a (addendum, revision 5): the last runs read through `runs_workflow_last`, one statement for every workflow (ruling 5)
+
+Executed on `feat/editor-4b` after the owner's milestone 1 review; recorded here as built.
+
+**Files:**
+- Create: `backend/migrations/versions/0047_runs_workflow_last.py` (revision `0047`, `down_revision = "0042"`)
+- Modify: `backend/src/dewpoint/apps/workflow_summary.py` (`LAST_RUNS`)
+- Modify: `backend/tests/apps/api/test_workflow_summary.py`, `backend/tests/probes/workflow_list.py`
+
+**Interfaces:** unchanged: `run_stats(s, tenant_id, workflow_ids) -> dict[uuid.UUID, RunStats]`, two statements for
+any number of workflows; the list's statement count stays 6.
+
+The migration (no autogenerate; plain `op.create_index`, as 0009 and 0017 index `runs`):
+
+```python
+revision = "0047"
+down_revision = "0042"
+
+
+def upgrade() -> None:
+    op.create_index(
+        "runs_workflow_last",
+        "runs",
+        ["workflow_id", "mode", sa.text("queued_at DESC"), sa.text("id DESC")],
+        postgresql_where=sa.text("kind = 'run'"),
+    )
+
+
+def downgrade() -> None:
+    op.drop_index("runs_workflow_last", table_name="runs")
+```
+
+The statement (ledger M5: the mode is a lower bound that leads the order, checked for equality outside the lookup,
+so only `runs_workflow_last` gives the order, and the scan stops at the first row):
+
+```python
+LAST_RUNS = text(
+    "select w.id as workflow_id, m.mode, r.status, r.at"
+    " from unnest(cast(:ids as uuid[])) as w(id) cross join (values ('live'), ('simulate')) as m(mode)"
+    " cross join lateral (select mode, status, coalesce(ended_at, started_at, queued_at) as at from runs"
+    " where tenant_id = :tenant and kind = 'run' and workflow_id = w.id and mode >= m.mode"
+    " order by mode, queued_at desc, id desc limit 1) as r where r.mode = m.mode"
+)
+```
+
+Tests (test-first; the first and third failed before the migration and the statement):
+- `test_the_index_is_the_one_reserved`: `pg_indexes` gives `CREATE INDEX runs_workflow_last ON public.runs USING btree
+  (workflow_id, mode, queued_at DESC, id DESC) WHERE ((kind)::text = 'run'::text)`.
+- `test_the_last_runs_read_answers_as_the_statement_it_replaced`: both modes of one workflow, a quiet workflow, two
+  runs at one timestamp (the greater id wins), a sub-run newer than its root, another tenant's run of the same
+  workflow; `run_stats` (as the API's role, in the tenant's scope) equals the DISTINCT ON statement it replaced, kept
+  in the test as `REFERENCE`, and the expected values.
+- `test_the_last_runs_read_examines_one_run_per_workflow_and_mode`: one workflow with 3,000 live root runs only,
+  analyzed, and a quiet one; EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) shows one `Index Scan` of `runs_workflow_last`, no
+  sort, at most 4 rows and 16 pages over the 4 lookups. The ruling's literal form fails it (`runs_tenant_queued`).
+
+The probe (`plans`: 200 workflows, 20 quiet, each active one with runs of both modes and failures in both, newest
+live runs tied two by two; `skew`: one live-only workflow and a quiet one, alone in its database) asserts the
+product's read, the literal LATERAL form and the replaced DISTINCT ON agree whole at every size.
 
 ## Milestone 2 — The list and the chooser
 
@@ -9395,7 +9472,7 @@ it("keeps the draft still while it's being published", async () => {
   await vi.waitFor(() => expect(steps().dataset.editable).toBe("true"));
 });
 
-it("reads what happened when a publish's answer is lost, and says it was published when the version holds this draft", async () => {
+it("reads what happened when a publish's answer is lost: the version holds the submitted graph, never who made it", async () => {
   answers.set(`POST ${BASE}/publish`, () => {
     answers.set(`GET ${BASE}/versions`, () => json([version(1, true, "h1")])); // "h1": the draft as loaded
     answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, active_version_id: "v1", active_version_number: 1, unpublished_changes: false }));
@@ -9403,7 +9480,7 @@ it("reads what happened when a publish's answer is lost, and says it was publish
   });
   await show();
   await confirmPublish(1);
-  expect((await screen.findByRole("status", { name: "Notice" })).textContent).toContain("Version 1 was published from your draft");
+  expect((await screen.findByRole("status", { name: "Notice" })).textContent).toContain("Version 1 holds the submitted graph. Your publish request's outcome wasn't received.");
   expect(screen.getByText("Saved · published as v1")).toBeTruthy();
   expect(screen.queryByText(/wasn't published|Not published/)).toBeNull();
 });
@@ -9422,7 +9499,7 @@ it("never takes another's publication for this draft's when an answer is lost", 
   await confirmPublish(1);
   expect((await screen.findByRole("alert")).textContent).toContain("Version 1 holds another draft: yours wasn't published");
   expect(screen.getByText("Saved · unpublished changes since v1")).toBeTruthy();
-  expect(screen.queryByText(/published as v1|was published from your draft/)).toBeNull();
+  expect(screen.queryByText(/published as v1|holds the submitted graph/)).toBeNull();
 });
 
 it("takes the active version from the read, never from the number it hoped for", async () => {
@@ -9434,7 +9511,7 @@ it("takes the active version from the read, never from the number it hoped for",
   });
   await show();
   await confirmPublish(1);
-  expect((await screen.findByRole("status", { name: "Notice" })).textContent).toContain("Version 1 was published from your draft");
+  expect((await screen.findByRole("status", { name: "Notice" })).textContent).toContain("Version 1 holds the submitted graph. Your publish request's outcome wasn't received.");
   expect(screen.getByText("Saved · unpublished changes since v2")).toBeTruthy(); // version 2 came after, and is active
 });
 
@@ -9447,7 +9524,7 @@ it("says it isn't known when the draft submitted has no hash to compare", async 
   await show();
   await confirmPublish(1);
   expect((await screen.findByRole("alert")).textContent).toContain("it isn't known whether it holds your draft");
-  expect(screen.queryByText(/holds another draft|was published from your draft/)).toBeNull();
+  expect(screen.queryByText(/holds another draft|holds the submitted graph/)).toBeNull();
 });
 
 it("never calls a lost publish a failure when what happened can't be read", async () => {
@@ -9868,8 +9945,10 @@ In `Editor`:
       const made = listedRead.value.find((v) => v.number === number);
       if (made && hash !== null && made.graph_hash === hash) {
         setPublishProblems(null);
-        announce(`Version ${number} holds your draft`);
-        setNotice({ tone: "info", text: `Version ${number} was published from your draft; its answer was lost on the way.` });
+        // A matching hash says the version holds the graph submitted, never which request made it (the owner's review
+        // of milestone 1).
+        announce(`Version ${number} holds the submitted graph`);
+        setNotice({ tone: "info", text: `Version ${number} holds the submitted graph. Your publish request's outcome wasn't received.` });
       } else if (made && hash !== null) {
         // Someone else's publication made version `number`: this one, expecting the one before, was refused.
         setNotice({ tone: "danger", text: `Version ${number} holds another draft: yours wasn't published. Open Versions before publishing again.` });
