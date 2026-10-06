@@ -584,3 +584,14 @@ M18. **The owner's three rulings on milestone 3, built** (2026-10-07). Lazy edit
     canvas under 640 px (a CSS container query); the keys' reveal treats the minimap, the zoom controls and the placing
     bar as covering, so a step reached behind one is brought clear. The gate checks all three. No overview toggle:
     closing the panel brings it back. - The rulings. - None.
+
+### 4b, milestone 4 (2026-10-07)
+
+M19. **Problems, as the plan has them, with three adaptations** (Task 14): the problem and expression counts are keyed
+    by the step's identity (`idKey`) and a step's panel filters by `sameId`, so the server's canonical ids find a step
+    the draft spells otherwise (a test: an uppercase id, its problem on its card, in its panel, and "Go to" by its
+    key); the editor's check state starts at "Checking…" for an editor (it checks on opening: its first frame never
+    says "Not checked" for an instant); and the right column's one panel (`side`) keeps Task 12's step panel as a
+    derived `panel`, so undo's focus rules (M16) read as before, and any side panel hides the minimap (M18). The plan's
+    test block declared `steps()` again (Task 13's tests needed it first). - The plan predates M15, M16 and M18. -
+    None.

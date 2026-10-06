@@ -32,6 +32,7 @@ vi.mock("./Canvas", async () => {
           }}
           data-editable={String(props.editable)}
           data-problems={String(props.problems.size)}
+          data-problem-steps={[...props.problems.keys()].join(",")}
         >
           <button data-item="start" onClick={() => props.onItem({ kind: "after", from: null })}>Start</button>
           {(props.doc.nodes ?? []).map((n) => (
@@ -415,4 +416,74 @@ it("asks before Reload discards the version a conflict kept", async () => {
   await userEvent.click(within(ask).getByRole("button", { name: "Discard my version and reload" }));
   expect(await screen.findByRole("button", { name: "theirs" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "transform" })).toBeNull();
+});
+
+const valid = (revision: number) => ({ draft_revision: revision, valid: true, diagnostics: [], expressions: [], taint: { sites: [], declassified: [] } });
+const invalid = (revision: number, node: string | null) => ({
+  draft_revision: revision, valid: false, expressions: [], taint: { sites: [], declassified: [] },
+  diagnostics: [{ code: "config.invalid", message: "fields needs at least one entry", node, field: "/fields", fix: null, severity: "error" }],
+});  // prettier-ignore
+const checks = () => sent.filter((r) => r.path.endsWith("/validate")).length;
+
+it("says it's checking before the first answer, never No problems", async () => {
+  let answer: ((r: Response) => void) | undefined;
+  answers.set(`POST ${BASE}/validate`, () => new Promise<Response>((r) => (answer = r)));
+  await show();
+  expect(screen.getByRole("button", { name: "Checking…" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "No problems" })).toBeNull();
+  await vi.waitFor(() => expect(answer).toBeDefined());
+  answer!(json(valid(1)));
+  expect(await screen.findByRole("button", { name: "No problems" })).toBeTruthy();
+});
+
+it("checks the saved revision once a save settles, and counts its problems on the steps", async () => {
+  answers.set(`POST ${BASE}/validate`, () => json(invalid(2, "x")));
+  await show();
+  await addTransform();
+  expect(await screen.findByRole("button", { name: "Problems · 1" }, { timeout: 3000 })).toBeTruthy();
+  expect(steps().dataset.problems).toBe("1");
+});
+
+it("calls an answer for an older revision stale, and never paints it on the steps", async () => {
+  answers.set(`POST ${BASE}/validate`, () => json(invalid(1, "x"))); // even after the save made revision 2
+  await show();
+  await screen.findByRole("button", { name: "Problems · 1" }); // revision 1, on the screen: current
+  expect(steps().dataset.problems).toBe("1");
+  await addTransform();
+  await screen.findByText("Saved · not published", {}, { timeout: 3000 });
+  await vi.waitFor(() => expect(checks()).toBe(2));
+  expect(screen.getByRole("button", { name: "Problems · 1, before your edits" })).toBeTruthy();
+  expect(steps().dataset.problems).toBe("0");
+});
+
+it("says when a check failed, and checks again when asked", async () => {
+  answers.set(`POST ${BASE}/validate`, () => json({ error: "http_error" }, 500));
+  await show();
+  await userEvent.click(await screen.findByRole("button", { name: "Check failed" }));
+  answers.set(`POST ${BASE}/validate`, () => json(valid(1)));
+  const panel = screen.getByRole("complementary", { name: "Problems" });
+  await userEvent.click(within(panel).getByRole("button", { name: "Check again" }));
+  expect(await screen.findByRole("button", { name: "No problems" })).toBeTruthy();
+});
+
+it("offers a viewer no checks", async () => {
+  role = "viewer";
+  await show();
+  expect(screen.queryByRole("button", { name: /Problems|Check|Not checked/ })).toBeNull();
+  expect(checks()).toBe(0);
+});
+
+it("finds a step whose id the draft spells otherwise by the server's canonical id (the owner's review of M3)", async () => {
+  const UPPER = "0B6C2F1E-1D1E-4C1E-8E1E-1E1E1E1E1E0A";
+  const draft = { graph_format: 1, nodes: [{ id: UPPER, key: "transform", type: "flow.transform@1", position: { x: 0, y: 140 } }], edges: [] };
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft }));
+  answers.set(`POST ${BASE}/validate`, () => json(invalid(1, UPPER.toLowerCase())));
+  await show();
+  await screen.findByRole("button", { name: "Problems · 1" });
+  expect(steps().dataset.problemSteps).toBe(UPPER.toLowerCase()); // keyed as the canvas looks it up (`idKey`)
+  await userEvent.click(screen.getByRole("button", { name: "transform" })); // its panel lists the problem
+  const panel = screen.getByRole("complementary", { name: "transform" });
+  expect(panel.textContent).toContain("fields needs at least one entry");
+  await userEvent.click(screen.getByRole("button", { name: "Problems · 1" }));
+  expect(within(screen.getByRole("complementary", { name: "Problems" })).getByRole("button", { name: "Go to transform" })).toBeTruthy();
 });

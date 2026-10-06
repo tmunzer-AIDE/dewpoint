@@ -20,19 +20,26 @@ import { CARD, layout } from "../../lib/layout";
 import { guardLeaving } from "../../lib/leaving";
 import { useDocumentTitle } from "../../lib/title";
 import {
-  canEdit, nodeTypesQuery, tenantQuery, workflowQuery, type GraphDoc, type GraphEdge, type NodeType,
+  canEdit, nodeTypesQuery, tenantQuery, workflowQuery, type Diagnostic, type GraphDoc, type GraphEdge, type NodeType,
   type WorkflowDetail,
 } from "../../lib/workflows";  // prettier-ignore
 import { Canvas } from "./Canvas";
 import { NAV_KEYS, isPath, navModel, pathTo, step, type NavKey } from "./canvasNav";
+import { checkLabel, checkState, lastOf, type Check } from "./check";
 import { ConnectDialog } from "./ConnectDialog";
 import { item, type ItemAction } from "./items";
+import { ProblemsPanel, type PublishProblems } from "./ProblemsPanel";
 import { SaveState } from "./SaveState";
+import { type Problems } from "./StepCard";
 import { StepPanel } from "./StepPanel";
 import { StepPicker, type PickMode } from "./StepPicker";
 import { Toolbar } from "./Toolbar";
 
 type Opened = { workflow: WorkflowDetail; types: NodeType[]; role: string | null };
+
+/** The editor's right column: a step's panel, the problems, or the versions (Task 15). */
+type Side = { kind: "step"; node: string } | { kind: "problems" } | { kind: "versions" } | null;
+const NO_DIAGNOSTICS: Diagnostic[] = []; // one empty list, so a memo over it holds
 
 export function EditorPage({ tenantId, workflowId }: { tenantId: string; workflowId: string }) {
   const qc = useQueryClient();
@@ -104,6 +111,7 @@ function Editor({
       savedHash: workflow.draft_graph_hash,
       activeNumber: workflow.active_version_number,
       onChange: setSyncState,
+      onSettled: () => void validate.current(),
       save: async (next, revision) => {
         try {
           return await ok(
@@ -194,7 +202,59 @@ function Editor({
   const shown = nav.order.includes(focusId) ? focusId : START; // a deleted item's tab stop falls back to the start card
   const [connecting, setConnecting] = useState<PortRef | null>(null);
   const [asking, setAsking] = useState<{ kind: "node"; id: string } | { kind: "edge"; edge: GraphEdge } | null>(null);
-  const [panel, setPanel] = useState<string | null>(null); // the step whose panel is open
+  const [side, setSide] = useState<Side>(null); // the right column's one panel
+  const panel = side?.kind === "step" ? side.node : null; // the step whose panel is open
+  // An editor checks on opening: its first frame already says so, never "Not checked" for an instant.
+  const [check, setCheck] = useState<Check>(() => (canEdit(role) ? { status: "checking", last: null } : { status: "unchecked" }));
+  const [publishProblems] = useState<PublishProblems | null>(null); // set by a refused publish (Task 15)
+  const asked = useRef(0); // the newest check asked for: an older one's answer or failure says nothing
+
+  /** Check the saved draft (validate needs workflow.edit). Its answer names the revision it checked. */
+  const validate = useRef(async () => {});
+  validate.current = async () => {
+    if (!canEdit(role)) return;
+    const n = ++asked.current;
+    setCheck((c) => ({ status: "checking", last: lastOf(c) }));
+    try {
+      const answer = await ok(
+        client.POST("/api/v1/t/{tenant_id}/workflows/{workflow_id}/validate", {
+          params: { path: { tenant_id: tenantId, workflow_id: workflow.id } },
+        }),
+      );
+      if (n === asked.current) setCheck({ status: "done", last: answer });
+    } catch {
+      if (n === asked.current) setCheck((c) => ({ status: "failed", last: lastOf(c) }));
+    }
+  };
+  useEffect(() => void validate.current(), []);
+
+  const checked = checkState(check, sync);
+  const last = lastOf(check);
+  const trusted = checked === "current" ? last : null; // badges and the step panel's problems: current only
+  // What only publish found is current only for the snapshot it was found in: the same saved revision, and no edit
+  // since (a pending edit leaves the revision as it was, never the generation).
+  const publishCurrent =
+    publishProblems !== null && publishProblems.revision === sync.revision &&
+    publishProblems.generation === sync.generation && sync.generation === sync.savedGeneration;  // prettier-ignore
+  const published = publishCurrent && publishProblems ? publishProblems.diagnostics : NO_DIAGNOSTICS;
+  // Keyed by the step's identity (`idKey`): the server names steps by their canonical ids, the draft as authored.
+  const problems = useMemo(() => {
+    const counts = new Map<string, Problems>();
+    for (const d of [...(trusted?.diagnostics ?? []), ...published]) {
+      if (!d.node) continue;
+      const c = counts.get(idKey(d.node)) ?? { errors: 0, warnings: 0 };
+      counts.set(idKey(d.node), d.severity === "error" ? { ...c, errors: c.errors + 1 } : { ...c, warnings: c.warnings + 1 });
+    }
+    return counts;
+  }, [trusted, published]);
+  const separate = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const x of trusted?.expressions ?? []) {
+      if (x.node && x.mode === "activity") counts.set(idKey(x.node), (counts.get(idKey(x.node)) ?? 0) + 1);
+    }
+    return counts;
+  }, [trusted]);
+  const count = (last?.diagnostics.length ?? 0) + published.length; // a stale publish finding never counts
   const [placing, setPlacing] = useState<string | null>(null); // the step the next click on the canvas puts there
 
   function focus(id: string, path: string[] | null = null) {
@@ -257,7 +317,7 @@ function Editor({
       // Focus goes to the step it came after (its own items are gone with it), or to the start card.
       const inbound = edgesOf(doc).find((e) => sameId(e.to.node, asking.id));
       const back = inbound ? item.node(inbound.from.node) : START;
-      if (panel === asking.id) setPanel(null);
+      if (panel !== null && sameId(panel, asking.id)) setSide(null);
       change(next, `Deleted ${keyOf(asking.id)}${healed ? `; ${keyOf(healed.from.node)} now leads to ${keyOf(healed.to.node)}` : ""}`, back);
     } else {
       change(deleteEdge(doc, asking.edge), `Deleted the edge from ${keyOf(asking.edge.from.node)} to ${keyOf(asking.edge.to.node)}`, item.node(asking.edge.from.node));
@@ -338,7 +398,7 @@ function Editor({
       return n ? portsOf(n, typeMap.get(n.type)) : [];
     }, editable);  // prettier-ignore
     const panelGone = panel !== null && !findNode(after, panel);
-    if (panelGone) setPanel(null);
+    if (panelGone) setSide(null);
     // What had focus: a canvas item; the open panel (left there while its step survives); or something else in the
     // editor (left where it is).
     const inPanel = panel !== null && !t.dataset.item && t.closest("aside") !== null;
@@ -353,7 +413,7 @@ function Editor({
   }
 
   function onItem(action: ItemAction) {
-    if (action.kind === "open") return setPanel(action.node);
+    if (action.kind === "open") return setSide({ kind: "step", node: action.node });
     if (!editable) return;
     if (action.kind === "after") setPicker({ kind: "after", from: action.from });
     if (action.kind === "insert") setPicker({ kind: "insert", edge: action.edge });
@@ -387,6 +447,15 @@ function Editor({
     <div className="flex min-h-0 flex-1 flex-col" onKeyDown={onEditorKey} onKeyDownCapture={onEditorKeyCapture}>
       <Toolbar tenantId={tenantId} name={workflow.name}>
         <SaveState state={sync} />
+        {canEdit(role) && (
+          <Button
+            size="md"
+            aria-expanded={side?.kind === "problems"}
+            onClick={() => setSide(side?.kind === "problems" ? null : { kind: "problems" })}
+          >
+            {checkLabel(checked, count)}
+          </Button>
+        )}
         {sync.status === "error" && (
           <Button size="md" onClick={() => saver.current?.retry()}>Retry</Button>
         )}
@@ -422,8 +491,8 @@ function Editor({
           <Canvas
           doc={doc}
           types={typeMap}
-          problems={new Map()}
-          separate={new Map()}
+          problems={problems}
+          separate={separate}
           editable={editable}
           current={panel}
           focusId={shown}
@@ -439,7 +508,7 @@ function Editor({
           onKeyDown={onCanvasKey}
           placing={editable && placing !== null}
           onPlace={place}
-          overview={!open}
+          overview={side === null}
           />
         </div>
         {open && (
@@ -447,8 +516,8 @@ function Editor({
             node={open}
             type={typeMap.get(open.type)}
             ports={portMap.get(idKey(open.id)) ?? []}
-            problems={null}
-            expressions={[]}
+            problems={trusted ? [...trusted.diagnostics, ...published].filter((d) => d.node !== null && sameId(d.node, open.id)) : null}
+            expressions={trusted?.expressions.filter((x) => x.node !== null && sameId(x.node, open.id)) ?? []}
             editable={editable}
             onDelete={() => setAsking({ kind: "node", id: open.id })}
             onConnectPort={(port) => setConnecting({ node: open.id, port })}
@@ -458,9 +527,21 @@ function Editor({
             }}
             onNudge={(key) => nudge(open.id, key)}
             onClose={() => {
-              setPanel(null);
+              setSide(null);
               focus(item.node(open.id));
             }}
+          />
+        )}
+        {side?.kind === "problems" && (
+          <ProblemsPanel
+            state={checked}
+            validation={last}
+            publishProblems={publishProblems}
+            publishCurrent={publishCurrent}
+            keyOf={keyOf}
+            onJump={(nodeId) => focus(item.node(nodeId))}
+            onCheck={() => void validate.current()}
+            onClose={() => setSide(null)}
           />
         )}
       </div>
