@@ -596,3 +596,9 @@ output outcome are closed. Fixed test-first:
   and null only for an operation that answers nothing - as the curated nodes do today. The fixture redesign the owner
   recommends (bounded schema-built fixtures with validated example overlays, generic nodes included) is still the
   open ruling above; it would replace both.
+
+Runs after the owner's three findings, at `839d733` (2026-10-06): the full backend suite, 3222 passed, 8 skipped, in
+6 min 33 s; ruff, format, mypy, import contracts and the OpenAPI drift check pass; CodeQL locally: no findings in
+Python or JavaScript/TypeScript. Still open for the owner: the rulings, the fixture redesign and the catalog's size (the
+owner recommends bounded schema-built fixtures with validated example overlays, generic nodes included, and catalog
+compression before a schema-on-demand redesign), the Compose proof, the read-only Mist smoke test, push and PR.
