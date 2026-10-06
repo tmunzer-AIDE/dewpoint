@@ -607,6 +607,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/t/{tenant_id}/retention": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Retention */
+        get: operations["get_retention_api_v1_t__tenant_id__retention_get"];
+        /** Set Retention */
+        put: operations["set_retention_api_v1_t__tenant_id__retention_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/t/{tenant_id}/runs": {
         parameters: {
             query?: never;
@@ -641,7 +659,8 @@ export interface paths {
         /**
          * Cancel Run
          * @description 200, `cancelled`: it was queued. 202, `requested`: recorded, for the dispatcher to apply when its start resolves
-         *     or to send to Temporal. 409 `run_ended`: nothing left to cancel.
+         *     or to send to Temporal. 409 `run_ended`: nothing left to cancel. 404 past the retention cutoff (§10.1), which only
+         *     an ended request can pass: there is nothing to cancel.
          */
         post: operations["cancel_run_api_v1_t__tenant_id__runs__request_id__cancel_post"];
         delete?: never;
@@ -663,9 +682,11 @@ export interface paths {
          * Rerun
          * @description A new admission (source `rerun`) on the workflow's active version, with new input, or else the old request's
          *     complete input, validated and claimed again under the new request: no old handle is reused. The key is checked
-         *     first: an exact retry returns the request it admitted, whatever retention has removed since; another request under
-         *     the key is a 409. 410 `input_not_retained` when the original input can't be rebuilt: a run from before 2b-2, a
-         *     refused request, an envelope or a claim retention has removed. New input needs none of it.
+         *     first: an exact retry returns the request it admitted, whatever retention has removed of the old one's input, while
+         *     that request is within its own cutoff (410 `request_not_retained` past it); another request under the key is a 409.
+         *     410 `input_not_retained` when the original input can't be rebuilt: a run from before 2b-2, a refused request, an
+         *     envelope or a claim retention has removed, or a request past the retention cutoff, whatever is still stored (§10.1).
+         *     New input needs none of it.
          */
         post: operations["rerun_api_v1_t__tenant_id__runs__request_id__rerun_post"];
         delete?: never;
@@ -684,7 +705,8 @@ export interface paths {
         /**
          * Get Run
          * @description A run with its steps and sub-runs, or a request that hasn't started as itself; with its CSV record (engine 2b
-         *     spec §8.1), when it took a CSV: the mapping, the file's headers, the row count and the skipped rows.
+         *     spec §8.1), when it took a CSV: the mapping, the file's headers, the row count and the skipped rows. A run whose
+         *     tree, or a request that, passed the retention cutoff isn't found (§10.1).
          */
         get: operations["get_run_api_v1_t__tenant_id__runs__run_id__get"];
         put?: never;
@@ -996,7 +1018,8 @@ export interface paths {
         put?: never;
         /**
          * Start Run
-         * @description 202 with the request, queued for the dispatcher (or as an exact retry finds it now).
+         * @description 202 with the request, queued for the dispatcher (or as an exact retry finds it now, within the retention cutoff:
+         *     410 `request_not_retained` past it).
          */
         post: operations["start_run_api_v1_t__tenant_id__workflows__workflow_id__runs_post"];
         delete?: never;
@@ -1519,6 +1542,11 @@ export interface components {
             } | null;
             /** Mode */
             mode?: ("live" | "simulate") | null;
+        };
+        /** RetentionIn */
+        RetentionIn: {
+            /** Runs Days */
+            runs_days: number;
         };
         /** RoleChange */
         RoleChange: {
@@ -2868,6 +2896,76 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["OptionsOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_retention_api_v1_t__tenant_id__retention_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: number;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_retention_api_v1_t__tenant_id__retention_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RetentionIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: number;
+                    };
                 };
             };
             /** @description Validation Error */

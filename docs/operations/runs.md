@@ -21,7 +21,10 @@ webhook's event, by the dispatcher ([webhook ingress](ingress.md)).
 talks to Temporal.
 
 - The same key with the same body returns the same request, as it is now; another body under the key is 409
-  `idempotency_conflict`. Retrying after a lost answer is safe.
+  `idempotency_conflict`. Retrying after a lost answer is safe. A key is recognized only while its request is stored:
+  past the request's retention cutoff a retry admits nothing and answers 410 `request_not_retained`, and once
+  retention deletes the request the key is free again, so a retry under it admits a new request
+  ([retention](retention.md)).
 - Admission takes the workflow's active version, if the workflow is enabled, and freezes it in the request. It checks
   the deployment's environment is recorded and, in `production`, that production runs are on; that the dispatcher
   recorded a current build within the last 2 minutes, of the version's engine ABI; that nothing the version uses is
@@ -184,12 +187,13 @@ cancel.
 
 `POST /api/v1/t/{tenant}/runs/{id}/rerun`, with `run.start` and an `Idempotency-Key`, admits a new request (source
 `rerun`) on the workflow's active version. With `{"input": {...}}` it uses that new input, offered whatever was
-retained. Without it, it uses the old request's complete input: rebuilt from its envelope and its claims in memory
-only, then validated and claimed again, so no old handle is reused; 410 `input_not_retained` for a run from before
-2b-2, a refused request, or an input retention has removed. `{"mode": ...}` is optional (the old one's by default).
-The key covers what was asked (the request re-run, the mode, any new input), and is checked before anything is
-rebuilt: an exact retry returns the request it admitted even once retention has removed the old input, and another
-re-run under the key is 409 `idempotency_conflict`. The audit entry names the request re-run (`rerun_of`).
+retained. Without it, it uses the old request's complete input: rebuilt from its envelope and its claims in memory only,
+then validated and claimed again, so no old handle is reused; 410 `input_not_retained` for a run from before 2b-2, a
+refused request, a request past its tenant's retention cutoff, or an input retention has removed. `{"mode": ...}` is
+optional (the old one's by default). The key covers what was asked (the request re-run, the mode, any new input), and is
+checked before anything is rebuilt: an exact retry returns the request it admitted even once retention has removed the
+old input, while the re-run's own request is within its cutoff (410 `request_not_retained` past it), and another re-run
+under the key is 409 `idempotency_conflict`. The audit entry names the request re-run (`rerun_of`).
 
 ## The worker
 
@@ -246,7 +250,8 @@ It admits the workflow's active version with the source `dev`, as any start is a
 - `--wait SECONDS` waits up to that long for the end the database records: its run's (status, code and message), or,
   when it never started, the request's own (`cancelled`, `refused` or `dead`, with its reason). Without it, the
   command prints the queued request and returns.
-- `--idempotency-key` retries a request; by default each invocation admits a new one.
+- `--idempotency-key` retries a request; by default each invocation admits a new one. A retry, or a wait, on a
+  request past its tenant's retention cutoff shows nothing of it (exit 2, `request_not_retained`).
 - Exit codes: 0 when it was admitted (with `--wait`: when its run succeeded); 1 when it ended otherwise; 2 when it
   wasn't admitted (each message is printed, never a value: in a `production` deployment, "Production runs are off in
   this deployment"; an input that doesn't match the workflow's input schema, each place and rule it breaks, a map's key

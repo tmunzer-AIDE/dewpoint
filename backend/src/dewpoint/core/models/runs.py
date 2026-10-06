@@ -18,7 +18,7 @@ class Run(Base):
     handler's) points at the run and step that started it."""
 
     __tablename__ = "runs"
-    __table_args__ = (  # its version and its parent, both of its own tenant (#35)
+    __table_args__ = (  # its version, its parent and its root, all of its own tenant (#35, engine 2b spec §10.1)
         UniqueConstraint("id", "tenant_id", name="runs_tenant"),
         ForeignKeyConstraint(
             ["workflow_version_id", "workflow_id", "tenant_id"],
@@ -26,6 +26,7 @@ class Run(Base):
             name="runs_version_fk",
         ),
         ForeignKeyConstraint(["parent_run_id", "tenant_id"], ["runs.id", "runs.tenant_id"], name="runs_parent_run"),
+        ForeignKeyConstraint(["root_run_id", "tenant_id"], ["runs.id", "runs.tenant_id"], name="runs_root_run"),
     )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"))
@@ -44,6 +45,9 @@ class Run(Base):
     started_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     kind: Mapped[str] = mapped_column(String(32), default="run")
     parent_run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    # The tree's root, set by the database on insert (a root run's own id, a sub-run's parent's root), never changed:
+    # retention counts a tree's cutoff from its root (engine 2b spec §10.1).
+    root_run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     parent_step_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     parent_iteration_key: Mapped[str | None] = mapped_column(Text)
 

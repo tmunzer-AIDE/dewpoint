@@ -20,6 +20,7 @@ from dewpoint.core.crypto.ingress import IngressKey
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.http import TenantContext, get_db, require
 from dewpoint.core.models.ingress import TriggerBinding, WebhookEndpoint
+from dewpoint.core.retention import cutoff as retention
 
 router = APIRouter(prefix="/api/v1", tags=["webhooks"])
 STATUSES = Literal["pending", "matched", "unmatched", "cancelled", "dead"]
@@ -217,7 +218,8 @@ async def list_events(
     db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, object]:
     admin = P.TENANT_MANAGE in ROLE_PERMISSIONS[ctx.role]  # dead events are listed to admins only
-    found = await webhooks.events_of(db, endpoint_id, status, dead=admin)
+    found = await webhooks.events_of(db, endpoint_id, status, dead=admin,
+                                     kept_after=await retention.cutoff(db, ctx.tenant_id))  # fmt: skip
     return {"events": [webhooks.event_body(e) for e in found]}
 
 
@@ -226,7 +228,8 @@ async def list_dead_events(
     ctx: TenantContext = Depends(require(P.TENANT_MANAGE)),
     db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, object]:
-    return {"events": [webhooks.event_body(e) for e in await webhooks.dead_events(db)]}
+    dead = await webhooks.dead_events(db, kept_after=await retention.cutoff(db, ctx.tenant_id))
+    return {"events": [webhooks.event_body(e) for e in dead]}
 
 
 @router.post("/t/{tenant_id}/inbound-events/{event_id}/cancel")

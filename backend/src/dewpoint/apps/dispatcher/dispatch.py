@@ -44,6 +44,7 @@ from dewpoint.core.models.tenancy import Tenant
 from dewpoint.core.models.workflows import WorkflowVersion
 from dewpoint.core.platform.service import PRODUCTION, workers_ready
 from dewpoint.core.plugins import lifecycle
+from dewpoint.core.retention import slo as retention_slo
 from dewpoint.core.runs import service as runs
 from dewpoint.core.workflows.service import other_abi
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, RunInput
@@ -62,6 +63,7 @@ ENVELOPE_UNREADABLE = "envelope_unreadable"
 RUN_ENDED = "run_ended"
 RETIRING = "retiring"  # a retirement holds the closure's lifecycle lock: back next cycle
 KEY_UNUSABLE = "key_unusable"
+RETENTION_UNHEALTHY = "retention_unhealthy"  # no recent successful sweep, or it left data a day past its cutoff
 ENVELOPE_MESSAGE = (
     "The request's trigger envelope doesn't open or isn't JSON; repairing a key never reopens it (engine 2b spec §7.1)."
 )
@@ -90,8 +92,8 @@ class Starting:
 
 @dataclass(frozen=True)
 class Waiting:
-    """A request left queued, no attempt counted: `gate_off`, `environment_not_recorded`, `tenant_erasing`,
-    `workers_not_ready`, `no_slot` or `key_unusable`."""
+    """A request left queued, no attempt counted: `gate_off`, `environment_not_recorded`, `retention_unhealthy` (a
+    production deployment's, §10.3), `tenant_erasing`, `workers_not_ready`, `no_slot` or `key_unusable`."""
 
     reason: str
 
@@ -256,6 +258,9 @@ async def _begin(
         return Waiting("environment_not_recorded")
     if platform.environment == PRODUCTION and not platform.production_runs:
         return Waiting("gate_off")
+    if platform.environment == PRODUCTION and not await retention_slo.healthy(s):
+        log.warning("dispatch_waiting", reason=RETENTION_UNHEALTHY)
+        return Waiting(RETENTION_UNHEALTHY)
     tenant = await s.get(Tenant, tenant_id, populate_existing=True)
     if tenant is None or tenant.status != "active":
         return Waiting("tenant_erasing")

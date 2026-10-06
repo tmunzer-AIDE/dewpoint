@@ -24,11 +24,14 @@ from tests.conftest import _url_for
 
 @pytest.fixture
 async def production_on(development_deployment, owner_sessionmaker) -> None:
-    """The recorded deployment made production, its gate on: the dispatcher's every start depends on it."""
+    """The recorded deployment made production, its gate on, its retention healthy (a sweep that just succeeded, §10.3):
+    the dispatcher's every start depends on it."""
     async with owner_sessionmaker() as s, s.begin():
         await s.execute(text("alter table platform_settings disable trigger user"))
         await s.execute(text("update platform_settings set environment = 'production', production_runs = true"))
         await s.execute(text("alter table platform_settings enable trigger user"))
+        await s.execute(text("insert into retention_sweeps (ended_at, succeeded, tenants, lag_s) "
+                             "values (now(), true, 0, 0)"))  # fmt: skip
 
 
 async def gate_on(owner: Any) -> bool:

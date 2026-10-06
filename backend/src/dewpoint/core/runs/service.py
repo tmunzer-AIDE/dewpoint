@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.models.requests import RunRequest
 from dewpoint.core.models.runs import Run, RunStep
+from dewpoint.core.retention.cutoff import Cutoff, kept
 
 MESSAGE_LIMIT = 500
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
@@ -241,12 +242,14 @@ class Listed:
 async def list_items(
     s: AsyncSession,
     *,
+    kept_after: Cutoff,
     workflow_id: uuid.UUID | None = None,
     before: tuple[datetime, uuid.UUID] | None = None,
     limit: int = 50,
 ) -> list[Listed]:
     """Requests and runs together, newest first by `(queued_at, id)`; the next page starts after the last item of this
-    one. A request's pre-created row is never shown until its request has started (§7.3): the request is."""
+    one. A request's pre-created row is never shown until its request has started (§7.3): the request is. Nothing past
+    the retention cutoff `kept_after` is (§10.1): every run listed is a root, so its own end is its tree's."""
     runs = (
         select(
             Run.id, Run.workflow_id, Run.workflow_version_id.label("version_id"), Run.mode, Run.status, Run.queued_at,
@@ -254,14 +257,15 @@ async def list_items(
             RunRequest.status.label("request_status"), RunRequest.source, RunRequest.reason,
         )
         .outerjoin(RunRequest, RunRequest.id == Run.id)
-        .where(Run.parent_run_id.is_(None), or_(RunRequest.id.is_(None), RunRequest.status == "started"))
+        .where(Run.parent_run_id.is_(None), or_(RunRequest.id.is_(None), RunRequest.status == "started"),
+               kept(Run.ended_at, kept_after))
     )  # fmt: skip
     requests = select(
         RunRequest.id, RunRequest.workflow_id, RunRequest.workflow_version_id.label("version_id"), RunRequest.mode,
         RunRequest.status, RunRequest.queued_at, null().label("started_at"), RunRequest.ended_at,
         null().label("error_code"), null().label("error_message"), literal(0).label("iterations"),
         literal("run").label("kind"), RunRequest.status.label("request_status"), RunRequest.source, RunRequest.reason,
-    ).where(RunRequest.status != "started")  # fmt: skip
+    ).where(RunRequest.status != "started", kept(RunRequest.ended_at, kept_after))  # fmt: skip
     if workflow_id is not None:
         runs, requests = (
             runs.where(Run.workflow_id == workflow_id),

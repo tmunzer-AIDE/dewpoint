@@ -145,6 +145,7 @@ async def test_the_upgrade_refuses_rows_that_break_a_key_naming_keys_and_counts_
         await s.begin()
         for name, table, *_ in migration.KEYS:
             await s.execute(text(f"ALTER TABLE {table} DROP CONSTRAINT {name}"))
+        await s.execute(text("ALTER TABLE runs DROP CONSTRAINT runs_root_run"))  # 0037's, which such a sub-run breaks
         for _, _, sql, foreign in CASES:
             params = _params(ids, foreign)
             await s.execute(text(sql), params)

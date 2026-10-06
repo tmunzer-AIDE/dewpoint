@@ -15,9 +15,20 @@ from dewpoint.core.crypto.keys import KeySource
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.requests import RunRequest
 from dewpoint.core.models.runs import Run
+from dewpoint.core.retention import cutoff as retention
 from dewpoint.engine.runtime.activities import LIVE, SIMULATE
 
 ENDED = ("cancelled", "refused", "dead")  # a request's own ends: it never started
+
+
+class RequestNotRetainedError(Exception):
+    """The request an old key names is past its tenant's retention cutoff (engine 2b spec §10.1): nothing of it is
+    shown, and nothing new is admitted under the key while it's stored."""
+
+
+async def _kept(s: AsyncSession, tenant_id: uuid.UUID, request: RunRequest) -> None:
+    if not await retention.request_kept(s, await retention.cutoff(s, tenant_id), request):
+        raise RequestNotRetainedError(str(request.id))
 
 
 @dataclass(frozen=True)
@@ -34,24 +45,29 @@ async def admit(
     sessionmaker: async_sessionmaker[AsyncSession], keys: KeySource, *, tenant_id: uuid.UUID, workflow_id: uuid.UUID,
     input: dict[str, Any], simulate: bool, idempotency_key: str,
 ) -> RunRequest:  # fmt: skip
-    """The request, queued. Raises admission's errors, AdmissionRefusedError with its reason and messages first."""
+    """The request, queued (or as an exact retry finds it). Raises admission's errors, AdmissionRefusedError with its
+    reason and messages first, and RequestNotRetainedError for a retry whose request is past its tenant's cutoff."""
     async with sessionmaker() as s, s.begin():
         admitted = await admission.admit_request(
             s, keys, tenant_id=tenant_id, workflow_id=workflow_id, source="dev", actor_id=None,
             mode=SIMULATE if simulate else LIVE, idempotency_key=idempotency_key, input=input,
         )  # fmt: skip
+        if not admitted.new:
+            await _kept(s, tenant_id, admitted.request)
         return admitted.request
 
 
 async def ended(
     sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, request_id: uuid.UUID
 ) -> Ended | None:
-    """The end the database records for a request, or None while it's queued, starting or running."""
+    """The end the database records for a request, or None while it's queued, starting or running. Raises
+    RequestNotRetainedError past its tenant's cutoff."""
     async with sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant_id)
         request = await s.get(RunRequest, request_id)
         if request is None:
             raise LookupError("No such run request.")
+        await _kept(s, tenant_id, request)
         if request.status in ENDED:
             return Ended("request", request.status, request.reason, None)
         if request.status != "started":

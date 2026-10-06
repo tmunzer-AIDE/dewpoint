@@ -113,3 +113,10 @@ def test_an_input_that_isnt_a_json_object_is_refused_before_admission(
 def test_no_command_starts_a_run_itself() -> None:
     """2b-2: every packaged start goes through admission and the dispatcher; `start_run` is a test helper."""
     assert "start_run" not in vars(cli) and "dev_run_version" not in vars(cli)
+
+
+@pytest.mark.usefixtures("cli_env")
+def test_a_retry_of_a_request_past_its_cutoff_shows_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    answer(monkeypatch, dev_run.RequestNotRetainedError(), None, {})
+    result = run("--idempotency-key", "old", "--wait", "5")
+    assert result.exit_code == 2 and "request_not_retained" in result.output

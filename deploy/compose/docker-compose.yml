@@ -31,6 +31,7 @@ services:
       DEWPOINT_WORKER_DB_PASSWORD: ${DEWPOINT_WORKER_DB_PASSWORD:?set in .env}
       DEWPOINT_DISPATCH_DB_PASSWORD: ${DEWPOINT_DISPATCH_DB_PASSWORD:?set in .env}
       DEWPOINT_INGRESS_DB_PASSWORD: ${DEWPOINT_INGRESS_DB_PASSWORD:?set in .env}
+      DEWPOINT_RETENTION_DB_PASSWORD: ${DEWPOINT_RETENTION_DB_PASSWORD:?set in .env}
     volumes: [pgdata:/var/lib/postgresql/data, ./initdb:/docker-entrypoint-initdb.d:ro]
     healthcheck: { test: ["CMD-SHELL", "pg_isready -U dewpoint_owner -d dewpoint"], interval: 5s, retries: 20 }
 
@@ -140,6 +141,17 @@ services:
     depends_on:
       migrate: { condition: service_completed_successfully }
       temporal: { condition: service_healthy }
+
+  retention:
+    <<: *app
+    # Deletes each tenant's data past its retention, every hour (engine 2b spec §10.3; docs/operations/retention.md),
+    # as the only login that may. It never decrypts anything: its environment holds no key.
+    command: ["dewpoint", "retention"]
+    environment:
+      DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_retention_login:${DEWPOINT_RETENTION_DB_PASSWORD}@postgres/dewpoint
+    restart: unless-stopped  # the SLO needs a successful sweep a day: one that ends comes back
+    depends_on:
+      migrate: { condition: service_completed_successfully }
 
   cel-evaluator:
     image: ${DEWPOINT_CEL_EVALUATOR_IMAGE:-dewpoint-cel-evaluator:dev}

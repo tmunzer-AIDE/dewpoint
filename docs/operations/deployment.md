@@ -191,8 +191,8 @@ types, task queues, timestamps, and a local activity's own bookkeeping (its type
 - **Claims** (from ABI 6) are stored in the database, encrypted with the same data keys and bound to their id and
   tenant: `run_inputs` and `step_outputs` hold sensitive and large values, `claim_grants` which run may read which, and
   `run_secret_index` each run tree's known secrets, used to mask messages and rows. The worker's role reads and writes
-  them; admission (the dispatch role) writes a run's input claims and seeds its index. No role updates or deletes a
-  claim; tenant retention will (sub-project 2b-4).
+  them; admission (the dispatch role) writes a run's input claims and seeds its index. No role updates a claim; only
+  the retention job deletes them, with their run tree ([retention](retention.md)).
 - **No digest of a claim's value is kept** (migration 0018, issue #28). Before it, each claim row held an unkeyed
   SHA-256 of its plaintext, which let anyone who read the table test guesses for a short secret offline. The migration
   drops the column from the live database, and a rewrite of a claim's id is checked by decrypting the existing claim.
@@ -258,12 +258,15 @@ image has a new engine ABI, publish every workflow again after upgrading (above)
 overlap.
 
 The worker, and the dispatcher and `dewpoint dev run`, log in as `dewpoint_worker_login` and `dewpoint_dispatch_login`
-(`DEWPOINT_WORKER_DB_PASSWORD`, `DEWPOINT_DISPATCH_DB_PASSWORD`), and webhook ingress as `dewpoint_ingress_login`
-(`DEWPOINT_INGRESS_DB_PASSWORD`), whose role holds no table, only its three functions. A fresh install creates them. An
-install whose database predates them creates them once, as the database owner:
+(`DEWPOINT_WORKER_DB_PASSWORD`, `DEWPOINT_DISPATCH_DB_PASSWORD`), webhook ingress as `dewpoint_ingress_login`
+(`DEWPOINT_INGRESS_DB_PASSWORD`), whose role holds no table, only its three functions, and the retention job (Compose's
+`retention` service) as `dewpoint_retention_login` (`DEWPOINT_RETENTION_DB_PASSWORD`), the only login that deletes
+retained data ([retention](retention.md)). A fresh install creates them. An install whose database predates them
+creates them once, as the database owner, after upgrading (the migrations make the group roles):
 
 ```sql
 CREATE ROLE dewpoint_worker_login LOGIN PASSWORD '<worker password>' IN ROLE dewpoint_worker;
 CREATE ROLE dewpoint_dispatch_login LOGIN PASSWORD '<dispatch password>' IN ROLE dewpoint_dispatch;
 CREATE ROLE dewpoint_ingress_login LOGIN PASSWORD '<ingress password>' IN ROLE dewpoint_ingress;
+CREATE ROLE dewpoint_retention_login LOGIN PASSWORD '<retention password>' IN ROLE dewpoint_retention;
 ```

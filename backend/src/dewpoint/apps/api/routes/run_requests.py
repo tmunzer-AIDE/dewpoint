@@ -25,6 +25,7 @@ from dewpoint.core.http import TenantContext, get_db, require
 from dewpoint.core.models.requests import RunRequest
 from dewpoint.core.models.runs import Run
 from dewpoint.core.models.workflows import Workflow, WorkflowVersion
+from dewpoint.core.retention import cutoff as retention
 from dewpoint.engine.handles import NestingError, StoredClaim, resolve_value
 
 router = APIRouter(prefix="/api/v1", tags=["runs"])
@@ -34,6 +35,7 @@ INVALID = {INPUT_INVALID, SECRET_INDEX_LIMIT, admission.CSV_MAPPING_INVALID}
 NOT_FOUND = {admission.UPLOAD_NOT_FOUND}  # whoever's it is: an upload is its owner's only
 GONE = {admission.UPLOAD_EXPIRED}
 INPUT_NOT_RETAINED = "input_not_retained"
+REQUEST_NOT_RETAINED = "request_not_retained"  # an exact retry's request, past its retention cutoff
 
 
 class CsvIn(BaseModel):
@@ -123,7 +125,17 @@ async def admit(
         raise HTTPException(status, detail={"error": e.reason, "messages": e.messages}) from None
     except Exception as e:
         raise key_unusable(e) from None
+    if not admitted.new:
+        await not_past_cutoff(db, ctx, admitted.request)
     return admitted.request
+
+
+async def not_past_cutoff(db: AsyncSession, ctx: TenantContext, request: RunRequest) -> None:
+    """An exact retry finds the request its key admitted, which it shows only within the retention cutoff: past it,
+    410 `request_not_retained`, and still nothing new is admitted under the key. The key is recognized only while its
+    request is stored; once retention deletes it, the key is free again (engine 2b spec §10.1)."""
+    if not await retention.request_kept(db, await retention.cutoff(db, ctx.tenant_id), request):
+        raise HTTPException(410, detail={"error": REQUEST_NOT_RETAINED})
 
 
 @router.post("/t/{tenant_id}/workflows/{workflow_id}/runs", status_code=202)
@@ -135,7 +147,8 @@ async def start_run(
     db: AsyncSession = Depends(get_db, scope="function"),
     keys: KeySource = Depends(get_keys),
 ) -> dict[str, object]:
-    """202 with the request, queued for the dispatcher (or as an exact retry finds it now)."""
+    """202 with the request, queued for the dispatcher (or as an exact retry finds it now, within the retention cutoff:
+    410 `request_not_retained` past it)."""
     return request_body(await admit(db, keys, ctx, workflow_id, "manual", body, key))
 
 
@@ -170,7 +183,11 @@ async def cancel_run(
     db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, object]:
     """200, `cancelled`: it was queued. 202, `requested`: recorded, for the dispatcher to apply when its start resolves
-    or to send to Temporal. 409 `run_ended`: nothing left to cancel."""
+    or to send to Temporal. 409 `run_ended`: nothing left to cancel. 404 past the retention cutoff (§10.1), which only
+    an ended request can pass: there is nothing to cancel."""
+    seen = await db.get(RunRequest, request_id)  # row-level security: the caller's tenant's only
+    if seen is not None and not await retention.request_kept(db, await retention.cutoff(db, ctx.tenant_id), seen):
+        raise HTTPException(404, detail={"error": "not_found"})
     try:
         happened = await cancels.cancel_request(
             db, tenant_id=ctx.tenant_id, request_id=request_id, actor_id=ctx.user.id
@@ -197,9 +214,11 @@ async def rerun(
 ) -> dict[str, object]:
     """A new admission (source `rerun`) on the workflow's active version, with new input, or else the old request's
     complete input, validated and claimed again under the new request: no old handle is reused. The key is checked
-    first: an exact retry returns the request it admitted, whatever retention has removed since; another request under
-    the key is a 409. 410 `input_not_retained` when the original input can't be rebuilt: a run from before 2b-2, a
-    refused request, an envelope or a claim retention has removed. New input needs none of it."""
+    first: an exact retry returns the request it admitted, whatever retention has removed of the old one's input, while
+    that request is within its own cutoff (410 `request_not_retained` past it); another request under the key is a 409.
+    410 `input_not_retained` when the original input can't be rebuilt: a run from before 2b-2, a refused request, an
+    envelope or a claim retention has removed, or a request past the retention cutoff, whatever is still stored (§10.1).
+    New input needs none of it."""
     given = body or RerunIn()
     old = await db.get(RunRequest, request_id)  # row-level security: the caller's tenant's only
     run = await db.get(Run, request_id) if old is None else None  # a run 2a started: no request, no envelope
@@ -218,13 +237,14 @@ async def rerun(
     except Exception as e:
         raise key_unusable(e) from None
     if existing is not None:
+        await not_past_cutoff(db, ctx, existing)
         return request_body(existing)
     if given.csv is not None:
         start = StartIn(input=given.input or {}, mode=mode, csv=given.csv)
         return request_body(await admit(db, keys, ctx, workflow_id, "rerun", start, key, rerun=again))
     if given.input is not None:
         value = given.input
-    elif old is None:
+    elif old is None or not await retention.request_kept(db, await retention.cutoff(db, ctx.tenant_id), old):
         raise HTTPException(410, detail={"error": INPUT_NOT_RETAINED})
     else:
         value = await original_input(db, keys, ctx.tenant_id, old)

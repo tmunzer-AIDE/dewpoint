@@ -392,6 +392,25 @@ def worker() -> None:
         raise typer.Exit(3) from None
 
 
+@app.command("retention")
+def retention(once: bool = typer.Option(False, "--once", help="One sweep, then exit 0 if it succeeded")) -> None:
+    """Run the retention job (engine 2b spec §10.3): every tenant's data past its retention deleted, every interval
+    (DEWPOINT_RETENTION_INTERVAL_S), as the retention login. It holds no key."""
+    from dewpoint.apps.retention import RetentionSettings
+    from dewpoint.apps.retention import run as run_retention
+
+    try:
+        done = asyncio.run(run_retention(RetentionSettings(), once=once))
+    except Exception as e:  # only --once returns: the job itself retries
+        typer.echo(f"retention sweep failed: {type(e).__name__}")
+        raise typer.Exit(1) from None
+    if done is None:
+        typer.echo("another retention sweep is running")
+        raise typer.Exit(1)
+    typer.echo(f"retention sweep {done.id}: {'succeeded' if done.succeeded else 'failed'}")
+    raise typer.Exit(0 if done.succeeded else 1)
+
+
 @app.command("ingress")
 def ingress(host: str = typer.Option("127.0.0.1"), port: int = typer.Option(8001, min=1, max=65535)) -> None:
     """Serve webhook ingress, `/hooks/<endpoint_id>` (engine 2b spec §8.3), in a development deployment only until
@@ -587,6 +606,10 @@ def dev_run_command(
     except admission.AdmissionRefusedError as e:
         for message in e.messages:
             typer.echo(f"ERROR: {message}")
+        raise typer.Exit(2) from None
+    except dev_run.RequestNotRetainedError:
+        typer.echo("ERROR: request_not_retained: the request under this idempotency key is past its tenant's "
+                   "retention cutoff")  # fmt: skip
         raise typer.Exit(2) from None
     except (admission.WorkflowNotFoundError, admission.IdempotencyConflictError) as e:
         typer.echo(f"ERROR: {e or type(e).__name__}")

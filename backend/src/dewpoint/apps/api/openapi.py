@@ -18,6 +18,7 @@ from dewpoint.apps.api.routes import (
     node_types,
     passkeys,
     platform,
+    retention,
     run_requests,
     runs,
     schedules,
@@ -45,6 +46,7 @@ ROUTERS: tuple[APIRouter, ...] = (
     run_requests.router,
     csv_uploads.router,
     runs.router,
+    retention.router,
     schedules.router,
     webhooks.router,
 )

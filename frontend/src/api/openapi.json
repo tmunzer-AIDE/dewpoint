@@ -1081,6 +1081,22 @@
         "title": "RerunIn",
         "type": "object"
       },
+      "RetentionIn": {
+        "additionalProperties": false,
+        "properties": {
+          "runs_days": {
+            "maximum": 365.0,
+            "minimum": 1.0,
+            "title": "Runs Days",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "runs_days"
+        ],
+        "title": "RetentionIn",
+        "type": "object"
+      },
       "RoleChange": {
         "properties": {
           "role": {
@@ -3244,6 +3260,108 @@
         ]
       }
     },
+    "/api/v1/t/{tenant_id}/retention": {
+      "get": {
+        "operationId": "get_retention_api_v1_t__tenant_id__retention_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "integer"
+                  },
+                  "title": "Response Get Retention Api V1 T  Tenant Id  Retention Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Retention",
+        "tags": [
+          "retention"
+        ]
+      },
+      "put": {
+        "operationId": "set_retention_api_v1_t__tenant_id__retention_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetentionIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "integer"
+                  },
+                  "title": "Response Set Retention Api V1 T  Tenant Id  Retention Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Retention",
+        "tags": [
+          "retention"
+        ]
+      }
+    },
     "/api/v1/t/{tenant_id}/runs": {
       "get": {
         "description": "Requests and runs, newest first by `(queued_at, id)`. The next page: `before` and `before_id`, the last item's\n`queued_at` and `id`, always together: items can be queued in the same instant, so the time alone would skip\nsome.",
@@ -3358,7 +3476,7 @@
     },
     "/api/v1/t/{tenant_id}/runs/{request_id}/cancel": {
       "post": {
-        "description": "200, `cancelled`: it was queued. 202, `requested`: recorded, for the dispatcher to apply when its start resolves\nor to send to Temporal. 409 `run_ended`: nothing left to cancel.",
+        "description": "200, `cancelled`: it was queued. 202, `requested`: recorded, for the dispatcher to apply when its start resolves\nor to send to Temporal. 409 `run_ended`: nothing left to cancel. 404 past the retention cutoff (\u00a710.1), which only\nan ended request can pass: there is nothing to cancel.",
         "operationId": "cancel_run_api_v1_t__tenant_id__runs__request_id__cancel_post",
         "parameters": [
           {
@@ -3414,7 +3532,7 @@
     },
     "/api/v1/t/{tenant_id}/runs/{request_id}/rerun": {
       "post": {
-        "description": "A new admission (source `rerun`) on the workflow's active version, with new input, or else the old request's\ncomplete input, validated and claimed again under the new request: no old handle is reused. The key is checked\nfirst: an exact retry returns the request it admitted, whatever retention has removed since; another request under\nthe key is a 409. 410 `input_not_retained` when the original input can't be rebuilt: a run from before 2b-2, a\nrefused request, an envelope or a claim retention has removed. New input needs none of it.",
+        "description": "A new admission (source `rerun`) on the workflow's active version, with new input, or else the old request's\ncomplete input, validated and claimed again under the new request: no old handle is reused. The key is checked\nfirst: an exact retry returns the request it admitted, whatever retention has removed of the old one's input, while\nthat request is within its own cutoff (410 `request_not_retained` past it); another request under the key is a 409.\n410 `input_not_retained` when the original input can't be rebuilt: a run from before 2b-2, a refused request, an\nenvelope or a claim retention has removed, or a request past the retention cutoff, whatever is still stored (\u00a710.1).\nNew input needs none of it.",
         "operationId": "rerun_api_v1_t__tenant_id__runs__request_id__rerun_post",
         "parameters": [
           {
@@ -3503,7 +3621,7 @@
     },
     "/api/v1/t/{tenant_id}/runs/{run_id}": {
       "get": {
-        "description": "A run with its steps and sub-runs, or a request that hasn't started as itself; with its CSV record (engine 2b\nspec \u00a78.1), when it took a CSV: the mapping, the file's headers, the row count and the skipped rows.",
+        "description": "A run with its steps and sub-runs, or a request that hasn't started as itself; with its CSV record (engine 2b\nspec \u00a78.1), when it took a CSV: the mapping, the file's headers, the row count and the skipped rows. A run whose\ntree, or a request that, passed the retention cutoff isn't found (\u00a710.1).",
         "operationId": "get_run_api_v1_t__tenant_id__runs__run_id__get",
         "parameters": [
           {
@@ -4976,7 +5094,7 @@
     },
     "/api/v1/t/{tenant_id}/workflows/{workflow_id}/runs": {
       "post": {
-        "description": "202 with the request, queued for the dispatcher (or as an exact retry finds it now).",
+        "description": "202 with the request, queued for the dispatcher (or as an exact retry finds it now, within the retention cutoff:\n410 `request_not_retained` past it).",
         "operationId": "start_run_api_v1_t__tenant_id__workflows__workflow_id__runs_post",
         "parameters": [
           {

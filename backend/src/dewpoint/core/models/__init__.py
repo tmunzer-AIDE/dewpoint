@@ -9,6 +9,7 @@ from dewpoint.core.models import (
     keys,
     plugins,
     requests,
+    retention,
     runs,
     schedules,
     tenancy,
@@ -18,6 +19,7 @@ from dewpoint.core.models import (
 from dewpoint.core.models.base import Base
 
 __all__ = [
-    "Base", "audit", "claims", "connections", "egress", "identity", "ingress", "keys", "plugins", "requests", "runs",
+    "Base", "audit", "claims", "connections", "egress", "identity", "ingress", "keys", "plugins", "requests",
+    "retention", "runs",
     "schedules", "tenancy", "uploads", "workflows",
 ]  # fmt: skip

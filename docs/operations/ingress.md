@@ -111,7 +111,7 @@ stored: only keyed digests of them.
 | 413 `too_large` | past the endpoint's body limit (1 MiB by default, at most 5 MiB) or the global 5 MiB |
 | 429 `rate_limited`, `Retry-After` | short of a rate budget, or too many failures from this address |
 | 429 `quota_exceeded`, `Retry-After: 30` | the endpoint's or the tenant's pending backlog is full |
-| 429 `retained_full`, no `Retry-After` | the stored events are at their cap: nothing frees it before 2b-4 |
+| 429 `retained_full`, no `Retry-After` | the stored events are at their cap, until retention deletes ended events past the tenant's cutoff ([retention](retention.md)) |
 | 503 | too many requests in flight (`busy`, `Retry-After`), outside a development deployment, the database unavailable, or the tenant without an inbound key |
 
 A refused attempt pays its rate budget as an accepted one does.
