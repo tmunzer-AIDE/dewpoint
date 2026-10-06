@@ -283,3 +283,153 @@ test("the minimap never hides what the keys reach, and gives way to a panel and 
   await expectAccessible(page, "editor: a narrow canvas");
   await page.setViewportSize({ width: 1280, height: 720 });
 });
+
+const importReport = (page: Page, name: string) => importFile(page, name, "e2e/fixtures/report.dewpoint.json");
+
+test("edits save themselves and survive a reload; a step's problems show on it, and a problem focuses it", async ({ page }) => {
+  await newWorkflow(page, "Saved flow");
+  await page.getByRole("button", { name: "Add the first step" }).click();
+  await page.getByRole("option", { name: /flow\.transform@1/ }).click();
+  await expect(page.getByText("Saved · not published")).toBeVisible({ timeout: 10_000 });
+  const problems = page.getByRole("button", { name: /^Problems · \d+$/ });
+  await expect(problems).toBeVisible({ timeout: 10_000 });
+  const step = page.getByRole("button", { name: /^transform, Transform, \d+ problems?/ });
+  await expect(step).toBeVisible();
+  await page.reload();
+  await expect(step).toBeVisible(); // the server kept it
+  await problems.click();
+  const panel = page.getByRole("complementary", { name: "Problems" });
+  await expect(panel.getByRole("heading", { name: "Problems" })).toBeFocused();
+  await expectAccessible(page, "editor: problems");
+  await panel.getByRole("button", { name: "Go to transform" }).first().click();
+  await expect(step).toBeFocused();
+});
+
+test("publishing names the version; a version is viewed read only and made active", async ({ page }) => {
+  await importReport(page, "Report A");
+  await expect(page.getByRole("button", { name: "No problems" })).toBeVisible({ timeout: 10_000 });
+  await page.getByRole("button", { name: "Publish v1" }).click();
+  const ask = page.getByRole("dialog", { name: "Publish version 1" });
+  await expect(ask.getByRole("button", { name: "Cancel" })).toBeFocused();
+  await expectAccessible(page, "editor: publish");
+  await ask.getByRole("button", { name: "Publish" }).click();
+  await expect(page.getByText("Saved · published as v1")).toBeVisible({ timeout: 10_000 });
+  // A change makes it unpublished; publishing again makes version 2. A stop step may end a run before any step
+  // finishes, so the fixture's output guards its read with has(), as publish requires.
+  await page.getByRole("button", { name: "Add a step after t" }).click();
+  await page.getByRole("option", { name: /flow\.stop@1/ }).click();
+  await expect(page.getByText("Saved · unpublished changes since v1")).toBeVisible({ timeout: 10_000 });
+  await page.getByRole("button", { name: "Publish v2" }).click();
+  await page.getByRole("dialog", { name: "Publish version 2" }).getByRole("button", { name: "Publish" }).click();
+  await expect(page.getByText("Saved · published as v2")).toBeVisible({ timeout: 10_000 });
+  // Version 1, read only: no stop step, nothing to add; then back, and version 1 made active.
+  await page.getByRole("button", { name: "Versions" }).click();
+  await expectAccessible(page, "editor: versions");
+  await page.getByRole("button", { name: "View version 1" }).click();
+  await expect(page.getByText("Viewing version 1, read only. The draft is unchanged.")).toBeVisible();
+  await expect(page.getByRole("button", { name: /^stop, Stop/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^Insert a step/ })).toHaveCount(0);
+  await page.getByRole("button", { name: "Back to the draft" }).click();
+  await expect(page.getByRole("button", { name: /^stop, Stop/ })).toBeVisible();
+  await page.getByRole("button", { name: "Versions" }).click();
+  await page.getByRole("button", { name: "Make version 1 active" }).click();
+  await page.getByRole("dialog", { name: "Make version 1 active" }).getByRole("button", { name: "Make active" }).click();
+  await expect(page.getByText("Saved · unpublished changes since v1")).toBeVisible({ timeout: 10_000 });
+  // The list agrees.
+  await page.goto(`/t/${await tenantId(page)}/workflows`);
+  const row = page.getByRole("link", { name: "Report A" }).locator("xpath=ancestor::tr");
+  await expect(row).toContainText("v1 · unpublished changes");
+  await expect(row.getByRole("switch", { name: "Enable Report A" })).toBeVisible();
+});
+
+test("a draft changed elsewhere turns this editor read only, its work downloadable", async ({ page, context }) => {
+  await importReport(page, "Report B");
+  const other = await context.newPage();
+  await other.goto(page.url());
+  await expect(other.getByRole("button", { name: /^t, Transform/ })).toBeVisible();
+  // This editor saves first: revision 2.
+  await page.getByRole("button", { name: "Add a step after t" }).click();
+  await page.getByRole("option", { name: /flow\.stop@1/ }).click();
+  await expect(page.getByText("Saved · not published")).toBeVisible({ timeout: 10_000 });
+  // The other, still at revision 1, is refused, and stops.
+  await other.getByRole("button", { name: "Add a step after t" }).click();
+  await other.getByRole("option", { name: /flow\.delay@1/ }).click();
+  const alert = other.getByRole("alert");
+  await expect(alert).toContainText("changed elsewhere", { timeout: 10_000 });
+  await expect(other.getByRole("button", { name: /Add step/ })).toHaveCount(0);
+  const download = other.waitForEvent("download");
+  await alert.getByRole("button", { name: "Download my version" }).click();
+  expect((await download).suggestedFilename()).toBe("report-b.draft.json");
+  // Its unsaved version is guarded: leaving asks, and Reload asks before discarding it.
+  await other.getByRole("navigation", { name: "Breadcrumb" }).getByRole("link", { name: "Workflows" }).click();
+  const leave = other.getByRole("dialog", { name: "Your latest changes aren't saved" });
+  await expect(leave).toContainText("changed elsewhere");
+  await expectAccessible(other, "editor: leaving unsaved work");
+  await leave.getByRole("button", { name: "Stay" }).click();
+  await alert.getByRole("button", { name: "Reload" }).click();
+  await other.getByRole("dialog", { name: "Reload the saved draft" }).getByRole("button", { name: "Discard my version and reload" }).click();
+  await expect(other.getByRole("button", { name: /^stop, Stop/ })).toBeVisible();
+  await expect(other.getByRole("button", { name: /^delay, Delay/ })).toHaveCount(0);
+  await other.close();
+});
+
+test("a workflow exports to a file and imports back as a new one", async ({ page }, info) => {
+  await importReport(page, "Report C");
+  await page.goto(`/t/${await tenantId(page)}/workflows`);
+  await page.getByRole("button", { name: "Actions for Report C" }).click();
+  const download = page.waitForEvent("download");
+  await page.getByRole("menuitem", { name: "Export" }).click();
+  const file = info.outputPath("report-c.dewpoint.json");
+  await (await download).saveAs(file);
+  await page.getByTestId("workflow-new").click();
+  const dialog = page.getByRole("dialog", { name: "New workflow" });
+  await dialog.getByLabel("Name").fill("Report C copy");
+  await dialog.getByRole("radio", { name: /Import from file/ }).check();
+  await dialog.getByLabel("Workflow file").setInputFiles(file);
+  await dialog.getByRole("button", { name: "Import and open" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "Report C copy" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^t, Transform/ })).toBeVisible();
+});
+
+test("leaving through the breadcrumb saves the last edit first", async ({ page }) => {
+  await newWorkflow(page, "Leaving flow");
+  await page.getByRole("button", { name: "Add the first step" }).click();
+  await page.getByRole("option", { name: /flow\.transform@1/ }).click();
+  await expect(page.getByText("Unsaved changes")).toBeVisible(); // inside the second before it would save
+  await page.getByRole("navigation", { name: "Breadcrumb" }).getByRole("link", { name: "Workflows" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "Workflows" })).toBeVisible();
+  await page.getByRole("link", { name: "Leaving flow" }).click();
+  await expect(page.getByRole("button", { name: /^transform, Transform/ })).toBeVisible(); // the server kept it
+});
+
+test("a publish names the version it makes, even when another lands first", async ({ page, context }) => {
+  await importReport(page, "Report D");
+  const other = await context.newPage();
+  await other.goto(page.url());
+  const publish = page.getByRole("button", { name: "Publish v1" });
+  await expect(publish).toBeEnabled({ timeout: 10_000 });
+  await publish.click();
+  const ask = page.getByRole("dialog", { name: "Publish version 1" });
+  await expect(ask).toBeVisible();
+  // Meanwhile, the other editor publishes version 1.
+  await other.getByRole("button", { name: "Publish v1" }).click();
+  await other.getByRole("dialog", { name: "Publish version 1" }).getByRole("button", { name: "Publish" }).click();
+  await expect(other.getByText("Saved · published as v1")).toBeVisible({ timeout: 10_000 });
+  await other.close();
+  // This one still names version 1: the server refuses it, and the editor asks again with the new number.
+  await ask.getByRole("button", { name: "Publish" }).click();
+  const again = page.getByRole("dialog", { name: "Publish version 2" });
+  await expect(again).toContainText("Version 1 was published since you opened this", { timeout: 10_000 });
+  await again.getByRole("button", { name: "Publish" }).click();
+  await expect(page.getByText("Saved · published as v2")).toBeVisible({ timeout: 10_000 });
+});
+
+test("the list reflows at 320 px and stays AA (WCAG 1.4.10)", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 640 });
+  await page.goto(`/t/${await tenantId(page)}/workflows`);
+  await expect(page.getByRole("link", { name: "Report A" })).toBeVisible();
+  await expect(page.getByRole("note", { name: "Deployment" })).toBeVisible();
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow, "the workflows list scrolls sideways at 320 px").toBeLessThanOrEqual(0);
+  await expectAccessible(page, "workflows at 320 px");
+});

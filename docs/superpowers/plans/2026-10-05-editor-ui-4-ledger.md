@@ -600,3 +600,41 @@ M20. **Publishing and versions, as the plan has them, on M15 and M19** (Task 15)
     and a running publication or activation ahead of the keyboard model (which reads what's on the screen), and the
     side column (M19) carries the versions panel. The lost-publish wording is revision 5's (graph equivalence only).
     - The plan predates M15 and M19. - None.
+M21. **The Report fixture's output guards its read** (Task 16; the browser gate caught it): the plan's fixture is CI's
+    seed graph, which publishes as it stands, but the flow's second publish (a stop step added after `t`) is refused,
+    `cel.conditional_ref`. A graph with a stop step may end a run while a step is still pending, so at the exit every
+    step's output may be missing (`engine/graph/validate.py`, by design). Of the flow types only `flow.stop` has a
+    valid default configuration (every other requires a field), so the flow keeps it, and the fixture's output reads
+    `has(steps.t.output) ? steps.t.output.answer : 0`, the fix the server's message gives. The editor did as designed
+    throughout: it showed "Problems · 1" before the publish, and the refused publish opened the panel with the problem
+    "Found at publish". - The flow tests the editor; the rule is the engine's. - None for the product; the fixture
+    differs from CI's seed graph by its guard.
+M22. **The notices name what dagre's build inlines** (Task 16): Step 3 expects `@dagrejs/graphlib` in the notices, but
+    dagre 3.1.1's `dist/dagre.esm.js` imports nothing and carries graphlib's code, so the build's metadata names only
+    dagre. The notices plugin gains `INLINED` (`@dagrejs/dagre` to `@dagrejs/graphlib`, read from beside the package in
+    its `node_modules`; one missing fails the build), and its self-test covers it. The gate's notices check also asks
+    for the four canvas packages. - graphlib's code ships, so its notice must (ruling 65). - A future dependency that
+    inlines another package's code goes unnoticed until someone reads its build: the map is per package, reviewed by
+    hand.
+M23. **Task 16's checks, as they came out** (2026-10-07, the working tree before its commit):
+    - Browser gate, on a freshly reset stack: 24 passed in 49.4 s, with no CSP violation, console error or remote
+      request. `foundations` 8; `workflows` 16 (the plan's 11, plus M15's aliases, M16's undo and redo, and M18's lazy
+      load, pointer reachability and minimap). The list and sign-in load 591,007 bytes; opening a workflow adds
+      300,443.
+    - Frontend: 497 tests in 41 files; lint, types and `check:api` clean.
+    - Build: index 557.57 kB of JS (180.60 kB gzipped), the editor's chunk 288.36 kB (93.54 kB), CSS 32.85 and 12.09 kB.
+    - Licences: both self-tests pass; production and all dependencies are within D22 (isbot's Unlicense, the approved
+      exception).
+    - Notices: the canvas's packages, each with its licence text. @xyflow/react 12.12.0, @xyflow/system 0.0.83,
+      @dagrejs/dagre 3.1.1, @dagrejs/graphlib 4.0.5, @radix-ui/react-switch 1.3.7, classcat 5.0.5, zustand 4.5.7, and
+      d3's color, dispatch, drag, ease, interpolate, selection, timer, transition and zoom.
+    - Backend: ruff clean; format clean (599 files); mypy clean (231 source files); import contracts 11 kept;
+      pip-licenses clean. The OpenAPI dump matches the frontend's copy. The replay gate, against the merge base
+      f65c6f9, finds no recorded history changed or removed.
+    - The parallel suite, without the serial CEL group as the plan says: 2,639 passed, 1 failed, 223 s. The failure
+      is `test_triggers_end_to_end::test_a_short_outage_fires_each_missed_time_and_admits_each_once`, with gaps
+      {2.0, 4.0}: one missed time not fired.
+      - 4b changes nothing in the dispatcher or its tests. Alone, the test passed 3 of 3 (18 s each).
+      - It was listed as open before this slice, and it isn't the database-clock fault #43 fixed.
+      - Its cause isn't established: load on a real-time Temporal schedule is suspected, not shown.
+    - The serial CEL group didn't run: this slice doesn't touch it (ruling 66's procedure, if the owner asks).
