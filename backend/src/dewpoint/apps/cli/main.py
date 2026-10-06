@@ -52,6 +52,7 @@ from dewpoint.core.plugins.registry import (
     list_node_types,
     sync_plugins,
 )
+from dewpoint.core.tenancy import lifecycle as tenant_lifecycle
 from dewpoint.core.tenancy.service import NotKeyAdminError, ensure_tenant_event_keys, ensure_tenant_keys
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.sdk import ManifestError
@@ -271,9 +272,15 @@ def keys_rotate_dek(tenant: str | None = typer.Option(None), platform: bool = ty
 
     async def _run(s: AsyncSession) -> int:
         async with s.begin():
+            if tenant_id is not None:  # in the transaction that writes the key (the 2b-4 outline's fencing)
+                await tenant_lifecycle.require_active(s, tenant_id)
             return await keyring.rotate(s, tenant_id)
 
-    typer.echo(f"active data key version: {asyncio.run(_in_session(_run))}")
+    try:
+        typer.echo(f"active data key version: {asyncio.run(_in_session(_run))}")
+    except tenant_lifecycle.TenantNotActiveError as e:
+        typer.echo(f"ERROR: {e} (or no such tenant)")
+        raise typer.Exit(1) from None
 
 
 @keys.command("reencrypt")
@@ -330,9 +337,14 @@ def keys_rotate_event_key(tenant: str = typer.Option(..., help="the tenant whose
     async def _run(s: AsyncSession) -> int:
         async with s.begin():
             await tenant_scope(s, tenant_id)
+            await tenant_lifecycle.require_active(s, tenant_id)
             return await rotate_event_key(s, keyring, tenant_id)
 
-    typer.echo(f"inbound keypair version: {asyncio.run(_in_session(_run))}")
+    try:
+        typer.echo(f"inbound keypair version: {asyncio.run(_in_session(_run))}")
+    except tenant_lifecycle.TenantNotActiveError as e:
+        typer.echo(f"ERROR: {e} (or no such tenant)")
+        raise typer.Exit(1) from None
 
 
 @keys.command("retire-event-keys")

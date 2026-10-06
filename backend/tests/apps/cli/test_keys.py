@@ -24,10 +24,26 @@ def _env(monkeypatch, pg_url: str, **kek: str) -> None:
     get_settings.cache_clear()
 
 
+def _tenants(pg_url: str, n: int) -> list[str]:
+    """Tenants to rotate keys for: a tenant's key rotates only while it's active (2b-4a M4's fencing)."""
+    made = [uuid.uuid4() for _ in range(n)]
+
+    async def _make() -> None:
+        engine = make_engine(pg_url)
+        async with make_sessionmaker(engine)() as s, s.begin():
+            for t in made:
+                await s.execute(text("insert into tenants (id, name, slug) values (:t, 'T', :s)"),
+                                {"t": t, "s": t.hex[:12]})  # fmt: skip
+        await engine.dispose()
+
+    asyncio.run(_make())
+    return [str(t) for t in made]
+
+
 def test_status_rewrap_and_rotate(pg_url, monkeypatch) -> None:
     r = CliRunner()
     _env(monkeypatch, pg_url, DEWPOINT_KEK_B64=OLD, DEWPOINT_KEK_ID="old")
-    t = str(uuid.uuid4())
+    [t] = _tenants(pg_url, 1)
     assert r.invoke(app, ["keys", "rotate-dek", "--tenant", t]).exit_code == 0  # creates v1 then v2 under "old"
     assert "old=2" in r.invoke(app, ["keys", "status"]).output
     assert r.invoke(app, ["keys", "rewrap"]).exit_code == 2  # no previous key configured: refuse
@@ -56,7 +72,7 @@ def test_key_commands_work_as_the_admin_role(pg_url, _test_users, monkeypatch) -
     admin = _url_for(pg_url, "dewpoint_admin")
     r = CliRunner()
     _env(monkeypatch, admin, DEWPOINT_KEK_B64=OLD, DEWPOINT_KEK_ID="old")
-    t1, t2 = str(uuid.uuid4()), str(uuid.uuid4())
+    t1, t2 = _tenants(pg_url, 2)
     for args in (["--tenant", t1], ["--tenant", t2], ["--platform"]):
         out = r.invoke(app, ["keys", "rotate-dek", *args])
         assert out.exit_code == 0 and "version: 2" in out.output, out.output

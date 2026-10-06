@@ -61,6 +61,62 @@ END $$""",
     "REVOKE ALL ON FUNCTION tenant_insert_fence() FROM PUBLIC",
 ]
 
+ROLES = (
+    "dewpoint_api",
+    "dewpoint_dispatch",
+    "dewpoint_worker",
+    "dewpoint_admin",
+    "dewpoint_ingress",
+    "dewpoint_retention",
+)
+STATUS = [  # a tenant's status, whatever the reader's scope: what each writer checks under the lifecycle lock
+    """CREATE FUNCTION tenant_status(tenant uuid) RETURNS text LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = public, pg_temp AS $$ SELECT status FROM tenants WHERE id = tenant $$""",
+    "REVOKE ALL ON FUNCTION tenant_status(uuid) FROM PUBLIC",
+    f"GRANT EXECUTE ON FUNCTION tenant_status(uuid) TO {', '.join(ROLES)}",
+]
+# Plugin calls (0042, plugins-3a-2): a worker takes only an active tenant's calls (the owner's review of 2b-4a v6).
+# A call an erasure left queued is never run (the worker's locked check, `lifecycle.calls_allowed`, stays the final
+# fence), so it mustn't stay a candidate: as many of them as a worker has free slots would be taken and skipped every
+# round, holding a newer call of an active tenant back past its API's wait.
+CALL_CANDIDATES = """
+CREATE OR REPLACE FUNCTION plugin_call_candidates(refs text[], types text[], hashes text[], max_calls integer)
+RETURNS TABLE (tenant_id uuid, id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT due.tenant_id, due.id FROM (
+    SELECT c.tenant_id, c.id, c.created_at,
+           row_number() OVER (PARTITION BY c.tenant_id ORDER BY c.created_at, c.id) AS turn
+    FROM plugin_calls c JOIN tenants t ON t.id = c.tenant_id AND t.status = 'active'
+    WHERE c.expires_at > now()
+      AND (c.state = 'pending' OR (c.state = 'claimed' AND c.lease_until <= now()))
+      AND ((c.kind = 'options' AND c.node_ref = ANY(refs)) OR (c.kind = 'verify' AND c.connection_type = ANY(types)))
+      AND (c.type_hash IS NULL OR c.type_hash = ANY(hashes))
+  ) due
+  ORDER BY due.turn, due.created_at, due.id
+  LIMIT max_calls
+$$"""
+CALL_CANDIDATES_0042 = """
+CREATE OR REPLACE FUNCTION plugin_call_candidates(refs text[], types text[], hashes text[], max_calls integer)
+RETURNS TABLE (tenant_id uuid, id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT due.tenant_id, due.id FROM (
+    SELECT c.tenant_id, c.id, c.created_at,
+           row_number() OVER (PARTITION BY c.tenant_id ORDER BY c.created_at, c.id) AS turn
+    FROM plugin_calls c
+    WHERE c.expires_at > now()
+      AND (c.state = 'pending' OR (c.state = 'claimed' AND c.lease_until <= now()))
+      AND ((c.kind = 'options' AND c.node_ref = ANY(refs)) OR (c.kind = 'verify' AND c.connection_type = ANY(types)))
+      AND (c.type_hash IS NULL OR c.type_hash = ANY(hashes))
+  ) due
+  ORDER BY due.turn, due.created_at, due.id
+  LIMIT max_calls
+$$"""
+ERASURES = [  # a platform admin starts, stops and retries an erasure through the API (as its role)
+    "GRANT SELECT, INSERT ON tenant_erasures TO dewpoint_api",
+    "GRANT UPDATE (stopped_at, stopped_by, attempts, next_attempt_at) ON tenant_erasures TO dewpoint_api",
+    "GRANT SELECT ON tenant_erasure_items, tenant_erasure_known TO dewpoint_api",
+]
+
 FIRINGS = [
     "ALTER TABLE schedule_firings ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE schedule_firings FORCE ROW LEVEL SECURITY",
@@ -138,7 +194,7 @@ def upgrade() -> None:
     )
     op.create_index("schedule_firings_tenant", "schedule_firings", ["tenant_id", "schedule_id"])
     op.create_index("schedule_firings_recorded", "schedule_firings", ["recorded_at"])
-    for statement in FIRINGS:
+    for statement in [*FIRINGS, *STATUS, *ERASURES]:
         op.execute(statement)
     op.add_column("schedules", sa.Column("creation_misses", sa.Integer, nullable=False, server_default="0"))
     op.execute("GRANT UPDATE (creation_misses) ON schedules TO dewpoint_dispatch")
@@ -147,12 +203,15 @@ def upgrade() -> None:
     for table in FENCED:
         op.execute(f"CREATE TRIGGER {table}_fence BEFORE INSERT ON {table} FOR EACH ROW "
                    "EXECUTE FUNCTION tenant_insert_fence()")  # fmt: skip
+    op.execute(CALL_CANDIDATES)
 
 
 def downgrade() -> None:
+    op.execute(CALL_CANDIDATES_0042)
     for table in FENCED:
         op.execute(f"DROP TRIGGER {table}_fence ON {table}")
     op.execute("DROP FUNCTION tenant_insert_fence()")
+    op.execute("DROP FUNCTION tenant_status(uuid)")
     op.execute("REVOKE UPDATE (creation_misses) ON schedules FROM dewpoint_dispatch")
     op.drop_column("schedules", "creation_misses")
     op.drop_table("schedule_firings")

@@ -17,6 +17,7 @@ from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.http import TenantContext, active_session, get_db, require
 from dewpoint.core.models.connections import Connection
 from dewpoint.core.plugins import asking
+from dewpoint.core.tenancy import lifecycle
 
 router = APIRouter(prefix="/api/v1", tags=["connections"])
 
@@ -164,6 +165,8 @@ async def verify(
             raise HTTPException(503, detail={"error": "plugin_calls_busy"}) from None
         except asking.TooManyCallsError:
             raise HTTPException(429, detail={"error": "too_many_plugin_calls"}) from None
+        except lifecycle.TenantNotActiveError:  # an erasure started after the request's check (2b-4a)
+            raise HTTPException(409, detail={"error": "tenant_erasing"}) from None
 
     try:
         conn = await service.verify_connection(

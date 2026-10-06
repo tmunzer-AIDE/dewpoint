@@ -52,6 +52,7 @@ from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.requests import RunRequest
 from dewpoint.core.models.schedules import Schedule
 from dewpoint.core.models.tenancy import Tenant
+from dewpoint.core.tenancy import lifecycle
 from dewpoint.core.workflows.service import lock_for_admission
 from dewpoint.engine.runtime.ids import schedule_of
 
@@ -110,6 +111,7 @@ async def admit_tick(
     `recorded` when its key already holds another outcome of this tick (it was paused then, enabled since). An expiry
     this call newly records is left in `s.info[EXPIRED]`, for the caller to alert on once its transaction commits."""
     await tenant_scope(s, tenant_id)
+    await lifecycle.hold_shared(s, tenant_id)  # first, as every writer of tenant data: an erasure's step 1 takes it
     found = await s.get(Schedule, schedule_id, populate_existing=True)  # row-level security: that tenant's only
     if found is None:
         raise ScheduleUnknownError(str(schedule_id))

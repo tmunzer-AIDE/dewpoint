@@ -50,6 +50,7 @@ from dewpoint.core.models.workflows import WorkflowVersion
 from dewpoint.core.platform.service import NOT_RECORDED, PRODUCTION, recorded
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.requests import digest as digests
+from dewpoint.core.tenancy import lifecycle as tenant_lifecycle
 from dewpoint.core.workflows.service import lock_for_admission, other_abi
 from dewpoint.engine.graph.csv import RESERVED, trigger_schema
 from dewpoint.engine.runtime.activities import LIVE, SIMULATE
@@ -296,6 +297,7 @@ async def _frozen(
 ) -> _Frozen:  # fmt: skip
     """The mutable checks, then the trigger claimed and its envelope stored (a CSV start's rows built and its upload
     consumed first): the frozen version, the envelope and what the audit entry adds."""
+    await tenant_lifecycle.hold_shared(s, tenant_id)  # an erasure's step 1 waits for this request, or it sees `erasing`
     tenant = await s.get(Tenant, tenant_id, populate_existing=True)
     if tenant is None:
         raise WorkflowNotFoundError(str(fields["workflow_id"]))
