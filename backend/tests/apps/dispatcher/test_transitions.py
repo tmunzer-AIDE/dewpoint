@@ -215,3 +215,23 @@ async def test_an_ended_runs_request_back_in_the_queue_goes_to_starting_holding_
     after = await state(owner_sessionmaker, first.id)
     assert (after["request"][0], after["slot"]) == ("starting", 0)
     assert await second_starts(dispatch_sessionmaker, second, api_settings)
+
+
+async def test_a_start_found_absent_is_due_at_once_whatever_the_dispatchers_clock(
+    limited, owner_sessionmaker, dispatch_sessionmaker, api_settings, monkeypatch
+) -> None:
+    """Back in the queue "due at once" is due by the clock `begin` reads, the database's: stamped by the dispatcher's
+    own, ahead of the database's (Docker Desktop's VM clock lags the host's, 66 to 678 ms measured, #38), it waited
+    out the offset, and a start retried at once found nothing (M4's full-suite failures, accounted for)."""
+    import datetime as real
+
+    class Ahead(real.datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> Any:  # type: ignore[override]
+            return real.datetime.now(tz) + real.timedelta(seconds=1)
+
+    monkeypatch.setattr(dispatch, "datetime", Ahead)
+    _, _, first, _ = limited
+    found = await started(dispatch_sessionmaker, first, api_settings)
+    assert await dispatch.settle(dispatch_sessionmaker, found, dispatch.Outcome("absent")) == "absent"
+    assert isinstance(await begin(dispatch_sessionmaker, first, api_settings), dispatch.Starting)

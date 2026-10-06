@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 import uuid
 
+import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from dewpoint.core.db import tenant_scope, user_scope
 
@@ -31,3 +33,13 @@ async def test_group_roles_exist(owner_sessionmaker) -> None:
     async with owner_sessionmaker() as s:
         rows = (await s.execute(text("select rolname from pg_roles where rolname like 'dewpoint_%'"))).scalars().all()
     assert {"dewpoint_api", "dewpoint_ingress", "dewpoint_dispatch", "dewpoint_worker", "dewpoint_admin"} <= set(rows)
+
+
+async def test_a_failed_statements_error_never_quotes_its_parameters(api_sessionmaker) -> None:
+    """An error's text is written wherever it's shown (a CLI's message, a test's report): a statement's parameters
+    are a password's hash, a token, a tenant's data."""
+    secret = "param-secret-6a1d"
+    async with api_sessionmaker() as s:
+        with pytest.raises(DBAPIError) as failed:
+            await s.execute(text("select cast(:p as text), 1 / 0"), {"p": secret})
+    assert "division by zero" in str(failed.value) and secret not in str(failed.value)

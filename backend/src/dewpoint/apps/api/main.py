@@ -9,6 +9,7 @@ from dewpoint.apps.api.errors import install_error_handlers
 from dewpoint.apps.api.middleware import BodyLimitMiddleware, ClientHeaderMiddleware, SecurityHeadersMiddleware
 from dewpoint.apps.api.openapi import OPENAPI_URL, ROUTERS, TITLE
 from dewpoint.apps.api.routes import csv_uploads
+from dewpoint.core import logs
 from dewpoint.core.config import Settings, get_settings
 from dewpoint.core.crypto.ingress import IngressKey
 from dewpoint.core.crypto.kek import KekSet
@@ -19,6 +20,7 @@ from dewpoint.engine.graph.csv import MAX_BYTES as CSV_MAX_BYTES
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
+    logs.configure()  # uvicorn's factory: the API's process starts here
     settings = settings or get_settings()
 
     @asynccontextmanager
@@ -45,6 +47,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )  # innermost: its 413 gets security headers
     app.add_middleware(ClientHeaderMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(logs.LifespanFailures)  # a startup or shutdown failure, by its type: never its traceback
     install_error_handlers(app)
     for router in ROUTERS:
         app.include_router(router)
