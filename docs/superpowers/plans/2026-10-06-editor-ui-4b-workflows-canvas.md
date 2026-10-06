@@ -2,8 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Revision 2 (2026-10-06).** Revision 1 (325fc14) was reviewed by the owner, who asked for seven corrections before
-approving execution; "Revision 2" below lists what changed and where. Execution waits for the owner's approval.
+**Revision 3 (2026-10-06).** The owner reviewed revision 1 (325fc14: seven corrections) and revision 2 (089c004:
+five corrections and one smaller); "Revision 2" and "Revision 3" below list what changed and where. Execution waits
+for the owner's approval.
 
 **Goal:** A tenant member can list workflows with their state at a glance, create one (blank or imported from a file),
 build its graph on a canvas with a pointer or the keyboard alone, have every edit saved without ever overwriting
@@ -87,29 +88,40 @@ The input classes and conditions most likely to bite a person using this, which 
   work downloadable, never retrying over the other's draft (Task 13: `a 409 stops every save and keeps the
   document`). A second publisher lands first: the confirmation's number is refused at the server and asked again,
   never silently published as the next one (Task 4: `two publishers naming one version publish it once`; Task 15:
-  `asks again, with the new number`; Task 16's two-page flow).
+  `asks again, with the new number`; Task 16's two-page flow). An activation lands between a save's read and its
+  swap: the answer compares with the version active when it landed (Task 3: `a save compares with the version
+  active when it lands`). A lost answer is read back, and another's publication is never taken for this draft's
+  (Task 15: `never takes another's publication for this draft's`, `takes the active version from the read`).
 - **Edits faster than saves, and leaving before the save.** Typing or dragging during a save never sends two saves at
   once nor drops the last edit (Task 13: `edits during a save coalesce into exactly one next save`); the breadcrumb,
-  the rail, the palette or the tenant switcher wait for the save, and ask when it can't be made (Task 13: `saves
-  before leaving through a link`, `asks before leaving work it couldn't save`; Task 16).
+  the rail, the palette, the tenant switcher, sign-out and an ended session all wait for the save, and ask when it
+  can't be made, before anything is revoked or cleared; a background failure never closes the editor (Task 13:
+  `saves before leaving through a link`, `asks before leaving work it couldn't save`, `answers sign-out's question`,
+  `stays open … when the step types fail to refresh or the cache is cleared`; Shell: `signs out only once every
+  open editor has had its say`; router: `leaves unsaved editor work on screen when the session ends`; Task 16).
 - **A check that doesn't describe what's on the screen.** An answer for an older revision, edits since, or a failed
   request: never "No problems", never badges on the steps (Task 14: `calls an answer for an older revision stale`,
-  `says it's checking before the first answer`, `says when a check failed`).
+  `says it's checking before the first answer`, `says when a check failed`); an older draft's publish findings never
+  count as current (Task 15: `keeps an older draft's publish findings out of the current problems`).
 - **A draft from elsewhere with what the editor can't model** (an unknown or retired type, a port the type no longer
   has, a cycle no entry reaches, an edge to a step that isn't there, a `settings` block): the canvas draws it, keeps
-  every field it doesn't touch byte for byte, reaches every item with the keys, and export refuses what it can't make
-  portable for certain (Task 9: `keeps what it doesn't touch`; Task 12: `reaches every item … with the keys alone`;
-  Task 5: `a draft that can't be made portable isn't exported`; Task 16's imported cycle).
+  every field it doesn't touch byte for byte, reaches every item with the keys (at a join, along the branch taken),
+  and export refuses what it can't make portable for certain (Task 9: `keeps what it doesn't touch`; Task 12:
+  `reaches every item … with the keys alone`, `keeps to the branch it came by at a join`; Task 15: the join read only
+  for a viewer, a conflict and a viewed version; Task 5: `a draft that can't be made portable isn't exported`; Task
+  12's imported cycle in the browser).
 - **An import that would carry or write the wrong thing** (an id kept in the file, a site its step's schema doesn't
-  mark, another tenant's connection, one of the wrong type, a malformed envelope): refused by name, nothing created
-  (Task 5: `a file embedding an id is refused`, `a binding of the wrong kind is refused`, `a malformed file is
-  refused`; Task 8: `refuses %s`).
+  mark, another tenant's connection, one of the wrong type, a malformed envelope, or a lookup that failed): refused
+  by name, nothing created, and never "unbound" by default (Task 5: `a file embedding an id is refused`, `a binding of
+  the wrong kind is refused`, `a malformed file is refused`; Task 8: `refuses %s`, `offers no choice until this
+  tenant's connections are read`).
 
 ## Rulings this plan proposes
 
 The outline leaves these open, or the code found differs from it. Each is the safest option; they join the ledger as
 rulings 68 onward when the plan is approved. Format: what - why - cost if wrong. The owner ruled on 1–21 with
-revision 1 (2026-10-06); each carries its status, and the amended ones read as amended. 22–26 are new in revision 2.
+revision 1 and on 22–26 with revision 2 (both 2026-10-06); each carries its status, and the amended ones read as
+amended. 27–28 are new in revision 3.
 
 1. **Accepted. Triggers wait for 4c.** Triggers are rows (schedules, webhook bindings, CSV uploads), not graph nodes,
    and their setup is 4c's. So 4b's chooser (1b) asks only how to start (Blank, Import from file); its first step,
@@ -177,17 +189,21 @@ revision 1 (2026-10-06); each carries its status, and the amended ones read as a
     not one that would close a cycle, not one already connected from that port); dragging from a handle does the
     same with a pointer. An edge is removed from its "+" item with Delete, after a confirmation. - Every pointer
     action has a keyboard one (2.1.1). - None.
-15. **Amended (owner): demonstrably complete keyboard navigation. The keyboard model (D16), exactly.** The canvas is
-    one tab stop. Its items are the start card, each step, each edge (its "+"), and each free port (its "+"); they form
-    a tree from the start card, and a step no entry reaches (a cycle no entry leads into, a step whose only edges in
-    come from steps that aren't there) joins the start card's children, topmost first, so every item drawn is reached.
-    Down goes to the first item below, Up to the one above, Left and Right to the previous or next sibling; Home goes
-    to the start card. Enter on a step opens its panel (read-only in 4b; 4c's drawer replaces it), on an edge or a
-    free port the picker; `A` opens the picker after the focused step's first port; `C` connects from it; Delete asks;
-    Escape closes the picker or panel and returns focus; Ctrl or Cmd+Z undoes, Shift+Ctrl or Cmd+Z redoes. A polite
-    live region announces what changed. React Flow's own keyboard handling is off. Tests press every key from every
-    item reached, over chains, branches, joins, cycles, separate components and an imported draft's dangling, repeated
-    and self edges, and the browser walks an imported cycle. - D16. - None.
+15. **Amended (owner): demonstrably complete keyboard navigation. The keyboard model (D16), exactly.** The canvas is one
+    tab stop. Its items are the start card, each step, each edge (its "+"), and each free port (its "+"); each lists its
+    children from the start card down, and a step no entry reaches (a cycle no entry leads into, a step whose only edges
+    in come from steps that aren't there) joins the start card's children, topmost first, so every item drawn is
+    reached. A step joined from two places is a child of both, so the keys carry the path they came by (revision 3, the
+    owner's correction 3): Down goes to the first child, Up back the way the keys came, Left and Right among the
+    children of the item they came from (at a join, the branch taken); a click, Tab or a change starts the path afresh
+    from the walk's own. Home goes to the start card. Enter on a step opens its panel (read-only in 4b; 4c's drawer
+    replaces it), on an edge or a free port the picker; `A` opens the picker after the focused step's first port; `C`
+    connects from it; Delete asks; Escape closes the picker or panel and returns focus; Ctrl or Cmd+Z undoes, Shift+Ctrl
+    or Cmd+Z redoes. A polite live region announces what changed. React Flow's own keyboard handling is off. Tests press
+    every key from every path reached, over chains, branches, joins (one a second branch also reaches), cycles, separate
+    components and an imported draft's dangling, repeated and self edges, editable and read only (a viewer, a conflict,
+    a viewed version); the editor's own wiring is tested at that join for all three read-only cases, and the browser
+    walks an imported cycle. - D16. - None.
 16. **Accepted. A problem focuses its step** on the canvas (brought into view); the field itself waits for 4c's
     drawer. - 4b has no field to focus. - None.
 17. **Amended (owner): server-bound publish confirmation.** Publish needs `workflow.publish`; an editor without it
@@ -224,33 +240,56 @@ revision 1 (2026-10-06); each carries its status, and the amended ones read as a
 21. **Accepted, extended by correction 4. Undo and redo stay local** (D17): a history of up to 100 documents in
     memory, cleared when the editor closes. Undo is off after a conflict (the editor is read-only), and while a
     publication or an activation runs. - D17. - None.
-22. **New. Leaving the editor saves first.** Router navigations (the breadcrumb, the rail, the palette, the tenant
-    switcher) wait for the pending save (`useBlocker`); work that can't be saved (a failed save, a conflict) asks:
-    stay, download my version, or leave without saving. Closing the tab gets the browser's prompt. Reload after a
+22. **Accepted (owner, with revision 2); extended in revision 3. Leaving the editor saves first.** One decision, the
+    editor's: save what's pending; when that can't be done (a failed save, a conflict), ask: stay, download my
+    version, or leave without saving. It answers every way out: router navigations (the breadcrumb, the rail, the
+    palette, the tenant switcher) through the router's blocker; sign-out, which asks it before revoking the session
+    or clearing the query cache; and an ended session, which keeps the shell and the unsaved work on screen with a
+    notice instead of swapping it for the sign-in page. Closing the tab gets the browser's prompt. Reload after a
     conflict asks before discarding the local version. The saver is disposed when the editor closes: a save still in
     flight that answers afterwards sends nothing more. - The debounce and a conflict both leave work only on the
-    screen. - Leaving waits as long as a save takes.
-23. **New. The editor opens on a fresh snapshot.** It waits for the workflow read made after it mounted (never a
-    cached copy, which would conflict on the first edit), seeds itself once, and owns its document from then: a later
-    read neither replaces nor closes it. - A stale draft turns the first edit into a conflict. - One read, and a
-    moment of "Loading…", on every entry.
-24. **New. A check is current only for what's on the screen.** The editor says "Checking…" or "Not checked" before
-    the first answer, "Check failed" when a request fails, "… before your edits" when the answer is for an older
-    revision or edits came since; badges sit on the steps, and a step's panel lists its problems, only while the
-    check is current. Viewing a version shows none of the draft's. - The owner's correction 2: a failed or stale check
-    must not keep reassuring. - Badges disappear between an edit and the next check (about a second, plus the
-    check).
-25. **New. An outcome is said only when known.** A publish or an activation without an answer from the API (the
-    network, or a 5xx) is read back (the versions and the workflow) and reported as found, or as not known; never as
-    failed. A version made active stays made active when the read after it fails, and the draft's comparison with it
-    is "not known" until read (`Saved · v1 is active`). Only the newest "View version" answer is shown. - Lost answers
-    don't establish failure, and a retry after one is safe only because of ruling 17's expectation. - One or two reads
-    after a lost answer.
-26. **New. A draft that can't be exported portably is offered as it is, labelled.** In the editor, a refused export
-    offers "Download this draft as it is (not portable)", a `.draft.json` file the importer refuses (it isn't a
-    `dewpoint.workflow` file); the list says to open the workflow for it. - The owner's option of a separately
-    labelled recovery download: the person keeps their work, and the label says the file holds this tenant's ids. -
-    One more download path carrying the tenant's ids, as the conflict's download already does.
+    screen, and a revoked session or a cleared cache must not take it first. - Leaving waits as long as a save takes;
+    an ended session waits for the person's choice.
+23. **Accepted (owner, with revision 2); extended in revision 3. The editor opens on a fresh snapshot, and stays
+    open.** It waits for the workflow read made after it mounted (never a cached copy, which would conflict on the
+    first edit), and keeps what it opened with (the workflow, the step types, the role): a later read, a failed
+    refresh of an auxiliary query or a cleared cache neither replaces nor closes it, and a failure shows beside it. -
+    A stale draft turns the first edit into a conflict; a background failure must not discard local work. - One read,
+    and a moment of "Loading…", on every entry; step types refreshed elsewhere may lag in an open editor.
+24. **Accepted (owner, with revision 2); extended in revision 3. A check is current only for what's on the screen.**
+    The editor says "Checking…" or "Not checked" before the first answer, "Check failed" when a request fails, "…
+    before your edits" when the answer is for an older revision or edits came since; badges sit on the steps, and a
+    step's panel lists its problems, only while the check is current. What only publish found carries its own
+    snapshot (revision and generation) and is current on the same terms: afterwards it stays in the panel's "Found
+    at publish", marked as before the latest edits, never in a step's problems or an unqualified count. Viewing a
+    version shows none of the draft's. - A failed or stale check must not keep reassuring, nor a stale finding
+    alarm. - Badges disappear between an edit and the next check (about a second, plus the check).
+25. **Principle accepted (owner, with revision 2); proof amended in revision 3. An outcome is said only when known.**
+    A publish or an activation without an answer from the API (the network, or a 5xx) is read back and reported as
+    found, or as not known; never as failed, and never as published without evidence. A version holds this draft
+    only if its recorded `graph_hash` is the hash the server gave for the revision submitted (the save's answer, or
+    the load's `draft_graph_hash`); a version of that number with another hash is another publication, and this one
+    was refused. The active version and the draft's comparison always come from the read (or the answer) itself,
+    never from the number hoped for. A version made active stays made active when the read after it fails, and the
+    draft's comparison with it is "not known" until read (`Saved · v1 is active`); nothing read back leaves the
+    active version "not known". Only the newest "View version" answer is shown. - A version's existence and the
+    draft's current revision don't say which revision the version holds (the owner reproduced both wrong
+    inferences). - Two reads after a lost answer; the draft's hash travels in the save's answer and the summary.
+26. **Accepted (owner, with revision 2). A draft that can't be exported portably is offered as it is, labelled.** In
+    the editor, a refused export offers "Download this draft as it is (not portable)", a `.draft.json` file the
+    importer refuses (it isn't a `dewpoint.workflow` file); the list says to open the workflow for it. - The owner's
+    option of a separately labelled recovery download: the person keeps their work, and the label says the file
+    holds this tenant's ids. - One more download path carrying the tenant's ids, as the conflict's download already
+    does.
+27. **New in revision 3. A save's answer names the version it compared with.** `put_draft` reads the active version
+    after its compare-and-swap, under the row lock the swap took, and answers it (`active_version_id`,
+    `active_version_number`) beside `unpublished_changes` and the saved draft's `graph_hash`; the editor labels the
+    active version from that same answer. - The route reads the workflow without a lock, so an activation can land
+    between that read and the swap (the owner's correction 5). - Two fields more on each save's answer, and one read.
+28. **New in revision 3. Bindings are chosen from what was read.** While this tenant's connections and workflows are
+    loading, or when they couldn't be read, the import offers no choice and can't be submitted; "Leave unbound" is a
+    choice among what was read, and a binding with nothing to offer says so. - An empty list standing in for a
+    failed lookup would make "unbound" look chosen. - An import waits for two lists.
 
 ## Revision 2
 
@@ -287,6 +326,33 @@ step panel showing the draft's step and expressions, and placing a step while a 
 a lost publish's read-back calling a listed version unpublished, and a re-asked confirmation keeping the old focus
 (Task 15); the browser parser skipping the API model's bounds (Task 8); and a miscounted test total (Task 16).
 
+## Revision 3
+
+What changed from revision 2 (089c004), by the owner's review of it (five corrections, one smaller), and where:
+1. **Lost-answer reconciliation** (Tasks 3, 15; ruling 25's proof): a version holds this draft only if its recorded
+   `graph_hash` equals the hash the server gave for the revision submitted; the save's answer and the summary carry
+   that hash (`graph_hash`, `draft_graph_hash`), and the saver keeps it (`savedHash`). Another hash means another
+   publication, and this one refused; the active version and the comparison come from the read itself
+   (`compared`), and nothing read back leaves the active version "not known" (`lostTrack`).
+2. **Destructive exits and background failures** (Task 13; rulings 22, 23): leaving is one decision the editor
+   makes, awaited by the router's blocker and asked by sign-out (`mayLeave`, before the session is revoked or the
+   cache cleared) and by an ended session (`RequireActive` keeps the shell and the work on screen, with a notice).
+   `EditorPage` keeps what it opened with: a failed step-type refresh, or a cleared cache, shows beside the editor,
+   never in its place.
+3. **Keyboard reach at joins** (Tasks 12, 15; ruling 15): the keys carry the path they came by (`step`, `pathTo`,
+   `isPath`), so at a join Left and Right stay in the branch taken and Up goes back that way; the reachability tests
+   walk paths, and the owner's case (a → b, c; b → d, e; c → d, f) is tested in the model, editable and read only,
+   and through the editor for a viewer, a conflict and a viewed version.
+4. **Publish findings' snapshot** (Tasks 14, 15; ruling 24): `PublishProblems` carries the revision and the generation
+   it was found in, and is current only on the same terms as a check; a stale finding stays in "Found at publish",
+   marked, and never in a step's problems, the badges or an unqualified count.
+5. **The save's comparison** (Tasks 3, 13; ruling 27): `put_draft` reads the active version after its swap, under the
+   row lock the swap took (`service.locked_active_version`), and answers it with the comparison; the editor's
+   active-version label comes from that same answer. A test interleaves an activation between the route's read and
+   its swap.
+6. **Binding choices** (Task 8; ruling 28): `useBindingChoices` says loading, failed (with Try again) or ready; the
+   import can't be submitted until each needed list is read, and a binding with nothing to offer says so.
+
 ## File structure
 
 Backend, modified:
@@ -310,8 +376,9 @@ Backend, new:
 
 Frontend, new:
 - `src/lib/workflows.ts`: the workflow API's types and queries, `notPortable`. `src/lib/graph.ts`: the document and
-  its operations. `src/lib/layout.ts`: dagre. `src/lib/draftSync.ts`: saving (D17). `src/lib/history.ts`: undo and
-  redo. `src/lib/announce.ts`: the live region's store. `src/lib/download.ts`.
+  its operations. `src/lib/layout.ts`: dagre. `src/lib/draftSync.ts`: saving (D17). `src/lib/leaving.ts`: leaving's
+  decision, asked from outside the router. `src/lib/history.ts`: undo and redo. `src/lib/announce.ts`: the live
+  region's store. `src/lib/download.ts`.
 - `src/components/Switch.tsx`, `src/components/Announcer.tsx`, `src/components/Segmented.tsx`.
 - `src/routes/Workflows.tsx` (1a), `src/routes/NewWorkflow.tsx` (1b), `src/routes/ImportBindings.tsx`.
 - `src/routes/editor/`: `Editor.tsx`, `Toolbar.tsx`, `Canvas.tsx`, `canvasNav.ts`, `check.ts`, `items.ts`,
@@ -854,7 +921,8 @@ git commit -m "feat(api): every workflow route answers a named model; the draft 
 - Modify: `backend/src/dewpoint/apps/api/routes/workflows.py` (`_summaries`, `_summary`, `list_workflows`, `put_draft`)
 - Create: `backend/tests/apps/test_workflow_summary.py`, `backend/tests/apps/api/test_workflow_summary.py`
 - Create: `backend/tests/probes/workflow_list.py` (the evidence for the milestone 1 pause; run by hand, never in CI)
-- Modify: `backend/tests/apps/api/test_workflows.py:32` (the draft PUT's answer gains `unpublished_changes`)
+- Modify: `backend/tests/apps/api/test_workflows.py:32` (the draft PUT's answer gains its comparison, its graph hash and
+  the active version it compared with)
 - Regenerate: `frontend/src/api/openapi.json`, `frontend/src/api/schema.d.ts`
 
 **Interfaces:**
@@ -871,11 +939,21 @@ git commit -m "feat(api): every workflow route answers a named model; the draft 
     RunStats]` (`RunStats(last_live, last_simulated, live_24h, simulated_24h)`, `LastRun(status, at)`),
     `attention(stats, *, published, blocked) -> list[str]`, `DraftHashes(kept)` with `async of(drafts) ->
     dict[uuid.UUID, str | None]` and `len()`, the process's `HASHES`;
-  - `service.blocked_by_many(s, versions) -> dict[uuid.UUID, list[str]]`;
-  - `WorkflowOut` gains `unpublished_changes: bool`, `last_run: LastRunOut | None` (the last live root run),
-    `last_simulation: LastRunOut | None` (the last simulated one), `runs_24h: RunCountOut` (`live`, `simulate`),
-    `needs_attention: list["last_run_failed" | "not_executable"]`; `LastRunOut` is `status`, `at`;
-    `DraftSavedOut` gains `unpublished_changes`.
+  - `service.blocked_by_many(s, versions) -> dict[uuid.UUID, list[str]]`; `service.locked_active_version(s,
+    workflow_id) -> WorkflowVersion | None` (read after `save_draft`'s update, under the row lock it took);
+  - `WorkflowOut` gains `unpublished_changes: bool`, `draft_graph_hash: str | None` (the server's hash of the draft,
+    as publish would record it; null for one that doesn't parse), `last_run: LastRunOut | None` (the last live root
+    run), `last_simulation: LastRunOut | None` (the last simulated one), `runs_24h: RunCountOut` (`live`,
+    `simulate`), `needs_attention: list["last_run_failed" | "not_executable"]`; `LastRunOut` is `status`, `at`;
+  - `DraftSavedOut` gains `unpublished_changes`, `graph_hash` (the saved draft's), and `active_version_id` and
+    `active_version_number`: the version it was compared with, active when the save landed. The editor keeps the
+    hash to recognise its draft in a version (Task 15, 4b ruling 25) and labels the active version from the same
+    answer.
+
+The save's comparison is with the version active when its update landed, never with the one the route read before
+it (the owner's review of revision 2, correction 5): `put_draft` reads the workflow without a lock, so an activation
+can commit between that read and the compare-and-swap; the swap's update takes the row lock, and the active version
+read after it can't change before the answer is sent.
 
 The list reads a fixed number of times whatever its length: the workflows, their active versions, the lifecycle states
 of every entry those versions use, the last runs and the 24-hour counts, each once for all (the owner's review of
@@ -1007,6 +1085,7 @@ import pytest
 from sqlalchemy import event, text
 from sqlalchemy.engine import Engine
 
+from dewpoint.engine.graph.model import graph_hash, parse_graph
 from tests.apps.api.helpers import session_client
 from tests.support.graphs import G
 from tests.support.registry import sync_test_plugins
@@ -1056,6 +1135,7 @@ async def test_the_list_says_how_each_workflows_runs_went(app, owner_sessionmake
         quiet, _ = await published(c, tid)
         rows = {w["id"]: w for w in (await c.get(f"/api/v1/t/{tid}/workflows")).json()}
     busy = rows[wid]
+    assert busy["draft_graph_hash"] == graph_hash(parse_graph(GRAPH))
     assert busy["last_run"]["status"] == "failed" and busy["last_simulation"]["status"] == "succeeded"
     assert busy["runs_24h"] == {"live": 2, "simulate": 1}
     assert busy["needs_attention"] == ["last_run_failed"]  # the later successful simulation doesn't clear it
@@ -1094,13 +1174,46 @@ async def test_a_moved_step_is_an_unpublished_change(app, owner_sessionmaker, ap
         assert new["unpublished_changes"] is True and new["active_version_number"] is None  # ruling 6
         wid, _ = await published(c, tid)
         base = f"/api/v1/t/{tid}/workflows/{wid}"
-        same = await c.put(f"{base}/draft", json=GRAPH, headers={"If-Match": "1"})
-        assert same.json() == {"draft_revision": 2, "unpublished_changes": False}
+        same = (await c.put(f"{base}/draft", json=GRAPH, headers={"If-Match": "1"})).json()
+        assert (same["draft_revision"], same["unpublished_changes"]) == (2, False)
+        assert (same["graph_hash"], same["active_version_number"]) == (graph_hash(parse_graph(GRAPH)), 1)
         moved = G().node("a", "testkit.echo@1", {"value": 1}).data()
         moved["nodes"][0]["position"] = {"x": 40, "y": 0}
-        saved = await c.put(f"{base}/draft", json=moved, headers={"If-Match": "2"})
-        assert saved.json() == {"draft_revision": 3, "unpublished_changes": True}
-        assert (await c.get(base)).json()["unpublished_changes"] is True
+        saved = (await c.put(f"{base}/draft", json=moved, headers={"If-Match": "2"})).json()
+        assert (saved["draft_revision"], saved["unpublished_changes"]) == (3, True)
+        row = (await c.get(base)).json()
+        assert row["unpublished_changes"] is True and row["draft_graph_hash"] == graph_hash(parse_graph(moved))
+
+
+async def test_a_save_compares_with_the_version_active_when_it_lands(
+    app, owner_sessionmaker, api_settings, monkeypatch
+) -> None:
+    """An activation commits between the route's read of the workflow and its compare-and-swap: the answer names the
+    version active when the save landed, and compares with that one (the owner's review of revision 2)."""
+    from dewpoint.core.workflows import service
+
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        wid, v1 = await published(c, tid)  # version 1 is GRAPH
+        base = f"/api/v1/t/{tid}/workflows/{wid}"
+        moved = G().node("a", "testkit.echo@1", {"value": 1}).data()
+        moved["nodes"][0]["position"] = {"x": 40, "y": 0}
+        await c.put(f"{base}/draft", json=moved, headers={"If-Match": "1"})
+        v2 = (await c.post(f"{base}/publish", headers={"If-Match": "2"})).json()  # version 2 is `moved`, active
+        real = service.save_draft
+
+        async def activated_meanwhile(s, wf, **kw):  # wf was read with version 2 active
+            async with owner_sessionmaker() as other, other.begin():  # as an activation of version 1 commits
+                await other.execute(
+                    text("update workflows set active_version_id = :v where id = :w"), {"v": uuid.UUID(v1), "w": uuid.UUID(wid)}
+                )
+            return await real(s, wf, **kw)
+
+        monkeypatch.setattr(service, "save_draft", activated_meanwhile)
+        saved = (await c.put(f"{base}/draft", json=moved, headers={"If-Match": "2"})).json()
+    assert v2["number"] == 2
+    assert (saved["active_version_id"], saved["active_version_number"]) == (v1, 1)
+    assert saved["unpublished_changes"] is True  # `moved` against version 1, never against the stale version 2
 
 
 async def test_a_version_that_cant_run_needs_attention(
@@ -1155,19 +1268,24 @@ async def test_the_lists_reads_dont_grow_with_its_workflows(app, owner_sessionma
     assert few == many <= 6  # workflows, active versions, two lifecycle reads at most, last runs, counts
 ```
 
-In `backend/tests/apps/api/test_workflows.py:32`, the draft PUT's answer gains the new field:
+In `backend/tests/apps/api/test_workflows.py:32`, the draft PUT's answer gains the new fields:
 
 ```python
-        assert saved.status_code == 200 and saved.json() == {"draft_revision": 2, "unpublished_changes": True}
+        assert saved.status_code == 200, saved.text
+        body = saved.json()
+        assert (body["draft_revision"], body["unpublished_changes"], body["active_version_id"]) == (2, True, None)
+        assert body["graph_hash"] == graph_hash(parse_graph(GRAPH))
 ```
+
+(`graph_hash` and `parse_graph` join that file's imports from `dewpoint.engine.graph.model`.)
 
 - [ ] **Step 3: Run the tests to see them fail**
 
 Run: `cd backend && uv run pytest -q -p no:cacheprovider tests/apps/test_workflow_summary.py tests/apps/api/test_workflow_summary.py tests/apps/api/test_workflows.py`
 Expected: FAIL: `ImportError: cannot import name 'workflow_summary'`, `KeyError: 'last_run'` (and
-`'unpublished_changes'`), the draft PUT's answer lacks `unpublished_changes`, and the statement count grows with the
-workflows (today's
-`_summary` refreshes each workflow and reads its version and lifecycle states one by one).
+`'unpublished_changes'`), the draft PUT's answer lacks its new fields, the statement count grows with the workflows
+(today's `_summary` refreshes each workflow and reads its version and lifecycle states one by one), and the save
+answers no active version.
 
 - [ ] **Step 4: Implement `workflow_summary.py`**
 
@@ -1349,6 +1467,7 @@ and add to `WorkflowOut`, after `updated_at` (B3):
 
 ```python
     unpublished_changes: bool  # the draft differs from the active version (true when nothing is published)
+    draft_graph_hash: str | None  # the draft's graph hash as publish would record it; null when it doesn't parse
     last_run: LastRunOut | None  # its last live root run: what attention follows
     last_simulation: LastRunOut | None  # its last simulated root run, shown apart, never attention
     runs_24h: RunCountOut  # its root runs queued in the last 24 hours, live and simulated apart
@@ -1358,7 +1477,10 @@ and add to `WorkflowOut`, after `updated_at` (B3):
 and to `DraftSavedOut`:
 
 ```python
-    unpublished_changes: bool
+    unpublished_changes: bool  # against `active_version_*`, the version active when the save landed
+    graph_hash: str | None  # the saved draft's, as publish would record it
+    active_version_id: str | None
+    active_version_number: int | None
 ```
 
 In `backend/src/dewpoint/apps/api/routes/workflows.py`, import it (`from dewpoint.apps import workflow_ops,
@@ -1395,6 +1517,7 @@ async def _summaries(db: AsyncSession, tenant_id: uuid.UUID, wfs: list[Workflow]
                 "created_at": wf.created_at.isoformat(),
                 "updated_at": wf.updated_at.isoformat(),
                 "unpublished_changes": active is None or hashes[wf.id] != active.graph_hash,
+                "draft_graph_hash": hashes[wf.id],
                 "last_run": _last(runs.last_live),
                 "last_simulation": _last(runs.last_simulated),
                 "runs_24h": {"live": runs.live_24h, "simulate": runs.simulated_24h},
@@ -1416,18 +1539,39 @@ async def _summary(db: AsyncSession, wf: Workflow) -> dict[str, object]:
     return await _summaries(db, ctx.tenant_id, await service.list_workflows(db, ctx.tenant_id))
 ```
 
-`put_draft` answers the comparison too, hashing the draft it is saving without keeping the hash: the transaction
-commits only after the handler returns, and a rolled-back save's revision can come back with another draft (found by
-the revision's review). The next list hashes it from the committed row.
+In `backend/src/dewpoint/core/workflows/service.py`, after `save_draft`:
+
+```python
+async def locked_active_version(s: AsyncSession, workflow_id: uuid.UUID) -> WorkflowVersion | None:
+    """The workflow's active version, read after this transaction updated its row (`save_draft`): the row lock it holds
+    until commit keeps an activation from changing it before the answer is sent. A `Workflow` read before the update
+    may name an older one (`save_draft` updates with `synchronize_session=False`)."""
+    q = (
+        select(WorkflowVersion)
+        .join(Workflow, Workflow.active_version_id == WorkflowVersion.id)
+        .where(Workflow.id == workflow_id)
+    )
+    return (await s.execute(q)).scalar_one_or_none()
+```
+
+`put_draft` answers the comparison, with the version it compared against, and the saved draft's hash. It hashes the
+draft without keeping the hash: the transaction commits only after the handler returns, and a rolled-back save's
+revision can come back with another draft (the next list hashes it from the committed row).
 
 ```python
     try:
         revision = await service.save_draft(db, wf, expected_revision=expected, draft=draft)
     except service.DraftConflictError as e:
         raise HTTPException(409, detail={"error": "draft_conflict", "draft_revision": e.current_revision}) from None
-    active = await service.get_version(db, wf.id, wf.active_version_id) if wf.active_version_id else None
+    active = await service.locked_active_version(db, wf.id)  # never `wf.active_version_id`: it may predate the swap
     saved = await workflow_summary.hash_now(draft)
-    return {"draft_revision": revision, "unpublished_changes": active is None or saved != active.graph_hash}
+    return {
+        "draft_revision": revision,
+        "unpublished_changes": active is None or saved != active.graph_hash,
+        "graph_hash": saved,
+        "active_version_id": str(active.id) if active else None,
+        "active_version_number": active.number if active else None,
+    }
 ```
 
 - [ ] **Step 7: Run the tests to see them pass, then the workflow suites**
@@ -1438,7 +1582,8 @@ the helper to the constraint the error names, never the code under test. If the 
 missed by a read the middleware makes of a workflow table, name that statement in the test's docstring and keep
 `few == many`, which is the property; never loosen the equality.
 
-- [ ] **Step 8: Regenerate the client's schema and check it.** Expected: `WorkflowOut` gains the five fields.
+- [ ] **Step 8: Regenerate the client's schema and check it.** Expected: `WorkflowOut` gains its six fields and
+  `DraftSavedOut` its four.
 
 - [ ] **Step 9: Write the probe, and run it for the milestone 1 pause**
 
@@ -2855,11 +3000,11 @@ git commit -m "feat(api): a workflow exports with typed placeholders and imports
 **Milestone 1's check, then the owner's pause.** Run `cd backend && uv run pytest -q -n 12 -p no:cacheprovider
 tests/apps/api tests/apps/test_workflow_ops.py tests/apps/test_workflow_summary.py tests/core/workflows
 tests/apps/test_admission.py`, then the static checks; all pass. Then stop for the owner's review with: the API
-contracts as they stand (the regenerated `openapi.json`'s diff for milestone 1, and the refusals each route answers), the statement-count test's
-result, and the probe's evidence from Task 3, Step 9 (the plans and timings at each size, with and without the
-candidate index, and the hashing costs, with the machine). Ruling 5 is decided there: accept the list without an index
-on the measured numbers, or assign a migration slot for the index and its LATERAL read (planned then, as an addendum to
-this plan). Milestone 2 waits for the owner's word.
+contracts as they stand (the regenerated `openapi.json`'s diff for milestone 1, and the refusals each route answers),
+the statement-count test's result, and the probe's evidence from Task 3, Step 9 (the plans and timings at each size,
+with and without the candidate index, and the hashing costs, with the machine). Ruling 5 is decided there: accept the
+list without an index on the measured numbers, or assign a migration slot for the index and its LATERAL read (planned
+then, as an addendum to this plan). Milestone 2 waits for the owner's word.
 
 ## Milestone 2 — The list and the chooser
 
@@ -4017,7 +4162,8 @@ git commit -m "feat(web): the workflows list (1a): state at a glance, filters, t
   (`{name, document, bind}`), `GET …/connections` (the key `["connections", tenantId]` Connections uses),
   `workflowsQuery`, `WorkflowDocument`, `Select` (`frontend/src/components/Field.tsx`).
 - Produces: `<NewWorkflow tenantId onClose />` (a native modal dialog, D23), `parseDocument(text) ->
-  WorkflowDocument | null`, `<ImportBindings tenantId bindings chosen onChange />`, `type Chosen = Record<string,
+  WorkflowDocument | null`, `useBindingChoices(tenantId, bindings) -> Choices` (`state: "ready" | "loading" |
+  "failed"`, the lists, `retry`), `<ImportBindings bindings choices chosen onChange />`, `type Chosen = Record<string,
   string>`.
 
 `parseDocument` checks the whole envelope as the API's model does (the owner's review of 325fc14, correction 5):
@@ -4052,17 +4198,19 @@ const CONNECTIONS = [
 
 let sent: { method: string; path: string; body: unknown }[];
 let answer: { status: number; body: unknown };
+let connectionsAnswer: () => Response;
 
 beforeEach(() => {
   sent = [];
   answer = { status: 201, body: { id: "w9", name: "Nightly report" } };
+  connectionsAnswer = () => new Response(JSON.stringify(CONNECTIONS));
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const request = input as Request;
     const path = new URL(request.url).pathname;
     const text = await request.text();
     sent.push({ method: request.method, path, body: text ? JSON.parse(text) : null });
     if (request.method === "POST") return new Response(JSON.stringify(answer.body), { status: answer.status });
-    if (path.endsWith("/connections")) return new Response(JSON.stringify(CONNECTIONS));
+    if (path.endsWith("/connections")) return connectionsAnswer();
     return new Response("[]");
   });
 });
@@ -4160,6 +4308,33 @@ it.each([
   expect(parseDocument(JSON.stringify(doc))).toBeNull();
 });
 
+async function importDoc(doc: object = DOC) {
+  await userEvent.click(screen.getByRole("radio", { name: /Import from file/ }));
+  await userEvent.upload(screen.getByLabelText("Workflow file"), new File([JSON.stringify(doc)], "n.json", { type: "application/json" }));
+}
+
+it("offers no choice until this tenant's connections are read, and says when they can't be", async () => {
+  connectionsAnswer = () => new Response(JSON.stringify({ error: "http_error" }), { status: 500 });
+  await show();
+  await importDoc();
+  expect((await screen.findByRole("alert")).textContent).toContain("couldn't be read, so nothing can be bound yet");
+  expect(screen.queryByLabelText("Acme Prod (mist connection)")).toBeNull(); // never "Leave unbound" by default
+  expect(screen.getByRole("button", { name: "Import and open" }).hasAttribute("disabled")).toBe(true);
+  connectionsAnswer = () => new Response(JSON.stringify(CONNECTIONS));
+  await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+  expect(await screen.findByLabelText("Acme Prod (mist connection)")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Import and open" }).hasAttribute("disabled")).toBe(false);
+});
+
+it("says when this tenant has no connection of a binding's type", async () => {
+  connectionsAnswer = () => new Response(JSON.stringify(CONNECTIONS.filter((c) => c.type !== "mist")));
+  await show();
+  await importDoc();
+  const binding = await screen.findByLabelText("Acme Prod (mist connection)");
+  expect([...(binding as HTMLSelectElement).options].map((o) => o.text)).toEqual(["Leave unbound"]);
+  expect(screen.getByText("No mist connection in this tenant: it stays unbound.")).toBeTruthy();
+});
+
 it("refuses a file with a null binding without breaking the dialog", async () => {
   await show();
   await userEvent.click(screen.getByRole("radio", { name: /Import from file/ }));
@@ -4210,46 +4385,86 @@ Expected: FAIL: `NewWorkflow` doesn't exist; the list has no "New workflow".
 ```tsx
 // SPDX-License-Identifier: Apache-2.0
 // Each id a workflow file names (a connection, a workflow) bound to one of this tenant's, or left unbound (B12; 4b
-// ruling 18). A connection binding offers only connections of its type.
+// ruling 18). A connection binding offers only connections of its type. Leaving one unbound is a choice the person
+// makes from what was read (ruling 28): while this tenant's connections and workflows are loading, or when they
+// couldn't be read, no choice is offered and nothing can be imported.
 import { useQuery } from "@tanstack/react-query";
+import { Button } from "../components/Button";
 import { Select } from "../components/Field";
 import { client, ok } from "../lib/client";
 import { workflowsQuery, type WorkflowDocument } from "../lib/workflows";
 
 export type Chosen = Record<string, string>;
 
-export function ImportBindings({
-  tenantId,
-  bindings,
-  chosen,
-  onChange,
-}: {
-  tenantId: string;
-  bindings: WorkflowDocument["bindings"];
-  chosen: Chosen;
-  onChange: (chosen: Chosen) => void;
-}) {
+export type Choices = {
+  state: "ready" | "loading" | "failed";
+  connections: { id: string; name: string; type: string }[];
+  workflows: { id: string; name: string }[];
+  retry: () => void;
+};
+
+/** This tenant's connections and workflows, read only when a binding needs them; "ready" only once each needed list
+ * was read, never an empty list standing in for one that wasn't. */
+export function useBindingChoices(tenantId: string, bindings: WorkflowDocument["bindings"]): Choices {
+  const needConnections = bindings.some((b) => b.kind === "connection");
+  const needWorkflows = bindings.some((b) => b.kind === "workflow");
   const connections = useQuery({
     queryKey: ["connections", tenantId],
     queryFn: () => ok(client.GET("/api/v1/t/{tenant_id}/connections", { params: { path: { tenant_id: tenantId } } })),
-    enabled: bindings.some((b) => b.kind === "connection"),
+    enabled: needConnections,
   });
-  const workflows = useQuery({ ...workflowsQuery(tenantId), enabled: bindings.some((b) => b.kind === "workflow") });
+  const workflows = useQuery({ ...workflowsQuery(tenantId), enabled: needWorkflows });
+  const needed = [...(needConnections ? [connections] : []), ...(needWorkflows ? [workflows] : [])];
+  const state = needed.some((q) => q.isError) ? "failed" : needed.every((q) => q.isSuccess) ? "ready" : "loading";
+  return {
+    state,
+    connections: (connections.data ?? []).map((c) => ({ id: c.id, name: c.name, type: c.type })),
+    workflows: (workflows.data ?? []).map((w) => ({ id: w.id, name: w.name })),
+    retry: () => {
+      if (connections.isError) void connections.refetch();
+      if (workflows.isError) void workflows.refetch();
+    },
+  };
+}
+
+export function ImportBindings({
+  bindings,
+  choices,
+  chosen,
+  onChange,
+}: {
+  bindings: WorkflowDocument["bindings"];
+  choices: Choices;
+  chosen: Chosen;
+  onChange: (chosen: Chosen) => void;
+}) {
   if (bindings.length === 0) return <p className="text-small text-muted">The file names no connection or workflow.</p>;
+  if (choices.state === "loading") {
+    return <p className="text-small text-muted">Reading this tenant&apos;s connections and workflows…</p>;
+  }
+  if (choices.state === "failed") {
+    return (
+      <p role="alert" className="flex flex-wrap items-center gap-2 text-small text-danger">
+        This tenant&apos;s connections or workflows couldn&apos;t be read, so nothing can be bound yet.
+        <Button size="sm" onClick={choices.retry}>Try again</Button>
+      </p>
+    );
+  }
   return (
     <fieldset className="flex flex-col gap-3">
       <legend className="mb-1 text-small font-semibold">What the file names, bound to this tenant&apos;s</legend>
       {bindings.map((b) => {
         const options =
           b.kind === "connection"
-            ? (connections.data ?? []).filter((c) => c.type === b.type).map((c) => ({ id: c.id, name: c.name }))
-            : (workflows.data ?? []).map((w) => ({ id: w.id, name: w.name }));
+            ? choices.connections.filter((c) => c.type === b.type)
+            : choices.workflows;
         const places = `${b.sites.length} place${b.sites.length === 1 ? "" : "s"} in the graph`;
+        const none = b.kind === "connection" ? `No ${b.type} connection in this tenant: it stays unbound.` : "No workflow in this tenant: it stays unbound.";
         return (
           <Select
             key={b.id}
             label={`${b.label} (${b.kind === "connection" ? `${b.type} connection` : "workflow"})`}
-            hint={places}
+            hint={options.length === 0 ? none : places}
             value={chosen[b.id] ?? ""}
             onChange={(e) => {
               const { [b.id]: _, ...rest } = chosen;
@@ -4285,7 +4500,7 @@ import { Field } from "../components/Field";
 import { announce } from "../lib/announce";
 import { ApiError, client, ok } from "../lib/client";
 import type { WorkflowDocument } from "../lib/workflows";
-import { ImportBindings, type Chosen } from "./ImportBindings";
+import { ImportBindings, useBindingChoices, type Chosen } from "./ImportBindings";
 
 type Start = "blank" | "import";
 
@@ -4378,6 +4593,7 @@ export function NewWorkflow({ tenantId, onClose }: { tenantId: string; onClose: 
   const [fileError, setFileError] = useState<string | null>(null);
   const [chosen, setChosen] = useState<Chosen>({});
   const [error, setError] = useState<string | null>(null);
+  const choices = useBindingChoices(tenantId, doc?.bindings ?? []);
 
   useEffect(() => {
     const d = dialog.current;
@@ -4423,7 +4639,8 @@ export function NewWorkflow({ tenantId, onClose }: { tenantId: string; onClose: 
     create.mutate();
   }
 
-  const ready = name.trim().length > 0 && (start === "blank" || doc !== null);
+  // An import waits for what its bindings are chosen from: unbound is a choice, never a lookup that failed.
+  const ready = name.trim().length > 0 && (start === "blank" || (doc !== null && choices.state === "ready"));
 
   return (
     <dialog
@@ -4463,7 +4680,7 @@ export function NewWorkflow({ tenantId, onClose }: { tenantId: string; onClose: 
               <input type="file" accept=".json,application/json" onChange={(e) => void readFile(e.target.files?.[0])} className="text-body" />
             </label>
             {fileError && <p className="text-small text-danger">{fileError}</p>}
-            {doc && <ImportBindings tenantId={tenantId} bindings={doc.bindings} chosen={chosen} onChange={setChosen} />}
+            {doc && <ImportBindings bindings={doc.bindings} choices={choices} chosen={chosen} onChange={setChosen} />}
           </div>
         )}
         {error && <p role="alert" className="text-body text-danger">{error}</p>}
@@ -5279,8 +5496,8 @@ const draftWith = (...keys: string[]): GraphDoc => ({
 });
 const WORKFLOW = {
   id: "w1", name: "Nightly", enabled: true, draft_revision: 1, active_version_id: null, active_version_number: null,
-  executable: null, blocked_by: [], created_at: "", updated_at: "", unpublished_changes: true, last_run: null,
-  last_simulation: null, runs_24h: { live: 0, simulate: 0 }, needs_attention: [], draft: draftWith(),
+  executable: null, blocked_by: [], created_at: "", updated_at: "", unpublished_changes: true, draft_graph_hash: "h1",
+  last_run: null, last_simulation: null, runs_24h: { live: 0, simulate: 0 }, needs_attention: [], draft: draftWith(),
 };  // prettier-ignore
 const BASE = "/api/v1/t/t1/workflows/w1";
 type Answer = () => Response | Promise<Response>;
@@ -6210,11 +6427,12 @@ git commit -m "feat(web): the canvas: React Flow under the CSP, a start card, st
   `portsOf` (Task 9); `undo`, `redo` (Task 9); `ConfirmDialog` (`frontend/src/components/ConfirmDialog.tsx`).
 - Consumes too: `@xyflow/react` 12.12.0's `onPaneClick(event)` and `useReactFlow().screenToFlowPosition({x, y})`
   (checked in the installed package first, Step 1); `CARD` (Task 10); `drawableEdges` (Task 9).
-- Produces: `type NavKey`; `navModel(doc, portsOf, editable) -> Nav` (`children`, `parent`, `order`, `edges`);
-  `move(nav, from, key) -> string`; `<ConnectDialog doc types from onConnect onClose />`; `<StepPanel node type
-  ports problems expressions editable onDelete onConnectPort onPlace onNudge onClose />` (`problems: Diagnostic[] |
-  null`, null when no current check speaks for what's on the screen: Task 14 fills it); `CanvasProps` gains
-  `placing: boolean` and `onPlace(at: {x, y})` (the click's point in the canvas's own coordinates).
+- Produces: `type NavKey`; `navModel(doc, portsOf, editable) -> Nav` (`children`, `parent` (the walk's first parent),
+  `order`, `edges`); `step(nav, path, key) -> string[]`, `pathTo(nav, id) -> string[]`, `isPath(nav, path)`;
+  `<ConnectDialog doc types from onConnect onClose />`; `<StepPanel node type ports problems expressions editable
+  onDelete onConnectPort onPlace onNudge onClose />` (`problems: Diagnostic[] | null`, null when no current check speaks
+  for what's on the screen: Task 14 fills it); `CanvasProps` gains `placing: boolean` and `onPlace(at: {x, y})` (the
+  click's point in the canvas's own coordinates).
 
 4b rulings 13 and 15, as the owner amended them (the owner's review of 325fc14, correction 6):
 - **Single-pointer movement (WCAG 2.5.7).** Auto layout arranges the graph; it doesn't put a step where a person
@@ -6241,30 +6459,36 @@ git commit -m "feat(web): the canvas: React Flow under the CSP, a start card, st
 // SPDX-License-Identifier: Apache-2.0
 import { expect, it } from "vitest";
 import type { GraphDoc } from "../../lib/workflows";
-import { NAV_KEYS, move, navModel, type Nav, type NavKey } from "./canvasNav";
+import { NAV_KEYS, isPath, navModel, pathTo, step, type Nav, type NavKey } from "./canvasNav";
 
 const node = (id: string, x = 0) => ({ id, key: id, type: "flow.transform@1", position: { x, y: 0 } });
 const edge = (from: string, to: string, port = "out") => ({ from: { node: from, port }, to: { node: to } });
 const ports = (map: Record<string, string[]>) => (id: string) => map[id] ?? ["out"];
+/** The item a path ends on: the focused one. */
+const at = (path: string[]) => path.at(-1);
+/** The path after pressing `keys` from `from`. */
+const press = (nav: Nav, from: string[], ...keys: NavKey[]) => keys.reduce((path, key) => step(nav, path, key), from);
 
 it("walks a chain down and back up, through its edges and its last free port", () => {
   const doc: GraphDoc = { graph_format: 1, nodes: [node("a"), node("b")], edges: [edge("a", "b")] };
   const nav = navModel(doc, ports({}), true);
-  const path = ["start"];
-  for (let i = 0; i < 5; i++) path.push(move(nav, path.at(-1)!, "ArrowDown"));
-  expect(path).toEqual(["start", "entry:a", "node:a", "edge:a:out->b", "node:b", "port:b:out"]);
-  expect(move(nav, "node:b", "ArrowUp")).toBe("edge:a:out->b");
-  expect(move(nav, "port:b:out", "ArrowDown")).toBe("port:b:out");
-  expect(move(nav, "node:b", "Home")).toBe("start");
+  const seen: (string | undefined)[] = [];
+  let path = ["start"];
+  for (let i = 0; i < 5; i++) seen.push(at((path = step(nav, path, "ArrowDown"))));
+  expect(seen).toEqual(["entry:a", "node:a", "edge:a:out->b", "node:b", "port:b:out"]);
+  expect(at(press(nav, path, "ArrowDown"))).toBe("port:b:out");
+  expect(at(press(nav, pathTo(nav, "node:b"), "ArrowUp"))).toBe("edge:a:out->b");
+  expect(press(nav, path, "Home")).toEqual(["start"]);
 });
 
 it("moves across a branch's ports, left to right, an empty port included", () => {
   const doc: GraphDoc = { graph_format: 1, nodes: [node("if"), node("yes")], edges: [edge("if", "yes", "true")] };
   const nav = navModel(doc, ports({ if: ["true", "false"] }), true);
   expect(nav.children.get("node:if")).toEqual(["edge:if:true->yes", "port:if:false"]);
-  expect(move(nav, "edge:if:true->yes", "ArrowRight")).toBe("port:if:false");
-  expect(move(nav, "port:if:false", "ArrowRight")).toBe("port:if:false");
-  expect(move(nav, "port:if:false", "ArrowLeft")).toBe("edge:if:true->yes");
+  const onTrue = pathTo(nav, "edge:if:true->yes");
+  expect(at(press(nav, onTrue, "ArrowRight"))).toBe("port:if:false");
+  expect(at(press(nav, onTrue, "ArrowRight", "ArrowRight"))).toBe("port:if:false");
+  expect(at(press(nav, onTrue, "ArrowRight", "ArrowLeft"))).toBe("edge:if:true->yes");
 });
 
 it("orders a port's targets by where they sit, and keeps an edge from a port the type no longer has", () => {
@@ -6288,8 +6512,36 @@ it("offers the start card's own '+' before any step, and links a cycle no entry 
   const loop: GraphDoc = { graph_format: 1, nodes: [node("a"), node("b")], edges: [edge("a", "b"), edge("b", "a")] };
   const nav = navModel(loop, ports({}), false);
   expect(nav.children.get("start")).toEqual(["node:a"]);
-  expect(move(nav, "start", "ArrowDown")).toBe("node:a");
-  expect(move(nav, "node:a", "ArrowDown")).toBe("node:b");
+  expect(press(nav, ["start"], "ArrowDown", "ArrowDown")).toEqual(["start", "node:a", "node:b"]);
+  // Down from b follows its edge back to a: the path returns to a, never growing round the cycle.
+  expect(press(nav, ["start"], "ArrowDown", "ArrowDown", "ArrowDown")).toEqual(["start", "node:a"]);
+});
+
+// a → b, c; b → d, e; c → d, f: d is reached from b and from c (the owner's review of revision 2).
+const JOINS: GraphDoc = {
+  graph_format: 1,
+  nodes: [node("a"), node("b"), node("c", 300), node("d"), node("e", 300), node("f", 600)],
+  edges: [edge("a", "b"), edge("a", "c"), edge("b", "d"), edge("b", "e"), edge("c", "d"), edge("c", "f")],
+};  // prettier-ignore
+
+it("keeps to the branch it came by at a join: from d reached through c, the sibling is f", () => {
+  const readOnly = navModel(JOINS, ports({}), false); // c's children are the steps d and f
+  const toD = press(readOnly, pathTo(readOnly, "node:c"), "ArrowDown");
+  expect(at(toD)).toBe("node:d");
+  expect(at(press(readOnly, toD, "ArrowRight"))).toBe("node:f"); // never b's e
+  expect(at(press(readOnly, toD, "ArrowUp"))).toBe("node:c"); // back the way it came, never to b
+  const editable = navModel(JOINS, ports({}), true); // c's children are the edges c→d and c→f
+  const viaEdge = press(editable, pathTo(editable, "node:c"), "ArrowDown", "ArrowDown");
+  expect(at(viaEdge)).toBe("node:d");
+  expect(at(press(editable, viaEdge, "ArrowUp"))).toBe("edge:c:out->d");
+  expect(at(press(editable, viaEdge, "ArrowUp", "ArrowRight", "ArrowDown"))).toBe("node:f");
+});
+
+it("takes a path only while each of its steps is a child of the one before", () => {
+  const nav = navModel(JOINS, ports({}), false);
+  expect(isPath(nav, ["start", "node:a", "node:c", "node:d"])).toBe(true);
+  expect(isPath(nav, ["start", "node:a", "node:e"])).toBe(false);
+  expect(pathTo(nav, "node:gone")).toEqual(["start"]);
 });
 
 /** Every item the canvas draws for `doc`, counted from the document itself, never from the model under test. */
@@ -6311,18 +6563,21 @@ function drawnItems(doc: GraphDoc, portsOf: (id: string) => string[], editable: 
   return out;
 }
 
-/** Every item the arrow keys and Home reach from the start card, each key pressed from each item reached. */
+/** Every item the keys reach from the start card: each key pressed from each path reached, the path carried along,
+ * as the editor carries it. */
 function reachedByKeys(nav: Nav): Set<string> {
   const reached = new Set(["start"]);
-  const todo = ["start"];
+  const seen = new Set([JSON.stringify(["start"])]);
+  const todo = [["start"]];
   while (todo.length) {
-    const at = todo.pop()!;
+    const path = todo.pop()!;
     for (const key of NAV_KEYS as NavKey[]) {
-      const to = move(nav, at, key);
-      if (!reached.has(to)) {
-        reached.add(to);
-        todo.push(to);
-      }
+      const next = step(nav, path, key);
+      const id = JSON.stringify(next);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      reached.add(at(next)!);
+      todo.push(next);
     }
   }
   return reached;
@@ -6336,6 +6591,7 @@ const CASES: [string, GraphDoc, Record<string, string[]>][] = [
       edges: [edge("if", "y", "true"), edge("if", "n", "false"), edge("y", "j"), edge("n", "j")] },
     { if: ["true", "false"] },
   ],
+  ["a join a second branch also reaches", JOINS, {}],
   ["a cycle no entry leads into", { graph_format: 1, nodes: [node("a"), node("b")], edges: [edge("a", "b"), edge("b", "a")] }, {}],
   ["a cycle beside an entry", { graph_format: 1, nodes: [node("e"), node("a"), node("b")], edges: [edge("a", "b"), edge("b", "a")] }, {}],
   [
@@ -6357,6 +6613,8 @@ const CASES: [string, GraphDoc, Record<string, string[]>][] = [
   ],
 ];  // prettier-ignore
 
+// Read only is how a viewer, an editor after a conflict, and any viewed version see the canvas: all three hand
+// `navModel` `editable: false`.
 it.each(CASES)("reaches every item of %s with the keys alone, editable or read only", (_, doc, map) => {
   for (const editable of [true, false]) {
     expect(reachedByKeys(navModel(doc, ports(map), editable))).toEqual(drawnItems(doc, ports(map), editable));
@@ -6466,11 +6724,12 @@ Expected: FAIL: `canvasNav.ts` doesn't exist; the editor ignores Delete, `a` and
 
 ```ts
 // SPDX-License-Identifier: Apache-2.0
-// The canvas's keyboard model (D16; 4b ruling 15, amended). Its items form a tree from the start card down: the start
-// card, its edges to the entry steps, each step, each edge leaving it (by port, then left to right), each free port.
-// A step no entry reaches (a cycle no entry leads into, a step whose only edges in come from steps that aren't
-// there) joins the start card's children, topmost first: every item the canvas draws is reached by the keys. Down
-// goes to an item's first child, Up to its parent, Left and Right among its siblings, Home to the start card. A
+// The canvas's keyboard model (D16; 4b ruling 15, amended). Each item lists its children from the start card down:
+// the start card, its edges to the entry steps, each step, each edge leaving it (by port, then left to right), each
+// free port. A step joined from two places is a child of both, so the keys carry the path they came by (`step`): Up
+// goes back that way, and Left and Right stay among the children of the item it came from. A step no entry reaches
+// (a cycle no entry leads into, a step whose only edges in come from steps that aren't there) joins the start card's
+// children, topmost first: every item the canvas draws is reached by the keys. Home goes to the start card. A
 // read-only canvas (a viewer, a conflict, an old version) holds the start card and the steps only.
 import { START, drawableEdges, entries, nodesOf, portOf, pos } from "../../lib/graph";
 import type { GraphDoc, GraphEdge } from "../../lib/workflows";
@@ -6554,14 +6813,35 @@ export function navModel(doc: GraphDoc, portsOf: (nodeId: string) => string[], e
   return { children, parent, order, edges };
 }
 
-export function move(nav: Nav, from: string, key: NavKey): string {
-  if (key === "Home") return item.start;
-  if (key === "ArrowDown") return nav.children.get(from)?.[0] ?? from;
-  if (key === "ArrowUp") return nav.parent.get(from) ?? from;
-  const up = nav.parent.get(from);
-  const siblings = up === undefined ? [from] : (nav.children.get(up) ?? [from]);
-  const i = siblings.indexOf(from);
-  return siblings[key === "ArrowLeft" ? i - 1 : i + 1] ?? from;
+/** Whether `path` runs from the start card, each item a child of the one before (still true after a change). */
+export function isPath(nav: Nav, path: string[]): boolean {
+  return path[0] === item.start && path.every((id, i) => i === 0 || (nav.children.get(path[i - 1]!) ?? []).includes(id));
+}
+
+/** The walk's own path to an item (its first parent at each step): where a click, Tab or a change leaves the keys. */
+export function pathTo(nav: Nav, id: string): string[] {
+  if (!nav.order.includes(id)) return [item.start];
+  const path = [id];
+  for (let at = nav.parent.get(id); at !== undefined; at = nav.parent.get(at)) path.unshift(at);
+  return path;
+}
+
+/** One key, from the path the keys came by: Down to the first child, Up back the way it came, Left and Right among
+ * the children of the item it came from (at a join, the branch it came by: the owner's review of revision 2), Home
+ * to the start card. Down onto an item already on the path goes back to it there, so a cycle never grows the path. */
+export function step(nav: Nav, path: string[], key: NavKey): string[] {
+  if (key === "Home") return [item.start];
+  const here = path.at(-1)!;
+  if (key === "ArrowDown") {
+    const child = nav.children.get(here)?.[0];
+    if (child === undefined) return path;
+    const back = path.indexOf(child);
+    return back >= 0 ? path.slice(0, back + 1) : [...path, child];
+  }
+  if (key === "ArrowUp") return path.length > 1 ? path.slice(0, -1) : path;
+  const siblings = path.length > 1 ? (nav.children.get(path.at(-2)!) ?? [here]) : [here];
+  const next = siblings[siblings.indexOf(here) + (key === "ArrowLeft" ? -1 : 1)];
+  return next === undefined ? path : [...path.slice(0, -1), next];
 }
 ```
 
@@ -6783,8 +7063,22 @@ with, in `canvas.css`:
 - [ ] **Step 6: Wire the keyboard into the editor**
 
 In `frontend/src/routes/editor/Editor.tsx`, add the imports (`type KeyboardEvent`, `ConfirmDialog`, `deleteEdge`,
-`deleteNode`, `edgesOf`, `portsOf`, `undo`, `redo`, `NAV_KEYS`, `move`, `navModel`, `type NavKey`, `type GraphEdge`,
-`ConnectDialog`, `StepPanel`), and in `Editor`:
+`deleteNode`, `edgesOf`, `portsOf`, `undo`, `redo`, `NAV_KEYS`, `isPath`, `navModel`, `pathTo`, `step`, `type NavKey`,
+`type GraphEdge`, `ConnectDialog`, `StepPanel`). Task 11's `focus` carries the path the keys came by, and a focus that
+didn't come by the keys (a click, Tab, a change) drops it:
+
+```tsx
+  const [trail, setTrail] = useState<string[] | null>(null); // the path the keys came by to the focused item
+
+  function focus(id: string, path: string[] | null = null) {
+    setFocusId(id);
+    setTrail(path);
+    setFocusRequest((r) => ({ id, n: (r?.n ?? 0) + 1 }));
+  }
+```
+
+and the canvas's `onFocusItem` becomes `(id) => { setFocusId(id); setTrail((t) => (t?.at(-1) === id ? t : null)); }`.
+Then, in `Editor`:
 
 ```tsx
   const portMap = useMemo(
@@ -6883,8 +7177,10 @@ In `frontend/src/routes/editor/Editor.tsx`, add the imports (`type KeyboardEvent
     if (NAV_KEYS.includes(e.key) && plain) {
       e.preventDefault();
       if (e.shiftKey && editable && id.startsWith("node:")) return nudge(id.slice(5), e.key as NavKey);
-      const to = move(nav, id, e.key as NavKey);
-      if (to !== id) focus(to);
+      // The path the keys came by while it still holds (at a join, the branch taken); else the walk's own path.
+      const path = trail && trail.at(-1) === id && isPath(nav, trail) ? trail : pathTo(nav, id);
+      const next = step(nav, path, e.key as NavKey);
+      if (next.at(-1) !== id) focus(next.at(-1)!, next);
       return;
     }
     if (!editable || !plain) return;
@@ -7175,36 +7471,49 @@ waits for the owner's word.
 **Files:**
 - Create: `frontend/src/lib/draftSync.ts`, `frontend/src/lib/draftSync.test.ts`
 - Create: `frontend/src/routes/editor/SaveState.tsx`
+- Create: `frontend/src/lib/leaving.ts`, `frontend/src/lib/leaving.test.ts`
 - Modify: `frontend/src/components/ConfirmDialog.tsx`, `frontend/src/components/ConfirmDialog.test.tsx` (`cancelLabel`)
+- Modify: `frontend/src/components/Shell.tsx`, `frontend/src/components/Shell.test.tsx` (sign-out asks first; the
+  ended-session notice)
+- Modify: `frontend/src/router.tsx`, `frontend/src/router.test.tsx` (an ended session leaves unsaved work on screen)
 - Modify: `frontend/src/routes/editor/Editor.tsx`, `frontend/src/routes/editor/Editor.test.tsx`
 
 **Interfaces:**
 - Consumes: `PUT /api/v1/t/{tenant_id}/workflows/{workflow_id}/draft` (`If-Match: <revision>`, body `Graph`) →
-  `DraftSavedOut` (`draft_revision`, `unpublished_changes`), `409 draft_conflict`; `downloadJson`, `fileName`;
-  TanStack Router 1.170.39's `useBlocker({ shouldBlockFn, enableBeforeUnload, withResolver: true })`, whose
-  `shouldBlockFn` may answer a promise and whose resolver is `{ status: "blocked" | "idle", proceed, reset }`
-  (verified in the installed package); TanStack Query 5.103.2's `refetchOnMount: "always"` and
-  `isFetchedAfterMount` (verified).
+  `DraftSavedOut` (`draft_revision`, `unpublished_changes`, `graph_hash`, `active_version_id`,
+  `active_version_number`: Task 3), `409 draft_conflict`; `WorkflowDetailOut.draft_graph_hash`; `downloadJson`,
+  `fileName`; TanStack Router 1.170.39's `useBlocker({ shouldBlockFn, enableBeforeUnload })`, whose `shouldBlockFn`
+  may answer a promise, which the router awaits (verified in the installed package); TanStack Query 5.103.2's
+  `refetchOnMount: "always"` and `isFetchedAfterMount` (verified).
 - Produces:
-  - `class DraftSync` (`new DraftSync({ revision, unpublished, save, onChange, onSettled?, delayMs? })`; `change(doc)`,
-    `flush(): Promise<number>`, `retry()`, `conflict()`, `dispose()`, `current: SyncState`, `unsaved: boolean`);
-    `type SyncState = { status: "saved" | "pending" | "saving" | "conflict" | "error"; revision: number; unpublished:
-    boolean | null; generation: number; savedGeneration: number }`; `class ConflictError`, `class SaveError`;
+  - `class DraftSync` (`new DraftSync({ revision, unpublished, savedHash, activeNumber, save, onChange, onSettled?,
+    delayMs? })`; `change(doc)`, `flush(): Promise<number>`, `retry()`, `conflict()`, `dispose()`, `current:
+    SyncState`, `unsaved: boolean`); `type SyncState = { status: "saved" | "pending" | "saving" | "conflict" |
+    "error"; revision: number; unpublished: boolean | null; generation: number; savedGeneration: number; savedHash:
+    string | null; activeNumber: number | null | "unknown" }`; `class ConflictError`, `class SaveError`;
     `onSettled(revision, generation)`.
-  - `ConfirmDialog`'s `cancelLabel?: string` (default "Cancel").
-  - `<SaveState state activeNumber />`.
-  - The editor opens on a snapshot read after it mounted, and is seeded once. Task 14 hooks `onSettled` and reads
-    `generation`/`savedGeneration`; Task 15 calls `flush()` before publishing and exporting.
+  - `src/lib/leaving.ts`: `type LeaveGuard = { unsaved(): boolean; decide(): Promise<boolean> }`,
+    `guardLeaving(guard) -> unsubscribe`, `unsavedWork()`, `mayLeave()`.
+  - `ConfirmDialog`'s `cancelLabel?: string` (default "Cancel"); `Shell`'s `sessionEnded?: boolean`.
+  - `<SaveState state />`: the active version's label comes from the same state as the comparison.
+  - The editor opens on a snapshot read after it mounted, is seeded once, and stays open through its auxiliary
+    queries' failures. Task 14 hooks `onSettled` and reads `generation`/`savedGeneration`; Task 15 calls `flush()`
+    before publishing and exporting, and reads `savedHash`.
 
-What this task guards (the owner's review of 325fc14, correction 1):
-- **Leaving.** `beforeunload` covers closing the tab only. The breadcrumb, the rail, the palette and the tenant
-  switcher are router navigations: a blocker saves what's pending first, and, when it can't (a failed save, a
-  conflict), asks: stay, download, or leave without saving (4b ruling 22).
+What this task guards (the owner's reviews of 325fc14, correction 1, and of revision 2, correction 2):
+- **Leaving.** One decision, the editor's own (`decide`): save what's pending; when that can't be done (a failed
+  save, a conflict), ask: stay, download my version, or leave without saving (4b ruling 22). It answers for every way
+  out: router navigations (the breadcrumb, the rail, the palette, the tenant switcher) through the router's blocker,
+  which awaits it; sign-out, which asks it (`mayLeave`) before it revokes the session or clears the query cache (a
+  save after that could no longer authenticate, and the cleared cache must not unmount the editor first); and an
+  ended session, which leaves the shell and its unsaved work on screen, with a notice, instead of swapping it for the
+  sign-in page. `beforeunload` covers closing the tab.
 - **Closing.** Once the editor closes, its saver is disposed: a save still in flight that answers afterwards sends
   nothing more and says nothing.
-- **Opening.** The editor never opens on a cached draft (it would conflict on the first edit): it waits for the read
-  made after it mounted, then owns its document; a later read of the workflow neither replaces nor closes it (4b
-  ruling 23).
+- **Opening, and staying open.** The editor never opens on a cached draft (it would conflict on the first edit): it
+  waits for the read made after it mounted, then owns its document; a later read of the workflow neither replaces nor
+  closes it. It keeps what it opened with (the workflow, the step types, the role): a failed refresh of the step
+  types, or a cleared cache, shows beside it, never in its place (4b ruling 23).
 - **A conflict's work.** The local version since the last save can't be saved; leaving asks, and Reload asks before
   discarding it.
 
@@ -7215,11 +7524,11 @@ What this task guards (the owner's review of 325fc14, correction 1):
 ```ts
 // SPDX-License-Identifier: Apache-2.0
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { ConflictError, DraftSync, SaveError, type SyncState } from "./draftSync";
+import { ConflictError, DraftSync, SaveError, type Saved, type SyncState } from "./draftSync";
 import type { GraphDoc } from "./workflows";
 
 const doc = (n: number): GraphDoc => ({ graph_format: 1, nodes: [{ id: `n${n}`, key: `k${n}`, type: "flow.transform@1" }], edges: [] });
-type Answer = () => Promise<{ draft_revision: number; unpublished_changes: boolean }>;
+type Answer = () => Promise<Saved>;
 
 let calls: { doc: GraphDoc; revision: number }[];
 let inFlight: number;
@@ -7228,17 +7537,25 @@ let answers: Answer[];
 let states: SyncState["status"][];
 let settled: number[];
 
+/** A save's answer, as the API gives it: the next revision, its hash, and the version it was compared with. */
+const saved = (revision: number, active: number | null = null): Saved => ({
+  draft_revision: revision, unpublished_changes: true, graph_hash: `h${revision}`, active_version_id: active ? `v${active}` : null,
+  active_version_number: active,
+});  // prettier-ignore
+
 function make() {
   return new DraftSync({
     revision: 1,
     unpublished: true,
+    savedHash: "h1",
+    activeNumber: null,
     delayMs: 1000,
     save: async (d, revision) => {
       calls.push({ doc: d, revision });
       inFlight++;
       maxInFlight = Math.max(maxInFlight, inFlight);
       try {
-        return await (answers.shift() ?? (() => Promise.resolve({ draft_revision: revision + 1, unpublished_changes: true })))();
+        return await (answers.shift() ?? (() => Promise.resolve(saved(revision + 1))))();
       } finally {
         inFlight--;
       }
@@ -7251,7 +7568,7 @@ function make() {
 /** A save that answers when the test says. */
 function held(): () => void {
   let release!: () => void;
-  answers.push(() => new Promise((r) => (release = () => r({ draft_revision: 2, unpublished_changes: true }))));
+  answers.push(() => new Promise((r) => (release = () => r(saved(2)))));
   return () => release();
 }
 
@@ -7275,8 +7592,18 @@ it("saves a second after the last change, with the revision the last save return
   expect(calls).toEqual([]);
   await vi.advanceTimersByTimeAsync(1);
   expect(calls).toEqual([{ doc: doc(2), revision: 1 }]);
-  expect(sync.current).toEqual({ status: "saved", revision: 2, unpublished: true, generation: 2, savedGeneration: 2 });
+  expect(sync.current).toEqual({
+    status: "saved", revision: 2, unpublished: true, generation: 2, savedGeneration: 2, savedHash: "h2", activeNumber: null,
+  });  // prettier-ignore
   expect(settled).toEqual([2]);
+});
+
+it("takes the active version and the hash from each save's answer", async () => {
+  answers.push(() => Promise.resolve(saved(2, 3))); // version 3 became active elsewhere before this save landed
+  const sync = make();
+  sync.change(doc(1));
+  await vi.advanceTimersByTimeAsync(1000);
+  expect([sync.current.activeNumber, sync.current.savedHash]).toEqual([3, "h2"]);
 });
 
 it("edits during a save coalesce into exactly one next save, never two at once", async () => {
@@ -7399,11 +7726,92 @@ it("names its cancel when asked", () => {
 });
 ```
 
+`frontend/src/lib/leaving.test.ts`:
+
+```ts
+// SPDX-License-Identifier: Apache-2.0
+import { expect, it, vi } from "vitest";
+import { guardLeaving, mayLeave, unsavedWork } from "./leaving";
+
+it("lets leaving go on only when every open editor agrees, asking each in turn", async () => {
+  expect(await mayLeave()).toBe(true); // nothing open
+  const first = vi.fn(async () => true);
+  const second = vi.fn(async () => false);
+  const third = vi.fn(async () => true);
+  const stops = [first, second, third].map((decide) => guardLeaving({ unsaved: () => false, decide }));
+  expect(await mayLeave()).toBe(false);
+  expect([first, second, third].map((f) => f.mock.calls.length)).toEqual([1, 1, 0]); // stops at the first "stay"
+  stops.forEach((stop) => stop());
+  expect(await mayLeave()).toBe(true);
+});
+
+it("says whether any open editor holds unsaved work", () => {
+  let dirty = false;
+  const stop = guardLeaving({ unsaved: () => dirty, decide: async () => true });
+  expect(unsavedWork()).toBe(false);
+  dirty = true;
+  expect(unsavedWork()).toBe(true);
+  stop();
+  expect(unsavedWork()).toBe(false);
+});
+```
+
+In `frontend/src/components/Shell.test.tsx`:
+
+```tsx
+const loggedOut = () => vi.mocked(globalThis.fetch).mock.calls.some(([input]) => (input as Request).url.endsWith("/api/v1/auth/logout"));
+
+it("signs out only once every open editor has had its say", async () => {
+  await renderAt("/t/t1/connections");
+  const stop = guardLeaving({ unsaved: () => true, decide: async () => false }); // the person chose to stay
+  await userEvent.click(screen.getByRole("button", { name: "Sign out" }));
+  expect(loggedOut()).toBe(false);
+  stop();
+  const go = guardLeaving({ unsaved: () => true, decide: async () => true });
+  await userEvent.click(screen.getByRole("button", { name: "Sign out" }));
+  await vi.waitFor(() => expect(loggedOut()).toBe(true));
+  go();
+});
+```
+
+(`guardLeaving` from `../lib/leaving` and `userEvent` join its imports.) In `frontend/src/router.test.tsx`, `showApp`
+keeps its QueryClient in a module-level `client`, the session's answer follows a flag (`let sessionGone = false`, reset
+in `beforeEach`: `if (key === "GET /api/v1/auth/session") return sessionGone ? json({ error: "unauthorized" }, 401) :
+json(SESSION);`), and:
+
+```tsx
+it("leaves unsaved editor work on screen when the session ends, and says so", async () => {
+  const stop = guardLeaving({ unsaved: () => true, decide: async () => true });
+  try {
+    const router = showApp("/t/t1/connections");
+    await screen.findByRole("button", { name: "Add Mist connection" });
+    sessionGone = true;
+    await act(() => client.invalidateQueries({ queryKey: ["session"] }));
+    expect((await screen.findByRole("alert", { name: "Session ended" })).textContent).toContain("Your session has ended");
+    expect(router.state.location.pathname).toBe("/t/t1/connections");
+  } finally {
+    stop();
+  }
+});
+
+it("goes to sign-in when the session ends with nothing unsaved", async () => {
+  const router = showApp("/t/t1/connections");
+  await screen.findByRole("button", { name: "Add Mist connection" });
+  sessionGone = true;
+  await act(() => client.invalidateQueries({ queryKey: ["session"] }));
+  await vi.waitFor(() => expect(router.state.location.pathname).toBe("/login"));
+});
+```
+
+(`guardLeaving` from `./lib/leaving` joins its imports.)
+
 In `frontend/src/routes/editor/Editor.test.tsx` (Task 11's helpers: `answers`, `json`, `sent`, `drawn`, `draftWith`,
 `show({ seed })`), `beforeEach` gains the draft PUT's answer:
 
 ```tsx
-  answers.set(`PUT ${BASE}/draft`, () => json({ draft_revision: 2, unpublished_changes: true }));
+  answers.set(`PUT ${BASE}/draft`, () =>
+    json({ draft_revision: 2, unpublished_changes: true, graph_hash: "h2", active_version_id: null, active_version_number: null }),
+  );
 ```
 
 and:
@@ -7481,6 +7889,29 @@ it("turns read-only on a conflict, keeping the work downloadable and leaving gua
   await userEvent.click(within(ask).getByRole("button", { name: "Stay" }));
 });
 
+it("answers sign-out's question with the same decision: staying keeps the work", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "http_error" }, 500));
+  await show();
+  await addTransform();
+  const decision = mayLeave(); // what the shell's Sign out asks before it revokes anything
+  const ask = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
+  await userEvent.click(within(ask).getByRole("button", { name: "Stay" }));
+  await expect(decision).resolves.toBe(false);
+  expect(screen.getByRole("button", { name: "transform" })).toBeTruthy();
+});
+
+it("stays open, with its edits, when the step types fail to refresh or the cache is cleared", async () => {
+  const { qc } = await show();
+  await addTransform();
+  answers.set("GET /api/v1/node-types", () => json({ error: "http_error" }, 500));
+  await act(() => qc.refetchQueries({ queryKey: ["node-types"] }));
+  expect(await screen.findByText(/The step types couldn't be refreshed/)).toBeTruthy();
+  expect(screen.getByRole("button", { name: "transform" })).toBeTruthy();
+  act(() => qc.clear());
+  expect(screen.getByRole("button", { name: "transform" })).toBeTruthy();
+  expect(screen.getByRole("group", { name: "Workflow steps" })).toBeTruthy();
+});
+
 it("asks before Reload discards the version a conflict kept", async () => {
   answers.set(`PUT ${BASE}/draft`, () => json({ error: "draft_conflict", draft_revision: 5 }, 409));
   await show();
@@ -7495,13 +7926,15 @@ it("asks before Reload discards the version a conflict kept", async () => {
 });
 ```
 
-(`within` joins the Testing Library import; `GraphDoc` is imported for the PUT body's type.)
+(`within` and `act` join the Testing Library import, `mayLeave` comes from `../../lib/leaving`; `GraphDoc` is imported
+for the PUT body's type.)
 
 - [ ] **Step 2: Run them to see them fail**
 
-Run: `cd frontend && npx -y pnpm@12.6.0 exec vitest run src/lib/draftSync.test.ts src/components/ConfirmDialog.test.tsx src/routes/editor/Editor.test.tsx`
-Expected: FAIL: `draftSync.ts` doesn't exist; no `cancelLabel`; the editor never saves, opens on the cached draft,
-and leaves without saving.
+Run: `cd frontend && npx -y pnpm@12.6.0 exec vitest run src/lib/draftSync.test.ts src/lib/leaving.test.ts src/components/ConfirmDialog.test.tsx src/components/Shell.test.tsx src/router.test.tsx src/routes/editor/Editor.test.tsx`
+Expected: FAIL: `draftSync.ts` and `leaving.ts` don't exist; no `cancelLabel`; sign-out doesn't ask and an ended
+session drops to sign-in; the editor never saves, opens on the cached draft, leaves without saving, and closes when
+the step types fail to refresh.
 
 - [ ] **Step 3: Implement the saver**
 
@@ -7525,11 +7958,16 @@ export interface SyncState {
   unpublished: boolean | null; // that draft differs from the active version (the server's word); null: not known
   generation: number; // the editor's changes so far
   savedGeneration: number; // the change `revision` holds: `generation` when nothing is unsaved
+  savedHash: string | null; // the server's graph hash of the draft at `revision` (what a version holding it records)
+  activeNumber: number | null | "unknown"; // the active version, from the same answer as `unpublished`; null: none
 }
-export interface Saved {
+export type Saved = {
   draft_revision: number;
   unpublished_changes: boolean;
-}
+  graph_hash: string | null;
+  active_version_id: string | null;
+  active_version_number: number | null;
+};
 
 export class ConflictError extends Error {
   constructor() {
@@ -7554,13 +7992,23 @@ export class DraftSync {
     private readonly opts: {
       revision: number;
       unpublished: boolean | null;
+      savedHash: string | null;
+      activeNumber: number | null;
       save: (doc: GraphDoc, revision: number) => Promise<Saved>;
       onChange: (state: SyncState) => void;
       onSettled?: (revision: number, generation: number) => void;
       delayMs?: number;
     },
   ) {
-    this.state = { status: "saved", revision: opts.revision, unpublished: opts.unpublished, generation: 0, savedGeneration: 0 };
+    this.state = {
+      status: "saved",
+      revision: opts.revision,
+      unpublished: opts.unpublished,
+      generation: 0,
+      savedGeneration: 0,
+      savedHash: opts.savedHash,
+      activeNumber: opts.activeNumber,
+    };
   }
 
   get current(): SyncState {
@@ -7620,11 +8068,14 @@ export class DraftSync {
     this.inflight = (async () => {
       try {
         const saved = await this.opts.save(sent.doc, this.state.revision);
+        // One answer, one identity: the comparison and the version it was made against (Task 3) travel together.
         this.state = {
           ...this.state,
           revision: saved.draft_revision,
           unpublished: saved.unpublished_changes,
           savedGeneration: sent.generation,
+          savedHash: saved.graph_hash,
+          activeNumber: saved.active_version_number,
         };
       } catch (e) {
         if (e instanceof ConflictError) {
@@ -7680,19 +8131,22 @@ export class DraftSync {
 ```tsx
 // SPDX-License-Identifier: Apache-2.0
 // The draft's state, in words, beside the workflow's name (1c's "Saved"): never a colour alone, and never a claim
-// the editor can't back (`unpublished` is null when the comparison with the active version isn't known).
+// the editor can't back. The active version and the comparison come from one state, so from one answer: `unpublished`
+// is null when the comparison isn't known, `activeNumber` "unknown" when the active version isn't.
 import type { SyncState } from "../../lib/draftSync";
 
-export function SaveState({ state, activeNumber }: { state: SyncState; activeNumber: number | null }) {
+export function SaveState({ state }: { state: SyncState }) {
+  const active = state.activeNumber;
   const text =
     state.status === "pending" ? "Unsaved changes"
     : state.status === "saving" ? "Saving…"
     : state.status === "error" ? "Not saved"
     : state.status === "conflict" ? "Changed elsewhere"
-    : activeNumber === null ? "Saved · not published"
-    : state.unpublished === null ? `Saved · v${activeNumber} is active`
-    : state.unpublished ? `Saved · unpublished changes since v${activeNumber}`
-    : `Saved · published as v${activeNumber}`;  // prettier-ignore
+    : active === "unknown" ? "Saved · the active version isn't known"
+    : active === null ? "Saved · not published"
+    : state.unpublished === null ? `Saved · v${active} is active`
+    : state.unpublished ? `Saved · unpublished changes since v${active}`
+    : `Saved · published as v${active}`;  // prettier-ignore
   const tone = state.status === "error" || state.status === "conflict" ? "text-danger" : state.status === "saved" ? "text-ok" : "text-muted";
   return <span className={`text-small ${tone}`}>{text}</span>;
 }
@@ -7701,16 +8155,86 @@ export function SaveState({ state, activeNumber }: { state: SyncState; activeNum
 In `frontend/src/components/ConfirmDialog.tsx`, the props gain `cancelLabel = "Cancel"` (`cancelLabel?: string`), and
 the cancel button reads `{cancelLabel}`.
 
-- [ ] **Step 4: Open on a fresh snapshot**
+- [ ] **Step 4: Ask before leaving, from anywhere**
 
-In `frontend/src/routes/editor/Editor.tsx`, `EditorPage` seeds the editor once, from the first read made after it
-mounted (import `useEffect`, `useQueryClient`, `type WorkflowDetail`):
+`frontend/src/lib/leaving.ts`:
+
+```ts
+// SPDX-License-Identifier: Apache-2.0
+// What an open editor says before something takes the person out of it without the router (4b ruling 22): sign-out,
+// an ended session. Router navigations ask the editor through its own blocker; these ask through here, before they
+// revoke anything or clear any cache.
+export interface LeaveGuard {
+  /** Whether it holds work the server hasn't got. */
+  unsaved: () => boolean;
+  /** Saves what it can; when it can't, asks the person. True: leaving may go on. */
+  decide: () => Promise<boolean>;
+}
+
+const guards = new Set<LeaveGuard>();
+
+export function guardLeaving(guard: LeaveGuard): () => void {
+  guards.add(guard);
+  return () => void guards.delete(guard);
+}
+
+export const unsavedWork = (): boolean => [...guards].some((g) => g.unsaved());
+
+/** Every open editor's say, in turn; the first "stay" ends it. */
+export async function mayLeave(): Promise<boolean> {
+  for (const g of [...guards]) if (!(await g.decide())) return false;
+  return true;
+}
+```
+
+In `frontend/src/components/Shell.tsx`, sign-out asks first, and an ended session has its notice (import `mayLeave`
+from `../lib/leaving`; `Shell` takes `{ sessionEnded = false }: { sessionEnded?: boolean }`):
 
 ```tsx
+  async function handleSignOut() {
+    setSignOutError(null);
+    // An open editor has its say first (4b ruling 22): it saves what's pending, or asks. Only then is the session
+    // revoked and the cache cleared, which would leave a pending save unable to authenticate.
+    if (!(await mayLeave())) return;
+    if ((await signOut()) === "failed") {
+```
+
+(the rest unchanged), and, beside the sign-out error:
+
+```tsx
+        {sessionEnded && (
+          <div role="alert" aria-label="Session ended" className="flex flex-wrap items-center gap-3 border-b border-danger bg-danger-bg px-5 py-2.5 text-small text-ink">
+            <span className="grow">
+              Your session has ended, and this page holds changes that aren&apos;t saved. Download them from the editor,
+              then sign in again.
+            </span>
+            <Button size="sm" onClick={() => void navigate({ to: "/login" })}>Sign in again</Button>
+          </div>
+        )}
+```
+
+In `frontend/src/router.tsx`, `RequireActive` keeps the shell on screen when the session ends under unsaved work
+(import `unsavedWork` from `./lib/leaving`):
+
+```tsx
+  // Work an editor couldn't save stays on screen when the session ends (4b ruling 22): never swapped for the sign-in
+  // page under it. "Sign in again" is a router navigation, so the editor has its say first.
+  if (!session.data) return unsavedWork() ? <Shell sessionEnded /> : <Navigate to="/login" />;
+```
+
+- [ ] **Step 5: Open on a fresh snapshot, and stay open**
+
+In `frontend/src/routes/editor/Editor.tsx`, `EditorPage` opens the editor once, from the first read made after it
+mounted, and keeps what it opened with (import `useEffect`, `useQueryClient`, `type WorkflowDetail`):
+
+```tsx
+type Opened = { workflow: WorkflowDetail; types: NodeType[]; role: string | null };
+
 export function EditorPage({ tenantId, workflowId }: { tenantId: string; workflowId: string }) {
   const qc = useQueryClient();
   // A draft cached from an earlier visit would conflict on the first edit (4b ruling 23): the editor waits for the read
-  // made after this page mounted. Once seeded it owns its document: a later read neither replaces nor closes it.
+  // made after this page mounted. Once open it owns its document and keeps what it opened with: a later read, a
+  // failed refresh or a cleared cache neither replaces nor closes it.
   const workflow = useQuery({
     ...workflowQuery(tenantId, workflowId),
     refetchOnMount: "always",
@@ -7719,40 +8243,56 @@ export function EditorPage({ tenantId, workflowId }: { tenantId: string; workflo
   });
   const types = useQuery(nodeTypesQuery);
   const tenant = useQuery(tenantQuery(tenantId));
-  const [seed, setSeed] = useState<WorkflowDetail | null>(null);
+  const [opened, setOpened] = useState<Opened | null>(null);
   const [loads, setLoads] = useState(0);
   useEffect(() => {
-    if (seed === null && workflow.isFetchedAfterMount && workflow.isSuccess) setSeed(workflow.data);
-  }, [seed, workflow.isFetchedAfterMount, workflow.isSuccess, workflow.data]);
-  useDocumentTitle(seed?.name ?? "Workflow");
+    if (opened !== null || !workflow.isFetchedAfterMount || !workflow.isSuccess || !types.data || !tenant.data) return;
+    setOpened({ workflow: workflow.data, types: types.data, role: tenant.data.role ?? null });
+  }, [opened, workflow.isFetchedAfterMount, workflow.isSuccess, workflow.data, types.data, tenant.data]);
+  useDocumentTitle(opened?.workflow.name ?? "Workflow");
 
   /** After a conflict: the saved draft, read afresh, in a new editor. */
   const reload = async () => {
     await qc.invalidateQueries({ queryKey: ["workflow", tenantId, workflowId] });
-    setSeed(null);
+    setOpened(null);
     setLoads((n) => n + 1);
   };
 
-  if (types.isError) return <section className="p-6"><LoadError what="The step types" /></section>;
-  if (seed === null) {
-    return workflow.isError ? <section className="p-6"><LoadError what="This workflow" /></section> : <p className="p-6 text-body text-muted">Loading…</p>;
+  if (opened === null) {
+    if (workflow.isError) return <section className="p-6"><LoadError what="This workflow" /></section>;
+    if (types.isError && !types.data) return <section className="p-6"><LoadError what="The step types" /></section>;
+    if (tenant.isError && !tenant.data) return <section className="p-6"><LoadError what="This tenant" /></section>;
+    return <p className="p-6 text-body text-muted">Loading…</p>;
   }
-  if (!types.data || !tenant.data) return <p className="p-6 text-body text-muted">Loading…</p>;
-  return <Editor key={loads} tenantId={tenantId} workflow={seed} types={types.data} role={tenant.data.role ?? null} onReload={() => void reload()} />;
+  const trouble = types.isError ? "The step types couldn't be refreshed: the editor keeps the ones it opened with." : null;
+  return (
+    <Editor
+      key={loads}
+      tenantId={tenantId}
+      workflow={opened.workflow}
+      types={types.data ?? opened.types}
+      role={opened.role}
+      trouble={trouble}
+      onReload={() => void reload()}
+    />
+  );
 }
 ```
 
 A failed first read shows the error, never the cached copy: `isSuccess` is false after a failed fetch even when old
-data is cached, and `isFetchedAfterMount` is false until the read made after mounting ends.
+data is cached, and `isFetchedAfterMount` is false until the read made after mounting ends. Once open, nothing but
+Reload (or leaving) closes the editor.
 
-- [ ] **Step 5: Save, guard leaving, and keep a conflict's work**
+- [ ] **Step 6: Save, decide on leaving, and keep a conflict's work**
 
-In `Editor` (which takes `onReload`; imports: `useBlocker`, `useRef`, `ApiError`, `client`, `ok`, `ConflictError`,
-`DraftSync`, `type SyncState`, `downloadJson`, `fileName`, `ConfirmDialog`, `SaveState`):
+In `Editor` (which takes `trouble` and `onReload`; imports: `useBlocker`, `useRef`, `ApiError`, `client`, `ok`,
+`ConflictError`, `DraftSync`, `type SyncState`, `downloadJson`, `fileName`, `guardLeaving`, `ConfirmDialog`,
+`SaveState`):
 
 ```tsx
   const [sync, setSyncState] = useState<SyncState>({
-    status: "saved", revision: workflow.draft_revision, unpublished: workflow.unpublished_changes, generation: 0, savedGeneration: 0,
+    status: "saved", revision: workflow.draft_revision, unpublished: workflow.unpublished_changes, generation: 0,
+    savedGeneration: 0, savedHash: workflow.draft_graph_hash, activeNumber: workflow.active_version_number,
   });  // prettier-ignore
   const saver = useRef<DraftSync | null>(null);
   // Made in an effect, so StrictMode's second mount (main.tsx) gets a live saver: its cleanup disposes the first.
@@ -7760,6 +8300,8 @@ In `Editor` (which takes `onReload`; imports: `useBlocker`, `useRef`, `ApiError`
     const s = new DraftSync({
       revision: workflow.draft_revision,
       unpublished: workflow.unpublished_changes,
+      savedHash: workflow.draft_graph_hash,
+      activeNumber: workflow.active_version_number,
       onChange: setSyncState,
       save: async (next, revision) => {
         try {
@@ -7781,23 +8323,30 @@ In `Editor` (which takes `onReload`; imports: `useBlocker`, `useRef`, `ApiError`
   const editable = canEdit(role) && sync.status !== "conflict";
   const downloadMine = () => downloadJson(fileName(workflow.name, ".draft.json"), doc);
 
-  // Leaving saves first (4b ruling 22). The breadcrumb, the rail, the palette and the tenant switcher are router
-  // navigations, which wait for the save; work that can't be saved (a failed save, a conflict) asks first. Closing
-  // the tab gets the browser's own prompt.
-  const leaving = useBlocker({
-    shouldBlockFn: async () => {
-      const s = saver.current;
-      if (!s?.unsaved) return false;
-      try {
-        await s.flush();
-        return false;
-      } catch {
-        return true;
-      }
-    },
+  // Leaving's one decision (4b ruling 22): save what's pending; when that can't be done (a failed save, a conflict),
+  // ask the person, and answer with their choice. The router's blocker awaits it for every navigation (the
+  // breadcrumb, the rail, the palette, the tenant switcher); sign-out and an ended session ask it through `leaving`.
+  const [leaveQuestion, setLeaveQuestion] = useState<((leave: boolean) => void) | null>(null);
+  const decide = useRef(async (): Promise<boolean> => true);
+  decide.current = async () => {
+    const s = saver.current;
+    if (!s?.unsaved) return true;
+    try {
+      await s.flush();
+      return true;
+    } catch {
+      return new Promise<boolean>((resolve) => setLeaveQuestion(() => resolve));
+    }
+  };
+  useEffect(() => guardLeaving({ unsaved: () => saver.current?.unsaved ?? false, decide: () => decide.current() }), []);
+  useBlocker({
+    shouldBlockFn: async () => !(await decide.current()),
     enableBeforeUnload: () => saver.current?.unsaved ?? false,
-    withResolver: true,
   });
+  const answer = (leave: boolean) => {
+    leaveQuestion?.(leave);
+    setLeaveQuestion(null);
+  };
   const [reloading, setReloading] = useState(false);
 ```
 
@@ -7820,12 +8369,13 @@ In `Editor` (which takes `onReload`; imports: `useBlocker`, `useRef`, `ApiError`
     announce(e.shiftKey ? "Redone" : "Undone");
 ```
 
-The toolbar shows `<SaveState state={sync} activeNumber={workflow.active_version_number} />` first, and a Retry
-button when `sync.status === "error"` (`onClick={() => saver.current?.retry()}`). Its "Read only" note now depends on
-the role alone (a conflict has its own banner): `{editable ? <AddStep /> : !canEdit(role) ? <span …>Read only: your
-role can't edit workflows</span> : null}`. Below the toolbar, on a conflict:
+The toolbar shows `<SaveState state={sync} />` first, and a Retry button when `sync.status === "error"`
+(`onClick={() => saver.current?.retry()}`). Its "Read only" note now depends on the role alone (a conflict has its own
+banner): `{editable ? <AddStep /> : !canEdit(role) ? <span …>Read only: your role can't edit workflows</span> :
+null}`. Below the toolbar, an auxiliary failure, and a conflict:
 
 ```tsx
+      {trouble && <p role="status" className="border-b border-line bg-surface px-5 py-2.5 text-small text-muted">{trouble}</p>}
       {sync.status === "conflict" && (
         <div role="alert" className="flex flex-wrap items-center gap-3 border-b border-danger bg-danger-bg px-5 py-2.5 text-small text-ink">
           <span className="grow">
@@ -7842,12 +8392,12 @@ and, with the other dialogs:
 
 ```tsx
       <ConfirmDialog
-        open={leaving.status === "blocked"}
+        open={leaveQuestion !== null}
         title="Your latest changes aren't saved"
         confirmLabel="Leave without saving"
         cancelLabel="Stay"
-        onConfirm={() => leaving.proceed?.()}
-        onCancel={() => leaving.reset?.()}
+        onConfirm={() => answer(true)}
+        onCancel={() => answer(false)}
       >
         {sync.status === "conflict"
           ? "This draft was changed elsewhere, so your changes since then can't be saved here. "
@@ -7868,17 +8418,20 @@ and, with the other dialogs:
       </ConfirmDialog>
 ```
 
-The banner's border is a full 1 px bottom rule, not a side stripe (outline §6); `ink` on `danger-bg` is in PAIRS.
+The banners' borders are full 1 px bottom rules, not side stripes (outline §6); `ink` on `danger-bg` is in PAIRS. An
+editor that unmounts while its question is open (a Reload can't: the dialog is modal) leaves the promise unanswered,
+and the router's navigation with it, which is the safe side: nothing leaves.
 
-- [ ] **Step 6: Run the tests to see them pass**
+- [ ] **Step 7: Run the tests to see them pass**
 
-Run: `cd frontend && npx -y pnpm@12.6.0 exec vitest run src/lib/draftSync.test.ts src/components src/routes/editor && npx -y pnpm@12.6.0 test && npx -y pnpm@12.6.0 lint && npx -y pnpm@12.6.0 typecheck`
+Run: `cd frontend && npx -y pnpm@12.6.0 exec vitest run src/lib src/components src/router.test.tsx src/routes/editor && npx -y pnpm@12.6.0 test && npx -y pnpm@12.6.0 lint && npx -y pnpm@12.6.0 typecheck`
 Expected: PASS and clean (Members' removal dialog keeps its "Cancel").
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add frontend/src/lib/draftSync.ts frontend/src/lib/draftSync.test.ts frontend/src/components frontend/src/routes/editor
+git add frontend/src/lib/draftSync.ts frontend/src/lib/draftSync.test.ts frontend/src/lib/leaving.ts frontend/src/lib/leaving.test.ts \
+  frontend/src/components frontend/src/router.tsx frontend/src/router.test.tsx frontend/src/routes/editor
 git commit -m "feat(web): the draft saves itself and leaving saves first; a fresh snapshot on entry; a conflict never overwrites (D17, 4b)"
 ```
 
@@ -7893,19 +8446,23 @@ git commit -m "feat(web): the draft saves itself and leaving saves first; a fres
 - Consumes: `POST …/validate` → `ValidationOut` (`draft_revision`, `valid`, `diagnostics`, `expressions`); the saver's
   `onSettled` and `SyncState`'s `revision`, `generation`, `savedGeneration` (Task 13); `StepPanel`'s `problems:
   Diagnostic[] | null` and `expressions` (Task 12).
-- Produces: (`check.ts`) `type Check = {status: "unchecked"} | {status: "checking", last} | {status: "failed", last}
-  | {status: "done", last}`, `type CheckState = "unchecked" | "checking" | "failed" | "stale" | "current"`,
+- Produces: (`check.ts`) `type Check = {status: "unchecked"} | {status: "checking", last} | {status: "failed", last} |
+  {status: "done", last}`, `type CheckState = "unchecked" | "checking" | "failed" | "stale" | "current"`,
   `checkState(check, sync)`, `lastOf(check)`, `checkLabel(state, count)`; `<ProblemsPanel state validation
-  publishProblems revision keyOf onJump onCheck onClose />`, `type PublishProblems = { revision: number; diagnostics:
-  Diagnostic[] }` (Task 15 sets it); the editor's right column holds one panel at a time: `type Side = { kind: "step";
-  node: string } | { kind: "problems" } | { kind: "versions" } | null`.
+  publishProblems publishCurrent keyOf onJump onCheck onClose />`, `type PublishProblems = { revision: number;
+  generation: number; diagnostics: Diagnostic[] }` (Task 15 sets it: the snapshot a refused publish was for); the
+  editor's right column holds one panel at a time: `type Side = { kind: "step"; node: string } | { kind: "problems" } |
+  { kind: "versions" } | null`.
 
 4b ruling 24 (the owner's review of 325fc14, correction 2): a check is of the saved revision it names, and is
 **current** only while that revision is the one saved and nothing was edited since (`generation ===
 savedGeneration`). Before the first answer the toolbar says "Checking…" (an editor checks on opening) or "Not
 checked", never "No problems"; a failed check says "Check failed" and offers to check again, never keeping an
 earlier answer's reassurance; an answer for an older revision, or one followed by edits, is **stale**: shown in the
-panel as of before the edits, never as badges on the steps. Revision 1 dropped older answers silently and kept
+panel as of before the edits, never as badges on the steps. What only publish found carries its own snapshot (the
+revision and the generation it was for, the owner's review of revision 2): it counts, badges steps and shows in a
+step's panel only while that snapshot is what's on the screen; afterwards it stays in the panel's "Found at publish",
+marked as from before the latest edits. Revision 1 dropped older answers silently and kept
 "No problems" through a failed request.
 
 - [ ] **Step 1: Write the failing tests**
@@ -7971,7 +8528,7 @@ const keyOf = (id: string) => ({ n1: "transform" })[id] ?? id;
 
 function panel(state: CheckState, validation: typeof VALIDATION | null, more: Partial<Parameters<typeof ProblemsPanel>[0]> = {}) {
   return render(
-    <ProblemsPanel state={state} validation={validation} publishProblems={null} revision={4} keyOf={keyOf} onJump={vi.fn()} onCheck={vi.fn()} onClose={vi.fn()} {...more} />,
+    <ProblemsPanel state={state} validation={validation} publishProblems={null} publishCurrent={false} keyOf={keyOf} onJump={vi.fn()} onCheck={vi.fn()} onClose={vi.fn()} {...more} />,
   );
 }
 
@@ -7993,8 +8550,8 @@ it("says how each expression runs (engine-core §5.10)", () => {
 });
 
 it("shows what only publish checks apart, and says when edits came since", () => {
-  const found = { revision: 3, diagnostics: [d("connection.unknown", "n1", "error", "That connection doesn't exist.")] };
-  panel("current", VALIDATION, { publishProblems: found });
+  const found = { revision: 3, generation: 2, diagnostics: [d("connection.unknown", "n1", "error", "That connection doesn't exist.")] };
+  panel("current", VALIDATION, { publishProblems: found, publishCurrent: false });
   const section = screen.getByRole("region", { name: "Found at publish" });
   expect(section.textContent).toContain("That connection doesn't exist.");
   expect(section.textContent).toContain("before your latest edits");
@@ -8138,7 +8695,8 @@ import { Button } from "../../components/Button";
 import type { Diagnostic, Validation } from "../../lib/workflows";
 import type { CheckState } from "./check";
 
-export type PublishProblems = { revision: number; diagnostics: Diagnostic[] };
+/** What only publish found, with the snapshot it was found in: the saved revision, and the editor's generation. */
+export type PublishProblems = { revision: number; generation: number; diagnostics: Diagnostic[] };
 
 function Problem({ d, keyOf, onJump }: { d: Diagnostic; keyOf: (id: string) => string; onJump: (id: string) => void }) {
   return (
@@ -8169,9 +8727,9 @@ const NOTES: Record<Exclude<CheckState, "current">, string> = {
 };
 
 export function ProblemsPanel({
-  state, validation, publishProblems, revision, keyOf, onJump, onCheck, onClose,
+  state, validation, publishProblems, publishCurrent, keyOf, onJump, onCheck, onClose,
 }: {
-  state: CheckState; validation: Validation | null; publishProblems: PublishProblems | null; revision: number;
+  state: CheckState; validation: Validation | null; publishProblems: PublishProblems | null; publishCurrent: boolean;
   keyOf: (id: string) => string; onJump: (nodeId: string) => void; onCheck: () => void; onClose: () => void;
 }) {  // prettier-ignore
   const heading = useRef<HTMLHeadingElement>(null);
@@ -8209,7 +8767,7 @@ export function ProblemsPanel({
         <section aria-labelledby="publish-problems" className="flex flex-col gap-1">
           <h3 id="publish-problems" className="text-small font-semibold">Found at publish</h3>
           <p className="text-small text-muted">
-            {publishProblems.revision === revision
+            {publishCurrent
               ? "Publishing checks connections, sub-flows and lifecycles too."
               : "From the last publish attempt, before your latest edits."}
           </p>
@@ -8245,6 +8803,7 @@ In `frontend/src/routes/editor/Editor.tsx`, the right column holds one panel at 
 ```tsx
 /** The editor's right column: a step's panel, the problems, or the versions (Task 15). */
 type Side = { kind: "step"; node: string } | { kind: "problems" } | { kind: "versions" } | null;
+const NO_DIAGNOSTICS: Diagnostic[] = []; // one empty list, so a memo over it holds
 ```
 
 and it replaces Task 12's `panel` state: `setPanel(id)` becomes `setSide({ kind: "step", node: id })`, `setPanel(null)`
@@ -8285,26 +8844,32 @@ The saver's options (Task 13's effect) gain `onSettled: () => void validate.curr
   const checked = checkState(check, sync);
   const last = lastOf(check);
   const trusted = checked === "current" ? last : null; // badges and the step panel's problems: current only
+  // What only publish found is current only for the snapshot it was found in: the same saved revision, and no edit
+  // since (a pending edit leaves the revision as it was, never the generation).
+  const publishCurrent =
+    publishProblems !== null && publishProblems.revision === sync.revision &&
+    publishProblems.generation === sync.generation && sync.generation === sync.savedGeneration;  // prettier-ignore
+  const published = publishCurrent && publishProblems ? publishProblems.diagnostics : NO_DIAGNOSTICS;
   const problems = useMemo(() => {
     const counts = new Map<string, Problems>();
-    for (const d of trusted?.diagnostics ?? []) {
+    for (const d of [...(trusted?.diagnostics ?? []), ...published]) {
       if (!d.node) continue;
       const c = counts.get(d.node) ?? { errors: 0, warnings: 0 };
       counts.set(d.node, d.severity === "error" ? { ...c, errors: c.errors + 1 } : { ...c, warnings: c.warnings + 1 });
     }
     return counts;
-  }, [trusted]);
+  }, [trusted, published]);
   const separate = useMemo(() => {
     const counts = new Map<string, number>();
     for (const x of trusted?.expressions ?? []) if (x.node && x.mode === "activity") counts.set(x.node, (counts.get(x.node) ?? 0) + 1);
     return counts;
   }, [trusted]);
-  const count = (last?.diagnostics.length ?? 0) + (publishProblems?.diagnostics.length ?? 0);
+  const count = (last?.diagnostics.length ?? 0) + published.length; // a stale publish finding never counts
 ```
 
 The canvas takes `problems={problems}`, `separate={separate}` and `current={side?.kind === "step" ? side.node :
 null}`; `onItem`'s `open` becomes `setSide({ kind: "step", node: action.node })`; the step panel's `problems` are
-`trusted ? [...trusted.diagnostics, ...(publishProblems?.diagnostics ?? [])].filter((d) => d.node === side.node) : null`
+`trusted ? [...trusted.diagnostics, ...published].filter((d) => d.node === side.node) : null`
 and its `expressions` `trusted?.expressions.filter((x) => x.node === side.node) ?? []`. The toolbar gains, after the
 save state, for an editor only:
 
@@ -8327,7 +8892,7 @@ and the right column shows, for `side?.kind === "problems"`:
             state={checked}
             validation={last}
             publishProblems={publishProblems}
-            revision={sync.revision}
+            publishCurrent={publishCurrent}
             keyOf={keyOf}
             onJump={(nodeId) => focus(item.node(nodeId))}
             onCheck={() => void validate.current()}
@@ -8351,7 +8916,8 @@ git commit -m "feat(web): problems of the saved revision, said to be current onl
 
 **Files:**
 - Modify: `frontend/src/components/ConfirmDialog.tsx`, `frontend/src/components/ConfirmDialog.test.tsx` (`tone`)
-- Modify: `frontend/src/lib/draftSync.ts`, `frontend/src/lib/draftSync.test.ts` (`published()`, `compared()`)
+- Modify: `frontend/src/lib/draftSync.ts`, `frontend/src/lib/draftSync.test.ts` (`published()`, `activated()`,
+  `compared()`, `lostTrack()`)
 - Create: `frontend/src/routes/editor/VersionsPanel.tsx`, `frontend/src/routes/editor/VersionsPanel.test.tsx`
 - Modify: `frontend/src/routes/editor/Editor.tsx`, `frontend/src/routes/editor/Editor.test.tsx`
 
@@ -8360,11 +8926,11 @@ git commit -m "feat(web): problems of the saved revision, said to be current onl
   (diagnostics, publish-only codes included), `409 draft_conflict`, `409 version_changed` (`latest_version`: Task 4);
   `versionsQuery`; `GET …/versions/{version_id}` → `VersionDetailOut`; `POST …/activate` (`{version_id}`) →
   `ActivatedOut`, `422 not_activatable`; `GET …/{workflow_id}` (`draft_revision`, `unpublished_changes`,
-  `active_version_id`); `GET …/export` and its `422 not_portable`; `notPortable(problems, keyOf)` (Task 7);
-  `flush()`, `ConflictError` (Task 13).
-- Produces: `ConfirmDialog`'s `tone?: "danger" | "primary"` (default `"danger"`); `DraftSync.published(revision)`,
-  `DraftSync.compared(summary | null)`; `<VersionsPanel versions publisher onView onActivate onClose />`;
-  `uncertain(e)` in `Editor.tsx`.
+  `active_version_id`, `active_version_number`); `VersionOut.graph_hash`; `GET …/export` and its `422 not_portable`;
+  `notPortable(problems, keyOf)` (Task 7); `flush()`, `ConflictError`, `SyncState.savedHash` (Task 13).
+- Produces: `ConfirmDialog`'s `tone?: "danger" | "primary"` (default `"danger"`); `DraftSync.published(revision,
+  number)`, `activated(number)`, `compared(summary)`, `lostTrack()`; `<VersionsPanel versions publisher onView
+  onActivate onClose />`; `uncertain(e)` in `Editor.tsx`.
 
 What this task guards (the owner's review of 325fc14, corrections 3 and 4; 4b rulings 17 and 25):
 - **The number named is the number published.** The confirmation names `latest + 1` from the versions list, and
@@ -8373,11 +8939,17 @@ What this task guards (the owner's review of 325fc14, corrections 3 and 4; 4b ru
   refreshes the list and asks again with the new number; it is never a draft conflict.
 - **Nothing changes under a publication or an activation.** Editing (and undo) is off while either runs.
 - **Success is snapshot-aware.** Publish marks the draft published only if the revision it published is still the
-  saved one (`published(revision)`); activation's comparison comes from the server, taken only for the revision it
-  read, and is "not known" (`null`) until then.
+  saved one (`published(revision, number)`); activation's comparison comes from the server, taken only for the
+  revision it read, and is "not known" (`null`) until then. The active version's label and the comparison always come
+  from the same answer (a save's, a publish's, or a read).
 - **An outcome is said only when known.** A request that got no answer from the API (the network, or a gateway's or
-  a server error's 5xx) is uncertain: the editor reads what happened (the versions and the workflow) and says that,
-  or says it isn't known; it never says "failed" without an answer saying so. A made-active version stays made active
+  a server error's 5xx) is uncertain: the editor reads what happened and says that, or says it isn't known; it never
+  says "failed" without an answer saying so, nor "published" without evidence (the owner's review of revision 2,
+  correction 1). The evidence is the version's own record: version N holds this draft only if its `graph_hash` is
+  the hash the server gave for the revision submitted (`savedHash`, from the save or the load that produced it). A
+  version N with another hash is someone else's publication, and this one was refused; no version N leaves it
+  open, said as such; no read leaves it unknown. The active version and the draft's comparison come from the read
+  itself (`compared`), never from the version number the editor hoped for. A made-active version stays made active
   when the follow-up read fails.
 - **Views arrive in order.** Only the newest "View version" answer is shown; "Back to the draft" drops any still on
   its way.
@@ -8420,20 +8992,26 @@ it("takes publish's word only for the revision it published", async () => {
   const sync = make();
   sync.change(doc(1));
   await vi.advanceTimersByTimeAsync(1000); // revision 2
-  sync.published(1); // not the revision saved now
-  expect(sync.current.unpublished).toBe(true);
-  sync.published(2);
-  expect(sync.current.unpublished).toBe(false);
+  sync.published(1, 4); // not the revision saved now: version 4 is active, the comparison isn't known
+  expect([sync.current.activeNumber, sync.current.unpublished]).toEqual([4, null]);
+  sync.published(2, 5);
+  expect([sync.current.activeNumber, sync.current.unpublished]).toEqual([5, false]);
 });
 
-it("takes a summary's comparison only for the revision it read, and says when it isn't known", () => {
+it("takes a read's active version, and its comparison only for the revision it read", () => {
   const sync = make();
-  sync.compared({ draft_revision: 1, unpublished_changes: false });
-  expect(sync.current.unpublished).toBe(false);
-  sync.compared({ draft_revision: 9, unpublished_changes: true }); // another revision's
-  expect(sync.current.unpublished).toBe(false);
-  sync.compared(null);
-  expect(sync.current.unpublished).toBeNull();
+  sync.compared({ draft_revision: 1, unpublished_changes: false, active_version_number: 2 });
+  expect([sync.current.activeNumber, sync.current.unpublished]).toEqual([2, false]);
+  sync.compared({ draft_revision: 9, unpublished_changes: false, active_version_number: 3 }); // another revision's
+  expect([sync.current.activeNumber, sync.current.unpublished]).toEqual([3, null]);
+});
+
+it("says what it doesn't know after an activation or a lost answer", () => {
+  const sync = make();
+  sync.activated(2);
+  expect([sync.current.activeNumber, sync.current.unpublished]).toEqual([2, null]);
+  sync.lostTrack();
+  expect([sync.current.activeNumber, sync.current.unpublished]).toEqual(["unknown", null]);
 });
 ```
 
@@ -8487,8 +9065,9 @@ In `frontend/src/routes/editor/Editor.test.tsx`, `beforeEach` gains:
 with, at the top level, `let downloads: string[];` and these helpers and tests:
 
 ```tsx
-const version = (number: number, active: boolean) => ({
-  id: `v${number}`, number, published_at: "2026-10-06T10:00:00Z", published_by: null, graph_hash: "h", version_hash: "h",
+/** A version as the list answers it; `hash` is its graph's, which says which draft it holds. */
+const version = (number: number, active: boolean, hash = "h") => ({
+  id: `v${number}`, number, published_at: "2026-10-06T10:00:00Z", published_by: null, graph_hash: hash, version_hash: "h",
   cel_profile: "p", engine_abi: 6, node_refs: [], active, executable: true, blocked_by: [],
 });  // prettier-ignore
 const detail = (number: number, key: string) => ({ ...version(number, false), graph: draftWith(key), expressions: [] });
@@ -8556,16 +9135,47 @@ it("keeps the draft still while it's being published", async () => {
   await vi.waitFor(() => expect(steps().dataset.editable).toBe("true"));
 });
 
-it("reads what happened when a publish's answer is lost, and says it was published", async () => {
+it("reads what happened when a publish's answer is lost, and says it was published when the version holds this draft", async () => {
   answers.set(`POST ${BASE}/publish`, () => {
-    answers.set(`GET ${BASE}/versions`, () => json([version(1, true)]));
+    answers.set(`GET ${BASE}/versions`, () => json([version(1, true, "h1")])); // "h1": the draft as loaded
     answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, active_version_id: "v1", active_version_number: 1, unpublished_changes: false }));
     return Promise.reject(new TypeError("Failed to fetch"));
   });
   await show();
   await confirmPublish(1);
-  await screen.findByText("Saved · published as v1");
+  expect((await screen.findByRole("status", { name: "Notice" })).textContent).toContain("Version 1 was published from your draft");
+  expect(screen.getByText("Saved · published as v1")).toBeTruthy();
   expect(screen.queryByText(/wasn't published|Not published/)).toBeNull();
+});
+
+it("never takes another's publication for this draft's when an answer is lost", async () => {
+  // Someone published version 1 from an earlier draft; this editor saved revision 2 ("h2"); its publish was refused,
+  // and the refusal lost. Version 1 exists and the draft is still at revision 2: neither says this draft is in it.
+  answers.set(`POST ${BASE}/publish`, () => {
+    answers.set(`GET ${BASE}/versions`, () => json([version(1, true, "h-theirs")]));
+    answers.set(`GET ${BASE}`, () =>
+      json({ ...WORKFLOW, draft_revision: 2, active_version_id: "v1", active_version_number: 1, unpublished_changes: true }));
+    return Promise.reject(new TypeError("Failed to fetch"));
+  });
+  await show();
+  await addTransform();
+  await confirmPublish(1);
+  expect((await screen.findByRole("alert")).textContent).toContain("Version 1 holds another draft: yours wasn't published");
+  expect(screen.getByText("Saved · unpublished changes since v1")).toBeTruthy();
+  expect(screen.queryByText(/published as v1|was published from your draft/)).toBeNull();
+});
+
+it("takes the active version from the read, never from the number it hoped for", async () => {
+  answers.set(`POST ${BASE}/publish`, () => {
+    answers.set(`GET ${BASE}/versions`, () => json([version(2, true, "h-later"), version(1, false, "h1")]));
+    answers.set(`GET ${BASE}`, () =>
+      json({ ...WORKFLOW, active_version_id: "v2", active_version_number: 2, unpublished_changes: true }));
+    return Promise.reject(new TypeError("Failed to fetch"));
+  });
+  await show();
+  await confirmPublish(1);
+  expect((await screen.findByRole("status", { name: "Notice" })).textContent).toContain("Version 1 was published from your draft");
+  expect(screen.getByText("Saved · unpublished changes since v2")).toBeTruthy(); // version 2 came after, and is active
 });
 
 it("never calls a lost publish a failure when what happened can't be read", async () => {
@@ -8576,6 +9186,7 @@ it("never calls a lost publish a failure when what happened can't be read", asyn
   await show();
   await confirmPublish(1);
   expect((await screen.findByRole("alert")).textContent).toContain("It isn't known whether version 1 was published");
+  expect(screen.getByText("Saved · the active version isn't known")).toBeTruthy();
 });
 
 it("keeps an activation made when the read after it fails", async () => {
@@ -8675,11 +9286,73 @@ it("shows what only publish checks, in the problems panel, marked", async () => 
   expect(within(panel).getByRole("region", { name: "Found at publish" }).textContent).toContain("That connection doesn't exist.");
 });
 
+it("keeps an older draft's publish findings out of the current problems", async () => {
+  // The owner's case: a clean check of revision 2 must not show revision 1's publish errors as current.
+  answers.set(`POST ${BASE}/publish`, () =>
+    json({ error: "invalid", diagnostics: [{ code: "connection.unknown", message: "That connection doesn't exist.", node: "x", field: null, fix: null, severity: "error" }] }, 422));
+  await show();
+  await confirmPublish(1);
+  expect(await screen.findByRole("button", { name: "Problems · 1" })).toBeTruthy(); // current: revision 1, no edits
+  expect(steps().dataset.problems).toBe("1");
+  answers.set(`POST ${BASE}/validate`, () => json(valid(2)));
+  await addTransform();
+  expect(screen.getByRole("button", { name: "Not checked since your edits" })).toBeTruthy(); // pending: revision 1 still
+  expect(steps().dataset.problems).toBe("0");
+  expect(await screen.findByRole("button", { name: "No problems" }, { timeout: 3000 })).toBeTruthy();
+  const panel = screen.getByRole("complementary", { name: "Problems" });
+  expect(within(panel).getByRole("region", { name: "Found at publish" }).textContent).toContain("before your latest edits");
+});
+
 it("offers no Publish to a viewer", async () => {
   role = "viewer";
   await show();
   expect(screen.queryByRole("button", { name: /^Publish/ })).toBeNull();
 });
+
+/** a → b, c; b → d, e; c → d, f (the owner's review of revision 2): d is joined from b and from c. */
+function joins(): GraphDoc {
+  const at = { a: [0, 0], b: [0, 140], c: [300, 140], d: [0, 280], e: [300, 280], f: [600, 280] } as const;
+  const keys = Object.keys(at) as (keyof typeof at)[];
+  const link = (from: string, to: string) => ({ from: { node: `id-${from}`, port: "out" }, to: { node: `id-${to}` } });
+  return {
+    graph_format: 1,
+    nodes: keys.map((key) => ({ id: `id-${key}`, key, type: "flow.transform@1", position: { x: at[key][0], y: at[key][1] } })),
+    edges: [link("a", "b"), link("a", "c"), link("b", "d"), link("b", "e"), link("c", "d"), link("c", "f")],
+  };
+}
+
+it.each(["a viewer", "an editor after a conflict", "a viewed version"])(
+  "keeps to the branch the keys came by at a join, read only for %s",
+  async (who) => {
+    if (who === "a viewer") role = "viewer";
+    if (who === "a viewed version") {
+      answers.set(`GET ${BASE}/versions`, () => json([version(1, true)]));
+      answers.set(`GET ${BASE}/versions/v1`, () => json({ ...version(1, true), graph: joins(), expressions: [] }));
+    } else {
+      answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: joins() }));
+    }
+    if (who === "an editor after a conflict") answers.set(`PUT ${BASE}/draft`, () => json({ error: "draft_conflict", draft_revision: 5 }, 409));
+    await show();
+    if (who === "an editor after a conflict") {
+      await userEvent.click(screen.getByRole("button", { name: "after f" }));
+      await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
+      await screen.findByRole("alert", {}, { timeout: 3000 }); // changed elsewhere: read only now
+    }
+    if (who === "a viewed version") {
+      await userEvent.click(screen.getByRole("button", { name: "Versions" }));
+      await userEvent.click(await screen.findByRole("button", { name: "View version 1" }));
+      await screen.findByRole("button", { name: "c" });
+    }
+    expect(steps().dataset.editable).toBe("false");
+    screen.getByRole("button", { name: "c" }).focus();
+    await userEvent.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "d" }));
+    await userEvent.keyboard("{ArrowRight}");
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "f" })); // never b's e
+    await userEvent.keyboard("{ArrowLeft}{ArrowUp}");
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "c" }));
+  },
+);
 ```
 
 - [ ] **Step 2: Run them to see them fail**
@@ -8706,17 +9379,29 @@ the primary colour; focus still starts on Cancel, and goes back there when the q
 In `frontend/src/lib/draftSync.ts`:
 
 ```ts
-  /** Publish answered for `revision`: the active version is that draft, so it no longer differs, unless a later save
-   * came since (whose own answer said whether it differs). */
-  published(revision: number): void {
-    if (this.state.revision === revision) this.set({ unpublished: false });
+  /** Publish answered: version `number` is active and holds the draft at `revision`. It no longer differs, if that's
+   * still the saved revision; otherwise how the newer draft compares isn't known. */
+  published(revision: number, number: number): void {
+    this.set({ activeNumber: number, unpublished: this.state.revision === revision ? false : null });
   }
 
-  /** The server's comparison after another version was made active, taken only for the revision it read; null when
-   * it couldn't be read: then nothing is claimed. */
-  compared(summary: { draft_revision: number; unpublished_changes: boolean } | null): void {
-    if (summary === null) this.set({ unpublished: null });
-    else if (summary.draft_revision === this.state.revision) this.set({ unpublished: summary.unpublished_changes });
+  /** A version was made active here; how the draft compares with it isn't known until read. */
+  activated(number: number): void {
+    this.set({ activeNumber: number, unpublished: null });
+  }
+
+  /** What a read of the workflow says: its active version, and the draft's comparison with it, taken only for the
+   * revision it read (else not known). */
+  compared(summary: { draft_revision: number; unpublished_changes: boolean; active_version_number: number | null }): void {
+    this.set({
+      activeNumber: summary.active_version_number,
+      unpublished: summary.draft_revision === this.state.revision ? summary.unpublished_changes : null,
+    });
+  }
+
+  /** An answer lost and nothing read back: which version is active isn't known, nor how the draft compares. */
+  lostTrack(): void {
+    this.set({ activeNumber: "unknown", unpublished: null });
   }
 ```
 
@@ -8805,7 +9490,6 @@ In `Editor`:
   const versions = useQuery(versionsQuery(tenantId, workflow.id));
   // The newest version's number: what a publish expects (4b ruling 17). Unknown while the list loads or refreshes.
   const latest = versions.isSuccess && !versions.isFetching ? (versions.data[0]?.number ?? 0) : null; // newest first
-  const [activeNumber, setActiveNumber] = useState(workflow.active_version_number);
   const [viewing, setViewing] = useState<VersionDetail | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [busy, setBusy] = useState<"publishing" | "activating" | null>(null);
@@ -8829,8 +9513,7 @@ In `Editor`:
   };
 
   function publishedAs(number: number, revision: number) {
-    saver.current?.published(revision);
-    setActiveNumber(number);
+    saver.current?.published(revision, number);
     setPublishProblems(null);
     announce(`Published version ${number}`);
     refresh();
@@ -8840,8 +9523,11 @@ In `Editor`:
     setBusy("publishing");
     setNotice(null);
     let revision: number;
+    let hash: string | null; // the server's hash of the draft submitted: how a version is known to hold it
+    let generation: number;
     try {
       revision = await saver.current!.flush();
+      ({ savedHash: hash, savedGeneration: generation } = saver.current!.current);
     } catch (e) {
       setBusy(null);
       setConfirm(null);
@@ -8868,11 +9554,11 @@ In `Editor`:
         saver.current?.conflict();
       } else if (e instanceof ApiError && e.code === "invalid") {
         const diagnostics = (e.body as { diagnostics: Diagnostic[] }).diagnostics;
-        setPublishProblems({ revision, diagnostics });
+        setPublishProblems({ revision, generation, diagnostics }); // the snapshot they were found in
         setSide({ kind: "problems" });
         announce(`Not published: ${diagnostics.filter((d) => d.severity === "error").length} problems`);
       } else if (uncertain(e)) {
-        await reconcilePublish(expected + 1, revision);
+        await reconcilePublish(expected + 1, hash);
       } else {
         setNotice({ tone: "danger", text: "Not published: the server refused it. Try again." });
       }
@@ -8882,40 +9568,43 @@ In `Editor`:
     }
   }
 
-  /** A publish without an answer: version `number` exists only if a publish expecting the one before went through,
-   * and, while the draft is still at `revision`, it holds this draft. Three outcomes, each said as found. */
-  async function reconcilePublish(number: number, revision: number) {
+  /** A publish without an answer (4b ruling 25, its proof amended by the owner's review of revision 2). Only a
+   * publish expecting the version before could have made version `number`, and a version records its graph's hash:
+   * it holds this draft only if that hash is the one the server gave for the draft submitted. The active version and
+   * the draft's comparison come from the read, never from the number hoped for. */
+  async function reconcilePublish(number: number, hash: string | null) {
     try {
       const [listed, now] = await Promise.all([readVersions(), readWorkflow()]);
-      if (!listed.some((v) => v.number === number)) {
+      saver.current?.compared(now);
+      const made = listed.find((v) => v.number === number);
+      if (made && hash !== null && made.graph_hash === hash) {
+        setPublishProblems(null);
+        announce(`Version ${number} holds your draft`);
+        setNotice({ tone: "info", text: `Version ${number} was published from your draft; its answer was lost on the way.` });
+      } else if (made) {
+        // Someone else's publication made version `number`: this one, expecting the one before, was refused.
+        setNotice({ tone: "danger", text: `Version ${number} holds another draft: yours wasn't published. Open Versions before publishing again.` });
+      } else {
         setNotice({
           tone: "danger",
           text: `Version ${number} isn't published, as far as the server can tell now. If the first attempt is still finishing it may appear: open Versions before publishing again.`,
         });
-      } else if (now.draft_revision === revision) {
-        return publishedAs(number, revision);
-      } else {
-        // Version `number` exists, but the draft was saved elsewhere since: which draft it holds isn't known.
-        setNotice({
-          tone: "danger",
-          text: `Version ${number} is published, but the draft changed elsewhere meanwhile, so it isn't known whether it holds your edits. Open Versions to see.`,
-        });
       }
     } catch {
+      saver.current?.lostTrack();
       setNotice({ tone: "danger", text: `It isn't known whether version ${number} was published: its answer was lost. Open Versions to see before publishing again.` });
     }
     refresh();
   }
 
-  /** Made active: so it stays, whatever the read after it says. The draft's comparison with it is the server's,
-   * and isn't claimed until read. */
-  async function activatedAs(version: VersionRow) {
-    setActiveNumber(version.number);
+  /** Made active: so it stays, whatever a read after it fails to say. The draft's comparison with it is the server's,
+   * from `now` when a read already has it, else read here, and not claimed until then. */
+  async function activatedAs(version: VersionRow, now?: WorkflowDetail) {
+    saver.current?.activated(version.number);
     announce(`Version ${version.number} is active`);
     refresh();
-    saver.current?.compared(null);
     try {
-      saver.current?.compared(await readWorkflow());
+      saver.current?.compared(now ?? (await readWorkflow()));
     } catch {
       setNotice({ tone: "info", text: `Version ${version.number} is active. Whether your draft differs from it couldn't be checked: reload the page to see.` });
     }
@@ -8945,9 +9634,11 @@ In `Editor`:
   async function reconcileActivate(version: VersionRow) {
     try {
       const now = await readWorkflow();
-      if (now.active_version_id === version.id) return await activatedAs(version);
+      if (now.active_version_id === version.id) return await activatedAs(version, now);
+      saver.current?.compared(now);
       setNotice({ tone: "danger", text: `Version ${version.number} isn't active, as far as the server can tell now. Open Versions before trying again.` });
     } catch {
+      saver.current?.lostTrack();
       setNotice({ tone: "danger", text: `It isn't known whether version ${version.number} was made active: its answer was lost. Open Versions to see.` });
     }
     refresh();
@@ -9014,8 +9705,8 @@ The canvas draws `shownDoc` with `editable={editable}`; while `viewing`, it take
 panel shows the step of what's on the screen, never the draft's while a version is viewed (found by the revision's
 review): it renders when `nodesOf(shownDoc)` holds the step, takes its node and type from there and its ports from
 `portMap`, and, while viewing, the version's own expressions (`viewing.expressions.filter((x) => x.node ===
-side.node)`, B4a's) and `problems={null}`. `SaveState` takes `activeNumber={activeNumber}`; the Problems button shows
-only when `viewing === null`.
+side.node)`, B4a's) and `problems={null}`. `SaveState` reads the active version from the saver's state, which every
+outcome above updates from its own answer or read; the Problems button shows only when `viewing === null`.
 The toolbar's actions, after Problems:
 
 ```tsx
@@ -9404,9 +10095,16 @@ with the plan in hand:
    - `PortRef`, `ItemAction` and `PickMode` keep one shape across Tasks 9–15.
    - `item.*` ids are built only in `items.ts` and read by `canvasNav.ts` and the components; the canvas and the
      keyboard model both use `drawableEdges` (Task 9).
-   - `SyncState` (`status`, `revision`, `unpublished: boolean | null`, `generation`, `savedGeneration`) and
-     `DraftSync`'s `change`, `flush`, `retry`, `conflict`, `dispose`, `unsaved` (Task 13), `published`, `compared`
-     (Task 15); `ConflictError` and `SaveError` (Task 13).
+   - `SyncState` (`status`, `revision`, `unpublished: boolean | null`, `generation`, `savedGeneration`, `savedHash`,
+     `activeNumber: number | null | "unknown"`) and `DraftSync`'s `change`, `flush`, `retry`, `conflict`, `dispose`,
+     `unsaved` (Task 13), `published(revision, number)`, `activated`, `compared(summary)`, `lostTrack` (Task 15);
+     `Saved` matches `DraftSavedOut` (Task 3); `ConflictError` and `SaveError` (Task 13); `<SaveState state />` reads
+     the active version from the state.
+   - `LeaveGuard`, `guardLeaving`, `unsavedWork`, `mayLeave` (Task 13), used by the editor, `Shell` and
+     `RequireActive`.
+   - `step`, `pathTo`, `isPath` replace revision 2's `move` (Task 12); the editor keeps `trail` beside `focusId`.
+   - `PublishProblems` is `{revision, generation, diagnostics}`; `ProblemsPanel` takes `publishCurrent` (Task 14).
+   - `useBindingChoices` and `ImportBindings`' `choices` (Task 8).
    - `Check`, `CheckState`, `checkState`, `lastOf`, `checkLabel` (Task 14), read by Task 15 only through the editor.
    - `StepPanel`'s `problems: Diagnostic[] | null`, `onPlace`, `onNudge` (Task 12), filled by Task 14 and emptied
      while viewing a version (Task 15).
@@ -9415,8 +10113,9 @@ with the plan in hand:
      14 says so.
    - `notPortable` and `PortableProblem` (Task 7), used by Task 15; the API's `not_portable` and `bad_document`
      problem shape `{reason, binding, node, field}` (Task 5), read by Tasks 7, 8 and 15.
-   - The schema names come from Tasks 1–5: `NodeTypeOut`, `WorkflowOut` (with `last_run`, `last_simulation`),
-     `WorkflowDetailOut`, `DraftSavedOut`, `ValidationOut`, `DiagnosticOut`, `ExpressionOut`, `VersionOut`,
+   - The schema names come from Tasks 1–5: `NodeTypeOut`, `WorkflowOut` (with `last_run`, `last_simulation`,
+     `draft_graph_hash`), `WorkflowDetailOut`, `DraftSavedOut` (with `graph_hash`, `active_version_id`,
+     `active_version_number`), `ValidationOut`, `DiagnosticOut`, `ExpressionOut`, `VersionOut`,
      `VersionDetailOut`, `PublishIn`, `WorkflowDocument`, `Binding`, `BindingSite`, and `Graph` (refined).
    - The summary module is `dewpoint.apps.workflow_summary` everywhere (Task 3, its tests, its probe).
 4. **Review Focus.** Each of its five lines has its tests in the task that owns the code, named in the line.
