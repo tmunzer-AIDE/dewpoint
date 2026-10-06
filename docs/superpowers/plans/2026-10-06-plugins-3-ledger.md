@@ -608,3 +608,9 @@ refused on both channels; holding `getSiteInfo` stops curated and generic nodes;
 allowed operation's answer schema). One Low remained: (O4) with an update's merge read held, a merge simulated
 successfully (by default or asked), its authorization living only in the run's merge. The mode-aware check now sits in
 the preflight a run and a simulation share; `replace` reads nothing and stays available.
+
+The owner closed the 3b-1 technical review at `461a926` (2026-10-07): default and explicit merges are refused when their
+auxiliary read is held, denied or not delegated, in a run and a simulation alike, before the connection opens; replace
+stays available; the earlier findings stay resolved. This closes the technical review only: the rulings above, the
+fixture redesign, catalog compression, the Compose proof, the read-only Mist smoke test, and push and PR remain the
+owner's.
