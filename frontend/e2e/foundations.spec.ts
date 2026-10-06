@@ -97,6 +97,7 @@ test.describe.serial("foundations", () => {
     for (const path of [connectionsPath, membersPath, "/account/security", "/tenants"]) {
       await page.goto(path);
       await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+      await page.waitForLoadState("networkidle"); // measure with the data in: tables come with it
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
       expect(overflow, `${path} scrolls sideways at 320 px`).toBeLessThanOrEqual(0);
       await expectAccessible(page, `${path} at 320 px`);

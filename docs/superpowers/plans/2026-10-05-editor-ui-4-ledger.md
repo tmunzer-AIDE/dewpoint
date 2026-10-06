@@ -228,3 +228,7 @@ thirteen minor findings. What became of each:
     its contrast rests on the warn pair in PAIRS until a later slice's e2e reaches it.
 49. Not mechanised, left to the checkpoint reviewer's eye: the pill shape off data pills (`rounded-full`,
     `rounded-pill`) and "!" in UI copy - the guard can't tell a data pill or a code sample from decoration.
+50. Fixed: the 320 px check measured before the lists loaded, so it passed while connections scrolled 166 px sideways
+    and members 41 px. A table header's screen-reader-only label (absolutely positioned) had no positioned ancestor,
+    so the page held it, not the table's scrolling frame. The frame is positioned now; the check waits for the network
+    to settle before measuring and failed red on connections first.
