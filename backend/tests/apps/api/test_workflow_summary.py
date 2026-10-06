@@ -4,6 +4,7 @@ its root runs in the last 24 hours, live and simulated apart; whether its draft 
 needs attention, from live runs only. Its reads don't grow with its workflows."""
 
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -219,3 +220,130 @@ async def test_the_lists_reads_dont_grow_with_its_workflows(app, owner_sessionma
                 await add_run(owner_sessionmaker, tid, wid, vid, status="failed", mode="simulate")
         many = await statements_listing(c, tid)
     assert few == many <= 6  # workflows, active versions, two lifecycle reads at most, last runs, counts
+
+
+# The last-runs read (4b ruling 5, the owner's review of M1): one batched LATERAL statement over `runs_workflow_last`
+# (migration 0047). REFERENCE is the statement it replaced, kept to prove the two answer the same.
+REFERENCE = text(
+    "select distinct on (workflow_id, mode) workflow_id, mode, status, coalesce(ended_at, started_at, queued_at) as at"
+    " from runs where tenant_id = :tenant and kind = 'run' and workflow_id = any(cast(:ids as uuid[]))"
+    " order by workflow_id, mode, queued_at desc, id desc"
+)
+
+
+async def put_run(owner, tid, wid, vid, *, mode, status, at, rid=None, parent=None) -> uuid.UUID:
+    """A run queued at `at` exactly, with the id given (equal timestamps are ordered by id)."""
+    rid = rid or uuid.uuid4()
+    async with owner() as s, s.begin():
+        await s.execute(
+            text(
+                "insert into runs (id, tenant_id, workflow_id, workflow_version_id, mode, status, queued_at,"
+                " iterations, kind, parent_run_id, parent_step_id) values (:i, :t, :w, :v, :m, :st, :at, 0, :k, :p,"
+                " :ps)"
+            ),
+            {
+                "i": rid, "t": tid, "w": wid, "v": vid, "m": mode, "st": status, "at": at,
+                "k": "subflow" if parent else "run", "p": parent, "ps": uuid.uuid4() if parent else None,
+            },
+        )  # fmt: skip
+    return rid
+
+
+async def test_the_index_is_the_one_reserved(owner_sessionmaker) -> None:
+    async with owner_sessionmaker() as s:
+        found = await s.execute(text("select indexdef from pg_indexes where indexname = 'runs_workflow_last'"))
+        definition = found.scalar_one()
+    assert definition == (
+        "CREATE INDEX runs_workflow_last ON public.runs USING btree (workflow_id, mode, queued_at DESC, id DESC)"
+        " WHERE ((kind)::text = 'run'::text)"
+    )
+
+
+async def test_the_last_runs_read_answers_as_the_statement_it_replaced(
+    app, owner_sessionmaker, api_sessionmaker, api_settings
+) -> None:
+    """Both modes of one workflow, a quiet workflow, equal timestamps (the greater id wins), a sub-run newer than its
+    root, and another tenant's run of the same workflow: the LATERAL read and the DISTINCT ON reference agree whole."""
+    from dewpoint.apps import workflow_summary
+    from dewpoint.core.db import tenant_scope
+
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    _, otid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        (a, av), (b, bv), (quiet, _) = [await published(c, tid) for _ in range(3)]
+    t0 = datetime.now(UTC) - timedelta(hours=1)
+    low, high = sorted((uuid.uuid4(), uuid.uuid4()))
+    await put_run(owner_sessionmaker, tid, a, av, mode="live", status="failed", at=t0, rid=low)
+    await put_run(owner_sessionmaker, tid, a, av, mode="live", status="succeeded", at=t0, rid=high)
+    await put_run(owner_sessionmaker, tid, a, av, mode="live", status="failed", at=t0 - timedelta(minutes=5))
+    await put_run(owner_sessionmaker, tid, a, av, mode="simulate", status="cancelled", at=t0 - timedelta(minutes=1))
+    root = await put_run(owner_sessionmaker, tid, b, bv, mode="live", status="succeeded", at=t0 - timedelta(minutes=9))
+    await put_run(owner_sessionmaker, tid, b, bv, mode="live", status="failed", at=t0, parent=root)
+    await put_run(owner_sessionmaker, otid, b, bv, mode="simulate", status="failed", at=t0)
+    ids = [uuid.UUID(w) for w in (a, b, quiet)]
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tid)
+        stats = await workflow_summary.run_stats(s, tid, ids)
+        found = await s.execute(REFERENCE, {"tenant": tid, "ids": ids})
+        reference = {(r.workflow_id, r.mode): (r.status, r.at) for r in found}
+    got = {
+        (wid, mode): (last.status, last.at)
+        for wid, st in stats.items()
+        for mode, last in (("live", st.last_live), ("simulate", st.last_simulated))
+        if last is not None
+    }
+    assert got == reference
+    assert got == {
+        (ids[0], "live"): ("succeeded", t0),  # the greater id of the two at t0
+        (ids[0], "simulate"): ("cancelled", t0 - timedelta(minutes=1)),
+        (ids[1], "live"): ("succeeded", t0 - timedelta(minutes=9)),  # the root, never its sub-run
+    }
+    assert stats[ids[2]] == workflow_summary.RunStats(None, None, 0, 0)
+
+
+def runs_scanned(node: dict[str, Any]) -> tuple[int, int, set[str]]:
+    """What a plan's scans of `runs` cost over every loop: the rows they read (kept or filtered out), the pages they
+    touched, and how (each scan's node type and index; a sort anywhere counts as one)."""
+    rows, pages, how = 0, 0, {node["Node Type"]} if node["Node Type"] in ("Sort", "Incremental Sort") else set()
+    if node.get("Relation Name") == "runs":
+        rows = round((node["Actual Rows"] + node.get("Rows Removed by Filter", 0)) * node["Actual Loops"])
+        pages = node.get("Shared Hit Blocks", 0) + node.get("Shared Read Blocks", 0)
+        how = {f"{node['Node Type']} {node.get('Index Name', '')}".strip()}
+    for child in node.get("Plans", []):
+        r, p, h = runs_scanned(child)
+        rows, pages, how = rows + r, pages + p, how | h
+    return rows, pages, how
+
+
+async def test_the_last_runs_read_examines_one_run_per_workflow_and_mode(
+    app, owner_sessionmaker, api_sessionmaker, api_settings
+) -> None:
+    """Counted in rows and pages, never time (4b ruling 5; ledger M5): however long a workflow's history, the read
+    looks up each workflow and mode once in `runs_workflow_last`, in order, stopping at the first row. The history here
+    is the one that turned the planner to `runs_tenant_queued` when the mode was an equality: one workflow's live runs
+    only, analyzed, and a quiet workflow. It then read every run of the tenant's for each of the three workflows and
+    modes with none."""
+    from dewpoint.apps import workflow_summary
+    from dewpoint.core.db import tenant_scope
+
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        (a, av), (b, _) = [await published(c, tid) for _ in range(2)]
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(
+            text(
+                "insert into runs (id, tenant_id, workflow_id, workflow_version_id, mode, status, queued_at,"
+                " iterations, kind) select gen_random_uuid(), :t, :w, :v, 'live', 'succeeded',"
+                " now() - make_interval(secs => g), 0, 'run' from generate_series(1, 3000) g"
+            ),
+            {"t": tid, "w": a, "v": av},
+        )
+        await s.execute(text("analyze runs"))
+    params = {"tenant": tid, "ids": [uuid.UUID(a), uuid.UUID(b)]}  # b is quiet; a never simulated
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tid)
+        query = text(f"explain (analyze, buffers, format json) {workflow_summary.LAST_RUNS.text}")
+        plan = (await s.execute(query, params)).scalar_one()[0]["Plan"]
+    rows, pages, how = runs_scanned(plan)
+    assert how == {"Index Scan runs_workflow_last"}  # ordered, stopping at the first row: no bitmap, no sort
+    assert rows <= 4 and pages <= 16  # 2 workflows x 2 modes: one lookup each, a few pages of the index and heap

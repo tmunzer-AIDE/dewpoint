@@ -19,12 +19,20 @@ from dewpoint.engine.graph.model import GraphFormatError, graph_hash, parse_grap
 
 ATTENTION_STATUSES = ("failed", "deadline_exceeded")
 
-# Each workflow's last root run of each mode. `runs` has no index on `workflow_id` (4b ruling 5, held on the probe's
-# evidence): this is one scan of the tenant's root runs, sorted, whatever the number of workflows.
+# Each workflow's last root run of each mode, in one statement for every workflow (4b ruling 5): one ordered lookup
+# of `runs_workflow_last` (migration 0047) per workflow and mode, however long its history; a workflow and mode with
+# no root run give no row. The mode is a lower bound that leads the order, checked for equality outside the lookup
+# (ledger M5). As an equality inside it, the planner drops it from the order, and `runs_tenant_queued (tenant_id,
+# queued_at DESC, id DESC)` then serves the order too: on a live-only history it chose that index, reading the
+# tenant's whole history for each workflow and mode with no run. Bounded on both sides, the planner's default range
+# estimate (0.5%) made it sort each workflow's runs of the mode instead of stopping at the first. From below, only
+# `runs_workflow_last` gives the order, and the first row is the mode's newest, or another mode's when it has none.
 LAST_RUNS = text(
-    "select distinct on (workflow_id, mode) workflow_id, mode, status, coalesce(ended_at, started_at, queued_at) as at"
-    " from runs where tenant_id = :tenant and kind = 'run' and workflow_id = any(cast(:ids as uuid[]))"
-    " order by workflow_id, mode, queued_at desc, id desc"
+    "select w.id as workflow_id, m.mode, r.status, r.at"
+    " from unnest(cast(:ids as uuid[])) as w(id) cross join (values ('live'), ('simulate')) as m(mode)"
+    " cross join lateral (select mode, status, coalesce(ended_at, started_at, queued_at) as at from runs"
+    " where tenant_id = :tenant and kind = 'run' and workflow_id = w.id and mode >= m.mode"
+    " order by mode, queued_at desc, id desc limit 1) as r where r.mode = m.mode"
 )
 # Each workflow's root runs queued in the last 24 hours, by the database's clock (its clock wrote the rows): a range of
 # `runs_tenant_queued`.
@@ -53,7 +61,7 @@ class RunStats:
 async def run_stats(
     s: AsyncSession, tenant_id: uuid.UUID, workflow_ids: Iterable[uuid.UUID]
 ) -> dict[uuid.UUID, RunStats]:
-    """Each workflow's root runs, in two reads for any number of workflows: a sub-flow's or failure handler's run
+    """Each workflow's root runs, in two statements for any number of workflows: a sub-flow's or failure handler's run
     counts toward its parent's, never as the workflow's own."""
     ids = sorted(set(workflow_ids), key=str)
     if not ids:

@@ -431,3 +431,23 @@ lost-answer wording is limited to graph equivalence: "Version N holds the submit
 outcome wasn't received." M1, M2 and M4 accepted. Execution: incorporate these and the index addendum, then proceed
 inline through milestones 2-4; the pauses after milestone 3 and at the final checkpoint stay, and Task 11's immediate
 stop on any CSP failure. No push or PR.
+
+### 4b, after the milestone 1 review (2026-10-06)
+
+M5. **The last-runs read bounds the mode from below inside each lookup and checks it outside** (ruling 5's index and
+    batched LATERAL read): `workflow_id = w.id and mode >= m.mode order by mode, queued_at desc, id desc limit 1`,
+    then `where r.mode = m.mode` outside the lookup, keeping the tenant and root-run filters. The ruling's literal
+    form (the mode an equality, `order by queued_at desc, id desc`) answers the same rows, but its plan depends on the
+    statistics: an equality makes the mode redundant in the order, so `runs_tenant_queued (tenant_id, queued_at DESC,
+    id DESC)` serves the order as well as `runs_workflow_last`. On a tenant whose one workflow has only live runs,
+    analyzed, the planner chose `runs_tenant_queued` and read the tenant's whole history for each workflow and mode
+    with no run: 60,000 rows and 1,419 pages at 20k runs in the test database; 34 ms at 100k and 372 ms at 1M in the
+    probe, slower than the DISTINCT ON read it replaced (24 and 262 ms). Bounding the mode on both sides kept the
+    order but let the planner's default range estimate (0.5%) choose a bitmap scan and a sort of each workflow's runs
+    of the mode (11.4 ms at 10k, against 2.5 ms). From below, the estimate is a third, only `runs_workflow_last` gives
+    the order, and the first row is the mode's newest, or another mode's when it has none (dropped outside). The probe
+    shows one ordered index scan, stopping at the first row, at every size of both workloads, and the reads' whole
+    results equal; `test_the_last_runs_read_examines_one_run_per_workflow_and_mode` pins the ordered scan on the
+    skewed history (it fails on the literal form). - A plan that turns on statistics reads a tenant's whole history
+    for a quiet workflow. - None in results (the reads agree whole, and the regression tests compare them); the
+    statement is less obvious, and its comment says why.
