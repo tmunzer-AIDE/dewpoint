@@ -394,7 +394,8 @@ class PickConfig(BaseModel):
 
 class Pick(Node):
     """Lists its connection's sites as options (plugins-3 D3). The typed text steers it, for tests: `post` writes,
-    `plain` posts through ctx.http, `echo` returns what the service echoed, `many` too many options, `boom` fails,
+    `plain` posts through ctx.http, `getbody` sends a GET with a body, `override` a GET
+    that asks to be a DELETE, `echo` returns what the service echoed, `many` too many options, `boom` fails,
     `slow` takes its time, `other:<id>` opens that connection; anything else is the search."""
 
     type = "testkit.pick"
@@ -416,6 +417,10 @@ class Pick(Node):
             await conn.http.request("POST", "/sites")
         if query.text == "plain":
             await ctx.http.request("POST", conn.config["base_url"] + "/sites")
+        if query.text == "getbody":
+            await conn.http.request("GET", "/sites", content=b"delete everything")
+        if query.text == "override":
+            await conn.http.request("GET", "/sites", headers={"X-HTTP-Method-Override": "DELETE"})
         if query.text == "boom":
             raise RuntimeError("the plugin broke, with a message that must not be logged")
         if query.text == "slow":

@@ -112,7 +112,7 @@ async def test_the_answer_is_sealed(owner_sessionmaker, api_sessionmaker, worker
     assert b"Site 1" not in stored
 
 
-@pytest.mark.parametrize("q", ["post", "plain"])
+@pytest.mark.parametrize("q", ["post", "plain", "getbody", "override"])
 async def test_a_hook_may_only_read(owner_sessionmaker, api_sessionmaker, worker_sessionmaker, q: str) -> None:
     async with serve(service, tls_names=NAMES) as fake:
         tenant, cid = await setup(owner_sessionmaker, fake.port)

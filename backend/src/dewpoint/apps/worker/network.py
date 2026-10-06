@@ -305,10 +305,19 @@ class Channel(Protocol):
 
 
 READ_METHODS = frozenset({"GET", "HEAD"})
+# Headers some servers read as the method itself: a read-only request sends none (the 3a-2 review's finding 11).
+METHOD_OVERRIDES = frozenset({"x-http-method-override", "x-http-method", "x-method-override"})
 
 
-def _check_method(channel: Channel, method: str) -> None:
-    if channel.read_only and (not isinstance(method, str) or method.upper() not in READ_METHODS):
+def _check_read(
+    channel: Channel, method: str, headers: Mapping[str, str] | None, content: bytes | None, json: Any
+) -> None:
+    """On a read-only channel: GET or HEAD only, with no body and no header asking for another method."""
+    if not channel.read_only:
+        return
+    if not isinstance(method, str) or method.upper() not in READ_METHODS or content is not None or json is not None:
+        raise ReadOnly()
+    if any(not isinstance(name, str) or name.lower() in METHOD_OVERRIDES for name in headers or {}):
         raise ReadOnly()
 
 
@@ -327,7 +336,7 @@ class PlainHttp:
         json: Any = None,
         follow_same_origin: int = 0,
     ) -> HttpResponse:
-        _check_method(self._attempt, method)
+        _check_read(self._attempt, method, headers, content, json)
         return await self._attempt.send(
             lambda: self._attempt.core_http().request(
                 method, url, headers=headers, params=params, content=content, json=json,
@@ -422,7 +431,7 @@ class ConnectionHttp:
         json: Any = None,
         follow_same_origin: int = 0,
     ) -> HttpResponse:
-        _check_method(self._attempt, method)
+        _check_read(self._attempt, method, headers, content, json)
         target = self._target(url)
         reserved = {name.lower() for name in self._credentials}
         if any(name.lower() in reserved for name in headers or {}):
