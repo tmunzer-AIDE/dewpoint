@@ -6,6 +6,7 @@ import pytest
 
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.plugins.lifecycle import Entry
+from dewpoint.engine.graph.model import graph_hash, parse_graph
 from tests.apps.api.helpers import member_client, session_client
 from tests.support.graphs import G, cel, nid, ref
 from tests.support.registry import sync_test_plugins
@@ -30,7 +31,10 @@ async def test_draft_edit_validate_publish_flow(app, owner_sessionmaker, api_set
         stale = await c.put(f"{base}/draft", json=GRAPH, headers={"If-Match": "7"})
         assert stale.status_code == 409 and stale.json() == {"error": "draft_conflict", "draft_revision": 1}
         saved = await c.put(f"{base}/draft", json=GRAPH, headers={"If-Match": "1"})
-        assert saved.status_code == 200 and saved.json() == {"draft_revision": 2}
+        assert saved.status_code == 200, saved.text
+        body = saved.json()
+        assert (body["draft_revision"], body["unpublished_changes"], body["active_version_id"]) == (2, True, None)
+        assert body["graph_hash"] == graph_hash(parse_graph(GRAPH))
         checked = (await c.post(f"{base}/validate")).json()
         assert checked["valid"] is True and checked["diagnostics"] == []
         published = await c.post(f"{base}/publish", headers={"If-Match": '"2"'})

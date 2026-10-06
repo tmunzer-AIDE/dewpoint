@@ -720,13 +720,54 @@
       "DraftSavedOut": {
         "additionalProperties": false,
         "properties": {
+          "active_version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Version Id"
+          },
+          "active_version_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Version Number"
+          },
           "draft_revision": {
             "title": "Draft Revision",
             "type": "integer"
+          },
+          "graph_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Graph Hash"
+          },
+          "unpublished_changes": {
+            "title": "Unpublished Changes",
+            "type": "boolean"
           }
         },
         "required": [
-          "draft_revision"
+          "draft_revision",
+          "unpublished_changes",
+          "graph_hash",
+          "active_version_id",
+          "active_version_number"
         ],
         "title": "DraftSavedOut",
         "type": "object"
@@ -1216,6 +1257,32 @@
           "field"
         ],
         "title": "InputOptionsIn",
+        "type": "object"
+      },
+      "LastRunOut": {
+        "additionalProperties": false,
+        "properties": {
+          "at": {
+            "title": "At",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled",
+              "deadline_exceeded"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "at"
+        ],
+        "title": "LastRunOut",
         "type": "object"
       },
       "LoginIn": {
@@ -1860,6 +1927,25 @@
           "role"
         ],
         "title": "RoleChange",
+        "type": "object"
+      },
+      "RunCountOut": {
+        "additionalProperties": false,
+        "properties": {
+          "live": {
+            "title": "Live",
+            "type": "integer"
+          },
+          "simulate": {
+            "title": "Simulate",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "live",
+          "simulate"
+        ],
+        "title": "RunCountOut",
         "type": "object"
       },
       "ScheduleIn": {
@@ -2573,6 +2659,17 @@
           "draft": {
             "$ref": "#/components/schemas/Graph"
           },
+          "draft_graph_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Draft Graph Hash"
+          },
           "draft_revision": {
             "title": "Draft Revision",
             "type": "integer"
@@ -2596,9 +2693,47 @@
             "title": "Id",
             "type": "string"
           },
+          "last_run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LastRunOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_simulation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LastRunOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "name": {
             "title": "Name",
             "type": "string"
+          },
+          "needs_attention": {
+            "items": {
+              "enum": [
+                "last_run_failed",
+                "not_executable"
+              ],
+              "type": "string"
+            },
+            "title": "Needs Attention",
+            "type": "array"
+          },
+          "runs_24h": {
+            "$ref": "#/components/schemas/RunCountOut"
+          },
+          "unpublished_changes": {
+            "title": "Unpublished Changes",
+            "type": "boolean"
           },
           "updated_at": {
             "title": "Updated At",
@@ -2616,6 +2751,12 @@
           "blocked_by",
           "created_at",
           "updated_at",
+          "unpublished_changes",
+          "draft_graph_hash",
+          "last_run",
+          "last_simulation",
+          "runs_24h",
+          "needs_attention",
           "draft"
         ],
         "title": "WorkflowDetailOut",
@@ -2657,6 +2798,17 @@
             "title": "Created At",
             "type": "string"
           },
+          "draft_graph_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Draft Graph Hash"
+          },
           "draft_revision": {
             "title": "Draft Revision",
             "type": "integer"
@@ -2680,9 +2832,47 @@
             "title": "Id",
             "type": "string"
           },
+          "last_run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LastRunOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_simulation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LastRunOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "name": {
             "title": "Name",
             "type": "string"
+          },
+          "needs_attention": {
+            "items": {
+              "enum": [
+                "last_run_failed",
+                "not_executable"
+              ],
+              "type": "string"
+            },
+            "title": "Needs Attention",
+            "type": "array"
+          },
+          "runs_24h": {
+            "$ref": "#/components/schemas/RunCountOut"
+          },
+          "unpublished_changes": {
+            "title": "Unpublished Changes",
+            "type": "boolean"
           },
           "updated_at": {
             "title": "Updated At",
@@ -2699,7 +2889,13 @@
           "executable",
           "blocked_by",
           "created_at",
-          "updated_at"
+          "updated_at",
+          "unpublished_changes",
+          "draft_graph_hash",
+          "last_run",
+          "last_simulation",
+          "runs_24h",
+          "needs_attention"
         ],
         "title": "WorkflowOut",
         "type": "object"
@@ -2770,6 +2966,17 @@
             "title": "Created At",
             "type": "string"
           },
+          "draft_graph_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Draft Graph Hash"
+          },
           "draft_revision": {
             "title": "Draft Revision",
             "type": "integer"
@@ -2793,9 +3000,47 @@
             "title": "Id",
             "type": "string"
           },
+          "last_run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LastRunOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_simulation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LastRunOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "name": {
             "title": "Name",
             "type": "string"
+          },
+          "needs_attention": {
+            "items": {
+              "enum": [
+                "last_run_failed",
+                "not_executable"
+              ],
+              "type": "string"
+            },
+            "title": "Needs Attention",
+            "type": "array"
+          },
+          "runs_24h": {
+            "$ref": "#/components/schemas/RunCountOut"
+          },
+          "unpublished_changes": {
+            "title": "Unpublished Changes",
+            "type": "boolean"
           },
           "updated_at": {
             "title": "Updated At",
@@ -2820,6 +3065,12 @@
           "blocked_by",
           "created_at",
           "updated_at",
+          "unpublished_changes",
+          "draft_graph_hash",
+          "last_run",
+          "last_simulation",
+          "runs_24h",
+          "needs_attention",
           "warnings"
         ],
         "title": "WorkflowUpdatedOut",

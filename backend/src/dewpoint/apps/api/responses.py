@@ -164,6 +164,16 @@ class DiagnosticOut(_Answer):
     severity: Literal["error", "warning"]
 
 
+class LastRunOut(_Answer):
+    status: Literal["running", "succeeded", "failed", "cancelled", "deadline_exceeded"]
+    at: str  # when it ended, else started, else was queued
+
+
+class RunCountOut(_Answer):
+    live: int
+    simulate: int
+
+
 class WorkflowOut(_Answer):
     id: str
     name: str
@@ -175,6 +185,12 @@ class WorkflowOut(_Answer):
     blocked_by: list[str]  # the lifecycle entries that keep the active version from running
     created_at: str
     updated_at: str
+    unpublished_changes: bool  # the draft differs from the active version (true when nothing is published)
+    draft_graph_hash: str | None  # the draft's graph hash as publish would record it; null when it doesn't parse
+    last_run: LastRunOut | None  # its last live root run: what attention follows
+    last_simulation: LastRunOut | None  # its last simulated root run, shown apart, never attention
+    runs_24h: RunCountOut  # its root runs queued in the last 24 hours, live and simulated apart
+    needs_attention: list[Literal["last_run_failed", "not_executable"]]
 
 
 class WorkflowDetailOut(WorkflowOut):
@@ -187,6 +203,10 @@ class WorkflowUpdatedOut(WorkflowOut):
 
 class DraftSavedOut(_Answer):
     draft_revision: int
+    unpublished_changes: bool  # against `active_version_*`, the version active when the save landed
+    graph_hash: str | None  # the saved draft's, as publish would record it
+    active_version_id: str | None
+    active_version_number: int | None
 
 
 class ExpressionOut(_Answer):

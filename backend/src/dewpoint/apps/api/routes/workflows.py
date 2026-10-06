@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dewpoint.apps import workflow_ops
+from dewpoint.apps import workflow_ops, workflow_summary
 from dewpoint.apps.api.deps import get_keyring
 from dewpoint.apps.api.responses import (
     ActivatedOut,
@@ -77,22 +77,50 @@ async def _get(db: AsyncSession, ctx: TenantContext, workflow_id: uuid.UUID, *, 
     return wf
 
 
+def _last(run: workflow_summary.LastRun | None) -> dict[str, str] | None:
+    return None if run is None else {"status": run.status, "at": run.at.isoformat()}
+
+
+async def _summaries(db: AsyncSession, tenant_id: uuid.UUID, wfs: list[Workflow]) -> list[dict[str, object]]:
+    """Each workflow's row (B3), in a fixed number of reads whatever their number: the active versions, the lifecycle
+    states of every entry they use, the last runs and the 24-hour counts, each read once for all."""
+    ids = [wf.id for wf in wfs]
+    actives = await service.active_versions(db, tenant_id, ids)
+    blocked = await service.blocked_by_many(db, actives.values())
+    stats = await workflow_summary.run_stats(db, tenant_id, ids)
+    hashes = await workflow_summary.HASHES.of([(wf.id, wf.draft_revision, wf.draft) for wf in wfs])
+    out: list[dict[str, object]] = []
+    for wf in wfs:
+        active = actives.get(wf.id)
+        stops = blocked[active.id] if active else []
+        runs = stats[wf.id]
+        out.append(
+            {
+                "id": str(wf.id),
+                "name": wf.name,
+                "enabled": wf.enabled,
+                "draft_revision": wf.draft_revision,
+                "active_version_id": str(active.id) if active else None,
+                "active_version_number": active.number if active else None,
+                "executable": (not stops) if active else None,
+                "blocked_by": stops,
+                "created_at": wf.created_at.isoformat(),
+                "updated_at": wf.updated_at.isoformat(),
+                "unpublished_changes": active is None or hashes[wf.id] != active.graph_hash,
+                "draft_graph_hash": hashes[wf.id],
+                "last_run": _last(runs.last_live),
+                "last_simulation": _last(runs.last_simulated),
+                "runs_24h": {"live": runs.live_24h, "simulate": runs.simulated_24h},
+                "needs_attention": workflow_summary.attention(runs, published=active is not None, blocked=stops),
+            }
+        )
+    return out
+
+
 async def _summary(db: AsyncSession, wf: Workflow) -> dict[str, object]:
+    """One workflow just read, created or changed: its server-set columns (`updated_at`) are read back first."""
     await db.refresh(wf)
-    active = await service.get_version(db, wf.id, wf.active_version_id) if wf.active_version_id else None
-    blocked = await service.blocked_by(db, active) if active else []
-    return {
-        "id": str(wf.id),
-        "name": wf.name,
-        "enabled": wf.enabled,
-        "draft_revision": wf.draft_revision,
-        "active_version_id": str(active.id) if active else None,
-        "active_version_number": active.number if active else None,
-        "executable": (not blocked) if active else None,
-        "blocked_by": blocked,
-        "created_at": wf.created_at.isoformat(),
-        "updated_at": wf.updated_at.isoformat(),
-    }
+    return (await _summaries(db, wf.tenant_id, [wf]))[0]
 
 
 def _version_out(v: WorkflowVersion, active_id: uuid.UUID | None, blocked: list[str]) -> dict[str, object]:
@@ -115,7 +143,7 @@ def _version_out(v: WorkflowVersion, active_id: uuid.UUID | None, blocked: list[
 async def list_workflows(
     ctx: TenantContext = Depends(require(P.WORKFLOW_VIEW)), db: AsyncSession = Depends(get_db, scope="function")
 ) -> list[dict[str, object]]:
-    return [await _summary(db, wf) for wf in await service.list_workflows(db, ctx.tenant_id)]
+    return await _summaries(db, ctx.tenant_id, await service.list_workflows(db, ctx.tenant_id))
 
 
 @router.post("/t/{tenant_id}/workflows", status_code=201, response_model=WorkflowDetailOut)
@@ -158,7 +186,15 @@ async def put_draft(
         revision = await service.save_draft(db, wf, expected_revision=expected, draft=draft)
     except service.DraftConflictError as e:
         raise HTTPException(409, detail={"error": "draft_conflict", "draft_revision": e.current_revision}) from None
-    return {"draft_revision": revision}
+    active = await service.locked_active_version(db, wf.id)  # never `wf.active_version_id`: it may predate the swap
+    saved = await workflow_summary.hash_now(draft)
+    return {
+        "draft_revision": revision,
+        "unpublished_changes": active is None or saved != active.graph_hash,
+        "graph_hash": saved,
+        "active_version_id": str(active.id) if active else None,
+        "active_version_number": active.number if active else None,
+    }
 
 
 @router.patch("/t/{tenant_id}/workflows/{workflow_id}", response_model=WorkflowUpdatedOut)

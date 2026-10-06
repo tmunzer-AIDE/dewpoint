@@ -1424,8 +1424,16 @@ export interface components {
         };
         /** DraftSavedOut */
         DraftSavedOut: {
+            /** Active Version Id */
+            active_version_id: string | null;
+            /** Active Version Number */
+            active_version_number: number | null;
             /** Draft Revision */
             draft_revision: number;
+            /** Graph Hash */
+            graph_hash: string | null;
+            /** Unpublished Changes */
+            unpublished_changes: boolean;
         };
         /** Edge */
         Edge: {
@@ -1612,6 +1620,16 @@ export interface components {
              * @default
              */
             query?: string;
+        };
+        /** LastRunOut */
+        LastRunOut: {
+            /** At */
+            at: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "running" | "succeeded" | "failed" | "cancelled" | "deadline_exceeded";
         };
         /** LoginIn */
         LoginIn: {
@@ -1851,6 +1869,13 @@ export interface components {
              * @enum {string}
              */
             role: "owner" | "admin" | "editor" | "operator" | "viewer";
+        };
+        /** RunCountOut */
+        RunCountOut: {
+            /** Live */
+            live: number;
+            /** Simulate */
+            simulate: number;
         };
         /** ScheduleIn */
         ScheduleIn: {
@@ -2104,6 +2129,8 @@ export interface components {
             /** Created At */
             created_at: string;
             draft: components["schemas"]["Graph"];
+            /** Draft Graph Hash */
+            draft_graph_hash: string | null;
             /** Draft Revision */
             draft_revision: number;
             /** Enabled */
@@ -2112,8 +2139,15 @@ export interface components {
             executable: boolean | null;
             /** Id */
             id: string;
+            last_run: components["schemas"]["LastRunOut"] | null;
+            last_simulation: components["schemas"]["LastRunOut"] | null;
             /** Name */
             name: string;
+            /** Needs Attention */
+            needs_attention: ("last_run_failed" | "not_executable")[];
+            runs_24h: components["schemas"]["RunCountOut"];
+            /** Unpublished Changes */
+            unpublished_changes: boolean;
             /** Updated At */
             updated_at: string;
         };
@@ -2127,6 +2161,8 @@ export interface components {
             blocked_by: string[];
             /** Created At */
             created_at: string;
+            /** Draft Graph Hash */
+            draft_graph_hash: string | null;
             /** Draft Revision */
             draft_revision: number;
             /** Enabled */
@@ -2135,8 +2171,15 @@ export interface components {
             executable: boolean | null;
             /** Id */
             id: string;
+            last_run: components["schemas"]["LastRunOut"] | null;
+            last_simulation: components["schemas"]["LastRunOut"] | null;
             /** Name */
             name: string;
+            /** Needs Attention */
+            needs_attention: ("last_run_failed" | "not_executable")[];
+            runs_24h: components["schemas"]["RunCountOut"];
+            /** Unpublished Changes */
+            unpublished_changes: boolean;
             /** Updated At */
             updated_at: string;
         };
@@ -2157,6 +2200,8 @@ export interface components {
             blocked_by: string[];
             /** Created At */
             created_at: string;
+            /** Draft Graph Hash */
+            draft_graph_hash: string | null;
             /** Draft Revision */
             draft_revision: number;
             /** Enabled */
@@ -2165,8 +2210,15 @@ export interface components {
             executable: boolean | null;
             /** Id */
             id: string;
+            last_run: components["schemas"]["LastRunOut"] | null;
+            last_simulation: components["schemas"]["LastRunOut"] | null;
             /** Name */
             name: string;
+            /** Needs Attention */
+            needs_attention: ("last_run_failed" | "not_executable")[];
+            runs_24h: components["schemas"]["RunCountOut"];
+            /** Unpublished Changes */
+            unpublished_changes: boolean;
             /** Updated At */
             updated_at: string;
             /** Warnings */

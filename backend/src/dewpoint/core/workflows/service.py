@@ -121,6 +121,18 @@ async def save_draft(s: AsyncSession, wf: Workflow, *, expected_revision: int, d
     return int(revision)
 
 
+async def locked_active_version(s: AsyncSession, workflow_id: uuid.UUID) -> WorkflowVersion | None:
+    """The workflow's active version, read after this transaction updated its row (`save_draft`): the row lock it holds
+    until commit keeps an activation from changing it before the answer is sent. A `Workflow` read before the update
+    may name an older one (`save_draft` updates with `synchronize_session=False`)."""
+    q = (
+        select(WorkflowVersion)
+        .join(Workflow, Workflow.active_version_id == WorkflowVersion.id)
+        .where(Workflow.id == workflow_id)
+    )
+    return (await s.execute(q)).scalar_one_or_none()
+
+
 async def update_workflow(
     s: AsyncSession, ctx: TenantContext, wf: Workflow, *, name: str | None, enabled: bool | None
 ) -> Workflow:
@@ -289,7 +301,17 @@ async def other_abi(s: AsyncSession, version_ids: Iterable[uuid.UUID], abi: int)
     return [(version_id, version_abi) for version_id, version_abi in rows]
 
 
+async def blocked_by_many(s: AsyncSession, versions: Iterable[WorkflowVersion]) -> dict[uuid.UUID, list[str]]:
+    """Each version's lifecycle entries that stop it from running (retired or missing), in one read of the states of
+    every entry any of them uses."""
+    entries = {v.id: lifecycle.entries_for(v.closure_node_refs, v.closure_cel_profiles) for v in versions}
+    current = await lifecycle.states(s, {e for used in entries.values() for e in used})
+    return {
+        version_id: [e.key for e in lifecycle.not_executable({e: current[e] for e in used})]
+        for version_id, used in entries.items()
+    }
+
+
 async def blocked_by(s: AsyncSession, version: WorkflowVersion) -> list[str]:
     """Lifecycle entries in the version's closure that stop it from running (retired or missing)."""
-    current = await lifecycle.states(s, lifecycle.entries_for(version.closure_node_refs, version.closure_cel_profiles))
-    return [e.key for e in lifecycle.not_executable(current)]
+    return (await blocked_by_many(s, [version]))[version.id]

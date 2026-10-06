@@ -391,9 +391,17 @@ M1. **The branch starts from `main` at f65c6f9**, not 66443c3 as the plan says: 
     in CI) merged after the plan was written. `feat/editor-4b` is f65c6f9 with the plan's commits merged in (c3ba754).
     #44 touches files milestone 1 changes (the node-types and workflow routes, `responses.py`, `workflow_ops.py`, the
     SDK's fields, test helpers); each task is checked against `main` before its code, and what differs is ruled here.
-    - #44 is merged on `main`, and the plan's lines numbers into those files are 66443c3's. - Wrong line references
+    - #44 is merged on `main`, and the plan's line numbers into those files are 66443c3's. - Wrong line references
     in the plan for those files; the code they describe is found by name.
 M2. **`NodeTypeOut` also declares `icon` and `options`** (Task 1): #44's palette answer carries both (a first-party
     icon's name, plugins-3; the config fields `options()` lists, D3), and the named model forbids extra keys, so it
     must declare them. The test pins `flow.loop`'s icon (`repeat`) and `testkit.pick`'s options (`site_id`). - Without
     them the answer fails its own model. - Two fields the 4b plan didn't list; 4c and 4f use them.
+M3. **A run names its own workflow's version** (Task 3): `runs` carries the foreign key `runs_version_fk
+    (workflow_version_id, workflow_id) -> workflow_versions (id, workflow_id)` (migration 0008), which the ORM model
+    doesn't show and the plan missed. So no row of another tenant's can claim this tenant's workflow: the plan's
+    `test_another_tenants_runs_never_count` (such a row) can't be written. It now proves the statements' own tenant
+    filter, with row-level security out of the way (the owner's session): asked for this tenant about another
+    tenant's workflow, they find nothing, while the row is there for its own tenant. The probe seeds real workflows
+    and versions (`seed_workflow`, 200 a tenant) and its runs name them. - The schema refuses what the plan's test
+    inserted. - None: the database already enforces what the old test checked.
