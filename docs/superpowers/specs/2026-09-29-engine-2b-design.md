@@ -175,9 +175,9 @@
     - the evidence outlives the tenant's retention (§10.2), and 2b-4's erasure deletes it with the tenant's Temporal
       histories (§6.5);
     - **re-encryption and rotation** (§6.4, §8.3): `keys reencrypt` seals every stored record again, its plaintext kept,
-      a tenant's credential scope key (plugins-3a-1) included; a tenant's inbound keypairs rotate and retire once no
-      stored event names them; the ingress key rotates through a previous key; `keys retire` deletes a version only when
-      every named check passes;
+      a tenant's credential scope key (plugins-3a-1) and plugin calls' answers (plugins-3a-2) included; a tenant's
+      inbound keypairs rotate and retire once no stored event names them; the ingress key rotates through a previous
+      key; `keys retire` deletes a version only when every named check passes;
     - **tenant erasure** (§6.5): irreversible once `erasing` is committed; every writer fenced by the tenant's lifecycle
       lock, and from stage 60 by an insert fence in the database; stages 20 to 100, each found, requested and verified
       by reading Temporal back; the bound, the final check, reopening, and reconciliation after completion. **No erasure
@@ -976,7 +976,8 @@ largest container when the budget requires.
   - every record Dewpoint stores under it has been sealed again under the active version by `dewpoint keys reencrypt`,
     or deleted by retention: `run_inputs` (claims, envelopes and CSV records), `step_outputs`, `run_secret_index`,
     staged `csv_uploads`, saved `csv_mappings`, schedule inputs, connection secrets, the tenant's inbound X25519 private
-    keys (§8.3) and its credential scope key (plugins-3a-1's `rate_scope_keys`);
+    keys (§8.3), its credential scope key (plugins-3a-1's `rate_scope_keys`) and plugin calls' answers (plugins-3a-2's
+    `plugin_calls`);
   - every schedule is synced (a deleted one's absence settled), and no live schedule's Temporal action still names it
     (an action synced before revision 10 carries the schedule's id, sealed, until its next sync);
   - no request's idempotency digest was made with it, until retention deletes that request;
@@ -992,8 +993,10 @@ largest container when the budget requires.
   blob it read, so a record the application rewrote meanwhile is never overwritten. It keeps each record's plaintext,
   purpose and context and changes only its blob: that's the command's behaviour, which the key admin's grants can't
   enforce (the owner's M3 review). A tenant's credential scope key is sealed again, the same key: a new one would split
-  every credential's quota budget and cooldown. A live schedule whose Temporal action still names a version has its
-  generation raised, so its next sync writes the action without it.
+  every credential's quota budget and cooldown. A plugin call's answer is sealed again too: a call can outlive its
+  expiry when no worker sweeps it, so retirement counts it and never relies on its duration (the owner's ruling on the
+  rebase onto plugins-3a-2). A live schedule whose Temporal action still names a version has its generation raised, so
+  its next sync writes the action without it.
 - **Run execution evidence** (revision 10). A run's row isn't proof of what Temporal holds: a run whose row says it
   ended may still be open, one closing long after its deadline keeps its history for the namespace's retention, and
   the tenant's retention may delete its row first. So each run execution has durable evidence (`execution_evidence`:
@@ -2433,16 +2436,17 @@ Beyond each task's own tests:
   (#35); the API's role refused a direct update of an endpoint's events pointer (D10); the cutoff on every read path;
   the sweep's exact, durable counts and its resumption; the SLO's wait at dispatch; pruning through its checkpoint, a
   scope pruned whole included; re-encryption keeping every record's plaintext and never overwriting one rewritten
-  meanwhile, a credential scope key included; each retirement check refusing on its own; keypair retirement against
-  recording, in both orders; the tick contract's replay; run evidence through lost and pending starts; the erasure's
-  stages on the dev server, the insert fence for every table and role, step 1 against each writer in flight, and the
-  late-create, stale-unpause race on Temporal; contract tests on the dev server (a paused schedule's due firings neither
-  caught up nor counted, and its missed count not growing across an outage; a deleted and recreated schedule restarting
-  its conflict token; running ticks unlisted under allow-all; executions deleted, running and closed); the races of the
-  missed-firings accounting (an edit through the landing, a failed second update, a re-enable during a lost create, a
-  timing edit, a held unpause against a delete, a successor recorded around an update); and **the proof:** after a
-  completed erasure (the firing bound taken as proven in the test), nothing of the tenant is decodable or stored beyond
-  the agreed exceptions. Every migration goes up, down and up again over existing rows.
+  meanwhile, a credential scope key and a plugin call's answer included; each retirement check refusing on its own;
+  keypair retirement against recording, in both orders; the tick contract's replay; run evidence through lost and
+  pending starts; the erasure's stages on the dev server, the insert fence for every table and role, step 1 against each
+  writer in flight, and the late-create, stale-unpause race on Temporal; contract tests on the dev server (a paused
+  schedule's due firings neither caught up nor counted, and its missed count not growing across an outage; a deleted and
+  recreated schedule restarting its conflict token; running ticks unlisted under allow-all; executions deleted, running
+  and closed); the races of the missed-firings accounting (an edit through the landing, a failed second update, a
+  re-enable during a lost create, a timing edit, a held unpause against a delete, a successor recorded around an
+  update); and **the proof:** after a completed erasure (the firing bound taken as proven in the test), nothing of the
+  tenant is decodable or stored beyond the agreed exceptions. Every migration goes up, down and up again over existing
+  rows.
 - **RLS and roles:** the RLS matrix over the new tables and roles; the authorization matrix over `run.start`,
   `run.cancel`, `trigger.manage` and `workflow.declassify`.
 
