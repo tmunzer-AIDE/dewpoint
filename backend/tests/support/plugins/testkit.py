@@ -428,6 +428,33 @@ class Pick(Node):
         return [Option(value=site["id"], label=site["name"]) for site in answer.json()]
 
 
+class MistSitesConfig(BaseModel):
+    connection: uuid.UUID = connection_field("mist")
+    site_id: str = options_field()
+
+
+class MistSites(Node):
+    """A Mist site picker for the 3a-2 proof (plugins-3 D3): the org's sites (`listOrgSites`, `GET
+    /api/v1/orgs/{org_id}/sites`, an array of `site` with `id` and `name`, per the Mist OAS), filtered by the typed
+    text. Test-only: Mist's own nodes come with 3b."""
+
+    type = "testkit.mist_sites"
+    version = 1
+    title = "Pick a Mist site"
+    Config = MistSitesConfig
+    credentials = ("mist",)
+
+    async def run(self, ctx: StepContext, config: MistSitesConfig) -> Empty:
+        return Empty()
+
+    async def options(self, ctx: CallContext, field: str, query: OptionsQuery) -> list[Option]:
+        assert query.connection_id is not None
+        conn = await ctx.connection(query.connection_id)
+        answer = await conn.http.request("GET", f"/api/v1/orgs/{conn.config['org_id']}/sites", params={"limit": 1000})
+        text = query.text.lower()
+        return [Option(value=site["id"], label=site["name"]) for site in answer.json() if text in site["name"].lower()]
+
+
 class TestkitConnectionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     base_url: str
@@ -473,6 +500,7 @@ TESTKIT = Plugin(
         HttpCall,
         AmbiguousCall,
         Pick,
+        MistSites,
     ),  # fmt: skip
     connection_types=(TESTKIT_CONNECTION,),
 )
