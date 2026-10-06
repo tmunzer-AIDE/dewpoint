@@ -2,10 +2,12 @@
 import asyncio
 import gzip
 import json
+import re
 import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, TypeAdapter
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,17 +30,35 @@ MAX_OPTIONS, MAX_VALUE, MAX_LABEL = 1000, 1000, 200  # the ruled limits, checked
 GZIP_LEVEL = 5  # the palette's 8 MB to 1.4 MB in about 70 ms, in a worker thread (level 6: 1.36 MB, 100 ms)
 
 
-def accepts_gzip(request: Request) -> bool:
-    """Whether the client's `Accept-Encoding` takes gzip (a `q` of 0 refuses it)."""
-    for part in request.headers.get("accept-encoding", "").split(","):
-        name, _, params = part.strip().partition(";")
-        if name.strip().lower() in ("gzip", "x-gzip"):
-            q = params.strip().removeprefix("q=").strip() if params.strip().startswith("q=") else "1"
-            try:
-                return float(q) > 0
-            except ValueError:
-                return False
-    return False
+QVALUE = re.compile(r"^(?:0(?:\.[0-9]{0,3})?|1(?:\.0{0,3})?)$")  # RFC 9110 12.4.2
+
+
+def negotiate(header: str | None) -> str | None:
+    """The coding a catalog answer takes for this `Accept-Encoding` (RFC 9110 12.5.3; the owner's review, R2): gzip
+    or identity, whichever weighs more (gzip on a tie), or None when neither is acceptable (406). `q` is read in any
+    case, and a malformed one refuses its coding; `*` covers whatever isn't named; identity is acceptable unless it's
+    refused by name or by `*`, and then, unnamed, it yields to any coding accepted. No header: identity."""
+    if header is None:
+        return "identity"
+    weights: dict[str, float] = {}
+    for member in header.split(","):
+        coding, *params = member.split(";")
+        coding = coding.strip().lower()
+        if not coding:
+            continue
+        weight = 1.0
+        for param in params:
+            name, _, value = param.strip().partition("=")
+            if name.strip().lower() == "q":
+                weight = float(value.strip()) if QVALUE.match(value.strip()) else 0.0
+        weights["gzip" if coding == "x-gzip" else coding] = weight
+    gzip_q = weights.get("gzip", weights.get("*", 0.0))
+    identity_q = weights.get("identity", weights.get("*"))  # None: acceptable by default, unweighed
+    if gzip_q > 0 and (identity_q is None or gzip_q >= identity_q):
+        return "gzip"
+    if identity_q is None or identity_q > 0:
+        return "identity"
+    return None
 
 
 async def catalog_answer(request: Request, content: Any) -> Response:
@@ -49,7 +69,10 @@ async def catalog_answer(request: Request, content: Any) -> Response:
         raw = json.dumps(content, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
         return gzip.compress(raw, compresslevel=GZIP_LEVEL, mtime=0) if zipped else raw
 
-    zipped = accepts_gzip(request)
+    chosen = negotiate(request.headers.get("accept-encoding"))
+    if chosen is None:
+        return JSONResponse({"error": "not_acceptable"}, status_code=406, headers={"Vary": "Accept-Encoding"})
+    zipped = chosen == "gzip"
     headers = {"Vary": "Accept-Encoding"} | ({"Content-Encoding": "gzip"} if zipped else {})
     return Response(await asyncio.to_thread(render), media_type="application/json", headers=headers)
 

@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from dewpoint.apps.api.routes.node_types import negotiate
 from dewpoint.apps.plugin_loader import sync_installed
 from dewpoint.plugins.flow import PLUGIN as FLOW
 from tests.apps.api.helpers import session_client
@@ -45,3 +46,32 @@ async def test_an_answer_that_could_hold_a_secret_is_never_compressed(
         for route in ("/api/v1/auth/session", "/api/v1/connection-types"):
             answer = await c.get(route, headers={"Accept-Encoding": "gzip"})
             assert answer.status_code == 200 and "content-encoding" not in answer.headers, route
+
+
+@pytest.mark.parametrize(
+    ("header", "chosen"),
+    [
+        (None, "identity"), ("", "identity"), ("gzip", "gzip"), ("GZip", "gzip"), ("x-gzip", "gzip"),
+        ("gzip;q=0", "identity"), ("gzip;Q=0", "identity"), ("gzip; q=0.000", "identity"), ("gzip;q=0.001", "gzip"),
+        ("gzip;q=0.5, identity;q=1", "identity"), ("gzip;q=1, identity;q=0.5", "gzip"), ("br", "identity"),
+        ("*", "gzip"), ("*;q=0", None), ("*;q=0, gzip", "gzip"), ("*;q=0, identity", "identity"),
+        ("identity;q=0", None), ("identity;q=0, gzip", "gzip"), ("identity;q=0, *", "gzip"),
+        ("gzip;q=0, identity;q=0", None), ("deflate, *;q=0", None), ("gzip;q=2", "identity"), ("gzip;q=x", "identity"),
+        ("identity;Q=0, *;q=0.3", "gzip"),
+    ],
+)  # fmt: skip
+def test_the_encoding_is_negotiated_as_rfc_9110_says(header: str | None, chosen: str | None) -> None:
+    """The owner's review of the compression (R2): `q` in any case, the wildcard, identity refused by name or by `*`,
+    the higher weight chosen (gzip on a tie), nothing acceptable answered 406; a malformed weight refuses its coding."""
+    assert negotiate(header) == chosen
+
+
+@pytest.mark.parametrize("header", ["identity;q=0", "*;q=0", "gzip;q=0, identity;q=0"])
+async def test_a_client_accepting_neither_gets_406(
+    app: Any, owner_sessionmaker: Any, api_settings: Any, header: str
+) -> None:
+    c, _ = await session_client(app, owner_sessionmaker, api_settings, "viewer")
+    async with c:
+        answer = await c.get("/api/v1/node-types", headers={"Accept-Encoding": header})
+    assert answer.status_code == 406 and answer.json() == {"error": "not_acceptable"}
+    assert "content-encoding" not in answer.headers

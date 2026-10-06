@@ -647,3 +647,8 @@ The owner's review of the redesign (`45d2245`, 2026-10-07, pasted): two Low find
   without defaults, and when none is, the operation has no fixture and its simulation fails `simulation_unavailable`.
 - The ruling's wording claimed no failure hides behind a "present" fixture; corrected above: the default prevents a
   missing-reference error, but the absent branch goes untested.
+- (R2, Low) the catalog's encoding was chosen loosely: `Q=0` or a wildcard went unread, identity couldn't be refused.
+  It's negotiated as RFC 9110 12.5.3 says: `q` in any case and a malformed one refusing its coding, `x-gzip` as
+  gzip, `*` for whatever isn't named, identity acceptable unless refused by name or by `*` (then, unnamed, yielding to
+  any coding accepted), the higher weight chosen (gzip on a tie), and 406 `not_acceptable` when neither gzip nor
+  identity is acceptable.
