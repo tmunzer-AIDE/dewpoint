@@ -419,3 +419,24 @@ async def test_an_ambiguous_nodes_probe_waits_out_a_short_retry_after(owner_sess
         finally:
             await a.aclose()
     assert answer.status_code == 200 and len(server.requests) == 2 and not a.uncertain
+
+
+@pytest.mark.parametrize("header", ["X-HTTP-Method-Override", "x-http-method", "X-Method-Override"])
+async def test_a_probe_asking_for_another_method_is_refused_before_sending(
+    owner_sessionmaker, worker_sessionmaker, header: str
+) -> None:
+    """The owner's review of the checkpoint: a server honouring a method-override header would apply the effect of a
+    GET the runtime takes for a read; a probe sends none, through a connection or plain HTTP."""
+    async with serve(respond(200, b"{}"), tls_names=NAMES) as server:
+        seeded, cid = await _setup(owner_sessionmaker, server.port, node_type="testkit.ambiguous_call@1")
+        a = attempt(worker_sessionmaker, seeded, node=AmbiguousCall)
+        try:
+            with pytest.raises(InvalidRequest):
+                await (await a.connection(cid)).http.request("GET", "/site", headers={header: "DELETE"}, probe=True)
+            with pytest.raises(InvalidRequest):
+                await a.http.request("GET", f"https://dewpoint.test:{server.port}/x", headers={header: "DELETE"},
+                                     probe=True)  # fmt: skip
+            assert not a.uncertain
+        finally:
+            await a.aclose()
+    assert server.requests == []

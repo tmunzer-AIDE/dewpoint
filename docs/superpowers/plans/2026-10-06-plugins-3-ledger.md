@@ -576,3 +576,10 @@ examples); the palette's 8 MB (D23); the `probe` the SDK gained for M1, a runtim
 an output check failing after a node ran now records `applied` for every node (L6, `apps/worker/activities.py`);
 `plugins sync` checks Mist's manifest in about 12 s. Not run: the Compose proof (needs the owner's say), the
 read-only Mist smoke test against a test org (D23's measure and L6's `required` fields; needs the owner's say).
+
+The owner's review of the checkpoint (`2c94e1e`, 2026-10-06, pasted): the review isn't closed; two earlier findings
+remain and `probe` adds one; the generic-secret leak, the picker refusal, the default page, the route shadowing and the
+output outcome are closed. Fixed test-first:
+- (O1, Medium) a probe accepted method-override headers (`X-HTTP-Method-Override: DELETE`): a GET the runtime took for
+  a read could apply an effect on a server honouring them. A probe now passes exactly the read-only channel's check
+  (GET or HEAD, no body, none of the three override headers), refused before sending otherwise.
