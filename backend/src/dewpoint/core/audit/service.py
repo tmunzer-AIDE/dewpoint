@@ -60,14 +60,19 @@ class ChainReport:
 _ROWS = text("""
 select seq, audit_canonical(seq, scope, actor_id, action, target_type, target_id, details, created_at) as canon,
        prev_hash, hash
-from audit_log where scope = :scope order by seq
+from audit_log where scope = :scope and seq > :after order by seq
 """)
+_CHECKPOINT = text("select seq, hash from audit_checkpoints where scope = :scope order by seq desc limit 1")
 
 
 async def verify_chain(s: AsyncSession, scope: str) -> ChainReport:
-    """Recompute every hash in Python. Uses the DB only to render the canonical text, not to judge it."""
-    prev, checked, head_seq, head_hash = ZERO, 0, None, None
-    for seq, canon, prev_hash, h in (await s.execute(_ROWS, {"scope": scope})).all():
+    """Recompute every hash in Python. Uses the DB only to render the canonical text, not to judge it. A pruned chain
+    starts from its latest checkpoint, the last entry pruned (engine 2b spec §10.2), which `verify_anchors` checks
+    against the signed external anchors."""
+    checkpoint = (await s.execute(_CHECKPOINT, {"scope": scope})).first()
+    prev, after = (bytes(checkpoint.hash), checkpoint.seq) if checkpoint else (ZERO, 0)
+    checked, head_seq, head_hash = 0, None, None
+    for seq, canon, prev_hash, h in (await s.execute(_ROWS, {"scope": scope, "after": after})).all():
         expected = hashlib.sha256(prev + canon.encode()).digest()
         if bytes(prev_hash) != prev or bytes(h) != expected:
             return ChainReport(False, checked, seq, head_seq, head_hash)

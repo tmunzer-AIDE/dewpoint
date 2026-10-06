@@ -139,6 +139,32 @@ def audit_anchor() -> None:
     typer.echo(f"anchored {asyncio.run(_run())} scope head(s)")
 
 
+@audit.command("prune")
+def audit_prune() -> None:
+    """Delete audit entries older than DEWPOINT_AUDIT_RETENTION_DAYS (400 unless set, never under 30) through a
+    checkpoint, the last entry pruned, anchored to the external sink first (engine 2b spec §10.2). Run as a
+    dewpoint_auditor login. Refused outside a development deployment until an off-host anchor sink exists (#3)."""
+    from dewpoint.core.audit.prune import PruningDisabledError, prune
+
+    sink = FileAnchorSink(_anchor_path(), _signing_key())
+
+    async def _run() -> dict[str, int]:
+        engine = make_engine(get_settings().database_url)
+        try:
+            async with make_sessionmaker(engine)() as s, s.begin():
+                return await prune(s, sink, older_than_days=get_settings().audit_retention_days)
+        finally:
+            await engine.dispose()
+
+    try:
+        pruned = asyncio.run(_run())
+    except PruningDisabledError:
+        typer.echo("ERROR: audit pruning is disabled outside a development deployment until an off-host anchor sink is "
+                   "configured (#3)")  # fmt: skip
+        raise typer.Exit(2) from None
+    typer.echo(f"pruned {sum(pruned.values())} entries in {len(pruned)} scope(s)")
+
+
 @audit.command("verify")
 def audit_verify() -> None:
     """Recompute every chain and check it against the signed external anchors. Exit 1 on any problem,

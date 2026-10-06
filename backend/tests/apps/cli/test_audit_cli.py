@@ -63,3 +63,37 @@ def test_anchor_then_verify_as_auditor(pg_url, _test_users, tmp_path, monkeypatc
 
     _env(monkeypatch, auditor)  # misconfigured: no key / path
     assert runner.invoke(app, ["audit", "anchor"]).exit_code == 2
+
+
+async def _deployment(url: str, environment: str) -> None:
+    from dewpoint.core.platform.service import record_environment
+
+    engine = make_engine(url)
+    try:
+        async with make_sessionmaker(engine)() as s, s.begin():
+            await record_environment(s, environment=environment, namespace="default")
+    finally:
+        await engine.dispose()
+
+
+def _signing(tmp_path) -> dict[str, str]:  # type: ignore[no-untyped-def]
+    return {
+        "DEWPOINT_AUDIT_SIGNING_KEY_B64": base64.b64encode(os.urandom(32)).decode(),
+        "DEWPOINT_AUDIT_ANCHOR_PATH": str(tmp_path / "anchors.jsonl"),
+    }
+
+
+def test_prune_is_refused_in_production_until_an_off_host_sink(pg_url, _test_users, tmp_path, monkeypatch) -> None:
+    """Engine 2b-4 ruling D5: pruning is disabled in production until #3's sink is configured."""
+    asyncio.run(_deployment(pg_url, "production"))
+    _env(monkeypatch, _url_for(pg_url, "dewpoint_auditor"), **_signing(tmp_path))
+    refused = CliRunner().invoke(app, ["audit", "prune"])
+    assert refused.exit_code == 2 and "disabled" in refused.output and "off-host" in refused.output
+
+
+def test_prune_in_development_says_what_it_pruned(pg_url, _test_users, tmp_path, monkeypatch) -> None:
+    asyncio.run(_deployment(pg_url, "development"))
+    asyncio.run(_seed(_url_for(pg_url, "dewpoint_api")))  # a new entry: within any retention
+    _env(monkeypatch, _url_for(pg_url, "dewpoint_auditor"), DEWPOINT_AUDIT_RETENTION_DAYS="30", **_signing(tmp_path))
+    pruned = CliRunner().invoke(app, ["audit", "prune"])
+    assert pruned.exit_code == 0 and "pruned 0 entries in 0 scope(s)" in pruned.output, pruned.output

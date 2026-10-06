@@ -37,3 +37,16 @@ class AuditAnchor(Base):
     anchored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     sink: Mapped[str] = mapped_column(Text)
     sink_ref: Mapped[str] = mapped_column(Text)
+
+
+class AuditCheckpoint(Base):
+    """A pruned scope's checkpoint (engine 2b spec §10.2): the last entry pruned, anchored off the database first. The
+    verifier starts the scope's chain from its latest one, and the scope's next entry chains to it when none is left."""
+
+    __tablename__ = "audit_checkpoints"
+    scope: Mapped[str] = mapped_column(Text, primary_key=True)
+    seq: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    hash: Mapped[bytes] = mapped_column(LargeBinary)
+    sink: Mapped[str] = mapped_column(Text)
+    sink_ref: Mapped[str] = mapped_column(Text)
+    anchored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

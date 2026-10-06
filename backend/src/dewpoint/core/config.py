@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     worker_set_current: bool = False
     audit_signing_key_b64: str | None = None  # Ed25519 private key (raw 32 bytes, base64)
     audit_anchor_path: str | None = None
+    # The platform's audit retention (engine 2b spec §10.2): `dewpoint audit prune` deletes older entries, never newer
+    # than 30 days, and only in a development deployment until an off-host anchor sink exists (#3).
+    audit_retention_days: int = Field(default=400, ge=30)
 
 
 @lru_cache

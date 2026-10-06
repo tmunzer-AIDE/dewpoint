@@ -76,6 +76,11 @@ async def verify_anchors(
         rep = await verify_chain(s, sc)
         if not rep.ok:
             problems.append(f"{sc}: chain broken at seq {rep.first_bad_seq}")
+    # A pruned scope's checkpoint, the last entry pruned, must be among the signed anchors (engine 2b spec §10.2): the
+    # database's own record of it could be rewritten. Anchored entries at or before it are gone by design.
+    latest = text("select distinct on (scope) scope, seq, hash from audit_checkpoints order by scope, seq desc")
+    checkpoints = {scope: (seq, bytes(h).hex()) for scope, seq, h in (await s.execute(latest)).all()}
+    signed: set[tuple[str, int, str]] = set()
     anchored: dict[str, int] = {}
     for e in entries:
         scope, seq, hash_hex, at = str(e["scope"]), int(e["seq"]), str(e["hash"]), str(e["at"])  # type: ignore[call-overload]
@@ -84,15 +89,21 @@ async def verify_anchors(
         except (InvalidSignature, ValueError):
             problems.append(f"{scope}:{seq}: bad anchor signature")
             continue
+        signed.add((scope, seq, hash_hex))
         row = (
             await s.execute(text("select hash from audit_log where scope=:s and seq=:q"), {"s": scope, "q": seq})
         ).first()
+        if row is None and seq <= checkpoints.get(scope, (0, ""))[0]:
+            continue  # pruned through a checkpoint
         if row is None:
             problems.append(f"{scope}:{seq}: anchored row missing")
         elif bytes(row[0]).hex() != hash_hex:
             problems.append(f"{scope}:{seq}: hash mismatch with external anchor")
         else:
             anchored[scope] = max(anchored.get(scope, 0), seq)
+    for scope, (seq, hash_hex) in sorted(checkpoints.items()):
+        if (scope, seq, hash_hex) not in signed:
+            problems.append(f"{scope}:{seq}: checkpoint not among the external anchors")
     # audit_append stamps created_at with the database's clock, so "now" defaults to that clock, not this host's:
     # any skew between the two would move the window (a just-written row would dodge max_lag=0)
     old_rows = await s.execute(

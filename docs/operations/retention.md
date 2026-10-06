@@ -1,4 +1,4 @@
-# Retention: a tenant's cutoff and the retention job
+# Retention: a tenant's cutoff, the retention job and audit pruning
 
 Spec: `docs/superpowers/specs/2026-09-29-engine-2b-design.md` §10.1–10.3 (with §2.3 and §14).
 
@@ -85,5 +85,17 @@ older than a few intervals, an unsuccessful one, or a lag approaching a day.
 
 - **Temporal** keeps histories (their visible metadata and codec-encrypted payloads) for the namespace's retention: 7
   days by default, 30 at most. A tenant whose retention is shorter has histories that outlive its data.
-- **Audit records** follow the platform's audit retention, not the tenant's.
+- **Audit records** follow the platform's audit retention (below), not the tenant's.
 - **Backups** keep deleted data until they expire: keep them at most 35 days.
+
+## Audit pruning
+
+`dewpoint audit prune`, as the auditor's login, deletes audit entries older than `DEWPOINT_AUDIT_RETENTION_DAYS` (400
+by default, never under 30). For each scope, it first anchors its last entry due to the external anchor sink, records
+it as the scope's checkpoint, then deletes it and every older entry. `dewpoint audit verify` starts a pruned chain from
+its latest checkpoint, which must be among the signed anchors, and a scope pruned whole goes on from it. Only the
+database function `audit_prune()` can delete audit entries, and only through such a checkpoint.
+
+**Disabled outside a development deployment** until an off-host anchor sink exists (#3): with anchors on the database's
+own host, nothing would show that a privileged operator hadn't pruned, rewritten and re-anchored. In production the
+command refuses (exit 2) before anything is anchored or deleted, and Compose doesn't run it.
