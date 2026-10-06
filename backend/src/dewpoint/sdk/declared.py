@@ -48,12 +48,17 @@ class DeclaredModel(RootModel[Any]):
         return value
 
 
-def declared_model(name: str, schema: Mapping[str, Any], *, formats: tuple[str, ...] = FORMATS) -> type[DeclaredModel]:
-    """A model named `name` whose JSON Schema is `schema` (a copy), refused unless it's a valid JSON Schema."""
-    try:
-        Draft202012Validator.check_schema(schema)
-    except SchemaError as e:
-        raise ValueError(f"{name}: not a valid JSON Schema ({e.message})") from None
+def declared_model(
+    name: str, schema: Mapping[str, Any], *, formats: tuple[str, ...] = FORMATS, checked: bool = True
+) -> type[DeclaredModel]:
+    """A model named `name` whose JSON Schema is `schema` (a copy), refused unless it's a valid JSON Schema. A plugin
+    generating many may pass `checked=False` (checking a schema against the metaschema is slow) when a test checks its
+    manifest as the catalog does: `plugins sync` checks every schema before registering it."""
+    if checked:
+        try:
+            Draft202012Validator.check_schema(schema)
+        except SchemaError as e:
+            raise ValueError(f"{name}: not a valid JSON Schema ({e.message})") from None
     frozen = copy.deepcopy(dict(schema))
     validator = Draft202012Validator(frozen, format_checker=FormatChecker(formats=formats))
     return type(name, (DeclaredModel,), {"declared_schema": frozen, "declared_validator": validator})

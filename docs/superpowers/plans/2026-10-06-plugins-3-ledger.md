@@ -422,3 +422,42 @@ Rulings:
   failing instead of truncating.
 - Ruling: a list without page headers whose page came back full is reported `truncated` - it may have more - cost if
   wrong: a list of exactly a page's size says it might be truncated.
+- Ruling: the curated nodes are built when the plugin loads, from the map and the OAS, not written out as source -
+  those two files are the reviewed source, and a test checks the whole manifest as the catalog does - cost if wrong:
+  none (0.9 s at import).
+- Ruling: the generated models skip the metaschema check at import (`declared_model(..., checked=False)`): 524 checks
+  took 6 s; `plugins sync` checks every schema before registering it (11.6 s for Mist's manifest), and so does a test
+  - cost if wrong: a malformed schema shows at sync rather than at import.
+- Ruling: an output keeps the OAS's shape (types, properties, required fields, items) and drops value constraints
+  (formats, enums, patterns, bounds) and closed objects; `oneOf` becomes `anyOf` (without their enums, branches
+  overlap) - the OAS is documentation (D2) and Mist adds fields and values; what it doesn't describe is tainted, never
+  refused - cost if wrong: a pill loses an enum's list of values; an out-of-range value passes.
+- Ruling: a field is a secret, `x-sensitive` in config and output, when its name's last word is `psk`, `passphrase`,
+  `secret`, `password`, `token`, `community`, `key`, `keys`, `apitoken`, `keypair`, `kek` or `mack`, or it's named
+  `community_name`; a version can't then write it as a literal (engine 2b §3.8) - D16's list read by word - cost if
+  wrong: a few non-secrets are tainted (BGP communities, SSH public keys, `cleanup_psk`), or a secret named otherwise
+  isn't claimed.
+- Ruling: a config is checked by the OAS's constraints but not its formats - publish validates literals without
+  formats, so the run does the same and a version that publishes runs; path values are checked by the client - cost
+  if wrong: a malformed address reaches Mist, which refuses it (`mist.bad_request`).
+- Ruling: the four array query parameters (`labels`, `usermac_label` twice, `resp_attrs`) are left out - the OAS gives
+  no style, so whether Mist wants them repeated or comma-joined is unverified - cost if wrong: those filters wait for
+  a verification.
+- Ruling: an update's body requires nothing; `mode` is `merge` (the default, when a GET of the same path is allowed)
+  or `replace`; `clear` names top-level fields sent as null; a field both set and cleared, or nothing to change, fails
+  before anything is sent - D15's Keep / Set / Null as absent / set / cleared - cost if wrong: clearing a nested field
+  means setting its parent structure.
+- Ruling: a list answers `{results, total, truncated}`, a search Mist's answer with every page's results, without
+  `next`, and `truncated`; a page cap of 1-10 (default 1), a list's or search's timeout 5 minutes - the cap bounds a
+  step's memory (an output over 64 KB is already a size claim) - cost if wrong: a list past 10 pages of 1,000 is cut.
+- Ruling: a create's body is required, an action's (ack, restart) optional; an action answers `{}` and a delete
+  `{already_absent}`, whatever Mist's body says - the OAS describes no answer for them - cost if wrong: none.
+- Ruling: titles are the operationId in words ("List org sites"), descriptions the OAS's first paragraph cut at 300
+  characters, no icon - display metadata, changeable without a version - cost if wrong: none.
+- D23 measured on the generated manifest: 262 nodes, 8.0 MB (1.34 MB gzipped), 3.3 MB without `description`s; the
+  median node 5.6 KB; the largest site settings' update (634 KB: config 327 KB, output 307 KB), a device's update
+  (560 KB) and device profiles' create and update (500 KB). A schema's descriptions sit outside contract hashes, so
+  trimming them later makes no new versions. Splitting Mist into per-scope plugins changes no total, so it isn't
+  done. **For the owner:** `GET /node-types` answers every schema at once, 8 MB uncompressed (neither the API nor
+  nginx compresses); options are trimming descriptions, compressing, or a palette without schemas plus one type's
+  schemas on demand (an editor change).

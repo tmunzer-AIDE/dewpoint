@@ -90,3 +90,38 @@ class FakeConnection:
     config: Mapping[str, Any] = field(default_factory=lambda: {"cloud": "global_01", "org_id": ORG})
     id: uuid.UUID = field(default_factory=uuid.uuid4)
     type: str = "mist"
+
+
+@dataclass
+class FakeLog:
+    def info(self, event: str, **fields: object) -> None:
+        pass
+
+    def warning(self, event: str, **fields: object) -> None:
+        pass
+
+
+@dataclass
+class FakeStep:
+    """A step's context with one Mist connection, for a node's run(): its id must be the one asked for."""
+
+    connection_: FakeConnection
+    attempt: int = 1
+    tenant_id: uuid.UUID = field(default_factory=uuid.uuid4)
+    run_id: uuid.UUID = field(default_factory=uuid.uuid4)
+    step_id: uuid.UUID = field(default_factory=uuid.uuid4)
+    iteration_key: str = ""
+    cancelled: bool = False
+    log: FakeLog = field(default_factory=FakeLog)
+    opened: list[uuid.UUID] = field(default_factory=list)
+
+    def idempotency_key(self) -> str:
+        return "k"
+
+    async def connection(self, connection_id: uuid.UUID) -> FakeConnection:
+        self.opened.append(connection_id)
+        assert connection_id == self.connection_.id
+        return self.connection_
+
+    def heartbeat(self, *details: object) -> None:
+        pass

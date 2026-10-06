@@ -28,11 +28,12 @@ def test_plugins_sync_is_idempotent(cli_env) -> None:  # type: ignore[no-untyped
     runner = CliRunner()
     first = runner.invoke(app, ["plugins", "sync"])
     assert first.exit_code == 0, first.output
-    assert "added 11, unchanged 0" in first.output
+    installed = sum(len(p.nodes) for p in installed_plugins())  # flow's 11 and a node per curated Mist operation
+    assert installed > 11 and f"added {installed}, unchanged 0" in first.output
     second = runner.invoke(app, ["plugins", "sync"])
-    assert second.exit_code == 0 and "added 0, unchanged 11" in second.output
+    assert second.exit_code == 0 and f"added 0, unchanged {installed}" in second.output
     listed = runner.invoke(app, ["plugins", "list"])
-    assert "flow.if@1 active" in listed.output
+    assert "flow.if@1 active" in listed.output and "mist.org_wlans.get@1 active" in listed.output
 
 
 def test_lifecycle_commands(cli_env) -> None:  # type: ignore[no-untyped-def]
