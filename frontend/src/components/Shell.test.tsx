@@ -13,8 +13,17 @@ import { Shell } from "./Shell";
 
 const TENANTS = [{ id: "t1", name: "Acme Retail", slug: "acme-retail", role: "admin", require_passkey: false }];
 
+let environment: string | null = "production";
+
 beforeEach(() => {
-  vi.spyOn(globalThis, "fetch").mockImplementation(() => Promise.resolve(new Response(JSON.stringify(TENANTS))));
+  environment = "production";
+  vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    const body = url.endsWith("/api/v1/platform/status")
+      ? { environment, production_runs: false }
+      : TENANTS;
+    return Promise.resolve(new Response(JSON.stringify(body)));
+  });
 });
 
 async function renderAt(path: string) {
@@ -64,3 +73,17 @@ it("keeps the tenant switcher, the ⌘K palette, Security and Sign out in the he
   expect(header.contains(screen.getByRole("link", { name: "Security" }))).toBe(true);
   expect(header.contains(screen.getByRole("button", { name: "Sign out" }))).toBe(true);
 });
+
+it("says so on every screen when the deployment is a development one (engine 2b spec §2.1)", async () => {
+  environment = "development";
+  await renderAt("/t/t1/connections");
+  const note = await screen.findByRole("note", { name: "Deployment" });
+  expect(note.textContent).toContain("Development deployment");
+});
+
+it("shows no deployment note in production", async () => {
+  await renderAt("/t/t1/connections");
+  await screen.findByTestId("tenant-switcher");
+  expect(screen.queryByRole("note", { name: "Deployment" })).toBeNull();
+});
+

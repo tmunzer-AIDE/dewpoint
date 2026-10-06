@@ -5,6 +5,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useNavigate, useParams } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { onStepUpRequired } from "../lib/events";
+import { usePlatformStatus } from "../lib/platform";
 import { signOut } from "../lib/signOut";
 import { authenticatePasskey } from "../lib/webauthn";
 import { Button } from "./Button";
@@ -27,6 +28,7 @@ export function Shell() {
   useEffect(() => onStepUpRequired(() => setStepUp(true)), []);
 
   const [signOutError, setSignOutError] = useState<string | null>(null);
+  const platform = usePlatformStatus();
 
   async function handleSignOut() {
     setSignOutError(null);
@@ -79,6 +81,13 @@ export function Shell() {
         <Button size="md" onClick={() => void handleSignOut()}>Sign out</Button>
       </header>
       <main className="col-start-2 flex min-w-0 flex-col">
+        {platform.data?.environment === "development" && (
+          // Engine 2b spec §2.1: a development deployment says so on every screen. Amber: check this (D4).
+          <div role="note" aria-label="Deployment" className="border-b border-warn-line bg-warn-bg px-6 py-2 text-small text-warn-ink">
+            <strong className="font-semibold">Development deployment.</strong> Runs start without the production gate.
+            Use synthetic data only.
+          </div>
+        )}
         {signOutError && (
           <div role="alert" className="m-6 mb-0 rounded-lg border border-danger bg-danger-bg px-3 py-2 text-small text-ink">
             {signOutError}

@@ -43,6 +43,8 @@ test.describe.serial("foundations", () => {
     await expect(page.getByRole("menuitem", { name: /Acme Retail/ })).toBeVisible();
     await expectAccessible(page, "tenant menu");
     await page.getByRole("menuitem", { name: /Acme Retail/ }).click();
+    // This stack is a development deployment (Compose's dev override): every signed-in screen says so.
+    await expect(page.getByRole("note", { name: "Deployment" })).toContainText("Development deployment");
     await expectAccessible(page, "connections");
 
     await page.getByTestId("conn-add").click();

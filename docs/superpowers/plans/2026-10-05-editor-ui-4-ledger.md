@@ -169,3 +169,8 @@ cover local work only: anything outward-facing (push, PR, issues) is confirmed i
     dialog was closed, so keys went to the dialog (the browser gate's first palette run caught it; jsdom can't). Test
     setup stands in for what jsdom lacks (a modal dialog's open and close, ResizeObserver, scrollIntoView,
     scrollTo); the browser gate checks the real ones - none.
+38. Ruling (B2): `GET /api/v1/platform/status` answers signed-in sessions only, with the environment (null until
+    recorded) and whether production runs are on, never the Temporal namespace. The shell shows an amber note,
+    "Development deployment", on every signed-in screen of a development deployment; the browser gate checks it on
+    the dev stack. The sign-in screens (login, MFA, enrolment) don't show it: that would take an unauthenticated
+    endpoint - the label is missing there until the owner wants one.
