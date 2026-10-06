@@ -9,12 +9,13 @@ from typing import Any
 from cryptography.exceptions import InvalidTag
 from sqlalchemy import any_, literal, select, update
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
 from dewpoint.core.audit.service import record
 from dewpoint.core.connections.declared import DeclaredType, declared_types
 from dewpoint.core.crypto.keyring import Keyring
+from dewpoint.core.db import tenant_scope
 from dewpoint.core.http import TenantContext
 from dewpoint.core.models.connections import Connection
 from dewpoint.core.models.requests import RunRequest
@@ -246,31 +247,64 @@ def _checked(answer: dict[str, Any] | None) -> tuple[str, str, str | None]:
 
 
 async def verify_connection(
-    s: AsyncSession, keyring: Keyring, ctx: TenantContext, conn: Connection, ask: Asker
+    s: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    keyring: Keyring,
+    ctx: TenantContext,
+    conn: Connection,
+    ask: Asker,
 ) -> Connection:
     """Asks a worker to verify the credentials (plugins-3 D3), then records the result only if they are still the
     revision verified. Raises StaleVerificationError (after auditing it) when an edit committed while the check was in
     flight, ConnectionGoneError when the connection was deleted, VerificationUnansweredError when no worker
-    answered."""
+    answered.
+
+    Before asking, it ends the request's transaction (`s`), so the wait holds no pooled connection and no lock (the
+    3a-2 review's finding 2); the result is then recorded in a transaction of its own."""
     kind, loaded_revision = await declared(s, conn.type), conn.revision
-    discarded = False
+    local: tuple[str, str, str | None] | None = None
     if not await _secret_readable(s, keyring, conn, kind):
-        status, detail, privilege = "error", "secret_unreadable", None
+        local = ("error", "secret_unreadable", None)
     elif not kind.verify:
-        status, detail, privilege = "error", "unverifiable", None
-    else:
-        outcome = await ask(
-            lambda inner: calls.ask_verify(
-                inner, ctx.tenant_id, connection_type=conn.type, connection_id=conn.id, revision=loaded_revision
-            )
+        local = ("error", "unverifiable", None)
+    if local is not None:  # nothing to ask: recorded in the request's own transaction
+        try:
+            return await _record(s, ctx, conn, loaded_revision, local, discarded=False)
+        except (StaleVerificationError, ConnectionGoneError):
+            await s.commit()  # keep the verify_discarded audit entry
+            raise
+    await s.commit()
+    outcome = await ask(
+        lambda inner: calls.ask_verify(
+            inner, ctx.tenant_id, connection_type=conn.type, connection_id=conn.id, revision=loaded_revision
         )
-        if outcome.timed_out:
-            raise VerificationUnansweredError()
-        discarded = outcome.gone or outcome.error == "connection_changed"
-        if outcome.error is not None:
-            status, detail, privilege = "error", outcome.error, None
-        else:
-            status, detail, privilege = _checked(outcome.answer)
+    )
+    if outcome.timed_out:
+        raise VerificationUnansweredError()
+    discarded = outcome.gone or outcome.error == "connection_changed"
+    result = ("error", outcome.error, None) if outcome.error is not None else _checked(outcome.answer)
+    failure: Exception | None = None
+    async with sessionmaker() as fresh, fresh.begin():
+        await tenant_scope(fresh, ctx.tenant_id)
+        try:
+            return await _record(fresh, ctx, conn, loaded_revision, result, discarded=discarded)
+        except (StaleVerificationError, ConnectionGoneError) as e:
+            failure = e  # raised once the discard's audit entry is committed
+    assert failure is not None  # noqa: S101 - set whenever the block didn't return
+    raise failure
+
+
+async def _record(
+    s: AsyncSession,
+    ctx: TenantContext,
+    conn: Connection,
+    loaded_revision: int,
+    result: tuple[str, str, str | None],
+    *,
+    discarded: bool,
+) -> Connection:
+    """The verification's result, applied only to the revision verified (compare-and-set), and audited either way."""
+    status, detail, privilege = result
     applied = None
     if not discarded:
         applied = await s.execute(
@@ -280,10 +314,11 @@ async def verify_connection(
             .execution_options(synchronize_session=False)
         )
     if applied is not None and getattr(applied, "rowcount", 0) == 1:
-        # Our UPDATE holds the row lock until commit, so the row can't vanish before this refresh.
-        await s.refresh(conn)  # current row, including concurrent non-credential edits such as a rename
+        # Our UPDATE holds the row lock until commit, so the row can't vanish before this read.
+        current = (await s.execute(select(Connection).where(Connection.id == conn.id))).scalar_one()
+        await s.refresh(current)  # current row, including concurrent non-credential edits such as a rename
         await _audit_verify(s, ctx, conn.id, "connection.verify", status, loaded_revision, None)
-        return conn
+        return current
     # Not applied: the connection was deleted, or its credentials changed, while the check was in flight.
     exists = (await s.execute(select(Connection.id).where(Connection.id == conn.id))).first() is not None
     reason = "edited" if exists else "deleted"

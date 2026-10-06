@@ -10,14 +10,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps import workflow_ops
 from dewpoint.apps.api.deps import get_keyring
-from dewpoint.apps.api.routes.node_types import options_reply
+from dewpoint.apps.api.routes.node_types import ask_and_wait, options_reply
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.config import Settings
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.http import TenantContext, get_db, get_settings_dep, require
 from dewpoint.core.models.connections import Connection
 from dewpoint.core.models.workflows import Workflow, WorkflowVersion
-from dewpoint.core.plugins import asking, calls, registry
+from dewpoint.core.plugins import calls, registry
 from dewpoint.core.workflows import service
 from dewpoint.engine.graph.model import GraphFormatError, parse_graph
 from dewpoint.engine.graph.validate import PICKER
@@ -298,4 +298,4 @@ async def input_options(
             query=body.query,
         )  # fmt: skip
 
-    return options_reply(await asking.ask_and_wait(request.app.state.sessionmaker, keyring, ctx.tenant_id, ask))
+    return options_reply(await ask_and_wait(request, db, keyring, ctx.tenant_id, ask))

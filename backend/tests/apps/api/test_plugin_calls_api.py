@@ -288,8 +288,8 @@ def _picker_draft(cid: str) -> dict[str, Any]:
     return g.data()
 
 
-async def _published_with_a_picker(c: Any, tid: Any, port: int) -> str:
-    cid = await _connection(c, tid, port)
+async def _published_with_a_picker(c: Any, tid: Any, port: int, name: str = "Kit") -> str:
+    cid = await _connection(c, tid, port, name)
     made = await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "W", "draft": _picker_draft(cid)})
     assert made.status_code == 201, made.text
     wid = made.json()["id"]
@@ -357,3 +357,69 @@ async def test_a_stored_secret_never_follows_a_moved_base_url(
         after = (await c.get(f"/api/v1/t/{tid}/connections/{cid}")).json()
     assert (moved.status_code, moved.json()) == (422, {"error": "secret_required"})
     assert after["config"]["base_url"] == f"https://dewpoint.test:{fake[1].port}"
+
+
+@pytest.fixture
+async def one_connection_app(api_settings: Any, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Any]:
+    """An API whose pool holds one connection: a request that kept its own while waiting for a worker would starve
+    every other (the 3a-2 review's finding 2)."""
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from dewpoint.apps.api import main
+
+    def tiny(url: str) -> Any:
+        return create_async_engine(url, pool_size=1, max_overflow=0, pool_timeout=1, hide_parameters=True)
+
+    monkeypatch.setattr(main, "make_engine", tiny)
+    application = main.create_app(api_settings)
+    yield application
+    await application.state.engine.dispose()
+
+
+async def test_waiting_for_a_worker_holds_no_database_connection(
+    one_connection_app, owner_sessionmaker, api_settings, unserved, fake
+) -> None:
+    c, tid = await session_client(one_connection_app, owner_sessionmaker, api_settings, "admin")
+    async with c:
+        cid = await _connection(c, tid, fake[1].port)
+        options = await c.post(_options(tid), json={"field": "site_id", "connection_id": cid, "query": ""})
+        verify = await c.post(f"/api/v1/t/{tid}/connections/{cid}/verify")
+        wid = await _published_with_a_picker(c, tid, fake[1].port, name="Kit 2")
+        form = await c.post(f"/api/v1/t/{tid}/workflows/{wid}/input-options", json={"field": "site", "query": ""})
+    for r in (options, verify, form):
+        assert (r.status_code, r.json()) == (504, {"error": "plugin_call_timeout"})
+
+
+async def test_a_process_waits_for_a_bounded_number_of_calls(
+    app, owner_sessionmaker, api_settings, unserved, fake, monkeypatch
+) -> None:
+    monkeypatch.setattr(asking, "MAX_IN_FLIGHT", 1)
+    monkeypatch.setattr(asking, "WAIT_S", 1.0)
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    async with c:
+        cid = await _connection(c, tid, fake[1].port)
+        body = {"field": "site_id", "connection_id": cid, "query": ""}
+        first = asyncio.create_task(c.post(_options(tid), json=body))
+        await asyncio.sleep(0.3)  # the first is waiting for a worker
+        second = await c.post(_options(tid), json=body)
+        await first
+    assert (second.status_code, second.json()) == (503, {"error": "plugin_calls_busy"})
+
+
+async def test_a_tenant_has_a_bounded_number_of_calls_outstanding(
+    app, owner_sessionmaker, api_settings, unserved, fake, monkeypatch
+) -> None:
+    monkeypatch.setattr(asking, "MAX_PER_TENANT", 1)
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    async with c:
+        cid = await _connection(c, tid, fake[1].port)
+        async with owner_sessionmaker() as s, s.begin():
+            await s.execute(
+                text(
+                    "insert into plugin_calls (tenant_id, kind, node_ref, field, expires_at) "
+                    "values (:t, 'options', 'testkit.pick@1', 'site_id', now() + interval '30 seconds')"
+                ),
+                {"t": tid},
+            )
+        r = await c.post(_options(tid), json={"field": "site_id", "connection_id": cid, "query": ""})
+    assert (r.status_code, r.json()) == (429, {"error": "too_many_plugin_calls"})

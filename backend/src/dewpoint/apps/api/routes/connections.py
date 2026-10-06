@@ -154,18 +154,23 @@ async def verify(
     """Verified by the type's `verify()` on a worker (plugins-3 D3): the API sends nothing itself."""
 
     async def ask(call: Any) -> asking.Outcome:
-        return await asking.ask_and_wait(request.app.state.sessionmaker, keyring, ctx.tenant_id, call)
+        try:
+            return await asking.ask_and_wait(request.app.state.sessionmaker, keyring, ctx.tenant_id, call)
+        except asking.BusyError:
+            raise HTTPException(503, detail={"error": "plugin_calls_busy"}) from None
+        except asking.TooManyCallsError:
+            raise HTTPException(429, detail={"error": "too_many_plugin_calls"}) from None
 
     try:
-        conn = await service.verify_connection(db, keyring, ctx, await _get(db, ctx, connection_id), ask)
+        conn = await service.verify_connection(
+            db, request.app.state.sessionmaker, keyring, ctx, await _get(db, ctx, connection_id), ask
+        )
     except service.UnknownTypeError:
         raise HTTPException(422, detail={"error": "unknown_type"}) from None
     except service.VerificationUnansweredError:
         raise HTTPException(504, detail={"error": "plugin_call_timeout"}) from None
-    except service.StaleVerificationError:
-        await db.commit()  # keep the verify_discarded audit entry
+    except service.StaleVerificationError:  # its verify_discarded audit entry is committed
         raise HTTPException(409, detail={"error": "changed_during_verification"}) from None
     except service.ConnectionGoneError:
-        await db.commit()  # keep the verify_discarded audit entry
         raise HTTPException(404, detail={"error": "not_found"}) from None
     return service.to_out(conn)

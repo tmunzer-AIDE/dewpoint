@@ -65,6 +65,20 @@ def options_reply(outcome: asking.Outcome) -> dict[str, Any]:
     return {"options": found}
 
 
+async def ask_and_wait(
+    request: Request, db: AsyncSession, keyring: Keyring, tenant_id: uuid.UUID, ask: Any
+) -> asking.Outcome:
+    """Ends the request's transaction, then asks: the wait holds no pooled connection and no lock (the 3a-2 review's
+    finding 2). Nothing is read through `db` afterwards."""
+    await db.commit()
+    try:
+        return await asking.ask_and_wait(request.app.state.sessionmaker, keyring, tenant_id, ask)
+    except asking.BusyError:
+        raise HTTPException(503, detail={"error": "plugin_calls_busy"}) from None
+    except asking.TooManyCallsError:
+        raise HTTPException(429, detail={"error": "too_many_plugin_calls"}) from None
+
+
 @router.post("/t/{tenant_id}/node-types/{ref}/options")
 async def node_options(
     ref: str,
@@ -104,4 +118,4 @@ async def node_options(
             query=body.query,
         )  # fmt: skip
 
-    return options_reply(await asking.ask_and_wait(request.app.state.sessionmaker, keyring, ctx.tenant_id, ask))
+    return options_reply(await ask_and_wait(request, db, keyring, ctx.tenant_id, ask))
