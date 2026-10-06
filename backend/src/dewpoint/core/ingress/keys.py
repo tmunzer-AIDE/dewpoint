@@ -51,7 +51,9 @@ async def ensure_event_key(s: AsyncSession, keyring: Keyring, tenant_id: uuid.UU
 SETTLE = timedelta(minutes=10)  # a settling period: ingress reads the newest public key for each delivery
 
 
-async def _lock(s: AsyncSession, tenant_id: uuid.UUID) -> None:
+async def lock(s: AsyncSession, tenant_id: uuid.UUID) -> None:
+    """The tenant's keypair lock, exclusively, until the transaction ends: what making, retiring and deleting its
+    keypairs take; recording an event takes it shared (migration 0039)."""
     await s.execute(
         text("select pg_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": f"dewpoint:event-key:{tenant_id}"}
     )
@@ -61,7 +63,7 @@ async def rotate_event_key(s: AsyncSession, keyring: Keyring, tenant_id: uuid.UU
     """The tenant's next keypair version, its private key sealed under the active data key, in the caller's tenant
     scope (engine 2b spec §8.3): ingress seals new events to its public key. Older versions stay, for the events
     sealed to them."""
-    await _lock(s, tenant_id)
+    await lock(s, tenant_id)
     current = (
         await s.execute(select(func.max(TenantEventKey.version)).where(TenantEventKey.tenant_id == tenant_id))
     ).scalar_one()
@@ -80,7 +82,7 @@ async def retire_event_keys(s: AsyncSession, tenant_id: uuid.UUID, *, settle: ti
     (migration 0039): an event being recorded is found once it commits, and keeps its keypair; one recorded after
     is refused (`key_retired`, a retryable 503 from ingress) for naming a keypair that's gone. `settle` only spares
     most deliveries sealed just before a rotation that refusal."""
-    await _lock(s, tenant_id)
+    await lock(s, tenant_id)
     retired = await s.execute(text(
         "DELETE FROM tenant_event_keys k WHERE k.tenant_id = :t "
         "AND EXISTS (SELECT 1 FROM tenant_event_keys n WHERE n.tenant_id = k.tenant_id AND n.version > k.version "

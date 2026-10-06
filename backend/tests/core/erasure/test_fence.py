@@ -21,6 +21,13 @@ from tests.support.workflows import seed_workflow
 # What holds a tenant id and isn't fenced, each for its reason: the audit log (kept under the platform's audit policy),
 # the retention sweep's counts (the erasure's sweep deletes them once audited), and the erasure's own record.
 UNFENCED = {"audit_log", "retention_sweep_tenants", "tenant_erasures", "tenant_erasure_items", "tenant_erasure_known"}
+FENCED_TABLES = (
+    "claim_grants", "connections", "csv_mappings", "csv_uploads", "data_keys", "egress_allowlist", "execution_evidence",
+    "inbound_events", "memberships", "plugin_calls", "rate_buckets", "rate_scope_keys", "run_inputs", "run_requests",
+    "run_secret_index", "run_slots", "run_steps", "runs", "schedule_firings", "schedules", "step_outputs",
+    "tenant_event_counters", "tenant_event_keys", "tenant_retention", "tenant_run_limits", "trigger_bindings",
+    "webhook_endpoints", "workflow_versions", "workflows",
+)  # fmt: skip
 LIMITS = "insert into tenant_run_limits (tenant_id, max_concurrent) values (:t, 3)"
 
 
@@ -46,7 +53,7 @@ async def test_every_table_holding_tenant_data_is_fenced(owner_sessionmaker) -> 
             "join pg_proc p on p.oid = t.tgfoid where p.proname = 'tenant_insert_fence' and t.tgenabled = 'O'"
         ))).scalars())  # fmt: skip
     assert holding - fenced == UNFENCED
-    assert fenced <= holding
+    assert fenced == set(FENCED_TABLES)
 
 
 @pytest.mark.parametrize(("step", "inserted"), [(50, True), (60, False), (100, False)])
@@ -162,3 +169,27 @@ async def test_an_insert_waiting_for_stage_60_is_refused_once_it_commits(owner_s
     with pytest.raises(DBAPIError) as e:
         await inserting
     assert refused(e)
+
+
+@pytest.mark.parametrize(("step", "deleted"), [(None, False), (70, False), (80, True)])
+async def test_a_workflow_version_stays_immutable_but_to_its_tenants_erasure_sweep(
+    owner_sessionmaker, step: int | None, deleted: bool
+) -> None:
+    """Migration 0007 makes a version immutable, deletes included; an erasure's sweep (stage 80) deletes the tenant's
+    versions, and nothing else does."""
+    tenant, workflow_id, version_id = await seed_workflow(owner_sessionmaker)
+    if step is not None:
+        await erasure_at(owner_sessionmaker, tenant, step)
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("update workflows set active_version_id = null where id = :w"), {"w": workflow_id})
+    statement = text("delete from workflow_versions where id = :v")
+    if deleted:
+        async with owner_sessionmaker() as s, s.begin():
+            assert (await s.execute(statement, {"v": version_id})).rowcount == 1
+        return
+    with pytest.raises(DBAPIError, match="immutable"):
+        async with owner_sessionmaker() as s, s.begin():
+            await s.execute(statement, {"v": version_id})
+    with pytest.raises(DBAPIError, match="immutable"):  # an update never
+        async with owner_sessionmaker() as s, s.begin():
+            await s.execute(text("update workflow_versions set number = 2 where id = :v"), {"v": version_id})

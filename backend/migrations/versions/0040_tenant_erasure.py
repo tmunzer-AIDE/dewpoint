@@ -117,6 +117,93 @@ ERASURES = [  # a platform admin starts, stops and retries an erasure through th
     "GRANT SELECT ON tenant_erasure_items, tenant_erasure_known TO dewpoint_api",
 ]
 
+# The retention process carries an erasure on, as `dewpoint_retention`: its record and items; the cancels of step 40; the
+# keys of step 70 and every row of step 80, each under the tenant's scope; the tombstone's anonymization. Reads are by
+# column, the ids a statement's conditions need: never a sealed, wrapped or tenant-written value.
+NO_POLICY = (
+    "csv_mappings",
+    "egress_allowlist",
+    "execution_evidence",
+    "plugin_calls",
+    "rate_buckets",
+    "rate_scope_keys",
+    "run_slots",
+    "tenant_event_keys",
+    "tenant_run_limits",
+    "trigger_bindings",
+)  # their policies name their roles: the
+# retention role's added (0041's tables: its tenant's rows only, never an egress exception for every tenant; 0042's
+# plugin calls)  # fmt: skip
+READS = {
+    "connections": "id, tenant_id", "csv_mappings": "workflow_id, tenant_id", "data_keys": "id, tenant_id, version",
+    "memberships": "id, tenant_id, user_id", "run_slots": "run_id, tenant_id", "tenant_event_keys": "tenant_id, version",
+    "tenant_run_limits": "tenant_id", "trigger_bindings": "id, tenant_id", "workflow_versions": "id, tenant_id",
+    "workflows": "id, tenant_id, active_version_id", "webhook_endpoints": "pending_events, pending_bytes",
+    "tenant_event_counters": "pending_events, pending_bytes",  # its tenant_id: 0037
+    "egress_allowlist": "id, tenant_id", "rate_buckets": "tenant_id, scope", "rate_scope_keys": "tenant_id",  # 0041
+    "plugin_calls": "id, tenant_id",  # 0042
+}  # fmt: skip
+# What the sweep deletes (step 80), as `dewpoint_retention`
+DELETES = (
+    "connections, csv_mappings, data_keys, egress_allowlist, execution_evidence, memberships, plugin_calls, "
+    "rate_buckets, rate_scope_keys, run_slots, tenant_event_counters, tenant_event_keys, tenant_retention, "
+    "tenant_run_limits, trigger_bindings, webhook_endpoints, workflow_versions, workflows, retention_sweep_tenants"
+)
+ERASER = [
+    "GRANT SELECT, UPDATE ON tenant_erasures TO dewpoint_retention",
+    "GRANT SELECT, INSERT, UPDATE, DELETE ON tenant_erasure_items TO dewpoint_retention",
+    "GRANT SELECT, INSERT ON tenant_erasure_known TO dewpoint_retention",
+    "GRANT USAGE ON SEQUENCE tenant_erasure_items_id_seq, tenant_erasure_known_id_seq TO dewpoint_retention",
+    *(
+        f"CREATE POLICY {t}_erasure ON {t} TO dewpoint_retention USING (tenant_id = app_tenant_id()) "
+        "WITH CHECK (tenant_id = app_tenant_id())"
+        for t in NO_POLICY
+    ),
+    *(f"GRANT SELECT ({columns}) ON {t} TO dewpoint_retention" for t, columns in READS.items()),
+    "GRANT SELECT ON execution_evidence TO dewpoint_retention",  # identifiers and times only
+    f"GRANT DELETE ON {DELETES} TO dewpoint_retention",
+    "GRANT UPDATE (active_version_id) ON workflows TO dewpoint_retention",  # a workflow's versions go before it
+    "GRANT UPDATE (status, reason, ended_at, cancel_requested_at) ON run_requests TO dewpoint_retention",
+    "GRANT UPDATE (status, reason, ended_at) ON inbound_events TO dewpoint_retention",
+    "GRANT UPDATE (pending_events, pending_bytes) ON webhook_endpoints, tenant_event_counters TO dewpoint_retention",
+    "GRANT EXECUTE ON FUNCTION end_unstarted_run(uuid) TO dewpoint_retention",
+    "GRANT UPDATE (status, name, slug) ON tenants TO dewpoint_retention",
+    "CREATE POLICY tenants_erasure ON tenants FOR UPDATE TO dewpoint_retention USING (id = app_tenant_id())",
+]
+
+# A workflow version stays immutable (0007), deletes included, but to its tenant's erasure sweep (stage 80).
+VERSIONS = """CREATE OR REPLACE FUNCTION workflow_versions_immutable() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public, pg_temp AS $$
+BEGIN
+  IF TG_OP = 'DELETE' AND EXISTS (SELECT 1 FROM tenant_erasures e WHERE e.tenant_id = OLD.tenant_id AND e.step = 80)
+  THEN
+    RETURN OLD;
+  END IF;
+  RAISE EXCEPTION 'workflow_versions rows are immutable';
+END $$"""
+VERSIONS_0007 = (
+    "CREATE OR REPLACE FUNCTION workflow_versions_immutable() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER "
+    "AS $$ BEGIN RAISE EXCEPTION 'workflow_versions rows are immutable'; END $$"
+)
+
+# The run evidence's leader pass (0039) leaves a tenant that isn't active to its erasure.
+EVIDENCE_DUE = """CREATE OR REPLACE FUNCTION execution_evidence_due(max_rows integer)
+RETURNS TABLE (tenant_id uuid, id bigint)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+    SELECT e.tenant_id, e.id FROM execution_evidence e JOIN tenants t ON t.id = e.tenant_id AND t.status = 'active'
+    WHERE e.lost_at IS NULL AND e.next_check_at <= statement_timestamp()
+    ORDER BY e.next_check_at, e.id
+    LIMIT max_rows
+$$"""
+EVIDENCE_DUE_0039 = """CREATE OR REPLACE FUNCTION execution_evidence_due(max_rows integer)
+RETURNS TABLE (tenant_id uuid, id bigint)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+    SELECT e.tenant_id, e.id FROM execution_evidence e
+    WHERE e.lost_at IS NULL AND e.next_check_at <= statement_timestamp()
+    ORDER BY e.next_check_at, e.id
+    LIMIT max_rows
+$$"""
+
 FIRINGS = [
     "ALTER TABLE schedule_firings ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE schedule_firings FORCE ROW LEVEL SECURITY",
@@ -194,7 +281,7 @@ def upgrade() -> None:
     )
     op.create_index("schedule_firings_tenant", "schedule_firings", ["tenant_id", "schedule_id"])
     op.create_index("schedule_firings_recorded", "schedule_firings", ["recorded_at"])
-    for statement in [*FIRINGS, *STATUS, *ERASURES]:
+    for statement in [*FIRINGS, *STATUS, *ERASURES, *ERASER, VERSIONS, EVIDENCE_DUE]:
         op.execute(statement)
     op.add_column("schedules", sa.Column("creation_misses", sa.Integer, nullable=False, server_default="0"))
     op.execute("GRANT UPDATE (creation_misses) ON schedules TO dewpoint_dispatch")
@@ -212,6 +299,26 @@ def downgrade() -> None:
         op.execute(f"DROP TRIGGER {table}_fence ON {table}")
     op.execute("DROP FUNCTION tenant_insert_fence()")
     op.execute("DROP FUNCTION tenant_status(uuid)")
+    op.execute(VERSIONS_0007)
+    op.execute(EVIDENCE_DUE_0039)
+    op.execute("ALTER FUNCTION workflow_versions_immutable() RESET search_path")
+    op.execute("DROP POLICY tenants_erasure ON tenants")
+    for table in NO_POLICY:
+        op.execute(f"DROP POLICY {table}_erasure ON {table}")
+    for table, columns in READS.items():
+        op.execute(f"REVOKE SELECT ({columns}) ON {table} FROM dewpoint_retention")
+    for statement in (
+        "REVOKE SELECT ON execution_evidence FROM dewpoint_retention",
+        f"REVOKE DELETE ON {DELETES} FROM dewpoint_retention",
+        "REVOKE UPDATE (active_version_id) ON workflows FROM dewpoint_retention",
+        "REVOKE UPDATE (status, reason, ended_at, cancel_requested_at) ON run_requests FROM dewpoint_retention",
+        "REVOKE UPDATE (status, reason, ended_at) ON inbound_events FROM dewpoint_retention",
+        "REVOKE UPDATE (pending_events, pending_bytes) ON webhook_endpoints, tenant_event_counters "
+        "FROM dewpoint_retention",
+        "REVOKE EXECUTE ON FUNCTION end_unstarted_run(uuid) FROM dewpoint_retention",
+        "REVOKE UPDATE (status, name, slug) ON tenants FROM dewpoint_retention",
+    ):
+        op.execute(statement)
     op.execute("REVOKE UPDATE (creation_misses) ON schedules FROM dewpoint_dispatch")
     op.drop_column("schedules", "creation_misses")
     op.drop_table("schedule_firings")

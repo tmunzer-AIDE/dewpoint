@@ -242,3 +242,19 @@ async def test_the_leader_reads_the_namespaces_retention_at_most_every_five_minu
     clock[0] += 1
     await cached(None)  # type: ignore[arg-type]
     assert len(reads) == 2
+
+
+@pytest.mark.parametrize("status", ["erasing", "erased"])
+async def test_a_tenant_being_erased_is_left_to_its_erasure(owner_sessionmaker, dispatch_sessionmaker, status) -> None:
+    """2b-4a M4: the leader's pass leaves a tenant that isn't active alone (the erasure walks and deletes its executions
+    itself, and its keys go): never a Temporal call, never an insert past the erasure's fence."""
+    ctx = await tenant(owner_sessionmaker)
+    await tree(owner_sessionmaker, ctx, OLD)
+    await sql(owner_sessionmaker, "update tenants set status = :s where id = :t", s=status, t=ctx["t"])
+
+    class Unreachable:
+        def __getattr__(self, name: str) -> Any:
+            raise AssertionError("asked Temporal")
+
+    counts = await evidence.check_evidence(dispatch_sessionmaker, Unreachable(), retention=None)  # type: ignore[arg-type]
+    assert counts == {}
