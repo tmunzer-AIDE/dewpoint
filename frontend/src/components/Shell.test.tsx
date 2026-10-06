@@ -34,7 +34,7 @@ beforeEach(() => {
 async function renderAt(path: string) {
   const root = createRootRoute({ component: Shell });
   const page = () => <p>page</p>;
-  const children = ["/t/$tenantId/connections", "/t/$tenantId/settings/members", "/tenants", "/account/security"].map((p) =>
+  const children = ["/t/$tenantId/workflows", "/t/$tenantId/connections", "/t/$tenantId/settings/members", "/tenants", "/account/security"].map((p) =>
     createRoute({ getParentRoute: () => root, path: p, component: page }),
   );
   const router = createRouter({
@@ -114,3 +114,30 @@ it("offers a theme choice in the header: the OS's, light or dark (D6)", async ()
   expect(screen.getByRole("banner").contains(theme)).toBe(true);
 });
 
+
+it("offers Workflows first on the rail, current on its pages", async () => {
+  await renderAt("/t/t1/workflows");
+  const links = screen.getAllByRole("link").filter((l) => l.closest("nav"));
+  expect(links.map((l) => l.textContent)).toEqual(["Workflows", "Connections", "Settings"]);
+  expect(screen.getByRole("link", { name: "Workflows" }).getAttribute("aria-current")).toBe("page");
+});
+
+it("keeps the editor's rail to icons at every width (outline §2)", async () => {
+  const root = createRootRoute({ component: Shell });
+  const editor = createRoute({
+    getParentRoute: () => root,
+    path: "/t/$tenantId/workflows/$workflowId",
+    component: () => <p>page</p>,
+    staticData: { compactRail: true },
+  });
+  const router = createRouter({ routeTree: root.addChildren([editor]), history: createMemoryHistory({ initialEntries: ["/t/t1/workflows/w1"] }) });
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  );
+  await screen.findByText("page");
+  const label = screen.getByRole("link", { name: "Workflows" }).querySelector("span")!;
+  expect(label.className).toMatch(/(?:^|\s)sr-only(?:\s|$)/);
+  expect(label.className).not.toMatch(/lg:not-sr-only/);
+});

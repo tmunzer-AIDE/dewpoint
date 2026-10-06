@@ -2,16 +2,17 @@
 // The app's frame, as designed (screen 1a): the navy rail with the wordmark and the main navigation, a header with the
 // tenant switcher, Security and Sign out, and the page.
 import { useQueryClient } from "@tanstack/react-query";
-import { Link, Outlet, useNavigate, useParams } from "@tanstack/react-router";
+import { Link, Outlet, useMatches, useNavigate, useParams } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { onStepUpRequired } from "../lib/events";
 import { usePlatformStatus } from "../lib/platform";
 import { signOut } from "../lib/signOut";
 import { authenticatePasskey } from "../lib/webauthn";
+import { Announcer } from "./Announcer";
 import { Button } from "./Button";
 import { CommandPalette } from "./CommandPalette";
-import { ConnectionsIcon, SettingsIcon } from "./icons";
-import { Wordmark } from "./Mark";
+import { ConnectionsIcon, SettingsIcon, WorkflowsIcon } from "./icons";
+import { Mark, Wordmark } from "./Mark";
 import { TenantSwitcher } from "./TenantSwitcher";
 import { ThemeSelect } from "./ThemeSelect";
 
@@ -21,11 +22,19 @@ import { ThemeSelect } from "./ThemeSelect";
 const ITEM = "flex items-center justify-center gap-2.5 rounded-md px-2 py-2.5 text-body text-rail-ink lg:justify-start lg:px-3 lg:py-2";
 const CURRENT = "bg-rail-current font-semibold text-rail-ink-strong lg:bg-rail-active";
 const INACTIVE = "hover:bg-rail-line";
+// On a compact route (the editor) the rail stays the 60 px icon rail at every width; the current item's fill
+// carries the mark there too (rail-current, ruling 53).
+const ITEM_COMPACT = "flex items-center justify-center rounded-md px-2 py-2.5 text-body text-rail-ink";
+const CURRENT_COMPACT = "bg-rail-current font-semibold text-rail-ink-strong";
 
 export function Shell() {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const params = useParams({ strict: false });
+  const compact = useMatches({ select: (matches) => matches.some((m) => m.staticData?.compactRail === true) });
+  const item = compact ? ITEM_COMPACT : ITEM;
+  const current = compact ? CURRENT_COMPACT : CURRENT;
+  const label = compact ? "sr-only" : "sr-only lg:not-sr-only";
   const [stepUp, setStepUp] = useState(false);
   const [stepUpError, setStepUpError] = useState<string | null>(null);
   useEffect(() => onStepUpRequired(() => setStepUp(true)), []);
@@ -56,34 +65,48 @@ export function Shell() {
   }
 
   return (
-    <div className="grid min-h-screen grid-cols-[var(--rail-w-collapsed)_minmax(0,1fr)] grid-rows-[auto_1fr] lg:grid-cols-[var(--rail-w)_minmax(0,1fr)]">
+    <div
+      className={`grid min-h-screen grid-rows-[auto_1fr] ${compact ? "grid-cols-[var(--rail-w-collapsed)_minmax(0,1fr)]" : "grid-cols-[var(--rail-w-collapsed)_minmax(0,1fr)] lg:grid-cols-[var(--rail-w)_minmax(0,1fr)]"}`}
+    >
       <div data-surface="rail" className="row-span-2 flex flex-col gap-0.5 bg-rail px-2 py-4 lg:px-3">
         <span className="flex justify-center px-0 pt-2 pb-5 lg:block lg:px-2">
-          <Wordmark />
+          {compact ? <Mark /> : <Wordmark />}
         </span>
         <nav aria-label="Main" className="flex flex-col gap-0.5">
           {params.tenantId && (
             <Link
+              to="/t/$tenantId/workflows"
+              params={{ tenantId: params.tenantId }}
+              className={item}
+              activeProps={{ className: current }}
+              inactiveProps={{ className: INACTIVE }}
+            >
+              <WorkflowsIcon />
+              <span className={label}>Workflows</span>
+            </Link>
+          )}
+          {params.tenantId && (
+            <Link
               to="/t/$tenantId/connections"
               params={{ tenantId: params.tenantId }}
-              className={ITEM}
-              activeProps={{ className: CURRENT }}
+              className={item}
+              activeProps={{ className: current }}
               inactiveProps={{ className: INACTIVE }}
             >
               <ConnectionsIcon />
-              <span className="sr-only lg:not-sr-only">Connections</span>
+              <span className={label}>Connections</span>
             </Link>
           )}
           {params.tenantId && (
             <Link
               to="/t/$tenantId/settings"
               params={{ tenantId: params.tenantId }}
-              className={ITEM}
-              activeProps={{ className: CURRENT }}
+              className={item}
+              activeProps={{ className: current }}
               inactiveProps={{ className: INACTIVE }}
             >
               <SettingsIcon />
-              <span className="sr-only lg:not-sr-only">Settings</span>
+              <span className={label}>Settings</span>
             </Link>
           )}
         </nav>
@@ -124,6 +147,7 @@ export function Shell() {
         )}
         <Outlet />
       </main>
+      <Announcer />
     </div>
   );
 }

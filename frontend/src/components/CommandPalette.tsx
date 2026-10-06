@@ -7,6 +7,7 @@ import { useNavigate, useParams } from "@tanstack/react-router";
 import { Command } from "cmdk";
 import { useEffect, useRef, useState } from "react";
 import { client, ok } from "../lib/client";
+import { workflowsQuery } from "../lib/workflows";
 
 // The selected option never takes focus (the search field keeps it), so it carries its own 3:1 outline (WCAG 1.4.11).
 const ITEM =
@@ -22,6 +23,7 @@ export function CommandPalette() {
   const navigate = useNavigate();
   const params = useParams({ strict: false });
   const tenants = useQuery({ queryKey: ["tenants"], queryFn: () => ok(client.GET("/api/v1/tenants")) });
+  const workflows = useQuery({ ...workflowsQuery(params.tenantId ?? ""), enabled: open && !!params.tenantId });
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -71,12 +73,34 @@ export function CommandPalette() {
         {open && (
           <Command label="Search or jump to" loop>
             <Command.Input
-              placeholder="Type a page or a tenant"
+              placeholder="Type a page, a workflow or a tenant"
               className="w-full rounded-t-dialog border-b border-line bg-transparent px-4 py-3 text-body-lg text-ink placeholder:text-muted focus-visible:-outline-offset-2"
             />
             <Command.List className="max-h-80 overflow-y-auto p-1">
               <Command.Empty className="px-3 py-2 text-body text-muted">Nothing matches.</Command.Empty>
               <Command.Group heading="Go to" className={GROUP}>
+                {params.tenantId && (
+                  <Command.Item
+                    value="Workflows"
+                    className={ITEM}
+                    onSelect={() => go(() => navigate({ to: "/t/$tenantId/workflows", params: { tenantId: params.tenantId! } }))}
+                  >
+                    Workflows
+                  </Command.Item>
+                )}
+                {params.tenantId && (
+                  <Command.Item
+                    value="New workflow"
+                    className={ITEM}
+                    onSelect={() =>
+                      go(() =>
+                        navigate({ to: "/t/$tenantId/workflows", params: { tenantId: params.tenantId! }, search: { new: true } }),
+                      )
+                    }
+                  >
+                    New workflow
+                  </Command.Item>
+                )}
                 {params.tenantId && (
                   <Command.Item
                     value="Connections"
@@ -104,6 +128,24 @@ export function CommandPalette() {
                   All tenants
                 </Command.Item>
               </Command.Group>
+              {params.tenantId && !!workflows.data?.length && (
+                <Command.Group heading="Workflows" className={GROUP}>
+                  {workflows.data.map((w) => (
+                    <Command.Item
+                      key={w.id}
+                      value={w.name}
+                      className={ITEM}
+                      onSelect={() =>
+                        go(() =>
+                          navigate({ to: "/t/$tenantId/workflows/$workflowId", params: { tenantId: params.tenantId!, workflowId: w.id } }),
+                        )
+                      }
+                    >
+                      {w.name}
+                    </Command.Item>
+                  ))}
+                </Command.Group>
+              )}
               {!!tenants.data?.length && (
                 <Command.Group heading="Tenants" className={GROUP}>
                   {tenants.data.map((t) => (
@@ -111,7 +153,7 @@ export function CommandPalette() {
                       key={t.id}
                       value={`${t.name} ${t.slug}`}
                       className={ITEM}
-                      onSelect={() => go(() => navigate({ to: "/t/$tenantId/connections", params: { tenantId: t.id } }))}
+                      onSelect={() => go(() => navigate({ to: "/t/$tenantId/workflows", params: { tenantId: t.id } }))}
                     >
                       <span>{t.name}</span>
                       <span className="text-small text-muted">{t.role}</span>

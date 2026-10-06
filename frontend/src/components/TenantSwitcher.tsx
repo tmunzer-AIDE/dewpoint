@@ -32,7 +32,7 @@ export function TenantSwitcher() {
           {tenants.data?.map((t) => (
             <Dropdown.Item
               key={t.id}
-              onSelect={() => void navigate({ to: "/t/$tenantId/connections", params: { tenantId: t.id } })}
+              onSelect={() => void navigate({ to: "/t/$tenantId/workflows", params: { tenantId: t.id } })}
               className={ITEM}
             >
               <span>{t.name}</span>

@@ -451,3 +451,11 @@ M5. **The last-runs read bounds the mode from below inside each lookup and check
     skewed history (it fails on the literal form). - A plan that turns on statistics reads a tenant's whole history
     for a quiet workflow. - None in results (the reads agree whole, and the regression tests compare them); the
     statement is less obvious, and its comment says why.
+
+### 4b, milestone 2 (2026-10-06)
+
+M6. **The tenants page opens a tenant on its workflows too** (Task 6; ruling 19, "Workflows lands a tenant"): the
+    plan changed the switcher and the palette; the tenants page's name link still opened Connections. It now opens
+    Workflows (`router.test.tsx`: from `/tenants`, choosing Acme Lab lands on `/t/t2/workflows`). The palette's
+    existing "goes where the chosen item points" test now chooses Security, since a tenant lands on Workflows (its
+    own new test). - Three ways to choose a tenant should land in one place. - None: the link's target only.

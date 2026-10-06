@@ -41,6 +41,8 @@ beforeEach(() => {
     if (key === "GET /api/v1/platform/status") return json({ environment: "production", production_runs: false });
     if (key === "GET /api/v1/connection-types") return json(TYPES);
     if (/^GET \/api\/v1\/t\/t[12]\/(?:connections|members)$/.test(key)) return json([]);
+    if (/^GET \/api\/v1\/t\/t[12]\/workflows$/.test(key)) return json([]);
+    if (key === "GET /api/v1/node-types") return json([]);
     const tenant = TENANTS.find((t) => key === `GET /api/v1/t/${t.id}`);
     if (tenant) return json(tenant);
     return json({ error: "unexpected" }, 500);
@@ -110,4 +112,17 @@ it("drops a member being added when the tenant changes", async () => {
   await act(() => router.navigate({ to: "/t/$tenantId/settings/members", params: { tenantId: "t2" } }));
   await screen.findByRole("heading", { name: /Settings · Acme Lab/ });
   expect(await screen.findByLabelText("Email")).toHaveProperty("value", "");
+});
+
+it("opens a tenant on its workflows", async () => {
+  const router = showApp("/t/t1");
+  expect(await screen.findByRole("heading", { level: 1, name: "Workflows" })).toBeTruthy();
+  expect(router.state.location.pathname).toBe("/t/t1/workflows");
+});
+
+it("opens a tenant chosen from the tenants page on its workflows (4b ruling 19; ledger M6)", async () => {
+  const router = showApp("/tenants");
+  await userEvent.click(await screen.findByRole("link", { name: "Acme Lab" }));
+  expect(await screen.findByRole("heading", { level: 1, name: "Workflows" })).toBeTruthy();
+  expect(router.state.location.pathname).toBe("/t/t2/workflows");
 });
