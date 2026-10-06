@@ -479,3 +479,24 @@ M9. **dagre's graph is typed with its own `NodeLabel`** (Task 10): checked in th
     typescript-eslint refuses; `new dagre.graphlib.Graph<object, NodeLabel, object>()` types them, and `x`/`y`
     (optional in `NodeLabel`) are read with a default. Positions are the offset of each card's centre from the start
     card's, which equals the plan's top-left arithmetic for cards of one size. - Lint. - None: the layout tests hold.
+M10. **The foundations e2e follows ruling 19** (Task 11): choosing a tenant in the switcher now opens its workflows,
+    so the flow asserts `/workflows` there and follows the rail's Connections link to the connections it goes on to
+    test. It also saves the signed-in state (`e2e/state.ts`) for the `workflows` project, as the plan says. - The
+    plan changed the switcher (Task 6) but not this test. - None.
+M11. **React Flow's nodes take the pointer and keep their size** (Task 11; the browser gate caught three faults, none
+    of them CSP: the traces hold no console message, and the gate saw no violation). In the installed 12.12.0: a
+    node's wrapper gets `pointer-events: none` unless it can be selected or dragged or has a mouse handler
+    (`hasPointerEvents`), so the start card's "+" (and a viewer's step card) passed the press to the pane; the cards
+    and their "+" carry `pointer-events-auto`, as the edges' "+" already did in React Flow's label layer. A node object
+    without `measured` has no dimensions (`nodeHasDimensions`) and is hidden until measured again: the canvas rebuilt
+    its nodes on each editor render, so a press that moved focus (and re-rendered) released over the pane (a
+    MutationObserver showed the start node's style flip and `pointerup` on `react-flow__pane`); a rebuilt node now
+    keeps its measured size. A new node is hidden until its first measure, after the frame that focuses it, so the
+    step just added never took focus; every node carries `initialWidth`/`initialHeight` (the card's 260 by 64). A unit
+    test pins `pointer-events-auto`; the gate's pointer flow pins the rest. - Clicks and focus lost on the canvas. -
+    None: the canvas behaves as the plan describes.
+M12. **The isolated stack builds the 4b worktree** (Task 11, scratchpad only): `compose-ui4a/dc.sh` and `e2e.sh` point
+    at `ui4/4b` (4a is merged), and `reset.sh` syncs the installed plugins as the admin login after `admin init`, as
+    CI's e2e job does. Project, ports, images' tags, secrets file and CSP are ruling 24's, unchanged. Base images:
+    the ones 4a's gate built from. A gate run (rebuild, fresh database, admin, sync, e2e) takes about 1.8 minutes. -
+    None.

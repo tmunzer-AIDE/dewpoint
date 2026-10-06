@@ -1,0 +1,31 @@
+/* React Flow's structural classes, coloured from our tokens (4b ruling 20): its default theme isn't imported.
+   The dots are React Flow's SVG pattern, drawn as circles, never a CSS background image (outline §6). */
+.react-flow__background {
+  background-color: var(--ground);
+}
+.react-flow__background circle {
+  fill: var(--line-strong);
+}
+.react-flow__edge-path {
+  stroke: var(--line-strong);
+  stroke-width: 1.5;
+}
+.react-flow__handle {
+  width: 8px;
+  height: 8px;
+  border: 1px solid var(--line-control);
+  border-radius: 2px;
+  background-color: var(--surface);
+}
+.react-flow__minimap {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background-color: var(--surface);
+}
+.react-flow__minimap-mask {
+  fill: var(--surface-2);
+  fill-opacity: 0.6;
+}
+.canvas-minimap-node {
+  fill: var(--line-strong);
+}

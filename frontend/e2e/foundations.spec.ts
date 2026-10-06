@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { Page } from "@playwright/test";
 import { expect, expectAccessible, test } from "./gate";
+import { ADMIN_STATE } from "./state";
 import * as OTPAuth from "otpauth";
 
 const EMAIL = process.env.E2E_ADMIN_EMAIL ?? "admin@example.com";
@@ -46,6 +47,8 @@ test.describe.serial("foundations", () => {
     await expect(page.getByRole("menuitem", { name: /Acme Retail/ })).toBeVisible();
     await expectAccessible(page, "tenant menu");
     await page.getByRole("menuitem", { name: /Acme Retail/ }).click();
+    await expect(page).toHaveURL(/\/t\/[0-9a-f-]+\/workflows$/); // a tenant opens on its workflows (4b ruling 19)
+    await page.getByRole("link", { name: "Connections" }).click();
     await expect(page).toHaveURL(/\/t\/[0-9a-f-]+\/connections/);
     const connectionsPath = new URL(page.url()).pathname;
     // This stack is a development deployment (Compose's dev override): every signed-in screen says so.
@@ -116,6 +119,7 @@ test.describe.serial("foundations", () => {
       await expectAccessible(page, `${path} at 320 px`);
     }
     await page.setViewportSize({ width: 1280, height: 720 });
+    await page.context().storageState({ path: ADMIN_STATE });
   });
 
   test("passkey added with a virtual authenticator signs in without a password", async ({ page }) => {
