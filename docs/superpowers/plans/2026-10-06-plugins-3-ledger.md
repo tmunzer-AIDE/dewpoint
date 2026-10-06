@@ -210,9 +210,11 @@ Rulings:
   as in runs - cost if wrong: none.
 
 Dependency for 2b-4a (data lifecycle): `plugin_calls.result_ct` is sealed under a tenant's data key (purpose
-`plugin.call`, the call's id as context). It lives at most 90 s (30 s to expiry, swept a minute later), so key
-retirement may wait for the sweep rather than re-encrypt it, but must not retire a version a live call still uses;
-tenant erasure removes calls by their foreign key (cascade).
+`plugin.call`, the call's id as context). A call becomes deletable 90 s after it was asked (30 s to expiry, then a
+minute) and is deleted by the API at once or by a worker's periodic sweep, but that is no bound: without a working
+sweeper a row can survive indefinitely. Key retirement must check the `plugin_calls` rows that still hold a ciphertext
+of the version (the owner's correction), never rely on the duration; tenant erasure removes calls by their foreign key
+(cascade).
 - Ruling: options for a node's field need `workflow.edit`, and `connection.use` when a connection is named, of a type the
   node declares - D3 names `connection.use`; options are an editing aid - cost if wrong: an operator can't list choices.
 - Ruling: a verification no worker answered within 10 s records nothing (504), rather than marking the connection in
@@ -285,7 +287,22 @@ Checkpoint full runs (2026-10-06, after the review's fixes): one run errored on 
 under another session's load (no code involved); the next showed 4 failures in #41's lifespan logging tests, which
 closed the API's outbound HTTP client 3a-2 removed: they now fail the engine's disposal instead (`27e6585`). Final run
 at `27e6585`: 2876 passed, 8 skipped, in 4 min 52 s; ruff, format, mypy, import contracts, licences and the replay gate
-pass at `211ef73`. Not run: the Compose proof (its web image's bases, `node:22-bookworm-slim` and
-`nginxinc/nginx-unprivileged:1.30-alpine`, aren't on the approved image list).
+pass at `211ef73`. Not run: the Compose proof. (Correction from the owner: its web image's bases,
+`node:22-bookworm-slim` and `nginxinc/nginx-unprivileged:1.30-alpine`, were approved for #40's proof; that doesn't
+authorize a new Compose run, which still needs the owner's say.)
+
+Owner's review of the checkpoint (`6167ed1`, 2026-10-06, pasted): three Medium and two Low findings, reproduced against
+an isolated database and local fakes, all fixed test-first:
+- (1, Medium) the host rule compared with an unlocked, possibly stale copy: an edit restoring the old host while
+  another moved it with a new token kept the new token. The edit now locks the connection first: `64dfc8e`.
+- (2, Medium) the tenant cap counted then inserted without serializing: two asks at seven both got in. Admission takes
+  a per-tenant advisory lock: `609b437`.
+- (3, Medium) options were accepted after an edit landed while the provider answered. The answer write is fenced on
+  the connection's revision (`connection_changed` otherwise), and the API checks it again before returning:
+  `4286729`. D3 asked a final compare-and-set for verification only; this is the stricter ruling.
+- (4) secrets shorter than four characters escaped the answer's secret check (the run index's minimum): a call's
+  answer is checked against every non-empty string: `7354193`.
+- (5) a notification arriving during a round was cleared without another query: the event is cleared before the
+  query: `2e81380`.
 
 **Checkpoint:** awaiting the owner's rulings on 3a-2's rulings above. Nothing is pushed.
