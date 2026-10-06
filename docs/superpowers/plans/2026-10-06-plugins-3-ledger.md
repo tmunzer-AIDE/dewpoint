@@ -410,3 +410,15 @@ Rulings:
   refused.
 - Ruling: a trigger declares only `id_source: none` and bearer or HMAC endpoints - ingress offers those, and D17 needs no
   more - cost if wrong: a provider with event ids needs the declaration widened.
+- Ruling: a path value must be one segment of unreserved characters (letters, digits, `_ . ~ -`), neither `.` nor `..`,
+  then percent-encoded; anything else fails `mist.invalid_path_value` before sending - every curated parameter is a
+  UUID, a MAC or a name of that shape, and the open question of 3a-2 (typed text in a path) closes with it - cost if
+  wrong: a parameter with other characters needs the rule widened.
+- Ruling: a site is the connection's org's only when Mist's `GET /sites/{id}` answers that org's id exactly (one GET a
+  site per attempt), for curated site-scope nodes too, not only D14's any-endpoint nodes - a token can reach other
+  orgs' sites (an MSP's, an admin of several orgs) - cost if wrong: one more request per site-scope step.
+- Ruling: a search's `next` is followed only on the connection's host and exactly the search's own path (no fragment);
+  else the step fails `mist.invalid_next` - D14 - cost if wrong: a search Mist pages through another path stops
+  failing instead of truncating.
+- Ruling: a list without page headers whose page came back full is reported `truncated` - it may have more - cost if
+  wrong: a list of exactly a page's size says it might be truncated.
