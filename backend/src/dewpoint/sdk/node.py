@@ -8,9 +8,11 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict
 
+from dewpoint.sdk.calls import CallContext, Option, OptionsQuery
 from dewpoint.sdk.context import StepContext
 
 TYPE_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
+ICON_RE = re.compile(r"^[a-z][a-z0-9-]{0,39}$")  # a first-party icon's name, never a URL or markup
 PORT_RE = re.compile(r"^[a-z][a-z0-9_]{0,30}$")
 RESERVED_PORTS = frozenset({"error"})  # added by the engine when a step routes errors to a port
 MAX_RETRY_ATTEMPTS = 20  # same ceiling as a step's max_attempts override in the graph
@@ -49,6 +51,7 @@ class Node:
     version: ClassVar[int]
     title: ClassVar[str]
     description: ClassVar[str] = ""
+    icon: ClassVar[str | None] = None  # display only: a first-party icon's name
     kind: ClassVar[NodeKind] = NodeKind.ACTION
     # `builtins.type`: inside this class body, `type` names the class attribute above.
     Config: ClassVar[builtins.type[BaseModel]] = Empty
@@ -68,4 +71,8 @@ class Node:
         raise NotImplementedError
 
     async def reconcile(self, ctx: StepContext, config: Any) -> BaseModel | None:
+        raise NotImplementedError
+
+    async def options(self, ctx: CallContext, field: str, query: OptionsQuery) -> list[Option]:
+        """The choices for `field`, one of the config's `options_field`s (plugins-3 D3): read-only, outside any run."""
         raise NotImplementedError

@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Dewpoint plugin SDK. Semver'd separately from the platform; plugins import only this package."""
 
+from dewpoint.sdk.calls import CallContext, Option, OptionsQuery, ReadOnly
+from dewpoint.sdk.connections import ConnectionType, HeaderAuth, HostMap, RateScope, UrlField, VerifyResult
 from dewpoint.sdk.context import StepContext, StepLogger
 from dewpoint.sdk.errors import FatalError, NodeError, OutcomeUnknownError, RetryableError
-from dewpoint.sdk.fields import connection_field, literal_only, sensitive, value_kinds
+from dewpoint.sdk.fields import connection_field, literal_only, options_field, sensitive, value_kinds
 from dewpoint.sdk.manifest import ManifestError, Plugin, dump_output, node_manifest
 from dewpoint.sdk.net import (
     Connection,
@@ -30,41 +32,52 @@ from dewpoint.sdk.version import SDK_VERSION
 
 __all__ = [
     "SDK_VERSION",
+    "CallContext",
     "Connection",
+    "ConnectionType",
     "ConnectionUnavailable",
     "Cooldown",
     "EgressRefused",
     "Empty",
     "FatalError",
+    "HeaderAuth",
+    "HostMap",
     "HttpClient",
     "HttpResponse",
     "InvalidRequest",
+    "ManifestError",
     "MaybeSent",
     "Net",
     "NetStream",
-    "NotSent",
-    "RateLimited",
-    "RedirectRefused",
-    "ResponseTooLarge",
-    "ResponseUnreadable",
-    "SimulationSendsNothing",
-    "TlsVerificationFailed",
-    "TransportError",
-    "ManifestError",
     "Node",
     "NodeError",
     "NodeKind",
+    "NotSent",
+    "Option",
+    "OptionsQuery",
     "OutcomeUnknownError",
     "Plugin",
+    "RateLimited",
+    "RateScope",
+    "ReadOnly",
+    "RedirectRefused",
+    "ResponseTooLarge",
+    "ResponseUnreadable",
     "RetryDefaults",
     "RetryableError",
     "SideEffect",
+    "SimulationSendsNothing",
     "StepContext",
     "StepLogger",
+    "TlsVerificationFailed",
+    "TransportError",
+    "UrlField",
+    "VerifyResult",
     "connection_field",
     "dump_output",
     "literal_only",
     "node_manifest",
+    "options_field",
     "sensitive",
     "value_kinds",
 ]
