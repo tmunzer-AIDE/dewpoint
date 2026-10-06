@@ -23,10 +23,16 @@ erasure's firing inventory; identifiers only, kept 31 days (the platform's longe
 `schedules.creation_misses`: firings due while a newly created schedule stayed paused, before its unpause (D3f): Temporal
 neither catches them up nor counts them as missed, so the sync counts them.
 
-The insert fence: once an erasure reaches stage 60 (its executions being deleted, nothing of the tenant runs any more),
-no row of the tenant is inserted into any table that holds tenant data, by any role, whatever the writer: a trigger
-takes the tenant's lifecycle lock, shared, and refuses the insert (SQLSTATE DPE01). Stage 60 is entered under that lock
-taken exclusively, so an insert either commits before it or sees it. Not fenced: the audit log (kept under the audit
+The insert fence: once an erasure reaches stage 60 (`fenced_at`: its executions being deleted, nothing of the tenant
+runs any more), no row of the tenant is inserted into any table that holds tenant data, by any role, whatever the
+writer: a trigger takes the tenant's lifecycle lock, shared, and refuses the insert (SQLSTATE DPE01). Stage 60 is
+entered under that lock taken exclusively, so an insert either commits before it or sees it; an erasure reopened at an
+earlier stage (a late Temporal item found) keeps its fence.
+
+`namespace_boundaries` (D3g): the namespace-change boundary verified for the deployment's Temporal (its name, when it
+was verified, and when it was found lost), which step 9's bound relies on. The verified proof of 2b-4b (D12) records
+it, as the key admin; no migration does. An erasure records the boundary it relied on, and can't complete without one,
+nor once it's lost. Not fenced: the audit log (kept under the audit
 policy), and the retention sweep's own counts (deleted by the erasure's sweep once audited)."""
 
 import sqlalchemy as sa
@@ -39,7 +45,6 @@ branch_labels = None
 depends_on = None
 
 STAGES = (20, 31, 32, 33, 40, 50, 60, 70, 80, 90, 100)
-FENCED_AT = 60
 # Every table holding tenant data, the keys included: what the fence covers.
 FENCED = ("claim_grants", "connections", "csv_mappings", "csv_uploads", "data_keys", "egress_allowlist",
           "execution_evidence", "inbound_events", "memberships", "plugin_calls", "rate_buckets", "rate_scope_keys",
@@ -48,12 +53,12 @@ FENCED = ("claim_grants", "connections", "csv_mappings", "csv_uploads", "data_ke
           "tenant_run_limits", "trigger_bindings", "webhook_endpoints", "workflow_versions", "workflows")  # fmt: skip
 
 FENCE = [
-    f"""CREATE FUNCTION tenant_insert_fence() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
+    """CREATE FUNCTION tenant_insert_fence() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = public, pg_temp AS $$
 BEGIN
-  -- the tenant's lifecycle lock (core/ingress/counters.py), shared: entering stage {FENCED_AT} takes it exclusively
+  -- the tenant's lifecycle lock (core/ingress/counters.py), shared: entering stage 60 takes it exclusively
   PERFORM pg_advisory_xact_lock_shared(hashtextextended('dewpoint:tenant:' || NEW.tenant_id::text, 0));
-  IF EXISTS (SELECT 1 FROM tenant_erasures e WHERE e.tenant_id = NEW.tenant_id AND e.step >= {FENCED_AT}) THEN
+  IF EXISTS (SELECT 1 FROM tenant_erasures e WHERE e.tenant_id = NEW.tenant_id AND e.fenced_at IS NOT NULL) THEN
     RAISE EXCEPTION 'tenant_erased' USING ERRCODE = 'DPE01';
   END IF;
   RETURN NEW;
@@ -214,6 +219,15 @@ FIRINGS = [
 ]
 
 
+# The retention process checks the deployment's recorded namespace before erasure reaches Temporal (§2.1).
+RECORD = "GRANT SELECT ON platform_settings TO dewpoint_retention"
+BOUNDARIES = [
+    "GRANT SELECT, INSERT, UPDATE (lost_at) ON namespace_boundaries TO dewpoint_admin",
+    "GRANT USAGE ON SEQUENCE namespace_boundaries_id_seq TO dewpoint_admin",
+    "GRANT SELECT ON namespace_boundaries TO dewpoint_retention",
+]
+
+
 def upgrade() -> None:
     op.drop_constraint("tenants_status", "tenants", type_="check")
     op.create_check_constraint("tenants_status", "tenants", "status IN ('active', 'erasing', 'erased')")
@@ -223,12 +237,14 @@ def upgrade() -> None:
         sa.Column("requested_by", sa.Uuid, nullable=False),  # a platform admin's user id
         sa.Column("requested_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.Column("step", sa.SmallInteger, nullable=False, server_default="20"),
+        sa.Column("step_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),  # entered it
         sa.Column("stopped_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("stopped_by", sa.Uuid, nullable=True),
         sa.Column("attempts", sa.Integer, nullable=False, server_default="0"),
         sa.Column("failure", sa.Text, nullable=True),  # the last failure's fixed code
         sa.Column("failed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("next_attempt_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column("fenced_at", sa.DateTime(timezone=True), nullable=True),  # entered stage 60: never cleared
         sa.Column("paused_at", sa.DateTime(timezone=True), nullable=True),  # the last schedule verified paused
         sa.Column("latest_close", sa.DateTime(timezone=True), nullable=True),  # every found execution verified gone
         sa.Column("check_after", sa.DateTime(timezone=True), nullable=True),  # the bound: the final check's earliest
@@ -251,14 +267,13 @@ def upgrade() -> None:
         sa.Column("state", sa.Text, nullable=False, server_default="found"),
         sa.Column("attempts", sa.Integer, nullable=False, server_default="0"),
         sa.Column("failure", sa.Text, nullable=True),
-        sa.Column("next_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.Column("verified_at", sa.DateTime(timezone=True), nullable=True),
         sa.CheckConstraint("kind IN ('request', 'schedule', 'run', 'execution')", name="tenant_erasure_items_kind"),
         sa.CheckConstraint("state IN ('found', 'requested', 'verified')", name="tenant_erasure_items_state"),
     )
     op.create_index("tenant_erasure_items_one", "tenant_erasure_items",
                     ["tenant_id", "step", "workflow_id", sa.text("coalesce(run_id, '')")], unique=True)  # fmt: skip
-    op.create_index("tenant_erasure_items_due", "tenant_erasure_items", ["tenant_id", "step", "next_at"],
+    op.create_index("tenant_erasure_items_open", "tenant_erasure_items", ["tenant_id", "step", "id"],
                     postgresql_where=sa.text("state <> 'verified'"))  # fmt: skip
     op.create_table(
         "tenant_erasure_known",
@@ -281,7 +296,16 @@ def upgrade() -> None:
     )
     op.create_index("schedule_firings_tenant", "schedule_firings", ["tenant_id", "schedule_id"])
     op.create_index("schedule_firings_recorded", "schedule_firings", ["recorded_at"])
-    for statement in [*FIRINGS, *STATUS, *ERASURES, *ERASER, VERSIONS, EVIDENCE_DUE]:
+    for statement in [*FIRINGS, *STATUS, *ERASURES, *ERASER, VERSIONS, EVIDENCE_DUE, RECORD]:
+        op.execute(statement)
+    op.create_table(
+        "namespace_boundaries",
+        sa.Column("id", sa.BigInteger, sa.Identity(always=False), primary_key=True),
+        sa.Column("name", sa.Text, nullable=False),
+        sa.Column("verified_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column("lost_at", sa.DateTime(timezone=True), nullable=True),
+    )
+    for statement in BOUNDARIES:
         op.execute(statement)
     op.add_column("schedules", sa.Column("creation_misses", sa.Integer, nullable=False, server_default="0"))
     op.execute("GRANT UPDATE (creation_misses) ON schedules TO dewpoint_dispatch")
@@ -299,6 +323,7 @@ def downgrade() -> None:
         op.execute(f"DROP TRIGGER {table}_fence ON {table}")
     op.execute("DROP FUNCTION tenant_insert_fence()")
     op.execute("DROP FUNCTION tenant_status(uuid)")
+    op.execute("REVOKE SELECT ON platform_settings FROM dewpoint_retention")
     op.execute(VERSIONS_0007)
     op.execute(EVIDENCE_DUE_0039)
     op.execute("ALTER FUNCTION workflow_versions_immutable() RESET search_path")
@@ -321,6 +346,7 @@ def downgrade() -> None:
         op.execute(statement)
     op.execute("REVOKE UPDATE (creation_misses) ON schedules FROM dewpoint_dispatch")
     op.drop_column("schedules", "creation_misses")
+    op.drop_table("namespace_boundaries")
     op.drop_table("schedule_firings")
     op.drop_table("tenant_erasure_known")
     op.drop_table("tenant_erasure_items")

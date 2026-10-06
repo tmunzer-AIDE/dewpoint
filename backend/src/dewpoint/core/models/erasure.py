@@ -41,12 +41,14 @@ class TenantErasure(Base):
     requested_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     step: Mapped[int] = mapped_column(SmallInteger, server_default=text("20"))
+    step_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())  # entered it
     stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     stopped_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     failure: Mapped[str | None] = mapped_column(Text)
     failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    fenced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # entered stage 60: never cleared
     paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     latest_close: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     check_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -63,7 +65,7 @@ class TenantErasureItem(Base):
         Index(
             "tenant_erasure_items_one", "tenant_id", "step", "workflow_id", text("coalesce(run_id, '')"), unique=True
         ),  # fmt: skip
-        Index("tenant_erasure_items_due", "tenant_id", "step", "next_at", postgresql_where=text("state <> 'verified'")),
+        Index("tenant_erasure_items_open", "tenant_id", "step", "id", postgresql_where=text("state <> 'verified'")),
     )
     id: Mapped[int] = mapped_column(BigInteger, Identity(always=False), primary_key=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenant_erasures.tenant_id"))
@@ -75,7 +77,6 @@ class TenantErasureItem(Base):
     state: Mapped[str] = mapped_column(Text, server_default="found")  # found, requested, verified
     attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     failure: Mapped[str | None] = mapped_column(Text)
-    next_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -91,3 +92,13 @@ class TenantErasureKnown(Base):
     kind: Mapped[str] = mapped_column(Text)  # schedule, execution
     workflow_id: Mapped[str] = mapped_column(Text)
     run_id: Mapped[str | None] = mapped_column(Text)
+
+
+class NamespaceBoundary(Base):
+    """A namespace-change boundary verified for the deployment's Temporal (D3g), which step 9's bound relies on."""
+
+    __tablename__ = "namespace_boundaries"
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=False), primary_key=True)
+    name: Mapped[str] = mapped_column(Text)
+    verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    lost_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

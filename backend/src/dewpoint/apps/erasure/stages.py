@@ -13,11 +13,13 @@ each found, then requested, then verified by a read-back (a Temporal call can't 
 - 50 end runs: every running run cancelled in Temporal, verified ended in Dewpoint's projection and closed in Temporal.
   Its workers need the tenant's keys until then.
 - 60 executions, entered under the tenant's lifecycle lock taken exclusively (the insert fence holds from here): every
-  execution of the tenant enumerated from what's durable (runs, started requests, the run evidence, step 32's
-  inventory), visibility adding, and each walked through its history (the run it continued from and as, every child it
-  started), an open one terminated first; each deleted, verified when describing that exact run answers not-found
-  (Temporal deletes asynchronously: one still there is tried again later).
-- 70 keys: every data-key version and event keypair deleted; every remaining ciphertext of the tenant unreadable.
+  execution of the tenant enumerated from what's durable (runs, started requests, the run evidence, the ticks'
+  records again, step 32's inventory), visibility adding, and each walked through its history (the run it continued
+  from and as, every child it started), an open one terminated first; each deleted, verified when describing that
+  exact run answers not-found (Temporal deletes asynchronously: one still there is tried again later).
+- 70 keys: every data-key version and event keypair deleted: no process can unwrap one again (one that already did
+  keeps it in its key cache for at most 5 minutes, `KeyringKeys`), so every remaining ciphertext of the tenant is
+  unreadable from then on.
 - 80 sweep: every row of the tenant deleted, in committed batches, counted; its tombstone anonymized."""
 
 import contextlib
@@ -72,15 +74,25 @@ async def _known(s: AsyncSession, ctx: Context, kind: str, workflow_id: str, run
                                                       run_id=run_id).on_conflict_do_nothing())  # fmt: skip
 
 
-async def _open(ctx: Context, step: Stage) -> list[TenantErasureItem]:
+async def _open(ctx: Context, step: Stage, after: int = 0) -> list[TenantErasureItem]:
     async with ctx.sessionmaker() as s:
         found = await s.execute(
             select(TenantErasureItem).where(TenantErasureItem.tenant_id == ctx.tenant_id,
                                             TenantErasureItem.step == int(step),
-                                            TenantErasureItem.state != "verified")
+                                            TenantErasureItem.state != "verified", TenantErasureItem.id > after)
             .order_by(TenantErasureItem.id).limit(ctx.batch)
         )  # fmt: skip
         return list(found.scalars())
+
+
+async def _each_open(ctx: Context, step: Stage) -> AsyncIterator[TenantErasureItem]:
+    """Every open item of the stage, a batch at a time, those found meanwhile included: a pass reaches each, so an item
+    that stays open never holds back the others."""
+    after = 0
+    while page := await _open(ctx, step, after):
+        for item in page:
+            yield item
+        after = page[-1].id
 
 
 async def _items(ctx: Context, step: Stage) -> list[TenantErasureItem]:
@@ -127,7 +139,7 @@ async def _schedules(ctx: Context, step: Stage) -> None:
 
 async def pause(ctx: Context) -> bool:
     await _schedules(ctx, Stage.PAUSE)
-    for item in await _open(ctx, Stage.PAUSE):
+    async for item in _each_open(ctx, Stage.PAUSE):
         shown = await temporal.schedule(ctx.client, item.workflow_id)
         if shown is None or shown.paused:
             await _mark(ctx, item, "verified")
@@ -155,8 +167,11 @@ async def inventory(ctx: Context) -> bool:
 
 
 async def unschedule(ctx: Context) -> bool:
-    await _schedules(ctx, Stage.UNSCHEDULE)
-    for item in await _open(ctx, Stage.UNSCHEDULE):
+    """Every schedule stage 31 listed (a reopened erasure's included) deleted."""
+    listed = [(i.workflow_id, None) for i in await _items(ctx, Stage.PAUSE)]
+    async with _scoped(ctx) as s:
+        await _found(s, ctx, Stage.UNSCHEDULE, "schedule", listed, "pause")
+    async for item in _each_open(ctx, Stage.UNSCHEDULE):
         if await temporal.schedule(ctx.client, item.workflow_id) is None:
             await _mark(ctx, item, "verified", known="schedule")
         else:
@@ -211,7 +226,7 @@ async def end_runs(ctx: Context) -> bool:
         roots: list[uuid.UUID] = list((await s.execute(query)).scalars())
         found: list[tuple[str, str | None]] = [(run_workflow_id(str(ctx.tenant_id), str(r)), None) for r in roots]
         await _found(s, ctx, Stage.END_RUNS, "run", found, "runs")
-    for item in await _open(ctx, Stage.END_RUNS):
+    async for item in _each_open(ctx, Stage.END_RUNS):
         root = item.workflow_id.rsplit(":", 1)[1]
         async with _scoped(ctx) as s:
             counted = text("SELECT count(*) FROM runs WHERE root_run_id = :r AND status = 'running'")
@@ -240,14 +255,17 @@ async def _enumerated(ctx: Context) -> None:
         evidence: list[tuple[str, str | None]] = [
             (w, r) for w, r in await s.execute(text("SELECT workflow_id, run_id FROM execution_evidence"))
         ]
-        for source, found in (("runs", runs), ("requests", started), ("evidence", evidence),
+        firings: list[tuple[str, str | None]] = [  # again: a tick may record itself until the fence goes up
+            (w, r) for w, r in await s.execute(text("SELECT workflow_id, run_id FROM schedule_firings"))
+        ]
+        for source, found in (("runs", runs), ("requests", started), ("evidence", evidence), ("firing", firings),
                               ("visibility", visible)):  # fmt: skip
             await _found(s, ctx, Stage.EXECUTIONS, "execution", found, source)
 
 
 async def executions(ctx: Context) -> bool:
     await _enumerated(ctx)
-    for item in await _open(ctx, Stage.EXECUTIONS):
+    async for item in _each_open(ctx, Stage.EXECUTIONS):
         if item.run_id is None:  # an id alone: its chain's latest run, if Temporal shows one
             shown = await temporal.execution(ctx.client, item.workflow_id, None)
             if shown is None:

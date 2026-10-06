@@ -33,8 +33,11 @@ LIMITS = "insert into tenant_run_limits (tenant_id, max_concurrent) values (:t, 
 
 async def erasure_at(owner: Any, tenant_id: uuid.UUID, step: int) -> None:
     async with owner() as s, s.begin():
-        await s.execute(text("insert into tenant_erasures (tenant_id, requested_by, step) values (:t, :u, :s) "
-                             "on conflict (tenant_id) do update set step = excluded.step"),
+        await s.execute(text("insert into tenant_erasures (tenant_id, requested_by, step, fenced_at) "
+                             "values (:t, :u, cast(:s as smallint), "
+                             "case when cast(:s as smallint) >= 60 then now() end) "
+                             "on conflict (tenant_id) "
+                             "do update set step = excluded.step, fenced_at = excluded.fenced_at"),
                         {"t": tenant_id, "u": uuid.uuid4(), "s": step})  # fmt: skip
 
 
@@ -130,7 +133,8 @@ async def enter_60(owner: Any, tenant_id: uuid.UUID, *, hold: asyncio.Event | No
     async with owner() as s, s.begin():
         await s.execute(text("select pg_advisory_xact_lock(hashtextextended(:k, 0))"),
                         {"k": f"dewpoint:tenant:{tenant_id}"})  # fmt: skip
-        await s.execute(text("update tenant_erasures set step = 60 where tenant_id = :t"), {"t": tenant_id})
+        await s.execute(text("update tenant_erasures set step = 60, fenced_at = now() where tenant_id = :t"),
+                        {"t": tenant_id})  # fmt: skip
         if hold is not None:
             await hold.wait()
 

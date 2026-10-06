@@ -3,9 +3,10 @@
 way that an operator hasn't stopped and whose next attempt is due is carried on from its recorded stage, each stage
 until one isn't done yet. A stage not done waits (`WAIT`); one that fails records its fixed code, counts the attempt,
 backs off (doubling, at most an hour) and alerts (`erasure_step_failed`, its error's type only), never skipping a
-stage or an item. Each move to the next stage is audited, identifiers and counts only; entering stage 60 takes the
-tenant's lifecycle lock exclusively, so the insert fence holds from then on for every writer. One process erases at a
-time, under a lock its connection holds."""
+stage or an item; a stage still waiting an hour after it was entered alerts on every pass (`erasure_stalled`). Each
+move to the next stage is audited, identifiers and counts only; entering stage 60 takes the tenant's lifecycle lock
+exclusively, so the insert fence holds from then on for every writer. One process erases at a time, under a lock its
+connection holds."""
 
 import uuid
 from datetime import datetime, timedelta
@@ -17,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.client import Client
 from temporalio.service import RPCError
 
-from dewpoint.apps.erasure import stages
+from dewpoint.apps.erasure import bound, stages
 from dewpoint.core.audit import service as audit
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.erasure import Stage, TenantErasure, TenantErasureItem
@@ -27,7 +28,8 @@ log = structlog.get_logger("dewpoint.erasure")
 WAIT = timedelta(seconds=30)  # a stage not done yet is tried again after this
 BACKOFF = timedelta(seconds=30)  # a failure's first wait, doubling
 BACKOFF_MAX = timedelta(hours=1)
-NAMESPACE_RETENTION_MAX = timedelta(days=30)  # the platform's longest namespace retention (§10.2)
+STALLED = timedelta(hours=1)  # a stage still waiting after this alerts on every pass
+NAMESPACE_RETENTION_MAX = bound.NAMESPACE_RETENTION_MAX
 _LOCK = text("SELECT pg_try_advisory_lock(hashtextextended('dewpoint:erasure', 0))")
 _UNLOCK = text("SELECT pg_advisory_unlock(hashtextextended('dewpoint:erasure', 0))")
 ORDER = list(Stage)
@@ -54,8 +56,10 @@ async def _moved(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid
         if following == Stage.EXECUTIONS:  # waits for every writer holding the lock shared; each later one sees it
             await lifecycle.hold_exclusive(s, tenant_id)
         now: datetime = (await s.execute(select(func.statement_timestamp()))).scalar_one()
-        values: dict[str, object] = {"step": int(following), "failure": None, "failed_at": None, "attempts": 0,
-                                     "next_attempt_at": now}  # fmt: skip
+        values: dict[str, object] = {"step": int(following), "step_at": now, "failure": None, "failed_at": None,
+                                     "attempts": 0, "next_attempt_at": now}  # fmt: skip
+        if following == Stage.EXECUTIONS:
+            values["fenced_at"] = func.coalesce(TenantErasure.fenced_at, now)  # the insert fence, never lifted
         if done == Stage.PAUSE:
             values["paused_at"] = now  # the last schedule verified paused
         if done == Stage.EXECUTIONS:  # every execution found is verified gone: none of them closes after this
@@ -88,12 +92,29 @@ async def _waits(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid
         now: datetime = (await s.execute(select(func.statement_timestamp()))).scalar_one()
         if failed is None:
             record.next_attempt_at = now + WAIT
+            if now - record.step_at >= STALLED:  # a run ignoring its cancel, a request left starting
+                log.error("erasure_stalled", tenant=str(tenant_id), step=record.step,
+                          waited_s=int((now - record.step_at).total_seconds()))  # fmt: skip
             return
         record.attempts += 1
         record.failure, record.failed_at = failure_code(failed), now
         record.next_attempt_at = now + min(BACKOFF * 2 ** min(record.attempts - 1, 7), BACKOFF_MAX)
         log.error("erasure_step_failed", tenant=str(tenant_id), step=record.step, code=record.failure,
                   attempts=record.attempts, error=type(failed).__name__)  # fmt: skip
+
+
+async def _held(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, held: bound.Held) -> None:
+    """Step 9 may not run yet: its fixed reason recorded (no attempt counted), its next look, an alert unless it's only
+    waiting for the bound."""
+    async with sessionmaker() as s, s.begin():
+        now: datetime = (await s.execute(select(func.statement_timestamp()))).scalar_one()
+        await s.execute(update(TenantErasure).where(TenantErasure.tenant_id == tenant_id).values(
+            failure=held.reason, failed_at=now, next_attempt_at=held.until or now + bound.HOLD,
+        ))  # fmt: skip
+    if held.alert:
+        log.error("erasure_held", tenant=str(tenant_id), reason=held.reason)
+    else:
+        log.info("erasure_held", tenant=str(tenant_id), reason=held.reason)
 
 
 async def advance(sessionmaker: async_sessionmaker[AsyncSession], client: Client, tenant_id: uuid.UUID, *,
@@ -107,8 +128,18 @@ async def advance(sessionmaker: async_sessionmaker[AsyncSession], client: Client
         if record is None or record.stopped_at is not None or record.completed_at is not None:
             return None if record is None else record.step
         stage = Stage(record.step)
+        if stage == Stage.BOUND:
+            try:
+                if await bound.check(ctx) == "reopened":
+                    continue
+                return Stage.COMPLETE
+            except bound.Held as held:
+                await _held(sessionmaker, tenant_id, held)
+            except Exception as e:
+                await _waits(sessionmaker, tenant_id, failed=e)
+            return stage
         run = stages.STAGES.get(stage)
-        if run is None:  # the bound and the final check: `bound`'s
+        if run is None:
             return stage
         try:
             done = await run(ctx)

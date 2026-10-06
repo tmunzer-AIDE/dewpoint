@@ -16,7 +16,6 @@ from sqlalchemy import text
 from temporalio import workflow
 from temporalio.client import Client, ScheduleBackfill, ScheduleOverlapPolicy
 from temporalio.service import RPCError, RPCStatusCode
-from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from dewpoint.apps.dispatcher import schedule_sync
@@ -28,24 +27,18 @@ from tests.apps.dispatcher.test_schedule_sync import Leading
 from tests.apps.erasure.support import erasing, populated, rows_of
 from tests.core.erasure.test_fence import FENCED_TABLES
 from tests.core.retention.support import sql
-from tests.support.keys import FIXTURE_CONVERTER
 
 pytestmark = pytest.mark.usefixtures("development_deployment")
 QUEUE = "erasure-stages"
 
 
-@pytest.fixture(scope="module")
-async def server() -> AsyncIterator[WorkflowEnvironment]:
-    async with await WorkflowEnvironment.start_local(data_converter=FIXTURE_CONVERTER) as environment:
-        yield environment
-
-
-async def until(retention: Any, client: Client, tenant: uuid.UUID, stage: Stage, *, tries: int = 600) -> int:
+async def until(retention: Any, client: Client, tenant: uuid.UUID, stage: Stage, *, tries: int = 600,
+                batch: int = stages.BATCH) -> int:  # fmt: skip
     """The erasure carried on, pass after pass, until it reaches `stage` (Temporal deletes a closed execution within
     about a minute)."""
     at: int | None = None
     for _ in range(tries):
-        at = await process.advance(retention, client, tenant)
+        at = await process.advance(retention, client, tenant, batch=batch)
         if at is not None and at >= stage:
             return at
         await asyncio.sleep(0.3)
@@ -269,7 +262,7 @@ async def test_a_failure_backs_off_with_its_fixed_code_and_alerts_and_a_stop_is_
         await service.retry(s, tenant_id=data["t"], actor_id=uuid.uuid4())
     assert await process.erase_pass(retention_sessionmaker, server.client) == {str(int(Stage.BOUND)): 1}
     erasure = await record(owner_sessionmaker, data["t"])
-    assert (erasure.failure, erasure.attempts) == (None, 0)
+    assert (erasure.failure, erasure.attempts) == ("firing_bound_unproven", 0)  # the failure cleared; held at 90
 
 
 async def test_entering_stage_60_waits_for_a_write_in_flight_and_fences_every_later_one(
@@ -290,3 +283,63 @@ async def test_entering_stage_60_waits_for_a_write_in_flight_and_fences_every_la
     with pytest.raises(Exception, match="tenant_erased"):
         await sql(owner_sessionmaker, "insert into run_slots (run_id, tenant_id) values (:i, :t)", i=uuid.uuid4(),
                   t=data["t"])  # fmt: skip
+
+
+# The whole-branch review's findings (2b-4a M4)
+
+
+async def test_more_executions_than_a_batch_are_all_reached_and_deleted(
+    server, owner_sessionmaker, ingress_sessionmaker, api_sessionmaker, retention_sessionmaker
+) -> None:
+    """Each pass works through every open item, a batch at a time: an id alone whose execution Temporal still shows
+    never holds back the run it resolves to (the review's finding 1: stage 60 stalled, silently, past a batch)."""
+    from tests.core.retention.support import OLD, run
+
+    data = await populated(owner_sessionmaker, ingress_sessionmaker)
+    client, tenant = server.client, data["t"]
+    runs = [data["tree"]["root"], data["tree"]["sub"], await run(owner_sessionmaker, data, OLD)]
+    async with serving(client):
+        for r in runs:
+            await client.start_workflow(Leaf.run, id=run_workflow_id(str(tenant), str(r)), task_queue=QUEUE)
+    await erasing(api_sessionmaker, tenant)
+    assert await until(retention_sessionmaker, client, tenant, Stage.KEYS, batch=1) >= Stage.KEYS
+    for r in runs:
+        assert await temporal.execution(client, run_workflow_id(str(tenant), str(r)), None) is None
+
+
+async def test_a_stage_that_waits_over_an_hour_alerts(
+    server, owner_sessionmaker, ingress_sessionmaker, api_sessionmaker, retention_sessionmaker, monkeypatch
+) -> None:
+    """A run ignoring its cancel, a request left starting: a wait is no failure, but one past an hour at the same
+    stage alerts on every pass (the review's finding 3)."""
+    data = await populated(owner_sessionmaker, ingress_sessionmaker)
+    await erasing(api_sessionmaker, data["t"])
+    held(monkeypatch, Stage.RECONCILE)
+    with structlog.testing.capture_logs() as logs:
+        assert await process.advance(retention_sessionmaker, server.client, data["t"]) == Stage.RECONCILE
+    assert [e for e in logs if e["log_level"] == "error"] == []
+    await sql(owner_sessionmaker, "update tenant_erasures set step_at = now() - interval '2 hours' "
+              "where tenant_id = :t", t=data["t"])  # fmt: skip
+    with structlog.testing.capture_logs() as logs:
+        await process.advance(retention_sessionmaker, server.client, data["t"])
+    assert [(e["event"], e["step"]) for e in logs if e["log_level"] == "error"] == [("erasure_stalled", 20)]
+
+
+async def test_a_firing_recorded_after_the_inventory_is_still_found_and_deleted(
+    server, owner_sessionmaker, ingress_sessionmaker, api_sessionmaker, retention_sessionmaker, monkeypatch
+) -> None:
+    """A tick that started before the pause and ran its first activity late records itself after stage 32, until the
+    fence goes up at 60: stage 60 reads the records again (the review's finding 4)."""
+    data = await populated(owner_sessionmaker, ingress_sessionmaker)
+    await erasing(api_sessionmaker, data["t"])
+    held(monkeypatch, Stage.END_RUNS)
+    assert await until(retention_sessionmaker, server.client, data["t"], Stage.END_RUNS) == Stage.END_RUNS
+    late, late_run = f"t:{data['t']}:sched:{data['schedule']}-2026-10-06T09:00:00Z", str(uuid.uuid4())
+    await sql(owner_sessionmaker, "insert into schedule_firings (workflow_id, run_id, tenant_id, schedule_id) "
+              "values (:w, :r, :t, :s)", w=late, r=late_run, t=data["t"], s=data["schedule"])  # fmt: skip
+    monkeypatch.undo()
+    assert await until(retention_sessionmaker, server.client, data["t"], Stage.KEYS) >= Stage.KEYS
+    async with owner_sessionmaker() as s:
+        known = (await s.execute(text("select count(*) from tenant_erasure_known where workflow_id = :w "
+                                      "and run_id = :r"), {"w": late, "r": late_run})).scalar_one()  # fmt: skip
+    assert known == 1

@@ -307,13 +307,21 @@ def _routes(routes: Any) -> list[APIRoute]:
     return found
 
 
+def _admins(route: APIRoute) -> bool:
+    return any(d.call is http.require_platform_admin for d in route.dependant.dependencies)
+
+
 def test_every_tenant_scoped_write_goes_through_require(api_settings) -> None:
     """require() takes the lock and refuses a tenant that isn't active for every non-safe method, so every route
-    naming a tenant that writes must go through it."""
+    naming a tenant that writes must go through it; but the platform admin's, which erase a tenant (2b-4a M4)."""
     writes = [route for route in _routes(create_app(api_settings).routes)
               if "{tenant_id}" in route.path and route.methods - http.SAFE_METHODS]  # fmt: skip
-    assert len(writes) > 20  # the inventory isn't empty
-    assert [(route.path, sorted(route.methods)) for route in writes if not _requires(route)] == []
+    admins = [route for route in writes if route.path.startswith("/api/v1/admin/")]
+    assert len(writes) > 20 and len(admins) == 3  # the inventory isn't empty; start, stop and retry
+    assert [route.path for route in admins if not _admins(route)] == []
+    assert [
+        (route.path, sorted(route.methods)) for route in writes if route not in admins and not _requires(route)
+    ] == []
 
 
 async def test_an_api_write_holding_its_check_commits_before_step_1(

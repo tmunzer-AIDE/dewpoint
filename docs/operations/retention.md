@@ -51,9 +51,13 @@ no key; its settings come from its environment only:
 | `DEWPOINT_DATABASE_URL` | the retention login's |
 | `DEWPOINT_RETENTION_INTERVAL_S` | between sweeps: 3600 by default, from 60 to 21,600 |
 | `DEWPOINT_RETENTION_BATCH` | rows (or run trees) per transaction: 100 by default |
+| `DEWPOINT_ERASURE_INTERVAL_S` | between passes over the tenant erasures under way: 60 by default, from 5 to 3600 |
+| `DEWPOINT_TEMPORAL_ADDRESS`, `DEWPOINT_TEMPORAL_NAMESPACE` | Temporal, for erasures ([erasure](erasure.md)); none: erasures under way are alerted on, never carried on |
 
 `dewpoint retention --once` sweeps once and exits 0 only if the sweep succeeded (1 if it failed, or if another
-retention process is sweeping). Compose runs the `retention` service, restarting it if it ends.
+retention process is sweeping). Compose runs the `retention` service, restarting it if it ends. The same process
+carries tenant erasures on ([erasure](erasure.md)): a pass every erasure interval, and with every sweep the
+reconciliation of completed erasures.
 
 One sweep runs at a time, under a lock its database connection holds: another retention process finds it held and
 makes none, and a process that dies releases it. A sweep takes each active tenant in turn, under its scope and its
@@ -63,7 +67,9 @@ lifecycle lock, in batches that each commit, so a sweep that stops resumes where
 - a request that ended without starting, with its inputs;
 - an event that ended, freeing its endpoint's and its tenant's retained counters (so `retained_full` clears);
 - an upload, an hour after it was made, whether a start consumed it or not;
-- a schedule's tombstone, once the dispatcher's sync has recorded its Temporal schedule gone.
+- a schedule's tombstone, once the dispatcher's sync has recorded its Temporal schedule gone;
+- whatever the cutoff, a tick's record of its own ids (`schedule_firings`, an erasure's firing inventory) after 31
+  days, uncounted: identifiers only, kept while Temporal may keep the tick.
 
 Each sweep is recorded in `retention_sweeps`: its start and end, whether every tenant was swept, and its **lag**, how
 far past its cutoff the oldest data still stored is. A run tree held back past its cutoff (a sub-run that never ended)
@@ -88,7 +94,7 @@ older than a few intervals, an unsuccessful one, or a lag approaching a day.
 - **Audit records** follow the platform's audit retention (below), not the tenant's.
 - **Run execution evidence** (`execution_evidence`: workflow and run ids and times, nothing more) stays until Temporal
   shows the execution gone, whatever the tenant's retention: a key's retirement needs it ([key
-  rotation](key-rotation.md)).
+  rotation](key-rotation.md)). A tenant's erasure deletes it, with every other row of the tenant.
 - **Backups** keep deleted data until they expire: keep them at most 35 days.
 
 ## Audit pruning

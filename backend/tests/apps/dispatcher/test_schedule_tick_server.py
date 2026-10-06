@@ -330,7 +330,8 @@ async def test_a_tick_records_its_own_ids_first_a_skip_included(
     assert await ran("run-2") == "skipped:tenant_erasing"
     assert await recorded() == [(workflow_id, "run-1", schedule_id), (workflow_id, "run-2", schedule_id)]
     async with owner_sessionmaker() as s, s.begin():
-        await s.execute(text("insert into tenant_erasures (tenant_id, requested_by, step) values (:t, :u, 60)"),
+        await s.execute(text("insert into tenant_erasures (tenant_id, requested_by, step, fenced_at) "
+                             "values (:t, :u, 60, now())"),
                         {"t": ctx.tenant_id, "u": uuid.uuid4()})  # fmt: skip
     with structlog.testing.capture_logs() as logs:
         assert await ran("run-3") == "skipped:tenant_erasing"

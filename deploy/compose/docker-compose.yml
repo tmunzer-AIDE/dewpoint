@@ -152,9 +152,13 @@ services:
     command: ["dewpoint", "retention"]
     environment:
       DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_retention_login:${DEWPOINT_RETENTION_DB_PASSWORD}@postgres/dewpoint
+      # It carries tenant erasures on too (docs/operations/erasure.md), through Temporal, decoding no payload.
+      DEWPOINT_TEMPORAL_ADDRESS: temporal:7233
+      DEWPOINT_TEMPORAL_NAMESPACE: ${DEWPOINT_TEMPORAL_NAMESPACE:-default}
     restart: unless-stopped  # the SLO needs a successful sweep a day: one that ends comes back
     depends_on:
       migrate: { condition: service_completed_successfully }
+      temporal: { condition: service_healthy }
 
   cel-evaluator:
     image: ${DEWPOINT_CEL_EVALUATOR_IMAGE:-dewpoint-cel-evaluator:dev}

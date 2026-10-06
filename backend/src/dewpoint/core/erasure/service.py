@@ -6,7 +6,7 @@ Starting it is step 1, in one transaction, under the tenant's lifecycle lock tak
 the start audited. The exclusive lock waits for every writer that read `active` to commit or roll back; every writer
 after it reads `erasing` and is refused. Irreversible from then on (D3a): an operator stops an erasure (audited; the
 tenant stays `erasing`, every refusal still applies) or retries it, never reverses it. The retention process carries
-it on (`core.erasure.steps`)."""
+it on (`apps.erasure`)."""
 
 import uuid
 

@@ -141,16 +141,21 @@ def test_the_database_init_makes_a_retention_login_from_its_password() -> None:
 
 def test_retention_runs_as_its_own_login_without_a_key_and_comes_back() -> None:
     """§10.3: `dewpoint retention` is its own process, as the only login that deletes retained data. It never decrypts
-    anything, so it holds no key-encryption key; one that ends comes back, since the SLO needs a sweep a day."""
+    anything, so it holds no key-encryption key; one that ends comes back, since the SLO needs a sweep a day. It carries
+    tenant erasures on too (2b-4a M4), through Temporal, with a plain client that decodes nothing."""
     retention = service("retention")
     assert retention["command"] == ["dewpoint", "retention"]
     env = environment("retention")
     assert env == {
-        "DEWPOINT_DATABASE_URL": "postgresql+asyncpg://dewpoint_retention_login:retention-pw@postgres/dewpoint"
+        "DEWPOINT_DATABASE_URL": "postgresql+asyncpg://dewpoint_retention_login:retention-pw@postgres/dewpoint",
+        "DEWPOINT_TEMPORAL_ADDRESS": "temporal:7233",
+        "DEWPOINT_TEMPORAL_NAMESPACE": "dewpoint-ci",
     }
+    assert not [name for name in env if "KEK" in name]
     assert retention["restart"] == "unless-stopped" and "ports" not in retention
     assert retention["read_only"] is True and retention["cap_drop"] == ["ALL"]
-    assert retention["depends_on"] == {"migrate": {"condition": "service_completed_successfully"}}
+    assert retention["depends_on"] == {"migrate": {"condition": "service_completed_successfully"},
+                                       "temporal": {"condition": "service_healthy"}}  # fmt: skip
 
 
 NGINX = Path(__file__).parents[3] / "deploy" / "docker" / "nginx.conf"
