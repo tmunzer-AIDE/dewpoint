@@ -251,6 +251,13 @@ error naming row-level security rather than check nothing. Migration 0035 also a
 transaction, which blocks writes to `runs`, `run_steps`, `run_requests` and the other tables it changes until it ends;
 before migrating large populated tables, plan the downtime or split the check (a decision of its own).
 
+**That role keeps bypassing row-level security for as long as the deployment runs,** not only while it migrates: it
+owns the database functions that read across tenants (the erasure's insert fence and stage gate, a workflow version's
+immutability, a tenant's status, and the candidate lists of the dispatcher, the reconciler and the retention process),
+and they read through it. Without it, the insert fence refuses every insert of a tenant's data (an error, migration
+0043, never an insert let through), the stage gate, the immutability and the status refuse what they check, and the
+candidate lists read nothing, so runs, events, erasures and sweeps wait without an error of their own.
+
 It records `development` (`DEWPOINT_ENVIRONMENT`); CI sets `COMPOSE_FILE` to both files.
 
 Webhook ingress, a development-only prototype until engine 2b-4, runs only with the `ingress` profile

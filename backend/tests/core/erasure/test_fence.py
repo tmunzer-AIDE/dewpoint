@@ -197,3 +197,23 @@ async def test_a_workflow_version_stays_immutable_but_to_its_tenants_erasure_swe
     with pytest.raises(DBAPIError, match="immutable"):  # an update never
         async with owner_sessionmaker() as s, s.begin():
             await s.execute(text("update workflow_versions set number = 2 where id = :v"), {"v": version_id})
+
+
+async def test_the_fence_refuses_rather_than_lets_through_when_its_owner_cant_bypass_row_level_security(
+    owner_sessionmaker,
+) -> None:
+    """The fence reads the erasure's record as its owner, the migrating role, which bypasses row-level security
+    (deployment.md). Should that role lose it, the fence would read no record and let every insert through: it
+    refuses instead (the fix-pass review's R3). Shown with an owner of its own, in a rolled-back transaction."""
+    tenant, _, _ = await seed_workflow(owner_sessionmaker)
+    await erasure_at(owner_sessionmaker, tenant, 60)
+    owner = f"fence_owner_{uuid.uuid4().hex[:8]}"
+    async with owner_sessionmaker() as s:
+        await s.begin()
+        await s.execute(text(f"create role {owner} nologin"))
+        await s.execute(text(f"grant select on tenant_erasures to {owner}"))
+        await s.execute(text(f"alter function tenant_insert_fence() owner to {owner}"))
+        with pytest.raises(DBAPIError) as e:
+            await s.execute(text(LIMITS), {"t": tenant})
+        await s.rollback()
+    assert getattr(e.value.orig, "sqlstate", None) == "42501"  # insufficient privilege: row-level security applies
