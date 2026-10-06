@@ -213,3 +213,10 @@ Dependency for 2b-4a (data lifecycle): `plugin_calls.result_ct` is sealed under 
 `plugin.call`, the call's id as context). It lives at most 90 s (30 s to expiry, swept a minute later), so key
 retirement may wait for the sweep rather than re-encrypt it, but must not retire a version a live call still uses;
 tenant erasure removes calls by their foreign key (cascade).
+- Ruling: options for a node's field need `workflow.edit`, and `connection.use` when a connection is named, of a type the
+  node declares - D3 names `connection.use`; options are an editing aid - cost if wrong: an operator can't list choices.
+- Ruling: a verification no worker answered within 10 s records nothing (504), rather than marking the connection in
+  error - the credentials may be fine - cost if wrong: a broken worker pool shows as timeouts, not statuses.
+- Ruling: the API keeps decrypting a secret before asking for a verification, to record `secret_unreadable` without a
+  call; it no longer holds an outbound HTTP client at all - verify was its last outbound request (D3) - cost if wrong:
+  none.
