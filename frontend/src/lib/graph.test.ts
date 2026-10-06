@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ROW, addAfter, canConnect, connect, continuationPort, defaultConfig, deleteEdge, deleteNode, drawableEdges, edgeId,
-  entries, insertBeforeEntry, insertOnEdge, keyFor, moveNodes, portsOf, startPosition,
+  entries, idKey, insertBeforeEntry, insertOnEdge, keyFor, moveNodes, portsOf, reaches, sameId, startPosition,
 } from "./graph";  // prettier-ignore
 import type { GraphDoc, NodeType } from "./workflows";
 
@@ -138,4 +138,71 @@ it("keeps what it doesn't touch, byte for byte (4b's Review Focus)", () => {
 it("puts the start card a row above the entry steps", () => {
   expect(startPosition(doc())).toEqual({ x: 0, y: -ROW });
   expect(startPosition({ graph_format: 1, nodes: [], edges: [] })).toEqual({ x: 0, y: 0 });
+});
+
+// A step's id is one UUID whatever its spelling, as the engine reads it (the owner's review of milestone 3): an
+// imported or hand-made draft may name a step in edges or settings otherwise than its own id does.
+describe("step ids by UUID identity", () => {
+  const A = "0b6c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e0a";
+  const B = "0b6c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e0b";
+  const C = "0b6c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e0c";
+  const SPELLINGS: [string, (u: string) => string][] = [
+    ["uppercase", (u) => u.toUpperCase()],
+    ["unhyphenated", (u) => u.replace(/-/g, "")],
+    ["braced", (u) => `{${u}}`],
+    ["as a urn", (u) => `urn:uuid:${u}`],
+  ];
+  const aliased = (spell: (u: string) => string): GraphDoc => ({
+    graph_format: 1,
+    nodes: [
+      { id: A, key: "a", type: "flow.transform@1", position: { x: 0, y: 140 } },
+      { id: B, key: "b", type: "flow.transform@1", position: { x: 0, y: 280 } },
+    ],
+    edges: [{ from: { node: spell(A), port: "out" }, to: { node: spell(B) } }],
+    settings: { declassify: [{ node: spell(B), field: "/x" }] },
+  });
+
+  it.each(SPELLINGS)("draws an edge whose ends are spelt %s, its target no entry", (_, spell) => {
+    const d = aliased(spell);
+    expect(idKey(spell(A))).toBe(A);
+    expect(sameId(spell(A), A.toUpperCase())).toBe(true);
+    expect(drawableEdges(d)).toHaveLength(1);
+    expect(entries(d).map((n) => n.key)).toEqual(["a"]);
+    expect(edgeId(d.edges![0]!)).toBe(`${A}:out->${B}`);
+  });
+
+  it.each(SPELLINGS)("deletes a step with its edges and declassify entries spelt %s", (_, spell) => {
+    const { doc: next } = deleteNode(aliased(spell), B);
+    expect(next.edges).toEqual([]);
+    expect(next.settings!.declassify).toEqual([]);
+    expect(deleteNode(aliased(spell), spell(A)).doc.nodes!.map((n) => n.key)).toEqual(["b"]);
+  });
+
+  it("refuses a duplicate and a cycle through another spelling, and connects with each step's own", () => {
+    const d = aliased((u) => u.toUpperCase());
+    expect(canConnect(d, { node: A, port: "out" }, B)).toBe(false); // the edge exists, spelt otherwise
+    expect(canConnect(d, { node: B, port: "out" }, A.toUpperCase())).toBe(false); // it would close a loop
+    const withC: GraphDoc = { ...d, nodes: [...d.nodes!, { id: C.toUpperCase(), key: "c", type: "flow.transform@1" }] };
+    const next = connect(withC, { node: A.replace(/-/g, ""), port: "out" }, C)!;
+    expect(next.edges!.at(-1)).toEqual({ from: { node: A, port: "out" }, to: { node: C.toUpperCase() } });
+    expect(next.edges![0]).toBe(withC.edges![0]); // the authored edge, untouched
+  });
+
+  it("adds, inserts and moves by any spelling, writing each step's own and keeping the rest as authored", () => {
+    const d = aliased((u) => u.toUpperCase());
+    const after = addAfter(d, { node: B.toUpperCase(), port: "out" }, TRANSFORM, C);
+    expect(after.doc.edges.at(-1)).toEqual({ from: { node: B, port: "out" }, to: { node: C } });
+    expect(after.node.position).toEqual({ x: 0, y: 280 + ROW });
+    const before = insertBeforeEntry(d, A.toUpperCase(), TRANSFORM, C)!;
+    expect(before.doc.edges.at(-1)).toEqual({ from: { node: C, port: "out" }, to: { node: A } });
+    const moved = moveNodes(d, new Map([[A.toUpperCase(), { x: 5, y: 6 }]]));
+    expect(moved.nodes![0]!.position).toEqual({ x: 5, y: 6 });
+    expect(moved.edges).toBe(d.edges);
+    expect(reaches(d, A.toUpperCase(), B)).toBe(true);
+  });
+
+  it("leaves an id that isn't a UUID as written", () => {
+    expect(idKey("start")).toBe("start");
+    expect(idKey("not-a-uuid")).toBe("not-a-uuid");
+  });
 });

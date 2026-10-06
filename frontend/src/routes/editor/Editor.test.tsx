@@ -24,6 +24,11 @@ vi.mock("./Canvas", async () => {
           role="group"
           aria-label="Workflow steps"
           onKeyDown={props.onKeyDown}
+          onFocus={(e) => {
+            // As the canvas does: the item that takes focus, by a click, Tab or a key, becomes the tab stop.
+            const id = (e.target as HTMLElement).dataset.item;
+            if (id) props.onFocusItem(id);
+          }}
           data-editable={String(props.editable)}
           data-problems={String(props.problems.size)}
         >
@@ -158,7 +163,8 @@ it("opens the picker after the focused step with A, and undoes and redoes", asyn
   screen.getByRole("button", { name: "transform_2" }).focus();
   await userEvent.keyboard("{Control>}z{/Control}");
   expect(screen.queryByRole("button", { name: "transform_2" })).toBeNull();
-  screen.getByRole("button", { name: "transform" }).focus();
+  // Focus moved to the step before it by itself (the owner's review of M3): redo is heard without repairing it.
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "transform" })));
   await userEvent.keyboard("{Control>}{Shift>}z{/Shift}{/Control}");
   expect(screen.getByRole("button", { name: "transform_2" })).toBeTruthy();
 });
@@ -207,4 +213,37 @@ it("moves a step 20 px a click from its panel", async () => {
   await userEvent.click(screen.getByRole("button", { name: "Move transform right" }));
   await userEvent.click(screen.getByRole("button", { name: "Move transform down" }));
   expect(at("transform")).toEqual({ x: before.x! + 20, y: before.y! + 20 });
+});
+
+it("keeps focus in the editor through undo and redo, never repairing it by hand (the owner's review of M3)", async () => {
+  await withTwoSteps();
+  const second = screen.getByRole("button", { name: "transform_2" });
+  await vi.waitFor(() => expect(document.activeElement).toBe(second)); // the step just added has focus
+  await userEvent.keyboard("{Control>}z{/Control}"); // its addition undone: its card is gone
+  expect(screen.queryByRole("button", { name: "transform_2" })).toBeNull();
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "transform" })));
+  await userEvent.keyboard("{Control>}z{/Control}"); // and the first: focus falls back to the start card
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Start" })));
+  await userEvent.keyboard("{Control>}{Shift>}z{/Shift}{/Control}");
+  await userEvent.keyboard("{Control>}{Shift>}z{/Shift}{/Control}"); // both redone, the keys still heard
+  expect(screen.getByRole("button", { name: "transform_2" })).toBeTruthy();
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "Start" })); // it survived: focus stays
+});
+
+it("closes a step's panel when undo removes its step, and gives focus to what remains", async () => {
+  await withTwoSteps();
+  await userEvent.click(screen.getByRole("button", { name: "transform_2" })); // its panel, its heading focused
+  await userEvent.keyboard("{Control>}z{/Control}");
+  expect(screen.queryByRole("complementary")).toBeNull();
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "transform" })));
+});
+
+it("leaves focus in a step's panel when undo keeps its step", async () => {
+  await withTwoSteps();
+  await userEvent.click(screen.getByRole("button", { name: "transform" })); // the first step's panel
+  const heading = within(screen.getByRole("complementary", { name: "transform" })).getByRole("heading", { name: "transform" });
+  await vi.waitFor(() => expect(document.activeElement).toBe(heading));
+  await userEvent.keyboard("{Control>}z{/Control}"); // the second step's addition undone; transform stays
+  expect(screen.getByRole("complementary", { name: "transform" })).toBeTruthy();
+  expect(document.activeElement).toBe(heading);
 });

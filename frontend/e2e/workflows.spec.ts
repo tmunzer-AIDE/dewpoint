@@ -151,3 +151,40 @@ test("the keys reach every step of an imported cycle no entry leads into", async
   await expect(start).toBeFocused();
   await expectAccessible(page, "editor: an imported cycle");
 });
+
+test("an edge spelling its steps' ids otherwise is drawn, walked and deleted with them", async ({ page }) => {
+  await importFile(page, "Aliases", "e2e/fixtures/aliases.dewpoint.json");
+  // One entry (a), and the edge from a to b, though the edge spells their ids in capitals and without hyphens.
+  await expect(page.getByRole("button", { name: "Insert a step before a" })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Insert a step before b" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Insert a step between a and b" })).toHaveCount(1);
+  const b = page.getByRole("button", { name: /^b, Transform/ });
+  await b.focus();
+  await page.keyboard.press("Delete");
+  await page.getByRole("dialog", { name: "Delete a step" }).getByRole("button", { name: "Delete" }).click();
+  await expect(b).toHaveCount(0);
+  // Its edge went with it: a's port is free again.
+  await expect(page.getByRole("button", { name: "Insert a step between a and b" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Add a step after a" })).toHaveCount(1);
+  await expectAccessible(page, "editor: an edge spelling ids otherwise");
+});
+
+test("undo and redo from the keyboard keep focus in the editor, never repaired by hand", async ({ page }) => {
+  await newWorkflow(page, "Undo flow");
+  const start = page.getByRole("button", { name: /^Start, where every run begins/ });
+  await start.focus();
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("transform");
+  await page.keyboard.press("Enter");
+  const transform = page.getByRole("button", { name: /^transform, Transform/ });
+  await expect(transform).toBeFocused();
+  await page.keyboard.press("Control+z"); // the step it was on is gone: focus goes back to the start card
+  await expect(transform).toHaveCount(0);
+  await expect(start).toBeFocused();
+  await page.keyboard.press("Control+Shift+z");
+  await expect(transform).toBeVisible();
+  await expect(start).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowDown");
+  await expect(transform).toBeFocused(); // the keys still walk from where focus was kept
+});

@@ -26,3 +26,11 @@ it("places every step, ignores an edge to a missing one, and gives the same answ
   expect([...layout(doc).keys()].sort()).toEqual(["a", "lonely"]);
   expect([...layout(doc)]).toEqual([...layout(doc)]);
 });
+
+it("follows an edge whose ends are spelt otherwise than the steps", () => {
+  const A = "0b6c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e0a";
+  const B = "0b6c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e0b";
+  const doc: GraphDoc = { graph_format: 1, nodes: [n(A), n(B)], edges: [e(A.toUpperCase(), B.replace(/-/g, ""))] };
+  const at = layout(doc);
+  expect([at.get(A)!.y, at.get(B)!.y]).toEqual([ROW, 2 * ROW]);
+});

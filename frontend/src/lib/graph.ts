@@ -20,8 +20,20 @@ export const nodesOf = (doc: GraphDoc): GraphNode[] => doc.nodes ?? [];
 export const edgesOf = (doc: GraphDoc): GraphEdge[] => doc.edges ?? [];
 export const portOf = (edge: GraphEdge): string => edge.from.port ?? "out";
 
-/** An edge's identity on the canvas: the graph gives edges no id. */
-export const edgeId = (edge: GraphEdge): string => `${edge.from.node}:${portOf(edge)}->${edge.to.node}`;
+/** A step's id as the engine reads it: one UUID whatever its spelling (case, hyphens, braces, a urn), as the API's
+ * `uuid.UUID` and the graph's format read it (the owner's review of milestone 3). An id that isn't a UUID (the start
+ * card's) stays as written. Every comparison of step ids goes through it; the document keeps each id as authored. */
+export function idKey(id: string): string {
+  const hex = id.replace(/urn:|uuid:/gi, "").replace(/^\{+|\}+$/g, "").replace(/-/g, "").toLowerCase();
+  if (!/^[0-9a-f]{32}$/.test(hex)) return id;
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+export const sameId = (a: string, b: string): boolean => idKey(a) === idKey(b);
+
+/** An edge's identity on the canvas: the graph gives edges no id. Its ends by identity, so two spellings of one edge
+ * are one edge. */
+export const edgeId = (edge: GraphEdge): string => `${idKey(edge.from.node)}:${portOf(edge)}->${idKey(edge.to.node)}`;
 
 export const pos = (node: GraphNode): { x: number; y: number } => ({ x: node.position?.x ?? 0, y: node.position?.y ?? 0 });
 
@@ -77,8 +89,8 @@ function newNode(type: NodeType, doc: GraphDoc, at: { x: number; y: number }, id
 
 /** Steps no edge leads to: where a run starts. */
 export function entries(doc: GraphDoc): GraphNode[] {
-  const targets = new Set(edgesOf(doc).map((e) => e.to.node));
-  return nodesOf(doc).filter((n) => !targets.has(n.id));
+  const targets = new Set(edgesOf(doc).map((e) => idKey(e.to.node)));
+  return nodesOf(doc).filter((n) => !targets.has(idKey(n.id)));
 }
 
 /** The start card: a row above the entry steps (or all steps, when a cycle leaves none), at their left. */
@@ -88,7 +100,8 @@ export function startPosition(doc: GraphDoc): { x: number; y: number } {
   return { x: Math.min(...first.map((n) => pos(n).x)), y: Math.min(...first.map((n) => pos(n).y)) - ROW };
 }
 
-const findNode = (doc: GraphDoc, id: string) => nodesOf(doc).find((n) => n.id === id);
+/** The step a reference names, by identity; its `id` is the authored spelling, what new edges are written with. */
+export const findNode = (doc: GraphDoc, id: string): GraphNode | undefined => nodesOf(doc).find((n) => sameId(n.id, id));
 const newId = () => crypto.randomUUID();
 
 /** A step after a port, below its source and right of the port's other targets; or, from the start card (`null`),
@@ -96,9 +109,11 @@ const newId = () => crypto.randomUUID();
 export function addAfter(doc: GraphDoc, from: PortRef | null, type: NodeType, id: string = newId()) {
   const source = from ? findNode(doc, from.node) : undefined;
   const base = source ? pos(source) : startPosition(doc);
-  const beside = from ? edgesOf(doc).filter((e) => e.from.node === from.node).length : entries(doc).length;
+  const beside = from ? edgesOf(doc).filter((e) => sameId(e.from.node, from.node)).length : entries(doc).length;
   const node = newNode(type, doc, { x: base.x + beside * COLUMN, y: base.y + ROW }, id);
-  const edges = from ? [...edgesOf(doc), { from: { node: from.node, port: from.port }, to: { node: node.id } }] : edgesOf(doc);
+  const edges = from
+    ? [...edgesOf(doc), { from: { node: source?.id ?? from.node, port: from.port }, to: { node: node.id } }]
+    : edgesOf(doc);
   return { doc: { ...doc, nodes: [...nodesOf(doc), node], edges }, node };
 }
 
@@ -128,7 +143,7 @@ export function insertBeforeEntry(doc: GraphDoc, entryId: string, type: NodeType
   const at = pos(entry);
   const node = newNode(type, doc, at, id);
   return {
-    doc: { ...doc, nodes: [...makeRoom(doc, at.y), node], edges: [...edgesOf(doc), { from: { node: node.id, port }, to: { node: entryId } }] },
+    doc: { ...doc, nodes: [...makeRoom(doc, at.y), node], edges: [...edgesOf(doc), { from: { node: node.id, port }, to: { node: entry.id } }] },
     node,
   };
 }
@@ -136,21 +151,21 @@ export function insertBeforeEntry(doc: GraphDoc, entryId: string, type: NodeType
 /** A step removed with its edges and its declassify entries; with exactly one edge in and one out, its predecessor
  * now leads to its successor (`healed`, 4b ruling 12). References to it elsewhere stay: the validator reports them. */
 export function deleteNode(doc: GraphDoc, id: string): { doc: GraphDoc; healed: GraphEdge | null } {
-  const inbound = edgesOf(doc).filter((e) => e.to.node === id);
-  const outbound = edgesOf(doc).filter((e) => e.from.node === id);
-  const edges = edgesOf(doc).filter((e) => e.to.node !== id && e.from.node !== id);
+  const inbound = edgesOf(doc).filter((e) => sameId(e.to.node, id));
+  const outbound = edgesOf(doc).filter((e) => sameId(e.from.node, id));
+  const edges = edgesOf(doc).filter((e) => !sameId(e.to.node, id) && !sameId(e.from.node, id));
   let healed: GraphEdge | null = null;
   if (inbound.length === 1 && outbound.length === 1) {
     const candidate = { from: inbound[0]!.from, to: outbound[0]!.to };
-    if (candidate.to.node !== candidate.from.node && !edges.some((e) => edgeId(e) === edgeId(candidate))) {
+    if (!sameId(candidate.to.node, candidate.from.node) && !edges.some((e) => edgeId(e) === edgeId(candidate))) {
       healed = candidate;
       edges.push(candidate);
     }
   }
   const settings = doc.settings?.declassify
-    ? { ...doc.settings, declassify: doc.settings.declassify.filter((d) => d.node !== id) }
+    ? { ...doc.settings, declassify: doc.settings.declassify.filter((d) => !sameId(d.node, id)) }
     : doc.settings;
-  return { doc: { ...doc, nodes: nodesOf(doc).filter((n) => n.id !== id), edges, ...(settings ? { settings } : {}) }, healed };
+  return { doc: { ...doc, nodes: nodesOf(doc).filter((n) => !sameId(n.id, id)), edges, ...(settings ? { settings } : {}) }, healed };
 }
 
 export function deleteEdge(doc: GraphDoc, edge: GraphEdge): GraphDoc {
@@ -160,12 +175,12 @@ export function deleteEdge(doc: GraphDoc, edge: GraphEdge): GraphDoc {
 /** Whether `to` is reachable from `from` along edges. */
 export function reaches(doc: GraphDoc, from: string, to: string): boolean {
   const next = new Map<string, string[]>();
-  for (const e of edgesOf(doc)) next.set(e.from.node, [...(next.get(e.from.node) ?? []), e.to.node]);
+  for (const e of edgesOf(doc)) next.set(idKey(e.from.node), [...(next.get(idKey(e.from.node)) ?? []), idKey(e.to.node)]);
   const seen = new Set<string>();
-  const stack = [from];
+  const stack = [idKey(from)];
   while (stack.length) {
     const at = stack.pop()!;
-    if (at === to) return true;
+    if (at === idKey(to)) return true;
     if (seen.has(at)) continue;
     seen.add(at);
     stack.push(...(next.get(at) ?? []));
@@ -175,35 +190,39 @@ export function reaches(doc: GraphDoc, from: string, to: string): boolean {
 
 /** A new edge from a port to a step: never to itself, never twice, never closing a cycle (4b ruling 14). */
 export function canConnect(doc: GraphDoc, from: PortRef, to: string): boolean {
-  if (from.node === to || !findNode(doc, to)) return false;
-  if (edgesOf(doc).some((e) => e.from.node === from.node && portOf(e) === from.port && e.to.node === to)) return false;
+  if (sameId(from.node, to) || !findNode(doc, to)) return false;
+  if (edgesOf(doc).some((e) => sameId(e.from.node, from.node) && portOf(e) === from.port && sameId(e.to.node, to))) return false;
   return !reaches(doc, to, from.node);
 }
 
 export function connect(doc: GraphDoc, from: PortRef, to: string): GraphDoc | null {
   if (!canConnect(doc, from, to)) return null;
-  return { ...doc, edges: [...edgesOf(doc), { from: { node: from.node, port: from.port }, to: { node: to } }] };
+  const source = findNode(doc, from.node)!;
+  const target = findNode(doc, to)!;
+  return { ...doc, edges: [...edgesOf(doc), { from: { node: source.id, port: from.port }, to: { node: target.id } }] };
 }
 
 /** The edges the canvas draws and the keyboard walks: both ends exist, each once. An imported draft may hold an edge
  * to a step that isn't there, or the same edge twice; the validator reports them, and nothing draws them. */
 export function drawableEdges(doc: GraphDoc): GraphEdge[] {
-  const ids = new Set(nodesOf(doc).map((n) => n.id));
+  const ids = new Set(nodesOf(doc).map((n) => idKey(n.id)));
   const seen = new Set<string>();
   return edgesOf(doc).filter((e) => {
     const id = edgeId(e);
-    if (!ids.has(e.from.node) || !ids.has(e.to.node) || seen.has(id)) return false;
+    if (!ids.has(idKey(e.from.node)) || !ids.has(idKey(e.to.node)) || seen.has(id)) return false;
     seen.add(id);
     return true;
   });
 }
 
-/** Steps moved to whole-pixel positions; every other step is the same object as before. */
+/** Steps moved to whole-pixel positions, each named by any spelling of its id; every other step is the same object
+ * as before. */
 export function moveNodes(doc: GraphDoc, positions: Map<string, { x: number; y: number }>): GraphDoc {
+  const byId = new Map([...positions].map(([id, at]) => [idKey(id), at]));
   return {
     ...doc,
     nodes: nodesOf(doc).map((n) => {
-      const p = positions.get(n.id);
+      const p = byId.get(idKey(n.id));
       return p ? { ...n, position: { x: Math.round(p.x), y: Math.round(p.y) } } : n;
     }),
   };

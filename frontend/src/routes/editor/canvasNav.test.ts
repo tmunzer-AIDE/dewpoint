@@ -186,3 +186,15 @@ it.each(CASES)("reaches every item of %s with the keys alone, editable or read o
     expect(reachedByKeys(navModel(doc, ports(map), editable))).toEqual(drawnItems(doc, ports(map), editable));
   }
 });
+
+it("walks an edge whose ends are spelt otherwise than the steps (uppercase, unhyphenated): one step leads to the next", () => {
+  const A = "0b6c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e0a";
+  const B = "0b6c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e0b";
+  for (const spell of [(u: string) => u.toUpperCase(), (u: string) => u.replace(/-/g, "")]) {
+    const doc: GraphDoc = { graph_format: 1, nodes: [node(A), node(B)], edges: [edge(spell(A), spell(B))] };
+    const nav = navModel(doc, ports({}), true);
+    expect(nav.children.get("start")).toEqual([`entry:${A}`]); // b isn't an entry: the edge reaches it
+    expect(nav.children.get(`node:${A}`)).toEqual([`edge:${A}:out->${B}`]);
+    expect(at(press(nav, ["start"], "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown"))).toBe(`node:${B}`);
+  }
+});

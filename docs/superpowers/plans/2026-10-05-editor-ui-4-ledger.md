@@ -538,3 +538,24 @@ the initial load measured); overlapping edge controls on a cycle fixed before fi
 targetable controls or an edge chooser, reciprocal edges and a valid multi-port join covered); the minimap hidden while
 a side panel is open (an accessible overview toggle if needed; the narrow canvas checked; focus never left behind an
 overlay). Proceed inline through Tasks 13-16 with these, then stop at the final checkpoint.
+
+### 4b, after the milestone 3 review (2026-10-07)
+
+M15. **The editor matches step ids by UUID identity** (owner's correction 1): `idKey` (`lib/graph.ts`) reads an id as
+    the API's `uuid.UUID` does (case, hyphens, braces, a urn), and `sameId`, `findNode` and `edgeId` go through it:
+    entries, drawable edges, reachability, connect, insert, delete (edges and declassify entries), moves, the dagre
+    layout, the canvas's React Flow ids and item ids, and the keyboard model. New edges are written with each step's
+    authored spelling; nothing already in the document is rewritten. Unit tests cover uppercase, unhyphenated, braced
+    and urn spellings (they fail without the change: 13 of 50), and the gate imports a file whose edge spells its
+    steps' ids in capitals and without hyphens: drawn, walked, and gone with its step. Task 14 maps the server's
+    canonical diagnostic ids to cards through `idKey`. - A draft from elsewhere lost edges on the canvas and kept
+    dangling ones on delete. - None: the document keeps its spelling.
+M16. **Undo and redo keep focus in the editor; a key acts from the item focus is meant to be on** (owner's correction
+    2): undo or redo that removes the focused item (or the step whose panel holds focus, closing it) moves focus to
+    the nearest surviving item back along its path, else the start card; an item that survives keeps its focus,
+    untouched (asking again would steal it a frame later from wherever the person had moved it, as the gate showed).
+    Focus moves a frame after a key (the canvas draws first); a key pressed before then (auto-repeat, two quick
+    presses, the gate's own) used to act from the old item, so the canvas's keys act from the editor's tab stop.
+    The unit tests' stand-in canvas reports focus to the editor as the canvas does. Unit tests undo, redo and keep the
+    panel without repairing focus by hand; the gate adds a keyboard undo and redo sequence. Three gate runs: 14
+    passed each. - Focus on the page body after an undo, and keys heard nowhere. - None.

@@ -6,7 +6,7 @@
 // (a cycle no entry leads into, a step whose only edges in come from steps that aren't there) joins the start card's
 // children, topmost first: every item the canvas draws is reached by the keys. Home goes to the start card. A
 // read-only canvas (a viewer, a conflict, an old version) holds the start card and the steps only.
-import { START, drawableEdges, entries, nodesOf, portOf, pos } from "../../lib/graph";
+import { START, drawableEdges, entries, idKey, nodesOf, portOf, pos, sameId } from "../../lib/graph";
 import type { GraphDoc, GraphEdge } from "../../lib/workflows";
 import { item } from "./items";
 
@@ -25,16 +25,16 @@ export function navModel(doc: GraphDoc, portsOf: (nodeId: string) => string[], e
   const edges = new Map<string, GraphEdge>();
   const nodes = nodesOf(doc);
   const drawn = drawableEdges(doc);
-  const x = new Map(nodes.map((n) => [n.id, pos(n).x]));
+  const x = new Map(nodes.map((n) => [idKey(n.id), pos(n).x]));
   const byPlace = (a: GraphEdge, b: GraphEdge) =>
-    (x.get(a.to.node) ?? 0) - (x.get(b.to.node) ?? 0) || a.to.node.localeCompare(b.to.node);
+    (x.get(idKey(a.to.node)) ?? 0) - (x.get(idKey(b.to.node)) ?? 0) || idKey(a.to.node).localeCompare(idKey(b.to.node));
   const first = [...entries(doc)].sort((a, b) => pos(a).x - pos(b).x || a.id.localeCompare(b.id));
   const top = editable ? first.map((n) => item.entry(n.id)) : first.map((n) => item.node(n.id));
   if (editable) for (const n of first) children.set(item.entry(n.id), [item.node(n.id)]);
   if (editable && nodes.length === 0) top.push(item.port(START, "out"));
   children.set(item.start, top);
   for (const n of nodes) {
-    const leaving = drawn.filter((e) => e.from.node === n.id);
+    const leaving = drawn.filter((e) => sameId(e.from.node, n.id));
     const own = portsOf(n.id);
     const ports = [...own, ...new Set(leaving.map(portOf).filter((p) => !own.includes(p)))];
     const out: string[] = [];

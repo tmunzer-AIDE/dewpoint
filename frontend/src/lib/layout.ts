@@ -2,7 +2,7 @@
 // Auto layout, on demand (outline §2): dagre, top to bottom. Every card, the start card included, is 260 by 64, and
 // rows are 76 apart, so one row is ROW (140) from the next and the start card's row sits at y = 0.
 import dagre, { type NodeLabel } from "@dagrejs/dagre";
-import { START, edgesOf, entries, nodesOf } from "./graph";
+import { START, edgesOf, entries, idKey, nodesOf } from "./graph";
 import type { GraphDoc } from "./workflows";
 
 export const CARD = { width: 260, height: 64 };
@@ -12,10 +12,12 @@ export function layout(doc: GraphDoc): Map<string, { x: number; y: number }> {
   g.setGraph({ rankdir: "TB", nodesep: 40, ranksep: 76, marginx: 0, marginy: 0 });
   g.setDefaultEdgeLabel(() => ({}));
   g.setNode(START, { ...CARD });
-  for (const node of nodesOf(doc)) g.setNode(node.id, { ...CARD });
-  for (const node of entries(doc)) g.setEdge(START, node.id);
+  // Steps by identity (`idKey`): an edge may spell its ends otherwise than the steps do.
+  for (const node of nodesOf(doc)) g.setNode(idKey(node.id), { ...CARD });
+  for (const node of entries(doc)) g.setEdge(START, idKey(node.id));
   for (const edge of edgesOf(doc)) {
-    if (g.hasNode(edge.from.node) && g.hasNode(edge.to.node)) g.setEdge(edge.from.node, edge.to.node);
+    const [from, to] = [idKey(edge.from.node), idKey(edge.to.node)];
+    if (g.hasNode(from) && g.hasNode(to)) g.setEdge(from, to);
   }
   dagre.layout(g);
   // dagre sets each node's centre; every card is the same size, so offsets from the start card's are the cards' own.
@@ -26,7 +28,7 @@ export function layout(doc: GraphDoc): Map<string, { x: number; y: number }> {
   const start = centre(START);
   const out = new Map<string, { x: number; y: number }>();
   for (const node of nodesOf(doc)) {
-    const at = centre(node.id);
+    const at = centre(idKey(node.id));
     out.set(node.id, { x: Math.round(at.x - start.x), y: Math.round(at.y - start.y) });
   }
   return out;

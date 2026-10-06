@@ -8,8 +8,8 @@ import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { LoadError } from "../../components/LoadError";
 import { announce } from "../../lib/announce";
 import {
-  START, addAfter, asGraph, connect, deleteEdge, deleteNode, edgesOf, insertBeforeEntry, insertOnEdge, moveNodes,
-  nodesOf, portsOf, type PortRef,
+  START, addAfter, asGraph, connect, deleteEdge, deleteNode, edgesOf, findNode, idKey, insertBeforeEntry, insertOnEdge,
+  moveNodes, nodesOf, portsOf, sameId, type PortRef,
 } from "../../lib/graph";  // prettier-ignore
 import { begin, record, redo, undo, type History } from "../../lib/history";
 import { CARD, layout } from "../../lib/layout";
@@ -46,13 +46,14 @@ function Editor({ tenantId, workflow, types, role }: { tenantId: string; workflo
   const [focusRequest, setFocusRequest] = useState<{ id: string; n: number } | null>(null);
   const [trail, setTrail] = useState<string[] | null>(null); // the path the keys came by to the focused item
   const [picker, setPicker] = useState<PickMode | null>(null);
-  const keyOf = (id: string) => nodesOf(doc).find((n) => n.id === id)?.key ?? "a step";
+  // Steps by identity (`idKey`, `findNode`): an item names a step's canonical id, the document its authored one.
+  const keyOf = (id: string) => findNode(doc, id)?.key ?? "a step";
 
   const portMap = useMemo(
-    () => new Map(nodesOf(doc).map((n) => [n.id, portsOf(n, typeMap.get(n.type))])),
+    () => new Map(nodesOf(doc).map((n) => [idKey(n.id), portsOf(n, typeMap.get(n.type))])),
     [doc, typeMap],
   );
-  const nav = useMemo(() => navModel(doc, (id) => portMap.get(id) ?? [], editable), [doc, portMap, editable]);
+  const nav = useMemo(() => navModel(doc, (id) => portMap.get(idKey(id)) ?? [], editable), [doc, portMap, editable]);
   const shown = nav.order.includes(focusId) ? focusId : START; // a deleted item's tab stop falls back to the start card
   const [connecting, setConnecting] = useState<PortRef | null>(null);
   const [asking, setAsking] = useState<{ kind: "node"; id: string } | { kind: "edge"; edge: GraphEdge } | null>(null);
@@ -72,7 +73,7 @@ function Editor({ tenantId, workflow, types, role }: { tenantId: string; workflo
   }
 
   const firstPort = (nodeId: string): PortRef | null => {
-    const port = portMap.get(nodeId)?.[0];
+    const port = portMap.get(idKey(nodeId))?.[0];
     return port ? { node: nodeId, port } : null;
   };
 
@@ -115,7 +116,7 @@ function Editor({ tenantId, workflow, types, role }: { tenantId: string; workflo
     if (asking.kind === "node") {
       const { doc: next, healed } = deleteNode(doc, asking.id);
       // Focus goes to the step it came after (its own items are gone with it), or to the start card.
-      const inbound = edgesOf(doc).find((e) => e.to.node === asking.id);
+      const inbound = edgesOf(doc).find((e) => sameId(e.to.node, asking.id));
       const back = inbound ? item.node(inbound.from.node) : START;
       if (panel === asking.id) setPanel(null);
       change(next, `Deleted ${keyOf(asking.id)}${healed ? `; ${keyOf(healed.from.node)} now leads to ${keyOf(healed.to.node)}` : ""}`, back);
@@ -126,7 +127,7 @@ function Editor({ tenantId, workflow, types, role }: { tenantId: string; workflo
   }
 
   function nudge(nodeId: string, key: NavKey) {
-    const n = nodesOf(doc).find((m) => m.id === nodeId);
+    const n = findNode(doc, nodeId);
     if (!n) return;
     const d = { ArrowUp: [0, -20], ArrowDown: [0, 20], ArrowLeft: [-20, 0], ArrowRight: [20, 0], Home: [0, 0] }[key];
     change(moveNodes(doc, new Map([[nodeId, { x: (n.position?.x ?? 0) + d[0]!, y: (n.position?.y ?? 0) + d[1]! }]])), `Moved ${n.key}`);
@@ -150,8 +151,11 @@ function Editor({ tenantId, workflow, types, role }: { tenantId: string; workflo
   }
 
   function onCanvasKey(e: KeyboardEvent<HTMLDivElement>) {
-    const id = (e.target as HTMLElement).dataset.item;
-    if (!id || e.altKey) return;
+    if (!(e.target as HTMLElement).dataset.item || e.altKey) return;
+    // From the item focus is meant to be on: a key moves focus a frame later (the canvas draws it first), and a key
+    // pressed before then (auto-repeat, a quick hand) starts where the last one left it, not where the browser's
+    // focus still is.
+    const id = shown;
     const plain = !e.ctrlKey && !e.metaKey;
     if (NAV_KEYS.includes(e.key) && plain) {
       e.preventDefault();
@@ -175,14 +179,36 @@ function Editor({ tenantId, workflow, types, role }: { tenantId: string; workflo
     }
   }
 
-  /** Ctrl or Cmd+Z undoes, with Shift redoes (D17: local). Not while typing, nor behind a dialog. */
+  /** Ctrl or Cmd+Z undoes, with Shift redoes (D17: local). Not while typing, nor behind a dialog. Focus stays in the
+   * editor: on the focused item while it survives, else on its nearest surviving item back along the path the keys
+   * would take to it, else on the start card (the owner's review of M3). */
   function onEditorKey(e: KeyboardEvent<HTMLDivElement>) {
     if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== "z" || !editable) return;
     const t = e.target as HTMLElement;
     if (t.closest("input, textarea, select, dialog")) return;
     e.preventDefault();
-    setHistory((h) => (e.shiftKey ? redo(h) : undo(h)));
+    const next = e.shiftKey ? redo(history) : undo(history);
+    if (next === history) return;
+    setHistory(next);
     announce(e.shiftKey ? "Redone" : "Undone");
+    const after = next.present;
+    const nextNav = navModel(after, (id) => {
+      const n = findNode(after, id);
+      return n ? portsOf(n, typeMap.get(n.type)) : [];
+    }, editable);  // prettier-ignore
+    const panelGone = panel !== null && !findNode(after, panel);
+    if (panelGone) setPanel(null);
+    // What had focus: a canvas item; the open panel (left there while its step survives); or something else in the
+    // editor (left where it is).
+    const inPanel = panel !== null && !t.dataset.item && t.closest("aside") !== null;
+    if (inPanel && !panelGone) return;
+    const held = inPanel ? item.node(panel) : (t.dataset.item ?? null);
+    if (held === null) return;
+    // A surviving item keeps its element and its focus: asking again would steal it back a frame later from
+    // wherever the person has since moved it.
+    if (nextNav.order.includes(held)) return;
+    const back = (trail && trail.at(-1) === held ? trail : pathTo(nav, held)).slice(0, -1).reverse();
+    focus(back.find((id) => nextNav.order.includes(id)) ?? START);
   }
 
   function onItem(action: ItemAction) {
@@ -214,7 +240,7 @@ function Editor({ tenantId, workflow, types, role }: { tenantId: string; workflo
   }
 
   const healed = asking?.kind === "node" ? deleteNode(doc, asking.id).healed : null;
-  const open = panel ? nodesOf(doc).find((n) => n.id === panel) : undefined;
+  const open = panel ? findNode(doc, panel) : undefined;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" onKeyDown={onEditorKey} onKeyDownCapture={onEditorKeyCapture}>
@@ -263,7 +289,7 @@ function Editor({ tenantId, workflow, types, role }: { tenantId: string; workflo
           <StepPanel
             node={open}
             type={typeMap.get(open.type)}
-            ports={portMap.get(open.id) ?? []}
+            ports={portMap.get(idKey(open.id)) ?? []}
             problems={null}
             expressions={[]}
             editable={editable}

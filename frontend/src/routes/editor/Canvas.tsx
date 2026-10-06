@@ -10,7 +10,9 @@ import {
 } from "@xyflow/react";  // prettier-ignore
 import { useCallback, useEffect, useMemo, useRef, useState, type FocusEvent, type KeyboardEvent } from "react";
 import { Button } from "../../components/Button";
-import { START, drawableEdges, entries, nodesOf, portOf, portsOf, pos, startPosition, type PortRef } from "../../lib/graph";
+import {
+  START, drawableEdges, entries, idKey, nodesOf, portOf, portsOf, pos, sameId, startPosition, type PortRef,
+} from "../../lib/graph";  // prettier-ignore
 import { CARD } from "../../lib/layout";
 import type { GraphDoc, NodeType } from "../../lib/workflows";
 import { FlowEdge, type FlowData } from "./FlowEdge";
@@ -28,8 +30,8 @@ const SIZE = { initialWidth: CARD.width, initialHeight: CARD.height };
 export interface CanvasProps {
   doc: GraphDoc;
   types: Map<string, NodeType>;
-  problems: Map<string, Problems>;
-  separate: Map<string, number>;
+  problems: Map<string, Problems>; // by step id's identity (`idKey`): the server's canonical ids
+  separate: Map<string, number>; // by step id's identity
   editable: boolean;
   current: string | null; // the step whose panel is open
   focusId: string; // the roving tab stop's item
@@ -47,31 +49,33 @@ export interface CanvasProps {
 /** What React Flow draws: the start card, each step, an edge from the start card to each entry step, and each edge
  * whose ends exist, once (`drawableEdges`: an imported draft may hold others, which the problems name). */
 function build(p: CanvasProps): { nodes: Node[]; edges: Edge[] } {
+  // React Flow's ids are the steps' identities (`idKey`): an edge may spell its ends otherwise than the steps do.
   const used = new Map<string, string[]>();
-  for (const e of drawableEdges(p.doc)) used.set(e.from.node, [...(used.get(e.from.node) ?? []), portOf(e)]);
-  const keyOf = new Map(nodesOf(p.doc).map((n) => [n.id, n.key]));
+  for (const e of drawableEdges(p.doc)) used.set(idKey(e.from.node), [...(used.get(idKey(e.from.node)) ?? []), portOf(e)]);
+  const keyOf = new Map(nodesOf(p.doc).map((n) => [idKey(n.id), n.key]));
   const start: StartData = { empty: nodesOf(p.doc).length === 0, focusId: p.focusId, editable: p.editable, onItem: p.onItem };
   const nodes: Node[] = [
     { id: START, type: "start", position: startPosition(p.doc), draggable: false, selectable: false, data: start, ...SIZE },
     ...nodesOf(p.doc).map((n): Node => {
       const type = p.types.get(n.type);
       const data: StepData = {
-        node: n, type, ports: portsOf(n, type), connected: used.get(n.id) ?? [], problems: p.problems.get(n.id) ?? NONE,
-        separate: p.separate.get(n.id) ?? 0, current: p.current === n.id, focusId: p.focusId, editable: p.editable,
+        node: n, type, ports: portsOf(n, type), connected: used.get(idKey(n.id)) ?? [], problems: p.problems.get(idKey(n.id)) ?? NONE,
+        separate: p.separate.get(idKey(n.id)) ?? 0, current: p.current !== null && sameId(p.current, n.id), focusId: p.focusId,
+        editable: p.editable,
         onItem: p.onItem,
       };  // prettier-ignore
-      return { id: n.id, type: "step", position: pos(n), draggable: p.editable, selectable: false, data, ...SIZE };
+      return { id: idKey(n.id), type: "step", position: pos(n), draggable: p.editable, selectable: false, data, ...SIZE };
     }),
   ];
   const flow = (id: string, label: string, action: ItemAction): FlowData => ({ item: id, label, action, focusId: p.focusId, editable: p.editable, onItem: p.onItem });
   const edges: Edge[] = [
     ...entries(p.doc).map((n): Edge => ({
-      id: item.entry(n.id), source: START, sourceHandle: "out", target: n.id, type: "flow",
+      id: item.entry(n.id), source: START, sourceHandle: "out", target: idKey(n.id), type: "flow",
       data: flow(item.entry(n.id), `Insert a step before ${n.key}`, { kind: "before", entry: n.id }),
     })),
     ...drawableEdges(p.doc).map((e): Edge => ({
-      id: item.edge(e), source: e.from.node, sourceHandle: portOf(e), target: e.to.node, type: "flow",
-      data: flow(item.edge(e), `Insert a step between ${keyOf.get(e.from.node) ?? "a step"} and ${keyOf.get(e.to.node) ?? "a step"}`, { kind: "insert", edge: e }),
+      id: item.edge(e), source: idKey(e.from.node), sourceHandle: portOf(e), target: idKey(e.to.node), type: "flow",
+      data: flow(item.edge(e), `Insert a step between ${keyOf.get(idKey(e.from.node)) ?? "a step"} and ${keyOf.get(idKey(e.to.node)) ?? "a step"}`, { kind: "insert", edge: e }),
     })),
   ];  // prettier-ignore
   return { nodes, edges };
