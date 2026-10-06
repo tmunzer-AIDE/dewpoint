@@ -25,6 +25,7 @@ from dewpoint.plugins.flow import PLUGIN as FLOW
 from dewpoint.plugins.mist import PLUGIN as MIST
 from tests.apps.api.helpers import session_client
 from tests.support.connections import types_for_testkit
+from tests.support.graphs import G
 from tests.support.netfakes import Request, Server, guard, serve, tls
 from tests.support.plugins.testkit import TESTKIT
 
@@ -277,3 +278,69 @@ async def test_a_verification_whose_call_vanished_records_nothing(
         after = (await c.get(f"/api/v1/t/{tid}/connections/{cid}")).json()
     assert r.status_code == 409 and r.json() == {"error": "changed_during_verification"}
     assert after["status"] == "unverified"
+
+
+def _picker_draft(cid: str) -> dict[str, Any]:
+    g = G().node("e", "testkit.echo@1")
+    picker = {"node": "testkit.pick@1", "field": "site_id", "connection": cid}
+    site = {"type": "string", "x-dewpoint-picker": picker}
+    g.settings = {"input_schema": {"type": "object", "properties": {"site": site, "note": {"type": "string"}}}}
+    return g.data()
+
+
+async def _published_with_a_picker(c: Any, tid: Any, port: int) -> str:
+    cid = await _connection(c, tid, port)
+    made = await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "W", "draft": _picker_draft(cid)})
+    assert made.status_code == 201, made.text
+    wid = made.json()["id"]
+    published = await c.post(f"/api/v1/t/{tid}/workflows/{wid}/publish",
+                             headers={"If-Match": str(made.json()["draft_revision"])})  # fmt: skip
+    assert published.status_code == 201, published.text
+    return str(wid)
+
+
+async def test_an_operator_gets_a_start_forms_options_through_its_picker(
+    app, owner_sessionmaker, api_settings, worker, fake
+) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    async with c:
+        wid = await _published_with_a_picker(c, tid, fake[1].port)
+        async with owner_sessionmaker() as s, s.begin():  # the same person, now an operator
+            await s.execute(text("update memberships set role = 'operator' where tenant_id = :t"), {"t": tid})
+        r = await c.post(f"/api/v1/t/{tid}/workflows/{wid}/input-options", json={"field": "site", "query": "s"})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"options": [{"value": "s1", "label": "Site 1"}]}
+    assert await _calls_left(owner_sessionmaker) == 0
+
+
+async def test_a_start_forms_options_need_run_start(app, owner_sessionmaker, api_settings, unserved, fake) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    async with c:
+        wid = await _published_with_a_picker(c, tid, fake[1].port)
+        async with owner_sessionmaker() as s, s.begin():
+            await s.execute(text("update memberships set role = 'viewer' where tenant_id = :t"), {"t": tid})
+        r = await c.post(f"/api/v1/t/{tid}/workflows/{wid}/input-options", json={"field": "site", "query": ""})
+    assert r.status_code == 403
+
+
+@pytest.mark.parametrize(
+    ("field", "status", "error"), [("note", 422, "not_a_picker"), ("nothing", 422, "not_a_picker")]
+)
+async def test_a_start_form_lists_options_only_for_a_picker(
+    app, owner_sessionmaker, api_settings, unserved, fake, field: str, status: int, error: str
+) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    async with c:
+        wid = await _published_with_a_picker(c, tid, fake[1].port)
+        r = await c.post(f"/api/v1/t/{tid}/workflows/{wid}/input-options", json={"field": field, "query": ""})
+    assert (r.status_code, r.json()) == (status, {"error": error})
+    assert await _calls_left(owner_sessionmaker) == 0
+
+
+async def test_an_unpublished_workflow_has_no_start_form(app, owner_sessionmaker, api_settings, unserved) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    async with c:
+        made = await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "W"})
+        r = await c.post(f"/api/v1/t/{tid}/workflows/{made.json()['id']}/input-options",
+                         json={"field": "site", "query": ""})  # fmt: skip
+    assert (r.status_code, r.json()) == (404, {"error": "not_published"})

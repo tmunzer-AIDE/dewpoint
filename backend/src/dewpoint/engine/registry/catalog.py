@@ -35,6 +35,8 @@ class NodeTypeSpec:
     output_schema: Mapping[str, Any]
     side_effect: str
     state: str = "active"
+    options: tuple[str, ...] = ()  # the options fields (plugins-3 D3)
+    credentials: tuple[str, ...] = ()  # the connection types it may use (plugins-3 D4)
 
     @property
     def ref(self) -> str:
@@ -53,6 +55,8 @@ def spec_from_manifest(m: Mapping[str, Any], state: str = "active") -> NodeTypeS
         output_schema=m["output_schema"],
         side_effect=m["side_effect"],
         state=state,
+        options=tuple(m.get("options", ())),
+        credentials=tuple(m.get("credentials", ())),
     )
 
 
@@ -153,7 +157,7 @@ def _dynamic_ports_problems(ref: str, n: Mapping[str, Any]) -> list[str]:
     return [f"{ref}: dynamic_ports must name a config field"]
 
 
-def _marked_below_top(schema: Mapping[str, Any], marker: str) -> bool:
+def marked_below_top(schema: Mapping[str, Any], marker: str) -> bool:
     """Whether `marker` appears anywhere but on a top-level property."""
     stack: list[Any] = [v for k, v in schema.items() if k != "properties"]
     props = schema.get("properties")
@@ -191,7 +195,7 @@ def _options_problems(ref: str, n: Mapping[str, Any]) -> list[str]:
            if f not in marked]  # fmt: skip
     out += [f"{ref}: config_schema marks {f!r} as an options field, which options doesn't list" for f in marked
             if f not in listed]  # fmt: skip
-    if _marked_below_top(schema, OPTIONS):
+    if marked_below_top(schema, OPTIONS):
         out.append(f"{ref}: an options field must be a top-level config property")
     return out
 
