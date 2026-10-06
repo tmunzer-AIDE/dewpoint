@@ -1825,7 +1825,8 @@ its guide.
   as the auditor's login (`dewpoint_auditor`), anchors each scope's last entry due to the external anchor sink first,
   records it as the scope's checkpoint (`audit_checkpoints`), then deletes it and every older entry through
   `audit_prune()`, the only path that deletes audit entries; the verifier starts each chain from its latest
-  checkpoint, which must be among the signed anchors, and a scope pruned whole goes on from it. Pruning is refused
+  checkpoint with no entry at or before it left (one followed by unpruned entries starts nothing, so every entry left
+  is verified), which must be among the signed anchors, and a scope pruned whole goes on from it. Pruning is refused
   outside a development deployment until #3's off-host anchor sink exists (D5, revision 10): anchors on the database's
   own host can't show that a privileged operator hadn't pruned, rewritten and re-anchored.
 - **Backups:** the operator's policy; the guide recommends at most 35 days. Data removed by retention lasts in

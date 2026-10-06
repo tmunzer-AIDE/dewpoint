@@ -102,7 +102,8 @@ older than a few intervals, an unsuccessful one, or a lag approaching a day.
 `dewpoint audit prune`, as the auditor's login, deletes audit entries older than `DEWPOINT_AUDIT_RETENTION_DAYS` (400
 by default, never under 30). For each scope, it first anchors its last entry due to the external anchor sink, records
 it as the scope's checkpoint, then deletes it and every older entry. `dewpoint audit verify` starts a pruned chain from
-its latest checkpoint, which must be among the signed anchors, and a scope pruned whole goes on from it. Only the
+its latest checkpoint with no entry at or before it left, which must be among the signed anchors; a checkpoint recorded
+but not pruned through never shortens verification. A scope pruned whole goes on from its checkpoint. Only the
 database function `audit_prune()` can delete audit entries, and only through such a checkpoint.
 
 **Disabled outside a development deployment** until an off-host anchor sink exists (#3): with anchors on the database's

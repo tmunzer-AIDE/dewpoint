@@ -62,13 +62,19 @@ select seq, audit_canonical(seq, scope, actor_id, action, target_type, target_id
        prev_hash, hash
 from audit_log where scope = :scope and seq > :after order by seq
 """)
-_CHECKPOINT = text("select seq, hash from audit_checkpoints where scope = :scope order by seq desc limit 1")
+# the latest checkpoint with no entry at or before it left: one still followed by unpruned entries starts nothing (M4)
+_CHECKPOINT = text("""
+select c.seq, c.hash from audit_checkpoints c
+where c.scope = :scope and not exists (select 1 from audit_log l where l.scope = :scope and l.seq <= c.seq)
+order by c.seq desc limit 1
+""")
 
 
 async def verify_chain(s: AsyncSession, scope: str) -> ChainReport:
     """Recompute every hash in Python. Uses the DB only to render the canonical text, not to judge it. A pruned chain
-    starts from its latest checkpoint, the last entry pruned (engine 2b spec §10.2), which `verify_anchors` checks
-    against the signed external anchors."""
+    starts from its checkpoint, the last entry pruned (engine 2b spec §10.2), which `verify_anchors` checks against the
+    signed external anchors; a checkpoint with entries still at or before it is no start (the final review's M4), so
+    every entry left is verified."""
     checkpoint = (await s.execute(_CHECKPOINT, {"scope": scope})).first()
     prev, after = (bytes(checkpoint.hash), checkpoint.seq) if checkpoint else (ZERO, 0)
     checked, head_seq, head_hash = 0, None, None

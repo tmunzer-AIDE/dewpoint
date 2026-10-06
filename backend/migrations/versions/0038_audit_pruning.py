@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Audit pruning (engine 2b spec §10.2; ruling D5): past the platform's audit retention, a scope's oldest entries are
 deleted through a checkpoint, the last entry pruned, which the anchor job anchors off the database first and records
-in `audit_checkpoints`; the verifier starts each chain from its latest checkpoint.
+in `audit_checkpoints`; the verifier starts each chain from its latest checkpoint with no entry at or before it left.
 
 `audit_prune()` alone deletes, as the table's owner: through a recorded checkpoint that matches its entry, of an entry
 older than the retention it's given, never one under 30 days, holding the scope's append lock. The append-only trigger
