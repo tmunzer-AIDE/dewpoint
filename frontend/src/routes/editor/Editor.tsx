@@ -20,7 +20,8 @@ import { CARD, layout } from "../../lib/layout";
 import { guardLeaving } from "../../lib/leaving";
 import { useDocumentTitle } from "../../lib/title";
 import {
-  canEdit, nodeTypesQuery, tenantQuery, workflowQuery, type Diagnostic, type GraphDoc, type GraphEdge, type NodeType,
+  canEdit, canPublish, nodeTypesQuery, notPortable, tenantQuery, versionsQuery, workflowQuery, type Diagnostic,
+  type GraphDoc, type GraphEdge, type NodeType, type PortableProblem, type VersionDetail, type VersionRow,
   type WorkflowDetail,
 } from "../../lib/workflows";  // prettier-ignore
 import { Canvas } from "./Canvas";
@@ -33,6 +34,7 @@ import { SaveState } from "./SaveState";
 import { type Problems } from "./StepCard";
 import { StepPanel } from "./StepPanel";
 import { StepPicker, type PickMode } from "./StepPicker";
+import { VersionsPanel } from "./VersionsPanel";
 import { Toolbar } from "./Toolbar";
 
 type Opened = { workflow: WorkflowDetail; types: NodeType[]; role: string | null };
@@ -40,6 +42,13 @@ type Opened = { workflow: WorkflowDetail; types: NodeType[]; role: string | null
 /** The editor's right column: a step's panel, the problems, or the versions (Task 15). */
 type Side = { kind: "step"; node: string } | { kind: "problems" } | { kind: "versions" } | null;
 const NO_DIAGNOSTICS: Diagnostic[] = []; // one empty list, so a memo over it holds
+
+/** Whether a request's outcome is unknown: no answer reached the editor (the network), or a 5xx came in the API's
+ * place or after its commit. Such an outcome is read back, never assumed (4b ruling 25). */
+const uncertain = (e: unknown) => !(e instanceof ApiError) || e.status >= 500;
+
+type Notice = { tone: "danger" | "info"; text: string; action?: { label: string; run: () => void } };
+type Confirm = { kind: "publish"; expected: number; elsewhere?: boolean } | { kind: "activate"; version: VersionRow };
 
 export function EditorPage({ tenantId, workflowId }: { tenantId: string; workflowId: string }) {
   const qc = useQueryClient();
@@ -130,7 +139,11 @@ function Editor({
     return () => s.dispose();
   }, [tenantId, workflow]);
   const [held, setHeld] = useState(false); // an exit was agreed to: no edit until it completes or is withdrawn
-  const editable = canEdit(role) && sync.status !== "conflict" && !held;
+  const [viewing, setViewing] = useState<VersionDetail | null>(null); // a version on the canvas, read only
+  const [busy, setBusy] = useState<"publishing" | "activating" | null>(null);
+  // Nothing changes under a version view, a publication, an activation or an exit.
+  const editable = canEdit(role) && sync.status !== "conflict" && !held && viewing === null && busy === null;
+  const shownDoc = viewing ? asGraph(viewing.graph) : doc;
   const downloadMine = () => downloadJson(fileName(workflow.name, ".draft.json"), doc);
 
   // Leaving is one transaction (4b ruling 22; the owner's review of revision 3). Its one decision: save what's
@@ -195,10 +208,13 @@ function Editor({
   const keyOf = (id: string) => findNode(doc, id)?.key ?? "a step";
 
   const portMap = useMemo(
-    () => new Map(nodesOf(doc).map((n) => [idKey(n.id), portsOf(n, typeMap.get(n.type))])),
-    [doc, typeMap],
+    () => new Map(nodesOf(shownDoc).map((n) => [idKey(n.id), portsOf(n, typeMap.get(n.type))])),
+    [shownDoc, typeMap],
   );
-  const nav = useMemo(() => navModel(doc, (id) => portMap.get(idKey(id)) ?? [], editable), [doc, portMap, editable]);
+  const nav = useMemo(
+    () => navModel(shownDoc, (id) => portMap.get(idKey(id)) ?? [], editable),
+    [shownDoc, portMap, editable],
+  );
   const shown = nav.order.includes(focusId) ? focusId : START; // a deleted item's tab stop falls back to the start card
   const [connecting, setConnecting] = useState<PortRef | null>(null);
   const [asking, setAsking] = useState<{ kind: "node"; id: string } | { kind: "edge"; edge: GraphEdge } | null>(null);
@@ -206,7 +222,7 @@ function Editor({
   const panel = side?.kind === "step" ? side.node : null; // the step whose panel is open
   // An editor checks on opening: its first frame already says so, never "Not checked" for an instant.
   const [check, setCheck] = useState<Check>(() => (canEdit(role) ? { status: "checking", last: null } : { status: "unchecked" }));
-  const [publishProblems] = useState<PublishProblems | null>(null); // set by a refused publish (Task 15)
+  const [publishProblems, setPublishProblems] = useState<PublishProblems | null>(null);
   const asked = useRef(0); // the newest check asked for: an older one's answer or failure says nothing
 
   /** Check the saved draft (validate needs workflow.edit). Its answer names the revision it checked. */
@@ -256,6 +272,222 @@ function Editor({
   }, [trusted]);
   const count = (last?.diagnostics.length ?? 0) + published.length; // a stale publish finding never counts
   const [placing, setPlacing] = useState<string | null>(null); // the step the next click on the canvas puts there
+  const qc = useQueryClient();
+  const versions = useQuery(versionsQuery(tenantId, workflow.id));
+  // The newest version's number: what a publish expects (4b ruling 17). Unknown while the list loads or refreshes.
+  const latest = versions.isSuccess && !versions.isFetching ? (versions.data[0]?.number ?? 0) : null; // newest first
+  const [confirm, setConfirm] = useState<Confirm | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const viewAsked = useRef(0); // the newest version view asked for
+  const publisher = canPublish(role) && sync.status !== "conflict";
+  useEffect(() => {
+    if (!editable) setPlacing(null); // a click on a read-only canvas places nothing, even one placing began on
+  }, [editable]);
+  const path = { params: { path: { tenant_id: tenantId, workflow_id: workflow.id } } };
+  const readWorkflow = () => ok(client.GET("/api/v1/t/{tenant_id}/workflows/{workflow_id}", path));
+  const readVersions = () => ok(client.GET("/api/v1/t/{tenant_id}/workflows/{workflow_id}/versions", path));
+
+  /** The lists that show versions: refreshed after a change, their failure changing no outcome. */
+  const refresh = () => {
+    void qc.invalidateQueries({ queryKey: ["versions", tenantId, workflow.id] });
+    void qc.invalidateQueries({ queryKey: ["workflows", tenantId] });
+  };
+
+  function publishedAs(number: number, revision: number) {
+    saver.current?.published(revision, number);
+    setPublishProblems(null);
+    announce(`Published version ${number}`);
+    refresh();
+  }
+
+  async function publish(expected: number) {
+    setBusy("publishing");
+    setNotice(null);
+    let revision: number;
+    let hash: string | null; // the server's hash of the draft submitted: how a version is known to hold it
+    let generation: number;
+    try {
+      revision = await saver.current!.flush();
+      ({ savedHash: hash, savedGeneration: generation } = saver.current!.current);
+    } catch (e) {
+      setBusy(null);
+      setConfirm(null);
+      if (!(e instanceof ConflictError)) setNotice({ tone: "danger", text: "Not published: your latest edits aren't saved. Retry the save, then publish." });
+      return; // a conflict has its own banner
+    }
+    let next: Confirm | null = null;
+    try {
+      const done = await ok(
+        client.POST("/api/v1/t/{tenant_id}/workflows/{workflow_id}/publish", {
+          params: { path: { tenant_id: tenantId, workflow_id: workflow.id }, header: { "If-Match": String(revision) } },
+          body: { expected_latest_version: expected },
+        }),
+      );
+      publishedAs(done.number, revision);
+    } catch (e) {
+      if (e instanceof ApiError && e.code === "version_changed") {
+        // Someone (or an attempt whose answer was lost) published meanwhile: ask again, naming the new number.
+        await qc.invalidateQueries({ queryKey: ["versions", tenantId, workflow.id] });
+        const latestNow = (e.body as { latest_version: number }).latest_version;
+        next = { kind: "publish", expected: latestNow, elsewhere: true };
+        announce(`Version ${latestNow} was published meanwhile. Confirm to publish version ${latestNow + 1}`);
+      } else if (e instanceof ApiError && e.code === "draft_conflict") {
+        saver.current?.conflict();
+      } else if (e instanceof ApiError && e.code === "invalid") {
+        const diagnostics = (e.body as { diagnostics: Diagnostic[] }).diagnostics;
+        setPublishProblems({ revision, generation, diagnostics }); // the snapshot they were found in
+        setSide({ kind: "problems" });
+        announce(`Not published: ${diagnostics.filter((d) => d.severity === "error").length} problems`);
+      } else if (uncertain(e)) {
+        await reconcilePublish(expected + 1, hash);
+      } else {
+        setNotice({ tone: "danger", text: "Not published: the server refused it. Try again." });
+      }
+    } finally {
+      setBusy(null);
+      setConfirm(next);
+    }
+  }
+
+  /** A publish without an answer (4b ruling 25, its proof amended by the owner's review of revision 2). Only a
+   * publish expecting the version before could have made version `number`, and a version records its graph's hash:
+   * it holds this draft only if that hash is the one the server gave for the draft submitted. The active version and
+   * the draft's comparison come from the read, never from the number hoped for. */
+  async function reconcilePublish(number: number, hash: string | null) {
+    // Each read stands on its own: the workflow's says which version is active, the versions' what this publish did.
+    const [listedRead, nowRead] = await Promise.allSettled([readVersions(), readWorkflow()]);
+    if (nowRead.status === "fulfilled") saver.current?.compared(nowRead.value);
+    else saver.current?.lostTrack();
+    if (listedRead.status === "rejected") {
+      setNotice({ tone: "danger", text: `It isn't known whether version ${number} was published: its answer was lost. Open Versions to see before publishing again.` });
+    } else {
+      const made = listedRead.value.find((v) => v.number === number);
+      if (made && hash !== null && made.graph_hash === hash) {
+        setPublishProblems(null);
+        // A matching hash says the version holds the graph submitted, never which request made it (the owner's review
+        // of milestone 1).
+        announce(`Version ${number} holds the submitted graph`);
+        setNotice({ tone: "info", text: `Version ${number} holds the submitted graph. Your publish request's outcome wasn't received.` });
+      } else if (made && hash !== null) {
+        // Someone else's publication made version `number`: this one, expecting the one before, was refused.
+        setNotice({ tone: "danger", text: `Version ${number} holds another draft: yours wasn't published. Open Versions before publishing again.` });
+      } else if (made) {
+        // No hash for the draft submitted (one that doesn't parse): nothing proves either way (the owner's review).
+        setNotice({ tone: "danger", text: `Version ${number} exists, and it isn't known whether it holds your draft. Open Versions to see before publishing again.` });
+      } else {
+        setNotice({
+          tone: "danger",
+          text: `Version ${number} isn't published, as far as the server can tell now. If the first attempt is still finishing it may appear: open Versions before publishing again.`,
+        });
+      }
+    }
+    refresh();
+  }
+
+  /** Made active: so it stays, whatever a read after it fails to say. The draft's comparison with it is the server's,
+   * from `now` when a read already has it, else read here, and not claimed until then. */
+  async function activatedAs(version: VersionRow, now?: WorkflowDetail) {
+    saver.current?.activated(version.number);
+    announce(`Version ${version.number} is active`);
+    refresh();
+    try {
+      saver.current?.compared(now ?? (await readWorkflow()));
+    } catch {
+      setNotice({ tone: "info", text: `Version ${version.number} is active. Whether your draft differs from it couldn't be checked: reload the page to see.` });
+    }
+  }
+
+  async function activate(version: VersionRow) {
+    setBusy("activating");
+    setNotice(null);
+    // No save may answer after the activation with the version it compared against before it (the revision's review):
+    // what's pending or in flight settles first. A save that fails keeps its own state; the activation doesn't need it.
+    await saver.current?.flush().catch(() => undefined);
+    try {
+      await ok(client.POST("/api/v1/t/{tenant_id}/workflows/{workflow_id}/activate", { ...path, body: { version_id: version.id } }));
+      await activatedAs(version);
+    } catch (e) {
+      if (e instanceof ApiError && e.code === "not_activatable") {
+        const first = (e.body as { diagnostics?: Diagnostic[] }).diagnostics?.[0]?.message;
+        setNotice({ tone: "danger", text: `Version ${version.number} can't be made active${first ? `: ${first}` : "."}` });
+      } else if (uncertain(e)) {
+        await reconcileActivate(version);
+      } else {
+        setNotice({ tone: "danger", text: `Version ${version.number} wasn't made active: the server refused it.` });
+      }
+    } finally {
+      setBusy(null);
+      setConfirm(null);
+    }
+  }
+
+  async function reconcileActivate(version: VersionRow) {
+    try {
+      const now = await readWorkflow();
+      if (now.active_version_id === version.id) return await activatedAs(version, now);
+      saver.current?.compared(now);
+      setNotice({ tone: "danger", text: `Version ${version.number} isn't active, as far as the server can tell now. Open Versions before trying again.` });
+    } catch {
+      saver.current?.lostTrack();
+      setNotice({ tone: "danger", text: `It isn't known whether version ${version.number} was made active: its answer was lost. Open Versions to see.` });
+    }
+    refresh();
+  }
+
+  async function view(version: VersionRow) {
+    const asked = ++viewAsked.current;
+    try {
+      const opened = await ok(
+        client.GET("/api/v1/t/{tenant_id}/workflows/{workflow_id}/versions/{version_id}", {
+          params: { path: { tenant_id: tenantId, workflow_id: workflow.id, version_id: version.id } },
+        }),
+      );
+      if (asked !== viewAsked.current) return; // a newer view, or Back to the draft, came since
+      setViewing(opened);
+      setSide(null);
+      setPlacing(null);
+      focus(START);
+      announce(`Viewing version ${opened.number}, read only`);
+    } catch {
+      if (asked === viewAsked.current) setNotice({ tone: "danger", text: `Version ${version.number} couldn't be opened. Try again.` });
+    }
+  }
+
+  function backToDraft() {
+    viewAsked.current++;
+    setViewing(null);
+    focus(START);
+  }
+
+  /** The saved draft as a file (B12; 4b ruling 18). Unsaved edits stop it: the file would miss them. */
+  async function exportFile(savedOnly = false) {
+    setNotice(null);
+    if (!savedOnly) {
+      try {
+        await saver.current!.flush();
+      } catch {
+        setNotice({
+          tone: "danger",
+          text: "Not exported: your latest edits aren't saved, so the file would miss them.",
+          action: { label: "Export the last saved draft", run: () => void exportFile(true) },
+        });
+        return;
+      }
+    }
+    try {
+      downloadJson(fileName(workflow.name, ".dewpoint.json"), await ok(client.GET("/api/v1/t/{tenant_id}/workflows/{workflow_id}/export", path)));
+    } catch (e) {
+      if (e instanceof ApiError && e.code === "not_portable") {
+        setNotice({
+          tone: "danger",
+          text: `Not exported: ${notPortable((e.body as { problems: PortableProblem[] }).problems, keyOf)}, so it can't be exported as a portable file.`,
+          action: { label: "Download this draft as it is (not portable)", run: () => downloadJson(fileName(workflow.name, ".draft.json"), doc) },
+        });
+        return;
+      }
+      setNotice({ tone: "danger", text: "The workflow couldn't be exported. Try again." });
+    }
+  }
 
   function focus(id: string, path: string[] | null = null) {
     setFocusId(id);
@@ -441,19 +673,33 @@ function Editor({
   }
 
   const healed = asking?.kind === "node" ? deleteNode(doc, asking.id).healed : null;
-  const open = panel ? findNode(doc, panel) : undefined;
+  const open = panel ? findNode(shownDoc, panel) : undefined; // the step of what's on the screen
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" onKeyDown={onEditorKey} onKeyDownCapture={onEditorKeyCapture}>
       <Toolbar tenantId={tenantId} name={workflow.name}>
         <SaveState state={sync} />
-        {canEdit(role) && (
+        {canEdit(role) && viewing === null && (
           <Button
             size="md"
             aria-expanded={side?.kind === "problems"}
             onClick={() => setSide(side?.kind === "problems" ? null : { kind: "problems" })}
           >
             {checkLabel(checked, count)}
+          </Button>
+        )}
+        <Button size="md" aria-expanded={side?.kind === "versions"} onClick={() => setSide(side?.kind === "versions" ? null : { kind: "versions" })}>
+          Versions
+        </Button>
+        <Button size="md" onClick={() => void exportFile()}>Export</Button>
+        {publisher && viewing === null && (
+          <Button
+            variant="primary"
+            size="md"
+            disabled={busy !== null || latest === null}
+            onClick={() => latest !== null && setConfirm({ kind: "publish", expected: latest })}
+          >
+            {latest === null ? "Publish" : `Publish v${latest + 1}`}
           </Button>
         )}
         {sync.status === "error" && (
@@ -467,6 +713,28 @@ function Editor({
           <span className="text-small text-muted">Read only: your role can&apos;t edit workflows</span>
         ) : null}
       </Toolbar>
+      {viewing && (
+        <div className="flex flex-wrap items-center gap-3 border-b border-line bg-surface-2 px-5 py-2.5 text-small">
+          <span className="grow">Viewing version {viewing.number}, read only. The draft is unchanged.</span>
+          <Button size="sm" onClick={backToDraft}>Back to the draft</Button>
+        </div>
+      )}
+      {publisher && versions.isError && (
+        <p className="flex flex-wrap items-center gap-3 border-b border-line bg-surface px-5 py-2.5 text-small text-danger">
+          The versions couldn&apos;t be read, so publishing waits.
+          <Button size="sm" onClick={() => void versions.refetch()}>Read them again</Button>
+        </p>
+      )}
+      {notice && (
+        <div
+          role={notice.tone === "danger" ? "alert" : "status"}
+          aria-label={notice.tone === "danger" ? undefined : "Notice"}
+          className={`flex flex-wrap items-center gap-3 border-b border-line bg-surface px-5 py-2.5 text-small ${notice.tone === "danger" ? "text-danger" : "text-ink"}`}
+        >
+          <span className="grow">{notice.text}</span>
+          {notice.action && <Button size="sm" onClick={notice.action.run}>{notice.action.label}</Button>}
+        </div>
+      )}
       {trouble && <p role="status" className="border-b border-line bg-surface px-5 py-2.5 text-small text-muted">{trouble}</p>}
       {sync.status === "conflict" && (
         <div role="alert" className="flex flex-wrap items-center gap-3 border-b border-danger bg-danger-bg px-5 py-2.5 text-small text-ink">
@@ -489,10 +757,10 @@ function Editor({
             </div>
           )}
           <Canvas
-          doc={doc}
+          doc={shownDoc}
           types={typeMap}
-          problems={problems}
-          separate={separate}
+          problems={viewing ? new Map() : problems}
+          separate={viewing ? new Map() : separate}
           editable={editable}
           current={panel}
           focusId={shown}
@@ -516,8 +784,10 @@ function Editor({
             node={open}
             type={typeMap.get(open.type)}
             ports={portMap.get(idKey(open.id)) ?? []}
-            problems={trusted ? [...trusted.diagnostics, ...published].filter((d) => d.node !== null && sameId(d.node, open.id)) : null}
-            expressions={trusted?.expressions.filter((x) => x.node !== null && sameId(x.node, open.id)) ?? []}
+            problems={
+              viewing || !trusted ? null : [...trusted.diagnostics, ...published].filter((d) => d.node !== null && sameId(d.node, open.id))
+            }
+            expressions={(viewing ? viewing.expressions : (trusted?.expressions ?? [])).filter((x) => x.node !== null && sameId(x.node, open.id))}
             editable={editable}
             onDelete={() => setAsking({ kind: "node", id: open.id })}
             onConnectPort={(port) => setConnecting({ node: open.id, port })}
@@ -530,6 +800,15 @@ function Editor({
               setSide(null);
               focus(item.node(open.id));
             }}
+          />
+        )}
+        {side?.kind === "versions" && (
+          <VersionsPanel
+            versions={versions.data ?? []}
+            publisher={publisher && busy === null}
+            onView={(v) => void view(v)}
+            onActivate={(version) => setConfirm({ kind: "activate", version })}
+            onClose={() => setSide(null)}
           />
         )}
         {side?.kind === "problems" && (
@@ -578,6 +857,27 @@ function Editor({
           </>
         )}
         {asking?.kind === "edge" && `${keyOf(asking.edge.to.node)} will no longer follow ${keyOf(asking.edge.from.node)}.`}
+      </ConfirmDialog>
+      <ConfirmDialog
+        open={confirm !== null}
+        tone="primary"
+        busy={busy !== null}
+        title={confirm?.kind === "activate" ? `Make version ${confirm.version.number} active` : confirm ? `Publish version ${confirm.expected + 1}` : ""}
+        confirmLabel={confirm?.kind === "activate" ? "Make active" : "Publish"}
+        onConfirm={() => {
+          if (confirm?.kind === "activate") void activate(confirm.version);
+          else if (confirm) void publish(confirm.expected);
+        }}
+        onCancel={() => setConfirm(null)}
+      >
+        {confirm?.kind === "activate" && `Runs start on version ${confirm.version.number} from now on. The draft doesn't change.`}
+        {confirm?.kind === "publish" && (
+          <>
+            {confirm.elsewhere &&
+              `Version ${confirm.expected} was published since you opened this, by someone else or by an attempt whose answer was lost. `}
+            {`Your latest edits are saved first. Version ${confirm.expected + 1} of ${workflow.name} becomes the active version${workflow.enabled ? ": its triggers start runs on it" : ""}.`}
+          </>
+        )}
       </ConfirmDialog>
       <ConfirmDialog
         open={leaveQuestion !== null}

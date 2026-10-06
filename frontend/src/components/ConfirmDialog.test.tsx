@@ -73,3 +73,25 @@ it("names its cancel when asked", () => {
   );
   expect(document.activeElement).toBe(screen.getByRole("button", { name: "Stay" }));
 });
+
+it("confirms a constructive action in the primary colour", () => {
+  render(
+    <ConfirmDialog open tone="primary" title="Publish version 3" confirmLabel="Publish" onConfirm={vi.fn()} onCancel={vi.fn()}>
+      Version 3 becomes active.
+    </ConfirmDialog>,
+  );
+  expect(screen.getByRole("button", { name: "Publish" }).className).toMatch(/\bbg-accent\b/);
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "Cancel" })); // the safe choice first still
+});
+
+it("asks afresh when its question changes while open: focus goes back to Cancel", () => {
+  const ask = (title: string) => (
+    <ConfirmDialog open tone="primary" title={title} confirmLabel="Publish" onConfirm={vi.fn()} onCancel={vi.fn()}>
+      It becomes active.
+    </ConfirmDialog>
+  );
+  const { rerender } = render(ask("Publish version 1"));
+  screen.getByRole("button", { name: "Publish" }).focus();
+  rerender(ask("Publish version 2"));
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "Cancel" }));
+});

@@ -187,3 +187,29 @@ it("once closed, a save in flight that answers sends nothing more and says nothi
   expect(settled).toEqual([]);
   await expect(sync.flush()).rejects.toBeInstanceOf(SaveError);
 });
+
+it("takes publish's word only for the revision it published", async () => {
+  const sync = make();
+  sync.change(doc(1));
+  await vi.advanceTimersByTimeAsync(1000); // revision 2
+  sync.published(1, 4); // not the revision saved now: version 4 is active, the comparison isn't known
+  expect([sync.current.activeNumber, sync.current.unpublished]).toEqual([4, null]);
+  sync.published(2, 5);
+  expect([sync.current.activeNumber, sync.current.unpublished]).toEqual([5, false]);
+});
+
+it("takes a read's active version, and its comparison only for the revision it read", () => {
+  const sync = make();
+  sync.compared({ draft_revision: 1, unpublished_changes: false, active_version_number: 2 });
+  expect([sync.current.activeNumber, sync.current.unpublished]).toEqual([2, false]);
+  sync.compared({ draft_revision: 9, unpublished_changes: false, active_version_number: 3 }); // another revision's
+  expect([sync.current.activeNumber, sync.current.unpublished]).toEqual([3, null]);
+});
+
+it("says what it doesn't know after an activation or a lost answer", () => {
+  const sync = make();
+  sync.activated(2);
+  expect([sync.current.activeNumber, sync.current.unpublished]).toEqual([2, null]);
+  sync.lostTrack();
+  expect([sync.current.activeNumber, sync.current.unpublished]).toEqual(["unknown", null]);
+});

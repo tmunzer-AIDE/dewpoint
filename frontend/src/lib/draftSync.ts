@@ -174,6 +174,31 @@ export class DraftSync {
     return this.state.revision;
   }
 
+  /** Publish answered: version `number` is active and holds the draft at `revision`. It no longer differs, if that's
+   * still the saved revision; otherwise how the newer draft compares isn't known. */
+  published(revision: number, number: number): void {
+    this.set({ activeNumber: number, unpublished: this.state.revision === revision ? false : null });
+  }
+
+  /** A version was made active here; how the draft compares with it isn't known until read. */
+  activated(number: number): void {
+    this.set({ activeNumber: number, unpublished: null });
+  }
+
+  /** What a read of the workflow says: its active version, and the draft's comparison with it, taken only for the
+   * revision it read (else not known). */
+  compared(summary: { draft_revision: number; unpublished_changes: boolean; active_version_number: number | null }): void {
+    this.set({
+      activeNumber: summary.active_version_number,
+      unpublished: summary.draft_revision === this.state.revision ? summary.unpublished_changes : null,
+    });
+  }
+
+  /** An answer lost and nothing read back: which version is active isn't known, nor how the draft compares. */
+  lostTrack(): void {
+    this.set({ activeNumber: "unknown", unpublished: null });
+  }
+
   /** The editor closed: stop, and drop whatever wasn't sent. */
   dispose(): void {
     this.disposed = true;

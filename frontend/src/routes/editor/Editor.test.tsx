@@ -70,6 +70,7 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
 let role = "editor";
 let answers: Map<string, Answer>; // "METHOD path" → its answer: a test sets what it needs
 let sent: { method: string; path: string; headers: Headers; body: unknown }[];
+let downloads: string[];
 
 beforeEach(() => {
   role = "editor";
@@ -83,6 +84,13 @@ beforeEach(() => {
       json({ draft_revision: 2, unpublished_changes: true, graph_hash: "h2", active_version_id: null, active_version_number: null })],
     [`POST ${BASE}/validate`, () => json({ draft_revision: 1, valid: true, diagnostics: [], expressions: [], taint: { sites: [], declassified: [] } })],
   ]);
+  answers.set(`GET ${BASE}/versions`, () => json([]));
+  answers.set(`POST ${BASE}/publish`, () => json({ version_id: "v1", number: 1, warnings: [] }, 201));
+  downloads = [];
+  Object.assign(URL, { createObjectURL: vi.fn(() => "blob:test"), revokeObjectURL: vi.fn() });
+  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+    downloads.push(this.download);
+  });
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const request = input as Request;
     const path = new URL(request.url).pathname;
@@ -487,3 +495,317 @@ it("finds a step whose id the draft spells otherwise by the server's canonical i
   await userEvent.click(screen.getByRole("button", { name: "Problems · 1" }));
   expect(within(screen.getByRole("complementary", { name: "Problems" })).getByRole("button", { name: "Go to transform" })).toBeTruthy();
 });
+
+/** A version as the list answers it; `hash` is its graph's, which says which draft it holds. */
+const version = (number: number, active: boolean, hash = "h") => ({
+  id: `v${number}`, number, published_at: "2026-10-06T10:00:00Z", published_by: null, graph_hash: hash, version_hash: "h",
+  cel_profile: "p", engine_abi: 6, node_refs: [], active, executable: true, blocked_by: [],
+});  // prettier-ignore
+const detail = (number: number, key: string) => ({ ...version(number, false), graph: draftWith(key), expressions: [] });
+const publishes = () => sent.filter((r) => r.path.endsWith("/publish"));
+
+async function confirmPublish(number: number) {
+  await userEvent.click(await screen.findByRole("button", { name: `Publish v${number}` }));
+  const ask = screen.getByRole("dialog", { name: `Publish version ${number}` });
+  await userEvent.click(within(ask).getByRole("button", { name: "Publish" }));
+  return ask;
+}
+
+it("publishes after saving, naming the version it confirms", async () => {
+  await show();
+  await addTransform();
+  await confirmPublish(1);
+  await screen.findByText("Saved · published as v1", {}, { timeout: 3000 });
+  const put = sent.findIndex((r) => r.method === "PUT");
+  const publish = sent.findIndex((r) => r.path.endsWith("/publish"));
+  expect(put).toBeGreaterThanOrEqual(0);
+  expect(publish).toBeGreaterThan(put); // flushed first
+  expect(sent[publish]!.headers.get("If-Match")).toBe("2");
+  expect(sent[publish]!.body).toEqual({ expected_latest_version: 0 });
+});
+
+it("names no number until the versions are read, and says when they can't be", async () => {
+  let list: ((r: Response) => void) | undefined;
+  answers.set(`GET ${BASE}/versions`, () => new Promise<Response>((r) => (list = r)));
+  await show();
+  expect(screen.getByRole("button", { name: "Publish" }).hasAttribute("disabled")).toBe(true);
+  await vi.waitFor(() => expect(list).toBeDefined());
+  list!(json({ error: "http_error" }, 500));
+  expect(await screen.findByText("The versions couldn't be read, so publishing waits.")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Publish" }).hasAttribute("disabled")).toBe(true);
+  answers.set(`GET ${BASE}/versions`, () => json([version(1, true)]));
+  await userEvent.click(screen.getByRole("button", { name: "Read them again" }));
+  expect(await screen.findByRole("button", { name: "Publish v2" })).toBeTruthy();
+});
+
+it("asks again, with the new number, when another version was published meanwhile", async () => {
+  answers.set(`POST ${BASE}/publish`, () => {
+    answers.set(`GET ${BASE}/versions`, () => json([version(1, true)]));
+    answers.set(`POST ${BASE}/publish`, () => json({ version_id: "v2", number: 2, warnings: [] }, 201));
+    return json({ error: "version_changed", latest_version: 1 }, 409);
+  });
+  await show();
+  await confirmPublish(1);
+  const again = await screen.findByRole("dialog", { name: "Publish version 2" });
+  expect(again.textContent).toContain("Version 1 was published since you opened this");
+  await vi.waitFor(() => expect(document.activeElement).toBe(within(again).getByRole("button", { name: "Cancel" })));
+  expect(screen.queryByText(/changed elsewhere/)).toBeNull(); // never a draft conflict
+  await userEvent.click(within(again).getByRole("button", { name: "Publish" }));
+  await vi.waitFor(() => expect(publishes()).toHaveLength(2));
+  expect(publishes()[1]!.body).toEqual({ expected_latest_version: 1 });
+});
+
+it("keeps the draft still while it's being published", async () => {
+  let done: ((r: Response) => void) | undefined;
+  answers.set(`POST ${BASE}/publish`, () => new Promise<Response>((r) => (done = r)));
+  await show();
+  await confirmPublish(1);
+  await vi.waitFor(() => expect(done).toBeDefined());
+  expect(steps().dataset.editable).toBe("false");
+  done!(json({ version_id: "v1", number: 1, warnings: [] }, 201));
+  await vi.waitFor(() => expect(steps().dataset.editable).toBe("true"));
+});
+
+it("reads what happened when a publish's answer is lost: the version holds the submitted graph, never who made it", async () => {
+  answers.set(`POST ${BASE}/publish`, () => {
+    answers.set(`GET ${BASE}/versions`, () => json([version(1, true, "h1")])); // "h1": the draft as loaded
+    answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, active_version_id: "v1", active_version_number: 1, unpublished_changes: false }));
+    return Promise.reject(new TypeError("Failed to fetch"));
+  });
+  await show();
+  await confirmPublish(1);
+  expect((await screen.findByRole("status", { name: "Notice" })).textContent).toContain("Version 1 holds the submitted graph. Your publish request's outcome wasn't received.");
+  expect(screen.getByText("Saved · published as v1")).toBeTruthy();
+  expect(screen.queryByText(/wasn't published|Not published/)).toBeNull();
+});
+
+it("never takes another's publication for this draft's when an answer is lost", async () => {
+  // Someone published version 1 from an earlier draft; this editor saved revision 2 ("h2"); its publish was refused,
+  // and the refusal lost. Version 1 exists and the draft is still at revision 2: neither says this draft is in it.
+  answers.set(`POST ${BASE}/publish`, () => {
+    answers.set(`GET ${BASE}/versions`, () => json([version(1, true, "h-theirs")]));
+    answers.set(`GET ${BASE}`, () =>
+      json({ ...WORKFLOW, draft_revision: 2, active_version_id: "v1", active_version_number: 1, unpublished_changes: true }));
+    return Promise.reject(new TypeError("Failed to fetch"));
+  });
+  await show();
+  await addTransform();
+  await confirmPublish(1);
+  expect((await screen.findByRole("alert")).textContent).toContain("Version 1 holds another draft: yours wasn't published");
+  expect(screen.getByText("Saved · unpublished changes since v1")).toBeTruthy();
+  expect(screen.queryByText(/published as v1|holds the submitted graph/)).toBeNull();
+});
+
+it("takes the active version from the read, never from the number it hoped for", async () => {
+  answers.set(`POST ${BASE}/publish`, () => {
+    answers.set(`GET ${BASE}/versions`, () => json([version(2, true, "h-later"), version(1, false, "h1")]));
+    answers.set(`GET ${BASE}`, () =>
+      json({ ...WORKFLOW, active_version_id: "v2", active_version_number: 2, unpublished_changes: true }));
+    return Promise.reject(new TypeError("Failed to fetch"));
+  });
+  await show();
+  await confirmPublish(1);
+  expect((await screen.findByRole("status", { name: "Notice" })).textContent).toContain("Version 1 holds the submitted graph. Your publish request's outcome wasn't received.");
+  expect(screen.getByText("Saved · unpublished changes since v2")).toBeTruthy(); // version 2 came after, and is active
+});
+
+it("says it isn't known when the draft submitted has no hash to compare", async () => {
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft_graph_hash: null }));
+  answers.set(`POST ${BASE}/publish`, () => {
+    answers.set(`GET ${BASE}/versions`, () => json([version(1, true, "h-any")]));
+    return Promise.reject(new TypeError("Failed to fetch"));
+  });
+  await show();
+  await confirmPublish(1);
+  expect((await screen.findByRole("alert")).textContent).toContain("it isn't known whether it holds your draft");
+  expect(screen.queryByText(/holds another draft|holds the submitted graph/)).toBeNull();
+});
+
+it("never calls a lost publish a failure when what happened can't be read", async () => {
+  answers.set(`POST ${BASE}/publish`, () => {
+    answers.set(`GET ${BASE}/versions`, () => json({ error: "http_error" }, 502));
+    answers.set(`GET ${BASE}`, () => json({ error: "http_error" }, 502));
+    return json({ error: "http_error" }, 504);
+  });
+  await show();
+  await confirmPublish(1);
+  expect((await screen.findByRole("alert")).textContent).toContain("It isn't known whether version 1 was published");
+  expect(screen.getByText("Saved · the active version isn't known")).toBeTruthy();
+});
+
+it("keeps what the workflow's read says when only the versions' read fails", async () => {
+  answers.set(`POST ${BASE}/publish`, () => {
+    answers.set(`GET ${BASE}/versions`, () => json({ error: "http_error" }, 502));
+    answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, active_version_id: "v3", active_version_number: 3, unpublished_changes: true }));
+    return Promise.reject(new TypeError("Failed to fetch"));
+  });
+  await show();
+  await confirmPublish(1);
+  expect((await screen.findByRole("alert")).textContent).toContain("It isn't known whether version 1 was published");
+  expect(screen.getByText("Saved · unpublished changes since v3")).toBeTruthy(); // the active version, as read
+});
+
+it("keeps an activation made when the read after it fails", async () => {
+  answers.set(`GET ${BASE}/versions`, () => json([version(2, true), version(1, false)]));
+  answers.set(`POST ${BASE}/activate`, () => {
+    answers.set(`GET ${BASE}`, () => json({ error: "http_error" }, 500));
+    return json({ active_version_id: "v1", number: 1, warnings: [] });
+  });
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "Versions" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Make version 1 active" }));
+  await userEvent.click(within(screen.getByRole("dialog", { name: "Make version 1 active" })).getByRole("button", { name: "Make active" }));
+  expect((await screen.findByRole("status", { name: "Notice" })).textContent).toContain("Version 1 is active.");
+  expect(screen.getByText("Saved · v1 is active")).toBeTruthy(); // the comparison isn't known: nothing claimed
+  expect(screen.queryByText(/wasn't made active/)).toBeNull();
+});
+
+it("shows the newest version asked for, whatever order the answers come in", async () => {
+  let first: ((r: Response) => void) | undefined;
+  answers.set(`GET ${BASE}/versions`, () => json([version(2, true), version(1, false)]));
+  answers.set(`GET ${BASE}/versions/v1`, () => new Promise<Response>((r) => (first = r)));
+  answers.set(`GET ${BASE}/versions/v2`, () => json(detail(2, "two")));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "Versions" }));
+  await userEvent.click(await screen.findByRole("button", { name: "View version 1" }));
+  await userEvent.click(screen.getByRole("button", { name: "View version 2" }));
+  expect(await screen.findByRole("button", { name: "two" })).toBeTruthy();
+  first!(json(detail(1, "one")));
+  await new Promise((r) => setTimeout(r, 20)); // the late answer has landed
+  expect(screen.queryByRole("button", { name: "one" })).toBeNull();
+  expect(screen.getByText("Viewing version 2, read only. The draft is unchanged.")).toBeTruthy();
+});
+
+it("carries no draft diagnostics onto a version's canvas", async () => {
+  answers.set(`POST ${BASE}/validate`, () => json(invalid(1, "x")));
+  answers.set(`GET ${BASE}/versions`, () => json([version(1, true)]));
+  answers.set(`GET ${BASE}/versions/v1`, () => json(detail(1, "one")));
+  await show();
+  await screen.findByRole("button", { name: "Problems · 1" });
+  await userEvent.click(screen.getByRole("button", { name: "Versions" }));
+  await userEvent.click(await screen.findByRole("button", { name: "View version 1" }));
+  await screen.findByRole("button", { name: "one" });
+  expect(steps().dataset.problems).toBe("0");
+  expect(screen.queryByRole("button", { name: /Problems/ })).toBeNull();
+});
+
+it("shows a version's own step in the step panel, never the draft's", async () => {
+  const theirs = draftWith("one");
+  theirs.nodes![0]!.options = { timeout_s: 30 }; // the draft's "one" keeps the type's 60 s
+  const expressions = [{ node: "id-one", field: "/fields/a", mode: "activity", reason: "builds a message" }];
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: draftWith("one") }));
+  answers.set(`GET ${BASE}/versions`, () => json([version(1, true)]));
+  answers.set(`GET ${BASE}/versions/v1`, () => json({ ...version(1, true), graph: theirs, expressions }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "Versions" }));
+  await userEvent.click(await screen.findByRole("button", { name: "View version 1" }));
+  await screen.findByText("Viewing version 1, read only. The draft is unchanged.");
+  await userEvent.click(screen.getByRole("button", { name: "one" }));
+  const panel = screen.getByRole("complementary", { name: "one" });
+  expect(panel.textContent).toContain("30 s");
+  expect(panel.textContent).toContain("Runs as a separate step: builds a message");
+  expect(panel.textContent).toContain("Not checked for what's on the screen.");
+});
+
+it("stops an export when the latest edits aren't saved, and offers the saved draft by name", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "http_error" }, 500));
+  answers.set(`GET ${BASE}/export`, () => json({ format: "dewpoint.workflow", format_version: 1, name: "Nightly", graph: {}, bindings: [] }));
+  await show();
+  await addTransform();
+  await userEvent.click(screen.getByRole("button", { name: "Export" }));
+  const stop = await screen.findByRole("alert");
+  expect(stop.textContent).toContain("Not exported: your latest edits aren't saved");
+  expect(sent.some((r) => r.path.endsWith("/export"))).toBe(false);
+  await userEvent.click(within(stop).getByRole("button", { name: "Export the last saved draft" }));
+  await vi.waitFor(() => expect(downloads).toEqual(["nightly.dewpoint.json"]));
+});
+
+it("offers a draft that can't be made portable as it is, labelled", async () => {
+  answers.set(`GET ${BASE}/export`, () =>
+    json({ error: "not_portable", problems: [{ reason: "unknown_type", binding: null, node: "id-odd", field: null }] }, 422));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: draftWith("odd") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "Export" }));
+  const stop = await screen.findByRole("alert");
+  expect(stop.textContent).toContain("can't be exported as a portable file");
+  expect(stop.textContent).toContain("odd");
+  await userEvent.click(within(stop).getByRole("button", { name: "Download this draft as it is (not portable)" }));
+  expect(downloads).toEqual(["nightly.draft.json"]);
+});
+
+it("shows what only publish checks, in the problems panel, marked", async () => {
+  answers.set(`POST ${BASE}/publish`, () =>
+    json({ error: "invalid", diagnostics: [{ code: "connection.unknown", message: "That connection doesn't exist.", node: null, field: null, fix: null, severity: "error" }] }, 422));
+  await show();
+  await confirmPublish(1);
+  const panel = await screen.findByRole("complementary", { name: "Problems" });
+  expect(within(panel).getByRole("region", { name: "Found at publish" }).textContent).toContain("That connection doesn't exist.");
+});
+
+it("keeps an older draft's publish findings out of the current problems", async () => {
+  // The owner's case: a clean check of revision 2 must not show revision 1's publish errors as current.
+  answers.set(`POST ${BASE}/publish`, () =>
+    json({ error: "invalid", diagnostics: [{ code: "connection.unknown", message: "That connection doesn't exist.", node: "x", field: null, fix: null, severity: "error" }] }, 422));
+  await show();
+  await confirmPublish(1);
+  expect(await screen.findByRole("button", { name: "Problems · 1" })).toBeTruthy(); // current: revision 1, no edits
+  expect(steps().dataset.problems).toBe("1");
+  answers.set(`POST ${BASE}/validate`, () => json(valid(2)));
+  await addTransform();
+  expect(screen.getByRole("button", { name: "Not checked since your edits" })).toBeTruthy(); // pending: revision 1 still
+  expect(steps().dataset.problems).toBe("0");
+  expect(await screen.findByRole("button", { name: "No problems" }, { timeout: 3000 })).toBeTruthy();
+  const panel = screen.getByRole("complementary", { name: "Problems" });
+  expect(within(panel).getByRole("region", { name: "Found at publish" }).textContent).toContain("before your latest edits");
+});
+
+it("offers no Publish to a viewer", async () => {
+  role = "viewer";
+  await show();
+  expect(screen.queryByRole("button", { name: /^Publish/ })).toBeNull();
+});
+
+/** a → b, c; b → d, e; c → d, f (the owner's review of revision 2): d is joined from b and from c. */
+function joins(): GraphDoc {
+  const at = { a: [0, 0], b: [0, 140], c: [300, 140], d: [0, 280], e: [300, 280], f: [600, 280] } as const;
+  const keys = Object.keys(at) as (keyof typeof at)[];
+  const link = (from: string, to: string) => ({ from: { node: `id-${from}`, port: "out" }, to: { node: `id-${to}` } });
+  return {
+    graph_format: 1,
+    nodes: keys.map((key) => ({ id: `id-${key}`, key, type: "flow.transform@1", position: { x: at[key][0], y: at[key][1] } })),
+    edges: [link("a", "b"), link("a", "c"), link("b", "d"), link("b", "e"), link("c", "d"), link("c", "f")],
+  };
+}
+
+it.each(["a viewer", "an editor after a conflict", "a viewed version"])(
+  "keeps to the branch the keys came by at a join, read only for %s",
+  async (who) => {
+    if (who === "a viewer") role = "viewer";
+    if (who === "a viewed version") {
+      answers.set(`GET ${BASE}/versions`, () => json([version(1, true)]));
+      answers.set(`GET ${BASE}/versions/v1`, () => json({ ...version(1, true), graph: joins(), expressions: [] }));
+    } else {
+      answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: joins() }));
+    }
+    if (who === "an editor after a conflict") answers.set(`PUT ${BASE}/draft`, () => json({ error: "draft_conflict", draft_revision: 5 }, 409));
+    await show();
+    if (who === "an editor after a conflict") {
+      await userEvent.click(screen.getByRole("button", { name: "after f" }));
+      await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
+      await screen.findByRole("alert", {}, { timeout: 3000 }); // changed elsewhere: read only now
+    }
+    if (who === "a viewed version") {
+      await userEvent.click(screen.getByRole("button", { name: "Versions" }));
+      await userEvent.click(await screen.findByRole("button", { name: "View version 1" }));
+      await screen.findByRole("button", { name: "c" });
+    }
+    expect(steps().dataset.editable).toBe("false");
+    screen.getByRole("button", { name: "c" }).focus();
+    await userEvent.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "d" }));
+    await userEvent.keyboard("{ArrowRight}");
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "f" })); // never b's e
+    await userEvent.keyboard("{ArrowLeft}{ArrowUp}");
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "c" }));
+  },
+);

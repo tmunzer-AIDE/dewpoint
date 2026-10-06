@@ -595,3 +595,8 @@ M19. **Problems, as the plan has them, with three adaptations** (Task 14): the p
     derived `panel`, so undo's focus rules (M16) read as before, and any side panel hides the minimap (M18). The plan's
     test block declared `steps()` again (Task 13's tests needed it first). - The plan predates M15, M16 and M18. -
     None.
+M20. **Publishing and versions, as the plan has them, on M15 and M19** (Task 15): a viewed version's step panel finds
+    its step and its expressions by identity (`findNode`, `sameId`), the editor's `editable` folds in the version view
+    and a running publication or activation ahead of the keyboard model (which reads what's on the screen), and the
+    side column (M19) carries the versions panel. The lost-publish wording is revision 5's (graph equivalence only).
+    - The plan predates M15 and M19. - None.
