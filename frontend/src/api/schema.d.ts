@@ -1438,6 +1438,61 @@ export interface components {
             /** User Id */
             user_id: string;
         };
+        /**
+         * NodeTypeOut
+         * @description A node type the editor may place (active) or still draws (deprecated), and how a step of it runs (B5): what it
+         *     may change, the connection types it takes, what it may reach, and its retry and timeout defaults.
+         */
+        NodeTypeOut: {
+            /** Capabilities */
+            capabilities: string[];
+            /** Config Schema */
+            config_schema: {
+                [key: string]: unknown;
+            };
+            /** Credentials */
+            credentials: string[];
+            /** Description */
+            description: string;
+            /** Dynamic Ports */
+            dynamic_ports: string | null;
+            /** Icon */
+            icon: string | null;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "action" | "control";
+            /** Options */
+            options: string[];
+            /** Output Schema */
+            output_schema: {
+                [key: string]: unknown;
+            };
+            /** Ports */
+            ports: string[];
+            /** Ref */
+            ref: string;
+            retry: components["schemas"]["RetryOut"];
+            /**
+             * Side Effect
+             * @enum {string}
+             */
+            side_effect: "none" | "idempotent" | "keyed" | "reconcilable" | "ambiguous";
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "active" | "deprecated";
+            /** Timeout S */
+            timeout_s: number;
+            /** Title */
+            title: string;
+            /** Type */
+            type: string;
+            /** Version */
+            version: number;
+        };
         /** OptionOut */
         OptionOut: {
             /** Label */
@@ -1520,6 +1575,19 @@ export interface components {
             } | null;
             /** Mode */
             mode?: ("live" | "simulate") | null;
+        };
+        /** RetryOut */
+        RetryOut: {
+            /** Backoff */
+            backoff: number;
+            /** Initial Interval S */
+            initial_interval_s: number;
+            /** Max Attempts */
+            max_attempts: number;
+            /** Max Interval S */
+            max_interval_s: number;
+            /** Non Retryable */
+            non_retryable: string[];
         };
         /** RoleChange */
         RoleChange: {
@@ -2289,9 +2357,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    }[];
+                    "application/json": components["schemas"]["NodeTypeOut"][];
                 };
             };
         };

@@ -370,3 +370,30 @@ three gaps in what the fixes claimed. What became of each:
 67. The replay-history gate ran locally against the updated base (717f420), in CI's pull-request form and with the
     base given: no recorded history changed or removed - the branch changes none. It needs only git; the PR's
     "needs CI's environment" is corrected.
+
+### Owner, 4b plan (2026-10-06, pasted)
+
+The 4b plan (`2026-10-06-editor-ui-4b-workflows-canvas.md`) went through four revisions on the owner's reviews:
+325fc14 (seven corrections), 089c004 (five and one smaller), a206ea9 (one Task 13 lifecycle correction and one
+smaller), and 5a0076f, which incorporates the last. Rulings on its proposals: 1-4, 6, 8-12, 14, 16, 19-21 accepted
+(4 and 6 with the unpublished filter correction); 5 held until the batching and query-plan evidence exist (any index
+needs a migration slot); 7, 13, 15, 17, 18 amended; 22-24 and 26 accepted; 25 accepted, its non-null hash proof as
+evidence that a version holds the submitted graph, not of which caller published it; 27 and 28 accepted. They join
+this ledger as rulings 68-95 when the slice is approved; the plan carries their text.
+
+Execution: "Proceed inline from current `main`, locally through milestone 1, then stop for the API/probe review.
+Incorporate the Task 13 correction before requesting approval for the remaining milestones. No push or PR
+authorization." The Task 13 correction is revision 4 (5a0076f).
+
+### 4b, milestone 1 (2026-10-06)
+
+M1. **The branch starts from `main` at f65c6f9**, not 66443c3 as the plan says: #44 (plugins 3a-2) and #45 (CodeQL
+    in CI) merged after the plan was written. `feat/editor-4b` is f65c6f9 with the plan's commits merged in (c3ba754).
+    #44 touches files milestone 1 changes (the node-types and workflow routes, `responses.py`, `workflow_ops.py`, the
+    SDK's fields, test helpers); each task is checked against `main` before its code, and what differs is ruled here.
+    - #44 is merged on `main`, and the plan's lines numbers into those files are 66443c3's. - Wrong line references
+    in the plan for those files; the code they describe is found by name.
+M2. **`NodeTypeOut` also declares `icon` and `options`** (Task 1): #44's palette answer carries both (a first-party
+    icon's name, plugins-3; the config fields `options()` lists, D3), and the named model forbids extra keys, so it
+    must declare them. The test pins `flow.loop`'s icon (`repeat`) and `testkit.pick`'s options (`site_id`). - Without
+    them the answer fails its own model. - Two fields the 4b plan didn't list; 4c and 4f use them.

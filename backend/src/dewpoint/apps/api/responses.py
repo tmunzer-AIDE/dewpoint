@@ -117,6 +117,41 @@ class PlatformStatusOut(_Answer):
     production_runs: bool
 
 
+SideEffect = Literal["none", "idempotent", "keyed", "reconcilable", "ambiguous"]
+
+
+class RetryOut(_Answer):
+    max_attempts: int
+    initial_interval_s: float
+    backoff: float
+    max_interval_s: float
+    non_retryable: list[str]
+
+
+class NodeTypeOut(_Answer):
+    """A node type the editor may place (active) or still draws (deprecated), and how a step of it runs (B5): what it
+    may change, the connection types it takes, what it may reach, and its retry and timeout defaults."""
+
+    ref: str
+    type: str
+    version: int
+    kind: Literal["action", "control"]
+    state: Literal["active", "deprecated"]
+    title: str
+    description: str
+    icon: str | None  # a first-party icon's name (plugins-3), never a URL or markup
+    ports: list[str]
+    dynamic_ports: str | None  # a config field whose entries each declare a `port` (flow.switch's "cases")
+    config_schema: dict[str, Any]
+    output_schema: dict[str, Any]
+    options: list[str]  # the config fields whose choices the node's options() lists (plugins-3 D3)
+    side_effect: SideEffect
+    credentials: list[str]
+    capabilities: list[str]
+    retry: RetryOut
+    timeout_s: float
+
+
 class OptionOut(_Answer):
     value: str
     label: str

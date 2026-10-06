@@ -839,6 +839,148 @@
         "title": "MemberRoleOut",
         "type": "object"
       },
+      "NodeTypeOut": {
+        "additionalProperties": false,
+        "description": "A node type the editor may place (active) or still draws (deprecated), and how a step of it runs (B5): what it\nmay change, the connection types it takes, what it may reach, and its retry and timeout defaults.",
+        "properties": {
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "config_schema": {
+            "additionalProperties": true,
+            "title": "Config Schema",
+            "type": "object"
+          },
+          "credentials": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Credentials",
+            "type": "array"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "dynamic_ports": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dynamic Ports"
+          },
+          "icon": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Icon"
+          },
+          "kind": {
+            "enum": [
+              "action",
+              "control"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "options": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Options",
+            "type": "array"
+          },
+          "output_schema": {
+            "additionalProperties": true,
+            "title": "Output Schema",
+            "type": "object"
+          },
+          "ports": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Ports",
+            "type": "array"
+          },
+          "ref": {
+            "title": "Ref",
+            "type": "string"
+          },
+          "retry": {
+            "$ref": "#/components/schemas/RetryOut"
+          },
+          "side_effect": {
+            "enum": [
+              "none",
+              "idempotent",
+              "keyed",
+              "reconcilable",
+              "ambiguous"
+            ],
+            "title": "Side Effect",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "active",
+              "deprecated"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "timeout_s": {
+            "title": "Timeout S",
+            "type": "number"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ref",
+          "type",
+          "version",
+          "kind",
+          "state",
+          "title",
+          "description",
+          "icon",
+          "ports",
+          "dynamic_ports",
+          "config_schema",
+          "output_schema",
+          "options",
+          "side_effect",
+          "credentials",
+          "capabilities",
+          "retry",
+          "timeout_s"
+        ],
+        "title": "NodeTypeOut",
+        "type": "object"
+      },
       "OptionOut": {
         "additionalProperties": false,
         "properties": {
@@ -1090,6 +1232,43 @@
           }
         },
         "title": "RerunIn",
+        "type": "object"
+      },
+      "RetryOut": {
+        "additionalProperties": false,
+        "properties": {
+          "backoff": {
+            "title": "Backoff",
+            "type": "number"
+          },
+          "initial_interval_s": {
+            "title": "Initial Interval S",
+            "type": "number"
+          },
+          "max_attempts": {
+            "title": "Max Attempts",
+            "type": "integer"
+          },
+          "max_interval_s": {
+            "title": "Max Interval S",
+            "type": "number"
+          },
+          "non_retryable": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Non Retryable",
+            "type": "array"
+          }
+        },
+        "required": [
+          "max_attempts",
+          "initial_interval_s",
+          "backoff",
+          "max_interval_s",
+          "non_retryable"
+        ],
+        "title": "RetryOut",
         "type": "object"
       },
       "RoleChange": {
@@ -2323,8 +2502,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "additionalProperties": true,
-                    "type": "object"
+                    "$ref": "#/components/schemas/NodeTypeOut"
                   },
                   "title": "Response Node Types Api V1 Node Types Get",
                   "type": "array"

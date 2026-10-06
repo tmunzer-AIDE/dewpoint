@@ -70,6 +70,20 @@ def test_slice_4a_routes_name_their_answer(method: str, path: str) -> None:
     assert "$ref" in body or "$ref" in body.get("items", {}), body
 
 
+# What the web client calls in slice 4b: each answers a named model.
+SLICE_4B = [
+    ("get", "/api/v1/node-types"),
+]
+
+
+@pytest.mark.parametrize("method,path", SLICE_4B)
+def test_slice_4b_routes_name_their_answer(method: str, path: str) -> None:
+    responses = schema()["paths"][path][method]["responses"]
+    ok = next(code for code in responses if code.startswith("2"))
+    body = responses[ok]["content"]["application/json"]["schema"]
+    assert "$ref" in body or "$ref" in body.get("items", {}), body
+
+
 def test_options_answer_a_named_model() -> None:
     """Plugin-call options (plugins-3 D3, D19), which the editor's slice 4f calls, answer `OptionsOut`."""
     paths = schema()["paths"]
