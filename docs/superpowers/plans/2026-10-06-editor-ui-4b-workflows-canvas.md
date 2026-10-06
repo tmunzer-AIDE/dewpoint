@@ -246,8 +246,9 @@ amended. 27–28 are new in revision 3.
     or leave without saving. It answers every way out: router navigations (the breadcrumb, the rail, the palette, the
     tenant switcher) through the router's blocker; sign-out, which asks it before revoking the session or clearing the
     query cache; and an ended session, which keeps the shell and the unsaved work on screen with a notice instead of
-    swapping it for the sign-in page. "Leave without saving", once chosen, stands until the next edit, so the navigation
-    that follows (sign-out's to the sign-in page) doesn't ask again. Closing the tab gets the browser's prompt. Reload
+    swapping it for the sign-in page. "Leave without saving", once chosen, stands until the next edit, or until the
+    exit it answered fails (a sign-out that didn't go through withdraws it), so the navigation that follows
+    (sign-out's to the sign-in page) doesn't ask again. Closing the tab gets the browser's prompt. Reload
     after a conflict asks before discarding the local version. The saver is disposed when the editor closes: a save
     still in flight that answers afterwards sends nothing more. - The debounce and a conflict both leave work only on
     the screen, and a revoked session or a cleared cache must not take it first. - Leaving waits as long as a save
@@ -372,6 +373,10 @@ A fresh-context review of this revision found seven defects, fixed here:
 - a "cleared cache" test that couldn't fail (removed; the cache is cleared only at sign-out, after the decision, Task
   13);
 - an activation that didn't wait for a save in flight (it settles the saver first, Task 15).
+
+The reviewer's re-check confirmed the seven fixed (the keyboard model also on 400 randomised graphs, editable and
+read only) and found one gap the first fix opened: "Leave without saving" outlived a sign-out that failed. A failed
+sign-out now withdraws it (`cancelLeaving()`, each guard's `stayed()`, Task 13).
 
 ## File structure
 
@@ -7561,8 +7566,8 @@ waits for the owner's word.
     "error"; revision: number; unpublished: boolean | null; generation: number; savedGeneration: number; savedHash:
     string | null; activeNumber: number | null | "unknown" }`; `class ConflictError`, `class SaveError`;
     `onSettled(revision, generation)`.
-  - `src/lib/leaving.ts`: `type LeaveGuard = { unsaved(): boolean; decide(): Promise<boolean> }`,
-    `guardLeaving(guard) -> unsubscribe`, `unsavedWork()`, `mayLeave()`.
+  - `src/lib/leaving.ts`: `type LeaveGuard = { unsaved(): boolean; decide(): Promise<boolean>; stayed?(): void }`,
+    `guardLeaving(guard) -> unsubscribe`, `unsavedWork()`, `mayLeave()`, `cancelLeaving()`.
   - `ConfirmDialog`'s `cancelLabel?: string` (default "Cancel"); `Shell`'s `sessionEnded?: boolean`.
   - `<SaveState state />`: the active version's label comes from the same state as the comparison.
   - The editor opens on a snapshot read after it mounted, is seeded once, and stays open through its auxiliary
@@ -7801,7 +7806,7 @@ it("names its cancel when asked", () => {
 ```ts
 // SPDX-License-Identifier: Apache-2.0
 import { expect, it, vi } from "vitest";
-import { guardLeaving, mayLeave, unsavedWork } from "./leaving";
+import { cancelLeaving, guardLeaving, mayLeave, unsavedWork } from "./leaving";
 
 it("lets leaving go on only when every open editor agrees, asking each in turn", async () => {
   expect(await mayLeave()).toBe(true); // nothing open
@@ -7813,6 +7818,14 @@ it("lets leaving go on only when every open editor agrees, asking each in turn",
   expect([first, second, third].map((f) => f.mock.calls.length)).toEqual([1, 1, 0]); // stops at the first "stay"
   stops.forEach((stop) => stop());
   expect(await mayLeave()).toBe(true);
+});
+
+it("withdraws every editor's \"leave\" when the exit doesn't happen", () => {
+  const stayed = vi.fn();
+  const stop = guardLeaving({ unsaved: () => true, decide: () => Promise.resolve(true), stayed });
+  cancelLeaving();
+  expect(stayed).toHaveBeenCalledOnce();
+  stop();
 });
 
 it("says whether any open editor holds unsaved work", () => {
@@ -7837,9 +7850,13 @@ it("signs out only once every open editor has had its say", async () => {
   await userEvent.click(screen.getByRole("button", { name: "Sign out" }));
   expect(loggedOut()).toBe(false);
   stop();
-  const go = guardLeaving({ unsaved: () => true, decide: () => Promise.resolve(true) });
+  const stayed = vi.fn();
+  const go = guardLeaving({ unsaved: () => true, decide: () => Promise.resolve(true), stayed });
   await userEvent.click(screen.getByRole("button", { name: "Sign out" }));
   await vi.waitFor(() => expect(loggedOut()).toBe(true));
+  // This mock answers logout 200, not 204: the sign-out fails, so the editor's "leave" is withdrawn.
+  await screen.findByText(/Sign-out failed/);
+  expect(stayed).toHaveBeenCalledOnce();
   go();
 });
 ```
@@ -7983,6 +8000,21 @@ it("asks once: a navigation after sign-out's \"leave\" goes without asking again
   expect(screen.queryByRole("dialog", { name: "Your latest changes aren't saved" })).toBeNull();
 });
 
+it("asks again after a sign-out that failed", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "http_error" }, 500));
+  await show();
+  await addTransform();
+  const decision = mayLeave();
+  await userEvent.click(
+    within(await screen.findByRole("dialog", { name: "Your latest changes aren't saved" })).getByRole("button", { name: "Leave without saving" }),
+  );
+  await expect(decision).resolves.toBe(true);
+  act(() => cancelLeaving()); // what the shell does when signOut() fails
+  await userEvent.click(screen.getByRole("link", { name: "Workflows" }));
+  expect(await screen.findByRole("dialog", { name: "Your latest changes aren't saved" })).toBeTruthy();
+  expect(screen.queryByText("list")).toBeNull();
+});
+
 it("stays open, with its edits, when the step types fail to refresh", async () => {
   const { qc } = await show();
   await addTransform();
@@ -8007,8 +8039,8 @@ it("asks before Reload discards the version a conflict kept", async () => {
 });
 ```
 
-(`within` and `act` join the Testing Library import, `mayLeave` comes from `../../lib/leaving`; `GraphDoc` is imported
-for the PUT body's type.)
+(`within` and `act` join the Testing Library import, `mayLeave` and `cancelLeaving` come from `../../lib/leaving`;
+`GraphDoc` is imported for the PUT body's type.)
 
 - [ ] **Step 2: Run them to see them fail**
 
@@ -8250,6 +8282,8 @@ export interface LeaveGuard {
   unsaved: () => boolean;
   /** Saves what it can; when it can't, asks the person. True: leaving may go on. */
   decide: () => Promise<boolean>;
+  /** The exit it agreed to didn't happen (a sign-out that failed): its next decision asks afresh. */
+  stayed?: () => void;
 }
 
 const guards = new Set<LeaveGuard>();
@@ -8266,6 +8300,11 @@ export async function mayLeave(): Promise<boolean> {
   for (const g of [...guards]) if (!(await g.decide())) return false;
   return true;
 }
+
+/** The exit `mayLeave` was asked for didn't happen: no editor's "leave" stands for the next one. */
+export function cancelLeaving(): void {
+  for (const g of [...guards]) g.stayed?.();
+}
 ```
 
 In `frontend/src/components/Shell.tsx`, sign-out asks first, and an ended session has its notice (import `mayLeave`
@@ -8278,9 +8317,10 @@ from `../lib/leaving`; `Shell` takes `{ sessionEnded = false }: { sessionEnded?:
     // revoked and the cache cleared, which would leave a pending save unable to authenticate.
     if (!(await mayLeave())) return;
     if ((await signOut()) === "failed") {
+      cancelLeaving(); // still signed in, still on the page: an editor's "leave" must not stand for the next exit
 ```
 
-(the rest unchanged), and, beside the sign-out error:
+(the rest unchanged, `cancelLeaving` imported beside `mayLeave`), and, beside the sign-out error:
 
 ```tsx
         {sessionEnded && (
@@ -8422,7 +8462,15 @@ In `Editor` (which takes `trouble` and `onReload`; imports: `useBlocker`, `useRe
       return new Promise<boolean>((resolve) => setLeaveQuestion(() => resolve));
     }
   };
-  useEffect(() => guardLeaving({ unsaved: () => saver.current?.unsaved ?? false, decide: () => decide.current() }), []);
+  useEffect(
+    () =>
+      guardLeaving({
+        unsaved: () => saver.current?.unsaved ?? false,
+        decide: () => decide.current(),
+        stayed: () => void (leaveAccepted.current = false), // the sign-out it answered failed: ask again next time
+      }),
+    [],
+  );
   useBlocker({
     shouldBlockFn: async () => !(await decide.current()),
     enableBeforeUnload: () => saver.current?.unsaved ?? false,
