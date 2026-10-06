@@ -280,3 +280,12 @@ Open question for 3b: a start form passes the operator's typed text to `options(
 A hook that put that text into a URL path (relative URLs may hold `../` within the origin) would let an operator reach
 any GET the publisher's token can. 3b's Mist nodes must encode path parameters (the SDK should offer a helper) before
 any picker uses typed text in a path.
+
+Checkpoint full runs (2026-10-06, after the review's fixes): one run errored on the test database's container start
+under another session's load (no code involved); the next showed 4 failures in #41's lifespan logging tests, which
+closed the API's outbound HTTP client 3a-2 removed: they now fail the engine's disposal instead (`27e6585`). Final run
+at `27e6585`: 2876 passed, 8 skipped, in 4 min 52 s; ruff, format, mypy, import contracts, licences and the replay gate
+pass at `211ef73`. Not run: the Compose proof (its web image's bases, `node:22-bookworm-slim` and
+`nginxinc/nginx-unprivileged:1.30-alpine`, aren't on the approved image list).
+
+**Checkpoint:** awaiting the owner's rulings on 3a-2's rulings above. Nothing is pushed.
