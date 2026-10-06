@@ -48,3 +48,17 @@ def test_testkit_is_a_valid_plugin() -> None:
     assert nodes["testkit.ambiguous_send@1"]["side_effect"] == "ambiguous"
     assert nodes["testkit.sensitive@1"]["output_schema"]["properties"]["secret_value"][SENSITIVE] is True
     assert nodes["testkit.echo@1"]["output_schema"]["required"] == ["value"]
+
+
+def test_every_flow_node_has_an_icon() -> None:
+    """Flow completion (plugins-3 D19): icons are display metadata, so flow@1's hashes don't move (pinned)."""
+    icons = {f"{n['type']}@{n['version']}": n.get("icon") for n in PLUGIN.manifest()["nodes"]}
+    assert all(isinstance(icon, str) and icon for icon in icons.values()), icons
+    assert len(set(icons.values())) == len(icons)
+
+
+def test_conditions_are_shown_as_cel() -> None:
+    nodes = {n["type"]: n["config_schema"] for n in PLUGIN.manifest()["nodes"]}
+    assert nodes["flow.if"]["properties"]["condition"]["x-widget"] == "cel"
+    assert nodes["flow.filter"]["properties"]["predicate"]["x-widget"] == "cel"
+    assert nodes["flow.switch"]["$defs"]["SwitchCase"]["properties"]["when"]["x-widget"] == "cel"

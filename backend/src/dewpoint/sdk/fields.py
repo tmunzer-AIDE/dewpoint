@@ -21,7 +21,7 @@ def literal_only(default: Any = PydanticUndefined, **kwargs: Any) -> Any:
 def value_kinds(*kinds: str, default: Any = PydanticUndefined, **kwargs: Any) -> Any:
     if not kinds or set(kinds) - VALUE_KINDS:
         raise ValueError(f"value_kinds needs one or more of {sorted(VALUE_KINDS)}, got {sorted(kinds)}")
-    extra: dict[str, Any] = {KINDS: sorted(kinds)}
+    extra: dict[str, Any] = {**(kwargs.pop("json_schema_extra", None) or {}), KINDS: sorted(kinds)}
     return Field(default, json_schema_extra=extra, **kwargs)
 
 

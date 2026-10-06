@@ -24,13 +24,19 @@ class _Control(Node):
     kind = NodeKind.CONTROL
 
 
+def cel_widget() -> dict[str, Any]:
+    """Display only (plugins-3 D19): the editor shows the field as CEL."""
+    return {"x-widget": "cel"}
+
+
 class IfConfig(_Strict):
-    condition: bool
+    condition: bool = Field(json_schema_extra=cel_widget())
 
 
 class If(_Control):
     type = "flow.if"
     version = 1
+    icon = "branch"
     title = "If"
     description = "Continues on `true` or `false`."
     Config = IfConfig
@@ -39,7 +45,7 @@ class If(_Control):
 
 class SwitchCase(_Strict):
     port: str = literal_only(pattern=r"^[a-z][a-z0-9_]{0,30}$")
-    when: bool
+    when: bool = Field(json_schema_extra=cel_widget())
 
 
 class SwitchConfig(_Strict):
@@ -49,6 +55,7 @@ class SwitchConfig(_Strict):
 class Switch(_Control):
     type = "flow.switch"
     version = 1
+    icon = "switch"
     title = "Switch"
     description = "Continues on the first case whose condition holds, otherwise on `default`."
     Config = SwitchConfig
@@ -79,6 +86,7 @@ class LoopOutput(BaseModel):
 class Loop(_Control):
     type = "flow.loop"
     version = 1
+    icon = "repeat"
     title = "Loop"
     description = "Runs the `body` region once per item, then continues on `done`."
     Config = LoopConfig
@@ -88,7 +96,7 @@ class Loop(_Control):
 
 class FilterConfig(_Strict):
     items: list[Any]
-    predicate: bool = value_kinds("cel")
+    predicate: bool = value_kinds("cel", json_schema_extra=cel_widget())
 
 
 class FilterOutput(BaseModel):
@@ -99,6 +107,7 @@ class FilterOutput(BaseModel):
 class Filter(_Control):
     type = "flow.filter"
     version = 1
+    icon = "filter"
     title = "Filter"
     description = "Keeps the items for which the predicate holds. Each item is a separate evaluation."
     Config = FilterConfig
@@ -112,6 +121,7 @@ class SetVariablesConfig(_Strict):
 class SetVariables(_Control):
     type = "flow.set_variables"
     version = 1
+    icon = "variable"
     title = "Set variables"
     Config = SetVariablesConfig
 
@@ -123,6 +133,7 @@ class DelayConfig(_Strict):
 class Delay(_Control):
     type = "flow.delay"
     version = 1
+    icon = "timer"
     title = "Delay"
     Config = DelayConfig
 
@@ -134,6 +145,7 @@ class WaitUntilConfig(_Strict):
 class WaitUntil(_Control):
     type = "flow.wait_until"
     version = 1
+    icon = "calendar-clock"
     title = "Wait until"
     Config = WaitUntilConfig
 
@@ -141,6 +153,7 @@ class WaitUntil(_Control):
 class Stop(_Control):
     type = "flow.stop"
     version = 1
+    icon = "stop"
     title = "Stop"
     description = "Ends the run as succeeded."
     ports = ()
@@ -153,6 +166,7 @@ class FailConfig(_Strict):
 class Fail(_Control):
     type = "flow.fail"
     version = 1
+    icon = "alert"
     title = "Fail"
     description = "Ends the run as failed."
     Config = FailConfig
@@ -167,6 +181,7 @@ class RunWorkflowConfig(_Strict):
 class RunWorkflow(_Control):
     type = "flow.run_workflow"
     version = 1
+    icon = "workflow"
     title = "Run workflow"
     description = "Runs another workflow's version pinned at publish, and returns its outputs."
     Config = RunWorkflowConfig
@@ -180,6 +195,7 @@ class TransformConfig(_Strict):
 class Transform(_Control):
     type = "flow.transform"
     version = 1
+    icon = "transform"
     title = "Transform"
     description = "Builds an object from values, references and expressions."
     Config = TransformConfig
