@@ -74,7 +74,8 @@ def upgrade() -> None:
             name="plugin_calls_verify",
         ),
         sa.CheckConstraint(
-            "(connection_id IS NULL) = (connection_revision IS NULL AND type_hash IS NULL)", name="plugin_calls_revision"
+            "(connection_id IS NULL) = (connection_revision IS NULL AND type_hash IS NULL)",
+            name="plugin_calls_revision",
         ),
         sa.CheckConstraint("(connection_revision IS NULL) = (type_hash IS NULL)", name="plugin_calls_type_hash"),
         sa.ForeignKeyConstraint(
