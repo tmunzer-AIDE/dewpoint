@@ -220,3 +220,12 @@ tenant erasure removes calls by their foreign key (cascade).
 - Ruling: the API keeps decrypting a secret before asking for a verification, to record `secret_unreadable` without a
   call; it no longer holds an outbound HTTP client at all - verify was its last outbound request (D3) - cost if wrong:
   none.
+- Ruling: a start-form picker is `x-dewpoint-picker: {node, field, connection}` on a top-level string field of the input
+  schema, its connection written literally and recorded in `connection_ids` - the start form shows top-level fields,
+  a picked value is text, and the connection can't then be deleted while the workflow is enabled - cost if wrong: a
+  picker on a nested or non-string field needs a new form.
+- Ruling: a start form's options need `run.start`, through the connection the publisher wrote, not `connection.use` -
+  publishing the picker is the publisher's consent, and a run would use the connection with the same authority -
+  cost if wrong: an operator sees option labels (site names) through a connection they couldn't name themselves.
+- Ruling: a picker's node isn't part of the version's closure: retiring it stops the start form listing choices (the
+  field stays typeable), never a run - the node isn't run - cost if wrong: none.
