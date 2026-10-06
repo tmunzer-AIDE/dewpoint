@@ -271,3 +271,17 @@ def test_a_verification_fits_what_is_stored(result: VerifyResult) -> None:
     with pytest.raises(_Refused) as raised:
         _verify_answer(result)
     assert raised.value.code == "invalid_result"
+
+
+def test_an_option_is_plain_text() -> None:
+    """A `str` subclass could answer the secret check's `in` as it likes (the 3a-2 review's finding 12)."""
+    from dewpoint.apps.worker.plugin_calls import _options_answer
+    from dewpoint.sdk import Option
+
+    class Sly(str):
+        def __contains__(self, other: object) -> bool:
+            return False
+
+    with pytest.raises(_Refused) as raised:
+        _options_answer([Option(value="v", label=Sly("Site 1"))])
+    assert raised.value.code == "invalid_result"

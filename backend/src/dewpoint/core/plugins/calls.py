@@ -15,10 +15,29 @@ from datetime import datetime
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dewpoint.sdk import calls as sdk_calls
+from dewpoint.sdk import net as sdk_net
+
 PURPOSE = "plugin.call"  # an answer is sealed under the tenant's data key with this purpose, the call's id as context
 CHANNEL = "dewpoint_plugin_calls"  # NOTIFY wakes the workers; it carries nothing
 EXPIRES_S = 30.0
 LEASE_S = 15.0
+
+
+# The only failure codes a call shows: the SDK's own transport errors' and the plugin-call codes (the 3a-2 review's
+# finding 12). Anything else is shown as `unavailable`.
+SDK_CODES = frozenset(
+    cls.code for module in (sdk_net, sdk_calls) for cls in vars(module).values()
+    if isinstance(cls, type) and issubclass(cls, sdk_net.TransportError)
+)  # fmt: skip
+CODES = SDK_CODES | frozenset({
+    "timeout", "plugin_failed", "connection_changed", "invalid_field", "invalid_result", "result_refused",
+    "result_too_large", "unavailable",
+})  # fmt: skip
+
+
+def shown(code: str | None) -> str:
+    return code if code in CODES else "unavailable"
 
 
 @dataclass(frozen=True)
@@ -176,7 +195,7 @@ async def answer(s: AsyncSession, tenant_id: uuid.UUID, call_id: uuid.UUID, toke
 
 async def refuse(s: AsyncSession, tenant_id: uuid.UUID, call_id: uuid.UUID, token: uuid.UUID, error: str) -> bool:
     """Records why the call has no answer, fenced as `answer`."""
-    done = await s.execute(_REFUSE, {"i": call_id, "t": tenant_id, "token": token, "e": error[:64]})
+    done = await s.execute(_REFUSE, {"i": call_id, "t": tenant_id, "token": token, "e": shown(error)})
     return bool(getattr(done, "rowcount", 0) == 1)
 
 

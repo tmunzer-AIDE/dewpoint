@@ -148,7 +148,7 @@ class CallContext:
 
 
 def _strings(value: Any) -> Iterable[str]:
-    if isinstance(value, str):
+    if type(value) is str:  # exactly: a subclass could answer `in` as it likes
         yield value
     elif isinstance(value, dict):
         for k, v in value.items():
@@ -165,8 +165,8 @@ def _options_answer(found: Any) -> dict[str, Any]:
     if len(found) > MAX_OPTIONS:
         raise _Refused("result_too_large")
     for o in found:
-        if not isinstance(o.value, str) or not isinstance(o.label, str) or not 0 < len(o.label) <= MAX_LABEL:
-            raise _Refused("invalid_result")
+        if type(o.value) is not str or type(o.label) is not str or not 0 < len(o.label) <= MAX_LABEL:
+            raise _Refused("invalid_result")  # exactly `str`: a subclass could answer the secret check as it likes
         if len(o.value) > MAX_VALUE:
             raise _Refused("result_too_large")
     return {"options": [{"value": o.value, "label": o.label} for o in found]}
@@ -313,7 +313,7 @@ class PluginCallServer:
                 await self._finish(claimed, None, e.code)
                 return
             except Exception as e:
-                log.warning("plugin_call_unsealed", kind=claimed.kind, error=type(e).__name__)
+                log.warning("plugin_call_unsealed", kind=claimed.kind, error=logs.error_class(e))
                 await self._finish(claimed, None, "unavailable")
                 return
             await self._finish(claimed, sealed, None)

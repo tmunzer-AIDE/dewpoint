@@ -446,3 +446,32 @@ async def test_a_start_form_lists_nothing_a_run_couldnt_use(
     assert (unrecorded.status_code, unrecorded.json()) == (422, {"error": "connection_unavailable"})
     assert (off.status_code, off.json()) == (409, {"error": "workflow_disabled"})
     assert await _calls_left(owner_sessionmaker) == 0
+
+
+@pytest.mark.parametrize(
+    ("outcome", "status", "error"),
+    [
+        (asking.Outcome(answer={"options": [{"value": str(i), "label": "x"} for i in range(1001)]}), 502,
+         "invalid_result"),
+        (asking.Outcome(answer={"options": [{"value": "v", "label": ""}]}), 502, "invalid_result"),
+        (asking.Outcome(answer={"options": [{"value": "v" * 1001, "label": "x"}]}), 502, "invalid_result"),
+        (asking.Outcome(error="not a code: it says whatever"), 502, "unavailable"),
+        (asking.Outcome(error="read_only"), 502, "read_only"),
+    ],
+)  # fmt: skip
+def test_the_api_shows_only_what_the_rulings_allow(outcome: asking.Outcome, status: int, error: str) -> None:
+    """The API checks a worker's answer again (the 3a-2 review's finding 12): its limits, and only fixed codes."""
+    from fastapi import HTTPException
+
+    from dewpoint.apps.api.routes.node_types import options_reply
+
+    with pytest.raises(HTTPException) as raised:
+        options_reply(outcome)
+    assert (raised.value.status_code, raised.value.detail) == (status, {"error": error})
+
+
+def test_a_verification_shows_only_a_fixed_code() -> None:
+    from dewpoint.core.connections.service import shown_code
+
+    assert shown_code("egress_refused") == "egress_refused"
+    assert shown_code("whatever a worker wrote") == "unavailable"

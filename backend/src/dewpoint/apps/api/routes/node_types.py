@@ -15,6 +15,7 @@ from dewpoint.core.models.connections import Connection
 from dewpoint.core.plugins import asking, calls, registry
 
 router = APIRouter(prefix="/api/v1", tags=["node-types"])
+MAX_OPTIONS, MAX_VALUE, MAX_LABEL = 1000, 1000, 200  # the ruled limits, checked again on the API's side
 
 
 @router.get("/node-types", dependencies=[Depends(active_session)])
@@ -55,11 +56,20 @@ def options_reply(outcome: asking.Outcome) -> dict[str, Any]:
     if outcome.error == "connection_changed":
         raise HTTPException(409, detail={"error": "connection_changed"})
     if outcome.error is not None:
-        raise HTTPException(502, detail={"error": outcome.error})
+        raise HTTPException(502, detail={"error": calls.shown(outcome.error)})
     found = (outcome.answer or {}).get("options")
-    if not isinstance(found, list) or not all(
-        isinstance(o, dict) and set(o) == {"value", "label"} and all(isinstance(v, str) for v in o.values())
-        for o in found
+    if (
+        not isinstance(found, list)
+        or len(found) > MAX_OPTIONS
+        or not all(
+            isinstance(o, dict)
+            and set(o) == {"value", "label"}
+            and type(o["value"]) is str
+            and type(o["label"]) is str
+            and len(o["value"]) <= MAX_VALUE
+            and 0 < len(o["label"]) <= MAX_LABEL
+            for o in found
+        )
     ):
         raise HTTPException(502, detail={"error": "invalid_result"})
     return {"options": found}

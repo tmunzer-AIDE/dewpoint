@@ -233,6 +233,11 @@ type Asker = Callable[[Callable[[AsyncSession], Awaitable[uuid.UUID]]], Awaitabl
 DETAIL_RE = re.compile(r"^[a-z0-9_]{1,40}$")  # what `status_detail` holds
 
 
+def shown_code(code: str | None) -> str:
+    """A worker's failure code as a connection's status shows it: one of the fixed codes, else `unavailable`."""
+    return calls.shown(code)
+
+
 def _checked(answer: dict[str, Any] | None) -> tuple[str, str, str | None]:
     """A worker's verification answer, checked again: (status, detail, privilege)."""
     ok, detail, privilege = (answer or {}).get("ok"), (answer or {}).get("detail"), (answer or {}).get("privilege")
@@ -282,7 +287,7 @@ async def verify_connection(
     if outcome.timed_out:
         raise VerificationUnansweredError()
     discarded = outcome.gone or outcome.error == "connection_changed"
-    result = ("error", outcome.error, None) if outcome.error is not None else _checked(outcome.answer)
+    result = ("error", shown_code(outcome.error), None) if outcome.error is not None else _checked(outcome.answer)
     failure: Exception | None = None
     async with sessionmaker() as fresh, fresh.begin():
         await tenant_scope(fresh, ctx.tenant_id)
