@@ -622,7 +622,9 @@ class Execution:
             try:
                 await workflow.get_external_workflow_handle(workflow_id).signal(name, args=args)
             except Exception:  # the child ended meanwhile: nothing reads the answer
-                workflow.logger.warning("budget_signal_undelivered", extra={"to": workflow_id, "signal": name})
+                workflow.logger.warning(
+                    "budget_signal_undelivered", extra={"signal_to": workflow_id, "signal_name": name}
+                )
 
         self._signals.append(asyncio.create_task(send()))
 
