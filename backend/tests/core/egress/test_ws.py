@@ -152,6 +152,18 @@ async def test_a_header_the_handshake_owns_or_a_malformed_one_is_refused(headers
     assert seen.connections == 0
 
 
+async def test_a_header_name_ending_in_a_line_break_is_refused_before_anything() -> None:
+    """`$` also matches before a final "\\n": the name must be a token to its very end, or the handshake would carry
+    the line break."""
+    resolver = Resolver({"stream.test": ["127.0.0.1"]})
+    w = GuardedWebsocket(Guard(resolver, guard({}).allowlist), TENANT, ssl_context=tls(NAMES).client_context())
+    with pytest.raises(InvalidRequestError) as refused:
+        await w.open("wss://stream.test/s", {"X-Test\n": "x"})
+    await w.aclose()
+    assert refused.value.reason == "header"
+    assert resolver.asked == []
+
+
 async def test_a_certificate_for_another_name_fails_tls_verification() -> None:
     async with server(names=("other.test",)) as (port, seen):
         w = websocket()

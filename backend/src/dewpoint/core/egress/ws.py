@@ -80,7 +80,7 @@ def _target(url: str) -> tuple[str, int]:
 
 def _headers(headers: Mapping[str, str]) -> dict[str, str]:
     for name, value in headers.items():
-        if not isinstance(name, str) or not isinstance(value, str) or not HEADER_NAME.match(name):
+        if not isinstance(name, str) or not isinstance(value, str) or not HEADER_NAME.fullmatch(name):
             raise InvalidRequestError("header")
         lowered = name.lower()
         if lowered in RESERVED_HEADERS or lowered.startswith("sec-websocket-") or any(c in value for c in "\r\n\0"):
