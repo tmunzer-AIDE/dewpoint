@@ -2,9 +2,12 @@
 """The leader's Temporal calls' probe (the 2b-4b plan's M1b; the owner's D16): each leader pass, its calls and its time
 per item, driven against Temporal's CLI dev server (real time) with a backlog of 1, 10 and 50 items; the whole cycle
 with every pass's backlog full; `keys retire`'s proof at 10, 100 and 1,000 executions; and a closed execution's
-history read at 1,000 and 5,000 events. Every call to Temporal is timed where the SDK makes it
-(`ServiceClient._rpc_call`), with the deadline it carried, if any. A run by hand, never in CI (skipped unless
-`DEWPOINT_PROBE` is set); its results go to `DEWPOINT_PROBE_OUT` (JSON). From `backend/`:
+history read at 1,000 and 5,000 events. Since the owner's D16 ruling, also each item's worst shapes: run evidence
+over long histories, a schedule with many incarnations (its misses, its tombstone, its strays found in Temporal),
+dispatch's starts and matching's events (every dispatcher's, every cycle), and a whole cycle with all of them.
+Every call to Temporal is timed where the SDK makes it (`ServiceClient._rpc_call`), with the deadline it carried, if
+any. A run by hand, never in CI (skipped unless `DEWPOINT_PROBE` is set); its results go to `DEWPOINT_PROBE_OUT`
+(JSON). From `backend/`:
 
     DEWPOINT_PROBE=1 DEWPOINT_PROBE_OUT=leader.json .venv/bin/pytest tests/probes/test_leader_calls.py -p no:randomly
 
@@ -23,15 +26,21 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import text
 from temporalio.client import Client
 from temporalio.testing import WorkflowEnvironment
 
 from dewpoint.apps import schedules
-from dewpoint.apps.dispatcher import cancels, evidence, reconcile, schedule_sync
+from dewpoint.apps.dispatcher import cancels, dispatch, evidence, matching, reconcile, schedule_sync
+from dewpoint.apps.dispatcher.recount import recount_once
 from dewpoint.core.db import tenant_scope
 from dewpoint.engine.runtime.ids import run_workflow_id
-from tests.apps.test_admission import KEYS, TOKEN, current, published
+from tests.apps.dispatcher.inbound import bind, inbound, sealed
+from tests.apps.dispatcher.support import BUILD, workers
+from tests.apps.test_admission import KEYS, TOKEN, admit, current, published
+from tests.core.ingress.support import RECORD
 from tests.core.retention.support import request, run, sql, tenant
+from tests.probes.ingress_load import FAST
 from tests.support.keys import FIXTURE_CONVERTER
 
 pytestmark = [
@@ -279,6 +288,123 @@ async def test_history_read(events, server) -> None:
     await measured("history_read", events, server.client, read)
 
 
+# --- each item's worst shapes (the owner's D16 ruling) ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("events", (1_000, 5_000))
+async def test_run_evidence_long_histories(events, server, owner_sessionmaker, dispatch_sessionmaker) -> None:
+    """Five due rows, each a closed execution of `events` events: a describe, then its whole history, 250 events a
+    page (Temporal's limit is 51,200 events, about 205 pages)."""
+    await _evidence(owner_sessionmaker, server.client, 5, signals=events)
+    await measured(
+        f"run_evidence_{events}_events",
+        5,
+        server.client,
+        lambda: evidence.check_evidence(dispatch_sessionmaker, server.client, retention=RETENTION),
+    )
+
+
+async def _incarnated(k: int, owner: Any, api: Any, admin: Any, dispatch: Any, settings: Any, client: Client) -> Any:
+    """A schedule synced (its first incarnation, number 1, created in Temporal), then `k - 1` later incarnations
+    recorded that never landed: its id and tenant."""
+    await _schedules(1, owner, api, admin, dispatch, settings)
+    async with owner() as s:
+        tenant_id, schedule_id = (await s.execute(text(
+            "select tenant_id, id from schedules order by created_at desc, id limit 1"))).one()  # fmt: skip
+    await schedule_sync.sync_one(dispatch, client, Leading(), tenant_id, schedule_id)
+    for number in range(2, k + 1):
+        await sql(owner, "insert into schedule_incarnations (temporal_id, tenant_id, schedule_id, number) "
+                  "values (:i, :t, :s, :n)", i=schedule_sync.incarnation_id(tenant_id, schedule_id, number),
+                  t=tenant_id, s=schedule_id, n=number)  # fmt: skip
+    return tenant_id, schedule_id
+
+
+@pytest.mark.parametrize("k", (1, 5, 20))
+async def test_incarnations(
+    k, server, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """One schedule with `k` incarnations: its misses read (a describe each), then, deleted, its tombstone synced (each
+    described; the one found paused, its count read, and deleted)."""
+    tenant_id, schedule_id = await _incarnated(k, owner_sessionmaker, api_sessionmaker, admin_sessionmaker,
+                                               dispatch_sessionmaker, api_settings, server.client)  # fmt: skip
+    await sql(owner_sessionmaker, "update schedules set misses_checked_at = null")
+    await sql(owner_sessionmaker, "update schedules set misses_checked_at = now() where id <> :s", s=schedule_id)
+    await measured(f"misses_{k}_incarnations", 1, server.client,
+                   lambda: schedule_sync.check_misses(dispatch_sessionmaker, server.client))  # fmt: skip
+    await sql(owner_sessionmaker, "update schedules set input = null, deleted_at = now() - interval '1 minute', "
+              "generation = generation + 1, updated_at = now() where id = :s", s=schedule_id)  # fmt: skip
+    await measured(f"tombstone_{k}_incarnations", 1, server.client,
+                   lambda: schedule_sync.sync_one(dispatch_sessionmaker, server.client, Leading(), tenant_id,
+                                                  schedule_id))  # fmt: skip
+
+
+async def _strays_found(n: int, owner: Any, api: Any, admin: Any, dispatch: Any, settings: Any, client: Client) -> None:
+    """`n` schedules each with a stray in Temporal: its first incarnation, synced, then a second recorded as current."""
+    for _ in range(n):
+        tenant_id, schedule_id = await _incarnated(2, owner, api, admin, dispatch, settings, client)
+        await sql(owner, "update schedule_incarnations set checked_at = null where schedule_id = :s", s=schedule_id)
+
+
+@pytest.mark.parametrize("n", SIZES)
+async def test_strays_found(
+    n, server, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """Strays still in Temporal: a describe each, then paused, counted and deleted."""
+    await _strays_found(n, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker,
+                        api_settings, server.client)  # fmt: skip
+    await measured("strays_found", n, server.client,
+                   lambda: schedule_sync.check_strays(dispatch_sessionmaker, server.client))  # fmt: skip
+
+
+async def _queued(n: int, owner: Any, api: Any, admin: Any, dispatch: Any, settings: Any) -> None:
+    """`n` tenants, each with a request due: one start each."""
+    await current(dispatch)
+    await workers(owner)
+    for _ in range(n):
+        ctx, wf = await published(owner, api, admin, settings)
+        await admit(api, ctx, wf)
+
+
+@pytest.mark.parametrize("n", SIZES)
+async def test_dispatch(
+    n, server, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """Due requests of `n` tenants, every dispatcher's each cycle: a start each, on a queue no worker polls."""
+    await _queued(n, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings)
+    row = await measured("dispatch", n, server.client, lambda: dispatch.dispatch_once(
+        dispatch_sessionmaker, server.client, KEYS, api_settings, BUILD, dispatch.Rotation()))  # fmt: skip
+    assert row["outcome"] == {"started": n}
+
+
+async def _events(n: int, owner: Any, api: Any, admin: Any, dispatch_: Any, ingress: Any, settings: Any) -> None:
+    """`n` sealed events pending on an endpoint bound to one workflow, its buckets never refusing."""
+    ready = await inbound(owner, api, admin, dispatch_, settings)
+    await bind(owner, ready)
+    async with owner() as s, s.begin():
+        await s.execute(text("update webhook_endpoints set " + ", ".join(f"{k} = :{k}" for k in FAST)  # noqa: S608
+                             + " where id = :e"), FAST | {"e": ready.endpoint_id})  # fmt: skip
+    ids = [uuid.uuid4() for _ in range(n)]
+    params = {"e": ready.endpoint_id, "refusal": None, "read": 0, "ids": ids,
+              "sealed": [sealed(ready, i, {"type": "ap_down", "pad": "x" * 500}) for i in ids],
+              "versions": [1] * n, "dedupe": [None] * n, "digests": [None] * n}  # fmt: skip
+    async with ingress() as s, s.begin():
+        await s.execute(RECORD, params)
+
+
+@pytest.mark.parametrize("n", SIZES)
+async def test_matching(
+    n, server, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, ingress_sessionmaker,
+    api_settings,
+) -> None:  # fmt: skip
+    """Pending events, every dispatcher's each cycle: each opened, matched to its binding and its request admitted
+    (no Temporal call: the database's and the codec's time)."""
+    await _events(n, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker,
+                  ingress_sessionmaker, api_settings)  # fmt: skip
+    row = await measured("matching", n, server.client,
+                         lambda: matching.match_once(dispatch_sessionmaker, KEYS, matching.Verified()))  # fmt: skip
+    assert row["outcome"].get("matched") == n, row["outcome"]
+
+
 # --- the whole cycle --------------------------------------------------------------------------------------------------
 
 
@@ -315,3 +441,77 @@ async def test_whole_cycle(
         return done
 
     await measured("whole_cycle", full, server.client, cycle)
+
+
+async def test_whole_cycle_worst_shapes(
+    server, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, ingress_sessionmaker,
+    api_settings,
+) -> None:  # fmt: skip
+    """A cycle as `main.cycle` runs it, but for its observe and its reports (the dev server's build is BUILD): dispatch
+    and matching, then every leader pass, each backlog at 50, in its worst shape here: evidence over histories of 1,000
+    events, schedules with 5 incarnations to read misses of, strays found in Temporal."""
+    full = 50
+    await _queued(full, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings)
+    await _events(full, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker,
+                  ingress_sessionmaker, api_settings)  # fmt: skip
+    ctx = await tenant(owner_sessionmaker)
+    for _ in range(full):
+        rid = await request(owner_sessionmaker, ctx, "started", None)
+        await run(owner_sessionmaker, ctx, None, run_id=rid)
+        await target(server.client, run_workflow_id(str(ctx["t"]), str(rid)), closed=True)
+    await _orphans(owner_sessionmaker, server.client, full)
+    await _cancellable(owner_sessionmaker, server.client, full)
+    await _strays_found(full, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker,
+                        api_settings, server.client)  # fmt: skip
+    incarnated = [
+        (
+            await _incarnated(
+                5,
+                owner_sessionmaker,
+                api_sessionmaker,
+                admin_sessionmaker,
+                dispatch_sessionmaker,
+                api_settings,
+                server.client,
+            )
+        )[1]
+        for _ in range(full)
+    ]
+    await _schedules(full, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker,
+                     api_settings)  # fmt: skip  # new ones, queued for their sync
+    long = await _evidence(owner_sessionmaker, server.client, full, signals=1_000)
+    # Only the worst shapes due: the misses of the schedules of 5 incarnations (their earlier ones not strays yet), the
+    # strays found in Temporal, the evidence of the long histories (not that of the runs made above)
+    await sql(owner_sessionmaker, "update schedules set misses_checked_at = case when id = any(:ids) then null "
+              "else now() end", ids=incarnated)  # fmt: skip
+    await sql(owner_sessionmaker, "update schedule_incarnations set checked_at = now() where schedule_id = any(:ids)",
+              ids=incarnated)  # fmt: skip
+    await sql(owner_sessionmaker, "update execution_evidence set next_check_at = now() + interval '1 day' "
+              "where tenant_id <> :t", t=long["t"])  # fmt: skip
+
+    async def cycle() -> dict[str, Any]:
+        done: dict[str, Any] = {}
+        for name, step in (
+            ("dispatch", lambda: dispatch.dispatch_once(dispatch_sessionmaker, server.client, KEYS, api_settings, BUILD,
+                                                        dispatch.Rotation())),
+            ("matching", lambda: matching.match_once(dispatch_sessionmaker, KEYS, matching.Verified())),
+            ("reconcile", lambda: reconcile.reconcile_once(dispatch_sessionmaker, server.client, KEYS, api_settings)),
+            ("subruns", lambda: reconcile.reconcile_subruns(dispatch_sessionmaker, server.client)),
+            ("cancels", lambda: cancels.send_cancels(dispatch_sessionmaker, server.client)),
+            ("sync", lambda: schedule_sync.sync_schedules(dispatch_sessionmaker, server.client, Leading())),
+            ("misses", lambda: schedule_sync.check_misses(dispatch_sessionmaker, server.client)),
+            ("strays", lambda: schedule_sync.check_strays(dispatch_sessionmaker, server.client)),
+            ("retention", lambda: evidence.Retention()(server.client)),
+            ("evidence", lambda: evidence.check_evidence(dispatch_sessionmaker, server.client, retention=RETENTION)),
+            ("recount", lambda: recount_once(dispatch_sessionmaker)),
+        ):  # fmt: skip
+            calls = Calls()
+            with calls.watching(server.client):
+                t0 = time.monotonic()
+                outcome = await step()
+            done[name] = {"outcome": outcome if isinstance(outcome, dict) else str(outcome),
+                          "seconds": round(time.monotonic() - t0, 3),
+                          "calls": sum(v["calls"] for v in calls.summary().values())}  # fmt: skip
+        return done
+
+    await measured("whole_cycle_worst_shapes", full, server.client, cycle)
