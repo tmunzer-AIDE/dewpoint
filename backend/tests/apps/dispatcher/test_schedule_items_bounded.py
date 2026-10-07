@@ -6,7 +6,7 @@ left; the stray pass reaches every earlier one each hour. Misses keep their five
 incarnation that may still miss a firing (unpaused once, or from before the migration) until it's verified paused for
 its delete, its count recorded, or gone: each is its own item, one describe; the API shows the accounting stale when
 one wasn't read within those five minutes. Counted in calls, against the dev server. Under the passes' soft budget
-(the owner's D16 review of checkpoint 3): each item's calls at most its pass's (`budget.CALLS`) on its longest path; a
+(the owner's D16 review of checkpoint 3): each item's calls at most its pass's (`calls.CALLS`) on its longest path; a
 slow call ends a pass's admission once its item ends, and the next passes take the rest; a pass stopped by a slow item
 takes another first next time (slowness injected on the SDK's RPC path, beneath the budget's own timing)."""
 
@@ -30,7 +30,7 @@ from temporalio.client import (
 from temporalio.testing import WorkflowEnvironment
 
 from dewpoint.apps import schedules
-from dewpoint.apps.dispatcher import budget, schedule_sync
+from dewpoint.apps.dispatcher import budget, calls, schedule_sync
 from dewpoint.core.db import tenant_scope
 from dewpoint.engine.runtime.ids import schedule_workflow_id
 from tests.apps.dispatcher.test_leader_deadlines import recorded
@@ -140,7 +140,8 @@ async def test_misses_read_each_incarnation_that_may_miss_a_firing_on_its_own_ev
         with recorded(server.client) as seen:
             done = await schedule_sync.check_misses(dispatch_sessionmaker, server.client)
         passes.append((done["checked"], len(seen)))
-    assert passes == [(50, 50), (50, 50), (0, 0)]
+    per = calls.CALLS["misses"]  # calls an item, at most
+    assert passes == [(50, 50 * per), (50, 50 * per), (0, 0)]
     await sql(owner_sessionmaker, "update schedule_incarnations set misses_checked_at = now() - interval '6 minutes' "
               "where schedule_id = :s", s=schedule_id)  # fmt: skip
     assert (await schedule_sync.check_misses(dispatch_sessionmaker, server.client))["checked"] == 50
@@ -344,7 +345,7 @@ async def test_a_live_schedules_sync_makes_at_most_its_calls_on_its_longest_path
 ) -> None:
     """Its current incarnation never landed: described, described again under its lock, a new one created, described,
     updated, read back, its creation wait counted; then `EARLIER` earlier ones described, the last of them found
-    (landed late), paused: `budget.CALLS["sync"]`, no more."""
+    (landed late), paused: `calls.CALLS["sync"]`, no more."""
     ctx, _, schedule_id = ready
     assert await sync(server, dispatch_sessionmaker, ctx, schedule_id) == "synced"
     [first] = await incarnations(schedule_id)
@@ -353,7 +354,7 @@ async def test_a_live_schedules_sync_makes_at_most_its_calls_on_its_longest_path
     await landed_late(server, made[0])  # the oldest of the four the visit reaches
     with described(server.client) as seen:
         assert await sync(server, dispatch_sessionmaker, ctx, schedule_id) == "pending"
-    assert len(seen) == budget.CALLS["sync"], seen
+    assert len(seen) == calls.CALLS["sync"], seen
 
 
 async def test_a_stray_is_paused_then_deleted_each_visit_at_most_its_calls(
@@ -370,7 +371,7 @@ async def test_a_stray_is_paused_then_deleted_each_visit_at_most_its_calls(
         with described(server.client) as seen:
             visits.append((await schedule_sync.check_strays(dispatch_sessionmaker, server.client), len(seen)))
     assert visits[0][0].get("held") == 1 and visits[1][0].get("deleted") == 1
-    assert [calls for _, calls in visits] == [budget.CALLS["strays"]] * 2
+    assert [calls for _, calls in visits] == [calls.CALLS["strays"]] * 2
 
 
 async def test_a_slow_call_ends_the_misses_pass_once_its_item_ends_and_the_next_passes_take_the_rest(

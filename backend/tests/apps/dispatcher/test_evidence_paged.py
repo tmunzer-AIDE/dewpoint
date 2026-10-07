@@ -29,6 +29,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import WorkflowEnvironment
 
 from dewpoint.apps.dispatcher import evidence
+from dewpoint.apps.dispatcher.calls import CALLS
 from dewpoint.engine.runtime.ids import run_workflow_id
 from tests.apps.dispatcher.test_leader_deadlines import recorded
 from tests.apps.dispatcher.test_run_evidence import _root
@@ -168,7 +169,7 @@ async def test_a_history_at_temporals_limit_is_read_in_bounded_visits_each_from_
         outcome = await evidence._check(dispatch_sessionmaker, Process(served), ctx["t"], row, RETENTION)
         visits.append((outcome, list(served.calls)))
     assert [outcome for outcome, _ in visits] == ["reading"] * 25 + ["read"]
-    assert all(len(calls) <= 1 + evidence.PAGES for _, calls in visits)
+    assert all(len(calls) <= CALLS["evidence"] for _, calls in visits)
     assert [c for _, calls in visits for c in calls] == ["describe", *(f"page {n}" for n in range(LIMIT_PAGES))]
     children = await _recorded_children(owner_sessionmaker, ctx["t"], root)
     never_started = served.children[LIMIT_PAGES - 1]

@@ -31,22 +31,6 @@ DEGRADED_ALERT_S = 300.0  # a pass a slow call stopped alerts at most this often
 log = structlog.get_logger("dewpoint.dispatcher.budget")
 _alerted: dict[str, float] = {}  # per pass: when it last alerted
 
-# The most Temporal calls one item of each pass makes, from its code's longest path (each pinned by a test):
-CALLS = {
-    "dispatch": 2,  # its start; already started, its history's first page (verified against it)
-    "reconcile": 2,  # a describe; then a closed run's result, an uncertain start's history page, or, NOT_FOUND, the
-    # namespace (whether it answers)
-    "subruns": 2,  # a describe; then a closed run's result, or, NOT_FOUND, the namespace
-    "cancels": 2,  # the cancel; NOT_FOUND, the namespace
-    "sync": 12,  # live: the current described, described again under its lock, created, described, updated, read back,
-    # its creation wait counted (matching times), up to EARLIER (4) earlier ones described, the one found paused; a
-    # tombstone: the current described, counted, then up to 1 + EARLIER described and each paused or deleted
-    "misses": 1,  # a describe
-    "strays": 2,  # a describe; then a pause or a delete
-    "evidence": 9,  # a describe (on a first visit), then up to PAGES (8) history pages
-    "matching": 0,
-    "recount": 0,
-}
 _visits: dict[str, dict[Hashable, float]] = {}  # per pass: when each item it picked was last taken
 _current: ContextVar["Admitted | None"] = ContextVar("dewpoint_pass", default=None)
 
