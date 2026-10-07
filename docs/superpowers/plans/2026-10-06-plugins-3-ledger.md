@@ -688,3 +688,28 @@ schema, 68 didn't, 1 failed, 13 were skipped (9 with nothing in this org to read
 - The failure: `searchOrgUserMacs` answered in a shape the search node doesn't read (`mist.invalid_answer`).
 - Sizes: wired-client searches about 434 KB a page; 2.25 MB across all answers.
 As shipped, those 69 operations fail their runs (`output_schema_violation` after the request, or `invalid_answer`).
+
+The OAS overlay (2026-10-07, the owner's request after the smoke run, while the upstream description is fixed):
+`backend/src/dewpoint/plugins/mist/data/oas-overlay.json`, 87 patches laid over the vendored file when it's read
+(`oas.document()`), each citing the smoke run and the definition it expects to replace: 43 fields nullable, 39 types
+widened (`start` and `end` of 14 search and count answers and map origins to numbers; `lease_time`, `last_vlan`,
+`mfg_company_id`, `random_mac`, a client's `model`, site settings' `flags` and an AP search result's bandwidths to
+both types seen), required fields dropped from site stats, assets, WxRule usage and AP search results, and
+`searchOrgUserMacs`'s answer an object with `results` and `total` (Mist's shape; the OAS says an array). A second probe
+run with per-branch union detail (`c8c59d8`) pinned the unions: the AP branch's `esl_config` and `usb_config` channels
+and band-6 `standard_power` null; an AP search result without `type`, `mxtunnel_status` or `wlans`, its bandwidths
+integers; a port usage's `reauth_interval` null.
+- Ruling: patches only what the smoke run showed, not every field made nullable - a nullable field makes every
+  reference to it need a default at publish (`ref.conditional`), so blanket nullability would weigh on every workflow
+  reading a Mist output - cost if wrong: a field null in another org's answers still fails its step until patched.
+- Ruling: the patched schemas are the components themselves, so they relax requests too (a PSK's `admin_sso_id` may be
+  sent null, an asset created without `name`, which Mist then refuses) - one description, read the same way in both
+  directions - cost if wrong: a config Mist refuses is caught by Mist (`mist.bad_request`) rather than at publish.
+- Ruling: the vendored file stays pinned; a patch whose target no longer reads as it expects fails the build, so
+  re-vendoring a fixed description retires its patches by test - cost if wrong: none.
+- Ruling: the changed output schemas change the contracts of the registered `@1` node types; they're amended in place,
+  not shipped as `@2`, since no environment runs workflows on Mist nodes yet - a database that already synced them
+  needs its Mist node-type rows reset before the next sync - cost if wrong: such a sync is refused (`contract changed`)
+  until reset. Awaits the owner's confirmation.
+- The user-MAC search now answers one page as Mist sends it (an object, `page` and `limit` in its query) instead of
+  paging headers it never sent; fixture counts move to 181 from examples and 40 from schemas.

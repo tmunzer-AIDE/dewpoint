@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Mist's OpenAPI description as data (plugins-3 D2): `mistsys/mist_openapi`'s `mist.openapi.json` at `COMMIT`,
 vendored gzipped (MIT, its licence beside it) and refused unless its SHA-256 is `SHA256`. Its README says it's for
-documentation, not code generation: the policy map (D28) decides what any operation may do, and overrides the
-description where it's wrong."""
+documentation, not code generation: the policy map (D28) decides what any operation may do, and the overlay
+(`data/oas-overlay.json`) patches the description where Mist's real answers showed it wrong, each patch citing its
+evidence, until the upstream description is fixed."""
 
+import copy
 import gzip
 import hashlib
 import json
@@ -46,9 +48,70 @@ def parse(blob: bytes) -> dict[str, Any]:
 
 
 @cache
+def overlay() -> Mapping[str, Any]:
+    """The reviewed patches laid over the vendored description (`data/oas-overlay.json`)."""
+    found: dict[str, Any] = json.loads((resources.files(__package__) / "data" / "oas-overlay.json").read_text())
+    if found.get("oas_sha256") != SHA256:
+        raise OasUnreadableError("the overlay was written for another description")
+    return found
+
+
+def _nullable(schema: Mapping[str, Any]) -> dict[str, Any]:
+    out = dict(schema)
+    kind = out.get("type")
+    if isinstance(kind, str):
+        out["type"] = [kind, "null"]
+    elif isinstance(kind, list):
+        out["type"] = [*kind, "null"]
+    else:  # a reference or a union: either it, or null
+        keep = {k: v for k, v in out.items() if k in ("description", "title")}
+        out = {**keep, "anyOf": [{k: v for k, v in out.items() if k not in keep}, {"type": "null"}]}
+    return out
+
+
+def overlaid(doc: dict[str, Any], patches: Mapping[str, Any]) -> dict[str, Any]:
+    """`doc` with every patch of `patches` applied, each only once its target reads as it expects: a patch that no
+    longer applies (the description fixed, or changed) raises, naming it."""
+    schemas = doc["components"]["schemas"]
+    for patch in patches["patches"]:
+        op = patch["op"]
+        if op == "answer":
+            name = patch["operation"]
+            spec = next((item[m] for item in doc["paths"].values() for m in METHODS
+                         if isinstance(item.get(m), dict) and item[m].get("operationId") == name), None)  # fmt: skip
+            if spec is None or spec["responses"].get("200") != patch["expect"]:
+                raise OasUnreadableError(f"the overlay's patch of {name}'s answer no longer applies")
+            spec["responses"]["200"] = {
+                "description": "OK", "content": {"application/json": {"schema": copy.deepcopy(patch["to"])}},
+            }  # fmt: skip
+            continue
+        holder = schemas.get(patch["schema"])
+        label = f"{patch['schema']}.{patch.get('property', '')}".rstrip(".")
+        if op == "not_required":
+            required = holder.get("required") if isinstance(holder, dict) else None
+            if not isinstance(required, list) or not set(patch["names"]) <= set(required):
+                raise OasUnreadableError(f"the overlay's patch of {label} no longer applies")
+            holder["required"] = [n for n in required if n not in patch["names"]]
+            continue
+        name = patch["property"]
+        container = holder.get("properties") if isinstance(holder, dict) else None
+        target = holder.get("additionalProperties") if name == "{*}" and isinstance(holder, dict) else (
+            container.get(name) if isinstance(container, dict) else None)  # fmt: skip
+        if not isinstance(target, dict) or any(target.get(k) != v for k, v in patch["expect"].items()):
+            raise OasUnreadableError(f"the overlay's patch of {label} no longer applies")
+        changed = _nullable(target) if op == "nullable" else {**target, "type": copy.deepcopy(patch["to"])}
+        if name == "{*}":
+            holder["additionalProperties"] = changed
+        else:
+            container[name] = changed  # type: ignore[index]
+    return doc
+
+
+@cache
 def document() -> Mapping[str, Any]:
-    """The packaged description. Read once per process; nothing may change it."""
-    return parse((resources.files(__package__) / "data" / "mist.openapi.json.gz").read_bytes())
+    """The packaged description, with the overlay laid over it. Read once per process; nothing may change it."""
+    raw = parse((resources.files(__package__) / "data" / "mist.openapi.json.gz").read_bytes())
+    return overlaid(raw, overlay())
 
 
 def resolve(doc: Mapping[str, Any], node: Any) -> Any:

@@ -121,11 +121,11 @@ def test_a_union_mismatch_says_why_each_branch_failed() -> None:
 
 
 async def test_an_answer_the_node_cant_read_is_described_by_its_shape() -> None:
-    def script(sent: Sent) -> Reply:  # the OAS says this search answers a list
+    def script(sent: Sent) -> Reply:  # the OAS says this list answers an array
         return Reply(200, SECRET)
 
     http, _ = readonly(script)
-    report = await mist_smoke.probe(http, "global_01", ORG, rate=0, nodes=["mist.org_usermacs.search"])
+    report = await mist_smoke.probe(http, "global_01", ORG, rate=0, nodes=["mist.org_sites.list"])
     entry = report["operations"][0]
     assert entry["status"] == "error" and entry["detail"] == "mist.invalid_answer"
     assert entry["answer"] == {"type": "string"}
@@ -133,11 +133,11 @@ async def test_an_answer_the_node_cant_read_is_described_by_its_shape() -> None:
 
 
 async def test_an_object_answer_shows_only_declared_keys() -> None:
-    def script(sent: Sent) -> Reply:
+    def script(sent: Sent) -> Reply:  # the OAS says this list answers an array
         return Reply(200, {"results": "not a list", "total": 1, SECRET: 2})
 
     http, _ = readonly(script)
-    report = await mist_smoke.probe(http, "global_01", ORG, rate=0, nodes=["mist.org_usermacs.search"])
+    report = await mist_smoke.probe(http, "global_01", ORG, rate=0, nodes=["mist.org_sites.list"])
     entry = report["operations"][0]
     assert entry["answer"] == {"type": "object", "keys": ["results", "total"], "other_keys": 1}
     assert SECRET not in json.dumps(report)
