@@ -255,10 +255,11 @@ class _Reader:
             self.kept_bytes += size
         return done
 
-    async def collect(self, session: str, max_duration_s: float) -> dict[str, Any]:
+    async def collect(self, session: str, max_duration_s: float, until: float | None = None) -> dict[str, Any]:
         loop = asyncio.get_running_loop()
         start = loop.time()
-        deadline, quiet_from = start + max_duration_s, start
+        deadline = start + max_duration_s if until is None else min(start + max_duration_s, until)
+        quiet_from = start
         ended: str | None = None
         for found_session, raw in self.pending:
             if found_session == session and self._take(raw):
@@ -313,9 +314,11 @@ async def collect(
     channel: str,
     terminal: bool,
     max_duration_s: float,
+    until: float | None = None,
 ) -> dict[str, Any]:
     """The command's output as D27's streaming contracts promise it: `terminal`, only with its terminal evidence; else
-    a bounded collection, at least one message ended by idle, the maximum duration or that evidence."""
+    a bounded collection, at least one message ended by idle, the maximum duration or that evidence. `until` (the event
+    loop's time) ends the collection sooner, as its maximum duration would: the step's own timeout, less a margin."""
     ws = await _open(connection)
     try:
         reader = _Reader(ctx, ws, channel, terminal)
@@ -324,6 +327,6 @@ async def collect(
         session = answer.body.get("session") if isinstance(answer.body, Mapping) else None
         if not isinstance(session, str) or not session:
             raise no_session()
-        return await reader.collect(session, max_duration_s)
+        return await reader.collect(session, max_duration_s, until)
     finally:
         await ws.close()

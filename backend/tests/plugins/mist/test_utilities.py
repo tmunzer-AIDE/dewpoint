@@ -359,3 +359,28 @@ def test_a_stream_on_an_answer_without_a_session_fails_the_build(monkeypatch: py
     monkeypatch.setattr(policy, "load", lambda: policy.PolicyMap(found.oas_sha256, entries))
     with pytest.raises(ValueError, match="bounceDevicePort"):
         utilities.build()
+
+
+async def test_a_collection_ends_within_the_steps_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review L6: whatever the checks before it took, the collection ends a margin before the step's timeout, as
+    `max_duration`, rather than the attempt being lost to the timeout."""
+    import asyncio  # noqa: PLC0415
+    from datetime import timedelta  # noqa: PLC0415
+
+    kind = node("mist.site_devices.ping")
+    monkeypatch.setattr(kind, "timeout", timedelta(seconds=1.0))
+    monkeypatch.setattr(utilities, "MARGIN_S", 0.4)
+    step, _ = mist("switch", None, line("first\n"))
+    ws_stream = step.connection_.ws.stream
+
+    async def chatty() -> None:
+        for i in range(200):
+            await asyncio.sleep(0.03)
+            ws_stream.queue(line(f"more {i}\n"))
+
+    task = asyncio.create_task(chatty())
+    started = asyncio.get_running_loop().time()
+    out = await run("mist.site_devices.ping", step, body={"host": "8.8.8.8"}, max_duration_s=200)
+    task.cancel()
+    assert out["ended_by"] == "max_duration"
+    assert asyncio.get_running_loop().time() - started < 1.0

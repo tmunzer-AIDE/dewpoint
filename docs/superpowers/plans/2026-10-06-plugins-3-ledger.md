@@ -890,3 +890,9 @@ fixed test-first, and each fix's protection checked by disabling it.
 - L3 (the library writes each handshake header at DEBUG, the token included): its logger is Dewpoint's own, pinned at
   WARNING, so no level of the root logger lets such a line out.
 - The parity note (an attempt's websockets opened after `aclose()`): refused (`InvalidRequest`).
+- L6 (the checks before a collection could take longer than the reviewer's 75 s: three REST requests of up to 60 s
+  each, token waits, opening, the acknowledgement and in-attempt `Retry-After` waits; with a 240 s maximum the attempt
+  could pass its 5-minute timeout, losing its output and repeating the command): the collection ends 30 s before the
+  node's step timeout, counted from when it started running, as `max_duration` would. Ruling: the node's own timeout
+  is the reference; a graph that sets a shorter one cuts the collection by Temporal's timeout instead - cost if wrong:
+  such a step is retried as a timeout (the diagnostics are repeatable).

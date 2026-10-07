@@ -10,6 +10,7 @@ maximum duration; its output is its contract's:
 - a disruptive utility only POSTs: `{accepted: true, completion_known: false}`, and the session when its answer has one.
   It's ambiguous, so a failure after sending is never retried."""
 
+import asyncio
 import uuid
 from collections.abc import Mapping
 from datetime import timedelta
@@ -41,6 +42,7 @@ from dewpoint.sdk.fields import CONNECTION, LITERAL, OPTIONS
 DEVICE_CHECK = "getSiteDevice"  # the read that checks the device's type (reviews.DEVICE_CHECK)
 DEFAULT_DURATION = {"bounded_collection": 60, "stream_terminal_evidence": 120}  # seconds, within the review's maximum
 SIMULATED_SESSION = "00000000-0000-4000-8000-000000000000"
+MARGIN_S = 30.0  # a collection ends this long before the step's timeout, whatever the checks before it took (L6)
 # Free text a utility sends reaches a device's command line through Mist: one token of a host name, an address, an
 # interface, a prefix or a name (review M2). `all` as a selector would mean every port, session or neighbor (M1).
 ONE_WORD = r"^[A-Za-z0-9._:/@-]{1,253}$"
@@ -92,6 +94,7 @@ class MistUtility(MistOperation):
         return self.Output.model_construct(simulated)
 
     async def run(self, ctx: StepContext, config: Any) -> BaseModel:
+        until = asyncio.get_running_loop().time() + self.timeout.total_seconds() - MARGIN_S  # the step's time, at most
         values, body, _ = self._checked(config)
         connection = await ctx.connection(uuid.UUID(values["connection"]))
         client = MistClient(connection)
@@ -104,7 +107,7 @@ class MistUtility(MistOperation):
                 found: Any = await stream.collect(
                     ctx, connection, client, path, sent, channel=stream.channel(values["site_id"], values["device_id"]),
                     terminal=self.review.contract == "stream_terminal_evidence",
-                    max_duration_s=float(values.get("max_duration_s", self.default_duration or 1)),
+                    max_duration_s=float(values.get("max_duration_s", self.default_duration or 1)), until=until,
                 )  # fmt: skip
             except stream.Unmet as e:
                 raise failure(e, repeatable=self.side_effect == SideEffect.IDEMPOTENT) from None
