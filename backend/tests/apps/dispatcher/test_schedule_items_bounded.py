@@ -150,7 +150,7 @@ async def test_a_tombstone_of_many_incarnations_goes_a_few_a_visit_until_none_is
     server, ready, owner_sessionmaker, dispatch_sessionmaker, api_sessionmaker
 ) -> None:
     """34 incarnations, 3 of them landed late: each visit describes at most 1 + `EARLIER` not yet retired (pausing,
-    then deleting, one found), the least recently checked first, beside the sync's own describe of the current one;
+    then deleting, one found), the newest first, beside the sync's own describe of the current one;
     the tombstone is recorded once every one is verified gone: absent after it was seen, or after the deletion
     settled."""
     ctx, _, schedule_id = ready
@@ -180,6 +180,27 @@ async def test_a_tombstone_of_many_incarnations_goes_a_few_a_visit_until_none_is
         left = (await s.execute(text("select count(*) from schedule_incarnations where schedule_id = :s and "
                                      "retired_at is null"), {"s": schedule_id})).scalar_one()  # fmt: skip
     assert left == 0
+
+
+async def test_a_tombstone_pauses_its_current_incarnation_on_its_first_visit(
+    server, ready, owner_sessionmaker, dispatch_sessionmaker, api_sessionmaker
+) -> None:
+    """The owner's review of checkpoint 4 (M3): a tombstone visit takes its newest incarnations first, so the current
+    one, the one likeliest to be there unpaused and firing, is paused on the first visit, not after its older ones."""
+    ctx, _, schedule_id = ready
+    assert await sync(server, dispatch_sessionmaker, ctx, schedule_id) == "synced"  # its current one, live, unpaused
+    [current] = await incarnations(schedule_id)
+    made = await recorded_earlier(owner_sessionmaker, ctx, schedule_id, 8, unpaused=False)  # never landed
+    async with owner_sessionmaker() as s, s.begin():  # numbered before the current one: older
+        await s.execute(text("update schedule_incarnations set number = number - 100 where temporal_id = any(:m)"),
+                        {"m": made})  # fmt: skip
+    assert (await incarnations(schedule_id))[-1] == current
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        await schedules.delete(s, actor_id=ctx.user.id, schedule=await s.get(schedules.Schedule, schedule_id))
+    assert await sync(server, dispatch_sessionmaker, ctx, schedule_id) == "deleting"
+    found = await schedule_sync.described(server.client, current)
+    assert found is not None and found.paused and found.note == schedule_sync.DELETING
 
 
 async def test_a_sync_checks_at_most_a_few_earlier_incarnations_a_visit_for_a_late_create(

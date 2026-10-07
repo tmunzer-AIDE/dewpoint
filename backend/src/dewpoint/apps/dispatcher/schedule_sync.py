@@ -593,11 +593,12 @@ async def sync_one(
             return "gone"
         await _after_read()
         if wanted.schedule is None:  # a tombstone: every incarnation paused, its count read, then deleted
-            # At most 1 + EARLIER a visit, in order, those not yet retired: each found is paused, counted, then deleted
-            # on later visits; each absent retired once that's verified (absent after it was seen, or after the
-            # deletion settled), so every visit moves its few on. The stray check describes each, retired or not,
-            # every hour for good: a create can still land late.
-            visit = [i for i in known if i.retired_at is None]
+            # At most 1 + EARLIER a visit, those not yet retired, newest first: the current one, likeliest there and
+            # unpaused, is paused on the first visit (the owner's review of checkpoint 4, M3). Each found is paused,
+            # counted, then deleted on later visits; each absent retired once that's verified (absent after it was
+            # seen, or after the deletion settled), so every visit moves its few on. The stray check describes each,
+            # retired or not, every hour for good: a create can still land late.
+            visit = [i for i in sorted(known, key=lambda i: -i.number) if i.retired_at is None]
             shown = [(i, await described(client, i.temporal_id)) for i in visit[: 1 + EARLIER]]
             live = [i.temporal_id for i, found in shown if found is not None]
             for i, found in shown:
