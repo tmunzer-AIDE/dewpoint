@@ -151,11 +151,13 @@ HIDDEN = """SELECT s.source IN ('user', 'database user', 'client', 'session') AN
   WHERE r.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database()) AND r.setrole = 0
     AND starts_with(c, 'deadlock_timeout=')
 ) FROM pg_settings s WHERE s.name = 'deadlock_timeout'"""
-# The application's sessions connected (none of the migrating role's: under Postgres 16, a role that creates roles is a
-# member of each), each running with the deadlock_timeout it had when it connected, which no catalogue shows (the
-# owner's review of checkpoint 4, R2)
+# The application's sessions connected to this database (none of the migrating role's: under Postgres 16, a role that
+# creates roles is a member of each), each running with the deadlock_timeout it had when it connected, which no
+# catalogue shows (the owner's review of checkpoint 4, R2). Another database's take no lock on this one's tables, so
+# can't queue behind a step nor join its lock cycle (the review of checkpoint 5, M1)
 CONNECTED = (f"{APP} SELECT count(*) FROM pg_stat_activity a WHERE a.usesysid IN (SELECT oid FROM app) "
-             "AND a.usesysid <> (SELECT oid FROM pg_roles WHERE rolname = current_user)")  # fmt: skip
+             "AND a.usesysid <> (SELECT oid FROM pg_roles WHERE rolname = current_user) "
+             "AND a.datname = current_database()")  # fmt: skip
 ATTESTED = "DEWPOINT_UPGRADE_SETTINGS_ATTESTED"  # =1: the operator's word, as below
 UNITS = {"us": 0.001, "ms": 1, "s": 1_000, "min": 60_000, "h": 3_600_000, "d": 86_400_000}
 

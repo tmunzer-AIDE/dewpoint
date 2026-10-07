@@ -829,6 +829,24 @@ async def test_an_upgrade_with_application_sessions_connected_needs_their_settin
     assert await exists(scratch, "t6") and await exists(scratch, "t7")
 
 
+async def test_application_sessions_of_another_database_need_no_attestation(cluster, scratch, templates,
+                                                                             monkeypatch) -> None:  # fmt: skip
+    """The review of checkpoint 5 (M1), seen in the full suite: the attestation counted application sessions in every
+    database of the cluster, so a fresh database's upgrade refused while another database's application was connected.
+    A session of another database takes no lock on this one's tables, so it can't queue behind a step nor join its lock
+    cycle: only this database's sessions count."""
+    monkeypatch.delenv("DEWPOINT_UPGRADE_SETTINGS_ATTESTED", raising=False)
+    login = f"app_{uuid.uuid4().hex[:8]}"
+    await execute(scratch, f"CREATE ROLE {login} LOGIN PASSWORD 'pw' IN ROLE dewpoint_worker")
+    app = await asyncpg.connect(f"postgresql://{login}:pw@{cluster.split('@', 1)[1]}/{templates['0042']}")
+    try:
+        await run(scratch, lambda c: online.step(c, "elsewhere", "CREATE TABLE t8 (x int)"))
+    finally:
+        await app.close()
+        await execute(scratch, f"DROP ROLE {login}")
+    assert await exists(scratch, "t8")
+
+
 CHANGES = {  # a change to what a step's budget rests on, made while the upgrade runs
     "deadlock_timeout": ["ALTER DATABASE {db} SET deadlock_timeout = '500ms'"],
     "a grant": ["CREATE ROLE {role}", "GRANT SET ON PARAMETER deadlock_timeout TO {role}"],

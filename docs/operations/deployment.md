@@ -64,8 +64,8 @@ run again with `alembic upgrade head`. Two of the database's settings matter:
   when it connected, which no catalogue shows. After any change to it, restart the application's processes (or
   recycle their connection pools), keep it unchanged until the upgrade ends, and attest that to the upgrade:
   `DEWPOINT_UPGRADE_SETTINGS_ATTESTED=1` in the migrating process's environment. While any application session is
-  connected, the upgrade refuses without it; with none connected (a fresh installation, or the application stopped),
-  it needs none.
+  connected to the database being upgraded, the upgrade refuses without it; with none connected (a fresh
+  installation, or the application stopped), it needs none. Sessions of the cluster's other databases don't count.
 - **A step's commit waits for no synchronous standby** (`synchronous_commit = local`): a standby that stops answering
   can't hold a step's locks. Each step is idempotent, and run again if a failover loses it.
 - **A stalled migrating client is cut off.** A step's session left idle in its transaction longer than its budget (a
