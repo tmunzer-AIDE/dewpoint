@@ -384,3 +384,19 @@ async def test_a_collection_ends_within_the_steps_timeout(monkeypatch: pytest.Mo
     task.cancel()
     assert out["ended_by"] == "max_duration"
     assert asyncio.get_running_loop().time() - started < 1.0
+
+
+@pytest.mark.parametrize(
+    ("type_", "body"),
+    [
+        ("mist.site_devices.ping", {"host": "8.8.8.8\n"}),
+        ("mist.site_devices.bounce_port", {"ports": ["ge-0/0/1\n"]}),
+        ("mist.site_devices.clear_bgp", {"neighbor": "10.0.0.1\n", "type": "soft"}),
+        ("mist.site_devices.clear_bgp", {"neighbor": "all\n", "type": "soft"}),
+    ],
+)  # fmt: skip
+def test_a_trailing_newline_isnt_one_word(type_: str, body: Any) -> None:
+    """The owner's review R3: Python's `$` matches before a final newline; the pattern ends at the text's end, in
+    Python and JavaScript alike."""
+    with pytest.raises(ValueError):
+        node(type_).Config.model_validate(_config(type_, body))

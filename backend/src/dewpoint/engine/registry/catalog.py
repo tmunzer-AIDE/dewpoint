@@ -283,7 +283,7 @@ def _host_problems(name: str, host: Any, config_fields: Mapping[str, Any], label
     if set(host) != {"kind", "field", "hosts"} or not isinstance(hosts, Mapping) or not hosts:
         return [f"{name}: a host map needs hosts"]
     out = [f"{name}: {label} {h!r} must be a host name" for h in hosts.values() if not isinstance(h, str)
-           or not HOST_RE.match(h)]  # fmt: skip
+           or not HOST_RE.fullmatch(h)]  # fmt: skip
     prop = config_fields[field]
     enum = prop.get("enum") if isinstance(prop, Mapping) else None
     if not isinstance(enum, list) or sorted(map(str, enum)) != sorted(map(str, hosts)):
@@ -303,7 +303,7 @@ def _stream_problems(
     host = {"kind": "map", "field": stream["field"], "hosts": stream["hosts"]}
     out = _host_problems(name, host, config_fields, label="stream host")
     path = stream["path"]
-    if not isinstance(path, str) or not PATH_RE.match(path):
+    if not isinstance(path, str) or not PATH_RE.fullmatch(path):
         out.append(f"{name}: stream path must be one or more /segments of unreserved characters")
     scopes = stream["rate_scopes"]
     if not isinstance(scopes, list):

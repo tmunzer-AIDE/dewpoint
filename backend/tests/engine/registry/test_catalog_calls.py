@@ -221,3 +221,16 @@ def test_a_connection_types_stream_validates_as_the_sdk_writes_it() -> None:
 def test_a_stream_is_checked(manifest: dict[str, Any], problem: str) -> None:
     problems = validate_plugin_manifest(manifest)
     assert any(problem in p for p in problems), problems
+
+
+@pytest.mark.parametrize(
+    ("manifest", "problem"),
+    [
+        (_streams(lambda s: s.update(path="/ws/v1/stream\n")), "stream path"),
+        (_streams(lambda s: s.update(hosts={"eu": "ws.eu.example.com\n", "us": "ws.example.com"})), "stream host"),
+        (_types(lambda t: t["host"]["hosts"].update(eu="api.eu.example.com\n")), "host 'api.eu.example.com\\n'"),
+    ],
+)  # fmt: skip
+def test_a_trailing_newline_is_refused_as_data_too(manifest: dict[str, Any], problem: str) -> None:
+    problems = validate_plugin_manifest(manifest)
+    assert any(problem in p for p in problems), problems

@@ -150,12 +150,12 @@ class ConnectionType:
         else:
             if not self.Config.model_fields[host.field].is_required():
                 out.append(f"{where} host field {host.field!r} must be required")
-            out += [f"{where} host {h!r} must be a host name" for h in host.hosts.values() if not HOST_RE.match(h)]
+            out += [f"{where} host {h!r} must be a host name" for h in host.hosts.values() if not HOST_RE.fullmatch(h)]
             prop = self.Config.model_json_schema(mode="validation").get("properties", {}).get(host.field, {})
             if sorted(map(str, prop.get("enum", []))) != sorted(host.hosts):
                 out.append(f"{where} host field {host.field!r} must allow exactly the host map's keys")
         path = self.stream.path
-        if not isinstance(path, str) or not PATH_RE.match(path):
+        if not isinstance(path, str) or not PATH_RE.fullmatch(path):
             out.append(f"{where} path must be one or more /segments of unreserved characters")
         for scope in self.stream.rate_scopes:
             out += self._scope_problems(name, scope, config_fields, secret_fields)
@@ -209,7 +209,7 @@ class ConnectionType:
             return [f"{name}: host field {self.host.field!r} isn't a config field"]
         if isinstance(self.host, UrlField):
             return []
-        out = [f"{name}: host {h!r} must be a host name" for h in self.host.hosts.values() if not HOST_RE.match(h)]
+        out = [f"{name}: host {h!r} must be a host name" for h in self.host.hosts.values() if not HOST_RE.fullmatch(h)]
         prop = self.Config.model_json_schema(mode="validation").get("properties", {}).get(self.host.field, {})
         if sorted(map(str, prop.get("enum", []))) != sorted(self.host.hosts):
             out.append(f"{name}: host field {self.host.field!r} must allow exactly the host map's keys")

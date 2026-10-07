@@ -347,3 +347,17 @@ def test_a_streams_failures_are_transport_errors_with_fixed_codes() -> None:
     assert (rejected.code, rejected.status) == ("handshake_rejected", 429)
     assert StreamLost.code == "stream_lost"
     assert "429" not in str(rejected)
+
+
+@pytest.mark.parametrize(
+    ("kind", "problem"),
+    [
+        (_streaming(path="/ws/v1/stream\n"), "stream path"),
+        (_streaming(host=HostMap("region", {"eu": "ws.eu.example.com\n", "us": "ws.example.com"})), "stream host"),
+    ],
+)  # fmt: skip
+def test_a_stream_endpoint_with_a_trailing_newline_is_refused(kind: ConnectionType, problem: str) -> None:
+    """The owner's review R3's class: `re.match` with `$` accepts a final newline."""
+    with pytest.raises(ManifestError) as raised:
+        Plugin("demo", "1.0.0", (), connection_types=(kind,)).manifest()
+    assert any(problem in p for p in raised.value.problems), raised.value.problems

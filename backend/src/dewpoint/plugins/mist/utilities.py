@@ -45,8 +45,10 @@ SIMULATED_SESSION = "00000000-0000-4000-8000-000000000000"
 MARGIN_S = 30.0  # a collection ends this long before the step's timeout, whatever the checks before it took (L6)
 # Free text a utility sends reaches a device's command line through Mist: one token of a host name, an address, an
 # interface, a prefix or a name (review M2). `all` as a selector would mean every port, session or neighbor (M1).
-ONE_WORD = r"^[A-Za-z0-9._:/@-]{1,253}$"
-EVERY = {"pattern": "^[Aa][Ll][Ll]$"}
+# Each pattern ends at the text's very end: Python's `$` also matches before a final newline (the owner's review R3);
+# `(?![\s\S])` means the same in Python and JavaScript.
+ONE_WORD = r"^[A-Za-z0-9._:/@-]{1,253}(?![\s\S])"
+EVERY = {"pattern": r"^[Aa][Ll][Ll](?![\s\S])"}
 CONTRACT_TEXT = {
     "bounded_collection": " Returns the output received until it goes quiet or the maximum duration passes: never"
     " proof that the command finished.",

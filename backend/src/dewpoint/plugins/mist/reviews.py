@@ -547,7 +547,7 @@ def _utility_problems(op: oas.Operation, u: Utility) -> list[str]:
     of its body but the refresh ones; maxima only for its integer parameters (within the OAS's own) and, streaming, its
     duration."""
     name, doc = op.id, oas.document()
-    if op.method != "POST" or not UTILITY_PATH.match(op.path):
+    if op.method != "POST" or not UTILITY_PATH.fullmatch(op.path):
         return [f"{name}: not a device utility"]
     out: list[str] = []
     if u.kind not in KINDS:

@@ -924,3 +924,8 @@ its protection checked by disabling it. A technical review; the rulings above st
 - R1 (an opening under way when the attempt closed returned a live stream): the attempt's close fences openings under
   way; a socket dialed or a handshake completed after it is closed and the opening refused (`InvalidRequest`).
 - R2 (vetting ran outside the 5 s opening bound): the guard's resolution and allowlist read count in it too.
+- R3 (Python's `$` matches before a final newline, so `"8.8.8.8\n"` passed the one-word pattern and reached the POST):
+  the one-word and `all` patterns end with `(?![\s\S])`, the text's very end in Python and JavaScript alike; the
+  stream path and host checks (SDK and catalog, the host check shared with 3a-2's host map) and the utility path
+  check use `fullmatch`. The same `.match` with `$` remains in older manifest validators (plugin names, type keys,
+  ports, icons, topics, header names, scope kinds, a verify's detail): flagged as its own task.
