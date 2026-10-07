@@ -70,7 +70,7 @@ run again with `alembic upgrade head`. Two of the database's settings matter:
   can't hold a step's locks. Each step is idempotent, and run again if a failover loses it.
 - **A stalled migrating client is cut off.** A step's session left idle in its transaction longer than its budget (a
   paused machine, a lost network) is ended by the server, its locks with it, so nothing waits behind it more than
-  about two budgets (2 seconds at most). The upgrade stops there; run it again.
+  about two budgets (2.2 seconds at most). The upgrade stops there; run it again.
 - No session may set its own `deadlock_timeout` lower than the catalogue shows. The upgrade refuses to start while a
   role other than the migrating one is granted `SET` on it, or while a superuser is one of the application's roles
   (`dewpoint_*`) or a member of one. Keep `deadlock_timeout` and those grants unchanged until the upgrade ends: each
