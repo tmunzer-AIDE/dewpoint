@@ -26,11 +26,11 @@ class Flaky(FakeDeployment):
         super().__init__(this_build())
         self.failures = failures
 
-    async def describe_worker_deployment(self, request: Any) -> Any:
+    async def describe_worker_deployment(self, request: Any, **kw: Any) -> Any:
         if self.failures:
             self.failures -= 1
             raise rpc(RPCStatusCode.UNAVAILABLE)
-        return await super().describe_worker_deployment(request)
+        return await super().describe_worker_deployment(request, **kw)
 
 
 class NotLeading:

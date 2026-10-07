@@ -93,7 +93,7 @@ class Live:
         self.asked.append(workflow_id)
 
         class Handle:
-            async def describe(self) -> Any:
+            async def describe(self, **_: Any) -> Any:
                 return SimpleNamespace(status=WorkflowExecutionStatus.RUNNING, close_time=None)
 
         return Handle()

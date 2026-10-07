@@ -62,7 +62,7 @@ class Described:
         status = self.status
 
         class Handle:
-            async def describe(self) -> Any:
+            async def describe(self, **_: Any) -> Any:
                 return SimpleNamespace(status=status, close_time=None)
 
         return Handle()

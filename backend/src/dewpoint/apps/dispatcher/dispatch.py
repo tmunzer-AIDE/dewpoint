@@ -407,7 +407,7 @@ async def verify(client: Client, starting: Starting) -> Outcome:
     workflow_id = run_workflow_id(starting.start.tenant_id, starting.start.run_id)
     try:
         first: Any = None
-        async for event in client.get_workflow_handle(workflow_id).fetch_history_events():
+        async for event in client.get_workflow_handle(workflow_id).fetch_history_events(rpc_timeout=START_DEADLINE):
             first = event
             break
         attributes = first.workflow_execution_started_event_attributes

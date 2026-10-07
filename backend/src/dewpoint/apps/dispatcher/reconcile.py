@@ -39,6 +39,7 @@ GRACE = timedelta(seconds=30)  # longer than a start's own deadline (dispatch.ST
 RECHECK = timedelta(seconds=30)  # each request asked about at most once in this long
 ALERT_AFTER = timedelta(minutes=10)  # an uncertain start still unresolved this long after it was made: an error
 BATCH = 50  # requests per pass
+CALL_DEADLINE = timedelta(seconds=10)  # every call to Temporal here: the SDK sets none (the 2b-4b plan's M1b)
 MISSING_MAX = timedelta(days=1)  # a sub-run whose history is gone waits twice its last gap each time, up to this
 TERMINATED_MESSAGE = "The run's workflow was terminated outside Dewpoint."
 FAILED_MESSAGE = "The run's workflow failed outside its own code (engine 2b spec §7.6)."
@@ -128,7 +129,7 @@ async def _starting(
     answers, back in the queue; anything else, left `starting`."""
     handle = client.get_workflow_handle(run_workflow_id(str(tenant_id), str(request_id)))
     try:
-        await handle.describe()
+        await handle.describe(rpc_timeout=CALL_DEADLINE)
     except RPCError as e:
         if e.status == RPCStatusCode.NOT_FOUND and await namespace_answers(client):
             ref = dispatch.Ref(request_id, tenant_id)
@@ -176,7 +177,9 @@ async def _expected(
 async def namespace_answers(client: Client) -> bool:
     """Whether the namespace is reachable, so a NOT_FOUND is about the execution (§7.6). Any failure: it isn't known."""
     try:
-        await client.workflow_service.describe_namespace(DescribeNamespaceRequest(namespace=client.namespace))
+        await client.workflow_service.describe_namespace(
+            DescribeNamespaceRequest(namespace=client.namespace), timeout=CALL_DEADLINE
+        )
     except Exception:
         return False
     return True
@@ -216,7 +219,7 @@ async def _open(
     reports is recorded, and its slot released, in one transaction. Its own end write wins: never over an ended row."""
     handle = client.get_workflow_handle(run_workflow_id(str(tenant_id), str(run_id)), result_type=RunResult)
     try:
-        described = await handle.describe()  # no run id: the latest execution, past every continue-as-new
+        described = await handle.describe(rpc_timeout=CALL_DEADLINE)  # no run id: the latest, past continue-as-new
     except Exception as e:
         await _missing_or_unanswered(client, e, run_id, "run_history_missing")
         await _checked_alone(sessionmaker, tenant_id, run_id)
@@ -240,7 +243,7 @@ async def _open(
 async def _ended(handle: Any, status: WorkflowExecutionStatus, run_id: uuid.UUID) -> Ended:
     """The end Temporal reports for a closed execution (§7.6)."""
     if status == WorkflowExecutionStatus.COMPLETED:
-        result: RunResult = await handle.result()  # the run's own end, which its end write should have recorded
+        result: RunResult = await handle.result(rpc_timeout=CALL_DEADLINE)  # its own end, as its end write had it
         error = result.error or {}
         return Ended(result.status, error.get("code"), error.get("message"), result.iterations)
     if status == WorkflowExecutionStatus.CANCELED:
@@ -257,7 +260,8 @@ async def _slot(
     """A slot whose run's row has ended: released only once the logical run's latest execution is closed. Its history
     gone is an alert, never a release (the owner's ruling)."""
     try:
-        described = await client.get_workflow_handle(run_workflow_id(str(tenant_id), str(run_id))).describe()
+        handle = client.get_workflow_handle(run_workflow_id(str(tenant_id), str(run_id)))
+        described = await handle.describe(rpc_timeout=CALL_DEADLINE)
     except Exception as e:
         await _missing_or_unanswered(client, e, run_id, "slot_history_missing")
         await _checked_alone(sessionmaker, tenant_id, run_id)
@@ -332,7 +336,7 @@ async def _subrun(
     gone: an alert and no end, as for a root (the owner's ruling)."""
     handle = client.get_workflow_handle(run_workflow_id(str(tenant_id), str(run_id)), result_type=RunResult)
     try:
-        described = await handle.describe()
+        described = await handle.describe(rpc_timeout=CALL_DEADLINE)
     except Exception as e:
         missing = await _missing_or_unanswered(client, e, run_id, "subrun_history_missing")
         await _subrun_checked_alone(sessionmaker, tenant_id, run_id, backoff=missing)

@@ -61,7 +61,7 @@ class Handle:
     def __init__(self, error: BaseException | None) -> None:
         self.error = error
 
-    async def describe(self) -> Any:
+    async def describe(self, **_: Any) -> Any:
         if self.error is not None:
             raise self.error
         raise AssertionError("no execution in this fake")
@@ -71,7 +71,7 @@ class Service:
     def __init__(self, namespace_error: BaseException | None) -> None:
         self.namespace_error = namespace_error
 
-    async def describe_namespace(self, _: Any) -> Any:
+    async def describe_namespace(self, _: Any, **__: Any) -> Any:
         if self.namespace_error is not None:
             raise self.namespace_error
         return object()

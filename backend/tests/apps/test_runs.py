@@ -84,7 +84,7 @@ class FakeDeployment:
     def __init__(self, current: str | None) -> None:
         self.current = current
 
-    async def describe_worker_deployment(self, _request: DescribeWorkerDeploymentRequest) -> Any:
+    async def describe_worker_deployment(self, _request: DescribeWorkerDeploymentRequest, **_: Any) -> Any:
         if self.current is None:
             raise rpc(RPCStatusCode.NOT_FOUND)  # no worker has joined it
         response = DescribeWorkerDeploymentResponse()
