@@ -5,7 +5,7 @@ a visit for a late create, and a tombstone pauses, counts and deletes at most 1 
 left; the stray pass reaches every earlier one each hour. Misses keep their five-minute accounting for every
 incarnation that may still miss a firing (unpaused once, or from before the migration) until it's verified paused for
 its delete, its count recorded, or gone: each is its own item, one describe; the API shows the accounting stale when
-one wasn't read within ten minutes. Counted in calls, against the dev server."""
+one wasn't read within those five minutes and a minute's grace. Counted in calls, against the dev server."""
 
 import contextlib
 import math
@@ -28,6 +28,7 @@ from temporalio.testing import WorkflowEnvironment
 from dewpoint.apps import schedules
 from dewpoint.apps.dispatcher import schedule_sync
 from dewpoint.core.db import tenant_scope
+from dewpoint.engine.runtime.ids import schedule_workflow_id
 from tests.apps.dispatcher.test_leader_deadlines import recorded
 from tests.apps.dispatcher.test_schedule_sync import TIMING, incarnations, sync
 from tests.apps.test_admission import KEYS, TOKEN, current, published
@@ -195,25 +196,83 @@ async def test_a_sync_checks_at_most_a_few_earlier_incarnations_a_visit_for_a_la
     assert len(earlier) <= schedule_sync.EARLIER and earlier == sorted(earlier, reverse=True)
 
 
-async def test_the_api_shows_the_misses_accounting_stale_when_one_wasnt_read_within_ten_minutes(
+async def test_the_api_shows_the_misses_accounting_stale_when_one_wasnt_read_within_five_minutes_and_a_grace(
     server, ready, owner_sessionmaker, dispatch_sessionmaker, api_sessionmaker
 ) -> None:
+    """The owner's ruling 3: every relevant incarnation read within the five-minute cadence, or the accounting reported
+    stale. Stale once one's last read is older than five minutes and a minute's grace for the pass to reach it (the
+    review's I3: ten let a read every nine minutes pass unreported); one never read is stale from its unpause, not
+    from its recording (enabled long after it was made, it isn't stale at once)."""
     ctx, _, schedule_id = ready
     assert await sync(server, dispatch_sessionmaker, ctx, schedule_id) == "synced"
     await recorded_earlier(owner_sessionmaker, ctx, schedule_id, 1, unpaused=True)
-    await sql(owner_sessionmaker, "update schedule_incarnations set misses_checked_at = now() - interval '11 minutes' "
-              "where schedule_id = :s", s=schedule_id)  # fmt: skip
 
     async def accounted() -> Any:
         async with api_sessionmaker() as s, s.begin():
             await tenant_scope(s, ctx.tenant_id)
             return await schedules.accounting(s, schedule_id)
 
-    stale = await accounted()
-    assert any(span["reason"] == "misses_stale" for span in stale.uncounted) and not stale.complete
+    def stale(found: Any) -> bool:
+        return any(span["reason"] == "misses_stale" for span in found.uncounted)
+
+    await sql(owner_sessionmaker, "update schedule_incarnations set misses_checked_at = now() - interval '7 minutes' "
+              "where schedule_id = :s", s=schedule_id)  # fmt: skip
+    found = await accounted()
+    assert stale(found) and not found.complete
+    await sql(owner_sessionmaker, "update schedule_incarnations set misses_checked_at = now() - interval '5 minutes' "
+              "where schedule_id = :s", s=schedule_id)  # fmt: skip
+    assert not stale(await accounted())  # due, within the grace
+    await sql(owner_sessionmaker, "update schedule_incarnations set misses_checked_at = null, recorded_at = now() - "
+              "interval '1 hour', unpause_sent_at = now() - interval '1 minute' where schedule_id = :s",
+              s=schedule_id)  # fmt: skip
+    assert not stale(await accounted())  # enabled a minute ago: due, never read yet
     await only_these_due(owner_sessionmaker, schedule_id)
     await sql(owner_sessionmaker, "update schedule_incarnations set misses_checked_at = null where schedule_id = :s",
               s=schedule_id)  # fmt: skip
     while (await schedule_sync.check_misses(dispatch_sessionmaker, server.client))["checked"]:
         pass
-    assert not any(span["reason"] == "misses_stale" for span in (await accounted()).uncounted)
+    assert not stale(await accounted())
+
+
+async def test_an_incarnation_from_before_the_migration_found_absent_is_retired(
+    server, ready, owner_sessionmaker, dispatch_sessionmaker
+) -> None:
+    """Incarnation 0 (backfilled), never seen, absent from Temporal (its schedule deleted before the migration, or
+    replaced since): once the inventory's cutover is recorded, no writer can create its id again (the old dispatcher is
+    gone; the new sync numbers from 1), so the misses pass retires it, and it's never due again (the review's I2: it
+    was read every five minutes for good)."""
+    ctx, _, schedule_id = ready
+    base = schedule_workflow_id(str(ctx.tenant_id), str(schedule_id))
+    await sql(owner_sessionmaker, "insert into schedule_incarnations (temporal_id, tenant_id, schedule_id, number, "
+              "backfilled) values (:i, :t, :s, 0, true)", i=base, t=ctx.tenant_id, s=schedule_id)  # fmt: skip
+    await only_these_due(owner_sessionmaker, schedule_id)
+    with described(server.client) as seen:
+        assert (await schedule_sync.check_misses(dispatch_sessionmaker, server.client))["checked"] == 1
+    assert seen == [base]
+    await sql(owner_sessionmaker, "update schedule_incarnations set misses_checked_at = now() - interval '6 minutes' "
+              "where schedule_id = :s", s=schedule_id)  # fmt: skip
+    assert (await schedule_sync.check_misses(dispatch_sessionmaker, server.client))["checked"] == 0
+
+
+READ = """SELECT sum(pg_stat_get_xact_tuples_returned(c.oid)) FROM pg_class c
+WHERE c.oid = 'schedule_incarnations'::regclass
+   OR c.oid IN (SELECT indexrelid FROM pg_index WHERE indrelid = 'schedule_incarnations'::regclass)"""
+
+
+async def test_finding_the_misses_candidates_never_reads_the_incarnations_that_cant_miss_a_firing(
+    ready, owner_sessionmaker, dispatch_sessionmaker
+) -> None:
+    """2,000 incarnations never unpaused (a disabled schedule's, say: never read, never retired) beside 60 due: finding
+    a pass's 50 reads about as many rows and index entries as it returns, not every one of the 2,000 (the review's I5:
+    the index kept them at its head)."""
+    ctx, _, schedule_id = ready
+    base = schedule_workflow_id(str(ctx.tenant_id), str(schedule_id))
+    await sql(owner_sessionmaker, "insert into schedule_incarnations (temporal_id, tenant_id, schedule_id, number, "
+              "unpause_sent_at) select :b || '~' || n, :t, :s, n, case when n > 2000 then now() end "
+              "from generate_series(1, 2060) n", b=base, t=ctx.tenant_id, s=schedule_id)  # fmt: skip
+    await only_these_due(owner_sessionmaker, schedule_id)
+    await sql(owner_sessionmaker, "analyze schedule_incarnations")
+    async with dispatch_sessionmaker() as s, s.begin():
+        picked = (await s.execute(text("select temporal_id from incarnation_miss_candidates(50)"))).all()
+        read = (await s.execute(text(READ))).scalar_one()
+    assert len(picked) == 50 and read < 200

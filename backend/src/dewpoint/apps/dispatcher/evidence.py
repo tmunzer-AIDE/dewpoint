@@ -230,10 +230,28 @@ async def _check(sessionmaker: async_sessionmaker[AsyncSession], client: Client,
     try:
         reading = await _read_on(client, workflow_id, reading)
     except RPCError as e:
+        if e.status == RPCStatusCode.INVALID_ARGUMENT and started_from is not None:
+            return await _restarted(sessionmaker, tenant_id, row_id, run_id, started_from)
         if e.status != RPCStatusCode.NOT_FOUND:
             raise
         return await _gone_reading(sessionmaker, tenant_id, row_id, run_id, started_from)
     return await _recorded(sessionmaker, tenant_id, row_id, workflow_id, run_id, started_from, reading, retention)
+
+
+async def _restarted(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, row_id: int,
+                     run_id: str | None, started_from: bytes) -> str:  # fmt: skip
+    """A kept page token Temporal refuses (a server that no longer reads it, the review's I6): the read starts over on
+    the next pass, from a describe and the first page, rather than failing every pass for good. What the pages read
+    before found stays recorded; recording it again changes nothing."""
+    async with sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant_id)
+        row = await s.get(ExecutionEvidence, row_id, with_for_update=True, populate_existing=True)
+        if row is None or (row.run_id, row.read_at, row.read_token) != (run_id, None, started_from):
+            return "moved"
+        row.read_token = row.read_run = row.read_pending = row.read_last_at = None
+        row.next_check_at = await _after(s, timedelta(0))
+    log.warning("execution_evidence_read_restarted", evidence=row_id)
+    return "restarted"
 
 
 async def _gone_reading(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, row_id: int,
@@ -256,19 +274,20 @@ async def _gone_reading(sessionmaker: async_sessionmaker[AsyncSession], tenant_i
 async def _recorded(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, row_id: int,
                     workflow_id: str, run_id: str | None, started_from: bytes | None, reading: _Reading,
                     retention: timedelta | None) -> str:  # fmt: skip
-    """What a visit's pages found, recorded: every child they showed started; then, the read not done, where it
-    stopped (`reading`, due again); done, every child only initiated (by its id alone) and the run it continued as,
-    the row read (`read`)."""
+    """What a visit's pages found, recorded: every child they showed started, and the run it continued as (recorded by
+    the visit that read it: a later one may read only an empty last page, the review's I4); then, the read not done,
+    where it stopped (`reading`, due again); done, every child only initiated (by its id alone), the row read
+    (`read`)."""
     async with sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant_id)
         row = await s.get(ExecutionEvidence, row_id, with_for_update=True, populate_existing=True)
         if row is None or (row.run_id, row.read_at, row.read_token) != (run_id, None, started_from):
             return "moved"
         found = list(reading.children)
+        if reading.continued is not None:
+            found.append((workflow_id, *reading.continued))
         if reading.done:
             found += [(child, None, when) for child, when in reading.initiated.values()]  # may have started: its id
-            if reading.continued is not None:
-                found.append((workflow_id, *reading.continued))
         for child, child_run, when in found:
             if tenant_of(child) != str(tenant_id):
                 raise RuntimeError("A child of another tenant than its parent's.")  # server-built ids: impossible
@@ -308,9 +327,9 @@ async def _unshown(s: AsyncSession, row: ExecutionEvidence, *, record: bool = Tr
 
 async def check_evidence(sessionmaker: async_sessionmaker[AsyncSession], client: Client, *,
                          retention: timedelta | None, batch: int = BATCH) -> dict[str, int]:  # fmt: skip
-    """One pass over the evidence due, each row on its own (`read`, `open`, `retained`, `gone`, `pending`, `lost`,
-    `resolved`, `moved`, `failed`); a row that failed is looked at again later. `retention`: the namespace's, as
-    Temporal reports it, which only schedules when a read execution is next described (None: a day)."""
+    """One pass over the evidence due, each row on its own (`read`, `reading`, `restarted`, `open`, `retained`, `gone`,
+    `pending`, `lost`, `resolved`, `moved`, `failed`); a row that failed is looked at again later. `retention`: the
+    namespace's, as Temporal reports it, which only schedules when a read execution is next described (None: a day)."""
     async with sessionmaker() as s:
         due = (await s.execute(text("select tenant_id, id from execution_evidence_due(:n)"), {"n": batch})).all()
     counts: dict[str, int] = {}

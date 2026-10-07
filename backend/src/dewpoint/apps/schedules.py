@@ -252,7 +252,9 @@ async def delete(s: AsyncSession, *, actor_id: uuid.UUID, schedule: Schedule) ->
     await _audited(s, "schedule.delete", actor_id, schedule)
 
 
-MISSES_STALE = timedelta(minutes=10)  # an incarnation's misses read every five minutes: stale past ten
+# An incarnation's misses are read every five minutes (the owner's ruling 3): stale past that, and a minute's grace for
+# the pass to reach one once it's due
+MISSES_STALE = timedelta(minutes=6)
 
 
 @dataclass(frozen=True)
@@ -299,11 +301,12 @@ async def accounting(s: AsyncSession, schedule_id: uuid.UUID) -> Accounting:
                                   "class": "pending",
                                   "reason": "count_pending" if landed else "awaiting_first_update"}))  # fmt: skip
     # Missed firings are read every five minutes for each incarnation that may still miss one (D16): one not read
-    # within ten leaves the accounting stale, from its last read (or its recording)
+    # within that and the grace leaves the accounting stale, from its last read (never read: from its unpause, or its
+    # recording)
     relevant = [i for i in ids if i.retired_at is None and (i.backfilled or i.unpause_sent_at is not None
                                                             or i.landed_paused is False)]  # fmt: skip
     now: datetime = (await s.execute(select(func.statement_timestamp()))).scalar_one()
-    last = [i.misses_checked_at or i.recorded_at for i in relevant]
+    last = [i.misses_checked_at or i.unpause_sent_at or i.recorded_at for i in relevant]
     if last and min(last) < now - MISSES_STALE:
         spans.append((min(last), {"from": min(last).isoformat(), "to": None, "class": "pending",
                                   "reason": "misses_stale"}))  # fmt: skip

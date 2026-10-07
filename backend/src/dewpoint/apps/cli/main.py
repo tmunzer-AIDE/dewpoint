@@ -12,6 +12,7 @@ from pathlib import Path
 import typer
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest
 from temporalio.client import Client
@@ -588,6 +589,12 @@ INVENTORY_ATTESTED = (
     "every writer from before 0040 (its API, its dispatcher) stopped and unable to restart; no image from before 0040 "
     "deployable"
 )
+# The cutover's lock on schedules, waited for at most this an attempt: a writer arriving meanwhile queues behind the
+# request, so it waits no longer (D15's bar: no writer waits long). Then it gives way and tries again, a pause apart.
+CUTOVER_LOCK_WAIT = "200ms"
+LOCK_NOT_AVAILABLE = "55P03"
+CUTOVER_ATTEMPTS = 60
+CUTOVER_PAUSE_S = 1.0
 
 
 @schedules_cli.command("inventory-cutover")
@@ -605,8 +612,9 @@ def schedules_inventory_cutover(
     0040 polling the admission queue (its identity lacks the tick contract's mark, from the same release), and when
     Temporal can't be asked (exit 3). With --confirm it records once, in one transaction holding off schedules' inserts:
     any schedule without an incarnation (one the capture missed) is caught up first, and the count audited with the
-    attestation. Exit 2 without --attest. Exit 2 when no Temporal namespace is recorded or the configured one isn't it,
-    before any connection. Run as dewpoint_admin."""
+    attestation. That lock is waited for at most `CUTOVER_LOCK_WAIT` an attempt, `CUTOVER_ATTEMPTS` times: still busy,
+    nothing is recorded (exit 1; run it again). Exit 2 without --attest. Exit 2 when no Temporal namespace is recorded
+    or the configured one isn't it, before any connection. Run as dewpoint_admin."""
     if not attest:
         typer.echo("pass --attest: no writer from before migration 0040 runs, or can be deployed again")
         raise typer.Exit(2)
@@ -628,15 +636,28 @@ def schedules_inventory_cutover(
             raise typer.Exit(1)
         if not confirm:
             return "not recorded (a dry run: pass --confirm)"
-        async with s.begin():
-            caught: int | None = (await s.execute(text("SELECT schedule_inventory_cutover_record()"))).scalar_one()
-            if caught is None:
-                return "already recorded"
-            at: datetime = (await s.execute(text("SELECT at FROM schedule_inventory_cutover"))).scalar_one()
-            details: dict[str, object] = {"caught_up": int(caught), "attested": INVENTORY_ATTESTED}
-            await audit_log.record(s, tenant_id=None, actor_id=None, action="schedules.inventory_cutover",
-                                   target_type="platform", target_id="inventory_cutover", details=details)  # fmt: skip
-        return f"recorded the inventory's cutover at {at.isoformat()}; {caught} schedule(s) caught up"
+        for _ in range(CUTOVER_ATTEMPTS):
+            try:
+                async with s.begin():
+                    await s.execute(text("SELECT set_config('lock_timeout', :w, true)"), {"w": CUTOVER_LOCK_WAIT})
+                    caught: int | None = (
+                        await s.execute(text("SELECT schedule_inventory_cutover_record()"))
+                    ).scalar_one()
+                    if caught is None:
+                        return "already recorded"
+                    at: datetime = (await s.execute(text("SELECT at FROM schedule_inventory_cutover"))).scalar_one()
+                    details: dict[str, object] = {"caught_up": int(caught), "attested": INVENTORY_ATTESTED}
+                    await audit_log.record(s, tenant_id=None, actor_id=None, action="schedules.inventory_cutover",
+                                           target_type="platform", target_id="inventory_cutover",
+                                           details=details)  # fmt: skip
+                return f"recorded the inventory's cutover at {at.isoformat()}; {caught} schedule(s) caught up"
+            except DBAPIError as e:
+                if getattr(e.orig, "sqlstate", None) != LOCK_NOT_AVAILABLE:
+                    raise
+            await asyncio.sleep(CUTOVER_PAUSE_S)
+        typer.echo(f"schedules stayed busy: their lock wasn't had within {CUTOVER_LOCK_WAIT} in {CUTOVER_ATTEMPTS} "
+                   "attempts; nothing recorded, run it again")  # fmt: skip
+        raise typer.Exit(1)
 
     typer.echo(asyncio.run(_in_session(_run)))
 

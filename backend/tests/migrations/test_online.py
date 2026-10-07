@@ -295,28 +295,46 @@ async def test_both_paths_upgrade_under_a_continuing_load(cluster, templates, st
     assert max(took for times in load.times.values() for _, took in times) < 1.0
 
 
-# The old application (from before 0040) at work during the upgrade: its API adds a schedule, its dispatcher syncs it
-# (under the schedule's own id in Temporal, as it did every schedule)
+# The old application (from before 0040) at work during the upgrade, each under its own role and its tenant's scope: its
+# API adds a schedule; its dispatcher syncs it (under the schedule's own id in Temporal, as it did every schedule) and
+# records the missed count Temporal shows for that id, as it did every five minutes
+OLD_PICK = """SELECT w.tenant_id, w.id, m.user_id FROM workflows w JOIN memberships m ON m.tenant_id = w.tenant_id
+ORDER BY w.id LIMIT 1"""
 OLD_CREATE = """INSERT INTO schedules (id, tenant_id, workflow_id, mode, created_by, every_s, offset_s, input)
-SELECT :i, w.tenant_id, w.id, 'live', m.user_id, 3600, 0, '\\x01'::bytea FROM workflows w
-JOIN memberships m ON m.tenant_id = w.tenant_id ORDER BY w.id LIMIT 1"""
-OLD_SYNC = "UPDATE schedules SET synced_generation = generation WHERE id = :i"
+VALUES (:i, :t, :w, 'live', :u, 3600, 0, '\\x01'::bytea)"""
+OLD_SYNC = "UPDATE schedules SET synced_generation = generation, misses = :m WHERE id = :i"
+OLD_MISSED = 5
 INVENTORIED = """SELECT count(*) FROM schedule_incarnations i JOIN schedule_intervals v ON v.temporal_id = i.temporal_id
 WHERE i.schedule_id = :i AND i.number = 0 AND i.backfilled AND v.reason = 'before_migration'"""
 
 
+def as_old(conn: Connection, role: str, tenant: uuid.UUID, statement: str, **params: object) -> None:
+    """`statement` as the old application's `role` does it, in its tenant's scope, committed: its own session's row
+    security on (the migration's is off)."""
+    conn.execute(text("BEGIN"))
+    conn.execute(text(f"SET LOCAL ROLE {role}"))
+    conn.execute(text("SET LOCAL row_security = on"))
+    conn.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": str(tenant)})
+    conn.execute(text(statement), params)
+    conn.execute(text("COMMIT"))
+
+
 async def test_a_schedule_the_old_code_makes_after_the_backfill_is_still_inventoried(cluster, templates) -> None:
-    """Right after each batch of 0040's backfills (the last ones included), the old application adds a schedule and
-    syncs it: once the upgrade ends, each has its incarnation 0 and its life before the migration recorded, as the
-    schedules already there have. 0040 captures every schedule added until the inventory's cutover is recorded."""
+    """Right after each batch of 0040's backfills (the last ones included), the old application adds a schedule (its
+    API, as dewpoint_api) and syncs it (its dispatcher, as dewpoint_dispatch), recording the missed count Temporal
+    shows: once the upgrade ends, each has its incarnation 0 and its life before the migration recorded, as the
+    schedules already there have. 0040 captures every schedule added until the inventory's cutover is recorded; the
+    cutover takes each incarnation 0's count as the old dispatcher last recorded it (the review's I1: the new misses
+    pass would have counted that increase again)."""
     url = await copy(cluster, templates["0034"])
     made: list[uuid.UUID] = []
 
     def old_code(conn: Connection, name: str) -> None:
         if name.startswith(("0040 schedule_incarnations backfill", "0040 schedule_intervals backfill")):
+            tenant, workflow, user = conn.execute(text(OLD_PICK)).one()
             made.append(uuid.uuid4())
-            conn.execute(text(OLD_CREATE), {"i": made[-1]})
-            conn.execute(text(OLD_SYNC), {"i": made[-1]})
+            as_old(conn, "dewpoint_api", tenant, OLD_CREATE, i=made[-1], t=tenant, w=workflow, u=user)
+            as_old(conn, "dewpoint_dispatch", tenant, OLD_SYNC, i=made[-1], m=OLD_MISSED)
 
     online.AFTER.append(old_code)
     try:
@@ -327,6 +345,10 @@ async def test_a_schedule_the_old_code_makes_after_the_backfill_is_still_invento
     found = [await scalar(url, INVENTORIED.replace(":i", f"'{i}'")) for i in made]
     assert found == [1] * len(made)
     assert await scalar(url, UNINCARNATED) == 0 and await scalar(url, UNSPANNED) == 0
+    assert await scalar(url, "SELECT schedule_inventory_cutover_record()") == 0  # nothing left to catch up
+    counts = [await scalar(url, f"SELECT misses FROM schedule_incarnations WHERE schedule_id = '{i}' AND number = 0")
+              for i in made]  # fmt: skip
+    assert counts == [OLD_MISSED] * len(made)
 
 
 async def test_once_the_cutover_is_recorded_a_new_schedule_is_the_new_syncs_alone(cluster, templates) -> None:
@@ -336,7 +358,11 @@ async def test_once_the_cutover_is_recorded_a_new_schedule_is_the_new_syncs_alon
     await asyncio.to_thread(upgrade, url)
     await execute(url, "INSERT INTO schedule_inventory_cutover DEFAULT VALUES")
     made = uuid.uuid4()
-    await execute(url, OLD_CREATE.replace(":i", f"'{made}'"))
+    await execute(
+        url,
+        "INSERT INTO schedules (id, tenant_id, workflow_id, mode, created_by, every_s, offset_s, input) "
+        f"SELECT '{made}', p.tenant_id, p.id, 'live', p.user_id, 3600, 0, '\\x01'::bytea FROM ({OLD_PICK}) p",
+    )
     assert await scalar(url, f"SELECT count(*) FROM schedule_incarnations WHERE schedule_id = '{made}'") == 0
 
 
@@ -426,8 +452,10 @@ async def test_a_step_behind_a_held_lock_gives_way_until_it_is_released(cluster,
         finally:
             stop.set()
             await asyncio.gather(*writing)
-    assert gave_way(caplog) and all(m.endswith("(lock)") for m in gave_way(caplog))
-    assert gave_way(caplog)[0].startswith(f"online step {first} ")
+    # Behind the hold, the step gave way on the lock alone; a later step may also give way on its budget, its writers
+    # coming and going while a loaded machine runs it slowly (seen under the parallel suite), and tries again
+    held = [m for m in gave_way(caplog) if m.startswith(f"online step {first} ")]
+    assert held and gave_way(caplog)[0] == held[0] and all(m.endswith("(lock)") for m in held)
     assert await scalar(url, "SELECT version_num FROM alembic_version") == HEAD
     assert max(waits) < 1.0  # the server's deadlock_timeout
 

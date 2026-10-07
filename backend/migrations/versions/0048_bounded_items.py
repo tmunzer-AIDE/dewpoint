@@ -18,13 +18,17 @@ depends_on = None
 
 READ = ["read_token bytea", "read_run text", "read_pending jsonb", "read_last_at timestamptz"]
 RETIRING = ["misses_checked_at timestamptz", "retired_at timestamptz"]
+# An incarnation that may still miss a firing: not yet retired, and sent an unpause once, from before 0040, or landed
+# unpaused. The candidates' filter and their index's predicate, alike: one never unpaused (a disabled schedule's) is
+# never read, so never in the index's way (the review's I5)
+MAY_MISS = "retired_at IS NULL AND (backfilled OR unpause_sent_at IS NOT NULL OR landed_paused IS FALSE)"
 CANDIDATES = [
-    """CREATE FUNCTION incarnation_miss_candidates(max_rows integer) RETURNS TABLE (tenant_id uuid, temporal_id text)
+    f"""CREATE FUNCTION incarnation_miss_candidates(max_rows integer) RETURNS TABLE (tenant_id uuid, temporal_id text)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
-  SELECT i.tenant_id, i.temporal_id FROM schedule_incarnations i
-  WHERE i.retired_at IS NULL AND (i.backfilled OR i.unpause_sent_at IS NOT NULL OR i.landed_paused IS FALSE)
-    AND (i.misses_checked_at IS NULL OR i.misses_checked_at < statement_timestamp() - interval '5 minutes')
-  ORDER BY i.misses_checked_at NULLS FIRST, i.temporal_id
+  SELECT tenant_id, temporal_id FROM schedule_incarnations
+  WHERE {MAY_MISS}
+    AND (misses_checked_at IS NULL OR misses_checked_at < statement_timestamp() - interval '5 minutes')
+  ORDER BY misses_checked_at NULLS FIRST, temporal_id
   LIMIT max_rows
 $$""",
     "REVOKE ALL ON FUNCTION incarnation_miss_candidates(integer) FROM PUBLIC",
@@ -43,7 +47,7 @@ def upgrade() -> None:
              done=exists("column", "retired_at", "schedule_incarnations"))  # fmt: skip
         index(conn, "0048 schedule_incarnations_misses_due",
               "CREATE INDEX CONCURRENTLY IF NOT EXISTS schedule_incarnations_misses_due ON schedule_incarnations "
-              "(misses_checked_at NULLS FIRST, temporal_id) WHERE retired_at IS NULL")  # fmt: skip
+              f"(misses_checked_at NULLS FIRST, temporal_id) WHERE {MAY_MISS}")  # fmt: skip
         step(conn, "0048 incarnation_miss_candidates", *ungranted(*CANDIDATES),
              done=exists("function", "incarnation_miss_candidates(integer)"))  # fmt: skip
         step(conn, "0048 grants", *grants(*CANDIDATES))

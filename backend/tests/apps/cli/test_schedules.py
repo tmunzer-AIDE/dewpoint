@@ -4,8 +4,11 @@ becomes the new dispatcher's and the erasure's to rely on only once every writer
 on the operator's attestation, and an idempotent catch-up has accounted for any schedule its capture missed."""
 
 import asyncio
+import threading
+import time
 import uuid
 
+import asyncpg
 from sqlalchemy import text
 from typer.testing import CliRunner
 
@@ -93,3 +96,85 @@ def test_the_inventory_cutover_is_recorded_once_after_its_catch_up_and_never_whi
     finally:
         sql("delete from schedule_inventory_cutover")
         sql("insert into schedule_inventory_cutover (at) values (:a)", a=kept)
+
+
+def _sql(pg_url: str, statement: str, **params: object) -> list[object]:
+    async def run() -> list[object]:
+        engine = make_engine(pg_url)
+        try:
+            async with make_sessionmaker(engine)() as s, s.begin():
+                found = await s.execute(text(statement), params)
+                return list(found.scalars()) if found.returns_rows else []
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(run())
+
+
+class _Writer:
+    """A schedule writer's open transaction (`ROW EXCLUSIVE` on schedules, as any insert holds until it commits), on a
+    thread of its own until the block ends."""
+
+    def __init__(self, pg_url: str) -> None:
+        self.url = pg_url.replace("postgresql+asyncpg://", "postgresql://")
+        self.held, self.done = threading.Event(), threading.Event()
+        self.thread = threading.Thread(target=lambda: asyncio.run(self._hold()))
+
+    async def _hold(self) -> None:
+        c = await asyncpg.connect(self.url)
+        try:
+            async with c.transaction():
+                await c.execute("LOCK TABLE schedules IN ROW EXCLUSIVE MODE")
+                self.held.set()
+                await asyncio.to_thread(self.done.wait)
+        finally:
+            await c.close()
+
+    def __enter__(self) -> "_Writer":
+        self.thread.start()
+        assert self.held.wait(10)
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.done.set()
+        self.thread.join()
+
+
+def test_the_cutover_waits_for_schedules_writers_only_briefly_and_gives_way_to_them(
+    pg_url, _test_users, monkeypatch
+) -> None:  # fmt: skip
+    """Its lock on schedules (their inserts held off while it catches up) is waited for at most `CUTOVER_LOCK_WAIT` an
+    attempt, so a writer arriving meanwhile, queued behind it, waits no longer; then it gives way and tries again.
+    Still busy after `CUTOVER_ATTEMPTS`, it records nothing and says so (exit 1). Unbounded, one writer left open
+    would have queued every schedule write behind it (the review's M2, held to D15's bar: no writer waits long)."""
+    from dewpoint.apps import tick_contract
+    from dewpoint.apps.cli import main as cli
+
+    async def admission_pollers(settings: object) -> list[str]:
+        return [f"4243@a-new-dispatcher {tick_contract.IDENTITY}"]
+
+    monkeypatch.setattr(cli, "_admission_pollers", admission_pollers)
+    monkeypatch.setattr(cli, "CUTOVER_ATTEMPTS", 3, raising=False)
+    monkeypatch.setattr(cli, "CUTOVER_PAUSE_S", 0.1, raising=False)
+    _recorded(pg_url)
+    _env(monkeypatch, _url_for(pg_url, "dewpoint_admin"), DEWPOINT_KEK_B64=OLD, DEWPOINT_KEK_ID="old")
+    command = ["schedules", "inventory-cutover", "--attest", "--confirm"]
+    [kept] = _sql(pg_url, "select at from schedule_inventory_cutover")
+    _sql(pg_url, "delete from schedule_inventory_cutover")
+    try:
+        answers: list[object] = []
+        with _Writer(pg_url):
+            attempt = threading.Thread(target=lambda: answers.append(CliRunner().invoke(app, command)))
+            started = time.monotonic()
+            attempt.start()
+            attempt.join(20)
+            took = time.monotonic() - started
+        attempt.join()
+        [busy] = answers
+        assert busy.exit_code == 1 and "busy" in busy.output, busy.output  # type: ignore[attr-defined]
+        assert took < 10 and _sql(pg_url, "select count(*) from schedule_inventory_cutover") == [0]
+        done = CliRunner().invoke(app, command)
+        assert done.exit_code == 0 and "recorded the inventory's cutover" in done.output, done.output
+    finally:
+        _sql(pg_url, "delete from schedule_inventory_cutover")
+        _sql(pg_url, "insert into schedule_inventory_cutover (at) values (:a)", a=kept)

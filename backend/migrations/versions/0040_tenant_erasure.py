@@ -372,8 +372,11 @@ BEGIN
 END $$""",
     "REVOKE ALL ON FUNCTION schedule_inventoried() FROM PUBLIC",
     # The cutover, once, after its catch-up, in one transaction, schedules' inserts held off meanwhile: any schedule
-    # without an incarnation (one the capture missed) given its incarnation 0 and its life until then unknown. Its
-    # count, or NULL when recorded already. The key admin's, through `dewpoint schedules inventory-cutover`.
+    # without an incarnation (one the capture missed) given its incarnation 0 and its life until then unknown; each
+    # incarnation 0 given its schedule's missed count, as the old dispatcher last recorded it (it read Temporal's under
+    # the schedule's own id every five minutes, past the count copied here: the new misses pass adds only what's missed
+    # after this, never that increase again, the review's I1). Its count of schedules caught up, or NULL when recorded
+    # already. The key admin's, through `dewpoint schedules inventory-cutover`.
     """CREATE FUNCTION schedule_inventory_cutover_record() RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = public, pg_temp SET row_security = off AS $$
 DECLARE
@@ -394,6 +397,8 @@ BEGIN
   FROM schedule_incarnations i JOIN schedules s ON s.id = i.schedule_id
   WHERE i.backfilled AND NOT EXISTS (SELECT 1 FROM schedule_intervals v WHERE v.temporal_id = i.temporal_id
                                      AND v.kind = 'creation');
+  UPDATE schedule_incarnations i SET misses = s.misses FROM schedules s
+  WHERE i.schedule_id = s.id AND i.backfilled AND s.misses > i.misses;
   INSERT INTO schedule_inventory_cutover DEFAULT VALUES;
   RETURN v_count;
 END $$""",
