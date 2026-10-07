@@ -655,3 +655,9 @@ The owner's review of the redesign (`45d2245`, 2026-10-07, pasted): two Low find
 Targeted runs at `3beacb5` (2026-10-07): the API tests (276), the plugin, SDK and end-to-end Mist proof tests (385),
 ruff, format, mypy, import contracts and the OpenAPI drift check pass; each of R1's and R2's fixes was also checked by
 disabling it (the tests fail). The last full run is `d09db0c`'s (3235 passed).
+
+The owner closed R1 and R2 at `5699914` (2026-10-07): fixture returns enforce the schema and the size cap, and when
+none fits, curated and generic simulations fail `simulation_unavailable` alike; the encoding cases negotiate correctly,
+406 included; the optional-field wording is corrected. The fixture and compression additions are technically cleared.
+This is technical closure only: the rulings, the Compose proof, the read-only Mist smoke test, and push and PR remain
+the owner's.
