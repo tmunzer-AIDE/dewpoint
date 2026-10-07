@@ -984,3 +984,17 @@ home, mode 600, holding outcomes, counts and message shapes, never a value):
   Run 4 (show ARP on the switch and the SRX): both ok, ended on idle (39 and 71 messages).
 - Still unverified: bounce port's answer and stream (no disruptive utility ran); a `subscribe_failed` detail (none
   came); a device answer without `type` (every device had one).
+
+After the PR (2026-10-08):
+- The owner's technical review of 59111815: no new findings (the MAC channel keeps the site, device and exact-session
+  checks, nested envelopes and messages before the POST's answer included; show ARP reports `completion_known: false`
+  on idle and `true` on a finished table; the header-name fix holds). CI on #56 at 59111815: all nine checks passed
+  (the backend suite, the CEL gates, both CodeQL analyses, the Compose and browser e2e job). That run is 59111815's
+  only; the merge below needs its own.
+- `origin/main` moved to 4977bfe (#55, the Python validators' `fullmatch`), conflicting with #56 in the catalog's
+  `_host_problems`. The session "Fix websocket header-name check on plugins-3b2", at the owner's request, merged it
+  into this branch (c7e793f, a merge commit, no rebase), keeping 3b-2's labelled messages with #55's `fullmatch`. That
+  session ran the full backend suite at c7e793f: 3,977 passed, 8 skipped, in 10 minutes 36 seconds; this session ran
+  495 tests in the catalog, SDK, egress and Mist stream and utility areas; the owner's review found the resolution
+  correct (113 catalog and SDK tests). Not pushed: on the owner's word.
+- The show ARP ruling change (a bounded collection, above) still awaits the owner's sign-off.
