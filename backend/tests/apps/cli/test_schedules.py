@@ -220,7 +220,7 @@ def test_the_cutovers_final_step_reads_no_schedule_however_many_there_are(pg_url
         engine = make_engine(pg_url)
         try:
             async with make_sessionmaker(engine)() as s, s.begin():
-                await s.execute(text("SELECT schedule_inventory_cutover_record()"))
+                await s.execute(text("SELECT schedule_inventory_cutover_record(schedule_inventory_capture())"))
                 return int((await s.execute(text(SCHEDULES_READ))).scalar_one())
         finally:
             await engine.dispose()
@@ -346,5 +346,90 @@ def test_schedules_writers_wait_briefly_through_a_whole_cutover(pg_url, _test_us
                 time.sleep(0.3)
             assert done.exit_code == 0 and "recorded the inventory's cutover" in done.output, done.output
             assert len(writers.times) > 30 and max(writers.times) < 1.0
+        finally:
+            _unseeded(pg_url, tenant)
+
+
+def test_the_cutover_refuses_when_the_capture_changed_during_its_catch_up(pg_url, _test_users, monkeypatch) -> None:
+    """The owner's review of checkpoint 4 (R1): the capture, turned off and on again between the catch-up's batches and
+    the final step (a schedule added meanwhile, with a lower id than the batch passed, escapes both), is on at the
+    final step all the same. Its state is read before the catch-up, and the final step refuses if it changed: nothing
+    is recorded, said plainly (exit 1, no traceback)."""
+    from dewpoint.core.platform import inventory
+
+    command = _cutover_env(pg_url, monkeypatch)
+    batch, escaped = inventory._batch, []
+
+    async def meanwhile(*args: object, **kwargs: object) -> object:
+        done = await batch(*args, **kwargs)  # type: ignore[arg-type]
+        if not escaped:
+            escaped.append(await asyncio.to_thread(_seeded, pg_url, 1, captured=False))  # off, one added, on again
+        return done
+
+    with _restoring(pg_url):
+        try:
+            monkeypatch.setattr(inventory, "_batch", meanwhile)
+            refused = CliRunner().invoke(app, command)
+            assert refused.exit_code == 1 and isinstance(refused.exception, SystemExit), refused.output
+            assert "changed" in refused.output
+            assert _sql(pg_url, "select count(*) from schedule_inventory_cutover") == [0]
+        finally:
+            for tenant in escaped:
+                _unseeded(pg_url, tenant)
+
+
+def test_a_second_cutover_while_one_runs_refuses_plainly(pg_url, _test_users, monkeypatch) -> None:
+    """The owner's review of checkpoint 4 (R4): two operators running the cutover at once serialize: while one holds the
+    cutover's lock, the other refuses, said plainly (exit 1, no traceback), and records nothing; once it's free, the
+    cutover runs."""
+    from dewpoint.core.platform import inventory
+
+    command = _cutover_env(pg_url, monkeypatch)
+    url = pg_url.replace("postgresql+asyncpg://", "postgresql://")
+
+    async def holding() -> None:
+        c = await asyncpg.connect(url)
+        try:
+            assert await c.fetchval("SELECT pg_try_advisory_lock(hashtextextended($1, 0))", inventory.RUNNING)
+            refused = await asyncio.to_thread(CliRunner().invoke, app, command)
+            assert refused.exit_code == 1 and isinstance(refused.exception, SystemExit), refused.output
+            assert "running" in refused.output
+        finally:
+            await c.close()
+
+    with _restoring(pg_url):
+        asyncio.run(holding())
+        assert _sql(pg_url, "select count(*) from schedule_inventory_cutover") == [0]
+        done = CliRunner().invoke(app, command)
+        assert done.exit_code == 0 and "recorded the inventory's cutover" in done.output, done.output
+
+
+def test_two_catch_ups_of_one_batch_at_once_never_collide(pg_url, _test_users) -> None:
+    """The owner's review of checkpoint 4 (R4): the same batch caught up by two transactions at once, its schedules'
+    incarnations there but not their spans (the second waits for the first's spans): the second adds nothing, rather
+    than failing on the spans' unique key."""
+    url = pg_url.replace("postgresql+asyncpg://", "postgresql://")
+
+    async def both() -> object:
+        first, second = await asyncpg.connect(url), await asyncpg.connect(url)
+        try:
+            tx = first.transaction()
+            await tx.start()
+            await first.fetch("SELECT * FROM schedule_inventory_catch_up('00000000-0000-0000-0000-000000000000', 1000)")
+            racing = asyncio.create_task(second.fetch(
+                "SELECT * FROM schedule_inventory_catch_up('00000000-0000-0000-0000-000000000000', 1000)"))  # fmt: skip
+            await asyncio.sleep(0.5)  # the second waits for the first's uncommitted spans
+            await tx.commit()
+            return await racing
+        finally:
+            await first.close()
+            await second.close()
+
+    with _restoring(pg_url):
+        tenant = _seeded(pg_url, 3, captured=True)
+        _sql(pg_url, "delete from schedule_intervals where tenant_id = :t", t=tenant)
+        try:
+            [row] = asyncio.run(both())  # type: ignore[misc]
+            assert row["caught"] == 0
         finally:
             _unseeded(pg_url, tenant)

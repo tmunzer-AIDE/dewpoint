@@ -104,7 +104,10 @@ def schema(conn: Connection) -> dict[str, Any]:
 
 # What the online migrations add to the originals on purpose: 0040's capture of the schedules added until the
 # inventory's cutover (the owner's D15 ruling on the 2b-4b M1 checkpoint)
-ADDED = ("schedule_inventory_cutover", "schedule_inventory_catch_up", "schedule_inventoried", "schedules_inventoried")
+ADDED = (
+    "schedule_inventory_cutover", "schedule_inventory_catch_up", "schedule_inventory_capture", "schedule_inventoried",
+    "schedules_inventoried",
+)  # fmt: skip
 
 
 def fingerprint(conn: Connection, excluding: tuple[str, ...] = ()) -> dict[str, list[Any]]:

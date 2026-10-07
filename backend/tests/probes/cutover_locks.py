@@ -138,11 +138,12 @@ async def measure(url: str, *, per_kind: int, pause: float) -> dict[str, Any]:
     engine = make_engine(url.replace("postgresql://", "postgresql+asyncpg://"))
     try:
         async with make_sessionmaker(engine)() as s:
+            state = await inventory.capture(s)  # as `inventory.cut_over` runs it, its parts timed apart
             t0 = time.monotonic()
             caught = await inventory.catch_up(s)
             t1 = time.monotonic()
-            at = await inventory.record(s, {"caught_up": caught.caught, "refreshed": caught.refreshed,
-                                            "attested": "the cutover probe"})  # fmt: skip
+            at = await inventory.record(s, state, {"caught_up": caught.caught, "refreshed": caught.refreshed,
+                                                   "attested": "the cutover probe"})  # fmt: skip
             t2 = time.monotonic()
     finally:
         await engine.dispose()

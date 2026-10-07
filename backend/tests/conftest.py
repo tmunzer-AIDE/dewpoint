@@ -50,7 +50,7 @@ def _attest_inventory_cutover(url: str) -> None:
     async def record() -> None:
         engine = make_engine(url)
         async with engine.begin() as c:
-            await c.execute(text("select schedule_inventory_cutover_record()"))
+            await c.execute(text("select schedule_inventory_cutover_record(schedule_inventory_capture())"))
         await engine.dispose()
 
     asyncio.run(record())

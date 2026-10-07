@@ -632,13 +632,10 @@ def schedules_inventory_cutover(
             raise typer.Exit(1)
         if not confirm:
             return "not recorded (a dry run: pass --confirm)"
-        caught = await inventory.catch_up(s)
-        details: dict[str, object] = {"caught_up": caught.caught, "refreshed": caught.refreshed,
-                                      "attested": INVENTORY_ATTESTED}  # fmt: skip
         try:
-            at = await inventory.record(s, details)
-        except inventory.InventoryBusyError as e:
-            typer.echo(f"{e}; run it again")
+            at, caught = await inventory.cut_over(s, INVENTORY_ATTESTED)
+        except inventory.CutoverRefusedError as e:
+            typer.echo(f"not recorded: {e}")
             raise typer.Exit(1) from None
         if at is None:
             return "already recorded"

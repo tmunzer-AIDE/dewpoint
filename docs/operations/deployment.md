@@ -94,9 +94,19 @@ dispatcher from before 0040 polling the admission queue. It then works in two pa
   before 0040 the missed count the old dispatcher last recorded, so the new dispatcher never counts those firings
   again. If it's interrupted, run the command again: the batches done stay done.
 - **A short final step** that records the cutover. Schedule writes (inserts, updates, deletes) wait while it runs, but
-  it reads no schedule, so its time doesn't grow with them. It waits at most 200 ms for its lock each attempt. If
-  schedules stay busy through its attempts, it records nothing and exits 1: run it again. It refuses while the capture
-  trigger (`schedules_inventoried`) is off: turn it back on, then run the command again.
+  it reads no schedule, so its time doesn't grow with them. It waits at most 200 ms for its lock each attempt.
+
+It refuses, records nothing and exits 1, saying why, when:
+- **Another cutover is running.** Two at once serialize: wait for the first to end.
+- **The capture trigger (`schedules_inventoried`) is off,** or changed while the catch-up ran (turned off and on again,
+  or replaced: a schedule added meanwhile could have escaped it). Turn it on, leave it, and run the command again.
+- **Schedules stay busy through its attempts** (about a minute): a long transaction writing schedules, or an
+  autovacuum of `schedules`, which a 200 ms wait never makes the server cancel. Wait for it to end (an autovacuum
+  shows in `pg_stat_progress_vacuum`), or cancel that autovacuum (`pg_cancel_backend`), then run the command again.
+  Retrying is safe: the catch-up's batches stay done, and nothing else was written.
+
+**Until the cutover is recorded, no session may set `session_replication_role = replica`** on this database (a
+superuser's setting): such a session's inserts skip the capture trigger unseen, which nothing here can detect.
 
 ## A build with a new engine ABI
 

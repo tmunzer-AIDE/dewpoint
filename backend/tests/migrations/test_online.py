@@ -349,7 +349,8 @@ async def test_a_schedule_the_old_code_makes_after_the_backfill_is_still_invento
     assert await scalar(url, UNINCARNATED) == 0 and await scalar(url, UNSPANNED) == 0
     caught = await scalar(url, "SELECT caught FROM schedule_inventory_catch_up('00000000-0000-0000-0000-000000000000', "
                                "1000000)")  # fmt: skip
-    assert caught == 0 and await scalar(url, "SELECT schedule_inventory_cutover_record()") is True  # none missed
+    recorded = await scalar(url, "SELECT schedule_inventory_cutover_record(schedule_inventory_capture())")
+    assert caught == 0 and recorded == "recorded"  # none missed
     counts = [await scalar(url, f"SELECT misses FROM schedule_incarnations WHERE schedule_id = '{i}' AND number = 0")
               for i in made]  # fmt: skip
     assert counts == [OLD_MISSED] * len(made)

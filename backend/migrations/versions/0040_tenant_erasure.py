@@ -410,40 +410,52 @@ BEGIN
          'before_migration'
   FROM schedule_incarnations i JOIN schedules s ON s.id = i.schedule_id
   WHERE i.schedule_id = ANY (v_ids) AND i.backfilled
-    AND NOT EXISTS (SELECT 1 FROM schedule_intervals v WHERE v.temporal_id = i.temporal_id AND v.kind = 'creation');
+    AND NOT EXISTS (SELECT 1 FROM schedule_intervals v WHERE v.temporal_id = i.temporal_id AND v.kind = 'creation')
+  ON CONFLICT (temporal_id, kind) DO NOTHING;
   UPDATE schedule_incarnations i SET misses = s.misses FROM schedules s
   WHERE i.schedule_id = s.id AND s.id = ANY (v_ids) AND i.backfilled AND s.misses > i.misses;
   GET DIAGNOSTICS v_refreshed = ROW_COUNT;
   RETURN QUERY SELECT v_ids[v_seen], v_seen, v_caught, v_refreshed;
 END $$""",
     "REVOKE ALL ON FUNCTION schedule_inventory_catch_up(uuid, integer) FROM PUBLIC",
+    # The capture's state (the owner's review of checkpoint 4, R1): its trigger's row, as `oid:xmin:tgenabled`, which
+    # turning it off or on, or replacing it, changes; NULL when it's gone. Read before the catch-up, and compared in the
+    # final step: a capture turned off and on again in between would have let a schedule escape both.
+    """CREATE FUNCTION schedule_inventory_capture() RETURNS text LANGUAGE sql STABLE
+SET search_path = public, pg_temp AS $$
+  SELECT t.oid::text || ':' || t.xmin::text || ':' || t.tgenabled::text FROM pg_trigger t
+  WHERE t.tgrelid = 'public.schedules'::regclass AND t.tgname = 'schedules_inventoried'
+$$""",
+    "REVOKE ALL ON FUNCTION schedule_inventory_capture() FROM PUBLIC",
     # The cutover, once, after the catch-up: in one short transaction holding schedules' writes off, and the capture's
-    # state still (turning a trigger off takes the same lock), it refuses while the capture is off (a schedule added
-    # since the catch-up passed would be missed), then records. It reads no schedule: its hold doesn't grow with them.
-    # Whether it recorded (false: recorded already). The key admin's, as the catch-up is, through `dewpoint schedules
-    # inventory-cutover`.
-    """CREATE FUNCTION schedule_inventory_cutover_record() RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER
+    # state still (turning a trigger off takes the same lock), it records, unless the capture is off, or changed since
+    # `capture` was read before the catch-up (a schedule added meanwhile would be missed). It reads no schedule: its
+    # hold doesn't grow with them. `recorded`, `recorded_already`, `capture_off` or `capture_changed`. The key admin's,
+    # as the catch-up is, through `dewpoint schedules inventory-cutover`.
+    """CREATE FUNCTION schedule_inventory_cutover_record(capture text) RETURNS text LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = public, pg_temp SET row_security = off AS $$
 BEGIN
   LOCK TABLE schedules IN SHARE ROW EXCLUSIVE MODE;
   IF EXISTS (SELECT 1 FROM schedule_inventory_cutover) THEN
-    RETURN false;
+    RETURN 'recorded_already';
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'schedules'::regclass AND tgname = 'schedules_inventoried'
-                 AND tgenabled IN ('O', 'A')) THEN
-    RAISE EXCEPTION 'the schedule inventory''s capture (trigger schedules_inventoried) is off: turn it on, then run '
-                    'the cutover again';
+  IF schedule_inventory_capture() IS DISTINCT FROM capture THEN
+    RETURN 'capture_changed';
+  END IF;
+  IF capture IS NULL OR right(capture, 1) NOT IN ('O', 'A') THEN
+    RETURN 'capture_off';
   END IF;
   INSERT INTO schedule_inventory_cutover DEFAULT VALUES;
-  RETURN true;
+  RETURN 'recorded';
 END $$""",
-    "REVOKE ALL ON FUNCTION schedule_inventory_cutover_record() FROM PUBLIC",
+    "REVOKE ALL ON FUNCTION schedule_inventory_cutover_record(text) FROM PUBLIC",
 ]
 CAPTURED = "CREATE TRIGGER schedules_inventoried AFTER INSERT ON schedules FOR EACH ROW EXECUTE FUNCTION schedule_inventoried()"
 CUTOVER = [
     "GRANT SELECT ON schedule_inventory_cutover TO dewpoint_admin, dewpoint_dispatch, dewpoint_retention",
     "GRANT EXECUTE ON FUNCTION schedule_inventory_catch_up(uuid, integer) TO dewpoint_admin",
-    "GRANT EXECUTE ON FUNCTION schedule_inventory_cutover_record() TO dewpoint_admin",
+    "GRANT EXECUTE ON FUNCTION schedule_inventory_capture() TO dewpoint_admin",
+    "GRANT EXECUTE ON FUNCTION schedule_inventory_cutover_record(text) TO dewpoint_admin",
 ]
 
 # The retention process checks the deployment's recorded namespace before erasure reaches Temporal (§2.1).
@@ -688,7 +700,8 @@ def _actions() -> list[str | Callable[[], object]]:
 def downgrade() -> None:
     op.execute("DROP TRIGGER schedules_inventoried ON schedules")
     op.execute("DROP FUNCTION schedule_inventoried()")
-    op.execute("DROP FUNCTION schedule_inventory_cutover_record()")
+    op.execute("DROP FUNCTION schedule_inventory_cutover_record(text)")
+    op.execute("DROP FUNCTION schedule_inventory_capture()")
     op.execute("DROP FUNCTION schedule_inventory_catch_up(uuid, integer)")
     op.drop_table("schedule_inventory_cutover")
     op.execute(CALL_CANDIDATES_0042)
