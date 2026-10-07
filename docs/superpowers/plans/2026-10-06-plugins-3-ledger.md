@@ -998,3 +998,4 @@ After the PR (2026-10-08):
   495 tests in the catalog, SDK, egress and Mist stream and utility areas; the owner's review found the resolution
   correct (113 catalog and SDK tests). Not pushed: on the owner's word.
 - The show ARP ruling change (a bounded collection, above) still awaits the owner's sign-off.
+- The owner signed off the show ARP ruling change (a bounded collection) and the push of the merge (2026-10-08).
