@@ -829,3 +829,20 @@ Rulings:
   `getSiteDeviceZtpPassword` stays denied as always refused, which is stricter - cost if wrong: none.
 - The map at task 6 (measured): 1,072 operations, 292 allowed (262 curated, 30 utilities: 19 diagnostics, 11
   disruptive), 602 held (578 unreviewed, 24 the owner's or D27's), 178 denied.
+- Ruling (task 7, the stream reader): a finished table counts as evidence only with `"status": "SUCCESS"`; with another
+  status it's the device's refusal (`mist.command_failed`); without a status it's no evidence (`completion_unknown`) -
+  the docs show only `SUCCESS` - cost if wrong: a status-less finished table is retried instead of accepted.
+- Ruling: a table's evidence is the JSON object at the start of `raw`, whatever text follows it - the docs' show ARP
+  sample ends its table with `\n"}}` where show service path's and show session's end in a newline - cost if wrong:
+  trailing text that should have voided the table doesn't.
+- Ruling: a data envelope's channel must be the device's (compared in lower case), a nested envelope's too, at most one
+  level deep; `data` an object or a JSON string of one, never a string encoded twice; `session` a non-empty string and
+  `raw` a string; anything else is discarded, never accepted - cost if wrong: a reshaped Mist message reads as no
+  output (retried for diagnostics).
+- Ruling: while the POST is under way the reader buffers the channel's data (at most 256 messages and 1 MiB); a lost
+  stream or an overflow then lets the POST finish, since it's the command, and fails after it (`mist.stream_lost`,
+  `mist.output_unreadable`, `mist.output_overflow`) - cost if wrong: none.
+- Ruling: the kept output is at most 5,000 lines and 512 KiB (`truncated` past either; reading goes on to the end),
+  well under a step output's 1.75 MiB - cost if wrong: a long table is cut.
+- Ruling: a `HandshakeRejected` the node doesn't catch is retried by the runtime only for a 429 or a 5xx; a
+  `StreamLost` is handled as `MaybeSent` (8ac5b1f) - cost if wrong: none for safety.
