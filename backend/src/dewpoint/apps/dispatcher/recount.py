@@ -58,8 +58,7 @@ async def recount_once(sessionmaker: async_sessionmaker[AsyncSession], *, batch:
             except Exception as e:
                 log.error("event_recount_failed", tenant_id=str(tenant_id), error=type(e).__name__)
                 counts["error"] += 1
-    if admitted.deferred:
-        counts["deferred"] = admitted.deferred
+    admitted.reported(counts, full=len(picked) >= batch)
     return dict(counts)
 
 

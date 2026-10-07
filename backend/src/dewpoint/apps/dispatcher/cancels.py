@@ -64,6 +64,5 @@ async def send_cancels(sessionmaker: async_sessionmaker[AsyncSession], client: C
                     {"i": request_id},
                 )
             counts[happened] += 1
-    if admitted.deferred:
-        counts["deferred"] = admitted.deferred
+    admitted.reported(counts, full=len(picked) >= BATCH)
     return dict(counts)

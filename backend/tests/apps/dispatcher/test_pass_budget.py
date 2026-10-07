@@ -124,3 +124,29 @@ async def test_the_hook_times_every_call_once_however_often_it_is_installed() ->
     started = time.monotonic()
     assert await _call(client, "describe_namespace") == "describe_namespace"
     assert client.service_client.calls == ["describe_namespace"] and time.monotonic() - started < 1
+
+
+async def test_a_pass_its_slow_calls_stopped_reports_its_degraded_state_and_alerts_once_a_while(monkeypatch) -> None:
+    """The owner's review of checkpoint 4: a steadily slow Temporal leaves every pass one item a cycle, a degraded
+    state that must be explicit, never taken for its five-minute accounting. A pass a slow call stopped reports it
+    (`slow`), what it deferred, and whether its selection was full (`backlog`: more may wait beyond what it picked,
+    which `deferred` doesn't count); and alerts (`dispatcher_pass_degraded`), at most every `DEGRADED_ALERT_S` a
+    pass."""
+    import structlog
+
+    monkeypatch.setattr(budget, "SLOW_S", 0.01)
+    monkeypatch.setattr(budget, "_alerted", {})
+    client = _client()
+    client.service_client.delays["describe_schedule"] = 0.03
+    reports = []
+    with structlog.testing.capture_logs() as logs:
+        for _ in range(2):
+            counts: dict[str, int] = {}
+            with budget.passing("degraded") as admitted:
+                for _item in admitted(range(4), key=lambda i: i):
+                    await _call(client, "describe_schedule")
+                admitted.reported(counts, full=True)
+            reports.append(counts)
+    assert reports == [{"deferred": 3, "slow": 1, "backlog": 1}] * 2
+    alerts = [entry for entry in logs if entry["event"] == "dispatcher_pass_degraded"]
+    assert len(alerts) == 1 and alerts[0]["pass_name"] == "degraded" and alerts[0]["log_level"] == "error"

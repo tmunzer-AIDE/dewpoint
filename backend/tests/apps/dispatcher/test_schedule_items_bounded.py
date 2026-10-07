@@ -413,7 +413,7 @@ async def test_a_sync_pass_stopped_by_a_slow_schedule_takes_another_first_next_t
     with slowed(server.client, "describe_schedule", 0.1, only=lambda req: req.schedule_id.startswith(prefix)):
         first = await schedule_sync.sync_schedules(dispatch_sessionmaker, server.client, Leading())
         second = await schedule_sync.sync_schedules(dispatch_sessionmaker, server.client, Leading())
-    assert first == {"deleting": 1, "deferred": 1}
+    assert first == {"deleting": 1, "deferred": 1, "slow": 1}
     assert second.get("synced") == 1  # the other, taken first
     async with owner_sessionmaker() as s:
         synced = (await s.execute(text("select synced_generation = generation from schedules where id = :i"),

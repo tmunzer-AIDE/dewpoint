@@ -116,8 +116,7 @@ async def reconcile_once(
                 await _checked_alone(sessionmaker, tenant_id, request_id)
                 continue
             counts[happened] += 1
-    if admitted.deferred:
-        counts["deferred"] = admitted.deferred
+    admitted.reported(counts, full=len(picked) >= BATCH)
     return dict(counts)
 
 
@@ -330,8 +329,7 @@ async def reconcile_subruns(sessionmaker: async_sessionmaker[AsyncSession], clie
                 await _subrun_checked_alone(sessionmaker, tenant_id, run_id)
                 continue
             counts[happened] += 1
-    if admitted.deferred:
-        counts["deferred"] = admitted.deferred
+    admitted.reported(counts, full=len(picked) >= BATCH)
     return dict(counts)
 
 

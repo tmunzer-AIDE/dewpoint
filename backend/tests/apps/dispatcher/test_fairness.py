@@ -40,13 +40,13 @@ async def test_fifty_blocked_tenants_never_starve_a_runnable_one(
     runnable = (await admit(api_sessionmaker, ctx, wf)).request  # the newest due tenant, with a free slot
     client, rotation = FakeClient(), dispatch.Rotation()
     first = await dispatch.dispatch_once(dispatch_sessionmaker, client, KEYS, api_settings, BUILD, rotation)
-    assert first == {"no_slot": dispatch.CANDIDATES}
+    assert first == {"no_slot": dispatch.CANDIDATES, "backlog": 1}  # a full pick: more may wait
     second = await dispatch.dispatch_once(dispatch_sessionmaker, client, KEYS, api_settings, BUILD, rotation)
     assert second == {"started": 1}  # on from where the first pick ended
     assert (await state(owner_sessionmaker, runnable.id))["request"][0] == "started"
     assert [(await state(owner_sessionmaker, r.id))["request"][0] for r in blocked[:3]] == ["queued"] * 3
     third = await dispatch.dispatch_once(dispatch_sessionmaker, client, KEYS, api_settings, BUILD, rotation)
-    assert third == {"no_slot": dispatch.CANDIDATES}  # wrapped around to the oldest
+    assert third == {"no_slot": dispatch.CANDIDATES, "backlog": 1}  # wrapped around to the oldest
 
 
 async def test_a_dispatch_pass_its_budget_stopped_goes_on_next_cycle_from_the_last_request_it_took(

@@ -573,7 +573,7 @@ async def dispatch_once(
                 counts[happened] += 1
     if admitted.deferred:
         rotation.after = last  # the next cycle goes on from the last it took
-        counts["deferred"] = admitted.deferred
+    admitted.reported(counts, full=len(picked) >= CANDIDATES)
     return dict(counts)
 
 

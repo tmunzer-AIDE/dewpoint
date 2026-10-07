@@ -19,12 +19,17 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
+import structlog
 from temporalio.client import Client
 from temporalio.service import RPCError, RPCStatusCode
 
 PASS_S = 10.0  # a pass takes no new item once it has run this long (its first, always)
 SLOW_S = 1.0  # a call slower than this ends its pass's admission once its item ends
 SLOW = (RPCStatusCode.DEADLINE_EXCEEDED, RPCStatusCode.UNAVAILABLE)  # answers that end it too
+DEGRADED_ALERT_S = 300.0  # a pass a slow call stopped alerts at most this often
+
+log = structlog.get_logger("dewpoint.dispatcher.budget")
+_alerted: dict[str, float] = {}  # per pass: when it last alerted
 
 # The most Temporal calls one item of each pass makes, from its code's longest path (each pinned by a test):
 CALLS = {
@@ -52,6 +57,18 @@ class Admitted:
 
     def __init__(self, name: str) -> None:
         self.name, self.started, self.slow, self.taken, self.deferred = name, time.monotonic(), False, 0, 0
+
+    def reported(self, counts: dict[str, int], *, full: bool = False) -> None:
+        """Its degraded state, explicit in `counts` (the owner's review of checkpoint 4: a steadily slow Temporal
+        leaves each pass one item a cycle, never taken for its accounting): the items picked but not taken
+        (`deferred`), a slow call having stopped it (`slow`), and its selection full (`backlog`: more may wait beyond
+        what it picked, which `deferred` doesn't count)."""
+        if self.deferred:
+            counts["deferred"] = self.deferred
+        if self.slow:
+            counts["slow"] = 1
+        if full:
+            counts["backlog"] = 1
 
     def _admits(self) -> bool:
         return not self.taken or not (self.slow or time.monotonic() - self.started >= PASS_S)
@@ -82,6 +99,10 @@ def passing(name: str) -> Iterator[Admitted]:
         yield admitted
     finally:
         _current.reset(token)
+        now = time.monotonic()
+        if admitted.slow and now - _alerted.get(name, float("-inf")) >= DEGRADED_ALERT_S:
+            _alerted[name] = now
+            log.error("dispatcher_pass_degraded", pass_name=name, taken=admitted.taken, deferred=admitted.deferred)
 
 
 def _slowed() -> None:

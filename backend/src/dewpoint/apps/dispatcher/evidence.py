@@ -349,8 +349,7 @@ async def check_evidence(sessionmaker: async_sessionmaker[AsyncSession], client:
                 except Exception as again:
                     log.error("execution_evidence_unrescheduled", evidence=row_id, error=type(again).__name__)
             counts[outcome] = counts.get(outcome, 0) + 1
-    if admitted.deferred:
-        counts["deferred"] = admitted.deferred
+    admitted.reported(counts, full=len(due) >= batch)
     return counts
 
 

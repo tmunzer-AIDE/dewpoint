@@ -107,7 +107,7 @@ async def test_more_live_sub_runs_than_a_pass_takes_are_all_asked_about(
                              for _ in range(reconcile.BATCH + 9)]]  # fmt: skip
     client = Live()
     passes = [await reconcile.reconcile_subruns(dispatch_sessionmaker, client) for _ in range(2)]
-    assert passes == [{"running": reconcile.BATCH}, {"running": 10}]
+    assert passes == [{"running": reconcile.BATCH, "backlog": 1}, {"running": 10}]  # a full pick: more may wait
     assert set(client.asked) == {run_workflow_id(str(orphan["ctx"]["t"]), str(sub)) for sub in subs}
 
 

@@ -149,8 +149,7 @@ async def match_once(
                 )
                 counts["error"] += 1
                 await _backed_off(sessionmaker, tenant_id, event_id)
-    if admitted.deferred:
-        counts["deferred"] = admitted.deferred
+    admitted.reported(counts, full=len(picked) >= batch)
     return dict(counts)
 
 

@@ -711,8 +711,7 @@ async def sync_schedules(
                     log.error("schedule_sync_unrecorded", schedule_id=str(schedule_id), error=type(again).__name__)
                 outcome = "failed"
             counts[outcome] = counts.get(outcome, 0) + 1
-    if admitted.deferred:
-        counts["deferred"] = admitted.deferred
+    admitted.reported(counts, full=len(picked) >= batch)
     return counts
 
 
@@ -768,8 +767,7 @@ async def check_misses(
             except Exception as e:
                 log.error("schedule_misses_unread", incarnation=temporal_id, error=type(e).__name__)
                 await _misses_tried(sessionmaker, tenant_id, temporal_id)
-    if admitted.deferred:
-        counts["deferred"] = admitted.deferred
+    admitted.reported(counts, full=len(picked) >= batch)
     return counts
 
 
@@ -822,6 +820,5 @@ async def check_strays(
                 except Exception as again:
                     log.error("schedule_stray_unrescheduled", tenant=str(tenant_id), error=type(again).__name__)
             counts[outcome] = counts.get(outcome, 0) + 1
-    if admitted.deferred:
-        counts["deferred"] = admitted.deferred
+    admitted.reported(counts, full=len(picked) >= batch)
     return counts
