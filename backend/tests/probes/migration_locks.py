@@ -7,11 +7,12 @@ CI; each run is bounded and uses a disposable Postgres 16 container (testcontain
     PYTHONPATH=$PWD/src:$PWD .venv/bin/python -m tests.probes.migration_locks <from> <roots> [--out FILE]
 
 `<from>` is the starting revision (`0034` or `0042`, D15's two paths) and `<roots>` the root runs seeded there, the rest
-in proportion (`PROFILE`). The seeded database is copied twice, and `alembic upgrade head` runs on each copy in one
-transaction, as a deployment's would:
+in proportion (`PROFILE`). The seeded database is copied twice, and `alembic upgrade head` runs on each copy, as a
+deployment's would (0035 to 0044 in their online steps since D15's ruling, `migrations/online.py`):
 - **control**, alone: a sampler reads the migrating backend's relation locks and statement every `SAMPLE` seconds, so
-  each existing table's reads and writes are blocked from when the upgrade first took such a lock to its commit
-  (`held`): what a normal operation arriving then would wait;
+  each existing table's reads and writes are blocked for as long as the upgrade holds such a lock without a break
+  (`held`, each hold from the first sample that saw it to the last, plus a sample): what a normal operation arriving
+  then would wait at most;
 - **loaded**, under a synthetic normal load, one operation at a time per kind (`Load.KINDS`: an API's reads, a worker's
   projections, an admission, an ingress recording), each operation's time kept, and whether the upgrade completes.
 D15's acceptance: no operation waits more than five seconds in total during the upgrade. Numbers depend on the
@@ -163,13 +164,14 @@ async def seed(url: str, roots: int) -> dict[str, int]:
 
 
 class Load:
-    """The normal load: one connection and one operation at a time per kind, each operation's time kept."""
+    """The normal load: `per_kind` connections per kind (one by default), each one operation at a time with `pause`
+    seconds between them (`PAUSE` by default), each operation's time kept."""
 
     KINDS = ("read_runs", "read_tenant", "read_connections", "read_versions", "write_step", "write_run_end",
              "admit_request", "record_event")  # fmt: skip
 
-    def __init__(self, url: str) -> None:
-        self.url, self.stop = url, asyncio.Event()
+    def __init__(self, url: str, per_kind: int = 1, pause: float = PAUSE) -> None:
+        self.url, self.stop, self.per_kind, self.pause = url, asyncio.Event(), per_kind, pause
         self.times: dict[str, list[tuple[float, float]]] = {k: [] for k in self.KINDS}
         self.errors: dict[str, dict[str, int]] = {k: {} for k in self.KINDS}
         self.pids: list[int] = []
@@ -241,7 +243,7 @@ class Load:
                 except asyncpg.PostgresError as e:  # counted by type, never by value; the loop carries on
                     self.errors[kind][type(e).__name__] = self.errors[kind].get(type(e).__name__, 0) + 1
                 self.times[kind].append((t0, time.monotonic() - t0))
-                await asyncio.sleep(PAUSE)
+                await asyncio.sleep(self.pause)
         finally:
             await c.close()
 
@@ -251,7 +253,7 @@ class Sampler:
 
     def __init__(self, url: str, skip: list[int]) -> None:
         self.url, self.skip, self.stop = url, skip, asyncio.Event()
-        self.locks: dict[tuple[str, str], float] = {}  # (relation, mode): first seen, seconds from the upgrade's start
+        self.locks: dict[tuple[str, str], list[float]] = {}  # (relation, mode): each sample that saw it held, seconds
         self.names: dict[int, str] = {}  # every relation that existed before the upgrade: its oid, its name
         self.statements: list[tuple[float, str]] = []
 
@@ -274,14 +276,17 @@ class Sampler:
                                               "AND locktype = 'relation' AND granted", row["pid"]):  # fmt: skip
                         name = self.names.get(lock["rel"])  # an index, or a relation the upgrade made: not reported
                         if name is not None:
-                            self.locks.setdefault((name, lock["mode"]), round(at, 2))
+                            seen = self.locks.setdefault((name, lock["mode"]), [])
+                            if not seen or seen[-1] != round(at, 2):
+                                seen.append(round(at, 2))
                 await asyncio.sleep(SAMPLE)
         finally:
             await c.close()
 
 
-def _upgrade(url: str, marks: list[tuple[float, str]], t0: float) -> tuple[int, list[str]]:
-    """`alembic upgrade head`, its "Running upgrade" lines stamped as they come; its exit and its last lines."""
+def _upgrade(url: str, marks: list[tuple[float, str]], t0: float, gave_way: dict[str, int]) -> tuple[int, list[str]]:
+    """`alembic upgrade head`, its "Running upgrade" lines stamped as they come, its steps' giving-way counted by why;
+    its exit and its last lines."""
     env = {**os.environ, "DEWPOINT_DATABASE_URL": url.replace("postgresql://", "postgresql+asyncpg://")}
     proc = subprocess.Popen([str(BACKEND / ".venv/bin/alembic"), "upgrade", "head"], cwd=BACKEND, env=env,  # noqa: S603
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)  # fmt: skip
@@ -290,6 +295,9 @@ def _upgrade(url: str, marks: list[tuple[float, str]], t0: float) -> tuple[int, 
     for line in proc.stdout:
         if "Running upgrade" in line:
             marks.append((round(time.monotonic() - t0, 2), line.split("Running upgrade", 1)[1].split(",")[0].strip()))
+        elif "gave way (" in line:
+            why = line.rsplit("gave way (", 1)[1].split(")")[0]
+            gave_way[why] = gave_way.get(why, 0) + 1
         elif line.strip():
             tail = [*tail, line.rstrip()][-30:]
     return proc.wait(), tail
@@ -300,32 +308,43 @@ BLOCK_READS = {"AccessExclusiveLock"}
 BLOCK_WRITES = {"ShareLock", "ShareRowExclusiveLock", "ExclusiveLock", "AccessExclusiveLock"}
 
 
-def _held(locks: dict[tuple[str, str], float], took: float) -> dict[str, dict[str, float]]:
-    """Each existing table's reads and writes blocked from when the upgrade first took such a lock on it to its commit:
-    how long a normal operation that arrived just then would wait."""
+def _longest(seen: list[float]) -> float:
+    """The longest hold among the samples that saw a lock: consecutive samples (no gap over 1.5 `SAMPLE`) are one
+    hold, from its first to its last, plus a sample (it may have started, and ended, between two)."""
+    longest, start = 0.0, seen[0]
+    for prev, at in zip(seen, [*seen[1:], None], strict=True):
+        if at is None or at - prev > 1.5 * SAMPLE:
+            longest, start = max(longest, prev - start + SAMPLE), at if at is not None else start
+    return round(longest, 2)
+
+
+def _held(locks: dict[tuple[str, str], list[float]]) -> dict[str, dict[str, float]]:
+    """Each existing table's reads and writes blocked by the upgrade's longest hold of such a lock: how long a normal
+    operation that arrived just then would wait at most."""
     held: dict[str, dict[str, float]] = {}
-    for (rel, mode), at in locks.items():
+    for (rel, mode), seen in locks.items():
         entry = held.setdefault(rel, {})
         for kind, modes in (("reads_blocked_s", BLOCK_READS), ("writes_blocked_s", BLOCK_WRITES)):
             if mode in modes:
-                entry[kind] = max(entry.get(kind, 0.0), round(took - at, 2))
+                entry[kind] = max(entry.get(kind, 0.0), _longest(seen))
     return {rel: v for rel, v in sorted(held.items(), key=lambda x: -max(x[1].values(), default=0)) if v}
 
 
-async def measure(url: str, *, loaded: bool) -> dict[str, Any]:
-    load = Load(url)
+async def measure(url: str, *, loaded: bool, per_kind: int = 1, pause: float = PAUSE) -> dict[str, Any]:
+    load = Load(url, per_kind, pause)
     loops: list[asyncio.Task[None]] = []
     baseline: dict[str, float] = {}
     if loaded:
         await load.prepare()
-        loops = [asyncio.create_task(load._loop(k)) for k in Load.KINDS]
+        loops = [asyncio.create_task(load._loop(k)) for k in Load.KINDS for _ in range(per_kind)]
         await asyncio.sleep(2)  # the load's baseline, before the upgrade
         baseline = {k: statistics.median(d for _, d in v) for k, v in load.times.items() if v}
     sampler = Sampler(url, load.pids)
     marks: list[tuple[float, str]] = []
+    gave_way: dict[str, int] = {}
     t0 = time.monotonic()
     sampling = asyncio.create_task(sampler.run(t0))
-    code, tail = await asyncio.to_thread(_upgrade, url, marks, t0)
+    code, tail = await asyncio.to_thread(_upgrade, url, marks, t0, gave_way)
     took = time.monotonic() - t0
     if loaded:
         await asyncio.sleep(1)  # what the upgrade released
@@ -333,9 +352,10 @@ async def measure(url: str, *, loaded: bool) -> dict[str, Any]:
     sampler.stop.set()
     await asyncio.gather(*loops, sampling)
     result: dict[str, Any] = {
-        "upgrade_exit": code, "upgrade_s": round(took, 2), "migrations": marks,
-        "held": _held(sampler.locks, took) if code == 0 else {},
-        "locks": sorted([[rel, mode, at] for (rel, mode), at in sampler.locks.items()], key=lambda x: (x[2], x[0])),
+        "upgrade_exit": code, "upgrade_s": round(took, 2), "migrations": marks, "gave_way": gave_way,
+        "held": _held(sampler.locks) if code == 0 else {},
+        "locks": sorted([[rel, mode, seen[0], _longest(seen)] for (rel, mode), seen in sampler.locks.items()],
+                        key=lambda x: (x[2], x[0])),
         "statements": sampler.statements,
     }  # fmt: skip
     if code:
@@ -365,6 +385,8 @@ def main() -> None:
     parser.add_argument("start", choices=["0034", "0042"])
     parser.add_argument("roots", type=int)
     parser.add_argument("--out")
+    parser.add_argument("--per-kind", type=int, default=1, help="connections per kind of operation (a heavier load)")
+    parser.add_argument("--pause", type=float, default=PAUSE, help="seconds between a connection's operations")
     args = parser.parse_args()
     with PostgresContainer("postgres:16-alpine", driver=None) as pg:
         url = pg.get_connection_url()
@@ -377,9 +399,11 @@ def main() -> None:
         asyncio.run(_copies(url, ["control", "loaded"]))
         base = url.rsplit("/", 1)[0]
         control = asyncio.run(measure(f"{base}/control", loaded=False))  # the upgrade alone: what it holds, how long
-        loaded = asyncio.run(measure(f"{base}/loaded", loaded=True))  # the same under the normal load
+        loaded = asyncio.run(measure(f"{base}/loaded", loaded=True, per_kind=args.per_kind,
+                                     pause=args.pause))  # the same under the normal load  # fmt: skip
     accepted = loaded["upgrade_exit"] == 0 and all(v["over_5s"] == 0 for v in loaded["load"].values())
-    result = {"start": args.start, "roots": args.roots, "seeded": counts, "seed_s": seeded_s,
+    result = {"start": args.start, "roots": args.roots, "load": {"per_kind": args.per_kind, "pause": args.pause},
+              "seeded": counts, "seed_s": seeded_s,
               "machine": {"platform": platform.platform(), "cpus": os.cpu_count(), "python": sys.version.split()[0]},
               "accepted": accepted, "control": control, "loaded": loaded}  # fmt: skip
     if args.out:
@@ -389,6 +413,7 @@ def main() -> None:
         "control": {"exit": control["upgrade_exit"], "upgrade_s": control["upgrade_s"],
                     "held": dict(list(control["held"].items())[:8])},
         "loaded": {"exit": loaded["upgrade_exit"], "upgrade_s": loaded["upgrade_s"], "errors": loaded["errors"],
+                   "gave_way": loaded["gave_way"],
                    "max_wait_s": max(v["max_wait_s"] for v in loaded["load"].values()),
                    "upgrade_error": [line for line in loaded.get("upgrade_error", []) if "Error" in line][-2:]},
     }  # fmt: skip

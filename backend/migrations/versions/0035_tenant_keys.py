@@ -14,6 +14,8 @@ from alembic import op
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
+from migrations.online import exists, index, online, plain, step
+
 revision = "0035"
 down_revision = "0042"
 branch_labels = None
@@ -54,9 +56,8 @@ TARGETS = [("workflow_versions_tenant", *VERSION), ("runs_tenant", *RUN)]  # wor
 
 def check(conn: Connection) -> None:
     """Refuse rows that would break a new key: a row naming another tenant's object, or a version of another workflow.
-    The error names each key with its count, never a row's contents."""
-    # The check must see every tenant's rows: a role that row-level security applies to errors here, never counts none.
-    conn.execute(text("SET LOCAL row_security = off"))
+    The error names each key with its count, never a row's contents. It must see every tenant's rows: `online()` turns
+    row-level security off, so a role it applies to errors here, never counts none."""
     found = []
     for name, table, columns, (ref, ref_columns), _, _ in KEYS:
         on = f"r.{ref_columns[0]} = t.{columns[0]}"
@@ -64,19 +65,42 @@ def check(conn: Connection) -> None:
         count = conn.execute(text(f"SELECT count(*) FROM {table} t JOIN {ref} r ON {on} WHERE {mismatch}")).scalar_one()
         if count:
             found.append(f"{name} {count}")
-    conn.execute(text("SET LOCAL row_security TO DEFAULT"))
     if found:
         raise RuntimeError(f"rows name another tenant's object or another workflow's version ({', '.join(found)}); "
                            "resolve them before this upgrade (migration 0035, issue #35)")  # fmt: skip
 
 
+def _key(name: str, table: str, columns: list[str], ref: str, ref_columns: list[str], ondelete: str | None) -> str:
+    cascade = f" ON DELETE {ondelete}" if ondelete else ""
+    return (f"ALTER TABLE {table} ADD CONSTRAINT {name} FOREIGN KEY ({', '.join(columns)}) "
+            f"REFERENCES {ref} ({', '.join(ref_columns)}){cascade} NOT VALID")  # fmt: skip
+
+
+def _replaced(name: str, table: str, columns: list[str]) -> str:
+    """A `done` query: the key under its new name with its new columns (two keep their old names)."""
+    return (f"SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.{table}'::regclass "
+            f"AND conname = '{name}' AND cardinality(conkey) = {len(columns)})")  # fmt: skip
+
+
 def upgrade() -> None:
-    check(op.get_bind())
-    for name, table, columns in TARGETS:
-        op.create_unique_constraint(name, table, columns)
-    for name, table, columns, (ref, ref_columns), ondelete, (old, *_) in KEYS:
-        op.drop_constraint(old, table, type_="foreignkey")
-        op.create_foreign_key(name, table, ref, columns, ref_columns, ondelete=ondelete)
+    # Online (2b-4b, D15): the targets' unique indexes built concurrently, then attached; each key replaced in a step
+    # of its own, its replacement added `NOT VALID` as the old one goes, so one of them always holds and every new row
+    # is checked by the new one; the rows checked again once every replacement holds; then each key validated, which
+    # blocks no reads or writes.
+    with online() as conn:
+        check(conn)
+        for name, table, columns in TARGETS:
+            index(conn, f"0035 {name}",
+                  f"CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS {name} ON {table} ({', '.join(columns)})")  # fmt: skip
+        for name, table, _ in TARGETS:
+            step(conn, f"0035 {name} attached", f"ALTER TABLE {table} ADD CONSTRAINT {name} UNIQUE USING INDEX {name}",
+                 done=exists("constraint", name))  # fmt: skip
+        for name, table, columns, (ref, ref_columns), ondelete, (old, *_) in KEYS:
+            step(conn, f"0035 {name}", f"ALTER TABLE {table} DROP CONSTRAINT {old}",
+                 _key(name, table, columns, ref, ref_columns, ondelete), done=_replaced(name, table, columns))  # fmt: skip
+        check(conn)
+        for name, table, *_ in KEYS:
+            plain(conn, f"0035 {name} validated", f"ALTER TABLE {table} VALIDATE CONSTRAINT {name}")
 
 
 def downgrade() -> None:

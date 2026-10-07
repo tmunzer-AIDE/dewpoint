@@ -57,7 +57,9 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    # A transaction per migration (2b-4b, D15): 0035 to 0044 commit in short steps of their own (`migrations/online.py`),
+    # and each migration is recorded as it ends, so an interrupted upgrade goes on from the last one recorded.
+    context.configure(connection=connection, target_metadata=target_metadata, transaction_per_migration=True)
 
     with context.begin_transaction():
         context.run_migrations()
