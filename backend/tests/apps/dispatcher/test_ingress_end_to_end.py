@@ -16,6 +16,7 @@ import json
 import time
 import uuid
 from collections.abc import AsyncIterator
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -138,6 +139,8 @@ async def test_a_signed_webhook_becomes_a_run_end_to_end_with_the_keyrings_real_
             raise RuntimeError("the dispatcher dies before its commit")
 
         monkeypatch.setattr(matching, "_before_commit", crash)
+        # A crash's process writes no backoff (`ERROR_BACKOFF`, for an error the pass catches): none here either
+        monkeypatch.setattr(matching, "ERROR_BACKOFF", timedelta(0))
         assert (await matching.match_once(dispatch_sessionmaker, dispatch_keys, matching.Verified())).get("error")
         assert await status_of(owner_sessionmaker, event_id) == ("pending", None)  # nothing it decided stayed
         monkeypatch.undo()

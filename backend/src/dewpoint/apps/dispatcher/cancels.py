@@ -3,6 +3,7 @@
 started run with a recorded cancel, still running, gets one cancel request; the run then ends as cancelled through its
 own end write (or the reconciler, §7.6). Ids reach it only through `cancel_candidates()`."""
 
+import uuid
 from collections import Counter
 from datetime import timedelta
 
@@ -22,6 +23,18 @@ BATCH = 50  # cancels per cycle
 CALL_DEADLINE = timedelta(seconds=10)  # a cancel's: the SDK sets none (the 2b-4b plan's M1b)
 
 
+async def _tried(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, request_id: uuid.UUID) -> None:
+    """A cancel's try, marked: its candidates come least lately tried first, so one that keeps failing never keeps the
+    others out (the owner's review of the 2b-4b M1 checkpoint 4). Never fails the pass."""
+    try:
+        async with sessionmaker() as s, s.begin():
+            await tenant_scope(s, tenant_id)
+            await s.execute(text("update run_requests set cancel_tried_at = statement_timestamp() where id = :i"),
+                            {"i": request_id})  # fmt: skip
+    except Exception as e:
+        log.warning("cancel_try_unmarked", request_id=str(request_id), error=type(e).__name__)
+
+
 async def send_cancels(sessionmaker: async_sessionmaker[AsyncSession], client: Client) -> dict[str, int]:
     """What happened, counted: `sent`, `closed` (its execution had already ended), `unsent` (tried again next cycle)."""
     async with sessionmaker() as s:
@@ -30,6 +43,7 @@ async def send_cancels(sessionmaker: async_sessionmaker[AsyncSession], client: C
     with budget.passing("cancels") as admitted:
         for tenant_id, request_id in admitted(picked, key=lambda row: row[1]):
             happened = "sent"
+            await _tried(sessionmaker, tenant_id, request_id)
             try:
                 handle = client.get_workflow_handle(run_workflow_id(str(tenant_id), str(request_id)))
                 await handle.cancel(rpc_timeout=CALL_DEADLINE)

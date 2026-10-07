@@ -649,6 +649,19 @@ async def sync_one(
         return await _record(s, leader, schedule_id, wanted.generation, after.action_key_version, seen=temporal_id)
 
 
+async def _visited(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID,
+                   schedule_id: uuid.UUID) -> None:  # fmt: skip
+    """A schedule's sync visit, marked: its candidates come least lately visited first, so one that stays incomplete
+    (a tombstone `deleting` visit after visit) never keeps the others out (the owner's review of the 2b-4b M1 checkpoint
+    4). Never fails the pass."""
+    try:
+        async with sessionmaker() as s, s.begin():
+            await tenant_scope(s, tenant_id)
+            await s.execute(update(Row).where(Row.id == schedule_id).values(sync_visited_at=func.statement_timestamp()))
+    except Exception as e:
+        log.error("schedule_sync_visit_unmarked", schedule_id=str(schedule_id), error=type(e).__name__)
+
+
 async def _failed(
     sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, schedule_id: uuid.UUID, code: str
 ) -> None:
@@ -684,6 +697,7 @@ async def sync_schedules(
     counts: dict[str, int] = {}
     with budget.passing("sync") as admitted:
         for tenant_id, schedule_id in admitted(picked, key=lambda row: row[1]):
+            await _visited(sessionmaker, tenant_id, schedule_id)
             try:
                 outcome = await sync_one(sessionmaker, client, leader, tenant_id, schedule_id)
             except Exception as e:
@@ -700,6 +714,20 @@ async def sync_schedules(
     if admitted.deferred:
         counts["deferred"] = admitted.deferred
     return counts
+
+
+async def _misses_tried(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID,
+                        temporal_id: str) -> None:  # fmt: skip
+    """A misses read that failed, its try marked: its candidates come least lately tried first, so one that keeps
+    failing never keeps the others out (the owner's review of the 2b-4b M1 checkpoint 4); it stays unread, and its
+    accounting stale. Never fails the pass."""
+    try:
+        async with sessionmaker() as s, s.begin():
+            await tenant_scope(s, tenant_id)
+            await s.execute(update(Incarnation).where(Incarnation.temporal_id == temporal_id)
+                            .values(misses_tried_at=func.statement_timestamp()))  # fmt: skip
+    except Exception as e:
+        log.error("schedule_misses_try_unmarked", incarnation=temporal_id, error=type(e).__name__)
 
 
 async def check_misses(
@@ -735,10 +763,11 @@ async def check_misses(
                     elif read.seen_at is not None or read.backfilled:
                         await _retired(s, [temporal_id])  # seen, then gone: its one create can't land again
                     await s.execute(update(Incarnation).where(Incarnation.temporal_id == temporal_id)
-                                    .values(misses_checked_at=at))  # fmt: skip
+                                    .values(misses_checked_at=at, misses_tried_at=at))  # fmt: skip
                 counts["checked"] += 1
             except Exception as e:
                 log.error("schedule_misses_unread", incarnation=temporal_id, error=type(e).__name__)
+                await _misses_tried(sessionmaker, tenant_id, temporal_id)
     if admitted.deferred:
         counts["deferred"] = admitted.deferred
     return counts

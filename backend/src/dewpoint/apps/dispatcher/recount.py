@@ -30,6 +30,18 @@ async def _before_recount_commit() -> None:
     """Runs as a recount is about to commit its corrections. A no-op; the tests fail a transaction here."""
 
 
+async def _tried(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID) -> None:
+    """A recount's try, marked: its candidates come least lately tried first, so one that keeps failing never keeps the
+    other tenants out (the owner's review of the 2b-4b M1 checkpoint 4). Never fails the pass."""
+    try:
+        async with sessionmaker() as s, s.begin():
+            await tenant_scope(s, tenant_id)
+            await s.execute(text("update tenant_event_counters set recount_tried_at = statement_timestamp() "
+                                 "where tenant_id = :t"), {"t": tenant_id})  # fmt: skip
+    except Exception as e:
+        log.error("event_recount_try_unmarked", tenant_id=str(tenant_id), error=type(e).__name__)
+
+
 async def recount_once(sessionmaker: async_sessionmaker[AsyncSession], *, batch: int = BATCH) -> dict[str, int]:
     """The tenants due a recount, each recounted: how many, and how many rows were corrected. A recount that fails is
     logged by type and leaves its tenant for a later cycle."""
@@ -39,6 +51,7 @@ async def recount_once(sessionmaker: async_sessionmaker[AsyncSession], *, batch:
     counts: Counter[str] = Counter()
     with budget.passing("recount") as admitted:
         for tenant_id in admitted(picked, key=lambda tenant: tenant):
+            await _tried(sessionmaker, tenant_id)
             try:
                 counts["drifted"] += await recount_tenant(sessionmaker, tenant_id)
                 counts["recounted"] += 1

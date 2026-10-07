@@ -98,6 +98,7 @@ class TenantEventCounters(Base):
     retained_events_max: Mapped[int] = mapped_column(BigInteger, server_default="250000")
     retained_bytes_max: Mapped[int] = mapped_column(BigInteger, server_default=str(1024 * 1024 * 1024))
     recounted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recount_tried_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # its recount's last try
 
 
 class TriggerBinding(Base):

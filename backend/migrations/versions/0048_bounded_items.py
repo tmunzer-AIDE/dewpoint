@@ -18,7 +18,7 @@ branch_labels = None
 depends_on = None
 
 READ = ["read_token bytea", "read_run text", "read_pending jsonb", "read_last_at timestamptz"]
-RETIRING = ["misses_checked_at timestamptz", "retired_at timestamptz"]
+RETIRING = ["misses_checked_at timestamptz", "retired_at timestamptz", "misses_tried_at timestamptz"]
 # An incarnation that may still miss a firing: not yet retired, and sent an unpause once, from before 0040, or landed
 # unpaused. The candidates' filter and their index's predicate, alike: one never unpaused (a disabled schedule's) is
 # never read, so never in the index's way (the review's I5)
@@ -32,12 +32,77 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
   SELECT tenant_id, temporal_id FROM schedule_incarnations
   WHERE {MAY_MISS}
     AND (misses_checked_at IS NULL OR misses_checked_at < statement_timestamp() - interval '{MISSES_DUE}')
-  ORDER BY misses_checked_at NULLS FIRST, temporal_id
+  ORDER BY misses_tried_at NULLS FIRST, temporal_id
   LIMIT max_rows
 $$""",
     "REVOKE ALL ON FUNCTION incarnation_miss_candidates(integer) FROM PUBLIC",
     "GRANT EXECUTE ON FUNCTION incarnation_miss_candidates(integer) TO dewpoint_dispatch",
-    "GRANT UPDATE (misses_checked_at, retired_at) ON schedule_incarnations TO dewpoint_dispatch",
+    "GRANT UPDATE (misses_checked_at, retired_at, misses_tried_at) ON schedule_incarnations TO dewpoint_dispatch",
+]
+
+# Each pass's selection moves on past what it tried (the owner's review of checkpoint 4): a candidate function took the
+# first items by its own order, and one that failed, or came back incomplete, kept its place for good, keeping the
+# rest out. Each pass now marks what it tried (the misses read above, `misses_tried_at`; a schedule's sync, a cancel, a
+# recount, here), and its candidates come least lately tried first.
+TRIED = {"schedules": "sync_visited_at", "run_requests": "cancel_tried_at", "tenant_event_counters": "recount_tried_at"}
+ROTATED = [
+    """CREATE OR REPLACE FUNCTION schedule_candidates(max_schedules integer)
+RETURNS TABLE (tenant_id uuid, schedule_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+    SELECT s.tenant_id, s.id FROM schedules s
+    WHERE s.generation > s.synced_generation
+      AND (s.sync_error_at IS NULL OR s.sync_error_at < statement_timestamp() - interval '60 seconds')
+    ORDER BY s.sync_visited_at NULLS FIRST, s.updated_at, s.id
+    LIMIT max_schedules
+$$""",
+    """CREATE OR REPLACE FUNCTION cancel_candidates(max_rows integer)
+RETURNS TABLE (tenant_id uuid, request_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT r.tenant_id, r.id FROM run_requests r JOIN runs u ON u.id = r.id
+  WHERE r.status = 'started' AND r.cancel_requested_at IS NOT NULL AND r.cancel_sent_at IS NULL
+    AND u.status = 'running'
+  ORDER BY r.cancel_tried_at NULLS FIRST, r.cancel_requested_at, r.id
+  LIMIT max_rows
+$$""",
+    """CREATE OR REPLACE FUNCTION recount_candidates(max_tenants integer)
+RETURNS TABLE (tenant_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT c.tenant_id FROM public.tenant_event_counters c
+   WHERE c.recounted_at IS NULL OR c.recounted_at <= now() - interval '10 minutes'
+   ORDER BY c.recount_tried_at NULLS FIRST, c.recounted_at NULLS FIRST, c.tenant_id
+   LIMIT max_tenants
+$$""",
+    "GRANT UPDATE (sync_visited_at) ON schedules TO dewpoint_dispatch",
+    "GRANT UPDATE (recount_tried_at) ON tenant_event_counters TO dewpoint_dispatch",
+]
+# As 0030, 0022 and 0033 left them: the downgrade's
+ORIGINAL = [
+    """CREATE OR REPLACE FUNCTION schedule_candidates(max_schedules integer)
+RETURNS TABLE (tenant_id uuid, schedule_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+    SELECT s.tenant_id, s.id FROM schedules s
+    WHERE s.generation > s.synced_generation
+      AND (s.sync_error_at IS NULL OR s.sync_error_at < statement_timestamp() - interval '60 seconds')
+    ORDER BY s.updated_at, s.id
+    LIMIT max_schedules
+$$""",
+    """CREATE OR REPLACE FUNCTION cancel_candidates(max_rows integer)
+RETURNS TABLE (tenant_id uuid, request_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT r.tenant_id, r.id FROM run_requests r JOIN runs u ON u.id = r.id
+  WHERE r.status = 'started' AND r.cancel_requested_at IS NOT NULL AND r.cancel_sent_at IS NULL
+    AND u.status = 'running'
+  ORDER BY r.cancel_requested_at, r.id
+  LIMIT max_rows
+$$""",
+    """CREATE OR REPLACE FUNCTION recount_candidates(max_tenants integer)
+RETURNS TABLE (tenant_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT c.tenant_id FROM public.tenant_event_counters c
+   WHERE c.recounted_at IS NULL OR c.recounted_at <= now() - interval '10 minutes'
+   ORDER BY c.recounted_at NULLS FIRST, c.tenant_id
+   LIMIT max_tenants
+$$""",
 ]
 
 
@@ -51,14 +116,29 @@ def upgrade() -> None:
              done=exists("column", "retired_at", "schedule_incarnations"))  # fmt: skip
         index(conn, "0048 schedule_incarnations_misses_due",
               "CREATE INDEX CONCURRENTLY IF NOT EXISTS schedule_incarnations_misses_due ON schedule_incarnations "
-              f"(misses_checked_at NULLS FIRST, temporal_id) WHERE {MAY_MISS}")  # fmt: skip
+              f"(misses_tried_at NULLS FIRST, temporal_id) WHERE {MAY_MISS}")  # fmt: skip
         step(conn, "0048 incarnation_miss_candidates", *ungranted(*CANDIDATES),
              done=exists("function", "incarnation_miss_candidates(integer)"))  # fmt: skip
-        step(conn, "0048 grants", *grants(*CANDIDATES))
+        for table, column in TRIED.items():  # one busy table a step
+            step(conn, f"0048 {table} {column}", f"ALTER TABLE {table} ADD COLUMN {column} timestamptz",
+                 done=exists("column", column, table))  # fmt: skip
+        index(conn, "0048 schedules_unsynced_visited",
+              "CREATE INDEX CONCURRENTLY IF NOT EXISTS schedules_unsynced_visited ON schedules "
+              "(sync_visited_at NULLS FIRST, updated_at, id) WHERE generation > synced_generation")  # fmt: skip
+        step(conn, "0048 candidates rotated", *ungranted(*ROTATED))
+        step(conn, "0048 grants", *grants(*CANDIDATES), *grants(*ROTATED))
 
 
 def downgrade() -> None:
-    op.execute("REVOKE UPDATE (misses_checked_at, retired_at) ON schedule_incarnations FROM dewpoint_dispatch")
+    for statement in ORIGINAL:
+        op.execute(statement)
+    op.execute("REVOKE UPDATE (recount_tried_at) ON tenant_event_counters FROM dewpoint_dispatch")
+    op.execute("REVOKE UPDATE (sync_visited_at) ON schedules FROM dewpoint_dispatch")
+    op.execute("DROP INDEX schedules_unsynced_visited")
+    for table, column in TRIED.items():
+        op.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+    op.execute("REVOKE UPDATE (misses_checked_at, retired_at, misses_tried_at) ON schedule_incarnations "
+               "FROM dewpoint_dispatch")  # fmt: skip
     op.execute("DROP FUNCTION incarnation_miss_candidates(integer)")
     op.execute("DROP INDEX schedule_incarnations_misses_due")
     op.execute(f"ALTER TABLE schedule_incarnations {', '.join(f'DROP COLUMN {c.split()[0]}' for c in RETIRING)}")

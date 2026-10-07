@@ -66,6 +66,7 @@ EVENT_NOT_JSON = "event_not_json"
 EVENT_NOT_OBJECT = "event_not_object"
 EVENT_ATTEMPTS = 5  # event-specific attempts before an unconfirmed failure is dead (§8.3)
 BACKOFF = timedelta(seconds=30)  # after the first event-specific failure, doubling (§15, provisional)
+ERROR_BACKOFF = timedelta(minutes=1)  # after a match failed unexpectedly (a bug, an outage), its attempts untouched
 ROLLED_BACK = (GATE_OFF, ENVIRONMENT_NOT_RECORDED, TENANT_ERASING, SKIPPED)
 ALERTS = "dewpoint.matching.alerts"  # in the session's `info`: alerts logged once its transaction commits
 
@@ -109,6 +110,22 @@ async def _lock(s: AsyncSession, key: str) -> None:
     await s.execute(text("select pg_advisory_xact_lock_shared(hashtextextended(:k, 0))"), {"k": key})
 
 
+async def _backed_off(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID,
+                     event_id: uuid.UUID) -> None:  # fmt: skip
+    """An event whose match failed unexpectedly (a bug, an outage) tried again only after `ERROR_BACKOFF`, so it never
+    keeps the events after it out (the owner's review of the 2b-4b M1 checkpoint 4). Never fails the pass."""
+    try:
+        async with sessionmaker() as s, s.begin():
+            await tenant_scope(s, tenant_id)
+            query = text(
+                "update inbound_events set next_attempt_at = statement_timestamp() + :b "
+                "where id = :e and status = 'pending'"
+            )
+            await s.execute(query, {"b": ERROR_BACKOFF, "e": event_id})
+    except Exception as e:
+        log.error("event_match_unbacked", event_id=str(event_id), error=type(e).__name__)
+
+
 async def match_once(
     sessionmaker: async_sessionmaker[AsyncSession], keys: KeySource, verified: Verified, *, batch: int = BATCH
 ) -> dict[str, int]:
@@ -131,6 +148,7 @@ async def match_once(
                     "event_match_failed", tenant_id=str(tenant_id), event_id=str(event_id), error=type(e).__name__
                 )
                 counts["error"] += 1
+                await _backed_off(sessionmaker, tenant_id, event_id)
     if admitted.deferred:
         counts["deferred"] = admitted.deferred
     return dict(counts)
