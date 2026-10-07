@@ -933,3 +933,6 @@ its protection checked by disabling it. A technical review; the rulings above st
   isn't UTF-8 is unreadable, so the message is discarded in either phase, never counted or kept.
 - At eadff20 (local, not pushed): 1,857 tests in the affected areas, ruff, format, mypy, import contracts; CodeQL's
   python analysis 0 findings. Still not run: the full suite, a Compose proof, any real Mist call.
+- The owner's review of the fixes (2026-10-07): R1-R4 technically closed at 12cd76b, no new findings. Technical closure
+  only: the rulings still await the owner's sign-off, and the full suite, any real Mist call, push and PR each wait for
+  the owner's word.
