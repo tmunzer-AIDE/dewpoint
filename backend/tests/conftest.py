@@ -42,6 +42,20 @@ def _attest_tick_cutover(url: str) -> None:
     asyncio.run(record())
 
 
+def _attest_inventory_cutover(url: str) -> None:
+    """The suite's inventory cutover, recorded before any schedule, as `schedules inventory-cutover --attest` would on a
+    new deployment (no migration records one): the schedules the tests add are the new sync's alone."""
+    import asyncio
+
+    async def record() -> None:
+        engine = make_engine(url)
+        async with engine.begin() as c:
+            await c.execute(text("select schedule_inventory_cutover_record()"))
+        await engine.dispose()
+
+    asyncio.run(record())
+
+
 @pytest.fixture(scope="session")
 def pg_url() -> str:
     with PostgresContainer("postgres:16-alpine", driver="asyncpg") as pg:
@@ -49,6 +63,7 @@ def pg_url() -> str:
         env = {**os.environ, "DEWPOINT_DATABASE_URL": url}
         subprocess.run(["uv", "run", "alembic", "upgrade", "head"], cwd=BACKEND, env=env, check=True)
         _attest_tick_cutover(url)
+        _attest_inventory_cutover(url)
         yield url
 
 
@@ -138,7 +153,8 @@ async def clean_db(owner_sessionmaker: async_sessionmaker[AsyncSession]) -> Asyn
             await s.execute(
                 text(
                     "select string_agg(format('%I', tablename), ',') from pg_tables "
-                    "where schemaname='public' and tablename not in ('alembic_version', 'tick_cutover')"
+                    "where schemaname='public' and tablename not in ('alembic_version', 'tick_cutover', "
+                    "'schedule_inventory_cutover')"
                 )
             )
         ).scalar_one()

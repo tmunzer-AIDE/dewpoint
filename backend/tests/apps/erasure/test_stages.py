@@ -23,7 +23,7 @@ from dewpoint.apps.erasure import process, stages, temporal
 from dewpoint.core.erasure import service
 from dewpoint.core.models.erasure import Stage
 from dewpoint.engine.runtime.ids import run_workflow_id, schedule_workflow_id
-from tests.apps.dispatcher.test_schedule_sync import Leading
+from tests.apps.dispatcher.test_schedule_sync import Leading, before_the_cutover
 from tests.apps.erasure.support import erasing, populated, rows_of
 from tests.core.erasure.test_fence import FENCED_TABLES
 from tests.core.retention.support import sql
@@ -345,3 +345,19 @@ async def test_a_firing_recorded_after_the_inventory_is_still_found_and_deleted(
         known = (await s.execute(text("select count(*) from tenant_erasure_known where workflow_id = :w "
                                       "and run_id = :r"), {"w": late, "r": late_run})).scalar_one()  # fmt: skip
     assert known == 1
+
+
+async def test_an_erasure_waits_at_its_schedules_until_the_inventorys_cutover(
+    server, owner_sessionmaker, ingress_sessionmaker, api_sessionmaker, retention_sessionmaker
+) -> None:
+    """Pausing, inventorying and deleting a tenant's schedules relies on every Temporal id a schedule may have: until
+    the inventory's cutover, a dispatcher from before 0040 may still sync one under its own id. The erasure holds at
+    stage 31, its fixed reason recorded and alerted on, and goes on once the cutover is recorded."""
+    data = await populated(owner_sessionmaker, ingress_sessionmaker)
+    await erasing(api_sessionmaker, data["t"])
+    async with before_the_cutover(owner_sessionmaker):
+        with structlog.testing.capture_logs() as logs:
+            assert await process.advance(retention_sessionmaker, server.client, data["t"]) == Stage.PAUSE
+        assert (await record(owner_sessionmaker, data["t"])).failure == "schedule_inventory_not_cut_over"
+        assert any(e["event"] == "erasure_held" and e["log_level"] == "error" for e in logs)
+    assert await process.advance(retention_sessionmaker, server.client, data["t"]) > Stage.PAUSE

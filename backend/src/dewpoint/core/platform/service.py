@@ -146,3 +146,11 @@ async def longest_run_duration_days(s: AsyncSession) -> int | None:
     """The longest maximum run duration ever recorded, or None when none is: the payload floor can't be reckoned."""
     found = (await s.execute(text("SELECT max(days) FROM run_duration_limits"))).scalar()
     return None if found is None else int(found)
+
+
+async def inventory_cut_over(s: AsyncSession) -> bool:
+    """Whether the schedule inventory's cutover is recorded (`schedules inventory-cutover`): only from it may a
+    dispatcher pass or an erasure stage rely on every Temporal id a schedule may have. Before it, a dispatcher from
+    before migration 0040 may still sync a schedule under its own id (the owner's D15 ruling on the 2b-4b M1
+    checkpoint)."""
+    return bool(await s.scalar(text("SELECT EXISTS (SELECT 1 FROM schedule_inventory_cutover)")))

@@ -102,11 +102,18 @@ def schema(conn: Connection) -> dict[str, Any]:
     }.items()}}  # fmt: skip
 
 
-def fingerprint(conn: Connection) -> dict[str, list[Any]]:
-    """Each part of `schema`: its rows' count and a digest of them, sorted: what a revision's state is compared on."""
+# What the online migrations add to the originals on purpose: 0040's capture of the schedules added until the
+# inventory's cutover (the owner's D15 ruling on the 2b-4b M1 checkpoint)
+ADDED = ("schedule_inventory_cutover", "schedule_inventoried", "schedules_inventoried")
+
+
+def fingerprint(conn: Connection, excluding: tuple[str, ...] = ()) -> dict[str, list[Any]]:
+    """Each part of `schema`: its rows' count and a digest of them, sorted: what a revision's state is compared on.
+    Rows naming any of `excluding` are left out."""
     parts = {}
     for name, rows in schema(conn).items():
-        flat = sorted(repr(row) for row in (rows.items() if isinstance(rows, dict) else rows))
+        kept = (repr(row) for row in (rows.items() if isinstance(rows, dict) else rows))
+        flat = sorted(row for row in kept if not any(name in row for name in excluding))
         parts[name] = [len(flat), hashlib.sha256("\n".join(flat).encode()).hexdigest()]
     return parts
 

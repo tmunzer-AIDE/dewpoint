@@ -7,7 +7,8 @@ security, every grant, roles). Run by hand, never in CI; a disposable Postgres 1
 
     PYTHONPATH=$PWD/src:$PWD .venv/bin/python -m tests.probes.migration_equivalence <ref> --workdir DIR [--write]
 
-Prints each revision's differing parts with their rows, original first. `--write` records the original's fingerprints
+Prints each revision's differing parts with their rows, original first; what 0040 adds on purpose
+(`support.ADDED`) is counted apart. `--write` records the original's fingerprints
 as the suite's fixture (`tests/migrations/revisions.json`), which `test_each_revision_ends_as_the_original_left_it`
 compares the working tree's migrations against."""
 
@@ -23,7 +24,7 @@ from typing import Any
 import asyncpg
 from testcontainers.community.postgres import PostgresContainer
 
-from tests.migrations.support import BACKEND, alembic_config, autocommitted, fingerprint, schema, upgrade
+from tests.migrations.support import ADDED, BACKEND, alembic_config, autocommitted, fingerprint, schema, upgrade
 
 ORDER = ["0034", "0041", "0042", "0035", "0036", "0037", "0038", "0039", "0040", "0043", "0044"]
 FIXTURE = BACKEND / "tests/migrations/revisions.json"
@@ -56,6 +57,7 @@ def main() -> None:
     original = alembic_config(extract(args.ref, args.workdir))
     fingerprints: dict[str, Any] = {}
     differ: dict[str, dict[str, Any]] = {}
+    added: dict[str, int] = {}
     with PostgresContainer("postgres:16-alpine", driver=None) as pg:
         base = pg.get_connection_url().rsplit("/", 1)[0]
         asyncio.run(_create(base, "original", "online"))
@@ -65,12 +67,17 @@ def main() -> None:
             before, after = autocommitted(f"{base}/original", schema), autocommitted(f"{base}/online", schema)
             fingerprints[revision] = autocommitted(f"{base}/original", fingerprint)
             for part, rows in before.items():
-                if rows != after[part]:
-                    a = set(rows.items()) if isinstance(rows, dict) else rows
-                    b = set(after[part].items()) if isinstance(after[part], dict) else after[part]
-                    differ.setdefault(revision, {})[part] = {"original": sorted(map(repr, a - b)),
-                                                             "online": sorted(map(repr, b - a))}  # fmt: skip
-            print(revision, "identical" if revision not in differ else f"differs: {sorted(differ[revision])}")
+                a = {repr(r) for r in (rows.items() if isinstance(rows, dict) else rows)}
+                b = {repr(r) for r in (after[part].items() if isinstance(after[part], dict) else after[part])}
+                added[revision] = added.get(revision, 0) + sum(any(n in r for n in ADDED) for r in b - a)
+                b = {r for r in b if not any(n in r for n in ADDED)}  # what 0040 adds on purpose
+                if a != b:
+                    differ.setdefault(revision, {})[part] = {"original": sorted(a - b), "online": sorted(b - a)}
+            print(
+                revision,
+                "identical" if revision not in differ else f"differs: {sorted(differ[revision])}",
+                f"(and {added[revision]} rows of what 0040 adds on purpose)" if added[revision] else "",
+            )
     if differ:
         print(json.dumps(differ, indent=1))
     if args.write:

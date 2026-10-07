@@ -58,6 +58,18 @@ class TickCutover(Base):
     at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class ScheduleInventoryCutover(Base):
+    """The schedule inventory's cutover (the owner's D15 ruling on the 2b-4b M1 checkpoint): from it, every writer from
+    before migration 0040 is gone (the operator's attestation), so no schedule is added that an older dispatcher may
+    sync under its own id. Recorded once, after its catch-up, by `schedules inventory-cutover`; before it, migration
+    0040 captures every schedule added as it backfilled those already there, and no dispatcher pass or erasure stage
+    that relies on the inventory runs."""
+
+    __tablename__ = "schedule_inventory_cutover"
+    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, default=1)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class RunDurationLimit(Base):
     """A maximum run duration the dispatcher has set deadlines with (engine 2b spec §6.4): the longest is the payload
     floor's."""

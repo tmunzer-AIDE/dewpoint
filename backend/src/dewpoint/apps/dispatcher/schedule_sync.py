@@ -74,6 +74,7 @@ still names, from its own read-back (none for an action it wrote): `keys reencry
 next sync writes the action without its argument."""
 
 import dataclasses
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -112,10 +113,13 @@ from dewpoint.core.models.schedules import ScheduleIncarnation as Incarnation
 from dewpoint.core.models.schedules import ScheduleInterval as Span
 from dewpoint.core.models.tenancy import Tenant
 from dewpoint.core.models.workflows import Workflow
+from dewpoint.core.platform.service import inventory_cut_over
 from dewpoint.core.tenancy import lifecycle
 from dewpoint.engine.runtime.ids import schedule_workflow_id
 
 log = structlog.get_logger("dewpoint.dispatcher.schedules")
+UNCUT_ALERT_S = 3600.0  # how often the passes waiting for the inventory's cutover alert
+_uncut_alerted: list[float] = []
 MARK = "dewpoint generation {}"  # the only thing the sync writes into a schedule's note (the owner's ruling)
 CREATED = "dewpoint created"  # a schedule's note from its paused create until the update that unpauses it
 DELETING = "dewpoint deleting"  # an incarnation's note once paused for its delete: its count, then, is final
@@ -632,11 +636,26 @@ async def _failed(
         await s.execute(update(Row).where(Row.id == schedule_id).values(sync_error=code, sync_error_at=func.now()))
 
 
+async def _cut_over(sessionmaker: async_sessionmaker[AsyncSession]) -> bool:
+    """Whether the schedule passes may run: the inventory's cutover recorded. Until then a dispatcher from before 0040
+    may sync any schedule under its own id; the passes take nothing, alerting at most hourly."""
+    async with sessionmaker() as s:
+        if await inventory_cut_over(s):
+            return True
+    now = time.monotonic()
+    if not _uncut_alerted or now - _uncut_alerted[-1] >= UNCUT_ALERT_S:
+        _uncut_alerted[:] = [now]
+        log.error("schedule_inventory_not_cut_over")
+    return False
+
+
 async def sync_schedules(
     sessionmaker: async_sessionmaker[AsyncSession], client: Client, leader: _Leader, *, batch: int = BATCH
 ) -> dict[str, int]:
     """One pass over the queued schedules, each isolated: a failure is recorded with a fixed code, alerted on, and
-    retried after a while."""
+    retried after a while. None before the inventory's cutover (`awaiting_cutover`)."""
+    if not await _cut_over(sessionmaker):
+        return {"awaiting_cutover": 1}
     async with sessionmaker() as s:
         picked = (
             await s.execute(text("select tenant_id, schedule_id from schedule_candidates(:n)"), {"n": batch})
@@ -663,7 +682,10 @@ async def check_misses(
     sessionmaker: async_sessionmaker[AsyncSession], client: Client, *, batch: int = BATCH
 ) -> dict[str, int]:
     """Temporal's count of firings missed past each schedule's catch-up window (an outage longer than it), read every
-    five minutes: an increase is recorded on the schedule, audited and alerted on, and the API shows it."""
+    five minutes: an increase is recorded on the schedule, audited and alerted on, and the API shows it. None before
+    the inventory's cutover."""
+    if not await _cut_over(sessionmaker):
+        return {"awaiting_cutover": 1}
     async with sessionmaker() as s:
         query = text("select tenant_id, schedule_id from schedule_miss_candidates(:n)")
         picked = (await s.execute(query, {"n": batch})).all()
@@ -697,7 +719,10 @@ async def check_strays(
     """Every incarnation that isn't current (an earlier one of a live schedule, or any of a deleted schedule's, its
     tombstone gone or not), described again every hour, for good (the owner's review of 2b-4a M4): a late create
     lands paused and fires nothing, but stays until found. One found is paused by the sync for its delete and its count
-    recorded (`held`), then deleted and alerted on; it's described again on the next pass, its absence read back."""
+    recorded (`held`), then deleted and alerted on; it's described again on the next pass, its absence read back.
+    None before the inventory's cutover."""
+    if not await _cut_over(sessionmaker):
+        return {"awaiting_cutover": 1}
     async with sessionmaker() as s:
         picked = (
             await s.execute(text("select tenant_id, temporal_id from stray_incarnations(:n)"), {"n": batch})

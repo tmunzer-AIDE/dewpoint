@@ -94,6 +94,8 @@ egress_cli = typer.Typer(
 platform_cli.add_typer(egress_cli, name="egress")
 api_cli = typer.Typer(no_args_is_help=True)
 app.add_typer(api_cli, name="api")
+schedules_cli = typer.Typer(no_args_is_help=True)
+app.add_typer(schedules_cli, name="schedules")
 
 
 async def _init(email: str, password: str) -> None:
@@ -578,6 +580,63 @@ def keys_tick_cutover(
             await audit_log.record(s, tenant_id=None, actor_id=None, action="keys.tick_cutover", target_type="platform",
                                target_id="tick_cutover", details=details)  # fmt: skip
         return f"recorded the tick cutover at {recorded.isoformat()}; {queued} schedule(s) queued"
+
+    typer.echo(asyncio.run(_in_session(_run)))
+
+
+INVENTORY_ATTESTED = (
+    "every writer from before 0040 (its API, its dispatcher) stopped and unable to restart; no image from before 0040 "
+    "deployable"
+)
+
+
+@schedules_cli.command("inventory-cutover")
+def schedules_inventory_cutover(
+    attest: bool = typer.Option(False, "--attest", help="no writer from before 0040 runs or can run again"),
+    confirm: bool = typer.Option(False, "--confirm", help="record it (else a dry run)"),
+) -> None:
+    """Record the schedule inventory's cutover (the owner's D15 ruling on the 2b-4b M1 checkpoint): from it, the
+    dispatcher's schedule passes and an erasure's schedule stages rely on every Temporal id a schedule may have. An
+    online upgrade runs while the application from before migration 0040 still writes, and its dispatcher syncs any
+    schedule under the schedule's own id: until this cutover, 0040 records each schedule added as it backfilled those
+    already there. It needs the operator's attestation (`--attest`, required) that every writer from before 0040 (its
+    API and its dispatcher) has stopped and can't restart, and that no image from before 0040 can be deployed against
+    this database: nothing here can prove that. It also refuses (exit 1) while Temporal shows a dispatcher from before
+    0040 polling the admission queue (its identity lacks the tick contract's mark, from the same release), and when
+    Temporal can't be asked (exit 3). With --confirm it records once, in one transaction holding off schedules' inserts:
+    any schedule without an incarnation (one the capture missed) is caught up first, and the count audited with the
+    attestation. Exit 2 without --attest. Exit 2 when no Temporal namespace is recorded or the configured one isn't it,
+    before any connection. Run as dewpoint_admin."""
+    if not attest:
+        typer.echo("pass --attest: no writer from before migration 0040 runs, or can be deployed again")
+        raise typer.Exit(2)
+    settings = get_settings()
+
+    async def _run(s: AsyncSession) -> str:
+        await _verified_namespace(s, settings)
+        async with s.begin():
+            existing = (await s.execute(text("SELECT at FROM schedule_inventory_cutover"))).scalar_one_or_none()
+        if existing is not None:
+            return f"already recorded at {existing.isoformat()}"
+        pollers = await _admission_pollers(settings)
+        if pollers is None:
+            raise typer.Exit(3)
+        old = [p for p in pollers if tick_contract.IDENTITY not in p]
+        if old:
+            typer.echo(f"{len(old)} poller(s) of the admission queue without the tick contract's mark: stop every "
+                       "dispatcher from before migration 0040 first")  # fmt: skip
+            raise typer.Exit(1)
+        if not confirm:
+            return "not recorded (a dry run: pass --confirm)"
+        async with s.begin():
+            caught = (await s.execute(text("SELECT schedule_inventory_cutover_record()"))).scalar_one()
+            if caught is None:
+                return "already recorded"
+            at = (await s.execute(text("SELECT at FROM schedule_inventory_cutover"))).scalar_one()
+            details: dict[str, object] = {"caught_up": int(caught), "attested": INVENTORY_ATTESTED}
+            await audit_log.record(s, tenant_id=None, actor_id=None, action="schedules.inventory_cutover",
+                                   target_type="platform", target_id="inventory_cutover", details=details)  # fmt: skip
+        return f"recorded the inventory's cutover at {at.isoformat()}; {caught} schedule(s) caught up"
 
     typer.echo(asyncio.run(_in_session(_run)))
 

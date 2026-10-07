@@ -8,6 +8,7 @@ holds the leadership; a marker absent or different leaves it queued. A deletion 
 absence is seen a call deadline after it, and a tick that finds a tombstone queues it again."""
 
 import asyncio
+import contextlib
 import dataclasses
 import uuid
 from collections.abc import AsyncIterator
@@ -25,6 +26,7 @@ from dewpoint.apps import schedules
 from dewpoint.apps.dispatcher import schedule_sync, tick
 from dewpoint.core.db import tenant_scope
 from dewpoint.engine.runtime.ids import schedule_workflow_id
+from tests.apps.dispatcher.test_leader_deadlines import recorded
 from tests.apps.test_admission import KEYS, TOKEN, current, published
 from tests.apps.test_runs import rpc
 from tests.apps.test_workflow_ops import update as update_workflow
@@ -1343,3 +1345,32 @@ async def test_an_older_sync_waits_for_a_successor_being_recorded_and_then_sends
     assert done == {successor, *older} and newest != first
     assert shown is not None and shown.paused  # 1, no longer current, never unpaused
     assert older[0].result() == "pending"
+
+
+@contextlib.asynccontextmanager
+async def before_the_cutover(owner: Any) -> AsyncIterator[None]:
+    """The suite's database as one upgraded while the application from before 0040 ran, before its inventory's
+    cutover (`dewpoint schedules inventory-cutover`)."""
+    async with owner() as s, s.begin():
+        kept = (await s.execute(text("delete from schedule_inventory_cutover returning at"))).scalar_one()
+    try:
+        yield
+    finally:
+        async with owner() as s, s.begin():
+            await s.execute(text("insert into schedule_inventory_cutover (at) values (:a)"), {"a": kept})
+
+
+async def test_no_schedule_pass_runs_before_the_inventorys_cutover(
+    server, ready, owner_sessionmaker, dispatch_sessionmaker
+) -> None:
+    """A dispatcher from before 0040 may still sync any schedule under its own id until every one is gone: the sync,
+    misses and strays passes take nothing (no call to Temporal) until the cutover is recorded, then go on."""
+    ctx, _, schedule_id = ready
+    async with before_the_cutover(owner_sessionmaker):
+        with recorded(server.client) as seen:
+            assert await schedule_sync.sync_schedules(dispatch_sessionmaker, server.client, Leading()) == {
+                "awaiting_cutover": 1}  # fmt: skip
+            assert await schedule_sync.check_misses(dispatch_sessionmaker, server.client) == {"awaiting_cutover": 1}
+            assert await schedule_sync.check_strays(dispatch_sessionmaker, server.client) == {"awaiting_cutover": 1}
+        assert seen == []
+    assert await sync(server, dispatch_sessionmaker, ctx, schedule_id) == "synced"

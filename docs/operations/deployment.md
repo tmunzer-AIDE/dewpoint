@@ -48,6 +48,31 @@ To roll back, make the old build current again while its workers still run: `dew
 A node type the new build no longer ships must be retired first ([`plugin-lifecycle.md`](plugin-lifecycle.md)). The
 old build's runs that still use it finish on the old build's workers, which still have it.
 
+## Upgrading the database while the old build runs (migrations 0035 to 0044)
+
+Migrations 0035 to 0044 upgrade a database in use: each commits in short steps (`backend/migrations/online.py`), so
+normal reads and writes wait at most a fraction of a second behind the upgrade, and an upgrade interrupted anywhere is
+run again with `alembic upgrade head`. Two of the database's settings matter:
+
+- A step lasts at most 60% of the shortest `deadlock_timeout` the server, the database or any role has (`ALTER ROLE …
+  SET deadlock_timeout`). A very short one makes steps too short to finish: the upgrade then stops, naming the step.
+- When the migrating role may set `deadlock_timeout` (a superuser, or one granted `SET ON PARAMETER
+  deadlock_timeout`), a step waiting for an autovacuum has the server cancel that one; otherwise the step gives way
+  and tries again until the autovacuum ends, and the upgrade stops after its attempts if it never does.
+
+Then, once every process of the build from before migration 0040 (its API and its dispatcher) has stopped and can't be
+deployed again, record the schedule inventory's cutover, as the key admin:
+
+```sh
+dewpoint schedules inventory-cutover --attest            # a dry run: the admission queue's pollers
+dewpoint schedules inventory-cutover --attest --confirm  # records it, once
+```
+
+Until then the old dispatcher may sync any schedule under the schedule's own Temporal id, so the database records each
+schedule added as one the inventory can't account for, and the new dispatcher's schedule passes and an erasure's
+schedule stages wait (`schedule_inventory_not_cut_over`, alerted on). The command refuses while Temporal shows a
+dispatcher from before 0040 polling the admission queue, and catches up any schedule the database didn't record.
+
 ## A build with a new engine ABI
 
 A build ID ends with its engine ABI (`+abi6`), which changes whenever a build could execute a workflow differently. A

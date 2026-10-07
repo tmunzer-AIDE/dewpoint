@@ -62,7 +62,15 @@ earlier stage (a late Temporal item found) keeps its fence.
 was verified, and when it was found lost), which step 9's bound relies on. The verified proof of 2b-4b (D12) records
 it, as the key admin; no migration does. An erasure records the boundary it relied on, and can't complete without one,
 nor once it's lost. Not fenced: the audit log (kept under the audit
-policy), and the retention sweep's own counts (deleted by the erasure's sweep once audited)."""
+policy), and the retention sweep's own counts (deleted by the erasure's sweep once audited).
+
+The inventory's cutover (the owner's D15 ruling on the 2b-4b M1 checkpoint): an online upgrade runs while the
+application from before it still writes, and its dispatcher syncs every schedule row under the schedule's own id. Until
+`dewpoint schedules inventory-cutover --attest` records `schedule_inventory_cutover` (every writer from before 0040
+gone, attested), each schedule added, by any writer, is captured as the backfill records those already here: its
+incarnation 0 and its life until then unknown (`schedules_inventoried`, from before the backfill, so none slips between
+them). No dispatcher pass or erasure stage that relies on the inventory runs before the cutover; no migration records
+it, not even a fresh deployment's."""
 
 from collections.abc import Callable
 from uuid import UUID
@@ -346,6 +354,57 @@ SPANNED = (
     "WHERE v.temporal_id = i.temporal_id AND v.kind = 'creation')"
 )
 
+# Until the inventory's cutover, a schedule any writer adds is captured as the backfill records those already here.
+INVENTORIED = [
+    """CREATE FUNCTION schedule_inventoried() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public, pg_temp SET row_security = off AS $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM schedule_inventory_cutover) THEN
+    INSERT INTO schedule_incarnations (temporal_id, tenant_id, schedule_id, number, misses, backfilled)
+    VALUES ('t:' || NEW.tenant_id || ':sched:' || NEW.id, NEW.tenant_id, NEW.id, 0, NEW.misses, true)
+    ON CONFLICT (temporal_id) DO NOTHING;
+    INSERT INTO schedule_intervals (tenant_id, schedule_id, temporal_id, kind, starts_at, ends_at, class, reason)
+    VALUES (NEW.tenant_id, NEW.id, 't:' || NEW.tenant_id || ':sched:' || NEW.id, 'creation', NEW.created_at,
+            statement_timestamp(), 'unknown', 'before_migration')
+    ON CONFLICT (temporal_id, kind) DO NOTHING;
+  END IF;
+  RETURN NULL;
+END $$""",
+    "REVOKE ALL ON FUNCTION schedule_inventoried() FROM PUBLIC",
+    # The cutover, once, after its catch-up, in one transaction, schedules' inserts held off meanwhile: any schedule
+    # without an incarnation (one the capture missed) given its incarnation 0 and its life until then unknown. Its
+    # count, or NULL when recorded already. The key admin's, through `dewpoint schedules inventory-cutover`.
+    """CREATE FUNCTION schedule_inventory_cutover_record() RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public, pg_temp SET row_security = off AS $$
+DECLARE
+  v_count bigint;
+BEGIN
+  LOCK TABLE schedules IN SHARE ROW EXCLUSIVE MODE;
+  IF EXISTS (SELECT 1 FROM schedule_inventory_cutover) THEN
+    RETURN NULL;
+  END IF;
+  INSERT INTO schedule_incarnations (temporal_id, tenant_id, schedule_id, number, misses, backfilled)
+  SELECT 't:' || s.tenant_id || ':sched:' || s.id, s.tenant_id, s.id, 0, s.misses, true FROM schedules s
+  WHERE NOT EXISTS (SELECT 1 FROM schedule_incarnations i WHERE i.schedule_id = s.id)
+  ON CONFLICT (temporal_id) DO NOTHING;
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+  INSERT INTO schedule_intervals (tenant_id, schedule_id, temporal_id, kind, starts_at, ends_at, class, reason)
+  SELECT i.tenant_id, i.schedule_id, i.temporal_id, 'creation', s.created_at, i.recorded_at, 'unknown',
+         'before_migration'
+  FROM schedule_incarnations i JOIN schedules s ON s.id = i.schedule_id
+  WHERE i.backfilled AND NOT EXISTS (SELECT 1 FROM schedule_intervals v WHERE v.temporal_id = i.temporal_id
+                                     AND v.kind = 'creation');
+  INSERT INTO schedule_inventory_cutover DEFAULT VALUES;
+  RETURN v_count;
+END $$""",
+    "REVOKE ALL ON FUNCTION schedule_inventory_cutover_record() FROM PUBLIC",
+]
+CAPTURED = "CREATE TRIGGER schedules_inventoried AFTER INSERT ON schedules FOR EACH ROW EXECUTE FUNCTION schedule_inventoried()"
+CUTOVER = [
+    "GRANT SELECT ON schedule_inventory_cutover TO dewpoint_admin, dewpoint_dispatch, dewpoint_retention",
+    "GRANT EXECUTE ON FUNCTION schedule_inventory_cutover_record() TO dewpoint_admin",
+]
+
 # The retention process checks the deployment's recorded namespace before erasure reaches Temporal (§2.1).
 RECORD = "GRANT SELECT ON platform_settings TO dewpoint_retention"
 # The database's own boundary around the erasure's destructive paths (the final review's I2): the retention role
@@ -406,6 +465,7 @@ def upgrade() -> None:
     # them is there (the eraser may advance an erasure only once every insert past stage 60 is refused).
     with online() as conn:
         step(conn, "0040 tenant erasure", *ungranted(*_actions()), done=exists("relation", "tenant_erasures"))
+        step(conn, "0040 schedules inventoried", CAPTURED, done=exists("trigger", "schedules_inventoried", "schedules"))
         batches(conn, "0040 schedule_incarnations backfill", INCARNATED_BOUNDS, INCARNATED, first=UUID(int=0))
         batches(conn, "0040 schedule_intervals backfill", SPANNED_BOUNDS, SPANNED, first="")
         for table in dict.fromkeys(t for t, *_ in GATED if t not in MADE_GATED):
@@ -421,7 +481,7 @@ def upgrade() -> None:
         step(conn, "0040 schedules.creation_misses",
              lambda: op.add_column("schedules", sa.Column("creation_misses", sa.Integer, nullable=False, server_default="0")),
              done=exists("column", "creation_misses", "schedules"))  # fmt: skip
-        step(conn, "0040 grants", *grants(*_actions()), *ERASER,
+        step(conn, "0040 grants", *grants(*_actions()), *ERASER, *CUTOVER,
              "GRANT UPDATE (creation_misses) ON schedules TO dewpoint_dispatch", TOMBSTONE,
              done=exists("policy", "tenants_erasure", "tenants"))  # fmt: skip
 
@@ -570,6 +630,13 @@ def _actions() -> list[str | Callable[[], object]]:
         ),
         lambda: op.create_index("schedule_intervals_schedule", "schedule_intervals", ["schedule_id", "starts_at"]),
         *INTERVALS,
+        lambda: op.create_table(
+            "schedule_inventory_cutover",
+            sa.Column("id", sa.SmallInteger, primary_key=True, server_default="1"),
+            sa.Column("at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+            sa.CheckConstraint("id = 1", name="schedule_inventory_cutover_once"),
+        ),
+        *INVENTORIED,
         *FENCE,
         CALL_CANDIDATES,
         *GATE,
@@ -578,6 +645,10 @@ def _actions() -> list[str | Callable[[], object]]:
 
 
 def downgrade() -> None:
+    op.execute("DROP TRIGGER schedules_inventoried ON schedules")
+    op.execute("DROP FUNCTION schedule_inventoried()")
+    op.execute("DROP FUNCTION schedule_inventory_cutover_record()")
+    op.drop_table("schedule_inventory_cutover")
     op.execute(CALL_CANDIDATES_0042)
     for table, command, _, _ in GATED:
         op.execute(f"DROP POLICY {table}_erasure_{command.lower()} ON {table}")

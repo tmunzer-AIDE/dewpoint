@@ -9,15 +9,17 @@ behind it, and a writer's lock order can't deadlock it into rolling everything b
   last, in its last step (`grants`, `ungranted`), once everything that bounds what it grants is committed: its
   restrictive policies, its triggers. A step locks at most one table in use (a grant locks none), but for 0035's keys,
   which take both their table and the one they reference, and a new table's keys, which share what they reference.
-- A step's transaction lasts at most its budget, `SHARE` of the server's `deadlock_timeout`: each statement's lock
-  timeout is what's left of it (its statement timeout, `MARGIN` of `deadlock_timeout` more). So a normal operation
-  queued behind it waits less than that, and a writer whose lock the step waits for never waits long enough for the
-  server's deadlock check: the step gives way first. A lock not taken in time, a deadlock, or the budget spent rolls
-  the step back whole; it's tried again after a growing, jittered pause, at most `ATTEMPTS` times, each giving-way
-  logged, then the upgrade stops, naming it (`StepFailedError`); a statement cancelled on purpose stops it at once.
-  After a lock not taken, the schema's autovacuums are cancelled, as the server does for a lock request that has
-  waited `deadlock_timeout` (a step never does). A step whose `done` query says it committed already is skipped: an
-  interrupted migration runs again from its start (Alembic records it only at its end).
+- A step's transaction lasts at most its budget, `SHARE` of the shortest `deadlock_timeout` any role or the database
+  has: each statement's lock timeout is what's left of it (its statement timeout, `MARGIN` of that `deadlock_timeout`
+  more). So a normal operation queued behind it waits less than that, and a writer whose lock the step waits for never
+  waits long enough for its own deadlock check: the step gives way first. A lock not taken in time, a deadlock, or the
+  budget spent rolls the step back whole; it's tried again after a growing, jittered pause, at most `ATTEMPTS` times,
+  each giving-way logged, then the upgrade stops, naming it (`StepFailedError`); a statement cancelled on purpose
+  stops it at once. A role that may sets each step's own `deadlock_timeout` to a third of its budget: the server,
+  checking the lock a step waits for, then cancels the autovacuum blocking it, and only that one (it otherwise would
+  only once the request had waited `deadlock_timeout`, which a step never does). A step whose `done` query says it
+  committed already is skipped: an interrupted migration runs again from its start (Alembic records it only at its
+  end).
 - `batches`: a backfill in committed batches of `BATCH` rows, each taking rows not done yet: finding them outside any
   step (it waits for no normal operation), applying them in one.
 - `plain`: one statement outside any transaction, whose locks block no normal read or write (`CREATE INDEX
@@ -25,7 +27,7 @@ behind it, and a writer's lock order can't deadlock it into rolling everything b
 - `index`: an index built concurrently, an invalid one an interrupted build left behind dropped first.
 
 `AFTER` holds hooks called with each committed step's (or statement's) name: the tests check each boundary there.
-Logs name a step, its attempt, why it gave way and an autovacuum's tables, never a value."""
+Logs name a step, its attempt and why it gave way, never a value."""
 
 import logging
 import random
@@ -47,13 +49,6 @@ ATTEMPTS = 60  # a step's tries before the upgrade stops, naming it
 PAUSE_S = (0.05, 2.0)  # the pause between tries: doubling from the first, at most the second, jittered
 BATCH = 1_000  # rows a backfill's batch
 GIVE_WAY = {"55P03": "lock", "40P01": "deadlock", "57014": "budget"}  # lock_not_available, deadlock, canceled
-# The schema's autovacuums, but against wraparound (which the server never cancels either), with their tables
-AUTOVACUUMS = """SELECT a.pid, string_agg(DISTINCT c.relname, ', ' ORDER BY c.relname) FROM pg_stat_activity a
-JOIN pg_locks l ON l.pid = a.pid AND l.locktype = 'relation' AND l.granted
-JOIN pg_class c ON c.oid = l.relation AND c.relnamespace = 'public'::regnamespace
-WHERE a.backend_type = 'autovacuum worker' AND a.datname = current_database()
-  AND a.query NOT LIKE '%(to prevent wraparound)%'
-GROUP BY a.pid"""
 INVALID = (
     "SELECT NOT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
     "WHERE c.relname = :n AND c.relnamespace = 'public'::regnamespace"
@@ -87,12 +82,36 @@ def online() -> Iterator[Connection]:
             conn.execute(text("RESET row_security"))
 
 
+# Every `deadlock_timeout` a session of this database may run with: this one's, each role's and the database's own
+# (`ALTER ROLE`, `ALTER DATABASE`), and the server's files' (when this role may read them). A role can't set its own in
+# a session without the privilege to (a superuser parameter).
+TIMEOUTS = """SELECT setting || 'ms' FROM pg_settings WHERE name = 'deadlock_timeout'
+UNION ALL
+SELECT substr(c, length('deadlock_timeout=') + 1) FROM pg_db_role_setting s, unnest(s.setconfig) c
+WHERE s.setdatabase IN (0, (SELECT oid FROM pg_database WHERE datname = current_database()))
+  AND starts_with(c, 'deadlock_timeout=')"""
+FILES = "SELECT setting FROM pg_file_settings WHERE name = 'deadlock_timeout' AND applied"
+UNITS = {"us": 0.001, "ms": 1, "s": 1_000, "min": 60_000, "h": 3_600_000, "d": 86_400_000}
+
+
+def _ms(value: str) -> float:
+    """A `deadlock_timeout` as configured ('200ms', '1s', '1000': milliseconds), in milliseconds."""
+    found = re.fullmatch(r"([0-9.]+)\s*([a-z]*)", value.strip().strip("'\""))
+    if found is None or found[2] not in ("", *UNITS):
+        raise ValueError(f"a deadlock_timeout this module can't read: {value!r}")
+    return float(found[1]) * UNITS.get(found[2], 1)
+
+
 def _budget(conn: Connection) -> float:
+    """A step's budget, in seconds: `SHARE` of the shortest `deadlock_timeout` any session of this database may have,
+    so no writer's deadlock check comes before the step gives way, whatever its role."""
     if "online_budget" not in conn.info:
-        ms: int = conn.execute(
-            text("SELECT setting::int FROM pg_settings WHERE name = 'deadlock_timeout'")
-        ).scalar_one()
-        conn.info["online_budget"] = SHARE * ms / 1000
+        values = list(conn.execute(text(TIMEOUTS)).scalars())
+        try:
+            values += list(conn.execute(text(FILES)).scalars())
+        except DBAPIError:  # only a role that may read the server's files: its session's setting stands in for them
+            pass
+        conn.info["online_budget"] = SHARE * min(_ms(v) for v in values) / 1000
     budget: float = conn.info["online_budget"]
     return budget
 
@@ -107,16 +126,19 @@ def _why(e: BaseException) -> str | None:
     return GIVE_WAY.get(getattr(orig, "sqlstate", None) or "")
 
 
-def _unblock(conn: Connection, name: str) -> None:
-    """After a lock not taken in time: the schema's autovacuums cancelled, as the server cancels one that blocks a lock
-    request once it has waited `deadlock_timeout`, which a step never does (it gives way first). An autovacuum runs
-    again later; one this role may not cancel is named and left."""
-    for pid, tables in conn.execute(text(AUTOVACUUMS)).all():
-        try:
-            conn.execute(text("SELECT pg_cancel_backend(:p)"), {"p": pid})
-            log.warning("online step %s: an autovacuum of %s cancelled", name, tables)
-        except DBAPIError as e:
-            log.warning("online step %s: an autovacuum of %s left running (%s)", name, tables, type(e).__name__)
+def _detects(conn: Connection) -> bool:
+    """Whether this role may set its own `deadlock_timeout` (a superuser's parameter, unless granted `SET` on it):
+    then each step sets it shorter than its budget, and the server, checking the lock a step waits for, cancels the
+    autovacuum that blocks it (never one against wraparound) and no other; a cycle makes the step its victim. Else a
+    step behind an autovacuum gives way and tries again, said once."""
+    if "online_detects" not in conn.info:
+        conn.info["online_detects"] = bool(conn.execute(text(
+            "SELECT has_parameter_privilege('deadlock_timeout', 'SET')")).scalar())  # fmt: skip
+        if not conn.info["online_detects"]:
+            log.warning("online steps: this role may not set deadlock_timeout, so an autovacuum a step waits for is "
+                        "waited out (the step gives way and tries again)")  # fmt: skip
+    detects: bool = conn.info["online_detects"]
+    return detects
 
 
 def _tried(conn: Connection, name: str, once: Callable[[], Any], done: str | None) -> None:
@@ -135,8 +157,6 @@ def _tried(conn: Connection, name: str, once: Callable[[], Any], done: str | Non
             if attempt == ATTEMPTS:
                 raise StepFailedError(f"online step {name} gave way {ATTEMPTS} times ({why})") from e
             log.warning("online step %s: attempt %d gave way (%s)", name, attempt, why)
-            if why == "lock":
-                _unblock(conn, name)
             pause = min(PAUSE_S[1], PAUSE_S[0] * 2 ** (attempt - 1))
             time.sleep(pause * random.uniform(0.5, 1.0))  # noqa: S311  # jitter, no security meaning
             continue
@@ -149,11 +169,15 @@ def _tried(conn: Connection, name: str, once: Callable[[], Any], done: str | Non
 def step(conn: Connection, name: str, *actions: str | Callable[[], object], done: str | None = None) -> None:
     """`actions` (statements, or callables issuing them: Alembic's operations) in one transaction, as above."""
     budget = _budget(conn)
+    detects = _detects(conn)
 
     def once() -> None:
         started = time.monotonic()
         conn.execute(text("BEGIN"))
         try:
+            if detects:
+                conn.execute(text("SELECT set_config('deadlock_timeout', :d, true)"),
+                             {"d": f"{max(1, int(budget * 1000 / 3))}ms"})  # fmt: skip
             for action in actions:
                 left = budget - (time.monotonic() - started)
                 if left <= 0:

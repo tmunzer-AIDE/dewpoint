@@ -9,18 +9,21 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 import asyncpg
 import pytest
+from sqlalchemy import text
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import DBAPIError
 from testcontainers.community.postgres import PostgresContainer
 
 from migrations import online
 from tests.migrations.support import (
+    ADDED,
     autocommitted,
     copy,
     downgrade,
@@ -153,20 +156,29 @@ async def test_an_upgraded_database_ends_as_a_fresh_one_does(cluster, templates,
     assert await scalar(url, UNINCARNATED) == 0 and await scalar(url, UNSPANNED) == 0
 
 
+ADDED_THERE = (
+    "SELECT (to_regclass('public.schedule_inventory_cutover') IS NOT NULL) "
+    "AND (to_regprocedure('public.schedule_inventoried()') IS NOT NULL)"
+)
+
+
 async def test_each_revision_ends_as_the_original_left_it() -> None:
     """Run revision by revision from an empty database, the online migrations leave each revision's schema exactly as
     the original ones did (bc4c840's, fingerprinted by `tests/probes/migration_equivalence.py`): every migration's
-    committed end is the original's state, grants, policies and roles included. A cluster of its own: roles are the
-    cluster's, and the other tests' upgrades make them."""
+    committed end is the original's state, grants, policies and roles included, but for what 0040 adds on purpose
+    (`support.ADDED`: the capture until the inventory's cutover), which is there from 0040 on. A cluster of its own:
+    roles are the cluster's, and the other tests' upgrades make them."""
     expected = json.loads(REVISIONS.read_text())
-    differ = {}
+    differ, added = {}, {}
     with PostgresContainer("postgres:16-alpine", driver=None) as pg:
         url = pg.get_connection_url()
         for revision, parts in expected.items():
             await asyncio.to_thread(upgrade, url, revision)
-            got = await read(url, fingerprint)
+            got = await read(url, lambda c: fingerprint(c, ADDED))
             differ[revision] = sorted(part for part in parts if got[part] != parts[part])
+            added[revision] = await scalar(url, ADDED_THERE)
     assert {revision: parts for revision, parts in differ.items() if parts} == {}
+    assert [r for r, there in added.items() if there] == ["0040", "0043", "0044"]
 
 
 async def test_the_round_trip_restores_the_starting_revision() -> None:
@@ -280,6 +292,51 @@ async def test_both_paths_upgrade_under_a_continuing_load(cluster, templates, st
     assert {kind: errors for kind, errors in load.errors.items() if errors} == {}
     assert sum(len(times) for times in load.times.values()) > 100
     assert max(took for times in load.times.values() for _, took in times) < 1.0
+
+
+# The old application (from before 0040) at work during the upgrade: its API adds a schedule, its dispatcher syncs it
+# (under the schedule's own id in Temporal, as it did every schedule)
+OLD_CREATE = """INSERT INTO schedules (id, tenant_id, workflow_id, mode, created_by, every_s, offset_s, input)
+SELECT :i, w.tenant_id, w.id, 'live', m.user_id, 3600, 0, '\\x01'::bytea FROM workflows w
+JOIN memberships m ON m.tenant_id = w.tenant_id ORDER BY w.id LIMIT 1"""
+OLD_SYNC = "UPDATE schedules SET synced_generation = generation WHERE id = :i"
+INVENTORIED = """SELECT count(*) FROM schedule_incarnations i JOIN schedule_intervals v ON v.temporal_id = i.temporal_id
+WHERE i.schedule_id = :i AND i.number = 0 AND i.backfilled AND v.reason = 'before_migration'"""
+
+
+async def test_a_schedule_the_old_code_makes_after_the_backfill_is_still_inventoried(cluster, templates) -> None:
+    """Right after each batch of 0040's backfills (the last ones included), the old application adds a schedule and
+    syncs it: once the upgrade ends, each has its incarnation 0 and its life before the migration recorded, as the
+    schedules already there have. 0040 captures every schedule added until the inventory's cutover is recorded."""
+    url = await copy(cluster, templates["0034"])
+    made: list[uuid.UUID] = []
+
+    def old_code(conn: Connection, name: str) -> None:
+        if name.startswith(("0040 schedule_incarnations backfill", "0040 schedule_intervals backfill")):
+            made.append(uuid.uuid4())
+            conn.execute(text(OLD_CREATE), {"i": made[-1]})
+            conn.execute(text(OLD_SYNC), {"i": made[-1]})
+
+    online.AFTER.append(old_code)
+    try:
+        await asyncio.to_thread(upgrade, url)
+    finally:
+        online.AFTER.remove(old_code)
+    assert len(made) >= 2
+    found = [await scalar(url, INVENTORIED.replace(":i", f"'{i}'")) for i in made]
+    assert found == [1] * len(made)
+    assert await scalar(url, UNINCARNATED) == 0 and await scalar(url, UNSPANNED) == 0
+
+
+async def test_once_the_cutover_is_recorded_a_new_schedule_is_the_new_syncs_alone(cluster, templates) -> None:
+    """After `dewpoint schedules inventory-cutover` (no writer from before 0040 left), a schedule added is the new
+    sync's to incarnate: nothing is captured for it."""
+    url = await copy(cluster, templates["0042"])
+    await asyncio.to_thread(upgrade, url)
+    await execute(url, "INSERT INTO schedule_inventory_cutover DEFAULT VALUES")
+    made = uuid.uuid4()
+    await execute(url, OLD_CREATE.replace(":i", f"'{made}'"))
+    assert await scalar(url, f"SELECT count(*) FROM schedule_incarnations WHERE schedule_id = '{made}'") == 0
 
 
 class Holder:
@@ -430,8 +487,8 @@ async def test_a_failing_statement_rolls_its_step_back_whole_and_stops(scratch) 
 
 async def test_a_step_gives_way_to_a_writer_it_would_deadlock(scratch, caplog) -> None:
     """A step holding one table and waiting for a second, which a writer holds while it waits for the first: the step
-    gives way within its budget, short of the server's deadlock check, so the writer goes on and commits; the step
-    commits on a later attempt."""
+    gives way within its budget, short of the writer's deadlock check (its lock timeout, or its own shorter deadlock
+    check making it the victim), so the writer goes on and commits; the step commits on a later attempt."""
     caplog.set_level(logging.INFO, logger="alembic.online")
     await execute(scratch, "CREATE TABLE a (x int); CREATE TABLE b (x int)")
     w = await asyncpg.connect(scratch)
@@ -450,8 +507,37 @@ async def test_a_step_gives_way_to_a_writer_it_would_deadlock(scratch, caplog) -
     finally:
         await w.close()
     assert waited < 1.0
-    assert gave_way(caplog)[0] == "online step both: attempt 1 gave way (lock)"
-    assert all(m.endswith("(lock)") for m in gave_way(caplog))
+    assert gave_way(caplog)[0] in ("online step both: attempt 1 gave way (lock)",
+                                   "online step both: attempt 1 gave way (deadlock)")  # fmt: skip
+
+
+async def test_a_writer_whose_role_checks_deadlocks_sooner_is_never_a_steps_victim(scratch) -> None:
+    """A role of its own `deadlock_timeout` (200 ms, `ALTER ROLE … IN DATABASE`): the steps' budget is the shortest
+    any role or the database has, so the step gives way before that writer's deadlock check could find it in a cycle."""
+    role = f"w_{uuid.uuid4().hex[:8]}"
+    await execute(
+        scratch,
+        f"CREATE TABLE a (x int); CREATE TABLE b (x int); CREATE ROLE {role} LOGIN PASSWORD 'pw'; "
+        f"ALTER ROLE {role} IN DATABASE {scratch.rsplit('/', 1)[1]} SET deadlock_timeout = '200ms'; "  # this database's
+        f"GRANT ALL ON a, b TO {role}",
+    )
+    w = await asyncpg.connect(f"postgresql://{role}:pw@{scratch.split('@', 1)[1]}")
+    try:
+        assert await w.fetchval("SHOW deadlock_timeout") == "200ms"
+        tx = w.transaction()
+        await tx.start()
+        await w.execute("INSERT INTO b VALUES (1)")
+        stepping = asyncio.create_task(run(scratch, lambda c: online.step(
+            c, "both", "LOCK TABLE a IN ACCESS EXCLUSIVE MODE", "LOCK TABLE b IN ACCESS EXCLUSIVE MODE")))  # fmt: skip
+        await asyncio.sleep(0.15)  # the step holds `a` (or gave way already), and waits for `b`
+        t0 = time.monotonic()
+        await w.execute("INSERT INTO a VALUES (1)")
+        waited = time.monotonic() - t0
+        await tx.commit()
+        await asyncio.wait_for(stepping, 30)
+    finally:
+        await w.close()
+    assert waited < 0.2
 
 
 async def test_an_index_an_interrupted_build_left_invalid_is_built_again(scratch) -> None:
@@ -500,29 +586,63 @@ async def test_a_backfill_whose_rows_take_long_to_find_still_goes_on(scratch, mo
     assert await scalar(scratch, "SELECT count(*) FROM w WHERE NOT done") == 0
 
 
-async def test_a_step_behind_an_autovacuum_cancels_it_rather_than_wait_for_it(caplog, monkeypatch) -> None:
-    """The server cancels an autovacuum that blocks a lock request only once the request has waited `deadlock_timeout`,
-    which a step never does: after a step gives way on a lock, it cancels the schema's autovacuums (never one against
-    wraparound), as the server would, and commits on a later attempt. A cluster of its own, its autovacuum woken every
-    second, a table's slowed to hold its lock."""
-    caplog.set_level(logging.INFO, logger="alembic.online")
-    monkeypatch.setattr(online, "ATTEMPTS", 4)
+@pytest.fixture(scope="module")
+def autovacuuming() -> Iterator[str]:
+    """A cluster of its own, its autovacuum woken every second."""
     with PostgresContainer("postgres:16-alpine", driver=None) as pg:
         url = pg.get_connection_url()
-        await execute(url, "ALTER SYSTEM SET autovacuum_naptime = '1s'")
-        await execute(url, "SELECT pg_reload_conf()")
-        await execute(url, "CREATE TABLE av (id int, pad text) WITH (autovacuum_vacuum_threshold = 0, "
+        asyncio.run(execute(url, "ALTER SYSTEM SET autovacuum_naptime = '1s'"))
+        asyncio.run(execute(url, "SELECT pg_reload_conf()"))
+        yield url
+
+
+VACUUMED = """SELECT count(*) FROM pg_stat_activity a JOIN pg_locks l ON l.pid = a.pid AND l.locktype = 'relation'
+WHERE a.backend_type = 'autovacuum worker' AND l.relation = to_regclass('public.{t}')"""
+
+
+async def slowly_vacuumed(url: str, *tables: str, observer: str | None = None) -> None:
+    """Each table's autovacuum under way, slowed (a page a tenth of a second) so it holds its lock for long. Made by
+    `url`'s role, seen by `observer`'s (a role that may see the autovacuum's session)."""
+    for t in tables:
+        await execute(url, f"CREATE TABLE {t} (id int, pad text) WITH (autovacuum_vacuum_threshold = 0, "
                            "autovacuum_vacuum_scale_factor = 0, autovacuum_vacuum_cost_delay = 100, "
-                           "autovacuum_vacuum_cost_limit = 1); INSERT INTO av SELECT g, repeat('x', 200) "
-                           "FROM generate_series(1, 20000) g; DELETE FROM av")  # fmt: skip
-        query = ("SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'autovacuum worker' "
-                 "AND query LIKE '%av%'")  # fmt: skip
-        until = time.monotonic() + 60
-        while not await scalar(url, query):
-            assert time.monotonic() < until, "no autovacuum started"
-            await asyncio.sleep(0.2)
-        await run(url, lambda c: online.step(c, "vacuumed", "ALTER TABLE av ADD COLUMN x int"))
-    assert any("autovacuum of av cancelled" in m for m in (r.getMessage() for r in caplog.records))
+                           f"autovacuum_vacuum_cost_limit = 1); INSERT INTO {t} SELECT g, repeat('x', 200) "
+                           f"FROM generate_series(1, 20000) g; DELETE FROM {t}")  # fmt: skip
+    until = time.monotonic() + 60
+    while not all([await scalar(observer or url, VACUUMED.format(t=t)) for t in tables]):
+        assert time.monotonic() < until, "no autovacuum started"
+        await asyncio.sleep(0.2)
+
+
+async def test_a_step_behind_an_autovacuum_has_the_server_cancel_that_one_only(autovacuuming) -> None:
+    """The server cancels an autovacuum that blocks a lock request once the request has waited `deadlock_timeout`; a
+    step waits less than its budget, so it sets its own shorter (a role that may): the server then cancels the very
+    autovacuum it waits for, never one against wraparound, and no other. The step commits; another table's autovacuum
+    runs on."""
+    db = await copy(autovacuuming.rsplit("/", 1)[0], "template1")
+    await slowly_vacuumed(db, "av1", "av2")
+    await run(db, lambda c: online.step(c, "vacuumed", "ALTER TABLE av1 ADD COLUMN x int"))
+    assert await scalar(db, VACUUMED.format(t="av2")) == 1
+    await execute(db, "DROP TABLE av2")  # its autovacuum ends with it
+
+
+async def test_a_role_that_may_not_shorten_its_deadlock_timeout_gives_way_and_cancels_nothing(
+    autovacuuming, monkeypatch, caplog
+) -> None:  # fmt: skip
+    """A migrating role without the privilege to set `deadlock_timeout` (a superuser's parameter, unless granted)
+    cancels no autovacuum: a step behind one gives way and tries again, its attempts bounded, and says why."""
+    caplog.set_level(logging.INFO, logger="alembic.online")
+    monkeypatch.setattr(online, "ATTEMPTS", 3)
+    db = await copy(autovacuuming.rsplit("/", 1)[0], "template1")
+    role = f"m_{uuid.uuid4().hex[:8]}"
+    await execute(db, f"CREATE ROLE {role} LOGIN PASSWORD 'pw'; GRANT CREATE ON SCHEMA public TO {role}")
+    owned = f"postgresql://{role}:pw@{db.split('@', 1)[1]}"
+    await slowly_vacuumed(owned, "av3", observer=db)
+    with pytest.raises(online.StepFailedError, match=r"gave way 3 times \(lock\)"):
+        await run(owned, lambda c: online.step(c, "vacuumed", "ALTER TABLE av3 ADD COLUMN x int"))
+    assert await scalar(db, VACUUMED.format(t="av3")) == 1
+    assert any("may not set deadlock_timeout" in r.getMessage() for r in caplog.records)
+    await execute(db, "DROP TABLE av3")
 
 
 async def test_an_operators_cancel_stops_the_step_rather_than_retry_it(scratch) -> None:

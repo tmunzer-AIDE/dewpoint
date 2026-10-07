@@ -5,8 +5,9 @@ until one isn't done yet. A stage not done waits (`WAIT`); one that fails record
 backs off (doubling, at most an hour) and alerts (`erasure_step_failed`, its error's type only), never skipping a
 stage or an item; a stage still waiting an hour after it was entered alerts on every pass (`erasure_stalled`). Each
 move to the next stage is audited, identifiers and counts only; entering stage 60 takes the tenant's lifecycle lock
-exclusively, so the insert fence holds from then on for every writer. One process erases at a time, under a lock its
-connection holds."""
+exclusively, so the insert fence holds from then on for every writer. Stages 31 to 33 are held
+(`schedule_inventory_not_cut_over`, alerted on) until the schedule inventory's cutover is recorded. One process erases
+at a time, under a lock its connection holds."""
 
 import uuid
 from datetime import datetime, timedelta
@@ -22,6 +23,7 @@ from dewpoint.apps.erasure import bound, stages
 from dewpoint.core.audit import service as audit
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.erasure import Stage, TenantErasure, TenantErasureItem
+from dewpoint.core.platform.service import inventory_cut_over
 from dewpoint.core.tenancy import lifecycle
 
 log = structlog.get_logger("dewpoint.erasure")
@@ -33,6 +35,13 @@ NAMESPACE_RETENTION_MAX = bound.NAMESPACE_RETENTION_MAX
 _LOCK = text("SELECT pg_try_advisory_lock(hashtextextended('dewpoint:erasure', 0))")
 _UNLOCK = text("SELECT pg_advisory_unlock(hashtextextended('dewpoint:erasure', 0))")
 ORDER = list(Stage)
+# The stages that rely on every Temporal id a schedule may have: held until the inventory's cutover is recorded
+SCHEDULES = (Stage.PAUSE, Stage.INVENTORY, Stage.UNSCHEDULE)
+
+
+async def _cut_over(sessionmaker: async_sessionmaker[AsyncSession]) -> bool:
+    async with sessionmaker() as s:
+        return await inventory_cut_over(s)
 
 
 def failure_code(e: BaseException) -> str:
@@ -148,6 +157,9 @@ async def advance(sessionmaker: async_sessionmaker[AsyncSession], client: Client
             return stage
         run = stages.STAGES.get(stage)
         if run is None:
+            return stage
+        if stage in SCHEDULES and not await _cut_over(sessionmaker):
+            await _held(sessionmaker, tenant_id, bound.Held("schedule_inventory_not_cut_over"))
             return stage
         try:
             done = await run(ctx)
