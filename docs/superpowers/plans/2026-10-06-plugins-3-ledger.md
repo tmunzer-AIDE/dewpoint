@@ -615,7 +615,10 @@ stays available; the earlier findings stay resolved. This closes the technical r
 fixture redesign, catalog compression, the Compose proof, the read-only Mist smoke test, and push and PR remain the
 owner's.
 
-The owner approved the fixture redesign and catalog compression (2026-10-07), both built test-first:
+The owner chose to have the fixture redesign and catalog compression built in this slice (2026-10-07, "approve 2
+and 3, build them"); both were built test-first. The two rulings below record how; like every 3b-1 ruling, they
+await the owner's sign-off, and the later technical clearance of R1 and R2 is not acceptance (corrected at the
+owner's review, 2026-10-07; an earlier wording read "approved"):
 - Ruling (fixtures): a fixture is built from the schema, every declared property filled to 6 levels (only the required
   ones past them, so recursive schemas end), within 64 KB (the engine's inline limit; shallower past it): a given
   default, an array of one element, a union's first branch, else the type's empty value. The OAS example, shaped as
@@ -665,3 +668,7 @@ the owner's.
 The owner asked for the push and PR (2026-10-07). The branch was rebased onto `origin/main` 69944d0 (#46, #47: 2b-4a)
 without conflicts; the OpenAPI document and the web client's types still match (no drift, `check:api` passes). Full
 run at the rebased head: 3621 passed, 8 skipped, in 12 min 7 s; ruff, format, mypy and import contracts pass.
+
+**Status at the merge** (#49, `bc4c840`, 2026-10-07; all 15 checks passed): the technical review is closed; no 3b-1
+ruling has the owner's sign-off yet; the read-only Mist smoke test against a test org is pending. #49's e2e jobs ran
+the packaged Compose proof and the browser tests, so no separate local Compose run was made.
