@@ -11,7 +11,7 @@ from jsonschema.exceptions import SchemaError
 from dewpoint.engine.canonical import sha256_hex
 from dewpoint.engine.registry.control import CONTROL_TYPES
 from dewpoint.engine.schema_refs import SCHEMA_LIST, SCHEMA_MAP, SCHEMA_ONE, ref_problems
-from dewpoint.sdk.connections import HEADER_RE, HOST_RE, SCOPE_KIND_RE, TYPE_KEY_RE, template_parts
+from dewpoint.sdk.connections import HEADER_RE, HOST_RE, PATH_RE, SCOPE_KIND_RE, TYPE_KEY_RE, template_parts
 from dewpoint.sdk.fields import OPTIONS, SENSITIVE
 from dewpoint.sdk.node import ICON_RE, MAX_RETRY_ATTEMPTS, PORT_RE, RESERVED_PORTS, TYPE_RE, NodeKind, SideEffect
 from dewpoint.sdk.triggers import trigger_problems
@@ -269,25 +269,48 @@ def _auth_problems(name: str, auth: Any, secret_fields: Mapping[str, Any]) -> li
     return [f"{name}: auth template names {n!r}, not a secret field" for n in named if n not in secret_fields]
 
 
-def _host_problems(name: str, host: Any, config_fields: Mapping[str, Any]) -> list[str]:
+def _host_problems(name: str, host: Any, config_fields: Mapping[str, Any], label: str = "host") -> list[str]:
     if host is None:
         return []
     if not isinstance(host, Mapping) or host.get("kind") not in ("map", "url_field"):
         return [f"{name}: host must be {{kind: map, field, hosts}} or {{kind: url_field, field}}"]
     field = host.get("field")
     if not isinstance(field, str) or field not in config_fields:
-        return [f"{name}: host field {field!r} isn't a config field"]
+        return [f"{name}: {label} field {field!r} isn't a config field"]
     if host["kind"] == "url_field":
         return [] if set(host) == {"kind", "field"} else [f"{name}: host has unknown keys"]
     hosts = host.get("hosts")
     if set(host) != {"kind", "field", "hosts"} or not isinstance(hosts, Mapping) or not hosts:
         return [f"{name}: a host map needs hosts"]
-    out = [f"{name}: host {h!r} must be a host name" for h in hosts.values() if not isinstance(h, str)
+    out = [f"{name}: {label} {h!r} must be a host name" for h in hosts.values() if not isinstance(h, str)
            or not HOST_RE.match(h)]  # fmt: skip
     prop = config_fields[field]
     enum = prop.get("enum") if isinstance(prop, Mapping) else None
     if not isinstance(enum, list) or sorted(map(str, enum)) != sorted(map(str, hosts)):
-        out.append(f"{name}: host field {field!r} must allow exactly the host map's keys")
+        out.append(f"{name}: {label} field {field!r} must allow exactly the host map's keys")
+    return out
+
+
+STREAM_KEYS = frozenset({"kind", "field", "hosts", "path", "rate_scopes"})
+
+
+def _stream_problems(
+    name: str, key: str, stream: Any, config_fields: Mapping[str, Any], secret_fields: Mapping[str, Any]
+) -> list[str]:
+    """A connection type's websocket (plugins-3 D26): a host map, a fixed path, the scopes opening one charges."""
+    if not isinstance(stream, Mapping) or set(stream) != STREAM_KEYS or stream.get("kind") != "map":
+        return [f"{name}: stream must be {{kind: map, field, hosts, path, rate_scopes}}"]
+    host = {"kind": "map", "field": stream["field"], "hosts": stream["hosts"]}
+    out = _host_problems(name, host, config_fields, label="stream host")
+    path = stream["path"]
+    if not isinstance(path, str) or not PATH_RE.match(path):
+        out.append(f"{name}: stream path must be one or more /segments of unreserved characters")
+    scopes = stream["rate_scopes"]
+    if not isinstance(scopes, list):
+        out.append(f"{name}: stream rate_scopes must be a list")
+    else:
+        for scope in scopes:
+            out += _scope_problems(name, key, scope, config_fields, secret_fields)
     return out
 
 
@@ -322,9 +345,16 @@ def _required_problems(name: str, t: Mapping[str, Any]) -> list[str]:
     config_fields, secret_fields = _props(t.get("config_schema")), _props(t.get("secret_schema"))
     out: list[str] = []
     host, auth, scopes = t.get("host"), t.get("auth"), t.get("rate_scopes")
+    found = t.get("stream")
+    stream: Mapping[str, Any] = found if isinstance(found, Mapping) else {}
     field = host.get("field") if isinstance(host, Mapping) else None
     if field in config_fields and field not in config:
         out.append(f"{name}: host field {field!r} must be required")
+    stream_field = stream.get("field")
+    if stream_field in config_fields and stream_field not in config:
+        out.append(f"{name}: stream host field {stream_field!r} must be required")
+    more = stream.get("rate_scopes")
+    scopes = [*(scopes if isinstance(scopes, list) else []), *(more if isinstance(more, list) else [])]
     template = auth.get("template") if isinstance(auth, Mapping) else None
     if isinstance(template, str):
         try:
@@ -357,6 +387,8 @@ def _connection_type_problems(plugin: str, t: Any, seen: set[str]) -> list[str]:
         out.append(f"duplicate connection type {key!r}")
     seen.add(key)
     expected = {"key", "label", "config_schema", "secret_schema", "auth", "host", "rate_scopes", "verify"}
+    if "stream" in t:  # only when set
+        expected.add("stream")
     if set(t) != expected:
         out.append(f"{name}: needs exactly {sorted(expected)}")
     label = t.get("label")
@@ -382,6 +414,8 @@ def _connection_type_problems(plugin: str, t: Any, seen: set[str]) -> list[str]:
             out += _scope_problems(name, key, scope, config_fields, secret_fields)
     if not isinstance(t.get("verify"), bool):
         out.append(f"{name}: verify must be true or false")
+    if "stream" in t:
+        out += _stream_problems(name, key, t["stream"], config_fields, secret_fields)
     out += _required_problems(name, t)
     return out
 

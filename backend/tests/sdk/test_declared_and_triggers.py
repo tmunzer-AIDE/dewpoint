@@ -40,8 +40,8 @@ EVENT = {
 }
 
 
-def test_the_sdk_is_0_4_0() -> None:
-    assert SDK_VERSION == "0.4.0"
+def test_the_sdk_is_0_5_0() -> None:
+    assert SDK_VERSION == "0.5.0"
 
 
 def test_a_declared_model_reports_its_schema_in_every_mode() -> None:
