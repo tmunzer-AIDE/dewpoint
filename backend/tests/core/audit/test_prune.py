@@ -102,6 +102,27 @@ async def test_a_checkpoint_missing_from_the_anchor_sink_is_a_problem(aged, audi
 
 
 @pytest.mark.usefixtures("development_deployment")
+async def test_the_checkpoint_a_chain_starts_from_must_be_among_the_anchors(
+    aged, owner_sessionmaker, auditor_sessionmaker
+) -> None:
+    """The fix-pass review's R8: a later checkpoint recorded without pruning through it isn't where verification starts
+    (M4); the one it starts from, the last entry pruned, must be signed whatever a later one says."""
+    before = await _seqs(owner_sessionmaker, aged["scope"])
+    async with auditor_sessionmaker() as s, s.begin():
+        await prune(s, aged["sink"], older_than_days=DAYS)
+    async with owner_sessionmaker() as s:
+        head = (await s.execute(text("select hash from audit_log where seq = :q"), {"q": before[4]})).scalar_one()
+    async with auditor_sessionmaker() as s, s.begin():  # the anchored head, recorded as a checkpoint, nothing pruned
+        await s.execute(text("insert into audit_checkpoints (scope, seq, hash, sink, sink_ref) "
+                             "values (:s, :q, :h, 'file', 'r')"),
+                        {"s": aged["scope"], "q": before[4], "h": head})  # fmt: skip
+    unsigned_start = [e for e in aged["sink"].entries() if e["seq"] != before[2]]
+    async with auditor_sessionmaker() as s:
+        problems = await verify_anchors(s, unsigned_start, aged["key"].public_key())
+    assert f"{aged['scope']}:{before[2]}: checkpoint not among the external anchors" in problems, problems
+
+
+@pytest.mark.usefixtures("development_deployment")
 async def test_pruning_past_a_checkpoint_breaks_the_chain(aged, owner_sessionmaker, auditor_sessionmaker) -> None:
     async with auditor_sessionmaker() as s, s.begin():
         await prune(s, aged["sink"], older_than_days=DAYS)
