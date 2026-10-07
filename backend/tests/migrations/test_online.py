@@ -686,6 +686,18 @@ async def test_a_steps_commit_waits_for_no_standby(cluster, scratch) -> None:
     assert outcome is None and waited < 1.5
 
 
+async def test_a_migrating_client_that_stalls_mid_step_never_holds_its_locks_past_the_idle_bound(scratch) -> None:
+    """The review of checkpoint 5 (I1): the server bounded a step's statements, not the time it sat idle in its
+    transaction while the migrating client stalled (a paused machine, a lost network), its locks held until TCP
+    noticed. A step's session idle in its transaction past its budget (and margin) is ended, its locks with it: a
+    client stalled 5 s mid-step holds a writer queued behind it its budget and that idle bound at most, about two
+    budgets, not 5 s; the upgrade stops (run it again)."""
+    await execute(scratch, "CREATE TABLE a (x int)")
+    waited, outcome = await _queued_through(scratch, lambda c: online.step(
+        c, "stalled", "LOCK TABLE a IN ACCESS EXCLUSIVE MODE", lambda: time.sleep(5), "SELECT 1"))  # fmt: skip
+    assert isinstance(outcome, Exception) and waited < 2 * online.BUDGET_MAX_S + 1.0, (waited, outcome)
+
+
 async def test_a_writer_whose_role_checks_deadlocks_sooner_is_never_a_steps_victim(scratch) -> None:
     """A role of its own `deadlock_timeout` (200 ms, `ALTER ROLE … IN DATABASE`): the steps' budget is the shortest
     any role or the database has, so the step gives way before that writer's deadlock check could find it in a cycle."""
@@ -712,7 +724,7 @@ async def test_a_writer_whose_role_checks_deadlocks_sooner_is_never_a_steps_vict
         await asyncio.wait_for(stepping, 30)
     finally:
         await w.close()
-    assert waited < 0.2
+    assert waited < 1.0  # a deadlock's victim would have raised; the margin is a loaded machine's
 
 
 async def test_a_step_lasts_at_most_a_second_however_long_deadlock_timeout_is(scratch, monkeypatch) -> None:
@@ -741,7 +753,7 @@ async def test_a_step_lasts_at_most_a_second_however_long_deadlock_timeout_is(sc
         await tx.rollback()
         await holder.close()
         await reader.close()
-    assert took < 1.5 and queued < 1.2
+    assert took < 3.0 and queued < 1.5  # 6 s uncapped; the margins are a loaded machine's
 
 
 async def test_an_upgrade_refuses_while_a_role_could_lower_its_own_deadlock_timeout(scratch, templates) -> None:

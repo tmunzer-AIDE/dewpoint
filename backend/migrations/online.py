@@ -21,9 +21,12 @@ behind it, and a writer's lock order can't deadlock it into rolling everything b
   request had waited `deadlock_timeout`, which a step never does). Its locks are held for its budget and its commit, and
   no statement timeout bounds a commit (Postgres turns it off first; the owner's review of checkpoint 4): so the
   deferred triggers' work runs within the budget (`DEFERRED`), and the commit waits for no standby (`synchronous_commit
-  = local`: a step is idempotent, run again if a failover lost it), leaving only the local WAL flush, as any writer's. A
-  step whose `done` query says it committed already is skipped: an interrupted migration runs again from its start
-  (Alembic records it only at its end).
+  = local`: a step is idempotent, run again if a failover lost it), leaving only the local WAL flush, as any writer's.
+  Nor does one bound its session's idling between statements, a stalled client's (the review of checkpoint 5): a step's
+  session idle in its transaction longer than its budget and margin is ended, its locks with it, and the upgrade stops
+  (run it again). So a step holds its locks two budgets at most, a stalled client's included. A step whose `done` query
+  says it committed already is skipped: an interrupted migration runs again from its start (Alembic records it only at
+  its end).
 - What a budget rests on holds through the upgrade (the owner's review of checkpoint 3): no session may set its own
   `deadlock_timeout` below what the catalogue shows, so the upgrade refuses while a role other than the migrating one
   is granted `SET` on it, or a superuser is an application role (`APPLICATION`) or a member of one
@@ -274,9 +277,10 @@ def step(conn: Connection, name: str, *actions: str | Callable[[], object], done
         started = time.monotonic()
         conn.execute(text("BEGIN"))
         try:
-            conn.execute(
-                text("SELECT set_config('synchronous_commit', 'local', true)")
-            )  # its commit waits for no standby
+            # its commit waits for no standby; its session, idle in it past its budget (a stalled client), is ended
+            idle = max(1, int(budget / SHARE * MARGIN * 1000)) + int(budget * 1000)
+            conn.execute(text("SELECT set_config('synchronous_commit', 'local', true), "
+                              "set_config('idle_in_transaction_session_timeout', :i, true)"), {"i": f"{idle}ms"})  # fmt: skip
             if detects:
                 conn.execute(text("SELECT set_config('deadlock_timeout', :d, true)"),
                              {"d": f"{max(1, int(budget * 1000 / 3))}ms"})  # fmt: skip

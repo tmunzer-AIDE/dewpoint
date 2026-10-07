@@ -14,7 +14,9 @@ before migration 0040 is gone: a catch-up, in batches, then a short final step t
 - `record`: the cutover, in one short transaction that holds schedules' writes off while it records, reading no
   schedule (the owner's review of checkpoint 3: done with the catch-up under that lock, its hold grew with the
   schedules). Its lock is waited for at most `LOCK_WAIT` an attempt, so a writer queued behind the request waits no
-  longer; then it gives way, at most `ATTEMPTS` times, `PAUSE_S` apart (`InventoryBusyError`: run it again).
+  longer; then it gives way, at most `ATTEMPTS` times, `PAUSE_S` apart (`InventoryBusyError`: run it again). Its
+  statements are bounded (`STATEMENT_WAIT`), and so is its session's idling between them (`IDLE_WAIT`): a client
+  stalled there has its session ended, its lock with it, and nothing recorded (the review of checkpoint 5).
 
 Every refusal is a `CutoverRefusedError`, said in its message; nothing is recorded by one."""
 
@@ -31,6 +33,8 @@ from dewpoint.core.audit import service as audit_log
 
 CATCH_UP_BATCH = 1_000  # schedules a catch-up batch takes
 LOCK_WAIT = "200ms"  # the final step's wait for its lock, an attempt
+STATEMENT_WAIT = "500ms"  # each of the final step's statements at most, its lock's wait included
+IDLE_WAIT = "500ms"  # the final step's session idle in its transaction at most (a stalled client): then it's ended
 ATTEMPTS = 60  # the final step's attempts while schedules stay busy
 PAUSE_S = 1.0  # between them
 LOCK_NOT_AVAILABLE = "55P03"
@@ -115,7 +119,9 @@ async def record(s: AsyncSession, state: str | None, details: dict[str, object])
     for _ in range(ATTEMPTS):
         try:
             async with s.begin():
-                await s.execute(text("SELECT set_config('lock_timeout', :w, true)"), {"w": LOCK_WAIT})
+                await s.execute(text("SELECT set_config('lock_timeout', :w, true), set_config('statement_timeout', :s, "
+                                     "true), set_config('idle_in_transaction_session_timeout', :i, true)"),
+                                {"w": LOCK_WAIT, "s": STATEMENT_WAIT, "i": IDLE_WAIT})  # fmt: skip
                 query = text("SELECT schedule_inventory_cutover_record(:c)")
                 outcome: str = (await s.execute(query, {"c": state})).scalar_one()
                 if outcome == "recorded_already":

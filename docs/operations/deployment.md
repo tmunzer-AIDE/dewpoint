@@ -68,6 +68,9 @@ run again with `alembic upgrade head`. Two of the database's settings matter:
   it needs none.
 - **A step's commit waits for no synchronous standby** (`synchronous_commit = local`): a standby that stops answering
   can't hold a step's locks. Each step is idempotent, and run again if a failover loses it.
+- **A stalled migrating client is cut off.** A step's session left idle in its transaction longer than its budget (a
+  paused machine, a lost network) is ended by the server, its locks with it, so nothing waits behind it more than
+  about two budgets (2 seconds at most). The upgrade stops there; run it again.
 - No session may set its own `deadlock_timeout` lower than the catalogue shows. The upgrade refuses to start while a
   role other than the migrating one is granted `SET` on it, or while a superuser is one of the application's roles
   (`dewpoint_*`) or a member of one. Keep `deadlock_timeout` and those grants unchanged until the upgrade ends: each
@@ -94,7 +97,9 @@ dispatcher from before 0040 polling the admission queue. It then works in two pa
   before 0040 the missed count the old dispatcher last recorded, so the new dispatcher never counts those firings
   again. If it's interrupted, run the command again: the batches done stay done.
 - **A short final step** that records the cutover. Schedule writes (inserts, updates, deletes) wait while it runs, but
-  it reads no schedule, so its time doesn't grow with them. It waits at most 200 ms for its lock each attempt.
+  it reads no schedule, so its time doesn't grow with them. It waits at most 200 ms for its lock each attempt, each
+  of its statements runs at most 500 ms, and its session left idle 500 ms in its transaction (a stalled client) is
+  ended, nothing recorded: run it again.
 
 It refuses, records nothing and exits 1, saying why, when:
 - **Another cutover is running.** A second one refuses while the first runs: wait for it to end, then run the
