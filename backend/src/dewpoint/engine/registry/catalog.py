@@ -11,7 +11,16 @@ from jsonschema.exceptions import SchemaError
 from dewpoint.engine.canonical import sha256_hex
 from dewpoint.engine.registry.control import CONTROL_TYPES
 from dewpoint.engine.schema_refs import SCHEMA_LIST, SCHEMA_MAP, SCHEMA_ONE, ref_problems
-from dewpoint.sdk.connections import HEADER_RE, HOST_RE, PATH_RE, SCOPE_KIND_RE, TYPE_KEY_RE, template_parts
+from dewpoint.sdk.connections import (
+    HEADER_RE,
+    HOST_RE,
+    PATH_RE,
+    SCOPE_KIND_RE,
+    TYPE_KEY_RE,
+    secret_pattern_problem,
+    template_parts,
+    url_pattern_problem,
+)
 from dewpoint.sdk.fields import OPTIONS, SENSITIVE
 from dewpoint.sdk.node import ICON_RE, MAX_RETRY_ATTEMPTS, PORT_RE, RESERVED_PORTS, TYPE_RE, NodeKind, SideEffect
 from dewpoint.sdk.triggers import trigger_problems
@@ -269,12 +278,26 @@ def _auth_problems(name: str, auth: Any, secret_fields: Mapping[str, Any]) -> li
     return [f"{name}: auth template names {n!r}, not a secret field" for n in named if n not in secret_fields]
 
 
-def _host_problems(name: str, host: Any, config_fields: Mapping[str, Any], label: str = "host") -> list[str]:
+def _host_problems(
+    name: str,
+    host: Any,
+    config_fields: Mapping[str, Any],
+    label: str = "host",
+    secret_fields: Mapping[str, Any] | None = None,
+) -> list[str]:
     if host is None:
         return []
-    if not isinstance(host, Mapping) or host.get("kind") not in ("map", "url_field"):
-        return [f"{name}: host must be {{kind: map, field, hosts}} or {{kind: url_field, field}}"]
+    if not isinstance(host, Mapping) or host.get("kind") not in ("map", "url_field", "secret_url"):
+        return [f"{name}: host must be {{kind: map, field, hosts}}, {{kind: url_field, field}} or "
+                f"{{kind: secret_url, field, pattern}}"]  # fmt: skip
     field = host.get("field")
+    if host["kind"] == "secret_url":  # an incoming webhook's URL, its credential (plugins-3 D4's `url` auth)
+        if set(host) != {"kind", "field", "pattern"}:
+            return [f"{name}: a secret URL host must be {{kind: secret_url, field, pattern}}"]
+        if not isinstance(field, str) or field not in (secret_fields or {}):
+            return [f"{name}: host field {field!r} isn't a secret field"]
+        problem = url_pattern_problem(host["pattern"])
+        return [f"{name}: {problem}"] if problem else []
     if not isinstance(field, str) or field not in config_fields:
         return [f"{name}: {label} field {field!r} isn't a config field"]
     if host["kind"] == "url_field":
@@ -314,10 +337,14 @@ def _stream_problems(
     return out
 
 
+SCOPE_KEYS = frozenset({"kind", "config", "secret", "capacity", "refill_per_s"})
+
+
 def _scope_problems(name: str, key: str, scope: Any, config_fields: Mapping[str, Any],
                     secret_fields: Mapping[str, Any]) -> list[str]:  # fmt: skip
-    if not isinstance(scope, Mapping) or set(scope) != {"kind", "config", "secret", "capacity", "refill_per_s"}:
-        return [f"{name}: a rate scope must be {{kind, config, secret, capacity, refill_per_s}}"]
+    if not isinstance(scope, Mapping) or set(scope) not in (SCOPE_KEYS, SCOPE_KEYS | {"secret_pattern"}):
+        return [f"{name}: a rate scope must be {{kind, config, secret, capacity, refill_per_s}}, and a "
+                f"secret_pattern only when set"]  # fmt: skip
     kind, config, secret = scope["kind"], scope["config"], scope["secret"]
     where = f"{name}: rate scope {kind!r}"
     out: list[str] = []
@@ -331,6 +358,12 @@ def _scope_problems(name: str, key: str, scope: Any, config_fields: Mapping[str,
         out.append(f"{where} names {secret!r}, not a secret field")
     if not all(_finite(scope[k]) and scope[k] > 0 for k in ("capacity", "refill_per_s")):
         out.append(f"{where} needs a positive capacity and refill_per_s")
+    if "secret_pattern" in scope:
+        if secret is None:
+            out.append(f"{where}: a secret pattern needs its secret field")
+        problem = secret_pattern_problem(scope["secret_pattern"])
+        if problem:
+            out.append(f"{where}: {problem}")
     return out
 
 
@@ -349,6 +382,9 @@ def _required_problems(name: str, t: Mapping[str, Any]) -> list[str]:
     stream: Mapping[str, Any] = found if isinstance(found, Mapping) else {}
     field = host.get("field") if isinstance(host, Mapping) else None
     if field in config_fields and field not in config:
+        out.append(f"{name}: host field {field!r} must be required")
+    secret_host = isinstance(host, Mapping) and host.get("kind") == "secret_url"
+    if secret_host and field in secret_fields and field not in secret:
         out.append(f"{name}: host field {field!r} must be required")
     stream_field = stream.get("field")
     if stream_field in config_fields and stream_field not in config:
@@ -409,7 +445,7 @@ def _connection_type_problems(plugin: str, t: Any, seen: set[str]) -> list[str]:
         if not isinstance(sub, Mapping) or sub.get(SENSITIVE) is not True or sub.get("type") != "string":
             out.append(f"{name}: secret field {prop!r} must be an x-sensitive string")
     out += _auth_problems(name, t.get("auth"), secret_fields)
-    out += _host_problems(name, t.get("host"), config_fields)
+    out += _host_problems(name, t.get("host"), config_fields, secret_fields=secret_fields)
     scopes = t.get("rate_scopes")
     if not isinstance(scopes, list):
         out.append(f"{name}: rate_scopes must be a list")

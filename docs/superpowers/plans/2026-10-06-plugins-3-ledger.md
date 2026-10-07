@@ -1098,3 +1098,7 @@ Rulings:
 - Ruling: a generic webhook's URL is any https URL the guard allows (http only to allowlisted addresses, D7), the
   answer's status its only output (a receiver's body could quote anything) - cost if wrong: a receiver's answer isn't
   readable.
+- Ruling (task 1): a secret URL's pattern is declared on the type (`SecretUrl(field, pattern)`), matched whole
+  (`re.fullmatch`) wherever the secret is read, not put on the secret field: pydantic's default regex engine has no
+  look-around, and with Python's it can't apply a pattern to a `SecretStr`, while a `$` in JSON Schema's Python check
+  would accept a final newline - cost if wrong: none.
