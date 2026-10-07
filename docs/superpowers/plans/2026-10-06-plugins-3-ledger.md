@@ -945,3 +945,12 @@ its protection checked by disabling it. A technical review; the rulings above st
   POST only to a diagnostic utility of a chosen device, any other request refused before sending. The owner chose
   diagnostics only, on one device of each kind in the test org: a switch (EX4100-48MP), an SRX340, an SSR130 and an
   AP47.
+- R3's class in the guarded websocket (flagged by the `fix/validator-fullmatch` work and named a follow-up in the
+  owner's review of it): `HEADER_NAME.match` let a header name ending in "\n" through, and `websockets` checks only a
+  header's value, so the line break would have gone into the handshake. `fullmatch` refuses it as an invalid header
+  before anything is resolved or dialed (4cee8c8, its test failing first). No other `.match` on a `$` pattern is new
+  on this branch: the utility path check and the SDK's stream path check already use `fullmatch`. The utility nodes'
+  path value patterns still end in `$`, like main's Mist path patterns (left as they are by the owner): a config may
+  hold "x\n", and the run refuses it before the connection opens (`mist.invalid_path_value`, `client.path`'s
+  `fullmatch`). At 4cee8c8: 245 tests (core egress, the worker's network, streams, plugin calls and the utilities'
+  RunGraph proof), ruff, format, mypy, import contracts. Not rerun: the full suite, CodeQL.
