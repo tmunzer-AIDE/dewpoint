@@ -19,6 +19,7 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
+from dewpoint.apps.worker import network as network_module
 from dewpoint.apps.worker.network import DbConnections, Network, worker_types
 from dewpoint.apps.worker.plugin_calls import CallNetwork
 from dewpoint.apps.worker.store import DbRunStore
@@ -118,11 +119,13 @@ async def _setup(owner: Any, node: type = StreamCall, type_key: str = "streamkit
     return await seed_step(owner, named=[cid], tenant=tenant, node_type=f"{node.type}@1"), cid
 
 
-def attempt(worker: Any, seeded: Any, node: type = StreamCall, simulated: bool = False, **kw: Any) -> Any:
+def attempt(
+    worker: Any, seeded: Any, node: type = StreamCall, simulated: bool = False, beat: Any = None, **kw: Any
+) -> Any:
     store = DbRunStore(worker, FixtureKeys())
     return network(worker, seeded.tenant, **kw).attempt(
         tenant_id=seeded.tenant, run_id=seeded.run, step_id=seeded.step, root_run_id=seeded.run, node=node,
-        simulated=simulated, remember=store.remember, beat=lambda: None,
+        simulated=simulated, remember=store.remember, beat=beat or (lambda: None),
     )  # fmt: skip
 
 
@@ -292,3 +295,22 @@ async def test_the_attempt_closes_its_streams(owner_sessionmaker, worker_session
         await a.aclose()
         with pytest.raises(StreamLost):
             await stream.receive(1)
+
+
+async def test_a_long_receive_heartbeats_while_it_waits(owner_sessionmaker, worker_sessionmaker, monkeypatch) -> None:
+    """Review L7 (D26: the attempt heartbeats while it reads): a receive waits in slices, beating between them, so a
+    cancel reaches a node however long it asked to wait."""
+    monkeypatch.setattr(network_module, "RECEIVE_BEAT_S", 0.1)
+    beats: list[int] = []
+    async with stream_server(monkeypatch):
+        seeded, cid = await _setup(owner_sessionmaker)
+        a = attempt(worker_sessionmaker, seeded, beat=lambda: beats.append(1))
+        try:
+            stream = await (await a.connection(cid)).ws.connect()
+            beats.clear()  # the opening's own
+            assert await stream.receive(0.45) is None
+            with pytest.raises(InvalidRequest):
+                await stream.receive("5")  # type: ignore[arg-type]
+        finally:
+            await a.aclose()
+    assert len(beats) >= 3

@@ -896,3 +896,5 @@ fixed test-first, and each fix's protection checked by disabling it.
   node's step timeout, counted from when it started running, as `max_duration` would. Ruling: the node's own timeout
   is the reference; a graph that sets a shorter one cuts the collection by Temporal's timeout instead - cost if wrong:
   such a step is retried as a timeout (the diagnostics are repeatable).
+- L7 (the runtime's receive waited up to an hour without a heartbeat, delaying a cancel): it waits in slices of 10 s,
+  heartbeating between them, the timeout checked first.

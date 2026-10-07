@@ -20,6 +20,7 @@ connection's HTTP and its stream.
 import asyncio
 import email.utils
 import json
+import math
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -55,7 +56,14 @@ from dewpoint.core.egress.http import (
     ResponseUnreadableError,
 )
 from dewpoint.core.egress.net import GuardedNet, GuardedStream, NetLimits
-from dewpoint.core.egress.ws import GuardedSocket, GuardedWebsocket, HandshakeRejectedError, StreamLostError, WsLimits
+from dewpoint.core.egress.ws import (
+    MAX_RECEIVE_WAIT_S,
+    GuardedSocket,
+    GuardedWebsocket,
+    HandshakeRejectedError,
+    StreamLostError,
+    WsLimits,
+)
 from dewpoint.core.models.connections import Connection as ConnectionRow
 from dewpoint.core.models.runs import Run
 from dewpoint.core.models.workflows import WorkflowVersion
@@ -95,6 +103,7 @@ MAX_RETRY_AFTER_S = 3600  # a provider's wait past an hour is read as an hour (a
 RESENDS = (SideEffect.NONE, SideEffect.IDEMPOTENT, SideEffect.KEYED)
 NOTHING_SENT = (NotSentError, EgressRefusedError, InvalidRequestError, TlsVerificationError, HandshakeRejectedError)
 SCOPE_WAIT_S = 10.0  # the longest wait for a quota token before `Cooldown` (D9)
+RECEIVE_BEAT_S = 10.0  # a stream's receive heartbeats at least this often while it waits (D26; review L7)
 MIN_SECRET = 4  # the secret index's shortest string (engine 2b spec §3.7)
 URL_PART = 8  # a secret URL's path segments and query values this long are secrets too
 type Remember = Callable[[str, str, Sequence[str]], Awaitable[object]]
@@ -547,10 +556,22 @@ class _WebSocket:
         await self._channel.send(lambda: self._stream.send(text), counts=not probe)
 
     async def receive(self, timeout_s: float) -> str | None:
-        try:
-            return await self._stream.receive(timeout_s)
-        except CORE_ERRORS as e:
-            raise mapped(e) from None
+        """Waits in slices of `RECEIVE_BEAT_S`, heartbeating between them, so a cancel reaches the node however long it
+        asked to wait."""
+        if (not isinstance(timeout_s, int | float) or isinstance(timeout_s, bool) or not math.isfinite(timeout_s)
+                or not 0 <= timeout_s <= MAX_RECEIVE_WAIT_S):  # fmt: skip
+            raise InvalidRequest()
+        remaining = float(timeout_s)
+        while True:
+            wait = min(remaining, RECEIVE_BEAT_S)
+            try:
+                text = await self._stream.receive(wait)
+            except CORE_ERRORS as e:
+                raise mapped(e) from None
+            remaining -= wait
+            if text is not None or remaining <= 0:
+                return text
+            self._channel.beat()
 
     async def close(self) -> None:
         await self._stream.close()
