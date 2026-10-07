@@ -1106,3 +1106,9 @@ Rulings:
   headers or redirects - the provider's URL is the whole request target, and a header of the node's could add
   credentials the type doesn't declare - cost if wrong: a provider option set by query (Google Chat's threads) needs
   the type to declare it.
+- Ruling (task 3, Slack): a 4xx is Slack's refusal (`slack.invalid_payload`, `slack.action_prohibited`,
+  `slack.channel_not_found`, `slack.channel_is_archived`, else `slack.refused`), never retried; the runtime marks an
+  ambiguous step's failure after a send `outcome_unknown` with that code kept (2b's rule: a later failure can't
+  establish what an earlier request did) - cost if wrong: the step reads unknown where Slack said no.
+- Ruling: a simulated send renders the message and reports what it would cut, `sent: true` like the real output's
+  shape, opening no connection - cost if wrong: none.
