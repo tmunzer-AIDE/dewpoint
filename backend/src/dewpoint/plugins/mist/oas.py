@@ -99,7 +99,10 @@ def overlaid(doc: dict[str, Any], patches: Mapping[str, Any]) -> dict[str, Any]:
             container.get(name) if isinstance(container, dict) else None)  # fmt: skip
         if not isinstance(target, dict) or any(target.get(k) != v for k, v in patch["expect"].items()):
             raise OasUnreadableError(f"the overlay's patch of {label} no longer applies")
-        changed = _nullable(target) if op == "nullable" else {**target, "type": copy.deepcopy(patch["to"])}
+        if op == "nullable":
+            changed = _nullable(target)
+        else:  # the new type replaces the old, a reference included: JSON Schema would apply both
+            changed = {**{k: v for k, v in target.items() if k != "$ref"}, "type": copy.deepcopy(patch["to"])}
         if name == "{*}":
             holder["additionalProperties"] = changed
         else:

@@ -94,3 +94,16 @@ def test_the_user_mac_search_answers_an_object_with_its_results() -> None:
     assert fits("mist.org_usermacs.search", answer) == []
     assert "page" in node_manifest(search)["config_schema"]["properties"]["query"]["properties"]
     assert json.dumps(oas.operations()["searchOrgUserMacs"].spec["responses"]["200"]).count("UserMacsArray") == 0
+
+
+def test_the_third_runs_answers_fit_too() -> None:
+    """The third smoke run: a retyped field that was a reference (`last_vlan`, `random_mac`) takes the new type only,
+    the alarm search's window is fractional, an asset's map may be null."""
+    nac = copy.deepcopy(fixture_of(node("mist.org_nac_clients.search"))[0])
+    nac["results"] = [{**nac["results"][0], "last_vlan": "10", "random_mac": True}] if nac["results"] else [
+        {"last_vlan": "10", "random_mac": True}]  # fmt: skip
+    assert fits("mist.org_nac_clients.search", nac) == []
+    alarms = {**fixture_of(node("mist.org_alarms.search"))[0], "start": 1759830000.25, "end": 1759916400.5}
+    assert fits("mist.org_alarms.search", alarms) == []
+    asset = {**fixture_of(node("mist.org_assets.get"))[0], "map_id": None}
+    assert fits("mist.org_assets.get", asset) == []

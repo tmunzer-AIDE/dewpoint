@@ -3,6 +3,8 @@
 "evidence": {"smoke-2026-10-07": "The read-only Mist smoke run of 2026-10-07 against the test org (3b-1 ledger): answers held these values where the description says otherwise."},
 "patches": [
 {"evidence": "smoke-2026-10-07", "expect": {"$ref": "#/components/responses/UserMacsArray"}, "op": "answer", "operation": "searchOrgUserMacs", "to": {"description": "User MACs found (Mist answers an object, not the array the OAS says)", "properties": {"results": {"items": {"$ref": "#/components/schemas/user_mac"}, "type": "array"}, "total": {"type": "integer"}}, "required": ["results"], "type": "object"}},
+{"evidence": "smoke-2026-10-07", "expect": {"type": "integer"}, "op": "type", "property": "end", "schema": "alarm_search_result", "to": "number"},
+{"evidence": "smoke-2026-10-07", "expect": {"type": "integer"}, "op": "type", "property": "start", "schema": "alarm_search_result", "to": "number"},
 {"evidence": "smoke-2026-10-07", "expect": {"type": "integer"}, "op": "nullable", "property": "channel", "schema": "ap_esl_config"},
 {"evidence": "smoke-2026-10-07", "expect": {"type": "boolean"}, "op": "nullable", "property": "standard_power", "schema": "ap_radio_band6"},
 {"evidence": "smoke-2026-10-07", "names": ["mxtunnel_status", "wlans"], "op": "not_required", "schema": "ap_search"},
@@ -11,6 +13,7 @@
 {"evidence": "smoke-2026-10-07", "expect": {"type": "string"}, "op": "type", "property": "band_6_bandwidth", "schema": "ap_search", "to": ["string", "integer"]},
 {"evidence": "smoke-2026-10-07", "expect": {"type": "integer"}, "op": "nullable", "property": "channel", "schema": "ap_usb"},
 {"evidence": "smoke-2026-10-07", "names": ["name"], "op": "not_required", "schema": "asset"},
+{"evidence": "smoke-2026-10-07", "expect": {"type": "string"}, "op": "nullable", "property": "map_id", "schema": "asset"},
 {"evidence": "smoke-2026-10-07", "expect": {"type": "integer"}, "op": "type", "property": "mfg_company_id", "schema": "asset_filter", "to": ["integer", "string"]},
 {"evidence": "smoke-2026-10-07", "expect": {"$ref": "#/components/schemas/last_vlan"}, "op": "type", "property": "last_vlan", "schema": "client_nac", "to": ["integer", "string"]},
 {"evidence": "smoke-2026-10-07", "expect": {"$ref": "#/components/schemas/random_mac"}, "op": "type", "property": "random_mac", "schema": "client_nac", "to": ["string", "boolean"]},

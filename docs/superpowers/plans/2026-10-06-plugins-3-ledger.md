@@ -713,3 +713,9 @@ integers; a port usage's `reauth_interval` null.
   until reset. Awaits the owner's confirmation.
 - The user-MAC search now answers one page as Mist sends it (an object, `page` and `limit` in its query) instead of
   paging headers it never sent; fixture counts move to 181 from examples and 40 from schemas.
+- The owner's third probe run (with the overlay): 127 matched, 6 mismatched, 0 failed, 13 skipped. The 6: two fields
+  missed (`alarm_search_result`'s `start` and `end`; `asset.map_id`), and two retyped fields that were references
+  (`client_nac.last_vlan`, `random_mac`) whose new type was added beside the reference, which JSON Schema applies too.
+  A retyped field's reference is now replaced by its new type, and a test checks the observed values validate, not
+  only the patched keyword. The overlay holds 90 patches: 44 nullable, 41 types widened (15 search and count answers'
+  `start` and `end`), 4 `required` lists trimmed, 1 answer reshaped.
