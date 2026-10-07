@@ -112,6 +112,11 @@ function Editor({
     savedGeneration: 0, savedHash: workflow.draft_graph_hash, activeNumber: workflow.active_version_number,
   });  // prettier-ignore
   const saver = useRef<DraftSync | null>(null);
+  // A save that failed is said, not only shown (WCAG 4.1.3): the edits made after it would otherwise go on unsaved
+  // unnoticed. A conflict has its own alert.
+  useEffect(() => {
+    if (sync.status === "error") announce("Your latest edits aren't saved. Retry is in the toolbar.");
+  }, [sync.status]);
   // Made in an effect, so StrictMode's second mount (main.tsx) gets a live saver: its cleanup disposes the first.
   useEffect(() => {
     const s = new DraftSync({
@@ -219,6 +224,29 @@ function Editor({
   const [connecting, setConnecting] = useState<PortRef | null>(null);
   const [asking, setAsking] = useState<{ kind: "node"; id: string } | { kind: "edge"; edge: GraphEdge } | null>(null);
   const [side, setSide] = useState<Side>(null); // the right column's one panel
+  // Where focus lands when what held it goes: a panel's Close, or a confirmation whose button an action removed or
+  // disabled (the final checkpoint's review, WCAG 2.4.3). A native dialog returns focus to its opener only while that
+  // opener can take it, and a modal one keeps it from anything else until it closes: the editor places it, after.
+  const problemsButton = useRef<HTMLButtonElement>(null);
+  const versionsButton = useRef<HTMLButtonElement>(null);
+  const publishButton = useRef<HTMLButtonElement>(null);
+  const [landing, setLanding] = useState<{ on: "problems" | "versions" | "publish" | "problems-panel" | "versions-panel"; n: number } | null>(null);
+  const land = (on: NonNullable<typeof landing>["on"]) => setLanding((l) => ({ on, n: (l?.n ?? 0) + 1 }));
+  useEffect(() => {
+    if (!landing) return;
+    const frame = requestAnimationFrame(() => {
+      const usable = (el: HTMLElement | null | undefined) => (el && !(el as HTMLButtonElement).disabled ? el : null);
+      const target = {
+        problems: () => usable(problemsButton.current),
+        versions: () => usable(versionsButton.current),
+        publish: () => usable(publishButton.current) ?? usable(versionsButton.current),
+        "problems-panel": () => document.getElementById("problems-title") ?? usable(problemsButton.current),
+        "versions-panel": () => document.getElementById("versions-title") ?? usable(versionsButton.current),
+      }[landing.on]();
+      target?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [landing]);
   const panel = side?.kind === "step" ? side.node : null; // the step whose panel is open
   // An editor checks on opening: its first frame already says so, never "Not checked" for an instant.
   const [check, setCheck] = useState<Check>(() => (canEdit(role) ? { status: "checking", last: null } : { status: "unchecked" }));
@@ -289,15 +317,15 @@ function Editor({
 
   /** The lists that show versions: refreshed after a change, their failure changing no outcome. */
   const refresh = () => {
-    void qc.invalidateQueries({ queryKey: ["versions", tenantId, workflow.id] });
     void qc.invalidateQueries({ queryKey: ["workflows", tenantId] });
+    return qc.invalidateQueries({ queryKey: ["versions", tenantId, workflow.id] }).catch(() => undefined);
   };
 
   function publishedAs(number: number, revision: number) {
     saver.current?.published(revision, number);
     setPublishProblems(null);
     announce(`Published version ${number}`);
-    refresh();
+    return refresh();
   }
 
   async function publish(expected: number) {
@@ -316,6 +344,7 @@ function Editor({
       return; // a conflict has its own banner
     }
     let next: Confirm | null = null;
+    let landOn: "publish" | "problems-panel" = "publish";
     try {
       const done = await ok(
         client.POST("/api/v1/t/{tenant_id}/workflows/{workflow_id}/publish", {
@@ -323,7 +352,7 @@ function Editor({
           body: { expected_latest_version: expected },
         }),
       );
-      publishedAs(done.number, revision);
+      await publishedAs(done.number, revision); // the dialog holds until Publish names the next number again
     } catch (e) {
       if (e instanceof ApiError && e.code === "version_changed") {
         // Someone (or an attempt whose answer was lost) published meanwhile: ask again, naming the new number.
@@ -337,6 +366,7 @@ function Editor({
         const diagnostics = (e.body as { diagnostics: Diagnostic[] }).diagnostics;
         setPublishProblems({ revision, generation, diagnostics }); // the snapshot they were found in
         setSide({ kind: "problems" });
+        landOn = "problems-panel";
         announce(`Not published: ${diagnostics.filter((d) => d.severity === "error").length} problems`);
       } else if (uncertain(e)) {
         await reconcilePublish(expected + 1, hash);
@@ -346,6 +376,7 @@ function Editor({
     } finally {
       setBusy(null);
       setConfirm(next);
+      if (next === null) land(landOn);
     }
   }
 
@@ -366,7 +397,6 @@ function Editor({
         setPublishProblems(null);
         // A matching hash says the version holds the graph submitted, never which request made it (the owner's review
         // of milestone 1).
-        announce(`Version ${number} holds the submitted graph`);
         setNotice({ tone: "info", text: `Version ${number} holds the submitted graph. Your publish request's outcome wasn't received.` });
       } else if (made && hash !== null) {
         // Someone else's publication made version `number`: this one, expecting the one before, was refused.
@@ -381,7 +411,7 @@ function Editor({
         });
       }
     }
-    refresh();
+    void refresh();
   }
 
   /** Made active: so it stays, whatever a read after it fails to say. The draft's comparison with it is the server's,
@@ -389,7 +419,7 @@ function Editor({
   async function activatedAs(version: VersionRow, now?: WorkflowDetail) {
     saver.current?.activated(version.number);
     announce(`Version ${version.number} is active`);
-    refresh();
+    void refresh();
     try {
       saver.current?.compared(now ?? (await readWorkflow()));
     } catch {
@@ -418,6 +448,7 @@ function Editor({
     } finally {
       setBusy(null);
       setConfirm(null);
+      land("versions-panel"); // its Make active is gone: the version is active, or the panel held it while it ran
     }
   }
 
@@ -431,7 +462,7 @@ function Editor({
       saver.current?.lostTrack();
       setNotice({ tone: "danger", text: `It isn't known whether version ${version.number} was made active: its answer was lost. Open Versions to see.` });
     }
-    refresh();
+    void refresh();
   }
 
   async function view(version: VersionRow) {
@@ -677,10 +708,28 @@ function Editor({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" onKeyDown={onEditorKey} onKeyDownCapture={onEditorKeyCapture}>
-      <Toolbar tenantId={tenantId} name={workflow.name}>
-        <SaveState state={sync} />
+      <Toolbar
+        tenantId={tenantId}
+        name={workflow.name}
+        state={
+          <>
+            <SaveState state={sync} />
+            {sync.status === "error" && (
+              <Button size="md" onClick={() => saver.current?.retry()}>Retry</Button>
+            )}
+          </>
+        }
+      >
+        {editable ? (
+          <Button size="md" aria-keyshortcuts="A" onClick={() => addFrom(shown)}>
+            ＋ Add step <kbd className="rounded-sm border border-line-strong px-1 font-mono text-meta">A</kbd>
+          </Button>
+        ) : !canEdit(role) ? (
+          <span className="text-small text-muted">Read only: your role can&apos;t edit workflows</span>
+        ) : null}
         {canEdit(role) && viewing === null && (
           <Button
+            ref={problemsButton}
             size="md"
             aria-expanded={side?.kind === "problems"}
             onClick={() => setSide(side?.kind === "problems" ? null : { kind: "problems" })}
@@ -688,12 +737,13 @@ function Editor({
             {checkLabel(checked, count)}
           </Button>
         )}
-        <Button size="md" aria-expanded={side?.kind === "versions"} onClick={() => setSide(side?.kind === "versions" ? null : { kind: "versions" })}>
+        <Button ref={versionsButton} size="md" aria-expanded={side?.kind === "versions"} onClick={() => setSide(side?.kind === "versions" ? null : { kind: "versions" })}>
           Versions
         </Button>
         <Button size="md" onClick={() => void exportFile()}>Export</Button>
         {publisher && viewing === null && (
           <Button
+            ref={publishButton}
             variant="primary"
             size="md"
             disabled={busy !== null || latest === null}
@@ -702,16 +752,6 @@ function Editor({
             {latest === null ? "Publish" : `Publish v${latest + 1}`}
           </Button>
         )}
-        {sync.status === "error" && (
-          <Button size="md" onClick={() => saver.current?.retry()}>Retry</Button>
-        )}
-        {editable ? (
-          <Button size="md" aria-keyshortcuts="A" onClick={() => addFrom(shown)}>
-            ＋ Add step <kbd className="rounded-sm border border-line-strong px-1 font-mono text-meta">A</kbd>
-          </Button>
-        ) : !canEdit(role) ? (
-          <span className="text-small text-muted">Read only: your role can&apos;t edit workflows</span>
-        ) : null}
       </Toolbar>
       {viewing && (
         <div className="flex flex-wrap items-center gap-3 border-b border-line bg-surface-2 px-5 py-2.5 text-small">
@@ -725,17 +765,26 @@ function Editor({
           <Button size="sm" onClick={() => void versions.refetch()}>Read them again</Button>
         </p>
       )}
-      {notice && (
-        <div
-          role={notice.tone === "danger" ? "alert" : "status"}
-          aria-label={notice.tone === "danger" ? undefined : "Notice"}
-          className={`flex flex-wrap items-center gap-3 border-b border-line bg-surface px-5 py-2.5 text-small ${notice.tone === "danger" ? "text-danger" : "text-ink"}`}
-        >
+      {/* A notice's live region is there before its text, so the text is said (WCAG 4.1.3); a refusal is an alert. */}
+      <div
+        role="status"
+        aria-label="Notice"
+        className={notice?.tone === "info" ? "flex flex-wrap items-center gap-3 border-b border-line bg-surface px-5 py-2.5 text-small text-ink" : undefined}
+      >
+        {notice?.tone === "info" && (
+          <>
+            <span className="grow">{notice.text}</span>
+            {notice.action && <Button size="sm" onClick={notice.action.run}>{notice.action.label}</Button>}
+          </>
+        )}
+      </div>
+      {notice?.tone === "danger" && (
+        <div role="alert" className="flex flex-wrap items-center gap-3 border-b border-line bg-surface px-5 py-2.5 text-small text-danger">
           <span className="grow">{notice.text}</span>
           {notice.action && <Button size="sm" onClick={notice.action.run}>{notice.action.label}</Button>}
         </div>
       )}
-      {trouble && <p role="status" className="border-b border-line bg-surface px-5 py-2.5 text-small text-muted">{trouble}</p>}
+      <p role="status" className={trouble ? "border-b border-line bg-surface px-5 py-2.5 text-small text-muted" : undefined}>{trouble}</p>
       {sync.status === "conflict" && (
         <div role="alert" className="flex flex-wrap items-center gap-3 border-b border-danger bg-danger-bg px-5 py-2.5 text-small text-ink">
           <span className="grow">
@@ -808,7 +857,10 @@ function Editor({
             publisher={publisher && busy === null}
             onView={(v) => void view(v)}
             onActivate={(version) => setConfirm({ kind: "activate", version })}
-            onClose={() => setSide(null)}
+            onClose={() => {
+              setSide(null);
+              land("versions");
+            }}
           />
         )}
         {side?.kind === "problems" && (
@@ -820,7 +872,10 @@ function Editor({
             keyOf={keyOf}
             onJump={(nodeId) => focus(item.node(nodeId))}
             onCheck={() => void validate.current()}
-            onClose={() => setSide(null)}
+            onClose={() => {
+              setSide(null);
+              land("problems");
+            }}
           />
         )}
       </div>

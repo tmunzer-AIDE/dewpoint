@@ -19,6 +19,7 @@ import { FlowEdge, type FlowData } from "./FlowEdge";
 import { item, type ItemAction } from "./items";
 import { StartNode, type StartData } from "./StartCard";
 import { StepNode, type Problems, type StepData } from "./StepCard";
+import { mustReveal } from "./reveal";
 
 const nodeTypes = { step: StepNode, start: StartNode } satisfies NodeTypes;
 const edgeTypes = { flow: FlowEdge } satisfies EdgeTypes;
@@ -108,23 +109,21 @@ function Flow(p: CanvasProps) {
     [],
   );
 
-  /** Brings an item into view when it's outside the canvas, keeping the zoom; only when the keyboard moved focus there
-   * (`:focus-visible`). A pointer's focus never moves the view: it would slide the item from under a press before
-   * its release, or a step placed with a click from under the click (ledger M13). */
+  /** Brings the item focus landed on into view, keeping the zoom, when `mustReveal` says so: for the keyboard unless
+   * it's wholly in the clear; otherwise only when it's entirely hidden, so a pointer's press never slides it away
+   * (ledger M13, revised at the final checkpoint). */
   const reveal = useCallback(
     (el: HTMLElement) => {
-      if (!el.matches(":focus-visible")) return;
       const frame = container.current;
       const box = frame?.getBoundingClientRect();
       if (!frame || !box) return;
       const r = el.getBoundingClientRect();
       // What lies over the canvas (the minimap, its controls, the placing bar) hides what's under it as surely as its
-      // edge does: an item behind one is brought into the clear (WCAG 2.4.11).
+      // edge does (WCAG 2.4.11).
       const over = [...(frame.parentElement ?? frame).querySelectorAll<HTMLElement>(".react-flow__minimap, [data-canvas-overlay]")]
         .map((o) => o.getBoundingClientRect())
         .filter((o) => o.width > 0 && o.height > 0);
-      const hidden = over.some((o) => r.left < o.right && o.left < r.right && r.top < o.bottom && o.top < r.bottom);
-      if (!hidden && r.left >= box.left && r.right <= box.right && r.top >= box.top && r.bottom <= box.bottom) return;
+      if (!mustReveal(r, box, over, el.matches(":focus-visible"))) return;
       const v = flow.getViewport();
       void flow.setViewport(
         { x: v.x + (box.left + box.width / 2 - (r.left + r.width / 2)), y: v.y + (box.top + box.height / 2 - (r.top + r.height / 2)), zoom: v.zoom },

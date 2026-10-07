@@ -6,8 +6,9 @@
 .react-flow__background circle {
   fill: var(--line-strong);
 }
+/* Edges say which step follows which: `--edge`, 3:1 on the ground (WCAG 1.4.11; ledger 4a ruling 1). */
 .react-flow__edge-path {
-  stroke: var(--line-strong);
+  stroke: var(--edge);
   stroke-width: 1.5;
 }
 .react-flow__handle {
@@ -27,7 +28,7 @@
   fill-opacity: 0.6;
 }
 .canvas-minimap-node {
-  fill: var(--line-strong);
+  fill: var(--edge);
 }
 
 .canvas-placing .react-flow__pane {

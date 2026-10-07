@@ -224,7 +224,8 @@ export function WorkflowsPage({ tenantId, startNew = false }: { tenantId: string
         </Table>
       )}
       <p className="text-small text-muted">A disabled workflow keeps its versions and its history; nothing starts it.</p>
-      {creating && <NewWorkflow tenantId={tenantId} onClose={closeNew} />}
+      {/* Asked for by the address (?new) too: opened only once the role is known to create one. */}
+      {creating && canEdit(tenant.data?.role) && <NewWorkflow tenantId={tenantId} onClose={closeNew} />}
     </section>
   );
 }

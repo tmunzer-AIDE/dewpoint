@@ -226,7 +226,7 @@ export function NewWorkflow({ tenantId, onClose }: { tenantId: string; onClose: 
               <input type="file" accept=".json,application/json" onChange={(e) => void readFile(e.target.files?.[0])} className="text-body" />
             </label>
             {reading && <p role="status" className="text-small text-muted">Reading the file…</p>}
-            {fileError && <p className="text-small text-danger">{fileError}</p>}
+            {fileError && <p role="alert" className="text-small text-danger">{fileError}</p>}
             {doc && <ImportBindings bindings={doc.bindings} choices={choices} chosen={chosen} onChange={setChosen} />}
           </div>
         )}

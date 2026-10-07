@@ -305,6 +305,27 @@ test("edits save themselves and survive a reload; a step's problems show on it, 
   await expect(step).toBeFocused();
 });
 
+test("a step a pointer sends focus to comes into view when it's off the canvas (WCAG 2.4.11)", async ({ page }) => {
+  await newWorkflow(page, "Far flow");
+  await page.getByRole("button", { name: "Add the first step" }).click();
+  await page.getByRole("option", { name: /flow\.transform@1/ }).click();
+  const problems = page.getByRole("button", { name: /^Problems · \d+$/ });
+  await expect(problems).toBeVisible({ timeout: 10_000 });
+  // Drag the canvas until the step is off it entirely.
+  const step = page.getByRole("button", { name: /^transform, Transform, \d+ problems?/ });
+  const pane = (await page.locator(".react-flow__pane").boundingBox())!;
+  await page.mouse.move(pane.x + pane.width - 40, pane.y + 40);
+  await page.mouse.down();
+  await page.mouse.move(pane.x + pane.width - 1240, pane.y + 40, { steps: 12 });
+  await page.mouse.up();
+  await expect(step).not.toBeInViewport();
+  // "Go to" with a pointer: focus lands on the step, and the step is where it can be seen.
+  await problems.click();
+  await page.getByRole("complementary", { name: "Problems" }).getByRole("button", { name: "Go to transform" }).click();
+  await expect(step).toBeFocused();
+  await expect(step).toBeInViewport();
+});
+
 test("publishing names the version; a version is viewed read only and made active", async ({ page }) => {
   await importReport(page, "Report A");
   await expect(page.getByRole("button", { name: "No problems" })).toBeVisible({ timeout: 10_000 });

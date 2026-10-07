@@ -175,7 +175,7 @@ it("refuses a file with a null binding without breaking the dialog", async () =>
   await userEvent.click(screen.getByRole("radio", { name: /Import from file/ }));
   const bad = new File([JSON.stringify({ ...DOC, bindings: [null] })], "x.json", { type: "application/json" });
   await userEvent.upload(screen.getByLabelText("Workflow file"), bad);
-  expect(await screen.findByText(/isn't a Dewpoint workflow/)).toBeTruthy();
+  expect((await screen.findByRole("alert")).textContent).toContain("isn't a Dewpoint workflow"); // said, not only shown
   expect(screen.getByRole("button", { name: "Import and open" }).hasAttribute("disabled")).toBe(true);
 });
 
@@ -250,7 +250,7 @@ it("says when a file can't be read, and takes another", async () => {
   const bad = slowFile("bad.json", null);
   await userEvent.upload(screen.getByLabelText("Workflow file"), bad.file);
   await act(() => bad.settle());
-  expect(await screen.findByText("That file couldn't be read. Choose it again, or another.")).toBeTruthy();
+  expect((await screen.findByRole("alert")).textContent).toBe("That file couldn't be read. Choose it again, or another.");
   expect(screen.getByRole("button", { name: "Import and open" }).hasAttribute("disabled")).toBe(true);
   await userEvent.upload(screen.getByLabelText("Workflow file"), new File([JSON.stringify(DOC)], "n.json", { type: "application/json" }));
   expect(await screen.findByLabelText("Acme Prod (mist connection)")).toBeTruthy();

@@ -20,10 +20,13 @@ it("says a step's type is unknown, and draws its card dashed", () => {
   expect(card.className).toMatch(/border-dashed/);
 });
 
-it("marks the step whose panel is open with a 2 px outline, never a halo", () => {
+it("marks the step whose panel is open with a 2 px accent border (1c), never the focus ring's outline nor a halo", () => {
   render(<StepCardBody node={node} type={TRANSFORM} problems={{ errors: 0, warnings: 0 }} separate={0} current tabIndex={0} onOpen={vi.fn()} />);
   const card = screen.getByRole("button");
-  expect(card.className).toMatch(/outline-2/);
+  expect(card.className).toMatch(/\bborder-2\b/);
+  expect(card.className).toMatch(/\bborder-accent\b/);
+  // The focus ring is the one 2 px outline (theme.css): an open step that wore it too would look focused when it isn't.
+  expect(card.className).not.toMatch(/\boutline-/);
   expect(card.className).not.toMatch(/ring-[3-9]|shadow-\[/);
 });
 

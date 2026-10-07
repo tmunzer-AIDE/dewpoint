@@ -4,7 +4,7 @@
 // a handle does. A native modal dialog (D23).
 import { useEffect, useRef } from "react";
 import { Button } from "../../components/Button";
-import { canConnect, nodesOf, type PortRef } from "../../lib/graph";
+import { canConnect, findNode, nodesOf, type PortRef } from "../../lib/graph";
 import type { GraphDoc, NodeType } from "../../lib/workflows";
 
 export function ConnectDialog({
@@ -18,7 +18,7 @@ export function ConnectDialog({
       d.querySelector<HTMLButtonElement>("li button")?.focus();
     }
   }, []);
-  const source = nodesOf(doc).find((n) => n.id === from.node);
+  const source = findNode(doc, from.node); // by identity: the port may spell the step otherwise (M15)
   const candidates = nodesOf(doc).filter((n) => canConnect(doc, from, n.id)).sort((a, b) => a.key.localeCompare(b.key));
   const name = `${source?.key ?? "a step"}${from.port === "out" ? "" : ` (${from.port})`}`;
   return (

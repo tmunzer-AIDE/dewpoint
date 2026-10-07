@@ -638,3 +638,78 @@ M23. **Task 16's checks, as they came out** (2026-10-07, the working tree before
       - It was listed as open before this slice, and it isn't the database-clock fault #43 fixed.
       - Its cause isn't established: load on a real-time Temporal schedule is suspected, not shown.
     - The serial CEL group didn't run: this slice doesn't touch it (ruling 66's procedure, if the owner asks).
+
+### 4b, the final checkpoint (2026-10-07)
+
+A fresh-context reviewer (a subagent, read-only) reviewed f65c6f9..f0d5ac8 against the six hunts, with the screenshots
+beside frames 1a, 1b and 1c. Nothing Critical; four Important findings and six Minor. One process slip, its own
+report says: its first grep wrote `scratchpad/files4b.txt`, outside the directory it was given; it deleted that file
+by name, and the worktree stayed clean.
+
+M24. **Eight findings fixed, each test-first** (a failing test first, watched failing, then the fix):
+    - Edges and the minimap's steps were drawn in `--line-strong`: 1.43:1 on the ground in light, 1.77:1 in dark.
+      They now use `--edge` (3.65:1 and 4.65:1), as 4a's ruling 1 has it. Axe doesn't measure SVG strokes, so
+      `canvasStyles.test.ts` holds both to tokens `PAIRS` pins at 3:1.
+    - Focus the editor sends after a pointer's press (Go to, a step added, a version viewed) never moved the view, so
+      a step off the canvas took focus unseen (WCAG 2.4.11). M13 is revised: `reveal.ts` decides.
+      - Focus moved by the keyboard: the view moves unless the item is wholly in the clear (as before).
+      - Any other focus: the view moves only when the item is entirely hidden. A press or a placing click is always
+        on something that shows, so M13's protection holds.
+      - A browser flow drags a step off the canvas, then uses Go to with the pointer. It failed on the old canvas
+        (focused, viewport ratio 0) and passes now.
+    - Focus fell to the page in three places (WCAG 2.4.3). The editor now places it:
+      - a closed panel returns focus to its toolbar button;
+      - a version made active lands focus on the versions panel's heading (its Make active is gone);
+      - a publish refused for its problems lands on the problems panel's heading;
+      - a publish done returns to Publish, which names the next version. The dialog holds, busy, until the versions
+        are read again, so the button is enabled when focus comes back.
+    - Status messages (WCAG 4.1.3):
+      - a failed save is announced ("Your latest edits aren't saved. Retry is in the toolbar.");
+      - a notice's live region is there before its text, and a refusal is an alert;
+      - the step types' trouble line keeps its region too;
+      - New workflow's file errors are alerts;
+      - the lost-publish notice no longer also announces the same words.
+    - A viewer could open New workflow from the palette or `?new=true`, only for the server to refuse it. The palette
+      offers it only to a role that can create one, and the list opens it only once the role is known to.
+    - The open step wore the focus ring's 2 px outline, so it looked focused when it wasn't. It now wears a 2 px accent
+      border all round, as 1c draws it, with its padding a pixel less.
+    - The toolbar follows 1c: the save state (and Retry) beside the name; Add step first among the actions; Publish,
+      the one primary, last.
+    - The list's filter wrapped at 320 px into ragged rows with stray borders. Its options are now separated by 1 px
+      gaps and fill each row.
+    - The connect dialog found its source step by spelling, so a draft spelling the id otherwise titled it "Connect a
+      step to" (M15). It now finds the step by identity.
+    - The plan predates the review. - Small; each fix has its test.
+M25. **Ruled for the owner: a schema message can quote a value** (Minor, hunt 1; the code predates 4b).
+    - The engine's `config.invalid` passes jsonschema's own message through (`engine/graph/validate.py`,
+      `_schema_errors`), and that message may quote the value (`'…' is too short`). 4b shows the server's messages
+      as they come (§5.10).
+    - So a literal typed into a field marked sensitive that also fails its schema shows in the problems panel. The
+      draft holds it already, for the same readers.
+    - Separately, export refuses only ids. A draft the validator flags for `sensitive.literal` exports with that
+      literal in the file (ruling 18's scope).
+    - Neither is 4b's code to change. Recommended: the engine builds `config.invalid` from the failing keyword and the
+      path, never the value (at least where the schema marks the field sensitive), and export refuses a draft with a
+      `sensitive.literal` problem. - Until then a sensitive literal shows to its draft's readers and travels in an
+      exported file.
+M26. **Ruled for the owner: the "+" controls' size when zoomed out** (Minor, hunt 5, WCAG 2.5.8).
+    - The "+" controls are 24 px at 100% and scale with the canvas.
+    - Below 100% they rely on the spacing exception: a 24 px circle on each must touch no other target.
+    - From the layout (cards 64 px tall, ranks 76 apart, a port's "+" centred 36 px below its card, ports spread
+      evenly over the card's 260 px), that holds from a zoom of 0.35 for one port. With n ports it needs
+      24(n+1)/260: 0.37 for three, 0.55 for five.
+    - The canvas zooms out to 0.25, and a fit stops there.
+    - Options:
+      - fit no lower than the zoom that holds, and let a person zoom out further by hand;
+      - keep the "+" at 24 px on screen whatever the zoom;
+      - accept it.
+    - Recommended: the first. - Today a large graph's fit, or a person zooming out, can leave "+" controls too small
+      to meet 2.5.8.
+M27. **The checks after the fixes** (2026-10-07):
+    - Frontend: 515 tests in 44 files; lint, types and `check:api` clean.
+    - Build: index 557.69 kB of JS (180.66 kB gzipped), the editor's chunk 289.75 kB (93.91 kB).
+    - Licence and notices self-tests pass.
+    - Browser gate, on a freshly reset stack: 25 passed in 53.1 s (M23's 24 and the off-canvas flow), with no CSP
+      violation, console error or remote request. The list and sign-in load 591,346 bytes; opening a workflow adds
+      301,824.
+    - No backend file changed since M23, whose backend results stand.

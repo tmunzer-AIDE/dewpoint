@@ -7,7 +7,7 @@ import { useNavigate, useParams } from "@tanstack/react-router";
 import { Command } from "cmdk";
 import { useEffect, useRef, useState } from "react";
 import { client, ok } from "../lib/client";
-import { workflowsQuery } from "../lib/workflows";
+import { canEdit, workflowsQuery } from "../lib/workflows";
 
 // The selected option never takes focus (the search field keeps it), so it carries its own 3:1 outline (WCAG 1.4.11).
 export const PALETTE_ITEM =
@@ -88,7 +88,8 @@ export function CommandPalette() {
                     Workflows
                   </Command.Item>
                 )}
-                {params.tenantId && (
+                {/* Only for a role that can create one: the server would refuse anyone else (403). */}
+                {params.tenantId && canEdit(tenants.data?.find((t) => t.id === params.tenantId)?.role) && (
                   <Command.Item
                     value="New workflow"
                     className={PALETTE_ITEM}

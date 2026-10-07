@@ -14,14 +14,16 @@ export function Segmented<T extends string>({
   onChange: (value: T) => void;
 }) {
   return (
-    <div role="group" aria-label={label} className="inline-flex flex-wrap overflow-hidden rounded-lg border border-line-strong">
-      {options.map((o, i) => (
+    // The 1 px gaps show the group's line colour between options; wrapped at 320 px (WCAG 1.4.10), each row starts
+    // clean and its options fill it.
+    <div role="group" aria-label={label} className="inline-flex flex-wrap gap-px overflow-hidden rounded-lg border border-line-strong bg-line-strong">
+      {options.map((o) => (
         <button
           key={o.value}
           type="button"
           aria-pressed={o.value === value}
           onClick={() => onChange(o.value)}
-          className={`min-h-9 px-3 text-small ${i > 0 ? "border-l border-line-strong" : ""} ${
+          className={`min-h-9 grow px-3 text-small ${
             o.value === value ? "bg-accent-soft font-semibold text-accent-ink" : "bg-surface text-ink hover:bg-surface-hover"
           }`}
         >

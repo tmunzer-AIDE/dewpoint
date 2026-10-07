@@ -3,8 +3,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Outlet, RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GraphDoc } from "../../lib/workflows";
+import { onAnnounce } from "../../lib/announce";
 import { cancelLeaving, mayLeave } from "../../lib/leaving";
 import type { CanvasProps } from "./Canvas";
 import { EditorPage } from "./Editor";
@@ -138,6 +139,18 @@ it("adds a first step from the start card, then one after it, through the picker
   await userEvent.click(await screen.findByRole("button", { name: "after transform" }));
   await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
   expect(screen.getByRole("button", { name: "transform_2" })).toBeTruthy();
+});
+
+it("lays the toolbar out as 1c: the state beside the name, Add step first among the actions, Publish last", async () => {
+  await show();
+  await screen.findByRole("button", { name: "Publish v1" });
+  const follows = (a: Node, b: Node) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+  const name = screen.getByRole("heading", { level: 1, name: "Nightly" });
+  const state = screen.getByText(/^Saved/);
+  const buttons = [...name.parentElement!.querySelectorAll("button")];
+  expect(follows(name, state) && follows(state, buttons[0]!)).toBe(true);
+  expect(buttons[0]!.textContent).toMatch(/Add step/);
+  expect(buttons.at(-1)!.textContent).toBe("Publish v1");
 });
 
 it("offers a viewer no Add step", async () => {
@@ -574,7 +587,7 @@ it("reads what happened when a publish's answer is lost: the version holds the s
   });
   await show();
   await confirmPublish(1);
-  expect((await screen.findByRole("status", { name: "Notice" })).textContent).toContain("Version 1 holds the submitted graph. Your publish request's outcome wasn't received.");
+  await vi.waitFor(() => expect(screen.getByRole("status", { name: "Notice" }).textContent).toContain("Version 1 holds the submitted graph. Your publish request's outcome wasn't received."));
   expect(screen.getByText("Saved · published as v1")).toBeTruthy();
   expect(screen.queryByText(/wasn't published|Not published/)).toBeNull();
 });
@@ -605,7 +618,7 @@ it("takes the active version from the read, never from the number it hoped for",
   });
   await show();
   await confirmPublish(1);
-  expect((await screen.findByRole("status", { name: "Notice" })).textContent).toContain("Version 1 holds the submitted graph. Your publish request's outcome wasn't received.");
+  await vi.waitFor(() => expect(screen.getByRole("status", { name: "Notice" }).textContent).toContain("Version 1 holds the submitted graph. Your publish request's outcome wasn't received."));
   expect(screen.getByText("Saved · unpublished changes since v2")).toBeTruthy(); // version 2 came after, and is active
 });
 
@@ -655,7 +668,7 @@ it("keeps an activation made when the read after it fails", async () => {
   await userEvent.click(screen.getByRole("button", { name: "Versions" }));
   await userEvent.click(await screen.findByRole("button", { name: "Make version 1 active" }));
   await userEvent.click(within(screen.getByRole("dialog", { name: "Make version 1 active" })).getByRole("button", { name: "Make active" }));
-  expect((await screen.findByRole("status", { name: "Notice" })).textContent).toContain("Version 1 is active.");
+  await vi.waitFor(() => expect(screen.getByRole("status", { name: "Notice" }).textContent).toContain("Version 1 is active."));
   expect(screen.getByText("Saved · v1 is active")).toBeTruthy(); // the comparison isn't known: nothing claimed
   expect(screen.queryByText(/wasn't made active/)).toBeNull();
 });
@@ -740,6 +753,74 @@ it("shows what only publish checks, in the problems panel, marked", async () => 
   await confirmPublish(1);
   const panel = await screen.findByRole("complementary", { name: "Problems" });
   expect(within(panel).getByRole("region", { name: "Found at publish" }).textContent).toContain("That connection doesn't exist.");
+});
+
+// What changes without a key being pressed is said (WCAG 4.1.3): a save that failed, and a notice, through a live
+// region that's there before its text (one inserted already holding it often goes unsaid).
+describe("status messages", () => {
+  it("says when the latest edits aren't saved", async () => {
+    const said: string[] = [];
+    const stop = onAnnounce((m) => said.push(m));
+    answers.set(`PUT ${BASE}/draft`, () => json({ error: "http_error" }, 500));
+    await show();
+    await addTransform();
+    await screen.findByText("Not saved", {}, { timeout: 3000 });
+    expect(said).toContain("Your latest edits aren't saved. Retry is in the toolbar.");
+    stop();
+  });
+
+  it("keeps the notices' live region in place before any notice", async () => {
+    await show();
+    expect(screen.getByRole("status", { name: "Notice" }).textContent).toBe("");
+  });
+});
+
+// Where focus goes when what held it leaves (the final checkpoint's review, WCAG 2.4.3): never to the page. The test
+// setup's dialog returns no focus, as a native one can't when its opener is gone or disabled: the editor places it.
+describe("focus, when what held it goes", () => {
+  it("returns to the toolbar's button when the problems panel closes", async () => {
+    await show();
+    await userEvent.click(await screen.findByRole("button", { name: "No problems" }));
+    await userEvent.click(within(screen.getByRole("complementary", { name: "Problems" })).getByRole("button", { name: "Close" }));
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "No problems" })));
+  });
+
+  it("returns to the toolbar's button when Escape closes the versions panel", async () => {
+    await show();
+    await userEvent.click(screen.getByRole("button", { name: "Versions" }));
+    await screen.findByRole("complementary", { name: "Versions" });
+    await userEvent.keyboard("{Escape}");
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Versions" })));
+  });
+
+  it("lands on the versions panel's heading once a version is made active", async () => {
+    answers.set(`GET ${BASE}/versions`, () => json([version(2, true), version(1, false)]));
+    answers.set(`POST ${BASE}/activate`, () => json({ active_version_id: "v1", number: 1, warnings: [] }));
+    await show();
+    await userEvent.click(screen.getByRole("button", { name: "Versions" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Make version 1 active" }));
+    await userEvent.click(within(screen.getByRole("dialog", { name: "Make version 1 active" })).getByRole("button", { name: "Make active" }));
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("heading", { level: 2, name: "Versions" })));
+  });
+
+  it("returns to Publish, naming the next version, once a publish is done", async () => {
+    answers.set(`POST ${BASE}/publish`, () => {
+      answers.set(`GET ${BASE}/versions`, () => json([version(1, true)]));
+      return json({ version_id: "v1", number: 1, warnings: [] }, 201);
+    });
+    await show();
+    await confirmPublish(1);
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Publish v2" })));
+  });
+
+  it("lands on the problems panel's heading when a publish is refused for its problems", async () => {
+    answers.set(`POST ${BASE}/publish`, () =>
+      json({ error: "invalid", diagnostics: [{ code: "connection.unknown", message: "That connection doesn't exist.", node: null, field: null, fix: null, severity: "error" }] }, 422));
+    await show();
+    await confirmPublish(1);
+    await screen.findByRole("complementary", { name: "Problems" });
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("heading", { level: 2, name: "Problems" })));
+  });
 });
 
 it("keeps an older draft's publish findings out of the current problems", async () => {

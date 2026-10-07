@@ -36,7 +36,9 @@ export function StepCardBody({
     !problems.errors && problems.warnings ? plural(problems.warnings, "warning", "warnings") : null,
     separate ? `${plural(separate, "expression runs", "expressions run")} as a separate step` : null,
   ].filter(Boolean);
-  const border = current ? "border-accent outline-2 outline-offset-2 outline-accent" : "border-line-strong";
+  // The open step wears a 2 px accent border all round (1c), its padding a pixel less so nothing moves; the focus ring
+  // stays the one 2 px outline (theme.css), so an open step never looks focused when it isn't.
+  const border = current ? "border-2 border-accent px-[13px]" : "border border-line-strong px-3.5";
   return (
     <button
       type="button"
@@ -44,7 +46,7 @@ export function StepCardBody({
       tabIndex={tabIndex}
       aria-label={said.join(", ")}
       onClick={onOpen}
-      className={`pointer-events-auto flex h-16 w-[260px] items-center gap-3 rounded-lg border bg-surface px-3.5 text-left shadow-node ${border} ${type ? "" : "border-dashed"}`}
+      className={`pointer-events-auto flex h-16 w-[260px] items-center gap-3 rounded-lg bg-surface text-left shadow-node ${border} ${type ? "" : "border-dashed"}`}
     >
       <span aria-hidden="true" className="w-12 shrink-0 truncate font-mono text-meta font-semibold text-accent-ink">{typeCode(node.type)}</span>
       <span className="min-w-0 flex-1" aria-hidden="true">

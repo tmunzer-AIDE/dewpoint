@@ -112,6 +112,15 @@ it("lists the tenant's workflows, opens one, and starts a new one", async () => 
   expect(router.state.location.search).toEqual({ new: true });
 });
 
+it("offers New workflow only where the role can create one", async () => {
+  const viewing = TENANTS.map((t) => ({ ...t, role: "viewer" }));
+  vi.spyOn(globalThis, "fetch").mockImplementation(() => Promise.resolve(new Response(JSON.stringify(viewing))));
+  await renderAt("/t/t1/connections");
+  fireEvent.keyDown(document, { key: "k", metaKey: true });
+  expect(await screen.findByRole("option", { name: "Workflows" })).toBeTruthy();
+  expect(screen.queryByRole("option", { name: "New workflow" })).toBeNull();
+});
+
 it("opens a tenant on its workflows", async () => {
   const router = await renderAt("/account/security");
   fireEvent.keyDown(document, { key: "k", metaKey: true });

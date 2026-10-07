@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
-import { render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { WorkflowsPage } from "./Workflows";
@@ -45,8 +45,8 @@ beforeEach(() => {
   });
 });
 
-async function show() {
-  const root = createRootRoute({ component: () => <WorkflowsPage tenantId="t1" /> });
+async function show({ startNew = false } = {}) {
+  const root = createRootRoute({ component: () => <WorkflowsPage tenantId="t1" startNew={startNew} /> });
   const editor = createRoute({ getParentRoute: () => root, path: "/t/$tenantId/workflows/$workflowId", component: () => <p>editor</p> });
   const router = createRouter({ routeTree: root.addChildren([editor]), history: createMemoryHistory({ initialEntries: ["/"] }) });
   render(
@@ -107,6 +107,18 @@ it("shows a viewer the state, not the switch", async () => {
   await vi.waitFor(() => expect(sent.some((r) => r.path === "/api/v1/t/t1")).toBe(true)); // the role is known
   await vi.waitFor(() => expect(rowOf("Nightly").textContent).toContain("On"));
   expect(within(rowOf("Nightly")).queryByRole("switch")).toBeNull();
+});
+
+it("opens New workflow from the address only for who can create one", async () => {
+  role = "viewer";
+  await show({ startNew: true });
+  await vi.waitFor(() => expect(sent.some((r) => r.path === "/api/v1/t/t1")).toBe(true)); // the role is known
+  await act(() => Promise.resolve());
+  expect(screen.queryByRole("dialog", { name: "New workflow" })).toBeNull();
+  cleanup();
+  role = "editor";
+  await show({ startNew: true });
+  expect(await screen.findByRole("dialog", { name: "New workflow" })).toBeTruthy();
 });
 
 it("exports a workflow as a file named after it", async () => {
