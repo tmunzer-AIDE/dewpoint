@@ -661,3 +661,7 @@ none fits, curated and generic simulations fail `simulation_unavailable` alike; 
 406 included; the optional-field wording is corrected. The fixture and compression additions are technically cleared.
 This is technical closure only: the rulings, the Compose proof, the read-only Mist smoke test, and push and PR remain
 the owner's.
+
+The owner asked for the push and PR (2026-10-07). The branch was rebased onto `origin/main` 69944d0 (#46, #47: 2b-4a)
+without conflicts; the OpenAPI document and the web client's types still match (no drift, `check:api` passes). Full
+run at the rebased head: 3621 passed, 8 skipped, in 12 min 7 s; ruff, format, mypy and import contracts pass.
