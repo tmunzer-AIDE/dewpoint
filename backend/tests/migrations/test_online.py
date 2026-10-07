@@ -10,7 +10,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -501,10 +501,11 @@ async def exists(url: str, table: str) -> bool:
     return bool(await scalar(url, f"SELECT to_regclass('public.{table}') IS NOT NULL"))
 
 
-async def waiting_for(url: str, table: str) -> None:
-    """Until a session waits for a lock on `table`: the step holds its first table, and waits for the second (a fixed
-    pause wasn't enough on a loaded machine: the step hadn't begun)."""
-    query = f"SELECT EXISTS (SELECT 1 FROM pg_locks WHERE NOT granted AND relation = to_regclass('public.{table}'))"
+async def waiting_for(url: str, table: str, *, granted: bool = False) -> None:
+    """Until a session waits for a lock on `table` (or holds one, `granted`): the step holds its first table, and waits
+    for the second (a fixed pause wasn't enough on a loaded machine: the step hadn't begun)."""
+    held = "" if granted else "NOT "
+    query = f"SELECT EXISTS (SELECT 1 FROM pg_locks WHERE {held}granted AND relation = to_regclass('public.{table}'))"
     for _ in range(200):
         if await scalar(url, query):
             return
@@ -613,6 +614,77 @@ async def test_a_step_gives_way_to_a_writer_it_would_deadlock(scratch, caplog) -
                                    "online step both: attempt 1 gave way (deadlock)")  # fmt: skip
 
 
+async def _queued_through(
+    scratch: str, step: Callable[[Connection], Any], *, writer: str = "",
+    release: Callable[[], Awaitable[None]] | None = None,
+) -> tuple[float, Any]:  # fmt: skip
+    """A writer queued behind `step` (on table `a`, which the step locks first): how long it waited (infinity: still
+    waiting after `QUEUED_MAX_S`), and the step's outcome (its error, if it stopped). `release` frees whatever holds the
+    step up, before its outcome is awaited."""
+    w = await asyncpg.connect(scratch)
+    stepping = asyncio.create_task(run(scratch, step))
+    try:
+        if writer:
+            await w.execute(writer)
+        await waiting_for(scratch, "a", granted=True)
+        t0 = time.monotonic()
+        try:
+            await asyncio.wait_for(w.execute("INSERT INTO a VALUES (1)"), QUEUED_MAX_S)
+            waited = time.monotonic() - t0
+        except TimeoutError:
+            waited = float("inf")
+    finally:
+        if release is not None:
+            await release()
+        try:
+            outcome: Any = await asyncio.wait_for(stepping, 30)
+        except Exception as e:
+            outcome = e
+        w.terminate()
+    return waited, outcome
+
+
+QUEUED_MAX_S = 6.0  # past D15's five seconds
+
+
+async def test_a_steps_deferred_work_runs_within_its_budget_not_in_its_commit(scratch, monkeypatch) -> None:
+    """The owner's review of checkpoint 4: a `COMMIT` isn't bounded by a statement timeout (Postgres turns it off before
+    the commit's own work), so a step's deferred trigger work, done at its commit, held its locks for as long as it
+    took. It runs within the step's budget (`SET CONSTRAINTS ALL IMMEDIATE`, its last statement): 3 s of it gives way
+    at the budget, and a writer queued behind the step waits no longer."""
+    monkeypatch.setattr(online, "ATTEMPTS", 1)
+    await execute(
+        scratch,
+        """CREATE TABLE a (x int); CREATE TABLE d (x int);
+CREATE FUNCTION slow() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(3); RETURN NULL; END $$;
+CREATE CONSTRAINT TRIGGER d_slow AFTER INSERT ON d DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION slow()""",
+    )
+    waited, outcome = await _queued_through(scratch, lambda c: online.step(
+        c, "deferred", "LOCK TABLE a IN ACCESS EXCLUSIVE MODE", "INSERT INTO d VALUES (1)"))  # fmt: skip
+    assert waited < 1.5 and isinstance(outcome, online.StepFailedError) and "(budget)" in str(outcome)
+    assert await scalar(scratch, "SELECT count(*) FROM d") == 0
+
+
+async def test_a_steps_commit_waits_for_no_standby(cluster, scratch) -> None:
+    """The owner's review of checkpoint 4: a commit waits for a synchronous standby's answer with its locks held, and
+    no statement timeout bounds that. A step commits without waiting for any (`synchronous_commit = local`: it's
+    idempotent, run again if a failover lost it): with a standby named that never answers, the step commits, and a
+    writer queued behind it waits only for the step."""
+    await execute(scratch, "CREATE TABLE a (x int)")
+    await execute(f"{cluster}/postgres", "ALTER SYSTEM SET synchronous_standby_names = 'nobody'")
+    await execute(f"{cluster}/postgres", "SELECT pg_reload_conf()")
+
+    async def answered() -> None:  # no standby named: a commit waiting for one is let go
+        await execute(f"{cluster}/postgres", "ALTER SYSTEM RESET synchronous_standby_names")
+        await execute(f"{cluster}/postgres", "SELECT pg_reload_conf()")
+
+    waited, outcome = await _queued_through(scratch, lambda c: online.step(
+        c, "standby", "LOCK TABLE a IN ACCESS EXCLUSIVE MODE", "SELECT pg_sleep(0.2)"),
+        writer="SET synchronous_commit = local", release=answered)  # fmt: skip
+    assert outcome is None and waited < 1.5
+
+
 async def test_a_writer_whose_role_checks_deadlocks_sooner_is_never_a_steps_victim(scratch) -> None:
     """A role of its own `deadlock_timeout` (200 ms, `ALTER ROLE … IN DATABASE`): the steps' budget is the shortest
     any role or the database has, so the step gives way before that writer's deadlock check could find it in a cycle."""
@@ -703,6 +775,45 @@ async def test_a_superuser_that_isnt_an_application_role_never_refuses_the_upgra
     finally:
         await execute(scratch, f"DROP ROLE {owner}")
     assert await exists(scratch, "t4")
+
+
+async def test_an_upgrade_refuses_when_its_own_setting_hides_the_servers(scratch) -> None:
+    """The owner's review of checkpoint 4 (M1): the migrating session shows the server's `deadlock_timeout` (its files,
+    its command line, its default) unless a role or session setting of its own replaces it, and no catalogue shows a
+    command-line value. So the upgrade refuses while its own value comes from such a setting, unless the database has
+    one of its own (then no session of it runs with the server's)."""
+    db = scratch.rsplit("/", 1)[1]
+    await execute(scratch, f"ALTER ROLE CURRENT_USER IN DATABASE {db} SET deadlock_timeout = '2s'")
+    with pytest.raises(online.UnsafeSettingsError, match="hides the server's"):
+        await run(scratch, lambda c: online.step(c, "hidden", "CREATE TABLE t5 (x int)"))
+    assert not await exists(scratch, "t5")
+    await execute(scratch, f"ALTER DATABASE {db} SET deadlock_timeout = '3s'")  # every session of it: none the server's
+    await run(scratch, lambda c: online.step(c, "own", "CREATE TABLE t5 (x int)"))
+    assert await exists(scratch, "t5")
+
+
+async def test_an_upgrade_with_application_sessions_connected_needs_their_settings_attested(
+    scratch, templates, monkeypatch
+) -> None:  # fmt: skip
+    """The owner's review of checkpoint 4 (R2): a live session runs with the `deadlock_timeout` it had when it
+    connected, which no catalogue shows. While an application session is connected, the upgrade needs the operator's
+    attestation that the application's connections were recycled after any change to it, and that it holds until the
+    upgrade ends (`DEWPOINT_UPGRADE_SETTINGS_ATTESTED=1`); with none connected (a fresh installation, an upgrade with
+    the application stopped), it needs none."""
+    monkeypatch.delenv("DEWPOINT_UPGRADE_SETTINGS_ATTESTED", raising=False)
+    login = f"app_{uuid.uuid4().hex[:8]}"
+    await execute(scratch, f"CREATE ROLE {login} LOGIN PASSWORD 'pw' IN ROLE dewpoint_worker")
+    await run(scratch, lambda c: online.step(c, "none connected", "CREATE TABLE t6 (x int)"))
+    app = await asyncpg.connect(f"postgresql://{login}:pw@{scratch.split('@', 1)[1]}")
+    try:
+        with pytest.raises(online.UnsafeSettingsError, match="DEWPOINT_UPGRADE_SETTINGS_ATTESTED"):
+            await run(scratch, lambda c: online.step(c, "connected", "CREATE TABLE t7 (x int)"))
+        monkeypatch.setenv("DEWPOINT_UPGRADE_SETTINGS_ATTESTED", "1")
+        await run(scratch, lambda c: online.step(c, "attested", "CREATE TABLE t7 (x int)"))
+    finally:
+        await app.close()
+        await execute(scratch, f"DROP ROLE {login}")
+    assert await exists(scratch, "t6") and await exists(scratch, "t7")
 
 
 CHANGES = {  # a change to what a step's budget rests on, made while the upgrade runs

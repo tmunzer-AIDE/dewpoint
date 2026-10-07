@@ -57,6 +57,17 @@ run again with `alembic upgrade head`. Two of the database's settings matter:
 - A step lasts at most 60% of the shortest `deadlock_timeout` the server, the database or any role has (`ALTER ROLE …
   SET deadlock_timeout`), and never more than about 1 second (1 s and its statements' margin). A very short one makes
   steps too short to finish: the upgrade then stops, naming the step.
+- **Run it as a role whose `deadlock_timeout` is the server's:** with no role setting of its own (`ALTER ROLE … SET`),
+  unless the database has one (`ALTER DATABASE … SET`). The upgrade refuses otherwise: a role's setting hides the
+  server's, and a value given on the server's command line shows in no catalogue.
+- **With the application connected, recycle its connections first.** Each session keeps the `deadlock_timeout` it had
+  when it connected, which no catalogue shows. After any change to it, restart the application's processes (or
+  recycle their connection pools), keep it unchanged until the upgrade ends, and attest that to the upgrade:
+  `DEWPOINT_UPGRADE_SETTINGS_ATTESTED=1` in the migrating process's environment. While any application session is
+  connected, the upgrade refuses without it; with none connected (a fresh installation, or the application stopped),
+  it needs none.
+- **A step's commit waits for no synchronous standby** (`synchronous_commit = local`): a standby that stops answering
+  can't hold a step's locks. Each step is idempotent, and run again if a failover loses it.
 - No session may set its own `deadlock_timeout` lower than the catalogue shows. The upgrade refuses to start while a
   role other than the migrating one is granted `SET` on it, or while a superuser is one of the application's roles
   (`dewpoint_*`) or a member of one. Keep `deadlock_timeout` and those grants unchanged until the upgrade ends: each

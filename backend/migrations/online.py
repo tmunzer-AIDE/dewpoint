@@ -14,13 +14,16 @@ behind it, and a writer's lock order can't deadlock it into rolling everything b
   lock timeout is what's left of it (its statement timeout, a `MARGIN` share more). So a normal operation queued behind
   it waits less than that, and a writer whose lock the step waits for never waits long enough for its own deadlock
   check: the step gives way first. A lock not taken in time, a deadlock, or the budget spent rolls the step back whole
-  (a `ROLLBACK` cancelled is run again; its `COMMIT` is never cut short); it's tried again after a growing, jittered
-  pause, at most `ATTEMPTS` times, each giving-way logged, then the upgrade stops, naming it (`StepFailedError`); a
-  statement cancelled on purpose stops it at once. A role that may sets each step's own `deadlock_timeout` to a third of
-  its budget: the server, checking the lock a step waits for, then cancels the autovacuum blocking it, and only that one
-  (it otherwise would only once the request had waited `deadlock_timeout`, which a step never does). A step whose `done`
-  query says it committed already is skipped: an interrupted migration runs again from its start (Alembic records it
-  only at its end).
+  (a `ROLLBACK` cancelled is run again); it's tried again after a growing, jittered pause, at most `ATTEMPTS` times,
+  each giving-way logged, then the upgrade stops, naming it (`StepFailedError`); a statement cancelled on purpose stops
+  it at once. A role that may sets each step's own `deadlock_timeout` to a third of its budget: the server, checking the
+  lock a step waits for, then cancels the autovacuum blocking it, and only that one (it otherwise would only once the
+  request had waited `deadlock_timeout`, which a step never does). Its locks are held for its budget and its commit, and
+  no statement timeout bounds a commit (Postgres turns it off first; the owner's review of checkpoint 4): so the
+  deferred triggers' work runs within the budget (`DEFERRED`), and the commit waits for no standby (`synchronous_commit
+  = local`: a step is idempotent, run again if a failover lost it), leaving only the local WAL flush, as any writer's. A
+  step whose `done` query says it committed already is skipped: an interrupted migration runs again from its start
+  (Alembic records it only at its end).
 - What a budget rests on holds through the upgrade (the owner's review of checkpoint 3): no session may set its own
   `deadlock_timeout` below what the catalogue shows, so the upgrade refuses while a role other than the migrating one
   is granted `SET` on it, or a superuser is an application role (`APPLICATION`) or a member of one
@@ -37,6 +40,7 @@ Logs name a step, its attempt and why it gave way, never a value."""
 
 import contextlib
 import logging
+import os
 import random
 import re
 import time
@@ -55,6 +59,9 @@ MARGIN = 0.05  # a statement's timeout past its lock timeout: this share of the 
 LOCK_PLAIN = "5s"  # what a statement outside a step waits for each of its locks
 ATTEMPTS = 60  # a step's tries before the upgrade stops, naming it
 ROLLBACKS = 10  # a step's ROLLBACK, cancelled, run again at most this many times in all
+# A step's last statement, within its budget: the deferred triggers' work, which its commit would do, done now under the
+# statement timeout (Postgres turns that off before a commit's own work, so it bounds none of it)
+DEFERRED = "SET CONSTRAINTS ALL IMMEDIATE"
 PAUSE_S = (0.05, 2.0)  # the pause between tries: doubling from the first, at most the second, jittered
 BATCH = 1_000  # rows a backfill's batch
 GIVE_WAY = {"55P03": "lock", "40P01": "deadlock", "57014": "budget"}  # lock_not_available, deadlock, canceled
@@ -119,11 +126,12 @@ APPLICATION = ("dewpoint_api", "dewpoint_ingress", "dewpoint_dispatch", "dewpoin
 # Roles whose sessions could set their own deadlock_timeout below what this upgrade sees: one granted SET on it, but the
 # migrating role and the superusers (the parameter's owner lists its own), and a superuser that is an application role
 # or a member of one, through any chain; PUBLIC if it's granted to every role
-UNSEEN = f"""WITH RECURSIVE app AS (
+APP = f"""WITH RECURSIVE app AS (
   SELECT oid FROM pg_roles WHERE rolname IN ({", ".join(f"'{r}'" for r in APPLICATION)})
   UNION
   SELECT m.member FROM pg_auth_members m JOIN app ON m.roleid = app.oid
-), granted AS (
+)"""
+UNSEEN = f"""{APP}, granted AS (
   SELECT a.grantee FROM pg_parameter_acl p, aclexplode(p.paracl) a
   WHERE p.parname = 'deadlock_timeout' AND a.privilege_type = 'SET'
 )
@@ -132,6 +140,20 @@ SELECT r.rolname FROM pg_roles r WHERE r.rolname <> current_user
 UNION ALL
 SELECT 'PUBLIC' FROM granted WHERE grantee = 0
 ORDER BY 1"""
+# Whether this session's own deadlock_timeout hides the server's (the owner's review of checkpoint 4, M1): a role,
+# client or session setting replaces the server's files, command line or default, and no catalogue shows a command-line
+# value; unless the database has a setting of its own, which every session of it runs with instead of the server's
+HIDDEN = """SELECT s.source IN ('user', 'database user', 'client', 'session') AND NOT EXISTS (
+  SELECT 1 FROM pg_db_role_setting r, unnest(r.setconfig) c
+  WHERE r.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database()) AND r.setrole = 0
+    AND starts_with(c, 'deadlock_timeout=')
+) FROM pg_settings s WHERE s.name = 'deadlock_timeout'"""
+# The application's sessions connected (none of the migrating role's: under Postgres 16, a role that creates roles is a
+# member of each), each running with the deadlock_timeout it had when it connected, which no catalogue shows (the
+# owner's review of checkpoint 4, R2)
+CONNECTED = (f"{APP} SELECT count(*) FROM pg_stat_activity a WHERE a.usesysid IN (SELECT oid FROM app) "
+             "AND a.usesysid <> (SELECT oid FROM pg_roles WHERE rolname = current_user)")  # fmt: skip
+ATTESTED = "DEWPOINT_UPGRADE_SETTINGS_ATTESTED"  # =1: the operator's word, as below
 UNITS = {"us": 0.001, "ms": 1, "s": 1_000, "min": 60_000, "h": 3_600_000, "d": 86_400_000}
 
 
@@ -164,6 +186,8 @@ def _budget(conn: Connection) -> float:
             f"roles whose sessions could set deadlock_timeout below what this upgrade sees: {', '.join(unseen)} "
             "(granted SET on it, or a superuser among the application's roles); revoke that for the upgrade"
         )
+    if "online_settings" not in conn.info:
+        _preconditions(conn)
     began = conn.info.setdefault("online_settings", now)
     if now != began:
         raise SettingsChangedError(
@@ -171,6 +195,24 @@ def _budget(conn: Connection) -> float:
             "hold it, and who may set it, until the upgrade ends; run the upgrade again"
         )
     return min(SHARE * shortest / 1000, BUDGET_MAX_S)
+
+
+def _preconditions(conn: Connection) -> None:
+    """At the upgrade's start: this session sees the server's own `deadlock_timeout`, and, while the application's
+    sessions are connected, the operator attests (`ATTESTED`) they were recycled after any change to it, and that it
+    holds until the upgrade ends. Else `UnsafeSettingsError`, before any step."""
+    if conn.execute(text(HIDDEN)).scalar():
+        raise UnsafeSettingsError(
+            "this session's deadlock_timeout comes from a role, client or session setting, which hides the server's "
+            "(its command line shows in no catalogue): run the upgrade as a role without one"
+        )
+    connected = int(conn.execute(text(CONNECTED)).scalar_one())
+    if connected and os.environ.get(ATTESTED) != "1":
+        raise UnsafeSettingsError(
+            f"{connected} application session(s) connected, each with the deadlock_timeout it had when it connected, "
+            "which no catalogue shows: recycle the application's connections after any change to it, hold it until "
+            f"the upgrade ends, and attest that ({ATTESTED}=1)"
+        )
 
 
 def _why(e: BaseException) -> str | None:
@@ -232,10 +274,13 @@ def step(conn: Connection, name: str, *actions: str | Callable[[], object], done
         started = time.monotonic()
         conn.execute(text("BEGIN"))
         try:
+            conn.execute(
+                text("SELECT set_config('synchronous_commit', 'local', true)")
+            )  # its commit waits for no standby
             if detects:
                 conn.execute(text("SELECT set_config('deadlock_timeout', :d, true)"),
                              {"d": f"{max(1, int(budget * 1000 / 3))}ms"})  # fmt: skip
-            for action in actions:
+            for action in [*actions, DEFERRED]:
                 left = budget - (time.monotonic() - started)
                 if left <= 0:
                     raise _Budget
@@ -250,8 +295,7 @@ def step(conn: Connection, name: str, *actions: str | Callable[[], object], done
         except BaseException:
             _rolled_back(conn)
             raise
-        try:  # its commit, never cut short by what was left of the budget
-            conn.execute(text("SELECT set_config('statement_timeout', :s, true)"), {"s": LOCK_PLAIN})
+        try:  # no statement timeout bounds a commit: what's left of it is the local flush, its work done above
             conn.execute(text("COMMIT"))
         except BaseException:
             _rolled_back(conn)
