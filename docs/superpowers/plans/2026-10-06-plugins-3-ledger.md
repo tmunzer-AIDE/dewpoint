@@ -710,7 +710,7 @@ integers; a port usage's `reauth_interval` null.
 - Ruling: the changed output schemas change the contracts of the registered `@1` node types; they're amended in place,
   not shipped as `@2`, since no environment runs workflows on Mist nodes yet - a database that already synced them
   needs its Mist node-type rows reset before the next sync - cost if wrong: such a sync is refused (`contract changed`)
-  until reset. Awaits the owner's confirmation.
+  until reset. The owner confirmed (2026-10-07): no environment uses the Mist nodes yet, so amending `@1` is fine.
 - The user-MAC search now answers one page as Mist sends it (an object, `page` and `limit` in its query) instead of
   paging headers it never sent; fixture counts move to 181 from examples and 40 from schemas.
 - The owner's third probe run (with the overlay): 127 matched, 6 mismatched, 0 failed, 13 skipped. The 6: two fields
