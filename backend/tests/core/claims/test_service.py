@@ -134,6 +134,25 @@ async def test_only_the_owner_and_runs_it_was_granted_to_read_a_claim(owner_sess
         await fetch(worker_sessionmaker, tenant, sibling, new.id)
 
 
+async def test_a_grant_of_more_claims_than_one_statement_takes_is_granted_whole(
+    owner_sessionmaker, worker_sessionmaker
+) -> None:
+    """A loop's 10,000 claimed outputs handed to a sub-flow are 10,000 grants, 5 arguments each: past the driver's
+    32,767 arguments a statement, they're written in several (as the 2b-4a review's C1 found for erasure items)."""
+    tenant, parent, child = await a_tenant(owner_sessionmaker), uuid.uuid4(), uuid.uuid4()
+    async with owner_sessionmaker() as s, s.begin():
+        ids = list((await s.execute(text(
+            "insert into step_outputs (id, tenant_id, owner_run_id, root_run_id, sensitive_pointers, ciphertext, kind) "
+            "select gen_random_uuid(), :t, :r, :r, '[]', '\\x00', 'output' from generate_series(1, 7000) returning id"
+        ), {"t": tenant, "r": parent})).scalars())  # fmt: skip
+    async with worker_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        await service.grant(s, tenant, granted_by=parent, to=child, claim_ids=ids, root_run_id=parent)
+    async with owner_sessionmaker() as s:
+        granted = (await s.execute(text("select count(*) from claim_grants where run_id = :c"), {"c": child})).scalar()
+    assert granted == 7000
+
+
 async def test_a_run_grants_only_what_it_owns_or_holds(owner_sessionmaker, worker_sessionmaker) -> None:
     tenant = await a_tenant(owner_sessionmaker)
     owner, other, child = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()

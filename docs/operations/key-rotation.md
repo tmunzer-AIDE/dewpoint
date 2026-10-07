@@ -112,8 +112,9 @@ An execution Temporal doesn't show, and that was never read:
 
 The leader takes 50 due executions a pass, oldest due first. An open one is described again after 5 minutes; a read one
 Temporal still keeps, after its close plus the namespace's retention, but never sooner than 5 minutes on; a pending one
-backs off, each wait twice the last, from 5 minutes up to a day. So however many are due, each is described within a few
-passes, and none comes back at once to hold the rest.
+backs off, each wait twice the last, from 5 minutes up to a day. So N executions due are described within N/50 passes,
+rounded up, the earliest due first: a backfill of thousands takes as many passes, one each leader cycle, and one just
+described never comes back ahead of those still waiting.
 
 `keys retire` describes each execution that started before the version's successor reached every cache (with a
 margin of the same again). The version is kept by any one that is open, closed and still retained, closed and not

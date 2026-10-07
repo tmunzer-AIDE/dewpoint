@@ -64,6 +64,7 @@ class Run(Base):
     # retention counts a tree's cutoff from its root (engine 2b spec §10.1).
     root_run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # a sub-run its root's end left (M5)
+    next_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # and when it's asked again (R9)
     parent_step_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     parent_iteration_key: Mapped[str | None] = mapped_column(Text)
 

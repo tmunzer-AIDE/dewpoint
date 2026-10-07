@@ -113,17 +113,45 @@ async def test_guards_in_the_shared_pool_would_leave_the_activities_waiting(
         await held.end()
 
 
-def test_a_worker_process_opens_at_most_its_budgeted_connections(pg_url: str) -> None:
-    from dewpoint.apps.worker import main
+async def test_a_worker_process_opens_at_most_its_budgeted_connections(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fix-pass review's R10: every engine the worker's `run()` makes, up to where its workers would poll, counted
+    where each is made (the one factory every engine goes through), with the most connections each may open: the
+    budget, CONNECTIONS. Its plugin calls' LISTEN takes a connection of the shared pool's."""
+    from types import SimpleNamespace
 
-    shared_engine, guard_engine = main.engines(_url_for(pg_url, "dewpoint_worker"))
-    try:
-        pools = [(e.pool.size(), e.pool._max_overflow) for e in (shared_engine, guard_engine)]  # type: ignore[attr-defined]
-        assert (sum(size + overflow for size, overflow in pools), pools[1]) == (
-            main.CONNECTIONS,
-            (main.PLUGIN_CALLS, 0),
-        )
-        assert main.CONNECTIONS == 23
-    finally:
-        asyncio.run(shared_engine.dispose())
-        asyncio.run(guard_engine.dispose())
+    from dewpoint.apps.worker import main
+    from dewpoint.core import db
+    from tests.apps.worker.test_main import proven, settings, unrecorded
+
+    made: list[AsyncEngine] = []
+    factory = db.create_async_engine
+
+    def counted(url: str, **options: Any) -> AsyncEngine:
+        made.append(factory(url, **options))
+        return made[-1]
+
+    class Polling(Exception):
+        """Where the test stops the worker: every part of it made, none of it run."""
+
+    def gather(*started: Any, **_: Any) -> None:
+        for coroutine in started:
+            coroutine.close()
+        raise Polling
+
+    async def recorded(*args: object) -> None: ...
+
+    async def connect(*args: object, **kwargs: object) -> object:
+        return object()
+
+    monkeypatch.setattr(db, "create_async_engine", counted)
+    monkeypatch.setattr(main.Client, "connect", connect)
+    monkeypatch.setattr(main, "verify_environment", recorded)
+    monkeypatch.setattr(main, "reporter", lambda *args: unrecorded)
+    monkeypatch.setattr(main, "self_check", proven)
+    monkeypatch.setattr(main, "engine_worker", lambda *args, **kwargs: SimpleNamespace(run=lambda: asyncio.sleep(0)))
+    monkeypatch.setattr(main, "asyncio", SimpleNamespace(gather=gather))
+    with pytest.raises(Polling):
+        await main.run(settings())
+    pools = [(e.pool.size(), e.pool._max_overflow) for e in made]  # type: ignore[attr-defined]
+    assert pools == [(main.SHARED_POOL, main.SHARED_OVERFLOW), (main.PLUGIN_CALLS, 0)]
+    assert sum(size + overflow for size, overflow in pools) == main.CONNECTIONS == 23

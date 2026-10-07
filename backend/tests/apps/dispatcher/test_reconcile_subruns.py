@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 import structlog
+from sqlalchemy import text
 from temporalio.client import WorkflowExecutionStatus
 from temporalio.service import RPCStatusCode
 
@@ -108,3 +109,56 @@ async def test_more_live_sub_runs_than_a_pass_takes_are_all_asked_about(
     passes = [await reconcile.reconcile_subruns(dispatch_sessionmaker, client) for _ in range(2)]
     assert passes == [{"running": reconcile.BATCH}, {"running": 10}]
     assert set(client.asked) == {run_workflow_id(str(orphan["ctx"]["t"]), str(sub)) for sub in subs}
+
+
+async def _sql(owner: Any, statement: str, **params: Any) -> Any:
+    async with owner() as s, s.begin():
+        found = await s.execute(text(statement), params)
+        return found.scalar() if found.returns_rows else None
+
+
+async def _wait(owner: Any, run_id: Any) -> int:
+    """How long the sub-run waits before it's asked about again, in seconds."""
+    wait = await _sql(owner, "select next_check_at - checked_at from runs where id = :i", i=run_id)
+    return round(wait.total_seconds())
+
+
+async def test_a_sub_run_whose_history_is_gone_is_asked_about_less_and_less_often_up_to_a_day(
+    owner_sessionmaker, dispatch_sessionmaker
+) -> None:
+    """The fix-pass review's R9: one orphaned before the upgrade, closed past the namespace's retention, is alerted on
+    at each look; it waits twice its last gap each time, up to a day, rather than coming back every RECHECK."""
+    gone = DescribeFails(rpc(RPCStatusCode.NOT_FOUND))
+    waits = []
+    for ago in (None, timedelta(hours=1), timedelta(hours=20)):  # first asked, asked an hour ago, twenty hours ago
+        orphan = await _orphan(owner_sessionmaker)
+        if ago is not None:
+            await _sql(owner_sessionmaker, "update runs set checked_at = now() - cast(:a as interval) where id = :i",
+                       a=ago, i=orphan["sub"])  # fmt: skip
+        assert await reconcile.reconcile_subruns(dispatch_sessionmaker, gone) == {"unresolved": 1}
+        waits.append(await _wait(owner_sessionmaker, orphan["sub"]))
+    assert waits == [30, 2 * 60 * 60, 24 * 60 * 60]  # RECHECK at first, then twice the last gap, never over a day
+
+
+@pytest.mark.parametrize("answer", ["live", "unanswered"])
+async def test_a_live_or_unanswered_sub_run_is_asked_about_again_after_its_recheck(
+    owner_sessionmaker, dispatch_sessionmaker, answer
+) -> None:
+    """Only missing history backs off: a live execution, or a Temporal that didn't answer, is asked again soon."""
+    orphan = await _orphan(owner_sessionmaker)
+    await _sql(owner_sessionmaker, "update runs set checked_at = now() - interval '20 hours' where id = :i",
+               i=orphan["sub"])  # fmt: skip
+    client = (Described(WorkflowExecutionStatus.RUNNING) if answer == "live"
+              else DescribeFails(rpc(RPCStatusCode.UNAVAILABLE)))  # fmt: skip
+    assert await reconcile.reconcile_subruns(dispatch_sessionmaker, client) == {
+        "live": {"running": 1}, "unanswered": {"unresolved": 1}}[answer]  # fmt: skip
+    assert await _wait(owner_sessionmaker, orphan["sub"]) == 30
+
+
+async def test_a_sub_run_not_due_yet_is_left_for_later(owner_sessionmaker, dispatch_sessionmaker) -> None:
+    orphan = await _orphan(owner_sessionmaker)
+    await _sql(owner_sessionmaker, "update runs set next_check_at = now() + interval '1 hour' where id = :i",
+               i=orphan["sub"])  # fmt: skip
+    closed = Described(WorkflowExecutionStatus.TERMINATED)
+    assert await reconcile.reconcile_subruns(dispatch_sessionmaker, closed) == {}
+    assert await ended(owner_sessionmaker, orphan["sub"]) == ("running", None)

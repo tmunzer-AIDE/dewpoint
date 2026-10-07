@@ -3,7 +3,7 @@
 due rows a pass, oldest due first, on the cycle that dispatches, so a row it has just described must come back later,
 never at once: a read execution Temporal still keeps is next described no sooner than five minutes on (its close plus
 the retention can be long past), and one Temporal never showed backs off, its wait doubling up to a day. However many
-rows are due, every one is described within a few passes."""
+rows are due, every one is described within N/50 passes, rounded up, the earliest due first."""
 
 import uuid
 from datetime import UTC, datetime, timedelta

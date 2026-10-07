@@ -216,10 +216,14 @@ KEK configured under the right id passes it, and passes `dewpoint keys status`, 
 and reads each tenant's key the way the workers do, first.
 
 A worker process opens at most 23 database connections: a pool of 5 with an overflow of 10 for its activities, its
-health check and its other work, and a pool of 8 for plugin calls, one per call in flight, each held for the whole
-call so that erasure can't start beneath it. A call waits for a guard rather than taking an activity's connection.
-Size PostgreSQL's `max_connections` for 23 per worker process, plus the API's, dispatcher's and retention process's
-pools, plus headroom for migrations and operators.
+health check, the plugin calls' `LISTEN` and each call's own short transactions (its claim, its key lookup and
+sealing, its answer), and a pool of 8 for the plugin calls' guards, one per call in flight, each held across the whole
+call so that erasure can't start beneath it. A call never holds an activity's connection across its hook, but its
+short transactions share the activities' pool; their load there is unmeasured. Every other process opens at most 15
+(a pool of 5 with an overflow of 10): each API process, each dispatcher, each ingress process, the retention process,
+and each CLI command while it runs. Size PostgreSQL's `max_connections` for their sum, plus headroom for migrations and
+operators: two workers, two API processes, a dispatcher, an ingress process and the retention process need at most
+2 × 23 + 5 × 15 = 121.
 
 ## Docker Compose (evaluation)
 
@@ -250,6 +254,13 @@ another tenant's workflow, version or run; 0037 records each run's tree), and un
 error naming row-level security rather than check nothing. Migration 0035 also adds and checks its keys inside its own
 transaction, which blocks writes to `runs`, `run_steps`, `run_requests` and the other tables it changes until it ends;
 before migrating large populated tables, plan the downtime or split the check (a decision of its own).
+
+**That role keeps bypassing row-level security for as long as the deployment runs,** not only while it migrates: it
+owns the database functions that read across tenants (the erasure's insert fence and stage gate, a workflow version's
+immutability, a tenant's status, and the candidate lists of the dispatcher, the reconciler and the retention process),
+and they read through it. Without it, the insert fence refuses every insert of a tenant's data (an error, migration
+0043, never an insert let through), the stage gate, the immutability and the status refuse what they check, and the
+candidate lists read nothing, so runs, events, erasures and sweeps wait without an error of their own.
 
 It records `development` (`DEWPOINT_ENVIRONMENT`); CI sets `COMPOSE_FILE` to both files.
 

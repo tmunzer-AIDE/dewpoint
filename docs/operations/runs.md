@@ -235,7 +235,29 @@ over when it goes). It asks Temporal about each request at most once every 30 se
   retirement's `open_runs` check and an erasure's stage 50.
 - **History Temporal no longer has**, for a started run, such a sub-run or a held slot: left as it is, with an error
   (`run_history_missing`, `subrun_history_missing`, `slot_history_missing`); no outcome is invented and no slot
-  released. Recover it by hand.
+  released. Recover it by hand. Such a sub-run (one orphaned before the upgrade that added this, say, and closed past
+  the namespace's retention) is asked about again less and less often, twice its last gap each time from 30 seconds,
+  up to a day, with its error each time.
+- **Recovering a sub-run whose history is gone** (an exceptional recovery, by hand, as the database's owner):
+  1. Read the namespace the deployment recorded: `SELECT temporal_namespace FROM platform_settings;`.
+  2. Confirm Temporal has no execution under the sub-run's workflow id, `t:<tenant id>:run:<run id>`, in that
+     namespace: `temporal workflow describe --namespace <namespace> --workflow-id <workflow id>` answers `NotFound`.
+     Any other answer, or any doubt about the namespace: stop here.
+  3. Record its end in a transaction of its own, naming its tenant and its run, and see which row changed:
+
+     ```sql
+     BEGIN;
+     UPDATE runs SET status = 'failed', error_code = 'internal_error',
+                     error_message = 'Its history was gone before its end was recorded.', ended_at = now()
+     WHERE tenant_id = '<tenant id>' AND id = '<run id>' AND parent_run_id IS NOT NULL AND status = 'running'
+     RETURNING tenant_id, id, root_run_id, status, ended_at;
+     ```
+
+  4. Exactly one row must come back (`UPDATE 1`), the sub-run you named: then `COMMIT;`. Any other count: `ROLLBACK;`
+     and check the ids.
+
+  The reconciler stops asking about it, and its tree's retention, a key retirement's `open_runs` check and an erasure's
+  stage 50 go on.
 - **Cancels:** it sends each recorded cancel to Temporal, once.
 
 ## Cancelling and re-running

@@ -93,9 +93,10 @@ exercise. Each stays open past this plan, and the reviewer weighs each deliberat
 - **Many executions, incarnations and plugin calls.** `keys retire` describes and reads the history of every execution
   with evidence (its worst-case time is an operational measurement still to make, the owner's M3 ruling), and every
   incarnation that isn't current is described every hour, for good: both add Temporal calls to the leader's serial
-  cycle (§7.9, 2b-4b). Each plugin call in flight holds one of the worker's pooled connections across its claim, hook,
-  sealing and answer (up to its concurrency of 8), beside the worker's activities, and an erasure's start waits for
-  them: only the hook has a deadline (10 seconds), so that wait has no fixed bound.
+  cycle (§7.9, 2b-4b). Each plugin call in flight holds a guard connection across its claim, hook, sealing and
+  answer, from a pool of 8 of its own (the final review's I4), while its short transactions share the worker's
+  activities' pool (their load unmeasured), and an erasure's start waits for the calls in flight: only the hook has a
+  deadline (10 seconds), so that wait has no fixed bound.
 
 ## File structure
 

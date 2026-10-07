@@ -1029,8 +1029,9 @@ largest container when the budget requires.
     longer shows stays pending;
   - **its cadence** (the final review's I3): the leader takes at most 50 due rows a pass, the earliest next check
     first. A row still retained or read is next checked at its own time, never sooner than 5 minutes on; a pending one
-    again after a backoff doubling from 5 minutes, from its last check, to a day. So a backlog larger than a pass is
-    still reached, and pending rows, a whole backfill of them, don't hold the rest back.
+    again after a backoff doubling from 5 minutes, from its last check, to a day. So N rows due are checked within
+    N/50 passes, rounded up, the earliest due first: a whole backfill takes as many passes, and a row just checked
+    never comes back ahead of those still waiting.
 - **The tick cutover** (revision 10). A tick from before §6.2's tick exception sealed its payloads under whatever
   version was active, and nothing proves those histories gone: a version made before the cutover never retires. The
   cutover is when the last dispatcher that sealed tick payloads had stopped, unable to restart; until it's recorded,
@@ -1351,10 +1352,12 @@ dispatcher's are.
     `internal_error`, and an alert.
 - **Sub-runs a root's close left `running`** (2b-4a; the final review's M5): a parent writes its children's ends, so a
   sub-run still `running` 30 seconds after its root ended is one its root's close left (a child asked to cancel, or a
-  parent gone before writing it). Through `orphan_subruns()` (ids only), at most once per recheck interval
-  (`runs.checked_at`), the reconciler describes the sub-run's own execution: closed, it records the outcome Temporal
-  reports, as above (no slot: a sub-run holds none); still running, it's left as it is. Until then it holds its tree
-  from retention (§10.1), a key retirement's `open_runs` check and an erasure's stage 50.
+  parent gone before writing it). Through `orphan_subruns()` (ids only), when it's due (`runs.next_check_at`), the
+  reconciler describes the sub-run's own execution: closed, it records the outcome Temporal reports, as above (no
+  slot: a sub-run holds none); still running, it's left as it is, and asked again after the recheck interval. Its
+  history gone (below), it's asked again after twice its last gap, from the recheck interval up to a day (the fix-pass
+  review's R9). Until then it holds its tree from retention (§10.1), a key retirement's `open_runs` check and an
+  erasure's stage 50.
 - **History Temporal no longer has** — for a started run whose row is still `running`, a sub-run as above, or a slot
   whose row has ended — isn't evidence that the latest execution is terminal: the row and the slot stay as they are,
   with an alert, for an operator's recovery (§7.9). No outcome is inferred and no slot released from missing history
@@ -1848,7 +1851,8 @@ its guide.
   records it as the scope's checkpoint (`audit_checkpoints`), then deletes it and every older entry through
   `audit_prune()`, the only path that deletes audit entries; the verifier starts each chain from its latest
   checkpoint with no entry at or before it left (one followed by unpruned entries starts nothing, so every entry left
-  is verified), which must be among the signed anchors, and a scope pruned whole goes on from it. Pruning is refused
+  is verified); it, and every other checkpoint recorded, must be among the signed anchors, and a scope pruned whole
+  goes on from it. Pruning is refused
   outside a development deployment until #3's off-host anchor sink exists (D5, revision 10): anchors on the database's
   own host can't show that a privileged operator hadn't pruned, rewritten and re-anchored.
 - **Backups:** the operator's policy; the guide recommends at most 35 days. Data removed by retention lasts in
@@ -2597,7 +2601,8 @@ erasure pass every 60 s (5 s to 1 hour), a failed stage backing off from 30 s, d
 after an hour, the bound stage 60's end plus 30 days; each incarnation that isn't current described every hour, a failed
 describe again after 5 minutes; Temporal's missed count read every 5 minutes; run evidence 50 rows a pass, rechecked
 no sooner than 5 minutes on, a pending row's backoff doubling from 5 minutes to a day; a worker process's database
-connections at most 23 (a pool of 5 with an overflow of 10, and 8 plugin-call guards in a pool of their own).
+connections at most 23 (a pool of 5 with an overflow of 10, and 8 plugin-call guards in a pool of their own); a
+sub-run whose history is gone asked about again after twice its last gap, from 30 seconds up to a day.
 
 These numbers are starting points. Each stays provisional until the go/no-go experiments (§11) or the owning plan's
 measurements establish it; the spec is revised with the measured value when that plan lands.
