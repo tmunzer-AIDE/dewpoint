@@ -69,6 +69,7 @@ class DeclaredType:
     rate_scopes: tuple[Mapping[str, Any], ...]
     verify: bool
     hash: str = ""
+    stream: Mapping[str, Any] | None = None  # its websocket (plugins-3 D26): a host map, a path, its own scopes
 
     @classmethod
     def from_manifest(cls, plugin: str, m: Mapping[str, Any]) -> "DeclaredType":
@@ -83,6 +84,7 @@ class DeclaredType:
             rate_scopes=tuple(m.get("rate_scopes", ())),
             verify=bool(m.get("verify")),
             hash=declaration_hash(m),
+            stream=m.get("stream"),
         )
 
     def _checked(self, schema: Mapping[str, Any], value: Any) -> dict[str, Any]:
@@ -118,15 +120,24 @@ class DeclaredType:
             raise InvalidValueError(["auth"]) from None
 
     def scopes(self, config: Mapping[str, Any], secret: Mapping[str, Any], mac: Callable[[str], str]) -> list[Scope]:
-        """Each quota scope (plugins-3 D9): its kind, the named config values, then a MAC of the named secret field
-        under the tenant's scope key, never the secret itself."""
-        out: list[Scope] = []
-        for s in self.rate_scopes:
-            parts = [s["kind"], *(str(config[name]) for name in s["config"])]
-            if s["secret"] is not None:
-                parts.append(mac(str(secret[s["secret"]])))
-            out.append(Scope(":".join(parts), float(s["capacity"]), float(s["refill_per_s"])))
-        return out
+        """Each quota scope a request charges (plugins-3 D9): its kind, the named config values, then a MAC of the
+        named secret field under the tenant's scope key, never the secret itself."""
+        return _scopes(self.rate_scopes, config, secret, mac)
+
+    def stream_url(self, config: Mapping[str, Any]) -> str | None:
+        """The type's stream (plugins-3 D26): `wss://`, the host the config field's value maps to, the declared path;
+        None for a type without one."""
+        if self.stream is None:
+            return None
+        value = config.get(self.stream["field"])
+        host = self.stream["hosts"].get(value) if isinstance(value, str) else None
+        return f"wss://{host}{self.stream['path']}" if host else None
+
+    def stream_scopes(
+        self, config: Mapping[str, Any], secret: Mapping[str, Any], mac: Callable[[str], str]
+    ) -> list[Scope]:
+        """Each quota scope opening a stream charges, keyed as `scopes` keys a request's."""
+        return _scopes(tuple(self.stream["rate_scopes"]) if self.stream else (), config, secret, mac)
 
     def listing(self) -> dict[str, object]:
         """What `GET /connection-types` shows; a host map on `cloud` is shown as `clouds`, as the web app reads it."""
@@ -139,6 +150,21 @@ class DeclaredType:
         if self.host is not None and self.host["kind"] == "map" and self.host["field"] == "cloud":
             out["clouds"] = dict(self.host["hosts"])
         return out
+
+
+def _scopes(
+    declared: tuple[Mapping[str, Any], ...],
+    config: Mapping[str, Any],
+    secret: Mapping[str, Any],
+    mac: Callable[[str], str],
+) -> list[Scope]:
+    out: list[Scope] = []
+    for s in declared:
+        parts = [s["kind"], *(str(config[name]) for name in s["config"])]
+        if s["secret"] is not None:
+            parts.append(mac(str(secret[s["secret"]])))
+        out.append(Scope(":".join(parts), float(s["capacity"]), float(s["refill_per_s"])))
+    return out
 
 
 async def declared_types(s: AsyncSession) -> dict[str, DeclaredType]:

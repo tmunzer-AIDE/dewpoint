@@ -20,6 +20,7 @@ TYPE_KEY_RE = re.compile(r"^(?=.{1,64}$)[a-z][a-z0-9_]{0,40}(\.[a-z][a-z0-9_]{0,
 SCOPE_KIND_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
 HEADER_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$")  # an RFC 9110 token
 HOST_RE = re.compile(r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
+PATH_RE = re.compile(r"^(/[A-Za-z0-9_~-][A-Za-z0-9._~-]{0,63}){1,16}$")  # segments of unreserved characters, no dots
 
 
 FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -90,6 +91,17 @@ class RateScope:
     refill_per_s: float = 1.25
 
 
+@dataclass(frozen=True)
+class StreamEndpoint:
+    """The websocket the runtime opens for a connection (plugins-3 D26): `wss://`, the host this config field's value
+    maps to, then `path`; the connection's auth header sent with the handshake; and the quota scopes opening a stream
+    charges, once a stream (a provider's limit on connections, not on messages). A node can't name another URL."""
+
+    host: HostMap
+    path: str
+    rate_scopes: tuple[RateScope, ...] = ()
+
+
 type Verify = Callable[[CallContext, Connection], Awaitable[VerifyResult]]
 
 
@@ -103,6 +115,7 @@ class ConnectionType:
     host: HostMap | UrlField | None = None
     rate_scopes: tuple[RateScope, ...] = field(default=())
     verify: Verify | None = None
+    stream: StreamEndpoint | None = None
 
     def problems(self) -> list[str]:
         name = f"connection type {self.key!r}"
@@ -123,6 +136,33 @@ class ConnectionType:
         out += self._host_problems(name, config_fields)
         for scope in self.rate_scopes:
             out += self._scope_problems(name, scope, config_fields, secret_fields)
+        out += self._stream_problems(name, config_fields, secret_fields)
+        return out
+
+    def _stream_problems(self, name: str, config_fields: set[str], secret_fields: set[str]) -> list[str]:
+        if self.stream is None:
+            return []
+        where = f"{name}: stream"
+        host = self.stream.host
+        out: list[str] = []
+        if host.field not in config_fields:
+            out.append(f"{where} host field {host.field!r} isn't a config field")
+        else:
+            if not self.Config.model_fields[host.field].is_required():
+                out.append(f"{where} host field {host.field!r} must be required")
+            out += [f"{where} host {h!r} must be a host name" for h in host.hosts.values() if not HOST_RE.fullmatch(h)]
+            prop = self.Config.model_json_schema(mode="validation").get("properties", {}).get(host.field, {})
+            if sorted(map(str, prop.get("enum", []))) != sorted(host.hosts):
+                out.append(f"{where} host field {host.field!r} must allow exactly the host map's keys")
+        path = self.stream.path
+        if not isinstance(path, str) or not PATH_RE.fullmatch(path):
+            out.append(f"{where} path must be one or more /segments of unreserved characters")
+        for scope in self.stream.rate_scopes:
+            out += self._scope_problems(name, scope, config_fields, secret_fields)
+            out += [f"{name}: rate scope {scope.kind!r} names {n!r}, which must be required" for n in scope.config
+                    if n in self.Config.model_fields and not self.Config.model_fields[n].is_required()]  # fmt: skip
+            if scope.secret in self.Secret.model_fields and not self.Secret.model_fields[scope.secret].is_required():
+                out.append(f"{name}: rate scope {scope.kind!r} names {scope.secret!r}, which must be required")
         return out
 
     def _required_problems(self, name: str) -> list[str]:
@@ -212,15 +252,26 @@ class ConnectionType:
                 else None
             ),
             "host": host,
-            "rate_scopes": [
-                {
-                    "kind": s.kind,
-                    "config": list(s.config),
-                    "secret": s.secret,
-                    "capacity": float(s.capacity),
-                    "refill_per_s": float(s.refill_per_s),
-                }
-                for s in self.rate_scopes
-            ],  # fmt: skip
+            "rate_scopes": [_scope_manifest(s) for s in self.rate_scopes],
             "verify": self.verify is not None,
+        } | ({"stream": self._stream_manifest()} if self.stream is not None else {})
+
+    def _stream_manifest(self) -> dict[str, Any]:
+        assert self.stream is not None  # noqa: S101 - only when set
+        return {
+            "kind": "map",
+            "field": self.stream.host.field,
+            "hosts": dict(self.stream.host.hosts),
+            "path": self.stream.path,
+            "rate_scopes": [_scope_manifest(s) for s in self.stream.rate_scopes],
         }
+
+
+def _scope_manifest(s: RateScope) -> dict[str, Any]:
+    return {
+        "kind": s.kind,
+        "config": list(s.config),
+        "secret": s.secret,
+        "capacity": float(s.capacity),
+        "refill_per_s": float(s.refill_per_s),
+    }

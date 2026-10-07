@@ -135,9 +135,12 @@ async def test_a_connection_shows_its_current_cooldowns(app, owner_sessionmaker,
             await s.execute(insert, {"t": tid, "s": f"mist.org:emea_01:{ORG}", "w": 120})
             await s.execute(insert, {"t": tid, "s": f"mist.token:{hasher(BODY['secret']['api_token'])}", "w": 600})
             await s.execute(insert, {"t": tid, "s": "mist.org:emea_01:someone-else", "w": 600})
+            stream = f"mist.stream:{hasher(BODY['secret']['api_token'])}"  # its stream's scope (plugins-3 D26)
+            await s.execute(insert, {"t": tid, "s": stream, "w": 300})
         r = await c.get(f"/api/v1/t/{tid}/connections/{cid}")
     shown = {x["scope"]: datetime.fromisoformat(x["until"]) - datetime.now(UTC) for x in r.json()["cooldowns"]}
-    assert set(shown) == {"mist.org", "mist.token"}
+    assert set(shown) == {"mist.org", "mist.token", "mist.stream"}
+    assert timedelta(seconds=280) < shown["mist.stream"] <= timedelta(seconds=305)
     assert timedelta(seconds=100) < shown["mist.org"] <= timedelta(seconds=125)
     assert timedelta(seconds=580) < shown["mist.token"] <= timedelta(seconds=605)
     assert "tok_" not in r.text and "someone-else" not in r.text

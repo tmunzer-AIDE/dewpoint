@@ -722,3 +722,280 @@ integers; a port usage's `reauth_interval` null.
 - The owner's fourth probe run (2026-10-07, at `a9c8610`): 133 matched their output schema, 0 mismatched, 0 failed;
   13 skipped as before (9 with nothing in the test org to read their id from, 4 insight reads needing a `metrics`
   query). Every curated read the probe could reach runs as shipped against this org.
+
+## 3b-2 Mist device utilities
+
+Branch `feat/plugins-3b2` from `origin/main` 5e79a10 (#51, after 3b-1's #49 and its follow-up #50), started 2026-10-07:
+I named 3b-2 as next and the owner said "let's continue". That is the go to build 3b-2; this section's rulings await
+the owner's sign-off. No migration expected. No real Mist call: the proof runs against local fakes (REST and stream).
+
+Facts checked before the tasks (never from memory):
+- `websockets` 17.1 as installed (`websockets/asyncio/client.py`): `connect(uri, sock=..., ssl=..., server_hostname=...,
+  proxy=..., additional_headers=..., open_timeout=..., ping_interval=..., ping_timeout=..., max_size=...)`; with `sock`
+  given it sets no proxy and refuses every redirect ("cannot follow redirect ... with a preexisting socket"); `max_size`
+  bounds a message.
+- Mist's stream (docs clone `mistapi-portal` 919c9b47, `guides/websocket/`): hosts `api-ws.<cloud>` beside each REST
+  `api.<cloud>` (`1_hosts`); `wss://api-ws.mist.com/api-ws/v1/stream` with `Authorization: Token` (`2_best_practices`);
+  `{"subscribe": channel}` answered `channel_subscribed` or `subscribe_failed` with a `detail` (sample: "Server error,
+  please try again later"); 2,000 connections an hour and 2,000 channels a connection per token, 429 past them
+  (`3_rate_limit`); device command output on `/sites/{site_id}/devices/{device_id}/cmd`, `data.session` matching the
+  POST answer's `session`, `data.raw` the text; `"finished": true` in table output (`samples/site_device_command_output`:
+  show ARP, show service path, show session); a release-DHCP sample whose `data` is a JSON string holding another
+  envelope (the OAS). Unsubscribing is mentioned but its message isn't documented.
+- The 30 utilities in the vendored OAS (0613a22): all exist, none deprecated; 25 answer `websocket_session`
+  (`{session}`, required), 5 an empty 200 (`bounce_port`, `clear_macs`, `clear_bpdu_error`, `release_dhcp_leases`,
+  `clear_session`); `resolve_dns` takes no body; five table commands take a refresh `interval` (at most 10 s) and
+  `duration` (at most 300 s); devices are typed `ap`, `switch` or `gateway`. In 3b-1's map each is `held`
+  (`unreviewed`). (An earlier line said 24 and 6, counting `resolve_dns` as empty: corrected when the reviews were
+  generated from the OAS.)
+
+Tasks (test-first, in order):
+1. `websockets` 17.1 becomes a direct dependency (D26; approved with the outline's rev 5).
+2. The guarded websocket in `core` (D26): wss only; the name vetted and the socket connected by the guard to a vetted
+   address, then handed to `websockets` (`sock`, `server_hostname`, `proxy=None`); opening 5 s, 1 MiB a message, 10 MiB
+   an attempt, pings every 60 s with a 45 s timeout; text messages only; failures as core errors.
+3. SDK 0.5.0: a connection's `ws.connect()` (its type's stream endpoint) and the `WebSocket` it gives (`send`, with
+   `probe` for a message that changes nothing; `receive` with a timeout; `close`); a connection type's
+   `StreamEndpoint` (host map, path, stream quota scopes) as data; `HandshakeRejected` (its status) and `StreamLost`.
+4. The runtime's connection stream (D4, D9, D10): the declared URL only, the credentials the runtime's, a token from
+   each stream scope per connection (`Cooldown` otherwise), a 429's `Retry-After` blocking those scopes; refused in a
+   simulation and on a plugin call's read-only channel; a counted send marks the attempt, a probe doesn't; closed with
+   the attempt. The API's cooldowns list the stream scopes.
+5. Mist's stream endpoint: each cloud's `api-ws` host, `/api-ws/v1/stream`, a stream scope per token.
+6. The utilities' reviews (D27, D28): each with its contract, stream mode, device types, permitted parameters,
+   execution bounds, repeat behaviour and evidence; allowed to its own node only; the map's version 2.
+7. The stream reader (D27): subscribe, acknowledgement (10 s), POST, the session's messages kept (at most 256 and 1 MiB
+   before the session is known), strict and bounded decoding, ANSI stripped; idle (10 s), first message (30 s),
+   maximum duration, terminal evidence; heartbeats; closed in `finally`; every failure classified.
+8. One node type per utility: config (connection, site, device, permitted parameters, maximum duration), output by
+   contract, the site and device-type checks, simulate, pickers.
+9. Proof: a ping streamed from a local stream fake and a bounce-port accepted by a local REST fake, through RunGraph;
+   the same run simulated sends nothing.
+
+Rulings:
+- Ruling: the branch starts from `origin/main` 5e79a10 - #50's overlay and #51's log fields included - cost if wrong:
+  one rebase.
+- Ruling: D26's `ctx.ws` is exposed as `connection.ws` only: the connection type's stream endpoint, its credentials
+  applied by the runtime, its stream scopes charged. A websocket without credentials waits for a node that needs one -
+  every node 3b-2 adds streams through its connection, and each surface is one more to guard - cost if wrong: adding
+  `ctx.ws` later is additive (an SDK minor).
+- Ruling: a node can't name the stream URL: it's the type's declared host (from a config field's host map) and path -
+  as the REST base is - cost if wrong: a provider whose stream URL varies per call needs the declaration widened.
+- Ruling: opening a stream sends nothing a node is accountable for (as a TCP connect isn't); a message sent counts as a
+  send unless the node marks it `probe` (a message that changes nothing, as Mist's subscribe) - fail closed for a
+  stream API whose messages act - cost if wrong: a node that mis-marks an acting message as a probe gets a retry it
+  shouldn't (first-party nodes only today).
+- Ruling: no unsubscribe message is sent: its format isn't documented; closing the connection ends its subscriptions -
+  cost if wrong: none (one connection a call, never shared).
+- Ruling: `subscribe_failed` is retryable only with the documented `detail` "Server error, please try again later",
+  fatal with any other - nothing was sent before the POST, so a retry is safe, but a refused channel or forbidden site
+  would only burn stream connections - cost if wrong: a transient failure worded otherwise fails the step.
+- Ruling: every disruptive utility is acceptance only (`{accepted: true, completion_known: false}`), none subscribes:
+  no completion, final message or readback is documented for any of the 11 (an empty 200 isn't documented as
+  completion; bounce port's docs sample streams "Port bounce complete." while its OAS answer is empty, unverified) -
+  cost if wrong: no output from the cable test (TDR) and the clears until a device run verifies a contract to promote.
+- Ruling: three diagnostics have stream terminal evidence (show ARP, show service path, show session: the docs samples'
+  `"finished": true` with `"status": "SUCCESS"`); the 16 others are bounded collections, and one that sees that evidence
+  ends early with `completion_known: true` - cost if wrong: a table command that never finishes fails its three nodes
+  `mist.completion_unknown` (retried, being repeatable diagnostics).
+- Ruling: a finished table whose `status` isn't `SUCCESS` fails `mist.command_failed` (fatal) - the device answered;
+  repeating a diagnostic the device refused won't change it - cost if wrong: a transient device failure isn't retried.
+- Ruling: the refresh parameters (`interval`, `duration`) aren't permitted: they repeat the output for up to 300 s, which
+  no contract bounds yet - cost if wrong: a repeated table needs a workflow loop.
+- Ruling: the device type is checked before anything else is sent: a probe read of the device (`getSiteDevice`, in the
+  map's reads), its `type` among the review's - D28's device types checked at run time, not only recorded - cost if
+  wrong: one more read a utility step.
+- Ruling: utilities are reachable by their own node only, never by `mist.api.write` - the generic node would bypass the
+  permitted parameters and the contract - cost if wrong: none for safety.
+- Ruling: the map's version is 2: an allowed utility's entry carries its review (`utility`: contract, stream, device
+  types, parameters, bounds, repeat); a map of version 1 is refused, as one of another description is - cost if wrong:
+  none (generated, and checked against the reviews by a test).
+- Ruling: a utility's contract is one its node implements: bounded collection, stream terminal evidence or acceptance
+  only; D28's documented REST completion and verified readback have no node yet, so a map naming them is refused -
+  cost if wrong: none until a utility needs one.
+- Ruling: a utility's device types are its OAS tag's (Utilities Common: AP, switch and gateway; LAN: switch; WAN:
+  gateway), narrowed or widened by its description's own list ("Ping from AP, Switch and SSR"; "BGP Summary from SSR,
+  SRX and Switch"; "Clear ARP cache for SSR, SRX and Switch"; port bounce "from Switch/Gateway"; TDR "from the
+  Switch"; show ARP's `node` "required for Gateways") - the documentation is the only evidence short of a device run -
+  cost if wrong: a supported type is refused `mist.device_type_unsupported`, or an unsupported one reaches Mist, which
+  refuses it.
+- Ruling: maxima on top of the OAS's: a ping's or a service ping's `count` at most 100, a traceroute's `timeout` at most
+  120 s, a streaming utility's own `max_duration_s` at most 240 - bounded collection needs a bounded command - cost if
+  wrong: a longer ping takes several steps.
+- Ruling: a device id has no picker: 3b-1's pickers are a site's and an org resource's, and a site resource's list
+  needs the chosen site, which an options query doesn't carry - cost if wrong: the device id is typed or referenced.
+- Ruling: the twelve utilities D27 holds back are `held` with their reason (shell, CLI config, support upload, FIPS
+  zeroize, reprovision, re-adoption, firmware rollback, VC switchover, packet capture, and the three JWT-URL streams);
+  `getSiteDeviceZtpPassword` stays denied as always refused, which is stricter - cost if wrong: none.
+- The map at task 6 (measured): 1,072 operations, 292 allowed (262 curated, 30 utilities: 19 diagnostics, 11
+  disruptive), 602 held (578 unreviewed, 24 the owner's or D27's), 178 denied.
+- Ruling (task 7, the stream reader): a finished table counts as evidence only with `"status": "SUCCESS"`; with another
+  status it's the device's refusal (`mist.command_failed`); without a status it's no evidence (`completion_unknown`) -
+  the docs show only `SUCCESS` - cost if wrong: a status-less finished table is retried instead of accepted.
+- Ruling: a table's evidence is the JSON object at the start of `raw`, whatever text follows it - the docs' show ARP
+  sample ends its table with `\n"}}` where show service path's and show session's end in a newline - cost if wrong:
+  trailing text that should have voided the table doesn't.
+- Ruling: a data envelope's channel must be the device's (compared in lower case), a nested envelope's too, at most one
+  level deep; `data` an object or a JSON string of one, never a string encoded twice; `session` a non-empty string and
+  `raw` a string; anything else is discarded, never accepted - cost if wrong: a reshaped Mist message reads as no
+  output (retried for diagnostics).
+- Ruling: while the POST is under way the reader buffers the channel's data (at most 256 messages and 1 MiB); a lost
+  stream or an overflow then lets the POST finish, since it's the command, and fails after it (`mist.stream_lost`,
+  `mist.output_unreadable`, `mist.output_overflow`) - cost if wrong: none.
+- Ruling: the kept output is at most 5,000 lines and 512 KiB (`truncated` past either; reading goes on to the end),
+  well under a step output's 1.75 MiB - cost if wrong: a long table is cut.
+- Ruling: a `HandshakeRejected` the node doesn't catch is retried by the runtime only for a 429 or a 5xx; a
+  `StreamLost` is handled as `MaybeSent` (8ac5b1f) - cost if wrong: none for safety.
+- Ruling (task 8, the utility nodes): a utility node is a curated operation (`MistUtility` extends `MistOperation`): the
+  same map, site and path checks and the same site picker, then the device check - one code path for what 3b-1's
+  review hardened - cost if wrong: none.
+- Ruling: a device whose answer names no `type` is refused `mist.device_type_unsupported` (the OAS's
+  `device_type_default_ap` suggests an unnamed type is an AP, but that's a default for writing) - fail closed - cost
+  if wrong: a utility on such a device fails until a device run shows what Mist answers.
+- Ruling: a utility whose OAS takes a body sends the permitted parameters given, `{}` when none are; `resolve_dns`,
+  which takes none, sends no body - cost if wrong: Mist refuses an empty body (`mist.bad_request`).
+- Ruling: an acceptance-only utility whose OAS answer holds a `session` reports it, and an answer without one is
+  `mist.invalid_answer` (after the send: outcome unknown, the node being ambiguous); the five answering nothing report
+  `{accepted, completion_known}` only - cost if wrong: none.
+- Ruling: a streaming utility's maximum duration defaults to 60 s (bounded collection) or 120 s (terminal evidence),
+  at most 240 s, within a 5-minute step timeout that also covers the 10 s acknowledgement, the POST and the 30 s first
+  message; an acceptance-only utility's timeout is a minute - cost if wrong: a slow table needs a longer maximum.
+- Ruling: a simulated utility answers its contract's shape (one line saying no command was sent; the session a fixed
+  placeholder), never an example of real output: the OAS has none to validate - cost if wrong: none.
+
+Fresh-context review of 3b-2 (at 40e800c, 2026-10-07): no High, 2 Medium, 7 Low and a parity note. Each finding is
+fixed test-first, and each fix's protection checked by disabling it.
+- M1 (disruptive utilities accepted their whole-device forms: an omitted, empty or `all` port list, an unfiltered MAC
+  table or ARP cache, an unscoped session clear, a BGP clear of `all` neighbors): each disruptive review names its
+  selectors (`ports`, `port`, `port_id`, `session_ids`, `neighbor`), required, a list of at least one, never `all` in
+  any case. Ruling: a whole-device form isn't permitted until the owner reviews it - D24 holds bulk forms where empty
+  means all - cost if wrong: clearing a whole table takes a loop over its ports.
+- M2 (`count` and `timeout` could be 0 or negative, which some pings read as unlimited): a bounded integer is at least
+  1. Ruling: every free-text string a utility sends (no enum) is one word of letters, digits and `. _ : / @ -` (host
+  names, addresses, interfaces, prefixes, names), at most 253 characters - such text reaches a device's command line
+  through Mist - cost if wrong: a name with another character is refused at publish.
+- L4 (show route's `node` is an object in the OAS, open to any keys): a permitted parameter can't be an object; show
+  route's `node` isn't permitted (the string form every other utility takes is refused by the OAS's object type).
+- L5 (the map's loader trusted a utility entry's consistency): where the map is read, a utility's entry must name its
+  own node alone (never `mist.api.read`/`write`), be a site's, pair `mist.diagnose` with idempotent and `mist.write`
+  with ambiguous, acceptance only and selectors, keep acceptance only ambiguous, and bound only its parameters and,
+  streaming, its duration; `api.routes` skips utilities whatever a map says; a stream on an answer without a session
+  fails the build where the OAS is read.
+- L1 (JSON nested past the decoder's limit raised `RecursionError`, which no phase caught, and the POST wait's `finally`
+  left the POST and the receive running): the three decoders read it as unreadable, so the message is discarded; the
+  wait cancels and awaits whatever is still running, the POST and the receive alike, whatever ended it.
+- L2 (a redirect whose Location isn't a websocket URL escaped as the library's own exception, retried or of unknown
+  outcome though nothing was sent; a malformed one read as not sent): every library exception is read for the refused
+  handshake behind it, so any redirect is `HandshakeRejected` with its status, anything else `NotSent`.
+- L3 (the library writes each handshake header at DEBUG, the token included): its logger is Dewpoint's own, pinned at
+  WARNING, so no level of the root logger lets such a line out.
+- The parity note (an attempt's websockets opened after `aclose()`): refused (`InvalidRequest`).
+- L6 (the checks before a collection could take longer than the reviewer's 75 s: three REST requests of up to 60 s
+  each, token waits, opening, the acknowledgement and in-attempt `Retry-After` waits; with a 240 s maximum the attempt
+  could pass its 5-minute timeout, losing its output and repeating the command): the collection ends 30 s before the
+  node's step timeout, counted from when it started running, as `max_duration` would. Ruling: the node's own timeout
+  is the reference; a graph that sets a shorter one cuts the collection by Temporal's timeout instead - cost if wrong:
+  such a step is retried as a timeout (the diagnostics are repeatable).
+- L7 (the runtime's receive waited up to an hour without a heartbeat, delaying a cancel): it waits in slices of 10 s,
+  heartbeating between them, the timeout checked first.
+
+### 3b-2 checkpoint (2026-10-07, at 8e96fda, local, not pushed)
+
+- Built (tasks 1-9, test-first): `websockets` 17.1 direct (983bb24); the guarded websocket (09c328d); SDK 0.5.0 with a
+  connection's stream (285694d); the runtime's connection stream (ae70993); Mist's stream endpoint and stream scope
+  (bc2e2a8); the 30 utility reviews in map version 2 (eaa614a); stream failures' classification (8ac5b1f); the stream
+  reader (9c0b952); a node per utility (ebd556f); the RunGraph proof (200e7ab); operator docs (7bc611a, 40e800c).
+- The map: 1,072 operations, 292 allowed (262 curated, 30 utilities: 19 diagnostics, 11 disruptive), 602 held, 178
+  denied. Mist declares 294 node types; its manifest is 8.25 MB.
+- Fresh-context review: no High; M1, M2, L1-L7 and the parity note fixed test-first, each protection checked by
+  disabling it (abfb1c3, 7b1aa66, 30401b3, 4ddd44d, 727db46, 8e96fda).
+- Verified locally: 1,843 tests (plugins, SDK, core, catalog, API, the worker's network, plugin calls and both Mist
+  RunGraph proofs), ruff, format, mypy, import contracts; CodeQL's python analysis (CI's CLI 2.27.1 and query filter)
+  0 findings at 8e96fda. Not run: the full backend suite (about 12 minutes: on the owner's word), a Compose proof, and
+  any real Mist call.
+- Unverified until a device run (each recorded above as a ruling): bounce port's streamed output; whether Mist sends
+  show ARP's table with text after it; `subscribe_failed` details other than the documented one; a device answer
+  without `type`; whether an empty body is what Mist expects where no parameter is given. Every utility is a POST to a
+  device, so a run against the test org needs the owner's go, and a device it may act on.
+- Awaiting the owner: sign-off on this section's rulings; the full suite; push and PR.
+
+The owner's technical review of 4d6c627 (2026-10-07): no High or Medium; four Low (R1-R4), each fixed test-first and
+its protection checked by disabling it. A technical review; the rulings above still await the owner's sign-off.
+- R1 (an opening under way when the attempt closed returned a live stream): the attempt's close fences openings under
+  way; a socket dialed or a handshake completed after it is closed and the opening refused (`InvalidRequest`).
+- R2 (vetting ran outside the 5 s opening bound): the guard's resolution and allowlist read count in it too.
+- R3 (Python's `$` matches before a final newline, so `"8.8.8.8\n"` passed the one-word pattern and reached the POST):
+  the one-word and `all` patterns end with `(?![\s\S])`, the text's very end in Python and JavaScript alike; the
+  stream path and host checks (SDK and catalog, the host check shared with 3a-2's host map) and the utility path
+  check use `fullmatch`. The same `.match` with `$` remains in older manifest validators (plugin names, type keys,
+  ports, icons, topics, header names, scope kinds, a verify's detail): flagged as its own task.
+- R4 (a JSON escape decoded to a lone surrogate, which then failed the byte counting): a session or a raw text that
+  isn't UTF-8 is unreadable, so the message is discarded in either phase, never counted or kept.
+- At eadff20 (local, not pushed): 1,857 tests in the affected areas, ruff, format, mypy, import contracts; CodeQL's
+  python analysis 0 findings. Still not run: the full suite, a Compose proof, any real Mist call.
+- The owner's review of the fixes (2026-10-07): R1-R4 technically closed at 12cd76b, no new findings. Technical closure
+  only: the rulings still await the owner's sign-off, and the full suite, any real Mist call, push and PR each wait for
+  the owner's word.
+- The owner signed off this section's rulings as written (2026-10-07, "go", confirmed in chat as covering the
+  rulings, push and PR after the full suite, and a real run against the test org).
+- Rebased onto `origin/main` af8b808 (#52, #53, #54; no conflicts; local backup branch
+  `backup/plugins-3b2-pre-rebase`). The full backend suite at the rebased head 80348ca: 3,929 passed, 8 skipped, in 8
+  minutes (`-n 10`).
+- The device-utility probe (`backend/tests/probes/mist_utilities.py`, bd03de3): `list` sends GETs only; `run` sends a
+  POST only to a diagnostic utility of a chosen device, any other request refused before sending. The owner chose
+  diagnostics only, on one device of each kind in the test org: a switch (EX4100-48MP), an SRX340, an SSR130 and an
+  AP47.
+- R3's class in the guarded websocket (flagged by the `fix/validator-fullmatch` work and named a follow-up in the
+  owner's review of it): `HEADER_NAME.match` let a header name ending in "\n" through, and `websockets` checks only a
+  header's value, so the line break would have gone into the handshake. `fullmatch` refuses it as an invalid header
+  before anything is resolved or dialed (4cee8c8, its test failing first). No other `.match` on a `$` pattern is new
+  on this branch: the utility path check and the SDK's stream path check already use `fullmatch`. The utility nodes'
+  path value patterns still end in `$`, like main's Mist path patterns (left as they are by the owner): a config may
+  hold "x\n", and the run refuses it before the connection opens (`mist.invalid_path_value`, `client.path`'s
+  `fullmatch`). At 4cee8c8: 245 tests (core egress, the worker's network, streams, plugin calls and the utilities'
+  RunGraph proof), ruff, format, mypy, import contracts. Not rerun: the full suite, CodeQL.
+
+The device runs (2026-10-07, diagnostics only, on the owner's go; the probe ran in this session; reports in the owner's
+home, mode 600, holding outcomes, counts and message shapes, never a value):
+- Run 1 (bd03de3): every streaming diagnostic on the four devices ended `mist.no_output`; the subscription was
+  acknowledged and each POST answered a `session`. Traced by shape: each output is a JSON string holding an envelope
+  whose channel names the device by its MAC, `/sites/<site>/devices/<mac>/cmd`, the MAC its id
+  `00000000-0000-0000-1000-<mac>` ends with, the session ours. Fixed (f4aebdf): that name is the device's command
+  channel too, at either level; another device's MAC, another site or another channel is still discarded.
+- Run 2 (f0806ea): 24 ok, 26 failed, 6 skipped (service ping and DHCP leases need a name of the org's).
+  - Every SRX and SSR table (OSPF database, interfaces, neighbors and summary, routes, BGP summary, forwarding table,
+    sessions, service path, ARP) ended on `"finished": true` with `"status": "SUCCESS"` within seconds, so the bounded
+    collections among them reported their completion; no table had text after it.
+  - Pings ended on idle, traceroutes at the 30 s maximum, the switch's MAC table on idle (73 messages).
+  - Show ARP on the switch and the SRX sent text (19 or more messages), no finished table: its terminal-evidence
+    contract failed every time (`mist.completion_unknown`).
+  - Commands to which a device sent nothing ended `mist.no_output` with only the acknowledgement seen: ARP, BGP
+    summary, 802.1X, EVPN and forwarding table on the switch; ARP, 802.1X, EVPN, MAC table, sessions and service path
+    on the SRX; ARP, 802.1X, EVPN, MAC table and DNS on the SSR; most of the AP's.
+  - The AP's output came after 30 s that time: another session's output (its earlier command's) reached the next
+    command's window, where it was discarded. Run 3 measured the AP alone: ping and ARP answered within 1 to 2 s and
+    succeeded. The 30 s first-message wait stays; a late answer fails `mist.no_output` and is retried.
+  - `mist.bad_request`: DNS resolution on the SRX (an SSR command; the review's device types are coarse, `gateway`);
+    the forwarding table on the SSR.
+- Ruling (changed after run 2, awaiting the owner's sign-off): show ARP is a bounded collection, no longer stream
+  terminal evidence - the docs' finished-table sample doesn't hold for a switch or an SRX; it still ends early, with
+  its completion known, when a finished table comes - cost if wrong: none for safety; a run that ends on idle doesn't
+  claim the table was complete. Show service path and show session keep their terminal evidence, which the SSR sent.
+  Run 4 (show ARP on the switch and the SRX): both ok, ended on idle (39 and 71 messages).
+- Still unverified: bounce port's answer and stream (no disruptive utility ran); a `subscribe_failed` detail (none
+  came); a device answer without `type` (every device had one).
+
+After the PR (2026-10-08):
+- The owner's technical review of 59111815: no new findings (the MAC channel keeps the site, device and exact-session
+  checks, nested envelopes and messages before the POST's answer included; show ARP reports `completion_known: false`
+  on idle and `true` on a finished table; the header-name fix holds). CI on #56 at 59111815: all nine checks passed
+  (the backend suite, the CEL gates, both CodeQL analyses, the Compose and browser e2e job). That run is 59111815's
+  only; the merge below needs its own.
+- `origin/main` moved to 4977bfe (#55, the Python validators' `fullmatch`), conflicting with #56 in the catalog's
+  `_host_problems`. The session "Fix websocket header-name check on plugins-3b2", at the owner's request, merged it
+  into this branch (c7e793f, a merge commit, no rebase), keeping 3b-2's labelled messages with #55's `fullmatch`. That
+  session ran the full backend suite at c7e793f: 3,977 passed, 8 skipped, in 10 minutes 36 seconds; this session ran
+  495 tests in the catalog, SDK, egress and Mist stream and utility areas; the owner's review found the resolution
+  correct (113 catalog and SDK tests). Not pushed: on the owner's word.
+- The show ARP ruling change (a bounded collection, above) still awaits the owner's sign-off.
+- The owner signed off the show ARP ruling change (a bounded collection) and the push of the merge (2026-10-08).

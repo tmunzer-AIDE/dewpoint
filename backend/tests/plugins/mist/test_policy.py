@@ -31,8 +31,9 @@ def test_every_operation_has_one_entry_with_its_method_and_path() -> None:
 
 def test_only_the_reviewed_operations_are_allowed() -> None:
     entries = policy.load().entries
-    allowed = {op for op, e in entries.items() if e.state == "allowed"}
+    allowed = {op for op, e in entries.items() if e.state == "allowed" and e.utility is None}
     assert allowed == set(CURATED)
+    assert {op for op, e in entries.items() if e.utility is not None} == {u.operation for u in reviews.UTILITIES}
     for op_id in allowed:
         e = entries[op_id]
         generic = "mist.api.read" if e.method == "GET" else "mist.api.write"
@@ -48,7 +49,9 @@ def test_only_the_reviewed_operations_are_allowed() -> None:
     [("GET", "none"), ("PUT", "idempotent"), ("DELETE", "idempotent"), ("POST", "ambiguous")],
 )
 def test_side_effects_follow_the_method_with_their_evidence(method: str, kind: str) -> None:
-    found = [e for e in policy.load().entries.values() if e.state == "allowed" and e.method == method]
+    """A curated operation's (a utility's is reviewed on its own: test_utility_reviews)."""
+    found = [e for e in policy.load().entries.values()
+             if e.state == "allowed" and e.method == method and e.utility is None]  # fmt: skip
     assert found and {e.side_effect for e in found} == {kind}
     assert {e.evidence for e in found} == {reviews.EVIDENCE[kind]}
 

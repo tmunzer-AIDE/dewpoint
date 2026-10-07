@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Plugin code outside runs and connection types in the SDK (plugins-3 D3, D11, D12): options fields and their hook,
-a node's icon, connection types declared by a plugin, and the manifest keys each adds only when set."""
+"""Plugin code outside runs and connection types in the SDK (plugins-3 D3, D11, D12, D26): options fields and their
+hook, a node's icon, connection types declared by a plugin (a stream endpoint among them), and the manifest keys each
+adds only when set."""
 
 import uuid
 from typing import Any, Literal
@@ -12,6 +13,7 @@ from dewpoint.sdk import (
     CallContext,
     Connection,
     ConnectionType,
+    HandshakeRejected,
     HeaderAuth,
     HostMap,
     ManifestError,
@@ -20,6 +22,9 @@ from dewpoint.sdk import (
     OptionsQuery,
     Plugin,
     RateScope,
+    StreamEndpoint,
+    StreamLost,
+    TransportError,
     UrlField,
     VerifyResult,
     connection_field,
@@ -277,3 +282,91 @@ def test_a_connection_type_key_fits_a_connections_type_column() -> None:
     kind = ConnectionType(key=f"{plugin}.{'x' * 40}", label="X", Config=DemoConfig, Secret=DemoSecret)
     with pytest.raises(ManifestError, match="connection type"):
         Plugin(plugin, "1.0.0", (), connection_types=(kind,)).manifest()
+
+
+WS_HOSTS = {"eu": "ws.eu.example.com", "us": "ws.example.com"}
+STREAMING = ConnectionType(
+    key="demo",
+    label="Demo",
+    Config=DemoConfig,
+    Secret=DemoSecret,
+    auth=HeaderAuth("Authorization", "Token {token}"),
+    host=HostMap("region", {"eu": "api.eu.example.com", "us": "api.example.com"}),
+    stream=StreamEndpoint(
+        HostMap("region", WS_HOSTS), "/ws/v1/stream", (RateScope("demo.stream", secret="token", capacity=30,
+                                                                  refill_per_s=0.5),),
+    ),
+)  # fmt: skip
+
+
+def test_a_stream_endpoint_is_data_and_listed_only_when_set() -> None:
+    """A connection type's websocket (D26): its host from a config field's map, a fixed path, and the quota scopes
+    opening a stream charges."""
+    assert STREAMING.manifest()["stream"] == {
+        "kind": "map",
+        "field": "region",
+        "hosts": WS_HOSTS,
+        "path": "/ws/v1/stream",
+        "rate_scopes": [
+            {"kind": "demo.stream", "config": [], "secret": "token", "capacity": 30.0, "refill_per_s": 0.5},
+        ],
+    }
+    assert "stream" not in DEMO.manifest()
+
+
+def _streaming(**changes: Any) -> ConnectionType:
+    stream = StreamEndpoint(**{"host": HostMap("region", WS_HOSTS), "path": "/ws/v1/stream", **changes})
+    return ConnectionType("demo", "D", DemoConfig, DemoSecret, stream=stream)
+
+
+@pytest.mark.parametrize(
+    ("kind", "problem"),
+    [
+        (_streaming(host=HostMap("nope", WS_HOSTS)), "stream host field 'nope'"),
+        (_streaming(host=HostMap("region", {"eu": "wss://x/", "us": "ws.example.com"})), "stream host 'wss://x/'"),
+        (_streaming(host=HostMap("region", {"eu": "ws.eu.example.com"})),
+         "stream host field 'region' must allow exactly the host map's keys"),
+        (ConnectionType("demo", "D", OptionalConfig, DemoSecret, stream=StreamEndpoint(HostMap("region", WS_HOSTS),
+                                                                                         "/s")),
+         "stream host field 'region' must be required"),
+        (_streaming(path="ws/v1"), "stream path"),
+        (_streaming(path="/ws/../admin"), "stream path"),
+        (_streaming(path="/ws?x=1"), "stream path"),
+        (_streaming(path="/ws#x"), "stream path"),
+        (_streaming(path="/"), "stream path"),
+        (_streaming(path="//evil.example.com/ws"), "stream path"),
+        (_streaming(rate_scopes=(RateScope("other.stream", secret="token"),)),
+         "rate scope 'other.stream' must start with 'demo.'"),
+        (_streaming(rate_scopes=(RateScope("demo.stream", secret="nope"),)), "rate scope 'demo.stream' names 'nope'"),
+        (ConnectionType("demo", "D", DemoConfig, OptionalSecret, stream=StreamEndpoint(
+            HostMap("region", WS_HOSTS), "/s", (RateScope("demo.stream", secret="token"),))),
+         "rate scope 'demo.stream' names 'token', which must be required"),
+    ],
+)  # fmt: skip
+def test_a_stream_endpoint_is_checked(kind: ConnectionType, problem: str) -> None:
+    with pytest.raises(ManifestError) as raised:
+        Plugin("demo", "1.0.0", (), connection_types=(kind,)).manifest()
+    assert any(problem in p for p in raised.value.problems), raised.value.problems
+
+
+def test_a_streams_failures_are_transport_errors_with_fixed_codes() -> None:
+    """A refused handshake names its status (a number, never the server's text); a lost stream says only that."""
+    rejected = HandshakeRejected(429)
+    assert isinstance(rejected, TransportError) and isinstance(StreamLost(), TransportError)
+    assert (rejected.code, rejected.status) == ("handshake_rejected", 429)
+    assert StreamLost.code == "stream_lost"
+    assert "429" not in str(rejected)
+
+
+@pytest.mark.parametrize(
+    ("kind", "problem"),
+    [
+        (_streaming(path="/ws/v1/stream\n"), "stream path"),
+        (_streaming(host=HostMap("region", {"eu": "ws.eu.example.com\n", "us": "ws.example.com"})), "stream host"),
+    ],
+)  # fmt: skip
+def test_a_stream_endpoint_with_a_trailing_newline_is_refused(kind: ConnectionType, problem: str) -> None:
+    """The owner's review R3's class: `re.match` with `$` accepts a final newline."""
+    with pytest.raises(ManifestError) as raised:
+        Plugin("demo", "1.0.0", (), connection_types=(kind,)).manifest()
+    assert any(problem in p for p in raised.value.problems), raised.value.problems

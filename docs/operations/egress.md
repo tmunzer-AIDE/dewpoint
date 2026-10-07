@@ -24,6 +24,24 @@ Plugin steps reach the network only through Dewpoint's guard (plugins-3 D7). It 
    origin.
 6. **Limits.** Responses are capped at 10 MiB. Connections time out after 5 s.
 
+### Streams (websockets)
+
+Some connections also have a stream: Mist's device utilities read a command's output over a websocket (plugins-3 D26).
+A stream goes through the same guard:
+
+- **Only the connection type's stream.** A step can't choose the URL: it's `wss://` and the host the connection's
+  config maps to (for Mist, the cloud's `api-ws.` host beside its `api.` host, for example `api-ws.mist.com`), then a
+  fixed path. Plain `ws://` isn't possible.
+- **Checked and pinned like a request.** The guard resolves the name, checks every address and connects to a checked
+  one; TLS is verified against the hostname; proxy settings in the environment are ignored; a redirect is never
+  followed.
+- **Credentials are the runtime's.** The connection's header (Mist: `Authorization: Token ...`) is sent with the
+  opening handshake; a step can't add or change it.
+- **Limits.** Opening (connect, TLS and handshake) within 5 s; text messages only, each at most 1 MiB, and at most
+  10 MiB received by one attempt; a ping every 60 s, with 45 s for its answer. A step's streams are closed when it ends.
+- **Firewalls.** A network that only lets Dewpoint reach listed hosts must list each Mist cloud's `api-ws.` host as
+  well as its `api.` host, both on port 443.
+
 ## The allowlist
 
 Only a platform admin can change the allowlist, through the `dewpoint_admin` database role. Every change is audited:
@@ -49,8 +67,11 @@ Every request through a connection takes a token from each quota scope of that c
 per tenant, so connections that share a credential share one budget.
 
 - **Mist.** Each request is charged to two scopes: its token and its org. Each scope allows bursts of 50 and refills
-  at 1.25 calls per second.
+  at 1.25 calls per second. Each stream opened is charged to a third scope, the token's streams (`mist.stream`): bursts
+  of 50, then 0.5 a second (1,800 an hour, under Mist's 2,000 connections an hour a token).
 - **When no token is available.** A step waits up to 10 s. After that it fails with `cooldown` and sends nothing.
 - **When the provider sends `Retry-After`.** That scope is blocked for every run, for up to an hour.
 - **Seeing a block.** `GET /api/v1/t/{tenant}/connections/{id}` lists each blocked scope's current cooldown, shown
-  by its kind (`mist.org`, `mist.token`). That end time is live: it moves if the provider extends or lifts the block.
+  by its kind (`mist.org`, `mist.token`, `mist.stream`). That end time is live: it moves if the provider extends or
+  lifts the block. A stream's opening refused with a 429 or 503 and a `Retry-After` blocks its stream scopes the same
+  way.

@@ -73,6 +73,22 @@ def test_scope_keys_are_the_ones_core_computed() -> None:
     ]
 
 
+def test_the_stream_url_and_its_scope_come_from_the_declaration() -> None:
+    """Mist's stream (plugins-3 D26): the cloud's websocket host and the fixed path; one scope per token."""
+    assert MIST.stream_url({"cloud": "emea_01", "org_id": ORG}) == "wss://api-ws.eu.mist.com/api-ws/v1/stream"
+    assert MIST.stream_url({"cloud": "nowhere", "org_id": ORG}) is None
+    assert MIST.stream_scopes({"cloud": "emea_01", "org_id": ORG}, {"api_token": TOKEN}, lambda c: f"mac({c})") == [
+        Scope(f"mist.stream:mac({TOKEN})", 50.0, 0.5),
+    ]
+
+
+def test_a_type_without_a_stream_has_no_url_and_no_stream_scope() -> None:
+    plain = DeclaredType.from_manifest("mist", {k: v for k, v in PLUGIN.manifest()["connection_types"][0].items()
+                                                if k != "stream"})  # fmt: skip
+    assert plain.stream_url({"cloud": "emea_01", "org_id": ORG}) is None
+    assert plain.stream_scopes({"cloud": "emea_01", "org_id": ORG}, {"api_token": TOKEN}, lambda c: c) == []
+
+
 def test_the_listing_keeps_the_shape_the_web_app_reads() -> None:
     listed = MIST.listing()
     assert {k: v for k, v in listed.items() if k != "config_schema"} == {

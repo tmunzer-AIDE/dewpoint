@@ -21,6 +21,7 @@ from dewpoint.sdk import (
     OptionsQuery,
     Plugin,
     RateScope,
+    StreamEndpoint,
     VerifyResult,
     connection_field,
     options_field,
@@ -164,5 +165,77 @@ def _types(change: Any) -> dict[str, Any]:
     ],
 )  # fmt: skip
 def test_new_keys_are_checked(manifest: dict[str, Any], problem: str) -> None:
+    problems = validate_plugin_manifest(manifest)
+    assert any(problem in p for p in problems), problems
+
+
+STREAM = {
+    "kind": "map",
+    "field": "region",
+    "hosts": {"eu": "ws.eu.example.com", "us": "ws.example.com"},
+    "path": "/ws/v1/stream",
+    "rate_scopes": [{"kind": "demo.stream", "config": [], "secret": "token", "capacity": 30.0, "refill_per_s": 0.5}],
+}
+
+
+def _streams(change: Any) -> dict[str, Any]:
+    def both(t: dict[str, Any]) -> None:
+        t["stream"] = copy.deepcopy(STREAM)
+        change(t["stream"] if change is not None else t)
+
+    return _types(both)
+
+
+def test_a_connection_types_stream_validates_as_the_sdk_writes_it() -> None:
+    """The stream endpoint (plugins-3 D26), checked as data by the same rules as the SDK's."""
+    stream = StreamEndpoint(
+        HostMap("region", STREAM["hosts"]), STREAM["path"], (RateScope("demo.stream", secret="token", capacity=30,
+                                                                         refill_per_s=0.5),),
+    )  # fmt: skip
+    kind = ConnectionType("demo", "Demo", DemoConfig, DemoSecret, stream=stream)
+    manifest = Plugin("demo", "1.0.0", (), connection_types=(kind,)).manifest()
+    assert manifest["connection_types"][0]["stream"] == STREAM
+    assert validate_plugin_manifest(manifest) == []
+
+
+@pytest.mark.parametrize(
+    ("manifest", "problem"),
+    [
+        (_types(lambda t: t.update(stream=None)), "stream must be"),
+        (_types(lambda t: t.update(stream="wss://x/")), "stream must be"),
+        (_streams(lambda s: s.update(kind="url_field")), "stream must be"),
+        (_streams(lambda s: s.update(extra=1)), "stream must be"),
+        (_streams(lambda s: s.update(field="nope")), "stream host field 'nope'"),
+        (_streams(lambda s: s.update(hosts={"eu": "ws.eu.example.com"})), "stream host field 'region' must allow"),
+        (_streams(lambda s: s.update(hosts={"eu": "x/y", "us": "ws.example.com"})), "stream host 'x/y'"),
+        (_streams(lambda s: s.update(path="ws")), "stream path"),
+        (_streams(lambda s: s.update(path="/ws/../x")), "stream path"),
+        (_streams(lambda s: s.update(path="//other.example.com/ws")), "stream path"),
+        (_streams(lambda s: s.update(path=5)), "stream path"),
+        (_streams(lambda s: s["rate_scopes"][0].update(kind="other.stream")), "must start with 'demo.'"),
+        (_streams(lambda s: s["rate_scopes"][0].update(secret="nope")), "names 'nope'"),
+        (_streams(lambda s: s.update(rate_scopes="all")), "stream rate_scopes must be a list"),
+        (_with(lambda m: (m["connection_types"][0].update(stream=copy.deepcopy(STREAM)),
+                          m["connection_types"][0]["config_schema"].update(required=["org_id"]))),
+         "stream host field 'region' must be required"),
+        (_with(lambda m: (m["connection_types"][0].update(stream=copy.deepcopy(STREAM)),
+                          m["connection_types"][0]["secret_schema"].update(required=[]))),
+         "rate scope 'demo.stream' names 'token', which must be required"),
+    ],
+)  # fmt: skip
+def test_a_stream_is_checked(manifest: dict[str, Any], problem: str) -> None:
+    problems = validate_plugin_manifest(manifest)
+    assert any(problem in p for p in problems), problems
+
+
+@pytest.mark.parametrize(
+    ("manifest", "problem"),
+    [
+        (_streams(lambda s: s.update(path="/ws/v1/stream\n")), "stream path"),
+        (_streams(lambda s: s.update(hosts={"eu": "ws.eu.example.com\n", "us": "ws.example.com"})), "stream host"),
+        (_types(lambda t: t["host"]["hosts"].update(eu="api.eu.example.com\n")), "host 'api.eu.example.com\\n'"),
+    ],
+)  # fmt: skip
+def test_a_trailing_newline_is_refused_as_data_too(manifest: dict[str, Any], problem: str) -> None:
     problems = validate_plugin_manifest(manifest)
     assert any(problem in p for p in problems), problems
