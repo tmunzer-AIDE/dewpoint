@@ -1029,8 +1029,9 @@ largest container when the budget requires.
     longer shows stays pending;
   - **its cadence** (the final review's I3): the leader takes at most 50 due rows a pass, the earliest next check
     first. A row still retained or read is next checked at its own time, never sooner than 5 minutes on; a pending one
-    again after a backoff doubling from 5 minutes, from its last check, to a day. So a backlog larger than a pass is
-    still reached, and pending rows, a whole backfill of them, don't hold the rest back.
+    again after a backoff doubling from 5 minutes, from its last check, to a day. So N rows due are checked within
+    N/50 passes, rounded up, the earliest due first: a whole backfill takes as many passes, and a row just checked
+    never comes back ahead of those still waiting.
 - **The tick cutover** (revision 10). A tick from before §6.2's tick exception sealed its payloads under whatever
   version was active, and nothing proves those histories gone: a version made before the cutover never retires. The
   cutover is when the last dispatcher that sealed tick payloads had stopped, unable to restart; until it's recorded,
