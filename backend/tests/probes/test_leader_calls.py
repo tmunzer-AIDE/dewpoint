@@ -14,6 +14,7 @@ any. A run by hand, never in CI (skipped unless `DEWPOINT_PROBE` is set); its re
 These numbers are the dev server's on this machine: they set the provisional budgets at M1, which M4's D12 server
 revalidates (the owner's D16); a fake's latency never sets one."""
 
+import asyncio
 import contextlib
 import json
 import os
@@ -38,7 +39,7 @@ from temporalio.client import (
 from temporalio.testing import WorkflowEnvironment
 
 from dewpoint.apps import schedules
-from dewpoint.apps.dispatcher import cancels, dispatch, evidence, matching, reconcile, schedule_sync
+from dewpoint.apps.dispatcher import budget, cancels, dispatch, evidence, matching, reconcile, schedule_sync
 from dewpoint.apps.dispatcher.recount import recount_once
 from dewpoint.core.db import tenant_scope
 from dewpoint.engine.runtime.ids import run_workflow_id
@@ -76,8 +77,9 @@ async def server() -> AsyncIterator[WorkflowEnvironment]:
 class Calls:
     """Every call the SDK makes to Temporal while watched: its RPC, the deadline it carried (None: none), its time."""
 
-    def __init__(self) -> None:
+    def __init__(self, latency: float = 0.0) -> None:
         self.rows: list[tuple[str, float | None, float, bool]] = []
+        self.latency = latency  # each call answered this late (a slow Temporal), beneath the passes' own timing
 
     @contextlib.contextmanager
     def watching(self, client: Client) -> Iterator["Calls"]:
@@ -88,6 +90,7 @@ class Calls:
         async def timed(self_: Any, rpc: str, req: Any, resp_type: Any, **kw: Any) -> Any:
             t0, ok = time.monotonic(), True
             try:
+                await asyncio.sleep(self.latency)
                 return await original(self_, rpc, req, resp_type, **kw)
             except Exception:
                 ok = False
@@ -492,15 +495,14 @@ async def test_whole_cycle(
     await measured("whole_cycle", full, server.client, cycle)
 
 
-async def test_whole_cycle_worst_shapes(
-    server, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, ingress_sessionmaker,
-    api_settings,
+FULL = 50
+
+
+async def _worst_shapes(
+    server: Any, owner_sessionmaker: Any, api_sessionmaker: Any, admin_sessionmaker: Any, dispatch_sessionmaker: Any,
+    ingress_sessionmaker: Any, api_settings: Any, full: int = FULL,
 ) -> None:  # fmt: skip
-    """A cycle as `main.cycle` runs it, but for its observe and its reports (the dev server's build is BUILD): dispatch
-    and matching, then every leader pass, each backlog at 50, each item at its cap (the owner's D16 ruling): evidence
-    over histories of 2,000 events (a describe and `PAGES` pages each), tombstones of 6 incarnations, 5 landed late
-    (a describe and a pause each, 1 + `EARLIER` a visit), 50 incarnations whose misses are due, strays found."""
-    full = 50
+    """Each backlog at `full`, each item at its cap, as `test_whole_cycle_worst_shapes` describes."""
     await _queued(full, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings)
     await _events(full, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker,
                   ingress_sessionmaker, api_settings)  # fmt: skip
@@ -531,6 +533,11 @@ async def test_whole_cycle_worst_shapes(
               ids=incarnated)  # fmt: skip
     await sql(owner_sessionmaker, "update execution_evidence set next_check_at = now() + interval '1 day' "
               "where tenant_id <> :t", t=long["t"])  # fmt: skip
+    await workers(owner_sessionmaker)  # recorded afresh: the setup outlasts their readiness
+
+
+def _cycle(server: Any, dispatch_sessionmaker: Any, api_settings: Any, latency: float = 0.0) -> Any:
+    """A cycle as `main.cycle` runs it, but for its observe and its reports; each call answered `latency` s late."""
 
     async def cycle() -> dict[str, Any]:
         done: dict[str, Any] = {}
@@ -548,7 +555,7 @@ async def test_whole_cycle_worst_shapes(
             ("evidence", lambda: evidence.check_evidence(dispatch_sessionmaker, server.client, retention=RETENTION)),
             ("recount", lambda: recount_once(dispatch_sessionmaker)),
         ):  # fmt: skip
-            calls = Calls()
+            calls = Calls(latency)
             with calls.watching(server.client):
                 t0 = time.monotonic()
                 outcome = await step()
@@ -557,4 +564,35 @@ async def test_whole_cycle_worst_shapes(
                           "calls": sum(v["calls"] for v in calls.summary().values())}  # fmt: skip
         return done
 
-    await measured("whole_cycle_worst_shapes", full, server.client, cycle)
+    return cycle
+
+
+async def test_whole_cycle_worst_shapes(
+    server, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, ingress_sessionmaker,
+    api_settings,
+) -> None:  # fmt: skip
+    """A cycle as `main.cycle` runs it, but for its observe and its reports (the dev server's build is BUILD): dispatch
+    and matching, then every leader pass, each backlog at 50, each item at its cap (the owner's D16 ruling): evidence
+    over histories of 2,000 events (a describe and `PAGES` pages each), tombstones of 6 incarnations, 5 landed late
+    (a describe and a pause each, 1 + `EARLIER` a visit), 50 incarnations whose misses are due, strays found."""
+    await _worst_shapes(server, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker,
+                        ingress_sessionmaker, api_settings)  # fmt: skip
+    await measured("whole_cycle_worst_shapes", FULL, server.client, _cycle(server, dispatch_sessionmaker, api_settings))
+
+
+@pytest.mark.parametrize("latency", [1.2, 0.9])
+async def test_whole_cycle_under_a_slow_temporal(
+    latency, server, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker,
+    ingress_sessionmaker, api_settings, monkeypatch,
+) -> None:  # fmt: skip
+    """The passes' soft budget, prototyped (the owner's D16 review of checkpoint 3: a cycle containing slow calls), at
+    its own numbers (`PASS_S` 10 s, `SLOW_S` 1 s), every call answered `latency` s late, the worst shapes as above.
+    Over `SLOW_S` (1.2 s): each pass takes one item, ends it, and defers the rest. Just under (0.9 s): each takes items
+    until it has run `PASS_S`, then ends the last it took. Each pass's outcome counts what it deferred."""
+    monkeypatch.setattr(budget, "PASS_S", 10.0)
+    monkeypatch.setattr(budget, "SLOW_S", 1.0)
+    await _worst_shapes(server, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker,
+                        ingress_sessionmaker, api_settings)  # fmt: skip
+    budget.instrument(server.client)
+    await measured(f"whole_cycle_slow_temporal_{latency}s", FULL, server.client,
+                   _cycle(server, dispatch_sessionmaker, api_settings, latency))  # fmt: skip
