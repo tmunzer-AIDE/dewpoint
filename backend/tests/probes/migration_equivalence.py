@@ -18,6 +18,7 @@ import json
 import subprocess
 import tarfile
 from pathlib import Path
+from typing import Any
 
 import asyncpg
 from testcontainers.community.postgres import PostgresContainer
@@ -53,7 +54,8 @@ def main() -> None:
     parser.add_argument("--write", action="store_true")
     args = parser.parse_args()
     original = alembic_config(extract(args.ref, args.workdir))
-    fingerprints, differ = {}, {}
+    fingerprints: dict[str, Any] = {}
+    differ: dict[str, dict[str, Any]] = {}
     with PostgresContainer("postgres:16-alpine", driver=None) as pg:
         base = pg.get_connection_url().rsplit("/", 1)[0]
         asyncio.run(_create(base, "original", "online"))

@@ -77,7 +77,9 @@ def online() -> Iterator[Connection]:
 
 def _budget(conn: Connection) -> float:
     if "online_budget" not in conn.info:
-        ms = conn.execute(text("SELECT setting::int FROM pg_settings WHERE name = 'deadlock_timeout'")).scalar_one()
+        ms: int = conn.execute(
+            text("SELECT setting::int FROM pg_settings WHERE name = 'deadlock_timeout'")
+        ).scalar_one()
         conn.info["online_budget"] = SHARE * ms / 1000
     budget: float = conn.info["online_budget"]
     return budget
@@ -179,7 +181,7 @@ def batches(conn: Connection, name: str, bounds: str, apply: str, *, first: Any,
             taken.update(hi=hi, n=n)
 
         step(conn, f"{name} (batch {k})", once)
-        total += taken["n"]
+        total += int(taken["n"])
         if taken["n"] < size:
             return total
         after = taken["hi"]
