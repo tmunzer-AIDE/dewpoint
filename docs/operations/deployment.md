@@ -337,9 +337,9 @@ after.
 **Migrations run as a role that bypasses row-level security:** the database's superuser (as Compose's `POSTGRES_USER`
 is) or a role with `BYPASSRLS`. Migrations 0035 and 0037 read every tenant's rows (0035 checks that no row names
 another tenant's workflow, version or run; 0037 records each run's tree), and under any other role they stop with an
-error naming row-level security rather than check nothing. Migration 0035 also adds and checks its keys inside its own
-transaction, which blocks writes to `runs`, `run_steps`, `run_requests` and the other tables it changes until it ends;
-before migrating large populated tables, plan the downtime or split the check (a decision of its own).
+error naming row-level security rather than check nothing. Migration 0035 replaces its keys online, as the section
+above describes: each in a short step of its own, added unchecked as the old one goes, then validated without blocking
+reads or writes.
 
 **That role keeps bypassing row-level security for as long as the deployment runs,** not only while it migrates: it
 owns the database functions that read across tenants (the erasure's insert fence and stage gate, a workflow version's
