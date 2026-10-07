@@ -127,12 +127,14 @@ synced yet, or its Temporal id's first update not landed) and `count_pending` (l
   refused as admission refuses it; a tenant being erased skips it, audited. A tick that can't be admitted (the database,
   a key) is retried without limit, and alerts after 10 minutes. Its request's audit entry names the schedule.
 - **Missed firings.** Within the catch-up window, firings missed while Temporal was down fire when it's back, each with
-  its own time. Past it they're skipped: Temporal counts them, and the schedule's `misses` shows the count, read every
-  five minutes for each of its Temporal ids (`misses_read_at`), each id's count added to the total, audited and alerted
-  on (`schedule_firings_missed`). A deleted schedule's count can't be read again, so the dispatcher deletes a Temporal
-  id only once it shows the dispatcher's own pause for the delete (which discards any update another writer still had in
-  flight), when its count can't grow any more, and that count is recorded: nothing it counted is lost. One that goes
-  without Dewpoint deleting it leaves a possibly missed or unknown span (below) over the time its count wasn't read.
+  its own time. Past it they're skipped: Temporal counts them, and the schedule's `misses` shows the count, read for
+  each of its Temporal ids four minutes after its last read (`misses_read_at`), each id's count added to the total,
+  audited and alerted on (`schedule_firings_missed`). A read more than five minutes old leaves the schedule's accounting
+  incomplete (`misses_stale`) until it's read. A deleted schedule's count can't be read again, so the dispatcher deletes
+  a Temporal id only once it shows the dispatcher's own pause for the delete (which discards any update another writer
+  still had in flight), when its count can't grow any more, and that count is recorded: nothing it counted is lost. One
+  that goes without Dewpoint deleting it leaves a possibly missed or unknown span (below) over the time its count wasn't
+  read.
 - **Firings due while a schedule waited for its unpause.** Each Temporal id is created paused, and Temporal neither
   catches up nor counts the firings due before the update that unpauses it. The dispatcher accounts for every such
   span from evidence it records before it acts, never from a guess: the schedule's generation when the id was
@@ -212,6 +214,13 @@ type only) and leaves that request as it was; the cycle goes on with the other t
 current build from Temporal dispatches nothing (`dispatcher_observe_failed`), and the next one asks again; a cycle
 that fails is logged (`dispatcher_cycle_failed`) and the process goes on. Each instance records its
 last cycle in `dispatcher_reports`.
+
+Each of a cycle's passes takes at most 50 items, those it tried least lately first, and no new one once it has run 10
+seconds, or once a call to Temporal took over a second, ran out its deadline or found Temporal unavailable (a
+prototype: its numbers aren't settled). An item it took runs to its end. A pass stopped that way is a degraded state,
+said in its report (`slow`; `deferred`, the items it picked but didn't take; `backlog`, its pick full, so more may
+wait) and alerted on (`dispatcher_pass_degraded`, at most every five minutes a pass). A Temporal slower than a second a
+call leaves each pass one item a cycle for as long as it lasts: the schedules' accounting then shows itself stale.
 
 ### The reconciler
 
