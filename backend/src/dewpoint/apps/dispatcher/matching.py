@@ -19,7 +19,8 @@ An event is `dead` (audited, alerted on, its counters released) only for a confi
 ciphertext fails under a key version that has opened another event in this process, or its payload isn't a JSON
 object; or after `EVENT_ATTEMPTS` unconfirmed failures, backing off from `BACKOFF`, doubling. A platform-wide failure
 (a key version missing, the tenant's data key unreadable) waits `WAIT` with an alert, its attempts untouched; the
-database itself failing writes nothing (§8.3, §10.5)."""
+database itself failing writes nothing (§8.3, §10.5). Any other unexpected failure (a bug) waits `ERROR_BACKOFF`, its
+attempts untouched, so it never keeps the events after it out (the owner's review of the 2b-4b M1 checkpoint 4)."""
 
 import json
 import uuid
@@ -148,7 +149,8 @@ async def match_once(
                     "event_match_failed", tenant_id=str(tenant_id), event_id=str(event_id), error=type(e).__name__
                 )
                 counts["error"] += 1
-                await _backed_off(sessionmaker, tenant_id, event_id)
+                if not unavailable(e):  # the database failing writes nothing; tried again next pass
+                    await _backed_off(sessionmaker, tenant_id, event_id)
     admitted.reported(counts, full=len(picked) >= batch)
     return dict(counts)
 

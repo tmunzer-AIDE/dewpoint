@@ -175,3 +175,23 @@ async def test_matching_takes_a_third_event_past_two_whose_matches_fail(
     first, both = taken(passes)
     assert first == set(ids[:2]) and both == set(ids)
     assert timedelta(0) < matching.ERROR_BACKOFF
+
+
+async def test_an_event_the_database_failed_is_tried_again_at_once(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, ingress_sessionmaker,
+    api_settings, monkeypatch,
+) -> None:  # fmt: skip
+    """The database itself failing writes nothing to the event (§8.3, §10.5; the review of checkpoint 5): only an
+    unexpected failure of its own backs it off, so an event a lost connection failed is taken again the next pass."""
+    await _events(1, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker,
+                  ingress_sessionmaker, api_settings)  # fmt: skip
+    tried: list[uuid.UUID] = []
+
+    async def lost(*_a: Any, event_id: uuid.UUID, **_k: Any) -> str:
+        tried.append(event_id)
+        raise OSError("the database's connection lost")
+
+    monkeypatch.setattr(matching, "match_event", lost)
+    for _ in range(2):
+        await matching.match_once(dispatch_sessionmaker, KEYS, matching.Verified())
+    assert len(tried) == 2 and tried[0] == tried[1]

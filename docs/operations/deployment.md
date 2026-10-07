@@ -97,7 +97,8 @@ dispatcher from before 0040 polling the admission queue. It then works in two pa
   it reads no schedule, so its time doesn't grow with them. It waits at most 200 ms for its lock each attempt.
 
 It refuses, records nothing and exits 1, saying why, when:
-- **Another cutover is running.** Two at once serialize: wait for the first to end.
+- **Another cutover is running.** A second one refuses while the first runs: wait for it to end, then run the
+  command again.
 - **The capture trigger (`schedules_inventoried`) is off,** or changed while the catch-up ran (turned off and on again,
   or replaced: a schedule added meanwhile could have escaped it). Turn it on, leave it, and run the command again.
 - **Schedules stay busy through its attempts** (about a minute): a long transaction writing schedules, or an
@@ -312,6 +313,18 @@ development override, on a database of their own (a project's own volume), with 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 ```
+
+**Schedules need the inventory's cutover recorded** (above): until then the API creates none. On a fresh Compose
+deployment, once `up` is done and Temporal answers, record it as the key admin (CI does the same):
+
+```bash
+docker compose run --rm -e DEWPOINT_DATABASE_URL="postgresql+asyncpg://dewpoint_admin_login:<its password>@postgres/dewpoint" -e DEWPOINT_TEMPORAL_ADDRESS=temporal:7233 api dewpoint schedules inventory-cutover --attest --confirm
+```
+
+**Upgrading Compose in place,** `migrate` runs while the old build's services are still connected. Either stop them
+first (`docker compose stop api worker dispatcher retention`), or, once their connections were recycled after any
+`deadlock_timeout` change (above), set `DEWPOINT_UPGRADE_SETTINGS_ATTESTED=1` in `.env` for the upgrade, and remove it
+after.
 
 **Migrations run as a role that bypasses row-level security:** the database's superuser (as Compose's `POSTGRES_USER`
 is) or a role with `BYPASSRLS`. Migrations 0035 and 0037 read every tenant's rows (0035 checks that no row names

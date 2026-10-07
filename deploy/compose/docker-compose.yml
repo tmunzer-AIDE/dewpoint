@@ -52,6 +52,8 @@ services:
       DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_owner:${POSTGRES_PASSWORD}@postgres/dewpoint
       DEWPOINT_ADMIN_DATABASE_URL: postgresql+asyncpg://dewpoint_admin_login:${DEWPOINT_ADMIN_DB_PASSWORD}@postgres/dewpoint
       DEWPOINT_ENVIRONMENT: ${DEWPOINT_ENVIRONMENT:-production}
+      # The operator's word, for an upgrade with the application connected: docs/operations/deployment.md
+      DEWPOINT_UPGRADE_SETTINGS_ATTESTED: ${DEWPOINT_UPGRADE_SETTINGS_ATTESTED:-}
     depends_on: { postgres: { condition: service_healthy } }
     restart: "no"
 
