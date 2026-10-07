@@ -15,8 +15,10 @@ deployment's would (0035 to 0044 in their online steps since D15's ruling, `migr
   then would wait at most;
 - **loaded**, under a synthetic normal load, one operation at a time per kind (`Load.KINDS`: an API's reads, a worker's
   projections, an admission, an ingress recording), each operation's time kept, and whether the upgrade completes.
-D15's acceptance: no operation waits more than five seconds in total during the upgrade. Numbers depend on the
-machine; record them with it."""
+D15's acceptance: no operation waits more than five seconds in total during the upgrade. `--deadlock-timeout` sets the
+copies' own (`ALTER DATABASE`), every session's, the upgrade's and the load's: the owner's review of checkpoint 3 asked
+for a configuration other than the default, where a step's budget is capped (`online.BUDGET_MAX_S`). Numbers depend on
+the machine; record them with it."""
 
 import argparse
 import asyncio
@@ -369,13 +371,16 @@ async def measure(url: str, *, loaded: bool, per_kind: int = 1, pause: float = P
     return result
 
 
-async def _copies(url: str, names: list[str]) -> None:
-    """Copies of the seeded database, one per measured upgrade: each starts from the same data."""
+async def _copies(url: str, names: list[str], deadlock_timeout: str | None = None) -> None:
+    """Copies of the seeded database, one per measured upgrade: each starts from the same data, and has
+    `deadlock_timeout` as its own, if given."""
     base, db = url.rsplit("/", 1)
     c = await asyncpg.connect(f"{base}/postgres")
     try:
         for name in names:
             await c.execute(f'CREATE DATABASE "{name}" TEMPLATE "{db}"')
+            if deadlock_timeout is not None:
+                await c.execute(f"ALTER DATABASE \"{name}\" SET deadlock_timeout = '{deadlock_timeout}'")
     finally:
         await c.close()
 
@@ -387,6 +392,7 @@ def main() -> None:
     parser.add_argument("--out")
     parser.add_argument("--per-kind", type=int, default=1, help="connections per kind of operation (a heavier load)")
     parser.add_argument("--pause", type=float, default=PAUSE, help="seconds between a connection's operations")
+    parser.add_argument("--deadlock-timeout", help="the copies' own deadlock_timeout (e.g. 10s), every session's")
     args = parser.parse_args()
     with PostgresContainer("postgres:16-alpine", driver=None) as pg:
         url = pg.get_connection_url()
@@ -396,13 +402,14 @@ def main() -> None:
         t = time.monotonic()
         counts = asyncio.run(seed(url, args.roots))
         seeded_s = round(time.monotonic() - t, 1)
-        asyncio.run(_copies(url, ["control", "loaded"]))
+        asyncio.run(_copies(url, ["control", "loaded"], args.deadlock_timeout))
         base = url.rsplit("/", 1)[0]
         control = asyncio.run(measure(f"{base}/control", loaded=False))  # the upgrade alone: what it holds, how long
         loaded = asyncio.run(measure(f"{base}/loaded", loaded=True, per_kind=args.per_kind,
                                      pause=args.pause))  # the same under the normal load  # fmt: skip
     accepted = loaded["upgrade_exit"] == 0 and all(v["over_5s"] == 0 for v in loaded["load"].values())
     result = {"start": args.start, "roots": args.roots, "load": {"per_kind": args.per_kind, "pause": args.pause},
+              "deadlock_timeout": args.deadlock_timeout,
               "seeded": counts, "seed_s": seeded_s,
               "machine": {"platform": platform.platform(), "cpus": os.cpu_count(), "python": sys.version.split()[0]},
               "accepted": accepted, "control": control, "loaded": loaded}  # fmt: skip
