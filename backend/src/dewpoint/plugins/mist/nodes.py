@@ -399,14 +399,14 @@ def _class_name(type_: str) -> str:
 
 
 def build() -> tuple[type[Node], ...]:
-    """Every allowed operation's curated node, in the map's order."""
+    """Every allowed operation's curated node, in the map's order; a device utility's node is its own (`utilities`)."""
     doc, ops, entries = oas.document(), oas.operations(), policy.load().entries
     by_path = {(e.method, e.path): op_id for op_id, e in entries.items() if e.state == "allowed"}
     lists = {e.path: op_id for op_id, e in sorted(entries.items()) if e.state == "allowed"
              and routing.is_list(doc, ops[op_id])}  # fmt: skip
     out: list[type[Node]] = []
     for op_id, entry in sorted(entries.items()):
-        if entry.state != "allowed" or entry.side_effect is None:
+        if entry.state != "allowed" or entry.side_effect is None or entry.utility is not None:
             continue
         op, type_ = ops[op_id], entry.nodes[0]
         answer = oas.answer(doc, op)

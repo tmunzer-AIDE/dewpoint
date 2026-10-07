@@ -97,6 +97,12 @@ async def verify(ctx: CallContext, connection: Connection) -> VerifyResult:
         return VerifyResult(False, "unreachable")
 
 
+STREAM_SCOPE = RateScope(
+    "mist.stream",
+    secret="api_token",  # noqa: S106 - a field's name
+    capacity=MIST_STREAM_BUDGET[0],
+    refill_per_s=MIST_STREAM_BUDGET[1],
+)
 MIST = ConnectionType(
     key="mist",
     label="Juniper Mist",
@@ -109,16 +115,5 @@ MIST = ConnectionType(
         RateScope("mist.token", secret="api_token", capacity=MIST_BUDGET[0], refill_per_s=MIST_BUDGET[1]),  # noqa: S106 - a field's name
     ),
     verify=verify,
-    stream=StreamEndpoint(
-        HostMap("cloud", MIST_STREAM_CLOUDS),
-        MIST_STREAM_PATH,
-        (
-            RateScope(
-                "mist.stream",
-                secret="api_token",
-                capacity=MIST_STREAM_BUDGET[0],  # noqa: S106 - a field's name
-                refill_per_s=MIST_STREAM_BUDGET[1],
-            ),
-        ),
-    ),  # fmt: skip
+    stream=StreamEndpoint(HostMap("cloud", MIST_STREAM_CLOUDS), MIST_STREAM_PATH, (STREAM_SCOPE,)),
 )

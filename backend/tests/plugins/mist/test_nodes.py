@@ -11,6 +11,7 @@ import pytest
 
 from dewpoint.engine.registry.catalog import validate_plugin_manifest
 from dewpoint.plugins.mist import PLUGIN, policy
+from dewpoint.plugins.mist.nodes import MistOperation
 from dewpoint.plugins.mist.schemas import SCHEMA_LIST, SCHEMA_MAP, SCHEMA_ONE
 from dewpoint.sdk import FatalError, Node, node_manifest
 from dewpoint.sdk.fields import CONNECTION, LITERAL, SENSITIVE
@@ -51,8 +52,8 @@ async def run(type_: str, config: dict[str, Any], script: Any, attempt: int = 1)
 
 def test_every_allowed_operation_has_its_node_and_no_other() -> None:
     entries = policy.load().entries
-    curated = {e.nodes[0]: op for op, e in entries.items() if e.state == "allowed"}
-    generated = {n.type: n for n in PLUGIN.nodes if n.type not in ("mist.api.read", "mist.api.write")}
+    curated = {e.nodes[0]: op for op, e in entries.items() if e.state == "allowed" and e.utility is None}
+    generated = {n.type: n for n in PLUGIN.nodes if issubclass(n, MistOperation)}  # a utility's: test_utilities
     assert set(generated) == set(curated)
     for type_, n in generated.items():
         e = entries[curated[type_]]

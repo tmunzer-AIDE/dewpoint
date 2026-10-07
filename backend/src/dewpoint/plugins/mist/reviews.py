@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The reviewed Mist operations (plugins-3 D28, D24, D14): the curated operations and the node each is reached by, the
-operations the owner holds back, and the evidence for each side effect. `make_map()` turns them and the vendored OAS
-into the operation-policy map, `data/policy.json`; `python -m dewpoint.plugins.mist.reviews` writes it, and a test
-refuses drift. Every operation nobody reviewed is held (D28 a), reads included."""
+"""The reviewed Mist operations (plugins-3 D28, D24, D14, D27): the curated operations and the node each is reached by,
+the device utilities and their reviews, the operations the owner holds back, and the evidence for each side effect.
+`make_map()` turns them and the vendored OAS into the operation-policy map, `data/policy.json`; `python -m
+dewpoint.plugins.mist.reviews` writes it, and a test refuses drift. Every operation nobody reviewed is held (D28 a),
+reads included."""
 
 import json
+import re
 import sys
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from dewpoint.plugins.mist import oas, policy, routing
@@ -277,6 +281,143 @@ CURATED: tuple[tuple[str, str], ...] = (
     ("listSiteSpectrumAnalysis", "mist.site_spectrum_analysis.list"),
 )
 
+
+@dataclass(frozen=True)
+class Utility:
+    operation: str
+    node: str
+    kind: str  # "diagnostic" (mist.diagnose, idempotent) or "disruptive" (mist.write, ambiguous)
+    contract: str  # policy.CONTRACTS
+    device_types: tuple[str, ...]
+    parameters: tuple[str, ...]
+    bounds: Mapping[str, int]
+    repeat: str
+    evidence: str
+
+
+# The device utilities (D27, D28), each reviewed into the map: its node, whether it's a repeatable diagnostic
+# (`mist.diagnose`, idempotent) or disruptive (`mist.write`, ambiguous), its contract, the device types it runs on (the
+# OAS tag's: Common all three, LAN switches, WAN gateways, narrowed or widened by the description's own list), the body
+# parameters it may send (the refresh `interval` and `duration` never), their maxima, what repeating it does, and the
+# evidence. Allowed to its own node only, never to `mist.api.write`, which would bypass all of that.
+ALL = ("ap", "gateway", "switch")
+GATEWAY, SWITCH, LAN_WAN = ("gateway",), ("switch",), ("gateway", "switch")
+STREAMED = "its 200 answers a `session`, its output streams on the device's `cmd` channel (OAS)"
+UNENDED = "no end of output is documented: a bounded collection"
+DURATION = {"max_duration_s": 240}
+READS = "reads the device's state again and changes nothing"
+UTILITIES: tuple[Utility, ...] = (
+    Utility("pingFromDevice", "mist.site_devices.ping", "diagnostic", "bounded_collection", ALL,
+            ("count", "egress_interface", "host", "node", "size", "use_ipv6", "vrf"), {"count": 100, **DURATION},
+            "sends `count` more echo requests from the device; no configuration or state changes",
+            f'"Ping from AP, Switch and SSR"; {STREAMED}; the docs sample shows echo lines and {UNENDED}'),
+    Utility("tracerouteFromDevice", "mist.site_devices.traceroute", "diagnostic", "bounded_collection", ALL,
+            ("host", "network", "node", "port", "protocol", "timeout", "use_ipv6", "vrf"), {"timeout": 120, **DURATION},
+            "sends more probes from the device; no configuration or state changes",
+            f"traceroute performed from the device (Utilities Common); {STREAMED}; the docs sample shows hops and "
+            f"{UNENDED}"),
+    Utility("arpFromDevice", "mist.site_devices.arp", "diagnostic", "bounded_collection", ALL, ("node",), DURATION,
+            READS, f"ARP performed on the device (Utilities Common); {STREAMED}; the docs sample is a text table and "
+            f"{UNENDED}"),
+    Utility("showSiteDeviceArpTable", "mist.site_devices.show_arp", "diagnostic", "stream_terminal_evidence", LAN_WAN,
+            ("ip", "node", "port_id", "vrf"), DURATION, READS,
+            f"the ARP table from the device (Utilities LAN, its `node` required for gateways); {STREAMED}; the docs "
+            'sample ends its table with "finished": true and "status": "SUCCESS": stream terminal evidence'),
+    Utility("showSiteDeviceBgpSummary", "mist.site_devices.show_bgp_summary", "diagnostic", "bounded_collection",
+            LAN_WAN, ("node",), DURATION, READS,
+            f'"Get BGP Summary from SSR, SRX and Switch"; {STREAMED}; the docs sample is text and {UNENDED}'),
+    Utility("showSiteDeviceDhcpLeases", "mist.site_devices.show_dhcp_leases", "diagnostic", "bounded_collection", ALL,
+            ("network", "node"), DURATION, READS, f'"Shows DHCP leases" (Utilities Common); {STREAMED}; {UNENDED}'),
+    Utility("showSiteDeviceDot1xTable", "mist.site_devices.show_dot1x", "diagnostic", "bounded_collection", ALL,
+            ("port_id",), DURATION, READS, f"the 802.1X table (Utilities Common); {STREAMED}; {UNENDED}"),
+    Utility("showSiteDeviceEvpnDatabase", "mist.site_devices.show_evpn_database", "diagnostic", "bounded_collection",
+            ALL, ("mac", "port_id"), DURATION, READS,
+            f"the EVPN database (Utilities Common); {STREAMED}; {UNENDED}"),
+    Utility("showSiteDeviceForwardingTable", "mist.site_devices.show_forwarding_table", "diagnostic",
+            "bounded_collection", ALL,
+            ("node", "prefix", "service_ip", "service_name", "service_port", "service_protocol", "service_tenant",
+             "vrf"), DURATION, READS, f"the forwarding table (Utilities Common); {STREAMED}; {UNENDED}"),
+    Utility("showSiteDeviceMacTable", "mist.site_devices.show_mac_table", "diagnostic", "bounded_collection", ALL,
+            ("mac_address", "port_id", "vlan_id"), DURATION, READS,
+            f"the MAC table (Utilities Common); {STREAMED}; {UNENDED}"),
+    Utility("showSiteGatewayOspfDatabase", "mist.site_devices.show_ospf_database", "diagnostic", "bounded_collection",
+            GATEWAY, ("node", "self_originate", "vrf"), DURATION, READS,
+            f"a gateway's OSPF database (Utilities WAN); {STREAMED}; {UNENDED}"),
+    Utility("showSiteGatewayOspfInterfaces", "mist.site_devices.show_ospf_interfaces", "diagnostic",
+            "bounded_collection", GATEWAY, ("node", "port_id", "vrf"), DURATION, READS,
+            f"a gateway's OSPF interfaces (Utilities WAN); {STREAMED}; {UNENDED}"),
+    Utility("showSiteGatewayOspfNeighbors", "mist.site_devices.show_ospf_neighbors", "diagnostic",
+            "bounded_collection", GATEWAY, ("neighbor", "node", "port_id", "vrf"), DURATION, READS,
+            f"a gateway's OSPF neighbors (Utilities WAN); {STREAMED}; {UNENDED}"),
+    Utility("showSiteGatewayOspfSummary", "mist.site_devices.show_ospf_summary", "diagnostic", "bounded_collection",
+            GATEWAY, ("node", "vrf"), DURATION, READS,
+            f"a gateway's OSPF summary (Utilities WAN); {STREAMED}; {UNENDED}"),
+    Utility("showSiteSsrAndSrxRoutes", "mist.site_devices.show_route", "diagnostic", "bounded_collection", GATEWAY,
+            ("neighbor", "node", "prefix", "protocol", "route", "vrf"), DURATION, READS,
+            f"an SSR's or SRX's routes (Utilities WAN); {STREAMED}; {UNENDED}"),
+    Utility("showSiteSsrServicePath", "mist.site_devices.show_service_path", "diagnostic", "stream_terminal_evidence",
+            GATEWAY, ("node", "service_name"), DURATION, READS,
+            f"an SSR's service path (Utilities WAN); {STREAMED}; the docs sample ends its table with "
+            '"finished": true and "status": "SUCCESS": stream terminal evidence'),
+    Utility("showSiteSsrAndSrxSessions", "mist.site_devices.show_session", "diagnostic", "stream_terminal_evidence",
+            GATEWAY, ("node", "service_name", "session_id"), DURATION, READS,
+            f"an SSR's or SRX's sessions (Utilities WAN); {STREAMED}; the docs sample ends its table with "
+            '"finished": true and "status": "SUCCESS": stream terminal evidence'),
+    Utility("servicePingFromSsr", "mist.site_devices.service_ping", "diagnostic", "bounded_collection", GATEWAY,
+            ("count", "host", "node", "service", "size", "tenant"), {"count": 100, **DURATION},
+            "sends `count` more echo requests along the service's path; no configuration or state changes",
+            f'"Ping from SSR" (Utilities WAN); {STREAMED}; the docs sample shows echo lines and {UNENDED}'),
+    Utility("testSiteSsrDnsResolution", "mist.site_devices.resolve_dns", "diagnostic", "bounded_collection", GATEWAY,
+            (), DURATION, "resolves the device's names again; no configuration changes",
+            f"DNS resolutions performed on an SSR (Utilities WAN), no body; {STREAMED}; the docs sample is a text "
+            f"table and {UNENDED}"),
+    Utility("bounceDevicePort", "mist.site_devices.bounce_port", "disruptive", "acceptance_only", LAN_WAN,
+            ("ports",), {}, "bounces the ports again: each bounce takes their links down",
+            "port bounce from a switch or gateway (Utilities Common; vme, ae, irb and SSR HA control ports "
+            "unsupported); its 200 answers nothing in the OAS, while the docs sample streams \"Port bounce "
+            "complete.\" (unverified); no completion documented: acceptance only"),
+    Utility("cableTestFromSwitch", "mist.site_devices.cable_test", "disruptive", "acceptance_only", SWITCH, ("port",),
+            {}, "runs the TDR test on the port again",
+            f"TDR from a switch (Utilities LAN); {STREAMED}; no final message documented: acceptance only"),
+    Utility("clearSiteDeviceMacTable", "mist.site_devices.clear_mac_table", "disruptive", "acceptance_only", ALL,
+            ("mac_address", "port_id", "vlan_id"), {}, "clears the MAC table's entries again; the device learns them "
+            "again", f"clears the MAC table (Utilities Common); {STREAMED}; no completion documented: acceptance only"),
+    Utility("clearAllLearnedMacsFromPortOnSwitch", "mist.site_devices.clear_macs", "disruptive", "acceptance_only",
+            SWITCH, ("ports",), {}, "clears the ports' learned MACs, persistent ones included, again",
+            "clears every learned MAC of a port (Utilities LAN); its 200 answers nothing; no completion documented: "
+            "acceptance only"),
+    Utility("clearBpduErrorsFromPortsOnSwitch", "mist.site_devices.clear_bpdu_error", "disruptive", "acceptance_only",
+            SWITCH, ("ports",), {}, "clears the ports' BPDU error state again",
+            "clears a BPDU error that disabled a port (Utilities LAN); its 200 answers nothing; no completion "
+            "documented: acceptance only"),
+    Utility("clearSiteDeviceDot1xSession", "mist.site_devices.clear_dot1x", "disruptive", "acceptance_only", SWITCH,
+            ("ports",), {}, "ends the ports' 802.1X sessions again; their clients authenticate again",
+            f"clears 802.1X sessions (Utilities LAN); {STREAMED}; no completion documented: acceptance only"),
+    Utility("releaseSiteDeviceDhcpLease", "mist.site_devices.release_dhcp_leases", "disruptive", "acceptance_only",
+            ALL, ("macs", "network", "node", "port_id"), {}, "releases the leases again",
+            '"Releases an active DHCP lease" (Utilities Common); its 200 answers nothing; no completion documented: '
+            "acceptance only"),
+    Utility("releaseSiteSsrDhcpLease", "mist.site_devices.release_dhcp", "disruptive", "acceptance_only", GATEWAY,
+            ("node", "port_id"), {}, "releases the interface's lease again",
+            f'"Releases an active DHCP lease" (Utilities WAN); {STREAMED}; no completion documented: acceptance only'),
+    Utility("clearSiteDeviceSession", "mist.site_devices.clear_session", "disruptive", "acceptance_only", GATEWAY,
+            ("node", "service_name", "session_ids"), {}, "clears the sessions again",
+            '"Clear session" (Utilities WAN); its 200 answers nothing; no completion documented: acceptance only'),
+    Utility("clearSiteSsrArpCache", "mist.site_devices.clear_arp", "disruptive", "acceptance_only", LAN_WAN,
+            ("ip", "node", "port_id", "vlan", "vrf"), {}, "clears the ARP entries again; the device learns them again",
+            f'"Clear ARP cache for SSR, SRX and Switch"; {STREAMED}; no completion documented: acceptance only'),
+    Utility("clearSiteSsrBgpRoutes", "mist.site_devices.clear_bgp", "disruptive", "acceptance_only", GATEWAY,
+            ("neighbor", "node", "type", "vrf"), {},
+            "resets the BGP sessions again: their routes are withdrawn and learnt again",
+            f"clears the routes of one or all BGP neighbors (Utilities WAN); {STREAMED}; no completion documented: "
+            "acceptance only"),
+)  # fmt: skip
+
+UTILITY_PATH = re.compile(r"^/api/v1/sites/\{site_id\}/devices/\{device_id\}/[a-z0-9_]+$")
+REFRESH = frozenset({"interval", "duration"})  # repeated output for up to 300 s: no contract bounds it yet
+DEVICE_CHECK = "getSiteDevice"  # the read that checks a utility's device type before anything else is sent
+KINDS = {"diagnostic": ("mist.diagnose", "idempotent"), "disruptive": ("mist.write", "ambiguous")}
+
 # Held back for the owner (D24): unavailable to every node. The deprecated audit-log list (`listOrgAuditLogsLegacy`),
 # which the appendix also holds, is denied as every deprecated operation is.
 HELD: dict[str, str] = {
@@ -292,6 +433,19 @@ HELD: dict[str, str] = {
     "uploadSiteMxEdgeSupportFiles": "a support upload",
     "upgradeSiteMxEdges": "a firmware upgrade",
     "upgradeDevice": "a firmware upgrade",
+    # The device utilities D27 holds back (the ZTP password's is always refused, which is stricter):
+    "createSiteDeviceShellSession": "an interactive shell (D27)",
+    "getSiteDeviceConfigCmd": "the full CLI configuration, which may hold secrets (D27)",
+    "uploadSiteDeviceSupportFile": "a support upload (D27)",
+    "zeroizeSiteFipsAllAps": "a FIPS zeroize of every AP (D27)",
+    "reprovisionSiteOctermDevice": "a reprovision (D27)",
+    "readoptSiteOctermDevice": "a re-adoption (D27)",
+    "restoreSiteDeviceBackupVersion": "a firmware rollback (D27)",
+    "toogleSiteDeviceVcRoutingEnginesRole": "a virtual chassis master switchover (D27)",
+    "startSitePacketCapture": "a packet capture stream, later (D27)",
+    "monitorSiteDeviceTraffic": "streams through a separate JWT URL whose protocol is undocumented (D27)",
+    "runSiteSrxTopCommand": "streams through a separate JWT URL whose protocol is undocumented (D27)",
+    "clearSiteDevicePolicyHitCount": "streams through a separate JWT URL whose protocol is undocumented (D27)",
 }
 
 # Each side effect's evidence (D16): the HTTP method alone is no evidence, so each kind cites what it rests on.
@@ -321,21 +475,34 @@ def make_map() -> dict[str, Any]:
     deprecated, held or always refused, or has no scope class, fails the build."""
     ops = oas.operations()
     curated = dict(CURATED)
+    utilities = {u.operation: u for u in UTILITIES}
     problems: list[str] = []
-    if len(curated) != len(CURATED) or len(set(curated.values())) != len(curated):
+    nodes = [*curated.values(), *(u.node for u in UTILITIES)]
+    if (
+        len(curated) != len(CURATED)
+        or len(utilities) != len(UTILITIES)
+        or len(set(nodes)) != len(nodes)
+        or (set(curated) & set(utilities))
+    ):
         problems.append("a duplicate review or node type")
-    problems += [f"{op_id}: no such operation" for op_id in curated if op_id not in ops]
+    problems += [f"{op_id}: no such operation" for op_id in [*curated, *utilities] if op_id not in ops]
     problems += [f"{op_id}: no such operation" for op_id in HELD if op_id not in ops]
     entries: dict[str, dict[str, Any]] = {}
     for op_id, op in sorted(ops.items()):
         entry: dict[str, Any] = {"method": op.method, "path": op.path}
-        reviewed = op_id in curated
+        reviewed = op_id in curated or op_id in utilities
         if op.deprecated:
             entry |= {"state": "denied", "reason": "deprecated"}
         elif policy.refused(op.path):
             entry |= {"state": "denied", "reason": "always_refused"}
         elif op_id in HELD:
             entry |= {"state": "held", "reason": HELD[op_id]}
+        elif op_id in utilities:
+            found = _utility_problems(op, utilities[op_id])
+            if found:
+                problems += found
+                continue
+            entry |= _utility_entry(utilities[op_id])
         elif reviewed:
             scope, side_effect = policy.scope_of(op.path), SIDE_EFFECTS.get(op.method)
             if scope is None or side_effect is None:
@@ -361,6 +528,71 @@ def make_map() -> dict[str, Any]:
     return {"version": policy.VERSION, "oas_sha256": oas.SHA256, "operations": entries}
 
 
+def _utility_problems(op: oas.Operation, u: Utility) -> list[str]:
+    """Whether a utility's review fits its operation: a POST under a site's device; a contract a node implements, a
+    disruptive one acceptance only; a stream only from an answer holding a `session`; known device types; parameters
+    of its body but the refresh ones; maxima only for its integer parameters (within the OAS's own) and, streaming, its
+    duration."""
+    name, doc = op.id, oas.document()
+    if op.method != "POST" or not UTILITY_PATH.match(op.path):
+        return [f"{name}: not a device utility"]
+    out: list[str] = []
+    if u.kind not in KINDS:
+        out.append(f"{name}: kind {u.kind!r}")
+    if u.contract not in policy.CONTRACTS:
+        return [*out, f"{name}: contract {u.contract!r} has no node"]
+    if u.kind == "disruptive" and u.contract != "acceptance_only":
+        out.append(f"{name}: a disruptive utility is acceptance only (D27)")
+    stream = u.contract != "acceptance_only"
+    answer = oas.answer(doc, op)
+    if stream and (answer is None or "session" not in oas.resolve(doc, answer).get("properties", {})):
+        out.append(f"{name}: streams, but its answer holds no session")
+    if not u.device_types or not set(u.device_types) <= set(policy.DEVICE_TYPES):
+        out.append(f"{name}: device types {list(u.device_types)} aren't {list(policy.DEVICE_TYPES)}")
+    body = _body(doc, op)
+    out += [f"{name}: parameter {p!r} isn't permitted" for p in u.parameters if p not in body or p in REFRESH]
+    for key, bound in u.bounds.items():
+        if key == "max_duration_s":
+            if not stream:
+                out.append(f"{name}: bound 'max_duration_s' is a stream's")
+            continue
+        prop = oas.resolve(doc, body.get(key, {})) if key in u.parameters else {}
+        low, high = prop.get("minimum"), prop.get("maximum")
+        if prop.get("type") != "integer" or (low is not None and bound < low) or (high is not None and bound > high):
+            out.append(f"{name}: bound {key!r} isn't within an integer parameter's range")
+    return out
+
+
+def _body(doc: Mapping[str, Any], op: oas.Operation) -> Mapping[str, Any]:
+    """An operation's JSON body's properties (none when it takes no body)."""
+    found = op.spec.get("requestBody")
+    if found is None:
+        return {}
+    schema = oas.resolve(doc, (oas.resolve(doc, found).get("content") or {}).get("application/json", {}).get("schema"))
+    props = schema.get("properties") if isinstance(schema, Mapping) else None
+    return props if isinstance(props, Mapping) else {}
+
+
+def _utility_entry(u: Utility) -> dict[str, Any]:
+    capability, side_effect = KINDS[u.kind]
+    return {
+        "state": "allowed",
+        "nodes": [u.node],  # never mist.api.write: it would bypass the parameters and the contract
+        "capability": capability,
+        "scope": "site",
+        "side_effect": side_effect,
+        "evidence": u.evidence,
+        "utility": {
+            "contract": u.contract,
+            "stream": u.contract != "acceptance_only",
+            "device_types": list(u.device_types),
+            "parameters": list(u.parameters),
+            "bounds": dict(u.bounds),
+            "repeat": u.repeat,
+        },
+    }
+
+
 def _reads(entries: dict[str, dict[str, Any]]) -> list[str]:
     """Each allowed operation's reads: its site check (a site-scope operation can't be allowed without it), the
     same-path GET an update merges into, and the lists its pickers read; every one allowed itself."""
@@ -378,6 +610,10 @@ def _reads(entries: dict[str, dict[str, Any]]) -> list[str]:
             reads.add(routing.SITE_CHECK)
         if op.method == "PUT" and op.path in gets:
             reads.add(gets[op.path])
+        if "utility" in entry:
+            if DEVICE_CHECK not in allowed:
+                problems.append(f"{op_id}: its device check reads {DEVICE_CHECK}, which isn't allowed")
+            reads.add(DEVICE_CHECK)
         entry["reads"] = sorted(reads)
     return problems
 

@@ -742,11 +742,12 @@ Facts checked before the tasks (never from memory):
   POST answer's `session`, `data.raw` the text; `"finished": true` in table output (`samples/site_device_command_output`:
   show ARP, show service path, show session); a release-DHCP sample whose `data` is a JSON string holding another
   envelope (the OAS). Unsubscribing is mentioned but its message isn't documented.
-- The 30 utilities in the vendored OAS (0613a22): all exist, none deprecated; 24 answer `websocket_session`
-  (`{session}`, required), 6 an empty 200 (`bounce_port`, `clear_macs`, `clear_bpdu_error`, `release_dhcp_leases`,
-  `clear_session`, and `resolve_dns`, which streams and takes no body); five table commands take a refresh `interval`
-  (at most 10 s) and `duration` (at most 300 s); devices are typed `ap`, `switch` or `gateway`. In 3b-1's map each is
-  `held` (`unreviewed`).
+- The 30 utilities in the vendored OAS (0613a22): all exist, none deprecated; 25 answer `websocket_session`
+  (`{session}`, required), 5 an empty 200 (`bounce_port`, `clear_macs`, `clear_bpdu_error`, `release_dhcp_leases`,
+  `clear_session`); `resolve_dns` takes no body; five table commands take a refresh `interval` (at most 10 s) and
+  `duration` (at most 300 s); devices are typed `ap`, `switch` or `gateway`. In 3b-1's map each is `held`
+  (`unreviewed`). (An earlier line said 24 and 6, counting `resolve_dns` as empty: corrected when the reviews were
+  generated from the OAS.)
 
 Tasks (test-first, in order):
 1. `websockets` 17.1 becomes a direct dependency (D26; approved with the outline's rev 5).
@@ -806,3 +807,25 @@ Rulings:
   wrong: one more read a utility step.
 - Ruling: utilities are reachable by their own node only, never by `mist.api.write` - the generic node would bypass the
   permitted parameters and the contract - cost if wrong: none for safety.
+- Ruling: the map's version is 2: an allowed utility's entry carries its review (`utility`: contract, stream, device
+  types, parameters, bounds, repeat); a map of version 1 is refused, as one of another description is - cost if wrong:
+  none (generated, and checked against the reviews by a test).
+- Ruling: a utility's contract is one its node implements: bounded collection, stream terminal evidence or acceptance
+  only; D28's documented REST completion and verified readback have no node yet, so a map naming them is refused -
+  cost if wrong: none until a utility needs one.
+- Ruling: a utility's device types are its OAS tag's (Utilities Common: AP, switch and gateway; LAN: switch; WAN:
+  gateway), narrowed or widened by its description's own list ("Ping from AP, Switch and SSR"; "BGP Summary from SSR,
+  SRX and Switch"; "Clear ARP cache for SSR, SRX and Switch"; port bounce "from Switch/Gateway"; TDR "from the
+  Switch"; show ARP's `node` "required for Gateways") - the documentation is the only evidence short of a device run -
+  cost if wrong: a supported type is refused `mist.device_type_unsupported`, or an unsupported one reaches Mist, which
+  refuses it.
+- Ruling: maxima on top of the OAS's: a ping's or a service ping's `count` at most 100, a traceroute's `timeout` at most
+  120 s, a streaming utility's own `max_duration_s` at most 240 - bounded collection needs a bounded command - cost if
+  wrong: a longer ping takes several steps.
+- Ruling: a device id has no picker: 3b-1's pickers are a site's and an org resource's, and a site resource's list
+  needs the chosen site, which an options query doesn't carry - cost if wrong: the device id is typed or referenced.
+- Ruling: the twelve utilities D27 holds back are `held` with their reason (shell, CLI config, support upload, FIPS
+  zeroize, reprovision, re-adoption, firmware rollback, VC switchover, packet capture, and the three JWT-URL streams);
+  `getSiteDeviceZtpPassword` stays denied as always refused, which is stricter - cost if wrong: none.
+- The map at task 6 (measured): 1,072 operations, 292 allowed (262 curated, 30 utilities: 19 diagnostics, 11
+  disruptive), 602 held (578 unreviewed, 24 the owner's or D27's), 178 denied.
