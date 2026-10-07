@@ -7,6 +7,7 @@ those it hasn't taken lately, so one slow item can't keep the others waiting. Co
 where the budget itself is time."""
 
 import asyncio
+import contextlib
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -152,9 +153,9 @@ async def test_a_pass_its_slow_calls_stopped_reports_its_degraded_state_and_aler
     assert len(alerts) == 1 and alerts[0]["pass_name"] == "degraded" and alerts[0]["log_level"] == "error"
 
 
-def _runs(monkeypatch: Any, items_s: list[tuple[int, float]], gap_s: float) -> tuple[list[dict[str, int]], list[Any]]:
-    """Runs of pass `p` on the test's clock, each picking `n` items of `s` seconds, `gap_s` apart; no call slow.
-    Its reports and its alerts."""
+def _runs(monkeypatch: Any, runs: list[tuple[int, float, float, bool]]) -> tuple[list[dict[str, int]], list[int]]:
+    """Runs of pass `p` on the test's clock, no call slow: each picks `n` items of `s` seconds, then `gap` seconds pass;
+    one that `raises` fails after its first item. Its reports, and the runs (from 1) that alerted."""
     import structlog
 
     now = [0.0]
@@ -162,33 +163,55 @@ def _runs(monkeypatch: Any, items_s: list[tuple[int, float]], gap_s: float) -> t
     monkeypatch.setattr(budget, "PASS_S", 10.0)
     monkeypatch.setattr(budget, "_alerted", {})
     monkeypatch.setattr(budget, "_limited", {})
-    reports = []
-    with structlog.testing.capture_logs() as logs:
-        for n, seconds in items_s:
-            counts: dict[str, int] = {}
+    monkeypatch.setattr(budget, "_ended", {})
+    reports, alerted = [], []
+    for run, (n, seconds, gap, raises) in enumerate(runs, 1):
+        counts: dict[str, int] = {}
+        with structlog.testing.capture_logs() as logs, contextlib.suppress(RuntimeError):
             with budget.passing("p") as admitted:
                 for _item in admitted(range(n), key=lambda i: i):
                     now[0] += seconds
+                    if raises:
+                        raise RuntimeError("a pass that fails")
                 admitted.reported(counts, full=True)
-            reports.append(counts)
-            now[0] += gap_s
-    return reports, [entry for entry in logs if entry["event"] == "dispatcher_pass_degraded"]
+        reports.append(counts)
+        if any(entry["event"] == "dispatcher_pass_degraded" and entry["why"] == "budget" for entry in logs):
+            alerted.append(run)
+        now[0] += gap
+    return reports, alerted
+
+
+DEFERRING = (10, 4.0, 28.0, False)  # 12 s, 3 of 10 taken; the next 40 s after its start
+TAKING_ALL = (2, 4.0, 32.0, False)
+RAISING = (10, 4.0, 36.0, True)
 
 
 async def test_a_pass_its_budget_keeps_limiting_alerts_though_no_call_is_slow(monkeypatch) -> None:
     """The owner's review of checkpoint 5 (M8): calls just under `SLOW_S` (0.9 s measured) stopped each pass at its
     budget, a fifth of its items taken, every cycle, and nothing alerted: only a slow call did. A pass that defers items
-    in every run for `SUSTAINED_S` alerts too (`why`: the budget), at most every `DEGRADED_ALERT_S`."""
-    reports, alerts = _runs(monkeypatch, [(10, 4.0)] * 5, gap_s=28.0)  # each run 12 s, 3 of 10 taken; 40 s apart
-    assert all(r == {"deferred": 7, "backlog": 1} for r in reports), reports
-    assert len(alerts) == 1 and alerts[0]["why"] == "budget" and alerts[0]["log_level"] == "error"
-    assert alerts[0]["deferred"] == 7  # at the third run's end: deferring since the first's, 80 s
+    in every run for `SUSTAINED_S` alerts too (`why`: the budget), at most every `DEGRADED_ALERT_S`: here at the third
+    run (deferring since the first's end, 80 s; the second's, 40 s, too soon), then not again within five minutes."""
+    reports, alerted = _runs(monkeypatch, [DEFERRING] * 5)
+    assert all(r == {"deferred": 7, "backlog": 1} for r in reports)
+    assert alerted == [3]
 
 
 async def test_neither_a_passing_deferral_nor_a_full_pick_alone_alerts(monkeypatch) -> None:
     """A run that defers, then one that takes all it picked, then one that defers: never a minute of it. And a pick
     that is full each time (more may wait) but takes all it picked, for ten minutes: degraded in nothing shown."""
-    _, alerts = _runs(monkeypatch, [(10, 4.0), (2, 4.0), (10, 4.0), (2, 4.0), (10, 4.0)], gap_s=28.0)
-    assert alerts == []
-    _, alerts = _runs(monkeypatch, [(50, 0.01)] * 60, gap_s=10.0)
-    assert alerts == []
+    assert _runs(monkeypatch, [DEFERRING, TAKING_ALL] * 3)[1] == []
+    assert _runs(monkeypatch, [(50, 0.01, 10.0, False)] * 60)[1] == []
+
+
+async def test_a_run_that_fails_neither_extends_nor_ends_a_deferring_streak(monkeypatch) -> None:
+    """The review of checkpoint 6: a run that raised (a database error escaping the pass) took nothing as picked, and
+    ended the streak as a run that took all it picked would. It says nothing of the budget: the streak stands through
+    it, and the run after alerts (deferring since the first's end)."""
+    assert _runs(monkeypatch, [DEFERRING, DEFERRING, RAISING, DEFERRING])[1] == [4]
+
+
+async def test_a_pass_back_after_not_running_starts_its_streak_anew(monkeypatch) -> None:
+    """The review of checkpoint 6: a pass that didn't run for a while (a leader demoted, an observe that failed) kept
+    the streak of its last runs, and alerted on its first deferring run back, an hour on. Not run for `GAP_S`, it
+    starts anew: here alerting at the fourth run, a minute of deferring after the gap."""
+    assert _runs(monkeypatch, [(10, 4.0, 3600.0, False), DEFERRING, DEFERRING, DEFERRING])[1] == [4]
