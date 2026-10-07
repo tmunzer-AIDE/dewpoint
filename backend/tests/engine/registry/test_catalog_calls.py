@@ -156,6 +156,11 @@ def _types(change: Any) -> dict[str, Any]:
         (_types(lambda t: t.update(verify="yes")), "verify"),
         (_with(lambda m: m["connection_types"].append(copy.deepcopy(m["connection_types"][0]))),
          "duplicate connection type 'demo'"),
+        # `$` also matches before a final newline (the owner's review R3 of 3b-2): each name is matched whole
+        (_types(lambda t: t.update(key="demo.x\n")), "must be named 'demo' or start with 'demo.'"),
+        (_types(lambda t: t["auth"].update(header="Authorization\n")), "auth must be"),
+        (_types(lambda t: t["host"]["hosts"].update(eu="api.eu.example.com\n")), "must be a host name"),
+        (_types(lambda t: t["rate_scopes"][0].update(kind="demo.org\n")), "must start with 'demo.'"),
     ],
 )  # fmt: skip
 def test_new_keys_are_checked(manifest: dict[str, Any], problem: str) -> None:

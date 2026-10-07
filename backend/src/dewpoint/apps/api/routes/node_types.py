@@ -50,7 +50,7 @@ def negotiate(header: str | None) -> str | None:
         for param in params:
             name, _, value = param.strip().partition("=")
             if name.strip().lower() == "q":
-                weight = float(value.strip()) if QVALUE.match(value.strip()) else 0.0
+                weight = float(value.strip()) if QVALUE.fullmatch(value.strip()) else 0.0
         weights["gzip" if coding == "x-gzip" else coding] = weight
     gzip_q = weights.get("gzip", weights.get("*", 0.0))
     identity_q = weights.get("identity", weights.get("*"))  # None: acceptable by default, unweighed

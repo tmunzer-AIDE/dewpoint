@@ -203,7 +203,7 @@ def _options_problems(ref: str, n: Mapping[str, Any]) -> list[str]:
 def _node_problems(plugin: str, n: Mapping[str, Any], seen: set[str]) -> list[str]:
     t, v = n.get("type"), n.get("version")
     ref = f"{t}@{v}"
-    if not isinstance(t, str) or not TYPE_RE.match(t) or not t.startswith(f"{plugin}."):
+    if not isinstance(t, str) or not TYPE_RE.fullmatch(t) or not t.startswith(f"{plugin}."):
         return [f"{ref}: type must start with '{plugin}.'"]
     out: list[str] = []
     if isinstance(v, bool) or not isinstance(v, int) or v < 1:
@@ -223,7 +223,7 @@ def _node_problems(plugin: str, n: Mapping[str, Any], seen: set[str]) -> list[st
     if (
         not isinstance(ports, list)
         or len(set(map(str, ports))) != len(ports)
-        or any(not isinstance(p, str) or not PORT_RE.match(p) or p in RESERVED_PORTS for p in ports)
+        or any(not isinstance(p, str) or not PORT_RE.fullmatch(p) or p in RESERVED_PORTS for p in ports)
     ):
         out.append(f"{ref}: invalid ports")
     side_effect = n.get("side_effect")
@@ -237,7 +237,7 @@ def _node_problems(plugin: str, n: Mapping[str, Any], seen: set[str]) -> list[st
     if not _finite(timeout) or timeout <= 0:
         out.append(f"{ref}: timeout_s must be a positive number")
     icon = n.get("icon")
-    if "icon" in n and (not isinstance(icon, str) or not ICON_RE.match(icon)):
+    if "icon" in n and (not isinstance(icon, str) or not ICON_RE.fullmatch(icon)):
         out.append(f"{ref}: icon must name a first-party icon (lowercase letters, digits and dashes)")
     out += _options_problems(ref, n)
     return out
@@ -257,7 +257,7 @@ def _auth_problems(name: str, auth: Any, secret_fields: Mapping[str, Any]) -> li
         or set(auth) != {"kind", "header", "template"}
         or auth["kind"] != "header"
         or not isinstance(auth["header"], str)
-        or not HEADER_RE.match(auth["header"])
+        or not HEADER_RE.fullmatch(auth["header"])
         or not isinstance(template, str)
         or any(c in template for c in "\r\n\0")
     ):
@@ -283,7 +283,7 @@ def _host_problems(name: str, host: Any, config_fields: Mapping[str, Any]) -> li
     if set(host) != {"kind", "field", "hosts"} or not isinstance(hosts, Mapping) or not hosts:
         return [f"{name}: a host map needs hosts"]
     out = [f"{name}: host {h!r} must be a host name" for h in hosts.values() if not isinstance(h, str)
-           or not HOST_RE.match(h)]  # fmt: skip
+           or not HOST_RE.fullmatch(h)]  # fmt: skip
     prop = config_fields[field]
     enum = prop.get("enum") if isinstance(prop, Mapping) else None
     if not isinstance(enum, list) or sorted(map(str, enum)) != sorted(map(str, hosts)):
@@ -298,7 +298,7 @@ def _scope_problems(name: str, key: str, scope: Any, config_fields: Mapping[str,
     kind, config, secret = scope["kind"], scope["config"], scope["secret"]
     where = f"{name}: rate scope {kind!r}"
     out: list[str] = []
-    if not isinstance(kind, str) or not SCOPE_KIND_RE.match(kind) or not kind.startswith(f"{key}."):
+    if not isinstance(kind, str) or not SCOPE_KIND_RE.fullmatch(kind) or not kind.startswith(f"{key}."):
         out.append(f"{where} must start with '{key}.'")
     if not isinstance(config, list) or not all(isinstance(c, str) for c in config):
         out.append(f"{where}: config must list config fields")
@@ -349,7 +349,11 @@ def _connection_type_problems(plugin: str, t: Any, seen: set[str]) -> list[str]:
     """The same rules the SDK applies to a ConnectionType (plugins-3 D11), for one received as data."""
     key = t.get("key") if isinstance(t, Mapping) else None
     name = f"connection type {key!r}"
-    if not isinstance(key, str) or not TYPE_KEY_RE.match(key) or (key != plugin and not key.startswith(f"{plugin}.")):
+    if (
+        not isinstance(key, str)
+        or not TYPE_KEY_RE.fullmatch(key)
+        or (key != plugin and not key.startswith(f"{plugin}."))
+    ):
         return [f"{name} must be named {plugin!r} or start with '{plugin}.'"]
     assert isinstance(t, Mapping)  # noqa: S101 - a key was read from it
     out: list[str] = []

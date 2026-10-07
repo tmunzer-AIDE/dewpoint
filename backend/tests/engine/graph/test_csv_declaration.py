@@ -82,7 +82,7 @@ def test_publish_refuses_duplicate_headers_and_names() -> None:
     ]
 
 
-@pytest.mark.parametrize("name", ["Site", "1st", "in", "null"])
+@pytest.mark.parametrize("name", ["Site", "1st", "in", "null", "site\n"])  # `$` matches before a final newline
 def test_publish_refuses_a_name_that_isnt_an_identifier(name: str) -> None:
     assert codes(declared({"header": "H", "name": name, "type": "string"})) == [
         ("csv.invalid_name", "/settings/csv/columns/0/name")

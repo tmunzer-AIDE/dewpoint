@@ -145,6 +145,9 @@ def test_a_plugin_lists_its_triggers_in_its_manifest_only_when_set() -> None:
         (Trigger("demo.webhook", "x", "bearer", "/topic", {"a": {"type": "array"}}), "object"),
         (Trigger("demo.webhook", "x", "bearer", "/topic", {"a": {"type": "nope"}}), "JSON Schema"),
         (Trigger("demo.webhook", "x", "bearer", "/topic", {"a": EVENT}, events_pointer="x"), "pointer"),
+        # `$` also matches before a final newline (the owner's review R3 of 3b-2): each name is matched whole
+        (Trigger("demo.webhook\n", "x", "bearer", "/topic", {"a": EVENT}), "must be named"),
+        (Trigger("demo.webhook", "x", "bearer", "/topic", {"a\n": EVENT}), "must be lowercase letters"),
     ],
 )
 def test_a_malformed_trigger_is_refused_by_the_sdk_and_the_catalog(trigger: Trigger, problem: str) -> None:

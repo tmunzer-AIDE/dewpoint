@@ -529,3 +529,13 @@ def test_cel_keywords_are_rejected_as_step_keys_and_variable_names() -> None:
     g = G().node("a", ECHO)
     g.settings = {"vars_schema": {"type": "object", "properties": {"true": {"type": "integer", "default": 0}}}}
     assert codes(g) == ["vars.invalid_name"]
+
+
+def test_a_name_with_a_trailing_newline_is_refused() -> None:
+    """`$` also matches before a final newline (the owner's review R3 of 3b-2): a name is matched whole."""
+    g = G().node("a", ECHO)
+    g.settings = {"vars_schema": {"type": "object", "properties": {"x\n": {"type": "integer", "default": 0}}}}
+    assert codes(g) == ["vars.invalid_name"]
+    g = G().node("a", ECHO)
+    g.settings["outputs"] = {"x\n": "fixed"}
+    assert codes(g) == ["settings.output_name"]
