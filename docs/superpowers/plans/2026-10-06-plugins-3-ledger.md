@@ -722,3 +722,87 @@ integers; a port usage's `reauth_interval` null.
 - The owner's fourth probe run (2026-10-07, at `a9c8610`): 133 matched their output schema, 0 mismatched, 0 failed;
   13 skipped as before (9 with nothing in the test org to read their id from, 4 insight reads needing a `metrics`
   query). Every curated read the probe could reach runs as shipped against this org.
+
+## 3b-2 Mist device utilities
+
+Branch `feat/plugins-3b2` from `origin/main` 5e79a10 (#51, after 3b-1's #49 and its follow-up #50), started 2026-10-07:
+I named 3b-2 as next and the owner said "let's continue". That is the go to build 3b-2; this section's rulings await
+the owner's sign-off. No migration expected. No real Mist call: the proof runs against local fakes (REST and stream).
+
+Facts checked before the tasks (never from memory):
+- `websockets` 17.1 as installed (`websockets/asyncio/client.py`): `connect(uri, sock=..., ssl=..., server_hostname=...,
+  proxy=..., additional_headers=..., open_timeout=..., ping_interval=..., ping_timeout=..., max_size=...)`; with `sock`
+  given it sets no proxy and refuses every redirect ("cannot follow redirect ... with a preexisting socket"); `max_size`
+  bounds a message.
+- Mist's stream (docs clone `mistapi-portal` 919c9b47, `guides/websocket/`): hosts `api-ws.<cloud>` beside each REST
+  `api.<cloud>` (`1_hosts`); `wss://api-ws.mist.com/api-ws/v1/stream` with `Authorization: Token` (`2_best_practices`);
+  `{"subscribe": channel}` answered `channel_subscribed` or `subscribe_failed` with a `detail` (sample: "Server error,
+  please try again later"); 2,000 connections an hour and 2,000 channels a connection per token, 429 past them
+  (`3_rate_limit`); device command output on `/sites/{site_id}/devices/{device_id}/cmd`, `data.session` matching the
+  POST answer's `session`, `data.raw` the text; `"finished": true` in table output (`samples/site_device_command_output`:
+  show ARP, show service path, show session); a release-DHCP sample whose `data` is a JSON string holding another
+  envelope (the OAS). Unsubscribing is mentioned but its message isn't documented.
+- The 30 utilities in the vendored OAS (0613a22): all exist, none deprecated; 24 answer `websocket_session`
+  (`{session}`, required), 6 an empty 200 (`bounce_port`, `clear_macs`, `clear_bpdu_error`, `release_dhcp_leases`,
+  `clear_session`, and `resolve_dns`, which streams and takes no body); five table commands take a refresh `interval`
+  (at most 10 s) and `duration` (at most 300 s); devices are typed `ap`, `switch` or `gateway`. In 3b-1's map each is
+  `held` (`unreviewed`).
+
+Tasks (test-first, in order):
+1. `websockets` 17.1 becomes a direct dependency (D26; approved with the outline's rev 5).
+2. The guarded websocket in `core` (D26): wss only; the name vetted and the socket connected by the guard to a vetted
+   address, then handed to `websockets` (`sock`, `server_hostname`, `proxy=None`); opening 5 s, 1 MiB a message, 10 MiB
+   an attempt, pings every 60 s with a 45 s timeout; text messages only; failures as core errors.
+3. SDK 0.5.0: a connection's `ws.connect()` (its type's stream endpoint) and the `WebSocket` it gives (`send`, with
+   `probe` for a message that changes nothing; `receive` with a timeout; `close`); a connection type's
+   `StreamEndpoint` (host map, path, stream quota scopes) as data; `HandshakeRejected` (its status) and `StreamLost`.
+4. The runtime's connection stream (D4, D9, D10): the declared URL only, the credentials the runtime's, a token from
+   each stream scope per connection (`Cooldown` otherwise), a 429's `Retry-After` blocking those scopes; refused in a
+   simulation and on a plugin call's read-only channel; a counted send marks the attempt, a probe doesn't; closed with
+   the attempt. The API's cooldowns list the stream scopes.
+5. Mist's stream endpoint: each cloud's `api-ws` host, `/api-ws/v1/stream`, a stream scope per token.
+6. The utilities' reviews (D27, D28): each with its contract, stream mode, device types, permitted parameters,
+   execution bounds, repeat behaviour and evidence; allowed to its own node only; the map's version 2.
+7. The stream reader (D27): subscribe, acknowledgement (10 s), POST, the session's messages kept (at most 256 and 1 MiB
+   before the session is known), strict and bounded decoding, ANSI stripped; idle (10 s), first message (30 s),
+   maximum duration, terminal evidence; heartbeats; closed in `finally`; every failure classified.
+8. One node type per utility: config (connection, site, device, permitted parameters, maximum duration), output by
+   contract, the site and device-type checks, simulate, pickers.
+9. Proof: a ping streamed from a local stream fake and a bounce-port accepted by a local REST fake, through RunGraph;
+   the same run simulated sends nothing.
+
+Rulings:
+- Ruling: the branch starts from `origin/main` 5e79a10 - #50's overlay and #51's log fields included - cost if wrong:
+  one rebase.
+- Ruling: D26's `ctx.ws` is exposed as `connection.ws` only: the connection type's stream endpoint, its credentials
+  applied by the runtime, its stream scopes charged. A websocket without credentials waits for a node that needs one -
+  every node 3b-2 adds streams through its connection, and each surface is one more to guard - cost if wrong: adding
+  `ctx.ws` later is additive (an SDK minor).
+- Ruling: a node can't name the stream URL: it's the type's declared host (from a config field's host map) and path -
+  as the REST base is - cost if wrong: a provider whose stream URL varies per call needs the declaration widened.
+- Ruling: opening a stream sends nothing a node is accountable for (as a TCP connect isn't); a message sent counts as a
+  send unless the node marks it `probe` (a message that changes nothing, as Mist's subscribe) - fail closed for a
+  stream API whose messages act - cost if wrong: a node that mis-marks an acting message as a probe gets a retry it
+  shouldn't (first-party nodes only today).
+- Ruling: no unsubscribe message is sent: its format isn't documented; closing the connection ends its subscriptions -
+  cost if wrong: none (one connection a call, never shared).
+- Ruling: `subscribe_failed` is retryable only with the documented `detail` "Server error, please try again later",
+  fatal with any other - nothing was sent before the POST, so a retry is safe, but a refused channel or forbidden site
+  would only burn stream connections - cost if wrong: a transient failure worded otherwise fails the step.
+- Ruling: every disruptive utility is acceptance only (`{accepted: true, completion_known: false}`), none subscribes:
+  no completion, final message or readback is documented for any of the 11 (an empty 200 isn't documented as
+  completion; bounce port's docs sample streams "Port bounce complete." while its OAS answer is empty, unverified) -
+  cost if wrong: no output from the cable test (TDR) and the clears until a device run verifies a contract to promote.
+- Ruling: three diagnostics have stream terminal evidence (show ARP, show service path, show session: the docs samples'
+  `"finished": true` with `"status": "SUCCESS"`); the 16 others are bounded collections, and one that sees that evidence
+  ends early with `completion_known: true` - cost if wrong: a table command that never finishes fails its three nodes
+  `mist.completion_unknown` (retried, being repeatable diagnostics).
+- Ruling: a finished table whose `status` isn't `SUCCESS` fails `mist.command_failed` (fatal) - the device answered;
+  repeating a diagnostic the device refused won't change it - cost if wrong: a transient device failure isn't retried.
+- Ruling: the refresh parameters (`interval`, `duration`) aren't permitted: they repeat the output for up to 300 s, which
+  no contract bounds yet - cost if wrong: a repeated table needs a workflow loop.
+- Ruling: the device type is checked before anything else is sent: a probe read of the device (`getSiteDevice`, in the
+  map's reads), its `type` among the review's - D28's device types checked at run time, not only recorded - cost if
+  wrong: one more read a utility step.
+- Ruling: utilities are reachable by their own node only, never by `mist.api.write` - the generic node would bypass the
+  permitted parameters and the contract - cost if wrong: none for safety.
