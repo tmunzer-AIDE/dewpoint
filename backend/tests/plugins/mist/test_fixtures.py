@@ -75,7 +75,7 @@ def test_every_curated_fixture_is_valid_complete_and_within_budget() -> None:
         assert list(Draft202012Validator(node_manifest(n)["output_schema"]).iter_errors(value)) == [], n.type
         assert len(json.dumps(value)) <= BUDGET, n.type
         sources[source] = sources.get(source, 0) + 1
-    assert sources == {"example": 182, "schema": 39, "fixed": 41}
+    assert sources == {"example": 181, "schema": 40, "fixed": 41}
 
 
 def test_a_fixture_fills_what_the_example_leaves_out() -> None:

@@ -615,7 +615,10 @@ stays available; the earlier findings stay resolved. This closes the technical r
 fixture redesign, catalog compression, the Compose proof, the read-only Mist smoke test, and push and PR remain the
 owner's.
 
-The owner approved the fixture redesign and catalog compression (2026-10-07), both built test-first:
+The owner chose to have the fixture redesign and catalog compression built in this slice (2026-10-07, "approve 2
+and 3, build them"); both were built test-first. The two rulings below record how; like every 3b-1 ruling, they
+await the owner's sign-off, and the later technical clearance of R1 and R2 is not acceptance (corrected at the
+owner's review, 2026-10-07; an earlier wording read "approved"):
 - Ruling (fixtures): a fixture is built from the schema, every declared property filled to 6 levels (only the required
   ones past them, so recursive schemas end), within 64 KB (the engine's inline limit; shallower past it): a given
   default, an array of one element, a union's first branch, else the type's empty value. The OAS example, shaped as
@@ -665,3 +668,57 @@ the owner's.
 The owner asked for the push and PR (2026-10-07). The branch was rebased onto `origin/main` 69944d0 (#46, #47: 2b-4a)
 without conflicts; the OpenAPI document and the web client's types still match (no drift, `check:api` passes). Full
 run at the rebased head: 3621 passed, 8 skipped, in 12 min 7 s; ruff, format, mypy and import contracts pass.
+
+**Status at the merge** (#49, `bc4c840`, 2026-10-07; all 15 checks passed): the technical review is closed; no 3b-1
+ruling has the owner's sign-off yet; the read-only Mist smoke test against a test org is pending. #49's e2e jobs ran
+the packaged Compose proof and the browser tests, so no separate local Compose run was made.
+
+Read-only Mist smoke run (2026-10-07): the owner ran `backend/tests/probes/mist_smoke.py` (local `test/mist-smoke`
+3dd2ebb) against the test org `9777c1a0-6ef6-11e6-8bbf-02e208b2d34f`, site `978c48e6-…`, on `api.mist.com`; GET only,
+the report holding names and schema rules, never a value. 146 curated reads in 108.6 s: 64 matched their output
+schema, 68 didn't, 1 failed, 13 were skipped (9 with nothing in this org to read their id from, 4 needing a query).
+- 53 of the 68 only because Mist answers null where the OAS types a value (79 places: ids such as `map_id` and
+  `template_id`, flags, lists), or a fractional number where it says integer (68 places: the `start` and `end` of
+  search and count answers, map origins).
+- 15 with real disagreements: fields typed otherwise (`lease_time`, `last_vlan` and `mfg_company_id` strings,
+  `random_mac` a boolean, a client's `model` an array, site settings' `flags` integers); unions no branch fits
+  (devices, device profiles, a port usage's `reauth_interval`); required fields absent (site stats' `country_code`
+  and `latlng`, discovered assets' `name`, WxRule usage's `client_mac`, `name`, `usage`, `dst_allow_wxtags`,
+  `dst_deny_wxtags`).
+- The failure: `searchOrgUserMacs` answered in a shape the search node doesn't read (`mist.invalid_answer`).
+- Sizes: wired-client searches about 434 KB a page; 2.25 MB across all answers.
+As shipped, those 69 operations fail their runs (`output_schema_violation` after the request, or `invalid_answer`).
+
+The OAS overlay (2026-10-07, the owner's request after the smoke run, while the upstream description is fixed):
+`backend/src/dewpoint/plugins/mist/data/oas-overlay.json`, 87 patches laid over the vendored file when it's read
+(`oas.document()`), each citing the smoke run and the definition it expects to replace: 43 fields nullable, 39 types
+widened (`start` and `end` of 14 search and count answers and map origins to numbers; `lease_time`, `last_vlan`,
+`mfg_company_id`, `random_mac`, a client's `model`, site settings' `flags` and an AP search result's bandwidths to
+both types seen), required fields dropped from site stats, assets, WxRule usage and AP search results, and
+`searchOrgUserMacs`'s answer an object with `results` and `total` (Mist's shape; the OAS says an array). A second probe
+run with per-branch union detail (`c8c59d8`) pinned the unions: the AP branch's `esl_config` and `usb_config` channels
+and band-6 `standard_power` null; an AP search result without `type`, `mxtunnel_status` or `wlans`, its bandwidths
+integers; a port usage's `reauth_interval` null.
+- Ruling: patches only what the smoke run showed, not every field made nullable - a nullable field makes every
+  reference to it need a default at publish (`ref.conditional`), so blanket nullability would weigh on every workflow
+  reading a Mist output - cost if wrong: a field null in another org's answers still fails its step until patched.
+- Ruling: the patched schemas are the components themselves, so they relax requests too (a PSK's `admin_sso_id` may be
+  sent null, an asset created without `name`, which Mist then refuses) - one description, read the same way in both
+  directions - cost if wrong: a config Mist refuses is caught by Mist (`mist.bad_request`) rather than at publish.
+- Ruling: the vendored file stays pinned; a patch whose target no longer reads as it expects fails the build, so
+  re-vendoring a fixed description retires its patches by test - cost if wrong: none.
+- Ruling: the changed output schemas change the contracts of the registered `@1` node types; they're amended in place,
+  not shipped as `@2`, since no environment runs workflows on Mist nodes yet - a database that already synced them
+  needs its Mist node-type rows reset before the next sync - cost if wrong: such a sync is refused (`contract changed`)
+  until reset. The owner confirmed (2026-10-07): no environment uses the Mist nodes yet, so amending `@1` is fine.
+- The user-MAC search now answers one page as Mist sends it (an object, `page` and `limit` in its query) instead of
+  paging headers it never sent; fixture counts move to 181 from examples and 40 from schemas.
+- The owner's third probe run (with the overlay): 127 matched, 6 mismatched, 0 failed, 13 skipped. The 6: two fields
+  missed (`alarm_search_result`'s `start` and `end`; `asset.map_id`), and two retyped fields that were references
+  (`client_nac.last_vlan`, `random_mac`) whose new type was added beside the reference, which JSON Schema applies too.
+  A retyped field's reference is now replaced by its new type, and a test checks the observed values validate, not
+  only the patched keyword. The overlay holds 90 patches: 44 nullable, 41 types widened (15 search and count answers'
+  `start` and `end`), 4 `required` lists trimmed, 1 answer reshaped.
+- The owner's fourth probe run (2026-10-07, at `a9c8610`): 133 matched their output schema, 0 mismatched, 0 failed;
+  13 skipped as before (9 with nothing in the test org to read their id from, 4 insight reads needing a `metrics`
+  query). Every curated read the probe could reach runs as shipped against this org.

@@ -41,7 +41,7 @@ def test_every_node_simulates_a_value_its_output_schema_accepts() -> None:
         fixture, source = fixture_of(n)
         assert list(Draft202012Validator(schema).iter_errors(fixture)) == [], n.type
         sources[source] = sources.get(source, 0) + 1
-    assert sources == {"example": 182, "schema": 39, "fixed": 41}  # the ledger records why
+    assert sources == {"example": 181, "schema": 40, "fixed": 41}  # the ledger records why
 
 
 async def test_a_read_answers_its_example() -> None:
