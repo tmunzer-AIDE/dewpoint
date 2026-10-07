@@ -3,16 +3,18 @@
 (`misses_checked_at` four minutes old) isn't its index's bound, so with fewer than 50 incarnations due the query walks
 every incarnation that may still miss a firing, checking each one's row. Measured here at 2,000 to 200,000 such
 incarnations, 0 or 10 of them due, those due least lately tried (the steady state: they come first in the index's
-order) or most lately (reads that keep failing: they come last). For each: the deployed function's own plan (its body,
-read from the catalogue, explained with its buffers), and its time as the dispatcher calls it, a pooled connection held
-throughout. A run by hand, never in CI (skipped unless `DEWPOINT_PROBE` is set); its results go to `DEWPOINT_PROBE_OUT`
-(JSON). From `backend/`:
+order) or most lately (reads that keep failing: they come last), and the steady state with every row's older version
+left in place. For each: the plan its statement ran with (`auto_explain` on the function's own call, nested statements
+included, its buffers: the first read since the shape was made, so before any read cleaned what it left), then its
+time as the dispatcher calls it, a pooled connection held throughout (its first call apart). A run by hand, never in
+CI (skipped unless `DEWPOINT_PROBE` is set); its results go to `DEWPOINT_PROBE_OUT` (JSON). From `backend/`:
 
     DEWPOINT_PROBE=1 DEWPOINT_PROBE_OUT=misses.json .venv/bin/pytest tests/probes/test_misses_due_cost.py -p no:randomly
 
 These are this machine's numbers, on a test container: an order of magnitude, not a supported figure."""
 
 import json
+import math
 import os
 import statistics
 import time
@@ -96,7 +98,8 @@ async def _plan(url: str) -> dict[str, Any]:
             "removed_by_filter": sum(n.get("Rows Removed by Filter", 0) for n in nodes),
             "shared_hit": inner["Plan"].get("Shared Hit Blocks"),
             "shared_read": inner["Plan"].get("Shared Read Blocks"),
-            "duration_ms": float(head.split("duration:", 1)[1].split("ms", 1)[0])}  # fmt: skip
+            "duration_ms": float(head.split("duration:", 1)[1].split("ms", 1)[0]),
+            "rows": inner["Plan"]["Actual Rows"]}  # fmt: skip
 
 
 async def _timed(dispatch: Any) -> dict[str, float]:
@@ -109,9 +112,9 @@ async def _timed(dispatch: Any) -> dict[str, float]:
         async with dispatch() as s:
             (await s.execute(query, {"n": 50})).all()
         took.append((time.perf_counter() - started) * 1000)
-    took.sort()
-    return {"median_ms": round(statistics.median(took), 2), "p95_ms": round(took[int(CALLS * 0.95) - 1], 2),
-            "max_ms": round(took[-1], 2)}  # fmt: skip
+    first, rest = round(took[0], 2), sorted(took[1:])
+    return {"first_ms": first, "median_ms": round(statistics.median(rest), 2),
+            "p95_ms": round(rest[math.ceil(len(rest) * 0.95) - 1], 2), "max_ms": round(rest[-1], 2)}  # fmt: skip
 
 
 @pytest.mark.parametrize("n", SIZES)
@@ -120,10 +123,9 @@ async def test_the_misses_due_query_at_scale(n, pg_url, owner_sessionmaker, disp
     try:
         for name, shape in SHAPES.items():
             await _shaped(owner_sessionmaker, pg_url, t, shape)
-            async with dispatch_sessionmaker() as s:
-                due = (await s.execute(text("select count(*) from incarnation_miss_candidates(50)"))).scalar()
-            assert due == (0 if shape is None else 10)
-            RESULTS.append({"incarnations": n, "shape": name, "picked": due, "plan": await _plan(pg_url),
+            plan = await _plan(pg_url)  # the first read since the shape was made
+            assert plan["rows"] == (0 if shape is None else 10)
+            RESULTS.append({"incarnations": n, "shape": name, "picked": plan["rows"], "plan": plan,
                             "call": await _timed(dispatch_sessionmaker)})  # fmt: skip
     finally:
         for table in ("schedule_intervals", "schedule_incarnations", "schedules"):
