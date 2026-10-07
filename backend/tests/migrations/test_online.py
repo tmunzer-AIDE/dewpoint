@@ -324,8 +324,8 @@ async def test_a_schedule_the_old_code_makes_after_the_backfill_is_still_invento
     API, as dewpoint_api) and syncs it (its dispatcher, as dewpoint_dispatch), recording the missed count Temporal
     shows: once the upgrade ends, each has its incarnation 0 and its life before the migration recorded, as the
     schedules already there have. 0040 captures every schedule added until the inventory's cutover is recorded; the
-    cutover takes each incarnation 0's count as the old dispatcher last recorded it (the review's I1: the new misses
-    pass would have counted that increase again)."""
+    cutover's catch-up takes each incarnation 0's count as the old dispatcher last recorded it (the review's I1: the new
+    misses pass would have counted that increase again)."""
     url = await copy(cluster, templates["0034"])
     made: list[uuid.UUID] = []
 
@@ -345,7 +345,9 @@ async def test_a_schedule_the_old_code_makes_after_the_backfill_is_still_invento
     found = [await scalar(url, INVENTORIED.replace(":i", f"'{i}'")) for i in made]
     assert found == [1] * len(made)
     assert await scalar(url, UNINCARNATED) == 0 and await scalar(url, UNSPANNED) == 0
-    assert await scalar(url, "SELECT schedule_inventory_cutover_record()") == 0  # nothing left to catch up
+    caught = await scalar(url, "SELECT caught FROM schedule_inventory_catch_up('00000000-0000-0000-0000-000000000000', "
+                               "1000000)")  # fmt: skip
+    assert caught == 0 and await scalar(url, "SELECT schedule_inventory_cutover_record()") is True  # none missed
     counts = [await scalar(url, f"SELECT misses FROM schedule_incarnations WHERE schedule_id = '{i}' AND number = 0")
               for i in made]  # fmt: skip
     assert counts == [OLD_MISSED] * len(made)

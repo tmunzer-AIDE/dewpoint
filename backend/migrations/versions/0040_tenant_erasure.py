@@ -69,8 +69,10 @@ application from before it still writes, and its dispatcher syncs every schedule
 `dewpoint schedules inventory-cutover --attest` records `schedule_inventory_cutover` (every writer from before 0040
 gone, attested), each schedule added, by any writer, is captured as the backfill records those already here: its
 incarnation 0 and its life until then unknown (`schedules_inventoried`, from before the backfill, so none slips between
-them). No dispatcher pass or erasure stage that relies on the inventory runs before the cutover; no migration records
-it, not even a fresh deployment's."""
+them). The cutover first catches up, in batches, any schedule the capture missed and the missed counts the old
+dispatcher recorded since (`schedule_inventory_catch_up`), then records, in a short transaction that reads no schedule
+(`schedule_inventory_cutover_record`). No dispatcher pass or erasure stage that relies on the inventory runs before the
+cutover; no migration records it, not even a fresh deployment's."""
 
 from collections.abc import Callable
 from uuid import UUID
@@ -371,42 +373,76 @@ BEGIN
   RETURN NULL;
 END $$""",
     "REVOKE ALL ON FUNCTION schedule_inventoried() FROM PUBLIC",
-    # The cutover, once, after its catch-up, in one transaction, schedules' inserts held off meanwhile: any schedule
-    # without an incarnation (one the capture missed) given its incarnation 0 and its life until then unknown; each
-    # incarnation 0 given its schedule's missed count, as the old dispatcher last recorded it (it read Temporal's under
-    # the schedule's own id every five minutes, past the count copied here: the new misses pass adds only what's missed
-    # after this, never that increase again, the review's I1). Its count of schedules caught up, or NULL when recorded
-    # already. The key admin's, through `dewpoint schedules inventory-cutover`.
-    """CREATE FUNCTION schedule_inventory_cutover_record() RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER
+    # The catch-up, before the cutover, a batch at a time (the owner's review of checkpoint 3: done under the cutover's
+    # lock, its time grew with the schedules): of the next `max_rows` schedules past `after`, by id, each without an
+    # incarnation (one the capture missed: its trigger off while it was added, as only the table's owner can turn it)
+    # given its incarnation 0 and its life until then unknown; each incarnation 0 given its schedule's missed count, as
+    # the old dispatcher last recorded it (it read Temporal's under the schedule's own id every five minutes, past the
+    # count copied here: the new misses pass adds only what's missed after the cutover, never that increase again, the
+    # review's I1). It holds no lock a schedule's writer waits for. The last id it took (NULL: none left), how many it
+    # took, caught up and refreshed. Refused once the cutover is recorded: a schedule added since is the new sync's.
+    """CREATE FUNCTION schedule_inventory_catch_up(after uuid, max_rows integer)
+RETURNS TABLE (last_id uuid, seen integer, caught integer, refreshed integer) LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = public, pg_temp SET row_security = off AS $$
 DECLARE
-  v_count bigint;
+  v_ids uuid[];
+  v_seen integer;
+  v_caught integer;
+  v_refreshed integer;
 BEGIN
-  LOCK TABLE schedules IN SHARE ROW EXCLUSIVE MODE;
   IF EXISTS (SELECT 1 FROM schedule_inventory_cutover) THEN
-    RETURN NULL;
+    RAISE EXCEPTION 'the schedule inventory''s cutover is recorded already';
+  END IF;
+  SELECT array_agg(id ORDER BY id) INTO v_ids
+  FROM (SELECT id FROM schedules WHERE id > after ORDER BY id LIMIT max_rows) b;
+  v_seen := coalesce(array_length(v_ids, 1), 0);
+  IF v_seen = 0 THEN
+    RETURN QUERY SELECT NULL::uuid, 0, 0, 0;
+    RETURN;
   END IF;
   INSERT INTO schedule_incarnations (temporal_id, tenant_id, schedule_id, number, misses, backfilled)
   SELECT 't:' || s.tenant_id || ':sched:' || s.id, s.tenant_id, s.id, 0, s.misses, true FROM schedules s
-  WHERE NOT EXISTS (SELECT 1 FROM schedule_incarnations i WHERE i.schedule_id = s.id)
+  WHERE s.id = ANY (v_ids) AND NOT EXISTS (SELECT 1 FROM schedule_incarnations i WHERE i.schedule_id = s.id)
   ON CONFLICT (temporal_id) DO NOTHING;
-  GET DIAGNOSTICS v_count = ROW_COUNT;
+  GET DIAGNOSTICS v_caught = ROW_COUNT;
   INSERT INTO schedule_intervals (tenant_id, schedule_id, temporal_id, kind, starts_at, ends_at, class, reason)
   SELECT i.tenant_id, i.schedule_id, i.temporal_id, 'creation', s.created_at, i.recorded_at, 'unknown',
          'before_migration'
   FROM schedule_incarnations i JOIN schedules s ON s.id = i.schedule_id
-  WHERE i.backfilled AND NOT EXISTS (SELECT 1 FROM schedule_intervals v WHERE v.temporal_id = i.temporal_id
-                                     AND v.kind = 'creation');
+  WHERE i.schedule_id = ANY (v_ids) AND i.backfilled
+    AND NOT EXISTS (SELECT 1 FROM schedule_intervals v WHERE v.temporal_id = i.temporal_id AND v.kind = 'creation');
   UPDATE schedule_incarnations i SET misses = s.misses FROM schedules s
-  WHERE i.schedule_id = s.id AND i.backfilled AND s.misses > i.misses;
+  WHERE i.schedule_id = s.id AND s.id = ANY (v_ids) AND i.backfilled AND s.misses > i.misses;
+  GET DIAGNOSTICS v_refreshed = ROW_COUNT;
+  RETURN QUERY SELECT v_ids[v_seen], v_seen, v_caught, v_refreshed;
+END $$""",
+    "REVOKE ALL ON FUNCTION schedule_inventory_catch_up(uuid, integer) FROM PUBLIC",
+    # The cutover, once, after the catch-up: in one short transaction holding schedules' inserts off, and the capture's
+    # state still (turning a trigger off takes the same lock), it refuses while the capture is off (a schedule added
+    # since the catch-up passed would be missed), then records. It reads no schedule: its hold doesn't grow with them.
+    # Whether it recorded (false: recorded already). The key admin's, as the catch-up is, through `dewpoint schedules
+    # inventory-cutover`.
+    """CREATE FUNCTION schedule_inventory_cutover_record() RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public, pg_temp SET row_security = off AS $$
+BEGIN
+  LOCK TABLE schedules IN SHARE ROW EXCLUSIVE MODE;
+  IF EXISTS (SELECT 1 FROM schedule_inventory_cutover) THEN
+    RETURN false;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'schedules'::regclass AND tgname = 'schedules_inventoried'
+                 AND tgenabled IN ('O', 'A')) THEN
+    RAISE EXCEPTION 'the schedule inventory''s capture (trigger schedules_inventoried) is off: turn it on, then run '
+                    'the cutover again';
+  END IF;
   INSERT INTO schedule_inventory_cutover DEFAULT VALUES;
-  RETURN v_count;
+  RETURN true;
 END $$""",
     "REVOKE ALL ON FUNCTION schedule_inventory_cutover_record() FROM PUBLIC",
 ]
 CAPTURED = "CREATE TRIGGER schedules_inventoried AFTER INSERT ON schedules FOR EACH ROW EXECUTE FUNCTION schedule_inventoried()"
 CUTOVER = [
     "GRANT SELECT ON schedule_inventory_cutover TO dewpoint_admin, dewpoint_dispatch, dewpoint_retention",
+    "GRANT EXECUTE ON FUNCTION schedule_inventory_catch_up(uuid, integer) TO dewpoint_admin",
     "GRANT EXECUTE ON FUNCTION schedule_inventory_cutover_record() TO dewpoint_admin",
 ]
 
@@ -653,6 +689,7 @@ def downgrade() -> None:
     op.execute("DROP TRIGGER schedules_inventoried ON schedules")
     op.execute("DROP FUNCTION schedule_inventoried()")
     op.execute("DROP FUNCTION schedule_inventory_cutover_record()")
+    op.execute("DROP FUNCTION schedule_inventory_catch_up(uuid, integer)")
     op.drop_table("schedule_inventory_cutover")
     op.execute(CALL_CANDIDATES_0042)
     for table, command, _, _ in GATED:

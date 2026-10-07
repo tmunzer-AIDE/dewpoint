@@ -76,11 +76,16 @@ dewpoint schedules inventory-cutover --attest --confirm  # records it, once
 Until then the old dispatcher may sync any schedule under the schedule's own Temporal id, so the database records each
 schedule added as one the inventory can't account for, and the new dispatcher's schedule passes and an erasure's
 schedule stages wait (`schedule_inventory_not_cut_over`, alerted on). The command refuses while Temporal shows a
-dispatcher from before 0040 polling the admission queue, and catches up any schedule the database didn't record. Each
-schedule from before 0040 keeps the missed count the old dispatcher last recorded, so the new dispatcher never counts
-those firings again. While it records, schedule inserts wait; it waits at most 200 ms for its lock each attempt, so no
-writer queues behind it for long. If schedules stay busy through its attempts, it records nothing and exits 1: run it
-again.
+dispatcher from before 0040 polling the admission queue. It then works in two parts:
+
+- **A catch-up, in batches of 1,000 schedules,** each committed on its own and holding no lock a schedule's writer
+  waits for. It gives any schedule the database didn't record its incarnation 0. It also gives each schedule from
+  before 0040 the missed count the old dispatcher last recorded, so the new dispatcher never counts those firings
+  again. If it's interrupted, run the command again: the batches done stay done.
+- **A short final step** that records the cutover. Schedule inserts wait while it runs, but it reads no schedule, so
+  its time doesn't grow with them. It waits at most 200 ms for its lock each attempt. If schedules stay busy through
+  its attempts, it records nothing and exits 1: run it again. It refuses while the capture trigger
+  (`schedules_inventoried`) is off: turn it back on, then run the command again.
 
 ## A build with a new engine ABI
 

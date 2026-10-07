@@ -6,13 +6,12 @@ import os
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 import typer
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import select, text
-from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest
 from temporalio.client import Client
@@ -43,6 +42,7 @@ from dewpoint.core.ingress import secrets_reseal
 from dewpoint.core.ingress.keys import retire_event_keys, rotate_event_key
 from dewpoint.core.models.identity import User
 from dewpoint.core.models.tenancy import Tenant
+from dewpoint.core.platform import inventory
 from dewpoint.core.platform.service import (
     EnvironmentMismatchError,
     EnvironmentNotRecordedError,
@@ -589,12 +589,6 @@ INVENTORY_ATTESTED = (
     "every writer from before 0040 (its API, its dispatcher) stopped and unable to restart; no image from before 0040 "
     "deployable"
 )
-# The cutover's lock on schedules, waited for at most this an attempt: a writer arriving meanwhile queues behind the
-# request, so it waits no longer (D15's bar: no writer waits long). Then it gives way and tries again, a pause apart.
-CUTOVER_LOCK_WAIT = "200ms"
-LOCK_NOT_AVAILABLE = "55P03"
-CUTOVER_ATTEMPTS = 60
-CUTOVER_PAUSE_S = 1.0
 
 
 @schedules_cli.command("inventory-cutover")
@@ -610,11 +604,13 @@ def schedules_inventory_cutover(
     API and its dispatcher) has stopped and can't restart, and that no image from before 0040 can be deployed against
     this database: nothing here can prove that. It also refuses (exit 1) while Temporal shows a dispatcher from before
     0040 polling the admission queue (its identity lacks the tick contract's mark, from the same release), and when
-    Temporal can't be asked (exit 3). With --confirm it records once, in one transaction holding off schedules' inserts:
-    any schedule without an incarnation (one the capture missed) is caught up first, and the count audited with the
-    attestation. That lock is waited for at most `CUTOVER_LOCK_WAIT` an attempt, `CUTOVER_ATTEMPTS` times: still busy,
-    nothing is recorded (exit 1; run it again). Exit 2 without --attest. Exit 2 when no Temporal namespace is recorded
-    or the configured one isn't it, before any connection. Run as dewpoint_admin."""
+    Temporal can't be asked (exit 3). With --confirm it catches up first, in batches each committed on its own (any
+    schedule without an incarnation, one the capture missed; each incarnation 0's missed count, as the old dispatcher
+    last recorded it), then records once, audited with the attestation, in a short transaction holding schedules'
+    inserts off (`dewpoint.core.platform.inventory`). Interrupted, it's run again: the batches done stay done. Its lock
+    waited for in vain through every attempt, nothing is recorded (exit 1; run it again); the capture off, it refuses.
+    Exit 2 without --attest. Exit 2 when no Temporal namespace is recorded or the configured one isn't it, before any
+    connection. Run as dewpoint_admin."""
     if not attest:
         typer.echo("pass --attest: no writer from before migration 0040 runs, or can be deployed again")
         raise typer.Exit(2)
@@ -636,28 +632,18 @@ def schedules_inventory_cutover(
             raise typer.Exit(1)
         if not confirm:
             return "not recorded (a dry run: pass --confirm)"
-        for _ in range(CUTOVER_ATTEMPTS):
-            try:
-                async with s.begin():
-                    await s.execute(text("SELECT set_config('lock_timeout', :w, true)"), {"w": CUTOVER_LOCK_WAIT})
-                    caught: int | None = (
-                        await s.execute(text("SELECT schedule_inventory_cutover_record()"))
-                    ).scalar_one()
-                    if caught is None:
-                        return "already recorded"
-                    at: datetime = (await s.execute(text("SELECT at FROM schedule_inventory_cutover"))).scalar_one()
-                    details: dict[str, object] = {"caught_up": int(caught), "attested": INVENTORY_ATTESTED}
-                    await audit_log.record(s, tenant_id=None, actor_id=None, action="schedules.inventory_cutover",
-                                           target_type="platform", target_id="inventory_cutover",
-                                           details=details)  # fmt: skip
-                return f"recorded the inventory's cutover at {at.isoformat()}; {caught} schedule(s) caught up"
-            except DBAPIError as e:
-                if getattr(e.orig, "sqlstate", None) != LOCK_NOT_AVAILABLE:
-                    raise
-            await asyncio.sleep(CUTOVER_PAUSE_S)
-        typer.echo(f"schedules stayed busy: their lock wasn't had within {CUTOVER_LOCK_WAIT} in {CUTOVER_ATTEMPTS} "
-                   "attempts; nothing recorded, run it again")  # fmt: skip
-        raise typer.Exit(1)
+        caught = await inventory.catch_up(s)
+        details: dict[str, object] = {"caught_up": caught.caught, "refreshed": caught.refreshed,
+                                      "attested": INVENTORY_ATTESTED}  # fmt: skip
+        try:
+            at = await inventory.record(s, details)
+        except inventory.InventoryBusyError as e:
+            typer.echo(f"{e}; run it again")
+            raise typer.Exit(1) from None
+        if at is None:
+            return "already recorded"
+        return (f"recorded the inventory's cutover at {at.isoformat()}; {caught.caught} schedule(s) caught up, "
+                f"{caught.refreshed} count(s) refreshed, in {caught.batches} batch(es)")  # fmt: skip
 
     typer.echo(asyncio.run(_in_session(_run)))
 
