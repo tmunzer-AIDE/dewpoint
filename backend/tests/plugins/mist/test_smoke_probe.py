@@ -97,3 +97,47 @@ def test_a_mismatch_names_only_declared_fields_and_rules() -> None:
     assert {"path": "results/*", "rule": "required", "missing": ["name"]} in found
     assert {"path": "map/*", "rule": "type", "expected": "integer", "found": "string"} in found
     assert SECRET not in json.dumps(found) and "aabbccddeeff" not in json.dumps(found)
+
+
+def test_a_union_mismatch_says_why_each_branch_failed() -> None:
+    schema = {
+        "type": "object",
+        "properties": {"device": {"anyOf": [
+            {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]},
+            {"type": "object", "properties": {"b": {"type": "integer"}}, "required": ["b"]},
+        ]}},
+    }  # fmt: skip
+    found = mist_smoke.mismatches(schema, {"device": {"a": None, SECRET: 1}})
+    assert found == [
+        {
+            "path": "device", "rule": "anyOf", "found": "object",
+            "branches": [
+                {"branch": 0, "errors": [{"path": "a", "rule": "type", "expected": "string", "found": "null"}]},
+                {"branch": 1, "errors": [{"path": "", "rule": "required", "missing": ["b"]}]},
+            ],
+        }
+    ]  # fmt: skip
+    assert SECRET not in json.dumps(found)
+
+
+async def test_an_answer_the_node_cant_read_is_described_by_its_shape() -> None:
+    def script(sent: Sent) -> Reply:  # the OAS says this search answers a list
+        return Reply(200, SECRET)
+
+    http, _ = readonly(script)
+    report = await mist_smoke.probe(http, "global_01", ORG, rate=0, nodes=["mist.org_usermacs.search"])
+    entry = report["operations"][0]
+    assert entry["status"] == "error" and entry["detail"] == "mist.invalid_answer"
+    assert entry["answer"] == {"type": "string"}
+    assert SECRET not in json.dumps(report)
+
+
+async def test_an_object_answer_shows_only_declared_keys() -> None:
+    def script(sent: Sent) -> Reply:
+        return Reply(200, {"results": "not a list", "total": 1, SECRET: 2})
+
+    http, _ = readonly(script)
+    report = await mist_smoke.probe(http, "global_01", ORG, rate=0, nodes=["mist.org_usermacs.search"])
+    entry = report["operations"][0]
+    assert entry["answer"] == {"type": "object", "keys": ["results", "total"], "other_keys": 1}
+    assert SECRET not in json.dumps(report)

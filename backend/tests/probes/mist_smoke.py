@@ -16,6 +16,7 @@ types), never a value."""
 import argparse
 import asyncio
 import json
+import json as json_module
 import re
 import sys
 import time
@@ -36,6 +37,7 @@ from dewpoint.sdk import InvalidRequest, NodeError, ReadOnly, TransportError, no
 
 PLACEHOLDER = re.compile(r"\{([a-z_]+)\}")
 MAX_MISMATCHES = 50  # distinct mismatches kept for one operation
+MAX_BRANCH_ERRORS = 20  # a union branch's errors kept
 # Path values a list elsewhere gives: (the list's path template, the field of its first result).
 SOURCES = {
     "device_id": ("/api/v1/sites/{site_id}/devices", "id"),
@@ -51,6 +53,7 @@ class ReadOnlyHttp:
 
     def __init__(self, inner: Any, base: str, token: str) -> None:
         self._inner, self._base, self._token = inner, base.rstrip("/"), token
+        self.last_body: Any = None
 
     def _target(self, url: str) -> str:
         parts = urlsplit(url)
@@ -79,7 +82,12 @@ class ReadOnlyHttp:
         if any(name.lower() == "authorization" for name in headers or {}):
             raise InvalidRequest()
         sent = {**(headers or {}), "Authorization": f"Token {self._token}"}
-        return await self._inner.request("GET", self._target(url), headers=sent, params=params)
+        answer = await self._inner.request("GET", self._target(url), headers=sent, params=params)
+        try:  # kept in memory only, for an answer's shape when the node can't read it
+            self.last_body = json_module.loads(answer.content) if answer.content.strip() else None
+        except ValueError:
+            self.last_body = None
+        return answer
 
 
 @dataclass
@@ -152,24 +160,53 @@ def _json_type(value: Any) -> str:
     return "array" if isinstance(value, list) else "object"
 
 
+def _described(e: Any, declared: set[str], path: Sequence[Any]) -> dict[str, Any]:
+    where = "/".join(p if isinstance(p, str) and p in declared else "*" for p in path)
+    entry: dict[str, Any] = {"path": where, "rule": str(e.validator)}
+    if e.validator == "required" and isinstance(e.instance, Mapping):
+        entry["missing"] = sorted(n for n in e.validator_value if isinstance(n, str) and n not in e.instance)
+    if e.validator == "type":
+        entry["expected"] = e.validator_value
+        entry["found"] = _json_type(e.instance)
+    if e.validator in ("anyOf", "oneOf"):  # why each branch failed, relative to the union's place
+        entry["found"] = _json_type(e.instance)
+        branches: dict[int, list[dict[str, Any]]] = {}
+        for sub in e.context or ():
+            index = sub.relative_schema_path[0] if sub.relative_schema_path else -1
+            errors = branches.setdefault(int(index), [])
+            described = _described(sub, declared, list(sub.relative_path))
+            described.pop("branches", None)
+            if described not in errors and len(errors) < MAX_BRANCH_ERRORS:
+                errors.append(described)
+        entry["branches"] = [{"branch": i, "errors": errs} for i, errs in sorted(branches.items())]
+    return entry
+
+
 def mismatches(schema: Mapping[str, Any], value: Any) -> list[dict[str, Any]]:
     """Where `value` breaks `schema`: each place as declared field names (`*` for an undeclared key or an index) and
-    its rule; a missing field's declared name; a type mismatch's JSON types. Never a value."""
+    its rule; a missing field's declared name; a type mismatch's JSON types; a union's failure per branch. Never a
+    value."""
     declared = _declared(schema)
     out: list[dict[str, Any]] = []
     for e in Draft202012Validator(schema).iter_errors(value):
-        where = "/".join(p if isinstance(p, str) and p in declared else "*" for p in e.absolute_path)
-        entry: dict[str, Any] = {"path": where, "rule": str(e.validator)}
-        if e.validator == "required" and isinstance(e.instance, Mapping):
-            entry["missing"] = sorted(n for n in e.validator_value if isinstance(n, str) and n not in e.instance)
-        if e.validator == "type":
-            entry["expected"] = e.validator_value
-            entry["found"] = _json_type(e.instance)
+        entry = _described(e, declared, list(e.absolute_path))
         if entry not in out:
             out.append(entry)
         if len(out) >= MAX_MISMATCHES:
             break
     return out
+
+
+def shape(value: Any, declared: set[str]) -> dict[str, Any]:
+    """An answer's shape, never its values: its JSON type, a list's length, an object's declared keys and how many
+    others it has."""
+    found: dict[str, Any] = {"type": _json_type(value)}
+    if isinstance(value, list):
+        found["length"] = len(value)
+    elif isinstance(value, Mapping):
+        found["keys"] = sorted(k for k in value if isinstance(k, str) and k in declared)
+        found["other_keys"] = len(value) - len(found["keys"])
+    return found
 
 
 def _source(node: type[MistOperation], name: str) -> tuple[str, str]:
@@ -235,6 +272,8 @@ async def probe(
             data = (await node().run(ProbeStep(connection), config)).model_dump(mode="json")  # type: ignore[arg-type]
         except NodeError as e:
             entry |= {"status": "error", "detail": e.code}
+            if e.code == "mist.invalid_answer":
+                entry["answer"] = shape(http.last_body, _declared(node_manifest(node)["output_schema"]))
             continue
         except TransportError as e:
             entry |= {"status": "error", "detail": type(e).code}
