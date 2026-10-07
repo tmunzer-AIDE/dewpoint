@@ -10,8 +10,8 @@ behind it, and a writer's lock order can't deadlock it into rolling everything b
   restrictive policies, its triggers. A step locks at most one table in use (a grant locks none), but for 0035's keys,
   which take both their table and the one they reference, and a new table's keys, which share what they reference.
 - A step's transaction lasts at most its budget, `SHARE` of the shortest `deadlock_timeout` any role or the database
-  has: each statement's lock timeout is what's left of it (its statement timeout, `MARGIN` of that `deadlock_timeout`
-  more). So a normal operation queued behind it waits less than that, and a writer whose lock the step waits for never
+  has, and never more than `BUDGET_MAX_S`, however long that is (the owner's review of checkpoint 3): each statement's
+  lock timeout is what's left of it (its statement timeout, a `MARGIN` share more). So a normal operation queued behind it waits less than that, and a writer whose lock the step waits for never
   waits long enough for its own deadlock check: the step gives way first. A lock not taken in time, a deadlock, or the
   budget spent rolls the step back whole; it's tried again after a growing, jittered pause, at most `ATTEMPTS` times,
   each giving-way logged, then the upgrade stops, naming it (`StepFailedError`); a statement cancelled on purpose
@@ -20,6 +20,11 @@ behind it, and a writer's lock order can't deadlock it into rolling everything b
   only once the request had waited `deadlock_timeout`, which a step never does). A step whose `done` query says it
   committed already is skipped: an interrupted migration runs again from its start (Alembic records it only at its
   end).
+- What a budget rests on holds through the upgrade (the owner's review of checkpoint 3): no session may set its own
+  `deadlock_timeout` below what the catalogue shows, so the upgrade refuses while a role other than the migrating one
+  is granted `SET` on it, or a superuser is an application role (`dewpoint_*`) or a member of one
+  (`UnsafeSettingsError`); and each step reads them again, stopping the upgrade if they changed since it began
+  (`SettingsChangedError`). It's run again once they're settled.
 - `batches`: a backfill in committed batches of `BATCH` rows, each taking rows not done yet: finding them outside any
   step (it waits for no normal operation), applying them in one.
 - `plain`: one statement outside any transaction, whose locks block no normal read or write (`CREATE INDEX
@@ -43,7 +48,8 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import DBAPIError
 
 SHARE = 0.6  # a step's budget: this share of the server's deadlock_timeout
-MARGIN = 0.05  # a statement's timeout past its lock timeout: this share of deadlock_timeout (50 ms at its default)
+BUDGET_MAX_S = 1.0  # a step's budget at most, however long deadlock_timeout is: what queues behind it waits no longer
+MARGIN = 0.05  # a statement's timeout past its lock timeout: this share of the budget's base (50 ms at the default)
 LOCK_PLAIN = "5s"  # what a statement outside a step waits for each of its locks
 ATTEMPTS = 60  # a step's tries before the upgrade stops, naming it
 PAUSE_S = (0.05, 2.0)  # the pause between tries: doubling from the first, at most the second, jittered
@@ -60,6 +66,14 @@ log = logging.getLogger("alembic.online")
 
 class StepFailedError(RuntimeError):
     """A step that gave way `ATTEMPTS` times: the upgrade stops, naming it."""
+
+
+class UnsafeSettingsError(StepFailedError):
+    """Roles whose sessions could set their own `deadlock_timeout` below what the upgrade sees: it doesn't start."""
+
+
+class SettingsChangedError(StepFailedError):
+    """What a step's budget rests on changed since the upgrade began: it stops, to be run again once settled."""
 
 
 class _Budget(Exception):
@@ -91,6 +105,22 @@ SELECT substr(c, length('deadlock_timeout=') + 1) FROM pg_db_role_setting s, unn
 WHERE s.setdatabase IN (0, (SELECT oid FROM pg_database WHERE datname = current_database()))
   AND starts_with(c, 'deadlock_timeout=')"""
 FILES = "SELECT setting FROM pg_file_settings WHERE name = 'deadlock_timeout' AND applied"
+# Roles whose sessions could set their own deadlock_timeout below what this upgrade sees: one granted SET on it, but the
+# migrating role and the superusers (the parameter's owner lists its own), and a superuser that is an application role
+# or a member of one; PUBLIC if it's granted to every role
+UNSEEN = """WITH RECURSIVE app AS (
+  SELECT oid FROM pg_roles WHERE rolname LIKE 'dewpoint\\_%'
+  UNION
+  SELECT m.member FROM pg_auth_members m JOIN app ON m.roleid = app.oid
+), granted AS (
+  SELECT a.grantee FROM pg_parameter_acl p, aclexplode(p.paracl) a
+  WHERE p.parname = 'deadlock_timeout' AND a.privilege_type = 'SET'
+)
+SELECT r.rolname FROM pg_roles r WHERE r.rolname <> current_user
+  AND ((r.rolsuper AND r.oid IN (SELECT oid FROM app)) OR (NOT r.rolsuper AND r.oid IN (SELECT grantee FROM granted)))
+UNION ALL
+SELECT 'PUBLIC' FROM granted WHERE grantee = 0
+ORDER BY 1"""
 UNITS = {"us": 0.001, "ms": 1, "s": 1_000, "min": 60_000, "h": 3_600_000, "d": 86_400_000}
 
 
@@ -102,18 +132,34 @@ def _ms(value: str) -> float:
     return float(found[1]) * UNITS.get(found[2], 1)
 
 
+def _settings(conn: Connection) -> tuple[float, tuple[str, ...]]:
+    """The shortest `deadlock_timeout` any session of this database may have, in milliseconds, and the roles whose
+    sessions could set theirs lower unseen."""
+    values: list[str] = list(conn.execute(text(TIMEOUTS)).scalars())
+    try:
+        values += list(conn.execute(text(FILES)).scalars())
+    except DBAPIError:  # only a role that may read the server's files: its session's setting stands in for them
+        pass
+    return min(_ms(v) for v in values), tuple(conn.execute(text(UNSEEN)).scalars())
+
+
 def _budget(conn: Connection) -> float:
     """A step's budget, in seconds: `SHARE` of the shortest `deadlock_timeout` any session of this database may have,
-    so no writer's deadlock check comes before the step gives way, whatever its role."""
-    if "online_budget" not in conn.info:
-        values = list(conn.execute(text(TIMEOUTS)).scalars())
-        try:
-            values += list(conn.execute(text(FILES)).scalars())
-        except DBAPIError:  # only a role that may read the server's files: its session's setting stands in for them
-            pass
-        conn.info["online_budget"] = SHARE * min(_ms(v) for v in values) / 1000
-    budget: float = conn.info["online_budget"]
-    return budget
+    so no writer's deadlock check comes before the step gives way, whatever its role; `BUDGET_MAX_S` at most. Read
+    again for each step: what it rests on must hold from the upgrade's start."""
+    shortest, unseen = now = _settings(conn)
+    if unseen:
+        raise UnsafeSettingsError(
+            f"roles whose sessions could set deadlock_timeout below what this upgrade sees: {', '.join(unseen)} "
+            "(granted SET on it, or a superuser among the application's roles); revoke that for the upgrade"
+        )
+    began = conn.info.setdefault("online_settings", now)
+    if now != began:
+        raise SettingsChangedError(
+            f"deadlock_timeout changed during the upgrade (the shortest was {began[0]:g} ms, now {shortest:g} ms): "
+            "hold it, and who may set it, until the upgrade ends; run the upgrade again"
+        )
+    return min(SHARE * shortest / 1000, BUDGET_MAX_S)
 
 
 def _why(e: BaseException) -> str | None:
@@ -183,7 +229,7 @@ def step(conn: Connection, name: str, *actions: str | Callable[[], object], done
                 if left <= 0:
                     raise _Budget
                 ms = max(1, int(left * 1000))  # a lock not taken gives way as such, just before the statement does
-                margin = max(1, int(budget / SHARE * MARGIN * 1000))
+                margin = max(1, int(budget / SHARE * MARGIN * 1000))  # 5% of the budget's base
                 conn.execute(text("SELECT set_config('lock_timeout', :l, true), set_config('statement_timeout', :s, "
                                   "true)"), {"l": f"{ms}ms", "s": f"{ms + margin}ms"})  # fmt: skip
                 if isinstance(action, str):

@@ -569,6 +569,105 @@ async def test_a_writer_whose_role_checks_deadlocks_sooner_is_never_a_steps_vict
     assert waited < 0.2
 
 
+async def test_a_step_lasts_at_most_a_second_however_long_deadlock_timeout_is(scratch, monkeypatch) -> None:
+    """The owner's review of checkpoint 3: a database whose `deadlock_timeout` is 10 s let a step last 6 s (60% of
+    it), and a read or write queued behind the step wait as long. A step's budget is `BUDGET_MAX_S` at most, whatever
+    `deadlock_timeout` is: behind a held lock it gives way within that, and what queued behind it waits no longer."""
+    monkeypatch.setattr(online, "ATTEMPTS", 1)
+    await execute(scratch, f"CREATE TABLE a (x int); ALTER DATABASE {scratch.rsplit('/', 1)[1]} "
+                           "SET deadlock_timeout = '10s'")  # fmt: skip
+    holder, reader = await asyncpg.connect(scratch), await asyncpg.connect(scratch)
+    tx = holder.transaction()
+    await tx.start()
+    await holder.execute("INSERT INTO a VALUES (1)")  # a writer's open transaction
+    try:
+        t0 = time.monotonic()
+        stepping = asyncio.create_task(run(scratch, lambda c: online.step(
+            c, "capped", "LOCK TABLE a IN ACCESS EXCLUSIVE MODE")))  # fmt: skip
+        await asyncio.sleep(0.2)  # the step waits for the writer
+        t1 = time.monotonic()
+        await reader.fetchval("SELECT count(*) FROM a")  # queued behind the step's request
+        queued = time.monotonic() - t1
+        with pytest.raises(online.StepFailedError, match=r"\(lock\)"):
+            await stepping
+        took = time.monotonic() - t0
+    finally:
+        await tx.rollback()
+        await holder.close()
+        await reader.close()
+    assert took < 1.5 and queued < 1.2
+
+
+async def test_an_upgrade_refuses_while_a_role_could_lower_its_own_deadlock_timeout(scratch) -> None:
+    """The owner's review of checkpoint 3: a step's budget rests on the shortest `deadlock_timeout` the catalogue shows,
+    so no session may set its own lower unseen. The upgrade refuses, naming them, while a role other than the
+    migrating one is granted `SET` on it, or a superuser is an application role or a member of one; it changes
+    nothing."""
+    tag = uuid.uuid4().hex[:8]
+    granted, app, superuser = f"granted_{tag}", f"dewpoint_t{tag}", f"su_{tag}"
+    await execute(scratch, f"CREATE ROLE {granted}; GRANT SET ON PARAMETER deadlock_timeout TO {granted}; "
+                           f"CREATE ROLE {app} NOLOGIN; CREATE ROLE {superuser} SUPERUSER IN ROLE {app}")  # fmt: skip
+    try:
+        with pytest.raises(online.StepFailedError) as refused:
+            await run(scratch, lambda c: online.step(c, "refused", "CREATE TABLE t3 (x int)"))
+        assert granted in str(refused.value) and superuser in str(refused.value)
+        assert not await exists(scratch, "t3")
+    finally:
+        await execute(scratch, f"REVOKE SET ON PARAMETER deadlock_timeout FROM {granted}; DROP ROLE {granted}; "
+                               f"DROP ROLE {superuser}; DROP ROLE {app}")  # fmt: skip
+
+
+CHANGES = {  # a change to what a step's budget rests on, made while the upgrade runs
+    "deadlock_timeout": ["ALTER DATABASE {db} SET deadlock_timeout = '500ms'"],
+    "a grant": ["CREATE ROLE {role}", "GRANT SET ON PARAMETER deadlock_timeout TO {role}"],
+}
+
+
+@pytest.mark.parametrize("change", CHANGES)
+async def test_an_upgrade_stops_when_what_its_budget_rests_on_changes_under_it(scratch, change) -> None:
+    """The owner's review of checkpoint 3: `deadlock_timeout`, and who may set it, held stable through the upgrade.
+    Each step reads them again; changed since the upgrade began, the upgrade stops before the step, naming why, and is
+    run again once they're settled (its committed steps stay done)."""
+    role = f"granted_{uuid.uuid4().hex[:8]}"
+
+    def two(c: Connection) -> None:
+        online.step(c, "one", "CREATE TABLE s1 (x int)")
+        for statement in CHANGES[change]:
+            c.execute(text(statement.format(db=scratch.rsplit("/", 1)[1], role=role)))
+        online.step(c, "two", "CREATE TABLE s2 (x int)")
+
+    try:
+        with pytest.raises(online.StepFailedError, match=r"deadlock_timeout"):
+            await run(scratch, two)
+    finally:
+        if change == "a grant":
+            await execute(scratch, f"REVOKE SET ON PARAMETER deadlock_timeout FROM {role}; DROP ROLE {role}")
+    assert await exists(scratch, "s1") and not await exists(scratch, "s2")
+
+
+async def test_no_application_role_can_set_its_own_deadlock_timeout(cluster, templates) -> None:
+    """The owner's review of checkpoint 3, verified: every role the migrations make (`dewpoint_*`) is refused `SET
+    deadlock_timeout` in its sessions (a superuser's parameter, granted to none of them)."""
+    url = await copy(cluster, templates["0042"])
+    await asyncio.to_thread(upgrade, url)
+    c = await asyncpg.connect(url)
+    try:
+        roles = [r["rolname"] for r in await c.fetch("SELECT rolname FROM pg_roles WHERE rolname LIKE 'dewpoint\\_%' "
+                                                     "AND NOT rolsuper ORDER BY 1")]  # fmt: skip
+        refused = []
+        for role in roles:
+            try:
+                async with c.transaction():
+                    await c.execute(f"SET LOCAL ROLE {role}")
+                    await c.execute("SET LOCAL deadlock_timeout = '100ms'")
+            except asyncpg.InsufficientPrivilegeError:
+                refused.append(role)
+        superusers = await c.fetchval("SELECT count(*) FROM pg_roles WHERE rolname LIKE 'dewpoint\\_%' AND rolsuper")
+    finally:
+        await c.close()
+    assert len(roles) >= 7 and refused == roles and superusers == 0
+
+
 async def test_an_index_an_interrupted_build_left_invalid_is_built_again(scratch) -> None:
     await execute(scratch, "CREATE TABLE u (x int); INSERT INTO u VALUES (1), (1)")
     with pytest.raises(asyncpg.UniqueViolationError):  # a build that fails leaves its index, invalid

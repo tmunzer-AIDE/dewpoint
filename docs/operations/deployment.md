@@ -55,7 +55,12 @@ normal reads and writes wait at most a fraction of a second behind the upgrade, 
 run again with `alembic upgrade head`. Two of the database's settings matter:
 
 - A step lasts at most 60% of the shortest `deadlock_timeout` the server, the database or any role has (`ALTER ROLE …
-  SET deadlock_timeout`). A very short one makes steps too short to finish: the upgrade then stops, naming the step.
+  SET deadlock_timeout`), and never more than 1 second. A very short one makes steps too short to finish: the upgrade
+  then stops, naming the step.
+- No session may set its own `deadlock_timeout` lower than the catalogue shows. The upgrade refuses to start while a
+  role other than the migrating one is granted `SET` on it, or while a superuser is one of the application's roles
+  (`dewpoint_*`) or a member of one. Keep `deadlock_timeout` and those grants unchanged until the upgrade ends: each
+  step reads them again and stops the upgrade if they changed. Run it again once they're settled.
 - When the migrating role may set `deadlock_timeout` (a superuser, or one granted `SET ON PARAMETER
   deadlock_timeout`), a step waiting for an autovacuum has the server cancel that one; otherwise the step gives way
   and tries again until the autovacuum ends, and the upgrade stops after its attempts if it never does.
