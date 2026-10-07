@@ -24,9 +24,9 @@ behind it, and a writer's lock order can't deadlock it into rolling everything b
   = local`: a step is idempotent, run again if a failover lost it), leaving only the local WAL flush, as any writer's.
   Nor does one bound its session's idling between statements, a stalled client's (the review of checkpoint 5): a step's
   session idle in its transaction longer than its budget and margin is ended, its locks with it, and the upgrade stops
-  (run it again). So a step holds its locks about two budgets at most, a stalled client's included. A step whose `done`
-  query says it committed already is skipped: an interrupted migration runs again from its start (Alembic records it
-  only at its end).
+  (run it again). So a stalled client's step holds its locks about two budgets and that flush, which no timeout bounds.
+  A step whose `done` query says it committed already is skipped: an interrupted migration runs again from its start
+  (Alembic records it only at its end).
 - What a budget rests on holds through the upgrade (the owner's review of checkpoint 3): no session may set its own
   `deadlock_timeout` below what the catalogue shows, so the upgrade refuses while a role other than the migrating one
   is granted `SET` on it, or a superuser is an application role (`APPLICATION`) or a member of one
@@ -205,7 +205,8 @@ def _budget(conn: Connection) -> float:
 def _preconditions(conn: Connection) -> None:
     """At the upgrade's start: this session sees the server's own `deadlock_timeout`, and, while the application's
     sessions are connected, the operator attests (`ATTESTED`) they were recycled after any change to it, and that it
-    holds until the upgrade ends. Else `UnsafeSettingsError`, before any step."""
+    holds until the upgrade ends: the operator's assertion, which nothing here can check (no catalogue shows a live
+    session's setting). Else `UnsafeSettingsError`, before any step."""
     if conn.execute(text(HIDDEN)).scalar():
         raise UnsafeSettingsError(
             "this session's deadlock_timeout comes from a role, client or session setting, which hides the server's "

@@ -633,14 +633,17 @@ def schedules_inventory_cutover(
         if not confirm:
             return "not recorded (a dry run: pass --confirm)"
         try:
-            at, caught = await inventory.cut_over(s, INVENTORY_ATTESTED)
+            done = await inventory.cut_over(s, INVENTORY_ATTESTED)
         except inventory.CutoverRefusedError as e:
             typer.echo(f"not recorded: {e}")
             raise typer.Exit(1) from None
-        if at is None:
-            return "already recorded"
-        return (f"recorded the inventory's cutover at {at.isoformat()}; {caught.caught} schedule(s) caught up, "
-                f"{caught.refreshed} count(s) refreshed, in {caught.batches} batch(es)")  # fmt: skip
+        said = "already recorded" if done.at is None else (
+            f"recorded the inventory's cutover at {done.at.isoformat()}; {done.caught.caught} schedule(s) caught up, "
+            f"{done.caught.refreshed} count(s) refreshed, in {done.caught.batches} batch(es)")  # fmt: skip
+        if done.lock_lost:
+            said += ("; its lock's connection was lost before it ended, so another cutover may have run beside it "
+                     "(the database records one only)")  # fmt: skip
+        return said
 
     typer.echo(asyncio.run(_in_session(_run)))
 

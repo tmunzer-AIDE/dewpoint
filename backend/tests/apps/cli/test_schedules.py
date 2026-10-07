@@ -478,3 +478,117 @@ def test_the_cutovers_final_step_never_holds_schedules_past_its_bounds_when_its_
         assert isinstance(outcome, Exception), outcome
         assert _sql(pg_url, "select count(*) from schedule_inventory_cutover") == [0]
     assert waited < 1.5, waited
+
+
+async def _lock_dropped(url: str) -> None:
+    """The cutover's lock connection ended under it, as a lost network or a restarted pooler would end it."""
+    from dewpoint.core.platform import inventory
+
+    c = await asyncpg.connect(url)
+    try:
+        ended = await c.fetchval(
+            "SELECT count(pg_terminate_backend(pid)) FROM pg_locks WHERE locktype = 'advisory' AND granted "
+            "AND objsubid = 1 AND ((classid::bigint << 32) | objid::bigint) = hashtextextended($1, 0)",
+            inventory.RUNNING,
+        )
+        assert ended == 1
+    finally:
+        await c.close()
+
+
+def _dropping_during_catch_up(pg_url: str, monkeypatch, *, then: object = None) -> list[object]:
+    """The cutover's lock connection dropped after its first catch-up batch (and `then` run); what `then` returned."""
+    from dewpoint.core.platform import inventory
+
+    batch, done = inventory._batch, []
+    url = pg_url.replace("postgresql+asyncpg://", "postgresql://")
+
+    async def dropping(*args: object, **kwargs: object) -> object:
+        caught = await batch(*args, **kwargs)  # type: ignore[arg-type]
+        if not done:
+            await _lock_dropped(url)
+            done.append(await asyncio.to_thread(then) if callable(then) else None)
+        return caught
+
+    monkeypatch.setattr(inventory, "_batch", dropping)
+    return done
+
+
+def test_a_cutover_whose_lock_connection_dropped_reports_what_it_recorded(pg_url, _test_users, monkeypatch) -> None:
+    """The owner's review of checkpoint 5 (M2): the cutover's lock connection lost, its unlock at the end failed, and
+    that failure took the place of the outcome: recorded, yet a traceback. It reports what it recorded, and that its
+    lock was lost before its end (another cutover may have run beside it; the database records one only)."""
+    command = _cutover_env(pg_url, monkeypatch)
+    _dropping_during_catch_up(pg_url, monkeypatch)
+    with _restoring(pg_url):
+        done = CliRunner().invoke(app, command)
+        assert done.exit_code == 0, (done.output, done.exception)
+        assert "recorded the inventory's cutover" in done.output and "lock" in done.output.split("recorded", 1)[1]
+        assert _sql(pg_url, "select count(*) from schedule_inventory_cutover") == [1]
+
+
+def test_a_cutover_refused_after_its_lock_connection_dropped_says_why(pg_url, _test_users, monkeypatch) -> None:
+    """The owner's review of checkpoint 5 (M2): an earlier error is never masked by the unlock's own failure. The lock
+    connection lost and the capture changed meanwhile: the cutover refuses for that, said plainly (exit 1), nothing
+    recorded."""
+    command = _cutover_env(pg_url, monkeypatch)
+    escaped = _dropping_during_catch_up(pg_url, monkeypatch, then=lambda: _seeded(pg_url, 1, captured=False))
+    with _restoring(pg_url):
+        try:
+            refused = CliRunner().invoke(app, command)
+            assert refused.exit_code == 1 and isinstance(refused.exception, SystemExit), refused.exception
+            assert "changed" in refused.output
+            assert _sql(pg_url, "select count(*) from schedule_inventory_cutover") == [0]
+        finally:
+            for tenant in escaped:
+                _unseeded(pg_url, tenant)
+
+
+def test_the_cutovers_final_step_never_holds_schedules_for_a_standby_that_stops_answering(pg_url, _test_users) -> None:
+    """The owner's review of checkpoint 5: the final step kept the session's `synchronous_commit`, and neither its
+    statement nor its idle bound covers a commit waiting for a synchronous standby: with one named that never answers,
+    it held schedules' writes off until the standby answered. It commits without waiting for any (`local`; recorded
+    again at once, `recorded_already`, if a failover lost it): a writer queued behind it waits for it only."""
+    from dewpoint.core.platform import inventory
+
+    url = pg_url.replace("postgresql+asyncpg://", "postgresql://")
+
+    async def standby(names: str) -> None:
+        c = await asyncpg.connect(url)
+        try:
+            await c.execute(f"ALTER SYSTEM SET synchronous_standby_names = '{names}'")
+            await c.execute("SELECT pg_reload_conf()")
+        finally:
+            await c.close()
+
+    async def through() -> tuple[float, object]:
+        engine = make_engine(pg_url)
+        writer = await asyncpg.connect(url)
+        try:
+            async with make_sessionmaker(engine)() as s:
+                state = await inventory.capture(s)
+                await standby("nobody")  # named, never answering
+                try:
+                    recording = asyncio.create_task(inventory.record(s, state, {"attested": "the test"}))
+                    await asyncio.sleep(0.5)  # the final step has recorded, or waits for the standby
+                    t0 = time.monotonic()
+                    try:  # a writer's lock (its own commit writes nothing: it waits for no standby)
+                        await asyncio.wait_for(writer.execute("UPDATE schedules SET every_s = every_s WHERE false"), 6)
+                        waited = time.monotonic() - t0
+                    except TimeoutError:
+                        waited = float("inf")
+                finally:
+                    await standby("")  # none named: a commit waiting for one is let go
+                try:
+                    outcome: object = await asyncio.wait_for(recording, 30)
+                except Exception as e:
+                    outcome = e
+        finally:
+            writer.terminate()
+            await engine.dispose()
+        return waited, outcome
+
+    with _restoring(pg_url):
+        waited, outcome = asyncio.run(through())
+        assert _sql(pg_url, "select count(*) from schedule_inventory_cutover") == [1]
+    assert waited < 1.5 and not isinstance(outcome, Exception), (waited, outcome)

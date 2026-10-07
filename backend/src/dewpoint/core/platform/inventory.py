@@ -16,18 +16,25 @@ before migration 0040 is gone: a catch-up, in batches, then a short final step t
   schedules). Its lock is waited for at most `LOCK_WAIT` an attempt, so a writer queued behind the request waits no
   longer; then it gives way, at most `ATTEMPTS` times, `PAUSE_S` apart (`InventoryBusyError`: run it again). Its
   statements are bounded (`STATEMENT_WAIT`), and so is its session's idling between them (`IDLE_WAIT`): a client
-  stalled there has its session ended, its lock with it, and nothing recorded (the review of checkpoint 5).
+  stalled there has its session ended, its lock with it, and nothing recorded (the review of checkpoint 5). Its commit
+  waits for no synchronous standby (`synchronous_commit = local`, the owner's review of checkpoint 5: no bound above
+  covers that wait); a failover that lost it leaves no cutover recorded, and it's run again. So its hold is those bounds
+  and the local WAL flush, which no timeout bounds.
 
-Every refusal is a `CutoverRefusedError`, said in its message; nothing is recorded by one."""
+Every refusal is a `CutoverRefusedError`, said in its message; nothing is recorded by one. Its lock's connection lost
+before its end (a network, a restarted pooler; its lock released with it), the outcome stands all the same, an error or
+what it recorded, and says so (`CutOver.lock_lost`; the owner's review of checkpoint 5, M2): the unlock's own failure
+never takes its place."""
 
 import asyncio
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
+import structlog
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
 
 from dewpoint.core.audit import service as audit_log
 
@@ -40,6 +47,8 @@ PAUSE_S = 1.0  # between them
 LOCK_NOT_AVAILABLE = "55P03"
 RUNNING = "dewpoint schedule inventory cutover"  # the advisory lock a cutover holds while it runs
 
+log = structlog.get_logger("dewpoint.platform.inventory")
+
 
 @dataclass(frozen=True)
 class CaughtUp:
@@ -48,6 +57,16 @@ class CaughtUp:
     caught: int = 0
     refreshed: int = 0
     batches: int = 0
+
+
+@dataclass(frozen=True)
+class CutOver:
+    """What a cutover did: when it recorded (None: recorded already), its catch-up, and whether its lock's connection
+    was lost before its end (`lock_lost`: another cutover may have run beside it; the database records one only)."""
+
+    at: datetime | None
+    caught: CaughtUp
+    lock_lost: bool = False
 
 
 class CutoverRefusedError(RuntimeError):
@@ -120,7 +139,8 @@ async def record(s: AsyncSession, state: str | None, details: dict[str, object])
         try:
             async with s.begin():
                 await s.execute(text("SELECT set_config('lock_timeout', :w, true), set_config('statement_timeout', :s, "
-                                     "true), set_config('idle_in_transaction_session_timeout', :i, true)"),
+                                     "true), set_config('idle_in_transaction_session_timeout', :i, true), "
+                                     "set_config('synchronous_commit', 'local', true)"),
                                 {"w": LOCK_WAIT, "s": STATEMENT_WAIT, "i": IDLE_WAIT})  # fmt: skip
                 query = text("SELECT schedule_inventory_cutover_record(:c)")
                 outcome: str = (await s.execute(query, {"c": state})).scalar_one()
@@ -142,9 +162,8 @@ async def record(s: AsyncSession, state: str | None, details: dict[str, object])
     raise InventoryBusyError(BUSY)
 
 
-async def cut_over(s: AsyncSession, attested: str) -> tuple[datetime | None, CaughtUp]:
-    """The whole cutover, as above: when it was recorded (None: recorded already), and what its catch-up did. Audited
-    with `attested`. A `CutoverRefusedError` when it refuses."""
+async def cut_over(s: AsyncSession, attested: str) -> CutOver:
+    """The whole cutover, as above, audited with `attested`. A `CutoverRefusedError` when it refuses."""
     engine = s.bind
     if not isinstance(engine, AsyncEngine):
         raise TypeError("a cutover's session is bound to an engine")
@@ -156,16 +175,30 @@ async def cut_over(s: AsyncSession, attested: str) -> tuple[datetime | None, Cau
         if not held:
             raise CutoverRunningError("another inventory cutover is running: wait for it to end, then run it again")
         try:
-            async with s.begin():
-                if (await s.execute(text("SELECT EXISTS (SELECT 1 FROM schedule_inventory_cutover)"))).scalar():
-                    return None, CaughtUp()
-            state = await capture(s)
-            if not _on(state):
-                raise CaptureOffError(CAPTURE_OFF)
-            caught = await catch_up(s)
-            details: dict[str, object] = {"caught_up": caught.caught, "refreshed": caught.refreshed,
-                                          "attested": attested}  # fmt: skip
-            return await record(s, state, details), caught
-        finally:
-            await holder.execute(text("SELECT pg_advisory_unlock(hashtextextended(:k, 0))"), key)
-            await holder.commit()
+            at, caught = await _cut_over(s, attested)
+        finally:  # an error above stands: an unlock that fails replaces nothing
+            lost = not await _unlocked(holder)
+    return CutOver(at, caught, lock_lost=lost)
+
+
+async def _cut_over(s: AsyncSession, attested: str) -> tuple[datetime | None, CaughtUp]:
+    async with s.begin():
+        if (await s.execute(text("SELECT EXISTS (SELECT 1 FROM schedule_inventory_cutover)"))).scalar():
+            return None, CaughtUp()
+    state = await capture(s)
+    if not _on(state):
+        raise CaptureOffError(CAPTURE_OFF)
+    caught = await catch_up(s)
+    details: dict[str, object] = {"caught_up": caught.caught, "refreshed": caught.refreshed, "attested": attested}
+    return await record(s, state, details), caught
+
+
+async def _unlocked(holder: AsyncConnection) -> bool:
+    """The cutover's lock released; False when its connection was lost, the lock released with it."""
+    try:
+        await holder.execute(text("SELECT pg_advisory_unlock(hashtextextended(:k, 0))"), {"k": RUNNING})
+        await holder.commit()
+    except DBAPIError as e:
+        log.warning("inventory_cutover_lock_lost", error_type=type(e).__name__)
+        return False
+    return True
