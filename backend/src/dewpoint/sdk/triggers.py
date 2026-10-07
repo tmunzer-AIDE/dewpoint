@@ -29,7 +29,11 @@ def trigger_problems(plugin: str, t: Any) -> list[str]:
     """What's wrong with a trigger received as data (its manifest), for the SDK and the catalog alike."""
     key = t.get("key") if isinstance(t, Mapping) else None
     name = f"trigger {key!r}"
-    if not isinstance(key, str) or not TYPE_KEY_RE.match(key) or (key != plugin and not key.startswith(f"{plugin}.")):
+    if (
+        not isinstance(key, str)
+        or not TYPE_KEY_RE.fullmatch(key)
+        or (key != plugin and not key.startswith(f"{plugin}."))
+    ):
         return [f"{name} must be named {plugin!r} or start with '{plugin}.'"]
     assert isinstance(t, Mapping)  # noqa: S101 - a key was read from it
     if set(t) != TRIGGER_KEYS:
@@ -55,7 +59,7 @@ def trigger_problems(plugin: str, t: Any) -> list[str]:
         return [*out, f"{name}: topics must name 1-{MAX_TOPICS} topics"]
     for topic, schema in topics.items():
         where = f"{name}: topic {topic!r}"
-        if not isinstance(topic, str) or not TOPIC_RE.match(topic):
+        if not isinstance(topic, str) or not TOPIC_RE.fullmatch(topic):
             out.append(f"{where} must be lowercase letters, digits, '_', '.' and '-'")
             continue
         try:

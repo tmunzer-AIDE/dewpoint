@@ -272,6 +272,7 @@ async def test_a_notification_wakes_the_server(owner_sessionmaker, api_sessionma
         VerifyResult(True, "x" * 41),
         VerifyResult(True, "ok", "p" * 41),
         VerifyResult(True, "Not_A_Code"),
+        VerifyResult(True, "ok\n"),  # `$` also matches before a final newline (the owner's review R3 of 3b-2)
     ],
 )
 def test_a_verification_fits_what_is_stored(result: VerifyResult) -> None:

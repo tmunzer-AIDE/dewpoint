@@ -133,7 +133,8 @@ def test_credentials_name_fields_and_never_format_them() -> None:
 @pytest.mark.parametrize(
     "answer",
     [{"ok": True, "detail": "x" * 41, "privilege": None}, {"ok": True, "detail": "ok", "privilege": "p" * 41},
-     {"ok": "yes", "detail": "ok", "privilege": None}, None],
+     {"ok": "yes", "detail": "ok", "privilege": None}, None,
+     {"ok": True, "detail": "ok\n", "privilege": None}],  # `$` also matches before a final newline (review R3 of 3b-2)
 )  # fmt: skip
 def test_the_api_records_only_a_verification_its_columns_hold(answer: object) -> None:
     from dewpoint.core.connections.service import _checked

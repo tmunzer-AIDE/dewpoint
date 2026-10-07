@@ -259,6 +259,15 @@ class PlainSecret(BaseModel):
          "rate scope 'other.x' must start with 'demo.'"),
         (ConnectionType("demo", "D", DemoConfig, DemoSecret,
                         rate_scopes=(RateScope("demo.x", capacity=0, refill_per_s=1),)), "rate scope 'demo.x'"),
+        # `$` also matches before a final newline (the owner's review R3 of 3b-2): each name is matched whole
+        (ConnectionType("demo.x\n", "D", DemoConfig, DemoSecret), "key must be a lowercase identifier"),
+        (ConnectionType("demo", "D", DemoConfig, DemoSecret, auth=HeaderAuth("Authorization\n", "Token {token}")),
+         "auth header"),
+        (ConnectionType("demo", "D", DemoConfig, DemoSecret,
+                        host=HostMap("region", {"eu": "api.eu.example.com\n", "us": "api.example.com"})),
+         "must be a host name"),
+        (ConnectionType("demo", "D", DemoConfig, DemoSecret, rate_scopes=(RateScope("demo.x\n"),)),
+         "must start with 'demo.'"),
     ],
 )  # fmt: skip
 def test_a_connection_type_is_checked(kind: ConnectionType, problem: str) -> None:

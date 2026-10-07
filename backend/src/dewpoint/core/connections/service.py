@@ -249,7 +249,7 @@ def _checked(answer: dict[str, Any] | None) -> tuple[str, str, str | None]:
     if (
         not isinstance(ok, bool)
         or not isinstance(detail, str)
-        or not DETAIL_RE.match(detail)
+        or not DETAIL_RE.fullmatch(detail)
         or not (privilege is None or (isinstance(privilege, str) and len(privilege) <= 40 and privilege.isprintable()))
     ):
         return "error", "invalid_result", None

@@ -158,6 +158,22 @@ def test_value_kinds_rejects_unknown_kind() -> None:
         value_kinds("python")
 
 
+@pytest.mark.parametrize(
+    ("plugin", "fragment"),
+    [
+        (Plugin(name="demo", version="1", nodes=(_node(type="demo.x\n", run=_run),)), "type must look like"),
+        (Plugin(name="demo", version="1", nodes=(_node(ports=("out\n",), run=_run),)), "invalid port"),
+        (Plugin(name="demo", version="1", nodes=(_node(icon="flag\n", run=_run),)), "icon must name"),
+        (Plugin(name="demo\n", version="1", nodes=(Send,)), "must be a lowercase identifier"),
+    ],
+)
+def test_a_name_with_a_trailing_newline_is_refused(plugin: Plugin, fragment: str) -> None:
+    """`$` also matches before a final newline (the owner's review R3 of 3b-2): every name is matched whole."""
+    with pytest.raises(ManifestError) as e:
+        plugin.manifest()
+    assert any(fragment in p for p in e.value.problems), e.value.problems
+
+
 class Defaults(BaseModel):
     name: str
     count: int = 0

@@ -120,7 +120,7 @@ class ConnectionType:
     def problems(self) -> list[str]:
         name = f"connection type {self.key!r}"
         out: list[str] = []
-        if not TYPE_KEY_RE.match(self.key):
+        if not TYPE_KEY_RE.fullmatch(self.key):
             out.append(f"{name}: key must be a lowercase identifier")
         if not isinstance(self.label, str) or not 0 < len(self.label) <= 100:
             out.append(f"{name}: label must be 1-100 characters")
@@ -191,7 +191,7 @@ class ConnectionType:
         if self.auth is None:
             return []
         out: list[str] = []
-        if not HEADER_RE.match(self.auth.header):
+        if not HEADER_RE.fullmatch(self.auth.header):
             out.append(f"{name}: auth header {self.auth.header!r} must be a header name")
         try:
             named = [n for _, n in template_parts(self.auth.template) if n is not None]
@@ -220,7 +220,7 @@ class ConnectionType:
     ) -> list[str]:
         where = f"{name}: rate scope {scope.kind!r}"
         out: list[str] = []
-        if not SCOPE_KIND_RE.match(scope.kind) or not scope.kind.startswith(f"{self.key}."):
+        if not SCOPE_KIND_RE.fullmatch(scope.kind) or not scope.kind.startswith(f"{self.key}."):
             out.append(f"{where} must start with '{self.key}.'")
         out += [f"{where} names {n!r}, not a config field" for n in scope.config if n not in config_fields]
         if scope.secret is not None and scope.secret not in secret_fields:

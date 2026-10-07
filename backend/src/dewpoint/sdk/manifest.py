@@ -214,21 +214,21 @@ def _problems(node: type[Node]) -> list[str]:
         return [f"{node.__name__}: missing {', '.join(missing)}"]
     name = f"{node.type}@{node.version}"
     out: list[str] = []
-    if not TYPE_RE.match(node.type):
+    if not TYPE_RE.fullmatch(node.type):
         out.append(f"{name}: type must look like 'plugin.name'")
     if isinstance(node.version, bool) or not isinstance(node.version, int) or node.version < 1:
         out.append(f"{name}: version must be an integer ≥ 1")
     if len(set(node.ports)) != len(node.ports):
         out.append(f"{name}: duplicate ports")
     for port in node.ports:
-        if not PORT_RE.match(port) or port in RESERVED_PORTS:
+        if not PORT_RE.fullmatch(port) or port in RESERVED_PORTS:
             out.append(f"{name}: invalid port {port!r}")
     if node.dynamic_ports is not None and node.dynamic_ports not in node.Config.model_fields:
         out.append(f"{name}: dynamic_ports names unknown config field {node.dynamic_ports!r}")
     out += _retry_problems(name, node)
     out += _connection_problems(name, node)
     out += _options_problems(name, node)
-    if node.icon is not None and (not isinstance(node.icon, str) or not ICON_RE.match(node.icon)):
+    if node.icon is not None and (not isinstance(node.icon, str) or not ICON_RE.fullmatch(node.icon)):
         out.append(f"{name}: icon must name a first-party icon (lowercase letters, digits and dashes)")
     out += [f"{name}: {problem}" for problem in _serializer_problems(node.Output.__pydantic_core_schema__)]
     if node.timeout.total_seconds() <= 0:
@@ -293,7 +293,7 @@ class Plugin:
 
     def manifest(self) -> dict[str, Any]:
         problems: list[str] = []
-        if not PLUGIN_NAME_RE.match(self.name):
+        if not PLUGIN_NAME_RE.fullmatch(self.name):
             problems.append(f"plugin name {self.name!r} must be a lowercase identifier")
         nodes: list[dict[str, Any]] = []
         seen: set[str] = set()
