@@ -918,3 +918,9 @@ fixed test-first, and each fix's protection checked by disabling it.
   without `type`; whether an empty body is what Mist expects where no parameter is given. Every utility is a POST to a
   device, so a run against the test org needs the owner's go, and a device it may act on.
 - Awaiting the owner: sign-off on this section's rulings; the full suite; push and PR.
+
+The owner's technical review of 4d6c627 (2026-10-07): no High or Medium; four Low (R1-R4), each fixed test-first and
+its protection checked by disabling it. A technical review; the rulings above still await the owner's sign-off.
+- R1 (an opening under way when the attempt closed returned a live stream): the attempt's close fences openings under
+  way; a socket dialed or a handshake completed after it is closed and the opening refused (`InvalidRequest`).
+- R2 (vetting ran outside the 5 s opening bound): the guard's resolution and allowlist read count in it too.

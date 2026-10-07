@@ -6,6 +6,7 @@ messages only; and every failure saying what happened, never the host or an addr
 
 import asyncio
 import contextlib
+import ipaddress
 import logging
 import socket
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -395,3 +396,47 @@ async def test_a_closed_attempt_opens_no_stream() -> None:
         with pytest.raises(InvalidRequestError):
             await w.open(f"wss://stream.test:{port}/s", {})
     assert seen.connections == 0
+
+
+async def test_an_opening_under_way_when_the_attempt_closes_returns_no_live_stream() -> None:
+    """The owner's review R1: closing the attempt fences openings already under way; one that completes after the
+    close is closed, never returned."""
+    held = asyncio.Event()
+    closed = asyncio.Event()
+
+    async def slow(conn: ServerConnection, request: Request) -> None:
+        held.set()
+        await asyncio.sleep(0.4)
+
+    async def waits(ws: ServerConnection) -> None:
+        try:
+            await ws.recv()
+        finally:
+            closed.set()
+
+    async with serve(waits, "127.0.0.1", 0, ssl=tls(NAMES).server_context(), process_request=slow) as s:
+        port = next(iter(s.sockets)).getsockname()[1]
+        w = websocket()
+        opening = asyncio.ensure_future(w.open(f"wss://stream.test:{port}/s", {}))
+        await asyncio.wait_for(held.wait(), 5)  # dialed, its handshake under way
+        await w.aclose()
+        with pytest.raises(InvalidRequestError):
+            await opening
+        await asyncio.wait_for(closed.wait(), 5)  # the late connection was closed
+
+
+async def test_vetting_counts_in_the_opening_time() -> None:
+    """The owner's review R2: a slow resolver or allowlist read is bounded by the same 5 s (here 80 ms)."""
+
+    class SlowResolver:
+        async def resolve(self, host: str, port: int) -> list[Any]:
+            await asyncio.sleep(0.3)
+            return [ipaddress.ip_address("127.0.0.1")]
+
+    w = GuardedWebsocket(Guard(SlowResolver(), guard({}).allowlist), TENANT, ssl_context=tls(NAMES).client_context(),
+                         limits=WsLimits(open_s=0.08))  # fmt: skip
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(NotSentError):
+        await w.open("wss://stream.test:443/s", {})
+    assert asyncio.get_running_loop().time() - started < 0.2
+    await w.aclose()

@@ -184,12 +184,18 @@ class GuardedWebsocket:
         host, port = _target(url)
         sent_headers = _headers(headers)
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + self.limits.open_s
-        addresses = await self._guard.vet(host, port, self._tenant)
+        deadline = loop.time() + self.limits.open_s  # vetting, connecting, TLS and the handshake (the review's R2)
+        try:
+            addresses = await asyncio.wait_for(self._guard.vet(host, port, self._tenant), self.limits.open_s)
+        except TimeoutError:
+            raise NotSentError("timeout") from None
         for address in addresses:
             sock = await _dial(str(address), port, max(0.0, deadline - loop.time()))
             if sock is None:
                 continue
+            if self._closed:  # the attempt ended while this opened (R1)
+                sock.close()
+                raise InvalidRequestError("closed")
             try:
                 connection = await self._handshake(url, sock, host, sent_headers, max(0.01, deadline - loop.time()))
             except ssl.SSLError:
@@ -200,6 +206,9 @@ class GuardedWebsocket:
                     raise _rejected(status) from None
                 raise NotSentError("handshake") from None
             stream = GuardedSocket(connection, self)
+            if self._closed:  # completed after the attempt closed: closed, never returned (R1)
+                await stream.close()
+                raise InvalidRequestError("closed")
             self._open.append(stream)
             return stream
         raise NotSentError("connect")
