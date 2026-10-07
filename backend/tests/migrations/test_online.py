@@ -279,7 +279,9 @@ async def test_an_upgrade_interrupted_after_any_step_goes_on_from_there(cluster,
 @pytest.mark.parametrize("start", PATHS)
 async def test_both_paths_upgrade_under_a_continuing_load(cluster, templates, start) -> None:
     """The lock probe's normal load runs throughout (an API's reads, a worker's writes, an admission, an ingress
-    recording, one connection each): the upgrade completes, no operation fails, none waits a `deadlock_timeout`."""
+    recording, one connection each): the upgrade completes, no operation fails, none waits D15's five seconds. (That
+    no writer waits its `deadlock_timeout` behind a step is the deadlock tests' to prove: under the parallel suite, a
+    loaded machine alone made an operation take over a second.)"""
     url = await copy(cluster, templates[start])
     load = Load(url, per_kind=1, pause=0.01)
     await load.prepare()
@@ -292,7 +294,7 @@ async def test_both_paths_upgrade_under_a_continuing_load(cluster, templates, st
     assert await scalar(url, "SELECT version_num FROM alembic_version") == HEAD
     assert {kind: errors for kind, errors in load.errors.items() if errors} == {}
     assert sum(len(times) for times in load.times.values()) > 100
-    assert max(took for times in load.times.values() for _, took in times) < 1.0
+    assert max(took for times in load.times.values() for _, took in times) < 5.0
 
 
 # The old application (from before 0040) at work during the upgrade, each under its own role and its tenant's scope: its
@@ -455,24 +457,25 @@ async def test_a_step_behind_a_held_lock_gives_way_until_it_is_released(cluster,
         finally:
             stop.set()
             await asyncio.gather(*writing)
-    # While the lock was held, the step gave way on it alone. The attempt the release came during may end on its budget
-    # (its lock taken late in it), as may a later step's, its writers coming and going while a loaded machine runs it
-    # slowly (both seen under the parallel suite): each is tried again
-    assert while_held and while_held[0].startswith(f"online step {first} ")
-    assert all(m.startswith(f"online step {first} ") and m.endswith("(lock)") for m in while_held), while_held
+    # While the lock was held, the held step gave way on it, or on its budget when a loaded machine ran its statements
+    # before the lock too slowly (seen under the parallel suite); the attempt the release came during, and a later
+    # step's, may end on its budget too: each is tried again
+    assert while_held and all(m.startswith(f"online step {first} ") for m in while_held), while_held
+    assert any(m.endswith("(lock)") for m in while_held) and all(m.endswith(("(lock)", "(budget)")) for m in while_held)
     assert await scalar(url, "SELECT version_num FROM alembic_version") == HEAD
     assert max(waits) < 1.0  # the server's deadlock_timeout
 
 
 async def test_a_lock_never_released_stops_the_upgrade_naming_its_step(cluster, templates, monkeypatch) -> None:
     """A step that gives way `ATTEMPTS` times stops the upgrade, naming itself, in bounded time; its migration stays
-    unrecorded, and the upgrade run again once the lock is free goes on to the head."""
-    monkeypatch.setattr(online, "ATTEMPTS", 3)
+    unrecorded, and the upgrade run again once the lock is free goes on to the head. Ten attempts: enough for the
+    other steps to finish on a loaded machine (with three, a large one ran out first, under the parallel suite)."""
+    monkeypatch.setattr(online, "ATTEMPTS", 10)
     url = await copy(cluster, templates["0042"])
     t0 = time.monotonic()
     async with Holder(url):
         upgrading = asyncio.create_task(asyncio.to_thread(upgrade, url))
-        with pytest.raises(online.StepFailedError, match=r"^online step 0037 .+ gave way 3 times \(lock\)"):
+        with pytest.raises(online.StepFailedError, match=r"^online step 0037 .+ gave way 10 times \(lock\)"):
             await asyncio.wait_for(asyncio.shield(upgrading), 60)
     assert time.monotonic() - t0 < 30
     assert await scalar(url, "SELECT version_num FROM alembic_version") == "0036"
@@ -496,6 +499,17 @@ async def run[T](url: str, fn: Callable[[Connection], T]) -> T:
 
 async def exists(url: str, table: str) -> bool:
     return bool(await scalar(url, f"SELECT to_regclass('public.{table}') IS NOT NULL"))
+
+
+async def waiting_for(url: str, table: str) -> None:
+    """Until a session waits for a lock on `table`: the step holds its first table, and waits for the second (a fixed
+    pause wasn't enough on a loaded machine: the step hadn't begun)."""
+    query = f"SELECT EXISTS (SELECT 1 FROM pg_locks WHERE NOT granted AND relation = to_regclass('public.{table}'))"
+    for _ in range(200):
+        if await scalar(url, query):
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"nothing waited for {table}")
 
 
 async def test_a_step_that_outruns_its_budget_gives_way_and_stops_after_its_attempts(scratch, monkeypatch) -> None:
@@ -586,7 +600,7 @@ async def test_a_step_gives_way_to_a_writer_it_would_deadlock(scratch, caplog) -
         await w.execute("INSERT INTO b VALUES (1)")
         stepping = asyncio.create_task(run(scratch, lambda c: online.step(
             c, "both", "LOCK TABLE a IN ACCESS EXCLUSIVE MODE", "LOCK TABLE b IN ACCESS EXCLUSIVE MODE")))  # fmt: skip
-        await asyncio.sleep(0.15)  # the step holds `a`, and waits for `b`
+        await waiting_for(scratch, "b")  # the step holds `a`, and waits for `b`
         t0 = time.monotonic()
         await w.execute("INSERT INTO a VALUES (1)")
         waited = time.monotonic() - t0
@@ -617,7 +631,7 @@ async def test_a_writer_whose_role_checks_deadlocks_sooner_is_never_a_steps_vict
         await w.execute("INSERT INTO b VALUES (1)")
         stepping = asyncio.create_task(run(scratch, lambda c: online.step(
             c, "both", "LOCK TABLE a IN ACCESS EXCLUSIVE MODE", "LOCK TABLE b IN ACCESS EXCLUSIVE MODE")))  # fmt: skip
-        await asyncio.sleep(0.15)  # the step holds `a` (or gave way already), and waits for `b`
+        await waiting_for(scratch, "b")  # the step holds `a`, and waits for `b`
         t0 = time.monotonic()
         await w.execute("INSERT INTO a VALUES (1)")
         waited = time.monotonic() - t0
