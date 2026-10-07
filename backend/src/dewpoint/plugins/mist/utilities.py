@@ -265,6 +265,8 @@ def build() -> tuple[type[Node], ...]:
         op, type_ = ops[op_id], entry.nodes[0]
         pickers = {f: o for f, o in routing.pickers(op.path, entry.scope, lists).items() if o in entry.reads}
         answers, default = _answers_session(doc, op), DEFAULT_DURATION.get(review.contract)
+        if review.stream and not answers:  # its output couldn't be told from another command's (review L5)
+            raise ValueError(f"{op_id}: a stream from an answer without a session")
         name = _class_name(type_)
         attrs: dict[str, Any] = {
             "__module__": __name__,

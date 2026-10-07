@@ -22,6 +22,9 @@ SIDE_EFFECTS = ("none", "idempotent", "ambiguous")
 # no node yet, so a map naming them is refused.
 CONTRACTS = ("bounded_collection", "stream_terminal_evidence", "acceptance_only")
 DEVICE_TYPES = ("ap", "gateway", "switch")  # the OAS's `device_type`
+# A utility's capability and the side effect it comes with (D27): a repeatable diagnostic, or a disruptive command.
+UTILITY_KINDS = {"mist.diagnose": "idempotent", "mist.write": "ambiguous"}
+GENERIC_NODES = frozenset({"mist.api.read", "mist.api.write"})
 # Always refused (D14): MSP, the token's own account, login and the other account or authentication routes, installer
 # and invite routes, credential tests, and anything outside /api/v1; first segments after /api/v1, then any segment.
 REFUSED_ROOTS = frozenset(
@@ -145,10 +148,30 @@ def _entry(op_id: str, raw: Any) -> Entry:
             raise PolicyUnreadableError(f"{op_id}: not an allowed entry")
         values = {k: v for k, v in raw.items() if k not in ("nodes", "reads", "utility")}
         utility = _utility(op_id, raw["utility"]) if "utility" in raw else None
-        return Entry(**values, nodes=tuple(nodes), reads=tuple(reads), utility=utility)
+        entry = Entry(**values, nodes=tuple(nodes), reads=tuple(reads), utility=utility)
+        if utility is not None and not _consistent(entry, utility):
+            raise PolicyUnreadableError(f"{op_id}: not a utility's entry")
+        return entry
     if set(raw) != _OTHER_KEYS or not all(isinstance(raw[k], str) and raw[k] for k in _OTHER_KEYS):
         raise PolicyUnreadableError(f"{op_id}: not a held or denied entry")
     return Entry(**raw)
+
+
+def _consistent(entry: Entry, u: UtilityReview) -> bool:
+    """What the reviews guarantee a utility's entry (review L5), checked where the map is read: its own node alone, a
+    site's; a diagnostic idempotent, a disruptive command ambiguous, acceptance only and scoped by its selectors; its
+    bounds its parameters' and, streaming only, its duration's."""
+    allowed_bounds = {*u.parameters, *(("max_duration_s",) if u.stream else ())}
+    return (
+        len(entry.nodes) == 1
+        and entry.nodes[0] not in GENERIC_NODES
+        and entry.scope == "site"
+        and UTILITY_KINDS.get(entry.capability or "") == entry.side_effect
+        and (entry.capability != "mist.write" or (u.contract == "acceptance_only" and bool(u.selectors)))
+        and (u.contract != "acceptance_only" or entry.side_effect == "ambiguous")
+        and set(u.bounds) <= allowed_bounds
+        and (not u.stream or "max_duration_s" in u.bounds)
+    )
 
 
 @dataclass(frozen=True)

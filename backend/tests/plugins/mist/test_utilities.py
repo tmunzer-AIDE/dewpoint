@@ -344,3 +344,18 @@ def test_no_permitted_parameter_is_an_object() -> None:
         for name, prop in schema["properties"].get("body", {}).get("properties", {}).items():
             target = schema.get("$defs", {}).get(prop.get("$ref", "").rsplit("/", 1)[-1], prop)
             assert target.get("type") != "object", (type_, name)
+
+
+def test_a_stream_on_an_answer_without_a_session_fails_the_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review L5: checked where the OAS is read, as the map's loader doesn't read it."""
+    import dataclasses  # noqa: PLC0415
+
+    found = policy.load()
+    entries = dict(found.entries)
+    bounce = entries["bounceDevicePort"]
+    assert bounce.utility is not None
+    review = dataclasses.replace(bounce.utility, contract="bounded_collection", stream=True)
+    entries["bounceDevicePort"] = dataclasses.replace(bounce, utility=review)
+    monkeypatch.setattr(policy, "load", lambda: policy.PolicyMap(found.oas_sha256, entries))
+    with pytest.raises(ValueError, match="bounceDevicePort"):
+        utilities.build()

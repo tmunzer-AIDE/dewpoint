@@ -876,3 +876,8 @@ fixed test-first, and each fix's protection checked by disabling it.
   through Mist - cost if wrong: a name with another character is refused at publish.
 - L4 (show route's `node` is an object in the OAS, open to any keys): a permitted parameter can't be an object; show
   route's `node` isn't permitted (the string form every other utility takes is refused by the OAS's object type).
+- L5 (the map's loader trusted a utility entry's consistency): where the map is read, a utility's entry must name its
+  own node alone (never `mist.api.read`/`write`), be a site's, pair `mist.diagnose` with idempotent and `mist.write`
+  with ambiguous, acceptance only and selectors, keep acceptance only ambiguous, and bound only its parameters and,
+  streaming, its duration; `api.routes` skips utilities whatever a map says; a stream on an answer without a session
+  fails the build where the OAS is read.

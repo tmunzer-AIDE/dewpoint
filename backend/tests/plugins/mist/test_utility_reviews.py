@@ -205,3 +205,28 @@ def test_every_disruptive_utility_names_its_selectors() -> None:
             assert e.utility.selectors and set(e.utility.selectors) <= set(e.utility.parameters), op_id
         else:
             assert e.utility.selectors == (), op_id
+
+
+@pytest.mark.parametrize(
+    ("op_id", "change"),
+    [
+        ("pingFromDevice", lambda e: e.update(nodes=[*e["nodes"], "mist.api.write"])),  # the generic write
+        ("pingFromDevice", lambda e: e.update(nodes=["mist.api.write"])),
+        ("pingFromDevice", lambda e: e.update(nodes=["mist.site_devices.ping", "mist.site_devices.arp"])),
+        ("bounceDevicePort", lambda e: e.update(side_effect="idempotent")),  # acceptance only stays ambiguous
+        ("bounceDevicePort", lambda e: e.update(capability="mist.diagnose")),
+        ("pingFromDevice", lambda e: e.update(capability="mist.write")),  # a disruptive one is acceptance only
+        ("pingFromDevice", lambda e: e.update(capability="mist.read")),
+        ("pingFromDevice", lambda e: e.update(scope="org")),
+        ("pingFromDevice", lambda e: e["utility"].update(bounds={"nope": 5, "max_duration_s": 240})),
+        ("bounceDevicePort", lambda e: e["utility"].update(bounds={"max_duration_s": 60})),  # not a stream
+        ("bounceDevicePort", lambda e: e["utility"].update(selectors=[])),  # disruptive: its selectors
+    ],
+)  # fmt: skip
+def test_the_map_refuses_an_inconsistent_utility_entry(op_id: str, change: Any) -> None:
+    """Review L5: what make_map guarantees is checked again where the map is read: a hand-edited map can't grant
+    it."""
+    data = json.loads(policy.MAP_FILE.read_text())
+    change(data["operations"][op_id])
+    with pytest.raises(policy.PolicyUnreadableError, match=op_id):
+        policy.PolicyMap.from_data(data)
