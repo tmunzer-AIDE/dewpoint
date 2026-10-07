@@ -426,6 +426,25 @@ async def test_a_new_schedule_is_created_paused_and_unpaused_only_by_a_token_bea
     assert (found.schedule.state.paused, found.schedule.state.notes) == (False, "dewpoint generation 1")
 
 
+async def test_an_unpausing_update_is_sent_only_after_its_unpause_is_recorded_and_committed(
+    server, ready, owner_sessionmaker, dispatch_sessionmaker, monkeypatch
+) -> None:
+    """The invariant the misses pass rests on (the owner's ruling on checkpoint 3: an incarnation never sent an unpause
+    is never read): every create is paused, and an update that unpauses one is sent only once `unpause_sent_at` is
+    committed, seen here from another connection as the call goes out."""
+    ctx, _, schedule_id = ready
+    seen: list[tuple[bool, object]] = []
+    update = schedule_sync._update
+
+    async def sending(client: Any, temporal_id: str, schedule: Any, token: bytes) -> None:
+        seen.append((schedule.state.paused, (await incarnation(owner_sessionmaker, temporal_id))["unpause_sent_at"]))
+        await update(client, temporal_id, schedule, token)
+
+    monkeypatch.setattr(schedule_sync, "_update", sending)
+    assert await sync(server, dispatch_sessionmaker, ctx, schedule_id) == "synced"
+    assert [paused for paused, _ in seen] == [False] and all(at is not None for _, at in seen)
+
+
 async def test_a_sync_holding_its_read_commits_its_create_before_step_1(
     server, ready, owner_sessionmaker, api_sessionmaker, dispatch_sessionmaker, monkeypatch
 ) -> None:

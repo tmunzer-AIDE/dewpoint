@@ -704,9 +704,9 @@ async def check_misses(
     incarnation that may still miss one (sent an unpause once, or from before the migration), each its own item, every
     five minutes until it's verified gone (the owner's D16 ruling: the five-minute accounting holds for every
     incarnation, the current one or not): an increase is recorded on its schedule, audited and alerted on; the API
-    shows the accounting stale when one wasn't read within those five minutes and a minute's grace. None before the
-    inventory's cutover: from it, one from before the migration found absent is gone for good (no writer left can
-    create its id; the new sync numbers from 1), seen or not."""
+    shows the accounting stale when one wasn't read within those five minutes. None before the inventory's cutover:
+    from it, one from before the migration found absent is gone for good (no writer left can create its id; the new
+    sync numbers from 1), seen or not."""
     if not await _cut_over(sessionmaker):
         return {"awaiting_cutover": 1}
     async with sessionmaker() as s:

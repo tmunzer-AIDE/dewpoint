@@ -5,7 +5,7 @@ a visit for a late create, and a tombstone pauses, counts and deletes at most 1 
 left; the stray pass reaches every earlier one each hour. Misses keep their five-minute accounting for every
 incarnation that may still miss a firing (unpaused once, or from before the migration) until it's verified paused for
 its delete, its count recorded, or gone: each is its own item, one describe; the API shows the accounting stale when
-one wasn't read within those five minutes and a minute's grace. Counted in calls, against the dev server."""
+one wasn't read within those five minutes. Counted in calls, against the dev server."""
 
 import contextlib
 import math
@@ -196,13 +196,13 @@ async def test_a_sync_checks_at_most_a_few_earlier_incarnations_a_visit_for_a_la
     assert len(earlier) <= schedule_sync.EARLIER and earlier == sorted(earlier, reverse=True)
 
 
-async def test_the_api_shows_the_misses_accounting_stale_when_one_wasnt_read_within_five_minutes_and_a_grace(
+async def test_the_api_shows_the_misses_accounting_stale_when_one_wasnt_read_within_five_minutes(
     server, ready, owner_sessionmaker, dispatch_sessionmaker, api_sessionmaker
 ) -> None:
     """The owner's ruling 3: every relevant incarnation read within the five-minute cadence, or the accounting reported
-    stale. Stale once one's last read is older than five minutes and a minute's grace for the pass to reach it (the
-    review's I3: ten let a read every nine minutes pass unreported); one never read is stale from its unpause, not
-    from its recording (enabled long after it was made, it isn't stale at once)."""
+    stale. Stale, never complete, once one's last read is older than five minutes (the owner's review of checkpoint
+    3: a grace may govern an alert, never leave an overdue read complete); one never read is stale from its unpause,
+    not from its recording (enabled long after it was made, it isn't stale at once)."""
     ctx, _, schedule_id = ready
     assert await sync(server, dispatch_sessionmaker, ctx, schedule_id) == "synced"
     await recorded_earlier(owner_sessionmaker, ctx, schedule_id, 1, unpaused=True)
@@ -215,13 +215,13 @@ async def test_the_api_shows_the_misses_accounting_stale_when_one_wasnt_read_wit
     def stale(found: Any) -> bool:
         return any(span["reason"] == "misses_stale" for span in found.uncounted)
 
-    await sql(owner_sessionmaker, "update schedule_incarnations set misses_checked_at = now() - interval '7 minutes' "
-              "where schedule_id = :s", s=schedule_id)  # fmt: skip
+    await sql(owner_sessionmaker, "update schedule_incarnations set misses_checked_at = now() - interval '5 minutes 30 "
+              "seconds' where schedule_id = :s", s=schedule_id)  # fmt: skip
     found = await accounted()
-    assert stale(found) and not found.complete
-    await sql(owner_sessionmaker, "update schedule_incarnations set misses_checked_at = now() - interval '5 minutes' "
+    assert stale(found) and not found.complete  # overdue
+    await sql(owner_sessionmaker, "update schedule_incarnations set misses_checked_at = now() - interval '4 minutes' "
               "where schedule_id = :s", s=schedule_id)  # fmt: skip
-    assert not stale(await accounted())  # due, within the grace
+    assert not stale(await accounted())  # read within its five minutes
     await sql(owner_sessionmaker, "update schedule_incarnations set misses_checked_at = null, recorded_at = now() - "
               "interval '1 hour', unpause_sent_at = now() - interval '1 minute' where schedule_id = :s",
               s=schedule_id)  # fmt: skip
