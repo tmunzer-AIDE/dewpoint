@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """The `mist` connection type, as it was in `core` (plugins-3 D11): an org on one of Mist's clouds, a token sent as
 `Authorization: Token …`, charged per token and per org (D9), and verified by reading `/self` (and the org, for an
-MSP token) through the connection's read-only HTTP."""
+MSP token) through the connection's read-only HTTP. Its stream (D26) is the cloud's websocket host at
+`/api-ws/v1/stream`, with the same header, each opening charged to the token's stream scope."""
 
 import uuid
 from typing import Any, Literal
@@ -15,6 +16,7 @@ from dewpoint.sdk import (
     HeaderAuth,
     HostMap,
     RateScope,
+    StreamEndpoint,
     TransportError,
     VerifyResult,
 )
@@ -34,6 +36,9 @@ MIST_CLOUDS: dict[str, str] = {
     "apac_02": "api.gc5.mist.com",
     "apac_03": "api.gc7.mist.com",
 }
+# Mist's websocket hosts (guides/websocket/1_hosts): each cloud's API host with `api-ws.` for `api.`.
+MIST_STREAM_CLOUDS: dict[str, str] = {cloud: host.replace("api.", "api-ws.", 1) for cloud, host in MIST_CLOUDS.items()}
+MIST_STREAM_PATH = "/api-ws/v1/stream"  # guides/websocket/2_best_practices
 MistCloud = Literal[
     "global_01",
     "global_02",
@@ -49,6 +54,8 @@ MistCloud = Literal[
     "apac_03",
 ]
 MIST_BUDGET = (50.0, 1.25)  # burst and refill per second, below the documented 5,000 an hour (plugins-3 D9)
+# Streams opened per token: a burst of 50, then 1,800 an hour, under the documented 2,000 (websocket/3_rate_limit).
+MIST_STREAM_BUDGET = (50.0, 0.5)
 JSON = {"Accept": "application/json"}
 
 
@@ -102,4 +109,16 @@ MIST = ConnectionType(
         RateScope("mist.token", secret="api_token", capacity=MIST_BUDGET[0], refill_per_s=MIST_BUDGET[1]),  # noqa: S106 - a field's name
     ),
     verify=verify,
+    stream=StreamEndpoint(
+        HostMap("cloud", MIST_STREAM_CLOUDS),
+        MIST_STREAM_PATH,
+        (
+            RateScope(
+                "mist.stream",
+                secret="api_token",
+                capacity=MIST_STREAM_BUDGET[0],  # noqa: S106 - a field's name
+                refill_per_s=MIST_STREAM_BUDGET[1],
+            ),
+        ),
+    ),  # fmt: skip
 )
