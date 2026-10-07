@@ -38,9 +38,10 @@ from tests.probes.migration_locks import Load, seed
 
 ROOTS = 300  # root runs seeded: 450 runs, in batches of `BATCH` below
 BATCH = 40
+HEAD = "0048"
 PATHS = {  # each deployed starting revision's migrations, in order (D15)
-    "0034": ["0041", "0042", "0035", "0036", "0037", "0038", "0039", "0040", "0043", "0044"],
-    "0042": ["0035", "0036", "0037", "0038", "0039", "0040", "0043", "0044"],
+    "0034": ["0041", "0042", "0035", "0036", "0037", "0038", "0039", "0040", "0043", "0044", "0048"],
+    "0042": ["0035", "0036", "0037", "0038", "0039", "0040", "0043", "0044", "0048"],
 }
 TREE = """WITH RECURSIVE tree AS (
   SELECT id, id AS root FROM runs WHERE parent_run_id IS NULL
@@ -231,7 +232,7 @@ async def test_an_interrupted_backfill_goes_on_from_its_committed_batches(cluste
         assert await scalar(url, "SELECT count(*) FROM execution_evidence") == 3 * BATCH
     with recorded() as steps:
         await asyncio.to_thread(upgrade, url)
-    assert await scalar(url, "SELECT version_num FROM alembic_version") == "0044"
+    assert await scalar(url, "SELECT version_num FROM alembic_version") == HEAD
     assert await scalar(url, TREE) == 0
     assert await scalar(url, UNRECORDED) == 0
     remaining = (450 if at.startswith("0037") else ROOTS) - 3 * BATCH  # runs, or root runs, not done yet
@@ -288,7 +289,7 @@ async def test_both_paths_upgrade_under_a_continuing_load(cluster, templates, st
     finally:
         load.stop.set()
         await asyncio.gather(*loops)
-    assert await scalar(url, "SELECT version_num FROM alembic_version") == "0044"
+    assert await scalar(url, "SELECT version_num FROM alembic_version") == HEAD
     assert {kind: errors for kind, errors in load.errors.items() if errors} == {}
     assert sum(len(times) for times in load.times.values()) > 100
     assert max(took for times in load.times.values() for _, took in times) < 1.0
@@ -427,7 +428,7 @@ async def test_a_step_behind_a_held_lock_gives_way_until_it_is_released(cluster,
             await asyncio.gather(*writing)
     assert gave_way(caplog) and all(m.endswith("(lock)") for m in gave_way(caplog))
     assert gave_way(caplog)[0].startswith(f"online step {first} ")
-    assert await scalar(url, "SELECT version_num FROM alembic_version") == "0044"
+    assert await scalar(url, "SELECT version_num FROM alembic_version") == HEAD
     assert max(waits) < 1.0  # the server's deadlock_timeout
 
 
@@ -444,7 +445,7 @@ async def test_a_lock_never_released_stops_the_upgrade_naming_its_step(cluster, 
     assert time.monotonic() - t0 < 30
     assert await scalar(url, "SELECT version_num FROM alembic_version") == "0036"
     await asyncio.to_thread(upgrade, url)
-    assert await scalar(url, "SELECT version_num FROM alembic_version") == "0044"
+    assert await scalar(url, "SELECT version_num FROM alembic_version") == HEAD
 
 
 # The steps themselves, on a scratch database
