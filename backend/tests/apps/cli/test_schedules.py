@@ -550,16 +550,9 @@ def test_the_cutovers_final_step_never_holds_schedules_for_a_standby_that_stops_
     it held schedules' writes off until the standby answered. It commits without waiting for any (`local`; recorded
     again at once, `recorded_already`, if a failover lost it): a writer queued behind it waits for it only."""
     from dewpoint.core.platform import inventory
+    from tests.support.standby import silent_standby
 
     url = pg_url.replace("postgresql+asyncpg://", "postgresql://")
-
-    async def standby(names: str) -> None:
-        c = await asyncpg.connect(url)
-        try:
-            await c.execute(f"ALTER SYSTEM SET synchronous_standby_names = '{names}'")
-            await c.execute("SELECT pg_reload_conf()")
-        finally:
-            await c.close()
 
     async def through() -> tuple[float, object]:
         engine = make_engine(pg_url)
@@ -567,8 +560,7 @@ def test_the_cutovers_final_step_never_holds_schedules_for_a_standby_that_stops_
         try:
             async with make_sessionmaker(engine)() as s:
                 state = await inventory.capture(s)
-                await standby("nobody")  # named, never answering
-                try:
+                async with silent_standby(url):  # named, never answering, waited for by a commit that writes
                     recording = asyncio.create_task(inventory.record(s, state, {"attested": "the test"}))
                     await asyncio.sleep(0.5)  # the final step has recorded, or waits for the standby
                     t0 = time.monotonic()
@@ -577,8 +569,6 @@ def test_the_cutovers_final_step_never_holds_schedules_for_a_standby_that_stops_
                         waited = time.monotonic() - t0
                     except TimeoutError:
                         waited = float("inf")
-                finally:
-                    await standby("")  # none named: a commit waiting for one is let go
                 try:
                     outcome: object = await asyncio.wait_for(recording, 30)
                 except Exception as e:

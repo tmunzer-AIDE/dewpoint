@@ -12,8 +12,8 @@ behind it, and a writer's lock order can't deadlock it into rolling everything b
 - A step's transaction lasts at most its budget, `SHARE` of the shortest `deadlock_timeout` any role or the database
   has, and never more than `BUDGET_MAX_S`, however long that is (the owner's review of checkpoint 3): each statement's
   lock timeout is what's left of it (its statement timeout, a `MARGIN` share more). So a normal operation queued behind
-  it waits less than that, and a writer whose lock the step waits for never waits long enough for its own deadlock
-  check: the step gives way first. A lock not taken in time, a deadlock, or the budget spent rolls the step back whole
+  it waits for that and its commit (below), and a writer whose lock the step waits for never waits long enough for its
+  own deadlock check: the step gives way first. A lock not taken in time, a deadlock, or the budget spent rolls the step back whole
   (a `ROLLBACK` cancelled is run again); it's tried again after a growing, jittered pause, at most `ATTEMPTS` times,
   each giving-way logged, then the upgrade stops, naming it (`StepFailedError`); a statement cancelled on purpose stops
   it at once. A role that may sets each step's own `deadlock_timeout` to a third of its budget: the server, checking the
@@ -57,7 +57,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import DBAPIError
 
 SHARE = 0.6  # a step's budget: this share of the server's deadlock_timeout
-BUDGET_MAX_S = 1.0  # a step's budget at most, however long deadlock_timeout is: what queues behind it waits no longer
+BUDGET_MAX_S = 1.0  # a step's budget at most, however long deadlock_timeout is: its statements run within it
 MARGIN = 0.05  # a statement's timeout past its lock timeout: this share of the budget's base (50 ms at the default)
 LOCK_PLAIN = "5s"  # what a statement outside a step waits for each of its locks
 ATTEMPTS = 60  # a step's tries before the upgrade stops, naming it

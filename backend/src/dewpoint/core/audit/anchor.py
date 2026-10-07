@@ -6,7 +6,7 @@ from pathlib import Path
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from dewpoint.core.audit.service import verify_chain
 
@@ -39,17 +39,37 @@ class FileAnchorSink:
         return [json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+async def _held_by_standbys(s: AsyncSession) -> None:
+    """Every row `s` has read is on the synchronous standbys, when any is named: a commit of its own, later in the WAL
+    than theirs and writing to it (a logical message no one reads; an xid alone writes nothing, and waits for none),
+    waits for them under `synchronous_commit` on, whatever the session's. A row committed locally only (the inventory
+    cutover's audit entry: its commit waits for no standby) is visible before then; signed, then lost in a failover,
+    it would fail `audit verify` for good, the sink being append-only (the review of the 2b-4b M1 checkpoint 6)."""
+    engine = s.bind
+    if not isinstance(engine, AsyncEngine):
+        raise TypeError("an anchor's session is bound to an engine")
+    async with engine.connect() as c:
+        await c.execute(text("SELECT set_config('synchronous_commit', 'on', true), "
+                             "pg_logical_emit_message(true, 'dewpoint', 'audit anchor')"))  # fmt: skip
+        await c.commit()
+
+
 async def anchor_all(s: AsyncSession, sink: FileAnchorSink) -> int:
+    """Each scope's head not anchored yet, signed to `sink` once the synchronous standbys hold it, then recorded."""
     heads = (
         await s.execute(text("select distinct on (scope) scope, seq, hash from audit_log order by scope, seq desc"))
     ).all()
-    written = 0
+    due = []
     for scope, seq, h in heads:
         exists = (
             await s.execute(text("select 1 from audit_anchors where scope=:s and seq=:q"), {"s": scope, "q": seq})
         ).first()
-        if exists:
-            continue
+        if not exists:
+            due.append((scope, seq, h))
+    if due:
+        await _held_by_standbys(s)
+    written = 0
+    for scope, seq, h in due:
         ref = sink.write(scope, seq, bytes(h))
         await s.execute(
             text("insert into audit_anchors(scope, seq, hash, sink, sink_ref) values (:s,:q,:h,:k,:r)"),

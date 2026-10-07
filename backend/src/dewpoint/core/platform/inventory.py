@@ -13,13 +13,14 @@ before migration 0040 is gone: a catch-up, in batches, then a short final step t
   done; run again, it passes over them.
 - `record`: the cutover, in one short transaction that holds schedules' writes off while it records, reading no
   schedule (the owner's review of checkpoint 3: done with the catch-up under that lock, its hold grew with the
-  schedules). Its lock is waited for at most `LOCK_WAIT` an attempt, so a writer queued behind the request waits no
-  longer; then it gives way, at most `ATTEMPTS` times, `PAUSE_S` apart (`InventoryBusyError`: run it again). Its
-  statements are bounded (`STATEMENT_WAIT`), and so is its session's idling between them (`IDLE_WAIT`): a client
-  stalled there has its session ended, its lock with it, and nothing recorded (the review of checkpoint 5). Its commit
-  waits for no synchronous standby (`synchronous_commit = local`, the owner's review of checkpoint 5: no bound above
-  covers that wait); a failover that lost it leaves no cutover recorded, and it's run again. So its hold is those bounds
-  and the local WAL flush, which no timeout bounds.
+  schedules). Its lock is waited for at most `LOCK_WAIT` an attempt (a writer queued behind the request waits that,
+  and the step's hold once it has the lock); then it gives way, at most `ATTEMPTS` times, `PAUSE_S` apart
+  (`InventoryBusyError`: run it again). Its statements are bounded (`STATEMENT_WAIT`), and so is its session's idling
+  between them (`IDLE_WAIT`): a client stalled there has its session ended, its lock with it, and nothing recorded
+  (the review of checkpoint 5). Its commit waits for no synchronous standby (`synchronous_commit = local`, the owner's
+  review of checkpoint 5: no bound above covers that wait); a failover that lost it leaves no cutover recorded, its
+  audit entry gone with it (the anchor signs none before the standbys hold it), and it's run again. So its hold is
+  those bounds and the local WAL flush, which no timeout bounds.
 
 Every refusal is a `CutoverRefusedError`, said in its message; nothing is recorded by one. Its lock's connection lost
 before its end (a network, a restarted pooler; its lock released with it), the outcome stands all the same, an error or

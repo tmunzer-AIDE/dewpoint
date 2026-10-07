@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta, tzinfo
 
@@ -131,3 +132,33 @@ async def test_anchor_freshness_flags_unanchored_rows(tmp_path, api_sessionmaker
     async with auditor_sessionmaker() as s:
         assert await anchor_freshness(s, timedelta(hours=1)) == []
         assert len(await anchor_freshness(s, timedelta(0))) == 1
+
+
+async def test_an_anchor_signs_no_row_its_synchronous_standby_lacks(
+    tmp_path, pg_url, owner_sessionmaker, auditor_sessionmaker
+) -> None:  # fmt: skip
+    """The review of the 2b-4b M1 checkpoint 6: a row committed locally (the inventory cutover's audit entry, its commit
+    waiting for no standby) is visible before a synchronous standby holds it. An anchor that signed it, then lost it in
+    a failover, would leave `audit verify` failing for good (the sink is append-only). With a standby named that never
+    answers, the anchor writes nothing until it holds every row read; then it anchors them."""
+    from tests.support.standby import silent_standby
+
+    sink = FileAnchorSink(tmp_path / "anchors.jsonl", Ed25519PrivateKey.generate())
+    url = pg_url.replace("postgresql+asyncpg://", "postgresql://")
+    async with silent_standby(url):
+        async with owner_sessionmaker() as s, s.begin():
+            await s.execute(text("SELECT set_config('synchronous_commit', 'local', true)"))
+            await record(s, tenant_id=None, actor_id=None, action="schedules.inventory_cutover")
+        async with owner_sessionmaker() as s:
+            seq = (await s.execute(text("select max(seq) from audit_log where scope = 'platform'"))).scalar_one()
+
+        async def anchoring() -> int:
+            async with auditor_sessionmaker() as s, s.begin():
+                return await anchor_all(s, sink)
+
+        anchored = asyncio.create_task(anchoring())
+        await asyncio.sleep(1.0)
+        signed_meanwhile = [e for e in sink.entries() if e["scope"] == "platform" and e["seq"] == seq]
+    assert await asyncio.wait_for(anchored, 30) >= 1
+    assert signed_meanwhile == []
+    assert [e for e in sink.entries() if e["scope"] == "platform" and e["seq"] == seq]

@@ -51,12 +51,13 @@ old build's runs that still use it finish on the old build's workers, which stil
 ## Upgrading the database while the old build runs (migrations 0035 to 0044)
 
 Migrations 0035 to 0044 upgrade a database in use: each commits in short steps (`backend/migrations/online.py`), so
-normal reads and writes wait at most a fraction of a second behind the upgrade, and an upgrade interrupted anywhere is
-run again with `alembic upgrade head`. Two of the database's settings matter:
+normal reads and writes wait behind the upgrade for a step's bounds and its local WAL flush (below), and an upgrade
+interrupted anywhere is run again with `alembic upgrade head`. Two of the database's settings matter:
 
-- A step lasts at most 60% of the shortest `deadlock_timeout` the server, the database or any role has (`ALTER ROLE …
-  SET deadlock_timeout`), and never more than about 1 second (1 s and its statements' margin). A very short one makes
-  steps too short to finish: the upgrade then stops, naming the step.
+- A step's statements run within its budget: 60% of the shortest `deadlock_timeout` the server, the database or any
+  role has (`ALTER ROLE … SET deadlock_timeout`), and 1 second at most (each statement a 5% margin more). Its commit
+  then flushes locally, which no timeout bounds. A very short budget makes steps too short to finish: the upgrade then
+  stops, naming the step.
 - **Run it as a role whose `deadlock_timeout` is the server's:** with no role setting of its own (`ALTER ROLE … SET`),
   unless the database has one (`ALTER DATABASE … SET`). The upgrade refuses otherwise: a role's setting hides the
   server's, and a value given on the server's command line shows in no catalogue.
@@ -101,8 +102,10 @@ dispatcher from before 0040 polling the admission queue. It then works in two pa
 - **A short final step** that records the cutover. Schedule writes (inserts, updates, deletes) wait while it runs, but
   it reads no schedule, so its time doesn't grow with them. It waits at most 200 ms for its lock each attempt, each
   of its statements runs at most 500 ms, and its session left idle 500 ms in its transaction (a stalled client) is
-  ended, nothing recorded: run it again. Its commit waits for no synchronous standby (`synchronous_commit = local`);
-  if a failover loses it, no cutover is recorded: run it again. Its hold is those bounds and the local WAL flush.
+  ended, nothing recorded: run it again. Its commit waits for no synchronous standby (`synchronous_commit = local`),
+  so its hold is those bounds and the local WAL flush. If a failover loses it, its audit entry goes with it, the
+  dispatcher's schedule passes wait again (`schedule_inventory_not_cut_over`), and you run it again. The audit anchor
+  signs no entry before the synchronous standbys hold it, so `audit verify` never names the lost one.
 
 It refuses, records nothing and exits 1, saying why, when:
 - **Another cutover is running.** A second one refuses while the first runs: wait for it to end, then run the
