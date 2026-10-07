@@ -34,6 +34,7 @@ dewpoint = "dewpoint.apps.cli.main:app"
 flow = "dewpoint.plugins.flow:PLUGIN"
 mist = "dewpoint.plugins.mist:PLUGIN"
 slack = "dewpoint.plugins.slack:PLUGIN"
+teams = "dewpoint.plugins.teams:PLUGIN"
 
 [dependency-groups]
 dev = [

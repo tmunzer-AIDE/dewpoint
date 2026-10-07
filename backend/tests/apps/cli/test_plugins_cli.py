@@ -21,7 +21,7 @@ def cli_env(pg_url, monkeypatch):  # type: ignore[no-untyped-def]
 
 
 def test_entry_points_expose_the_first_party_plugins() -> None:
-    assert [p.name for p in installed_plugins()] == ["flow", "mist", "slack"]
+    assert [p.name for p in installed_plugins()] == ["flow", "mist", "slack", "teams"]
 
 
 def test_plugins_sync_is_idempotent(cli_env) -> None:  # type: ignore[no-untyped-def]

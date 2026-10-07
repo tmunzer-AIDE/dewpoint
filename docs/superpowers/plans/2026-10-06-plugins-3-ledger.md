@@ -1034,7 +1034,13 @@ Facts checked (official documentation, read 2026-10-08; never from memory):
     allowlist page; sovereign clouds have their own); the `sig` query value is the secret;
   - the success status isn't documented for this trigger (Logic Apps' request trigger answers 202 without a Response
     action), nor 429; throttling: 25 non-GET flow-bot posts a connection per 300 s; a flow throttled for 14 days is
-    turned off.
+    turned off;
+  - cards (`task-modules-and-cards/cards/cards-format`, `cards-reference`, and the card schema
+    adaptivecards.microsoft.com `schemas/adaptive-card.json`, read 2026-10-08): markdown renders in a `TextBlock` and
+    in a fact's title and value, `[Title](url)` links included; a `TextRun`'s text: "Markdown is not supported";
+    `RichTextBlock` is 1.2, its inlines `TextRun`s only, no `wrap`; incoming-webhook cards support every native
+    element but `Action.Submit`, up to 1.6; a mention needs an `msteams` entity with the user's id;
+  - httpx 0.28.1 (the lock's) sends a `json=` body compact and UTF-8 (`httpx._content.encode_json`).
 - Google Chat incoming webhooks (developers.google.com `workspace/chat/quickstart/webhooks`, `spaces.messages/create`,
   `format-messages`, `limits`):
   - URL `https://chat.googleapis.com/v1/spaces/SPACE_ID/messages?key=KEY&token=TOKEN`; a webhook works only in its
@@ -1087,7 +1093,8 @@ Rulings:
   wrong: a title loses the header's size.
 - Ruling: Google Chat text replaces `<` and `>` with their full-width forms: no escape is documented, and `<users/all>`
   would notify the whole space - cost if wrong: a `<` in a message shows as `＜`.
-- Ruling: Teams cards are version 1.2 (the documented samples'), text blocks only and `Action.OpenUrl` buttons; hosts
+- Ruling: Teams cards are version 1.2 (the documented samples'), rich text only (was "text blocks only": changed in
+  task 4, below) and `Action.OpenUrl` buttons; hosts
   `*.logic.azure.com` and `*.api.powerplatform.com` only (the public cloud); no authentication header (the "Anyone"
   trigger) - cost if wrong: a sovereign-cloud or a tenant-only trigger isn't reachable yet.
 - Ruling: a Teams 2xx is reported `{accepted: true}`, never `delivered`: the trigger's success status isn't documented,
@@ -1112,3 +1119,16 @@ Rulings:
   establish what an earlier request did) - cost if wrong: the step reads unknown where Slack said no.
 - Ruling: a simulated send renders the message and reports what it would cut, `sent: true` like the real output's
   shape, opening no connection - cost if wrong: none.
+- Ruling (task 4, Teams): run data goes in rich text blocks of text runs, never a `TextBlock` or a fact set: those
+  render markdown, so a `[label](url)` from run data would be a link with a label of its choosing, while a text run's
+  text isn't markdown; no `msteams` entity is ever sent, so `<at>` mentions no one - cost if wrong: fields lose the
+  fact set's columns, and markdown a workflow meant shows as typed.
+- Ruling (task 4, Teams): the body is kept within 24,000 bytes, measured as httpx sends it (compact UTF-8), under the
+  documented ~28 KB; it's fitted in levels - nothing cut, then the text, field values, labels, and last links - and
+  every cut or dropped value is named in `truncated` - cost if wrong: a message near the limit loses detail it could
+  have kept.
+- Ruling (task 4, Teams): every non-2xx answer is `teams.outcome_unknown`, a 4xx included (unlike Slack): the
+  trigger's error answers aren't documented, so none can be read as a refusal - cost if wrong: a refused send reads
+  unknown and needs a person.
+- Ruling (task 4, Teams): the severity is a subtle line, as in Slack, not a container style: the styles' rendering in
+  Teams isn't documented on the pages read - cost if wrong: the severity isn't coloured.
