@@ -1351,10 +1351,12 @@ dispatcher's are.
     `internal_error`, and an alert.
 - **Sub-runs a root's close left `running`** (2b-4a; the final review's M5): a parent writes its children's ends, so a
   sub-run still `running` 30 seconds after its root ended is one its root's close left (a child asked to cancel, or a
-  parent gone before writing it). Through `orphan_subruns()` (ids only), at most once per recheck interval
-  (`runs.checked_at`), the reconciler describes the sub-run's own execution: closed, it records the outcome Temporal
-  reports, as above (no slot: a sub-run holds none); still running, it's left as it is. Until then it holds its tree
-  from retention (§10.1), a key retirement's `open_runs` check and an erasure's stage 50.
+  parent gone before writing it). Through `orphan_subruns()` (ids only), when it's due (`runs.next_check_at`), the
+  reconciler describes the sub-run's own execution: closed, it records the outcome Temporal reports, as above (no
+  slot: a sub-run holds none); still running, it's left as it is, and asked again after the recheck interval. Its
+  history gone (below), it's asked again after twice its last gap, from the recheck interval up to a day (the fix-pass
+  review's R9). Until then it holds its tree from retention (§10.1), a key retirement's `open_runs` check and an
+  erasure's stage 50.
 - **History Temporal no longer has** — for a started run whose row is still `running`, a sub-run as above, or a slot
   whose row has ended — isn't evidence that the latest execution is terminal: the row and the slot stay as they are,
   with an alert, for an operator's recovery (§7.9). No outcome is inferred and no slot released from missing history
@@ -2598,7 +2600,8 @@ erasure pass every 60 s (5 s to 1 hour), a failed stage backing off from 30 s, d
 after an hour, the bound stage 60's end plus 30 days; each incarnation that isn't current described every hour, a failed
 describe again after 5 minutes; Temporal's missed count read every 5 minutes; run evidence 50 rows a pass, rechecked
 no sooner than 5 minutes on, a pending row's backoff doubling from 5 minutes to a day; a worker process's database
-connections at most 23 (a pool of 5 with an overflow of 10, and 8 plugin-call guards in a pool of their own).
+connections at most 23 (a pool of 5 with an overflow of 10, and 8 plugin-call guards in a pool of their own); a
+sub-run whose history is gone asked about again after twice its last gap, from 30 seconds up to a day.
 
 These numbers are starting points. Each stays provisional until the go/no-go experiments (§11) or the owning plan's
 measurements establish it; the spec is revised with the measured value when that plan lands.

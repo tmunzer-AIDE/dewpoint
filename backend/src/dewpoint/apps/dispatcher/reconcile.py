@@ -39,6 +39,7 @@ GRACE = timedelta(seconds=30)  # longer than a start's own deadline (dispatch.ST
 RECHECK = timedelta(seconds=30)  # each request asked about at most once in this long
 ALERT_AFTER = timedelta(minutes=10)  # an uncertain start still unresolved this long after it was made: an error
 BATCH = 50  # requests per pass
+MISSING_MAX = timedelta(days=1)  # a sub-run whose history is gone waits twice its last gap each time, up to this
 TERMINATED_MESSAGE = "The run's workflow was terminated outside Dewpoint."
 FAILED_MESSAGE = "The run's workflow failed outside its own code (engine 2b spec §7.6)."
 LIVE = (WorkflowExecutionStatus.RUNNING, WorkflowExecutionStatus.CONTINUED_AS_NEW)  # its successor is starting
@@ -272,15 +273,16 @@ async def _slot(
     return "released"
 
 
-async def _missing_or_unanswered(client: Client, e: Exception, run_id: uuid.UUID, missing: str) -> None:
+async def _missing_or_unanswered(client: Client, e: Exception, run_id: uuid.UUID, missing: str) -> bool:
     """A started run's history Temporal no longer has (NOT_FOUND, from a namespace that answers) is an alert: no outcome
     is invented and no slot released from missing history alone; an operator recovers it (the owner's ruling). Any other
-    failure: unanswered this time."""
+    failure: unanswered this time. Whether it was missing."""
     if isinstance(e, RPCError) and e.status == RPCStatusCode.NOT_FOUND and await namespace_answers(client):
         log.error(missing, run_id=str(run_id))
-        return
+        return True
     error = e.status.name if isinstance(e, RPCError) else type(e).__name__
     log.warning("reconcile_unanswered", run_id=str(run_id), error=error)
+    return False
 
 
 async def _checked(s: AsyncSession, request_id: uuid.UUID) -> None:
@@ -301,12 +303,12 @@ async def _checked_alone(
 async def reconcile_subruns(sessionmaker: async_sessionmaker[AsyncSession], client: Client) -> dict[str, int]:
     """Sub-runs still `running` once their root has been ended for GRACE: a parent writes its children's ends, so these
     are what a root's close left (a child it asked to cancel, or a parent gone before writing one). Each one's own
-    execution is described, at most once per RECHECK, across tenants through `orphan_subruns()` (ids only)."""
+    execution is described when it's due (`runs.next_check_at`), across tenants through `orphan_subruns()` (ids only):
+    again after RECHECK, or, its history gone, after twice its last gap, up to MISSING_MAX (fix-pass review R9)."""
     async with sessionmaker() as s:
         picked = (
             await s.execute(
-                text("select tenant_id, run_id from orphan_subruns(:grace, :recheck, :n)"),
-                {"grace": GRACE, "recheck": RECHECK, "n": BATCH},
+                text("select tenant_id, run_id from orphan_subruns(:grace, :n)"), {"grace": GRACE, "n": BATCH}
             )
         ).all()
     counts: Counter[str] = Counter()
@@ -332,8 +334,8 @@ async def _subrun(
     try:
         described = await handle.describe()
     except Exception as e:
-        await _missing_or_unanswered(client, e, run_id, "subrun_history_missing")
-        await _subrun_checked_alone(sessionmaker, tenant_id, run_id)
+        missing = await _missing_or_unanswered(client, e, run_id, "subrun_history_missing")
+        await _subrun_checked_alone(sessionmaker, tenant_id, run_id, backoff=missing)
         return "unresolved"
     if described.status is None or described.status in LIVE:
         await _subrun_checked_alone(sessionmaker, tenant_id, run_id)
@@ -350,13 +352,22 @@ async def _subrun(
     return "ended"
 
 
-async def _subrun_checked(s: AsyncSession, run_id: uuid.UUID) -> None:
-    await s.execute(text("update runs set checked_at = statement_timestamp() where id = :i"), {"i": run_id})
+_NEXT = text(
+    "update runs set checked_at = statement_timestamp(), next_check_at = statement_timestamp() + "
+    "least(greatest(cast(:recheck as interval), 2 * (statement_timestamp() - checked_at)), cast(:max as interval)) "
+    "where id = :i"
+)
+
+
+async def _subrun_checked(s: AsyncSession, run_id: uuid.UUID, *, backoff: bool = False) -> None:
+    """Asked about now; again after RECHECK, or with `backoff` after twice the last gap (RECHECK at first: greatest()
+    skips a null), up to MISSING_MAX."""
+    await s.execute(_NEXT, {"recheck": RECHECK, "max": MISSING_MAX if backoff else RECHECK, "i": run_id})
 
 
 async def _subrun_checked_alone(
-    sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, run_id: uuid.UUID
+    sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, run_id: uuid.UUID, *, backoff: bool = False
 ) -> None:
     async with sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant_id)
-        await _subrun_checked(s, run_id)
+        await _subrun_checked(s, run_id, backoff=backoff)
