@@ -448,16 +448,18 @@ async def test_a_step_behind_a_held_lock_gives_way_until_it_is_released(cluster,
         finally:
             logging.getLogger("alembic.online").removeHandler(giving_way)
         await asyncio.sleep(1.5)  # held well past a step's budget
+        while_held = gave_way(caplog)  # logged before the release: each attempt gave way while the lock was held
         await holder.release()
         try:
             await asyncio.wait_for(upgrading, 120)
         finally:
             stop.set()
             await asyncio.gather(*writing)
-    # Behind the hold, the step gave way on the lock alone; a later step may also give way on its budget, its writers
-    # coming and going while a loaded machine runs it slowly (seen under the parallel suite), and tries again
-    held = [m for m in gave_way(caplog) if m.startswith(f"online step {first} ")]
-    assert held and gave_way(caplog)[0] == held[0] and all(m.endswith("(lock)") for m in held)
+    # While the lock was held, the step gave way on it alone. The attempt the release came during may end on its budget
+    # (its lock taken late in it), as may a later step's, its writers coming and going while a loaded machine runs it
+    # slowly (both seen under the parallel suite): each is tried again
+    assert while_held and while_held[0].startswith(f"online step {first} ")
+    assert all(m.startswith(f"online step {first} ") and m.endswith("(lock)") for m in while_held), while_held
     assert await scalar(url, "SELECT version_num FROM alembic_version") == HEAD
     assert max(waits) < 1.0  # the server's deadlock_timeout
 
