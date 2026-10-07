@@ -20,7 +20,7 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql as pg
 
-from migrations.online import batches, exists, index, online, plain, step
+from migrations.online import batches, exists, grants, index, online, plain, step, ungranted
 
 revision = "0037"
 down_revision = "0036"
@@ -125,7 +125,8 @@ UNROLE = [  # after retention_sweeps is dropped, with its sequence and their gra
 ]
 # Online (2b-4b, D15): existing runs backfilled in committed batches, each run walked up to the first ancestor with its
 # root (or to its root), while new runs get theirs from the trigger, which walks a parent not backfilled yet the same way;
-# its original body is restored once every run has its root.
+# its original body is restored once every run has its root. A walk stops at 1,000 levels, so a cycle can't hold it:
+# sub-flows nest at most 5 deep (`MAX_SUBFLOW_DEPTH`).
 WALKING = """CREATE OR REPLACE FUNCTION runs_set_root() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF NEW.parent_run_id IS NULL THEN
@@ -171,7 +172,7 @@ def upgrade() -> None:
     # batches; `NOT NULL` through a check validated first; the key added `NOT VALID`, then validated; the indexes built
     # concurrently. None of these blocks normal reads or writes for longer than a step.
     with online() as conn:
-        step(conn, "0037 tenant_retention", _tenant_retention, *TENANT_RETENTION,
+        step(conn, "0037 tenant_retention", _tenant_retention, *ungranted(*TENANT_RETENTION),
              done=exists("relation", "tenant_retention"))  # fmt: skip
         step(conn, "0037 runs.root_run_id",
              lambda: op.add_column("runs", sa.Column("root_run_id", pg.UUID(as_uuid=True), nullable=True)),
@@ -197,14 +198,15 @@ def upgrade() -> None:
               "CREATE INDEX CONCURRENTLY IF NOT EXISTS runs_open_subruns ON runs (checked_at, id) "
               "WHERE status = 'running' AND parent_run_id IS NOT NULL")  # fmt: skip
         # The retention role, then its policies, a step a table (a step locks at most one table in use; a policy
-        # naming a role with no grant opens nothing), then its grants with the sweeps' tables, which lock none.
-        step(conn, "0037 the retention role", *ROLE[:2], done=exists("policy", "tenants_retention", "tenants"))
+        # naming a role with no grant opens nothing), then the sweeps' tables, and last every grant of the migration,
+        # once both of its triggers are there (grants lock no table).
+        step(conn, "0037 the retention role", ROLE[0])
         for statement in (s for s in ROLE if s.startswith("CREATE POLICY")):
             table = statement.split(" ON ", 1)[1].split()[0]
             step(conn, f"0037 {table} for retention", statement,
                  done=exists("policy", statement.split()[2], table))  # fmt: skip
-        step(conn, "0037 retention", *ORPHANS, _retention_sweeps, _retention_sweep_tenants,
-             *(s for s in ROLE[2:] if not s.startswith("CREATE POLICY")), *SWEEP_SCOPE,
+        step(conn, "0037 retention", *ungranted(*ORPHANS), _retention_sweeps, _retention_sweep_tenants,
+             *ungranted(*SWEEP_SCOPE), *grants(*TENANT_RETENTION, *ROLE, *ORPHANS, *SWEEP_SCOPE),
              done=exists("relation", "retention_sweeps"))  # fmt: skip
 
 

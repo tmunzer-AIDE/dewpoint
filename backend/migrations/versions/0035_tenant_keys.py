@@ -86,7 +86,8 @@ def upgrade() -> None:
     # Online (2b-4b, D15): the targets' unique indexes built concurrently, then attached; each key replaced in a step
     # of its own, its replacement added `NOT VALID` as the old one goes, so one of them always holds and every new row
     # is checked by the new one; the rows checked again once every replacement holds; then each key validated, which
-    # blocks no reads or writes.
+    # blocks no reads or writes. A key's step locks both its table and the table it references (dropping a key takes
+    # the referenced table too): the one exception to a step's one table in use, bounded by its budget all the same.
     with online() as conn:
         check(conn)
         for name, table, columns in TARGETS:

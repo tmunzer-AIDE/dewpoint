@@ -31,7 +31,7 @@ from tests.migrations.support import (
     upgrade,
     violations,
 )
-from tests.probes.migration_locks import seed
+from tests.probes.migration_locks import Load, seed
 
 ROOTS = 300  # root runs seeded: 450 runs, in batches of `BATCH` below
 BATCH = 40
@@ -45,6 +45,10 @@ TREE = """WITH RECURSIVE tree AS (
   SELECT r.id, t.root FROM runs r JOIN tree t ON r.parent_run_id = t.id
 ) SELECT count(*) FROM runs JOIN tree USING (id) WHERE runs.root_run_id IS DISTINCT FROM tree.root"""
 REVISIONS = Path(__file__).with_name("revisions.json")  # the original migrations' (bc4c840), by revision
+UNINCARNATED = """SELECT count(*) FROM schedules s WHERE NOT EXISTS
+  (SELECT 1 FROM schedule_incarnations i WHERE i.schedule_id = s.id AND i.number = 0 AND i.backfilled)"""
+UNSPANNED = """SELECT count(*) FROM schedule_incarnations i WHERE i.backfilled AND NOT EXISTS
+  (SELECT 1 FROM schedule_intervals v WHERE v.temporal_id = i.temporal_id AND v.reason = 'before_migration')"""
 UNRECORDED = """SELECT count(*) FROM runs r WHERE r.parent_run_id IS NULL AND NOT EXISTS
   (SELECT 1 FROM execution_evidence e WHERE e.workflow_id = 't:' || r.tenant_id || ':run:' || r.id)"""
 
@@ -129,19 +133,24 @@ async def test_every_committed_step_keeps_the_boundaries_its_migration_keeps(clu
     assert await read(url, security) == at_start
 
 
-async def test_an_upgraded_database_ends_as_a_fresh_one_does(cluster, templates) -> None:
-    """Upgraded online from 0034 with its runs, a database ends with the schema an empty one upgraded to the head
-    has: every constraint validated, every index valid, every column, function, trigger, policy and grant the same."""
-    url = await copy(cluster, templates["0034"])
+@pytest.mark.parametrize("start", PATHS)
+async def test_an_upgraded_database_ends_as_a_fresh_one_does(cluster, templates, start) -> None:
+    """Upgraded online from either path with its runs and schedules, a database ends with the schema an empty one
+    upgraded to the head has: every constraint validated, every index valid, every column, function, trigger, policy
+    and grant the same; its data backfilled: each run's root its tree's, each root's execution recorded, each schedule
+    its incarnation 0 with its life before the migration."""
+    url = await copy(cluster, templates[start])
     await asyncio.to_thread(upgrade, url)
-    await _create(cluster, "fresh")
-    await asyncio.to_thread(upgrade, f"{cluster}/fresh")
-    upgraded, fresh = await read(url, schema), await read(f"{cluster}/fresh", schema)
+    empty = await copy(cluster, "template0")
+    await asyncio.to_thread(upgrade, empty)
+    upgraded, fresh = await read(url, schema), await read(empty, schema)
     assert {k: v for k, v in upgraded.items() if v != fresh[k]} == {}
     assert all(valid and ready for _, valid, ready in upgraded["valid"])
     assert all(validated for *_, validated in upgraded["constraints"])
     assert await scalar(url, TREE) == 0
     assert await scalar(url, UNRECORDED) == 0
+    assert await scalar(url, "SELECT count(*) FROM schedules") > 0
+    assert await scalar(url, UNINCARNATED) == 0 and await scalar(url, UNSPANNED) == 0
 
 
 async def test_each_revision_ends_as_the_original_left_it() -> None:
@@ -220,17 +229,71 @@ async def test_an_interrupted_backfill_goes_on_from_its_committed_batches(cluste
     assert await read(url, schema) == await read(straight, schema)
 
 
-class Holder:
-    """A writer's open transaction on `tenants` (its `ROW EXCLUSIVE` lock), as any write holds until it commits."""
+async def test_an_upgrade_interrupted_after_any_step_goes_on_from_there(cluster, templates, monkeypatch) -> None:
+    """Interrupted after each committed step in turn (the process killed just after its commit), the upgrade run again
+    goes on from there: each step's `done` query skips what committed, each step without one is safe to run again. It
+    ends as one never interrupted, its data backfilled whole."""
+    monkeypatch.setattr(online, "BATCH", 200)
+    url = await copy(cluster, templates["0034"])
+    seen: set[str] = set()
 
-    def __init__(self, url: str) -> None:
-        self.url = url
+    def interrupt(conn: Connection, name: str) -> None:
+        if name not in seen:
+            seen.add(name)
+            raise Interrupted
+
+    online.AFTER.append(interrupt)
+    runs = 0
+    try:
+        while True:
+            runs += 1
+            assert runs < 1_000
+            try:
+                await asyncio.to_thread(upgrade, url)
+                break
+            except Interrupted:
+                pass
+    finally:
+        online.AFTER.remove(interrupt)
+    assert runs == len(seen) + 1 > 100
+    straight = await copy(cluster, templates["0034"])
+    await asyncio.to_thread(upgrade, straight)
+    assert await read(url, schema) == await read(straight, schema)
+    for query in (TREE, UNRECORDED, UNINCARNATED, UNSPANNED):
+        assert await scalar(url, query) == 0, query
+
+
+@pytest.mark.parametrize("start", PATHS)
+async def test_both_paths_upgrade_under_a_continuing_load(cluster, templates, start) -> None:
+    """The lock probe's normal load runs throughout (an API's reads, a worker's writes, an admission, an ingress
+    recording, one connection each): the upgrade completes, no operation fails, none waits a `deadlock_timeout`."""
+    url = await copy(cluster, templates[start])
+    load = Load(url, per_kind=1, pause=0.01)
+    await load.prepare()
+    loops = [asyncio.create_task(load._loop(kind)) for kind in Load.KINDS]
+    try:
+        await asyncio.wait_for(asyncio.to_thread(upgrade, url), 120)
+    finally:
+        load.stop.set()
+        await asyncio.gather(*loops)
+    assert await scalar(url, "SELECT version_num FROM alembic_version") == "0044"
+    assert {kind: errors for kind, errors in load.errors.items() if errors} == {}
+    assert sum(len(times) for times in load.times.values()) > 100
+    assert max(took for times in load.times.values() for _, took in times) < 1.0
+
+
+class Holder:
+    """An open transaction holding `table` in `mode`: a writer's (`ROW EXCLUSIVE`), as any write holds until it
+    commits, or a long read's (`ACCESS SHARE`)."""
+
+    def __init__(self, url: str, table: str = "tenants", mode: str = "ROW EXCLUSIVE") -> None:
+        self.url, self.table, self.mode = url, table, mode
 
     async def __aenter__(self) -> "Holder":
         self.c = await asyncpg.connect(self.url)
         self.tx = self.c.transaction()
         await self.tx.start()
-        await self.c.execute("LOCK TABLE tenants IN ROW EXCLUSIVE MODE")
+        await self.c.execute(f"LOCK TABLE {self.table} IN {self.mode} MODE")
         return self
 
     async def release(self) -> None:
@@ -258,29 +321,41 @@ class GivingWay(logging.Handler):
             self.loop.call_soon_threadsafe(self.seen.set)
 
 
-async def test_a_step_behind_a_held_lock_gives_way_until_it_is_released(cluster, templates, caplog) -> None:
+HELD = {  # the table held and how; the writes probed meanwhile; the first migration that waits for it
+    "tenants": ("ROW EXCLUSIVE", ["UPDATE tenants SET status = status WHERE false"], "0037"),
+    # A long read of `runs`, which a concurrent index build doesn't wait for: 0035's steps on `runs` do (its unique key
+    # attached, then the keys that take both their table and the one they reference)
+    "runs": ("ACCESS SHARE", ["UPDATE runs SET iterations = iterations WHERE false",
+                              "UPDATE run_steps SET attempt = attempt WHERE false"], "0035"),
+}  # fmt: skip
+
+
+@pytest.mark.parametrize("table", HELD)
+async def test_a_step_behind_a_held_lock_gives_way_until_it_is_released(cluster, templates, caplog, table) -> None:
     """Behind a writer's open transaction, a step waits at most its budget, gives way, and tries again until the
-    writer commits: a read of `tenants` meanwhile waits less than a second, never the writer's whole hold."""
+    writer commits. A write queued behind the step meanwhile (any write waits for a pending lock that conflicts with
+    it, a read only for an exclusive one) waits less than `deadlock_timeout`, never the writer's whole hold."""
     caplog.set_level(logging.INFO, logger="alembic.online")
     url = await copy(cluster, templates["0042"])
-    reads: list[float] = []
+    mode, probes, first = HELD[table]
+    waits: list[float] = []
     stop = asyncio.Event()
 
-    async def reader() -> None:
+    async def writer(statement: str) -> None:
         c = await asyncpg.connect(url)
         try:
             while not stop.is_set():
                 t0 = time.monotonic()
-                await c.fetch("SELECT id, status FROM tenants LIMIT 5")
-                reads.append(time.monotonic() - t0)
+                await c.execute(statement)
+                waits.append(time.monotonic() - t0)
                 await asyncio.sleep(0.02)
         finally:
             await c.close()
 
-    reading = asyncio.create_task(reader())
+    writing = [asyncio.create_task(writer(statement)) for statement in probes]
     giving_way = GivingWay()
     logging.getLogger("alembic.online").addHandler(giving_way)
-    async with Holder(url) as holder:
+    async with Holder(url, table, mode) as holder:
         upgrading = asyncio.create_task(asyncio.to_thread(upgrade, url))
         try:
             await asyncio.wait_for(giving_way.seen.wait(), 60)
@@ -292,10 +367,11 @@ async def test_a_step_behind_a_held_lock_gives_way_until_it_is_released(cluster,
             await asyncio.wait_for(upgrading, 120)
         finally:
             stop.set()
-            await reading
+            await asyncio.gather(*writing)
     assert gave_way(caplog) and all(m.endswith("(lock)") for m in gave_way(caplog))
+    assert gave_way(caplog)[0].startswith(f"online step {first} ")
     assert await scalar(url, "SELECT version_num FROM alembic_version") == "0044"
-    assert max(reads) < 1.0
+    assert max(waits) < 1.0  # the server's deadlock_timeout
 
 
 async def test_a_lock_never_released_stops_the_upgrade_naming_its_step(cluster, templates, monkeypatch) -> None:
@@ -409,3 +485,55 @@ async def test_a_backfill_commits_each_batch_and_goes_on_from_them(scratch) -> N
     assert await run(scratch, lambda c: online.batches(c, "v backfill", bounds, apply, first=0, size=10)) == 5
     assert names == ["v backfill (batch 1)", "v backfill (batch 2)"]
     assert await scalar(scratch, "SELECT count(*) FROM v WHERE NOT done") == 0
+
+
+async def test_a_backfill_whose_rows_take_long_to_find_still_goes_on(scratch, monkeypatch) -> None:
+    """Finding a batch's rows (a resumed backfill scans the rows already done) takes no lock that blocks a normal
+    operation, so it runs outside the step and its budget: only applying the batch does."""
+    monkeypatch.setattr(online, "ATTEMPTS", 2)
+    await execute(scratch, "CREATE TABLE w (id int PRIMARY KEY, done bool NOT NULL DEFAULT false); "
+                           "INSERT INTO w (id) SELECT generate_series(1, 5)")  # fmt: skip
+    bounds = ("SELECT max(id), count(*) FROM (SELECT id FROM w WHERE id > :after AND NOT done ORDER BY id LIMIT :n) b, "
+              "pg_sleep(0.7)")  # fmt: skip
+    apply = "UPDATE w SET done = true WHERE id > :after AND id <= :hi AND NOT done"
+    assert await run(scratch, lambda c: online.batches(c, "w backfill", bounds, apply, first=0, size=10)) == 5
+    assert await scalar(scratch, "SELECT count(*) FROM w WHERE NOT done") == 0
+
+
+async def test_a_step_behind_an_autovacuum_cancels_it_rather_than_wait_for_it(caplog, monkeypatch) -> None:
+    """The server cancels an autovacuum that blocks a lock request only once the request has waited `deadlock_timeout`,
+    which a step never does: after a step gives way on a lock, it cancels the schema's autovacuums (never one against
+    wraparound), as the server would, and commits on a later attempt. A cluster of its own, its autovacuum woken every
+    second, a table's slowed to hold its lock."""
+    caplog.set_level(logging.INFO, logger="alembic.online")
+    monkeypatch.setattr(online, "ATTEMPTS", 4)
+    with PostgresContainer("postgres:16-alpine", driver=None) as pg:
+        url = pg.get_connection_url()
+        await execute(url, "ALTER SYSTEM SET autovacuum_naptime = '1s'")
+        await execute(url, "SELECT pg_reload_conf()")
+        await execute(url, "CREATE TABLE av (id int, pad text) WITH (autovacuum_vacuum_threshold = 0, "
+                           "autovacuum_vacuum_scale_factor = 0, autovacuum_vacuum_cost_delay = 100, "
+                           "autovacuum_vacuum_cost_limit = 1); INSERT INTO av SELECT g, repeat('x', 200) "
+                           "FROM generate_series(1, 20000) g; DELETE FROM av")  # fmt: skip
+        query = ("SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'autovacuum worker' "
+                 "AND query LIKE '%av%'")  # fmt: skip
+        until = time.monotonic() + 60
+        while not await scalar(url, query):
+            assert time.monotonic() < until, "no autovacuum started"
+            await asyncio.sleep(0.2)
+        await run(url, lambda c: online.step(c, "vacuumed", "ALTER TABLE av ADD COLUMN x int"))
+    assert any("autovacuum of av cancelled" in m for m in (r.getMessage() for r in caplog.records))
+
+
+async def test_an_operators_cancel_stops_the_step_rather_than_retry_it(scratch) -> None:
+    """A statement cancelled on purpose (`pg_cancel_backend`) stops the upgrade: only a timeout gives way."""
+    stepping = asyncio.create_task(run(scratch, lambda c: online.step(c, "cancelled", "SELECT pg_sleep(0.5)")))
+    query = "SELECT pid FROM pg_stat_activity WHERE query = 'SELECT pg_sleep(0.5)' AND state = 'active'"
+    until = time.monotonic() + 10
+    while (pid := await scalar(scratch, query)) is None:
+        assert time.monotonic() < until
+        await asyncio.sleep(0.01)
+    await scalar(scratch, f"SELECT pg_cancel_backend({pid})")
+    with pytest.raises(DBAPIError) as raised:
+        await stepping
+    assert getattr(raised.value.orig, "sqlstate", None) == "57014"

@@ -118,9 +118,11 @@ COMMANDS = {"ALL": {"SELECT", "INSERT", "UPDATE", "DELETE"}, "SELECT": {"SELECT"
 def violations(before: dict[str, Any], at: dict[str, Any], after: dict[str, Any]) -> list[str]:
     """How the state `at` a committed step breaks a boundary that holds both `before` the upgrade and `after` it: a
     privilege neither had; a policy in a form neither had; a privilege new since `before` without a restrictive policy
-    `after` puts on it; a table's row-level security in neither's form (a new table's, not `after`'s); a trigger both
-    had, missing; a security-definer function in neither's form; fewer keys between two tables than both had; a role
-    neither had."""
+    `after` puts on it, or a restrictive policy both have, missing; a privilege new since `before` while a trigger the
+    migration adds is missing (a migration's grants come after everything that bounds them: the erasure's insert fence,
+    say, before the eraser may advance an erasure); a table's row-level security in neither's form (a new table's, not
+    `after`'s); a trigger both had, missing; a security-definer function in neither's form; fewer keys between two
+    tables than both had; a role neither had."""
     found = [f"privilege {p}" for p in sorted(at["privileges"] - before["privileges"] - after["privileges"])]
     for key, form in sorted(at["policies"].items()):
         if form not in (before["policies"].get(key), after["policies"].get(key)):
@@ -134,6 +136,17 @@ def violations(before: dict[str, Any], at: dict[str, Any], after: dict[str, Any]
             gated = privilege in COMMANDS[applies] and ("public" in named or grantee in named)
             if obj.split(".")[0] == table and gated:
                 found.append(f"{grantee} {privilege} on {obj} without the restrictive policy {name}")
+    for key, form in sorted(before["policies"].items()):
+        if form[0] == "RESTRICTIVE" and after["policies"].get(key) == form and key not in at["policies"]:
+            found.append(f"restrictive policy {key} missing")
+    # Granted: not the migrating role's, which owns what it makes, nor `PUBLIC`'s default on a new invoker function
+    # (a trigger's), which runs with its caller's privileges
+    granted = {
+        p for p in new if p[1] != "owner" and not (p[1] == "PUBLIC" and "(" in p[0] and p[0] not in at["definers"])
+    }
+    unadded = sorted(after["triggers"] - before["triggers"] - at["triggers"])
+    if granted and unadded:
+        found.append(f"{len(granted)} privileges granted while {len(unadded)} triggers aren't there: {unadded[:2]}")
     for table, form in sorted(at["rls"].items()):
         allowed = [after["rls"].get(table), *([before["rls"][table]] if table in before["rls"] else [])]
         if form not in allowed:

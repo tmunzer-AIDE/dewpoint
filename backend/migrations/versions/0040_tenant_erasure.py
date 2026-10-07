@@ -65,12 +65,13 @@ nor once it's lost. Not fenced: the audit log (kept under the audit
 policy), and the retention sweep's own counts (deleted by the erasure's sweep once audited)."""
 
 from collections.abc import Callable
+from uuid import UUID
 
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-from migrations.online import exists, online, step
+from migrations.online import batches, exists, grants, online, step, ungranted
 
 revision = "0040"
 down_revision = "0039"
@@ -292,9 +293,6 @@ INCARNATIONS = [
     "landed_at, landed_paused, unpause_sent_at) ON schedule_incarnations TO dewpoint_dispatch",
     "GRANT SELECT ON schedule_incarnations TO dewpoint_api",  # a wait not yet settled, shown as pending
     "GRANT SELECT, DELETE ON schedule_incarnations TO dewpoint_retention",
-    # every schedule already here: incarnation 0, under the id the sync gave every schedule before
-    "INSERT INTO schedule_incarnations (temporal_id, tenant_id, schedule_id, number, misses, backfilled) "
-    "SELECT 't:' || tenant_id || ':sched:' || id, tenant_id, id, 0, misses, true FROM schedules",
     """CREATE FUNCTION stray_incarnations(max_rows integer) RETURNS TABLE (tenant_id uuid, temporal_id text)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
     SELECT i.tenant_id, i.temporal_id FROM schedule_incarnations i
@@ -319,11 +317,34 @@ INTERVALS = [
     "GRANT USAGE ON SEQUENCE schedule_intervals_id_seq TO dewpoint_dispatch",
     "GRANT SELECT ON schedule_intervals TO dewpoint_api",
     "GRANT SELECT, DELETE ON schedule_intervals TO dewpoint_retention",
-    # every schedule already here: its life before the migration, which nothing recorded as evidence, unknown
+]
+
+# Every schedule already here, in batches (2b-4b, D15): incarnation 0, under the id the sync gave every schedule
+# before; then its life before the migration, which nothing recorded as evidence, unknown.
+INCARNATED_BOUNDS = (
+    "WITH b AS (SELECT s.id FROM schedules s WHERE s.id > :after AND NOT EXISTS (SELECT 1 FROM schedule_incarnations i "
+    "WHERE i.schedule_id = s.id) ORDER BY s.id LIMIT :n) SELECT (SELECT id FROM b ORDER BY id DESC LIMIT 1), "
+    "(SELECT count(*) FROM b)"
+)
+INCARNATED = (
+    "INSERT INTO schedule_incarnations (temporal_id, tenant_id, schedule_id, number, misses, backfilled) "
+    "SELECT 't:' || tenant_id || ':sched:' || id, tenant_id, id, 0, misses, true FROM schedules s "
+    "WHERE s.id > :after AND s.id <= :hi AND NOT EXISTS (SELECT 1 FROM schedule_incarnations i "
+    "WHERE i.schedule_id = s.id) ON CONFLICT (temporal_id) DO NOTHING"
+)
+SPANNED_BOUNDS = (
+    "WITH b AS (SELECT i.temporal_id FROM schedule_incarnations i WHERE i.backfilled AND i.temporal_id > :after "
+    "AND NOT EXISTS (SELECT 1 FROM schedule_intervals v WHERE v.temporal_id = i.temporal_id AND v.kind = 'creation') "
+    "ORDER BY i.temporal_id LIMIT :n) SELECT (SELECT temporal_id FROM b ORDER BY temporal_id DESC LIMIT 1), "
+    "(SELECT count(*) FROM b)"
+)
+SPANNED = (
     "INSERT INTO schedule_intervals (tenant_id, schedule_id, temporal_id, kind, starts_at, ends_at, class, reason) "
     "SELECT i.tenant_id, i.schedule_id, i.temporal_id, 'creation', s.created_at, i.recorded_at, 'unknown', "
-    "'before_migration' FROM schedule_incarnations i JOIN schedules s ON s.id = i.schedule_id WHERE i.backfilled",
-]
+    "'before_migration' FROM schedule_incarnations i JOIN schedules s ON s.id = i.schedule_id WHERE i.backfilled "
+    "AND i.temporal_id > :after AND i.temporal_id <= :hi AND NOT EXISTS (SELECT 1 FROM schedule_intervals v "
+    "WHERE v.temporal_id = i.temporal_id AND v.kind = 'creation')"
+)
 
 # The retention process checks the deployment's recorded namespace before erasure reaches Temporal (§2.1).
 RECORD = "GRANT SELECT ON platform_settings TO dewpoint_retention"
@@ -379,26 +400,30 @@ BOUNDARIES = [
 def upgrade() -> None:
     # Online (2b-4b, D15). A step locks at most one table in use (a grant locks none, and a new table's keys only share
     # what they reference), so no writer's lock order can hold it up for long: the new tables first, each with its
-    # security, the functions, and the gates of the new tables the step grants on (it locks `tenants`); then each
-    # existing table's gate, before any privilege it bounds is granted; the eraser's policies, table by table; its
-    # grants; each table's fence; the schedules' new column. Each step's end keeps every boundary this one keeps.
+    # row-level security, the functions, and the gates of the new tables (it locks `tenants`); the schedules already
+    # here, recorded in batches; each existing table's gate; the eraser's policies, table by table; each table's
+    # fence; the schedules' new column; and last every grant of the migration, once each gate and fence that bounds
+    # them is there (the eraser may advance an erasure only once every insert past stage 60 is refused).
     with online() as conn:
-        step(conn, "0040 tenant erasure", *_actions(), done=exists("relation", "tenant_erasures"))
+        step(conn, "0040 tenant erasure", *ungranted(*_actions()), done=exists("relation", "tenant_erasures"))
+        batches(conn, "0040 schedule_incarnations backfill", INCARNATED_BOUNDS, INCARNATED, first=UUID(int=0))
+        batches(conn, "0040 schedule_intervals backfill", SPANNED_BOUNDS, SPANNED, first="")
         for table in dict.fromkeys(t for t, *_ in GATED if t not in MADE_GATED):
             first = next(f"{t}_erasure_{command.lower()}" for t, command, *_ in GATED if t == table)
             step(conn, f"0040 {table} gated", *gates(table), done=exists("policy", first, table))
         for table in NO_POLICY:
             step(conn, f"0040 {table} for the eraser", ERASER_POLICY.format(t=table),
                  done=exists("policy", f"{table}_erasure", table))  # fmt: skip
-        step(conn, "0040 the eraser's grants", *ERASER, TOMBSTONE, done=exists("policy", "tenants_erasure", "tenants"))
         for table in FENCED:
             step(conn, f"0040 {table} fenced",
                  f"CREATE TRIGGER {table}_fence BEFORE INSERT ON {table} FOR EACH ROW EXECUTE FUNCTION tenant_insert_fence()",
                  done=exists("trigger", f"{table}_fence", table))  # fmt: skip
         step(conn, "0040 schedules.creation_misses",
              lambda: op.add_column("schedules", sa.Column("creation_misses", sa.Integer, nullable=False, server_default="0")),
-             "GRANT UPDATE (creation_misses) ON schedules TO dewpoint_dispatch",
              done=exists("column", "creation_misses", "schedules"))  # fmt: skip
+        step(conn, "0040 grants", *grants(*_actions()), *ERASER,
+             "GRANT UPDATE (creation_misses) ON schedules TO dewpoint_dispatch", TOMBSTONE,
+             done=exists("policy", "tenants_erasure", "tenants"))  # fmt: skip
 
 
 def _actions() -> list[str | Callable[[], object]]:

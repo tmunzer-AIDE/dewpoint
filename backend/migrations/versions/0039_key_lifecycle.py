@@ -48,7 +48,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from alembic import op
 
-from migrations.online import batches, exists, online, step
+from migrations.online import batches, exists, grants, online, step, ungranted
 
 revision = "0039"
 down_revision = "0038"
@@ -172,15 +172,15 @@ def upgrade() -> None:
     with online() as conn:
         step(conn, "0039 schedules.action_key_version",
              lambda: op.add_column("schedules", sa.Column("action_key_version", sa.Integer, nullable=True)),
-             "GRANT UPDATE (action_key_version) ON schedules TO dewpoint_dispatch",
              done=exists("column", "action_key_version", "schedules"))  # fmt: skip
-        step(conn, "0039 key lifecycle", *_tables(recorder), done=exists("relation", "execution_evidence"))
+        step(conn, "0039 key lifecycle", *ungranted(*_tables(recorder)), done=exists("relation", "execution_evidence"))
         step(conn, "0039 runs_evidence", TRIGGER, done=exists("trigger", "runs_evidence", "runs"))
         batches(conn, "0039 execution_evidence backfill", BACKFILL_BOUNDS, BACKFILL, first=UUID(int=0))
         for table, policy in _policies():
             step(conn, f"0039 {table} for the key admin", policy,
                  done=exists("policy", f"{table}_key_admin", table))  # fmt: skip
-        step(conn, "0039 the key admin's grants", *_grants())
+        step(conn, "0039 grants", "GRANT UPDATE (action_key_version) ON schedules TO dewpoint_dispatch",
+             *grants(*_tables(recorder)), *_grants())  # fmt: skip
 
 
 def _tables(recorder: str) -> list[str | Callable[[], object]]:
