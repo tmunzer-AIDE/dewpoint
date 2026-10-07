@@ -938,3 +938,10 @@ its protection checked by disabling it. A technical review; the rulings above st
   the owner's word.
 - The owner signed off this section's rulings as written (2026-10-07, "go", confirmed in chat as covering the
   rulings, push and PR after the full suite, and a real run against the test org).
+- Rebased onto `origin/main` af8b808 (#52, #53, #54; no conflicts; local backup branch
+  `backup/plugins-3b2-pre-rebase`). The full backend suite at the rebased head 80348ca: 3,929 passed, 8 skipped, in 8
+  minutes (`-n 10`).
+- The device-utility probe (`backend/tests/probes/mist_utilities.py`, bd03de3): `list` sends GETs only; `run` sends a
+  POST only to a diagnostic utility of a chosen device, any other request refused before sending. The owner chose
+  diagnostics only, on one device of each kind in the test org: a switch (EX4100-48MP), an SRX340, an SSR130 and an
+  AP47.
