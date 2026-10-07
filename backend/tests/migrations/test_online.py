@@ -470,13 +470,16 @@ async def test_a_step_behind_a_held_lock_gives_way_until_it_is_released(cluster,
 async def test_a_lock_never_released_stops_the_upgrade_naming_its_step(cluster, templates, monkeypatch) -> None:
     """A step that gives way `ATTEMPTS` times stops the upgrade, naming itself, in bounded time; its migration stays
     unrecorded, and the upgrade run again once the lock is free goes on to the head. Ten attempts: enough for the
-    other steps to finish on a loaded machine (with three, a large one ran out first, under the parallel suite)."""
+    other steps to finish on a loaded machine (with three, a large one ran out first, under the parallel suite). Its
+    last attempt gives way to the lock it waited for, or, on a machine loaded enough that its statement began waiting
+    later than its margin, at its statement's bound: either way within its budget (seen under the full suite, the
+    2b-4b M1 checkpoint 6)."""
     monkeypatch.setattr(online, "ATTEMPTS", 10)
     url = await copy(cluster, templates["0042"])
     t0 = time.monotonic()
     async with Holder(url):
         upgrading = asyncio.create_task(asyncio.to_thread(upgrade, url))
-        with pytest.raises(online.StepFailedError, match=r"^online step 0037 .+ gave way 10 times \(lock\)"):
+        with pytest.raises(online.StepFailedError, match=r"^online step 0037 .+ gave way 10 times \((lock|budget)\)"):
             await asyncio.wait_for(asyncio.shield(upgrading), 60)
     assert time.monotonic() - t0 < 30
     assert await scalar(url, "SELECT version_num FROM alembic_version") == "0036"
