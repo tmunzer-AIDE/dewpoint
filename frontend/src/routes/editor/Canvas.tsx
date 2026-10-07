@@ -264,7 +264,8 @@ function Flow(p: CanvasProps) {
           {p.overview && <MiniMap pannable zoomable ariaLabel="Overview of the steps" nodeClassName="canvas-minimap-node" />}
         </ReactFlow>
       </Pluses.Provider>
-      <div data-canvas-overlay className="absolute bottom-4 left-4 flex items-center gap-1.5">
+      {/* One row, never wrapping a label: on a narrow canvas it covers as little as it can (the percentage goes first). */}
+      <div data-canvas-overlay className="absolute bottom-4 left-4 flex items-center gap-1.5 whitespace-nowrap">
         {p.editable && (
           <Button size="md" onClick={p.onLayout}>
             Auto layout
@@ -273,7 +274,7 @@ function Flow(p: CanvasProps) {
         <Button size="md" aria-label="Zoom in" onClick={() => void flow.zoomIn({ duration: 0 })}>＋</Button>
         <Button size="md" aria-label="Zoom out" onClick={() => void flow.zoomOut({ duration: 0 })}>−</Button>
         <Button size="md" onClick={() => void flow.fitView({ padding: 0.2, minZoom: MIN_ZOOM, maxZoom: 1, duration: 0 })}>Fit</Button>
-        <span className="ml-1.5 font-mono text-small text-muted">{Math.round(zoom * 100)}%</span>
+        <span className="canvas-zoom-level ml-1.5 font-mono text-small text-muted">{Math.round(zoom * 100)}%</span>
       </div>
     </div>
   );

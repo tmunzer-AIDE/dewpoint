@@ -310,12 +310,12 @@ test("at 320 px a panel leaves the canvas room: Go to shows its step, and a step
   await panel.getByRole("button", { name: "Go to transform" }).click();
   await expect(step).toBeFocused();
   await expect(step).toBeInViewport({ ratio: 0.5 });
-  // The canvas's own controls fit it (the final checkpoint's second review): nothing runs past its right edge.
+  // The canvas's own controls fit it in one row (the final checkpoint's second review): nothing past its right edge,
+  // and no taller than a button, so they cover as little of a small canvas as they can.
   const frame = (await canvas.boundingBox())!;
-  for (const control of [page.getByRole("button", { name: "Fit" }), page.getByText(/^\d+%$/)]) {
-    const b = (await control.boundingBox())!;
-    expect(b.x + b.width).toBeLessThanOrEqual(frame.x + frame.width);
-  }
+  const row = (await page.locator("[data-canvas-overlay]").filter({ has: page.getByRole("button", { name: "Fit" }) }).boundingBox())!;
+  expect(row.x + row.width).toBeLessThanOrEqual(frame.x + frame.width);
+  expect(row.height).toBeLessThanOrEqual(40);
   // A step whose panel opens in the canvas's lower half stays in view as the panel takes that half.
   await panel.getByRole("button", { name: "Close" }).click(); // the canvas takes the height again
   await expect(panel).toHaveCount(0);

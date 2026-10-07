@@ -45,3 +45,9 @@
     display: none;
   }
 }
+/* At 320 px the canvas is 260 wide: its controls keep one row without the zoom's percentage. */
+@container (max-width: 340px) {
+  .canvas-zoom-level {
+    display: none;
+  }
+}
