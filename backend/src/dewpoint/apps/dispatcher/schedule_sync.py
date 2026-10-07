@@ -105,6 +105,7 @@ from temporalio.client import (
 from temporalio.service import RPCError, RPCStatusCode
 
 from dewpoint.apps.codec import KEY_VERSION
+from dewpoint.apps.dispatcher import budget
 from dewpoint.apps.dispatcher.tick import ADMISSION_QUEUE
 from dewpoint.core.audit import service as audit
 from dewpoint.core.db import tenant_scope
@@ -680,20 +681,23 @@ async def sync_schedules(
             await s.execute(text("select tenant_id, schedule_id from schedule_candidates(:n)"), {"n": batch})
         ).all()
     counts: dict[str, int] = {}
-    for tenant_id, schedule_id in picked:
-        try:
-            outcome = await sync_one(sessionmaker, client, leader, tenant_id, schedule_id)
-        except Exception as e:
-            refused = isinstance(e, RPCError) and e.status in (RPCStatusCode.INVALID_ARGUMENT,
-                                                                RPCStatusCode.FAILED_PRECONDITION)  # fmt: skip
-            code = TEMPORAL_REFUSED if refused else SYNC_FAILED
-            log.error("schedule_sync_failed", schedule_id=str(schedule_id), code=code, error=type(e).__name__)
+    with budget.passing("sync") as admitted:
+        for tenant_id, schedule_id in admitted(picked, key=lambda row: row[1]):
             try:
-                await _failed(sessionmaker, tenant_id, schedule_id, code)
-            except Exception as again:
-                log.error("schedule_sync_unrecorded", schedule_id=str(schedule_id), error=type(again).__name__)
-            outcome = "failed"
-        counts[outcome] = counts.get(outcome, 0) + 1
+                outcome = await sync_one(sessionmaker, client, leader, tenant_id, schedule_id)
+            except Exception as e:
+                refused = isinstance(e, RPCError) and e.status in (RPCStatusCode.INVALID_ARGUMENT,
+                                                                    RPCStatusCode.FAILED_PRECONDITION)  # fmt: skip
+                code = TEMPORAL_REFUSED if refused else SYNC_FAILED
+                log.error("schedule_sync_failed", schedule_id=str(schedule_id), code=code, error=type(e).__name__)
+                try:
+                    await _failed(sessionmaker, tenant_id, schedule_id, code)
+                except Exception as again:
+                    log.error("schedule_sync_unrecorded", schedule_id=str(schedule_id), error=type(again).__name__)
+                outcome = "failed"
+            counts[outcome] = counts.get(outcome, 0) + 1
+    if admitted.deferred:
+        counts["deferred"] = admitted.deferred
     return counts
 
 
@@ -713,26 +717,29 @@ async def check_misses(
         query = text("select tenant_id, temporal_id from incarnation_miss_candidates(:n)")
         picked = (await s.execute(query, {"n": batch})).all()
     counts = {"checked": 0, "missed": 0}
-    for tenant_id, temporal_id in picked:
-        try:
-            async with sessionmaker() as s:
-                at = await s.scalar(select(func.statement_timestamp()))  # before the describe
-            found = await described(client, temporal_id)
-            async with sessionmaker() as s, s.begin():
-                await tenant_scope(s, tenant_id)
-                read = await s.get(Incarnation, temporal_id, populate_existing=True)
-                if read is None:
-                    continue
-                if found is not None:
-                    await _seen(s, [temporal_id], at)
-                    counts["missed"] += await _missed(s, tenant_id, read.schedule_id, temporal_id, found.missed)
-                elif read.seen_at is not None or read.backfilled:
-                    await _retired(s, [temporal_id])  # seen, then gone: its one create can't land again
-                await s.execute(update(Incarnation).where(Incarnation.temporal_id == temporal_id)
-                                .values(misses_checked_at=at))  # fmt: skip
-            counts["checked"] += 1
-        except Exception as e:
-            log.error("schedule_misses_unread", incarnation=temporal_id, error=type(e).__name__)
+    with budget.passing("misses") as admitted:
+        for tenant_id, temporal_id in admitted(picked, key=lambda row: row[1]):
+            try:
+                async with sessionmaker() as s:
+                    at = await s.scalar(select(func.statement_timestamp()))  # before the describe
+                found = await described(client, temporal_id)
+                async with sessionmaker() as s, s.begin():
+                    await tenant_scope(s, tenant_id)
+                    read = await s.get(Incarnation, temporal_id, populate_existing=True)
+                    if read is None:
+                        continue
+                    if found is not None:
+                        await _seen(s, [temporal_id], at)
+                        counts["missed"] += await _missed(s, tenant_id, read.schedule_id, temporal_id, found.missed)
+                    elif read.seen_at is not None or read.backfilled:
+                        await _retired(s, [temporal_id])  # seen, then gone: its one create can't land again
+                    await s.execute(update(Incarnation).where(Incarnation.temporal_id == temporal_id)
+                                    .values(misses_checked_at=at))  # fmt: skip
+                counts["checked"] += 1
+            except Exception as e:
+                log.error("schedule_misses_unread", incarnation=temporal_id, error=type(e).__name__)
+    if admitted.deferred:
+        counts["deferred"] = admitted.deferred
     return counts
 
 
@@ -751,37 +758,40 @@ async def check_strays(
             await s.execute(text("select tenant_id, temporal_id from stray_incarnations(:n)"), {"n": batch})
         ).all()
     counts: dict[str, int] = {}
-    for tenant_id, temporal_id in picked:
-        try:
-            async with sessionmaker() as s:
-                at = await s.scalar(select(func.statement_timestamp()))  # before the describe
-            found = await described(client, temporal_id)
-            ready = False
-            if found is not None:  # paused, its count recorded, then deleted, each committed first
-                async with sessionmaker() as s, s.begin():
-                    await tenant_scope(s, tenant_id)
-                    schedule_id = await s.scalar(select(Incarnation.schedule_id)
-                                                 .where(Incarnation.temporal_id == temporal_id))  # fmt: skip
-                    if schedule_id is not None:
-                        ready = await _deletable(s, client, tenant_id, schedule_id, temporal_id, found)
-                    await _seen(s, [temporal_id], at)
-                if ready:
-                    await _delete(client, temporal_id)
-                    log.error("schedule_incarnation_stray", tenant=str(tenant_id))
-            async with sessionmaker() as s, s.begin():  # one found is described again on the next pass
-                await tenant_scope(s, tenant_id)
-                await s.execute(update(Incarnation).where(Incarnation.temporal_id == temporal_id)
-                                .values(checked_at=None if found else func.now()))  # fmt: skip
-            outcome = ("deleted" if ready else "held") if found is not None else "checked"
-        except Exception as e:
-            log.error("schedule_stray_unchecked", tenant=str(tenant_id), error=type(e).__name__)
-            outcome = "failed"
-            try:  # retried in five minutes, behind the others: never holding the scan
-                async with sessionmaker() as s, s.begin():
+    with budget.passing("strays") as admitted:
+        for tenant_id, temporal_id in admitted(picked, key=lambda row: row[1]):
+            try:
+                async with sessionmaker() as s:
+                    at = await s.scalar(select(func.statement_timestamp()))  # before the describe
+                found = await described(client, temporal_id)
+                ready = False
+                if found is not None:  # paused, its count recorded, then deleted, each committed first
+                    async with sessionmaker() as s, s.begin():
+                        await tenant_scope(s, tenant_id)
+                        schedule_id = await s.scalar(select(Incarnation.schedule_id)
+                                                     .where(Incarnation.temporal_id == temporal_id))  # fmt: skip
+                        if schedule_id is not None:
+                            ready = await _deletable(s, client, tenant_id, schedule_id, temporal_id, found)
+                        await _seen(s, [temporal_id], at)
+                    if ready:
+                        await _delete(client, temporal_id)
+                        log.error("schedule_incarnation_stray", tenant=str(tenant_id))
+                async with sessionmaker() as s, s.begin():  # one found is described again on the next pass
                     await tenant_scope(s, tenant_id)
                     await s.execute(update(Incarnation).where(Incarnation.temporal_id == temporal_id)
-                                    .values(checked_at=func.now() - STRAYS_EVERY + STRAY_RETRY))  # fmt: skip
-            except Exception as again:
-                log.error("schedule_stray_unrescheduled", tenant=str(tenant_id), error=type(again).__name__)
-        counts[outcome] = counts.get(outcome, 0) + 1
+                                    .values(checked_at=None if found else func.now()))  # fmt: skip
+                outcome = ("deleted" if ready else "held") if found is not None else "checked"
+            except Exception as e:
+                log.error("schedule_stray_unchecked", tenant=str(tenant_id), error=type(e).__name__)
+                outcome = "failed"
+                try:  # retried in five minutes, behind the others: never holding the scan
+                    async with sessionmaker() as s, s.begin():
+                        await tenant_scope(s, tenant_id)
+                        await s.execute(update(Incarnation).where(Incarnation.temporal_id == temporal_id)
+                                        .values(checked_at=func.now() - STRAYS_EVERY + STRAY_RETRY))  # fmt: skip
+                except Exception as again:
+                    log.error("schedule_stray_unrescheduled", tenant=str(tenant_id), error=type(again).__name__)
+            counts[outcome] = counts.get(outcome, 0) + 1
+    if admitted.deferred:
+        counts["deferred"] = admitted.deferred
     return counts

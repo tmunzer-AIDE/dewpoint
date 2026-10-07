@@ -5,12 +5,16 @@ a visit for a late create, and a tombstone pauses, counts and deletes at most 1 
 left; the stray pass reaches every earlier one each hour. Misses keep their five-minute accounting for every
 incarnation that may still miss a firing (unpaused once, or from before the migration) until it's verified paused for
 its delete, its count recorded, or gone: each is its own item, one describe; the API shows the accounting stale when
-one wasn't read within those five minutes. Counted in calls, against the dev server."""
+one wasn't read within those five minutes. Counted in calls, against the dev server. Under the passes' soft budget
+(the owner's D16 review of checkpoint 3): each item's calls at most its pass's (`budget.CALLS`) on its longest path; a
+slow call ends a pass's admission once its item ends, and the next passes take the rest; a pass stopped by a slow item
+takes another first next time (slowness injected on the SDK's RPC path, beneath the budget's own timing)."""
 
+import asyncio
 import contextlib
 import math
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import timedelta
 from typing import Any
 
@@ -26,11 +30,11 @@ from temporalio.client import (
 from temporalio.testing import WorkflowEnvironment
 
 from dewpoint.apps import schedules
-from dewpoint.apps.dispatcher import schedule_sync
+from dewpoint.apps.dispatcher import budget, schedule_sync
 from dewpoint.core.db import tenant_scope
 from dewpoint.engine.runtime.ids import schedule_workflow_id
 from tests.apps.dispatcher.test_leader_deadlines import recorded
-from tests.apps.dispatcher.test_schedule_sync import TIMING, incarnations, sync
+from tests.apps.dispatcher.test_schedule_sync import TIMING, Leading, incarnations, sync
 from tests.apps.test_admission import KEYS, TOKEN, current, published
 from tests.core.retention.support import sql
 from tests.support.keys import FIXTURE_CONVERTER
@@ -276,3 +280,103 @@ async def test_finding_the_misses_candidates_never_reads_the_incarnations_that_c
         picked = (await s.execute(text("select temporal_id from incarnation_miss_candidates(50)"))).all()
         read = (await s.execute(text(READ))).scalar_one()
     assert len(picked) == 50 and read < 200
+
+
+@contextlib.contextmanager
+def slowed(client: Any, late: str, seconds: float, only: Callable[[Any], bool] = lambda req: True) -> Iterator[None]:
+    """Each `late` call (of those `only` keeps) answered `seconds` late, beneath the budget's timing."""
+    cls = type(client.service_client)
+    original = cls._rpc_call
+
+    async def call(self_: Any, rpc: str, req: Any, resp_type: Any, **kw: Any) -> Any:
+        if rpc == late and only(req):
+            await asyncio.sleep(seconds)
+        return await original(self_, rpc, req, resp_type, **kw)
+
+    cls._rpc_call = call  # type: ignore[method-assign]
+    try:
+        yield
+    finally:
+        cls._rpc_call = original  # type: ignore[method-assign]
+
+
+async def test_a_live_schedules_sync_makes_at_most_its_calls_on_its_longest_path(
+    server, ready, owner_sessionmaker, dispatch_sessionmaker
+) -> None:
+    """Its current incarnation never landed: described, described again under its lock, a new one created, described,
+    updated, read back, its creation wait counted; then `EARLIER` earlier ones described, the last of them found
+    (landed late), paused: `budget.CALLS["sync"]`, no more."""
+    ctx, _, schedule_id = ready
+    assert await sync(server, dispatch_sessionmaker, ctx, schedule_id) == "synced"
+    [first] = await incarnations(schedule_id)
+    await server.client.get_schedule_handle(first).delete()
+    made = await recorded_earlier(owner_sessionmaker, ctx, schedule_id, schedule_sync.EARLIER, unpaused=False)
+    await landed_late(server, made[0])  # the oldest of the four the visit reaches
+    with described(server.client) as seen:
+        assert await sync(server, dispatch_sessionmaker, ctx, schedule_id) == "pending"
+    assert len(seen) == budget.CALLS["sync"], seen
+
+
+async def test_a_stray_is_paused_then_deleted_each_visit_at_most_its_calls(
+    server, ready, owner_sessionmaker, dispatch_sessionmaker
+) -> None:
+    ctx, _, schedule_id = ready
+    assert await sync(server, dispatch_sessionmaker, ctx, schedule_id) == "synced"
+    await recorded_earlier(owner_sessionmaker, ctx, schedule_id, 1, unpaused=False)  # the first is no longer current
+    await only_these_due(owner_sessionmaker, schedule_id)
+    await sql(owner_sessionmaker, "update schedule_incarnations set checked_at = null where schedule_id = :s",
+              s=schedule_id)  # fmt: skip
+    visits = []
+    for _ in range(2):
+        with described(server.client) as seen:
+            visits.append((await schedule_sync.check_strays(dispatch_sessionmaker, server.client), len(seen)))
+    assert visits[0][0].get("held") == 1 and visits[1][0].get("deleted") == 1
+    assert [calls for _, calls in visits] == [budget.CALLS["strays"]] * 2
+
+
+async def test_a_slow_call_ends_the_misses_pass_once_its_item_ends_and_the_next_passes_take_the_rest(
+    server, ready, owner_sessionmaker, dispatch_sessionmaker, monkeypatch
+) -> None:
+    """Every describe answered late: each pass takes one incarnation, reads it to its end (it's not due again), and
+    defers the rest; the next passes take them, one each."""
+    monkeypatch.setattr(budget, "SLOW_S", 0.05)
+    ctx, _, schedule_id = ready
+    assert await sync(server, dispatch_sessionmaker, ctx, schedule_id) == "synced"
+    await recorded_earlier(owner_sessionmaker, ctx, schedule_id, 2, unpaused=True)  # three that may miss a firing
+    await only_these_due(owner_sessionmaker, schedule_id)
+    await sql(owner_sessionmaker, "update schedule_incarnations set misses_checked_at = null where schedule_id = :s",
+              s=schedule_id)  # fmt: skip
+    budget.instrument(server.client)
+    with slowed(server.client, "describe_schedule", 0.1):
+        passes = [await schedule_sync.check_misses(dispatch_sessionmaker, server.client) for _ in range(4)]
+    assert [(p["checked"], p.get("deferred", 0)) for p in passes] == [(1, 2), (1, 1), (1, 0), (0, 0)]
+
+
+async def test_a_sync_pass_stopped_by_a_slow_schedule_takes_another_first_next_time(
+    server, ready, owner_sessionmaker, api_sessionmaker, dispatch_sessionmaker, monkeypatch
+) -> None:
+    """A tombstone whose deletion keeps it `deleting` visit after visit, and whose calls are slow, comes first in the
+    pass's order (the oldest change): the pass takes it and stops. Next time it takes the other schedule first, the
+    one it hasn't taken lately, so the slow one never keeps it waiting."""
+    monkeypatch.setattr(budget, "SLOW_S", 0.05)
+    ctx, wf, slow = ready
+    assert await sync(server, dispatch_sessionmaker, ctx, slow) == "synced"
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        await schedules.delete(s, actor_id=ctx.user.id, schedule=await s.get(schedules.Schedule, slow))
+    async with api_sessionmaker() as s, s.begin():  # added after the deletion: later in the pass's own order
+        await tenant_scope(s, ctx.tenant_id)
+        made = await schedules.create(s, KEYS, tenant_id=ctx.tenant_id, actor_id=ctx.user.id, workflow_id=wf,
+                                      timing=TIMING, mode="live", input={"token": TOKEN}, enabled=True)  # fmt: skip
+        other = made.id
+    prefix = f"t:{ctx.tenant_id}:sched:{slow}"
+    budget.instrument(server.client)
+    with slowed(server.client, "describe_schedule", 0.1, only=lambda req: req.schedule_id.startswith(prefix)):
+        first = await schedule_sync.sync_schedules(dispatch_sessionmaker, server.client, Leading())
+        second = await schedule_sync.sync_schedules(dispatch_sessionmaker, server.client, Leading())
+    assert first == {"deleting": 1, "deferred": 1}
+    assert second.get("synced") == 1  # the other, taken first
+    async with owner_sessionmaker() as s:
+        synced = (await s.execute(text("select synced_generation = generation from schedules where id = :i"),
+                                  {"i": other})).scalar_one()  # fmt: skip
+    assert synced

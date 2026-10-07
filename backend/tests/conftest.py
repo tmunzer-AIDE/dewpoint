@@ -2,7 +2,7 @@
 import base64
 import os
 import subprocess
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 import httpx
@@ -141,6 +141,19 @@ async def auditor_sessionmaker(pg_url: str, _test_users: None) -> AsyncIterator[
     eng = make_engine(_url_for(pg_url, "dewpoint_auditor"))
     yield make_sessionmaker(eng)
     await eng.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _pass_budgets(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """The dispatcher passes' soft budget (`budget`, the D16 prototype) out of reach where a test doesn't set it: tests
+    count work, not time, so a loaded machine never stops a pass early; and no pass remembers another test's items."""
+    from dewpoint.apps.dispatcher import budget
+
+    monkeypatch.setattr(budget, "PASS_S", 3600.0)
+    monkeypatch.setattr(budget, "SLOW_S", 3600.0)
+    budget._visits.clear()
+    yield
+    budget._visits.clear()
 
 
 @pytest.fixture(autouse=True)

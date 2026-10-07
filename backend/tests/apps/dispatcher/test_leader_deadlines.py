@@ -2,7 +2,9 @@
 """Every Temporal call the dispatcher makes carries a deadline (the 2b-4b plan's M1b; the owner's D16): the SDK sets
 none of its own, so a call that passes none waits for as long as Temporal doesn't answer, holding its cycle. Each pass
 runs against the test server with an item of each kind it takes, every call recorded where the SDK makes it
-(`ServiceClient._rpc_call`); the schedule and evidence passes, which the dev server serves, are the M1 probe's."""
+(`ServiceClient._rpc_call`); the schedule and evidence passes, which the dev server serves, are the M1 probe's. Each
+item's calls are counted too, against its pass's most (`budget.CALLS`, the owner's D16 review of checkpoint 3: per-item
+call maxima before any budget's numbers): the longest path of each kind is driven here."""
 
 import contextlib
 import uuid
@@ -15,7 +17,7 @@ from sqlalchemy import text
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.service import RPCError
 
-from dewpoint.apps.dispatcher import cancels, dispatch, main, reconcile
+from dewpoint.apps.dispatcher import budget, cancels, dispatch, main, reconcile
 from dewpoint.engine.runtime.ids import run_workflow_id
 from tests.apps.dispatcher.test_reconcile import aged, starting
 from tests.apps.test_admission import KEYS
@@ -57,7 +59,7 @@ async def test_an_uncertain_start_found_is_described_and_verified_with_deadlines
     with recorded(env.client) as seen:
         assert await reconcile.reconcile_once(dispatch_sessionmaker, env.client, KEYS, api_settings) == {"started": 1}
     assert {"describe_workflow_execution", "get_workflow_execution_history"} <= {rpc for rpc, _ in seen}
-    assert without_deadline(seen) == []
+    assert without_deadline(seen) == [] and len(seen) == budget.CALLS["reconcile"]
 
 
 async def test_an_uncertain_start_absent_and_its_namespace_are_asked_with_deadlines(
@@ -69,7 +71,7 @@ async def test_an_uncertain_start_absent_and_its_namespace_are_asked_with_deadli
     with recorded(env.client) as seen:
         assert await reconcile.reconcile_once(dispatch_sessionmaker, env.client, KEYS, api_settings) == {"absent": 1}
     assert {"describe_workflow_execution", "describe_namespace"} <= {rpc for rpc, _ in seen}
-    assert without_deadline(seen) == []
+    assert without_deadline(seen) == [] and len(seen) == budget.CALLS["reconcile"]
 
 
 async def _started(queued: Any, dispatch_sessionmaker: Any, api_settings: Any, client: Client) -> Any:
@@ -86,7 +88,7 @@ async def test_an_open_run_whose_execution_closed_is_described_with_a_deadline(
     await env.client.get_workflow_handle(run_workflow_id(str(request.tenant_id), str(request.id))).terminate()
     with recorded(env.client) as seen:
         assert await reconcile.reconcile_once(dispatch_sessionmaker, env.client, KEYS, api_settings) == {"ended": 1}
-    assert seen and without_deadline(seen) == []
+    assert seen and without_deadline(seen) == [] and len(seen) <= budget.CALLS["reconcile"]
 
 
 async def test_a_leaked_slot_is_described_with_a_deadline(
@@ -98,7 +100,7 @@ async def test_a_leaked_slot_is_described_with_a_deadline(
     await env.client.get_workflow_handle(run_workflow_id(str(request.tenant_id), str(request.id))).terminate()
     with recorded(env.client) as seen:
         assert await reconcile.reconcile_once(dispatch_sessionmaker, env.client, KEYS, api_settings) == {"released": 1}
-    assert seen and without_deadline(seen) == []
+    assert seen and without_deadline(seen) == [] and len(seen) <= budget.CALLS["reconcile"]
 
 
 async def test_a_sub_run_its_roots_close_left_running_is_described_with_a_deadline(
@@ -111,7 +113,7 @@ async def test_a_sub_run_its_roots_close_left_running_is_described_with_a_deadli
     await handle.terminate()
     with recorded(env.client) as seen:
         assert await reconcile.reconcile_subruns(dispatch_sessionmaker, env.client) == {"ended": 1}
-    assert seen and without_deadline(seen) == []
+    assert seen and without_deadline(seen) == [] and len(seen) <= budget.CALLS["subruns"]
 
 
 async def test_a_cancel_is_sent_with_a_deadline(queued, owner_sessionmaker, dispatch_sessionmaker, api_settings, env):
@@ -121,17 +123,18 @@ async def test_a_cancel_is_sent_with_a_deadline(queued, owner_sessionmaker, disp
     with recorded(env.client) as seen:
         assert sum((await cancels.send_cancels(dispatch_sessionmaker, env.client)).values()) == 1
     assert {"request_cancel_workflow_execution"} <= {rpc for rpc, _ in seen}
-    assert without_deadline(seen) == []
+    assert without_deadline(seen) == [] and len(seen) <= budget.CALLS["cancels"]
 
 
 async def test_a_dispatch_start_carries_its_deadline(queued, dispatch_sessionmaker, api_settings, env) -> None:
     _, _, request = queued
     found = await starting(dispatch_sessionmaker, request, api_settings)
-    with recorded(env.client) as seen:
+    with recorded(env.client) as first:
         await dispatch.start(env.client, found)
-        await dispatch.start(env.client, found)  # already started: verified against its history
-    assert {"start_workflow_execution", "get_workflow_execution_history"} <= {rpc for rpc, _ in seen}
-    assert without_deadline(seen) == []
+    with recorded(env.client) as seen:
+        await dispatch.start(env.client, found)  # already started: verified against its history, its longest path
+    assert [rpc for rpc, _ in seen] == ["start_workflow_execution", "get_workflow_execution_history"]
+    assert without_deadline(first + seen) == [] and len(seen) == budget.CALLS["dispatch"]
 
 
 async def test_the_current_build_is_asked_with_a_deadline(env) -> None:
@@ -152,3 +155,19 @@ async def test_a_completed_runs_result_is_read_with_a_deadline() -> None:
 
     await reconcile._ended(Handle(), WorkflowExecutionStatus.COMPLETED, uuid.uuid4())
     assert asked.get("rpc_timeout") == reconcile.CALL_DEADLINE
+
+
+async def test_a_cancel_whose_execution_is_gone_asks_the_namespace_its_second_and_last_call(
+    queued, owner_sessionmaker, dispatch_sessionmaker, api_settings, env
+) -> None:
+    """A cancel's longest path: NOT_FOUND (its execution recorded started but not in Temporal, as one whose history
+    retention removed), then whether the namespace answers (`budget.CALLS["cancels"]`)."""
+    _, _, request = queued
+    found = await starting(dispatch_sessionmaker, request, api_settings)
+    assert await dispatch.settle(dispatch_sessionmaker, found, dispatch.Outcome("started")) == "started"
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("update run_requests set cancel_requested_at = now() where id = :i"), {"i": request.id})
+    with recorded(env.client) as seen:
+        assert await cancels.send_cancels(dispatch_sessionmaker, env.client) == {"closed": 1}
+    assert [rpc for rpc, _ in seen] == ["request_cancel_workflow_execution", "describe_namespace"]
+    assert without_deadline(seen) == [] and len(seen) == budget.CALLS["cancels"]

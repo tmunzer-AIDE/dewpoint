@@ -21,7 +21,7 @@ from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.service import RPCError, RPCStatusCode
 
-from dewpoint.apps.dispatcher import dispatch
+from dewpoint.apps.dispatcher import budget, dispatch
 from dewpoint.core.claims import service as claims
 from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.config import Settings
@@ -100,21 +100,24 @@ async def reconcile_once(
             )
         ).all()
     counts: Counter[str] = Counter()
-    for tenant_id, request_id, kind in picked:
-        try:
-            if kind == "starting":
-                happened = await _starting(sessionmaker, client, keys, settings, tenant_id, request_id)
-            elif kind == "open":
-                happened = await _open(sessionmaker, client, tenant_id, request_id)
-            else:
-                happened = await _slot(sessionmaker, client, tenant_id, request_id)
-        except Exception as e:  # a bug or an outage: left as it was, asked about again after RECHECK
-            log.error("reconcile_failed", tenant_id=str(tenant_id), request_id=str(request_id), kind=kind,
-                      error=type(e).__name__)  # fmt: skip
-            counts["error"] += 1
-            await _checked_alone(sessionmaker, tenant_id, request_id)
-            continue
-        counts[happened] += 1
+    with budget.passing("reconcile") as admitted:
+        for tenant_id, request_id, kind in admitted(picked, key=lambda row: row[1]):
+            try:
+                if kind == "starting":
+                    happened = await _starting(sessionmaker, client, keys, settings, tenant_id, request_id)
+                elif kind == "open":
+                    happened = await _open(sessionmaker, client, tenant_id, request_id)
+                else:
+                    happened = await _slot(sessionmaker, client, tenant_id, request_id)
+            except Exception as e:  # a bug or an outage: left as it was, asked about again after RECHECK
+                log.error("reconcile_failed", tenant_id=str(tenant_id), request_id=str(request_id), kind=kind,
+                          error=type(e).__name__)  # fmt: skip
+                counts["error"] += 1
+                await _checked_alone(sessionmaker, tenant_id, request_id)
+                continue
+            counts[happened] += 1
+    if admitted.deferred:
+        counts["deferred"] = admitted.deferred
     return dict(counts)
 
 
@@ -316,16 +319,19 @@ async def reconcile_subruns(sessionmaker: async_sessionmaker[AsyncSession], clie
             )
         ).all()
     counts: Counter[str] = Counter()
-    for tenant_id, run_id in picked:
-        try:
-            happened = await _subrun(sessionmaker, client, tenant_id, run_id)
-        except Exception as e:  # a bug or an outage: left as it was, asked about again after RECHECK
-            log.error("reconcile_failed", tenant_id=str(tenant_id), run_id=str(run_id), kind="subrun",
-                      error=type(e).__name__)  # fmt: skip
-            counts["error"] += 1
-            await _subrun_checked_alone(sessionmaker, tenant_id, run_id)
-            continue
-        counts[happened] += 1
+    with budget.passing("subruns") as admitted:
+        for tenant_id, run_id in admitted(picked, key=lambda row: row[1]):
+            try:
+                happened = await _subrun(sessionmaker, client, tenant_id, run_id)
+            except Exception as e:  # a bug or an outage: left as it was, asked about again after RECHECK
+                log.error("reconcile_failed", tenant_id=str(tenant_id), run_id=str(run_id), kind="subrun",
+                          error=type(e).__name__)  # fmt: skip
+                counts["error"] += 1
+                await _subrun_checked_alone(sessionmaker, tenant_id, run_id)
+                continue
+            counts[happened] += 1
+    if admitted.deferred:
+        counts["deferred"] = admitted.deferred
     return dict(counts)
 
 

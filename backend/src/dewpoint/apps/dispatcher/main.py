@@ -13,12 +13,12 @@ from collections.abc import Awaitable, Callable
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.client import Client
-from temporalio.service import RPCError, RPCStatusCode
+from temporalio.service import RetryConfig, RPCError, RPCStatusCode
 from temporalio.worker import Worker
 
 from dewpoint.apps import tick_contract
 from dewpoint.apps.codec import KeyringKeys, data_converter
-from dewpoint.apps.dispatcher import evidence
+from dewpoint.apps.dispatcher import budget, evidence
 from dewpoint.apps.dispatcher.cancels import send_cancels
 from dewpoint.apps.dispatcher.dispatch import Rotation, dispatch_once
 from dewpoint.apps.dispatcher.matching import Verified, match_once
@@ -40,6 +40,11 @@ from dewpoint.core.platform.service import record_run_duration
 
 log = structlog.get_logger("dewpoint.dispatcher")
 CYCLE_S = 1.0  # between cycles
+# The SDK's retries of its own calls (`start_workflow`, a handle's): its defaults, made explicit, since a call's worst
+# rests on them (the owner's D16 review of checkpoint 3): retried until 10 s after its first attempt, each attempt with
+# the call's deadline, so at most 20 s with the 10-second ones (`test_sdk_retry_bounds.py`)
+RETRY = RetryConfig(initial_interval_millis=100, randomization_factor=0.2, multiplier=1.5, max_interval_millis=5_000,
+                    max_elapsed_time_millis=10_000, max_retries=10)  # fmt: skip
 
 
 async def current_build(client: Client) -> str | None:
@@ -130,8 +135,9 @@ async def run(settings: Settings) -> None:
         keys = KeyringKeys(sessionmaker, Keyring(KekSet.from_settings(settings)))
         client = await Client.connect(
             settings.temporal_address, namespace=settings.temporal_namespace, data_converter=data_converter(keys),
-            identity=f"{os.getpid()}@{socket.gethostname()} {tick_contract.IDENTITY}",
+            identity=f"{os.getpid()}@{socket.gethostname()} {tick_contract.IDENTITY}", retry_config=RETRY,
         )  # fmt: skip
+        budget.instrument(client)  # its passes' soft budget: every call timed (D16 prototype)
         instance = uuid.uuid4()
         reconciler, leader = uuid.uuid5(instance, "reconciler"), Leader(engine)
         log.info("dispatcher_started", instance=str(instance), build=this_build())

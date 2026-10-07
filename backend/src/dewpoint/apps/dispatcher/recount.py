@@ -12,6 +12,7 @@ import structlog
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from dewpoint.apps.dispatcher import budget
 from dewpoint.apps.dispatcher.dispatch import tenant_lock
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.ingress import InboundEvent, TenantEventCounters, WebhookEndpoint
@@ -36,13 +37,16 @@ async def recount_once(sessionmaker: async_sessionmaker[AsyncSession], *, batch:
         query = text("select tenant_id from recount_candidates(:n)")
         picked: list[uuid.UUID] = list((await s.execute(query, {"n": batch})).scalars().all())
     counts: Counter[str] = Counter()
-    for tenant_id in picked:
-        try:
-            counts["drifted"] += await recount_tenant(sessionmaker, tenant_id)
-            counts["recounted"] += 1
-        except Exception as e:
-            log.error("event_recount_failed", tenant_id=str(tenant_id), error=type(e).__name__)
-            counts["error"] += 1
+    with budget.passing("recount") as admitted:
+        for tenant_id in admitted(picked, key=lambda tenant: tenant):
+            try:
+                counts["drifted"] += await recount_tenant(sessionmaker, tenant_id)
+                counts["recounted"] += 1
+            except Exception as e:
+                log.error("event_recount_failed", tenant_id=str(tenant_id), error=type(e).__name__)
+                counts["error"] += 1
+    if admitted.deferred:
+        counts["deferred"] = admitted.deferred
     return dict(counts)
 
 

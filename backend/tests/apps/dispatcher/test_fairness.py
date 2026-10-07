@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from sqlalchemy import text
 
-from dewpoint.apps.dispatcher import dispatch
+from dewpoint.apps.dispatcher import budget, dispatch
 from tests.apps.dispatcher.support import BUILD, state, workers
 from tests.apps.test_admission import KEYS, admit, current, published
 from tests.apps.test_runs import FakeClient
@@ -47,3 +47,24 @@ async def test_fifty_blocked_tenants_never_starve_a_runnable_one(
     assert [(await state(owner_sessionmaker, r.id))["request"][0] for r in blocked[:3]] == ["queued"] * 3
     third = await dispatch.dispatch_once(dispatch_sessionmaker, client, KEYS, api_settings, BUILD, rotation)
     assert third == {"no_slot": dispatch.CANDIDATES}  # wrapped around to the oldest
+
+
+async def test_a_dispatch_pass_its_budget_stopped_goes_on_next_cycle_from_the_last_request_it_took(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings, monkeypatch
+) -> None:
+    """One request a pass (its soft budget spent at once, the D16 prototype): the oldest due tenant can't start, and
+    stays due. The next pass goes on after it, not from the start of the queue, so it never keeps the runnable ones
+    waiting."""
+    monkeypatch.setattr(budget, "PASS_S", 0.0)
+    await current(dispatch_sessionmaker)
+    await workers(owner_sessionmaker)
+    ctx, wf = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings)
+    await at_its_limit(owner_sessionmaker, ctx.tenant_id)
+    await admit(api_sessionmaker, ctx, wf)
+    for _ in range(2):
+        ctx, wf = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings)
+        await admit(api_sessionmaker, ctx, wf)
+    client, rotation = FakeClient(), dispatch.Rotation()
+    passes = [await dispatch.dispatch_once(dispatch_sessionmaker, client, KEYS, api_settings, BUILD, rotation)
+              for _ in range(3)]  # fmt: skip
+    assert passes == [{"no_slot": 1, "deferred": 2}, {"started": 1, "deferred": 1}, {"started": 1}]

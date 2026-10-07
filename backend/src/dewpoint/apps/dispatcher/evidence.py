@@ -35,6 +35,7 @@ from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest, GetWorkf
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.service import RPCError, RPCStatusCode
 
+from dewpoint.apps.dispatcher import budget
 from dewpoint.core.crypto.retire import RunProof
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.runs import ExecutionEvidence
@@ -333,20 +334,23 @@ async def check_evidence(sessionmaker: async_sessionmaker[AsyncSession], client:
     async with sessionmaker() as s:
         due = (await s.execute(text("select tenant_id, id from execution_evidence_due(:n)"), {"n": batch})).all()
     counts: dict[str, int] = {}
-    for tenant_id, row_id in due:
-        try:
-            outcome = await _check(sessionmaker, client, tenant_id, row_id, retention)
-        except Exception as e:
-            log.error("execution_evidence_unchecked", evidence=row_id, error=type(e).__name__)
-            outcome = "failed"
+    with budget.passing("evidence") as admitted:
+        for tenant_id, row_id in admitted(due, key=lambda row: row[1]):
             try:
-                async with sessionmaker() as s, s.begin():
-                    await tenant_scope(s, tenant_id)
-                    await s.execute(update(ExecutionEvidence).where(ExecutionEvidence.id == row_id)
-                                    .values(next_check_at=await _after(s, RECHECK)))  # fmt: skip
-            except Exception as again:
-                log.error("execution_evidence_unrescheduled", evidence=row_id, error=type(again).__name__)
-        counts[outcome] = counts.get(outcome, 0) + 1
+                outcome = await _check(sessionmaker, client, tenant_id, row_id, retention)
+            except Exception as e:
+                log.error("execution_evidence_unchecked", evidence=row_id, error=type(e).__name__)
+                outcome = "failed"
+                try:
+                    async with sessionmaker() as s, s.begin():
+                        await tenant_scope(s, tenant_id)
+                        await s.execute(update(ExecutionEvidence).where(ExecutionEvidence.id == row_id)
+                                        .values(next_check_at=await _after(s, RECHECK)))  # fmt: skip
+                except Exception as again:
+                    log.error("execution_evidence_unrescheduled", evidence=row_id, error=type(again).__name__)
+            counts[outcome] = counts.get(outcome, 0) + 1
+    if admitted.deferred:
+        counts["deferred"] = admitted.deferred
     return counts
 
 

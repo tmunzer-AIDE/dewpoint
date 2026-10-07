@@ -31,6 +31,7 @@ from temporalio.service import RPCError, RPCStatusCode
 
 from dewpoint.apps.cancels import USER_CANCELLED
 from dewpoint.apps.codec import CodecRefusedError
+from dewpoint.apps.dispatcher import budget
 from dewpoint.apps.dispatcher.observe import REQUIRED, Build
 from dewpoint.core.audit import service as audit
 from dewpoint.core.claims import service as claims
@@ -557,15 +558,22 @@ async def dispatch_once(
         ).all()
     rotation.after = (picked[-1].queued_at, picked[-1].request_id) if len(picked) == CANDIDATES else None
     counts: Counter[str] = Counter()
-    for tenant_id, request_id, _ in picked:
-        try:
-            happened = await _dispatch(sessionmaker, client, seal, keys, settings, build, tenant_id, request_id)
-        except Exception as e:  # a bug or an outage: the request stays as it was, and the cycle goes on (M2 review)
-            log.error("dispatch_failed", tenant_id=str(tenant_id), request_id=str(request_id), error=type(e).__name__)
-            counts["error"] += 1
-            continue
-        if happened is not None:
-            counts[happened] += 1
+    with budget.passing("dispatch") as admitted:
+        for tenant_id, request_id, queued_at in admitted(picked):
+            last = (queued_at, request_id)
+            try:
+                happened = await _dispatch(sessionmaker, client, seal, keys, settings, build, tenant_id, request_id)
+            except Exception as e:  # a bug or an outage: the request stays as it was, and the cycle goes on (M2 review)
+                log.error(
+                    "dispatch_failed", tenant_id=str(tenant_id), request_id=str(request_id), error=type(e).__name__
+                )
+                counts["error"] += 1
+                continue
+            if happened is not None:
+                counts[happened] += 1
+    if admitted.deferred:
+        rotation.after = last  # the next cycle goes on from the last it took
+        counts["deferred"] = admitted.deferred
     return dict(counts)
 
 

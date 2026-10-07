@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import undefer
 
 from dewpoint.apps import admission
+from dewpoint.apps.dispatcher import budget
 from dewpoint.apps.dispatcher.dispatch import GATE_LOCK, tenant_lock
 from dewpoint.core.audit import service as audit
 from dewpoint.core.crypto import events
@@ -120,13 +121,18 @@ async def match_once(
         query = text("select tenant_id, event_id, endpoint_id from event_candidates(:n)")
         picked = (await s.execute(query, {"n": batch})).all()
     counts: Counter[str] = Counter()
-    for tenant_id, event_id, endpoint_id in picked:
-        try:
-            counts[await match_event(sessionmaker, keys, verified, tenant_id=tenant_id, event_id=event_id,
-                                     endpoint_id=endpoint_id)] += 1  # fmt: skip
-        except Exception as e:
-            log.error("event_match_failed", tenant_id=str(tenant_id), event_id=str(event_id), error=type(e).__name__)
-            counts["error"] += 1
+    with budget.passing("matching") as admitted:
+        for tenant_id, event_id, endpoint_id in admitted(picked, key=lambda row: row[1]):
+            try:
+                counts[await match_event(sessionmaker, keys, verified, tenant_id=tenant_id, event_id=event_id,
+                                         endpoint_id=endpoint_id)] += 1  # fmt: skip
+            except Exception as e:
+                log.error(
+                    "event_match_failed", tenant_id=str(tenant_id), event_id=str(event_id), error=type(e).__name__
+                )
+                counts["error"] += 1
+    if admitted.deferred:
+        counts["deferred"] = admitted.deferred
     return dict(counts)
 
 
