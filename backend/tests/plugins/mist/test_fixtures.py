@@ -14,6 +14,7 @@ from dewpoint.plugins.mist import PLUGIN, oas, policy
 from dewpoint.plugins.mist.api import answer_fixture
 from dewpoint.plugins.mist.fixtures import BUDGET, FixtureUnavailable, built, fixture
 from dewpoint.plugins.mist.nodes import MistOperation, fixture_of
+from dewpoint.plugins.mist.utilities import MistUtility
 from dewpoint.sdk import node_manifest
 
 SCHEMA: dict[str, Any] = {
@@ -65,7 +66,7 @@ def test_an_example_that_fits_nowhere_leaves_the_schemas_value() -> None:
 
 
 def curated() -> list[type[MistOperation]]:
-    return [n for n in PLUGIN.nodes if issubclass(n, MistOperation)]
+    return [n for n in PLUGIN.nodes if issubclass(n, MistOperation) and not issubclass(n, MistUtility)]
 
 
 def test_every_curated_fixture_is_valid_complete_and_within_budget() -> None:

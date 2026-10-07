@@ -247,3 +247,15 @@ async def test_a_generic_simulation_answers_a_value_its_operations_answer_schema
     assert list(Draft202012Validator(schema).iter_errors(out["body"])) == []
     deleted = await simulated("mist.api.write", {"method": "DELETE", "path": f"/api/v1/orgs/{ORG}/psks/{psk}"})
     assert deleted == {"status": 200, "body": None}
+
+
+async def test_a_device_utility_is_never_reached_by_the_generic_write() -> None:
+    """A utility is its own node's only (plugins-3 D27): the generic write would skip its review's parameters and its
+    contract, so it's refused at publish and at run time, before anything is sent."""
+    device = "00000000-0000-0000-1000-5c5b350e0060"
+    raw = {"method": "POST", "path": f"/api/v1/sites/{SITE}/devices/{device}/bounce_port", "body": {"ports": ["x"]}}
+    with pytest.raises(ValidationError):
+        node("mist.api.write").Config.model_validate({"connection": str(uuid.uuid4()), **raw})
+    with pytest.raises(FatalError) as e:
+        await call("mist.api.write", raw, {}, validated=False)
+    assert e.value.code == "mist.operation_unavailable"

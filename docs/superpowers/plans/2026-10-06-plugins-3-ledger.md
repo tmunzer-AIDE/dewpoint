@@ -846,3 +846,19 @@ Rulings:
   well under a step output's 1.75 MiB - cost if wrong: a long table is cut.
 - Ruling: a `HandshakeRejected` the node doesn't catch is retried by the runtime only for a 429 or a 5xx; a
   `StreamLost` is handled as `MaybeSent` (8ac5b1f) - cost if wrong: none for safety.
+- Ruling (task 8, the utility nodes): a utility node is a curated operation (`MistUtility` extends `MistOperation`): the
+  same map, site and path checks and the same site picker, then the device check - one code path for what 3b-1's
+  review hardened - cost if wrong: none.
+- Ruling: a device whose answer names no `type` is refused `mist.device_type_unsupported` (the OAS's
+  `device_type_default_ap` suggests an unnamed type is an AP, but that's a default for writing) - fail closed - cost
+  if wrong: a utility on such a device fails until a device run shows what Mist answers.
+- Ruling: a utility whose OAS takes a body sends the permitted parameters given, `{}` when none are; `resolve_dns`,
+  which takes none, sends no body - cost if wrong: Mist refuses an empty body (`mist.bad_request`).
+- Ruling: an acceptance-only utility whose OAS answer holds a `session` reports it, and an answer without one is
+  `mist.invalid_answer` (after the send: outcome unknown, the node being ambiguous); the five answering nothing report
+  `{accepted, completion_known}` only - cost if wrong: none.
+- Ruling: a streaming utility's maximum duration defaults to 60 s (bounded collection) or 120 s (terminal evidence),
+  at most 240 s, within a 5-minute step timeout that also covers the 10 s acknowledgement, the POST and the 30 s first
+  message; an acceptance-only utility's timeout is a minute - cost if wrong: a slow table needs a longer maximum.
+- Ruling: a simulated utility answers its contract's shape (one line saying no command was sent; the session a fixed
+  placeholder), never an example of real output: the OAS has none to validate - cost if wrong: none.

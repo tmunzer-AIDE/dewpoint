@@ -13,6 +13,7 @@ from dewpoint.engine.registry.catalog import validate_plugin_manifest
 from dewpoint.plugins.mist import PLUGIN, policy
 from dewpoint.plugins.mist.nodes import MistOperation
 from dewpoint.plugins.mist.schemas import SCHEMA_LIST, SCHEMA_MAP, SCHEMA_ONE
+from dewpoint.plugins.mist.utilities import MistUtility
 from dewpoint.sdk import FatalError, Node, node_manifest
 from dewpoint.sdk.fields import CONNECTION, LITERAL, SENSITIVE
 from tests.plugins.mist.fakes import ORG, SITE, FakeConnection, FakeHttp, FakeStep, Reply, Sent
@@ -53,7 +54,9 @@ async def run(type_: str, config: dict[str, Any], script: Any, attempt: int = 1)
 def test_every_allowed_operation_has_its_node_and_no_other() -> None:
     entries = policy.load().entries
     curated = {e.nodes[0]: op for op, e in entries.items() if e.state == "allowed" and e.utility is None}
-    generated = {n.type: n for n in PLUGIN.nodes if issubclass(n, MistOperation)}  # a utility's: test_utilities
+    generated = {
+        n.type: n for n in PLUGIN.nodes if issubclass(n, MistOperation) and not issubclass(n, MistUtility)
+    }  # a utility's: test_utilities
     assert set(generated) == set(curated)
     for type_, n in generated.items():
         e = entries[curated[type_]]
@@ -120,6 +123,8 @@ def test_secret_named_fields_are_sensitive_in_config_and_output() -> None:
 
 def test_outputs_keep_the_shape_and_drop_what_a_provider_outgrows() -> None:
     for n in PLUGIN.nodes:
+        if issubclass(n, MistUtility):  # its output is its contract's, not the OAS's (test_utilities)
+            continue
         out = node_manifest(n)["output_schema"]
         assert out["type"] == "object"
         for s in walk(out):
