@@ -293,6 +293,7 @@ class Utility:
     bounds: Mapping[str, int]
     repeat: str
     evidence: str
+    selectors: tuple[str, ...] = ()  # what scopes a disruptive command: required, never empty, never `all`
 
 
 # The device utilities (D27, D28), each reviewed into the map: its node, whether it's a repeatable diagnostic
@@ -353,7 +354,7 @@ UTILITIES: tuple[Utility, ...] = (
             GATEWAY, ("node", "vrf"), DURATION, READS,
             f"a gateway's OSPF summary (Utilities WAN); {STREAMED}; {UNENDED}"),
     Utility("showSiteSsrAndSrxRoutes", "mist.site_devices.show_route", "diagnostic", "bounded_collection", GATEWAY,
-            ("neighbor", "node", "prefix", "protocol", "route", "vrf"), DURATION, READS,
+            ("neighbor", "prefix", "protocol", "route", "vrf"), DURATION, READS,
             f"an SSR's or SRX's routes (Utilities WAN); {STREAMED}; {UNENDED}"),
     Utility("showSiteSsrServicePath", "mist.site_devices.show_service_path", "diagnostic", "stream_terminal_evidence",
             GATEWAY, ("node", "service_name"), DURATION, READS,
@@ -375,46 +376,58 @@ UTILITIES: tuple[Utility, ...] = (
             ("ports",), {}, "bounces the ports again: each bounce takes their links down",
             "port bounce from a switch or gateway (Utilities Common; vme, ae, irb and SSR HA control ports "
             "unsupported); its 200 answers nothing in the OAS, while the docs sample streams \"Port bounce "
-            "complete.\" (unverified); no completion documented: acceptance only"),
+            "complete.\" (unverified); no completion documented: acceptance only",
+            selectors=('ports',)),
     Utility("cableTestFromSwitch", "mist.site_devices.cable_test", "disruptive", "acceptance_only", SWITCH, ("port",),
             {}, "runs the TDR test on the port again",
-            f"TDR from a switch (Utilities LAN); {STREAMED}; no final message documented: acceptance only"),
+            f"TDR from a switch (Utilities LAN); {STREAMED}; no final message documented: acceptance only",
+            selectors=('port',)),
     Utility("clearSiteDeviceMacTable", "mist.site_devices.clear_mac_table", "disruptive", "acceptance_only", ALL,
             ("mac_address", "port_id", "vlan_id"), {}, "clears the MAC table's entries again; the device learns them "
-            "again", f"clears the MAC table (Utilities Common); {STREAMED}; no completion documented: acceptance only"),
+            "again", f"clears the MAC table (Utilities Common); {STREAMED}; no completion documented: acceptance only",
+            selectors=('port_id',)),
     Utility("clearAllLearnedMacsFromPortOnSwitch", "mist.site_devices.clear_macs", "disruptive", "acceptance_only",
             SWITCH, ("ports",), {}, "clears the ports' learned MACs, persistent ones included, again",
             "clears every learned MAC of a port (Utilities LAN); its 200 answers nothing; no completion documented: "
-            "acceptance only"),
+            "acceptance only",
+            selectors=('ports',)),
     Utility("clearBpduErrorsFromPortsOnSwitch", "mist.site_devices.clear_bpdu_error", "disruptive", "acceptance_only",
             SWITCH, ("ports",), {}, "clears the ports' BPDU error state again",
             "clears a BPDU error that disabled a port (Utilities LAN); its 200 answers nothing; no completion "
-            "documented: acceptance only"),
+            "documented: acceptance only",
+            selectors=('ports',)),
     Utility("clearSiteDeviceDot1xSession", "mist.site_devices.clear_dot1x", "disruptive", "acceptance_only", SWITCH,
             ("ports",), {}, "ends the ports' 802.1X sessions again; their clients authenticate again",
-            f"clears 802.1X sessions (Utilities LAN); {STREAMED}; no completion documented: acceptance only"),
+            f"clears 802.1X sessions (Utilities LAN); {STREAMED}; no completion documented: acceptance only",
+            selectors=('ports',)),
     Utility("releaseSiteDeviceDhcpLease", "mist.site_devices.release_dhcp_leases", "disruptive", "acceptance_only",
             ALL, ("macs", "network", "node", "port_id"), {}, "releases the leases again",
             '"Releases an active DHCP lease" (Utilities Common); its 200 answers nothing; no completion documented: '
-            "acceptance only"),
+            "acceptance only",
+            selectors=('port_id',)),
     Utility("releaseSiteSsrDhcpLease", "mist.site_devices.release_dhcp", "disruptive", "acceptance_only", GATEWAY,
             ("node", "port_id"), {}, "releases the interface's lease again",
-            f'"Releases an active DHCP lease" (Utilities WAN); {STREAMED}; no completion documented: acceptance only'),
+            f'"Releases an active DHCP lease" (Utilities WAN); {STREAMED}; no completion documented: acceptance only',
+            selectors=('port_id',)),
     Utility("clearSiteDeviceSession", "mist.site_devices.clear_session", "disruptive", "acceptance_only", GATEWAY,
             ("node", "service_name", "session_ids"), {}, "clears the sessions again",
-            '"Clear session" (Utilities WAN); its 200 answers nothing; no completion documented: acceptance only'),
+            '"Clear session" (Utilities WAN); its 200 answers nothing; no completion documented: acceptance only',
+            selectors=('session_ids',)),
     Utility("clearSiteSsrArpCache", "mist.site_devices.clear_arp", "disruptive", "acceptance_only", LAN_WAN,
             ("ip", "node", "port_id", "vlan", "vrf"), {}, "clears the ARP entries again; the device learns them again",
-            f'"Clear ARP cache for SSR, SRX and Switch"; {STREAMED}; no completion documented: acceptance only'),
+            f'"Clear ARP cache for SSR, SRX and Switch"; {STREAMED}; no completion documented: acceptance only',
+            selectors=('port_id',)),
     Utility("clearSiteSsrBgpRoutes", "mist.site_devices.clear_bgp", "disruptive", "acceptance_only", GATEWAY,
             ("neighbor", "node", "type", "vrf"), {},
             "resets the BGP sessions again: their routes are withdrawn and learnt again",
             f"clears the routes of one or all BGP neighbors (Utilities WAN); {STREAMED}; no completion documented: "
-            "acceptance only"),
+            "acceptance only",
+            selectors=('neighbor',)),
 )  # fmt: skip
 
 UTILITY_PATH = re.compile(r"^/api/v1/sites/\{site_id\}/devices/\{device_id\}/[a-z0-9_]+$")
 REFRESH = frozenset({"interval", "duration"})  # repeated output for up to 300 s: no contract bounds it yet
+SELECTOR_TYPES = ("string", "array")  # a port, a neighbor; a list of ports or sessions
 DEVICE_CHECK = "getSiteDevice"  # the read that checks a utility's device type before anything else is sent
 KINDS = {"diagnostic": ("mist.diagnose", "idempotent"), "disruptive": ("mist.write", "ambiguous")}
 
@@ -551,6 +564,15 @@ def _utility_problems(op: oas.Operation, u: Utility) -> list[str]:
         out.append(f"{name}: device types {list(u.device_types)} aren't {list(policy.DEVICE_TYPES)}")
     body = _body(doc, op)
     out += [f"{name}: parameter {p!r} isn't permitted" for p in u.parameters if p not in body or p in REFRESH]
+    out += [f"{name}: parameter {p!r} is an object, which would carry any keys" for p in u.parameters
+            if p in body and oas.resolve(doc, body[p]).get("type") == "object"]  # fmt: skip
+    if u.kind == "disruptive" and not u.selectors:
+        out.append(f"{name}: a disruptive utility names its selectors (review M1)")
+    for s in u.selectors:
+        found = oas.resolve(doc, body[s]) if s in u.parameters and s in body else None
+        items = oas.resolve(doc, found.get("items", {})) if found is not None and found.get("type") == "array" else {}
+        if found is None or found.get("type") not in SELECTOR_TYPES or (items and items.get("type") != "string"):
+            out.append(f"{name}: selector {s!r} isn't a string or a list of strings among its parameters")
     for key, bound in u.bounds.items():
         if key == "max_duration_s":
             if not stream:
@@ -589,6 +611,7 @@ def _utility_entry(u: Utility) -> dict[str, Any]:
             "parameters": list(u.parameters),
             "bounds": dict(u.bounds),
             "repeat": u.repeat,
+            "selectors": list(u.selectors),
         },
     }
 

@@ -76,6 +76,7 @@ class UtilityReview:
     parameters: tuple[str, ...]
     bounds: Mapping[str, int]
     repeat: str
+    selectors: tuple[str, ...] = ()  # what scopes a disruptive command: required, never empty, never `all`
 
 
 @dataclass(frozen=True)
@@ -97,7 +98,7 @@ _ALLOWED_KEYS = frozenset(
     {"method", "path", "state", "nodes", "capability", "scope", "side_effect", "evidence", "reads"}
 )
 _OTHER_KEYS = frozenset({"method", "path", "state", "reason"})
-_UTILITY_KEYS = frozenset({"contract", "stream", "device_types", "parameters", "bounds", "repeat"})
+_UTILITY_KEYS = frozenset({"contract", "stream", "device_types", "parameters", "bounds", "repeat", "selectors"})
 
 
 def _utility(op_id: str, raw: Any) -> UtilityReview:
@@ -115,11 +116,13 @@ def _utility(op_id: str, raw: Any) -> UtilityReview:
         or not all(isinstance(k, str) and type(v) is int and v > 0 for k, v in raw["bounds"].items())
         or not isinstance(raw["repeat"], str)
         or not raw["repeat"]
+        or not isinstance(raw["selectors"], list)
+        or not all(isinstance(p, str) and p in raw["parameters"] for p in raw["selectors"])
     ):
         raise PolicyUnreadableError(f"{op_id}: not a utility review")
     return UtilityReview(
         raw["contract"], raw["stream"], tuple(raw["device_types"]), tuple(raw["parameters"]), dict(raw["bounds"]),
-        raw["repeat"],
+        raw["repeat"], tuple(raw["selectors"]),
     )  # fmt: skip
 
 

@@ -41,6 +41,10 @@ from dewpoint.sdk.fields import CONNECTION, LITERAL, OPTIONS
 DEVICE_CHECK = "getSiteDevice"  # the read that checks the device's type (reviews.DEVICE_CHECK)
 DEFAULT_DURATION = {"bounded_collection": 60, "stream_terminal_evidence": 120}  # seconds, within the review's maximum
 SIMULATED_SESSION = "00000000-0000-4000-8000-000000000000"
+# Free text a utility sends reaches a device's command line through Mist: one token of a host name, an address, an
+# interface, a prefix or a name (review M2). `all` as a selector would mean every port, session or neighbor (M1).
+ONE_WORD = r"^[A-Za-z0-9._:/@-]{1,253}$"
+EVERY = {"pattern": "^[Aa][Ll][Ll]$"}
 CONTRACT_TEXT = {
     "bounded_collection": " Returns the output received until it goes quiet or the maximum duration passes: never"
     " proof that the command finished.",
@@ -177,14 +181,11 @@ def config_schema(
         declared = body.get("properties", {})
         permitted: dict[str, Any] = {}
         for name in review.parameters:
-            sub = dict(converted(declared[name], output=False))
-            bound = review.bounds.get(name)
-            if bound is not None:
-                sub["maximum"] = min(bound, sub.get("maximum", bound))
-            permitted[name] = sub
+            permitted[name] = _parameter(doc, declared[name], review.bounds.get(name), name in review.selectors)
             roots.append(declared[name])
         props["body"] = {"type": "object", "title": "Body", "properties": permitted, "additionalProperties": False}
         needed = [r for r in body.get("required", []) if r in review.parameters]
+        needed += [s for s in review.selectors if s not in needed]
         if needed:
             props["body"]["required"] = needed
             required.append("body")
@@ -195,6 +196,35 @@ def config_schema(
         }  # fmt: skip
     out = {"type": "object", "properties": props, "required": required, "additionalProperties": False}
     return with_defs(doc, out, roots, output=False, partial=False)
+
+
+def _token(doc: Mapping[str, Any], declared: Any, schema: dict[str, Any]) -> dict[str, Any]:
+    """A string without an enum as one token (review M2); any other schema as it is."""
+    target = oas.resolve(doc, declared)
+    if target.get("type") != "string" or "enum" in target:
+        return schema
+    if "pattern" in schema:
+        return {**schema, "allOf": [{"pattern": ONE_WORD}]}
+    return {**schema, "pattern": ONE_WORD}
+
+
+def _parameter(doc: Mapping[str, Any], declared: Any, bound: int | None, selector: bool) -> dict[str, Any]:
+    """A permitted body parameter's schema: the OAS's, a bounded integer within 1 and its maximum, free text one token,
+    a selector never empty nor `all`."""
+    target = oas.resolve(doc, declared)
+    sub = _token(doc, declared, dict(converted(declared, output=False)))
+    if bound is not None:
+        sub["maximum"] = min(bound, target.get("maximum", bound))
+        sub["minimum"] = max(1, target.get("minimum", 1))  # 0 is "unlimited" to some pings
+    if target.get("type") == "array":
+        items = target.get("items", {})
+        sub["items"] = _token(doc, items, dict(converted(items, output=False)))
+        if selector:
+            sub["minItems"] = 1
+            sub["items"] = {**sub["items"], "not": EVERY}
+    elif selector:
+        sub["not"] = EVERY
+    return sub
 
 
 def output_schema(review: policy.UtilityReview, answers_session: bool) -> dict[str, Any]:

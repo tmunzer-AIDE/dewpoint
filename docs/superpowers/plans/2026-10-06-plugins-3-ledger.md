@@ -862,3 +862,17 @@ Rulings:
   message; an acceptance-only utility's timeout is a minute - cost if wrong: a slow table needs a longer maximum.
 - Ruling: a simulated utility answers its contract's shape (one line saying no command was sent; the session a fixed
   placeholder), never an example of real output: the OAS has none to validate - cost if wrong: none.
+
+Fresh-context review of 3b-2 (at 40e800c, 2026-10-07): no High, 2 Medium, 7 Low and a parity note. Each finding is
+fixed test-first, and each fix's protection checked by disabling it.
+- M1 (disruptive utilities accepted their whole-device forms: an omitted, empty or `all` port list, an unfiltered MAC
+  table or ARP cache, an unscoped session clear, a BGP clear of `all` neighbors): each disruptive review names its
+  selectors (`ports`, `port`, `port_id`, `session_ids`, `neighbor`), required, a list of at least one, never `all` in
+  any case. Ruling: a whole-device form isn't permitted until the owner reviews it - D24 holds bulk forms where empty
+  means all - cost if wrong: clearing a whole table takes a loop over its ports.
+- M2 (`count` and `timeout` could be 0 or negative, which some pings read as unlimited): a bounded integer is at least
+  1. Ruling: every free-text string a utility sends (no enum) is one word of letters, digits and `. _ : / @ -` (host
+  names, addresses, interfaces, prefixes, names), at most 253 characters - such text reaches a device's command line
+  through Mist - cost if wrong: a name with another character is refused at publish.
+- L4 (show route's `node` is an object in the OAS, open to any keys): a permitted parameter can't be an object; show
+  route's `node` isn't permitted (the string form every other utility takes is refused by the OAS's object type).

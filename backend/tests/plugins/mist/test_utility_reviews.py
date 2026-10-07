@@ -34,12 +34,13 @@ def utilities() -> dict[str, policy.Entry]:
 
 
 def body_properties(op_id: str) -> set[str]:
+    """Its body's parameters but its objects, which would carry any keys (review L4)."""
     doc, op = oas.document(), oas.operations()[op_id]
     body = op.spec.get("requestBody")
     if body is None:
         return set()
     schema = oas.resolve(doc, oas.resolve(doc, body)["content"]["application/json"]["schema"])
-    return set(schema.get("properties", {}))
+    return {k for k, v in schema.get("properties", {}).items() if oas.resolve(doc, v).get("type") != "object"}
 
 
 def answers_a_session(op_id: str) -> bool:
@@ -81,7 +82,7 @@ def test_only_an_operation_answering_a_session_streams() -> None:
     assert {op for op in utilities() if not answers_a_session(op)} == REST_ONLY  # resolve_dns: no body, a session
 
 
-def test_the_permitted_parameters_are_the_bodys_but_the_refresh_ones() -> None:
+def test_the_permitted_parameters_are_the_bodys_but_the_refresh_ones_and_objects() -> None:
     for op_id, e in utilities().items():
         assert e.utility is not None
         assert set(e.utility.parameters) == body_properties(op_id) - {"interval", "duration"}, op_id
@@ -141,6 +142,11 @@ def _review(op_id: str, **changes: Any) -> tuple[Any, ...]:
         (_review("pingFromDevice", node="mist.site_devices.list"), "a duplicate"),
         (_review("pingFromDevice", operation="getSiteDevice"), "getSiteDevice: not a device utility"),
         (_review("pingFromDevice", operation="createSiteDeviceShellSession"), "createSiteDeviceShellSession"),
+        (_review("showSiteSsrAndSrxRoutes", parameters=("node", "vrf")), "showSiteSsrAndSrxRoutes: parameter 'node'"),
+        (_review("bounceDevicePort", selectors=()), "bounceDevicePort: a disruptive utility names its selector"),
+        (_review("bounceDevicePort", selectors=("nope",)), "bounceDevicePort: selector 'nope'"),
+        (_review("clearSiteSsrArpCache", selectors=("vlan",)), "clearSiteSsrArpCache: selector 'vlan'"),
+        (_review("pingFromDevice", bounds={"size": 70000, "max_duration_s": 240}), "pingFromDevice: bound 'size'"),
     ],
 )  # fmt: skip
 def test_a_review_that_doesnt_fit_its_operation_fails_the_build(
@@ -164,6 +170,8 @@ def test_a_review_that_doesnt_fit_its_operation_fails_the_build(
         lambda u: u.update(repeat=""),
         lambda u: u.update(extra=1),
         lambda u: u.pop("repeat"),
+        lambda u: u.update(selectors=["nope"]),  # not one of its parameters
+        lambda u: u.update(selectors="host"),
     ],
 )
 def test_the_map_reads_a_utility_strictly(change: Any) -> None:
@@ -187,3 +195,13 @@ def test_no_rest_node_is_made_for_a_utility() -> None:
 
     made = {n.operation for n in nodes.build()}
     assert not made & set(utilities())
+
+
+def test_every_disruptive_utility_names_its_selectors() -> None:
+    """Review M1: the parameters that scope a disruptive command, required, never empty or `all`."""
+    for op_id, e in utilities().items():
+        assert e.utility is not None
+        if op_id in DISRUPTIVE:
+            assert e.utility.selectors and set(e.utility.selectors) <= set(e.utility.parameters), op_id
+        else:
+            assert e.utility.selectors == (), op_id

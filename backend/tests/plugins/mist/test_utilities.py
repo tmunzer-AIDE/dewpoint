@@ -265,3 +265,82 @@ async def test_simulating_sends_nothing_and_answers_its_output_schema(type_: str
 def test_the_utility_operations_are_reached_by_their_own_path() -> None:
     for type_, n in utility_nodes().items():
         assert oas.operations()[n.operation].path == n.path, type_
+
+
+def _config(type_: str, body: Any = None) -> dict[str, Any]:
+    return {"connection": str(uuid.uuid4()), "site_id": SITE, "device_id": DEVICE,
+            **({"body": body} if body is not None else {})}  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("type_", "body"),
+    [
+        ("mist.site_devices.bounce_port", None), ("mist.site_devices.bounce_port", {}),
+        ("mist.site_devices.bounce_port", {"ports": []}), ("mist.site_devices.bounce_port", {"ports": ["all"]}),
+        ("mist.site_devices.bounce_port", {"ports": ["ge-0/0/1", "ALL"]}), ("mist.site_devices.clear_macs", {}),
+        ("mist.site_devices.clear_bpdu_error", {"ports": ["all"]}), ("mist.site_devices.clear_dot1x", {"ports": []}),
+        ("mist.site_devices.clear_session", {}), ("mist.site_devices.clear_session", {"session_ids": []}),
+        ("mist.site_devices.clear_mac_table", {}), ("mist.site_devices.clear_mac_table", {"vlan_id": "10"}),
+        ("mist.site_devices.clear_arp", {}), ("mist.site_devices.clear_arp", {"vrf": "default"}),
+        ("mist.site_devices.clear_bgp", {"neighbor": "all", "type": "soft"}),
+        ("mist.site_devices.clear_bgp", {"neighbor": "All", "type": "hard"}),
+        ("mist.site_devices.release_dhcp_leases", {"port_id": "all"}),
+    ],
+)  # fmt: skip
+def test_a_disruptive_utilitys_whole_device_form_is_refused(type_: str, body: Any) -> None:
+    """Review M1: an omitted, empty or `all` selector may mean every port, session or neighbor (D24 holds bulk
+    forms)."""
+    with pytest.raises(ValueError):
+        node(type_).Config.model_validate(_config(type_, body))
+
+
+@pytest.mark.parametrize(
+    ("type_", "body"),
+    [
+        ("mist.site_devices.bounce_port", {"ports": ["ge-0/0/1", "ge-0/0/2"]}),
+        ("mist.site_devices.clear_session", {"session_ids": [SESSION]}),
+        ("mist.site_devices.clear_mac_table", {"port_id": "ge-0/0/0.0", "vlan_id": "10"}),
+        ("mist.site_devices.clear_arp", {"port_id": "ge-0/0/1", "ip": "10.1.2.3"}),
+        ("mist.site_devices.clear_bgp", {"neighbor": "10.250.18.202", "type": "soft"}),
+        ("mist.site_devices.release_dhcp_leases", {"port_id": "ge-0/0/3", "macs": ["aabbccddeeff"]}),
+    ],
+)  # fmt: skip
+def test_a_selected_form_is_accepted(type_: str, body: Any) -> None:
+    node(type_).Config.model_validate(_config(type_, body))
+
+
+@pytest.mark.parametrize(
+    ("type_", "body"),
+    [
+        ("mist.site_devices.ping", {"host": "8.8.8.8", "count": 0}),  # 0 is "unlimited" to some pings
+        ("mist.site_devices.ping", {"host": "8.8.8.8", "count": -1}),
+        ("mist.site_devices.service_ping", {"host": "8.8.8.8", "service": "internet", "count": 0}),
+        ("mist.site_devices.traceroute", {"host": "8.8.8.8", "timeout": 0}),
+        ("mist.site_devices.ping", {"host": "8.8.8.8; reboot"}),  # free text reaches a device's command line
+        ("mist.site_devices.ping", {"host": "8.8.8.8 -c 100000"}),
+        ("mist.site_devices.ping", {"host": ""}),
+        ("mist.site_devices.show_route", {"vrf": "a b"}),
+        ("mist.site_devices.bounce_port", {"ports": ["ge-0/0/1|reboot"]}),
+    ],
+)  # fmt: skip
+def test_bounded_integers_start_at_one_and_free_text_is_a_token(type_: str, body: Any) -> None:
+    """Review M2."""
+    with pytest.raises(ValueError):
+        node(type_).Config.model_validate(_config(type_, body))
+
+
+def test_a_hostname_an_interface_and_a_prefix_are_tokens() -> None:
+    node("mist.site_devices.ping").Config.model_validate(
+        _config("", {"host": "dns.google", "egress_interface": "ge-0/0/0.100", "vrf": "mgmt_junos"})
+    )
+    node("mist.site_devices.show_route").Config.model_validate(_config("", {"prefix": "10.0.0.0/8"}))
+    node("mist.site_devices.ping").Config.model_validate(_config("", {"host": "2001:4860:4860::8888"}))
+
+
+def test_no_permitted_parameter_is_an_object() -> None:
+    """Review L4: an object parameter would carry whatever keys it's given (show_route's `node` is one in the OAS)."""
+    for type_, n in utility_nodes().items():
+        schema = node_manifest(n)["config_schema"]
+        for name, prop in schema["properties"].get("body", {}).get("properties", {}).items():
+            target = schema.get("$defs", {}).get(prop.get("$ref", "").rsplit("/", 1)[-1], prop)
+            assert target.get("type") != "object", (type_, name)
