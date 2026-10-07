@@ -479,11 +479,17 @@ class ConnectionHttp:
         base: httpx.URL,
         credentials: Mapping[str, str],
         scopes: Callable[[], Awaitable[list[Scope]]],
+        exact: bool = False,
     ) -> None:
         self._attempt, self._base, self._credentials = attempt, base, dict(credentials)
         self._scopes_of, self._scopes = scopes, list[Scope]()  # read at the first request, with its first token
+        self._exact = exact  # the base is a secret URL (an incoming webhook's): requests go to it exactly
 
     def _target(self, url: str) -> str:
+        if self._exact:
+            if url != "":
+                raise InvalidRequest()
+            return str(self._base)
         try:
             target = self._base.join(url)
         except (httpx.InvalidURL, ValueError, TypeError):
@@ -506,6 +512,8 @@ class ConnectionHttp:
     ) -> HttpResponse:
         _check_probe(probe, method, headers, content, json)
         _check_read(self._attempt, method, headers, content, json)
+        if self._exact and (params is not None or headers or follow_same_origin):
+            raise InvalidRequest()  # a secret URL's request is its URL, with nothing of the node's
         target = self._target(url)
         reserved = {name.lower() for name in self._credentials}
         if any(name.lower() in reserved for name in headers or {}):
@@ -639,6 +647,7 @@ class Unsealed:
     base: httpx.URL
     credentials: Mapping[str, str]
     stream_url: str | None = None
+    exact: bool = False  # the base is a secret URL: requests go to it exactly
 
     def opened(self, channel: Channel, mac: Callable[[], Awaitable[Callable[[str], str]]]) -> OpenedConnection:
         async def scopes() -> list[Scope]:
@@ -649,7 +658,7 @@ class Unsealed:
 
         return OpenedConnection(
             self.id, self.type, MappingProxyType(dict(self.config)),
-            ConnectionHttp(channel, self.base, self.credentials, scopes),
+            ConnectionHttp(channel, self.base, self.credentials, scopes, exact=self.exact),
             ConnectionWs(channel, self.stream_url, self.credentials, stream_scopes),
         )  # fmt: skip
 
@@ -677,7 +686,7 @@ async def unseal(
         if key_unreadable(e) or unavailable(e):
             raise NotSent() from None  # the keyring didn't answer: nothing was sent, a retry may succeed
         raise
-    url = kind.declared.base_url(stored_config)
+    url = kind.declared.base_url(stored_config, secret)
     try:
         base = httpx.URL(url) if url is not None else None
     except (httpx.InvalidURL, ValueError, TypeError):
@@ -685,7 +694,10 @@ async def unseal(
     if base is None or base.scheme not in ("http", "https") or not base.host:  # plain http still needs an entry
         raise ConnectionUnavailable()
     stream_url = kind.declared.stream_url(stored_config)
-    return Unsealed(connection_id, stored.type, kind, stored_config, config, secret, base, credentials, stream_url)
+    return Unsealed(
+        connection_id, stored.type, kind, stored_config, config, secret, base, credentials, stream_url,
+        exact=kind.declared.exact,
+    )  # fmt: skip
 
 
 class AttemptNetwork:

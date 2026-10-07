@@ -1102,3 +1102,7 @@ Rulings:
   (`re.fullmatch`) wherever the secret is read, not put on the secret field: pydantic's default regex engine has no
   look-around, and with Python's it can't apply a pattern to a `SecretStr`, while a `$` in JSON Schema's Python check
   would accept a final newline - cost if wrong: none.
+- Ruling (task 2): a secret-URL connection's request carries nothing of the node's - no path, query, parameters,
+  headers or redirects - the provider's URL is the whole request target, and a header of the node's could add
+  credentials the type doesn't declare - cost if wrong: a provider option set by query (Google Chat's threads) needs
+  the type to declare it.
