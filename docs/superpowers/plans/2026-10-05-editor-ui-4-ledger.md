@@ -713,3 +713,101 @@ M27. **The checks after the fixes** (2026-10-07):
       violation, console error or remote request. The list and sign-in load 591,346 bytes; opening a workflow adds
       301,824.
     - No backend file changed since M23, whose backend results stand.
+
+### Owner, 6d7766e reviewed (2026-10-07, pasted)
+
+"Final acceptance is still held at `6d7766e`: I reproduced four remaining defects." The owner asked for the branch to
+stay local: no push, no PR, no final approval recorded. The earlier UUID, import-race, undo-focus and lazy-loading
+corrections stand. The corrections:
+1. An open dialog could edit after a conflict: enforce edit permission where the change lands, and close what's open.
+2. A navigation within the same editor held its document for good: tell leaving from staying, and give an abandoned
+   exit back, without weakening the sign-out hold.
+3. A join climbing up and to the right put both its "+" on one rectangle: make the targets collision-aware (or give
+   an equivalent chooser), and add that join to the pointer regression.
+4. At 320 px a panel left the canvas zero wide: keep it usable, and test Go to and placing there by what shows.
+
+Rulings:
+- M25: a separate engine and portability follow-up (both schema-error sites, `_schema_errors` and `_check_instance`,
+  and refusing to export a sensitive literal). No browser-side masking. Resolve it before 4c accepts sensitive
+  configuration editing.
+- M26: "Do not accept a Fit-only restriction." Prefer screen-sized, collision-aware controls, or an equivalent unscaled
+  chooser. A minimum zoom is acceptable only if it covers the targets as rendered and every zoom path.
+- The outage test: investigate it separately, keeping its record as it stands (2,639 passed, 1 failed; three isolated
+  reruns passed; cause unknown).
+- The serial CEL group: run it on the corrected head.
+- Visual approval is still pending: the artifact's screenshots didn't reach the owner, so they come with this
+  checkpoint.
+
+### 4b, after the review of 6d7766e (2026-10-07)
+
+A fresh reviewer (read-only; it wrote no file this time) reviewed the correction round, 6d7766e..cd864ea. It found two
+Important findings and seven Minor ones, all fixed in 4e3061e and 37c764b and folded into M28–M32. Each fix has a test
+first, which was watched failing.
+
+M28. **Editing stops where a change lands, and what only editing offers stops with it** (correction 1; second-review
+    findings 1, 4 and 9).
+    - `change()` and undo ask `mayEdit()`: `editable` as last drawn, an exit agreed to, and the saver's own state,
+      which knows of a conflict before the screen does.
+    - When editing stops, an open picker, connect or delete dialog closes, and placing ends and says so.
+    - Focus held by what's gone moves:
+      - from a dialog, to the canvas item it was on;
+      - from a "+" (on a read-only canvas there are none), to its step, never the start card;
+      - from a panel's buttons, to the panel's heading;
+      - from Auto layout or Add step, to the canvas item.
+    - Tests: a conflict arriving under each of the three dialogs, under a panel button, while placing, and under a
+      port's "+".
+    - The owner's review. - None found.
+M29. **Only leaving the editor is an exit** (correction 2; finding 3).
+    - "This editor" is its route and its params, so a hash, a query or another spelling of the path (`/w1/` and
+      `/w1`) asks nothing and holds nothing.
+    - A router exit agreed to is released if a later navigation resolves back on this editor (`onResolved`).
+    - A sign-out's consent stays the guard's, released only by its own `stayed`: no second prompt.
+    - Tests: a hash, a query, a respelled path, and an exit whose destination redirects back.
+    - An exit a second blocker refuses fires no `onResolved`: there is no second blocker today.
+M30. **No two "+" share a rectangle, however the steps are placed** (correction 3; findings 5 and 6).
+    - Each edge reports the line it draws, and the canvas places every "+" (`pluses.ts`):
+      - React Flow's label point when it's clear;
+      - else the clear point along the edge's own line nearest its middle, off the cards where there's room;
+      - never on another edge's "+" or on a card's own "+";
+      - sideways only when the whole line is taken.
+    - Each port climbs in its own lane, measured from the cards' right edges, so a lane never runs through the card.
+    - The pointer regression now has the join climbing up and to the right.
+    - Edges that share a segment still draw one line there, though their "+" sit apart.
+M31. **A narrow editor keeps its canvas** (correction 4; findings 7 and 8).
+    - Below a 48rem editor (a container query), side panels stack under the canvas, at most half its height.
+    - The open step is brought back into the clear as its panel takes that half.
+    - The canvas's controls keep one row: no label wraps, and the zoom percentage hides below a 340 px canvas.
+      Measured, the row didn't overflow; it was 44 px tall with Auto layout broken onto two lines.
+    - The 320 px flow checks what shows:
+      - the canvas is over 200 px wide with Problems open;
+      - Go to shows the step at least half;
+      - a step opened in the lower half stays 90 % visible;
+      - Place lands the step centred on the click;
+      - the controls row is one row inside the canvas.
+    - At 320 × 720 with a panel open, the canvas is about 150 px tall: the shell's header, the development banner and
+      the toolbar take the rest.
+M32. **M26 as built: targets covered as rendered and on every zoom path** (finding 2).
+    - The UI's rem is 14 px, so the canvas's `h-16` cards were 56 px and its `size-6` "+" 21 px. The canvas now draws
+      in px, as React Flow lays it out: cards are CARD in size (64 tall), each "+" 24 square and 24 below its card.
+    - `MIN_ZOOM` 0.4 (a card 25.6 px tall) is React Flow's `minZoom`, the first fit's and the Fit button's. It bounds
+      the wheel, a pinch, the buttons and the minimap.
+    - Each "+" scales below 24 px. A step's panel offers every one of them at full size: insert before an entry,
+      insert on every edge the canvas draws from it (ports its type no longer lists included), add after each free
+      port. That is WCAG 2.5.8's equivalent.
+    - Handles have Connect to…; the start card is itself the full-size form of its "+".
+    - A browser flow zooms out every way and measures the card; another inserts through the panel.
+    - For the owner to confirm: that the panel's equivalents, with the minimum zoom, meet the ruling.
+M33. **M25 and the outage test, as ruled**: separate follow-ups, not in 4b. The outage test's record is unchanged:
+    2,639 passed, 1 failed; three isolated reruns passed; cause unknown.
+M34. **The checks on the corrected head** (37c764b, frontend only since 6d7766e):
+    - Frontend: 538 tests in 46 files; lint, types, `check:api`, licences and both self-tests clean.
+    - Build: index 557.70 kB of JS (180.66 kB gzipped), the editor's chunk 295.31 kB (96.09 kB).
+    - Browser gate, on a freshly reset stack: 27 passed. The list and sign-in load 591,680 bytes; opening a workflow
+      adds 307,451.
+    - Serial CEL group, by ruling 66's procedure: 406 passed, none skipped, at cd864ea (85.78 s) and at 4e3061e
+      (84.99 s).
+      - Same image digest 34386ef0, uv 0.12.10, `uv sync --locked`.
+      - The Temporal test server was fetched again from the URL recorded, its sha256 matching 1d712f6f.
+      - The second run overlapped a stack rebuild.
+      - No backend or deploy file changed between those heads and 37c764b.
+    - The backend's parallel suite didn't rerun: no backend file changed since M23.
