@@ -384,7 +384,7 @@ def _csv_declaration(csv: CsvSettings | None) -> list[Diagnostic]:
             out.append(Diagnostic(code="csv.duplicate_header", field=f"{where}/header", message=_CSV_HEADER))
         if c.name in names:
             out.append(Diagnostic(code="csv.duplicate_name", field=f"{where}/name", message=_CSV_NAME))
-        elif not IDENT.match(c.name) or c.name in CEL_KEYWORDS:
+        elif not IDENT.fullmatch(c.name) or c.name in CEL_KEYWORDS:
             out.append(Diagnostic(code="csv.invalid_name", field=f"{where}/name", message=_CSV_IDENT))
         headers.add(c.header)
         names.add(c.name)
@@ -460,7 +460,7 @@ def _settings(graph: Graph) -> list[Diagnostic]:
     defs = st.vars_schema.get("$defs", {})
     for name, schema in props.items() if isinstance(props, Mapping) else ():
         where = f"/settings/vars_schema/properties/{name}"
-        if not IDENT.match(name) or name in CEL_KEYWORDS:
+        if not IDENT.fullmatch(name) or name in CEL_KEYWORDS:
             out.append(
                 Diagnostic(
                     code="vars.invalid_name",
@@ -483,7 +483,7 @@ def _settings(graph: Graph) -> list[Diagnostic]:
         if contains_marker(value):
             out.append(Diagnostic(code="value.reserved_key", field=where, message=RESERVED, fix=_RESERVED_FIX))
     for name in st.outputs:
-        if not IDENT.match(name):
+        if not IDENT.fullmatch(name):
             out.append(
                 Diagnostic(
                     code="settings.output_name",

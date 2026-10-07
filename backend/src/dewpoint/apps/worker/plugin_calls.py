@@ -179,7 +179,7 @@ def _verify_answer(found: Any) -> dict[str, Any]:
         not isinstance(found, VerifyResult)
         or not isinstance(found.ok, bool)
         or not isinstance(found.detail, str)
-        or not DETAIL_RE.match(found.detail)
+        or not DETAIL_RE.fullmatch(found.detail)
         or not (
             found.privilege is None
             or (
