@@ -334,3 +334,33 @@ async def test_a_cancelled_step_stops_and_closes_its_stream() -> None:
 
 def test_the_channel_is_the_devices_command_channel_in_lower_case() -> None:
     assert stream.channel(SITE.upper(), DEVICE.upper()) == CHANNEL
+
+
+DEEP = "[" * 200_000  # past the JSON decoder's recursion limit
+
+
+async def test_deeply_nested_json_is_unreadable_and_discarded_in_every_phase() -> None:
+    """Review L1: `RecursionError` isn't a `ValueError`; each phase discards such a message instead of raising it."""
+    deep_raw = '{"a":' * 50_000
+    mist = Mist(data(deep_raw), data("after\n"), answer=Reply(200, {"session": SESSION}, delay_s=0.1))
+    mist.stream._on_send = lambda text: [DEEP, json.dumps(ACK), DEEP]  # type: ignore[assignment]
+    out = await mist.collect()
+    assert out["received"] == 2 and out["lines"][-1] == "after"
+    terminal = Mist(data(deep_raw))
+    with pytest.raises(stream.Unmet) as raised:
+        await terminal.collect(terminal=True)
+    assert raised.value.code == "mist.completion_unknown"
+
+
+async def test_a_cancelled_collection_leaves_no_task_behind() -> None:
+    """Review L1: the POST under way and the pending receive are both cancelled and awaited."""
+    mist = Mist(answer=Reply(200, {"session": SESSION}, delay_s=5))
+    before = asyncio.all_tasks()
+    collecting = asyncio.ensure_future(mist.collect())
+    await asyncio.sleep(0.2)  # subscribed, the POST under way
+    collecting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await collecting
+    await asyncio.sleep(0)
+    assert {t for t in asyncio.all_tasks() - before if not t.done()} == set()
+    assert mist.stream.closed

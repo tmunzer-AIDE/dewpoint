@@ -12,7 +12,6 @@ sent, so every failure there is retryable or fatal; after it, an unmet condition
 its review. The stream is closed whatever happens; no unsubscribe is sent (its message isn't documented)."""
 
 import asyncio
-import contextlib
 import json
 import re
 from collections.abc import Awaitable, Mapping
@@ -43,6 +42,7 @@ TRANSIENT = "Server error, please try again later"  # the docs' `subscribe_faile
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
 CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")  # every control character but tab and newline
 LOST = (StreamLost, ResponseTooLarge, ResponseUnreadable)
+UNREADABLE = (ValueError, RecursionError)  # JSON nested past the decoder's limit raises the second (review L1)
 
 
 class StreamUnavailable(RetryableError):
@@ -110,7 +110,7 @@ def _data(message: Any, channel_: str, depth: int = 0) -> tuple[str, str] | None
     if isinstance(value, str):
         try:
             value = json.loads(value)
-        except ValueError:
+        except UNREADABLE:
             return None
     if not isinstance(value, Mapping):
         return None
@@ -123,7 +123,7 @@ def _data(message: Any, channel_: str, depth: int = 0) -> tuple[str, str] | None
 def _parsed(text: str) -> Any:
     try:
         return json.loads(text)
-    except ValueError:
+    except UNREADABLE:
         return None
 
 
@@ -136,7 +136,7 @@ def _finished(raw: str) -> bool:
         return False
     try:
         table, _ = json.JSONDecoder().raw_decode(text)
-    except ValueError:
+    except UNREADABLE:
         return False
     if not isinstance(table, Mapping) or table.get("finished") is not True or not isinstance(table.get("status"), str):
         return False  # no evidence: a table without a status says nothing about the command
@@ -196,6 +196,7 @@ class _Reader:
         """The POST's answer, the channel's data buffered while it was under way. A lost stream or an overflow lets the
         POST finish (it's the command) and fails after it."""
         task = asyncio.ensure_future(post)
+        receive: asyncio.Future[str | None] | None = None
         try:
             while not task.done():
                 if self.gone:
@@ -205,23 +206,26 @@ class _Reader:
                 receive = asyncio.ensure_future(self.ws.receive(BEAT_S))
                 await asyncio.wait({task, receive}, return_when=asyncio.FIRST_COMPLETED)
                 if not receive.done():
-                    receive.cancel()  # a receive is cancel-safe: nothing is lost
-                    with contextlib.suppress(asyncio.CancelledError, *LOST):
-                        await receive
-                    continue
+                    continue  # the POST answered: the receive is cancelled below (cancel-safe, nothing is lost)
                 try:
                     text = receive.result()
                 except LOST as e:
                     self.gone, self.garbled = True, isinstance(e, ResponseUnreadable)
                     self.overflowed = self.overflowed or isinstance(e, ResponseTooLarge)
                     continue
+                finally:
+                    receive = None
                 self.ctx.heartbeat()
                 if text is not None:
                     self._buffer(text)
             answer = task.result()
         finally:
-            if not task.done():
-                task.cancel()
+            # Whatever ended the wait (the answer, a cancel, a bug), nothing is left running (review L1).
+            pending = [f for f in (receive, task) if f is not None and not f.done()]
+            for f in pending:
+                f.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
         if self.overflowed:
             raise overflow()
         if self.gone:

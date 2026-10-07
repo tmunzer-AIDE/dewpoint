@@ -881,3 +881,6 @@ fixed test-first, and each fix's protection checked by disabling it.
   with ambiguous, acceptance only and selectors, keep acceptance only ambiguous, and bound only its parameters and,
   streaming, its duration; `api.routes` skips utilities whatever a map says; a stream on an answer without a session
   fails the build where the OAS is read.
+- L1 (JSON nested past the decoder's limit raised `RecursionError`, which no phase caught, and the POST wait's `finally`
+  left the POST and the receive running): the three decoders read it as unreadable, so the message is discarded; the
+  wait cancels and awaits whatever is still running, the POST and the receive alike, whatever ended it.
