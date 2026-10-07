@@ -6,6 +6,7 @@ message and an attempt's bytes are bounded; only text messages are read; the han
 library's. Failures say what happened, never the host, an address or the URL."""
 
 import asyncio
+import logging
 import math
 import re
 import socket
@@ -17,13 +18,17 @@ from dataclasses import dataclass
 
 import httpx
 from websockets.asyncio.client import ClientConnection, connect
-from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus, PayloadTooBig
+from websockets.exceptions import ConnectionClosed, InvalidStatus, PayloadTooBig, WebSocketException
 from websockets.frames import CloseCode
 
 from dewpoint.core.egress.guard import Guard, InvalidRequestError, NotSentError, TlsVerificationError
 from dewpoint.core.egress.http import ResponseTooLargeError, ResponseUnreadableError
 
 MIB = 1024 * 1024
+# The library's own logger: it writes each handshake header at DEBUG, credentials included, so it never logs below
+# WARNING, whatever the root logger's level (review L3).
+LIBRARY_LOG = logging.getLogger("dewpoint.egress.websockets")
+LIBRARY_LOG.setLevel(logging.WARNING)
 MAX_RECEIVE_WAIT_S = 3600.0  # the longest one receive may wait (a step's timeout bounds it sooner)
 HEADER_NAME = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$")  # an RFC 9110 token
 # What the opening handshake is made of, or routes it: the library's alone.
@@ -85,6 +90,17 @@ def _headers(headers: Mapping[str, str]) -> dict[str, str]:
 
 def _rejected(error: InvalidStatus) -> HandshakeRejectedError:
     return HandshakeRejectedError(error.response.status_code, error.response.headers.get("Retry-After"))
+
+
+def _status(error: BaseException) -> InvalidStatus | None:
+    """The refused handshake behind `error`, if any: the library raises another exception while it reads a redirect
+    it then refuses (a Location that isn't a websocket URL, review L2)."""
+    seen: BaseException | None = error
+    for _ in range(8):
+        if seen is None or isinstance(seen, InvalidStatus):
+            return seen
+        seen = seen.__cause__ or seen.__context__
+    return None
 
 
 class GuardedSocket:
@@ -160,8 +176,11 @@ class GuardedWebsocket:
         self.limits = limits or WsLimits()
         self.received = 0
         self._open: list[GuardedSocket] = []
+        self._closed = False
 
     async def open(self, url: str, headers: Mapping[str, str]) -> GuardedSocket:
+        if self._closed:  # the attempt ended: nothing more opens
+            raise InvalidRequestError("closed")
         host, port = _target(url)
         sent_headers = _headers(headers)
         loop = asyncio.get_running_loop()
@@ -175,13 +194,10 @@ class GuardedWebsocket:
                 connection = await self._handshake(url, sock, host, sent_headers, max(0.01, deadline - loop.time()))
             except ssl.SSLError:
                 raise TlsVerificationError() from None
-            except InvalidStatus as e:
-                raise _rejected(e) from None
-            except ValueError as e:  # a redirect, refused since the socket was ours
-                if isinstance(e.__cause__, InvalidStatus):
-                    raise _rejected(e.__cause__) from None
-                raise NotSentError("handshake") from None
-            except (InvalidHandshake, ConnectionClosed, OSError, TimeoutError):
+            except (WebSocketException, ValueError, OSError, TimeoutError) as e:  # a redirect is refused: the socket
+                status = _status(e)  # was ours
+                if status is not None:
+                    raise _rejected(status) from None
                 raise NotSentError("handshake") from None
             stream = GuardedSocket(connection, self)
             self._open.append(stream)
@@ -196,6 +212,7 @@ class GuardedWebsocket:
         try:
             return await connect(
                 url, sock=sock, ssl=self._context, server_hostname=host, proxy=None, additional_headers=headers,
+                logger=LIBRARY_LOG,
                 open_timeout=timeout_s, max_size=self.limits.max_message_bytes,
                 ping_interval=self.limits.ping_interval_s, ping_timeout=self.limits.ping_timeout_s,
                 close_timeout=self.limits.close_s,
@@ -205,6 +222,7 @@ class GuardedWebsocket:
             raise
 
     async def aclose(self) -> None:
+        self._closed = True
         for stream in self._open:
             await stream.close()
         self._open.clear()

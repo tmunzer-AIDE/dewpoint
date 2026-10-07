@@ -6,6 +6,7 @@ messages only; and every failure saying what happened, never the host or an addr
 
 import asyncio
 import contextlib
+import logging
 import socket
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -358,3 +359,39 @@ async def test_a_receive_timeout_is_a_number_of_seconds_within_an_hour(timeout_s
                 await stream.receive(timeout_s)
         finally:
             await w.aclose()
+
+
+@pytest.mark.parametrize("location", ["http://elsewhere.test/s", "ftp://elsewhere.test/s", "wss://[bad/s"])
+async def test_a_redirect_anywhere_is_a_refused_handshake(location: str) -> None:
+    """Review L2: websockets parses the Location before refusing to follow it; whatever it says, it's the 302."""
+    moved = Response(302, "Found", Headers([("Location", location)]), b"")
+    async with server(status=moved) as (port, _):
+        w = websocket()
+        with pytest.raises(HandshakeRejectedError) as raised:
+            await w.open(f"wss://stream.test:{port}/s", {})
+        await w.aclose()
+    assert raised.value.status == 302
+
+
+async def test_the_librarys_debug_lines_never_carry_the_credentials(caplog: pytest.LogCaptureFixture) -> None:
+    """Review L3: websockets logs each handshake header at DEBUG; even with the root logger at DEBUG, none is logged."""
+    caplog.set_level(logging.DEBUG)
+    async with server() as (port, _):
+        w = websocket()
+        try:
+            stream = await w.open(f"wss://stream.test:{port}/s", {"Authorization": TOKEN})
+            await stream.send("hi")
+            await stream.receive(5)
+        finally:
+            await w.aclose()
+    ours = [r for r in caplog.records if not r.name.startswith("websockets.server")]  # the fake's own lines aside
+    assert not any("t" * 40 in r.getMessage() for r in ours)  # the library's client lines without the fix
+
+
+async def test_a_closed_attempt_opens_no_stream() -> None:
+    async with server() as (port, seen):
+        w = websocket()
+        await w.aclose()
+        with pytest.raises(InvalidRequestError):
+            await w.open(f"wss://stream.test:{port}/s", {})
+    assert seen.connections == 0

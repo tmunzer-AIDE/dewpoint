@@ -884,3 +884,9 @@ fixed test-first, and each fix's protection checked by disabling it.
 - L1 (JSON nested past the decoder's limit raised `RecursionError`, which no phase caught, and the POST wait's `finally`
   left the POST and the receive running): the three decoders read it as unreadable, so the message is discarded; the
   wait cancels and awaits whatever is still running, the POST and the receive alike, whatever ended it.
+- L2 (a redirect whose Location isn't a websocket URL escaped as the library's own exception, retried or of unknown
+  outcome though nothing was sent; a malformed one read as not sent): every library exception is read for the refused
+  handshake behind it, so any redirect is `HandshakeRejected` with its status, anything else `NotSent`.
+- L3 (the library writes each handshake header at DEBUG, the token included): its logger is Dewpoint's own, pinned at
+  WARNING, so no level of the root logger lets such a line out.
+- The parity note (an attempt's websockets opened after `aclose()`): refused (`InvalidRequest`).
