@@ -602,15 +602,16 @@ async def test_a_step_lasts_at_most_a_second_however_long_deadlock_timeout_is(sc
     assert took < 1.5 and queued < 1.2
 
 
-async def test_an_upgrade_refuses_while_a_role_could_lower_its_own_deadlock_timeout(scratch) -> None:
+async def test_an_upgrade_refuses_while_a_role_could_lower_its_own_deadlock_timeout(scratch, templates) -> None:
     """The owner's review of checkpoint 3: a step's budget rests on the shortest `deadlock_timeout` the catalogue shows,
     so no session may set its own lower unseen. The upgrade refuses, naming them, while a role other than the
-    migrating one is granted `SET` on it, or a superuser is an application role or a member of one; it changes
-    nothing."""
+    migrating one is granted `SET` on it, or a superuser is one of the application's roles or a member of one (here, of
+    `dewpoint_api`, through another role); it changes nothing."""
     tag = uuid.uuid4().hex[:8]
-    granted, app, superuser = f"granted_{tag}", f"dewpoint_t{tag}", f"su_{tag}"
+    granted, between, superuser = f"granted_{tag}", f"between_{tag}", f"su_{tag}"
     await execute(scratch, f"CREATE ROLE {granted}; GRANT SET ON PARAMETER deadlock_timeout TO {granted}; "
-                           f"CREATE ROLE {app} NOLOGIN; CREATE ROLE {superuser} SUPERUSER IN ROLE {app}")  # fmt: skip
+                           f"CREATE ROLE {between} NOLOGIN IN ROLE dewpoint_api; "
+                           f"CREATE ROLE {superuser} SUPERUSER IN ROLE {between}")  # fmt: skip
     try:
         with pytest.raises(online.StepFailedError) as refused:
             await run(scratch, lambda c: online.step(c, "refused", "CREATE TABLE t3 (x int)"))
@@ -618,7 +619,21 @@ async def test_an_upgrade_refuses_while_a_role_could_lower_its_own_deadlock_time
         assert not await exists(scratch, "t3")
     finally:
         await execute(scratch, f"REVOKE SET ON PARAMETER deadlock_timeout FROM {granted}; DROP ROLE {granted}; "
-                               f"DROP ROLE {superuser}; DROP ROLE {app}")  # fmt: skip
+                               f"DROP ROLE {superuser}; DROP ROLE {between}")  # fmt: skip
+
+
+async def test_a_superuser_that_isnt_an_application_role_never_refuses_the_upgrade(scratch, templates) -> None:
+    """Compose's bootstrap superuser is `dewpoint_owner`: when another role migrates (one that bypasses row-level
+    security, as the deployment guide allows), it's a superuser named like the application's roles, but none of them
+    nor a member of one, and its superuser can't be taken away. The upgrade goes on (the review of checkpoint 4: the
+    application's roles were found by their names' prefix)."""
+    owner = f"dewpoint_owner_{uuid.uuid4().hex[:8]}"
+    await execute(scratch, f"CREATE ROLE {owner} SUPERUSER")
+    try:
+        await run(scratch, lambda c: online.step(c, "allowed", "CREATE TABLE t4 (x int)"))
+    finally:
+        await execute(scratch, f"DROP ROLE {owner}")
+    assert await exists(scratch, "t4")
 
 
 CHANGES = {  # a change to what a step's budget rests on, made while the upgrade runs

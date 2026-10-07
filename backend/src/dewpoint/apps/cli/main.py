@@ -607,7 +607,7 @@ def schedules_inventory_cutover(
     Temporal can't be asked (exit 3). With --confirm it catches up first, in batches each committed on its own (any
     schedule without an incarnation, one the capture missed; each incarnation 0's missed count, as the old dispatcher
     last recorded it), then records once, audited with the attestation, in a short transaction holding schedules'
-    inserts off (`dewpoint.core.platform.inventory`). Interrupted, it's run again: the batches done stay done. Its lock
+    writes off (`dewpoint.core.platform.inventory`). Interrupted, it's run again: the batches done stay done. Its lock
     waited for in vain through every attempt, nothing is recorded (exit 1; run it again); the capture off, it refuses.
     Exit 2 without --attest. Exit 2 when no Temporal namespace is recorded or the configured one isn't it, before any
     connection. Run as dewpoint_admin."""

@@ -179,7 +179,7 @@ class _Writer:
 def test_the_cutover_waits_for_schedules_writers_only_briefly_and_gives_way_to_them(
     pg_url, _test_users, monkeypatch
 ) -> None:  # fmt: skip
-    """Its final step's lock on schedules (their inserts held off while it records) is waited for at most `LOCK_WAIT`
+    """Its final step's lock on schedules (their writes held off while it records) is waited for at most `LOCK_WAIT`
     an attempt, so a writer arriving meanwhile, queued behind it, waits no longer; then it gives way and tries again.
     Still busy after `ATTEMPTS`, it records nothing and says so (exit 1). Unbounded, one writer left open would have
     queued every schedule write behind it (the review's M2, held to D15's bar: no writer waits long)."""
@@ -213,7 +213,7 @@ WHERE c.oid IN {TABLES} OR c.oid IN (SELECT indexrelid FROM pg_index WHERE indre
 def test_the_cutovers_final_step_reads_no_schedule_however_many_there_are(pg_url, _test_users) -> None:
     """The owner's review of checkpoint 3: the cutover held a lock schedules' writers wait for while it scanned every
     schedule, caught up and refreshed, so its hold grew with them. The catch-up now runs before it, in batches; the
-    final step, holding schedules' inserts off only while it records, reads no schedule, incarnation or span, however
+    final step, holding schedules' writes off only while it records, reads no schedule, incarnation or span, however
     many there are."""
 
     async def record() -> int:
@@ -276,7 +276,7 @@ def test_the_catch_up_runs_in_committed_batches_and_an_interrupted_one_goes_on_f
 
 def test_the_cutover_refuses_while_the_capture_is_off(pg_url, _test_users, monkeypatch) -> None:
     """The catch-up covers every schedule committed before its batches passed; one added afterwards with the capture
-    off would be missed, so the final step, holding schedules' inserts and the trigger's state still, refuses while the
+    off would be missed, so the final step, holding schedules' writes and the trigger's state still, refuses while the
     capture is off (only the table's owner can turn it off): nothing is recorded."""
     command = _cutover_env(pg_url, monkeypatch)
     with _restoring(pg_url):

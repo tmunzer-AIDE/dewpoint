@@ -417,7 +417,7 @@ BEGIN
   RETURN QUERY SELECT v_ids[v_seen], v_seen, v_caught, v_refreshed;
 END $$""",
     "REVOKE ALL ON FUNCTION schedule_inventory_catch_up(uuid, integer) FROM PUBLIC",
-    # The cutover, once, after the catch-up: in one short transaction holding schedules' inserts off, and the capture's
+    # The cutover, once, after the catch-up: in one short transaction holding schedules' writes off, and the capture's
     # state still (turning a trigger off takes the same lock), it refuses while the capture is off (a schedule added
     # since the catch-up passed would be missed), then records. It reads no schedule: its hold doesn't grow with them.
     # Whether it recorded (false: recorded already). The key admin's, as the catch-up is, through `dewpoint schedules

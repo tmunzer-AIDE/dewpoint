@@ -45,18 +45,22 @@ async def _call(client: Any, rpc: str) -> Any:
 
 
 async def test_a_pass_takes_its_first_item_always_and_no_new_one_once_its_budget_is_spent(monkeypatch) -> None:
-    monkeypatch.setattr(budget, "PASS_S", 0.05)
+    """Counted on a clock of the test's own (the review of checkpoint 4: real time flaked under a loaded machine): each
+    item takes 4 s of a 10-second budget, so the pass takes three; one that takes the whole budget is still taken."""
+    now = [0.0]
+    monkeypatch.setattr(budget, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(budget, "PASS_S", 10.0)
     taken: list[int] = []
     with budget.passing("p") as admitted:
         for item in admitted(range(10), key=lambda i: i):
             taken.append(item)
-            await asyncio.sleep(0.03)
-    assert taken == [0, 1] and admitted.deferred == 8
+            now[0] += 4.0
+    assert taken == [0, 1, 2] and admitted.deferred == 7
     with budget.passing("first") as admitted:
         taken = []
         for item in admitted(range(3), key=lambda i: i):
             taken.append(item)
-            await asyncio.sleep(0.06)  # over the whole budget: the first is still taken, and only it
+            now[0] += 11.0  # over the whole budget: the first is still taken, and only it
     assert taken == [0] and admitted.deferred == 2
 
 

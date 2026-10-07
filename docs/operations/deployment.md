@@ -55,8 +55,8 @@ normal reads and writes wait at most a fraction of a second behind the upgrade, 
 run again with `alembic upgrade head`. Two of the database's settings matter:
 
 - A step lasts at most 60% of the shortest `deadlock_timeout` the server, the database or any role has (`ALTER ROLE …
-  SET deadlock_timeout`), and never more than 1 second. A very short one makes steps too short to finish: the upgrade
-  then stops, naming the step.
+  SET deadlock_timeout`), and never more than about 1 second (1 s and its statements' margin). A very short one makes
+  steps too short to finish: the upgrade then stops, naming the step.
 - No session may set its own `deadlock_timeout` lower than the catalogue shows. The upgrade refuses to start while a
   role other than the migrating one is granted `SET` on it, or while a superuser is one of the application's roles
   (`dewpoint_*`) or a member of one. Keep `deadlock_timeout` and those grants unchanged until the upgrade ends: each
@@ -82,10 +82,10 @@ dispatcher from before 0040 polling the admission queue. It then works in two pa
   waits for. It gives any schedule the database didn't record its incarnation 0. It also gives each schedule from
   before 0040 the missed count the old dispatcher last recorded, so the new dispatcher never counts those firings
   again. If it's interrupted, run the command again: the batches done stay done.
-- **A short final step** that records the cutover. Schedule inserts wait while it runs, but it reads no schedule, so
-  its time doesn't grow with them. It waits at most 200 ms for its lock each attempt. If schedules stay busy through
-  its attempts, it records nothing and exits 1: run it again. It refuses while the capture trigger
-  (`schedules_inventoried`) is off: turn it back on, then run the command again.
+- **A short final step** that records the cutover. Schedule writes (inserts, updates, deletes) wait while it runs, but
+  it reads no schedule, so its time doesn't grow with them. It waits at most 200 ms for its lock each attempt. If
+  schedules stay busy through its attempts, it records nothing and exits 1: run it again. It refuses while the capture
+  trigger (`schedules_inventoried`) is off: turn it back on, then run the command again.
 
 ## A build with a new engine ABI
 

@@ -22,7 +22,7 @@ behind it, and a writer's lock order can't deadlock it into rolling everything b
   end).
 - What a budget rests on holds through the upgrade (the owner's review of checkpoint 3): no session may set its own
   `deadlock_timeout` below what the catalogue shows, so the upgrade refuses while a role other than the migrating one
-  is granted `SET` on it, or a superuser is an application role (`dewpoint_*`) or a member of one
+  is granted `SET` on it, or a superuser is an application role (`APPLICATION`) or a member of one
   (`UnsafeSettingsError`); and each step reads them again, stopping the upgrade if they changed since it began
   (`SettingsChangedError`). It's run again once they're settled.
 - `batches`: a backfill in committed batches of `BATCH` rows, each taking rows not done yet: finding them outside any
@@ -105,11 +105,15 @@ SELECT substr(c, length('deadlock_timeout=') + 1) FROM pg_db_role_setting s, unn
 WHERE s.setdatabase IN (0, (SELECT oid FROM pg_database WHERE datname = current_database()))
   AND starts_with(c, 'deadlock_timeout=')"""
 FILES = "SELECT setting FROM pg_file_settings WHERE name = 'deadlock_timeout' AND applied"
+# The application's roles, as the migrations make them: the processes log in as them or as members of them. Found by
+# name, never by a prefix (the review of checkpoint 4: Compose's bootstrap superuser, `dewpoint_owner`, matched one)
+APPLICATION = ("dewpoint_api", "dewpoint_ingress", "dewpoint_dispatch", "dewpoint_worker", "dewpoint_admin",
+               "dewpoint_auditor", "dewpoint_retention")  # fmt: skip
 # Roles whose sessions could set their own deadlock_timeout below what this upgrade sees: one granted SET on it, but the
 # migrating role and the superusers (the parameter's owner lists its own), and a superuser that is an application role
-# or a member of one; PUBLIC if it's granted to every role
-UNSEEN = """WITH RECURSIVE app AS (
-  SELECT oid FROM pg_roles WHERE rolname LIKE 'dewpoint\\_%'
+# or a member of one, through any chain; PUBLIC if it's granted to every role
+UNSEEN = f"""WITH RECURSIVE app AS (
+  SELECT oid FROM pg_roles WHERE rolname IN ({", ".join(f"'{r}'" for r in APPLICATION)})
   UNION
   SELECT m.member FROM pg_auth_members m JOIN app ON m.roleid = app.oid
 ), granted AS (

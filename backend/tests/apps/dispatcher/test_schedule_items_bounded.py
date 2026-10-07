@@ -238,6 +238,24 @@ async def test_the_api_shows_the_misses_accounting_stale_when_one_wasnt_read_wit
     assert not stale(await accounted())
 
 
+async def test_an_incarnation_is_due_its_read_before_its_accounting_would_turn_stale(
+    server, ready, owner_sessionmaker, dispatch_sessionmaker, api_sessionmaker
+) -> None:
+    """Read 4 minutes 30 seconds ago: not stale yet (five minutes), and due already (`MISSES_DUE`, four), so a pass
+    reads it before it would be (the review of checkpoint 4: due and stale at the same five minutes, every schedule
+    showed itself incomplete for part of each period)."""
+    ctx, _, schedule_id = ready
+    assert await sync(server, dispatch_sessionmaker, ctx, schedule_id) == "synced"
+    await only_these_due(owner_sessionmaker, schedule_id)
+    await sql(owner_sessionmaker, "update schedule_incarnations set misses_checked_at = now() - interval '4 minutes 30 "
+              "seconds' where schedule_id = :s", s=schedule_id)  # fmt: skip
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        found = await schedules.accounting(s, schedule_id)
+    assert not any(span["reason"] == "misses_stale" for span in found.uncounted)
+    assert (await schedule_sync.check_misses(dispatch_sessionmaker, server.client))["checked"] == 1
+
+
 async def test_an_incarnation_from_before_the_migration_found_absent_is_retired(
     server, ready, owner_sessionmaker, dispatch_sessionmaker
 ) -> None:

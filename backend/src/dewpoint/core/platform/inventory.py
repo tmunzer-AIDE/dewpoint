@@ -6,7 +6,7 @@ before migration 0040 is gone: a catch-up, in batches, then a short final step t
   count as the old dispatcher last recorded it, `CATCH_UP_BATCH` schedules by id at a time, each batch committed on its
   own, holding no lock a schedule's writer waits for. Resumable: an interrupted catch-up's committed batches stay
   done; run again, it passes over them.
-- `record`: the cutover, in one short transaction that holds schedules' inserts off while it records, reading no
+- `record`: the cutover, in one short transaction that holds schedules' writes off while it records, reading no
   schedule (the owner's review of checkpoint 3: done with the catch-up under that lock, its hold grew with the
   schedules). Its lock is waited for at most `LOCK_WAIT` an attempt, so a writer queued behind the request waits no
   longer; then it gives way, at most `ATTEMPTS` times, `PAUSE_S` apart."""
