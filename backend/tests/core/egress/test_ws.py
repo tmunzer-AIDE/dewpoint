@@ -346,3 +346,15 @@ async def test_closing_the_attempt_closes_its_streams() -> None:
         with pytest.raises(StreamLostError):
             await stream.receive(1)
         await stream.close()  # closing again changes nothing
+
+
+@pytest.mark.parametrize("timeout_s", [-1, float("nan"), float("inf"), 3601, True, "5"])
+async def test_a_receive_timeout_is_a_number_of_seconds_within_an_hour(timeout_s: Any) -> None:
+    async with server() as (port, _):
+        w = websocket()
+        try:
+            stream = await w.open(f"wss://stream.test:{port}/s", {})
+            with pytest.raises(InvalidRequestError):
+                await stream.receive(timeout_s)
+        finally:
+            await w.aclose()

@@ -36,6 +36,7 @@ from dewpoint.apps.worker.network import (
 from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.db import tenant_scope, unavailable
 from dewpoint.core.egress.http import GuardedHttp
+from dewpoint.core.egress.ws import GuardedWebsocket
 from dewpoint.core.plugins import calls
 from dewpoint.core.tenancy import lifecycle
 from dewpoint.sdk import (
@@ -45,6 +46,7 @@ from dewpoint.sdk import (
     Option,
     OptionsQuery,
     Plugin,
+    ReadOnly,
     TransportError,
     VerifyResult,
 )
@@ -105,6 +107,9 @@ class CallNetwork:
                 limits=self.network.http_limits,
             )  # fmt: skip
         return self._http
+
+    def core_ws(self) -> GuardedWebsocket:
+        raise ReadOnly()  # a plugin call opens no stream (D3, D26); `ConnectionWs` refuses before asking
 
     @property
     def http(self) -> Any:

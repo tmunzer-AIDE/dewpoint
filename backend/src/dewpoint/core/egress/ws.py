@@ -6,6 +6,7 @@ message and an attempt's bytes are bounded; only text messages are read; the han
 library's. Failures say what happened, never the host, an address or the URL."""
 
 import asyncio
+import math
 import re
 import socket
 import ssl
@@ -23,6 +24,7 @@ from dewpoint.core.egress.guard import Guard, InvalidRequestError, NotSentError,
 from dewpoint.core.egress.http import ResponseTooLargeError, ResponseUnreadableError
 
 MIB = 1024 * 1024
+MAX_RECEIVE_WAIT_S = 3600.0  # the longest one receive may wait (a step's timeout bounds it sooner)
 HEADER_NAME = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$")  # an RFC 9110 token
 # What the opening handshake is made of, or routes it: the library's alone.
 RESERVED_HEADERS = frozenset({
@@ -105,6 +107,9 @@ class GuardedSocket:
     async def receive(self, timeout_s: float) -> str | None:
         """The next text message, or None when none came within `timeout_s` (nothing is lost: the next call reads
         it)."""
+        if (not isinstance(timeout_s, int | float) or isinstance(timeout_s, bool) or not math.isfinite(timeout_s)
+                or not 0 <= timeout_s <= MAX_RECEIVE_WAIT_S):  # fmt: skip
+            raise InvalidRequestError("timeout")
         if self.closed:
             raise StreamLostError()
         try:
