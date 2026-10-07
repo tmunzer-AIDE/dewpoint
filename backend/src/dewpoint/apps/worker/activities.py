@@ -126,6 +126,7 @@ from dewpoint.sdk import (
     dump_output,
     node_manifest,
 )
+from dewpoint.sdk.declared import ERROR as DECLARED_ERROR
 
 CONFIG_INVALID = "config_invalid"
 OUTPUT_SCHEMA_VIOLATION = "output_schema_violation"
@@ -138,6 +139,17 @@ NODE_FAILED = "node_failed"  # a node's failure whose own code isn't a safe iden
 MESSAGE_WITHHELD = "The node's message isn't shown: it was computed, and only text written in the node's code is."
 _log = structlog.get_logger("dewpoint.worker")
 _PYDANTIC_CODES = frozenset(get_args(ErrorType))  # every built-in validation error type
+# The JSON Schema 2020-12 keywords a declared model's error may name (`dewpoint.sdk.declared`).
+SCHEMA_KEYWORDS = frozenset(
+    {
+        "type", "enum", "const", "multipleOf", "maximum", "exclusiveMaximum", "minimum", "exclusiveMinimum",
+        "maxLength", "minLength", "pattern", "maxItems", "minItems", "uniqueItems", "maxContains", "minContains",
+        "maxProperties", "minProperties", "required", "dependentRequired", "format", "additionalProperties",
+        "properties", "patternProperties", "propertyNames", "items", "prefixItems", "contains", "unevaluatedItems",
+        "unevaluatedProperties", "allOf", "anyOf", "oneOf", "not", "if", "then", "else", "dependentSchemas", "$ref",
+        "false",
+    }
+)  # fmt: skip
 # The `format`s an emitted output is checked for: those whose checks agree with what pydantic emits, and need no
 # optional library. `date-time` and `time` aren't: RFC 3339 wants an offset, which pydantic's naive values lack, and
 # without the optional library `time` is checked as `HH:MM:SS`, refusing fractions and zones. Listing them keeps the
@@ -183,12 +195,18 @@ def _fields(error: ValidationError, schema: Mapping[str, Any]) -> str:
     messages quote the input, and so does a validator's own prose, whatever `include_input` says. A location shows
     only what the schema declares at each place (`projection.location`): a map key is data, even a numeric one. A
     code shows only if pydantic defines it: a custom error's type is whatever its validator made it."""
-    problems = error.errors(include_url=False, include_context=False, include_input=False)
-    return "; ".join(f"{location(e['loc'], schema)} ({_code(e['type'])})" for e in problems) + "."
+    problems = error.errors(include_url=False, include_context=True, include_input=False)
+    return "; ".join(f"{location(e['loc'], schema)} ({_code(e)})" for e in problems) + "."
 
 
-def _code(error_type: str) -> str:
-    return error_type if error_type in _PYDANTIC_CODES else "custom_error"
+def _code(error: Any) -> str:
+    """A built-in error's type; a declared model's schema keyword (`schema_maxLength`), a fixed vocabulary; else
+    `custom_error`. Nothing else of its context is read."""
+    kind = error.get("type")
+    if kind == DECLARED_ERROR:
+        rule = (error.get("ctx") or {}).get("rule")
+        return f"schema_{rule}" if rule in SCHEMA_KEYWORDS else "custom_error"
+    return kind if kind in _PYDANTIC_CODES else "custom_error"
 
 
 def _declared(e: NodeError, node: type[Node]) -> tuple[str, str]:
@@ -323,8 +341,9 @@ def step_activity_for(
     output_schema = node_manifest(node)["output_schema"]  # what the node promises to emit: serialized and closed
     emitted = Draft202012Validator(output_schema, format_checker=FormatChecker(formats=CHECKED_FORMATS))
 
-    def violation(detail: str) -> _StepFailed:
-        return _StepFailed(OUTPUT_SCHEMA_VIOLATION, f"The output doesn't match `{ref}`: {detail}", retryable=False)
+    def violation(detail: str, outcome: str | None = None) -> _StepFailed:
+        message = f"The output doesn't match `{ref}`: {detail}"
+        return _StepFailed(OUTPUT_SCHEMA_VIOLATION, message, retryable=False, outcome=outcome)
 
     def output_of(result: Any) -> Any:
         if not isinstance(result, BaseModel):
@@ -405,15 +424,17 @@ def step_activity_for(
             if not size.fits(done, JSON):  # Temporal would refuse to record it (engine 2b spec §5.2)
                 raise _StepFailed(size.PAYLOAD_TOO_LARGE, size.STEP_OUTPUT_TOO_LARGE, retryable=False, outcome=outcome)
             return done
-        except _StepFailed as f:
+        except _StepFailed as f:  # after the node ran, a failure says its effect happened (the 3b-1 review's L6)
+            if f.outcome is None:
+                f.outcome = outcome
             raise f.mapped(await secrets()) from None
         except PydanticSerializationError:
-            raise violation("it can't be written as JSON.").mapped() from None
+            raise violation("it can't be written as JSON.", outcome).mapped() from None
         except ValidationError as e:
-            raise violation(_fields(e, output_schema)).mapped() from None
+            raise violation(_fields(e, output_schema), outcome).mapped() from None
         except Exception as e:  # a validator's bug: it raised something pydantic doesn't turn into a validation error
             _bug("step_output_check_failed", step, e, node)
-            raise violation(f"checking it raised {logs.error_class(e)}.").mapped() from None
+            raise violation(f"checking it raised {logs.error_class(e)}.", outcome).mapped() from None
 
     return run_step
 

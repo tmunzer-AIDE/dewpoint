@@ -96,9 +96,16 @@ class HttpClient(Protocol):
         content: bytes | None = None,
         json: Any = None,
         follow_same_origin: int = 0,
+        probe: bool = False,
     ) -> HttpResponse:
         """`follow_same_origin`: how many redirects to the same origin to follow (GET and HEAD only); none by
-        default, and never to another origin."""
+        default, and never to another origin.
+
+        `probe`: a read the node makes before its effect, to check it may act (a scope check): GET or HEAD without a
+        body, else refused (`InvalidRequest`) before anything is sent. It doesn't count as a send, so an ambiguous
+        node whose later request fails having sent nothing is still retried; it may be resent within the attempt
+        after a short `Retry-After`. Its own failures are the node's to classify: one after which it may have arrived
+        changes nothing, being a read."""
         ...
 
 

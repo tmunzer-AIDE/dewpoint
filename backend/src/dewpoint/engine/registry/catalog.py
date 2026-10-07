@@ -14,6 +14,7 @@ from dewpoint.engine.schema_refs import SCHEMA_LIST, SCHEMA_MAP, SCHEMA_ONE, ref
 from dewpoint.sdk.connections import HEADER_RE, HOST_RE, SCOPE_KIND_RE, TYPE_KEY_RE, template_parts
 from dewpoint.sdk.fields import OPTIONS, SENSITIVE
 from dewpoint.sdk.node import ICON_RE, MAX_RETRY_ATTEMPTS, PORT_RE, RESERVED_PORTS, TYPE_RE, NodeKind, SideEffect
+from dewpoint.sdk.triggers import trigger_problems
 from dewpoint.sdk.version import SDK_MAJOR
 
 _DISPLAY = frozenset({"title", "description", "icon"})  # manifest keys that may change within a version
@@ -385,6 +386,20 @@ def _connection_type_problems(plugin: str, t: Any, seen: set[str]) -> list[str]:
     return out
 
 
+def _trigger_problems(plugin: str, t: Any, seen: set[str]) -> list[str]:
+    """The SDK's rules for a trigger (plugins-3 D17), and the engine's for each topic's schema, which types a run's
+    trigger: local `$ref`s only."""
+    out = trigger_problems(plugin, t)
+    if out or not isinstance(t, Mapping):
+        return out
+    if t["key"] in seen:
+        out.append(f"duplicate trigger {t['key']!r}")
+    seen.add(t["key"])
+    for topic, schema in t["topics"].items():
+        out += _schema_problems(f"trigger {t['key']!r} topic {topic!r}", "schema", schema)
+    return out
+
+
 def validate_plugin_manifest(m: Mapping[str, Any]) -> list[str]:
     """Checks a plugin manifest received as data. The SDK already checked first-party classes."""
     name = m.get("name")
@@ -393,17 +408,26 @@ def validate_plugin_manifest(m: Mapping[str, Any]) -> list[str]:
     problems: list[str] = []
     if str(m.get("sdk_version", "")).split(".", 1)[0] != SDK_MAJOR:
         problems.append(f"{name}: built for SDK {m.get('sdk_version')!r}; this build provides SDK {SDK_MAJOR}.x")
-    nodes, kinds = m.get("nodes"), m.get("connection_types", [])
-    if not isinstance(nodes, list) or not isinstance(kinds, list) or ("connection_types" in m and not kinds):
-        return [*problems, f"{name}: nodes and connection_types must be lists (connection_types only when set)"]
-    if not nodes and not kinds:
-        return [*problems, f"{name}: declares nothing: no node and no connection type"]
+    nodes, kinds, triggers = m.get("nodes"), m.get("connection_types", []), m.get("triggers", [])
+    if (
+        not isinstance(nodes, list)
+        or not isinstance(kinds, list)
+        or not isinstance(triggers, list)
+        or ("connection_types" in m and not kinds)
+        or ("triggers" in m and not triggers)
+    ):
+        return [*problems, f"{name}: nodes, connection_types and triggers must be lists (the last two only when set)"]
+    if not nodes and not kinds and not triggers:
+        return [*problems, f"{name}: declares nothing: no node, connection type or trigger"]
     seen: set[str] = set()
     for n in nodes:
         problems += _node_problems(name, n if isinstance(n, Mapping) else {}, seen)
     seen_types: set[str] = set()
     for t in kinds:
         problems += _connection_type_problems(name, t, seen_types)
+    seen_triggers: set[str] = set()
+    for t in triggers:
+        problems += _trigger_problems(name, t, seen_triggers)
     if name == "flow":
         problems += [f"flow: missing control type {ref}" for ref in sorted(CONTROL_TYPES - seen)]
     return problems

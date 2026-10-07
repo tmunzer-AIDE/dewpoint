@@ -1527,6 +1527,85 @@
         "title": "TotpEnrollOut",
         "type": "object"
       },
+      "TriggerEndpointOut": {
+        "additionalProperties": false,
+        "properties": {
+          "auth": {
+            "enum": [
+              "bearer",
+              "hmac"
+            ],
+            "title": "Auth",
+            "type": "string"
+          },
+          "events_pointer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Events Pointer"
+          },
+          "id_source": {
+            "const": "none",
+            "title": "Id Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "auth",
+          "events_pointer",
+          "id_source"
+        ],
+        "title": "TriggerEndpointOut",
+        "type": "object"
+      },
+      "TriggerTypeOut": {
+        "additionalProperties": false,
+        "description": "A trigger a synced plugin declares (plugins-3 D17): how its webhook endpoint is set up, where an event names its\ntopic, and each topic's event schema, which types a workflow's trigger.",
+        "properties": {
+          "endpoint": {
+            "$ref": "#/components/schemas/TriggerEndpointOut"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "plugin": {
+            "title": "Plugin",
+            "type": "string"
+          },
+          "topic_pointer": {
+            "title": "Topic Pointer",
+            "type": "string"
+          },
+          "topics": {
+            "additionalProperties": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Topics",
+            "type": "object"
+          }
+        },
+        "required": [
+          "plugin",
+          "key",
+          "label",
+          "endpoint",
+          "topic_pointer",
+          "topics"
+        ],
+        "title": "TriggerTypeOut",
+        "type": "object"
+      },
       "UserIn": {
         "properties": {
           "email": {
@@ -5725,6 +5804,32 @@
         "summary": "Create",
         "tags": [
           "tenants"
+        ]
+      }
+    },
+    "/api/v1/trigger-types": {
+      "get": {
+        "description": "The triggers the synced plugins declare (plugins-3 D17): an endpoint for one is set up as it says, a binding\nfilters on its topic pointer, and a topic's schema types a workflow's trigger.",
+        "operationId": "trigger_types_api_v1_trigger_types_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TriggerTypeOut"
+                  },
+                  "title": "Response Trigger Types Api V1 Trigger Types Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Trigger Types",
+        "tags": [
+          "node-types"
         ]
       }
     },

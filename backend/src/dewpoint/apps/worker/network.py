@@ -300,7 +300,7 @@ class Channel(Protocol):
 
     def beat(self) -> None: ...
 
-    async def send[T](self, call: Callable[[], Awaitable[T]]) -> T: ...
+    async def send[T](self, call: Callable[[], Awaitable[T]], *, counts: bool = True) -> T: ...  # a probe doesn't
 
     def core_http(self) -> GuardedHttp: ...
 
@@ -310,15 +310,29 @@ READ_METHODS = frozenset({"GET", "HEAD"})
 METHOD_OVERRIDES = frozenset({"x-http-method-override", "x-http-method", "x-method-override"})
 
 
+def _reads_only(method: str, headers: Mapping[str, str] | None, content: bytes | None, json: Any) -> bool:
+    """GET or HEAD, with no body and no header asking a server for another method."""
+    return (
+        isinstance(method, str)
+        and method.upper() in READ_METHODS
+        and content is None
+        and json is None
+        and not any(not isinstance(name, str) or name.lower() in METHOD_OVERRIDES for name in headers or {})
+    )
+
+
+def _check_probe(probe: bool, method: str, headers: Mapping[str, str] | None, content: bytes | None, json: Any) -> None:
+    """A probe (a check before the node's effect) reads only, as a read-only channel's requests do: refused before
+    sending otherwise (the owner's review of the 3b-1 checkpoint: method-override headers too)."""
+    if probe and not _reads_only(method, headers, content, json):
+        raise InvalidRequest()
+
+
 def _check_read(
     channel: Channel, method: str, headers: Mapping[str, str] | None, content: bytes | None, json: Any
 ) -> None:
     """On a read-only channel: GET or HEAD only, with no body and no header asking for another method."""
-    if not channel.read_only:
-        return
-    if not isinstance(method, str) or method.upper() not in READ_METHODS or content is not None or json is not None:
-        raise ReadOnly()
-    if any(not isinstance(name, str) or name.lower() in METHOD_OVERRIDES for name in headers or {}):
+    if channel.read_only and not _reads_only(method, headers, content, json):
         raise ReadOnly()
 
 
@@ -336,13 +350,16 @@ class PlainHttp:
         content: bytes | None = None,
         json: Any = None,
         follow_same_origin: int = 0,
+        probe: bool = False,
     ) -> HttpResponse:
+        _check_probe(probe, method, headers, content, json)
         _check_read(self._attempt, method, headers, content, json)
         return await self._attempt.send(
             lambda: self._attempt.core_http().request(
                 method, url, headers=headers, params=params, content=content, json=json,
                 follow_same_origin=follow_same_origin,
-            )
+            ),
+            counts=not probe,
         )  # fmt: skip
 
 
@@ -431,7 +448,9 @@ class ConnectionHttp:
         content: bytes | None = None,
         json: Any = None,
         follow_same_origin: int = 0,
+        probe: bool = False,
     ) -> HttpResponse:
+        _check_probe(probe, method, headers, content, json)
         _check_read(self._attempt, method, headers, content, json)
         target = self._target(url)
         reserved = {name.lower() for name in self._credentials}
@@ -439,7 +458,7 @@ class ConnectionHttp:
             raise InvalidRequest()
         sent_headers = {**(headers or {}), **self._credentials}
         attempt = self._attempt
-        resends = attempt.resends
+        resends = attempt.resends or probe  # a probe is a read: resending it repeats nothing
         waited, retries = 0.0, 0
         while True:
             try:
@@ -459,7 +478,8 @@ class ConnectionHttp:
                 lambda: attempt.core_http().request(
                     method, target, headers=sent_headers, params=params, content=content, json=json,
                     follow_same_origin=follow_same_origin,
-                )
+                ),
+                counts=not probe,
             )  # fmt: skip
             if answer.status_code not in (429, 503):
                 return answer
@@ -598,8 +618,14 @@ class AttemptNetwork:
         may fail first while another's request has already arrived; the second review's finding 1)."""
         return self.may_have_sent or self._in_flight > 0
 
-    async def send[T](self, call: Callable[[], Awaitable[T]]) -> T:
-        """Runs a transport call; unless it failed having sent nothing, a request may now have left the attempt."""
+    async def send[T](self, call: Callable[[], Awaitable[T]], *, counts: bool = True) -> T:
+        """Runs a transport call; unless it failed having sent nothing, a request may now have left the attempt. A
+        probe (`counts=False`, a GET or HEAD the node makes before its effect) leaves the attempt as it was."""
+        if not counts:
+            try:
+                return await call()
+            except CORE_ERRORS as e:
+                raise mapped(e) from None
         self._in_flight += 1
         try:
             result = await call()

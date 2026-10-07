@@ -23,11 +23,11 @@ from dewpoint.core.egress.addresses import AllowEntry
 from dewpoint.core.erasure import service
 from dewpoint.core.plugins import asking
 from dewpoint.plugins.flow import PLUGIN as FLOW
-from dewpoint.plugins.mist import PLUGIN as MIST
 from tests.apps.api.helpers import session_client
 from tests.support.connections import types_for_testkit
 from tests.support.graphs import G
 from tests.support.netfakes import Request, Server, guard, serve, tls
+from tests.support.plugins.mist import MIST_TYPE_ONLY as MIST
 from tests.support.plugins.testkit import TESTKIT
 
 NAMES = ("dewpoint.test",)

@@ -339,3 +339,329 @@ branch; `.env.example` held placeholders in all its revisions); this settles the
 then ran locally at `0812e14` with CI's versions (CLI 2.27.1, `python-queries` 1.8.11, `javascript-queries` 2.4.6) and
 query filter, over the whole tree: no findings in Python (45 queries) or JavaScript/TypeScript (89 queries). The
 `codeql` workflow is still disabled on GitHub.
+
+## 3b-1 Mist REST
+
+Branch `feat/plugins-3b1` from `origin/main` f65c6f9 (3a-2's merge), started 2026-10-06 on the owner's word. No
+migration expected: connection types, nodes and triggers all live in synced manifests.
+
+Tasks (test-first, in order):
+1. The OAS as data (D2): `mist.openapi.json` at 0613a22 vendored gzipped, its SHA-256 checked when it's read, a
+   `NOTICE` entry; a test pins each curated operation's method and path.
+2. The operation-policy map (D28, D24, D14): one generated data file with an entry per OAS operation (state, the nodes
+   that may reach it, capability, scope class, side effect and its evidence), made by a script from the OAS and the
+   reviewed table; a test regenerates it and refuses drift, and checks the invariants (deprecated and always-refused
+   routes denied, held operations reach nothing).
+3. SDK 0.4.0: models declared by a JSON Schema (validated by it, reporting it as their schema), for nodes generated
+   from data; a plugin's `triggers` (D12, D17), emitted only when set; the catalog checks both as data.
+4. The Mist client (D1, D16): requests through the connection's HTTP, path values checked and encoded, the org forced
+   to the connection's, a site checked to belong to it; status codes mapped; lists paged by `X-Page-*` headers,
+   searches by the body's `next` kept on the connection's host and path, under a page cap.
+5. One node type per curated operation (D23, D16, D15): config (connection, path values, query, body, a page cap,
+   an update's mode) and output (the 2xx answer) schemas from the OAS; side effects from the map; nested update
+   (merge by default, replace); delete's 404 on a retry. The manifest's size measured.
+6. Simulate (D13): the OAS's 2xx example when it validates, else a value made from the schema; every node checked.
+7. Options: the site picker and the org-scope resources' pickers.
+8. Any endpoint (D14): `mist.api.read` and `mist.api.write`, only what the map allows them, inside the connection's
+   scope, always-refused routes refused whatever the map says.
+9. The Mist webhook trigger (D17): the plugin declares its 30 topics' envelope schemas; the API lists trigger types;
+   an endpoint records the whole envelope (no events pointer, `id_source: none`); bindings filter on `/topic`.
+10. Proof: a curated read and a merge update through RunGraph against a local Mist fake, and a webhook delivery
+    through ingress into a run whose trigger is typed by its topic.
+
+Rulings:
+- Ruling: the branch starts from `origin/main` f65c6f9 (3a-2 merged) - as for 3a-2 - cost if wrong: one rebase.
+- Ruling: the OAS is taken from a local clone of `mistsys/mist_openapi` with `git show 0613a22:mist.openapi.json`
+  (the commit the appendix was generated from; that clone's working tree has local edits, which are not used), so
+  nothing is downloaded; SHA-256 of the file `22f55432535ab38f6c0539392a729b8fd515a9ccae9df693fbd4ff23d40b8fac`,
+  3,630,900 bytes; its `LICENSE` (MIT) comes from the same commit - cost if wrong: none (the hash pins the content).
+- Ruling: the SDK becomes 0.4.0 - 3b-1 adds schema-declared models and triggers - cost if wrong: none (the catalog
+  checks the major only).
+- Ruling (D23 measurement, before generation): the 262 curated operations' schemas, each with its own `$defs`, come to
+  6.5 MB of JSON (1.1 MB gzipped), 3.0 MB (0.3 MB gzipped) without `description` and `examples`; one schema reaches
+  341 KB (site settings), and device schemas about 300 KB. The palette (`GET /node-types`) returns every type's
+  schemas in one answer. Measured again on the generated manifests (task 5) before ruling on a split.
+- Ruling: every allowed operation is reachable by its curated node and by the any-endpoint node of its method
+  (`mist.api.read` for a GET, `mist.api.write` otherwise, always `ambiguous`) - D14 lets the generic nodes reach only
+  what the map allows, and an idempotent operation through `mist.api.write` is only retried less - cost if wrong:
+  none for safety; such a write never retries.
+- Ruling: the always-refused routes (D14) are read broadly: the roots `msps`, `self`, `login`, `logout`, `register`,
+  `recover`, `invite`, `installer`, `mobile` and `utils` (credential tests); any path with a segment `admins`,
+  `apitokens`, `invites`, `sdkinvites`, `marvisinvites`, `ssos`, `ssoroles`, `cert`, `crl`, `ssl_proxy_cert`,
+  `link_accounts`, `unlink_account`, `mist_scep`, `mist_nac_crls`, `export_idtokens`, `register_cmd` or
+  `request_ztp_password`; anything outside `/api/v1/`, or with an empty or dot segment: 173 operations - certificates,
+  CRLs, SCEP, OAuth links, registration commands and the ZTP password are authentication material - cost if wrong: a
+  reviewed certificate read can't be allowed without changing the rule.
+- Ruling: `listOrgAuditLogsLegacy` is denied as deprecated rather than held - D28 denies every deprecated operation,
+  stricter than D24's hold - cost if wrong: none.
+- Ruling: a side effect follows the method once evidence covers that kind: GET `none`, PUT and DELETE `idempotent`,
+  POST `ambiguous` (the creates and the two actions, alarm ack and device restart: ack's repeat behaviour isn't
+  documented, so D16's "else ambiguous") - cost if wrong: an ack that fails after sending needs a person.
+- Ruling: the approved metadata outside an org or site is `/api/v1/const/webhook_topics` alone, the one curated
+  constant - fail closed - cost if wrong: another constant needs a review.
+- The map (`backend/src/dewpoint/plugins/mist/data/policy.json`, made by `python -m dewpoint.plugins.mist.reviews`):
+  1,072 operations: 262 allowed (146 reads, 78 idempotent writes, 38 ambiguous; 173 org, 88 site, 1 metadata), 632
+  held (620 unreviewed, 12 the owner's), 178 denied (173 always refused, 5 deprecated).
+- Ruling: a declared model (`declared_model(name, schema)`) is the SDK's: it reports its schema in every mode, validates
+  with it (Draft 2020-12 and the formats a step's output is checked for: date, uuid, email, ipv4, ipv6, regex) and
+  names each failing place and the schema keyword, never the value; its output schema is shown exactly as declared,
+  not closed as a pydantic model's is - a generated node's schema is the provider's, and closing it would fail every
+  answer carrying a field the description doesn't list - cost if wrong: an undeclared output field is tainted, never
+  refused.
+- Ruling: a trigger declares only `id_source: none` and bearer or HMAC endpoints - ingress offers those, and D17 needs no
+  more - cost if wrong: a provider with event ids needs the declaration widened.
+- Ruling: a path value must be one segment of unreserved characters (letters, digits, `_ . ~ -`), neither `.` nor `..`,
+  then percent-encoded; anything else fails `mist.invalid_path_value` before sending - every curated parameter is a
+  UUID, a MAC or a name of that shape, and the open question of 3a-2 (typed text in a path) closes with it - cost if
+  wrong: a parameter with other characters needs the rule widened.
+- Ruling: a site is the connection's org's only when Mist's `GET /sites/{id}` answers that org's id exactly (one GET a
+  site per attempt), for curated site-scope nodes too, not only D14's any-endpoint nodes - a token can reach other
+  orgs' sites (an MSP's, an admin of several orgs) - cost if wrong: one more request per site-scope step.
+- Ruling: a search's `next` is followed only on the connection's host and exactly the search's own path (no fragment);
+  else the step fails `mist.invalid_next` - D14 - cost if wrong: a search Mist pages through another path stops
+  failing instead of truncating.
+- Ruling: a list without page headers whose page came back full is reported `truncated` - it may have more - cost if
+  wrong: a list of exactly a page's size says it might be truncated.
+- Ruling: the curated nodes are built when the plugin loads, from the map and the OAS, not written out as source -
+  those two files are the reviewed source, and a test checks the whole manifest as the catalog does - cost if wrong:
+  none (0.9 s at import).
+- Ruling: the generated models skip the metaschema check at import (`declared_model(..., checked=False)`): 524 checks
+  took 6 s; `plugins sync` checks every schema before registering it (11.6 s for Mist's manifest), and so does a test
+  - cost if wrong: a malformed schema shows at sync rather than at import.
+- Ruling: an output keeps the OAS's shape (types, properties, required fields, items) and drops value constraints
+  (formats, enums, patterns, bounds) and closed objects; `oneOf` becomes `anyOf` (without their enums, branches
+  overlap) - the OAS is documentation (D2) and Mist adds fields and values; what it doesn't describe is tainted, never
+  refused - cost if wrong: a pill loses an enum's list of values; an out-of-range value passes.
+- Ruling: a field is a secret, `x-sensitive` in config and output, when its name's last word is `psk`, `passphrase`,
+  `secret`, `password`, `token`, `community`, `key`, `keys`, `apitoken`, `keypair`, `kek` or `mack`, or it's named
+  `community_name`; a version can't then write it as a literal (engine 2b §3.8) - D16's list read by word - cost if
+  wrong: a few non-secrets are tainted (BGP communities, SSH public keys, `cleanup_psk`), or a secret named otherwise
+  isn't claimed.
+- Ruling: a config is checked by the OAS's constraints but not its formats - publish validates literals without
+  formats, so the run does the same and a version that publishes runs; path values are checked by the client - cost
+  if wrong: a malformed address reaches Mist, which refuses it (`mist.bad_request`).
+- Ruling: the four array query parameters (`labels`, `usermac_label` twice, `resp_attrs`) are left out - the OAS gives
+  no style, so whether Mist wants them repeated or comma-joined is unverified - cost if wrong: those filters wait for
+  a verification.
+- Ruling: an update's body requires nothing; `mode` is `merge` (the default, when a GET of the same path is allowed)
+  or `replace`; `clear` names top-level fields sent as null; a field both set and cleared, or nothing to change, fails
+  before anything is sent - D15's Keep / Set / Null as absent / set / cleared - cost if wrong: clearing a nested field
+  means setting its parent structure.
+- Ruling: a list answers `{results, total, truncated}`, a search Mist's answer with every page's results, without
+  `next`, and `truncated`; a page cap of 1-10 (default 1), a list's or search's timeout 5 minutes - the cap bounds a
+  step's memory (an output over 64 KB is already a size claim) - cost if wrong: a list past 10 pages of 1,000 is cut.
+- Ruling: a create's body is required, an action's (ack, restart) optional; an action answers `{}` and a delete
+  `{already_absent}`, whatever Mist's body says - the OAS describes no answer for them - cost if wrong: none.
+- Ruling: titles are the operationId in words ("List org sites"), descriptions the OAS's first paragraph cut at 300
+  characters, no icon - display metadata, changeable without a version - cost if wrong: none.
+- D23 measured on the generated manifest: 262 nodes, 8.0 MB (1.34 MB gzipped), 3.3 MB without `description`s; the
+  median node 5.6 KB; the largest site settings' update (634 KB: config 327 KB, output 307 KB), a device's update
+  (560 KB) and device profiles' create and update (500 KB). A schema's descriptions sit outside contract hashes, so
+  trimming them later makes no new versions. Splitting Mist into per-scope plugins changes no total, so it isn't
+  done. **For the owner:** `GET /node-types` answers every schema at once, 8 MB uncompressed (neither the API nor
+  nginx compresses); options are trimming descriptions, compressing, or a palette without schemas plus one type's
+  schemas on demand (an editor change).
+- Ruling: a simulated Mist step answers its operation's fixture without opening the connection: the OAS's first 2xx
+  example shaped as the output (a list's as `{results, total, truncated: false}`, a search's without `next`) when the
+  output schema accepts it, else the smallest value the schema accepts; a delete `{already_absent: false}`, an action
+  `{}`. The map and an update's config are checked as in a run. The step's `simulated` outcome is the fixture's label
+  - an output must match its schema, so it can't carry one - cost if wrong: none. Counts: 182 from examples (every
+  example present fits), 39 made from the schema (the OAS has no example), 41 fixed.
+- Ruling: pickers list a site-scope node's `site_id` (the org's sites) and an org resource's id or MAC where the map
+  allows a list at its collection's path (27 fields, 169 nodes); a site's resources (devices, maps…) get none - a hook
+  sees the typed text and the connection, never the rest of the config, so it can't know the site - cost if wrong: a
+  device id is typed or referenced, not picked.
+- Ruling: a picker reads one page of 1,000 (`limit=1000`) and filters it by the typed text locally; the text never
+  enters a path or a query (3a-2's open question); labels are `name`, else `ssid`, else the value; the node's own
+  operation and the list's must both be allowed - cost if wrong: an org with more than 1,000 sites shows its first
+  1,000, by Mist's order.
+- Ruling: `mist.api.read` and `mist.api.write` take a concrete path whose org is written as the connection's id or as
+  `{org_id}` (another org fails `mist.org_mismatch`); the config's `path` is an `anyOf` of one pattern per path the
+  map allows the node, so a version's reach is pinned in its contract (a later map that allows more makes a new
+  version; one that allows less refuses at run time) and publish refuses a literal path outside it - D28's check at
+  publish and at run time - cost if wrong: every map review that widens the generic nodes ships them as a new version.
+- Ruling: a generic request matches the most specific allowed template (most literal segments; a tie is refused), its
+  method must be the operation's, each path value must pass its parameter's schema (UUIDs and MAC patterns checked),
+  the query may name only the operation's (non-array) parameters, each value checked, and the body must pass the
+  operation's request body (an update's without required fields), or no body at all; everything is checked before
+  the connection is opened - D14 - cost if wrong: a parameter the OAS describes wrongly can't be sent until the map
+  overrides it.
+- Ruling: a generic node answers `{status, body}`, the body undeclared and so tainted; its simulation answers the
+  matched operation's OAS example with status 200 - D14, D13 - cost if wrong: none.
+- Open question (from the owner's remark, 2026-10-06: the OAS's examples are incomplete and may be outdated; the
+  schemas are the complete payloads): node schemas come only from the OAS's `schema` objects; examples are used only
+  as simulate fixtures (D13, recommended there). A fixture taken from an incomplete example can lack fields a real
+  answer has, so a later step referencing them could fail only in simulation. Alternative: build every fixture from
+  the schema (each declared property filled, to a bounded depth), with the example's values laid over where they
+  fit. Recommendation: switch to schema-built fixtures with example values laid over - the schema is the complete
+  shape - for the owner's ruling at the checkpoint.
+- Ruling: the Mist webhook trigger (`mist.webhook`) declares a bearer endpoint, no events pointer and no event ids, its
+  topic at `/topic`, and each of the OAS's 30 topics' envelope schema, relaxed as an output is (93 KB in all), its
+  `topic` fixed to the topic's name; every one passes publish's checks as a workflow's input schema. Its production
+  support still waits for a real delivery (D17, 2b-4 D13) - cost if wrong: none until then.
+- Ruling: `GET /api/v1/trigger-types` (any active session) lists the synced plugins' triggers, with each topic's
+  schema; nothing creates the endpoint or the binding for the editor yet (the existing webhook routes do, with the
+  declared settings) - D17 asks the editor to type pills per topic, which needs the schemas - cost if wrong: none.
+- Proof (`backend/tests/apps/worker/test_run_graph_mist.py`, task 10): a workflow of two generated nodes published,
+  admitted, dispatched and run through RunGraph against a local fake standing in for `api.eu.mist.com` (vetted,
+  pinned, TLS-checked; its port 443 redirected in the test's socket layer): the site checked, its devices listed, the
+  WLAN read and merge-updated (`auth` sent whole: its type and PSK kept, `pairwise` changed), every request with the
+  runtime's `Token` header, neither the token nor the PSK in any preview, the token in the run's secret index. The
+  same workflow simulated sends nothing. A Mist `alarms` envelope recorded by ingress's own function is matched by a
+  `/topic` binding and runs a workflow typed by the topic's schema; a `device-updowns` envelope matches nothing; an
+  `alarms` envelope whose events aren't a list is refused by admission (`input_invalid`).
+
+Runs at `7e81c7d` (tasks 1-10 done), 2026-10-06: the full backend suite, 3145 passed, 8 skipped, in 6 min 12 s
+(`-n auto`, with the reviewer's targeted runs alongside); ruff, format, mypy, import contracts and the OpenAPI drift
+check pass; the web client's `check:api`, lint, typecheck, 292 tests and build pass. CodeQL locally with CI's CLI
+(2.27.1) and query filter over the whole tree: no findings in Python (45 queries) or JavaScript/TypeScript (89).
+
+Checkpoint review (fresh-context reviewer, 2026-10-06, at `7e81c7d`): one High, three Medium and eleven Low findings,
+each fixed test-first and mutation-checked:
+- (H1, High) a curated node's id took any plain segment, so a sibling route's literal reached another operation:
+  `DELETE …/alarmtemplates/suppress` is `unsuppressOrgSuppressedAlarms` (held), and 17 such values reached held
+  operations (32 shadowings counting ties). Each path value's config pattern is now its parameter's (UUID, MAC, one
+  segment), so publish refuses it; every run and simulation checks each value against its parameter, and the concrete
+  path must resolve, among every OAS operation, to the node's own (the most literal template wins, a tie is refused),
+  for the generic nodes too: `373b731`, `75db8f8` (a test of the generic nodes' route check that the parameter
+  check masked).
+- (M1, Medium) the site check counted as a send, so an ambiguous site-scope write that never left (a restart whose
+  site check met a 503, a site of another org) ended `outcome_unknown`; (M2, Medium) a site delete's retry after the
+  delete applied found the site gone and failed `mist.not_found`.
+- Ruling (M1): a node may mark a GET or HEAD without a body as a **probe**, a read before its effect: the runtime
+  doesn't count it as a send (an ambiguous node's later failure that sent nothing stays retryable), may resend it
+  within the attempt after a short `Retry-After`, and refuses a probe of any other method or with a body before
+  sending. Mist's site check is a probe; one that may have reached Mist and failed is `mist.site_check_failed`,
+  retryable - the check D14 requires changes nothing - cost if wrong: a plugin marking a request that has an effect
+  as a probe has an ambiguous node retried after it (first-party code's declaration: the SDK is an API, not a sandbox).
+- Ruling (M2): a delete's retry whose site check finds the site gone answers `already_absent` - the object can't
+  outlive its site (D16) - cost if wrong: none.
+- (M3, Medium) `mist.api.write`'s body declared nothing, so a PSK written there as a literal published (the curated
+  node refuses it) and showed in previews. Fixed with the Ruling below; (L1) `magic`, a device's claim code, is now a
+  secret name.
+- Ruling (M3): the generic write's body marks, at any depth, every property name the OAS uses that the curated rule
+  calls a secret (76 names), as exact names: the engine never runs a pattern on workflow data (a sensitive
+  `patternProperties` marks its whole object), and the body's operation is known only at run time - the same reach as
+  the curated nodes' marking - cost if wrong: a secret under a name the OAS doesn't use isn't claimed, as with a
+  curated node.
+- Low findings, fixed together: (L2) simulate didn't check path values: it does now, with H1's checks; (L3) a list
+  reported a full page without headers as cut only when `limit` was asked: Mist's documented default page (100,
+  `guides/api-requests/pagination`) counts too, and the one unpaged list that takes `limit`
+  (`mist.site_wireless_client_stats.list`) says when it may be cut; (L4) a merge update's description warns of the
+  race D15 can't prevent; (L5) a declared model's error text quoted the value, and the step's message showed
+  `custom_error`: the input is hidden, and the message names the schema keyword (`schema_maxLength`); (L6) an output
+  check failing after the node ran recorded no outcome: it records `applied` (or `simulated`), as a claim failing then
+  does; (L7) a partial update of a typed union (a device: AP, switch or gateway) failed `oneOf` without `type`: a
+  partial body's `oneOf` is `anyOf`; (L8) a search at its cap judged a next page it would never follow; (L9) a
+  trailing newline passed the path-value check (`$`): `fullmatch`; (L10) a picker's list was checked by state only:
+  by `allowed()`, as any node's operation; (L11) four tests that couldn't fail were rewritten or removed (the most
+  specific route now has two candidates; the manifest-size bound is gone, the size being the ledger's), and a test
+  for a generic site path of another org added.
+- Ruling (L4): the exact merged body isn't previewed - it depends on the object read at run time, and a simulation
+  sends nothing, so it would need a new output field or a step-level preview contract; the description carries D15's
+  race warning instead - cost if wrong: an editor showing the body must wait for that contract.
+- Ruling (L6): outputs keep the OAS's `required` fields (pills need them unguarded); a Mist answer lacking one fails
+  `output_schema_violation`, now with `applied` recorded, so nobody takes a created object for one never made; the
+  read-only smoke test at the checkpoint is where a wrong `required` shows - cost if wrong: such a step fails after
+  its effect until the map overrides that schema.
+
+Runs after the review's fixes, at `5edee45` (2026-10-06): a first full run gave 3212 passed and 6 setup errors in
+`tests/sdk/test_manifest.py`, while another session's 14-worker suite loaded the machine (load average 36; the file
+passes alone, serial and parallel); the rerun: 3212 passed, 8 skipped, in 10 min 13 s, with that session's next run
+alongside. Ruff, format, mypy, import contracts and the OpenAPI drift check pass. CodeQL locally (CI's CLI 2.27.1 and
+query filter): no findings in Python or JavaScript/TypeScript.
+
+**Checkpoint (3b-1), for the owner:** every ruling above; the open question on simulate fixtures (the owner's remark on
+examples); the palette's 8 MB (D23); the `probe` the SDK gained for M1, a runtime change (`apps/worker/network.py`);
+an output check failing after a node ran now records `applied` for every node (L6, `apps/worker/activities.py`);
+`plugins sync` checks Mist's manifest in about 12 s. Not run: the Compose proof (needs the owner's say), the
+read-only Mist smoke test against a test org (D23's measure and L6's `required` fields; needs the owner's say).
+
+The owner's review of the checkpoint (`2c94e1e`, 2026-10-06, pasted): the review isn't closed; two earlier findings
+remain and `probe` adds one; the generic-secret leak, the picker refusal, the default page, the route shadowing and the
+output outcome are closed. Fixed test-first:
+- (O1, Medium) a probe accepted method-override headers (`X-HTTP-Method-Override: DELETE`): a GET the runtime took for
+  a read could apply an effect on a server honouring them. A probe now passes exactly the read-only channel's check
+  (GET or HEAD, no body, none of the three override headers), refused before sending otherwise.
+- (O2, Medium) the site check's `GET /sites/{id}` bypassed the map: with `getSiteInfo` held, a site-scope node still
+  sent it, then its own request; picker lists were checked, merge reads by state only.
+- Ruling (O2): every request a node makes for an operation other than its own is an auxiliary read the map lists for
+  that operation (`reads`: the site check's `getSiteInfo`, the same-path GET an update merges into, the lists its
+  pickers read) and allows, checked before anything is sent, in a run, a simulation and an options call; a site-scope
+  operation can't be allowed unless its site check is (the map's build fails); a merge read the map doesn't list or
+  allow leaves `replace` available - the map stays the single source (D28), its diff showing every read - cost if
+  wrong: holding `getSiteInfo` makes every site-scope node unavailable, as intended.
+- (O3, Low) a generic simulation answered `body: null` where the OAS has no example (`getOrgPsk`): it now answers the
+  example when the answer's schema (relaxed as an output's) accepts it, else the smallest value that schema accepts,
+  and null only for an operation that answers nothing - as the curated nodes do today. The fixture redesign the owner
+  recommends (bounded schema-built fixtures with validated example overlays, generic nodes included) is still the
+  open ruling above; it would replace both.
+
+Runs after the owner's three findings, at `839d733` (2026-10-06): the full backend suite, 3222 passed, 8 skipped, in
+6 min 33 s; ruff, format, mypy, import contracts and the OpenAPI drift check pass; CodeQL locally: no findings in
+Python or JavaScript/TypeScript. Still open for the owner: the rulings, the fixture redesign and the catalog's size (the
+owner recommends bounded schema-built fixtures with validated example overlays, generic nodes included, and catalog
+compression before a schema-on-demand redesign), the Compose proof, the read-only Mist smoke test, push and PR.
+
+The owner's second review of the checkpoint (`6c7e2bc`, 2026-10-07, pasted): O1-O3 closed (override-bearing probes
+refused on both channels; holding `getSiteInfo` stops curated and generic nodes; generic fixtures validate against every
+allowed operation's answer schema). One Low remained: (O4) with an update's merge read held, a merge simulated
+successfully (by default or asked), its authorization living only in the run's merge. The mode-aware check now sits in
+the preflight a run and a simulation share; `replace` reads nothing and stays available.
+
+The owner closed the 3b-1 technical review at `461a926` (2026-10-07): default and explicit merges are refused when their
+auxiliary read is held, denied or not delegated, in a run and a simulation alike, before the connection opens; replace
+stays available; the earlier findings stay resolved. This closes the technical review only: the rulings above, the
+fixture redesign, catalog compression, the Compose proof, the read-only Mist smoke test, and push and PR remain the
+owner's.
+
+The owner approved the fixture redesign and catalog compression (2026-10-07), both built test-first:
+- Ruling (fixtures): a fixture is built from the schema, every declared property filled to 6 levels (only the required
+  ones past them, so recursive schemas end), within 64 KB (the engine's inline limit; shallower past it): a given
+  default, an array of one element, a union's first branch, else the type's empty value. The OAS example, shaped as
+  the output, is laid over it: objects key by key, each array element over the built element; each part of the example
+  that the schema refuses is put back to the built one. Curated and generic nodes alike (a generic node over its
+  operation's answer schema, relaxed as an output's; null only when the operation answers nothing) - the OAS's examples
+  are incomplete (the owner's remark), so the schema gives the shape and the example values - cost if wrong: a fixture
+  fills optional properties a real answer may lack, so a simulation takes the "present" branch of a reference to one;
+  publish requires such a reference to carry a default, which prevents a missing-reference error, but the absent
+  (default) branch goes untested, and a failure there stays hidden until a real answer lacks the field (wording
+  corrected on the owner's review). Measured: all 262
+  curated fixtures in 0.2 s, the largest 30 KB (site settings), none past the budget; 182 take example values, 39 have
+  none, 41 are a delete's or an action's fixed answer.
+- Ruling (catalog): `GET /api/v1/node-types` and `GET /api/v1/trigger-types` answer gzipped (level 5) to a client that
+  accepts it (`Vary: Accept-Encoding`; a `q` of 0 refuses), rendered and compressed in a worker thread; no other route
+  is compressed - the catalog is the plugins' public metadata, while compressing an answer that holds a secret beside
+  what the client sent would let its length reveal the secret (BREACH); the documented response models are unchanged
+  (no OpenAPI drift) - cost if wrong: none; the schema-on-demand palette stays the editor's later redesign. Measured on
+  the installed plugins' 273 node types: 8.08 MB of JSON rendered in 26 ms, gzipped to 1.40 MB in 72 ms (level 6:
+  1.36 MB in 102 ms); returning the bytes also skips FastAPI's per-value encoding of the 8 MB.
+
+Runs after both, at `d09db0c` (2026-10-07): the full backend suite, 3235 passed, 8 skipped, in 9 min 7 s; ruff (one
+test line, fixed after), format, mypy, import contracts and the OpenAPI drift check pass; the web client's
+`check:api`, typecheck and 292 tests pass; CodeQL locally: no findings in Python or JavaScript/TypeScript.
+
+The owner's review of the redesign (`45d2245`, 2026-10-07, pasted): two Low findings and a wording correction.
+- (R1, Low) a fixture could be returned invalid or over budget: a merged `allOf` breaking one of its parts, or a default
+  too large to shrink. Every fixture returned is now one the schema accepts within the budget: shallower, then
+  without defaults, and when none is, the operation has no fixture and its simulation fails `simulation_unavailable`.
+- The ruling's wording claimed no failure hides behind a "present" fixture; corrected above: the default prevents a
+  missing-reference error, but the absent branch goes untested.
+- (R2, Low) the catalog's encoding was chosen loosely: `Q=0` or a wildcard went unread, identity couldn't be refused.
+  It's negotiated as RFC 9110 12.5.3 says: `q` in any case and a malformed one refusing its coding, `x-gzip` as
+  gzip, `*` for whatever isn't named, identity acceptable unless refused by name or by `*` (then, unnamed, yielding to
+  any coding accepted), the higher weight chosen (gzip on a tie), and 406 `not_acceptable` when neither gzip nor
+  identity is acceptable.
+Targeted runs at `3beacb5` (2026-10-07): the API tests (276), the plugin, SDK and end-to-end Mist proof tests (385),
+ruff, format, mypy, import contracts and the OpenAPI drift check pass; each of R1's and R2's fixes was also checked by
+disabling it (the tests fail). The last full run is `d09db0c`'s (3235 passed).
+
+The owner closed R1 and R2 at `5699914` (2026-10-07): fixture returns enforce the schema and the size cap, and when
+none fits, curated and generic simulations fail `simulation_unavailable` alike; the encoding cases negotiate correctly,
+406 included; the optional-field wording is corrected. The fixture and compression additions are technically cleared.
+This is technical closure only: the rulings, the Compose proof, the read-only Mist smoke test, and push and PR remain
+the owner's.
+
+The owner asked for the push and PR (2026-10-07). The branch was rebased onto `origin/main` 69944d0 (#46, #47: 2b-4a)
+without conflicts; the OpenAPI document and the web client's types still match (no drift, `check:api` passes). Full
+run at the rebased head: 3621 passed, 8 skipped, in 12 min 7 s; ruff, format, mypy and import contracts pass.

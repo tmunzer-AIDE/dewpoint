@@ -146,7 +146,7 @@ def test_plugin_manifest_checks_prefix_and_duplicates() -> None:
     ok = Plugin(name="demo", version="1.0.0", nodes=(Send,))
     manifest = ok.manifest()
     assert manifest["nodes"][0]["type"] == "demo.send"
-    assert manifest["sdk_version"] == "0.3.0"
+    assert manifest["sdk_version"] == "0.4.0"
     with pytest.raises(ManifestError, match="must start with 'other.'"):
         Plugin(name="other", version="1", nodes=(Send,)).manifest()
     with pytest.raises(ManifestError, match="duplicate"):

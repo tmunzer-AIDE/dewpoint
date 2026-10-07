@@ -92,7 +92,7 @@ class CallNetwork:
     def beat(self) -> None:
         return None
 
-    async def send[T](self, call: Callable[[], Awaitable[T]]) -> T:
+    async def send[T](self, call: Callable[[], Awaitable[T]], *, counts: bool = True) -> T:
         try:
             return await call()
         except CORE_ERRORS as e:

@@ -5,8 +5,8 @@ import pytest
 from sqlalchemy import text
 
 from dewpoint.apps.plugin_loader import sync_installed
-from dewpoint.plugins.mist import PLUGIN as MIST
 from tests.apps.api.helpers import session_client
+from tests.support.plugins.mist import MIST_TYPE_ONLY as MIST
 
 ORG = str(uuid.uuid4())
 BODY = {
