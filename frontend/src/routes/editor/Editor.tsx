@@ -2,7 +2,7 @@
 // The editor (screen 1c): the draft, on a canvas, by pointer or keyboard alone (D16), saved as it changes (D17). Task 14
 // adds problems, Task 15 publishing and versions.
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useBlocker, useLocation, useRouter } from "@tanstack/react-router";
+import { useBlocker, useMatch, useRouter } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Button } from "../../components/Button";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
@@ -209,16 +209,22 @@ function Editor({
   // nothing (the owner's review of 6d7766e). A router exit agreed to that never completes (its destination sends the
   // person back here) gives the document back once the router settles here again; a sign-out's hold is released only
   // by its own `stayed`.
-  const home = useRef(useLocation().pathname);
+  // "This editor" is its route and its params, never the path's spelling (a trailing slash, an encoding: the final
+  // checkpoint's second review).
+  const own = useMatch({ strict: false });
+  const home = useRef({ routeId: own.routeId, params: own.params });
+  const isHome = (routeId: string, params: Record<string, unknown>) =>
+    routeId === home.current.routeId && Object.entries(home.current.params).every(([k, v]) => params[k] === v);
   const router = useRouter();
   useBlocker({
-    shouldBlockFn: async ({ next }) => next.pathname !== home.current && !(await decide.current("router")),
+    shouldBlockFn: async ({ next }) => !isHome(next.routeId, next.params as Record<string, unknown>) && !(await decide.current("router")),
     enableBeforeUnload: () => saver.current?.unsaved ?? false,
   });
   useEffect(
     () =>
-      router.subscribe("onResolved", ({ toLocation }) => {
-        if (agreedBy.current !== "router" || toLocation.pathname !== home.current) return;
+      router.subscribe("onResolved", () => {
+        const at = router.state.matches.at(-1);
+        if (agreedBy.current !== "router" || !at || !isHome(at.routeId, at.params)) return;
         agreed.current = false;
         agreedBy.current = null;
         setHeld(false);
@@ -333,18 +339,35 @@ function Editor({
   const [notice, setNotice] = useState<Notice | null>(null);
   const viewAsked = useRef(0); // the newest version view asked for
   const publisher = canPublish(role) && sync.status !== "conflict";
+  // When editing stops (a conflict, an exit, a publication), what only editing offers stops with it: an open dialog
+  // closes, placing ends (a click on a read-only canvas places nothing) and says so. Focus held by what's gone (the
+  // dialog, a "+", Auto layout, Add step, a panel's buttons) goes to what's drawn: a panel's heading when it was in
+  // the panel, else the canvas item it was on, or, for a "+", its step (the final checkpoint's second review).
+  const root = useRef<HTMLDivElement>(null);
+  const lastFocus = useRef<{ inPanel: boolean } | null>(null);
+  const wasEditable = useRef(editable);
   useEffect(() => {
-    if (!editable) setPlacing(null); // a click on a read-only canvas places nothing, even one placing began on
-  }, [editable]);
-  // An action open when editing stops (a conflict, an exit, a publication) closes, and focus goes back to the canvas:
-  // the item it was on while that's still drawn, else the start card.
-  useEffect(() => {
-    if (editable || (picker === null && connecting === null && asking === null)) return;
+    if (wasEditable.current === editable) return;
+    wasEditable.current = editable;
+    if (editable) return;
+    const dialog = picker !== null || connecting !== null || asking !== null;
     setPicker(null);
     setConnecting(null);
     setAsking(null);
-    focus(shown);
-  }, [editable, picker, connecting, asking, shown]);
+    if (placing !== null) {
+      setPlacing(null);
+      announce("Not placed: the draft can't be changed now");
+    }
+    const back = nearestDrawn(focusId);
+    if (dialog) return focus(back);
+    requestAnimationFrame(() => {
+      const active = document.activeElement;
+      if (lastFocus.current === null || (active && active !== document.body && root.current?.contains(active))) return;
+      const heading = lastFocus.current.inPanel ? root.current?.querySelector<HTMLElement>("aside h2[tabindex='-1']") : null;
+      if (heading) heading.focus();
+      else focus(back);
+    });
+  }, [editable]); // once, as editing stops: the state of the render it stopped in
   const path = { params: { path: { tenant_id: tenantId, workflow_id: workflow.id } } };
   const readWorkflow = () => ok(client.GET("/api/v1/t/{tenant_id}/workflows/{workflow_id}", path));
   const readVersions = () => ok(client.GET("/api/v1/t/{tenant_id}/workflows/{workflow_id}/versions", path));
@@ -554,6 +577,17 @@ function Editor({
     }
   }
 
+  /** Where `id` falls back to when it isn't drawn (a "+" on a read-only canvas): the step it belongs to (an edge's or a
+   * port's source, the step an entry "+" stands before), else the start card. */
+  function nearestDrawn(id: string): string {
+    if (nav.order.includes(id)) return id;
+    const at = id.indexOf(":");
+    const kind = id.slice(0, at);
+    const node = kind === "edge" || kind === "port" ? id.slice(at + 1).split(":")[0] : kind === "entry" ? id.slice(at + 1) : null;
+    const step = node ? item.node(node) : null;
+    return step !== null && nav.order.includes(step) ? step : START;
+  }
+
   function focus(id: string, path: string[] | null = null) {
     setFocusId(id);
     setTrail(path);
@@ -741,7 +775,13 @@ function Editor({
   const open = panel ? findNode(shownDoc, panel) : undefined; // the step of what's on the screen
 
   return (
-    <div className="@container flex min-h-0 flex-1 flex-col" onKeyDown={onEditorKey} onKeyDownCapture={onEditorKeyCapture}>
+    <div
+      ref={root}
+      className="@container flex min-h-0 flex-1 flex-col"
+      onKeyDown={onEditorKey}
+      onKeyDownCapture={onEditorKeyCapture}
+      onFocus={(e) => (lastFocus.current = { inPanel: (e.target as HTMLElement).closest("aside") !== null })}
+    >
       <Toolbar
         tenantId={tenantId}
         name={workflow.name}

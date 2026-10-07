@@ -26,15 +26,18 @@ export const say = {
   before: (key: string) => `Insert a step before ${key}`,
 };
 
-/** Every "+" a step has on the canvas, in the canvas's words: before it when it's an entry, then per port, an insert
- * on each edge it leads by, or an add after it when it leads nowhere. Its panel offers them unscaled: the canvas's
+/** Every "+" a step has on the canvas, in the canvas's words: before it when it's an entry, then per port (its type's,
+ * then any other an edge leaves from), an insert on each edge it leads by, or an add after it when it leads nowhere. Its panel offers them unscaled: the canvas's
  * "+" scale with the zoom, and these are their full-size equivalents (WCAG 2.5.8; the owner's ruling on M26). */
 export function addsOf(doc: GraphDoc, node: GraphNode, ports: string[]): { label: string; action: ItemAction }[] {
   const keyOf = (id: string) => findNode(doc, id)?.key ?? "a step";
   const out: { label: string; action: ItemAction }[] = [];
   if (entries(doc).some((n) => sameId(n.id, node.id))) out.push({ label: say.before(node.key), action: { kind: "before", entry: node.id } });
   const edges = drawableEdges(doc).filter((e) => sameId(e.from.node, node.id));
-  for (const port of ports) {
+  // The type's ports, then any other its edges leave from (a port it no longer lists, an unknown type's): the canvas
+  // draws an edge, and its "+", from each.
+  const others = edges.map(portOf).filter((port, i, all) => !ports.includes(port) && all.indexOf(port) === i);
+  for (const port of [...ports, ...others]) {
     const leads = edges.filter((e) => portOf(e) === port);
     if (leads.length === 0) out.push({ label: say.after(node.key, port), action: { kind: "after", from: { node: node.id, port } } });
     for (const e of leads) out.push({ label: say.insert(node.key, port, keyOf(e.to.node)), action: { kind: "insert", edge: e } });

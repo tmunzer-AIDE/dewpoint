@@ -42,12 +42,15 @@ const hit = (a: Box, b: Box) => a.left < b.right && b.left < a.right && a.top < 
 const FRACTIONS = Array.from({ length: 9 }, (_, i) => [0.5 - (i + 1) * 0.05, 0.5 + (i + 1) * 0.05]).flat();
 
 /** Each edge's "+", in a stable order (by id): React Flow's label point when it's clear, else the clear point along
- * the edge nearest its middle; off the cards (`cards`) when the edge has room, and never on a "+" already placed.
- * When nothing along the edge is clear of the others (edges drawn as one line), it steps sideways from the label until
- * it is: two "+" never share a rectangle, so a pointer always reaches the one it aims at. */
-export function placePluses(edges: { id: string; label: Point; points: Point[] }[], cards: Box[]): Map<string, Point> {
+ * the edge nearest its middle; off the cards (`cards`) when the edge has room, and never on a "+": one already placed,
+ * or one a card draws itself (`fixed`: under a free port, under the start card). When nothing along the edge is clear
+ * of those (edges drawn as one line), it steps sideways from the label until it is: no two "+" share a rectangle, so a
+ * pointer always reaches the one it aims at. */
+export function placePluses(
+  edges: { id: string; label: Point; points: Point[] }[], cards: Box[], fixed: Box[] = [],
+): Map<string, Point> {  // prettier-ignore
   const placed = new Map<string, Point>();
-  const taken: Box[] = [];
+  const taken: Box[] = fixed.map((b) => ({ left: b.left - CLEAR / 2, top: b.top - CLEAR / 2, right: b.right + CLEAR / 2, bottom: b.bottom + CLEAR / 2 }));
   const free = (p: Point) => !taken.some((b) => hit(square(p, CLEAR / 2), b));
   const offCards = (p: Point) => !cards.some((c) => hit(square(p, CLEAR), c));
   for (const e of [...edges].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))) {

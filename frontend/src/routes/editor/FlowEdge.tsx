@@ -12,19 +12,24 @@ import { PLUS, Pluses, pointsOf } from "./pluses";
  * them, and its "+" would sit on the forward edge's, out of a pointer's reach (the owner's review of milestone 3).
  * Each port climbs in its own lane (`lane`: the port's place among its step's), a "+" and its clearance apart, so a
  * join from two ports climbs as two lines (the owner's review of 6d7766e). */
-export function route(e: { sourceX: number; sourceY: number; targetX: number; targetY: number }, lane = 0): { centerX?: number } {
-  return e.targetY < e.sourceY ? { centerX: Math.max(e.sourceX, e.targetX) + CARD.width / 2 + 40 + lane * (PLUS + 8) } : {};
-}
+export function route(
+  e: { sourceX: number; sourceY: number; targetX: number; targetY: number }, lane = 0, portAt = 0.5,
+): { centerX?: number } {
+  // Measured from the cards' right edges, not the ports': a port sits `portAt` of the way across its card, the
+  // target's input in the middle of its own (the final checkpoint's second review).
+  const right = Math.max(e.sourceX + CARD.width * (1 - portAt), e.targetX + CARD.width / 2);
+  return e.targetY < e.sourceY ? { centerX: right + 40 + lane * (PLUS + 8) } : {};
+}  // prettier-ignore
 
 export type FlowData = {
-  item: string; label: string; action: ItemAction; focusId: string; editable: boolean; lane: number;
+  item: string; label: string; action: ItemAction; focusId: string; editable: boolean; lane: number; portAt: number;
   onItem: (action: ItemAction) => void;
 };  // prettier-ignore
 
 export function FlowEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data }: EdgeProps<Edge<FlowData, "flow">>) {
   const [path, x, y] = getSmoothStepPath({
     sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition, borderRadius: 6,
-    ...route({ sourceX, sourceY, targetX, targetY }, data?.lane ?? 0),
+    ...route({ sourceX, sourceY, targetX, targetY }, data?.lane ?? 0, data?.portAt ?? 0.5),
   });  // prettier-ignore
   // The line drawn goes to the canvas, which places every "+" so none shares another's rectangle (pluses.ts).
   const { report, forget, placed } = useContext(Pluses);

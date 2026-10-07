@@ -310,8 +310,26 @@ test("at 320 px a panel leaves the canvas room: Go to shows its step, and a step
   await panel.getByRole("button", { name: "Go to transform" }).click();
   await expect(step).toBeFocused();
   await expect(step).toBeInViewport({ ratio: 0.5 });
-  // Placed with a click at 320 px: the panel's Place, then a click on the canvas, where the step lands and shows.
+  // The canvas's own controls fit it (the final checkpoint's second review): nothing runs past its right edge.
+  const frame = (await canvas.boundingBox())!;
+  for (const control of [page.getByRole("button", { name: "Fit" }), page.getByText(/^\d+%$/)]) {
+    const b = (await control.boundingBox())!;
+    expect(b.x + b.width).toBeLessThanOrEqual(frame.x + frame.width);
+  }
+  // A step whose panel opens in the canvas's lower half stays in view as the panel takes that half.
+  await panel.getByRole("button", { name: "Close" }).click(); // the canvas takes the height again
+  await expect(panel).toHaveCount(0);
+  const full = (await canvas.boundingBox())!;
+  const card = (await step.boundingBox())!;
+  const drop = full.y + full.height * 0.8 - (card.y + card.height / 2); // drag the step down to 80 % of the height
+  await page.mouse.move(full.x + 8, full.y + 8);
+  await page.mouse.down();
+  await page.mouse.move(full.x + 8, full.y + 8 + drop, { steps: 8 });
+  await page.mouse.up();
   await step.click();
+  await expect(page.getByRole("complementary", { name: "transform" })).toBeVisible();
+  await expect(step).toBeInViewport({ ratio: 0.9 });
+  // Placed with a click at 320 px: the panel's Place, then a click on the canvas, where the step lands and shows.
   await page.getByRole("button", { name: "Place on the canvas…" }).click();
   // An empty place: the first point of a grid over the canvas where the pane itself, not a card or a control, is hit.
   const box = (await canvas.boundingBox())!;

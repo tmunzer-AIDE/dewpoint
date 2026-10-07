@@ -39,7 +39,7 @@ vi.mock("./Canvas", async () => {
           {(props.doc.nodes ?? []).map((n) => (
             <span key={n.id}>
               <button data-item={`node:${n.id}`} onClick={() => props.onItem({ kind: "open", node: n.id })}>{n.key}</button>
-              <button onClick={() => props.onItem({ kind: "after", from: { node: n.id, port: "out" } })}>after {n.key}</button>
+              <button data-item={`port:${n.id}:out`} onClick={() => props.onItem({ kind: "after", from: { node: n.id, port: "out" } })}>after {n.key}</button>
             </span>
           ))}
           {props.placing && <button onClick={() => props.onPlace({ x: 400, y: 300 })}>place here</button>}
@@ -103,7 +103,7 @@ beforeEach(() => {
 });
 
 /** The editor on its route, beside the list's; `seed` fills the query cache first, as an earlier visit would. */
-async function show({ seed }: { seed?: (qc: QueryClient) => void } = {}) {
+async function show({ seed, at = "/t/t1/workflows/w1" }: { seed?: (qc: QueryClient) => void; at?: string } = {}) {
   const root = createRootRoute({ component: Outlet });
   const list = createRoute({ getParentRoute: () => root, path: "/t/$tenantId/workflows", component: () => <p>list</p> });
   const editor = createRoute({
@@ -122,7 +122,7 @@ async function show({ seed }: { seed?: (qc: QueryClient) => void } = {}) {
   });
   const router = createRouter({
     routeTree: root.addChildren([list, editor, away]),
-    history: createMemoryHistory({ initialEntries: ["/t/t1/workflows/w1"] }),
+    history: createMemoryHistory({ initialEntries: [at] }),
   });
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   seed?.(qc);
@@ -809,6 +809,62 @@ describe("a conflict that arrives while an action is open", () => {
   });
 });
 
+// When editing stops, focus held by a control only editing draws goes somewhere drawn (the final checkpoint's second
+// review): never to the page.
+describe("focus when editing stops under it", () => {
+  function heldEdit() {
+    let release: ((r: Response) => void) | undefined;
+    answers.set(`PUT ${BASE}/draft`, () => new Promise<Response>((r) => (release = r)));
+    return {
+      held: () => vi.waitFor(() => expect(release).toBeDefined(), { timeout: 3000 }),
+      conflict: async () => {
+        release!(json({ error: "draft_conflict", draft_revision: 5 }, 409));
+        await screen.findByRole("alert");
+      },
+    };
+  }
+
+  it("goes to the panel's heading from a panel button that's gone", async () => {
+    await withTwoSteps();
+    const save = heldEdit();
+    await userEvent.click(screen.getByRole("button", { name: "transform_2" }));
+    const panel = screen.getByRole("complementary", { name: "transform_2" });
+    await userEvent.click(within(panel).getByRole("button", { name: "Move transform_2 down" })); // focus stays on it
+    await save.held();
+    await save.conflict();
+    await vi.waitFor(() => expect(document.activeElement).toBe(within(panel).getByRole("heading", { name: "transform_2" })));
+  });
+
+  it("stops placing a step, and says so", async () => {
+    const said: string[] = [];
+    const stop = onAnnounce((m) => said.push(m));
+    await withTwoSteps();
+    const save = heldEdit();
+    await userEvent.click(screen.getByRole("button", { name: "transform_2" }));
+    const panel = screen.getByRole("complementary", { name: "transform_2" });
+    await userEvent.click(within(panel).getByRole("button", { name: "Move transform_2 down" }));
+    await save.held();
+    await userEvent.click(within(panel).getByRole("button", { name: "Place on the canvas…" }));
+    await save.conflict();
+    await vi.waitFor(() => expect(screen.queryByRole("button", { name: "place here" })).toBeNull());
+    expect(said).toContain("Not placed: the draft can't be changed now");
+    stop();
+  });
+
+  it("goes back to the step from a + whose picker a conflict closed, not to the start card", async () => {
+    await withTwoSteps();
+    const save = heldEdit();
+    screen.getByRole("button", { name: "transform_2" }).focus();
+    await userEvent.keyboard("{Shift>}{ArrowDown}{/Shift}");
+    await save.held();
+    screen.getByRole("button", { name: "after transform_2" }).focus(); // the free port's "+"
+    await userEvent.keyboard("a");
+    expect(screen.getByRole("dialog", { name: "Add a step" })).toBeTruthy();
+    await save.conflict();
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "transform_2" })));
+  });
+});
+
 // Only leaving the editor is an exit (the owner's review of 6d7766e, correction 2): a navigation that keeps it asks
 // nothing and holds nothing, and an exit that never completes gives the document back.
 describe("navigations that keep the editor", () => {
@@ -824,6 +880,16 @@ describe("navigations that keep the editor", () => {
     await userEvent.click(screen.getByRole("button", { name: "after transform" }));
     await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
     expect(screen.getByRole("button", { name: "transform_2" })).toBeTruthy();
+  });
+
+  it("keeps it when the same workflow is reached by another spelling of its path", async () => {
+    // Opened as /…/w1/ (a bookmark), then picked in the palette as /…/w1: the same route and step, not an exit.
+    const { router } = await show({ at: "/t/t1/workflows/w1/" });
+    await addTransform();
+    act(() => router.history.push("/t/t1/workflows/w1"));
+    await vi.waitFor(() => expect(router.state.location.pathname).toBe("/t/t1/workflows/w1"));
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    expect(steps().dataset.editable).toBe("true");
   });
 
   it("gives the document back when an exit doesn't complete", async () => {

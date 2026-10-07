@@ -70,10 +70,17 @@ function build(p: CanvasProps): { nodes: Node[]; edges: Edge[] } {
       return { id: idKey(n.id), type: "step", position: pos(n), draggable: p.editable, selectable: false, data, ...SIZE };
     }),
   ];
-  const flow = (id: string, label: string, action: ItemAction, lane = 0): FlowData => ({ item: id, label, action, focusId: p.focusId, editable: p.editable, lane, onItem: p.onItem });
+  const flow = (id: string, label: string, action: ItemAction, at = { lane: 0, portAt: 0.5 }): FlowData => ({ item: id, label, action, focusId: p.focusId, editable: p.editable, ...at, onItem: p.onItem });
+  // Where an edge leaves its card, and the lane it climbs in: a port the type lists sits a share of the way across
+  // (StepNode), one it doesn't in the middle; each port its own lane, the type's first.
   const laneOf = (e: GraphEdge) => {
     const n = nodesOf(p.doc).find((m) => idKey(m.id) === idKey(e.from.node));
-    return n ? Math.max(0, portsOf(n, p.types.get(n.type)).indexOf(portOf(e))) : 0;
+    if (!n) return { lane: 0, portAt: 0.5 };
+    const ports = portsOf(n, p.types.get(n.type));
+    const i = ports.indexOf(portOf(e));
+    if (i >= 0) return { lane: i, portAt: (i + 1) / (ports.length + 1) };
+    const others = (used.get(idKey(n.id)) ?? []).filter((port, j, all) => !ports.includes(port) && all.indexOf(port) === j);
+    return { lane: ports.length + Math.max(0, others.indexOf(portOf(e))), portAt: 0.5 };
   };
   const edges: Edge[] = [
     ...entries(p.doc).map((n): Edge => ({
@@ -89,10 +96,12 @@ function build(p: CanvasProps): { nodes: Node[]; edges: Edge[] } {
   return { nodes, edges };
 }
 
-/** What a "+" keeps off (pluses.ts): every card as drawn, and each "+" a card has under a free port, or the start
- * card's before the first step: where StepCard and StartCard put them, 24 below the card. */
-function obstacles(nodes: Node[]): Box[] {
+/** What an edge's "+" keeps off (pluses.ts): every card as drawn (`cards`, where the edge has room), and each "+" a card
+ * draws itself (`fixed`, always): under a free port, or the start card's before the first step, where StepCard and
+ * StartCard put them, 24 below the card. */
+function obstacles(nodes: Node[]): { cards: Box[]; fixed: Box[] } {
   const boxes: Box[] = [];
+  const fixed: Box[] = [];
   const plus = (c: Point): Box => ({ left: c.x - PLUS / 2, top: c.y - PLUS / 2, right: c.x + PLUS / 2, bottom: c.y + PLUS / 2 });
   for (const n of nodes) {
     const w = n.measured?.width ?? CARD.width;
@@ -104,11 +113,11 @@ function obstacles(nodes: Node[]): Box[] {
       const d = n.data as StepData;
       if (d.editable)
         d.ports.forEach((port, i) => {
-          if (!d.connected.includes(port)) boxes.push(plus({ x: x + (w * (i + 1)) / (d.ports.length + 1), y: below }));
+          if (!d.connected.includes(port)) fixed.push(plus({ x: x + (w * (i + 1)) / (d.ports.length + 1), y: below }));
         });
-    } else if ((n.data as StartData).empty && (n.data as StartData).editable) boxes.push(plus({ x: x + w / 2, y: below }));
+    } else if ((n.data as StartData).empty && (n.data as StartData).editable) fixed.push(plus({ x: x + w / 2, y: below }));
   }
-  return boxes;
+  return { cards: boxes, fixed };
 }
 
 function Flow(p: CanvasProps) {
@@ -138,8 +147,8 @@ function Flow(p: CanvasProps) {
       }),
     [],
   );
-  const cards = useMemo(() => obstacles(nodes), [nodes]);
-  const placed = useMemo(() => placePluses([...lines].map(([id, line]) => ({ id, ...line })), cards), [lines, cards]);
+  const drawn = useMemo(() => obstacles(nodes), [nodes]);
+  const placed = useMemo(() => placePluses([...lines].map(([id, line]) => ({ id, ...line })), drawn.cards, drawn.fixed), [lines, drawn]);
   const pluses = useMemo(() => ({ report, forget, placed }), [report, forget, placed]);
   // A rebuilt node keeps the size React Flow measured: one without it is hidden until measured again, and a press
   // that re-renders the editor (focus moves to what was pressed) would then release over the pane (ledger M11).
@@ -164,7 +173,7 @@ function Flow(p: CanvasProps) {
    * it's wholly in the clear; otherwise only when it's entirely hidden, so a pointer's press never slides it away
    * (ledger M13, revised at the final checkpoint). */
   const reveal = useCallback(
-    (el: HTMLElement) => {
+    (el: HTMLElement, keyboard = el.matches(":focus-visible")) => {
       const frame = container.current;
       const box = frame?.getBoundingClientRect();
       if (!frame || !box) return;
@@ -174,7 +183,7 @@ function Flow(p: CanvasProps) {
       const over = [...(frame.parentElement ?? frame).querySelectorAll<HTMLElement>(".react-flow__minimap, [data-canvas-overlay]")]
         .map((o) => o.getBoundingClientRect())
         .filter((o) => o.width > 0 && o.height > 0);
-      if (!mustReveal(r, box, over, el.matches(":focus-visible"))) return;
+      if (!mustReveal(r, box, over, keyboard)) return;
       const v = flow.getViewport();
       void flow.setViewport(
         { x: v.x + (box.left + box.width / 2 - (r.left + r.width / 2)), y: v.y + (box.top + box.height / 2 - (r.top + r.height / 2)), zoom: v.zoom },
@@ -183,6 +192,18 @@ function Flow(p: CanvasProps) {
     },
     [flow],
   );
+
+  // The step whose panel is open stays in the clear as the panel takes its share of the editor (below 48rem, the lower
+  // half: the final checkpoint's second review): once the canvas has its new size, as for a key.
+  useEffect(() => {
+    if (p.current === null) return;
+    const id = item.node(p.current);
+    const frame = requestAnimationFrame(() => {
+      const el = container.current?.querySelector<HTMLElement>(`[data-item="${CSS.escape(id)}"]`);
+      if (el) reveal(el, true);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [p.current, reveal]);
 
   useEffect(() => {
     if (!p.focusRequest) return;

@@ -47,6 +47,14 @@ describe("where each edge's + goes", () => {
     expect(placed.y + PLUS / 2 <= card.top || placed.y - PLUS / 2 >= card.bottom).toBe(true);
   });
 
+  it("never puts an edge's + on a port's or the start card's own +, even where the cards leave it no room", () => {
+    // Cards over the whole edge: no point along it is off them, so only the "+" already drawn can rule one out.
+    const cards: Box[] = [{ left: -200, top: -50, right: 200, bottom: 250 }];
+    const ports: Box[] = [100, 90, 110].map((y) => ({ left: -PLUS / 2, top: y - PLUS / 2, right: PLUS / 2, bottom: y + PLUS / 2 }));
+    const placed = placePluses([edge("a", down(0), { x: 0, y: 100 })], cards, ports).get("a")!;
+    for (const port of ports) expect(overlap(placed, { x: (port.left + port.right) / 2, y: (port.top + port.bottom) / 2 })).toBe(false);
+  });
+
   it("never stacks two + however the steps are placed, even when every edge is one line", () => {
     const same = Array.from({ length: 6 }, (_, i) => edge(`e${i}`, down(0), { x: 0, y: 100 }));
     const placed = [...placePluses(same, []).values()];
