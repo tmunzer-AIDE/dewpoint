@@ -641,8 +641,8 @@ def schedules_inventory_cutover(
             f"recorded the inventory's cutover at {done.at.isoformat()}; {done.caught.caught} schedule(s) caught up, "
             f"{done.caught.refreshed} count(s) refreshed, in {done.caught.batches} batch(es)")  # fmt: skip
         if done.lock_lost:
-            said += ("; its lock's connection was lost before it ended, so another cutover may have run beside it "
-                     "(the database records one only)")  # fmt: skip
+            said += ("; its lock wasn't held to its end (its connection lost, or its unlock unanswered), so another "
+                     "cutover may have run beside it (the database records one only)")  # fmt: skip
         return said
 
     typer.echo(asyncio.run(_in_session(_run)))

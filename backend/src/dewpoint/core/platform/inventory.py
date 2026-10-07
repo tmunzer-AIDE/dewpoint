@@ -28,6 +28,7 @@ what it recorded, and says so (`CutOver.lock_lost`; the owner's review of checkp
 never takes its place."""
 
 import asyncio
+import contextlib
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -47,6 +48,8 @@ ATTEMPTS = 60  # the final step's attempts while schedules stay busy
 PAUSE_S = 1.0  # between them
 LOCK_NOT_AVAILABLE = "55P03"
 RUNNING = "dewpoint schedule inventory cutover"  # the advisory lock a cutover holds while it runs
+UNLOCK = "SELECT pg_advisory_unlock(hashtextextended(:k, 0))"
+UNLOCK_S = 5.0  # the unlock's answer waited for at most: past it, its connection is taken for lost (dropped silently)
 
 log = structlog.get_logger("dewpoint.platform.inventory")
 
@@ -62,8 +65,9 @@ class CaughtUp:
 
 @dataclass(frozen=True)
 class CutOver:
-    """What a cutover did: when it recorded (None: recorded already), its catch-up, and whether its lock's connection
-    was lost before its end (`lock_lost`: another cutover may have run beside it; the database records one only)."""
+    """What a cutover did: when it recorded (None: recorded already), its catch-up, and whether its lock can't be said
+    to have been held to its end (`lock_lost`, `_unlocked`: another cutover may have run beside it; the database records
+    one only)."""
 
     at: datetime | None
     caught: CaughtUp
@@ -195,11 +199,20 @@ async def _cut_over(s: AsyncSession, attested: str) -> tuple[datetime | None, Ca
 
 
 async def _unlocked(holder: AsyncConnection) -> bool:
-    """The cutover's lock released; False when its connection was lost, the lock released with it."""
+    """The cutover's lock released; False when it can't be said to have been held to the end: its connection lost
+    (the lock released with it, once the server sees), its unlock unanswered within `UNLOCK_S`, or the lock no longer
+    held. The connection is then discarded, never pooled with a lock it might hold."""
     try:
-        await holder.execute(text("SELECT pg_advisory_unlock(hashtextextended(:k, 0))"), {"k": RUNNING})
-        await holder.commit()
-    except DBAPIError as e:
+        async with asyncio.timeout(UNLOCK_S):
+            released: bool = (await holder.execute(text(UNLOCK), {"k": RUNNING})).scalar_one()
+            await holder.commit()
+    except (DBAPIError, TimeoutError) as e:
         log.warning("inventory_cutover_lock_lost", error_type=type(e).__name__)
-        return False
-    return True
+        released = False
+    else:
+        if not released:
+            log.warning("inventory_cutover_lock_lost", error_type="not_held")
+    if not released:
+        with contextlib.suppress(Exception):  # a connection already gone: nothing more to discard
+            await holder.invalidate()
+    return released

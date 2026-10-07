@@ -11,6 +11,7 @@ import uuid
 from collections.abc import Iterator
 
 import asyncpg
+import pytest
 from sqlalchemy import text
 from typer.testing import CliRunner
 
@@ -582,3 +583,49 @@ def test_the_cutovers_final_step_never_holds_schedules_for_a_standby_that_stops_
         waited, outcome = asyncio.run(through())
         assert _sql(pg_url, "select count(*) from schedule_inventory_cutover") == [1]
     assert waited < 1.5 and not isinstance(outcome, Exception), (waited, outcome)
+
+
+async def _lock_ended(url: str) -> None:
+    """Whatever session still holds the cutover's lock, ended."""
+    from dewpoint.core.platform import inventory
+
+    c = await asyncpg.connect(url)
+    try:
+        await c.execute(
+            "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 1 "
+            "AND ((classid::bigint << 32) | objid::bigint) = hashtextextended($1, 0)",
+            inventory.RUNNING,
+        )
+    finally:
+        await c.close()
+
+
+UNLOCKS = {  # an unlock that never answers in time (a network that drops silently), and one that held no lock
+    "unanswered": "SELECT pg_sleep(4), pg_advisory_unlock(hashtextextended(:k, 0))",
+    "not held": "SELECT pg_advisory_unlock(hashtextextended(:k, 1))",
+}
+
+
+@pytest.mark.parametrize("unlock", UNLOCKS)
+def test_a_cutover_reports_what_it_recorded_whatever_its_unlock_answers(
+    pg_url, _test_users, monkeypatch, unlock
+) -> None:  # fmt: skip
+    """The review of checkpoint 6 (its finding 7): the unlock had no time bound (a connection black-holed held the
+    command, recorded, until TCP gave up, and a Ctrl-C then showed a traceback), and its answer was ignored (a lock not
+    held counted as released). Either way the cutover reports what it recorded, promptly, and that its lock was lost."""
+    from dewpoint.core.platform import inventory
+
+    command = _cutover_env(pg_url, monkeypatch)
+    monkeypatch.setattr(inventory, "UNLOCK", UNLOCKS[unlock])
+    monkeypatch.setattr(inventory, "UNLOCK_S", 1.0)
+    with _restoring(pg_url):
+        try:
+            t0 = time.monotonic()
+            done = CliRunner().invoke(app, command)
+            took = time.monotonic() - t0
+        finally:
+            asyncio.run(_lock_ended(pg_url.replace("postgresql+asyncpg://", "postgresql://")))
+        assert done.exit_code == 0, (done.output, done.exception)
+        assert "recorded the inventory's cutover" in done.output and "lock" in done.output.split("recorded", 1)[1]
+        assert _sql(pg_url, "select count(*) from schedule_inventory_cutover") == [1]
+    assert took < 3.5
