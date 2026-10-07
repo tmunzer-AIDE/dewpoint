@@ -117,7 +117,19 @@ def _data(message: Any, channel_: str, depth: int = 0) -> tuple[str, str] | None
     if "event" in value:  # another envelope inside, once
         return _data(value, channel_, depth + 1) if depth == 0 else None
     session, raw = value.get("session"), value.get("raw")
-    return (session, raw) if isinstance(session, str) and session and isinstance(raw, str) else None
+    if not isinstance(session, str) or not session or not isinstance(raw, str):
+        return None
+    return (session, raw) if _utf8(session) and _utf8(raw) else None
+
+
+def _utf8(text: str) -> bool:
+    """Whether `text` is UTF-8 text: a JSON escape can decode to a lone surrogate, which none holds (the owner's review
+    R4). Such a message is unreadable, so discarded."""
+    try:
+        text.encode()
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _parsed(text: str) -> Any:

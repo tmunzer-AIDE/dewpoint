@@ -364,3 +364,23 @@ async def test_a_cancelled_collection_leaves_no_task_behind() -> None:
     await asyncio.sleep(0)
     assert {t for t in asyncio.all_tasks() - before if not t.done()} == set()
     assert mist.stream.closed
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"event": "data", "channel": CHANNEL, "data": {"session": SESSION, "raw": "\ud800 half a pair\n"}},
+        {"event": "data", "channel": CHANNEL, "data": {"session": SESSION + "\udfff", "raw": "x\n"}},
+        {"event": "data", "channel": CHANNEL, "data": json.dumps({"session": SESSION, "raw": "\ud800"})},
+    ],
+)
+async def test_text_that_isnt_utf8_is_unreadable_and_discarded(message: dict[str, Any]) -> None:
+    """The owner's review R4: a JSON escape can decode to a lone surrogate, which no UTF-8 text holds; such a message
+    is discarded, in either phase, never counted or kept."""
+    after = Mist(message, data("after\n"))
+    out = await after.collect()
+    assert (out["lines"], out["received"]) == (["after"], 1)
+    early = Mist(answer=Reply(200, {"session": SESSION}, delay_s=0.1))
+    early.stream._on_send = lambda text: [json.dumps(ACK), json.dumps(message), json.dumps(data("early\n"))]  # type: ignore[assignment]
+    out = await early.collect()
+    assert (out["lines"], out["received"]) == (["early"], 1)

@@ -929,3 +929,5 @@ its protection checked by disabling it. A technical review; the rulings above st
   stream path and host checks (SDK and catalog, the host check shared with 3a-2's host map) and the utility path
   check use `fullmatch`. The same `.match` with `$` remains in older manifest validators (plugin names, type keys,
   ports, icons, topics, header names, scope kinds, a verify's detail): flagged as its own task.
+- R4 (a JSON escape decoded to a lone surrogate, which then failed the byte counting): a session or a raw text that
+  isn't UTF-8 is unreadable, so the message is discarded in either phase, never counted or kept.
