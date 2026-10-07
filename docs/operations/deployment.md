@@ -105,6 +105,11 @@ It refuses, records nothing and exits 1, saying why, when:
   shows in `pg_stat_progress_vacuum`), or cancel that autovacuum (`pg_cancel_backend`), then run the command again.
   Retrying is safe: the catch-up's batches stay done, and nothing else was written.
 
+**Every installation records it, fresh ones included,** whether Compose runs it or not: until it's recorded, the API
+creates no schedule (`503 schedule_inventory_not_cut_over`), since a schedule created then would be counted as one from
+before 0040, its accounting incomplete for good. On a fresh installation no writer from before 0040 exists: run the
+command, with `--attest --confirm`, once Temporal is reachable and before the API serves schedule creates.
+
 **Until the cutover is recorded, no session may set `session_replication_role = replica`** on this database (a
 superuser's setting): such a session's inserts skip the capture trigger unseen, which nothing here can detect.
 

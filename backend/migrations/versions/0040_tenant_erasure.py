@@ -452,7 +452,7 @@ END $$""",
 ]
 CAPTURED = "CREATE TRIGGER schedules_inventoried AFTER INSERT ON schedules FOR EACH ROW EXECUTE FUNCTION schedule_inventoried()"
 CUTOVER = [
-    "GRANT SELECT ON schedule_inventory_cutover TO dewpoint_admin, dewpoint_dispatch, dewpoint_retention",
+    "GRANT SELECT ON schedule_inventory_cutover TO dewpoint_admin, dewpoint_dispatch, dewpoint_retention, dewpoint_api",
     "GRANT EXECUTE ON FUNCTION schedule_inventory_catch_up(uuid, integer) TO dewpoint_admin",
     "GRANT EXECUTE ON FUNCTION schedule_inventory_capture() TO dewpoint_admin",
     "GRANT EXECUTE ON FUNCTION schedule_inventory_cutover_record(text) TO dewpoint_admin",

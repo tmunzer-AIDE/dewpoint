@@ -28,6 +28,7 @@ from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.crypto.keys import KeySource
 from dewpoint.core.models.schedules import Schedule, ScheduleIncarnation, ScheduleInterval
 from dewpoint.core.models.workflows import Workflow, WorkflowVersion
+from dewpoint.core.platform.service import inventory_cut_over
 from dewpoint.engine.graph.csv import RESERVED, trigger_schema
 from dewpoint.engine.handles import contains_marker
 
@@ -186,7 +187,11 @@ async def create(
     s: AsyncSession, keys: KeySource, *, tenant_id: uuid.UUID, actor_id: uuid.UUID, workflow_id: uuid.UUID,
     timing: Mapping[str, Any], mode: str, input: Mapping[str, Any], enabled: bool,
 ) -> Schedule:  # fmt: skip
-    """A schedule of the workflow's active version, its timing and its fixed input checked, the input sealed."""
+    """A schedule of the workflow's active version, its timing and its fixed input checked, the input sealed. None
+    before the inventory's cutover (the owner's review of checkpoint 4, M5): on any installation, one created then
+    would be captured as if from before migration 0040, its accounting incomplete for good."""
+    if not await inventory_cut_over(s):
+        raise ScheduleRefusedError(503, {"error": "schedule_inventory_not_cut_over"})
     version = await _active_version(s, workflow_id)
     _checked_timing(timing)
     _checked_input(version, input)

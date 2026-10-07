@@ -74,6 +74,28 @@ async def test_an_editor_schedules_a_workflow_its_input_sealed_and_never_shown(
     assert (await viewer.get(schedule_url(ctx, body["id"]))).json()["id"] == body["id"]
 
 
+async def test_no_schedule_is_created_before_the_inventorys_cutover(
+    keyed_app, workflow, owner_sessionmaker, api_settings
+) -> None:
+    """The owner's review of checkpoint 4 (M5): on any installation, fresh or upgraded, Compose's or not, the API
+    creates no schedule before the inventory's cutover is recorded (`dewpoint schedules inventory-cutover`): one
+    created then would be captured as if from before migration 0040, its accounting incomplete for good. It refuses
+    (503, `schedule_inventory_not_cut_over`), and creates once the cutover is recorded."""
+    ctx, wf = workflow
+    editor = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
+    async with owner_sessionmaker() as s, s.begin():
+        kept = (await s.execute(text("delete from schedule_inventory_cutover returning at"))).scalar_one()
+    try:
+        refused = await editor.post(schedules_url(ctx, wf), json=BODY)
+        assert (refused.status_code, refused.json()) == (503, {"error": "schedule_inventory_not_cut_over"})
+        async with owner_sessionmaker() as s:
+            assert (await s.execute(text("select count(*) from schedules"))).scalar_one() == 0
+    finally:
+        async with owner_sessionmaker() as s, s.begin():
+            await s.execute(text("insert into schedule_inventory_cutover (at) values (:a)"), {"a": kept})
+    assert (await editor.post(schedules_url(ctx, wf), json=BODY)).status_code == 201
+
+
 async def test_writing_a_schedule_needs_trigger_manage(keyed_app, workflow, owner_sessionmaker, api_settings) -> None:
     ctx, wf = workflow
     for role in ("operator", "viewer"):
