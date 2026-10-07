@@ -672,3 +672,19 @@ run at the rebased head: 3621 passed, 8 skipped, in 12 min 7 s; ruff, format, my
 **Status at the merge** (#49, `bc4c840`, 2026-10-07; all 15 checks passed): the technical review is closed; no 3b-1
 ruling has the owner's sign-off yet; the read-only Mist smoke test against a test org is pending. #49's e2e jobs ran
 the packaged Compose proof and the browser tests, so no separate local Compose run was made.
+
+Read-only Mist smoke run (2026-10-07): the owner ran `backend/tests/probes/mist_smoke.py` (local `test/mist-smoke`
+3dd2ebb) against the test org `9777c1a0-6ef6-11e6-8bbf-02e208b2d34f`, site `978c48e6-…`, on `api.mist.com`; GET only,
+the report holding names and schema rules, never a value. 146 curated reads in 108.6 s: 64 matched their output
+schema, 68 didn't, 1 failed, 13 were skipped (9 with nothing in this org to read their id from, 4 needing a query).
+- 53 of the 68 only because Mist answers null where the OAS types a value (79 places: ids such as `map_id` and
+  `template_id`, flags, lists), or a fractional number where it says integer (68 places: the `start` and `end` of
+  search and count answers, map origins).
+- 15 with real disagreements: fields typed otherwise (`lease_time`, `last_vlan` and `mfg_company_id` strings,
+  `random_mac` a boolean, a client's `model` an array, site settings' `flags` integers); unions no branch fits
+  (devices, device profiles, a port usage's `reauth_interval`); required fields absent (site stats' `country_code`
+  and `latlng`, discovered assets' `name`, WxRule usage's `client_mac`, `name`, `usage`, `dst_allow_wxtags`,
+  `dst_deny_wxtags`).
+- The failure: `searchOrgUserMacs` answered in a shape the search node doesn't read (`mist.invalid_answer`).
+- Sizes: wired-client searches about 434 KB a page; 2.25 MB across all answers.
+As shipped, those 69 operations fail their runs (`output_schema_violation` after the request, or `invalid_answer`).
