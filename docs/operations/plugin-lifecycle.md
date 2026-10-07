@@ -13,8 +13,9 @@ DEWPOINT_DATABASE_URL=postgresql+asyncpg://dewpoint_admin_login:...@postgres/dew
 It registers every node type version the build contains, the connection types its plugins declare (the API knows a
 connection type, `mist` included, only once a sync registered it: until then, creating one is refused as
 `unknown_type`), the triggers they declare (`GET /api/v1/trigger-types` lists them: the Mist webhook trigger's 30 topic
-schemas), and this build's CEL profile. Mist's plugin declares 264 node types (one per curated operation of its policy
-map, and `mist.api.read` and `mist.api.write`), so its first sync checks an 8 MB manifest: about 12 seconds. It
+schemas), and this build's CEL profile. Mist's plugin declares 294 node types (one per curated operation of its policy
+map, one per reviewed device utility, and `mist.api.read` and `mist.api.write`), so its first sync checks an 8 MB
+manifest: about 12 seconds. It
 refuses to proceed (exit 2) when:
 
 - **a registered version's contract changed.** Anything other than its title, description, icon or schema annotations (`title`, `description`, `examples`, `x-widget`, `x-group`) differs from what was registered: schemas, ports, kind, side effect, credentials, capabilities, retry policy or timeout. Ship the change as a new version (`type@N+1`) with a config migration. Display-only changes are stored in place.
