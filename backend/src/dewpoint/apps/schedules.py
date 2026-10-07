@@ -16,7 +16,7 @@ import uuid
 import zoneinfo
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
@@ -252,6 +252,9 @@ async def delete(s: AsyncSession, *, actor_id: uuid.UUID, schedule: Schedule) ->
     await _audited(s, "schedule.delete", actor_id, schedule)
 
 
+MISSES_STALE = timedelta(minutes=10)  # an incarnation's misses read every five minutes: stale past ten
+
+
 @dataclass(frozen=True)
 class Accounting:
     """A schedule's missed-firing accounting (D3f; the owner's ruling B and its review): complete only when no span of
@@ -259,6 +262,7 @@ class Accounting:
     None while one is open) and fixed reasons."""
 
     uncounted: list[dict[str, str | None]] = field(default_factory=list)
+    misses_read_at: datetime | None = None  # the oldest read of the incarnations that may still miss a firing
 
     @property
     def complete(self) -> bool:
@@ -294,7 +298,18 @@ async def accounting(s: AsyncSession, schedule_id: uuid.UUID) -> Accounting:
             spans.append((start, {"from": start.isoformat(), "to": landed.isoformat() if landed else None,
                                   "class": "pending",
                                   "reason": "count_pending" if landed else "awaiting_first_update"}))  # fmt: skip
-    return Accounting([span for _, span in sorted(spans, key=lambda pair: pair[0])])
+    # Missed firings are read every five minutes for each incarnation that may still miss one (D16): one not read
+    # within ten leaves the accounting stale, from its last read (or its recording)
+    relevant = [i for i in ids if i.retired_at is None and (i.backfilled or i.unpause_sent_at is not None
+                                                            or i.landed_paused is False)]  # fmt: skip
+    now: datetime = (await s.execute(select(func.statement_timestamp()))).scalar_one()
+    last = [i.misses_checked_at or i.recorded_at for i in relevant]
+    if last and min(last) < now - MISSES_STALE:
+        spans.append((min(last), {"from": min(last).isoformat(), "to": None, "class": "pending",
+                                  "reason": "misses_stale"}))  # fmt: skip
+    read = [i.misses_checked_at for i in relevant]
+    oldest = None if not read or None in read else min(r for r in read if r is not None)
+    return Accounting([span for _, span in sorted(spans, key=lambda pair: pair[0])], oldest)
 
 
 def body(schedule: Schedule, accounted: Accounting) -> dict[str, object]:
@@ -310,7 +325,7 @@ def body(schedule: Schedule, accounted: Accounting) -> dict[str, object]:
         "misses": schedule.misses + schedule.creation_misses,  # every firing certainly missed, both kinds (D3f)
         "missed_while_created": schedule.creation_misses,  # due while it waited, created paused, for its unpause
         # Temporal's count, read every five minutes: `misses` as of then (a deletion reads it last, paused, D3f)
-        "misses_read_at": schedule.misses_checked_at.isoformat() if schedule.misses_checked_at else None,
+        "misses_read_at": accounted.misses_read_at.isoformat() if accounted.misses_read_at else None,
         "accounting_complete": accounted.complete,  # false: some span's firings are possibly missed, unknown or pending
         "uncounted_intervals": accounted.uncounted,  # those spans, never in `misses`
         "sync_error": schedule.sync_error,

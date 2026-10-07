@@ -137,8 +137,10 @@ async def _row(owner: Any, tenant_id: uuid.UUID, workflow_id: str) -> int:
 
 async def _recorded_children(owner: Any, tenant_id: uuid.UUID, root: str) -> dict[str, list[str | None]]:
     async with owner() as s:
-        query = text("select workflow_id, run_id from execution_evidence where tenant_id = :t and workflow_id <> :r "
-                     "order by workflow_id, run_id")
+        query = text(
+            "select workflow_id, run_id from execution_evidence where tenant_id = :t and workflow_id <> :r "
+            "order by workflow_id, run_id"
+        )
         found = await s.execute(query, {"t": tenant_id, "r": root})
     children: dict[str, list[str | None]] = {}
     for workflow_id, run_id in found:

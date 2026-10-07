@@ -91,6 +91,10 @@ class ScheduleIncarnation(Base):
     unpause_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # before the call
     seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # a describe last showed it
     checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # the stray check described it
+    # Migration 0048 (the owner's D16 ruling): its own misses read, every five minutes, while it may still miss a
+    # firing; verified gone (absent after it was seen, or after its schedule's deletion settled)
+    misses_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ScheduleInterval(Base):

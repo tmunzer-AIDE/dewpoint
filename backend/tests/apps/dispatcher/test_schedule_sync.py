@@ -348,7 +348,8 @@ async def test_firings_missed_past_the_catch_up_window_are_recorded_audited_and_
         assert (await schedule_sync.check_misses(dispatch_sessionmaker, env.client))["missed"] == 0
     await asyncio.sleep(25)  # past the window: the firings before its last 10 s are skipped
     async with owner_sessionmaker() as s, s.begin():
-        await s.execute(text("update schedules set misses_checked_at = null where id = :i"), {"i": schedule_id})
+        await s.execute(text("update schedule_incarnations set misses_checked_at = null where temporal_id = :i"),
+                        {"i": temporal_id})  # fmt: skip  # due again: its last read was before the outage
     async with await WorkflowEnvironment.start_local(
         data_converter=FIXTURE_CONVERTER, dev_server_extra_args=args
     ) as env:
@@ -361,7 +362,10 @@ async def test_firings_missed_past_the_catch_up_window_are_recorded_audited_and_
             counts = await schedule_sync.check_misses(dispatch_sessionmaker, env.client)
         await env.client.get_schedule_handle(temporal_id).delete()
     row = await stored(owner_sessionmaker, schedule_id)
-    assert counts["missed"] == row["misses"] > 0 and row["misses_checked_at"] is not None
+    async with owner_sessionmaker() as s:
+        read = (await s.execute(text("select misses_checked_at from schedule_incarnations where temporal_id = :i"),
+                                {"i": temporal_id})).scalar_one()  # fmt: skip
+    assert counts["missed"] == row["misses"] > 0 and read is not None
     assert [e["event"] for e in logs if e["log_level"] == "error"] == ["schedule_firings_missed"]
     async with owner_sessionmaker() as s:
         audit = (await s.execute(text("select details from audit_log where action = 'schedule.missed'"))).scalar_one()
@@ -578,9 +582,9 @@ async def test_two_incarnations_missing_firings_in_one_check_both_count(
     base = schedule_workflow_id(str(ctx.tenant_id), str(schedule_id))
     async with owner_sessionmaker() as s, s.begin():
         for number, temporal_id in ((0, base), (1, f"{base}~1")):
-            await s.execute(text("insert into schedule_incarnations "
-                                 "(temporal_id, tenant_id, schedule_id, number, backfilled) "
-                                 "values (:i, :t, :s, :n, :n = 0)"),
+            await s.execute(text("insert into schedule_incarnations "  # incarnation 1 unpaused by the sync, once
+                                 "(temporal_id, tenant_id, schedule_id, number, backfilled, unpause_sent_at) "
+                                 "values (:i, :t, :s, :n, :n = 0, case when :n = 1 then now() end)"),
                             {"i": temporal_id, "t": ctx.tenant_id, "s": schedule_id, "n": number})  # fmt: skip
         await s.execute(text("update schedules set synced_generation = generation where id = :i"), {"i": schedule_id})
     missed = {base: 2, f"{base}~1": 3}

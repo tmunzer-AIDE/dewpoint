@@ -125,6 +125,7 @@ CREATED = "dewpoint created"  # a schedule's note from its paused create until t
 DELETING = "dewpoint deleting"  # an incarnation's note once paused for its delete: its count, then, is final
 BATCH = 50  # schedules a pass
 CALL_DEADLINE = timedelta(seconds=10)  # every call to Temporal here is bounded by it
+EARLIER = 4  # earlier incarnations a visit reaches, at most (the owner's D16 ruling: an experimental cap, not a budget)
 TEMPORAL_REFUSED = "temporal_refused"
 SYNC_FAILED = "sync_failed"
 STRAYS_EVERY = timedelta(hours=1)  # each incarnation that isn't current, described again (stray_incarnations())
@@ -425,6 +426,15 @@ async def _deletable(s: AsyncSession, client: Client, tenant_id: uuid.UUID, sche
     return not await _missed(s, tenant_id, schedule_id, temporal_id, found.missed)
 
 
+async def _retired(s: AsyncSession, temporal_ids: list[str]) -> None:
+    """Incarnations verified gone, as far as a tombstone and the misses pass go: neither reaches them again. The stray
+    check still describes every one that isn't current each hour, for good (a create can land late)."""
+    if temporal_ids:
+        await s.execute(update(Incarnation).where(Incarnation.temporal_id.in_(temporal_ids),
+                                                  Incarnation.retired_at.is_(None))
+                        .values(retired_at=func.statement_timestamp()))  # fmt: skip
+
+
 async def _still_current(s: AsyncSession, schedule_id: uuid.UUID, temporal_id: str) -> bool:
     """Whether `temporal_id` is still its live schedule's current incarnation, read after the describe whose token an
     update to it would carry (the owner's review: a sync that listed it as current may describe it only after a
@@ -582,14 +592,21 @@ async def sync_one(
             return "gone"
         await _after_read()
         if wanted.schedule is None:  # a tombstone: every incarnation paused, its count read, then deleted
-            shown = [(i.temporal_id, await described(client, i.temporal_id)) for i in known]
-            live = [listed for listed, found in shown if found is not None]
-            for listed, found in shown:
-                if found is not None and await _deletable(s, client, tenant_id, schedule_id, listed, found):
-                    await _delete(client, listed)
+            # At most 1 + EARLIER a visit, in order, those not yet retired: each found is paused, counted, then deleted
+            # on later visits; each absent retired once that's verified (absent after it was seen, or after the
+            # deletion settled), so every visit moves its few on. The stray check describes each, retired or not,
+            # every hour for good: a create can still land late.
+            visit = [i for i in known if i.retired_at is None]
+            shown = [(i, await described(client, i.temporal_id)) for i in visit[: 1 + EARLIER]]
+            live = [i.temporal_id for i, found in shown if found is not None]
+            for i, found in shown:
+                if found is not None and await _deletable(s, client, tenant_id, schedule_id, i.temporal_id, found):
+                    await _delete(client, i.temporal_id)
             await _seen(s, live, func.now())  # found at or after the deletion: there until it
-            if live or not wanted.settled:
-                return "deleting"  # absent, but a create started before the tombstone could still land
+            gone = [i.temporal_id for i, found in shown if found is None and (i.seen_at is not None or wanted.settled)]
+            await _retired(s, gone)
+            if len(visit) > len(gone) or not wanted.settled:
+                return "deleting"  # some not yet gone; or absent, but a create started before the tombstone could land
             if current is not None and wanted.deleted_at is not None and not await _has(s, current.temporal_id,
                                                                                          "deleted"):  # fmt: skip
                 present = current.seen_at is not None and current.seen_at >= wanted.deleted_at
@@ -619,7 +636,9 @@ async def sync_one(
             await _landing(sessionmaker, client, tenant_id, temporal_id, after, s)
         if after is None or after.note != mark:
             return "pending"
-        for stray in [i.temporal_id for i in known if i.temporal_id != temporal_id]:  # a late create of an earlier one
+        earlier = sorted((i for i in known if i.temporal_id != temporal_id and i.retired_at is None),
+                         key=lambda i: -i.number)[:EARLIER]  # fmt: skip  # the stray pass reaches every one each hour
+        for stray in [i.temporal_id for i in earlier]:  # a late create of an earlier one
             found = await described(client, stray)
             if found is not None:
                 if await _deletable(s, client, tenant_id, schedule_id, stray, found):
@@ -681,35 +700,37 @@ async def sync_schedules(
 async def check_misses(
     sessionmaker: async_sessionmaker[AsyncSession], client: Client, *, batch: int = BATCH
 ) -> dict[str, int]:
-    """Temporal's count of firings missed past each schedule's catch-up window (an outage longer than it), read every
-    five minutes: an increase is recorded on the schedule, audited and alerted on, and the API shows it. None before
-    the inventory's cutover."""
+    """Temporal's count of firings missed past each catch-up window (an outage longer than it), read for every
+    incarnation that may still miss one (sent an unpause once, or from before the migration), each its own item, every
+    five minutes until it's verified gone (the owner's D16 ruling: the five-minute accounting holds for every
+    incarnation, the current one or not): an increase is recorded on its schedule, audited and alerted on; the API
+    shows the accounting stale when one wasn't read within ten minutes. None before the inventory's cutover."""
     if not await _cut_over(sessionmaker):
         return {"awaiting_cutover": 1}
     async with sessionmaker() as s:
-        query = text("select tenant_id, schedule_id from schedule_miss_candidates(:n)")
+        query = text("select tenant_id, temporal_id from incarnation_miss_candidates(:n)")
         picked = (await s.execute(query, {"n": batch})).all()
     counts = {"checked": 0, "missed": 0}
-    for tenant_id, schedule_id in picked:
+    for tenant_id, temporal_id in picked:
         try:
-            known = await _incarnations(sessionmaker, tenant_id, schedule_id)
             async with sessionmaker() as s:
-                at = await s.scalar(select(func.statement_timestamp()))  # before the describes
-            shown = [(i.temporal_id, await described(client, i.temporal_id)) for i in known]
+                at = await s.scalar(select(func.statement_timestamp()))  # before the describe
+            found = await described(client, temporal_id)
             async with sessionmaker() as s, s.begin():
                 await tenant_scope(s, tenant_id)
-                row = await s.get(Row, schedule_id, populate_existing=True)
-                if row is None:
+                read = await s.get(Incarnation, temporal_id, populate_existing=True)
+                if read is None:
                     continue
-                for temporal_id, found in shown:
-                    if found is None:
-                        continue
+                if found is not None:
                     await _seen(s, [temporal_id], at)
-                    counts["missed"] += await _missed(s, tenant_id, schedule_id, temporal_id, found.missed)
-                await s.execute(update(Row).where(Row.id == schedule_id).values(misses_checked_at=func.now()))
+                    counts["missed"] += await _missed(s, tenant_id, read.schedule_id, temporal_id, found.missed)
+                elif read.seen_at is not None:
+                    await _retired(s, [temporal_id])  # seen, then gone: its one create can't land again
+                await s.execute(update(Incarnation).where(Incarnation.temporal_id == temporal_id)
+                                .values(misses_checked_at=at))  # fmt: skip
             counts["checked"] += 1
         except Exception as e:
-            log.error("schedule_misses_unread", schedule_id=str(schedule_id), error=type(e).__name__)
+            log.error("schedule_misses_unread", incarnation=temporal_id, error=type(e).__name__)
     return counts
 
 
