@@ -14,12 +14,13 @@ import pytest
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
-from dewpoint.apps.worker.activities import step_activity_for
+from dewpoint.apps.worker.activities import _transport_failed, step_activity_for
 from dewpoint.apps.worker.network import DbConnections, Network
 from dewpoint.apps.worker.store import DbRunStore
 from dewpoint.core.egress.addresses import AllowEntry
 from dewpoint.engine.runtime.activities import MAPPED, OUTCOME_UNKNOWN, StepInput
 from dewpoint.engine.runtime.ids import run_workflow_id
+from dewpoint.sdk import HandshakeRejected, StreamLost
 from tests.support.connections import add_connection, seed_step, types_for_testkit
 from tests.support.keys import FixtureKeys
 from tests.support.netfakes import Request, guard, respond, serve, tls
@@ -169,3 +170,23 @@ async def test_the_nodes_own_fatal_error_after_a_write_is_of_unknown_outcome(
     assert (failure.type, failure.non_retryable, failure.details[0]["outcome"]) == (
         "testkit.refused", True, OUTCOME_UNKNOWN,
     )  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("error", "node", "retryable", "outcome"),
+    [
+        (HandshakeRejected(401), HttpCall, False, None),  # only the handshake was sent: credentials fail for good
+        (HandshakeRejected(403), AmbiguousCall, False, None),
+        (HandshakeRejected(429), AmbiguousCall, True, None),  # nothing a node answers for was sent
+        (HandshakeRejected(503), HttpCall, True, None),
+        (HandshakeRejected(302), HttpCall, False, None),  # a redirect, never followed
+        (StreamLost(), HttpCall, True, None),  # a message may have left with it: a repeatable node retries
+        (StreamLost(), AmbiguousCall, False, "outcome_unknown"),
+    ],
+)  # fmt: skip
+def test_a_streams_failure_is_classified_by_what_may_have_been_sent(
+    error: Exception, node: type, retryable: bool, outcome: str | None
+) -> None:
+    """A stream's failures escaping a node (plugins-3 D26), each with its own fixed code."""
+    failed = _transport_failed(error, node)  # type: ignore[arg-type]
+    assert (failed.code, failed.retryable, failed.outcome) == (type(error).code, retryable, outcome)

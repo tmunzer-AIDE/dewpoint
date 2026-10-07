@@ -106,6 +106,7 @@ from dewpoint.sdk import (
     Cooldown,
     EgressRefused,
     FatalError,
+    HandshakeRejected,
     InvalidRequest,
     MaybeSent,
     Node,
@@ -121,6 +122,7 @@ from dewpoint.sdk import (
     RetryableError,
     SideEffect,
     SimulationSendsNothing,
+    StreamLost,
     TlsVerificationFailed,
     TransportError,
     dump_output,
@@ -223,11 +225,14 @@ def _declared(e: NodeError, node: type[Node]) -> tuple[str, str]:
 # the request may have arrived end an ambiguous node `outcome_unknown`; a node whose requests may repeat retries
 # `MaybeSent` and `RateLimited` and fails on the others. Nothing was sent after the rest: `NotSent` and `Cooldown`
 # are retried, the others fail.
-_SENT_MAYBE = (MaybeSent, RateLimited, RedirectRefused, ResponseTooLarge, ResponseUnreadable)
-_RETRIED = (NotSent, Cooldown, MaybeSent, RateLimited)
+# A stream (D26): a refused handshake sent nothing a node answers for, retried only when the provider asked to wait or
+# failed (429, 5xx); a lost stream may have carried a message the node sent, as `MaybeSent`.
+_SENT_MAYBE = (MaybeSent, RateLimited, RedirectRefused, ResponseTooLarge, ResponseUnreadable, StreamLost)
+_RETRIED = (NotSent, Cooldown, MaybeSent, RateLimited, StreamLost)
 _TRANSPORT = (
     EgressRefused, TlsVerificationFailed, InvalidRequest, ConnectionUnavailable, SimulationSendsNothing, NotSent,
-    Cooldown, MaybeSent, RateLimited, RedirectRefused, ResponseTooLarge, ResponseUnreadable,
+    Cooldown, MaybeSent, RateLimited, RedirectRefused, ResponseTooLarge, ResponseUnreadable, HandshakeRejected,
+    StreamLost,
 )  # fmt: skip
 
 
@@ -252,6 +257,9 @@ def _transport_failed(e: TransportError, node: type[Node]) -> _StepFailed:
         return _StepFailed(UNEXPECTED_ERROR, message, retryable=True)
     if isinstance(e, _SENT_MAYBE) and ambiguous:
         return _StepFailed(kind.code, kind.message, retryable=False, outcome=OUTCOME_UNKNOWN)
+    if isinstance(e, HandshakeRejected):
+        status = e.status if type(e.status) is int else 0  # a plugin's subclass can't make it retryable otherwise
+        return _StepFailed(kind.code, kind.message, retryable=status == 429 or 500 <= status < 600)
     return _StepFailed(kind.code, kind.message, retryable=isinstance(e, _RETRIED))
 
 
