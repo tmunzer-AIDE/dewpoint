@@ -6,7 +6,7 @@ import os
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import typer
@@ -629,10 +629,10 @@ def schedules_inventory_cutover(
         if not confirm:
             return "not recorded (a dry run: pass --confirm)"
         async with s.begin():
-            caught = (await s.execute(text("SELECT schedule_inventory_cutover_record()"))).scalar_one()
+            caught: int | None = (await s.execute(text("SELECT schedule_inventory_cutover_record()"))).scalar_one()
             if caught is None:
                 return "already recorded"
-            at = (await s.execute(text("SELECT at FROM schedule_inventory_cutover"))).scalar_one()
+            at: datetime = (await s.execute(text("SELECT at FROM schedule_inventory_cutover"))).scalar_one()
             details: dict[str, object] = {"caught_up": int(caught), "attested": INVENTORY_ATTESTED}
             await audit_log.record(s, tenant_id=None, actor_id=None, action="schedules.inventory_cutover",
                                    target_type="platform", target_id="inventory_cutover", details=details)  # fmt: skip
