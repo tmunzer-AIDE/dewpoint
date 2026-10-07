@@ -898,3 +898,23 @@ fixed test-first, and each fix's protection checked by disabling it.
   such a step is retried as a timeout (the diagnostics are repeatable).
 - L7 (the runtime's receive waited up to an hour without a heartbeat, delaying a cancel): it waits in slices of 10 s,
   heartbeating between them, the timeout checked first.
+
+### 3b-2 checkpoint (2026-10-07, at 8e96fda, local, not pushed)
+
+- Built (tasks 1-9, test-first): `websockets` 17.1 direct (983bb24); the guarded websocket (09c328d); SDK 0.5.0 with a
+  connection's stream (285694d); the runtime's connection stream (ae70993); Mist's stream endpoint and stream scope
+  (bc2e2a8); the 30 utility reviews in map version 2 (eaa614a); stream failures' classification (8ac5b1f); the stream
+  reader (9c0b952); a node per utility (ebd556f); the RunGraph proof (200e7ab); operator docs (7bc611a, 40e800c).
+- The map: 1,072 operations, 292 allowed (262 curated, 30 utilities: 19 diagnostics, 11 disruptive), 602 held, 178
+  denied. Mist declares 294 node types; its manifest is 8.25 MB.
+- Fresh-context review: no High; M1, M2, L1-L7 and the parity note fixed test-first, each protection checked by
+  disabling it (abfb1c3, 7b1aa66, 30401b3, 4ddd44d, 727db46, 8e96fda).
+- Verified locally: 1,843 tests (plugins, SDK, core, catalog, API, the worker's network, plugin calls and both Mist
+  RunGraph proofs), ruff, format, mypy, import contracts; CodeQL's python analysis (CI's CLI 2.27.1 and query filter)
+  0 findings at 8e96fda. Not run: the full backend suite (about 12 minutes: on the owner's word), a Compose proof, and
+  any real Mist call.
+- Unverified until a device run (each recorded above as a ruling): bounce port's streamed output; whether Mist sends
+  show ARP's table with text after it; `subscribe_failed` details other than the documented one; a device answer
+  without `type`; whether an empty body is what Mist expects where no parameter is given. Every utility is a POST to a
+  device, so a run against the test org needs the owner's go, and a device it may act on.
+- Awaiting the owner: sign-off on this section's rulings; the full suite; push and PR.
