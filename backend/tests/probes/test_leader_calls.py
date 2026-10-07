@@ -27,7 +27,14 @@ from typing import Any
 
 import pytest
 from sqlalchemy import text
-from temporalio.client import Client
+from temporalio.client import (
+    Client,
+    Schedule,
+    ScheduleActionStartWorkflow,
+    ScheduleIntervalSpec,
+    ScheduleSpec,
+    ScheduleState,
+)
 from temporalio.testing import WorkflowEnvironment
 
 from dewpoint.apps import schedules
@@ -56,7 +63,10 @@ RESULTS: list[dict[str, Any]] = []
 
 @pytest.fixture(scope="module")
 async def server() -> AsyncIterator[WorkflowEnvironment]:
-    async with await WorkflowEnvironment.start_local(data_converter=FIXTURE_CONVERTER) as environment:
+    # A history near Temporal's own limit of 51,200 events takes more signals than the dev server lets an execution have
+    extra = ["--dynamic-config-value", "history.maximumSignalsPerExecution=60000"]
+    async with await WorkflowEnvironment.start_local(data_converter=FIXTURE_CONVERTER,
+                                                     dev_server_extra_args=extra) as environment:  # fmt: skip
         yield environment
     out = os.environ.get("DEWPOINT_PROBE_OUT")
     if out:
@@ -291,51 +301,90 @@ async def test_history_read(events, server) -> None:
 # --- each item's worst shapes (the owner's D16 ruling) ----------------------------------------------------------------
 
 
+async def _visits(name: str, client: Client, run_visit: Callable[[], Awaitable[Any]], done: Callable[[Any], bool]
+                  ) -> list[dict[str, Any]]:  # fmt: skip
+    """Visits, each measured, until `done` says so: each visit's calls and time."""
+    visits = []
+    while not visits or not done(visits[-1]["outcome"]):
+        assert len(visits) < 200
+        visits.append(await measured(f"{name}_visit_{len(visits) + 1}", 1, client, run_visit))
+    RESULTS.append({"pass": name, "visits": len(visits),
+                    "max_calls": max(sum(c["calls"] for c in v["calls"].values()) for v in visits),
+                    "max_seconds": max(v["seconds"] for v in visits),
+                    "seconds": round(sum(v["seconds"] for v in visits), 3)})  # fmt: skip
+    return visits
+
+
 @pytest.mark.parametrize("events", (1_000, 5_000))
 async def test_run_evidence_long_histories(events, server, owner_sessionmaker, dispatch_sessionmaker) -> None:
-    """Five due rows, each a closed execution of `events` events: a describe, then its whole history, 250 events a
-    page (Temporal's limit is 51,200 events, about 205 pages)."""
+    """Five due rows, each a closed execution of `events` events (250 a page): each pass reads at most `PAGES` pages of
+    each, its first describing it, until every one is read."""
     await _evidence(owner_sessionmaker, server.client, 5, signals=events)
-    await measured(
-        f"run_evidence_{events}_events",
-        5,
-        server.client,
-        lambda: evidence.check_evidence(dispatch_sessionmaker, server.client, retention=RETENTION),
-    )
+    await _visits(f"run_evidence_{events}_events", server.client,
+                  lambda: evidence.check_evidence(dispatch_sessionmaker, server.client, retention=RETENTION),
+                  lambda outcome: "reading" not in outcome)  # fmt: skip
 
 
-async def _incarnated(k: int, owner: Any, api: Any, admin: Any, dispatch: Any, settings: Any, client: Client) -> Any:
+async def test_run_evidence_near_temporals_limit(server, owner_sessionmaker, dispatch_sessionmaker) -> None:
+    """One closed execution of 50,000 events (Temporal's limit is 51,200), read `PAGES` pages a visit to its end."""
+    ctx = await _evidence(owner_sessionmaker, server.client, 1, signals=50_000)
+    async with owner_sessionmaker() as s:
+        query = text("select id from execution_evidence where tenant_id = :t")
+        row = (await s.execute(query, {"t": ctx["t"]})).scalar_one()
+    await _visits("run_evidence_50000_events", server.client,
+                  lambda: evidence._check(dispatch_sessionmaker, server.client, ctx["t"], row, RETENTION),
+                  lambda outcome: outcome != "reading")  # fmt: skip
+
+
+async def _incarnated(k: int, owner: Any, api: Any, admin: Any, dispatch: Any, settings: Any, client: Client, *,
+                      unpaused: bool = False, landed: int = 0) -> Any:  # fmt: skip
     """A schedule synced (its first incarnation, number 1, created in Temporal), then `k - 1` later incarnations
-    recorded that never landed: its id and tenant."""
+    recorded, each sent an unpause once if `unpaused` (so each may miss a firing), the first `landed` of them created in
+    Temporal late (paused): its tenant and id."""
     await _schedules(1, owner, api, admin, dispatch, settings)
     async with owner() as s:
         tenant_id, schedule_id = (await s.execute(text(
             "select tenant_id, id from schedules order by created_at desc, id limit 1"))).one()  # fmt: skip
     await schedule_sync.sync_one(dispatch, client, Leading(), tenant_id, schedule_id)
     for number in range(2, k + 1):
-        await sql(owner, "insert into schedule_incarnations (temporal_id, tenant_id, schedule_id, number) "
-                  "values (:i, :t, :s, :n)", i=schedule_sync.incarnation_id(tenant_id, schedule_id, number),
-                  t=tenant_id, s=schedule_id, n=number)  # fmt: skip
+        temporal_id = schedule_sync.incarnation_id(tenant_id, schedule_id, number)
+        await sql(owner, "insert into schedule_incarnations (temporal_id, tenant_id, schedule_id, number, "
+                  "unpause_sent_at) values (:i, :t, :s, :n, case when :u then now() end)", i=temporal_id, t=tenant_id,
+                  s=schedule_id, n=number, u=unpaused)  # fmt: skip
+        if number - 1 <= landed:
+            await client.create_schedule(temporal_id, Schedule(
+                action=ScheduleActionStartWorkflow("Nothing", id=f"{temporal_id}-tick", task_queue=QUEUE),
+                spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(hours=1))]),
+                state=ScheduleState(paused=True)))  # fmt: skip
     return tenant_id, schedule_id
 
 
-@pytest.mark.parametrize("k", (1, 5, 20))
+async def _tombstoned(owner: Any, schedule_id: uuid.UUID) -> None:
+    """The schedule deleted, its deletion settled (no create can be in flight)."""
+    await sql(owner, "update schedules set input = null, deleted_at = now() - interval '1 minute', "
+              "generation = generation + 1, updated_at = now() where id = :s", s=schedule_id)  # fmt: skip
+
+
+@pytest.mark.parametrize("k", (1, 5, 20, 100))
 async def test_incarnations(
     k, server, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
 ) -> None:
-    """One schedule with `k` incarnations: its misses read (a describe each), then, deleted, its tombstone synced (each
-    described; the one found paused, its count read, and deleted)."""
+    """One schedule with `k` incarnations, each sent an unpause once, 3 landed late: its misses read, each incarnation
+    its own item (a describe), pass after pass until all are read; then, deleted, its tombstone synced visit after
+    visit, at most 1 + `EARLIER` incarnations a visit, until it's recorded."""
     tenant_id, schedule_id = await _incarnated(k, owner_sessionmaker, api_sessionmaker, admin_sessionmaker,
-                                               dispatch_sessionmaker, api_settings, server.client)  # fmt: skip
-    await sql(owner_sessionmaker, "update schedules set misses_checked_at = null")
-    await sql(owner_sessionmaker, "update schedules set misses_checked_at = now() where id <> :s", s=schedule_id)
-    await measured(f"misses_{k}_incarnations", 1, server.client,
-                   lambda: schedule_sync.check_misses(dispatch_sessionmaker, server.client))  # fmt: skip
-    await sql(owner_sessionmaker, "update schedules set input = null, deleted_at = now() - interval '1 minute', "
-              "generation = generation + 1, updated_at = now() where id = :s", s=schedule_id)  # fmt: skip
-    await measured(f"tombstone_{k}_incarnations", 1, server.client,
-                   lambda: schedule_sync.sync_one(dispatch_sessionmaker, server.client, Leading(), tenant_id,
-                                                  schedule_id))  # fmt: skip
+                                               dispatch_sessionmaker, api_settings, server.client, unpaused=True,
+                                               landed=min(3, k - 1))  # fmt: skip
+    await sql(owner_sessionmaker, "update schedule_incarnations set misses_checked_at = case when schedule_id = :s "
+              "then null else now() end", s=schedule_id)  # fmt: skip
+    await _visits(f"misses_{k}_incarnations", server.client,
+                  lambda: schedule_sync.check_misses(dispatch_sessionmaker, server.client),
+                  lambda outcome: outcome["checked"] < schedule_sync.BATCH)  # fmt: skip
+    await _tombstoned(owner_sessionmaker, schedule_id)
+    await _visits(f"tombstone_{k}_incarnations", server.client,
+                  lambda: schedule_sync.sync_one(dispatch_sessionmaker, server.client, Leading(), tenant_id,
+                                                 schedule_id),
+                  lambda outcome: outcome != "deleting")  # fmt: skip
 
 
 async def _strays_found(n: int, owner: Any, api: Any, admin: Any, dispatch: Any, settings: Any, client: Client) -> None:
@@ -448,8 +497,9 @@ async def test_whole_cycle_worst_shapes(
     api_settings,
 ) -> None:  # fmt: skip
     """A cycle as `main.cycle` runs it, but for its observe and its reports (the dev server's build is BUILD): dispatch
-    and matching, then every leader pass, each backlog at 50, in its worst shape here: evidence over histories of 1,000
-    events, schedules with 5 incarnations to read misses of, strays found in Temporal."""
+    and matching, then every leader pass, each backlog at 50, each item at its cap (the owner's D16 ruling): evidence
+    over histories of 2,000 events (a describe and `PAGES` pages each), tombstones of 6 incarnations, 5 landed late
+    (a describe and a pause each, 1 + `EARLIER` a visit), 50 incarnations whose misses are due, strays found."""
     full = 50
     await _queued(full, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings)
     await _events(full, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker,
@@ -463,27 +513,20 @@ async def test_whole_cycle_worst_shapes(
     await _cancellable(owner_sessionmaker, server.client, full)
     await _strays_found(full, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker,
                         api_settings, server.client)  # fmt: skip
-    incarnated = [
-        (
-            await _incarnated(
-                5,
-                owner_sessionmaker,
-                api_sessionmaker,
-                admin_sessionmaker,
-                dispatch_sessionmaker,
-                api_settings,
-                server.client,
-            )
-        )[1]
-        for _ in range(full)
-    ]
-    await _schedules(full, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker,
-                     api_settings)  # fmt: skip  # new ones, queued for their sync
-    long = await _evidence(owner_sessionmaker, server.client, full, signals=1_000)
-    # Only the worst shapes due: the misses of the schedules of 5 incarnations (their earlier ones not strays yet), the
-    # strays found in Temporal, the evidence of the long histories (not that of the runs made above)
-    await sql(owner_sessionmaker, "update schedules set misses_checked_at = case when id = any(:ids) then null "
-              "else now() end", ids=incarnated)  # fmt: skip
+    incarnated = []
+    for _ in range(full // 5):  # 50 incarnations whose misses are due
+        _, made = await _incarnated(5, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker,
+                                    api_settings, server.client, unpaused=True)  # fmt: skip
+        incarnated.append(made)
+    for _ in range(full):  # tombstones at their cap
+        _, tombstone = await _incarnated(6, owner_sessionmaker, api_sessionmaker, admin_sessionmaker,
+                                         dispatch_sessionmaker, api_settings, server.client, landed=5)  # fmt: skip
+        await _tombstoned(owner_sessionmaker, tombstone)
+    long = await _evidence(owner_sessionmaker, server.client, full, signals=2_000)
+    # Only these due: the misses of the incarnations of the 5-incarnation schedules, the strays found in Temporal (not
+    # the other schedules' earlier incarnations), the evidence of the long histories (not that of the runs made above)
+    await sql(owner_sessionmaker, "update schedule_incarnations set misses_checked_at = case when schedule_id = "
+              "any(:ids) then null else now() end", ids=incarnated)  # fmt: skip
     await sql(owner_sessionmaker, "update schedule_incarnations set checked_at = now() where schedule_id = any(:ids)",
               ids=incarnated)  # fmt: skip
     await sql(owner_sessionmaker, "update execution_evidence set next_check_at = now() + interval '1 day' "
