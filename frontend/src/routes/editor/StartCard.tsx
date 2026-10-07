@@ -17,7 +17,7 @@ export function StartNode({ data }: NodeProps<Node<StartData, "start">>) {
         tabIndex={data.focusId === item.start ? 0 : -1}
         aria-label={data.editable ? "Start, where every run begins. Add a step that runs first" : "Start, where every run begins"}
         onClick={() => data.editable && data.onItem({ kind: "after", from: null })}
-        className="pointer-events-auto flex h-16 w-[260px] flex-col justify-center rounded-lg border border-dashed border-line-strong bg-surface px-3.5 text-left"
+        className="pointer-events-auto flex h-[64px] w-[260px] flex-col justify-center rounded-lg border border-dashed border-line-strong bg-surface px-3.5 text-left"
       >
         <span className="truncate text-body font-semibold">Start</span>
         <span className="truncate text-small text-muted">By hand, a schedule or a webhook</span>
@@ -30,7 +30,7 @@ export function StartNode({ data }: NodeProps<Node<StartData, "start">>) {
           tabIndex={data.focusId === first ? 0 : -1}
           aria-label="Add the first step"
           onClick={() => data.onItem({ kind: "after", from: null })}
-          className="nodrag nopan pointer-events-auto absolute top-full left-1/2 mt-6 grid size-6 -translate-x-1/2 place-items-center rounded-sm border border-line-strong bg-surface text-body text-muted hover:bg-surface-hover"
+          className="nodrag nopan pointer-events-auto absolute top-full left-1/2 mt-[24px] grid size-[24px] -translate-x-1/2 place-items-center rounded-sm border border-line-strong bg-surface text-body text-muted hover:bg-surface-hover"
         >
           ＋
         </button>

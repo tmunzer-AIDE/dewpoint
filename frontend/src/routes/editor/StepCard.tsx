@@ -5,7 +5,7 @@ import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 import { Fragment } from "react";
 import type { PortRef } from "../../lib/graph";
 import type { GraphNode, NodeType } from "../../lib/workflows";
-import { item, type ItemAction } from "./items";
+import { item, say, type ItemAction } from "./items";
 
 const CODES: Record<string, string> = {
   "flow.if": "IF", "flow.switch": "SWITCH", "flow.loop": "LOOP", "flow.filter": "FILTER", "flow.set_variables": "SET",
@@ -46,7 +46,7 @@ export function StepCardBody({
       tabIndex={tabIndex}
       aria-label={said.join(", ")}
       onClick={onOpen}
-      className={`pointer-events-auto flex h-16 w-[260px] items-center gap-3 rounded-lg bg-surface text-left shadow-node ${border} ${type ? "" : "border-dashed"}`}
+      className={`pointer-events-auto flex h-[64px] w-[260px] items-center gap-3 rounded-lg bg-surface text-left shadow-node ${border} ${type ? "" : "border-dashed"}`}
     >
       <span aria-hidden="true" className="w-12 shrink-0 truncate font-mono text-meta font-semibold text-accent-ink">{typeCode(node.type)}</span>
       <span className="min-w-0 flex-1" aria-hidden="true">
@@ -79,8 +79,9 @@ export type StepData = {
 };
 
 // React Flow turns a node's pointer events off when it can be neither selected nor dragged (ledger M11): its
-// controls take them back, as an edge's "+" does in the label layer.
-const PLUS = "nodrag nopan pointer-events-auto absolute top-full mt-6 grid size-6 -translate-x-1/2 place-items-center rounded-sm border border-line-strong bg-surface text-body text-muted hover:bg-surface-hover";
+// controls take them back, as an edge's "+" does in the label layer. The canvas draws in px, as React Flow lays it
+// out (the UI's rem is 14 px): a card is CARD in size, a "+" 24 square, 24 below its card (pluses.ts counts on it).
+const PLUS = "nodrag nopan pointer-events-auto absolute top-full mt-[24px] grid size-[24px] -translate-x-1/2 place-items-center rounded-sm border border-line-strong bg-surface text-body text-muted hover:bg-surface-hover";
 
 /** The React Flow node: the card, its input on top, a handle per port at the bottom (and one for an edge from a
  * port the type no longer has), each port named when it isn't the only `out`, and a "+" under each free port. */
@@ -117,7 +118,7 @@ export function StepNode({ data }: NodeProps<Node<StepData, "step">>) {
                 type="button"
                 data-item={id}
                 tabIndex={data.focusId === id ? 0 : -1}
-                aria-label={`Add a step after ${node.key}${port === "out" ? "" : ` (${port})`}`}
+                aria-label={say.after(node.key, port)}
                 onClick={() => data.onItem({ kind: "after", from })}
                 className={PLUS}
                 style={{ left: at(i) }}

@@ -2,7 +2,7 @@
 // The editor (screen 1c): the draft, on a canvas, by pointer or keyboard alone (D16), saved as it changes (D17). Task 14
 // adds problems, Task 15 publishing and versions.
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useBlocker } from "@tanstack/react-router";
+import { useBlocker, useLocation, useRouter } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Button } from "../../components/Button";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
@@ -28,7 +28,7 @@ import { Canvas } from "./Canvas";
 import { NAV_KEYS, isPath, navModel, pathTo, step, type NavKey } from "./canvasNav";
 import { checkLabel, checkState, lastOf, type Check } from "./check";
 import { ConnectDialog } from "./ConnectDialog";
-import { item, type ItemAction } from "./items";
+import { addsOf, item, type ItemAction } from "./items";
 import { ProblemsPanel, type PublishProblems } from "./ProblemsPanel";
 import { SaveState } from "./SaveState";
 import { type Problems } from "./StepCard";
@@ -148,6 +148,12 @@ function Editor({
   const [busy, setBusy] = useState<"publishing" | "activating" | null>(null);
   // Nothing changes under a version view, a publication, an activation or an exit.
   const editable = canEdit(role) && sync.status !== "conflict" && !held && viewing === null && busy === null;
+  // Every change asks at the moment it would land, not only when its control opened (the owner's review of 6d7766e):
+  // `editable` as last drawn, an exit agreed to, and the saver's own state, which knows of a conflict before the
+  // screen does.
+  const editing = useRef(editable);
+  editing.current = editable;
+  const mayEdit = () => editing.current && !agreed.current && saver.current?.current.status !== "conflict";
   const shownDoc = viewing ? asGraph(viewing.graph) : doc;
   const downloadMine = () => downloadJson(fileName(workflow.name, ".draft.json"), doc);
 
@@ -161,8 +167,9 @@ function Editor({
   const [leaveQuestion, setLeaveQuestion] = useState<((leave: boolean) => void) | null>(null);
   const deciding = useRef<Promise<boolean> | null>(null);
   const agreed = useRef(false);
-  const decide = useRef((): Promise<boolean> => Promise.resolve(true));
-  decide.current = () => {
+  const agreedBy = useRef<"router" | "guard" | null>(null); // which kind of exit the consent was for
+  const decide = useRef<(by: "router" | "guard") => Promise<boolean>>(() => Promise.resolve(true));
+  decide.current = (by) => {
     if (deciding.current) return deciding.current;
     const run = (async () => {
       const s = saver.current;
@@ -176,6 +183,7 @@ function Editor({
     })().then((leave) => {
       deciding.current = null;
       if (leave) {
+        agreedBy.current ??= by;
         agreed.current = true;
         setHeld(true);
       }
@@ -188,18 +196,35 @@ function Editor({
     () =>
       guardLeaving({
         unsaved: () => saver.current?.unsaved ?? false,
-        decide: () => decide.current(),
+        decide: () => decide.current("guard"),
         stayed: () => {
           agreed.current = false; // the sign-out it agreed to failed: the document is the person's again
+          agreedBy.current = null;
           setHeld(false);
         },
       }),
     [],
   );
+  // Only a navigation away from this editor is an exit: one that keeps it (a hash, a query) asks nothing and holds
+  // nothing (the owner's review of 6d7766e). A router exit agreed to that never completes (its destination sends the
+  // person back here) gives the document back once the router settles here again; a sign-out's hold is released only
+  // by its own `stayed`.
+  const home = useRef(useLocation().pathname);
+  const router = useRouter();
   useBlocker({
-    shouldBlockFn: async () => !(await decide.current()),
+    shouldBlockFn: async ({ next }) => next.pathname !== home.current && !(await decide.current("router")),
     enableBeforeUnload: () => saver.current?.unsaved ?? false,
   });
+  useEffect(
+    () =>
+      router.subscribe("onResolved", ({ toLocation }) => {
+        if (agreedBy.current !== "router" || toLocation.pathname !== home.current) return;
+        agreed.current = false;
+        agreedBy.current = null;
+        setHeld(false);
+      }),
+    [router],
+  );
   const answer = (leave: boolean) => {
     leaveQuestion?.(leave);
     setLeaveQuestion(null);
@@ -311,6 +336,15 @@ function Editor({
   useEffect(() => {
     if (!editable) setPlacing(null); // a click on a read-only canvas places nothing, even one placing began on
   }, [editable]);
+  // An action open when editing stops (a conflict, an exit, a publication) closes, and focus goes back to the canvas:
+  // the item it was on while that's still drawn, else the start card.
+  useEffect(() => {
+    if (editable || (picker === null && connecting === null && asking === null)) return;
+    setPicker(null);
+    setConnecting(null);
+    setAsking(null);
+    focus(shown);
+  }, [editable, picker, connecting, asking, shown]);
   const path = { params: { path: { tenant_id: tenantId, workflow_id: workflow.id } } };
   const readWorkflow = () => ok(client.GET("/api/v1/t/{tenant_id}/workflows/{workflow_id}", path));
   const readVersions = () => ok(client.GET("/api/v1/t/{tenant_id}/workflows/{workflow_id}/versions", path));
@@ -527,7 +561,7 @@ function Editor({
   }
 
   function change(next: GraphDoc, message: string, then?: string) {
-    if (agreed.current) return; // held: an exit was agreed to (the state behind `editable` may not have rendered yet)
+    if (!mayEdit()) return; // read only now: a conflict, an exit agreed to, a version view, a publication
     setHistory((h) => record(h, next));
     saver.current?.change(next);
     announce(message);
@@ -649,7 +683,7 @@ function Editor({
     const t = e.target as HTMLElement;
     if (t.closest("input, textarea, select, dialog")) return;
     e.preventDefault();
-    if (agreed.current) return;
+    if (!mayEdit()) return;
     const next = e.shiftKey ? redo(history) : undo(history);
     if (next === history) return;
     setHistory(next);
@@ -707,7 +741,7 @@ function Editor({
   const open = panel ? findNode(shownDoc, panel) : undefined; // the step of what's on the screen
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col" onKeyDown={onEditorKey} onKeyDownCapture={onEditorKeyCapture}>
+    <div className="@container flex min-h-0 flex-1 flex-col" onKeyDown={onEditorKey} onKeyDownCapture={onEditorKeyCapture}>
       <Toolbar
         tenantId={tenantId}
         name={workflow.name}
@@ -795,7 +829,7 @@ function Editor({
           <Button size="sm" variant="primary" onClick={() => setReloading(true)}>Reload</Button>
         </div>
       )}
-      <div className="flex min-h-0 flex-1">
+      <div className="flex min-h-0 flex-1 @max-3xl:flex-col">
         <div className="relative flex min-h-0 min-w-0 flex-1">
           {placing && editable && (
             // Over the canvas's top edge, never above it: the canvas doesn't move when placing starts or ends, so a
@@ -838,6 +872,8 @@ function Editor({
             }
             expressions={(viewing ? viewing.expressions : (trusted?.expressions ?? [])).filter((x) => x.node !== null && sameId(x.node, open.id))}
             editable={editable}
+            adds={editable ? addsOf(doc, open, portMap.get(idKey(open.id)) ?? []) : []}
+            onAdd={onItem}
             onDelete={() => setAsking({ kind: "node", id: open.id })}
             onConnectPort={(port) => setConnecting({ node: open.id, port })}
             onPlace={() => {

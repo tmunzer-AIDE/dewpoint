@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { expect, it } from "vitest";
 import { ROW } from "./graph";
-import { layout } from "./layout";
+import { CARD, MIN_ZOOM, layout } from "./layout";
 import type { GraphDoc } from "./workflows";
 
 const n = (id: string) => ({ id, key: id, type: "flow.transform@1", position: { x: 900, y: 900 } });
@@ -33,4 +33,11 @@ it("follows an edge whose ends are spelt otherwise than the steps", () => {
   const doc: GraphDoc = { graph_format: 1, nodes: [n(A), n(B)], edges: [e(A.toUpperCase(), B.replace(/-/g, ""))] };
   const at = layout(doc);
   expect([at.get(A)!.y, at.get(B)!.y]).toEqual([ROW, 2 * ROW]);
+});
+
+it("never zooms out past where a card stays a 24 px target (WCAG 2.5.8; the owner's ruling on M26)", () => {
+  // The canvas bounds every way of zooming (wheel, pinch, its buttons, Fit) by MIN_ZOOM: a card, the start card
+  // included, is then at least 24 by 24 on the screen.
+  expect(CARD.height * MIN_ZOOM).toBeGreaterThanOrEqual(24);
+  expect(CARD.width * MIN_ZOOM).toBeGreaterThanOrEqual(24);
 });

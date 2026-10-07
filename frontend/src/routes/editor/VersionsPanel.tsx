@@ -4,6 +4,7 @@
 import { useEffect, useRef } from "react";
 import { Button } from "../../components/Button";
 import { since, type VersionRow } from "../../lib/workflows";
+import { SIDE } from "./side";
 
 export function VersionsPanel({
   versions, publisher, onView, onActivate, onClose,
@@ -22,7 +23,7 @@ export function VersionsPanel({
           onClose();
         }
       }}
-      className="flex w-full max-w-[440px] shrink-0 flex-col gap-4 overflow-y-auto border-l border-line bg-surface p-5"
+      className={`${SIDE} gap-4`}
     >
       <div className="flex items-center justify-between gap-3">
         <h2 id="versions-title" ref={heading} tabIndex={-1} className="text-body-lg font-semibold">Versions</h2>

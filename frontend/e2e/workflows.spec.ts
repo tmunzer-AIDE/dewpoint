@@ -255,6 +255,75 @@ test("each edge's + is reachable by a pointer: reciprocal edges, and a join from
   await importFile(page, "Join", "e2e/fixtures/join.dewpoint.json");
   await eachReachableByPointer(page, ["Insert a step between if (true) and j", "Insert a step between if (false) and j"]);
   await expectAccessible(page, "editor: a join from two ports");
+  // The same join climbing to a step above and to the right (the owner's review of 6d7766e): both edges run up the
+  // same side, and their "+" must still sit apart.
+  await importFile(page, "Join up", "e2e/fixtures/join-up.dewpoint.json");
+  await eachReachableByPointer(page, ["Insert a step between if (true) and j", "Insert a step between if (false) and j"]);
+  await expectAccessible(page, "editor: a join climbing from two ports");
+});
+
+test("zoomed out every way, a step stays a 24 px target, and each + has an unscaled twin in its panel (WCAG 2.5.8)", async ({ page }) => {
+  await importFile(page, "Zoomed join", "e2e/fixtures/join-up.dewpoint.json");
+  const card = page.getByRole("button", { name: /^if, If/ });
+  await expect(card).toBeVisible();
+  const tall = async () => expect((await card.boundingBox())!.height).toBeGreaterThanOrEqual(24);
+  for (let i = 0; i < 12; i++) await page.getByRole("button", { name: "Zoom out" }).click();
+  await tall();
+  await page.getByRole("button", { name: "Fit" }).click();
+  await tall();
+  const pane = (await page.locator(".react-flow__pane").boundingBox())!;
+  await page.mouse.move(pane.x + 40, pane.y + 40);
+  for (let i = 0; i < 12; i++) await page.mouse.wheel(0, 600);
+  await tall();
+  // The canvas's "+" scale with it; its panel offers each of them at full size.
+  await card.click();
+  const panel = page.getByRole("complementary", { name: "if" });
+  await panel.getByRole("button", { name: "Insert a step between if (false) and j", exact: true }).click();
+  await page.getByRole("dialog", { name: "Add a step" }).getByRole("option", { name: /flow\.transform@1/ }).click();
+  await expect(page.getByRole("button", { name: /^transform, Transform/ })).toHaveCount(1);
+  await expectAccessible(page, "editor: zoomed out, a step's panel");
+});
+
+test("at 320 px a panel leaves the canvas room: Go to shows its step, and a step is placed with a click", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 720 });
+  await newWorkflow(page, "Narrow flow");
+  await page.getByRole("button", { name: "Add the first step" }).click();
+  await page.getByRole("option", { name: /flow\.transform@1/ }).click();
+  const problems = page.getByRole("button", { name: /^Problems · \d+$/ });
+  await expect(problems).toBeVisible({ timeout: 10_000 });
+  const step = page.getByRole("button", { name: /^transform, Transform, \d+ problems?/ });
+  // Drag the canvas until the step is off it entirely.
+  const canvas = page.getByRole("group", { name: "Workflow steps" });
+  for (let i = 0; i < 4; i++) {
+    const box = (await canvas.boundingBox())!;
+    await page.mouse.move(box.x + box.width - 8, box.y + 8);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 8, box.y + 8, { steps: 8 });
+    await page.mouse.up();
+  }
+  await expect(step).not.toBeInViewport();
+  await problems.click();
+  const panel = page.getByRole("complementary", { name: "Problems" });
+  await expect(panel).toBeVisible();
+  expect((await canvas.boundingBox())!.width).toBeGreaterThan(200); // the panel leaves the canvas room
+  await expectAccessible(page, "editor at 320 px: the problems panel");
+  await panel.getByRole("button", { name: "Go to transform" }).click();
+  await expect(step).toBeFocused();
+  await expect(step).toBeInViewport({ ratio: 0.5 });
+  // Placed with a click at 320 px: the panel's Place, then a click on the canvas, where the step lands and shows.
+  await step.click();
+  await page.getByRole("button", { name: "Place on the canvas…" }).click();
+  // An empty place: the first point of a grid over the canvas where the pane itself, not a card or a control, is hit.
+  const box = (await canvas.boundingBox())!;
+  const grid = [0.5, 0.35, 0.65, 0.2, 0.8].flatMap((fy) => [0.5, 0.3, 0.7].map((fx) => ({ x: box.x + box.width * fx, y: box.y + box.height * fy })));
+  const hits = await page.evaluate((points) => points.map(({ x, y }) => document.elementFromPoint(x, y)?.classList.contains("react-flow__pane") ?? false), grid);
+  const at = grid[hits.indexOf(true)]!;
+  await page.mouse.click(at.x, at.y);
+  await expect(page.getByText("Click an empty place on the canvas")).toHaveCount(0);
+  await expect(step).toBeInViewport({ ratio: 0.5 });
+  const placed = (await step.boundingBox())!;
+  expect(Math.abs(placed.y + placed.height / 2 - at.y)).toBeLessThan(8); // centred on the click
+  await page.setViewportSize({ width: 1280, height: 720 });
 });
 
 const overlaps = (a: { x: number; y: number; width: number; height: number }, b: typeof a) =>

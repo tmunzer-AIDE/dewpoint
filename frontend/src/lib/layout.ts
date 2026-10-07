@@ -6,6 +6,10 @@ import { START, edgesOf, entries, idKey, nodesOf } from "./graph";
 import type { GraphDoc } from "./workflows";
 
 export const CARD = { width: 260, height: 64 };
+/** The farthest the canvas zooms out, by any way (wheel, pinch, its buttons, Fit): where a card is still 24 px tall on the
+ * screen, a pointer target WCAG 2.5.8 needs no spacing for (0.4 × 64 = 25.6). Each "+" scales below that; a step's
+ * panel offers them unscaled (the owner's ruling on M26). */
+export const MIN_ZOOM = 0.4;
 
 export function layout(doc: GraphDoc): Map<string, { x: number; y: number }> {
   const g = new dagre.graphlib.Graph<object, NodeLabel, object>();

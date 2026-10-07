@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { render, screen } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
+import { CARD } from "../../lib/layout";
 import { StepCardBody, typeCode } from "./StepCard";
 
 const node = { id: "n1", key: "get_device", type: "flow.transform@1" };
@@ -38,4 +39,12 @@ it("takes the pointer even where React Flow turns a node's off (a step a viewer 
   render(<StepCardBody node={node} type={TRANSFORM} problems={{ errors: 0, warnings: 0 }} separate={0} current={false} tabIndex={0} onOpen={vi.fn()} />);
   // @xyflow/react 12.12.0 sets `pointer-events: none` on a node that is neither selectable nor draggable (ledger M11).
   expect(screen.getByRole("button").className).toMatch(/(?:^|\s)pointer-events-auto(?:\s|$)/);
+});
+
+it("draws a card at the layout's size in px, as the canvas's other units are (the UI's rem is 14 px)", () => {
+  // In rem (h-16) a card was 56 px tall while the layout, the "+" placement and the farthest zoom counted 64.
+  render(<StepCardBody node={node} type={TRANSFORM} problems={{ errors: 0, warnings: 0 }} separate={0} current={false} tabIndex={0} onOpen={vi.fn()} />);
+  const card = screen.getByRole("button");
+  expect(card.className).toContain(`h-[${CARD.height}px]`);
+  expect(card.className).toContain(`w-[${CARD.width}px]`);
 });

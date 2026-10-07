@@ -7,6 +7,7 @@ import { useEffect, useRef } from "react";
 import { Button } from "../../components/Button";
 import type { Diagnostic, Validation } from "../../lib/workflows";
 import type { CheckState } from "./check";
+import { SIDE } from "./side";
 
 /** What only publish found, with the snapshot it was found in: the saved revision, and the editor's generation. */
 export type PublishProblems = { revision: number; generation: number; diagnostics: Diagnostic[] };
@@ -58,7 +59,7 @@ export function ProblemsPanel({
           onClose();
         }
       }}
-      className="flex w-full max-w-[440px] shrink-0 flex-col gap-5 overflow-y-auto border-l border-line bg-surface p-5"
+      className={`${SIDE} gap-5`}
     >
       <div className="flex items-center justify-between gap-3">
         <h2 id="problems-title" ref={heading} tabIndex={-1} className="text-body-lg font-semibold">Problems</h2>

@@ -13,12 +13,13 @@ import { Button } from "../../components/Button";
 import {
   START, drawableEdges, entries, idKey, nodesOf, portOf, portsOf, pos, sameId, startPosition, type PortRef,
 } from "../../lib/graph";  // prettier-ignore
-import { CARD } from "../../lib/layout";
-import type { GraphDoc, NodeType } from "../../lib/workflows";
+import { CARD, MIN_ZOOM } from "../../lib/layout";
+import type { GraphDoc, GraphEdge, NodeType } from "../../lib/workflows";
 import { FlowEdge, type FlowData } from "./FlowEdge";
-import { item, type ItemAction } from "./items";
+import { item, say, type ItemAction } from "./items";
 import { StartNode, type StartData } from "./StartCard";
 import { StepNode, type Problems, type StepData } from "./StepCard";
+import { PLUS, Pluses, placePluses, type Box, type Point } from "./pluses";
 import { mustReveal } from "./reveal";
 
 const nodeTypes = { step: StepNode, start: StartNode } satisfies NodeTypes;
@@ -69,19 +70,45 @@ function build(p: CanvasProps): { nodes: Node[]; edges: Edge[] } {
       return { id: idKey(n.id), type: "step", position: pos(n), draggable: p.editable, selectable: false, data, ...SIZE };
     }),
   ];
-  const flow = (id: string, label: string, action: ItemAction): FlowData => ({ item: id, label, action, focusId: p.focusId, editable: p.editable, onItem: p.onItem });
+  const flow = (id: string, label: string, action: ItemAction, lane = 0): FlowData => ({ item: id, label, action, focusId: p.focusId, editable: p.editable, lane, onItem: p.onItem });
+  const laneOf = (e: GraphEdge) => {
+    const n = nodesOf(p.doc).find((m) => idKey(m.id) === idKey(e.from.node));
+    return n ? Math.max(0, portsOf(n, p.types.get(n.type)).indexOf(portOf(e))) : 0;
+  };
   const edges: Edge[] = [
     ...entries(p.doc).map((n): Edge => ({
       id: item.entry(n.id), source: START, sourceHandle: "out", target: idKey(n.id), type: "flow",
-      data: flow(item.entry(n.id), `Insert a step before ${n.key}`, { kind: "before", entry: n.id }),
+      data: flow(item.entry(n.id), say.before(n.key), { kind: "before", entry: n.id }),
     })),
     ...drawableEdges(p.doc).map((e): Edge => ({
       id: item.edge(e), source: idKey(e.from.node), sourceHandle: portOf(e), target: idKey(e.to.node), type: "flow",
       // Named by its port when it isn't `out`: two edges from one step to the same one (a branch's join) read apart.
-      data: flow(item.edge(e), `Insert a step between ${keyOf.get(idKey(e.from.node)) ?? "a step"}${portOf(e) === "out" ? "" : ` (${portOf(e)})`} and ${keyOf.get(idKey(e.to.node)) ?? "a step"}`, { kind: "insert", edge: e }),
+      data: flow(item.edge(e), say.insert(keyOf.get(idKey(e.from.node)) ?? "a step", portOf(e), keyOf.get(idKey(e.to.node)) ?? "a step"), { kind: "insert", edge: e }, laneOf(e)),
     })),
   ];  // prettier-ignore
   return { nodes, edges };
+}
+
+/** What a "+" keeps off (pluses.ts): every card as drawn, and each "+" a card has under a free port, or the start
+ * card's before the first step: where StepCard and StartCard put them, 24 below the card. */
+function obstacles(nodes: Node[]): Box[] {
+  const boxes: Box[] = [];
+  const plus = (c: Point): Box => ({ left: c.x - PLUS / 2, top: c.y - PLUS / 2, right: c.x + PLUS / 2, bottom: c.y + PLUS / 2 });
+  for (const n of nodes) {
+    const w = n.measured?.width ?? CARD.width;
+    const h = n.measured?.height ?? CARD.height;
+    const { x, y } = n.position;
+    boxes.push({ left: x, top: y, right: x + w, bottom: y + h });
+    const below = y + h + 24 + PLUS / 2;
+    if (n.type === "step") {
+      const d = n.data as StepData;
+      if (d.editable)
+        d.ports.forEach((port, i) => {
+          if (!d.connected.includes(port)) boxes.push(plus({ x: x + (w * (i + 1)) / (d.ports.length + 1), y: below }));
+        });
+    } else if ((n.data as StartData).empty && (n.data as StartData).editable) boxes.push(plus({ x: x + w / 2, y: below }));
+  }
+  return boxes;
 }
 
 function Flow(p: CanvasProps) {
@@ -90,6 +117,30 @@ function Flow(p: CanvasProps) {
   const container = useRef<HTMLDivElement>(null);
   const built = useMemo(() => build(p), [p]);
   const [nodes, setNodes] = useState(built.nodes);
+  // Every "+" placed at once, from the line each edge reports and the cards as drawn (pluses.ts).
+  const [lines, setLines] = useState(() => new Map<string, { label: Point; points: Point[] }>());
+  const report = useCallback(
+    (id: string, label: Point, points: Point[]) =>
+      setLines((drawn) => {
+        const was = drawn.get(id);
+        if (was && was.label.x === label.x && was.label.y === label.y && JSON.stringify(was.points) === JSON.stringify(points)) return drawn;
+        return new Map(drawn).set(id, { label, points });
+      }),
+    [],
+  );
+  const forget = useCallback(
+    (id: string) =>
+      setLines((drawn) => {
+        if (!drawn.has(id)) return drawn;
+        const rest = new Map(drawn);
+        rest.delete(id);
+        return rest;
+      }),
+    [],
+  );
+  const cards = useMemo(() => obstacles(nodes), [nodes]);
+  const placed = useMemo(() => placePluses([...lines].map(([id, line]) => ({ id, ...line })), cards), [lines, cards]);
+  const pluses = useMemo(() => ({ report, forget, placed }), [report, forget, placed]);
   // A rebuilt node keeps the size React Flow measured: one without it is hidden until measured again, and a press
   // that re-renders the editor (focus moves to what was pressed) would then release over the pane (ledger M11).
   useEffect(
@@ -155,41 +206,43 @@ function Flow(p: CanvasProps) {
 
   return (
     <div ref={container} role="group" aria-label="Workflow steps" onKeyDown={p.onKeyDown} onFocus={onFocus} className="canvas-frame relative min-h-0 min-w-0 flex-1">
-      <ReactFlow
-        nodes={nodes}
-        edges={built.edges}
-        nodeTypes={nodeTypes}
-        edgeTypes={edgeTypes}
-        onNodesChange={onNodesChange}
-        onNodeDragStop={(_, __, dragged) => p.onMove(new Map(dragged.map((n) => [n.id, n.position])))}
-        onConnect={(c) => {
-          if (c.source && c.source !== START && c.sourceHandle && c.target) p.onConnect({ node: c.source, port: c.sourceHandle }, c.target);
-        }}
-        nodesDraggable={p.editable}
-        nodesConnectable={p.editable}
-        elementsSelectable={false}
-        nodesFocusable={false}
-        edgesFocusable={false}
-        disableKeyboardA11y
-        deleteKeyCode={null}
-        selectionKeyCode={null}
-        multiSelectionKeyCode={null}
-        panActivationKeyCode={null}
-        zoomActivationKeyCode={null}
-        zoomOnDoubleClick={false}
-        minZoom={0.25}
-        maxZoom={1.5}
-        fitView
-        fitViewOptions={{ padding: 0.2, maxZoom: 1 }}
-        proOptions={{ hideAttribution: true }}
-        onPaneClick={(e) => {
-          if (p.placing) p.onPlace(flow.screenToFlowPosition({ x: e.clientX, y: e.clientY }));
-        }}
-        className={p.placing ? "canvas-placing" : undefined}
-      >
-        <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
-        {p.overview && <MiniMap pannable zoomable ariaLabel="Overview of the steps" nodeClassName="canvas-minimap-node" />}
-      </ReactFlow>
+      <Pluses.Provider value={pluses}>
+        <ReactFlow
+          nodes={nodes}
+          edges={built.edges}
+          nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
+          onNodesChange={onNodesChange}
+          onNodeDragStop={(_, __, dragged) => p.onMove(new Map(dragged.map((n) => [n.id, n.position])))}
+          onConnect={(c) => {
+            if (c.source && c.source !== START && c.sourceHandle && c.target) p.onConnect({ node: c.source, port: c.sourceHandle }, c.target);
+          }}
+          nodesDraggable={p.editable}
+          nodesConnectable={p.editable}
+          elementsSelectable={false}
+          nodesFocusable={false}
+          edgesFocusable={false}
+          disableKeyboardA11y
+          deleteKeyCode={null}
+          selectionKeyCode={null}
+          multiSelectionKeyCode={null}
+          panActivationKeyCode={null}
+          zoomActivationKeyCode={null}
+          zoomOnDoubleClick={false}
+          minZoom={MIN_ZOOM}
+          maxZoom={1.5}
+          fitView
+          fitViewOptions={{ padding: 0.2, minZoom: MIN_ZOOM, maxZoom: 1 }}
+          proOptions={{ hideAttribution: true }}
+          onPaneClick={(e) => {
+            if (p.placing) p.onPlace(flow.screenToFlowPosition({ x: e.clientX, y: e.clientY }));
+          }}
+          className={p.placing ? "canvas-placing" : undefined}
+        >
+          <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
+          {p.overview && <MiniMap pannable zoomable ariaLabel="Overview of the steps" nodeClassName="canvas-minimap-node" />}
+        </ReactFlow>
+      </Pluses.Provider>
       <div data-canvas-overlay className="absolute bottom-4 left-4 flex items-center gap-1.5">
         {p.editable && (
           <Button size="md" onClick={p.onLayout}>
@@ -198,7 +251,7 @@ function Flow(p: CanvasProps) {
         )}
         <Button size="md" aria-label="Zoom in" onClick={() => void flow.zoomIn({ duration: 0 })}>＋</Button>
         <Button size="md" aria-label="Zoom out" onClick={() => void flow.zoomOut({ duration: 0 })}>−</Button>
-        <Button size="md" onClick={() => void flow.fitView({ padding: 0.2, maxZoom: 1, duration: 0 })}>Fit</Button>
+        <Button size="md" onClick={() => void flow.fitView({ padding: 0.2, minZoom: MIN_ZOOM, maxZoom: 1, duration: 0 })}>Fit</Button>
         <span className="ml-1.5 font-mono text-small text-muted">{Math.round(zoom * 100)}%</span>
       </div>
     </div>

@@ -6,6 +6,8 @@
 import { useEffect, useRef } from "react";
 import { Button } from "../../components/Button";
 import type { Diagnostic, Expression, GraphNode, NodeType } from "../../lib/workflows";
+import type { ItemAction } from "./items";
+import { SIDE } from "./side";
 
 const EFFECTS: Record<NodeType["side_effect"], string> = {
   none: "Changes nothing",
@@ -24,11 +26,12 @@ const NUDGES: { key: Nudge; glyph: string; word: string }[] = [
 ];
 
 export function StepPanel({
-  node, type, ports, problems, expressions, editable, onDelete, onConnectPort, onPlace, onNudge, onClose,
+  node, type, ports, problems, expressions, editable, adds, onAdd, onDelete, onConnectPort, onPlace, onNudge, onClose,
 }: {
   node: GraphNode; type: NodeType | undefined; ports: string[]; problems: Diagnostic[] | null; expressions: Expression[];
-  editable: boolean; onDelete: () => void; onConnectPort: (port: string) => void; onPlace: () => void;
-  onNudge: (key: Nudge) => void; onClose: () => void;
+  editable: boolean; adds: { label: string; action: ItemAction }[]; onAdd: (action: ItemAction) => void;
+  onDelete: () => void; onConnectPort: (port: string) => void; onPlace: () => void; onNudge: (key: Nudge) => void;
+  onClose: () => void;
 }) {  // prettier-ignore
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => heading.current?.focus(), [node.id]);
@@ -41,7 +44,7 @@ export function StepPanel({
           onClose();
         }
       }}
-      className="flex w-full max-w-[440px] shrink-0 flex-col gap-5 overflow-y-auto border-l border-line bg-surface p-5"
+      className={`${SIDE} gap-5`}
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
@@ -93,6 +96,14 @@ export function StepPanel({
             ))}
           </ul>
         </section>
+      )}
+      {editable && adds.length > 0 && (
+        // Each "+" this step has on the canvas, at full size whatever the zoom (WCAG 2.5.8: their equivalents).
+        <div role="group" aria-label="Add a step" className="flex flex-col items-start gap-2">
+          {adds.map((a) => (
+            <Button key={a.label} size="sm" onClick={() => onAdd(a.action)}>{a.label}</Button>
+          ))}
+        </div>
       )}
       {editable && (
         <div role="group" aria-label={`Where ${node.key} sits`} className="flex flex-wrap items-center gap-2">

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { Outlet, RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
+import { Outlet, RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter, redirect } from "@tanstack/react-router";
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -111,8 +111,17 @@ async function show({ seed }: { seed?: (qc: QueryClient) => void } = {}) {
     path: "/t/$tenantId/workflows/$workflowId",
     component: () => <EditorPage tenantId="t1" workflowId="w1" />,
   });
+  // A page whose loading sends the person straight back to the editor: an exit that never completes.
+  const away = createRoute({
+    getParentRoute: () => root,
+    path: "/away",
+    beforeLoad: () => {
+      // eslint-disable-next-line @typescript-eslint/only-throw-error -- TanStack Router's redirect is thrown, by design
+      throw redirect({ to: "/t/$tenantId/workflows/$workflowId", params: { tenantId: "t1", workflowId: "w1" } });
+    },
+  });
   const router = createRouter({
-    routeTree: root.addChildren([list, editor]),
+    routeTree: root.addChildren([list, editor, away]),
     history: createMemoryHistory({ initialEntries: ["/t/t1/workflows/w1"] }),
   });
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -261,6 +270,23 @@ it("closes a step's panel when undo removes its step, and gives focus to what re
   await userEvent.keyboard("{Control>}z{/Control}");
   expect(screen.queryByRole("complementary")).toBeNull();
   await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "transform" })));
+});
+
+it("offers each of a step's + in its panel, at full size, opening the picker as the + does (WCAG 2.5.8)", async () => {
+  await withTwoSteps();
+  await userEvent.click(screen.getByRole("button", { name: "transform" }));
+  const adds = () => within(screen.getByRole("complementary", { name: "transform" })).getByRole("group", { name: "Add a step" });
+  expect(within(adds()).getAllByRole("button").map((b) => b.textContent)).toEqual([
+    "Insert a step before transform",
+    "Insert a step between transform and transform_2",
+  ]);
+  await userEvent.click(within(adds()).getByRole("button", { name: "Insert a step between transform and transform_2" }));
+  await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
+  const doc = drawn.at(-1)!.doc;
+  const keyOf = (id: string) => doc.nodes!.find((n) => n.id === id)!.key;
+  expect(doc.edges!.map((e) => `${keyOf(e.from.node)}->${keyOf(e.to.node)}`).sort()).toEqual(["transform->transform_3", "transform_3->transform_2"]);
+  await userEvent.click(screen.getByRole("button", { name: "transform_2" }));
+  expect(within(screen.getByRole("complementary", { name: "transform_2" })).getByRole("group", { name: "Add a step" }).textContent).toBe("Add a step after transform_2");
 });
 
 it("leaves focus in a step's panel when undo keeps its step", async () => {
@@ -753,6 +779,63 @@ it("shows what only publish checks, in the problems panel, marked", async () => 
   await confirmPublish(1);
   const panel = await screen.findByRole("complementary", { name: "Problems" });
   expect(within(panel).getByRole("region", { name: "Found at publish" }).textContent).toContain("That connection doesn't exist.");
+});
+
+// Editing that stops while an action is open stops the action too (the owner's review of 6d7766e, correction 1): its
+// dialog closes, nothing it would have added lands, and focus goes back to the canvas.
+describe("a conflict that arrives while an action is open", () => {
+  it.each([
+    { action: "the step picker", key: "a", dialog: "Add a step" },
+    { action: "the connect dialog", key: "c", dialog: "Connect transform_2 to" },
+    { action: "the delete question", key: "{Delete}", dialog: "Delete a step" },
+  ])("closes $action, changes nothing and gives focus back to the step", async ({ key, dialog }) => {
+    await withTwoSteps();
+    let release: ((r: Response) => void) | undefined;
+    answers.set(`PUT ${BASE}/draft`, () => new Promise<Response>((r) => (release = r)));
+    screen.getByRole("button", { name: "transform_2" }).focus();
+    await userEvent.keyboard("{Shift>}{ArrowDown}{/Shift}"); // an edit, whose save the server holds
+    await vi.waitFor(() => expect(release).toBeDefined(), { timeout: 3000 });
+    screen.getByRole("button", { name: "transform_2" }).focus();
+    await userEvent.keyboard(key);
+    const open = screen.getByRole("dialog", { name: dialog });
+    const keys = () => drawn.at(-1)!.doc.nodes!.map((n) => n.key);
+    const before = keys();
+    release!(json({ error: "draft_conflict", draft_revision: 5 }, 409));
+    await screen.findByRole("alert");
+    await vi.waitFor(() => expect(open.isConnected && open.hasAttribute("open")).toBe(false));
+    expect(steps().dataset.editable).toBe("false");
+    expect(keys()).toEqual(before);
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "transform_2" })));
+  });
+});
+
+// Only leaving the editor is an exit (the owner's review of 6d7766e, correction 2): a navigation that keeps it asks
+// nothing and holds nothing, and an exit that never completes gives the document back.
+describe("navigations that keep the editor", () => {
+  it.each([
+    { what: "a hash", to: { hash: "notes" } },
+    { what: "a query", to: { search: { panel: "versions" } } },
+  ])("leave it editable when only $what changes", async ({ to }) => {
+    const { router } = await show();
+    await addTransform();
+    await act(() => router.navigate({ to: "/t/$tenantId/workflows/$workflowId", params: { tenantId: "t1", workflowId: "w1" }, ...to }));
+    expect(router.state.location.pathname).toBe("/t/t1/workflows/w1");
+    expect(steps().dataset.editable).toBe("true");
+    await userEvent.click(screen.getByRole("button", { name: "after transform" }));
+    await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
+    expect(screen.getByRole("button", { name: "transform_2" })).toBeTruthy();
+  });
+
+  it("gives the document back when an exit doesn't complete", async () => {
+    const { router } = await show();
+    await addTransform();
+    act(() => router.history.push("/away")); // through the blocker: agreed to, then sent back here
+    await vi.waitFor(() => expect(router.state.location.pathname).toBe("/t/t1/workflows/w1"));
+    await vi.waitFor(() => expect(steps().dataset.editable).toBe("true"));
+    await userEvent.click(screen.getByRole("button", { name: "after transform" }));
+    await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
+    expect(screen.getByRole("button", { name: "transform_2" })).toBeTruthy();
+  });
 });
 
 // What changes without a key being pressed is said (WCAG 4.1.3): a save that failed, and a notice, through a live
