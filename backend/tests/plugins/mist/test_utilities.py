@@ -118,7 +118,7 @@ def test_each_output_is_its_contracts() -> None:
     assert set(bounded["required"]) == {"accepted", "session", "lines", "received", "ended_by", "completion_known",
                                         "truncated"}  # fmt: skip
     assert bounded["properties"]["ended_by"]["enum"] == ["finished", "idle", "max_duration"]
-    terminal = node_manifest(node("mist.site_devices.show_arp"))["output_schema"]
+    terminal = node_manifest(node("mist.site_devices.show_service_path"))["output_schema"]
     assert terminal["properties"]["ended_by"] == {"const": "finished"}
     assert terminal["properties"]["completion_known"] == {"const": True}
     accepted = node_manifest(node("mist.site_devices.cable_test"))["output_schema"]
@@ -199,7 +199,7 @@ def test_an_unmet_condition_is_a_retry_only_for_a_repeatable_diagnostic() -> Non
 async def test_a_terminal_table_succeeds_on_its_evidence() -> None:
     table = {"status": "SUCCESS", "finished": True, "rows": [{"ip_address": "192.168.1.1"}]}
     step, _ = mist("gateway", None, line(json.dumps(table)))
-    out = await run("mist.site_devices.show_arp", step, body={"node": "node0"})
+    out = await run("mist.site_devices.show_service_path", step, body={"node": "node0"})
     assert (out["ended_by"], out["completion_known"]) == ("finished", True)
 
 
@@ -400,3 +400,10 @@ def test_a_trailing_newline_isnt_one_word(type_: str, body: Any) -> None:
     Python and JavaScript alike."""
     with pytest.raises(ValueError):
         node(type_).Config.model_validate(_config(type_, body))
+
+
+async def test_show_arp_returns_text_output_on_idle() -> None:
+    """A switch's and an SRX's show ARP (the test org, 2026-10-07): text, no finished table; a bounded collection."""
+    step, _ = mist("switch", None, line("Address  Hardware-Address  Interface\n"), line("10.0.0.1 aa:bb  ge-0/0/1\n"))
+    out = await run("mist.site_devices.show_arp", step)
+    assert (out["ended_by"], out["completion_known"], out["received"]) == ("idle", False, 2)

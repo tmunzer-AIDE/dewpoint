@@ -954,3 +954,33 @@ its protection checked by disabling it. A technical review; the rulings above st
   hold "x\n", and the run refuses it before the connection opens (`mist.invalid_path_value`, `client.path`'s
   `fullmatch`). At 4cee8c8: 245 tests (core egress, the worker's network, streams, plugin calls and the utilities'
   RunGraph proof), ruff, format, mypy, import contracts. Not rerun: the full suite, CodeQL.
+
+The device runs (2026-10-07, diagnostics only, on the owner's go; the probe ran in this session; reports in the owner's
+home, mode 600, holding outcomes, counts and message shapes, never a value):
+- Run 1 (bd03de3): every streaming diagnostic on the four devices ended `mist.no_output`; the subscription was
+  acknowledged and each POST answered a `session`. Traced by shape: each output is a JSON string holding an envelope
+  whose channel names the device by its MAC, `/sites/<site>/devices/<mac>/cmd`, the MAC its id
+  `00000000-0000-0000-1000-<mac>` ends with, the session ours. Fixed (f4aebdf): that name is the device's command
+  channel too, at either level; another device's MAC, another site or another channel is still discarded.
+- Run 2 (f0806ea): 24 ok, 26 failed, 6 skipped (service ping and DHCP leases need a name of the org's).
+  - Every SRX and SSR table (OSPF database, interfaces, neighbors and summary, routes, BGP summary, forwarding table,
+    sessions, service path, ARP) ended on `"finished": true` with `"status": "SUCCESS"` within seconds, so the bounded
+    collections among them reported their completion; no table had text after it.
+  - Pings ended on idle, traceroutes at the 30 s maximum, the switch's MAC table on idle (73 messages).
+  - Show ARP on the switch and the SRX sent text (19 or more messages), no finished table: its terminal-evidence
+    contract failed every time (`mist.completion_unknown`).
+  - Commands to which a device sent nothing ended `mist.no_output` with only the acknowledgement seen: ARP, BGP
+    summary, 802.1X, EVPN and forwarding table on the switch; ARP, 802.1X, EVPN, MAC table, sessions and service path
+    on the SRX; ARP, 802.1X, EVPN, MAC table and DNS on the SSR; most of the AP's.
+  - The AP's output came after 30 s that time: another session's output (its earlier command's) reached the next
+    command's window, where it was discarded. Run 3 measured the AP alone: ping and ARP answered within 1 to 2 s and
+    succeeded. The 30 s first-message wait stays; a late answer fails `mist.no_output` and is retried.
+  - `mist.bad_request`: DNS resolution on the SRX (an SSR command; the review's device types are coarse, `gateway`);
+    the forwarding table on the SSR.
+- Ruling (changed after run 2, awaiting the owner's sign-off): show ARP is a bounded collection, no longer stream
+  terminal evidence - the docs' finished-table sample doesn't hold for a switch or an SRX; it still ends early, with
+  its completion known, when a finished table comes - cost if wrong: none for safety; a run that ends on idle doesn't
+  claim the table was complete. Show service path and show session keep their terminal evidence, which the SSR sent.
+  Run 4 (show ARP on the switch and the SRX): both ok, ended on idle (39 and 71 messages).
+- Still unverified: bounce port's answer and stream (no disruptive utility ran); a `subscribe_failed` detail (none
+  came); a device answer without `type` (every device had one).

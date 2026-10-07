@@ -18,7 +18,9 @@ DISRUPTIVE = {
     "clearBpduErrorsFromPortsOnSwitch", "clearSiteDeviceDot1xSession", "releaseSiteDeviceDhcpLease",
     "releaseSiteSsrDhcpLease", "clearSiteDeviceSession", "clearSiteSsrArpCache", "clearSiteSsrBgpRoutes",
 }  # fmt: skip
-TERMINAL = {"showSiteDeviceArpTable", "showSiteSsrServicePath", "showSiteSsrAndSrxSessions"}
+# Show ARP's docs sample is a finished table, but a switch and an SRX of the test org send text (2026-10-07): it's a
+# bounded collection, which still ends early on the evidence when a table comes.
+TERMINAL = {"showSiteSsrServicePath", "showSiteSsrAndSrxSessions"}
 REST_ONLY = {"bounceDevicePort", "clearAllLearnedMacsFromPortOnSwitch", "clearBpduErrorsFromPortsOnSwitch",
              "releaseSiteDeviceDhcpLease", "clearSiteDeviceSession"}  # fmt: skip
 HELD_BACK = {

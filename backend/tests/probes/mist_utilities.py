@@ -133,10 +133,12 @@ class Trace:
     session: str | None = None
     messages: list[dict[str, Any]] = field(default_factory=list)
     answer_keys: list[str] = field(default_factory=list)
+    started: float = 0.0  # the run's start, `time.monotonic()`
 
     def record(self, text: str) -> None:
         if len(self.messages) < TRACED:
-            self.messages.append(shape(text, self.channel, self.session))
+            found = shape(text, self.channel, self.session)
+            self.messages.append({**found, "at": round(time.monotonic() - self.started, 1)})  # seconds into the run
 
 
 TRACE = Trace()
@@ -331,6 +333,7 @@ async def probe(
                     [],
                     [],
                 )
+                TRACE.started = time.monotonic()
                 stream._finished = _watched(tables)  # type: ignore[assignment]
                 began = time.monotonic()
                 try:
@@ -424,9 +427,12 @@ def main() -> None:
     parser.add_argument("--rate", type=float, default=1.0, help="utilities a second, at most")
     parser.add_argument("--max-duration", type=int, default=30, help="seconds a collection may take, at most")
     parser.add_argument("--only", action="append", help="a node type to run, for `run`; repeat for several")
+    parser.add_argument("--first-wait", type=float, help="seconds to wait for a command's first output (30)")
     args = parser.parse_args()
     if args.command == "run" and (not args.device or not args.report):
         sys.exit("run needs --device and --report")
+    if args.first_wait is not None:
+        stream.FIRST_S = args.first_wait  # to measure how long a device takes, not to change the node
     token = Path(args.token_file).expanduser().read_text().strip()
     if not token:
         sys.exit("the token file is empty")

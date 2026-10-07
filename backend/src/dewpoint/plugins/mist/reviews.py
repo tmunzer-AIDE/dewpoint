@@ -320,10 +320,11 @@ UTILITIES: tuple[Utility, ...] = (
     Utility("arpFromDevice", "mist.site_devices.arp", "diagnostic", "bounded_collection", ALL, ("node",), DURATION,
             READS, f"ARP performed on the device (Utilities Common); {STREAMED}; the docs sample is a text table and "
             f"{UNENDED}"),
-    Utility("showSiteDeviceArpTable", "mist.site_devices.show_arp", "diagnostic", "stream_terminal_evidence", LAN_WAN,
+    Utility("showSiteDeviceArpTable", "mist.site_devices.show_arp", "diagnostic", "bounded_collection", LAN_WAN,
             ("ip", "node", "port_id", "vrf"), DURATION, READS,
             f"the ARP table from the device (Utilities LAN, its `node` required for gateways); {STREAMED}; the docs "
-            'sample ends its table with "finished": true and "status": "SUCCESS": stream terminal evidence'),
+            'sample ends a table with "finished": true, but a switch and an SRX of the test org sent text without one '
+            "(2026-10-07): a bounded collection, which ends early on that evidence when it comes"),
     Utility("showSiteDeviceBgpSummary", "mist.site_devices.show_bgp_summary", "diagnostic", "bounded_collection",
             LAN_WAN, ("node",), DURATION, READS,
             f'"Get BGP Summary from SSR, SRX and Switch"; {STREAMED}; the docs sample is text and {UNENDED}'),

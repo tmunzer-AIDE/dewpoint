@@ -154,3 +154,9 @@ def test_a_nested_envelopes_shape_is_traced_one_level_down() -> None:
 )
 def test_a_channels_form_names_its_parts_never_their_values(named: str, form: str) -> None:
     assert mist_utilities.channel_form(named, SITE, SWITCH) == form
+
+
+def test_a_traced_message_records_when_it_came() -> None:
+    trace = mist_utilities.Trace(channel=f"/sites/{SITE}/devices/{SWITCH}/cmd", session="s1", started=0.0)
+    trace.record(json.dumps({"event": "data", "channel": trace.channel, "data": {"session": "s1", "raw": "x"}}))
+    assert set(trace.messages[0]) >= {"at"} and isinstance(trace.messages[0]["at"], float)
