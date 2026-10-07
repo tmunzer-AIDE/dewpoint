@@ -823,6 +823,36 @@ async def test_a_failed_second_update_never_moves_the_creation_wait(
     assert (await incarnation(owner_sessionmaker, first))["landed_at"] == landing["landed_at"]
 
 
+async def test_the_new_sync_takes_over_the_temporal_schedule_the_old_code_made_under_incarnation_0(
+    server, ready, owner_sessionmaker, dispatch_sessionmaker
+) -> None:
+    """The owner's review of checkpoint 4 (M4): a schedule the application from before 0040 made and synced, under the
+    schedule's own id (incarnation 0's, backfilled or captured), unpaused, its note that dispatcher's; edited since
+    (generation 2). The new sync takes it over: it updates that Temporal schedule in place, with its token, rather
+    than creating another, so the schedule keeps its one incarnation and its one Temporal schedule."""
+    from temporalio.client import Schedule, ScheduleIntervalSpec, ScheduleSpec, ScheduleState
+
+    ctx, _, schedule_id = ready
+    base = schedule_workflow_id(str(ctx.tenant_id), str(schedule_id))
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("insert into schedule_incarnations (temporal_id, tenant_id, schedule_id, number, "
+                             "backfilled) values (:i, :t, :s, 0, true)"),
+                        {"i": base, "t": ctx.tenant_id, "s": schedule_id})  # fmt: skip
+        await s.execute(text("update schedules set generation = 2, synced_generation = 1 where id = :i"),
+                        {"i": schedule_id})  # fmt: skip
+    await server.client.create_schedule(base, Schedule(  # as the old dispatcher left it: synced, unpaused
+        action=ScheduleActionStartWorkflow("ScheduleTick", id=base, task_queue=tick.ADMISSION_QUEUE),
+        spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(hours=1))]),
+        state=ScheduleState(paused=False, note=schedule_sync.MARK.format(1)),
+    ))  # fmt: skip
+    assert await sync(server, dispatch_sessionmaker, ctx, schedule_id) == "synced"
+    assert await incarnations(schedule_id) == [base]
+    found = await schedule_sync.described(server.client, base)
+    assert found is not None and found.note == schedule_sync.MARK.format(2) and not found.paused
+    second = schedule_sync.incarnation_id(ctx.tenant_id, schedule_id, 1)
+    assert await schedule_sync.described(server.client, second) is None
+
+
 async def test_a_pre_migration_incarnation_that_goes_leaves_its_span_unknown(
     server, ready, owner_sessionmaker, dispatch_sessionmaker
 ) -> None:
