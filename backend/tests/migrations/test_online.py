@@ -506,6 +506,61 @@ async def test_a_step_that_outruns_its_budget_gives_way_and_stops_after_its_atte
     assert not await exists(scratch, "t1")
 
 
+class _RollbackCancelledOnce:
+    """The migration's connection, but its first `ROLLBACK` cancelled before it ran, as the step's own statement timeout
+    cancels one on a machine too loaded to run it in time (seen under the parallel suite): its transaction stays
+    aborted."""
+
+    def __init__(self, conn: Connection) -> None:
+        self.conn, self.cancelled = conn, False
+
+    @property
+    def info(self) -> dict[str, Any]:
+        return self.conn.info
+
+    def execute(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
+        if str(statement) == "ROLLBACK" and not self.cancelled:
+            self.cancelled = True
+            raise DBAPIError("ROLLBACK", {}, _Cancelled())
+        return self.conn.execute(statement, *args, **kwargs)
+
+
+class _Cancelled(Exception):
+    sqlstate = "57014"
+
+    def __str__(self) -> str:
+        return "canceling statement due to statement timeout"
+
+
+async def test_a_step_whose_rollback_was_cancelled_rolls_back_again_and_gives_way_as_such(scratch, monkeypatch) -> None:
+    """The review of checkpoint 4's validation: a step's `ROLLBACK` cancelled left its transaction aborted, so the next
+    attempt's `BEGIN` failed (`current transaction is aborted`) and the upgrade stopped on that, the cleanup masking
+    why. A cancelled `ROLLBACK` is run again; the step gives way on its lock, as it should, and its connection is
+    whole."""
+    monkeypatch.setattr(online, "ATTEMPTS", 2)
+    await execute(scratch, "CREATE TABLE a (x int)")
+    holder = await asyncpg.connect(scratch)
+    tx = holder.transaction()
+    await tx.start()
+    await holder.execute("INSERT INTO a VALUES (1)")  # a writer's open transaction: the step's lock times out
+
+    def stepped(c: Connection) -> Any:
+        wrapped = _RollbackCancelledOnce(c)
+        try:
+            online.step(wrapped, "cancelled", "LOCK TABLE a IN ACCESS EXCLUSIVE MODE")  # type: ignore[arg-type]
+        except online.StepFailedError as e:
+            return str(e), wrapped.cancelled, c.execute(text("SELECT 1")).scalar()
+        return None
+
+    try:
+        found = await run(scratch, stepped)
+    finally:
+        await tx.rollback()
+        await holder.close()
+    assert found is not None and found[1:] == (True, 1)
+    assert found[0] == "online step cancelled gave way 2 times (lock)"
+
+
 async def test_a_failing_statement_rolls_its_step_back_whole_and_stops(scratch) -> None:
     tries: list[str] = []
     online.AFTER.append(lambda c, name: tries.append(name))

@@ -11,15 +11,16 @@ behind it, and a writer's lock order can't deadlock it into rolling everything b
   which take both their table and the one they reference, and a new table's keys, which share what they reference.
 - A step's transaction lasts at most its budget, `SHARE` of the shortest `deadlock_timeout` any role or the database
   has, and never more than `BUDGET_MAX_S`, however long that is (the owner's review of checkpoint 3): each statement's
-  lock timeout is what's left of it (its statement timeout, a `MARGIN` share more). So a normal operation queued behind it waits less than that, and a writer whose lock the step waits for never
-  waits long enough for its own deadlock check: the step gives way first. A lock not taken in time, a deadlock, or the
-  budget spent rolls the step back whole; it's tried again after a growing, jittered pause, at most `ATTEMPTS` times,
-  each giving-way logged, then the upgrade stops, naming it (`StepFailedError`); a statement cancelled on purpose
-  stops it at once. A role that may sets each step's own `deadlock_timeout` to a third of its budget: the server,
-  checking the lock a step waits for, then cancels the autovacuum blocking it, and only that one (it otherwise would
-  only once the request had waited `deadlock_timeout`, which a step never does). A step whose `done` query says it
-  committed already is skipped: an interrupted migration runs again from its start (Alembic records it only at its
-  end).
+  lock timeout is what's left of it (its statement timeout, a `MARGIN` share more). So a normal operation queued behind
+  it waits less than that, and a writer whose lock the step waits for never waits long enough for its own deadlock
+  check: the step gives way first. A lock not taken in time, a deadlock, or the budget spent rolls the step back whole
+  (a `ROLLBACK` cancelled is run again; its `COMMIT` is never cut short); it's tried again after a growing, jittered
+  pause, at most `ATTEMPTS` times, each giving-way logged, then the upgrade stops, naming it (`StepFailedError`); a
+  statement cancelled on purpose stops it at once. A role that may sets each step's own `deadlock_timeout` to a third of
+  its budget: the server, checking the lock a step waits for, then cancels the autovacuum blocking it, and only that one
+  (it otherwise would only once the request had waited `deadlock_timeout`, which a step never does). A step whose `done`
+  query says it committed already is skipped: an interrupted migration runs again from its start (Alembic records it
+  only at its end).
 - What a budget rests on holds through the upgrade (the owner's review of checkpoint 3): no session may set its own
   `deadlock_timeout` below what the catalogue shows, so the upgrade refuses while a role other than the migrating one
   is granted `SET` on it, or a superuser is an application role (`APPLICATION`) or a member of one
@@ -34,6 +35,7 @@ behind it, and a writer's lock order can't deadlock it into rolling everything b
 `AFTER` holds hooks called with each committed step's (or statement's) name: the tests check each boundary there.
 Logs name a step, its attempt and why it gave way, never a value."""
 
+import contextlib
 import logging
 import random
 import re
@@ -52,6 +54,7 @@ BUDGET_MAX_S = 1.0  # a step's budget at most, however long deadlock_timeout is:
 MARGIN = 0.05  # a statement's timeout past its lock timeout: this share of the budget's base (50 ms at the default)
 LOCK_PLAIN = "5s"  # what a statement outside a step waits for each of its locks
 ATTEMPTS = 60  # a step's tries before the upgrade stops, naming it
+ROLLBACKS = 10  # a step's ROLLBACK, cancelled, run again at most this many times in all
 PAUSE_S = (0.05, 2.0)  # the pause between tries: doubling from the first, at most the second, jittered
 BATCH = 1_000  # rows a backfill's batch
 GIVE_WAY = {"55P03": "lock", "40P01": "deadlock", "57014": "budget"}  # lock_not_available, deadlock, canceled
@@ -91,6 +94,10 @@ def online() -> Iterator[Connection]:
         conn.execute(text(f"SET lock_timeout = '{LOCK_PLAIN}'"))
         try:
             yield conn
+        except BaseException:
+            with contextlib.suppress(DBAPIError):  # an aborted transaction never masks why the migration stopped
+                conn.execute(text("ROLLBACK"))
+            raise
         finally:
             conn.execute(text("RESET lock_timeout"))
             conn.execute(text("RESET row_security"))
@@ -241,11 +248,29 @@ def step(conn: Connection, name: str, *actions: str | Callable[[], object], done
                 else:
                     action()
         except BaseException:
-            conn.execute(text("ROLLBACK"))
+            _rolled_back(conn)
             raise
-        conn.execute(text("COMMIT"))
+        try:  # its commit, never cut short by what was left of the budget
+            conn.execute(text("SELECT set_config('statement_timeout', :s, true)"), {"s": LOCK_PLAIN})
+            conn.execute(text("COMMIT"))
+        except BaseException:
+            _rolled_back(conn)
+            raise
 
     _tried(conn, name, once, done)
+
+
+def _rolled_back(conn: Connection) -> None:
+    """A step's transaction rolled back, whatever its state. Its `ROLLBACK` runs under the step's own statement timeout,
+    which a machine too loaded to run it in time lets cancel it, leaving the transaction aborted (the next attempt's
+    `BEGIN` would fail, seen under the parallel suite): it's run again, `ROLLBACKS` times at most."""
+    for _ in range(ROLLBACKS - 1):
+        try:
+            conn.execute(text("ROLLBACK"))
+            return
+        except DBAPIError:
+            continue
+    conn.execute(text("ROLLBACK"))
 
 
 def plain(conn: Connection, name: str, statement: str, *, done: str | None = None) -> None:
