@@ -8,8 +8,8 @@ What this covers, once `configure` has run:
 - structlog's lines, on stdout.
 - every record of a standard library logger that reaches the root logger, on stderr: uvicorn's (its own configuration
   gives way), SQLAlchemy's, Temporal's. Its exception is named by its type and where; an exception among its message's
-  arguments, or as its message, by its type. Of its `extra=` fields, only the ones a workflow bug is logged by, its
-  type and where (`EXTRAS`); the others are a library's to fill (Temporal's workflow logger adds the workflow's info).
+  arguments, or as its message, by its type. Of its `extra=` fields, only the ones the engine logs by (`EXTRAS`);
+  the others are a library's to fill (Temporal's workflow logger adds the workflow's info).
   A record is written once, however often the process is configured.
 - an ASGI app's lifespan failure, behind `LifespanFailures`: Starlette sends the server the formatted traceback.
 
@@ -33,7 +33,9 @@ from structlog.typing import EventDict, Processor, WrappedLogger
 
 WHERE_FRAMES = 8  # the innermost frames an exception's log names
 UVICORN = ("uvicorn", "uvicorn.access")  # the loggers uvicorn's own configuration gives handlers of its own
-EXTRAS = ("error_type", "where")  # a record's `extra=` fields written: a workflow bug's (engine 2b spec §6.7), no other
+# A record's `extra=` fields written, the ones the engine logs by: a workflow bug's type and where (engine 2b spec
+# §6.7), and an undelivered budget signal's workflow, an id the server built, and its name. No other is written.
+EXTRAS = ("error_type", "where", "signal_to", "signal_name")
 
 log = structlog.get_logger(__name__)
 
