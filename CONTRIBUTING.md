@@ -7,5 +7,6 @@
   (tests need a running Docker daemon for the PostgreSQL test container). Locally, one test worker per core is
   faster: `uv run pytest -n auto --ignore=tests/apps/cel_evaluator && uv run pytest tests/apps/cel_evaluator`.
   The evaluator's tests fork, so they run in a single-threaded pytest, never in a worker (each has a thread of its
-  own to talk to pytest). CI runs the suite serially: on its 2-core runner, workers gain nothing.
+  own to talk to pytest). CI runs one worker per core too, except for the CEL gates' tests (`CEL_GATE_TESTS` in
+  `.github/workflows/ci.yml`, the evaluator's among them), which run once, serially, in their own job.
 - Frontend: `cd frontend && npx pnpm@12.6.0 lint && npx pnpm@12.6.0 typecheck && npx pnpm@12.6.0 test` (pnpm is pinned in `package.json`; no global install needed).
