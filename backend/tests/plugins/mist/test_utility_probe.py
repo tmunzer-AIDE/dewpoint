@@ -112,3 +112,45 @@ async def test_a_run_reports_outcomes_and_shapes_never_output_or_the_token() -> 
     assert (arp["status"], arp["ended_by"], arp["tables"], arp["trailing_after_table"]) == ("ok", "finished", 1, 1)
     assert found["mist.site_devices.show_dhcp_leases"]["status"] == "skipped"  # it needs a network to name
     assert report["summary"] == {"ok": 2, "error": 0, "skipped": 1}
+
+
+def test_a_messages_shape_names_protocol_words_never_values() -> None:
+    """The trace that explains `mist.no_output`: each message's event, whether its channel and session are ours, and
+    its data's type and key names; never a value."""
+    channel = f"/sites/{SITE}/devices/{SWITCH}/cmd"
+    ours = json.dumps({"event": "data", "channel": channel, "data": {"session": "s1", "raw": SECRET_LINE}})
+    shape = mist_utilities.shape(ours, channel, "s1")
+    assert shape == {"event": "data", "keys": ["channel", "data", "event"], "channel": "ours", "data": "dict",
+                     "data_keys": ["raw", "session"], "session": "ours"}  # fmt: skip
+    nested = json.dumps({"event": "data", "channel": channel.upper(), "data": json.dumps({"session": "x", "raw": "y"})})
+    assert mist_utilities.shape(nested, channel, "s1") == {
+        "event": "data", "keys": ["channel", "data", "event"], "channel": "ours_case",
+        "channel_form": "/{?}/{site}/{?}/{device}/{?}", "data": "str",
+        "data_decoded": "dict", "data_keys": ["raw", "session"], "session": "other",
+    }  # fmt: skip
+    assert mist_utilities.shape("not json", channel, "s1") == {"json": False}
+    assert SECRET_LINE not in json.dumps(mist_utilities.shape(ours, channel, "s1"))
+
+
+def test_a_nested_envelopes_shape_is_traced_one_level_down() -> None:
+    channel = f"/sites/{SITE}/devices/{SWITCH}/cmd"
+    inner = {"event": "data", "channel": channel, "data": json.dumps({"session": "s1", "raw": SECRET_LINE})}
+    outer = json.dumps({"event": "data", "channel": channel, "data": json.dumps(inner)})
+    found = mist_utilities.shape(outer, channel, "s1")
+    assert found["nested"] == {"event": "data", "keys": ["channel", "data", "event"], "channel": "ours", "data": "str",
+                               "data_decoded": "dict", "data_keys": ["raw", "session"], "session": "ours"}  # fmt: skip
+    assert SECRET_LINE not in json.dumps(found)
+
+
+@pytest.mark.parametrize(
+    ("named", "form"),
+    [
+        (f"/sites/{SITE}/devices/{SWITCH}/cmd", "/sites/{site}/devices/{device}/cmd"),
+        (f"/devices/{SWITCH}/cmd", "/devices/{device}/cmd"),
+        (f"/sites/{SITE}/devices/{SWITCH[-12:]}/cmd", "/sites/{site}/devices/{device_mac}/cmd"),
+        ("/sites/7b2c4d6e-8f10-4a2b-9c3d-4e5f6a7b8c9d/devices/aabbccddeeff/cmd", "/sites/{uuid}/devices/{mac}/cmd"),
+        ("/sites/x y/Secret.Value", "/sites/{?}/{?}"),
+    ],
+)
+def test_a_channels_form_names_its_parts_never_their_values(named: str, form: str) -> None:
+    assert mist_utilities.channel_form(named, SITE, SWITCH) == form

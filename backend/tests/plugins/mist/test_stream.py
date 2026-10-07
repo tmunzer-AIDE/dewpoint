@@ -384,3 +384,40 @@ async def test_text_that_isnt_utf8_is_unreadable_and_discarded(message: dict[str
     early.stream._on_send = lambda text: [json.dumps(ACK), json.dumps(message), json.dumps(data("early\n"))]  # type: ignore[assignment]
     out = await early.collect()
     assert (out["lines"], out["received"]) == (["early"], 1)
+
+
+MAC_CHANNEL = f"/sites/{SITE}/devices/{DEVICE[-12:]}/cmd"  # the MAC a Mist device id ends with
+
+
+def nested(raw: str, inner_channel: str, outer_channel: str = CHANNEL) -> dict[str, Any]:
+    inner = {"event": "data", "channel": inner_channel, "data": {"session": SESSION, "raw": raw}}
+    return {"event": "data", "channel": outer_channel, "data": json.dumps(inner)}
+
+
+async def test_a_nested_envelope_naming_the_device_by_its_mac_is_its_output() -> None:
+    """The test org's devices (2026-10-07): a command's output is a JSON string holding an envelope whose channel names
+    the device by its MAC (`…/devices/<mac>/cmd`), the MAC its id `00000000-0000-0000-1000-<mac>` ends with."""
+    mist = Mist(nested("64 bytes\n", MAC_CHANNEL), nested("more\n", MAC_CHANNEL, outer_channel=MAC_CHANNEL))
+    out = await mist.collect()
+    assert (out["lines"], out["received"]) == (["64 bytes", "more"], 2)
+
+
+@pytest.mark.parametrize(
+    "inner_channel",
+    [
+        f"/sites/{SITE}/devices/aabbccddeeff/cmd",  # another device's MAC
+        f"/sites/0f5e3c1a-0000-4e2f-a1b3-c5d7e9f1a3b5/devices/{DEVICE[-12:]}/cmd",  # another site
+        f"/sites/{SITE}/devices/{DEVICE[-12:]}/stats",  # another channel of the device
+    ],
+)
+async def test_any_other_channel_is_still_discarded(inner_channel: str) -> None:
+    mist = Mist(nested("not ours\n", inner_channel))
+    with pytest.raises(stream.Unmet) as raised:
+        await mist.collect()
+    assert raised.value.code == "mist.no_output"
+
+
+def test_only_a_mist_device_id_has_a_mac_form() -> None:
+    assert stream.channels(SITE, DEVICE) == {CHANNEL, MAC_CHANNEL}
+    other = "7b2c4d6e-8f10-4a2b-9c3d-4e5f6a7b8c9d"
+    assert stream.channels(SITE, other) == {stream.channel(SITE, other)}

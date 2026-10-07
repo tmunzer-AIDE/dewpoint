@@ -98,13 +98,35 @@ def channel(site_id: str, device_id: str) -> str:
     return f"/sites/{site_id.lower()}/devices/{device_id.lower()}/cmd"
 
 
+MIST_DEVICE_ID = re.compile(r"00000000-0000-0000-1000-([0-9a-f]{12})")  # a Mist device id ends with its MAC
+COMMAND_CHANNEL = re.compile(r"/sites/([^/]+)/devices/([^/]+)/cmd")
+
+
+def channels(site_id: str, device_id: str) -> frozenset[str]:
+    """The names Mist gives a device's command channel: the one subscribed to, and, for a Mist device id, the same
+    channel by the device's MAC, which an output's nested envelope uses (seen on the test org's switches, gateways and
+    APs, 2026-10-07)."""
+    names = {channel(site_id, device_id)}
+    found = MIST_DEVICE_ID.fullmatch(device_id.lower())
+    if found is not None:
+        names.add(f"/sites/{site_id.lower()}/devices/{found.group(1)}/cmd")
+    return frozenset(names)
+
+
+def _names(subscribed: str) -> frozenset[str]:
+    found = COMMAND_CHANNEL.fullmatch(subscribed)
+    return channels(found.group(1), found.group(2)) if found is not None else frozenset({subscribed})
+
+
 def _lower(value: Any) -> str | None:
     return value.lower() if isinstance(value, str) else None
 
 
-def _data(message: Any, channel_: str, depth: int = 0) -> tuple[str, str] | None:
-    """A data envelope of `channel_`: its (session, raw), or None."""
-    if not isinstance(message, Mapping) or message.get("event") != "data" or _lower(message.get("channel")) != channel_:
+def _data(message: Any, names: frozenset[str], depth: int = 0) -> tuple[str, str] | None:
+    """A data envelope of one of the device's channel `names`: its (session, raw), or None."""
+    if not isinstance(message, Mapping) or message.get("event") != "data":
+        return None
+    if _lower(message.get("channel")) not in names:
         return None
     value = message.get("data")
     if isinstance(value, str):
@@ -115,7 +137,7 @@ def _data(message: Any, channel_: str, depth: int = 0) -> tuple[str, str] | None
     if not isinstance(value, Mapping):
         return None
     if "event" in value:  # another envelope inside, once
-        return _data(value, channel_, depth + 1) if depth == 0 else None
+        return _data(value, names, depth + 1) if depth == 0 else None
     session, raw = value.get("session"), value.get("raw")
     if not isinstance(session, str) or not session or not isinstance(raw, str):
         return None
@@ -171,6 +193,7 @@ async def _open(connection: Connection) -> WebSocket:
 class _Reader:
     def __init__(self, ctx: StepContext, ws: WebSocket, channel_: str, terminal: bool) -> None:
         self.ctx, self.ws, self.channel, self.terminal = ctx, ws, channel_, terminal
+        self.names = _names(channel_)  # the subscribed channel, and the device's by its MAC
         self.pending: list[tuple[str, str]] = []
         self.pending_bytes = 0
         self.overflowed = self.gone = self.garbled = False
@@ -245,7 +268,7 @@ class _Reader:
         return answer
 
     def _buffer(self, text: str) -> None:
-        found = _data(_parsed(text), self.channel)
+        found = _data(_parsed(text), self.names)
         if found is None or self.overflowed:
             return
         self.pending_bytes += len(text.encode())
@@ -295,7 +318,7 @@ class _Reader:
             except ResponseUnreadable:
                 raise unreadable() from None
             self._beat()
-            found = _data(_parsed(text), self.channel) if text is not None else None
+            found = _data(_parsed(text), self.names) if text is not None else None
             if found is None or found[0] != session:
                 continue
             quiet_from = loop.time()

@@ -18,6 +18,7 @@ unverified (whether a table came with text after it), never a line of output."""
 import argparse
 import asyncio
 import json
+import re
 import sys
 import time
 import uuid
@@ -46,6 +47,99 @@ NEEDS = {  # diagnostics whose required parameter names something of the org's: 
     "mist.site_devices.show_dhcp_leases": "needs_network",
 }
 type Opener = Callable[[], Awaitable[Any]]
+WORD = re.compile(r"[a-z_]{1,40}")
+TRACED = 20  # the messages a run's trace keeps
+
+
+def shape(text: str, channel: str, session: str | None, depth: int = 0) -> dict[str, Any]:
+    """A message's shape, to explain an unmet condition: its event, whether its channel and session are ours (exactly,
+    or but for case), its data's type and key names, and a nested envelope's the same, one level down. Protocol words
+    only, never a value."""
+    try:
+        message = json.loads(text)
+    except (ValueError, RecursionError):
+        return {"json": False}
+    return _shape(message, channel, session, depth)
+
+
+def _shape(message: Any, channel: str, session: str | None, depth: int) -> dict[str, Any]:
+    if not isinstance(message, dict):
+        return {"json": type(message).__name__}
+    event = message.get("event")
+    out: dict[str, Any] = {
+        "event": event if isinstance(event, str) and WORD.fullmatch(event) else "?",
+        "keys": sorted(k for k in message if isinstance(k, str) and WORD.fullmatch(k))[:10],
+        "channel": _same(message.get("channel"), channel),
+    }
+    named = message.get("channel")
+    if isinstance(named, str) and out["channel"] != "ours" and channel.count("/") == 5:
+        _, _, site_id, _, device_id, _ = channel.split("/")
+        out["channel_form"] = channel_form(named, site_id, device_id)
+    data = message.get("data")
+    out["data"] = type(data).__name__
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except (ValueError, RecursionError):
+            data = None
+        out["data_decoded"] = type(data).__name__
+    if isinstance(data, dict):
+        out["data_keys"] = sorted(k for k in data if isinstance(k, str) and WORD.fullmatch(k))[:10]
+        out["session"] = _same(data.get("session"), session)
+        if "event" in data and depth == 0:
+            out["nested"] = _shape(data, channel, session, 1)
+    return out
+
+
+UUID_FORM = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+MAC_FORM = re.compile(r"[0-9a-fA-F]{12}")
+
+
+def channel_form(named: str, site_id: str, device_id: str) -> str:
+    """A channel as a template: our site's and device's ids named so, another UUID `{uuid}`, a MAC `{mac}`, a protocol
+    word as itself, anything else `{?}`; never a value."""
+    parts = []
+    for segment in named.split("/"):
+        if segment.lower() == site_id.lower():
+            parts.append("{site}")
+        elif segment.lower() == device_id.lower():
+            parts.append("{device}")
+        elif MAC_FORM.fullmatch(segment) and segment.lower() == device_id.lower()[-12:]:
+            parts.append("{device_mac}")  # the MAC a Mist device id ends with
+        elif UUID_FORM.fullmatch(segment):
+            parts.append("{uuid}")
+        elif MAC_FORM.fullmatch(segment):
+            parts.append("{mac}")
+        elif segment == "" or WORD.fullmatch(segment):
+            parts.append(segment)
+        else:
+            parts.append("{?}")
+    return "/".join(parts)
+
+
+def _same(value: Any, ours: str | None) -> str:
+    if not isinstance(value, str):
+        return type(value).__name__
+    if value == ours:
+        return "ours"
+    return "ours_case" if ours is not None and value.lower() == ours.lower() else "other"
+
+
+@dataclass
+class Trace:
+    """A live run's trace: the channel and session it expects, the shapes of what came."""
+
+    channel: str = ""
+    session: str | None = None
+    messages: list[dict[str, Any]] = field(default_factory=list)
+    answer_keys: list[str] = field(default_factory=list)
+
+    def record(self, text: str) -> None:
+        if len(self.messages) < TRACED:
+            self.messages.append(shape(text, self.channel, self.session))
+
+
+TRACE = Trace()
 
 
 def diagnostics(device_type: str) -> list[type[MistUtility]]:
@@ -107,9 +201,17 @@ class ProbeHttp:
             raise InvalidRequest()
         sent = {**(headers or {}), "Authorization": f"Token {self._token}"}
         try:
-            return await self._inner.request(method, target, headers=sent, params=params, json=json)
+            answer = await self._inner.request(method, target, headers=sent, params=params, json=json)
         except Exception as e:
             raise _mapped(e) from None
+        if method == "POST":
+            try:
+                body = answer.json()
+            except (ValueError, TypeError):
+                body = None
+            TRACE.answer_keys = sorted(k for k in body if isinstance(k, str)) if isinstance(body, dict) else []
+            TRACE.session = body.get("session") if isinstance(body, dict) else None
+        return answer
 
 
 def _mapped(error: Exception) -> Exception:
@@ -135,6 +237,8 @@ class ProbeSocket:
             text: str | None = await self._inner.receive(timeout_s)
         except Exception as e:
             raise _mapped(e) from None
+        if text is not None:
+            TRACE.record(text)
         return text
 
     async def close(self) -> None:
@@ -221,6 +325,12 @@ async def probe(
                 if rate:
                     await asyncio.sleep(1 / rate)
                 tables = Tables()
+                TRACE.channel, TRACE.session, TRACE.messages, TRACE.answer_keys = (
+                    stream.channel(site_id, device_id),
+                    None,
+                    [],
+                    [],
+                )
                 stream._finished = _watched(tables)  # type: ignore[assignment]
                 began = time.monotonic()
                 try:
@@ -238,7 +348,8 @@ async def probe(
                 finally:
                     stream._finished = original  # type: ignore[assignment]
                 entry |= {"seconds": round(time.monotonic() - began, 1), "tables": tables.seen,
-                          "trailing_after_table": tables.trailing}  # fmt: skip
+                          "trailing_after_table": tables.trailing, "answer_keys": TRACE.answer_keys,
+                          "messages": TRACE.messages}  # fmt: skip
     finally:
         stream._finished = original  # type: ignore[assignment]
     summary = {s: sum(1 for o in operations if o["status"] == s) for s in ("ok", "error", "skipped")}
@@ -296,7 +407,7 @@ async def _live(args: argparse.Namespace, token: str) -> Any:
                 raise _mapped(e) from None
 
         return await probe(http, opener, args.cloud, args.org, devices, rate=args.rate,
-                           max_duration_s=args.max_duration)  # fmt: skip
+                           max_duration_s=args.max_duration, nodes=args.only)  # fmt: skip
     finally:
         await sockets.aclose()
         await guarded.aclose()
@@ -312,6 +423,7 @@ def main() -> None:
     parser.add_argument("--report", help="where `run` writes its report")
     parser.add_argument("--rate", type=float, default=1.0, help="utilities a second, at most")
     parser.add_argument("--max-duration", type=int, default=30, help="seconds a collection may take, at most")
+    parser.add_argument("--only", action="append", help="a node type to run, for `run`; repeat for several")
     args = parser.parse_args()
     if args.command == "run" and (not args.device or not args.report):
         sys.exit("run needs --device and --report")
