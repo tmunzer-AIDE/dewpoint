@@ -11,7 +11,11 @@ guarantee, its numbers not approved). Each pass takes its items through `passing
   so one slow item can't keep the others waiting: the pass's own order (its candidates') breaks ties.
 
 So a pass lasts at most `PASS_S` and one item's calls, each at its own worst: its deadline, and the SDK's retries for
-the calls that retry. No deadline here is shorter (the owner kept the 10-second ones)."""
+the calls that retry. No deadline here is shorter (the owner kept the 10-second ones).
+
+A pass's degraded state alerts (`dispatcher_pass_degraded`), at most every `DEGRADED_ALERT_S` a pass: once a slow call
+stopped it (`why`: slow), or once it has deferred items in every run for `SUSTAINED_S`, its calls under `SLOW_S` all
+the same (`why`: budget; the owner's review of checkpoint 5, M8). A full pick alone (more may wait) is no sign of it."""
 
 import time
 from collections.abc import Callable, Hashable, Iterable, Iterator
@@ -26,10 +30,14 @@ from temporalio.service import RPCError, RPCStatusCode
 PASS_S = 10.0  # a pass takes no new item once it has run this long (its first, always)
 SLOW_S = 1.0  # a call slower than this ends its pass's admission once its item ends
 SLOW = (RPCStatusCode.DEADLINE_EXCEEDED, RPCStatusCode.UNAVAILABLE)  # answers that end it too
-DEGRADED_ALERT_S = 300.0  # a pass a slow call stopped alerts at most this often
+DEGRADED_ALERT_S = 300.0  # a degraded pass alerts at most this often
+# A pass deferring items in every run this long alerts: the slack between a misses read's due (4 min) and its
+# accounting's staleness (5 min), so a backlog that outlasts it can make reads late
+SUSTAINED_S = 60.0
 
 log = structlog.get_logger("dewpoint.dispatcher.budget")
 _alerted: dict[str, float] = {}  # per pass: when it last alerted
+_limited: dict[str, float] = {}  # per pass: since when every run of it has deferred items (the first such run's end)
 
 _visits: dict[str, dict[Hashable, float]] = {}  # per pass: when each item it picked was last taken
 _current: ContextVar["Admitted | None"] = ContextVar("dewpoint_pass", default=None)
@@ -84,9 +92,16 @@ def passing(name: str) -> Iterator[Admitted]:
     finally:
         _current.reset(token)
         now = time.monotonic()
-        if admitted.slow and now - _alerted.get(name, float("-inf")) >= DEGRADED_ALERT_S:
+        if admitted.deferred:
+            since = _limited.setdefault(name, now)
+        else:  # a run that took all it picked ends the streak
+            _limited.pop(name, None)
+            since = now
+        why = "slow" if admitted.slow else "budget" if now - since >= SUSTAINED_S else None
+        if why is not None and now - _alerted.get(name, float("-inf")) >= DEGRADED_ALERT_S:
             _alerted[name] = now
-            log.error("dispatcher_pass_degraded", pass_name=name, taken=admitted.taken, deferred=admitted.deferred)
+            log.error("dispatcher_pass_degraded", pass_name=name, why=why, taken=admitted.taken,
+                      deferred=admitted.deferred)  # fmt: skip
 
 
 def _slowed() -> None:

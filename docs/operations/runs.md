@@ -219,8 +219,10 @@ Each of a cycle's passes takes at most 50 items, those it tried least lately fir
 seconds, or once a call to Temporal took over a second, ran out its deadline or found Temporal unavailable (a
 prototype: its numbers aren't settled). An item it took runs to its end. A pass stopped that way is a degraded state,
 said in its report (`slow`; `deferred`, the items it picked but didn't take; `backlog`, its pick full, so more may
-wait) and alerted on (`dispatcher_pass_degraded`, at most every five minutes a pass). A Temporal slower than a second a
-call leaves each pass one item a cycle for as long as it lasts: the schedules' accounting then shows itself stale.
+wait). It's alerted on (`dispatcher_pass_degraded`, at most every five minutes a pass) once a slow call stopped the
+pass (`why`: `slow`), or once the pass has deferred items in every run for a minute, its calls quick all the same
+(`why`: `budget`). A full pick alone alerts on nothing. A Temporal slower than a second a call leaves each pass one
+item a cycle for as long as it lasts: the schedules' accounting then shows itself stale.
 
 ### The reconciler
 

@@ -150,3 +150,45 @@ async def test_a_pass_its_slow_calls_stopped_reports_its_degraded_state_and_aler
     assert reports == [{"deferred": 3, "slow": 1, "backlog": 1}] * 2
     alerts = [entry for entry in logs if entry["event"] == "dispatcher_pass_degraded"]
     assert len(alerts) == 1 and alerts[0]["pass_name"] == "degraded" and alerts[0]["log_level"] == "error"
+
+
+def _runs(monkeypatch: Any, items_s: list[tuple[int, float]], gap_s: float) -> tuple[list[dict[str, int]], list[Any]]:
+    """Runs of pass `p` on the test's clock, each picking `n` items of `s` seconds, `gap_s` apart; no call slow.
+    Its reports and its alerts."""
+    import structlog
+
+    now = [0.0]
+    monkeypatch.setattr(budget, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(budget, "PASS_S", 10.0)
+    monkeypatch.setattr(budget, "_alerted", {})
+    monkeypatch.setattr(budget, "_limited", {})
+    reports = []
+    with structlog.testing.capture_logs() as logs:
+        for n, seconds in items_s:
+            counts: dict[str, int] = {}
+            with budget.passing("p") as admitted:
+                for _item in admitted(range(n), key=lambda i: i):
+                    now[0] += seconds
+                admitted.reported(counts, full=True)
+            reports.append(counts)
+            now[0] += gap_s
+    return reports, [entry for entry in logs if entry["event"] == "dispatcher_pass_degraded"]
+
+
+async def test_a_pass_its_budget_keeps_limiting_alerts_though_no_call_is_slow(monkeypatch) -> None:
+    """The owner's review of checkpoint 5 (M8): calls just under `SLOW_S` (0.9 s measured) stopped each pass at its
+    budget, a fifth of its items taken, every cycle, and nothing alerted: only a slow call did. A pass that defers items
+    in every run for `SUSTAINED_S` alerts too (`why`: the budget), at most every `DEGRADED_ALERT_S`."""
+    reports, alerts = _runs(monkeypatch, [(10, 4.0)] * 5, gap_s=28.0)  # each run 12 s, 3 of 10 taken; 40 s apart
+    assert all(r == {"deferred": 7, "backlog": 1} for r in reports), reports
+    assert len(alerts) == 1 and alerts[0]["why"] == "budget" and alerts[0]["log_level"] == "error"
+    assert alerts[0]["deferred"] == 7  # at the third run's end: deferring since the first's, 80 s
+
+
+async def test_neither_a_passing_deferral_nor_a_full_pick_alone_alerts(monkeypatch) -> None:
+    """A run that defers, then one that takes all it picked, then one that defers: never a minute of it. And a pick
+    that is full each time (more may wait) but takes all it picked, for ten minutes: degraded in nothing shown."""
+    _, alerts = _runs(monkeypatch, [(10, 4.0), (2, 4.0), (10, 4.0), (2, 4.0), (10, 4.0)], gap_s=28.0)
+    assert alerts == []
+    _, alerts = _runs(monkeypatch, [(50, 0.01)] * 60, gap_s=10.0)
+    assert alerts == []

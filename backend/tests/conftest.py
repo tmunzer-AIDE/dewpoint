@@ -152,8 +152,10 @@ def _pass_budgets(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(budget, "PASS_S", 3600.0)
     monkeypatch.setattr(budget, "SLOW_S", 3600.0)
     budget._visits.clear()
+    budget._limited.clear()
     yield
     budget._visits.clear()
+    budget._limited.clear()
 
 
 @pytest.fixture(autouse=True)
