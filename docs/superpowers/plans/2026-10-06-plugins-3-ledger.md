@@ -719,3 +719,6 @@ integers; a port usage's `reauth_interval` null.
   A retyped field's reference is now replaced by its new type, and a test checks the observed values validate, not
   only the patched keyword. The overlay holds 90 patches: 44 nullable, 41 types widened (15 search and count answers'
   `start` and `end`), 4 `required` lists trimmed, 1 answer reshaped.
+- The owner's fourth probe run (2026-10-07, at `a9c8610`): 133 matched their output schema, 0 mismatched, 0 failed;
+  13 skipped as before (9 with nothing in the test org to read their id from, 4 insight reads needing a `metrics`
+  query). Every curated read the probe could reach runs as shipped against this org.
