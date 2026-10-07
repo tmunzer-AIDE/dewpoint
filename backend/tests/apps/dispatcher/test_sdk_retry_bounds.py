@@ -36,12 +36,20 @@ MARGIN_S = 0.6  # the scheduler's and the backoff's own slack
 
 class Proxy:
     """A TCP proxy before the dev server: forwarding, frozen (it reads nothing more either way: Temporal stops
-    answering), or refusing (every connection closed, none accepted)."""
+    answering), refusing (every connection closed, none accepted), or failing slowly (each new connection closed after
+    `fail_delay`, until `failing_until`)."""
 
     def __init__(self, target: str) -> None:
         self.host, port = target.rsplit(":", 1)
         self.port, self.frozen, self.connections = int(port), asyncio.Event(), []
         self.server: asyncio.Server | None = None
+        self.failing_until, self.fail_delay = 0.0, 0.0
+
+    def drop(self) -> None:
+        """Every connection closed, new ones still accepted: the client connects anew."""
+        for writer in self.connections:
+            writer.close()
+        self.connections = []
 
     async def _pump(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         with contextlib.suppress(ConnectionError, asyncio.CancelledError):
@@ -60,6 +68,10 @@ class Proxy:
                 await writer.drain()
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        if time.monotonic() < self.failing_until:  # a connection that fails after a while
+            await asyncio.sleep(self.fail_delay)
+            writer.close()
+            return
         upstream_reader, upstream_writer = await asyncio.open_connection(self.host, self.port)
         self.connections += [writer, upstream_writer]
         await asyncio.gather(self._pump(reader, upstream_writer), self._pump(upstream_reader, writer))
@@ -134,3 +146,20 @@ def test_the_dispatchers_client_retries_as_these_bounds_assume() -> None:
     """The dispatcher connects with `main.RETRY`: these bounds' inputs, at ten times the scale measured here."""
     assert main.RETRY.max_elapsed_time_millis == 10 * SCALED.max_elapsed_time_millis
     assert main.RETRY.max_interval_millis == 5_000 and main.RETRY.max_retries == 10
+
+
+async def test_a_temporal_failing_slowly_then_hanging_holds_a_retried_call_its_retries_and_one_deadline_at_most(
+    proxied,
+) -> None:  # fmt: skip
+    """The owner's review of checkpoint 4 (R7): the bound a retried call's worst rests on, reached. Its connection
+    dropped, the client's new ones fail after 0.2 s each for half its 1-second retry limit; then one is taken and never
+    answered. The call retries through the failures, then waits that one attempt's deadline: longer than one deadline,
+    never longer than its retries' limit and one deadline. (Measured at the dispatcher's own scale, 10 s each: 19.5 s
+    at most, the failures lasting 7 to 9 s; failing to its limit, the SDK gives up before a last attempt.)"""
+    proxy, client = proxied
+    proxy.drop()
+    proxy.failing_until, proxy.fail_delay = time.monotonic() + 0.5, 0.2
+    proxy.frozen.set()
+    retried = await _timed(_retried(client))
+    elapsed = SCALED.max_elapsed_time_millis / 1000  # type: ignore[operator]
+    assert DEADLINE.total_seconds() + 0.5 <= retried <= elapsed + DEADLINE.total_seconds() + MARGIN_S, retried
