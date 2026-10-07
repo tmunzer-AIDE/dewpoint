@@ -936,3 +936,5 @@ its protection checked by disabling it. A technical review; the rulings above st
 - The owner's review of the fixes (2026-10-07): R1-R4 technically closed at 12cd76b, no new findings. Technical closure
   only: the rulings still await the owner's sign-off, and the full suite, any real Mist call, push and PR each wait for
   the owner's word.
+- The owner signed off this section's rulings as written (2026-10-07, "go", confirmed in chat as covering the
+  rulings, push and PR after the full suite, and a real run against the test org).
