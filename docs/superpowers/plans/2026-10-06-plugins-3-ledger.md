@@ -1691,3 +1691,6 @@ checked by removing it (24 mutants, all killed; `98ff5628`):
 - Awaiting the owner: sign-off of this section's rulings (the first ones, tasks 2 and 3, and the review's M1, L3, L4,
   L5 and the order limit; simulate's still departs from D13's exact request); the full suite; push and PR. 3d-2
   ServiceNow only on the owner's go.
+
+The owner signed off this section's rulings (2026-10-08: "sign-of ok"), the review's M1, L3, L4, L5 and the order
+limit included, simulate's departure from D13's exact request too; and authorized the full suite, push and PR.
