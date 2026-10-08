@@ -177,3 +177,19 @@ async def test_the_listings_show_held_items_and_recovery_reasons_across_tenants(
         (str(b), "run_history_missing", str(second))
     ]
     assert set(reasons[0]) == {"tenant_id", "reason", "item_id", "since", "last_seen_at"}
+
+
+async def test_a_tenant_being_erased_takes_no_command_and_no_release(app, owner_sessionmaker, api_settings) -> None:
+    """As require() fences a member's writes: the tenant's lifecycle lock, shared, then its status, so an erasure
+    never races an operator's change (its step 1 waits for the change to commit, or the change sees `erasing`)."""
+    admin, _ = await admin_of(app, owner_sessionmaker, api_settings)
+    tenant, _ = await tenant_of(app, owner_sessionmaker, api_settings)
+    item = uuid.uuid4()
+    await reason(owner_sessionmaker, tenant, item)
+    await held(owner_sessionmaker, tenant, "cancel", item)
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("update tenants set status = 'erasing' where id = :t"), {"t": tenant})
+    async with admin:
+        made = await admin.post(url(tenant, "commands"), json=asked("record_lost_run", item))
+        freed = await admin.post(url(tenant, "held/release"), json={"kind": "cancel", "item_id": str(item)})
+    assert [(r.status_code, r.json()) for r in (made, freed)] == [(409, {"error": "tenant_erasing"})] * 2

@@ -313,11 +313,16 @@ def _admins(route: APIRoute) -> bool:
 
 def test_every_tenant_scoped_write_goes_through_require(api_settings) -> None:
     """require() takes the lock and refuses a tenant that isn't active for every non-safe method, so every route
-    naming a tenant that writes must go through it; but the platform admin's, which erase a tenant (2b-4a M4)."""
+    naming a tenant that writes must go through it; but the platform admin's, which aren't a member's: those that
+    erase a tenant (2b-4a M4), and the operator's recovery (2b-4b M3), which takes the same lock and refuses a tenant
+    that isn't active itself (`test_recovery_api.py`)."""
     writes = [route for route in _routes(create_app(api_settings).routes)
               if "{tenant_id}" in route.path and route.methods - http.SAFE_METHODS]  # fmt: skip
     admins = [route for route in writes if route.path.startswith("/api/v1/admin/")]
-    assert len(writes) > 20 and len(admins) == 3  # the inventory isn't empty; start, stop and retry
+    assert len(writes) > 20  # the inventory isn't empty
+    assert sorted(route.path.split("{tenant_id}/")[1] for route in admins) == [
+        "commands", "erasure", "erasure/retry", "erasure/stop", "held/release",
+    ]  # fmt: skip
     assert [route.path for route in admins if not _admins(route)] == []
     assert [
         (route.path, sorted(route.methods)) for route in writes if route not in admins and not _requires(route)

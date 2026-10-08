@@ -28,6 +28,7 @@ from dewpoint.core.http import active_session, ensure_fresh_reauth, get_db, get_
 from dewpoint.core.models.identity import AuthSession, User
 from dewpoint.core.recovery import COMMANDS, EVIDENCE_LIMIT, LOST, CommandKind, WorkKind
 from dewpoint.core.runs.service import sanitize
+from dewpoint.core.tenancy import lifecycle
 from dewpoint.core.tenancy.lifecycle import FENCED
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
@@ -57,9 +58,16 @@ async def _command(db: AsyncSession, query: str, **params: object) -> Any:
 
 
 async def _tenant(db: AsyncSession, tenant_id: uuid.UUID) -> None:
+    """A change's tenant, fenced as require() fences a member's write: its lifecycle lock, shared, in the request's
+    transaction, before its status is read; refused unless it's active (an erasure's step 1, which takes the lock
+    exclusively, waits for the change to commit, or the change sees `erasing`)."""
+    await lifecycle.hold_shared(db, tenant_id)
     await tenant_scope(db, tenant_id)
-    if (await db.execute(text("SELECT 1 FROM tenants WHERE id = :t"), {"t": tenant_id})).scalar() is None:
+    status = (await db.execute(text("SELECT status FROM tenants WHERE id = :t"), {"t": tenant_id})).scalar()
+    if status is None:
         raise HTTPException(404, detail={"error": "not_found"})
+    if status != "active":
+        raise HTTPException(409, detail={"error": "tenant_erasing"})
 
 
 @router.post("/tenants/{tenant_id}/commands", status_code=202)
