@@ -1632,3 +1632,10 @@ Rulings:
   bytes as sent (PagerDuty takes 512 KB), cut and reported - cost if wrong: a field a team wants maps elsewhere.
 - Ruling: a simulated event renders and reports what it would cut, opening no connection, in the real output's shape
   (3c's precedent; D13's "exact request" isn't echoed) - cost if wrong: a simulation doesn't show the body.
+- Ruling (task 2): a body-field connection's request must carry a JSON object body the field isn't in: no body, a
+  non-object body, raw `content` (httpx would send it alone) or the node's own field is refused before anything is
+  sent - cost if wrong: such a type can't serve a GET (PagerDuty has none).
+- Ruling (task 3): a 2xx other than 202 is `pagerduty.unexpected`, retried (every PagerDuty event is keyed or
+  idempotent, so a retry repeats nothing); the trigger's `class` is the config's `event_class` (a Python keyword);
+  `custom_details` is `{text, fields: [{label, value}]}`, keeping repeated labels; a summary from the text is cut
+  without being reported (the whole text is in the details), a title always fits (at most 1000) - cost if wrong: none.
