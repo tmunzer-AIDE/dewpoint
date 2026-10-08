@@ -23,7 +23,9 @@ from temporalio.exceptions import ApplicationError
 from dewpoint.apps.inputs import FORGED, reasons
 from dewpoint.core.claims.secret_index import SECRET_INDEX_LIMIT, Index, SecretIndexLimitError
 from dewpoint.core.claims.service import CLAIM_UNAVAILABLE, ClaimUnavailableError, NewClaim
+from dewpoint.engine.canonical import canonical_json
 from dewpoint.engine.cel import evaluate as cel
+from dewpoint.engine.cel import ipc
 from dewpoint.engine.cel import types as T
 from dewpoint.engine.cel.bind import BindingError, bind_item, check_json
 from dewpoint.engine.cel.record import ExpressionRecord
@@ -321,13 +323,58 @@ def unforged(outcomes: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for o in outcomes]  # fmt: skip
 
 
+# What one evaluator call may carry once the sets' handles are resolved: its frame limit, less a margin for how the
+# client re-encodes the request (the review of the 2b-4b M2 checkpoint, C1)
+FRAME_BYTES = ipc.MAX_REQUEST - 4096
+FRAME_TOO_LARGE = "the referenced values exceed the 4 MiB request limit"
+
+
+def _cached(fetch: Fetch) -> Fetch:
+    """`fetch`, each claim read once for the call: binding sets that share a claim (#26's, one handle in every set)
+    don't each fetch it (the review of the 2b-4b M2 checkpoint, I1)."""
+    seen: dict[str, Any] = {}
+
+    async def cached(claim_id: str) -> Any:
+        if claim_id not in seen:
+            seen[claim_id] = await fetch(claim_id)
+        return seen[claim_id]
+
+    return cached
+
+
+def _within_frame(
+    request: Mapping[str, Any], ready: list[tuple[int, dict[str, Any]]]
+) -> list[tuple[list[tuple[int, dict[str, Any]]], list[int]]]:
+    """The resolved sets in order, cut into evaluator calls within FRAME_BYTES, and with each the sets too large for any
+    call alone. Resolved, a set weighs what its handles hold: #26's claim keeps the workflow's request small, but its
+    1,000 sets each carry the shared value again here (the review of the 2b-4b M2 checkpoint, C1)."""
+    base = len(canonical_json({**request, "bindings": []}))
+    out: list[tuple[list[tuple[int, dict[str, Any]]], list[int]]] = []
+    chunk: list[tuple[int, dict[str, Any]]] = []
+    refused: list[int] = []
+    size = base
+    for i, bindings in ready:
+        weight = len(canonical_json(bindings)) + 1
+        if base + weight > FRAME_BYTES:
+            refused.append(i)
+            continue
+        if chunk and size + weight > FRAME_BYTES:
+            out.append((chunk, refused))
+            chunk, refused, size = [], [], base
+        chunk.append((i, bindings))
+        size += weight
+    if chunk or refused:
+        out.append((chunk, refused))
+    return out
+
+
 async def evaluate_claimed(
     request: dict[str, Any], claims: Claiming, store: ClaimStore, evaluate: Evaluate
 ) -> list[dict[str, Any]]:
     """`cel.evaluate` over bindings that may hold handles (§4.2): one outcome per binding set, in order. A set whose
     handles can't be resolved fails alone (`claim_unavailable`, or `type_mismatch` for a value of the wrong type)."""
     tenant, run = caller()
-    fetch = _fetcher(store, tenant, run)
+    fetch = _cached(_fetcher(store, tenant, run))
     sets = request["bindings"]
     outcomes: list[dict[str, Any] | None] = [None] * len(sets)
     tainted = [claims.tainted] * len(sets)
@@ -343,10 +390,13 @@ async def evaluate_claimed(
             continue
         tainted[i] = tainted[i] or read_tainted
         ready.append((i, plain))
-    if ready:
-        answered = unforged(await evaluate({**request, "bindings": [b for _, b in ready]}))
-        for (i, _), outcome in zip(ready, answered, strict=True):
-            outcomes[i] = outcome
+    for chunk, refused in _within_frame(request, ready):
+        for i in refused:
+            outcomes[i] = {"error": cel.INPUT_TOO_LARGE, "message": FRAME_TOO_LARGE}
+        if chunk:
+            answered = unforged(await evaluate({**request, "bindings": [b for _, b in chunk]}))
+            for (i, _), outcome in zip(chunk, answered, strict=True):
+                outcomes[i] = outcome
     done = [o if o is not None else {"error": cel.EVALUATION_ERROR, "message": UNAVAILABLE} for o in outcomes]
     if claims.decision:  # a declassified decision comes back plain, only as a decision (§4.3; review I1)
         for i, o in enumerate(done):

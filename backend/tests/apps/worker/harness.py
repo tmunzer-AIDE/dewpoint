@@ -216,9 +216,15 @@ class MemoryStore:
 
 
 async def in_process(request: dict[str, Any]) -> list[dict[str, Any]]:
-    """What the evaluator would answer, computed here: `ipc.evaluate_request` is the child's own work."""
+    """What the evaluator would answer, computed here: `ipc.evaluate_request` is the child's own work. A request past
+    the evaluator's frame limit is refused as `evaluate_remote` refuses it, before it's sent (the review of the 2b-4b
+    M2 checkpoint, C1: tests that never met the limit passed what production would refuse)."""
     parsed = ipc.parse_request(request)
     assert isinstance(parsed, ipc.EvaluateRequest)
+    if len(ipc.encode(parsed.to_json())) - 4 > ipc.MAX_REQUEST:
+        return [{"error": "input_too_large", "message": "the referenced values exceed the 4 MiB request limit"}] * len(
+            parsed.bindings
+        )
     reply = ipc.parse_reply(ipc.evaluate_request(parsed), len(parsed.bindings))
     if reply.error is not None:
         return [{"error": reply.error, "message": reply.message}] * len(parsed.bindings)
