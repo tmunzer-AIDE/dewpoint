@@ -17,6 +17,7 @@ from dewpoint.sdk.connections import (
     PATH_RE,
     SCOPE_KIND_RE,
     TYPE_KEY_RE,
+    body_field_problems,
     secret_pattern_problem,
     smtp_problems,
     template_parts,
@@ -258,9 +259,11 @@ def _props(schema: Any) -> Mapping[str, Any]:
     return props if isinstance(props, Mapping) else {}
 
 
-def _auth_problems(name: str, auth: Any, secret_fields: Mapping[str, Any]) -> list[str]:
+def _auth_problems(name: str, auth: Any, secret_fields: Mapping[str, Any], secret_schema: Any = None) -> list[str]:
     if auth is None:
         return []
+    if isinstance(auth, Mapping) and auth.get("kind") == "body_field":
+        return body_field_problems(name, auth, secret_schema)
     template = auth.get("template") if isinstance(auth, Mapping) else None
     if (
         not isinstance(auth, Mapping)
@@ -271,7 +274,10 @@ def _auth_problems(name: str, auth: Any, secret_fields: Mapping[str, Any]) -> li
         or not isinstance(template, str)
         or any(c in template for c in "\r\n\0")
     ):
-        return [f"{name}: auth must be {{kind: header, header: a header name, template: one line}}"]
+        return [
+            f"{name}: auth must be {{kind: header, header: a header name, template: one line}} or "
+            f"{{kind: body_field, field, secret}}"
+        ]
     try:
         named = [n for _, n in template_parts(template) if n is not None]
     except ValueError:
@@ -447,7 +453,7 @@ def _connection_type_problems(plugin: str, t: Any, seen: set[str]) -> list[str]:
     for prop, sub in secret_fields.items():
         if not isinstance(sub, Mapping) or sub.get(SENSITIVE) is not True or sub.get("type") != "string":
             out.append(f"{name}: secret field {prop!r} must be an x-sensitive string")
-    out += _auth_problems(name, t.get("auth"), secret_fields)
+    out += _auth_problems(name, t.get("auth"), secret_fields, t.get("secret_schema"))
     out += _host_problems(name, t.get("host"), config_fields, secret_fields=secret_fields)
     scopes = t.get("rate_scopes")
     if not isinstance(scopes, list):

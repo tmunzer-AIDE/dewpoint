@@ -60,8 +60,8 @@ def plugin(*kinds: ConnectionType) -> Plugin:
     return Plugin("demo", "1.0.0", (), connection_types=kinds)
 
 
-def test_the_sdk_is_0_7_0() -> None:
-    assert SDK_VERSION == "0.7.0"
+def test_the_sdk_is_0_8_0_or_later() -> None:
+    assert SDK_VERSION == "0.8.0"
 
 
 def test_an_smtp_type_is_data() -> None:

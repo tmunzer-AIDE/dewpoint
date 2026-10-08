@@ -4,6 +4,7 @@
 from dewpoint.sdk.calls import CallContext, Option, OptionsQuery, ReadOnly
 from dewpoint.sdk.connections import (
     MAIL_ADDRESS,
+    BodyField,
     ConnectionType,
     HeaderAuth,
     HostMap,
@@ -55,6 +56,7 @@ __all__ = [
     "MAIL_ADDRESS",
     "SDK_VERSION",
     "AuthUnavailable",
+    "BodyField",
     "CallContext",
     "Connection",
     "ConnectionSmtp",

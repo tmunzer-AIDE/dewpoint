@@ -75,6 +75,30 @@ class HeaderAuth:
 
 
 @dataclass(frozen=True)
+class BodyField:
+    """Credentials the runtime puts into every request's JSON body as one top-level field, the `secret` field's value
+    (plugins-3 D4's `body_field`: PagerDuty's `routing_key`); the plugin never holds it, nor sets that field."""
+
+    field: str
+    secret: str
+
+
+def body_field_problems(name: str, auth: Any, secret_schema: Any) -> list[str]:
+    """A body field's declaration, as data (the SDK checks its own manifest, the catalog a received one)."""
+    if not isinstance(auth, Mapping) or set(auth) != {"kind", "field", "secret"} or auth["kind"] != "body_field":
+        return [f"{name}: auth must be {{kind: header, header, template}} or {{kind: body_field, field, secret}}"]
+    out: list[str] = []
+    field, secret = auth["field"], auth["secret"]
+    if not isinstance(field, str) or not FIELD_RE.fullmatch(field):
+        out.append(f"{name}: auth body field {field!r} must be an identifier")
+    props = secret_schema.get("properties", {}) if isinstance(secret_schema, Mapping) else {}
+    required = secret_schema.get("required", []) if isinstance(secret_schema, Mapping) else []
+    if not isinstance(secret, str) or secret not in props or secret not in required:
+        out.append(f"{name}: auth body field's secret {secret!r} isn't a required secret field")
+    return out
+
+
+@dataclass(frozen=True)
 class HostMap:
     """The base URL is `https://` and the host this config field's value maps to: fixed hosts only."""
 
@@ -203,7 +227,7 @@ class ConnectionType:
     label: str
     Config: type[BaseModel]
     Secret: type[BaseModel]
-    auth: HeaderAuth | None = None
+    auth: HeaderAuth | BodyField | None = None
     host: HostMap | UrlField | SecretUrl | None = None
     rate_scopes: tuple[RateScope, ...] = field(default=())
     verify: Verify | None = None
@@ -274,7 +298,7 @@ class ConnectionType:
         secret_host = isinstance(self.host, SecretUrl) and self.host.field in self.Secret.model_fields
         if secret_host and self.host is not None and self.host.field not in secret:
             out.append(f"{name}: host field {self.host.field!r} must be required")
-        if self.auth is not None:
+        if isinstance(self.auth, HeaderAuth):
             try:
                 named = [n for _, n in template_parts(self.auth.template) if n is not None]
             except ValueError:
@@ -291,6 +315,9 @@ class ConnectionType:
     def _auth_problems(self, name: str, secret_fields: set[str]) -> list[str]:
         if self.auth is None:
             return []
+        if isinstance(self.auth, BodyField):
+            secret_schema = self.Secret.model_json_schema(mode="validation")
+            return body_field_problems(name, _auth_manifest(self.auth), secret_schema)
         out: list[str] = []
         if not HEADER_RE.fullmatch(self.auth.header):
             out.append(f"{name}: auth header {self.auth.header!r} must be a header name")
@@ -361,11 +388,7 @@ class ConnectionType:
                 "label": self.label,
                 "config_schema": self.Config.model_json_schema(mode="validation"),
                 "secret_schema": secret_schema,
-                "auth": (
-                    {"kind": "header", "header": self.auth.header, "template": self.auth.template}
-                    if self.auth is not None
-                    else None
-                ),
+                "auth": _auth_manifest(self.auth) if self.auth is not None else None,
                 "host": host,
                 "rate_scopes": [_scope_manifest(s) for s in self.rate_scopes],
                 "verify": self.verify is not None,
@@ -383,6 +406,12 @@ class ConnectionType:
             "path": self.stream.path,
             "rate_scopes": [_scope_manifest(s) for s in self.stream.rate_scopes],
         }
+
+
+def _auth_manifest(auth: HeaderAuth | BodyField) -> dict[str, Any]:
+    if isinstance(auth, BodyField):
+        return {"kind": "body_field", "field": auth.field, "secret": auth.secret}
+    return {"kind": "header", "header": auth.header, "template": auth.template}
 
 
 def _scope_manifest(s: RateScope) -> dict[str, Any]:
