@@ -18,7 +18,8 @@ import structlog
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest
-from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.client import Client, WorkflowExecutionStatus, WorkflowFailureError
+from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError, RPCStatusCode
 
 from dewpoint.apps.dispatcher import budget, dispatch
@@ -43,6 +44,8 @@ CALL_DEADLINE = timedelta(seconds=10)  # every call to Temporal here: the SDK se
 MISSING_MAX = timedelta(days=1)  # a sub-run whose history is gone waits twice its last gap each time, up to this
 TERMINATED_MESSAGE = "The run's workflow was terminated outside Dewpoint."
 FAILED_MESSAGE = "The run's workflow failed outside its own code (engine 2b spec §7.6)."
+UNVERIFIED_COUNT = "Its iterations are as its interpreter last counted them, unverified."  # a bug failed it (2b-4b M2)
+UNKNOWN_COUNT = "The iterations it used are unknown."
 LIVE = (WorkflowExecutionStatus.RUNNING, WorkflowExecutionStatus.CONTINUED_AS_NEW)  # its successor is starting
 
 
@@ -211,7 +214,7 @@ class Ended:
     status: str
     error_code: str | None = None
     error_message: str | None = None
-    iterations: int = 0
+    iterations: int | None = None  # None: unknown, so the count recorded stays (never a zero for work used)
 
 
 async def _open(
@@ -237,6 +240,7 @@ async def _open(
             error_code=ended.error_code, error_message=ended.error_message, iterations=ended.iterations,
             if_running=True,
         )  # fmt: skip
+        await runs.close_unconfirmed(s, run_id)  # an ended run has no step running (2b-4b M2)
         await dispatch.release(s, run_id)
         await _checked(s, run_id)
     return "ended"
@@ -253,7 +257,25 @@ async def _ended(handle: Any, status: WorkflowExecutionStatus, run_id: uuid.UUID
     if status == WorkflowExecutionStatus.TERMINATED:
         return Ended("failed", TERMINATED, TERMINATED_MESSAGE)
     log.error("run_execution_failed", run_id=str(run_id), status=status.name)  # Dewpoint sets no execution timeout
+    if status == WorkflowExecutionStatus.FAILED:  # its own bug, which names only its type (the 2b-4b M2 design)?
+        try:
+            await handle.result(rpc_timeout=CALL_DEADLINE)
+        except WorkflowFailureError as e:
+            own = e.cause
+            if isinstance(own, ApplicationError) and own.type == INTERNAL_ERROR and own.non_retryable:
+                counted = _counted(own.details)
+                note = UNKNOWN_COUNT if counted is None else UNVERIFIED_COUNT
+                return Ended("failed", INTERNAL_ERROR, f"{own.message} {note}", counted)
+        except Exception as e:  # unread: the end stands, with the general message
+            log.warning("run_failure_unread", run_id=str(run_id), error=type(e).__name__)
     return Ended("failed", INTERNAL_ERROR, FAILED_MESSAGE)
+
+
+def _counted(details: Any) -> int | None:
+    """The iterations a run's interpreter counted when its bug failed it, as its failure carries them: or None."""
+    first = details[0] if details else None
+    count = first.get("iterations") if isinstance(first, dict) else None
+    return count if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else None
 
 
 async def _slot(
@@ -356,6 +378,7 @@ async def _subrun(
             error_code=ended.error_code, error_message=ended.error_message, iterations=ended.iterations,
             if_running=True,
         )  # fmt: skip
+        await runs.close_unconfirmed(s, run_id)  # an ended run has no step running (2b-4b M2)
         await _subrun_checked(s, run_id)
     return "ended"
 

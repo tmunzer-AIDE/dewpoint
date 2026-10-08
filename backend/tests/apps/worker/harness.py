@@ -3,10 +3,12 @@
 in-memory store and an in-process CEL evaluator (the real one needs Linux and its own container)."""
 
 import asyncio
+import dataclasses
 import uuid
 from collections.abc import AsyncIterator, Iterable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from temporalio.api.common.v1 import Payload
@@ -21,6 +23,7 @@ from dewpoint.apps.worker.activities import Evaluate, RunStore, cel_activity, en
 from dewpoint.apps.worker.network import Network
 from dewpoint.core.claims import secret_index
 from dewpoint.core.claims.service import ClaimConflictError, ClaimUnavailableError, NewClaim
+from dewpoint.core.runs.service import OUTCOME_UNCONFIRMED, UNCONFIRMED_MESSAGE, batch_keys, in_batch
 from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.cel import ipc
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
@@ -29,12 +32,14 @@ from dewpoint.engine.handles import ClaimRef, StoredClaim
 from dewpoint.engine.runtime.activities import (
     ENGINE_QUEUE,
     LIVE,
+    CloseBatchInput,
     ProjectInput,
     RunInput,
     RunResult,
     RunStart,
     RunSummary,
     StepRow,
+    UnconfirmedBatch,
     VersionData,
     cel_queue,
 )
@@ -71,6 +76,12 @@ class HeldClaim:
     kind: str
 
 
+def unconfirmed(row: StepRow) -> StepRow:
+    """A step whose outcome no one recorded, as the stores close it (2b-4b M2)."""
+    return dataclasses.replace(row, status="failed", error_code=OUTCOME_UNCONFIRMED, error_message=UNCONFIRMED_MESSAGE,
+                               ended_at=datetime.now(UTC).isoformat())  # fmt: skip
+
+
 @dataclass
 class MemoryStore:
     versions: dict[str, VersionData] = field(default_factory=dict)
@@ -78,6 +89,7 @@ class MemoryStore:
     runs: dict[str, RunSummary] = field(default_factory=dict)
     subflows: dict[uuid.UUID, SubflowInfo] = field(default_factory=dict)  # what validation sees as published
     starts: dict[str, RunStart] = field(default_factory=dict)  # sub-runs' own rows
+    closed_batches: list[tuple[str, UnconfirmedBatch]] = field(default_factory=list)  # batches a bug failed
     schemas: dict[str, dict[str, Any]] = field(default_factory=dict)  # version -> its output schema
     taints: dict[str, dict[str, Any]] = field(default_factory=dict)  # version -> its outputs' taint (2b spec §4.1)
     claims: dict[str, HeldClaim] = field(default_factory=dict)
@@ -131,12 +143,32 @@ class MemoryStore:
         return self.versions[version_id]
 
     async def project(self, data: ProjectInput) -> None:
+        """As the database store writes it: a `running` row of a run whose end is recorded, or of a batch of it a bug
+        failed, lands closed, and a run's end leaves none of its steps `running` (2b-4b M2)."""
         if data.start is not None:
             self.starts.setdefault(data.start.run_id, data.start)
         for row in data.steps:
+            closed = [b for run, b in self.closed_batches if run == row.run_id]
+            if row.status == "running" and (row.run_id in self.runs or any(in_batch(row.iteration_key, b)
+                                                                            for b in closed)):  # fmt: skip
+                row = unconfirmed(row)
             self.rows[(row.run_id, row.step_id, row.iteration_key, row.attempt)] = row
         if data.run is not None and not (data.run.if_running and data.run.run_id in self.runs):
             self.runs[data.run.run_id] = data.run
+        if data.run is not None:
+            self._close(data.run.run_id, None)
+
+    async def close_batch(self, data: CloseBatchInput) -> None:
+        self.closed_batches.append((data.run_id, data.batch))
+        self._close(data.run_id, batch_keys(data.batch))
+
+    def _close(self, run_id: str, scopes: list[str] | None) -> None:
+        for key, row in list(self.rows.items()):
+            inside = scopes is None or any(
+                row.iteration_key == k or row.iteration_key.startswith(f"{k}/") for k in scopes
+            )
+            if key[0] == run_id and row.status == "running" and inside:
+                self.rows[key] = unconfirmed(row)
 
     def steps(self, run_id: str) -> list[StepRow]:
         return [r for k, r in sorted(self.rows.items()) if k[0] == run_id]

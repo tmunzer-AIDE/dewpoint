@@ -5,18 +5,20 @@ whose end write never landed, or was refused after its slot was released (the ow
 
 import asyncio
 import dataclasses
+import uuid
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import structlog
 from sqlalchemy import text
-from temporalio.client import WorkflowExecutionStatus
+from temporalio.client import WorkflowExecutionStatus, WorkflowFailureError
 from temporalio.service import RPCStatusCode
 
 from dewpoint.apps.dispatcher import dispatch, reconcile
 from dewpoint.apps.worker.store import DbRunStore
-from dewpoint.engine.runtime.activities import ProjectInput
+from dewpoint.core.runs.service import OUTCOME_UNCONFIRMED
+from dewpoint.engine.runtime.activities import ProjectInput, StepRow
 from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.engine.runtime.workflow import RunGraph
 from tests.apps.dispatcher.support import BUILD, begin, state
@@ -97,6 +99,70 @@ async def test_a_completed_run_whose_end_write_never_landed_ends_with_its_own_re
     assert await reconcile.reconcile_once(dispatch_sessionmaker, env.client, KEYS, api_settings) == {"ended": 1}
     assert await ended(owner_sessionmaker, request.id) == ("succeeded", None)
     assert (await state(owner_sessionmaker, request.id))["slot"] == 0
+
+
+async def test_a_run_whose_execution_its_own_bug_failed_is_recorded_internal_error_and_frees_its_slot(
+    queued, owner_sessionmaker, dispatch_sessionmaker, worker_sessionmaker, api_settings, env, monkeypatch
+) -> None:  # fmt: skip
+    """The owner's design and ruling (2b-4b M2): a bug in a run's own workflow code fails its execution, and the
+    reconciler records the end: `internal_error`, the run's own message (its exception's type, never its text), the
+    iterations its interpreter counted (shown unverified), its slot released. In the same transaction, a step persisted
+    `running` closes `outcome_unconfirmed`; one projected later (the failed execution's, late) lands closed."""
+    from tests.apps.worker.test_workflow_bugs import RUN_BUG, bug_in
+
+    ctx, _, request = queued
+    bug_in(monkeypatch, lambda self: True)
+    store = DbRunStore(worker_sessionmaker, KEYS)
+    async with workers(env.client, store):
+        assert await dispatch.dispatch_once(dispatch_sessionmaker, env.client, KEYS, api_settings, BUILD) == {
+            "started": 1
+        }
+        handle = env.client.get_workflow_handle_for(RunGraph.run, run_workflow_id(str(ctx.tenant_id), str(request.id)))
+        with pytest.raises(WorkflowFailureError):
+            await asyncio.wait_for(handle.result(), 30)
+    tenant, run = str(ctx.tenant_id), str(request.id)
+    await store.project(ProjectInput(tenant, [StepRow(run, str(uuid.UUID(int=1)), "a", "", 1, "running")]))
+    assert await ended(owner_sessionmaker, request.id) == ("running", None)
+    assert await reconcile.reconcile_once(dispatch_sessionmaker, env.client, KEYS, api_settings) == {"ended": 1}
+    assert await ended(owner_sessionmaker, request.id) == ("failed", "internal_error")
+    async with owner_sessionmaker() as s:
+        found = await s.execute(text("select error_message, iterations from runs where id = :i"), {"i": request.id})
+        assert tuple(found.one()) == (f"{RUN_BUG} {reconcile.UNVERIFIED_COUNT}", 0)  # its count: no loop ran
+    assert (await state(owner_sessionmaker, request.id))["slot"] == 0
+    await store.project(ProjectInput(tenant, [StepRow(run, str(uuid.UUID(int=2)), "b", "", 1, "running")]))
+    assert await steps(owner_sessionmaker, request.id) == {
+        "a": ("failed", OUTCOME_UNCONFIRMED), "b": ("failed", OUTCOME_UNCONFIRMED)}  # fmt: skip
+
+
+async def steps(owner: Any, run_id: Any) -> dict[str, tuple[str, str | None]]:
+    async with owner() as s:
+        found = await s.execute(text("select node_key, status, error_code from run_steps where run_id = :i"),
+                                {"i": run_id})  # fmt: skip
+        return {key: (status, code) for key, status, code in found}
+
+
+@pytest.mark.parametrize(
+    ("details", "counted"),
+    [((), None), (({"iterations": 4},), 4), (({"iterations": "4"},), None), (({"iterations": True},), None),
+     (({"iterations": -1},), None), (("4",), None)],
+)  # fmt: skip
+def test_a_bugs_count_is_read_only_as_its_interpreter_wrote_it(details: Any, counted: int | None) -> None:
+    assert reconcile._counted(details) == counted
+
+
+async def test_an_end_the_reconciler_cant_count_keeps_the_count_recorded(
+    queued, owner_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:  # fmt: skip
+    """The owner's ruling: the reconciler's zero must not replace work already used. An end it records without a
+    count (its execution failed outside its code) leaves the count recorded as it was."""
+    _, _, request = queued
+    await started(dispatch_sessionmaker, request, api_settings)
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("update runs set iterations = 7 where id = :i"), {"i": request.id})
+    described = Described(WorkflowExecutionStatus.FAILED)
+    assert await reconcile.reconcile_once(dispatch_sessionmaker, described, KEYS, api_settings) == {"ended": 1}
+    async with owner_sessionmaker() as s:
+        assert (await s.execute(text("select iterations from runs where id = :i"), {"i": request.id})).scalar() == 7
 
 
 @pytest.mark.parametrize(

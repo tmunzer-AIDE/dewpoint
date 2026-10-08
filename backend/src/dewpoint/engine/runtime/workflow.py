@@ -88,6 +88,14 @@ HANDLED = ("failed", DEADLINE_EXCEEDED)  # the ends that run a failure handler (
 WHERE_FRAMES = 8  # the innermost frames a bug's log names, as the activities' (apps.worker.logs)
 
 
+def _counted(run: Execution, carried: int) -> int:
+    """The iterations a run's interpreter counted when its bug failed it (the owner's ruling, 2b-4b M2): its
+    scheduler's, or what it carried in when its scheduler never started. Whoever records the end shows it unverified."""
+    sched = getattr(run, "sched", None)
+    count = getattr(sched, "iterations", None)
+    return count if isinstance(count, int) else carried
+
+
 def _bug(e: BaseException) -> dict[str, Any]:
     """A workflow bug's log fields (engine 2b spec §6.7): its type and where it was raised, never its text, which may
     quote the run's data. No plugin code runs in the workflow, so its exceptions' types and frames are code."""
@@ -214,7 +222,11 @@ class RunGraph(Execution):
         except Exception as e:  # a bug: the text may quote run data, so it goes to the log, not the projection
             workflow.logger.error("run_internal_error", extra=_bug(e))
             message = f"The interpreter failed ({type(e).__name__}); the worker's log has the details."
-            end, outputs = RunEnd("failed", Failure(INTERNAL_ERROR, message)), None
+            # Its execution fails in this workflow task, nothing recorded first (the owner's design, 2b-4b M2): the
+            # failure stands, or the task's completion is refused and a replay that doesn't raise takes the run's own
+            # path. Whoever sees the execution close records its end: the reconciler, a sub-run's parent.
+            counted = {"iterations": _counted(self, start.iterations)}  # its end shows no zero for work it used
+            raise ApplicationError(message, counted, type=INTERNAL_ERROR, non_retryable=True) from None
         ended = workflow.now()  # the end is decided: whatever follows, it stands
         pin = self._handler_pin(data) if end.status in HANDLED else None
         if pin is not None and not await self._project_end(None):  # its rows land; its end waits for the handler
@@ -515,9 +527,8 @@ class LoopBatch(Execution):
             return await self._returned(self._result(RunEnd("cancelled", CANCELLED)))
         except Exception as e:
             workflow.logger.error("batch_internal_error", extra=_bug(e))
-            await self._project_end(None)  # its steps' rows land first, as a run's do
             message = f"The batch failed ({type(e).__name__}); the worker's log has the details."
-            raise ApplicationError(message, type=INTERNAL_ERROR, non_retryable=True) from None
+            raise ApplicationError(message, type=INTERNAL_ERROR, non_retryable=True) from None  # in this task, as a run
         await self._project_end(None)
         return await self._returned(self._result(self.sched.ended))
 

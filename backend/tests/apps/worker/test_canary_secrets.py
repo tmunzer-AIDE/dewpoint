@@ -19,6 +19,8 @@ from typing import Any
 import pytest
 import structlog
 from temporalio.api.enums.v1 import EventType
+from temporalio.client import WorkflowFailureError
+from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner
 
@@ -474,17 +476,23 @@ IN_A_BUG = "canary-in-a-bug-3e9a"  # what the workflow's own exception quotes: t
 
 async def bug_logged(env: WorkflowEnvironment, caplog: pytest.LogCaptureFixture, event: str) -> logging.LogRecord:
     """A run whose workflow code raises an exception quoting IN_A_BUG, outside the sandbox so a test can break it:
-    the record the workflow logs for it. No log line holds the exception's text."""
+    the record the workflow logs for it. No log line holds the exception's text, nor what Temporal holds of a failed
+    execution (a bug fails it)."""
     caplog.set_level(logging.DEBUG)
     store, g = MemoryStore(), G()
     g.settings = {"input_schema": {"type": "object", "additionalProperties": False}, "outputs": {}}
     g.node("e", ECHO, {"value": 1})
+    failure = ""
     with structlog.testing.capture_logs() as entries:
         async with workers(env.client, store, runner=UnsandboxedWorkflowRunner()):
             handle = await start(env.client, store, g, {})
-            result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
-    assert result.status == "failed", result
-    assert IN_A_BUG not in caplog.text + json.dumps(entries, default=str)
+            try:
+                result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+                assert result.status == "failed", result
+            except WorkflowFailureError as e:  # a bug fails the run's execution (2b-4b M2): what Temporal holds of it
+                assert isinstance(e.cause, ApplicationError) and e.cause.type == "internal_error", e
+                failure = e.cause.message + (e.cause.failure.stack_trace if e.cause.failure else "")
+    assert IN_A_BUG not in caplog.text + json.dumps(entries, default=str) + failure
     [record] = [r for r in caplog.records if r.getMessage().startswith(event)]
     return record
 

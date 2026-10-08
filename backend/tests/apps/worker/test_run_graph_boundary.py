@@ -8,7 +8,10 @@ row the projection writes. The workflow checks what arrives: plain data at a sen
 import uuid
 from typing import Any
 
+import pytest
 from temporalio import activity
+from temporalio.client import WorkflowFailureError
+from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
@@ -91,7 +94,8 @@ async def test_a_message_a_node_computed_from_a_secret_never_leaves_the_activity
 
 async def test_plain_data_at_a_sensitive_position_fails_the_run(env: WorkflowEnvironment) -> None:
     """The tripwire (§3.6): a step activity that skipped the boundary returns a secret in plain; the workflow fails the
-    run with `internal_error` rather than use it."""
+    run with `internal_error` rather than use it: its execution fails, as a bug's does (2b-4b M2), and the secret
+    reaches neither the store nor the failure."""
 
     @activity.defn(name=step_activity("testkit.sensitive@1"))
     async def leaky(_: StepInput) -> StepResult:
@@ -105,9 +109,12 @@ async def test_plain_data_at_a_sensitive_position_fails_the_run(env: WorkflowEnv
                     activities=[*engine_activities(store, []), leaky])  # fmt: skip
     async with worker:
         handle = await start(env.client, store, g, {})
-        result = await handle.result()
-    assert (result.status, result.error and result.error["code"]) == ("failed", "internal_error")
-    assert "s3cr3t-value" not in repr(store.rows) + repr(store.runs)
+        with pytest.raises(WorkflowFailureError) as failed:
+            await handle.result()
+    cause = failed.value.cause
+    assert isinstance(cause, ApplicationError) and cause.type == "internal_error"
+    stack = cause.failure.stack_trace if cause.failure else ""
+    assert "s3cr3t-value" not in repr(store.rows) + repr(store.runs) + cause.message + stack
 
 
 async def test_a_secret_indexed_while_a_step_runs_is_claimed_and_masked_at_its_boundary(

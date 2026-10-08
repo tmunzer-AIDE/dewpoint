@@ -237,8 +237,11 @@ over when it goes). It asks Temporal about each request at most once every 30 se
   settles is audited (`run.request.reconciled`).
 - **A started run whose row is still `running`,** once Temporal says the logical run's latest execution closed:
   completed records the run's own result; cancelled, `cancelled`; terminated, `failed` with `terminated`; failed or
-  timed out, `failed` with `internal_error`, and an alert. Its slot is released in the same transaction. This is how a
-  run whose end write was lost, or refused, ends.
+  timed out, `failed` with `internal_error`, and an alert. Its slot is released in the same transaction, and any of
+  its steps still `running` close `failed` with `outcome_unconfirmed`. This is how a run whose end write was lost, or
+  refused, ends, and how a run a bug in the interpreter failed ends (below): its message is then the run's own, naming
+  the exception's type, and its iterations are as its interpreter last counted them, which the message says are
+  unverified. An end that comes with no count leaves the count recorded as it was: never a zero for work used.
 - **A slot whose run's row has ended:** released once its execution is closed.
 - **A sub-run still `running` 30 seconds after its root ended** (a child its root's close asked to cancel, or one whose
   parent went before writing its end): once its own execution is closed, the end Temporal reports is recorded, as for
@@ -389,7 +392,8 @@ ending as cancelled.
   gets its own deadline. The run's end is decided when it fails, but the run shows `running` until its handler has
   finished; then its end is recorded, counting the handler's iterations. The handler's end doesn't change the
   run's, and neither does a cancel while it runs: that cancels the handler. A failure handler's own failure runs no
-  handler.
+  handler. Nor does a run that a bug in the interpreter failed (`internal_error`, below), deliberately: that is an
+  operational failure, not the graph's, and its closed execution can't supervise a handler's grant and lifetime.
 - **A loop over more than 100 items** runs in batches of 100, each a child workflow, one batch at a time; inside a
   batch, the items run with the loop's own concurrency. Its iterations' rows, keys and results are the same as if
   they had run inline, and its `on_item_error` works across batches.
@@ -531,7 +535,7 @@ its error class's either way.
 | `failed` | `workflow_failed` | A `fail` node ended the run. |
 | `failed` | `start_failed` | It never started: Temporal refused it, or its start couldn't be encrypted and was never sent. |
 | `failed` | `version_unusable` | This build can't load or run the version, for example a node type it lacks. Nothing ran. |
-| `failed` | `internal_error` | A bug in the interpreter. The message names the exception's type, and the worker's log names where it was raised, or says the result was too large to return; please report it. |
+| `failed` | `internal_error` | A bug in the interpreter. The message names the exception's type, and the worker's log names where it was raised, or says the result was too large to return; please report it. A bug fails the run's Temporal execution at once (never retried), and the reconciler records the end within about 30 seconds: steps the run hadn't recorded yet are absent, any still `running` show `outcome_unconfirmed`, no failure handler runs, and its iterations are its interpreter's last count, unverified. A sub-flow's or a batch's bug fails its step or loop with the same code. |
 | `failed` | `payload_too_large` | The run's outputs were too large to return (over 1.75 MiB once encrypted). A step or a loop fails with the same code, below. |
 | `failed` | `snapshot_too_large` | The run's state was too large to carry on as a new Temporal execution (over 1.5 MiB). |
 | `failed` | `terminated` | A sub-run that an operator terminated in Temporal. It couldn't record its end, so its parent did, and the step or loop that started it failed with the same code. |
@@ -542,7 +546,11 @@ Step error codes include the plugin's own codes and `config_invalid`, `output_sc
 key `$claim` too), `unexpected_error`, `evaluation_error`, `type_mismatch`, `timeout`, `cel_profile_unavailable`,
 `input_too_large`, `history_too_large` (the step's requests to the CEL evaluator would take the run's history past
 32 MiB, under Temporal's limit, which would terminate the run: the rest are never sent), `item_cap_exceeded`,
-`iteration_cap_exceeded`, `node_type_unavailable` (the registry lists the node
+`iteration_cap_exceeded`, `outcome_unconfirmed` (the run ended before the step's outcome was recorded: a bug in the
+interpreter failed the run, or a batch of its loop, or the run ended from outside; whether the step ran is unconfirmed,
+and it is never a plugin's failure; a projection landing after the run's end, or after its batch's closing while the
+run still runs, writes its steps so too: the run's row keeps each closed batch, `unconfirmed_batches`),
+`node_type_unavailable` (the registry lists the node
 type, but no worker of this build runs it: install its plugin on the workers), `payload_too_large`,
 `claim_unavailable` (a claim the run may not read, that isn't there or that's nested deeper than 32 claims, or the
 step's output couldn't be stored as claims after the node ran: its effect happened, and its row says so),

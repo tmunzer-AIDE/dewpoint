@@ -47,6 +47,7 @@ with workflow.unsafe.imports_passed_through():
         CLAIMS_GRANT,
         CLAIMS_MESSAGE,
         CLAIMS_SPILL,
+        CLOSE_BATCH,
         ENGINE_QUEUE,
         MAPPED,
         OUTCOME_UNKNOWN,
@@ -60,6 +61,7 @@ with workflow.unsafe.imports_passed_through():
         ChildInput,
         ChildInputResult,
         Claiming,
+        CloseBatchInput,
         DeriveInput,
         DeriveResult,
         GrantInput,
@@ -75,6 +77,7 @@ with workflow.unsafe.imports_passed_through():
         StepInput,
         StepResult,
         StepRow,
+        UnconfirmedBatch,
         cel_queue,
         step_activity,
     )
@@ -727,6 +730,19 @@ class Execution:
                     cel_mode=self._cel_modes.get(inst),
                 )
             )
+
+    async def _close_batch(self, batch: UnconfirmedBatch) -> None:
+        """A batch of this run's that a bug failed (the owner's ruling, 2b-4b M2): its rows still `running` close,
+        `outcome_unconfirmed`, and nothing else of the run's (a batch shares the run's id); its closing is kept for a
+        projection of it landing later."""
+        data = CloseBatchInput(self.tenant_id, self.run_id, batch)
+        await self._send(data)
+        await workflow.execute_activity(
+            CLOSE_BATCH,
+            data,
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_interval=timedelta(seconds=30)),
+        )
 
     async def _project(
         self, rows: list[StepRow], summary: RunSummary | None = None, start: RunStart | None = None
@@ -1517,9 +1533,12 @@ class Execution:
 
     @staticmethod
     def _lost(kind: str, e: ChildWorkflowError) -> Failure:
-        """A child that ended without a result: terminated from outside Dewpoint, or failed as a workflow (a bug)."""
+        """A child that ended without a result: terminated from outside Dewpoint, or failed as a workflow (a bug, its
+        own message naming only its type)."""
         if isinstance(e.cause, TerminatedError):
             return Failure(TERMINATED, f"The {kind} was terminated outside Dewpoint.")
+        if isinstance(e.cause, ApplicationError) and e.cause.type in (VERSION_UNUSABLE, INTERNAL_ERROR):
+            return Failure(e.cause.type, e.cause.message)
         return Failure(INTERNAL_ERROR, f"The {kind} ended without a result ({type(e.cause).__name__}).")
 
     async def _lost_end(self, run: RunInput, started_at: str, failure: Failure) -> None:
@@ -1608,6 +1627,9 @@ class Execution:
             used = result.iterations
         except ChildWorkflowError as e:  # its version didn't load or compile, a bug, or it was terminated
             cause = e.cause
+            if isinstance(cause, ApplicationError) and cause.type == INTERNAL_ERROR:  # a bug failed its execution
+                key, past = self.program.steps[b.loop.step].key, b.start + count(b.items)
+                await self._close_batch(UnconfirmedBatch(iteration_key(b.loop.scope), key, b.start, past))
             if isinstance(cause, ApplicationError) and cause.type in (VERSION_UNUSABLE, INTERNAL_ERROR):
                 return _Effect(failure=Failure(cause.type, cause.message))
             return _Effect(failure=self._lost("batch", e))

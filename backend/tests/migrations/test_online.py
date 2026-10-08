@@ -38,10 +38,10 @@ from tests.probes.migration_locks import Load, seed
 
 ROOTS = 300  # root runs seeded: 450 runs, in batches of `BATCH` below
 BATCH = 40
-HEAD = "0048"
+HEAD = "0049"
 PATHS = {  # each deployed starting revision's migrations, in order (D15)
-    "0034": ["0041", "0042", "0035", "0036", "0037", "0038", "0039", "0040", "0043", "0044", "0048"],
-    "0042": ["0035", "0036", "0037", "0038", "0039", "0040", "0043", "0044", "0048"],
+    "0034": ["0041", "0042", "0035", "0036", "0037", "0038", "0039", "0040", "0043", "0044", "0048", "0049"],
+    "0042": ["0035", "0036", "0037", "0038", "0039", "0040", "0043", "0044", "0048", "0049"],
 }
 TREE = """WITH RECURSIVE tree AS (
   SELECT id, id AS root FROM runs WHERE parent_run_id IS NULL

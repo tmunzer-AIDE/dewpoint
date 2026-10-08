@@ -58,6 +58,7 @@ class Run(Base):
     error_code: Mapped[str | None] = mapped_column(Text)  # a plugin's code: nothing bounds it, sanitize() does
     error_message: Mapped[str | None] = mapped_column(Text)
     iterations: Mapped[int] = mapped_column(Integer, default=0)
+    unconfirmed_batches: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)  # batches a bug failed (0049)
     started_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     kind: Mapped[str] = mapped_column(String(32), default="run")
     parent_run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))

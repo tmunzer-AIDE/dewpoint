@@ -5,9 +5,12 @@ A projection the database refuses for its data (SQLSTATE class 22 or 23) would b
 later write of its run would land. It's written again row by row: a row refused again is logged and skipped, so the
 others, and the run's end, land. Any other error is left to Temporal's retries: the database may take it later."""
 
+import json
 import uuid
 from collections.abc import Sequence
-from datetime import datetime
+from dataclasses import asdict, replace
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import structlog
@@ -27,9 +30,22 @@ from dewpoint.core.models.workflows import WorkflowVersion
 from dewpoint.core.plugins.registry import load_node_types
 from dewpoint.core.runs import service as runs
 from dewpoint.engine.handles import StoredClaim
-from dewpoint.engine.runtime.activities import ProjectInput, RunStart, RunSummary, StepRow, VersionData
+from dewpoint.engine.runtime.activities import (
+    CloseBatchInput,
+    ProjectInput,
+    RunStart,
+    RunSummary,
+    StepRow,
+    VersionData,
+)
 from dewpoint.engine.runtime.execution import INTERNAL_ERROR
 
+# A batch's closing kept once on its run's row (an activity retried appends nothing again)
+_KEEP_BATCH = text(
+    "update runs set unconfirmed_batches = coalesce(unconfirmed_batches, '[]'::jsonb) "
+    "|| jsonb_build_array(cast(:b as jsonb)) "
+    "where id = :i and not coalesce(unconfirmed_batches, '[]'::jsonb) @> jsonb_build_array(cast(:b as jsonb))"
+)
 REFUSED = ("22", "23")  # SQLSTATE classes: data exceptions, integrity violations
 _log = structlog.get_logger("dewpoint.worker")
 
@@ -186,6 +202,7 @@ class DbRunStore:
             await tenant_scope(s, tenant)
             if data.run is not None:
                 await _hold(s, data.run)
+            data = await _late(s, data)
             try:
                 async with s.begin_nested():
                     if data.start is not None:
@@ -198,6 +215,18 @@ class DbRunStore:
                 if _refused(e) is None:
                     raise
                 await self._one_by_one(s, tenant, data)
+
+    async def close_batch(self, data: CloseBatchInput) -> None:
+        """A batch an unexpected bug failed (the owner's ruling, 2b-4b M2): its rows still `running` close, and its
+        closing is kept on its run's row (`unconfirmed_batches`), written under the row's lock, which a projection
+        takes for share before it reads it: a projection of the batch landing later, the run still running, lands
+        closed too. Whichever of the two commits second sees the other's work."""
+        run_id, batch = uuid.UUID(data.run_id), json.dumps(asdict(data.batch))
+        async with self.sessionmaker() as s, s.begin():
+            await tenant_scope(s, uuid.UUID(data.tenant_id))
+            await s.execute(text("select 1 from runs where id = :i for update"), {"i": run_id})
+            await s.execute(_KEEP_BATCH, {"i": run_id, "b": batch})
+            await runs.close_unconfirmed(s, run_id, scopes=runs.batch_keys(data.batch))
 
     async def _one_by_one(self, s: AsyncSession, tenant: uuid.UUID, data: ProjectInput) -> None:
         if data.start is not None:
@@ -266,6 +295,7 @@ async def _release(s: AsyncSession, run: RunSummary) -> None:
 
 
 async def _finish(s: AsyncSession, run: RunSummary) -> None:
+    """The run's end, and none of its steps left `running`: the end leaves each with an outcome, or unconfirmed."""
     await runs.finish_run(
         s,
         uuid.UUID(run.run_id),
@@ -276,3 +306,34 @@ async def _finish(s: AsyncSession, run: RunSummary) -> None:
         iterations=run.iterations,
         if_running=run.if_running,
     )
+    await runs.close_unconfirmed(s, uuid.UUID(run.run_id))
+
+
+async def _late(s: AsyncSession, data: ProjectInput) -> ProjectInput:
+    """Rows of a run whose end is recorded already, or of a batch of it that a bug failed (a failed execution's
+    projection, late): one `running` lands closed, `outcome_unconfirmed`. Each run's row held for share first, as an end
+    write or a batch's closing holds it for update: whichever comes second sees the other's work, so no step of an ended
+    run, or of a closed batch, is ever left `running`."""
+    pending = sorted({r.run_id for r in data.steps if r.status == "running"})
+    if not pending:
+        return data
+    held = await s.execute(text("select id, status, unconfirmed_batches from runs where id = any(:ids) for share"),
+                           {"ids": [uuid.UUID(i) for i in pending]})  # fmt: skip
+    ended, closed = set(), {}
+    for i, status, batches in held:
+        if status != "running":
+            ended.add(str(i))
+        closed[str(i)] = [SimpleNamespace(**b) for b in batches or []]
+
+    def stale(r: StepRow) -> bool:
+        return r.status == "running" and (r.run_id in ended or any(runs.in_batch(r.iteration_key, b)
+                                                                   for b in closed.get(r.run_id, [])))  # fmt: skip
+
+    if not any(stale(r) for r in data.steps):
+        return data
+    return replace(data, steps=[_unconfirmed(r) if stale(r) else r for r in data.steps])
+
+
+def _unconfirmed(row: StepRow) -> StepRow:
+    return replace(row, status="failed", error_code=runs.OUTCOME_UNCONFIRMED, error_message=runs.UNCONFIRMED_MESSAGE,
+                   ended_at=datetime.now(UTC).isoformat())  # fmt: skip

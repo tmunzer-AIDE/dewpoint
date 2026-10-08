@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from temporalio.api.enums.v1 import EventType
 from temporalio.client import WorkflowFailureError
+from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner
 
@@ -307,7 +308,8 @@ async def test_a_bug_fails_the_run_instead_of_leaving_it_running(
     env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An exception in workflow code would fail the workflow task, which Temporal retries forever: the run would
-    hang, still `running` in the projection."""
+    hang, still `running` in the projection. It fails the run's execution instead, non-retryable, its message naming
+    only the type (the owner's design, 2b-4b M2); the reconciler records the end, which nothing projected."""
 
     def broken(ref: str, config: Any) -> nodes.Decision:
         raise RuntimeError("a bug in a control node")
@@ -317,11 +319,13 @@ async def test_a_bug_fails_the_run_instead_of_leaving_it_running(
     g = graph().node("a", ECHO).node("t", "flow.transform@1", {"fields": {"y": 1}}).edge("a", "t")
     async with workers(env.client, store, runner=UnsandboxedWorkflowRunner()):
         handle = await start(env.client, store, g, TRIGGER)
-        result = await asyncio.wait_for(handle.result(), 10)
+        with pytest.raises(WorkflowFailureError) as failed:
+            await asyncio.wait_for(handle.result(), 10)
+    cause = failed.value.cause
     message = "The interpreter failed (RuntimeError); the worker's log has the details."  # never the raw text
-    assert result.error == {"code": "internal_error", "message": message, "attempt": 1}
-    run_id = run_id_of(handle)
-    assert store.runs[run_id].status == "failed" and [r.status for r in store.steps(run_id)] == ["succeeded"]
+    assert isinstance(cause, ApplicationError) and (cause.type, cause.message, cause.non_retryable) == (
+        "internal_error", message, True)  # fmt: skip
+    assert run_id_of(handle) not in store.runs
 
 
 async def test_a_trigger_that_breaks_its_schema_fails_a_step_not_the_workflow(env: WorkflowEnvironment) -> None:
