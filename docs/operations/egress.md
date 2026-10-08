@@ -76,13 +76,16 @@ server nor the sender, and never holds the password.
   1.2 or later, the certificate checked against the server's name.
 - **Signing in.** With a username and password, the runtime signs in once TLS is up, with PLAIN or else LOGIN (never
   CRAM-MD5); both must be ASCII. A server offering neither fails the step, having sent nothing.
-- **What's sent.** The connection's sender, 1 to 50 recipients, and a plain-text message the runtime puts on the wire
-  whole: a message with a bare CR or LF, a NUL or a line past 998 octets is refused before connecting. EHLO names the
-  sender's domain, never the worker's host name.
+- **What's sent.** The connection's sender, 1 to 50 recipients, each once, and a plain-text message the runtime puts on
+  the wire whole: a message with a bare CR or LF, a NUL or a line past 998 octets is refused before connecting. EHLO
+  names the sender's domain, never the worker's host name.
 - **Outcomes.** A server's refusal before the message's end sends nothing: a 4yz is retried, a 5yz fails. After it, a
   250 is sent and a 4yz or 5yz is the server's definite refusal (RFC 5321 §4.2.5); a connection lost before the
   server's answer leaves the step `outcome_unknown`, never retried. Recipients refused while others were accepted are
   named in the step's output.
+- **Bounds.** A server's reply is at most 100 lines and 64 KiB, and a session at most 120 s (aborted past it). Mail
+  sessions run on a pool of 8 threads of their own, so a slow server never delays the rest of the worker's egress;
+  when all 8 are busy, further sends wait. A cancelled step aborts its send wherever it is.
 - **Verify.** Connects, greets, secures and signs in, then quits; it never sends MAIL.
 - **Firewalls.** Allow the server's host on its port (587 or 465; 25 for an allowlisted relay).
 

@@ -1489,3 +1489,30 @@ Rulings:
   Device Version is the plugin's - cost if wrong: a strict receiver reads its encoding as unspecified.
 - Ruling (task 5): simulated, a syslog message is cut for the default transport, TLS (8192 octets): the connection
   isn't opened, so its transport isn't known - cost if wrong: a UDP connection cuts more than the simulation shows.
+
+Fresh-context review of 3c-2 (at a468385, 2026-10-08): one High, one Medium, four Low; no ruling challenge. Each is
+fixed test-first, its protection checked by removing it (mutants named in each commit):
+- H1 (`d47941d`): `smtplib` reads a reply's continuation lines without end, and sessions ran on the event loop's
+  default executor, which the guard resolves names on: a tenant's own server (no allowlist entry, no certificate
+  needed before STARTTLS) could flood a greeting until the worker ran out of memory, or drip a byte a minute and
+  hold threads until DNS stalled for every guarded request. Ruling: a reply is at most 100 lines and 64 KiB; a
+  session at most 120 s, aborted past it (unknown once the payload may have left, else nothing sent); sessions run on
+  a pool of 8 threads of their own - cost if wrong: a send to a server slower than 120 s fails, and when 8 sessions
+  are under way across the worker's tenants, further sends wait.
+- M1 (`d47941d`): a cancel during `create_connection` or the implicit-TLS handshake closed nothing, and the session
+  went on to deliver, or to the next address. An abort now sets a flag `_connect` checks before each address and
+  after connecting; once a socket is open, closing it ends the session at its next read or write. An attempt and a
+  plugin call keep one mail client and abort its sessions when they close.
+- L3 (`97b345a`): an encoded word (`=?utf-8?b?...?=@x.il`) passed as an address, and a mail reader decoded the To
+  header into recipients the envelope never had. Ruling: `MAIL_ADDRESS` refuses `=?` in a local part, and the To
+  header is built from `Address` objects - cost if wrong: such an address, valid in RFC 5322, can't be mailed.
+- L4 (`97b345a`): a CEF line over UDP reached 2155 octets. The name and the message are fitted, by octets, into what
+  the header leaves, cut before an escape; an event class that leaves no room fails `syslog.too_large` before
+  sending.
+- L5 (`97b345a`): duplicate recipients muddled what was refused. Ruling: each recipient once (compared without case),
+  refused by the runtime and the node - cost if wrong: a workflow must dedupe its list.
+- L6 (`97b345a`): U+2028 and its like in a title crashed rendering, and the ambiguous node ended `outcome_unknown`
+  though nothing was sent. Every line break `str.splitlines()` knows becomes a space in a header, and any rendering
+  failure is `email.invalid_message`, fatal, before anything is sent.
+- Also: `SmtpTarget`'s repr leaves the password out; `smtp_problems` reports an enum with an unhashable item rather
+  than raising.
