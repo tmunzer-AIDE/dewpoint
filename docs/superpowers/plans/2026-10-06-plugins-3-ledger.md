@@ -1263,3 +1263,5 @@ acceptance or push permission.
   over-redaction note stay separate decisions.
 - The owner signed off this section's rulings, as amended and marked (2026-10-08), and authorized the full suite, the
   push and the PR.
+- The full backend suite at 9e9881b (2026-10-08), as CI runs it: 3,834 passed with `-n auto`, then the CEL gate tests
+  on their own, 398 passed and 8 skipped.
