@@ -24,7 +24,7 @@ import uuid
 from datetime import UTC, datetime
 from email.headerregistry import Address
 from email.message import EmailMessage
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
@@ -49,51 +49,47 @@ from dewpoint.sdk import (
     VerifyResult,
     connection_field,
 )
-from dewpoint.sdk.connections import HOST_RE
 from dewpoint.sdk.messages import Message, cut
 
 SUBJECT_MAX = 200
 CONTROL = re.compile(r"[\x00-\x1f\x7f]")  # CR and LF among them: a header is one line, NUL never on the wire
-USERNAME = re.compile(r"[\x20-\x7e]{1,256}")  # the runtime signs in with ASCII only
+# The config as the API checks it: the manifest's JSON Schema (pydantic's validators never run there), each pattern
+# also pydantic's, whose regex has no lookaround. A schema pattern's `$` is Python's, which takes a final newline:
+# `not` refuses any, in a string only (a null sender name or username passes).
+NO_NEWLINE: dict[str, Any] = {"not": {"type": "string", "pattern": "\n"}}
+HOST = r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"  # HOST_RE; max_length its 253
+ONE_LINE = r"^[^\x00-\x1f\x7f]*$"  # no CONTROL: a header is one line
+USERNAME = r"^[\x20-\x7e]+$"  # the runtime signs in with ASCII only
+# MAIL_ADDRESS, each of its lookarounds a schema of its own: a local part of at most 64 characters, and no `=?` in it.
+# Its validator stays: pydantic can't take them.
+_ATEXT = r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]"
+_LABEL = r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+ADDRESS: dict[str, Any] = {
+    "pattern": rf"^{_ATEXT}+(\.{_ATEXT}+)*@{_LABEL}(\.{_LABEL})+$",
+    "allOf": [{"pattern": "^[^@]{1,64}@"}, {"not": {"pattern": r"^[^@]*=\?"}}],
+    **NO_NEWLINE,
+}
 
 
 class EmailConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    host: str = Field(max_length=253, title="SMTP server", description="Its host name, e.g. smtp.example.com.")
+    host: str = Field(max_length=253, pattern=HOST, json_schema_extra=NO_NEWLINE, title="SMTP server",
+                      description="Its host name, e.g. smtp.example.com.")  # fmt: skip
     port: int = Field(ge=1, le=65535, title="Port", description="587 for STARTTLS, 465 for TLS.")
     security: Literal["starttls", "tls", "none"] = Field(
         title="Security", description="starttls (port 587), tls (port 465), or none: only to an allowlisted server."
     )
-    from_address: str = Field(max_length=254, title="Sender address")
-    from_name: str | None = Field(None, max_length=100, title="Sender name")
-    username: str | None = Field(None, max_length=256, title="Username")
-
-    @field_validator("host")
-    @classmethod
-    def _host(cls, value: str) -> str:
-        if not HOST_RE.fullmatch(value):
-            raise ValueError("a lowercase host name of two or more labels")
-        return value
+    from_address: str = Field(max_length=254, json_schema_extra=ADDRESS, title="Sender address")
+    from_name: str | None = Field(None, max_length=100, pattern=ONE_LINE, json_schema_extra=NO_NEWLINE,
+                                  title="Sender name")  # fmt: skip
+    username: str | None = Field(None, max_length=256, pattern=USERNAME, json_schema_extra=NO_NEWLINE,
+                                 title="Username")  # fmt: skip
 
     @field_validator("from_address")
     @classmethod
     def _address(cls, value: str) -> str:
         if not MAIL_ADDRESS.fullmatch(value):
             raise ValueError("a plain address, such as alerts@example.com")
-        return value
-
-    @field_validator("from_name")
-    @classmethod
-    def _name(cls, value: str | None) -> str | None:
-        if value is not None and CONTROL.search(value):
-            raise ValueError("one line of text")
-        return value
-
-    @field_validator("username")
-    @classmethod
-    def _username(cls, value: str | None) -> str | None:
-        if value is not None and not USERNAME.fullmatch(value):
-            raise ValueError("printable ASCII")
         return value
 
 

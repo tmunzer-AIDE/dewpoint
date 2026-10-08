@@ -12,7 +12,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
+from dewpoint.core.connections.declared import DeclaredType, InvalidValueError
 from dewpoint.engine.registry.catalog import validate_plugin_manifest
 from dewpoint.plugins.email import EMAIL, PLUGIN, SendMessage, render, verify
 from dewpoint.sdk import (
@@ -27,9 +30,11 @@ from dewpoint.sdk import (
 )
 from dewpoint.sdk.messages import Message
 from tests.plugins.mist.fakes import FakeStep
+from tests.support.plugins.parity import ENDS, HOSTS, NAMES, TEXTS, taken
 
 CONFIG = {"host": "smtp.example.com", "port": 587, "security": "starttls", "from_address": "alerts@example.com",
           "from_name": "Dewpoint alerts", "username": "alerts@example.com"}  # fmt: skip
+DECLARED = DeclaredType.from_manifest("email", EMAIL.manifest())  # the type as the API checks a connection
 
 
 @dataclass
@@ -80,13 +85,52 @@ def test_the_plugin_validates_and_its_node_is_an_ambiguous_send() -> None:
 
 @pytest.mark.parametrize(
     "changes",
-    [{"host": "Smtp.Example.com"}, {"host": "smtp.example.com\n"}, {"host": "smtp"}, {"port": 0},
-     {"security": "ssl"}, {"from_address": "alerts@example"}, {"from_address": "Alerts <alerts@example.com>"},
-     {"from_name": "a\nBcc: x@example.com"}, {"username": "ops\r\n"}, {"username": "opé"}, {"extra": 1}],
+    [{"host": "Smtp.Example.com"}, {"host": "smtp.example.com\n"}, {"host": "smtp"}, {"host": "-smtp.example.com"},
+     {"host": "a" * 64 + ".example.com"}, {"port": 0}, {"security": "ssl"}, {"from_address": "alerts@example"},
+     {"from_address": "Alerts <alerts@example.com>"}, {"from_address": "alerts@example.com\n"},
+     {"from_address": "a" * 65 + "@example.com"}, {"from_address": "=?utf-8?q?ops?=@example.com"},
+     {"from_name": "a\nBcc: x@example.com"}, {"from_name": "Dewpoint\n"}, {"from_name": "a\x7fb"},
+     {"username": "ops\r\n"}, {"username": "ops\n"}, {"username": "opé"}, {"username": ""}, {"extra": 1}],
 )  # fmt: skip
 def test_a_connection_of_another_form_is_refused(changes: dict[str, Any]) -> None:
     with pytest.raises(ValueError):
         EMAIL.Config.model_validate({**CONFIG, **changes})
+    with pytest.raises(InvalidValueError):  # where the API checks it: the manifest's schema
+        DECLARED.config({**CONFIG, **changes})
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [{}, {"from_name": None, "username": None}, {"host": "a" * 63 + ".example.com"},
+     {"from_address": "a" * 64 + "@example.com"}, {"from_address": "a=b?c@Example.COM"},
+     {"from_name": "Équipe réseau"}, {"username": "ops team ~!"}],
+)  # fmt: skip
+def test_a_connection_the_worker_takes_the_api_takes(changes: dict[str, Any]) -> None:
+    value = {**CONFIG, **changes}
+    EMAIL.Config.model_validate(value)
+    assert DECLARED.config(value) == value
+    bare = {k: v for k, v in value.items() if k not in ("from_name", "username")}
+    assert DECLARED.config(bare) == bare
+
+
+# A local part around its 64 characters, often with `=?`, or of any form. The cases above pin each rule; this checks
+# the two forms of every rule agree beyond them.
+LOCALS = st.one_of(st.text(alphabet="a=!", min_size=60, max_size=68), st.text(alphabet="a=?", min_size=1, max_size=12),
+                   st.text(alphabet="a.=?!@ ", max_size=12))  # fmt: skip
+VALUES = {
+    "host": HOSTS,
+    "from_address": st.builds(lambda local, labels, end: f"{local}@{'.'.join(labels)}{end}", LOCALS, NAMES, ENDS),
+    "from_name": TEXTS,
+    "username": TEXTS,
+}
+
+
+@pytest.mark.parametrize("name", VALUES)
+@settings(max_examples=300, deadline=None)
+@given(data=st.data())
+def test_the_api_takes_a_config_exactly_when_the_worker_does(name: str, data: st.DataObject) -> None:
+    worker, api = taken(EMAIL.Config, DECLARED, {**CONFIG, name: data.draw(VALUES[name])})
+    assert api == worker
 
 
 def test_the_email_is_plain_text_with_the_documented_headers() -> None:

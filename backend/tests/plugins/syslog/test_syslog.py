@@ -12,18 +12,23 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
+from dewpoint.core.connections.declared import DeclaredType, InvalidValueError
 from dewpoint.engine.registry.catalog import validate_plugin_manifest
 from dewpoint.plugins.syslog import BOM, LIMITS, PLUGIN, SYSLOG, SendMessage, frame, render
 from dewpoint.sdk import FatalError, SideEffect
 from dewpoint.sdk.messages import Message
 from tests.plugins.mist.fakes import FakeStep
+from tests.support.plugins.parity import HOSTS, TEXTS, taken
 
 NOW = datetime(2026, 10, 8, 9, 30, 0, 123456, tzinfo=UTC)
 CONFIG = {"host": "logs.example.com", "port": 6514, "transport": "tls", "framing": "octet", "facility": 1,
           "app_name": "dewpoint", "hostname": None, "format": "rfc5424",
           "cef_event_class": "dewpoint.message"}  # fmt: skip
 HEADER = re.compile(rb"<(\d{1,3})>1 (\S+) (\S+) (\S+) - - - ")
+DECLARED = DeclaredType.from_manifest("syslog", SYSLOG.manifest())  # the type as the API checks a connection
 
 
 def config(**changes: Any) -> Any:
@@ -103,13 +108,41 @@ def test_cef_names_and_messages_are_cut_to_their_lengths() -> None:
 
 @pytest.mark.parametrize(
     "changes",
-    [{"host": "Logs.Example.com"}, {"host": "logs"}, {"port": 0}, {"transport": "quic"}, {"framing": "nul"},
-     {"facility": 24}, {"facility": -1}, {"app_name": "dew point"}, {"app_name": "a" * 49}, {"hostname": "h\n"},
-     {"hostname": "x" * 256}, {"format": "json"}, {"cef_event_class": "c\nx"}, {"extra": 1}],
+    [{"host": "Logs.Example.com"}, {"host": "logs"}, {"host": "logs.example.com\n"}, {"host": "-logs.example.com"},
+     {"host": "a" * 64 + ".example.com"}, {"port": 0}, {"transport": "quic"}, {"framing": "nul"}, {"facility": 24},
+     {"facility": -1}, {"app_name": "dew point"}, {"app_name": "a" * 49}, {"app_name": "dewpoint\n"},
+     {"app_name": "dewpointé"}, {"app_name": ""}, {"hostname": "h\n"}, {"hostname": "db-1\n"}, {"hostname": "h\tx"},
+     {"hostname": ""}, {"hostname": "x" * 256}, {"format": "json"}, {"cef_event_class": "c\nx"},
+     {"cef_event_class": "c\rx"}, {"cef_event_class": "dewpoint.message\n"}, {"cef_event_class": "c\r"},
+     {"extra": 1}],
 )  # fmt: skip
 def test_a_connection_of_another_form_is_refused(changes: dict[str, Any]) -> None:
     with pytest.raises(ValueError):
         config(**changes)
+    with pytest.raises(InvalidValueError):  # where the API checks it: the manifest's schema
+        DECLARED.config({**CONFIG, **changes})
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [{}, {"hostname": "db-1.example.com"}, {"host": "a" * 63 + ".example.com"}, {"app_name": "~" * 48},
+     {"cef_event_class": "Dewpoint | alerts é\t"}],
+)  # fmt: skip
+def test_a_connection_the_worker_takes_the_api_takes(changes: dict[str, Any]) -> None:
+    value = {**CONFIG, **changes}
+    config(**changes)
+    assert DECLARED.config(value) == value
+    bare = {"host": value["host"], "port": value["port"]}
+    assert DECLARED.config(bare) == bare
+
+
+@pytest.mark.parametrize("name", ["host", "app_name", "hostname", "cef_event_class"])
+@settings(max_examples=300, deadline=None)
+@given(data=st.data())
+def test_the_api_takes_a_config_exactly_when_the_worker_does(name: str, data: st.DataObject) -> None:
+    """The cases above pin each rule; this checks the two forms of every rule agree beyond them."""
+    worker, api = taken(SYSLOG.Config, DECLARED, {**CONFIG, name: data.draw(HOSTS if name == "host" else TEXTS)})
+    assert api == worker
 
 
 @dataclass

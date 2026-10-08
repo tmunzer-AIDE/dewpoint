@@ -23,10 +23,9 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from dewpoint.sdk import ConnectionType, FatalError, Node, Plugin, SideEffect, StepContext, connection_field
-from dewpoint.sdk.connections import HOST_RE
 from dewpoint.sdk.messages import MARK, Message, Severity, cut
 
 VERSION = "1.0.0"
@@ -35,42 +34,31 @@ LIMITS = {"udp": 2048, "tcp": 8192, "tls": 8192}  # RFC 5424 §6.1, RFC 5426 §3
 SEVERITIES = {Severity.INFO: 6, Severity.SUCCESS: 5, Severity.WARNING: 4, Severity.CRITICAL: 2}
 CEF_SEVERITIES = {Severity.INFO: 3, Severity.SUCCESS: 1, Severity.WARNING: 6, Severity.CRITICAL: 10}
 CEF_NAME_MAX, CEF_MSG_MAX = 512, 1023
-PRINTUSASCII = re.compile(r"[\x21-\x7e]+")  # RFC 5424 §6: what a header field holds
 NEWLINES = re.compile(r"\r\n|\r|\n")
+# The config as the API checks it: the manifest's JSON Schema (pydantic's validators never run there), each pattern
+# also pydantic's, whose regex has no lookaround. A schema pattern's `$` is Python's, which takes a final newline:
+# `not` refuses any, in a string only (a null hostname passes).
+NO_NEWLINE: dict[str, Any] = {"not": {"type": "string", "pattern": "\n"}}
+HOST = r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"  # HOST_RE; max_length its 253
+PRINTUSASCII = r"^[\x21-\x7e]+$"  # RFC 5424 §6: what a header field holds
+ONE_LINE = r"^[^\r\n]*$"  # no NEWLINES: a CEF header field is one line
 
 
 class SyslogConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    host: str = Field(max_length=253, title="Receiver", description="Its host name, e.g. logs.example.com.")
+    host: str = Field(max_length=253, pattern=HOST, json_schema_extra=NO_NEWLINE, title="Receiver",
+                      description="Its host name, e.g. logs.example.com.")  # fmt: skip
     port: int = Field(ge=1, le=65535, title="Port", description="6514 for TLS, 514 for UDP.")
     transport: Literal["tls", "udp", "tcp"] = Field("tls", title="Transport")
     framing: Literal["octet", "lf"] = Field("octet", title="TCP framing", description="lf for legacy receivers.")
     facility: int = Field(1, ge=0, le=23, title="Facility", description="0 to 23; 16 to 23 are local0 to local7.")
-    app_name: str = Field("dewpoint", min_length=1, max_length=48, title="App name")
-    hostname: str | None = Field(None, max_length=255, title="Hostname", description="Nil (-) when empty.")
+    app_name: str = Field("dewpoint", min_length=1, max_length=48, pattern=PRINTUSASCII, json_schema_extra=NO_NEWLINE,
+                          title="App name")  # fmt: skip
+    hostname: str | None = Field(None, max_length=255, pattern=PRINTUSASCII, json_schema_extra=NO_NEWLINE,
+                                 title="Hostname", description="Nil (-) when empty.")  # fmt: skip
     format: Literal["rfc5424", "cef"] = Field("rfc5424", title="Format")
-    cef_event_class: str = Field("dewpoint.message", min_length=1, max_length=1023, title="CEF event class")
-
-    @field_validator("host")
-    @classmethod
-    def _host(cls, value: str) -> str:
-        if not HOST_RE.fullmatch(value):
-            raise ValueError("a lowercase host name of two or more labels")
-        return value
-
-    @field_validator("app_name", "hostname")
-    @classmethod
-    def _header_field(cls, value: str | None) -> str | None:
-        if value is not None and not PRINTUSASCII.fullmatch(value):
-            raise ValueError("printable ASCII, no spaces")
-        return value
-
-    @field_validator("cef_event_class")
-    @classmethod
-    def _one_line(cls, value: str) -> str:
-        if NEWLINES.search(value):
-            raise ValueError("one line")
-        return value
+    cef_event_class: str = Field("dewpoint.message", min_length=1, max_length=1023, pattern=ONE_LINE,
+                                 json_schema_extra=NO_NEWLINE, title="CEF event class")  # fmt: skip
 
 
 class SyslogSecret(BaseModel):
