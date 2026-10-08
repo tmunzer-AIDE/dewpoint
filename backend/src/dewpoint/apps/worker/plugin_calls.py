@@ -36,6 +36,7 @@ from dewpoint.apps.worker.network import (
 from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.db import tenant_scope, unavailable
 from dewpoint.core.egress.http import GuardedHttp
+from dewpoint.core.egress.smtp import GuardedSmtp
 from dewpoint.core.egress.ws import GuardedWebsocket
 from dewpoint.core.plugins import calls
 from dewpoint.core.tenancy import lifecycle
@@ -110,6 +111,13 @@ class CallNetwork:
 
     def core_ws(self) -> GuardedWebsocket:
         raise ReadOnly()  # a plugin call opens no stream (D3, D26); `ConnectionWs` refuses before asking
+
+    def core_smtp(self) -> GuardedSmtp:
+        """A mail server's probe (D3's read-only adapter): connect, greet, secure, sign in, QUIT; `ConnectionSmtp`
+        refuses a send before asking."""
+        return GuardedSmtp(
+            self.network.guard, self.tenant_id, ssl_context=self.network.ssl_context, limits=self.network.smtp_limits
+        )
 
     @property
     def http(self) -> Any:

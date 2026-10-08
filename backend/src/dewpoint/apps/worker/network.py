@@ -13,6 +13,9 @@ connection's HTTP and its stream.
   run; a node whose requests may be repeated waits out a short one inside the attempt, any other fails `RateLimited`.
 - A connection's stream is its type's declared URL only; opening it sends nothing a node answers for, and a message
   counts as a send unless the node marks it a probe. A plugin call opens none.
+- A connection's mail (D20) is its type's declared server and sender only, the runtime signing in; a send takes a
+  token from each quota scope, and a definite refusal leaves the attempt as it was (nothing was delivered). A plugin
+  call may only probe it.
 - A simulated step sends nothing. The attempt's connections and streams are one pool, closed when the attempt ends.
 - The attempt remembers once a request may have left it (`may_have_sent`): the wrapper then never lets an ambiguous
   node's failure be retried, whatever the failure that ended it."""
@@ -56,6 +59,14 @@ from dewpoint.core.egress.http import (
     ResponseUnreadableError,
 )
 from dewpoint.core.egress.net import GuardedNet, GuardedStream, NetLimits
+from dewpoint.core.egress.smtp import (
+    AuthUnavailableError,
+    GuardedSmtp,
+    SmtpLimits,
+    SmtpRefusedError,
+    SmtpTarget,
+    TlsUnavailableError,
+)
 from dewpoint.core.egress.ws import (
     MAX_RECEIVE_WAIT_S,
     GuardedSocket,
@@ -70,12 +81,14 @@ from dewpoint.core.models.workflows import WorkflowVersion
 from dewpoint.core.ratelimit import scopes as rate_scopes
 from dewpoint.core.ratelimit.buckets import CooldownError, Scope, acquire, block
 from dewpoint.sdk import (
+    AuthUnavailable,
     ConnectionType,
     ConnectionUnavailable,
     Cooldown,
     EgressRefused,
     HandshakeRejected,
     InvalidRequest,
+    MailRefused,
     MaybeSent,
     Node,
     NotSent,
@@ -88,6 +101,7 @@ from dewpoint.sdk import (
     SideEffect,
     SimulationSendsNothing,
     StreamLost,
+    TlsUnavailable,
     TlsVerificationFailed,
     TransportError,
 )
@@ -101,7 +115,11 @@ MAX_RETRY_AFTER_S = 3600  # a provider's wait past an hour is read as an hour (a
 # Nodes that may resend inside their attempt: a reconcilable node's retry checks for its effect first (`reconcile()`),
 # which only the engine's next attempt does; an ambiguous node never resends.
 RESENDS = (SideEffect.NONE, SideEffect.IDEMPOTENT, SideEffect.KEYED)
-NOTHING_SENT = (NotSentError, EgressRefusedError, InvalidRequestError, TlsVerificationError, HandshakeRejectedError)
+NOTHING_SENT = (
+    NotSentError, EgressRefusedError, InvalidRequestError, TlsVerificationError, HandshakeRejectedError,
+    SmtpRefusedError, TlsUnavailableError, AuthUnavailableError,  # a mail server's refusal delivers nothing (D20)
+)  # fmt: skip
+SMTP_BEAT_S = 10.0  # a mail send heartbeats at least this often while its thread works
 SCOPE_WAIT_S = 10.0  # the longest wait for a quota token before `Cooldown` (D9)
 RECEIVE_BEAT_S = 10.0  # a stream's receive heartbeats at least this often while it waits (D26; review L7)
 MIN_SECRET = 4  # the secret index's shortest string (engine 2b spec §3.7)
@@ -131,6 +149,12 @@ def mapped(error: Exception) -> TransportError:
         return HandshakeRejected(error.status)
     if isinstance(error, StreamLostError):
         return StreamLost()
+    if isinstance(error, SmtpRefusedError):
+        return MailRefused(error.stage, error.reply)
+    if isinstance(error, TlsUnavailableError):
+        return TlsUnavailable()
+    if isinstance(error, AuthUnavailableError):
+        return AuthUnavailable()
     return MaybeSent()
 
 
@@ -145,6 +169,9 @@ CORE_ERRORS = (
     ResponseUnreadableError,
     HandshakeRejectedError,
     StreamLostError,
+    SmtpRefusedError,
+    TlsUnavailableError,
+    AuthUnavailableError,
 )
 
 
@@ -294,6 +321,7 @@ class Network:
     net_limits: NetLimits = field(default_factory=NetLimits)
     types: Mapping[str, WorkerType] = field(default_factory=dict)
     ws_limits: WsLimits = field(default_factory=WsLimits)
+    smtp_limits: SmtpLimits = field(default_factory=SmtpLimits)
 
     def attempt(
         self,
@@ -332,6 +360,8 @@ class Channel(Protocol):
     def core_http(self) -> GuardedHttp: ...
 
     def core_ws(self) -> GuardedWebsocket: ...
+
+    def core_smtp(self) -> GuardedSmtp: ...
 
 
 READ_METHODS = frozenset({"GET", "HEAD"})
@@ -443,6 +473,7 @@ class OpenedConnection:
     config: Mapping[str, Any]
     http: "ConnectionHttp"
     ws: "ConnectionWs"
+    smtp: "ConnectionSmtp"
 
 
 async def block_scopes(channel: Channel, scopes: Sequence[Scope], wait_s: float) -> None:
@@ -481,7 +512,7 @@ class ConnectionHttp:
     def __init__(
         self,
         attempt: Channel,
-        base: httpx.URL,
+        base: httpx.URL | None,  # none for a type without HTTP (a mail server's): every request is refused
         credentials: Mapping[str, str],
         scopes: Callable[[], Awaitable[list[Scope]]],
         exact: bool = False,
@@ -491,6 +522,8 @@ class ConnectionHttp:
         self._exact = exact  # the base is a secret URL (an incoming webhook's): requests go to it exactly
 
     def _target(self, url: str) -> str:
+        if self._base is None:
+            raise InvalidRequest()
         if self._exact:
             if url != "":
                 raise InvalidRequest()
@@ -628,6 +661,56 @@ class ConnectionWs:
         return _WebSocket(channel, stream)
 
 
+async def _beating[T](channel: Channel, call: Callable[[], Awaitable[T]]) -> T:
+    """`call`, heartbeating at least every `SMTP_BEAT_S` while it works (a mail send waits on a thread)."""
+    task = asyncio.ensure_future(call())
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=SMTP_BEAT_S)
+            if done:
+                return task.result()
+            channel.beat()
+    finally:
+        if not task.done():
+            task.cancel()
+
+
+class ConnectionSmtp:
+    """A connection's mail (D20): its type's declared server and sender only, signed in by the runtime, a token from
+    each quota scope a send or probe; a step sends, a plugin call may only probe."""
+
+    def __init__(
+        self, channel: Channel, target: SmtpTarget | None, scopes: Callable[[], Awaitable[list[Scope]]]
+    ) -> None:
+        self._channel, self._target, self._scopes_of = channel, target, scopes
+
+    async def _scopes(self) -> list[Scope]:
+        try:
+            return await self._scopes_of()
+        except Exception as e:
+            if unavailable(e):  # the scope key couldn't be read: nothing was sent
+                raise NotSent() from None
+            raise
+
+    async def send(self, recipients: Sequence[str], message: bytes) -> list[str]:
+        channel, target = self._channel, self._target
+        if channel.read_only:  # a plugin call reads: it may probe, never send
+            raise ReadOnly()
+        if target is None:
+            raise InvalidRequest()
+        await take_tokens(channel, await self._scopes())
+        return await channel.send(
+            lambda: _beating(channel, lambda: channel.core_smtp().send(target, recipients, message))
+        )
+
+    async def probe(self) -> None:
+        channel, target = self._channel, self._target
+        if target is None:
+            raise InvalidRequest()
+        await take_tokens(channel, await self._scopes())
+        await channel.send(lambda: _beating(channel, lambda: channel.core_smtp().probe(target)), counts=False)
+
+
 async def credential_key(network: Network, tenant_id: uuid.UUID) -> Callable[[str], str]:
     """The tenant's scope key (made the first time): the same whichever data-key version this worker holds."""
     sealer = ClaimCipher(network.keys, purpose=rate_scopes.PURPOSE)
@@ -649,10 +732,11 @@ class Unsealed:
     stored_config: Mapping[str, Any]
     config: Mapping[str, Any]
     secret: Mapping[str, Any]
-    base: httpx.URL
+    base: httpx.URL | None
     credentials: Mapping[str, str]
     stream_url: str | None = None
     exact: bool = False  # the base is a secret URL: requests go to it exactly
+    smtp: SmtpTarget | None = None  # the type's mail server, when it declares one (its base is then none)
 
     def opened(self, channel: Channel, mac: Callable[[], Awaitable[Callable[[str], str]]]) -> OpenedConnection:
         async def scopes() -> list[Scope]:
@@ -665,6 +749,7 @@ class Unsealed:
             self.id, self.type, MappingProxyType(dict(self.config)),
             ConnectionHttp(channel, self.base, self.credentials, scopes, exact=self.exact),
             ConnectionWs(channel, self.stream_url, self.credentials, stream_scopes),
+            ConnectionSmtp(channel, self.smtp, scopes),
         )  # fmt: skip
 
 
@@ -691,6 +776,9 @@ async def unseal(
         if key_unreadable(e) or unavailable(e):
             raise NotSent() from None  # the keyring didn't answer: nothing was sent, a retry may succeed
         raise
+    smtp = kind.declared.smtp_target(stored_config, secret)
+    if smtp is not None:  # a mail server's type: no HTTP base, no stream
+        return Unsealed(connection_id, stored.type, kind, stored_config, config, secret, None, credentials, smtp=smtp)
     url = kind.declared.base_url(stored_config, secret)
     try:
         base = httpx.URL(url) if url is not None else None
@@ -786,6 +874,11 @@ class AttemptNetwork:
                 limits=self.network.net_limits,
             )  # fmt: skip
         return self._net
+
+    def core_smtp(self) -> GuardedSmtp:
+        return GuardedSmtp(
+            self.network.guard, self.tenant_id, ssl_context=self.network.ssl_context, limits=self.network.smtp_limits
+        )
 
     def core_ws(self) -> GuardedWebsocket:
         if self._ws is None:
