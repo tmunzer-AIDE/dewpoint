@@ -63,7 +63,8 @@ async def test_a_crossing_reads_its_closure_and_grants_it_in_statements_counted_
         await _granted(store, str(tenant), str(run), str(child), value, str(owner))
     async with worker_sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant)
-        granted = await service.fetch_many(s, service.ClaimCipher(FixtureKeys()), tenant, run_id=child,
-                                           claim_ids=[c.id for c in made])  # fmt: skip
+        granted = [c async for group in service.fetch_groups(s, service.ClaimCipher(FixtureKeys()), tenant,
+                                                             run_id=child, claim_ids=[c.id for c in made])
+                   for c in group]  # fmt: skip
     assert len(granted) == 1_665
     assert len(seen) <= 40, len(seen)

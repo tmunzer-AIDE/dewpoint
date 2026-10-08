@@ -29,7 +29,7 @@ from dewpoint.core.models.requests import RunSlot
 from dewpoint.core.models.workflows import WorkflowVersion
 from dewpoint.core.plugins.registry import load_node_types
 from dewpoint.core.runs import service as runs
-from dewpoint.engine.handles import StoredClaim
+from dewpoint.engine.handles import StoredClaim, handles_in
 from dewpoint.engine.runtime.activities import (
     CloseBatchInput,
     ProjectInput,
@@ -147,14 +147,17 @@ class DbRunStore:
             )
         return StoredClaim(found.value, found.sensitive_pointers)
 
-    async def fetch_many(self, tenant_id: str, run_id: str, claim_ids: Sequence[str]) -> dict[str, StoredClaim]:
-        """Claims as `fetch` reads one, in one session, a thousand a statement (2b-4b M3)."""
+    async def nested(self, tenant_id: str, run_id: str, claim_ids: Sequence[str]) -> set[str]:
+        """The handles these claims nest, read in groups bounded by bytes, each group let go once scanned (2b-4b M3;
+        the fresh M3 review's I4)."""
         cipher = self._claims()
+        found: set[str] = set()
         async with self.sessionmaker() as s, s.begin():
             await tenant_scope(s, uuid.UUID(tenant_id))
-            found = await claims.fetch_many(s, cipher, uuid.UUID(tenant_id), run_id=uuid.UUID(run_id),
-                                            claim_ids=[uuid.UUID(c) for c in claim_ids])  # fmt: skip
-        return {str(c): StoredClaim(v.value, v.sensitive_pointers) for c, v in found.items()}
+            async for group in claims.fetch_groups(s, cipher, uuid.UUID(tenant_id), run_id=uuid.UUID(run_id),
+                                                   claim_ids=[uuid.UUID(c) for c in claim_ids]):  # fmt: skip
+                found.update(h.id for stored in group.values() for _, h in handles_in(stored.value))
+        return found
 
     async def write(
         self,

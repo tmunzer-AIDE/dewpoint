@@ -28,7 +28,7 @@ from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.cel import ipc
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.graph.validate import SubflowInfo, ValidationContext, validate
-from dewpoint.engine.handles import ClaimRef, StoredClaim
+from dewpoint.engine.handles import ClaimRef, StoredClaim, handles_in
 from dewpoint.engine.runtime.activities import (
     ENGINE_QUEUE,
     LIVE,
@@ -175,8 +175,9 @@ class MemoryStore:
 
     # --- claims (2b spec §3), checked as the database store checks them ------------------------------------------
 
-    async def fetch_many(self, tenant_id: str, run_id: str, claim_ids: Sequence[str]) -> dict[str, StoredClaim]:
-        return {c: await self.fetch(tenant_id, run_id, c) for c in dict.fromkeys(claim_ids)}
+    async def nested(self, tenant_id: str, run_id: str, claim_ids: Sequence[str]) -> set[str]:
+        held = [await self.fetch(tenant_id, run_id, c) for c in dict.fromkeys(claim_ids)]  # each checked first
+        return {h.id for stored in held for _, h in handles_in(stored.value)}
 
     async def fetch(self, tenant_id: str, run_id: str, claim_id: str) -> StoredClaim:
         held = self.claims.get(claim_id)

@@ -85,8 +85,9 @@ class ClaimStore(Protocol):
         """A whole claim, for `run_id`: its owner, or a run it was granted to. Raises ClaimUnavailableError."""
         ...
 
-    async def fetch_many(self, tenant_id: str, run_id: str, claim_ids: Sequence[str]) -> dict[str, StoredClaim]:
-        """Whole claims, as `fetch` reads one, in one session: one this run may not read refuses them all."""
+    async def nested(self, tenant_id: str, run_id: str, claim_ids: Sequence[str]) -> set[str]:
+        """The claims the handles in these claims' values name, for `run_id`, in one session: each read as `fetch`
+        reads one and let go once its handles are taken; one this run may not read refuses them all."""
         ...
 
     async def write(
@@ -608,31 +609,30 @@ async def filter_claimed(
 # --- crossing between runs (§3.4) ----------------------------------------------------------------------------------
 
 
-CLOSURE_READS = 1_000  # claims a closure reads at once: their handles kept, their values let go
+CLOSURE_READS = 1_000  # claims a closure checks at once: read in groups bounded by bytes, their handles kept
 
 
-async def _closure(claim_ids: Sequence[str], fetch_many: Callable[[Sequence[str]], Awaitable[dict[str, StoredClaim]]]
-                   ) -> list[str]:  # fmt: skip
+async def _closure(claim_ids: Sequence[str], nested: Callable[[Sequence[str]], Awaitable[set[str]]]) -> list[str]:
     """`claim_ids` and every claim nested in them: what a run must be granted to resolve their handles. Read a level
     at a time, a thousand claims a read (the owner's ruling on the 2b-4b M2 measurement: a claim a session, about 7 ms
-    each, timed a crossing of 7,500 out), keeping only the handles each nests."""
+    each, timed a crossing of 7,500 out), keeping only the handles each nests: its values let go a group at a time,
+    never a thousand large ones at once (the fresh M3 review's I4)."""
     seen: set[str] = set()
     level = sorted(set(claim_ids))
     while level:
         seen.update(level)
-        nested: set[str] = set()
+        found: set[str] = set()
         for at in range(0, len(level), CLOSURE_READS):
-            found = await fetch_many(level[at : at + CLOSURE_READS])
-            nested.update(h.id for stored in found.values() for _, h in handles_in(stored.value))
-        level = sorted(nested - seen)
+            found.update(await nested(level[at : at + CLOSURE_READS]))
+        level = sorted(found - seen)
     return sorted(seen)
 
 
 async def _granted(store: ClaimStore, tenant: str, run: str, to: str, value: Any, root: str) -> None:
-    async def fetch_many(claim_ids: Sequence[str]) -> dict[str, StoredClaim]:
-        return await store.fetch_many(tenant, run, claim_ids)
+    async def nested(claim_ids: Sequence[str]) -> set[str]:
+        return await store.nested(tenant, run, claim_ids)
 
-    ids = await _closure([h.id for _, h in handles_in(value)], fetch_many)
+    ids = await _closure([h.id for _, h in handles_in(value)], nested)
     if ids:
         await store.grant(tenant, granted_by=run, to=to, claim_ids=ids, root_run_id=root)
 
