@@ -197,11 +197,14 @@ async def until_requested(owner: Any, prefix: str) -> str:
 
 
 async def test_a_short_outage_fires_each_missed_time_and_admits_each_once(
-    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings, tmp_path: Path
-) -> None:
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # fmt: skip
     """Within the catch-up window, no tick is dropped: the times missed while the server was down fire when it's back,
     each with its own nominal time, and each is admitted once, under its own key. (The Temporal Schedule fires every
-    2 s here, past the product's 60 s floor, to keep the outage short.)"""
+    2 s here, past the product's 60 s floor, to keep the outage short.) The first missed time's admission is held until
+    the schedule is paused, so later ones are admitted before it: the test's end waits for every tick the schedule
+    fired, not for a count of the ones after the outage, which a tick admitted out of order once slipped past."""
     ctx, wf = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings)
     await current(dispatch_sessionmaker)
     async with api_sessionmaker() as s, s.begin():
@@ -222,15 +225,28 @@ async def test_a_short_outage_fires_each_missed_time_and_admits_each_once(
             ))  # fmt: skip
             await admitted(owner_sessionmaker, 2)
     down = datetime.now(UTC)
+    first = datetime.fromtimestamp((int(down.timestamp()) // 2 + 1) * 2, UTC)  # every 2 s from the epoch
+    held, paused, holds = tick.tick_key(str(created.id), first)[0], asyncio.Event(), []
+    admit = tick.admit_tick
+
+    async def admit_held(s: Any, keys: Any, **kwargs: Any) -> str:
+        if kwargs["key"] == held:
+            holds.append(kwargs["key"])
+            await paused.wait()
+        return await admit(s, keys, **kwargs)
+
+    monkeypatch.setattr(tick, "admit_tick", admit_held)
     await asyncio.sleep(7)  # about three firings missed, well within the window
     async with await start_local(data_converter=FIXTURE_CONVERTER, dev_server_extra_args=args) as env:
         async with main.admission_worker(env.client, dispatch_sessionmaker, KEYS):
             times = await admitted(owner_sessionmaker, 0, after=down, at_least=3)
             handle = env.client.get_schedule_handle(temporal_id)
             await handle.pause()  # it fires no more: every tick it fired is admitted before the worker stops
+            paused.set()
             await admitted(owner_sessionmaker, (await handle.describe()).info.num_actions)
             await handle.delete()
     stamps = await nominal_times(owner_sessionmaker)
+    assert holds  # the first missed time fired, and its admission was held
     assert len(stamps) == len(set(stamps))  # each time admitted once
     gaps = {(b - a).total_seconds() for a, b in zip(stamps, stamps[1:], strict=False)}
     assert gaps == {2.0}, stamps  # every time fired, the missed ones included: no gap
