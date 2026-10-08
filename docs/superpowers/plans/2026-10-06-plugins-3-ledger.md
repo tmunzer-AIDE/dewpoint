@@ -1265,3 +1265,11 @@ acceptance or push permission.
   push and the PR.
 - The full backend suite at 9e9881b (2026-10-08), as CI runs it: 3,834 passed with `-n auto`, then the CEL gate tests
   on their own, 398 passed and 8 skipped.
+
+- The first push was declined by GitHub's push protection (2026-10-08): `test_slack.py` held Slack's documented
+  example webhook URL as one literal (since 5d56645), and gitleaks (the repository's config) also found the
+  secret-URL tests' fake key `k3y…` (since 616391e). On the owner's choice, the branch was rewritten from f0e7bf5
+  (`git filter-branch --tree-filter`, one idempotent text substitution in every commit): Slack's URL is assembled from
+  parts, the fake key is a run of `k` of the same length. Code is identical; the three test files alone differ, and
+  gitleaks finds nothing in the range. The pre-rewrite branch is kept as `backup/plugins-3c1-pre-rewrite` (c2a3127).
+  Every SHA this section names is a pre-rewrite one; the map, in order: ebf932b -> b71326b, 32b2d31 -> dd4bc7b, 616391e -> 7bd65f3, 5d56645 -> 0bde4a3, 4e34072 -> dd7b68b, d34dd85 -> 4914391, 684022d -> f985277, fa26d8f -> 8545b6e, e62f132 -> c63ac2d, c82364d -> eaf909f, f6e6d4d -> ae87c81, 7719a88 -> 548d5d4, 9c3728f -> 78fc369, c48eec0 -> 1efdda9, 1e71079 -> 3f74d5d, 434db38 -> 06ad7fb, 61ef7ee -> de3e9a8, 4879091 -> 8201fab, 86c9d9c -> a505157, 2ee0d8c -> 48069a7, cf69a8d -> b8fc955, be0e579 -> cba7847, 9e9881b -> e7efe68, c2a3127 -> 5eccfed.
