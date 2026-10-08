@@ -316,12 +316,30 @@ def test_literal_config_is_validated() -> None:
     assert codes(too_wide) == ["config.invalid"]
 
 
+def test_a_config_problem_never_says_the_value() -> None:
+    # Ledger M25: a literal written into a step's config (`_schema_errors`), even into a field marked sensitive, is
+    # named by its field and what it fails, never quoted.
+    send = G().node("a", "testkit.ambiguous_send@1", {"token": ["tok-9f2c"], "outcome": "tok-9f2c"})
+    found = check(send).diagnostics
+    assert {(d.code, d.field) for d in found} >= {("config.invalid", "/token"), ("config.invalid", "/outcome")}
+    assert all("tok-9f2c" not in d.message for d in found)
+
+
 VARS = {"type": "object", "properties": {"count": {"type": "integer", "default": 0}}}
 
 
 def _vars(g: G) -> G:
     g.settings["vars_schema"] = VARS
     return g
+
+
+def test_a_literal_checked_against_its_target_never_says_the_value() -> None:
+    # Ledger M25: a literal value, and a reference's default, checked against the field they fill (`_check_instance`).
+    assigned = check(_vars(G().node("s", SET, {"assignments": {"count": "tok-9f2c"}})))
+    defaulted = check(G().node("d", "flow.delay@1", {"duration_s": ref("trigger.wait", default="tok-9f2c")}))
+    for result in (assigned, defaulted):
+        invalid = [d for d in result.diagnostics if d.code == "config.invalid"]
+        assert invalid and all("tok-9f2c" not in d.message for d in result.diagnostics)
 
 
 def test_variables() -> None:

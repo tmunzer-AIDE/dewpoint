@@ -1055,7 +1055,8 @@ export interface paths {
         /**
          * Export
          * @description The saved draft as a file, every id of this tenant's replaced by a typed placeholder (B12). Refused, never
-         *     approximated, when that can't be done for certain (4b ruling 18).
+         *     approximated, when that can't be done for certain (4b ruling 18), or when the draft holds a value written into a
+         *     field marked sensitive, which the file would carry (ledger M25): every reason at once, by the validator's rule.
          */
         get: operations["export_api_v1_t__tenant_id__workflows__workflow_id__export_get"];
         put?: never;

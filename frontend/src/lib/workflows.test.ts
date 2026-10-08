@@ -29,3 +29,9 @@ it("says why a workflow isn't portable, naming its steps when it can", () => {
     "it has steps of a type this server doesn't know (odd), and something other than an id where a connection or workflow goes (call, the failure handler)",
   );
 });
+
+it("says when a workflow holds a sensitive value written into it, never the value (ledger M25)", () => {
+  const problems = [{ reason: "sensitive_literal", binding: null, node: "n1", field: "/token" }];
+  expect(notPortable(problems)).toBe("it has a sensitive value written into a step");
+  expect(notPortable(problems, () => "send")).toBe("it has a sensitive value written into a step (send)");
+});

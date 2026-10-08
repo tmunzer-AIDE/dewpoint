@@ -88,6 +88,8 @@ export function notPortable(problems: PortableProblem[], keyOf?: (nodeId: string
     clause("steps of a type this server doesn't know", "unknown_type"),
     clause("something other than an id where a connection or workflow goes", "unexpected_value"),
     clause("two steps sharing an id", "duplicate_node"),
+    // A value written into a field marked sensitive, which the file would carry (ledger M25): named, never quoted.
+    clause("a sensitive value written into a step", "sensitive_literal"),
   ].filter((c): c is string => c !== null);
   return `it has ${why.join(", and ")}`;
 }
