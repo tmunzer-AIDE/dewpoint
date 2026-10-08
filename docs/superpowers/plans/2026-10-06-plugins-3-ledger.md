@@ -1639,3 +1639,55 @@ Rulings:
   idempotent, so a retry repeats nothing); the trigger's `class` is the config's `event_class` (a Python keyword);
   `custom_details` is `{text, fields: [{label, value}]}`, keeping repeated labels; a summary from the text is cut
   without being reported (the whole text is in the details), a title always fits (at most 1000) - cost if wrong: none.
+  (The review's L5 replaces the last part: a summary is at most 1024 bytes, a title cut to fit reported.)
+
+Fresh-context review of 3d-1 (at 5856876, 2026-10-08): no High, one Medium, seven Low, three weak tests, one
+suspicion; no ruling challenged but simulate's, already awaiting sign-off. Each is fixed test-first, its protection
+checked by removing it (24 mutants, all killed; `98ff5628`):
+- M1: the nodes kept the SDK's default retries (3 attempts, 1 s then 2 s): a few seconds of PagerDuty 5xx and no
+  page went out, against PagerDuty's advice ("retry after some time", "preferably with a backoff of a few minutes").
+  Ruling: each PagerDuty node is retried after 30 s, 60 s, then 120 s, four attempts in three and a half minutes (a
+  step may set its own number, not the interval) - cost if wrong: a retried trigger has 3.5 minutes, not 3 s, in
+  which a human's resolve makes it open a second alert. The RunGraph proof cuts its first wait to 1 s (its local
+  server doesn't skip time); the unit tests pin the schedule.
+- L1: `credentials()` and `body_credentials()` returned nothing for an auth kind the runtime doesn't know (the catalog
+  refuses one: defence in depth), so such a type would send without credentials. It's unusable now
+  (`InvalidValueError`, so `ConnectionUnavailable`).
+- L2: a node's key could pass the field check as a `str` subclass hashing elsewhere, putting a second `routing_key`
+  on the wire (the runtime's last). The body must be exactly a `dict` with `str` keys.
+- L3: the SDK and the catalog took a body field beside a stream (its handshake would open unauthenticated) or a
+  verify (a read-only call can't carry a body). Ruling: a body-field type has neither - cost if wrong: a provider
+  needing both waits for another auth kind.
+- L4: a 408 or 425 was fatal. Ruling: both are retried as `pagerduty.unavailable` (transient in RFC 9110 and RFC
+  8470; PagerDuty documents neither) - cost if wrong: an event PagerDuty would never take is tried four times.
+- L5: a summary kept line breaks other than CR and LF, and other control characters; and its 1024 was counted in
+  code points, while PagerDuty doesn't say its unit (a fatal 400 would lose the page). Ruling: every control
+  character and line break becomes a space, and a summary is at most 1024 UTF-8 bytes, which fits any unit; a title
+  cut to fit is reported as `title` - cost if wrong: a non-ASCII title is cut shorter than PagerDuty would take (the
+  text stays whole in the details).
+- L6: `Unsealed`'s repr held the secret, the base (a secret URL's), the header and the body credentials; none is in it
+  now (no path printed it).
+- L7: the dedup key's description promised the step's key "when empty", but an empty key is refused (as the repo's
+  other optional strings are); it says "when not set" now. Wording only: no test.
+- Weak tests: the largest-event test asserts the cut for every fill (each grows past the budget); a read-only channel
+  and a probe are shown to send nothing through a body field. The proof's "no row holds the key" can't fail through
+  these nodes' outputs; it stays as a guard against the runtime writing the body into a step's input.
+- Suspicion, not confirmed: PagerDuty calls the Events API asynchronous and doesn't document the order it processes
+  events in (docs.pagerduty.com `developer/events-api-v2-overview`, read 2026-10-08), so an acknowledge or resolve
+  sent right after its trigger may be processed first and dropped. Ruling: a limit the operator guide states; the
+  nodes neither wait nor check (checking needs the REST API and another credential) - cost if wrong: a workflow
+  acknowledging at once may leave an alert open.
+
+### 3d-1 checkpoint (2026-10-08, at 98ff562, local, not pushed)
+- Tasks 1-6 done: SDK 0.8.0's `BodyField` (29889eb), the runtime's body field (580196c), the PagerDuty plugin and its
+  simulation (56038b1), the RunGraph proof (30dbd26: a trigger answered 503 once and retried with one `dedup_key`,
+  then acknowledged and resolved; simulated, nothing sent; its 7 wiring mutants killed, again after the retry change),
+  the operator guide (5856876); the review's fixes (98ff562).
+- Verified at 98ff562: 2,093 tests across the SDK, the catalog, connections, the worker, every plugin, the API and the
+  CLI; ruff, format, mypy, import contracts; gitleaks over the branch's commits finds nothing; CodeQL's python
+  analysis finds nothing locally, with CI's CLI and query filter.
+- Not run: the full suite (about 10 minutes, asked first); a Compose proof; any real PagerDuty event (needs the
+  owner's say and a test service: a real event pages someone).
+- Awaiting the owner: sign-off of this section's rulings (the first ones, tasks 2 and 3, and the review's M1, L3, L4,
+  L5 and the order limit; simulate's still departs from D13's exact request); the full suite; push and PR. 3d-2
+  ServiceNow only on the owner's go.
