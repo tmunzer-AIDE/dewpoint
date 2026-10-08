@@ -212,6 +212,18 @@ def test_a_library_records_other_extra_fields_are_not_logged(capsys: pytest.Capt
     assert not {"temporal_workflow", "input"} & record.keys()
 
 
+def test_an_http_librarys_request_line_never_names_its_url(capsys: pytest.CaptureFixture[str]) -> None:
+    """httpx logs each request's whole URL at INFO, and an incoming webhook's URL is its credential (the 3c-1 review,
+    finding 6): the HTTP libraries' records below WARNING aren't written, whatever the root's level."""
+    url = "https://hooks.example.com/services/T1/B2/an-http-url-part-5e1d"
+    with stdlib_restored():
+        logs.configure()
+        logging.getLogger().setLevel(logging.DEBUG)
+        with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200))) as client:
+            client.post(url)
+    assert "an-http-url-part" not in capsys.readouterr().err
+
+
 def test_a_record_is_written_once_however_often_the_process_is_configured(capsys: pytest.CaptureFixture[str]) -> None:
     with stdlib_restored():
         logs.configure()

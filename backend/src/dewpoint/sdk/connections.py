@@ -79,6 +79,35 @@ class UrlField:
 
 
 @dataclass(frozen=True)
+class SecretUrl:
+    """The base URL is this secret field's value (plugins-3 D4's `url` auth: an incoming webhook's URL is its
+    credential), matched whole by `pattern`, which starts with `https://`, wherever the secret is read; requests go to
+    that URL exactly, with no path, query or header of the node's."""
+
+    field: str
+    pattern: str
+
+
+def url_pattern_problem(pattern: Any) -> str | None:
+    if not isinstance(pattern, str) or not pattern.startswith("https://"):
+        return "secret URL pattern must start with https://"
+    try:
+        re.compile(pattern)
+    except re.error:
+        return "secret URL pattern doesn't compile"
+    return None
+
+
+def secret_pattern_problem(pattern: Any) -> str | None:
+    """A scope's `secret_pattern`: one capture group, the part of the secret field the scope is keyed by."""
+    try:
+        groups = re.compile(pattern).groups if isinstance(pattern, str) else 0
+    except re.error:
+        groups = 0
+    return None if groups == 1 else "a secret pattern needs exactly one group"
+
+
+@dataclass(frozen=True)
 class RateScope:
     """A provider quota scope a request through the connection charges (plugins-3 D9). Its key is `kind`, then each
     named config field's value, then, for `secret`, a MAC of that secret field under the tenant's scope key, never
@@ -89,6 +118,7 @@ class RateScope:
     secret: str | None = None
     capacity: float = 50.0
     refill_per_s: float = 1.25
+    secret_pattern: str | None = None  # keyed by this group of the secret field, not all of it (a Chat space, D9)
 
 
 @dataclass(frozen=True)
@@ -112,7 +142,7 @@ class ConnectionType:
     Config: type[BaseModel]
     Secret: type[BaseModel]
     auth: HeaderAuth | None = None
-    host: HostMap | UrlField | None = None
+    host: HostMap | UrlField | SecretUrl | None = None
     rate_scopes: tuple[RateScope, ...] = field(default=())
     verify: Verify | None = None
     stream: StreamEndpoint | None = None
@@ -133,7 +163,7 @@ class ConnectionType:
             if info.annotation is not SecretStr:
                 out.append(f"{name}: secret field {prop!r} must be a SecretStr")
         out += self._auth_problems(name, secret_fields)
-        out += self._host_problems(name, config_fields)
+        out += self._host_problems(name, config_fields, secret_fields)
         for scope in self.rate_scopes:
             out += self._scope_problems(name, scope, config_fields, secret_fields)
         out += self._stream_problems(name, config_fields, secret_fields)
@@ -173,6 +203,9 @@ class ConnectionType:
         out: list[str] = []
         if self.host is not None and self.host.field in self.Config.model_fields and self.host.field not in config:
             out.append(f"{name}: host field {self.host.field!r} must be required")
+        secret_host = isinstance(self.host, SecretUrl) and self.host.field in self.Secret.model_fields
+        if secret_host and self.host is not None and self.host.field not in secret:
+            out.append(f"{name}: host field {self.host.field!r} must be required")
         if self.auth is not None:
             try:
                 named = [n for _, n in template_parts(self.auth.template) if n is not None]
@@ -202,9 +235,14 @@ class ConnectionType:
             out.append(f"{name}: auth template must be one line")
         return out
 
-    def _host_problems(self, name: str, config_fields: set[str]) -> list[str]:
+    def _host_problems(self, name: str, config_fields: set[str], secret_fields: set[str]) -> list[str]:
         if self.host is None:
             return []
+        if isinstance(self.host, SecretUrl):
+            if self.host.field not in secret_fields:
+                return [f"{name}: host field {self.host.field!r} isn't a secret field"]
+            problem = url_pattern_problem(self.host.pattern)
+            return [f"{name}: {problem}"] if problem else []
         if self.host.field not in config_fields:
             return [f"{name}: host field {self.host.field!r} isn't a config field"]
         if isinstance(self.host, UrlField):
@@ -225,6 +263,12 @@ class ConnectionType:
         out += [f"{where} names {n!r}, not a config field" for n in scope.config if n not in config_fields]
         if scope.secret is not None and scope.secret not in secret_fields:
             out.append(f"{where} names {scope.secret!r}, not a secret field")
+        if scope.secret_pattern is not None:
+            if scope.secret is None:
+                out.append(f"{where}: a secret pattern needs its secret field")
+            problem = secret_pattern_problem(scope.secret_pattern)
+            if problem:
+                out.append(f"{where}: {problem}")
         budget = (scope.capacity, scope.refill_per_s)
         if not all(isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(v) and v > 0
                    for v in budget):  # fmt: skip
@@ -241,6 +285,8 @@ class ConnectionType:
             host = {"kind": "map", "field": self.host.field, "hosts": dict(self.host.hosts)}
         elif isinstance(self.host, UrlField):
             host = {"kind": "url_field", "field": self.host.field}
+        elif isinstance(self.host, SecretUrl):
+            host = {"kind": "secret_url", "field": self.host.field, "pattern": self.host.pattern}
         return {
             "key": self.key,
             "label": self.label,
@@ -274,4 +320,4 @@ def _scope_manifest(s: RateScope) -> dict[str, Any]:
         "secret": s.secret,
         "capacity": float(s.capacity),
         "refill_per_s": float(s.refill_per_s),
-    }
+    } | ({"secret_pattern": s.secret_pattern} if s.secret_pattern is not None else {})

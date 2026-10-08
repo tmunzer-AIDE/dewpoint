@@ -11,6 +11,7 @@ from typing import Any
 import structlog
 
 UVICORN = ("uvicorn", "uvicorn.error", "uvicorn.access", "uvicorn.asgi")  # the loggers uvicorn configures
+HTTP = ("httpx", "httpcore")  # the HTTP libraries' loggers, whose levels configuring the process sets
 
 
 @contextmanager
@@ -28,16 +29,17 @@ def rendered() -> Iterator[Callable[[], list[str]]]:
 
 @contextmanager
 def stdlib_restored() -> Iterator[None]:
-    """The root logger's handlers and uvicorn's loggers as they were, afterwards: configuring the process and uvicorn's
-    own configuration both change them."""
+    """The root logger's handlers and level, and uvicorn's and the HTTP libraries' loggers, as they were afterwards:
+    configuring the process and uvicorn's own configuration both change them."""
     root = logging.getLogger()
-    handlers = root.handlers[:]
-    loggers = {name: logging.getLogger(name) for name in UVICORN}
+    handlers, root_level = root.handlers[:], root.level
+    loggers = {name: logging.getLogger(name) for name in (*UVICORN, *HTTP)}
     saved = {name: (lg.handlers[:], lg.propagate, lg.level, lg.disabled) for name, lg in loggers.items()}
     try:
         yield
     finally:
         root.handlers[:] = handlers
+        root.setLevel(root_level)
         for name, (kept, propagate, level, disabled) in saved.items():
             lg = loggers[name]
             lg.handlers[:], lg.propagate, lg.disabled = kept, propagate, disabled

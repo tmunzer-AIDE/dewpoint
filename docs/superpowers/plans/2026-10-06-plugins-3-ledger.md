@@ -1054,3 +1054,277 @@ After the PR (2026-10-08):
   correct (113 catalog and SDK tests). Not pushed: on the owner's word.
 - The show ARP ruling change (a bounded collection, above) still awaits the owner's sign-off.
 - The owner signed off the show ARP ruling change (a bounded collection) and the push of the merge (2026-10-08).
+
+## 3c-1 Messaging: chat and webhooks
+
+Branch `feat/plugins-3c1` from `origin/main` f0e7bf5 (#56), started 2026-10-08 on the owner's "let's go" after 3b-2
+merged; the outline's order puts 3c before 3d. A go to build; this section's rulings await the owner's sign-off. No
+migration expected. No real Slack, Teams or Google Chat call: tests and the proof run against local fakes.
+
+Facts checked (official documentation, read 2026-10-08; never from memory):
+- Slack incoming webhooks (docs.slack.dev `messaging/sending-messages-using-incoming-webhooks`, `apis/web-api/rate-limits`,
+  `reference/block-kit/*`, `messaging/formatting-message-text`, `changelog/2016-05-17-changes-to-errors-for-incoming-webhooks`):
+  - the URL's only documented form is `https://hooks.slack.com/services/T…/B…/…` (the `B` segment named the service
+    id; the `T` segment not named); the URL is a secret; channel, user name and icon can't be overridden;
+  - POST JSON with `text` (the `no_text` error says it's needed), optional `blocks`; success is 200 with body `ok`;
+    errors are 4xx with a reason string (400 `invalid_payload`, 403 `action_prohibited`, 404 `channel_not_found`, 410
+    `channel_is_archived`; 500 `rollup_error` in the 2016 mapping); "any other response code as a failure";
+  - rate: incoming webhooks 1 a second, short bursts allowed; about one message a second a channel; past it, 429 with
+    `Retry-After` in seconds;
+  - Block Kit: 50 blocks a message; section text 1 to 3,000 characters; up to 10 fields of 2,000; context up to 10
+    elements; actions up to 25 elements; a button's text 75 (plain text), its url 3,000; a message `text` past 40,000
+    characters is truncated (documented for chat.postMessage);
+  - escaping: `&`, `<` and `>` become `&amp;`, `&lt;` and `&gt;` when not used for formatting; `<!here>` is a special
+    mention; `verbatim: true` turns off automatic parsing (bare links, `@here`, channels).
+- Microsoft Teams through Workflows (learn.microsoft.com `connectors/teams` "When a Teams webhook request is received",
+  `power-automate/ip-address-configuration`, `troubleshoot/.../triggers-troubleshoot`; devblogs on the connectors'
+  retirement):
+  - Office 365 connectors stopped working by 2026-05-22; Workflows replace them;
+  - body `{"type": "message", "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive",
+    "contentUrl": null, "content": <Adaptive Card>}]}`; POST only; samples at card version 1.2; Teams supports cards
+    up to 1.6 for bots; about 28 KB a message;
+  - the trigger's "Anyone" setting takes no authentication header (one sent fails it); the other settings need a
+    token;
+  - hosts: `*.logic.azure.com` (moved since 2025-11-30) and `*.api.powerplatform.com` for the public cloud (the
+    allowlist page; sovereign clouds have their own); the `sig` query value is the secret;
+  - the success status isn't documented for this trigger (Logic Apps' request trigger answers 202 without a Response
+    action), nor 429; throttling: 25 non-GET flow-bot posts a connection per 300 s; a flow throttled for 14 days is
+    turned off;
+  - cards (`task-modules-and-cards/cards/cards-format`, `cards-reference`, and the card schema
+    adaptivecards.microsoft.com `schemas/adaptive-card.json`, read 2026-10-08): markdown renders in a `TextBlock` and
+    in a fact's title and value, `[Title](url)` links included; a `TextRun`'s text: "Markdown is not supported";
+    `RichTextBlock` is 1.2, its inlines `TextRun`s only, no `wrap`; incoming-webhook cards support every native
+    element but `Action.Submit`, up to 1.6; a mention needs an `msteams` entity with the user's id;
+  - httpx 0.28.1 (the lock's) sends a `json=` body compact and UTF-8 (`httpx._content.encode_json`).
+- Google Chat incoming webhooks (developers.google.com `workspace/chat/quickstart/webhooks`, `spaces.messages/create`,
+  `format-messages`, `limits`):
+  - URL `https://chat.googleapis.com/v1/spaces/SPACE_ID/messages?key=KEY&token=TOKEN`; a webhook works only in its
+    space;
+  - POST JSON `{"text": …}`; cards over webhooks not documented; a message is at most 32,000 bytes;
+  - 1 request a second a space, shared by all its webhooks; 429 past a quota (no `Retry-After` documented); errors
+    are `google.rpc.Status` with 4xx or 5xx; the answer holds the message's `name` and `thread.name`;
+  - `<users/all>` mentions everyone in a text message; no escape is documented; `<url|text>` is a link.
+  - text syntax (`format-messages`, read again 2026-10-08): Chat's own by default - bold `*x*`, links
+    `<url|text>`, mentions `<users/{user}>`; Markdown (`[text](url)`, `<chat-user …>`) only when the request sets
+    `markupSyntax` to Markdown; bare URLs are linked; no escape is documented.
+
+Tasks (test-first, in order):
+1. SDK 0.6.0: a connection type whose base URL is a secret field (`SecretUrl`), the URL's shape the secret field's own
+   pattern; a rate scope keyed by a part of a secret field (`secret_pattern`); the message model (title, text, label
+   and value fields, link buttons, severity); the catalog checks the new declarations as data.
+2. The runtime and the API for a secret-URL connection: the request goes to that exact URL only, with no credentials
+   added; its parts join the secret index (as today); its quota scopes from URL parts; a URL of another shape is
+   refused when the connection is created.
+3. Slack: a connection type and `slack.send_message` (Block Kit, the documented escaping, every limit cut and marked;
+   200 `ok` sent, 4xx fatal, anything else after sending unknown).
+4. Teams: a connection type and `teams.send_message` (an Adaptive Card through a Workflows webhook; a 2xx is the flow's
+   acceptance, any other answer unknown).
+5. Google Chat: a connection type and `google_chat.send_message` (text, a scope per space).
+6. Webhook: a connection type, `webhook.send_message` (the message as JSON) and `webhook.send_json` (a body of the
+   workflow's).
+7. Simulate: each node renders and reports what would be cut, sending nothing.
+8. Proof: a workflow posting to Slack, Google Chat, Teams and a webhook through RunGraph against local fakes; simulated,
+   nothing is sent.
+9. Docs: the operator guide's connection types, their URLs and quotas.
+
+Rulings:
+- Ruling: 3c splits in two: 3c-1, the message model and its chat and webhook targets; 3c-2, SMTP (D20) and syslog
+  (D21) - HTTP and socket transports share little, and 3b split the same way - cost if wrong: one more PR.
+- Ruling: one plugin a target (`slack`, `teams`, `google_chat`, `webhook`), each with its connection type and node (the
+  webhook two: task 6, below); the
+  message model is the SDK's (`dewpoint.sdk.messages`), so any plugin can render it - a type key starts with its
+  plugin's name - cost if wrong: none.
+- Ruling: a secret-URL connection sends to its URL exactly, with no path, query or header of the node's; the URL's
+  shape is its secret field's pattern, checked at creation and again where it's read; no verify hook (verifying
+  would post to the channel; the pattern is the host and syntax check D3 names) - cost if wrong: a wrong URL fails at
+  its first send (`connection_unavailable` or the provider's 404).
+- Ruling: Slack's URL is its documented form only (`https://hooks.slack.com/services/T…/B…/…`, each segment letters
+  and digits): GovSlack's host isn't documented, so it's refused - cost if wrong: a GovSlack workspace waits for a
+  documented host.
+- Ruling: Slack's quota scope is one a tenant (D9's fallback: the `T` segment isn't documented as the workspace), 1 a
+  second with bursts of 3 - under-using the quota, never exceeding it - cost if wrong: a tenant's Slack messages queue
+  behind one another at 1 a second.
+- Ruling: a 429 or a 5xx after sending is `outcome_unknown` for every target (D10, D20): Slack and Google document a 429
+  past their rate, not that the message wasn't posted - cost if wrong: such a send needs a person; the buckets keep it
+  rare.
+- Ruling: Slack text is escaped (`&`, `<`, `>`) and sent in `mrkdwn` objects with `verbatim: true`; the title is a bold
+  line, not a `header` block, whose `plain_text` isn't documented to ignore mentions; button labels are `plain_text`
+  (Slack's only kind for them) - a value from run data never mentions `@here` or a channel, nor makes a link - cost if
+  wrong: a title loses the header's size. (Narrowed after the review of 1e71079, R4: no link labelled other than its URL;
+  a bare URL may link to itself.)
+- Ruling: Google Chat text replaces `<` and `>` with their full-width forms: no escape is documented, and `<users/all>`
+  would notify the whole space - cost if wrong: a `<` in a message shows as `＜`.
+- Ruling: Teams cards are version 1.2 (the documented samples'), rich text only (was "text blocks only": changed in
+  task 4, below) and `Action.OpenUrl` buttons; hosts
+  `*.logic.azure.com` and `*.api.powerplatform.com` only (the public cloud); no authentication header (the "Anyone"
+  trigger) - cost if wrong: a sovereign-cloud or a tenant-only trigger isn't reachable yet.
+- Ruling: a Teams 2xx is reported `{accepted: true}`, never `delivered`: the trigger's success status isn't documented,
+  and a flow accepting a request doesn't prove the post - cost if wrong: none.
+- Ruling: Teams's quota scope is per URL, 25 posts in 300 s (the flow-bot limit), bursts of 5 - cost if wrong: a fast
+  workflow waits. (Changed after the review: one a tenant, below.)
+- Ruling: Google Chat's scope is per space (D9: the URL's `spaces/{space}`), 1 a second, no burst - cost if wrong: none.
+- Ruling: a generic webhook's URL is any https URL the guard allows (http only to allowlisted addresses, D7: dropped
+  in task 6, below), the answer's status its only output (a receiver's body could quote anything) - cost if wrong: a receiver's answer isn't
+  readable.
+- Ruling (task 1): a secret URL's pattern is declared on the type (`SecretUrl(field, pattern)`), matched whole
+  (`re.fullmatch`) wherever the secret is read, not put on the secret field: pydantic's default regex engine has no
+  look-around, and with Python's it can't apply a pattern to a `SecretStr`, while a `$` in JSON Schema's Python check
+  would accept a final newline - cost if wrong: none.
+- Ruling (task 2): a secret-URL connection's request carries nothing of the node's - no path, query, parameters,
+  headers or redirects - the provider's URL is the whole request target, and a header of the node's could add
+  credentials the type doesn't declare - cost if wrong: a provider option set by query (Google Chat's threads) needs
+  the type to declare it.
+- Ruling (task 3, Slack): a 4xx is Slack's refusal (`slack.invalid_payload`, `slack.action_prohibited`,
+  `slack.channel_not_found`, `slack.channel_is_archived`, else `slack.refused`), never retried; the runtime marks an
+  ambiguous step's failure after a send `outcome_unknown` with that code kept (2b's rule: a later failure can't
+  establish what an earlier request did) - cost if wrong: the step reads unknown where Slack said no.
+- Ruling: a simulated send renders the message and reports what it would cut, `sent: true` like the real output's
+  shape, opening no connection - cost if wrong: none.
+- Ruling (task 4, Teams): run data goes in rich text blocks of text runs, never a `TextBlock` or a fact set: those
+  render markdown, so a `[label](url)` from run data would be a link with a label of its choosing, while a text run's
+  text isn't markdown; no `msteams` entity is ever sent, so `<at>` mentions no one - cost if wrong: fields lose the
+  fact set's columns, and markdown a workflow meant shows as typed.
+- Ruling (task 4, Teams): the body is kept within 24,000 bytes, measured as httpx sends it (compact UTF-8), under the
+  documented ~28 KB; it's fitted in levels - nothing cut, then the text, field values, labels, and last links - and
+  every cut or dropped value is named in `truncated` - cost if wrong: a message near the limit loses detail it could
+  have kept.
+- Ruling (task 4, Teams): every non-2xx answer is `teams.outcome_unknown`, a 4xx included (unlike Slack): the
+  trigger's error answers aren't documented, so none can be read as a refusal - cost if wrong: a refused send reads
+  unknown and needs a person.
+- Ruling (task 4, Teams): the severity is a subtle line, as in Slack, not a container style: the styles' rendering in
+  Teams isn't documented on the pages read - cost if wrong: the severity isn't coloured.
+- Ruling (task 5, Google Chat): the URL is the documented form exactly - `spaces/{space}/messages?key=…&token=…`, in
+  that order, no port nor other parameter; the space letters, digits, `-` and `_`; the key and token, whose
+  characters aren't documented, the URL's unreserved ones, `%` and `=` - cost if wrong: a URL Google issues with
+  another character is refused at creation until the class widens.
+- Ruling (task 5, Google Chat): text in Chat's own syntax (no `markupSyntax`, so Markdown never applies), the title
+  and labels bold; a link's `|` is percent-encoded so a URL never ends its link early - cost if wrong: a title's own
+  `*` or `_` may format it.
+- Ruling (task 5, Google Chat): the body is kept within 30,000 bytes as sent, under the documented 32,000, fitted in
+  Teams' levels, every cut or dropped value named - cost if wrong: a message near the limit loses detail.
+- Ruling (task 5, Google Chat): only a 200 is sent (Google answers the created message); a 4xx but 429 is
+  `google_chat.refused`, naming the status only, never the answer's message (it could quote anything); any other
+  answer is unknown - cost if wrong: as Slack's.
+- Ruling (task 6, webhook): two nodes, `webhook.send_message` (the message model as JSON, the chat targets'
+  configuration, so a workflow changes target without reshaping it) and `webhook.send_json` (D18's template body: a
+  JSON value of the workflow's), not one node with a union, whose configuration would take two shapes - cost if
+  wrong: one more node type.
+- Ruling (task 6, webhook): https only: a secret URL's pattern starts with https (task 1), so D7's http to an
+  allowlisted address isn't offered - cost if wrong: a plain-http receiver waits for a type that declares it.
+- Ruling (task 6, webhook): the URL is a lowercase host name or IPv4 address (no IPv6 literal, no trailing dot), a
+  port 1 to 65535, a path of RFC 3986's characters with its query; no user, no fragment - so the host the scope is
+  keyed by is the host connected to - cost if wrong: an IPv6-literal or an uppercase URL is refused at creation. (The
+  review added: not a chat target's own webhook host, below.)
+- Ruling (task 6, webhook): one quota scope a host (`secret_pattern` on the URL's host), 1 a second with bursts of 5:
+  a receiver's limit isn't known, and URLs to one receiver share its budget - cost if wrong: a fast workflow waits.
+- Ruling (task 6, webhook): no header of the node's (task 2), so a receiver that needs an authentication header
+  isn't reachable yet; the URL's own token is the credential - cost if wrong: such a receiver waits for a type that
+  declares the header as a secret.
+- Ruling (task 6, webhook): a 2xx is sent, its status the output; a 4xx but 429 is `webhook.refused`, naming the
+  status only; a 3xx (no redirect is followed), a 429, a 5xx or anything else is unknown; simulated, the status is
+  none - cost if wrong: as Slack's.
+- Ruling (task 6, webhook): a workflow's body is at most 1 MiB as sent and never NaN, checked when the configuration
+  is validated, before anything is sent; the message's size is its model's bound - cost if wrong: a larger body
+  needs a larger bound.
+- Ruling (task 6, webhook): its URL's path segments and query values of 8 characters or more join the secret index
+  like any secret URL's (task 2), so an output naming one (a path word such as `incoming`) is redacted - cost if
+  wrong: over-redaction of such words.
+
+Fresh-context review of 3c-1 (at e62f132, 2026-10-08): no High, no Medium, six Low and two notes. Each finding is
+fixed test-first, its protection checked by removing it (mutants named in each commit):
+- L1 (`c82364d`): a secret URL's pattern was checked as text only, so `https://x|http://.*` started with https yet
+  admitted plain http. Ruling: the runtime holds the rule - `secret()` takes a secret URL only if it starts with
+  `https://`, and `base_url()` reads none that doesn't - since a pattern's text can't prove what it matches - cost if
+  wrong: none.
+- L2 (`c82364d`): a `secret_pattern` whose group is optional or empty keyed a scope by nothing. A scope's part must
+  take part in the match and not be empty, where the secret is accepted and where scopes are keyed; else the secret
+  is refused before any request.
+- L3, a ruling challenge (`f6e6d4d`): Teams limits a flow bot's posts per Teams connection ("Non-Get requests per
+  connection", `connectors/teams`, read again 2026-10-08), which no Workflows URL names; keyed by URL, flows sharing
+  one connection each got a budget, as did one flow's URL spelt two ways. Ruling: Teams' scope is one a tenant
+  (`teams.tenant`), D9's fallback as Slack's - under-using the quota, never exceeding it - cost if wrong: a tenant's
+  Teams messages, every flow's together, queue at 25 in 300 s.
+- L4 (`7719a88`): the generic webhook accepted Slack's, Google Chat's and Teams' webhook URLs, and
+  `webhook.send_message` posts run data as it is, so a `<!channel>` would have reached Slack unescaped and the send
+  charged `webhook.host`. Ruling: the generic type refuses `hooks.slack.com`, `chat.googleapis.com` and any host
+  under `logic.azure.com`, `api.powerplatform.com` or `webhook.office.com`; those take their own type - cost if
+  wrong: a workflow that wanted the raw JSON shape on such a host can't have it.
+- L5 (`9c3728f`): the secret index held a URL's parts decoded only (a Chat token written `…%3D` was indexed as
+  `…=`). The raw path, raw segments and raw query values of 8 characters or more join it too.
+- L6 (`c48eec0`): httpx logs each request's whole URL at INFO; only the root's WARNING level kept it out. Configuring
+  the process sets `httpx` and `httpcore` to WARNING.
+- Note (docs): the webhook's docstring claimed a guard check at creation; the API's create path runs the type's
+  checks only, and the guard vets on every connect. Docstring corrected (`7719a88`). The gap against D7's and D8's
+  wording ("the API at connection creation") predates 3c-1; it's flagged for the owner as a separate task, not fixed
+  here.
+- Note (over-redaction): every secret-URL type's path segments and query values of 8 characters or more join the
+  index (task 2), so a provider's constant words (`services`, `messages`, `workflows`, `triggers`, `2016-06-01`,
+  `/triggers/manual/run`) are masked in every output of a run tree that uses such a connection, Mist's included.
+  Ruling: kept, fail-closed - cost if wrong: such words read redacted in those outputs. Recommendation for the owner,
+  not built: a type declares its URL's secret parts (named groups in its pattern: Teams' `sig`, Chat's `token`, a
+  Slack URL's last segment), the rest indexed only within the whole URL; it needs each provider's secret parts
+  verified first.
+
+### 3c-1 checkpoint (2026-10-08, at c48eec0, local, not pushed)
+
+- Built (tasks 1-9, test-first): SDK 0.6.0 with `SecretUrl`, `RateScope.secret_pattern` and the message model
+  (32b2d31); secret-URL connections at run time and at creation, exact URL only (616391e); Slack (5d56645); Teams
+  (4e34072); Google Chat (d34dd85); the generic webhook (684022d); simulate in each node; the RunGraph proof against
+  local fakes (fa26d8f); the operator guides (e62f132).
+- Fresh-context review: no High or Medium; L1-L6 fixed test-first, each protection checked by removing it; two notes
+  recorded above.
+- Verified at c48eec0: 1,656 tests across the SDK, the catalog, connections, egress, logs, the worker, the API's
+  connections and uvicorn logging, every plugin and the CLI; ruff, format, mypy and import contracts; CodeQL's
+  python analysis finds nothing locally, with CI's CLI and query filter.
+- Not run: the full suite (about 10 minutes, asked first); a Compose proof; any real Slack, Teams, Google Chat or
+  receiver call (each needs the owner's say and a test channel).
+- Awaiting the owner: sign-off of this section's rulings (amended in tasks 4 and 6 and after the review, as marked);
+  the full suite; push and PR.
+
+A technical review of 1e71079 (pasted by the owner, 2026-10-08): the six fixes above check out; four Low (R1-R4), no
+High or Medium. Each fixed test-first, its protection checked by removing it. A technical review: it grants no ruling
+acceptance or push permission.
+- R1 (`434db38`): `webhook.send_json` with a null body posted an empty request (httpx sends `json=None` as no body)
+  and reported it sent. Ruling: a workflow's body is never null - refused when validated and by the published schema
+  (`not: null`) - since sending `null` as content would need a content type a secret-URL request can't carry (task
+  2) - cost if wrong: a receiver that wants a bare `null` can't have it. A wire-level regression sends every falsy
+  body through the guarded transport to a local server: each arrives as its JSON with a JSON content type.
+- R2 (`61ef7ee`): Teams' bucket of 5 refilled at 25 per 300 s granted 30 posts in 300 s (29 in 288 s, measured on
+  the database bucket). Ruling (amends L3's): bursts of 5, then 20 in 300 s, so never more than 25 in any 300 s - a
+  work-unit test counts it exactly - cost if wrong: a tenant's Teams posts stay a little under the quota.
+- R3 (`4879091`): any Slack 200 was reported sent. Ruling: only a 200 whose body is exactly `ok` (the documented
+  acknowledgement) is sent; any other 200 is `slack.outcome_unknown`, never retried - cost if wrong: such a send
+  needs a person.
+- R4 (`86c9d9c`): Slack's top-level `text` (the escaped fallback) still turns "Regular URLs" into links unless `parse`
+  is `none` (`messaging/formatting-message-text`). Ruling (narrows Slack's and Google Chat's): run data never mentions
+  anyone nor makes a link labelled other than its own URL; a bare URL may become a link to itself. `parse: none`
+  isn't sent: it isn't documented for incoming webhooks, and an unknown field could make Slack refuse every send -
+  cost if wrong: a bare URL from run data is clickable, showing where it goes. Option for the owner: try `parse:
+  none` against a test channel (a real Slack call, on the owner's say). Docstrings and tests narrowed; a test pins
+  the fallback against a labelled link.
+- The creation-time vetting gap and the over-redaction note stand as separate owner decisions.
+
+### 3c-1 checkpoint, after the review of 1e71079 (2026-10-08, at 86c9d9c, local, not pushed)
+
+- Verified at 86c9d9c: 1,675 tests across the affected areas (as at c48eec0, plus the webhook's wire test); ruff,
+  format, mypy and import contracts; CodeQL's python analysis finds nothing locally.
+- Not run: the full suite (about 10 minutes, asked first); a Compose proof; any real provider call.
+- Awaiting the owner: technical closure of R1-R4; sign-off of this section's rulings (amended as marked); the full
+  suite; push and PR.
+- The review of the fixes (pasted by the owner, 2026-10-08): R1-R4 technically closed at 2ee0d8c, against the amended
+  contracts, no new findings (264 existing tests and 52 closure checks run independently; no real provider call). R1
+  and R4 change the promised behaviour rather than preserve it. A technical closure only: the revised null-body and
+  link rulings, and every other 3c-1 ruling, still await the owner's sign-off; the creation-time vetting gap and the
+  over-redaction note stay separate decisions.
+- The owner signed off this section's rulings, as amended and marked (2026-10-08), and authorized the full suite, the
+  push and the PR.
+- The full backend suite at 9e9881b (2026-10-08), as CI runs it: 3,834 passed with `-n auto`, then the CEL gate tests
+  on their own, 398 passed and 8 skipped.
+
+- The first push was declined by GitHub's push protection (2026-10-08): `test_slack.py` held Slack's documented
+  example webhook URL as one literal (since 5d56645), and gitleaks (the repository's config) also found the
+  secret-URL tests' fake key `k3y…` (since 616391e). On the owner's choice, the branch was rewritten from f0e7bf5
+  (`git filter-branch --tree-filter`, one idempotent text substitution in every commit): Slack's URL is assembled from
+  parts, the fake key is a run of `k` of the same length. Code is identical; the three test files alone differ, and
+  gitleaks finds nothing in the range. The pre-rewrite branch is kept as `backup/plugins-3c1-pre-rewrite` (c2a3127).
+  Every SHA this section names is a pre-rewrite one; the map, in order: ebf932b -> b71326b, 32b2d31 -> dd4bc7b, 616391e -> 7bd65f3, 5d56645 -> 0bde4a3, 4e34072 -> dd7b68b, d34dd85 -> 4914391, 684022d -> f985277, fa26d8f -> 8545b6e, e62f132 -> c63ac2d, c82364d -> eaf909f, f6e6d4d -> ae87c81, 7719a88 -> 548d5d4, 9c3728f -> 78fc369, c48eec0 -> 1efdda9, 1e71079 -> 3f74d5d, 434db38 -> 06ad7fb, 61ef7ee -> de3e9a8, 4879091 -> 8201fab, 86c9d9c -> a505157, 2ee0d8c -> 48069a7, cf69a8d -> b8fc955, be0e579 -> cba7847, 9e9881b -> e7efe68, c2a3127 -> 5eccfed.

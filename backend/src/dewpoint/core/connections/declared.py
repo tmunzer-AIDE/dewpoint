@@ -6,6 +6,7 @@ plugins' manifests, so the two always agree."""
 
 import hashlib
 import json
+import re
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -98,12 +99,29 @@ class DeclaredType:
         return self._checked(self.config_schema, value)
 
     def secret(self, value: Any) -> dict[str, Any]:
-        """The secret as written, once the schema accepts it."""
-        return self._checked(self.secret_schema, value)
+        """The secret as written, once the schema accepts it, a secret URL matches its type's pattern whole, and each
+        scope's `secret_pattern` finds its part (plugins-3 D4, D9)."""
+        found = self._checked(self.secret_schema, value)
+        if self.exact:  # https whatever the pattern admits: its text can't prove what it matches (3c-1 review, 1)
+            url = str(found.get(self.host["field"]))  # type: ignore[index]
+            if not url.startswith("https://") or not re.fullmatch(self.host["pattern"], url):  # type: ignore[index]
+                raise InvalidValueError([self.host["field"]])  # type: ignore[index]
+        for s in (*self.rate_scopes, *(self.stream["rate_scopes"] if self.stream else ())):
+            if s.get("secret_pattern") is not None:
+                _part(s, str(found.get(s["secret"])))
+        return found
 
-    def base_url(self, config: Mapping[str, Any]) -> str | None:
+    @property
+    def exact(self) -> bool:
+        """Whether the base URL is a secret field's: requests then go to that URL exactly (`SecretUrl`)."""
+        return self.host is not None and self.host.get("kind") == "secret_url"
+
+    def base_url(self, config: Mapping[str, Any], secret: Mapping[str, Any] | None = None) -> str | None:
         if self.host is None:
             return None
+        if self.exact:  # read from the secret, once `secret()` accepted it
+            found = (secret or {}).get(self.host["field"])
+            return found if isinstance(found, str) and found.startswith("https://") else None
         value = config.get(self.host["field"])
         if self.host["kind"] == "map":
             host = self.host["hosts"].get(value) if isinstance(value, str) else None
@@ -152,6 +170,16 @@ class DeclaredType:
         return out
 
 
+def _part(scope: Mapping[str, Any], value: str) -> str:
+    """The part of a secret a scope is keyed by: its `secret_pattern`'s group, which must take part in the match and
+    not be empty, so one provider scope is never keyed by nothing (3c-1 review, finding 2)."""
+    found = re.search(scope["secret_pattern"], value)
+    part = found.group(1) if found is not None else None
+    if not part:
+        raise InvalidValueError([scope["secret"]])
+    return part
+
+
 def _scopes(
     declared: tuple[Mapping[str, Any], ...],
     config: Mapping[str, Any],
@@ -162,7 +190,10 @@ def _scopes(
     for s in declared:
         parts = [s["kind"], *(str(config[name]) for name in s["config"])]
         if s["secret"] is not None:
-            parts.append(mac(str(secret[s["secret"]])))
+            value = str(secret[s["secret"]])
+            if s.get("secret_pattern") is not None:  # keyed by its part only (a Chat space), `secret()` checked it
+                value = _part(s, value)
+            parts.append(mac(value))
         out.append(Scope(":".join(parts), float(s["capacity"]), float(s["refill_per_s"])))
     return out
 

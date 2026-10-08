@@ -199,3 +199,30 @@ async def test_an_edit_racing_a_move_is_checked_against_the_move(app, owner_sess
             await asyncio.sleep(0.5)  # the restore has read the connection and is waiting on the move
         r = await restore
     assert (r.status_code, r.json()) == (422, {"error": "secret_required"})
+
+
+@pytest.mark.parametrize(
+    "webhook_url",
+    [
+        "https://evil.test/v1/spaces/space1/messages?key=kkkkkkkkkkkkkkkkkkk",
+        "https://hooks.test/v1/spaces/space1/messages?key=kkkkkkkkkkkkkkkkkkk\n",
+        "https://hooks.test/v1/spaces/space1/messages",
+    ],
+)
+async def test_a_webhook_url_of_another_shape_is_refused_naming_its_field(
+    app, owner_sessionmaker, api_settings, webhook_url: str
+) -> None:
+    """A secret-URL type (plugins-3 3c-1): the URL matches its type's pattern whole, or the connection isn't made."""
+    from tests.support.plugins.hookkit import HOOKKIT
+
+    async with owner_sessionmaker() as s, s.begin():
+        await sync_installed(s, [MIST, HOOKKIT])
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    async with c:
+        body = {"type": "hookkit", "name": "Hook", "config": {}, "secret": {"webhook_url": webhook_url}}
+        r = await c.post(f"/api/v1/t/{tid}/connections", json=body)
+        good = {**body, "secret": {"webhook_url": "https://hooks.test/v1/spaces/space1/messages?key=kkkkkkkkkkkkk"}}
+        made = await c.post(f"/api/v1/t/{tid}/connections", json={**good, "name": "Good hook"})
+    assert r.status_code == 422 and r.json() == {"error": "invalid", "fields": ["webhook_url"]}
+    assert "kkkkkkkkkkkkkkkkkkk" not in r.text and "evil" not in r.text
+    assert made.status_code == 201, made.text
