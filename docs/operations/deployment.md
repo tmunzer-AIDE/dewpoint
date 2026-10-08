@@ -10,7 +10,7 @@ breaking the runs already going. Runs of a build from before versioning aren't p
 
 ## Builds and versions
 
-- Each build of Dewpoint has a build ID, `dewpoint-<version>+abi<engine ABI>`, for example `dewpoint-0.1.0+abi6`. The
+- Each build of Dewpoint has a build ID, `dewpoint-<version>+abi<engine ABI>`, for example `dewpoint-0.1.0+abi7`. The
   engine ABI changes whenever a build could execute a workflow differently, so such a build always has a new ID.
 - Every engine worker joins one Temporal **Worker Deployment**, `dewpoint-engine`, as its build's version.
 - New runs start on the deployment's **current** version. Nothing becomes current by itself: making a build current
@@ -23,9 +23,9 @@ breaking the runs already going. Runs of a build from before versioning aren't p
 `dewpoint deployment status` shows the current build and every version Temporal knows:
 
 ```text
-current: dewpoint-0.1.0+abi6
-dewpoint-0.1.0+abi5  draining
-dewpoint-0.1.0+abi6  current
+current: dewpoint-0.1.0+abi7
+dewpoint-0.1.0+abi6  draining
+dewpoint-0.1.0+abi7  current
 ```
 
 A `draining` version still has runs pinned to it. A `drained` one has none left.
@@ -134,7 +134,7 @@ superuser's setting): such a session's inserts skip the capture trigger unseen, 
 
 ## A build with a new engine ABI
 
-A build ID ends with its engine ABI (`+abi6`), which changes whenever a build could execute a workflow differently. A
+A build ID ends with its engine ABI (`+abi7`), which changes whenever a build could execute a workflow differently. A
 version runs only on a build of the ABI it was published for. So when a new build changes it:
 
 - Runs already started on the old build finish there, pinned to it, with their sub-flows and failure handlers. (A
@@ -200,6 +200,21 @@ What a run does differently on ABI 6:
   one ([`runs.md`](runs.md#what-the-workers-log-shows)).
 - A loop that collects more than 64 KiB, or more than the run's live state holds, outputs one claim:
   `steps.<loop>.output.items` is a handle, read by position as before.
+
+### ABI 7: what changes
+
+ABI 7 (2b-4b's engine blockers, #18 and #26) changes how a run binds and sends CEL, not what publishing accepts: a
+workflow published under ABI 6 publishes again unchanged, as every workflow must once the ABI 7 build is current
+(above). Its CEL queue is `dewpoint-cel.abi7.<profile>`: deploy the new build's evaluator workers with it, while the old
+build's runs keep `abi6`'s until they end. What a run does differently:
+
+- Binding many views of one large value yields by the bytes measured as well as the values bound: a filter whose every
+  item reads a large value takes more workflow tasks, never one that outlasts the SDK's deadlock timeout.
+- A value several of a step's binding sets share goes to the CEL evaluator once, as a claim each set carries the
+  handle of: a filter over a large plain string no longer sends a copy with each item.
+- A step whose CEL requests would take the run's history past 32 MiB fails with `history_too_large`, rather than
+  Temporal terminating the run at its own limit.
+- An execution continues as new once it has added 8 MiB of history, whatever Temporal suggests.
 
 ## Upgrading from a build without versioning
 

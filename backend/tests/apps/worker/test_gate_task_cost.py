@@ -167,8 +167,13 @@ SHARED: dict[str, tuple[dict[str, Any], str, Any]] = {  # #18: one value every v
 }  # fmt: skip
 
 
-# 30,000 views of two nodes each: nearly a whole node budget (YIELD_NODES) in one task, the per-task worst
-@pytest.mark.parametrize("items", [1_000, 30_000])
+# 30,000 views of two nodes each: nearly a whole node budget (YIELD_NODES) in one task, the per-task worst. About 45 s
+# each, so only in the CEL gate job (which sets DEWPOINT_CEL_GATE_RESULTS), not in every suite run (the review of the M2
+# checkpoint, M5)
+GATE_JOB = pytest.mark.skipif(not os.environ.get("DEWPOINT_CEL_GATE_RESULTS"), reason="the CEL gate job's load")
+
+
+@pytest.mark.parametrize("items", [1_000, pytest.param(30_000, marks=GATE_JOB)])
 @pytest.mark.parametrize("shape", list(SHARED))
 async def test_many_views_binding_one_large_value_stay_within_the_cpu_target(
     shape: str, items: int, monkeypatch: pytest.MonkeyPatch
