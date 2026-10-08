@@ -12,7 +12,8 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
-from temporalio.api.enums.v1 import EventType
+from temporalio.api.enums.v1 import EventType, WorkflowTaskFailedCause
+from temporalio.api.history.v1 import HistoryEvent
 from temporalio.client import Client, WorkflowHandle, WorkflowHistory
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer, Worker
@@ -276,6 +277,53 @@ async def test_three_large_requests_are_paced_under_temporals_message_limit(dev_
     assert await task_failures(handle) == []
 
 
+FORCED = WorkflowTaskFailedCause.WORKFLOW_TASK_FAILED_CAUSE_FORCE_CLOSE_COMMAND
+UNHANDLED = WorkflowTaskFailedCause.WORKFLOW_TASK_FAILED_CAUSE_UNHANDLED_COMMAND
+NONDETERMINISM = WorkflowTaskFailedCause.WORKFLOW_TASK_FAILED_CAUSE_NON_DETERMINISTIC_ERROR
+SERVER = "history-service"  # the identity a workflow task failed by the server itself carries
+
+
+ACTIVITY_ENDS = ("activity_task_completed", "activity_task_failed", "activity_task_timed_out", "activity_task_canceled")
+
+
+def _named(e: HistoryEvent, scheduled: dict[int, str]) -> str:
+    """An event's kind, and the code name it concerns: an activity's type, a timer's id, a signal's name."""
+    kind = EventType.Name(e.event_type).removeprefix("EVENT_TYPE_")
+    for attrs in ACTIVITY_ENDS:
+        if e.HasField(f"{attrs}_event_attributes"):
+            return f"{kind} {scheduled.get(getattr(e, f'{attrs}_event_attributes').scheduled_event_id, '?')}"
+    if e.HasField("timer_fired_event_attributes"):
+        return f"{kind} {e.timer_fired_event_attributes.timer_id}"
+    if e.HasField("workflow_execution_signaled_event_attributes"):
+        return f"{kind} {e.workflow_execution_signaled_event_attributes.signal_name}"
+    return kind
+
+
+def unpermitted_task_failures(events: list[HistoryEvent]) -> list[str]:
+    """#16's acceptance permits only the server's own force-close of a slow workflow task (too many events buffered
+    during it: the server fails the task to record them, and the next task carries on), once a later task completed.
+    Each other failed task: its cause, who failed it, and the events that arrived meanwhile (recorded after the
+    failure, before the next task), by kind and code name."""
+    scheduled = {e.event_id: e.activity_task_scheduled_event_attributes.activity_type.name for e in events
+                 if e.HasField("activity_task_scheduled_event_attributes")}  # fmt: skip
+    out = []
+    for i, e in enumerate(events):
+        if not e.HasField("workflow_task_failed_event_attributes"):
+            continue
+        failed, later = e.workflow_task_failed_event_attributes, events[i + 1 :]
+        recovered = any(x.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED for x in later)
+        if failed.cause == FORCED and failed.identity == SERVER and recovered:
+            continue
+        arrived = []
+        for x in later:
+            if x.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_SCHEDULED:
+                break
+            arrived.append(_named(x, scheduled))
+        cause = WorkflowTaskFailedCause.Name(failed.cause).removeprefix("WORKFLOW_TASK_FAILED_CAUSE_")
+        out.append(f"{cause} by {failed.identity}{'' if recovered else ', never recovered'}: arrived {arrived}")
+    return out
+
+
 async def continued_inputs(client: Client, handle: WorkflowHandle[Any, Any]) -> tuple[list[int], list[int]]:
     """Across a run's continue-as-new chain: each continued run's input, its encoded bytes as Temporal holds them; and
     every failed workflow task's cause."""
@@ -304,24 +352,75 @@ def issue_16() -> G:
     return g
 
 
+async def replays(handle: WorkflowHandle[Any, Any]) -> list[HistoryEvent]:
+    """The run's history, which replays as it ran (a command it doesn't make again fails the replay)."""
+    history = await handle.fetch_history()
+    replayer = Replayer(workflows=[RunGraph, LoopBatch], data_converter=FIXTURE_CONVERTER)
+    await replayer.replay_workflow(WorkflowHistory.from_json(handle.id, history.to_json()))
+    return list(history.events)
+
+
+async def issue_16s_end(client: Client, store: MemoryStore, handle: WorkflowHandle[Any, Any]) -> list[HistoryEvent]:
+    """#16's acceptance: its run ends `snapshot_too_large`, nothing continued, its history replays; its events."""
+    from dewpoint.engine.runtime.size import SNAPSHOT_TOO_LARGE
+
+    result = await asyncio.wait_for(handle.result(), 120)
+    assert result.status == "failed" and result.error is not None and result.error["code"] == SNAPSHOT_TOO_LARGE
+    assert store.runs[run_id_of(handle)].error_code == SNAPSHOT_TOO_LARGE
+    assert (await continued_inputs(client, handle))[0] == []
+    return await replays(handle)
+
+
 async def test_issue_16s_run_too_large_to_carry_on_fails_never_its_task(
     dev_env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # fmt: skip
     """#16 on the dev server (closed after 2b-1a and 2b-1b; the 2b-4b plan's M2 checks its acceptance): its
-    reproduction's run, the snapshot bound lowered under its first snapshot, ends with `snapshot_too_large`; no
-    workflow task failed or retried, nothing continued. At its real bound it carries on, every iteration done, each
-    continued input within `SNAPSHOT_MAX` (`tests/probes/test_engine_issues.py`, by hand: about 4 minutes)."""
+    reproduction's run, the snapshot bound lowered under its first snapshot, ends with `snapshot_too_large`, nothing
+    continued, and its history replays. No workflow task failed, but the server's own force-close of a slow one, which
+    load may cause and the next task recovers (the owner's ruling on the M2 diagnostic); any other is named with what
+    arrived meanwhile. At its real bound it carries on, every iteration done, each continued input within
+    `SNAPSHOT_MAX` (`tests/probes/test_engine_issues.py`, by hand: about 4 minutes)."""
     from dewpoint.engine.runtime import size
-    from dewpoint.engine.runtime.size import SNAPSHOT_TOO_LARGE
 
     monkeypatch.setattr(size, "SNAPSHOT_BYTES", 5_000)
     client, store = dev_env.client, MemoryStore()
     async with serving(client, store):
         handle = await start(client, store, issue_16(), checkpoint_events=300, drain_events=600)
-        result = await asyncio.wait_for(handle.result(), 120)
-    assert result.status == "failed" and result.error is not None and result.error["code"] == SNAPSHOT_TOO_LARGE
-    assert store.runs[run_id_of(handle)].error_code == SNAPSHOT_TOO_LARGE
-    assert await continued_inputs(client, handle) == ([], [])
+        events = await issue_16s_end(client, store, handle)
+    assert unpermitted_task_failures(events) == []
+
+
+async def test_issue_16s_run_ends_the_same_through_the_servers_force_close_of_a_slow_task(
+    dev_env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:  # fmt: skip
+    """The case #16's acceptance permits, forced: the first four workflow tasks its steps' results reach are each held
+    1.2 s, so more than the server's 100 buffered events arrive meanwhile, and the server fails such a task itself.
+    The next task carries on: the run ends as it would, and its history replays."""
+    import time
+
+    from temporalio.worker import _workflow as running
+
+    from dewpoint.engine.runtime import size
+
+    monkeypatch.setattr(size, "SNAPSHOT_BYTES", 5_000)
+    real, held = running._RunningWorkflow.activate, []
+
+    def activate(self: Any, act: Any) -> Any:
+        if len(held) < 4 and sum(job.HasField("resolve_activity") for job in act.jobs) >= 10:
+            held.append(len(act.jobs))
+            time.sleep(1.2)  # under the SDK's 2 s deadlock bound
+        return real(self, act)
+
+    monkeypatch.setattr(running._RunningWorkflow, "activate", activate)
+    client, store = dev_env.client, MemoryStore()
+    async with serving(client, store):
+        handle = await start(client, store, issue_16(), checkpoint_events=300, drain_events=600)
+        events = await issue_16s_end(client, store, handle)
+    forced = [e for e in events if e.HasField("workflow_task_failed_event_attributes")]
+    assert held and forced, (held, forced)
+    assert {(e.workflow_task_failed_event_attributes.cause, e.workflow_task_failed_event_attributes.identity)
+            for e in forced} == {(FORCED, SERVER)}  # fmt: skip
+    assert unpermitted_task_failures(events) == []
 
 
 async def test_issue_18s_thousand_views_of_a_large_string_end_on_the_dev_server(dev_env: WorkflowEnvironment) -> None:
@@ -473,13 +572,62 @@ async def test_a_run_a_stopped_worker_left_in_memory_never_acts_in_another_run(
         handle = await start(client, store, g, {})
         result = await asyncio.wait_for(handle.result(), 60)
     assert (result.status, result.outputs) == ("succeeded", {"v": 1}), result
-    history = await handle.fetch_history()
-    replayer = Replayer(workflows=[RunGraph, LoopBatch], data_converter=FIXTURE_CONVERTER)
     try:
-        await replayer.replay_workflow(WorkflowHistory.from_json(handle.id, history.to_json()))
+        await replays(handle)
         replayed = "clean"
     except Exception as e:  # noqa: BLE001  # how its replay failed: the finding
         replayed = type(e).__name__
     logged = [r.getMessage().split(" ", 1)[0] for r in caplog.records if "_internal_error" in r.getMessage()]
     found = {"closing": raised, "logged": logged, "stale_rows": run_id_of(stale) in store.runs, "replay": replayed}
     assert found == {"closing": ["closed"], "logged": [], "stale_rows": False, "replay": "clean"}
+
+
+def event(event_id: int, kind: str, **attrs: Any) -> HistoryEvent:
+    """A history event of `kind` (its EventType name, without the prefix), with its attributes' fields."""
+    e = HistoryEvent(event_id=event_id, event_type=EventType.Value(f"EVENT_TYPE_{kind}"))
+    for field, value in attrs.items():
+        target = getattr(e, f"{kind.lower()}_event_attributes")
+        if field == "activity_type":
+            target.activity_type.name = value
+        else:
+            setattr(target, field, value)
+    return e
+
+
+def task(start: int, failed: tuple[int, str] | None = None) -> list[HistoryEvent]:
+    """A workflow task from `start`: completed, or failed with (cause, identity)."""
+    out = [event(start, "WORKFLOW_TASK_SCHEDULED"), event(start + 1, "WORKFLOW_TASK_STARTED")]
+    if failed is None:
+        return [*out, event(start + 2, "WORKFLOW_TASK_COMPLETED")]
+    return [*out, event(start + 2, "WORKFLOW_TASK_FAILED", cause=failed[0], identity=failed[1])]
+
+
+@pytest.mark.parametrize(
+    ("history", "found"),
+    [
+        (task(1), []),
+        ([*task(1, (FORCED, SERVER)), event(4, "TIMER_FIRED", timer_id="7"), *task(5)], []),
+        ([*task(1), *task(4, (FORCED, SERVER))], [f"FORCE_CLOSE_COMMAND by {SERVER}, never recovered: arrived []"]),
+        ([*task(1, (FORCED, "worker-a")), *task(4)], ["FORCE_CLOSE_COMMAND by worker-a: arrived []"]),
+        (
+            [
+                event(1, "ACTIVITY_TASK_SCHEDULED", activity_type="dewpoint.project"),
+                *task(2, (UNHANDLED, SERVER)),
+                event(5, "TIMER_FIRED", timer_id="9"),
+                event(6, "ACTIVITY_TASK_COMPLETED", scheduled_event_id=1),
+                *task(7),
+            ],
+            [f"UNHANDLED_COMMAND by {SERVER}: arrived {['TIMER_FIRED 9', 'ACTIVITY_TASK_COMPLETED dewpoint.project']}"],
+        ),
+        ([*task(1, (NONDETERMINISM, "worker-a")), *task(4)], ["NON_DETERMINISTIC_ERROR by worker-a: arrived []"]),
+    ],
+    ids=["none", "force_close_recovered", "force_close_unrecovered", "force_close_by_a_worker", "unhandled", "nde"],
+)
+def test_issue_16s_acceptance_permits_only_a_recovered_force_close_by_the_server(
+    history: list[HistoryEvent], found: list[str]
+) -> None:
+    """The owner's ruling on the 2b-4b M2 diagnostic: under load the server may fail a slow workflow task itself, too
+    many events buffered during it (`FORCE_CLOSE_COMMAND`, by `history-service`), and the next task carries on. #16's
+    acceptance permits that alone, once a later task completed; any other failed task fails it, named with what
+    arrived meanwhile (the events recorded after the failure, before the next task: kinds and code names only)."""
+    assert unpermitted_task_failures(history) == found
