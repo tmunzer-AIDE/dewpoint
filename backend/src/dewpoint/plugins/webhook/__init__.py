@@ -8,9 +8,10 @@ A secret URL's pattern starts with https, so a plain-http receiver isn't reachab
 second with bursts of 5: a receiver's limits aren't known, and URLs to one host share its budget (D9).
 
 Two sends, both ambiguous (D20): `webhook.send_message` posts the message model as JSON, the same configuration as
-the chat targets'; `webhook.send_json` posts a body of the workflow's, at most 1 MiB as sent. The answer's status is
-the only output, never its body: a receiver's answer could quote anything. A 2xx is sent; a 4xx but 429 is the
-receiver's refusal; a 429, a 5xx or anything else after sending is unknown (D10); no redirect is followed."""
+the chat targets'; `webhook.send_json` posts a body of the workflow's, never null, at most 1 MiB as sent. The
+answer's status is the only output, never its body: a receiver's answer could quote anything. A 2xx is sent; a 4xx
+but 429 is the receiver's refusal; a 429, a 5xx or anything else after sending is unknown (D10); no redirect is
+followed."""
 
 import json
 import uuid
@@ -124,11 +125,16 @@ class SendMessage(Node):
 class SendJsonConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     connection: uuid.UUID = connection_field("webhook")
-    body: JsonValue = Field(title="Body", description="The JSON to post, at most 1 MiB.")
+    # Never null: httpx sends `json=None` as no body at all, and `null` as content would need a content type the node
+    # can't set (task 2's exact URL; a review of 1e71079, R1).
+    body: JsonValue = Field(title="Body", description="The JSON to post, not null, at most 1 MiB.",
+                            json_schema_extra={"not": {"type": "null"}})  # fmt: skip
 
     @field_validator("body")
     @classmethod
     def _bounded(cls, value: JsonValue) -> JsonValue:
+        if value is None:
+            raise ValueError("the body can't be null")
         try:
             size = len(_encoded(value))
         except ValueError:

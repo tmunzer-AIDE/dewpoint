@@ -122,7 +122,9 @@ async def test_a_message_without_its_options_is_sent_whole() -> None:
     assert http.sent[0].json == {"title": None, "text": "hi", "fields": [], "links": [], "severity": "info"}
 
 
-@pytest.mark.parametrize("body", [{"event": "x", "n": [1, 2.5, None, True]}, [1, "a"], "plain", 7, None])
+@pytest.mark.parametrize(
+    "body", [{"event": "x", "n": [1, 2.5, None, True]}, [1, "a"], "plain", 7, 0, False, "", [], {}]
+)
 async def test_a_body_of_the_workflows_is_sent_as_it_is(body: Any) -> None:
     out, http = await run(SendJson, {"body": body}, Reply(202))
     assert out == {"sent": True, "status": 202} and http.sent[0].json == body
@@ -134,6 +136,16 @@ def test_a_body_past_its_bound_is_refused_before_sending() -> None:
                                         "body": {"x": "é" * (BODY_MAX // 2)}})  # fmt: skip
     SendJson.Config.model_validate({"connection": "00000000-0000-0000-0000-000000000001",
                                     "body": {"x": "e" * (BODY_MAX - 100)}})  # fmt: skip
+
+
+def test_a_null_body_is_refused_before_sending() -> None:
+    """httpx sends `json=None` as no body at all, and `null` sent as content would need a content type the node can't
+    set (task 2): refused when validated, and by the published schema (a review of 1e71079, R1)."""
+    with pytest.raises(pydantic.ValidationError):
+        SendJson.Config.model_validate({"connection": "00000000-0000-0000-0000-000000000001", "body": None})
+    assert SendJson.Config.model_json_schema()["properties"]["body"]["not"] == {"type": "null"}
+    with pytest.raises(pydantic.ValidationError):
+        SendJson.Config.model_validate({"connection": "00000000-0000-0000-0000-000000000001"})
 
 
 def test_a_body_must_be_json() -> None:
