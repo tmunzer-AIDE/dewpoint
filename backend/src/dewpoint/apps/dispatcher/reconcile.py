@@ -242,7 +242,7 @@ async def _open(
     if described.status is None or described.status in LIVE:
         await _checked_alone(sessionmaker, tenant_id, run_id)
         return "running"
-    ended = await _ended(handle, described.status, run_id)
+    ended = await reported_end(handle, described.status, run_id)
     async with sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant_id)
         await runs.finish_run(
@@ -256,7 +256,7 @@ async def _open(
     return "ended"
 
 
-async def _ended(handle: Any, status: WorkflowExecutionStatus, run_id: uuid.UUID) -> Ended:
+async def reported_end(handle: Any, status: WorkflowExecutionStatus, run_id: uuid.UUID) -> Ended:
     """The end Temporal reports for a closed execution (§7.6)."""
     if status == WorkflowExecutionStatus.COMPLETED:
         result: RunResult = await handle.result(rpc_timeout=CALL_DEADLINE)  # its own end, as its end write had it
@@ -392,7 +392,7 @@ async def _subrun(
     if described.status is None or described.status in LIVE:
         await _subrun_checked_alone(sessionmaker, tenant_id, run_id)
         return "running"
-    ended = await _ended(handle, described.status, run_id)
+    ended = await reported_end(handle, described.status, run_id)
     async with sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant_id)
         await runs.finish_run(

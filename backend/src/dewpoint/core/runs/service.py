@@ -41,6 +41,9 @@ STEP_FIELDS = (
 # unknown.
 OUTCOME_UNCONFIRMED = "outcome_unconfirmed"
 UNCONFIRMED_MESSAGE = "The run ended before this step's outcome was recorded: whether it ran is unconfirmed."
+# A run an operator settled once Temporal no longer had its history (2b-4b M3): an administrative settlement, its
+# outcome unconfirmed, never proof that it failed
+HISTORY_LOST = "history_lost"
 
 
 class BatchRange(Protocol):

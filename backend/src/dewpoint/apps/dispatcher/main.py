@@ -20,6 +20,7 @@ from dewpoint.apps import tick_contract
 from dewpoint.apps.codec import KeyringKeys, data_converter
 from dewpoint.apps.dispatcher import budget, evidence, matching
 from dewpoint.apps.dispatcher.cancels import send_cancels
+from dewpoint.apps.dispatcher.commands import commands_once
 from dewpoint.apps.dispatcher.dispatch import Rotation, dispatch_once
 from dewpoint.apps.dispatcher.matching import Verified, match_once
 from dewpoint.apps.dispatcher.observe import observe, report
@@ -63,12 +64,12 @@ async def cycle(
     retention: evidence.Retention | None = None, pages: matching.Rotation | None = None,
 ) -> None:  # fmt: skip
     """One cycle: observe the current build, dispatch what's due, match inbound events, report; the leader also
-    reconciles, sends cancels, keeps the Temporal Schedules in step with their rows, reads their missed firings,
-    reads the run executions' histories their evidence is due (`evidence`) and recounts the inbound-event counters
-    due a recount. An
-    observation that fails (Temporal, or the database, briefly unavailable) dispatches and matches nothing this cycle,
-    and the next one asks again: admission would refuse a matched event's requests for good without a fresh record of
-    the build (§7.2), which ages out meanwhile."""
+    reconciles, sends cancels, carries out the operator's commands (2b-4b M3), keeps the Temporal Schedules in step
+    with their rows, reads their missed firings, reads the run executions' histories their evidence is due
+    (`evidence`) and recounts the inbound-event counters due a recount. An observation that fails (Temporal, or the
+    database, briefly unavailable) dispatches and matches nothing this cycle, and the next one asks again: admission
+    would refuse a matched event's requests for good without a fresh record of the build (§7.2), which ages out
+    meanwhile."""
     try:
         build = await observe(sessionmaker, await current_build(client))
     except Exception as e:
@@ -85,6 +86,7 @@ async def cycle(
         settled = await reconcile_once(sessionmaker, client, keys, settings)
         settled.update({f"subrun_{k}": v for k, v in (await reconcile_subruns(sessionmaker, client)).items()})
         settled.update({f"cancel_{k}": v for k, v in (await send_cancels(sessionmaker, client)).items()})
+        settled.update({f"command_{k}": v for k, v in (await commands_once(sessionmaker, client)).items()})
         settled.update({f"schedule_{k}": v for k, v in (await sync_schedules(sessionmaker, client, leader)).items()})
         settled.update({f"misses_{k}": v for k, v in (await check_misses(sessionmaker, client)).items()})
         settled.update({f"strays_{k}": v for k, v in (await check_strays(sessionmaker, client)).items()})

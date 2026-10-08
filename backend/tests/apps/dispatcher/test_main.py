@@ -135,3 +135,34 @@ async def test_the_leader_recounts_inbound_event_counters_and_reports_it(
     async with owner_sessionmaker() as s:
         assert (await s.execute(text("select pending_events from webhook_endpoints where id = :e"),
                                 {"e": ready.endpoint_id})).scalar_one() == 0  # fmt: skip
+
+
+async def test_the_leader_carries_out_the_operators_commands_and_reports_them(
+    owner_sessionmaker, dispatch_sessionmaker, api_settings, monkeypatch
+) -> None:  # fmt: skip
+    """2b-4b M3: the commands pass is the leader's, after the reconciler's (its outcomes in the reconciler's report)."""
+    seen: list[str] = []
+
+    async def nothing(*args: Any, **kwargs: Any) -> dict[str, int]:
+        return {}
+
+    async def carried_out(*args: Any, **kwargs: Any) -> dict[str, int]:
+        seen.append("commands")
+        return {"slot_released": 1}
+
+    for step in ("reconcile_once", "reconcile_subruns", "send_cancels", "sync_schedules", "check_misses",
+                 "check_strays", "recount_once"):  # fmt: skip
+        monkeypatch.setattr(main, step, nothing)
+    monkeypatch.setattr(main, "commands_once", carried_out)
+
+    class Leading:
+        async def leading(self) -> bool:
+            return True
+
+    client = FakeClient()
+    client.workflow_service = Flaky(failures=0)
+    reconciler = uuid.uuid4()
+    await main.cycle(dispatch_sessionmaker, client, KEYS, api_settings, instance=uuid.uuid4(), reconciler=reconciler,
+                     leader=Leading(), rotation=dispatch.Rotation())  # type: ignore[arg-type]  # fmt: skip
+    assert seen == ["commands"]
+    assert (await reported(owner_sessionmaker, reconciler)).get("command_slot_released") == 1

@@ -153,7 +153,7 @@ async def test_a_completed_runs_result_is_read_with_a_deadline() -> None:
             asked.update(kw)
             return reconcile.RunResult(status="succeeded", iterations=0)
 
-    await reconcile._ended(Handle(), WorkflowExecutionStatus.COMPLETED, uuid.uuid4())
+    await reconcile.reported_end(Handle(), WorkflowExecutionStatus.COMPLETED, uuid.uuid4())
     assert asked.get("rpc_timeout") == reconcile.CALL_DEADLINE
 
 

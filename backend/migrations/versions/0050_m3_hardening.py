@@ -174,12 +174,13 @@ def _tenant() -> sa.Column[uuid.UUID]:
                      nullable=False)  # fmt: skip
 
 
-def _secured(table: str) -> list[str]:
-    """Its tenant's, as it's made: the dispatcher and the retention process within their scope (D15: in its step)."""
+def _secured(table: str, *roles: str) -> list[str]:
+    """Its tenant's, as it's made: the dispatcher, the retention process and `roles` within their scope (D15: in its
+    step)."""
     return [
         f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY",
         f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY",
-        f"CREATE POLICY {table}_scope ON {table} TO dewpoint_dispatch, dewpoint_retention "
+        f"CREATE POLICY {table}_scope ON {table} TO {', '.join(('dewpoint_dispatch', 'dewpoint_retention', *roles))} "
         "USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id())",
     ]
 
@@ -211,7 +212,7 @@ def _tables() -> list[str | Callable[[], object]]:
             sa.PrimaryKeyConstraint("tenant_id", "item_id", "reason", name="recovery_items_pkey"),
             sa.CheckConstraint(f"reason IN ({_within(REASONS)})", name="recovery_items_reason"),
         ),
-        *_secured("recovery_items"),
+        *_secured("recovery_items", "dewpoint_api"),
         lambda: op.create_table(
             "operator_commands",
             sa.Column("id", pg.UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
@@ -240,7 +241,7 @@ def _tables() -> list[str | Callable[[], object]]:
             unique=True,
             postgresql_where=sa.text("status = 'pending'"),
         ),
-        *_secured("operator_commands"),
+        *_secured("operator_commands", "dewpoint_api"),
     ]
 
 
@@ -248,6 +249,58 @@ def _fence(table: str) -> str:
     return f"CREATE TRIGGER {table}_fence BEFORE INSERT ON {table} FOR EACH ROW EXECUTE FUNCTION tenant_insert_fence()"
 
 
+# The operator's (the owner's rulings, rev 2): the API, a platform admin's, records a command, pending, within the
+# command's tenant, reading the recovery reason it acts on; never its evidence again, nor a command settled or changed
+# (the leader settles it). Its restricted access to runs and run slots stays as it was: it reaches no item itself.
+OPERATOR_COLUMNS = "tenant_id, kind, item_id, reason, incident_since, actor_id, idempotency_key"
+OPERATOR = [
+    """CREATE FUNCTION pending_commands(max_rows integer) RETURNS TABLE (tenant_id uuid, command_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp SET row_security = off AS $$
+  SELECT c.tenant_id, c.id FROM operator_commands c WHERE c.status = 'pending'
+  ORDER BY c.requested_at, c.id
+  LIMIT max_rows
+$$""",
+    """CREATE FUNCTION platform_admin_active(actor uuid) RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp SET row_security = off AS $$
+  SELECT coalesce((SELECT u.is_platform_admin AND u.is_active FROM users u WHERE u.id = actor), false)
+$$""",
+    # A release, guarded: the caller's tenant's held row of the kind it names, nothing else (never a write grant)
+    """CREATE FUNCTION work_failure_release(released_kind text, item uuid) RETURNS boolean
+LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp SET row_security = off AS $$
+  WITH gone AS (
+    DELETE FROM work_failures f
+     WHERE f.tenant_id = app_tenant_id() AND f.kind = released_kind AND f.item_id = item AND f.held_at IS NOT NULL
+    RETURNING 1
+  )
+  SELECT EXISTS (SELECT 1 FROM gone)
+$$""",
+    """CREATE FUNCTION work_failures_held(max_rows integer)
+RETURNS TABLE (tenant_id uuid, kind text, item_id uuid, errors integer, last_error text, held_at timestamptz)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp SET row_security = off AS $$
+  SELECT f.tenant_id, f.kind::text, f.item_id, f.errors, f.last_error::text, f.held_at FROM work_failures f
+  WHERE f.held_at IS NOT NULL
+  ORDER BY f.held_at, f.tenant_id, f.item_id, f.kind
+  LIMIT max_rows
+$$""",
+    """CREATE FUNCTION recovery_items_listed(max_rows integer)
+RETURNS TABLE (tenant_id uuid, reason text, item_id uuid, since timestamptz, last_seen_at timestamptz)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp SET row_security = off AS $$
+  SELECT r.tenant_id, r.reason::text, r.item_id, r.since, r.last_seen_at FROM recovery_items r
+  ORDER BY r.since, r.tenant_id, r.item_id, r.reason
+  LIMIT max_rows
+$$""",
+    *(f"REVOKE ALL ON FUNCTION {f} FROM PUBLIC" for f in ("pending_commands(integer)", "platform_admin_active(uuid)",
+                                                           "work_failure_release(text, uuid)",
+                                                           "work_failures_held(integer)",
+                                                           "recovery_items_listed(integer)")),
+    "GRANT EXECUTE ON FUNCTION pending_commands(integer), platform_admin_active(uuid) TO dewpoint_dispatch",
+    "GRANT EXECUTE ON FUNCTION work_failure_release(text, uuid), work_failures_held(integer), "
+    "recovery_items_listed(integer) TO dewpoint_api",
+    "GRANT SELECT ON recovery_items TO dewpoint_api",
+    f"GRANT SELECT (id, {OPERATOR_COLUMNS}, status, outcome, requested_at, decided_at) ON operator_commands "
+    "TO dewpoint_api",
+    f"GRANT INSERT ({OPERATOR_COLUMNS}, evidence) ON operator_commands TO dewpoint_api",
+]  # fmt: skip
 ACCESS = [
     "GRANT SELECT, INSERT, UPDATE, DELETE ON work_failures, recovery_items TO dewpoint_dispatch",
     "GRANT SELECT ON operator_commands TO dewpoint_dispatch",
@@ -269,7 +322,9 @@ def upgrade() -> None:
              done=exists("function", "event_candidates(integer, bigint, timestamptz, uuid)"))  # fmt: skip
         step(conn, "0050 candidates skip failing items", *SKIPPING, *ungranted(*CLEAR),
              done=exists("function", "recovery_items_clear(text[], uuid[], uuid[])"))  # fmt: skip
-        step(conn, "0050 grants", *grants(*CURSOR), *grants(*CLEAR), *ACCESS)
+        step(conn, "0050 the operator's functions", *ungranted(*OPERATOR),
+             done=exists("function", "recovery_items_listed(integer)"))  # fmt: skip
+        step(conn, "0050 grants", *grants(*CURSOR), *grants(*CLEAR), *grants(*OPERATOR), *ACCESS)
 
 
 def downgrade() -> None:
@@ -277,6 +332,9 @@ def downgrade() -> None:
         op.execute(prior.replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1))
     for table in ("work_failures", "recovery_items"):
         op.execute(f"DROP FUNCTION {table}_clear(text[], uuid[], uuid[])")
+    for function in ("pending_commands(integer)", "platform_admin_active(uuid)", "work_failure_release(text, uuid)",
+                     "work_failures_held(integer)", "recovery_items_listed(integer)"):  # fmt: skip
+        op.execute(f"DROP FUNCTION {function}")
     for table in reversed(TABLES):
         op.drop_table(table)
     op.execute("DROP FUNCTION event_candidates(integer, bigint, timestamptz, uuid)")

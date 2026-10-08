@@ -5,8 +5,11 @@ what an operator asked done about one. Each is its tenant's (row-level security)
 and swept at its stage 80, and goes with its item under retention.
 
 The dispatcher reads and writes failures and recovery items, and settles commands without changing what was asked. The
-retention process reads only their keys and deletes. Nothing else reaches them. A command is bounded: one pending per
-item and kind, an operator's key used once per tenant, its evidence short, and decided exactly when it isn't pending."""
+retention process reads only their keys and deletes. The API, within its tenant, reads recovery reasons and records a
+command, pending, never settling or changing one; it releases a held item only through a guarded function, for the
+kind it names; it lists held items and recovery reasons across tenants only through functions returning metadata.
+Nothing else reaches them. A command is bounded: one pending per item and kind, an operator's key used once per tenant,
+its evidence short, and decided exactly when it isn't pending."""
 
 import uuid
 from typing import Any
@@ -100,8 +103,10 @@ async def test_the_dispatcher_settles_a_command_but_never_changes_what_was_asked
         assert settled.rowcount == 1  # type: ignore[attr-defined]
 
 
-@pytest.mark.parametrize("table", TABLES)
-@pytest.mark.parametrize("service", ["api", "worker", "ingress"])
+@pytest.mark.parametrize(
+    ("service", "table"),
+    [("api", "work_failures"), *(("worker", t) for t in TABLES), *(("ingress", t) for t in TABLES)],
+)
 async def test_no_other_service_reaches_them(
     owner_sessionmaker, api_sessionmaker, worker_sessionmaker, ingress_sessionmaker, service: str, table: str
 ) -> None:  # fmt: skip
@@ -220,3 +225,144 @@ async def test_a_passs_resolved_items_lose_their_reasons_by_tenant_and_item(
         left = (await s.execute(text("select tenant_id, reason from recovery_items where item_id = :i"),
                                 {"i": item})).all()  # fmt: skip
     assert sorted(left) == sorted([(a, "subrun_history_missing"), (b, "run_history_missing")])
+
+
+API_COMMAND = (
+    "insert into operator_commands (tenant_id, kind, item_id, reason, incident_since, actor_id, idempotency_key, "
+    "evidence) values (:t, 'record_lost_run', :i, 'run_history_missing', now(), :u, :k, 'gone past retention') "
+    "returning id"
+)
+
+
+async def test_the_api_reads_recovery_reasons_and_records_a_pending_command_within_its_tenant(
+    owner_sessionmaker, api_sessionmaker
+) -> None:  # fmt: skip
+    a, b = await a_tenant(owner_sessionmaker), await a_tenant(owner_sessionmaker)
+    mine, theirs = uuid.uuid4(), uuid.uuid4()
+    await rows(owner_sessionmaker, a, mine)
+    await rows(owner_sessionmaker, b, theirs)
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, a)
+        assert set((await s.execute(text("select item_id from recovery_items"))).scalars()) == {mine}
+        made = (await s.execute(text(API_COMMAND), {"t": a, "i": uuid.uuid4(), "u": uuid.uuid4(), "k": "new"})).one()
+        found = await s.execute(text("select status from operator_commands where id = :c"), {"c": made.id})
+        assert found.scalar_one() == "pending"
+    with pytest.raises(DBAPIError, match="row-level security"):
+        async with api_sessionmaker() as s, s.begin():
+            await tenant_scope(s, a)
+            await s.execute(text(API_COMMAND), {"t": b, "i": uuid.uuid4(), "u": uuid.uuid4(), "k": "other"})
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "insert into operator_commands (tenant_id, kind, item_id, reason, incident_since, actor_id, idempotency_key, "
+        "status, decided_at) values (:t, 'record_lost_run', :i, 'run_history_missing', now(), :u, 'k2', 'applied', "
+        "now())",
+        "update operator_commands set status = 'refused', outcome = 'stale', decided_at = now() where id = :c",
+        "update operator_commands set evidence = 'x' where id = :c",
+        "delete from operator_commands where id = :c",
+        "select evidence from operator_commands where id = :c",
+        "update recovery_items set since = now() where item_id = :i",
+        "delete from recovery_items where item_id = :i",
+    ],
+)
+async def test_the_api_never_settles_changes_or_removes_what_it_reads(
+    owner_sessionmaker, api_sessionmaker, statement: str
+) -> None:  # fmt: skip
+    """Its evidence, once recorded, is the command's and its audit entry's: never read back through the table."""
+    tenant, item = await a_tenant(owner_sessionmaker), uuid.uuid4()
+    command = await rows(owner_sessionmaker, tenant, item)
+    with pytest.raises(DBAPIError, match="permission denied"):
+        async with api_sessionmaker() as s, s.begin():
+            await tenant_scope(s, tenant)
+            await s.execute(text(statement), {"c": command, "t": tenant, "i": item, "u": uuid.uuid4()})
+
+
+async def held(owner: Any, tenant: uuid.UUID, kind: str, item: uuid.UUID, *, hold: bool = True) -> None:
+    async with owner() as s, s.begin():
+        await s.execute(text("insert into work_failures (tenant_id, kind, item_id, errors, last_error, due_at, "
+                             "held_at) values (:t, :k, :i, 7, 'RuntimeError', now(), case when :h then now() end)"),
+                        {"t": tenant, "k": kind, "i": item, "h": hold})  # fmt: skip
+
+
+async def test_the_api_releases_a_held_item_only_for_the_kind_it_names_in_its_tenant(
+    owner_sessionmaker, api_sessionmaker
+) -> None:  # fmt: skip
+    """The owner's ruling (rev 2): a guarded function, never a write grant; a release never clears another kind's
+    hold, a count not held, or another tenant's."""
+    a, b, item, counting = (
+        await a_tenant(owner_sessionmaker),
+        await a_tenant(owner_sessionmaker),
+        uuid.uuid4(),
+        uuid.uuid4(),
+    )
+    for tenant, kind, i, hold in ((a, "dispatch", item, True), (a, "cancel", item, True), (a, "match", counting, False),
+                                  (b, "dispatch", item, True)):  # fmt: skip
+        await held(owner_sessionmaker, tenant, kind, i, hold=hold)
+    released = "select work_failure_release(:k, :i)"
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, a)
+        assert (await s.execute(text(released), {"k": "dispatch", "i": item})).scalar_one() is True
+        assert (await s.execute(text(released), {"k": "dispatch", "i": item})).scalar_one() is False  # once
+        assert (await s.execute(text(released), {"k": "match", "i": counting})).scalar_one() is False  # not held
+    with pytest.raises(DBAPIError, match="permission denied"):
+        async with api_sessionmaker() as s, s.begin():
+            await tenant_scope(s, a)
+            await s.execute(text("delete from work_failures"))
+    async with owner_sessionmaker() as s:
+        left = (await s.execute(text("select tenant_id, kind from work_failures where item_id = any(:i)"),
+                                {"i": [item, counting]})).all()  # fmt: skip
+    assert sorted(left) == sorted([(a, "cancel"), (a, "match"), (b, "dispatch")])
+
+
+async def test_the_api_lists_held_items_and_recovery_reasons_across_tenants_as_metadata(
+    owner_sessionmaker, api_sessionmaker, worker_sessionmaker
+) -> None:  # fmt: skip
+    a, b = await a_tenant(owner_sessionmaker), await a_tenant(owner_sessionmaker)
+    first, second, counting = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    await held(owner_sessionmaker, a, "cancel", first)
+    await held(owner_sessionmaker, b, "match", second)
+    await held(owner_sessionmaker, a, "dispatch", counting, hold=False)
+    await rows(owner_sessionmaker, b, second)
+    async with api_sessionmaker() as s:
+        listed = (await s.execute(text("select * from work_failures_held(100) where tenant_id = any(:t)"),
+                                  {"t": [a, b]})).mappings().all()  # fmt: skip
+        reasons = (await s.execute(text("select * from recovery_items_listed(100) where tenant_id = any(:t)"),
+                                   {"t": [a, b]})).mappings().all()  # fmt: skip
+    assert {(r["tenant_id"], r["kind"], r["item_id"]) for r in listed} == {(a, "cancel", first), (b, "match", second)}
+    assert set(listed[0].keys()) == {"tenant_id", "kind", "item_id", "errors", "last_error", "held_at"}
+    assert [(r["tenant_id"], r["reason"], r["item_id"]) for r in reasons] == [(b, "run_history_missing", second)]
+    assert set(reasons[0].keys()) == {"tenant_id", "reason", "item_id", "since", "last_seen_at"}
+    for listing in ("work_failures_held(1)", "recovery_items_listed(1)"):
+        with pytest.raises(DBAPIError, match="permission denied"):
+            async with worker_sessionmaker() as s:
+                await s.execute(text(f"select * from {listing}"))  # noqa: S608
+
+
+async def test_the_dispatcher_finds_pending_commands_and_rechecks_their_operators(
+    owner_sessionmaker, dispatch_sessionmaker
+) -> None:  # fmt: skip
+    from dewpoint.core.auth.users import create_user
+
+    tenant = await a_tenant(owner_sessionmaker)
+    older, newer, decided = [await rows(owner_sessionmaker, tenant, uuid.uuid4(), key=k) for k in ("a", "b", "c")]
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("update operator_commands set requested_at = now() - interval '1 minute' where id = :c"),
+                        {"c": older})  # fmt: skip
+        await s.execute(text("update operator_commands set status = 'applied', outcome = 'history_lost', "
+                             "decided_at = now() where id = :c"), {"c": decided})  # fmt: skip
+        admin = (await create_user(s, email=f"{uuid.uuid4().hex[:10]}@corp.test", password="violet-otter-42",
+                                   platform_admin=True)).id  # fmt: skip
+        gone = (await create_user(s, email=f"{uuid.uuid4().hex[:10]}@corp.test", password="violet-otter-42",
+                                  platform_admin=True)).id  # fmt: skip
+        member = (await create_user(s, email=f"{uuid.uuid4().hex[:10]}@corp.test", password="violet-otter-42")).id
+        await s.execute(text("update users set is_active = false where id = :u"), {"u": gone})
+    async with dispatch_sessionmaker() as s:
+        pending = (await s.execute(text("select tenant_id, command_id from pending_commands(10) where tenant_id = :t"),
+                                   {"t": tenant})).all()  # fmt: skip
+        assert pending == [(tenant, older), (tenant, newer)]
+        active = text("select platform_admin_active(:u)")
+        assert [(await s.execute(active, {"u": u})).scalar_one() for u in (admin, gone, member, uuid.uuid4())] == [
+            True, False, False, False,
+        ]  # fmt: skip
