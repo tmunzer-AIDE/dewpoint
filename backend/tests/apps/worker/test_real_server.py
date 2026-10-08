@@ -264,3 +264,51 @@ async def test_three_large_requests_are_paced_under_temporals_message_limit(dev_
     tasks = await cel_requests(handle)
     assert len(tasks) == 3 and len(set(tasks)) == 3
     assert await task_failures(handle) == []
+
+
+async def continued_inputs(client: Client, handle: WorkflowHandle[Any, Any]) -> tuple[list[int], list[int]]:
+    """Across a run's continue-as-new chain: each continued run's input, its encoded bytes as Temporal holds them; and
+    every failed workflow task's cause."""
+    sizes, failures, run_id = [], [], handle.first_execution_run_id
+    while run_id:
+        this, run_id = client.get_workflow_handle(handle.id, run_id=run_id), None
+        async for e in this.fetch_history_events():
+            if e.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED:
+                failures.append(e.workflow_task_failed_event_attributes.cause)
+            elif e.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW:
+                continued = e.workflow_execution_continued_as_new_event_attributes
+                sizes.append(sum(len(p.data) for p in continued.input.payloads))
+                run_id = continued.new_execution_run_id
+    return sizes, failures
+
+
+def issue_16() -> G:
+    """#16's reproduction: nested loops, 10 x 10, each inner iteration 200 parallel steps joined by one transform."""
+    g = graph(n=cel("size(steps.o.output.items)"))
+    g.node("o", "flow.loop@1", {"items": list(range(10)), "concurrency": 10, "collect": ref("item")})
+    g.node("i", "flow.loop@1", {"items": list(range(10)), "concurrency": 10, "collect": ref("item")})
+    g.edge("o", "i", "body")
+    g.node("j", "flow.transform@1", {"fields": {"v": ref("item")}})
+    for n in range(200):
+        g.node(f"x{n}", "testkit.echo@1", {"value": ref("item")}).edge("i", f"x{n}", "body").edge(f"x{n}", "j")
+    return g
+
+
+async def test_issue_16s_run_too_large_to_carry_on_fails_never_its_task(
+    dev_env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:  # fmt: skip
+    """#16 on the dev server (closed after 2b-1a and 2b-1b; the 2b-4b plan's M2 checks its acceptance): its
+    reproduction's run, the snapshot bound lowered under its first snapshot, ends with `snapshot_too_large`; no
+    workflow task failed or retried, nothing continued. At its real bound it carries on, every iteration done, each
+    continued input within `SNAPSHOT_MAX` (`tests/probes/test_engine_issues.py`, by hand: about 4 minutes)."""
+    from dewpoint.engine.runtime import size
+    from dewpoint.engine.runtime.size import SNAPSHOT_TOO_LARGE
+
+    monkeypatch.setattr(size, "SNAPSHOT_BYTES", 5_000)
+    client, store = dev_env.client, MemoryStore()
+    async with serving(client, store):
+        handle = await start(client, store, issue_16(), checkpoint_events=300, drain_events=600)
+        result = await asyncio.wait_for(handle.result(), 120)
+    assert result.status == "failed" and result.error is not None and result.error["code"] == SNAPSHOT_TOO_LARGE
+    assert store.runs[run_id_of(handle)].error_code == SNAPSHOT_TOO_LARGE
+    assert await continued_inputs(client, handle) == ([], [])
