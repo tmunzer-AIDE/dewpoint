@@ -42,6 +42,30 @@ A stream goes through the same guard:
 - **Firewalls.** A network that only lets Dewpoint reach listed hosts must list each Mist cloud's `api-ws.` host as
   well as its `api.` host, both on port 443.
 
+### Incoming webhooks (Slack, Teams, Google Chat, a generic webhook)
+
+Messaging connections post to an incoming webhook whose URL is the credential (plugins-3 D18). The whole URL is the
+connection's secret.
+
+| Type | The URL | Hosts to allow through a firewall |
+| --- | --- | --- |
+| `slack` | Slack's documented form only: `https://hooks.slack.com/services/T…/B…/…` | `hooks.slack.com` |
+| `teams` | A Teams Workflows URL ("When a Teams webhook request is received"), its trigger set to accept "Anyone": `https://….logic.azure.com/…` or `https://….api.powerplatform.com/…`, on port 443 | the flow's host |
+| `google_chat` | A space's webhook: `https://chat.googleapis.com/v1/spaces/SPACE/messages?key=…&token=…` | `chat.googleapis.com` |
+| `webhook` | Any https URL: a lowercase host name or IPv4 address, an optional port, a path and query; no user name, no fragment | the receiver's host |
+
+- **Checked as written.** A URL of another shape is refused when the connection is created, naming its field, and
+  again whenever it's read. Teams' sovereign clouds, GovSlack and Office 365 connectors (retired by Microsoft) aren't
+  accepted.
+- **Requests go to the URL exactly.** A step adds no path, query, header or redirect, and no authentication header
+  is sent: a receiver that needs one isn't reachable yet. Plain `http` isn't possible, even to an allowlisted address.
+- **Nothing is posted to test a connection.** A wrong URL fails at its first send.
+- **The URL's parts are secrets.** Its path, its segments and its query values of 8 characters or more join the run's
+  secret index, so an output repeating one is redacted.
+- **A send may not be retried.** A send that fails once it may have arrived (a 429, a 5xx, no answer) ends
+  `outcome_unknown` and is never retried automatically. A Teams 2xx means the flow accepted the message (`accepted`),
+  not that it was posted.
+
 ## The allowlist
 
 Only a platform admin can change the allowlist, through the `dewpoint_admin` database role. Every change is audited:
@@ -69,9 +93,16 @@ per tenant, so connections that share a credential share one budget.
 - **Mist.** Each request is charged to two scopes: its token and its org. Each scope allows bursts of 50 and refills
   at 1.25 calls per second. Each stream opened is charged to a third scope, the token's streams (`mist.stream`): bursts
   of 50, then 0.5 a second (1,800 an hour, under Mist's 2,000 connections an hour a token).
+- **Slack.** One scope a tenant (`slack.tenant`): bursts of 3, then 1 a second. A webhook URL names no documented
+  workspace or channel, so a tenant's Slack webhooks share it.
+- **Teams.** One scope a webhook URL (`teams.webhook`): bursts of 5, then 25 posts in 300 s, Teams' limit for a flow
+  posting to a channel. Microsoft turns off a flow that stays throttled for 14 days.
+- **Google Chat.** One scope a space (`google_chat.space`), read from the URL: 1 a second, no burst, shared by all the
+  space's webhooks.
+- **Webhook.** One scope a receiver's host (`webhook.host`): bursts of 5, then 1 a second.
 - **When no token is available.** A step waits up to 10 s. After that it fails with `cooldown` and sends nothing.
 - **When the provider sends `Retry-After`.** That scope is blocked for every run, for up to an hour.
 - **Seeing a block.** `GET /api/v1/t/{tenant}/connections/{id}` lists each blocked scope's current cooldown, shown
-  by its kind (`mist.org`, `mist.token`, `mist.stream`). That end time is live: it moves if the provider extends or
-  lifts the block. A stream's opening refused with a 429 or 503 and a `Retry-After` blocks its stream scopes the same
-  way.
+  by its kind (`mist.org`, `mist.token`, `mist.stream`, `slack.tenant`, `teams.webhook`, `google_chat.space`,
+  `webhook.host`). That end time is live: it moves if the provider extends or lifts the block. A stream's opening
+  refused with a 429 or 503 and a `Retry-After` blocks its stream scopes the same way.
