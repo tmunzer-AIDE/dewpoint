@@ -7,6 +7,8 @@
   shifts matched a tenant's events out of order). Every other event keeps its tenant's order, oldest first. The
   one-argument form stays for a dispatcher of an earlier build during a rollout. Still ids and ordering only, locking
   nothing.
+- **A tenant's next due request** (the owner's ruling 1 on the M3 checkpoint): `dispatch_next(tenants)`, each listed
+  tenant's oldest due request as `dispatch_candidates` picks it, for a cycle's further rounds. Ids and ordering only.
 - **Bounded retry and recovery** (D10(1), the owner's rulings on the M3 design, rev 2), three tables of a tenant's:
   `work_failures`, an item's count of consecutive unexpected failures for one kind of work (a reconciliation's by its
   request's phase), its next try and its hold; `recovery_items`, an item a pass can't settle and why, since when;
@@ -157,6 +159,25 @@ $$""",
     "GRANT EXECUTE ON FUNCTION event_candidates(integer, uuid[], uuid[]) TO dewpoint_dispatch",
 ]
 CURSOR[0] = CURSOR[0].replace("MATCH_SKIP", _unless("'match'", "e.tenant_id", "e.id"))
+
+# The owner's ruling 1 on the M3 checkpoint: a cycle's further rounds take each tenant that has just started one, its
+# next due request, as `dispatch_candidates` would pick it
+NEXT = [
+    f"""CREATE FUNCTION dispatch_next(tenants uuid[])
+RETURNS TABLE (tenant_id uuid, request_id uuid, queued_at timestamptz)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT due.tenant_id, due.request_id, due.queued_at FROM (
+    SELECT DISTINCT ON (r.tenant_id) r.tenant_id, r.id AS request_id, r.queued_at
+    FROM run_requests r
+    WHERE r.tenant_id = ANY(tenants) AND r.status = 'queued' AND r.next_attempt_at <= now()
+      AND {_unless("'dispatch'", "r.tenant_id", "r.id")}
+    ORDER BY r.tenant_id, r.queued_at, r.id
+  ) due
+  ORDER BY due.queued_at, due.request_id
+$$""",
+    "REVOKE ALL ON FUNCTION dispatch_next(uuid[]) FROM PUBLIC",
+    "GRANT EXECUTE ON FUNCTION dispatch_next(uuid[]) TO dewpoint_dispatch",
+]
 
 
 KINDS = ("dispatch", "reconcile_starting", "reconcile_open", "reconcile_slot", "cancel", "match", "subrun")
@@ -398,7 +419,10 @@ def upgrade() -> None:
              done=exists("function", "recovery_items_listed(integer)"))  # fmt: skip
         step(conn, "0050 settled entries cleared", *ungranted(*SETTLED),
              done=exists("function", "work_settled_clear(integer)"))  # fmt: skip
-        step(conn, "0050 grants", *grants(*CURSOR), *grants(*CLEAR), *grants(*OPERATOR), *grants(*SETTLED), *ACCESS)
+        step(conn, "0050 a tenant's next due request", *ungranted(*NEXT),
+             done=exists("function", "dispatch_next(uuid[])"))  # fmt: skip
+        step(conn, "0050 grants", *grants(*CURSOR), *grants(*CLEAR), *grants(*OPERATOR), *grants(*SETTLED),
+             *grants(*NEXT), *ACCESS)  # fmt: skip
 
 
 def downgrade() -> None:
@@ -407,6 +431,7 @@ def downgrade() -> None:
     for table in ("work_failures", "recovery_items"):
         op.execute(f"DROP FUNCTION {table}_clear(text[], uuid[], uuid[])")
     op.execute("DROP FUNCTION work_settled_clear(integer)")
+    op.execute("DROP FUNCTION dispatch_next(uuid[])")
     for function in ("work_failures_held_count(text, timestamptz)", "work_failures_release_many(text, timestamptz, integer)",
                      "pending_commands(integer)", "platform_admin_active(uuid)", "work_failure_release(text, uuid)",
                      "work_failures_held(integer)", "recovery_items_listed(integer)"):  # fmt: skip

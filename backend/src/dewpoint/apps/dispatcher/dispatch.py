@@ -11,10 +11,11 @@ retired (the defensive check, which should never fire), cancels the request expl
 reserved, the run's row written (or an earlier attempt's reused) and the request marked `starting`, together; the start
 itself is sent after the commit, with no lock held across the call to Temporal."""
 
+import time
 import uuid
 from collections import Counter
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Iterable, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
@@ -57,6 +58,7 @@ GATE_LOCK = "dewpoint:production-gate"
 START_DEADLINE = timedelta(seconds=10)  # a start's own deadline: the reconciler's grace period is longer (§7.6)
 MAX_ATTEMPTS = 10  # confirmed refusals before a request is dead (§7.4)
 CANDIDATES = 50  # tenants picked per cycle, each its oldest due request
+AGAIN_S = 1.0  # a pass takes further rounds while it has run less than this (2b-4b M3, the owner's ruling 1)
 START_REFUSED = "start_refused"
 ID_COLLISION = "id_collision"
 START_FAILED = "start_failed"
@@ -545,8 +547,12 @@ async def dispatch_once(
     rotation: Rotation | None = None,
 ) -> dict[str, int]:  # fmt: skip
     """One cycle: each tenant's oldest due request, picked through `dispatch_candidates` (queue-selection metadata
-    only) on from where `rotation` says the last pick ended, begun, started and settled in turn. What happened,
-    counted, for the report."""
+    only) on from where `rotation` says the last pick ended, begun, started and settled in turn. Then, round after
+    round while the pass has run less than `AGAIN_S` and its budget lasts, each tenant that has just started one, its
+    next due request (`dispatch_next`), oldest first: each round takes every such tenant once, every request is begun
+    alone, and a tenant that waits (its slots, say) or fails takes no more this cycle (the owner's ruling 1 on 2b-4b's
+    M3 checkpoint: the per-tenant start path, about 0.9 starts a second at one a cycle). What happened, counted, for the
+    report."""
     rotation = rotation if rotation is not None else Rotation()
     seal = sealer(client.data_converter, client.namespace)
     after_queued, after_request = rotation.after if rotation.after is not None else (None, None)
@@ -560,26 +566,64 @@ async def dispatch_once(
     rotation.after = (picked[-1].queued_at, picked[-1].request_id) if len(picked) == CANDIDATES else None
     counts: Counter[str] = Counter()
     done: list[tuple[uuid.UUID, uuid.UUID]] = []
+    taken = _Taken(sessionmaker, client, seal, keys, settings, build, counts, done)
     with budget.passing("dispatch") as admitted:
-        for tenant_id, request_id, queued_at in admitted(picked):
-            last = (queued_at, request_id)
+        going = await taken.round(admitted(picked))
+        if admitted.deferred:
+            rotation.after = taken.last  # the next cycle goes on from the last it took
+        while going and not admitted.deferred and time.monotonic() - admitted.started < AGAIN_S:
+            async with sessionmaker() as s:
+                following = (
+                    await s.execute(
+                        text("select tenant_id, request_id, queued_at from dispatch_next(:tenants)"), {"tenants": going}
+                    )
+                ).all()
+            going = await taken.round(admitted(following))
+    await failures.cleared(sessionmaker, [failures.DISPATCH], done)
+    admitted.reported(counts, full=len(picked) >= CANDIDATES)
+    return dict(counts)
+
+
+@dataclass
+class _Taken:
+    """A pass's candidates, taken a round at a time: what happened, counted, and those that went through. A request
+    is taken once a pass: one found again (still queued, whatever its start said) ends its tenant's rounds."""
+
+    sessionmaker: async_sessionmaker[AsyncSession]
+    client: Client
+    seal: Seal
+    keys: KeySource
+    settings: Settings
+    build: Build
+    counts: Counter[str]
+    done: list[tuple[uuid.UUID, uuid.UUID]]
+    last: tuple[datetime, uuid.UUID] | None = None
+    seen: set[uuid.UUID] = field(default_factory=set)
+
+    async def round(self, candidates: Iterable[Sequence[Any]]) -> list[uuid.UUID]:
+        """Each candidate begun, started and settled in turn: the tenants that started theirs."""
+        started: list[uuid.UUID] = []
+        for tenant_id, request_id, queued_at in candidates:
+            if request_id in self.seen:
+                continue
+            self.seen.add(request_id)
+            self.last = (queued_at, request_id)
             try:
-                happened = await _dispatch(sessionmaker, client, seal, keys, settings, build, tenant_id, request_id)
+                happened = await _dispatch(self.sessionmaker, self.client, self.seal, self.keys, self.settings,
+                                           self.build, tenant_id, request_id)  # fmt: skip
             except Exception as e:  # a bug or an outage: the request stays as it was, and the cycle goes on (M2 review)
                 log.error(
                     "dispatch_failed", tenant_id=str(tenant_id), request_id=str(request_id), error=type(e).__name__
                 )
-                counts["error"] += 1
-                await failures.failed(sessionmaker, tenant_id, failures.DISPATCH, request_id, e)  # bounded (D10)
+                self.counts["error"] += 1
+                await failures.failed(self.sessionmaker, tenant_id, failures.DISPATCH, request_id, e)  # bounded (D10)
                 continue
-            done.append((tenant_id, request_id))
+            self.done.append((tenant_id, request_id))
             if happened is not None:
-                counts[happened] += 1
-    await failures.cleared(sessionmaker, [failures.DISPATCH], done)
-    if admitted.deferred:
-        rotation.after = last  # the next cycle goes on from the last it took
-    admitted.reported(counts, full=len(picked) >= CANDIDATES)
-    return dict(counts)
+                self.counts[happened] += 1
+            if happened == "started":
+                started.append(tenant_id)
+        return started
 
 
 async def _dispatch(

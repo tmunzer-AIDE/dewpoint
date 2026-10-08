@@ -216,7 +216,11 @@ namespace before it connects: exit 2 otherwise, [`deployment.md`](deployment.md)
    doesn't open, or isn't JSON, makes the request `dead` (`envelope_unreadable`), audited; repairing a key never
    reopens it: re-run it;
 3. reserves the slot, writes the run's row (`running`, no start time yet), marks the request `starting`, and starts the
-   workflow under its run's id, refusing a duplicate, with a 10-second deadline.
+   workflow under its run's id, refusing a duplicate, with a 10-second deadline;
+4. then, while its pass has run less than a second (and within its budget), takes again each tenant that has just
+   started one: its next due request (`dispatch_next()`), checked and started the same way, round after round, each
+   such tenant once a round and its oldest first. A tenant that waits (its slots, say) or fails takes no more until the
+   next cycle. One start a cycle held a tenant to about 0.9 starts a second, whatever its backlog.
 
 What Temporal answers decides what follows:
 
