@@ -516,8 +516,10 @@ class ConnectionHttp:
         credentials: Mapping[str, str],
         scopes: Callable[[], Awaitable[list[Scope]]],
         exact: bool = False,
+        body: Mapping[str, str] | None = None,
     ) -> None:
         self._attempt, self._base, self._credentials = attempt, base, dict(credentials)
+        self._body = dict(body or {})  # D4's `body_field`: added to every request's JSON object body
         self._scopes_of, self._scopes = scopes, list[Scope]()  # read at the first request, with its first token
         self._exact = exact  # the base is a secret URL (an incoming webhook's): requests go to it exactly
 
@@ -552,6 +554,10 @@ class ConnectionHttp:
         _check_read(self._attempt, method, headers, content, json)
         if self._exact and (params is not None or headers or follow_same_origin):
             raise InvalidRequest()  # a secret URL's request is its URL, with nothing of the node's
+        if self._body:  # the credentials go into a JSON object body, never one the node set them in
+            if content is not None or not isinstance(json, dict) or any(name in json for name in self._body):
+                raise InvalidRequest()
+            json = {**json, **self._body}
         target = self._target(url)
         reserved = {name.lower() for name in self._credentials}
         if any(name.lower() in reserved for name in headers or {}):
@@ -737,6 +743,7 @@ class Unsealed:
     stream_url: str | None = None
     exact: bool = False  # the base is a secret URL: requests go to it exactly
     smtp: SmtpTarget | None = None  # the type's mail server, when it declares one (its base is then none)
+    body: Mapping[str, str] = field(default_factory=dict)  # credentials put into each request's JSON body
 
     def opened(self, channel: Channel, mac: Callable[[], Awaitable[Callable[[str], str]]]) -> OpenedConnection:
         async def scopes() -> list[Scope]:
@@ -747,7 +754,7 @@ class Unsealed:
 
         return OpenedConnection(
             self.id, self.type, MappingProxyType(dict(self.config)),
-            ConnectionHttp(channel, self.base, self.credentials, scopes, exact=self.exact),
+            ConnectionHttp(channel, self.base, self.credentials, scopes, exact=self.exact, body=self.body),
             ConnectionWs(channel, self.stream_url, self.credentials, stream_scopes),
             ConnectionSmtp(channel, self.smtp, scopes),
         )  # fmt: skip
@@ -769,6 +776,7 @@ async def unseal(
         secret = kind.declared.secret(json.loads(raw))
         stored_config = kind.declared.config(stored.config)
         credentials = kind.declared.credentials(secret)  # never a raw error quoting the secret (review, finding 3)
+        body = kind.declared.body_credentials(secret)
         config = kind.code.Config.model_validate(stored_config).model_dump(mode="json")
     except (ClaimUnreadableError, InvalidValueError, ValidationError, ValueError):
         raise ConnectionUnavailable() from None
@@ -778,7 +786,8 @@ async def unseal(
         raise
     smtp = kind.declared.smtp_target(stored_config, secret)
     if smtp is not None or kind.declared.host is None:  # a mail server's, or no host at all (syslog's): no HTTP
-        return Unsealed(connection_id, stored.type, kind, stored_config, config, secret, None, credentials, smtp=smtp)
+        return Unsealed(connection_id, stored.type, kind, stored_config, config, secret, None, credentials, smtp=smtp,
+                        body=body)  # fmt: skip
     url = kind.declared.base_url(stored_config, secret)
     try:
         base = httpx.URL(url) if url is not None else None
@@ -789,7 +798,7 @@ async def unseal(
     stream_url = kind.declared.stream_url(stored_config)
     return Unsealed(
         connection_id, stored.type, kind, stored_config, config, secret, base, credentials, stream_url,
-        exact=kind.declared.exact,
+        exact=kind.declared.exact, body=body,
     )  # fmt: skip
 
 
