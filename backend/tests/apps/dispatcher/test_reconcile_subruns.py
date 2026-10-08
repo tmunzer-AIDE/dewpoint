@@ -18,6 +18,7 @@ from temporalio.service import RPCStatusCode
 
 from dewpoint.apps.dispatcher import reconcile
 from dewpoint.engine.runtime.ids import run_workflow_id
+from tests.apps.dispatcher.support import reasons
 from tests.apps.dispatcher.test_reconcile import DescribeFails
 from tests.apps.dispatcher.test_reconcile_runs import Described, ended
 from tests.apps.test_runs import rpc
@@ -67,6 +68,12 @@ async def test_a_sub_run_whose_history_is_gone_is_left_running_with_an_alert(
         assert await reconcile.reconcile_subruns(dispatch_sessionmaker, gone) == {"unresolved": 1}
     assert await ended(owner_sessionmaker, orphan["sub"]) == ("running", None)
     assert any(e["event"] == "subrun_history_missing" and e["log_level"] == "error" for e in seen)
+    assert await reasons(owner_sessionmaker, orphan["sub"]) == {"subrun_history_missing": False}  # kept (2b-4b M3)
+    async with owner_sessionmaker() as s, s.begin():  # its history back
+        await s.execute(text("update runs set next_check_at = null where id = :i"), {"i": orphan["sub"]})
+    running = Described(WorkflowExecutionStatus.RUNNING)
+    assert await reconcile.reconcile_subruns(dispatch_sessionmaker, running) == {"running": 1}
+    assert await reasons(owner_sessionmaker, orphan["sub"]) == {}
 
 
 async def test_a_sub_run_whose_root_runs_or_just_ended_is_left_to_its_parent(

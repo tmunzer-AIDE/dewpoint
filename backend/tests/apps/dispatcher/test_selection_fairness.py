@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy import text
 from temporalio.service import RPCError, RPCStatusCode
 
-from dewpoint.apps.dispatcher import cancels, matching, recount, schedule_sync
+from dewpoint.apps.dispatcher import cancels, failures, matching, recount, schedule_sync
 from tests.apps.dispatcher.test_schedule_sync import Leading
 from tests.apps.test_admission import KEYS
 from tests.core.retention.support import request, run, sql, tenant
@@ -156,8 +156,8 @@ async def test_matching_takes_a_third_event_past_two_whose_matches_fail(
     owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, ingress_sessionmaker,
     api_settings, monkeypatch,
 ) -> None:  # fmt: skip
-    """An event whose match fails unexpectedly (a bug, an outage) waits `ERROR_BACKOFF` before it's tried again, so it
-    doesn't keep the events after it out."""
+    """An event whose match fails unexpectedly (a bug) waits its failure's delay (`failures.DELAYS`, D10) before it's
+    tried again, so it doesn't keep the events after it out."""
     await _events(3, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker,
                   ingress_sessionmaker, api_settings)  # fmt: skip
     async with owner_sessionmaker() as s:
@@ -174,7 +174,7 @@ async def test_matching_takes_a_third_event_past_two_whose_matches_fail(
         await matching.match_once(dispatch_sessionmaker, KEYS, matching.Verified(), batch=2)
     first, both = taken(passes)
     assert first == set(ids[:2]) and both == set(ids)
-    assert timedelta(0) < matching.ERROR_BACKOFF
+    assert timedelta(0) < failures.DELAYS[0]
 
 
 async def test_an_event_the_database_failed_is_tried_again_at_once(

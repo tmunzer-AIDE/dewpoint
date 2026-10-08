@@ -199,3 +199,24 @@ async def test_a_failures_and_a_recovery_items_shape_is_kept(owner_sessionmaker,
     with pytest.raises(IntegrityError, match=constraint):
         async with owner_sessionmaker() as s, s.begin():
             await s.execute(text(statement), {"t": tenant, "i": uuid.uuid4()})
+
+
+async def test_a_passs_resolved_items_lose_their_reasons_by_tenant_and_item(
+    owner_sessionmaker, dispatch_sessionmaker
+) -> None:  # fmt: skip
+    """One statement for a pass, as `work_failures_clear`: the named reasons of each (tenant, item) go; another
+    reason, and the same item id under another tenant, stay."""
+    a, b, item = await a_tenant(owner_sessionmaker), await a_tenant(owner_sessionmaker), uuid.uuid4()
+    async with owner_sessionmaker() as s, s.begin():
+        for tenant, reason in ((a, "run_history_missing"), (a, "start_after_end"), (a, "subrun_history_missing"),
+                               (b, "run_history_missing")):  # fmt: skip
+            await s.execute(text("insert into recovery_items (tenant_id, reason, item_id) values (:t, :r, :i)"),
+                            {"t": tenant, "r": reason, "i": item})  # fmt: skip
+    async with dispatch_sessionmaker() as s, s.begin():
+        gone = await s.execute(text("select recovery_items_clear(:r, :t, :i)"),
+                               {"r": ["run_history_missing", "start_after_end"], "t": [a], "i": [item]})  # fmt: skip
+        assert gone.scalar_one() == 2
+    async with owner_sessionmaker() as s:
+        left = (await s.execute(text("select tenant_id, reason from recovery_items where item_id = :i"),
+                                {"i": item})).all()  # fmt: skip
+    assert sorted(left) == sorted([(a, "subrun_history_missing"), (b, "run_history_missing")])

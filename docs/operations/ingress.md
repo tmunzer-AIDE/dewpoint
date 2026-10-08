@@ -150,7 +150,10 @@ first. An event is then:
 
 A failure that isn't the event's (a keypair version missing or not pairing with its public key, the tenant's data key
 unreadable) leaves it pending, retried after a minute, alerted on (`event_key_unavailable`), its attempts untouched. A
-dispatcher that stops before its commit leaves the event pending: matching is all or nothing.
+match that fails unexpectedly (a bug) leaves it pending too, its attempts untouched: it's tried again 1, 2, 4, 8, 16,
+then 30 minutes later, and the 7th failure in a row holds it for an operator, alerted on (`match_held`; see
+[runs](runs.md#items-that-keep-failing)). A dispatcher that stops before its commit leaves the event pending: matching
+is all or nothing.
 
 `GET /webhook-endpoints/{id}/events` (with `workflow.view`) lists an endpoint's events' metadata, never a payload; dead
 events only to admins. With `tenant.manage` (admins): `GET /inbound-events/dead`, `POST /inbound-events/{id}/cancel`

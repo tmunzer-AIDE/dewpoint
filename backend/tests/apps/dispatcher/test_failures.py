@@ -10,11 +10,11 @@ from typing import Any
 import pytest
 import structlog
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from temporalio.service import RPCError, RPCStatusCode
 
 from dewpoint.apps.dispatcher import failures
-from dewpoint.core.db import tenant_scope
-from tests.core.claims.test_service import a_tenant
+from tests.core.claims.test_service import a_tenant, statements
 
 
 @pytest.mark.parametrize(
@@ -74,14 +74,18 @@ async def test_a_kinds_failures_never_touch_another_kinds_and_a_success_clears_o
     tenant, item = await a_tenant(owner_sessionmaker), uuid.uuid4()
     for kind in (failures.CANCEL, failures.RECONCILE["starting"]):
         await failures.failed(dispatch_sessionmaker, tenant, kind, item, RuntimeError("a bug"))
-    async with dispatch_sessionmaker() as s, s.begin():
-        await tenant_scope(s, tenant)
-        assert await failures.failing(s, [failures.DISPATCH], [item]) == set()
-        assert await failures.failing(s, [failures.RECONCILE["open"]], [item]) == set()
-        assert await failures.failing(s, [failures.CANCEL], [item]) == {item}
-    await failures.cleared(dispatch_sessionmaker, tenant, list(failures.RECONCILE.values()), item)
+    assert await state(owner_sessionmaker, tenant, failures.DISPATCH, item) is None
+    assert await state(owner_sessionmaker, tenant, failures.RECONCILE["open"], item) is None
+    await failures.cleared(dispatch_sessionmaker, list(failures.RECONCILE.values()), [(tenant, item)])
     assert await state(owner_sessionmaker, tenant, failures.RECONCILE["starting"], item) is None
     assert (await state(owner_sessionmaker, tenant, failures.CANCEL, item))[0] == 1  # type: ignore[index]
+
+
+async def test_a_pass_with_no_success_clears_nothing_and_asks_nothing(dispatch_sessionmaker) -> None:
+    """Most passes' items never failed: clearing is one statement for the pass, and none for a pass with nothing."""
+    with statements(dispatch_sessionmaker) as seen:
+        await failures.cleared(dispatch_sessionmaker, [failures.DISPATCH], [])
+    assert seen == []
 
 
 async def test_an_outage_or_an_uncertain_answer_is_never_counted(owner_sessionmaker, dispatch_sessionmaker) -> None:
@@ -93,7 +97,13 @@ async def test_an_outage_or_an_uncertain_answer_is_never_counted(owner_sessionma
 
 async def test_a_failure_that_cant_be_recorded_is_logged_by_its_type_never_raised(dispatch_sessionmaker) -> None:
     """Recording runs in the pass's handler for the item: a refusal there (here, no such tenant; an erased tenant's
-    fence alike) mustn't end the pass. Its log names the error's type, never its text."""
+    fence alike), or the database gone, mustn't end the pass. Its log names the error's type, never its text."""
+    gone = async_sessionmaker(create_async_engine("postgresql+asyncpg://nobody@127.0.0.1:9/none"))
     with structlog.testing.capture_logs() as logs:
         await failures.failed(dispatch_sessionmaker, uuid.uuid4(), failures.DISPATCH, uuid.uuid4(), KeyError("x"))
-    assert [(e["event"], e["kind"], e["error"]) for e in logs] == [("failure_unrecorded", "dispatch", "IntegrityError")]
+        await failures.failed(gone, uuid.uuid4(), failures.DISPATCH, uuid.uuid4(), KeyError("x"))
+        await failures.cleared(gone, [failures.DISPATCH], [(uuid.uuid4(), uuid.uuid4())])
+    assert [(e["event"], e["error"]) for e in logs] == [
+        ("failure_unrecorded", "IntegrityError"), ("failure_unrecorded", "ConnectionRefusedError"),
+        ("failures_uncleared", "ConnectionRefusedError"),
+    ]  # fmt: skip

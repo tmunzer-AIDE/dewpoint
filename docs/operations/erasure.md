@@ -76,7 +76,7 @@ a schedule, a run, an execution), each found, requested, then verified by readin
 | 50 end runs | every running run cancelled in Temporal, then waited for: ended in Dewpoint and closed in Temporal |
 | 60 executions | the fence goes up; every execution enumerated from runs, started requests, the run evidence, the ticks' records and the inventory (visibility adding), each walked through its history (the run it continued from and as, every child it started), an open one terminated first, then deleted until describing that exact run answers not-found |
 | 70 keys | every data-key version and event keypair deleted: no process can unwrap one again, so every ciphertext of the tenant is unreadable once the processes' key caches (at most 5 minutes) have expired |
-| 80 sweep | every row of the tenant deleted in committed batches, counted (its own egress exceptions, quota budgets, scope key and plugin calls included; an egress exception for every tenant isn't the tenant's, and stays); the tenant renamed `Erased tenant`, its slug `erased-<id>` |
+| 80 sweep | every row of the tenant deleted in committed batches, counted (its own egress exceptions, quota budgets, scope key and plugin calls, its items' failure counts, recovery reasons and operator commands included; an egress exception for every tenant isn't the tenant's, and stays); the tenant renamed `Erased tenant`, its slug `erased-<id>` |
 | 90 bound | the holds, then the final check (below) |
 | 100 complete | the tenant is `erased` |
 

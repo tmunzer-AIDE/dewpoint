@@ -32,6 +32,110 @@ down_revision = "0049"
 branch_labels = None
 depends_on = None
 
+# As 0025, 0048, 0021 and 0044 left them: the downgrade's, and what the skips below are added to
+DISPATCH_0049 = """
+CREATE FUNCTION dispatch_candidates(max_tenants integer, after_queued_at timestamptz, after_request uuid)
+RETURNS TABLE (tenant_id uuid, request_id uuid, queued_at timestamptz)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT due.tenant_id, due.request_id, due.queued_at FROM (
+    SELECT DISTINCT ON (r.tenant_id) r.tenant_id, r.id AS request_id, r.queued_at
+    FROM run_requests r
+    WHERE r.status = 'queued' AND r.next_attempt_at <= now()
+    ORDER BY r.tenant_id, r.queued_at, r.id
+  ) due
+  WHERE after_queued_at IS NULL OR (due.queued_at, due.request_id) > (after_queued_at, after_request)
+  ORDER BY due.queued_at, due.request_id
+  LIMIT max_tenants
+$$"""
+CANCEL_0049 = """CREATE OR REPLACE FUNCTION cancel_candidates(max_rows integer)
+RETURNS TABLE (tenant_id uuid, request_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT r.tenant_id, r.id FROM run_requests r JOIN runs u ON u.id = r.id
+  WHERE r.status = 'started' AND r.cancel_requested_at IS NOT NULL AND r.cancel_sent_at IS NULL
+    AND u.status = 'running'
+  ORDER BY r.cancel_tried_at NULLS FIRST, r.cancel_requested_at, r.id
+  LIMIT max_rows
+$$"""
+RECONCILE_0049 = """
+CREATE FUNCTION reconcile_candidates(grace interval, recheck interval, max_rows integer)
+RETURNS TABLE (tenant_id uuid, request_id uuid, kind text)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT c.tenant_id, c.request_id, c.kind FROM (
+    SELECT r.tenant_id, r.id AS request_id, 'starting'::text AS kind, r.starting_at AS since
+    FROM run_requests r
+    WHERE r.status = 'starting' AND r.starting_at < statement_timestamp() - grace
+    UNION ALL
+    SELECT r.tenant_id, r.id, 'open', u.queued_at
+    FROM run_requests r JOIN runs u ON u.id = r.id
+    WHERE r.status = 'started' AND u.status = 'running'
+    UNION ALL
+    SELECT s.tenant_id, s.run_id, 'slot', s.reserved_at
+    FROM run_slots s JOIN runs u ON u.id = s.run_id JOIN run_requests r ON r.id = s.run_id
+    WHERE r.status <> 'starting' AND u.status <> 'running'
+  ) c JOIN run_requests q ON q.id = c.request_id
+  WHERE q.checked_at IS NULL OR q.checked_at < statement_timestamp() - recheck
+  ORDER BY q.checked_at NULLS FIRST, c.since, c.request_id
+  LIMIT max_rows
+$$"""
+ORPHANS_0049 = """CREATE FUNCTION orphan_subruns(grace interval, max_rows integer)
+RETURNS TABLE (tenant_id uuid, run_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT c.tenant_id, c.id FROM runs c JOIN runs r ON r.id = c.root_run_id AND r.tenant_id = c.tenant_id
+  WHERE c.status = 'running' AND c.parent_run_id IS NOT NULL AND r.status <> 'running'
+    AND r.ended_at < statement_timestamp() - grace
+    AND (c.next_check_at IS NULL OR c.next_check_at <= statement_timestamp())
+  ORDER BY c.next_check_at NULLS FIRST, r.ended_at, c.id
+  LIMIT max_rows
+$$"""
+
+
+def _unless(kind: str, tenant: str, item: str) -> str:
+    """Unless the item's failures for `kind` leave it for now: held, or not yet due."""
+    return (f"NOT EXISTS (SELECT 1 FROM work_failures f WHERE f.tenant_id = {tenant} AND f.item_id = {item} "
+            f"AND f.kind = {kind} AND (f.held_at IS NOT NULL OR f.due_at > now()))")  # fmt: skip
+
+
+def _skipping(prior: str, anchor: str, added: str) -> str:
+    """`prior`, replaced, with `added` after `anchor` (its one line naming what the pick takes)."""
+    if prior.count(anchor) != 1:
+        raise ValueError(anchor)
+    return prior.replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1).replace(anchor, anchor + added)
+
+
+CHECKED = "  WHERE q.checked_at IS NULL OR q.checked_at < statement_timestamp() - recheck\n"
+SKIPPING = [
+    _skipping(DISPATCH_0049, "    WHERE r.status = 'queued' AND r.next_attempt_at <= now()\n",
+              "      AND " + _unless("'dispatch'", "r.tenant_id", "r.id") + "\n"),
+    _skipping(CANCEL_0049, "    AND u.status = 'running'\n", "    AND " + _unless("'cancel'", "r.tenant_id", "r.id") + "\n"),
+    _skipping(RECONCILE_0049.replace(CHECKED, f"  WHERE ({CHECKED.strip().removeprefix('WHERE ')})\n"),
+              "statement_timestamp() - recheck)\n",
+              "    AND " + _unless("'reconcile_' || c.kind", "c.tenant_id", "c.request_id") + "\n"),
+    _skipping(ORPHANS_0049, "    AND (c.next_check_at IS NULL OR c.next_check_at <= statement_timestamp())\n",
+              "    AND " + _unless("'subrun'", "c.tenant_id", "c.id") + "\n"),
+]  # fmt: skip
+
+
+def _clear(table: str, column: str) -> list[str]:
+    """`{table}_clear(names, tenants, items)`: a pass's settled items lose their rows of `names` (kinds, reasons), by
+    tenant and item, in one statement: the pass's pick has no tenant scope."""
+    return [
+        f"""CREATE FUNCTION {table}_clear(names text[], tenants uuid[], items uuid[]) RETURNS integer
+LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp SET row_security = off AS $$
+  WITH gone AS (
+    DELETE FROM {table} f USING unnest(tenants, items) AS done(tenant_id, item_id)
+     WHERE f.tenant_id = done.tenant_id AND f.item_id = done.item_id AND f.{column} = ANY(names)
+    RETURNING 1
+  )
+  SELECT count(*)::integer FROM gone
+$$""",
+        f"REVOKE ALL ON FUNCTION {table}_clear(text[], uuid[], uuid[]) FROM PUBLIC",
+        f"GRANT EXECUTE ON FUNCTION {table}_clear(text[], uuid[], uuid[]) TO dewpoint_dispatch",
+    ]
+
+
+# Successes clear their kinds' counts; resolved items, their recovery reasons
+CLEAR = [*_clear("work_failures", "kind"), *_clear("recovery_items", "reason")]
+
 CURSOR = [
     """CREATE FUNCTION event_candidates(max_events integer, after_rank bigint, after_received timestamptz,
                                  after_event uuid)
@@ -42,6 +146,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
            row_number() OVER (PARTITION BY e.tenant_id ORDER BY e.received_at, e.id) AS rank
       FROM public.inbound_events e
      WHERE e.status = 'pending' AND (e.next_attempt_at IS NULL OR e.next_attempt_at <= now())
+       AND MATCH_SKIP
   ) ranked
   WHERE after_rank IS NULL OR (ranked.rank, ranked.received_at, ranked.id) > (after_rank, after_received, after_event)
   ORDER BY ranked.rank, ranked.received_at, ranked.id
@@ -50,6 +155,7 @@ $$""",
     "REVOKE ALL ON FUNCTION event_candidates(integer, bigint, timestamptz, uuid) FROM PUBLIC",
     "GRANT EXECUTE ON FUNCTION event_candidates(integer, bigint, timestamptz, uuid) TO dewpoint_dispatch",
 ]
+CURSOR[0] = CURSOR[0].replace("MATCH_SKIP", _unless("'match'", "e.tenant_id", "e.id"))
 
 
 KINDS = ("dispatch", "reconcile_starting", "reconcile_open", "reconcile_slot", "cancel", "match", "subrun")
@@ -155,16 +261,22 @@ ACCESS = [
 
 def upgrade() -> None:
     with online() as conn:
-        step(conn, "0050 event_candidates cursor", *ungranted(*CURSOR),
-             done=exists("function", "event_candidates(integer, bigint, timestamptz, uuid)"))  # fmt: skip
         step(conn, "0050 failures, recovery items and commands", *_tables(),
              done=exists("relation", "operator_commands"))  # fmt: skip
         for table in TABLES:
             step(conn, f"0050 {table} fenced", _fence(table), done=exists("trigger", f"{table}_fence", table))
-        step(conn, "0050 grants", *grants(*CURSOR), *ACCESS)
+        step(conn, "0050 event_candidates cursor", *ungranted(*CURSOR),
+             done=exists("function", "event_candidates(integer, bigint, timestamptz, uuid)"))  # fmt: skip
+        step(conn, "0050 candidates skip failing items", *SKIPPING, *ungranted(*CLEAR),
+             done=exists("function", "recovery_items_clear(text[], uuid[], uuid[])"))  # fmt: skip
+        step(conn, "0050 grants", *grants(*CURSOR), *grants(*CLEAR), *ACCESS)
 
 
 def downgrade() -> None:
+    for prior in (DISPATCH_0049, CANCEL_0049, RECONCILE_0049, ORPHANS_0049):
+        op.execute(prior.replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1))
+    for table in ("work_failures", "recovery_items"):
+        op.execute(f"DROP FUNCTION {table}_clear(text[], uuid[], uuid[])")
     for table in reversed(TABLES):
         op.drop_table(table)
     op.execute("DROP FUNCTION event_candidates(integer, bigint, timestamptz, uuid)")

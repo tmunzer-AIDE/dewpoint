@@ -31,7 +31,7 @@ from temporalio.service import RPCError, RPCStatusCode
 
 from dewpoint.apps.cancels import USER_CANCELLED
 from dewpoint.apps.codec import CodecRefusedError
-from dewpoint.apps.dispatcher import budget
+from dewpoint.apps.dispatcher import budget, failures, recovery
 from dewpoint.apps.dispatcher.observe import REQUIRED, Build
 from dewpoint.core.audit import service as audit
 from dewpoint.core.claims import service as claims
@@ -253,6 +253,7 @@ async def _begin(
         log.error("start_after_end", request_id=str(request.id))
         request.status, request.starting_at = "starting", func.statement_timestamp()
         await s.flush()
+        await recovery.noted(s, request.tenant_id, recovery.START_AFTER_END, request.id)  # for an operator (2b-4b M3)
         return Held(RUN_ENDED)
     platform = await s.get(PlatformSettings, 1, populate_existing=True)
     if platform is None:
@@ -558,6 +559,7 @@ async def dispatch_once(
         ).all()
     rotation.after = (picked[-1].queued_at, picked[-1].request_id) if len(picked) == CANDIDATES else None
     counts: Counter[str] = Counter()
+    done: list[tuple[uuid.UUID, uuid.UUID]] = []
     with budget.passing("dispatch") as admitted:
         for tenant_id, request_id, queued_at in admitted(picked):
             last = (queued_at, request_id)
@@ -568,9 +570,12 @@ async def dispatch_once(
                     "dispatch_failed", tenant_id=str(tenant_id), request_id=str(request_id), error=type(e).__name__
                 )
                 counts["error"] += 1
+                await failures.failed(sessionmaker, tenant_id, failures.DISPATCH, request_id, e)  # bounded (D10)
                 continue
+            done.append((tenant_id, request_id))
             if happened is not None:
                 counts[happened] += 1
+    await failures.cleared(sessionmaker, [failures.DISPATCH], done)
     if admitted.deferred:
         rotation.after = last  # the next cycle goes on from the last it took
     admitted.reported(counts, full=len(picked) >= CANDIDATES)

@@ -210,7 +210,8 @@ What Temporal answers decides what follows:
 - no answer: it stays `starting`, its slot held, for the reconciler.
 
 The root run's end write releases its slot. A failure the dispatcher can't classify is logged (`dispatch_failed`, its
-type only) and leaves that request as it was; the cycle goes on with the other tenants. A cycle that can't read the
+type only), leaves that request as it was, and is counted ([below](#items-that-keep-failing)); the cycle goes on with
+the other tenants. A cycle that can't read the
 current build from Temporal dispatches nothing (`dispatcher_observe_failed`), and the next one asks again; a cycle
 that fails is logged (`dispatcher_cycle_failed`) and the process goes on. Each instance records its
 last cycle in `dispatcher_reports`.
@@ -249,7 +250,11 @@ over when it goes). It asks Temporal about each request at most once every 30 se
   retirement's `open_runs` check and an erasure's stage 50.
 - **History Temporal no longer has**, for a started run, such a sub-run or a held slot: left as it is, with an error
   (`run_history_missing`, `subrun_history_missing`, `slot_history_missing`); no outcome is invented and no slot
-  released. Recover it by hand. Such a sub-run (one orphaned before the upgrade that added this, say, and closed past
+  released. Recover it by hand.
+- **Recovery reasons** are recorded, not only logged: each of `start_after_end`, `start_history_missing`,
+  `start_unresolved` (once past its 10 minutes), `run_history_missing`, `slot_history_missing` and
+  `subrun_history_missing` is kept in `recovery_items` with its item, since when, and when it was last seen again. An
+  item that resolves on its own (Temporal answers again, the start is verified, the run ends) loses its reasons. Such a sub-run (one orphaned before the upgrade that added this, say, and closed past
   the namespace's retention) is asked about again less and less often, twice its last gap each time from 30 seconds,
   up to a day, with its error each time.
 - **Recovering a sub-run whose history is gone** (an exceptional recovery, by hand, as the database's owner):
@@ -273,6 +278,33 @@ over when it goes). It asks Temporal about each request at most once every 30 se
   The reconciler stops asking about it, and its tree's retention, a key retirement's `open_runs` check and an erasure's
   stage 50 go on.
 - **Cancels:** it sends each recorded cancel to Temporal, once.
+
+### Items that keep failing
+
+A request, event or sub-run that a pass can't settle because of an unexpected failure (a bug, or an answer no rule
+above classifies, such as Temporal refusing a cancel) is counted for that kind of work alone: dispatching it,
+reconciling it (by its request's phase: still `starting`, its run open, its slot held), sending its cancel, matching
+an event, or settling an orphaned sub-run. Each failure is logged by its type (`dispatch_failed`, `reconcile_failed`,
+`cancel_unsent`, `event_match_failed`), and the pass leaves the item 1, 2, 4, 8, 16, then 30 minutes before trying it
+again, going on with the others meanwhile.
+
+The 7th failure in a row, about an hour after the first, **holds** the item. It's alerted on once, with the tenant,
+the item and the last error's type: `dispatch_held`, `reconcile_starting_held`, `reconcile_open_held`,
+`reconcile_slot_held`, `cancel_held`, `match_held` or `subrun_held`. No pass tries it again until an operator releases
+it. A success clears its kind's count; a reconciliation's clears its request's count in every phase.
+
+What isn't counted keeps its own handling:
+
+- Temporal not answering, or too late to tell (`UNAVAILABLE`, `DEADLINE_EXCEEDED`, `RESOURCE_EXHAUSTED`,
+  `CANCELLED`), a `NOT_FOUND` from a namespace that doesn't answer, a timeout, and the database failing;
+- a refused start, which counts in its request's attempts, and an event's own failure, which counts in the event's.
+
+A hold for one kind never stops another's work on the same item: a request whose cancel is held still ends through
+its run, and its reconciliation goes on. A held cancel stays requested: the request keeps `cancel_requested_at`, and
+`cancel_sent_at` stays empty. It's never shown as sent.
+
+The counts are kept in `work_failures`, by tenant, kind and item, with the last error's type, never its text. They go
+with their item under retention, and with their tenant at an erasure's stage 80.
 
 ## Cancelling and re-running
 

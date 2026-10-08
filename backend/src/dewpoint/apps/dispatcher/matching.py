@@ -22,8 +22,9 @@ An event is `dead` (audited, alerted on, its counters released) only for a confi
 ciphertext fails under a key version that has opened another event in this process, or its payload isn't a JSON
 object; or after `EVENT_ATTEMPTS` unconfirmed failures, backing off from `BACKOFF`, doubling. A platform-wide failure
 (a key version missing, the tenant's data key unreadable) waits `WAIT` with an alert, its attempts untouched; the
-database itself failing writes nothing (§8.3, §10.5). Any other unexpected failure (a bug) waits `ERROR_BACKOFF`, its
-attempts untouched, so it never keeps the events after it out (the owner's review of the 2b-4b M1 checkpoint 4)."""
+database itself failing writes nothing (§8.3, §10.5). Any other unexpected failure (a bug) is counted apart from its
+attempts (`failures`, D10): it waits 1, 2, 4, 8, 16 then 30 minutes, so it never keeps the events after it out (the
+owner's review of the 2b-4b M1 checkpoint 4), and the 7th in a row holds it for an operator."""
 
 import json
 import uuid
@@ -38,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import undefer
 
 from dewpoint.apps import admission
-from dewpoint.apps.dispatcher import budget
+from dewpoint.apps.dispatcher import budget, failures
 from dewpoint.apps.dispatcher.dispatch import GATE_LOCK, tenant_lock
 from dewpoint.core.audit import service as audit
 from dewpoint.core.crypto import events
@@ -74,7 +75,6 @@ EVENT_ATTEMPTS = 5  # event-specific attempts before an unconfirmed failure is d
 BACKOFF = timedelta(seconds=30)  # after the first event-specific failure, doubling (§15, provisional)
 PAGES = 4  # a pass picks this many batches' candidates, after its rotation's cursor: one busy (D9) gives its place to
 # the next, and the next pass goes on from the last visited; a batch is still all it tries
-ERROR_BACKOFF = timedelta(minutes=1)  # after a match failed unexpectedly (a bug, an outage), its attempts untouched
 ROLLED_BACK = (GATE_OFF, ENVIRONMENT_NOT_RECORDED, TENANT_ERASING, SKIPPED, BUSY)
 ALERTS = "dewpoint.matching.alerts"  # in the session's `info`: alerts logged once its transaction commits
 
@@ -118,22 +118,6 @@ async def _lock(s: AsyncSession, key: str) -> None:
     await s.execute(text("select pg_advisory_xact_lock_shared(hashtextextended(:k, 0))"), {"k": key})
 
 
-async def _backed_off(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID,
-                     event_id: uuid.UUID) -> None:  # fmt: skip
-    """An event whose match failed unexpectedly (a bug, an outage) tried again only after `ERROR_BACKOFF`, so it never
-    keeps the events after it out (the owner's review of the 2b-4b M1 checkpoint 4). Never fails the pass."""
-    try:
-        async with sessionmaker() as s, s.begin():
-            await tenant_scope(s, tenant_id)
-            query = text(
-                "update inbound_events set next_attempt_at = statement_timestamp() + :b "
-                "where id = :e and status = 'pending'"
-            )
-            await s.execute(query, {"b": ERROR_BACKOFF, "e": event_id})
-    except Exception as e:
-        log.error("event_match_unbacked", event_id=str(event_id), error=type(e).__name__)
-
-
 @dataclass
 class Rotation:
     """Where the last pass stopped among the candidates, `(rank, received_at, event id)`: the next goes on from there,
@@ -162,6 +146,7 @@ async def match_once(
         query = text("select tenant_id, event_id, endpoint_id, rank, received_at from event_candidates(:n, :r, :t, :e)")
         picked = (await s.execute(query, {"n": batch * PAGES, "r": after[0], "t": after[1], "e": after[2]})).all()
     counts: Counter[str] = Counter()
+    done: list[tuple[uuid.UUID, uuid.UUID]] = []
     tried, visited = 0, 0
     with budget.passing("matching") as admitted:
         for tenant_id, event_id, endpoint_id, rank, received_at in admitted(picked):  # in the cursor's order
@@ -180,8 +165,12 @@ async def match_once(
                     "event_match_failed", tenant_id=str(tenant_id), event_id=str(event_id), error=type(e).__name__
                 )
                 counts["error"] += 1
-                if not unavailable(e):  # the database failing writes nothing; tried again next pass
-                    await _backed_off(sessionmaker, tenant_id, event_id)
+                # bounded (D10): the database failing counts nothing, its event tried again next pass
+                await failures.failed(sessionmaker, tenant_id, failures.MATCH, event_id, e)
+                continue
+            if outcome != BUSY:  # passed by, not tried
+                done.append((tenant_id, event_id))
+    await failures.cleared(sessionmaker, [failures.MATCH], done)
     if visited == len(picked) and len(picked) < batch * PAGES:
         rotation.after = None  # it reached the end: the next pass starts over
     admitted.reported(counts, full=len(picked) >= batch * PAGES)

@@ -21,7 +21,7 @@ from dewpoint.core.runs.service import OUTCOME_UNCONFIRMED
 from dewpoint.engine.runtime.activities import ProjectInput, StepRow
 from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.engine.runtime.workflow import RunGraph
-from tests.apps.dispatcher.support import BUILD, begin, state
+from tests.apps.dispatcher.support import BUILD, begin, reasons, state
 from tests.apps.dispatcher.test_reconcile import DescribeFails
 from tests.apps.test_admission import KEYS
 from tests.apps.test_runs import rpc
@@ -211,3 +211,9 @@ async def test_a_started_run_whose_history_is_gone_is_left_unresolved_with_an_al
     assert await ended(owner_sessionmaker, request.id) == ("running", None)
     assert (await state(owner_sessionmaker, request.id))["slot"] == 1
     assert any(e["event"] == "run_history_missing" and e["log_level"] == "error" for e in seen)
+    assert await reasons(owner_sessionmaker, request.id) == {"run_history_missing": False}  # kept (2b-4b M3)
+    async with owner_sessionmaker() as s, s.begin():  # its history back
+        await s.execute(text("update run_requests set checked_at = null where id = :i"), {"i": request.id})
+    running = Described(WorkflowExecutionStatus.RUNNING)
+    assert await reconcile.reconcile_once(dispatch_sessionmaker, running, KEYS, api_settings) == {"running": 1}
+    assert await reasons(owner_sessionmaker, request.id) == {}

@@ -40,11 +40,7 @@ _FAILED = text(
     "held_at = CASE WHEN f.errors + 1 >= :bound THEN coalesce(f.held_at, statement_timestamp()) END "
     "RETURNING errors"
 )
-_FAILING = text(
-    "SELECT DISTINCT item_id FROM work_failures WHERE kind = ANY(:k) AND item_id = ANY(:i) "
-    "AND (held_at IS NOT NULL OR due_at > statement_timestamp())"
-)
-_CLEARED = text("DELETE FROM work_failures WHERE kind = ANY(:k) AND item_id = :i")
+_CLEARED = text("SELECT work_failures_clear(:k, :t, :i)")  # by tenant and item, across tenants (0050)
 
 
 def counted(e: BaseException) -> bool:
@@ -68,7 +64,7 @@ async def failed(
             errors: int = (await s.execute(_FAILED, {"t": tenant_id, "k": kind, "i": item_id, "e": type(error).__name__,
                                                 "first": seconds[0], "delays": seconds, "n": len(seconds),
                                                 "bound": BOUND})).scalar_one()  # fmt: skip
-    except DBAPIError as e:  # in the item's own handler: never ends the pass
+    except (DBAPIError, OSError) as e:  # in the item's own handler: never ends the pass
         log.error("failure_unrecorded", kind=kind, item_id=str(item_id), error=type(e).__name__)
         return
     if errors == BOUND:
@@ -76,16 +72,15 @@ async def failed(
                   error=type(error).__name__)  # fmt: skip
 
 
-async def failing(s: AsyncSession, kinds: Iterable[str], item_ids: Iterable[uuid.UUID]) -> set[uuid.UUID]:
-    """Which of the items, in the session's tenant, `kinds`' work leaves for now: held, or not yet due."""
-    found = await s.execute(_FAILING, {"k": list(kinds), "i": list(item_ids)})
-    return set(found.scalars())
-
-
 async def cleared(
-    sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, kinds: Iterable[str], item_id: uuid.UUID
+    sessionmaker: async_sessionmaker[AsyncSession], kinds: Iterable[str], done: Iterable[tuple[uuid.UUID, uuid.UUID]]
 ) -> None:  # fmt: skip
-    """`kinds`' work on the item succeeded: their counts go."""
-    async with sessionmaker() as s, s.begin():
-        await tenant_scope(s, tenant_id)
-        await s.execute(_CLEARED, {"k": list(kinds), "i": item_id})
+    """`kinds`' work succeeded on each `(tenant, item)` of a pass: their counts go, in one statement (none for none)."""
+    pairs = list(done)
+    if not pairs:
+        return
+    try:
+        async with sessionmaker() as s, s.begin():
+            await s.execute(_CLEARED, {"k": list(kinds), "t": [t for t, _ in pairs], "i": [i for _, i in pairs]})
+    except (DBAPIError, OSError) as e:  # a count left over: the next success clears it
+        log.error("failures_uncleared", kinds=list(kinds), error=type(e).__name__)
