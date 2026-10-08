@@ -1822,7 +1822,7 @@ Rulings:
   would set, and what it would cut - cost if wrong: none.
 
 Fresh-context review of 3d-2 (at 99e6ade, 2026-10-08): no High, four Medium, eight Low; one ruling challenged (M3).
-Each fixed test-first, its protection checked by removing it (19 mutants, all killed; `FIX_SHA`), but L5 (gone with
+Each fixed test-first, its protection checked by removing it (19 mutants, all killed; `6740070a`), but L5 (gone with
 M3) and L7 (a ruling):
 - M1: a 201 whose body it couldn't read was retried; when the key's user can create but not read the incident, the
   retry's search finds nothing and creates another. A 201 proves the incident exists: `servicenow.created_unreadable`,
@@ -1859,3 +1859,16 @@ M3) and L7 (a ruling):
   operator guide says so - cost if wrong: a late resolve reopens a closed incident's resolution.
 - L8: docstrings and the guide claimed every unreadable answer was retried (a note's is `outcome_unknown`), that
   ServiceNow counts UTF-16 units (a ruling, not a fact) and that a retry never opens a second incident; corrected.
+
+### 3d-2 checkpoint (2026-10-08, at 6740070, local, not pushed)
+- Tasks 1-7 done: the connection type (f349c7c), the reconcilable create (f6f0028), update, resolve and notes with
+  their simulations (f0378aa), the RunGraph proof (0c35b57: the create's first answer lost after the record was stored,
+  the retry reconciling with no second incident, then a note and a resolve; simulated, nothing sent; its 7 wiring
+  mutants killed), the operator guide (99e6ade); the review's fixes (6740070).
+- Verified at 6740070: 2,283 tests across the SDK, the catalog, connections, the worker, every plugin, the API and the
+  CLI; ruff, format, mypy, import contracts; gitleaks over the branch's commits finds nothing; CodeQL's python
+  analysis finds nothing locally, with CI's CLI and query filter.
+- Not run: the full suite (about 10 minutes, asked first); a Compose proof; any real ServiceNow call (needs the
+  owner's say and a developer instance with an API key).
+- Awaiting the owner: sign-off of this section's rulings (the first ones, tasks 2-5's, and the review's M2, M3, M4,
+  L3, L6, L7; simulate's still departs from D13's exact request); the full suite; push and PR.
