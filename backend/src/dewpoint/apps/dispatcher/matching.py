@@ -7,7 +7,9 @@ a transaction of its own, under the one lock order: the gate's lock and the tena
 gate's disable and 2b-4's erasure take them exclusively), with the gate, the recorded environment and the tenant
 rechecked under them; the event's endpoint row; the tenant's counter row; and only then the event row, `FOR UPDATE
 SKIP LOCKED`, rechecked still pending and due (another dispatcher may have finished it). Holding the endpoint's row
-serializes ingress and matching on one endpoint.
+serializes ingress and matching on one endpoint. The endpoint's and the counter's rows are taken `SKIP LOCKED` too (D9):
+one held elsewhere passes the event by, `busy`, never waited on, so a second dispatcher takes other tenants' work; a
+pass picks `PAGES` batches' candidates, so busy ones give their places to the next, and tries one batch.
 
 The event is opened with the tenant's private key and, for each enabled binding of its endpoint whose filter holds, in
 workflow-id order (§7.2), one request is admitted: source `webhook`, key `evt:<event id>:<workflow id>`, the event as
@@ -58,6 +60,7 @@ GATE_OFF = "gate_off"
 ENVIRONMENT_NOT_RECORDED = "environment_not_recorded"
 TENANT_ERASING = "tenant_erasing"
 SKIPPED = "skipped"
+BUSY = "busy"  # its endpoint's or its tenant's counter row held elsewhere (ingress, another dispatcher): passed by (D9)
 FAN_OUT_EXCEEDED = "fan_out_exceeded"
 KEY_UNAVAILABLE = "key_unavailable"
 RETRYING = "retrying"
@@ -67,8 +70,10 @@ EVENT_NOT_JSON = "event_not_json"
 EVENT_NOT_OBJECT = "event_not_object"
 EVENT_ATTEMPTS = 5  # event-specific attempts before an unconfirmed failure is dead (§8.3)
 BACKOFF = timedelta(seconds=30)  # after the first event-specific failure, doubling (§15, provisional)
+PAGES = 4  # a pass picks this many batches' candidates: one busy (D9) gives its place to the next, so busy rows never
+# hold the first batch; a batch is still all it tries
 ERROR_BACKOFF = timedelta(minutes=1)  # after a match failed unexpectedly (a bug, an outage), its attempts untouched
-ROLLED_BACK = (GATE_OFF, ENVIRONMENT_NOT_RECORDED, TENANT_ERASING, SKIPPED)
+ROLLED_BACK = (GATE_OFF, ENVIRONMENT_NOT_RECORDED, TENANT_ERASING, SKIPPED, BUSY)
 ALERTS = "dewpoint.matching.alerts"  # in the session's `info`: alerts logged once its transaction commits
 
 
@@ -137,21 +142,27 @@ async def match_once(
         if waiting is not None:
             return {waiting: 1}
         query = text("select tenant_id, event_id, endpoint_id from event_candidates(:n)")
-        picked = (await s.execute(query, {"n": batch})).all()
+        picked = (await s.execute(query, {"n": batch * PAGES})).all()
     counts: Counter[str] = Counter()
+    tried = 0
     with budget.passing("matching") as admitted:
         for tenant_id, event_id, endpoint_id in admitted(picked, key=lambda row: row[1]):
+            if tried >= batch:  # a batch tried: the candidates past it were for the busy ones' places (D9)
+                break
             try:
-                counts[await match_event(sessionmaker, keys, verified, tenant_id=tenant_id, event_id=event_id,
-                                         endpoint_id=endpoint_id)] += 1  # fmt: skip
+                outcome = await match_event(sessionmaker, keys, verified, tenant_id=tenant_id, event_id=event_id,
+                                            endpoint_id=endpoint_id)  # fmt: skip
+                counts[outcome] += 1
+                tried += outcome != BUSY
             except Exception as e:
+                tried += 1
                 log.error(
                     "event_match_failed", tenant_id=str(tenant_id), event_id=str(event_id), error=type(e).__name__
                 )
                 counts["error"] += 1
                 if not unavailable(e):  # the database failing writes nothing; tried again next pass
                     await _backed_off(sessionmaker, tenant_id, event_id)
-    admitted.reported(counts, full=len(picked) >= batch)
+    admitted.reported(counts, full=len(picked) >= batch * PAGES)
     return dict(counts)
 
 
@@ -187,16 +198,21 @@ async def _match(
     tenant = await s.get(Tenant, tenant_id, populate_existing=True)
     if tenant is None or tenant.status != "active":
         return TENANT_ERASING
+    # D9: the endpoint's row, then the tenant's counter row, `SKIP LOCKED`: one held elsewhere (ingress recording an
+    # event, another dispatcher matching one) is passed by, `busy`, never waited on, so dispatchers scale
     endpoint = (
         await s.execute(
-            select(WebhookEndpoint).where(WebhookEndpoint.id == endpoint_id).with_for_update()
+            select(WebhookEndpoint).where(WebhookEndpoint.id == endpoint_id).with_for_update(skip_locked=True)
             .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()  # fmt: skip
     if endpoint is None:
-        return SKIPPED
-    await s.execute(select(TenantEventCounters.tenant_id).where(TenantEventCounters.tenant_id == tenant_id)
-                    .with_for_update())  # fmt: skip
+        there = await s.execute(select(WebhookEndpoint.id).where(WebhookEndpoint.id == endpoint_id))
+        return BUSY if there.first() is not None else SKIPPED
+    counter = select(TenantEventCounters.tenant_id).where(TenantEventCounters.tenant_id == tenant_id)
+    if (await s.execute(counter.with_for_update(skip_locked=True))).first() is None:
+        if (await s.execute(counter)).first() is not None:
+            return BUSY
     event = (
         await s.execute(
             select(InboundEvent)

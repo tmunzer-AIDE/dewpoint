@@ -19,6 +19,7 @@ from dewpoint.core.platform.service import PRODUCTION, record_environment
 from tests.apps.dispatcher.inbound import (
     bind,
     counters,
+    endpoint,
     event_state,
     inbound,
     lock_waiters,
@@ -220,10 +221,10 @@ async def test_two_dispatchers_match_an_event_once(dev, owner_sessionmaker, ingr
     first = asyncio.create_task(matched(dispatch_sessionmaker, dev, event_id))
     await reached.wait()
     monkeypatch.setattr(matching, "_after_event_locked", matching_noop)
-    second = asyncio.create_task(matched(dispatch_sessionmaker, dev, event_id))
-    await _waiting(owner_sessionmaker)  # on the endpoint's row
+    second = await asyncio.wait_for(matched(dispatch_sessionmaker, dev, event_id), 5)  # the endpoint's row held: D9
     release.set()
-    assert sorted([await first, await second]) == ["matched", "skipped"]
+    assert [await first, second, await matched(dispatch_sessionmaker, dev, event_id)] == [
+        "matched", matching.BUSY, "skipped"]  # fmt: skip
     assert len(await requests_of(owner_sessionmaker, event_id)) == 1
 
 
@@ -231,19 +232,20 @@ async def matching_noop() -> None:
     return None
 
 
-async def test_two_events_of_one_endpoint_are_matched_one_after_the_other(
+async def test_two_events_of_one_endpoint_are_matched_one_at_a_time(
     dev, owner_sessionmaker, ingress_sessionmaker, dispatch_sessionmaker, monkeypatch
 ) -> None:
+    """One endpoint's events are matched one at a time (its row): while the first is matched, the second is passed by
+    at once, `busy` (D9: `SKIP LOCKED`, never waited on), and matched on its next try."""
     await bind(owner_sessionmaker, dev)
     one, two = await send(ingress_sessionmaker, dev, ALARM, ALARM | {"id": "a-2"})
     reached, release = await _held(monkeypatch)
     first = asyncio.create_task(matched(dispatch_sessionmaker, dev, one))
     await reached.wait()
     monkeypatch.setattr(matching, "_after_event_locked", matching_noop)
-    second = asyncio.create_task(matched(dispatch_sessionmaker, dev, two))
-    await _waiting(owner_sessionmaker)
+    assert await asyncio.wait_for(matched(dispatch_sessionmaker, dev, two), 5) == matching.BUSY
     release.set()
-    assert [await first, await second] == ["matched", "matched"]
+    assert [await first, await matched(dispatch_sessionmaker, dev, two)] == ["matched", "matched"]
     assert await counters(owner_sessionmaker, dev) == ((0, 0), (0, 0))
 
 
@@ -267,19 +269,19 @@ async def test_a_duplicate_recorded_while_its_event_is_matched_is_acknowledged_a
         assert (await s.execute(text("select count(*) from inbound_events"))).scalar_one() == 1
 
 
-async def test_a_duplicate_recorded_first_holds_the_matcher_until_it_commits(
+async def test_a_duplicate_recorded_first_passes_the_matcher_by_until_it_commits(
     dev, owner_sessionmaker, ingress_sessionmaker, dispatch_sessionmaker
 ) -> None:
-    """Ingress first: the matcher waits for the endpoint's row, then matches the one event once."""
+    """Ingress first: while its transaction holds the endpoint's row, the matcher passes the event by, `busy` (D9),
+    and on its next try matches the one event once."""
     await bind(owner_sessionmaker, dev)
     key = b"k" * 32
     [event_id] = await send(ingress_sessionmaker, dev, ALARM, dedupe=[key])
     async with ingress_sessionmaker() as s, s.begin():
         outcome = await s.execute(RECORD, _params(dev, ALARM, key))
         assert dict(outcome.scalar_one())["duplicates"] == 1
-        matcher = asyncio.create_task(matched(dispatch_sessionmaker, dev, event_id))
-        await _waiting(owner_sessionmaker)
-    assert await matcher == "matched"
+        assert await asyncio.wait_for(matched(dispatch_sessionmaker, dev, event_id), 5) == matching.BUSY
+    assert await matched(dispatch_sessionmaker, dev, event_id) == "matched"
     assert len(await requests_of(owner_sessionmaker, event_id)) == 1
 
 
@@ -366,7 +368,7 @@ async def test_a_cancel_waits_for_a_match_in_flight_and_finds_it_matched(
     assert await counters(owner_sessionmaker, dev) == ((0, 0), (0, 0))
 
 
-async def test_a_match_waits_for_a_cancel_and_passes_the_cancelled_event_by(
+async def test_a_match_during_a_cancel_is_passed_by_then_passes_the_cancelled_event_by(
     dev, owner_sessionmaker, ingress_sessionmaker, dispatch_sessionmaker, api_sessionmaker
 ) -> None:
     from dewpoint.apps import webhooks
@@ -377,8 +379,52 @@ async def test_a_match_waits_for_a_cancel_and_passes_the_cancelled_event_by(
     async with api_sessionmaker() as s, s.begin():
         await tenant_scope(s, dev.tenant_id)
         await webhooks.cancel_event(s, tenant_id=dev.tenant_id, event_id=event_id, actor_id=dev.user_id)
-        matcher = asyncio.create_task(matched(dispatch_sessionmaker, dev, event_id))
-        await _waiting(owner_sessionmaker)
-    assert await matcher == "skipped"
+        assert await asyncio.wait_for(matched(dispatch_sessionmaker, dev, event_id), 5) == matching.BUSY  # D9
+    assert await matched(dispatch_sessionmaker, dev, event_id) == "skipped"
     assert await requests_of(owner_sessionmaker, event_id) == []
     assert await counters(owner_sessionmaker, dev) == ((0, 0), (0, 0))
+
+
+async def test_a_busy_endpoint_is_skipped_never_waited_on(
+    dev, owner_sessionmaker, ingress_sessionmaker, dispatch_sessionmaker
+) -> None:  # fmt: skip
+    """D9: the endpoint's row `SKIP LOCKED`. Held elsewhere (ingress, another dispatcher), the matcher passes the event
+    by at once, `busy`, writing nothing: the event stays pending, its attempts and counters as they were."""
+    await bind(owner_sessionmaker, dev)
+    [event_id] = await send(ingress_sessionmaker, dev, ALARM)
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("select 1 from webhook_endpoints where id = :e for update"), {"e": dev.endpoint_id})
+        assert await asyncio.wait_for(matched(dispatch_sessionmaker, dev, event_id), 5) == matching.BUSY
+    state = await event_state(owner_sessionmaker, event_id)
+    assert (state["status"], state["attempts"]) == ("pending", 0)
+    assert await matched(dispatch_sessionmaker, dev, event_id) == "matched"
+
+
+async def test_a_busy_tenant_counter_is_skipped_never_waited_on(
+    dev, owner_sessionmaker, ingress_sessionmaker, dispatch_sessionmaker
+) -> None:  # fmt: skip
+    """D9: then the tenant's counter row, `SKIP LOCKED` too: a busy tenant is skipped, not waited on."""
+    await bind(owner_sessionmaker, dev)
+    [event_id] = await send(ingress_sessionmaker, dev, ALARM)
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("select 1 from tenant_event_counters where tenant_id = :t for update"),
+                        {"t": dev.tenant_id})  # fmt: skip
+        assert await asyncio.wait_for(matched(dispatch_sessionmaker, dev, event_id), 5) == matching.BUSY
+    assert (await event_state(owner_sessionmaker, event_id))["status"] == "pending"
+
+
+async def test_busy_events_never_hold_a_passes_batch(
+    dev, owner_sessionmaker, ingress_sessionmaker, dispatch_sessionmaker
+) -> None:  # fmt: skip
+    """D9: candidates page past the first batch, so busy rows can't hold it. A pass of two: the first two candidates'
+    endpoint is busy, and the pass goes on to the third, another endpoint's event."""
+    second = await endpoint(owner_sessionmaker, dev.tenant_id, dev.user_id)
+    await send(ingress_sessionmaker, dev, ALARM, ALARM | {"id": "a-2"})
+    [later] = await send(ingress_sessionmaker, dev, ALARM | {"id": "a-3"}, endpoint_id=second)
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("select 1 from webhook_endpoints where id = :e for update"), {"e": dev.endpoint_id})
+        counts = await asyncio.wait_for(
+            matching.match_once(dispatch_sessionmaker, KEYS, matching.Verified(), batch=2), 10
+        )
+    assert counts.get(matching.BUSY) == 2 and counts.get("unmatched") == 1, counts
+    assert (await event_state(owner_sessionmaker, later))["status"] == "unmatched"

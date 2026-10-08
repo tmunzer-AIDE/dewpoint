@@ -187,9 +187,11 @@ development machine, **not production capacity**:
   13.0 with five. A real Temporal, the leader's own work and more bindings only lower it;
 - **one tenant's endpoints together** (`tenant-drain`, each dispatcher a process of its own): four endpoints drained
   23.8 events a second against one endpoint's 22.9, and 24.7 with two dispatchers; two tenants with two dispatchers,
-  25.6. **A second dispatcher adds almost nothing today**: both take the same candidates in the same order, and the
-  second waits for each endpoint's row the first holds, to find its event matched. Making matching scale with
-  dispatchers is a required decision of engine 2b-4, before production, after which this control is measured again;
+  25.6. **Before D9, a second dispatcher added almost nothing**: both took the same candidates in the same order, and
+  the second waited for each endpoint's row the first held, to find its event matched. Since engine 2b-4b M3 (D9) the
+  matcher takes the endpoint's row and then the tenant's counter row `SKIP LOCKED`: one held elsewhere passes its event
+  by (`busy`, counted in the cycle's report), never waited on, and a pass picks four batches' candidates so busy ones
+  give their places to the next. This control is measured again before these numbers are replaced;
 - **each limit on its own** (`buckets`, `quotas`), at its default: every rate bucket accepted what its burst and rate
   allow over the time taken, within one call (an endpoint's events 1,029 of 1,030; its bytes 15.5 of 16.0 MiB; a
   tenant's events 5,000 of 5,030, in calls of 100 events, so the 30 refilled never made a whole one; its bytes 76 of
