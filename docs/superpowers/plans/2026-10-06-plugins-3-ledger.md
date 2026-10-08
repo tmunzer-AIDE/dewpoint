@@ -1461,3 +1461,24 @@ Rulings:
   (UDP has no acknowledgement); a failure once a byte may have left is unknown - cost if wrong: none.
 - Ruling: syslog has no quota scope (none is documented) and no secret (no client certificates in v1) - cost if
   wrong: a runaway workflow isn't slowed by the plugin.
+- Ruling (task 2): the SMTP session is staged by hand (EHLO, STARTTLS, AUTH, MAIL, RCPT, DATA, payload) rather than
+  through `smtplib.sendmail`, so the payload's first byte is the boundary between a refusal (nothing delivered) and
+  `MaybeSent`; the session wraps the socket in TLS itself, the certificate checked against the configured name -
+  cost if wrong: none.
+- Ruling (task 2): only a 250 answers the message's end as sent; another 2yz is unknown, as is anything unreadable
+  (RFC 5321 answers the end with 250) - cost if wrong: a server answering 251 there needs a person.
+- Ruling (task 2): when every recipient is refused, a transient refusal among them makes the whole refusal transient
+  (a retry may reach them), else it's permanent; a 421 to any RCPT ends the send - cost if wrong: a retry repeats
+  permanent refusals.
+- Ruling (task 2): the runtime puts a message on the wire whole or not at all: a bare CR or LF (how a second message
+  is smuggled past a server), a NUL or a line past 998 octets is refused before connecting, as is a message past 10
+  MiB - cost if wrong: a plugin's message must be well formed (`email.policy.SMTP` makes it so).
+- Ruling (task 2): the username and password are printable ASCII (`smtplib` signs in with ASCII), at most 256 and
+  1024 characters - cost if wrong: a non-ASCII password can't be used.
+- Ruling (task 3): a probe takes a token from the type's scopes (it reaches the server) and never counts as a send
+  (it sends no MAIL); a send heartbeats every 10 s while its thread works - cost if wrong: none.
+- Ruling (task 4): the body is quoted-printable UTF-8, so every line on the wire is ASCII and short whatever the
+  server's 8BITMIME; control characters in the subject and the sender's name become spaces; simulated, the email
+  renders from a placeholder sender (the connection isn't opened) - cost if wrong: none.
+- Ruling (task 4): verify names what failed: `auth_failed` (535 at AUTH), `refused`, `tls_unavailable`,
+  `auth_unavailable`, `tls_verification_failed`, `egress_refused`, else `unreachable` - cost if wrong: none.
