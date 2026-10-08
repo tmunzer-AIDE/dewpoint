@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""`servicenow.create_incident` (plugins-3 3d-2, D22), reconcilable: the incident's `correlation_id` is the config's,
-else the step's idempotency key; a retry first asks for it (`reconcile()`), keeping only records whose
-`correlation_id` is the step's, because the Table API ignores a query part it can't read. The message model renders
-into `short_description` (one line, at most 160 UTF-16 units) and `description` (at most 4,000), cut and reported."""
+"""`servicenow.create_incident` (plugins-3 3d-2, D22), reconcilable: the incident's `correlation_id` is the step's
+idempotency key, never the config's; a retry first asks for it (`reconcile()`) and takes only a record carrying it
+exactly. A search answering records of other ids didn't apply (the Table API ignores a query part it can't read):
+whether the create landed is then unknown. A 201 proves the incident exists, so its answer is never retried. The
+message model renders into `short_description` (one line, at most 160 UTF-16 units) and `description` (at most
+4,000), cut and reported."""
 
 import uuid
 from dataclasses import dataclass
@@ -13,7 +15,7 @@ import pytest
 from pydantic import ValidationError
 
 from dewpoint.plugins.servicenow import TABLE, CreateIncident, render_incident
-from dewpoint.sdk import FatalError, RetryableError, SideEffect
+from dewpoint.sdk import FatalError, OutcomeUnknownError, RetryableError, SideEffect
 from tests.plugins.mist.fakes import FakeConnection, FakeHttp, FakeStep, Reply
 
 KEY = "a" * 64
@@ -41,13 +43,15 @@ def created(**fields: Any) -> Reply:
     return Reply(201, {"result": {"sys_id": SYS_ID, "number": "INC0010002", "correlation_id": KEY, **fields}})
 
 
-def test_the_node_is_reconcilable_and_retried_for_half_a_minute() -> None:
+def test_the_node_is_reconcilable_and_retried_past_the_instances_transaction_limit() -> None:
+    """A retry looks once ServiceNow's 60-second Table API transaction limit has ended an attempt still under way (the
+    review's M4): 60 s, 120 s, then 240 s."""
     assert CreateIncident.type == "servicenow.create_incident"
     assert CreateIncident.side_effect == SideEffect.RECONCILABLE
     assert CreateIncident.credentials == ("servicenow",)
     r = CreateIncident.retry
-    assert (r.max_attempts, r.initial_interval, r.backoff, r.max_interval) == (4, timedelta(seconds=5), 2.0,
-                                                                              timedelta(seconds=20))  # fmt: skip
+    assert (r.max_attempts, r.initial_interval, r.backoff, r.max_interval) == (4, timedelta(seconds=60), 2.0,
+                                                                              timedelta(minutes=4))  # fmt: skip
 
 
 def test_the_message_renders_as_an_incident() -> None:
@@ -79,12 +83,11 @@ def test_set_values_win_and_options_go_in_only_when_set() -> None:
     group = "b" * 32
     body, _ = render_incident(create(severity="critical", urgency="3", impact="2", caller_id=SYS_ID,
                                      assignment_group=group, category="network", subcategory="wireless",
-                                     contact_type="monitoring", correlation_id="alarm-7:x.y_z",
-                                     correlation_display="Mist"), KEY)  # fmt: skip
+                                     contact_type="monitoring", correlation_display="Mist"), KEY)  # fmt: skip
     assert {k: body[k] for k in ("urgency", "impact", "caller_id", "assignment_group", "category", "subcategory",
                                  "contact_type", "correlation_id", "correlation_display")} == {
         "urgency": "3", "impact": "2", "caller_id": SYS_ID, "assignment_group": group, "category": "network",
-        "subcategory": "wireless", "contact_type": "monitoring", "correlation_id": "alarm-7:x.y_z",
+        "subcategory": "wireless", "contact_type": "monitoring", "correlation_id": KEY,
         "correlation_display": "Mist"}  # fmt: skip
 
 
@@ -111,10 +114,10 @@ def test_a_long_description_is_cut_to_4000_utf16_units_and_reported(fill: str) -
     assert cut == ["description"]
 
 
-@pytest.mark.parametrize("value", ["", "a^b", "a b", "a=b", "é", "a" * 101, "a\n", "a,b"])
-def test_a_correlation_id_outside_the_safe_set_is_refused(value: str) -> None:
+def test_a_correlation_id_cant_be_set() -> None:
+    """Only the step's own key tells its incident from another run's (the review's M3)."""
     with pytest.raises(ValidationError):
-        create(correlation_id=value)
+        create(correlation_id="alarm-7")
 
 
 @pytest.mark.parametrize("field", ["caller_id", "assignment_group"])
@@ -169,11 +172,12 @@ async def test_answers(status: int, error: type[Exception], code: str) -> None:
      {"result": {"sys_id": SYS_ID, "number": 7}}, {"result": {"sys_id": SYS_ID, "number": ""}},
      {"result": {"sys_id": SYS_ID, "number": "INC 1"}}, {"result": {"sys_id": SYS_ID, "number": "I" * 41}}],
 )  # fmt: skip
-async def test_a_created_answer_it_cant_read_is_retried_and_reconciled(body: Any) -> None:
-    """The record may be stored: the retry's `reconcile()` finds it."""
-    with pytest.raises(RetryableError) as raised:
+async def test_a_created_answer_it_cant_read_fails_never_creating_again(body: Any) -> None:
+    """A 201 proves the incident exists; a retry could create a second one the key's user can't read (the review's
+    M1)."""
+    with pytest.raises(FatalError) as raised:
         await run(create(), lambda sent: Reply(201, body))
-    assert raised.value.code == "servicenow.unexpected"
+    assert raised.value.code == "servicenow.created_unreadable"
 
 
 async def reconcile(config: Any, script: Any) -> tuple[Any, FakeHttp]:
@@ -196,27 +200,27 @@ async def test_a_retry_finds_the_steps_incident_by_its_correlation_id() -> None:
     assert out == {"sys_id": SYS_ID, "number": "INC0010002", "correlation_id": KEY, "truncated": []}
 
 
-async def test_records_of_another_correlation_id_arent_the_steps() -> None:
-    """An ignored query part returns other records: none of them is the step's incident."""
-    others = [{"sys_id": "b" * 32, "number": "INC1", "correlation_id": ""},
-              {"sys_id": "c" * 32, "number": "INC2", "correlation_id": KEY.upper()}]  # fmt: skip
-    out, _ = await reconcile(create(), lambda sent: found(*others))
-    assert out is None
+OTHERS = [{"sys_id": "b" * 32, "number": "INC1", "correlation_id": ""},
+          {"sys_id": "c" * 32, "number": "INC2", "correlation_id": KEY.upper()}]  # fmt: skip
+
+
+async def test_a_search_answering_other_records_leaves_the_outcome_unknown() -> None:
+    """An ignored query part returns other records, and the step's may be past them: never create again (the review's
+    M2)."""
+    with pytest.raises(OutcomeUnknownError) as raised:
+        await reconcile(create(), lambda sent: found(*OTHERS))
+    assert raised.value.code == "servicenow.unconfirmed"
+
+
+async def test_the_steps_record_among_others_is_taken() -> None:
     mine = {"sys_id": SYS_ID, "number": "INC3", "correlation_id": KEY}
-    out, _ = await reconcile(create(), lambda sent: found(*others, mine))
+    out, _ = await reconcile(create(), lambda sent: found(*OTHERS, mine))
     assert out is not None and out["sys_id"] == SYS_ID
 
 
 async def test_none_found_means_the_create_didnt_land() -> None:
     out, _ = await reconcile(create(), lambda sent: found())
     assert out is None
-
-
-async def test_a_configured_correlation_id_is_the_one_asked_for() -> None:
-    record = {"sys_id": SYS_ID, "number": "INC0010002", "correlation_id": "alarm-7"}
-    out, http = await reconcile(create(correlation_id="alarm-7"), lambda sent: found(record))
-    assert http.sent[0].params["sysparm_query"] == "correlation_id=alarm-7^ORDERBYsys_created_on"
-    assert out is not None and out["correlation_id"] == "alarm-7"
 
 
 @pytest.mark.parametrize(

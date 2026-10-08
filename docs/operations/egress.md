@@ -140,24 +140,35 @@ instance and holds a REST API key.
      prefix left empty;
   3. creates a REST API Key record tied to an integration user; its token is the connection's key;
   4. creates a REST API Access Policy for the Table API that names that profile (the global policy can't).
-  The user's roles decide what steps may do: itil (or sn_incident_write) creates, updates and resolves incidents.
-- **Verify.** Reads one incident: `invalid_key` (401), `no_table_access` (403), else `unexpected_status` or
-  `unreachable`. A key that can read but not write passes.
-- **A retry opens no second incident.** A create's `correlation_id` is its config's, else one derived from the run and
-  the step (64 hex characters). A retried create first asks for it and takes the incident it finds; only a record
-  whose `correlation_id` is exactly that counts (an instance ignores a search part it can't read). A record the user
-  can't read is created again. Update and resolve set the same values when repeated; a note may arrive twice, so a
-  note that may have arrived is never sent again (`outcome_unknown`).
+  The user's roles decide what steps may do: itil (or sn_incident_write) creates, updates and resolves incidents. It
+  must be able to write and read an incident's `correlation_id`: a retried create finds its incident by it.
+- **Verify.** Reads one incident, and expects the Table API's list: `invalid_key` (401), `no_table_access` (403),
+  `unexpected_answer` (a 200 of another body), else `unexpected_status` or `unreachable`. A key that can read but not
+  write passes.
+- **Retrying a create.** A create's `correlation_id` is one derived from the run and the step (64 hex characters); a
+  step can't set it. A retried create waits past ServiceNow's 60-second Table API transaction limit (60 s, then 120 s,
+  then 240 s), then asks for that `correlation_id` and takes the incident carrying it. A search that answers only other
+  incidents didn't apply (an instance ignores a search part it can't read): the step ends `outcome_unknown` rather than
+  risk a second incident. A create answered 201 with a body it can't read fails (`servicenow.created_unreadable`): the
+  incident exists. An incident the user can't read is created again.
+- **Repeats.** Update and resolve set the same values when repeated. Update checks the answer kept each field it set
+  but the two texts (`servicenow.not_applied` otherwise: an ACL or a business rule dropped one). A note may arrive
+  twice, so a note that may have arrived is never sent again (`outcome_unknown`). Resolving an incident already Closed
+  or Canceled is left to the instance's own rules.
 - **Values.** Raw values: references (`caller_id`, `assignment_group`) are sys_ids, choices their values. Urgency and
   impact follow the severity (critical 1, warning 2, info and success 3) unless set. Resolving sets `state` to 6
   unless the step names the instance's own value, with a resolution code and notes, and fails
   (`servicenow.not_resolved`) when the instance kept another state.
 - **Bounds.** A short description is one line of at most 160 characters, a description, resolution notes or a note at
-  most 4,000 (counted in UTF-16 units, as ServiceNow does); longer values are cut and named in the step's output.
+  most 4,000 (counted in UTF-16 units, Java's count and the stricter one: ServiceNow doesn't say which it uses);
+  longer values are cut and named in the step's output.
+- **Notes can't embed HTML.** An instance that allows `[code]` tags in journals (`glide.ui.security.allow_codetag`)
+  renders what's between them as HTML: in a note, a `[` opening `[code]` or `[/code]` is sent as a full-width `［`.
 - **Outcomes.** A 400 (`servicenow.invalid_request`), 401 (`servicenow.unauthorized`), 403 (`servicenow.forbidden`:
-  an ACL, a business rule or a data policy), 404 (`servicenow.not_found`) or another 4xx fails the step. A 408, 425 or
-  5xx, or an answer it can't read, is retried after 5 s, then 10 s, then 20 s. A 429's `Retry-After` blocks the key's
-  scope; a short one is waited out within the attempt by the idempotent nodes.
+  an ACL, a business rule or a data policy), 404 (`servicenow.not_found`) or another 4xx fails the step. Update and
+  resolve retry a 408, 425 or 5xx, or an answer they can't read, after 5 s, then 10 s, then 20 s; a create retries
+  them as above. A 429's `Retry-After` blocks the key's scope; a short one is waited out within the attempt by update
+  and resolve.
 - **Firewalls.** Allow the instance's host on port 443.
 
 ## The allowlist

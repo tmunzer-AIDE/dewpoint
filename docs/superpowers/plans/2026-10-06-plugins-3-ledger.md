@@ -1820,3 +1820,42 @@ Rulings:
   asked for - cost if wrong: none.
 - Ruling (task 5): a simulated change returns its sys_id, number `INC0000000` (a fixture), resolve the state it
   would set, and what it would cut - cost if wrong: none.
+
+Fresh-context review of 3d-2 (at 99e6ade, 2026-10-08): no High, four Medium, eight Low; one ruling challenged (M3).
+Each fixed test-first, its protection checked by removing it (19 mutants, all killed; `FIX_SHA`), but L5 (gone with
+M3) and L7 (a ruling):
+- M1: a 201 whose body it couldn't read was retried; when the key's user can create but not read the incident, the
+  retry's search finds nothing and creates another. A 201 proves the incident exists: `servicenow.created_unreadable`,
+  fatal, never retried.
+- M2: a search answering only other records (the Table API ignoring a query part it can't read) was taken as "not
+  created", and the step's own record may lie past the 10 read. Ruling: such an answer leaves the outcome unknown
+  (`servicenow.unconfirmed`, `outcome_unknown`); only an empty answer means the create didn't land - cost if wrong: a
+  person checks an instance whose search misbehaves instead of a second incident.
+- M3 (ruling challenged): a configured `correlation_id` let a retry adopt the oldest incident carrying it: another
+  run's, iteration's or tenant's. Ruling, replacing the first rulings' configured id: the `correlation_id` is always the
+  step's idempotency key; a step can't set it - cost if wrong: a team can't stamp its own id there (it goes in the
+  text or the fields).
+- M4: a create still under way on the instance past the client's 30-second read could be missed by a search 5 s later,
+  and created twice. Ruling: a create's retries wait 60 s, 120 s, then 240 s, past the Table API's 60-second
+  transaction limit (default quota rule); update, resolve and notes keep 5 s, 10 s, 20 s - cost if wrong: a create
+  answered 5xx waits a minute to try again.
+- L1: the instance URL and key rules lived only in pydantic validators, while the API checks a connection against the
+  manifest's JSON Schema (and a stored secret meets nothing else). Both are schema now: the URL a `pattern` (its last
+  label starting with a letter, so no IPv4 address), the key `minLength`, `maxLength` and a `pattern`, and each `not`
+  a newline (a schema pattern's `$` is Python's, which takes a final one).
+- L2: an update took any 200 as applied, though an ACL or a business rule can drop a field. It asks back each field it
+  set but the texts and compares (a reference's `value`): `servicenow.not_applied`, fatal. The create doesn't check
+  the stored `correlation_id`; the operator guide says the key's user must be able to write it.
+- L3: a note's `[code]...[/code]` renders as HTML where `glide.ui.security.allow_codetag` allows it (docs "Allow
+  embedded HTML code"; Community). Ruling: in a note, a `[` opening `[code]` or `[/code]` (any case, spaces allowed) is
+  sent as a full-width `［`, as Google Chat's `<` and `>` (3c-1) - cost if wrong: such text reads with a full-width
+  bracket.
+- L4: verify passed any 200; it expects the Table API's list now (`unexpected_answer` otherwise).
+- L5: query-special values (`NULL`, `javascript:`) in a configured id: gone with M3.
+- L6: a state of `06` was sent and then failed the check against `6`. Ruling: a state is `0` or 1 to 4 digits without a
+  leading zero - cost if wrong: none.
+- L7: resolving an incident already Closed or Canceled may move it back to Resolved where the instance allows it.
+  Ruling: left to the instance's own rules (their numbers aren't documented, and reading first costs a request); the
+  operator guide says so - cost if wrong: a late resolve reopens a closed incident's resolution.
+- L8: docstrings and the guide claimed every unreadable answer was retried (a note's is `outcome_unknown`), that
+  ServiceNow counts UTF-16 units (a ruling, not a fact) and that a retry never opens a second incident; corrected.

@@ -8,15 +8,19 @@ decide what a node may do (itil creates and resolves incidents). Requests go to 
 2 answers a query matching nothing with 200 and an empty list. One quota scope a key on an instance: bursts of 10,
 then 2 a second; an instance's own hourly rules answer 429 with a `Retry-After`. Verify reads one incident.
 
-`servicenow.create_incident` is reconcilable: its `correlation_id` is the config's, else the step's idempotency key,
-and a retry first asks for it, keeping only records carrying it exactly (the Table API ignores a query part it can't
-read). It renders the message model: `short_description` one line of at most 160 UTF-16 units, `description` the
-text, fields and links, at most 4,000, cut and reported; urgency and impact from the severity unless set.
-`servicenow.update_incident` and `servicenow.resolve_incident` are idempotent PATCHes by sys_id; resolve checks the
-answer kept the state it set. `servicenow.add_work_note` is ambiguous: each note appends.
+`servicenow.create_incident` is reconcilable: its `correlation_id` is the step's idempotency key, and a retry first
+asks for it, taking only a record carrying it exactly; a search answering only other records didn't apply (the Table
+API ignores a query part it can't read), so the outcome is unknown rather than a second incident. A 201 it can't read
+fails: the incident exists. A retry waits past ServiceNow's 60-second Table API transaction limit (60 s, 120 s, 240 s).
+It renders the message model: `short_description` one line of at most 160 UTF-16 units, `description` the text, fields
+and links, at most 4,000, cut and reported; urgency and impact from the severity unless set.
+`servicenow.update_incident` and `servicenow.resolve_incident` are idempotent PATCHes by sys_id: update checks the
+answer kept each field it set but the texts, resolve the state. `servicenow.add_work_note` is ambiguous: each note
+appends; a `[code]` tag in it is neutralized.
 
 The expected 201 or 200 is applied; a 400, 401, 403, 404 or another 4xx is fatal; a 408, a 425, a 5xx, another status
-or an answer it can't read is retried, after 5 s, 10 s, then 20 s."""
+or an answer it can't read is retried, after 5 s, 10 s, then 20 s, by update and resolve; for a note, any failure once
+it may have arrived is `outcome_unknown`."""
 
 import re
 import uuid
@@ -33,6 +37,7 @@ from dewpoint.sdk import (
     HeaderAuth,
     HttpResponse,
     Node,
+    OutcomeUnknownError,
     Plugin,
     RateScope,
     RetryableError,
@@ -44,7 +49,6 @@ from dewpoint.sdk import (
     VerifyResult,
     connection_field,
 )
-from dewpoint.sdk.connections import HOST_RE
 from dewpoint.sdk.messages import MARK, Message, Severity
 
 TABLE = "/api/now/v2/table/incident"
@@ -53,14 +57,25 @@ FIELDS = "sys_id,number,correlation_id"  # what an answer carries back
 KEY_TEXT = re.compile(r"[\x21-\x7e]{16,1024}")  # a key's format isn't documented: printable ASCII, no space
 SYS_ID = re.compile(r"[0-9a-f]{32}")  # the form every documented example shows; no page states it
 NUMBER = re.compile(r"[\x21-\x7e]{1,40}")
-STATE = re.compile(r"[0-9]{1,4}")  # a state's raw value: the instance's choice list numbers them
-CORRELATION = re.compile(r"[A-Za-z0-9._:-]{1,100}")  # no query syntax: escaping a value isn't documented
+STATE = re.compile(r"0|[1-9][0-9]{0,3}")  # a state's raw value, as the instance answers it: no leading zero
+# The instance URL and the key as the API checks them: the manifest's JSON Schema (the review's L1). A schema pattern's
+# `$` is Python's, which takes a final newline: `not` refuses any. The last label starts with a letter: no IPv4 address.
+URL = r"^https://([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$"
+NO_NEWLINE: dict[str, Any] = {"not": {"pattern": "\n"}}
+KEY_SCHEMA: dict[str, Any] = {"pattern": r"^[\x21-\x7e]+$", **NO_NEWLINE}
+# A journal renders `[code]...[/code]` as HTML when the instance allows it (`glide.ui.security.allow_codetag`): a note's
+# `[` before `code]` or `/code]` becomes a full-width one, so run data never opens a tag.
+CODE_TAG = re.compile(r"\[(?=\s*/?\s*code\s*\])", re.IGNORECASE)
 # What a one-line value turns into a space: CR LF, a line break of any kind, any other control character.
 CONTROLS = re.compile(r"\r\n|[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 SHORT_MAX, LONG_MAX = 160, 4000  # the task fields' documented lengths (the Case API): short_description, description
 LEVELS = {Severity.CRITICAL: "1", Severity.WARNING: "2", Severity.INFO: "3", Severity.SUCCESS: "3"}
 RETRY = RetryDefaults(max_attempts=4, initial_interval=timedelta(seconds=5), backoff=2.0,
                       max_interval=timedelta(seconds=20))  # fmt: skip
+# A create looks again only once ServiceNow's 60-second Table API transaction limit has ended an attempt still under
+# way past the client's 30-second read (the review's M4): a search sooner could miss it, and create a second.
+RETRY_CREATE = RetryDefaults(max_attempts=4, initial_interval=timedelta(seconds=60), backoff=2.0,
+                             max_interval=timedelta(minutes=4))  # fmt: skip
 SIMULATED_ID, SIMULATED_NUMBER = "0" * 32, "INC0000000"  # a simulation's fixture: nothing was created
 REFUSALS = {
     400: ("servicenow.invalid_request", "ServiceNow refused the request as invalid."),
@@ -72,26 +87,14 @@ REFUSALS = {
 
 class ServiceNowConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    instance_url: str = Field(max_length=261, title="Instance URL",
+    instance_url: str = Field(max_length=261, pattern=URL, json_schema_extra=NO_NEWLINE, title="Instance URL",
                               description="https:// and its host, e.g. https://acme.service-now.com")  # fmt: skip
-
-    @field_validator("instance_url")
-    @classmethod
-    def _instance(cls, value: str) -> str:
-        scheme, _, host = value.partition("://")
-        if scheme != "https" or not HOST_RE.fullmatch(host) or _numeric(host):
-            raise ValueError("https:// and a lowercase host name, no port, no path")
-        return value
-
-
-def _numeric(host: str) -> bool:
-    """An IPv4 address passes the host pattern: an instance has a name."""
-    return all(label.isdigit() for label in host.split("."))
 
 
 class ServiceNowSecret(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    api_key: SecretStr = Field(title="REST API key", description="The token of a REST API Key record.")
+    api_key: SecretStr = Field(min_length=16, max_length=1024, json_schema_extra=KEY_SCHEMA, title="REST API key",
+                               description="The token of a REST API Key record.")  # fmt: skip
 
     @field_validator("api_key")
     @classmethod
@@ -102,13 +105,19 @@ class ServiceNowSecret(BaseModel):
 
 
 async def verify(ctx: CallContext, connection: Connection) -> VerifyResult:
-    """Reads one incident: the key opens the Table API and its user may read incidents."""
+    """Reads one incident: the key opens the Table API and its user may read incidents. A 200 must be the Table API's
+    list (the review's L4): a sleeping developer instance or another server answers otherwise."""
     try:
         answer = await connection.http.request("GET", TABLE, params={"sysparm_limit": "1", "sysparm_fields": "sys_id"})
     except TransportError:
         return VerifyResult(False, "unreachable")
     if answer.status_code == 200:
-        return VerifyResult(True, "ok")
+        try:
+            body = answer.json()
+        except ValueError:
+            return VerifyResult(False, "unexpected_answer")
+        listed = isinstance(body, dict) and isinstance(body.get("result"), list)
+        return VerifyResult(True, "ok") if listed else VerifyResult(False, "unexpected_answer")
     if answer.status_code == 401:
         return VerifyResult(False, "invalid_key")
     if answer.status_code == 403:
@@ -211,8 +220,6 @@ class CreateConfig(Message):
     subcategory: str | None = Field(None, min_length=1, max_length=100, title="Subcategory")
     contact_type: str | None = Field(None, min_length=1, max_length=100, title="Channel",
                                      description="A contact_type value, e.g. monitoring.")  # fmt: skip
-    correlation_id: str | None = Field(None, title="Correlation ID",
-                                       description="Names the incident; the step's own key when not set.")  # fmt: skip
     correlation_display: str = Field("Dewpoint", min_length=1, max_length=100, title="Correlation display")
 
     @field_validator("caller_id", "assignment_group")
@@ -225,18 +232,11 @@ class CreateConfig(Message):
     def _one_line(cls, value: str | None) -> str | None:
         return _line(value)
 
-    @field_validator("correlation_id")
-    @classmethod
-    def _correlation(cls, value: str | None) -> str | None:
-        if value is not None and not CORRELATION.fullmatch(value):
-            raise ValueError("1 to 100 of A-Z a-z 0-9 . _ : -")
-        return value
-
 
 def render_incident(config: CreateConfig, key: str) -> tuple[dict[str, Any], list[str]]:
-    """The incident's fields, raw values (`sysparm_input_display_value` false), its `correlation_id` the config's, else
-    `key` (the step's), and the names of what it cut. A title cut to fit is reported; a short description made from the
-    text isn't (the text is in the description)."""
+    """The incident's fields, raw values (`sysparm_input_display_value` false), its `correlation_id` `key` (the step's:
+    only it tells the step's incident from another run's), and the names of what it cut. A title cut to fit is
+    reported; a short description made from the text isn't (the text is in the description)."""
     truncated: list[str] = []
     short, short_cut = cut16(CONTROLS.sub(" ", config.title or config.text), SHORT_MAX)
     if short_cut and config.title:
@@ -256,7 +256,7 @@ def render_incident(config: CreateConfig, key: str) -> tuple[dict[str, Any], lis
         value = getattr(config, name)
         if value is not None:
             body[name] = value
-    body["correlation_id"] = config.correlation_id or key
+    body["correlation_id"] = key
     body["correlation_display"] = config.correlation_display
     return body, truncated
 
@@ -275,35 +275,39 @@ class CreateIncident(Node):
     version = 1
     title = "Create a ServiceNow incident"
     description = (
-        "Opens an incident from a message. A retry looks for the incident first, by its correlation ID, the step's "
-        "own unless set: an incident is opened once."
+        "Opens an incident from a message. Its correlation ID is the step's own key: a retry looks for the incident "
+        "first, and when the search can't tell, the outcome is unknown rather than a second incident."
     )
     Config = CreateConfig
     Output = CreateOutput
     credentials = ("servicenow",)
     side_effect = SideEffect.RECONCILABLE
-    retry = RETRY
+    retry = RETRY_CREATE
 
     async def simulate(self, ctx: StepContext, config: CreateConfig) -> CreateOutput:
-        key = config.correlation_id or ctx.idempotency_key()
+        key = ctx.idempotency_key()
         _, truncated = render_incident(config, key)
         return CreateOutput(sys_id=SIMULATED_ID, number=SIMULATED_NUMBER, correlation_id=key, truncated=truncated)
 
     async def run(self, ctx: StepContext, config: CreateConfig) -> CreateOutput:
-        key = config.correlation_id or ctx.idempotency_key()
+        key = ctx.idempotency_key()
         body, truncated = render_incident(config, key)
         connection = await ctx.connection(config.connection)
         params = {"sysparm_fields": FIELDS, "sysparm_exclude_reference_link": "true"}
         answer = await connection.http.request("POST", TABLE, params=params, headers=JSON, json=body)
         _answered(answer, 201)
-        sys_id, number = _ids(_result(answer))
+        try:
+            sys_id, number = _ids(_result(answer))
+        except RetryableError:  # a 201 proves the incident exists: a retry could make another (the review's M1)
+            raise FatalError("servicenow.created_unreadable", "ServiceNow created the incident, but its answer doesn't "
+                             "name it.") from None  # fmt: skip
         return CreateOutput(sys_id=sys_id, number=number, correlation_id=key, truncated=truncated)
 
     async def reconcile(self, ctx: StepContext, config: CreateConfig) -> CreateOutput | None:
-        """The step's incident, if an earlier attempt opened it: a record whose `correlation_id` is the step's (the
-        Table API ignores a query part it can't read, so every record is checked); none, and the create didn't
-        land."""
-        key = config.correlation_id or ctx.idempotency_key()
+        """The step's incident, if an earlier attempt opened it: a record whose `correlation_id` is the step's. An
+        answer of only other records means the search didn't apply (the Table API ignores a query part it can't read),
+        and the step's may be past them: the outcome is unknown (the review's M2). No record: the create didn't land."""
+        key = ctx.idempotency_key()
         connection = await ctx.connection(config.connection)
         params = {"sysparm_query": f"correlation_id={key}^ORDERBYsys_created_on", "sysparm_fields": FIELDS,
                   "sysparm_limit": "10"}  # fmt: skip
@@ -317,6 +321,9 @@ class CreateIncident(Node):
                 sys_id, number = _ids(record)
                 _, truncated = render_incident(config, key)
                 return CreateOutput(sys_id=sys_id, number=number, correlation_id=key, truncated=truncated)
+        if records:
+            raise OutcomeUnknownError("servicenow.unconfirmed", "ServiceNow's search answered other incidents: whether "
+                                      "the create landed is unknown.")  # fmt: skip
         return None
 
 
@@ -380,6 +387,7 @@ class UpdateConfig(RecordConfig):
         return self
 
 
+TEXTS = ("short_description", "description")
 CHANGES = ("short_description", "description", "urgency", "impact", "state", "assignment_group", "category",
            "subcategory")  # fmt: skip
 
@@ -388,6 +396,11 @@ class ChangeOutput(BaseModel):
     sys_id: str
     number: str
     truncated: list[str]
+
+
+def _raw(value: Any) -> Any:
+    """A field's raw value as an answer gives it: a reference's is its `value` (PATCH can't leave the link out)."""
+    return value.get("value") if isinstance(value, dict) else value
 
 
 def render_update(config: UpdateConfig) -> tuple[dict[str, Any], list[str]]:
@@ -416,7 +429,10 @@ class UpdateIncident(Node):
     type = "servicenow.update_incident"
     version = 1
     title = "Update a ServiceNow incident"
-    description = "Sets the fields given on an incident, named by its sys_id. A repeat sets the same values."
+    description = (
+        "Sets the fields given on an incident, named by its sys_id, then checks ServiceNow kept each one but the "
+        "texts. A repeat sets the same values."
+    )
     Config = UpdateConfig
     Output = ChangeOutput
     credentials = ("servicenow",)
@@ -429,7 +445,11 @@ class UpdateIncident(Node):
 
     async def run(self, ctx: StepContext, config: UpdateConfig) -> ChangeOutput:
         body, truncated = render_update(config)
-        record = await _patch(ctx, config, body, "sys_id,number")
+        checked = [name for name in body if name not in TEXTS]  # a text comes back as stored, which may differ
+        record = await _patch(ctx, config, body, ",".join(["sys_id", "number", *checked]))
+        if any(_raw(record.get(name)) != body[name] for name in checked):  # the review's L2
+            raise FatalError("servicenow.not_applied", "ServiceNow didn't keep every field set: an ACL or a business "
+                             "rule.")  # fmt: skip
         return ChangeOutput(sys_id=config.sys_id, number=record["number"], truncated=truncated)
 
 
@@ -515,7 +535,7 @@ class AddWorkNote(Node):
         return ChangeOutput(sys_id=config.sys_id, number=SIMULATED_NUMBER, truncated=["text"] if was_cut else [])
 
     async def run(self, ctx: StepContext, config: NoteConfig) -> ChangeOutput:
-        text, was_cut = cut16(config.text, LONG_MAX)
+        text, was_cut = cut16(CODE_TAG.sub("\uff3b", config.text), LONG_MAX)  # the review's L3
         record = await _patch(ctx, config, {config.visibility: text}, "sys_id,number")
         return ChangeOutput(sys_id=config.sys_id, number=record["number"], truncated=["text"] if was_cut else [])
 

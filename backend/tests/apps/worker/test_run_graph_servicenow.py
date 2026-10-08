@@ -8,7 +8,7 @@ layer only):
   `authorization` header;
 - the create's first attempt stores the incident, then the connection drops before any answer: the engine's retry
   first asks for the step's `correlation_id` (`reconcile()`), finds the incident and creates none (its first wait cut
-  from 5 s to 1 s here: the unit tests pin the schedule);
+  from 60 s to 1 s here: the unit tests pin the schedule);
 - the note and the resolve name that incident through a ref; the resolve's state is checked;
 - no step's row holds the key, and each request charged the key's quota scope, keyed by a MAC;
 - simulated, nothing is sent."""
@@ -99,7 +99,7 @@ class Instance:
 
 @pytest.fixture(autouse=True)
 def quick_retry(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The create's retry waits 1 s, not 5 s, in the manifest this test syncs (a local server doesn't skip time)."""
+    """The create's retry waits 1 s, not 60 s, in the manifest this test syncs (a local server doesn't skip time)."""
     monkeypatch.setattr(CreateIncident, "retry", replace(CreateIncident.retry, initial_interval=timedelta(seconds=1)))
 
 

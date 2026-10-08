@@ -61,13 +61,26 @@ def test_a_record_is_named_by_its_sys_id(node: Any, sys_id: str) -> None:
 async def test_an_update_patches_only_what_it_sets() -> None:
     value = config(UpdateIncident, short_description="db-1 disk full\nagain", urgency="2", state="2",
                    assignment_group="b" * 32)  # fmt: skip
-    out, http = await run(UpdateIncident, value, lambda sent: patched())
+    group = {"link": "https://acme.service-now.com/api/now/table/sys_user_group/" + "b" * 32, "value": "b" * 32}
+    out, http = await run(UpdateIncident, value, lambda sent: patched(urgency="2", state="2", assignment_group=group))
     [sent] = http.sent
-    assert (sent.method, sent.url, sent.params, sent.headers) == ("PATCH", RECORD, {"sysparm_fields": "sys_id,number"},
+    fields = "sys_id,number,urgency,state,assignment_group"  # what it set, but texts: they come back as stored
+    assert (sent.method, sent.url, sent.params, sent.headers) == ("PATCH", RECORD, {"sysparm_fields": fields},
                                                                   {"Accept": "application/json"})  # fmt: skip
     assert sent.json == {"short_description": "db-1 disk full again", "urgency": "2", "state": "2",
                          "assignment_group": "b" * 32}  # fmt: skip
     assert out == {"sys_id": SYS_ID, "number": "INC0010002", "truncated": []}
+
+
+@pytest.mark.parametrize(
+    "kept", [{"urgency": "3", "state": "2"}, {"urgency": "2", "state": "1"}, {"urgency": "2"}, {"state": None,
+                                                                                             "urgency": "2"}],
+)  # fmt: skip
+async def test_an_update_the_instance_didnt_keep_fails(kept: dict[str, Any]) -> None:
+    """An ACL or a business rule can drop a field and still answer 200 (the review's L2)."""
+    with pytest.raises(FatalError) as raised:
+        await run(UpdateIncident, config(UpdateIncident, urgency="2", state="2"), lambda sent: patched(**kept))
+    assert raised.value.code == "servicenow.not_applied"
 
 
 def test_an_update_sets_something() -> None:
@@ -77,8 +90,8 @@ def test_an_update_sets_something() -> None:
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    [("state", "Resolved"), ("state", "-1"), ("state", "12345"), ("impact", "4"), ("assignment_group", "x"),
-     ("category", "a\nb")],
+    [("state", "Resolved"), ("state", "-1"), ("state", "12345"), ("state", "02"), ("impact", "4"),
+     ("assignment_group", "x"), ("category", "a\nb")],
 )  # fmt: skip
 def test_an_update_of_another_form_is_refused(field: str, value: str) -> None:
     with pytest.raises(ValidationError):
@@ -123,7 +136,8 @@ def test_a_resolve_names_its_code_and_notes(missing: str) -> None:
 
 
 @pytest.mark.parametrize(("field", "value"), [("close_code", ""), ("close_code", "a\nb"), ("close_code", "c" * 101),
-                                              ("close_notes", ""), ("resolved_state", "Resolved")])  # fmt: skip
+                                              ("close_notes", ""), ("resolved_state", "Resolved"),
+                                              ("resolved_state", "06")])  # fmt: skip
 def test_a_resolve_of_another_form_is_refused(field: str, value: str) -> None:
     with pytest.raises(ValidationError):
         resolve(**{field: value})
@@ -142,6 +156,17 @@ async def test_a_note_appends_a_work_note_or_a_comment(visibility: str, field: s
     assert (sent.method, sent.url, sent.params) == ("PATCH", RECORD, {"sysparm_fields": "sys_id,number"})
     assert sent.json == {field: "Rebooted db-1.\nWatching."}
     assert out == {"sys_id": SYS_ID, "number": "INC0010002", "truncated": []}
+
+
+@pytest.mark.parametrize("visibility", ["work_notes", "comments"])
+async def test_a_note_cant_embed_html(visibility: str) -> None:
+    """A journal renders `[code]...[/code]` as HTML when the instance allows it (`glide.ui.security.allow_codetag`):
+    run data never opens one (the review's L3)."""
+    value = config(
+        AddWorkNote, text="[code]<a href=x>y</a>[/code] [CODE] [ code ] [/ Code] [codex]", visibility=visibility
+    )
+    _, http = await run(AddWorkNote, value, lambda sent: patched())
+    assert http.sent[0].json == {visibility: "［code]<a href=x>y</a>［/code] ［CODE] ［ code ] ［/ Code] [codex]"}
 
 
 def test_a_note_is_internal_unless_asked() -> None:
