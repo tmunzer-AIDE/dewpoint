@@ -13,7 +13,7 @@ import uuid
 from datetime import timedelta
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 from dewpoint.sdk import (
     CallContext,
@@ -43,6 +43,7 @@ FIELDS = "sys_id,number,correlation_id"  # what an answer carries back
 KEY_TEXT = re.compile(r"[\x21-\x7e]{16,1024}")  # a key's format isn't documented: printable ASCII, no space
 SYS_ID = re.compile(r"[0-9a-f]{32}")  # the form every documented example shows; no page states it
 NUMBER = re.compile(r"[\x21-\x7e]{1,40}")
+STATE = re.compile(r"[0-9]{1,4}")  # a state's raw value: the instance's choice list numbers them
 CORRELATION = re.compile(r"[A-Za-z0-9._:-]{1,100}")  # no query syntax: escaping a value isn't documented
 # What a one-line value turns into a space: CR LF, a line break of any kind, any other control character.
 CONTROLS = re.compile(r"\r\n|[\x00-\x1f\x7f-\x9f\u2028\u2029]")
@@ -309,4 +310,206 @@ class CreateIncident(Node):
         return None
 
 
-PLUGIN = Plugin(name="servicenow", version="1.0.0", nodes=(CreateIncident,), connection_types=(SERVICENOW,))
+class RecordConfig(BaseModel):
+    """An incident named by its sys_id, as the create step's output gives it."""
+
+    model_config = ConfigDict(extra="forbid")
+    connection: uuid.UUID = connection_field("servicenow")
+    sys_id: str = Field(title="Incident sys_id", description="The incident's, as the create step returned it.")
+
+    @field_validator("sys_id")
+    @classmethod
+    def _record(cls, value: str) -> str:
+        return _sys_id(value) or value
+
+
+async def _patch(ctx: StepContext, config: RecordConfig, body: dict[str, Any], fields: str) -> dict[str, Any]:
+    """PATCHes the incident and returns the answer's record, which must be that incident's."""
+    connection = await ctx.connection(config.connection)
+    answer = await connection.http.request("PATCH", f"{TABLE}/{config.sys_id}", params={"sysparm_fields": fields},
+                                           headers=JSON, json=body)  # fmt: skip
+    _answered(answer, 200)
+    record = _result(answer)
+    sys_id, _ = _ids(record)
+    if sys_id != config.sys_id:
+        raise _unreadable()
+    return dict(record)
+
+
+class UpdateConfig(RecordConfig):
+    short_description: str | None = Field(None, min_length=1, max_length=1000, title="Short description")
+    description: str | None = Field(None, min_length=1, max_length=40_000, title="Description")
+    urgency: Level | None = Field(None, title="Urgency", description="1 High, 2 Medium, 3 Low.")
+    impact: Level | None = Field(None, title="Impact", description="1 High, 2 Medium, 3 Low.")
+    state: str | None = Field(None, title="State", description="The instance's raw value, e.g. 2 for In Progress.")
+    assignment_group: str | None = Field(None, title="Assignment group", description="A group's sys_id.")
+    category: str | None = Field(None, min_length=1, max_length=100, title="Category")
+    subcategory: str | None = Field(None, min_length=1, max_length=100, title="Subcategory")
+
+    @field_validator("assignment_group")
+    @classmethod
+    def _reference(cls, value: str | None) -> str | None:
+        return _sys_id(value)
+
+    @field_validator("category", "subcategory")
+    @classmethod
+    def _one_line(cls, value: str | None) -> str | None:
+        return _line(value)
+
+    @field_validator("state")
+    @classmethod
+    def _state(cls, value: str | None) -> str | None:
+        if value is not None and not STATE.fullmatch(value):
+            raise ValueError("a state's raw value: 1 to 4 digits")
+        return value
+
+    @model_validator(mode="after")
+    def _something(self) -> "UpdateConfig":
+        if all(getattr(self, name) is None for name in CHANGES):
+            raise ValueError("set at least one field")
+        return self
+
+
+CHANGES = ("short_description", "description", "urgency", "impact", "state", "assignment_group", "category",
+           "subcategory")  # fmt: skip
+
+
+class ChangeOutput(BaseModel):
+    sys_id: str
+    number: str
+    truncated: list[str]
+
+
+def render_update(config: UpdateConfig) -> tuple[dict[str, Any], list[str]]:
+    """The fields it sets, each only when given; long texts cut and reported."""
+    body: dict[str, Any] = {}
+    truncated: list[str] = []
+    for name in CHANGES:
+        value = getattr(config, name)
+        if value is None:
+            continue
+        if name == "short_description":
+            value, was_cut = cut16(CONTROLS.sub(" ", value), SHORT_MAX)
+        elif name == "description":
+            value, was_cut = cut16(value, LONG_MAX)
+        else:
+            was_cut = False
+        if was_cut:
+            truncated.append(name)
+        body[name] = value
+    return body, truncated
+
+
+class UpdateIncident(Node):
+    """Changes an incident's fields."""
+
+    type = "servicenow.update_incident"
+    version = 1
+    title = "Update a ServiceNow incident"
+    description = "Sets the fields given on an incident, named by its sys_id. A repeat sets the same values."
+    Config = UpdateConfig
+    Output = ChangeOutput
+    credentials = ("servicenow",)
+    side_effect = SideEffect.IDEMPOTENT
+    retry = RETRY
+
+    async def simulate(self, ctx: StepContext, config: UpdateConfig) -> ChangeOutput:
+        _, truncated = render_update(config)
+        return ChangeOutput(sys_id=config.sys_id, number=SIMULATED_NUMBER, truncated=truncated)
+
+    async def run(self, ctx: StepContext, config: UpdateConfig) -> ChangeOutput:
+        body, truncated = render_update(config)
+        record = await _patch(ctx, config, body, "sys_id,number")
+        return ChangeOutput(sys_id=config.sys_id, number=record["number"], truncated=truncated)
+
+
+class ResolveConfig(RecordConfig):
+    close_code: str = Field(min_length=1, max_length=100, title="Resolution code",
+                            description="One of the instance's resolution codes, e.g. Solution provided.")  # fmt: skip
+    close_notes: str = Field(min_length=1, max_length=40_000, title="Resolution notes")
+    resolved_state: str = Field("6", title="Resolved state", description="Resolved's raw value: 6 unless changed.")
+
+    @field_validator("close_code")
+    @classmethod
+    def _one_line(cls, value: str) -> str:
+        return _line(value) or value
+
+    @field_validator("resolved_state")
+    @classmethod
+    def _state(cls, value: str) -> str:
+        if not STATE.fullmatch(value):
+            raise ValueError("a state's raw value: 1 to 4 digits")
+        return value
+
+
+class ResolveOutput(ChangeOutput):
+    state: str
+
+
+class ResolveIncident(Node):
+    """Resolves an incident."""
+
+    type = "servicenow.resolve_incident"
+    version = 1
+    title = "Resolve a ServiceNow incident"
+    description = (
+        "Sets an incident's state to Resolved with a resolution code and notes, then checks ServiceNow kept it. A "
+        "repeat sets the same values."
+    )
+    Config = ResolveConfig
+    Output = ResolveOutput
+    credentials = ("servicenow",)
+    side_effect = SideEffect.IDEMPOTENT
+    retry = RETRY
+
+    async def simulate(self, ctx: StepContext, config: ResolveConfig) -> ResolveOutput:
+        _, truncated = cut16(config.close_notes, LONG_MAX)
+        return ResolveOutput(sys_id=config.sys_id, number=SIMULATED_NUMBER, state=config.resolved_state,
+                             truncated=["close_notes"] if truncated else [])  # fmt: skip
+
+    async def run(self, ctx: StepContext, config: ResolveConfig) -> ResolveOutput:
+        notes, notes_cut = cut16(config.close_notes, LONG_MAX)
+        body = {"state": config.resolved_state, "close_code": config.close_code, "close_notes": notes}
+        record = await _patch(ctx, config, body, "sys_id,number,state")
+        if record.get("state") != config.resolved_state:  # a business rule, or the instance numbers Resolved otherwise
+            raise FatalError("servicenow.not_resolved", "ServiceNow kept the incident in another state.")
+        return ResolveOutput(sys_id=config.sys_id, number=record["number"], state=config.resolved_state,
+                             truncated=["close_notes"] if notes_cut else [])  # fmt: skip
+
+
+class NoteConfig(RecordConfig):
+    text: str = Field(min_length=1, max_length=40_000, title="Note")
+    visibility: Literal["work_notes", "comments"] = Field(
+        "work_notes", title="Visibility", description="work_notes: internal; comments: the caller sees it."
+    )
+
+
+class AddWorkNote(Node):
+    """Adds a work note or a comment to an incident."""
+
+    type = "servicenow.add_work_note"
+    version = 1
+    title = "Add a note to a ServiceNow incident"
+    description = (
+        "Appends a work note (internal) or a comment (the caller sees it) to an incident. Each send appends one: a "
+        "send that may have arrived is never repeated."
+    )
+    Config = NoteConfig
+    Output = ChangeOutput
+    credentials = ("servicenow",)
+    side_effect = SideEffect.AMBIGUOUS
+    retry = RETRY
+
+    async def simulate(self, ctx: StepContext, config: NoteConfig) -> ChangeOutput:
+        _, was_cut = cut16(config.text, LONG_MAX)
+        return ChangeOutput(sys_id=config.sys_id, number=SIMULATED_NUMBER, truncated=["text"] if was_cut else [])
+
+    async def run(self, ctx: StepContext, config: NoteConfig) -> ChangeOutput:
+        text, was_cut = cut16(config.text, LONG_MAX)
+        record = await _patch(ctx, config, {config.visibility: text}, "sys_id,number")
+        return ChangeOutput(sys_id=config.sys_id, number=record["number"], truncated=["text"] if was_cut else [])
+
+
+PLUGIN = Plugin(name="servicenow", version="1.0.0",
+                nodes=(CreateIncident, UpdateIncident, ResolveIncident, AddWorkNote),
+                connection_types=(SERVICENOW,))  # fmt: skip

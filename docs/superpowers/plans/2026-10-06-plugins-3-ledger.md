@@ -1810,3 +1810,13 @@ Rulings:
   runs has a retried create adopt an earlier run's incident.
 - Ruling (task 2): a simulated create returns sys_id `0` x 32 and number `INC0000000`, labelled a fixture by D13 - cost
   if wrong: none (later simulated steps take it and send nothing).
+- Ruling (tasks 3 and 4): the change nodes PATCH `/incident/{sys_id}` (a sys_id as task 2 rules, so no path can be
+  named) and take only an answer for that sys_id, else `servicenow.unexpected`, retried. `update_incident` sets only
+  the fields given, at least one: `short_description` (one line, cut to 160), `description` (cut to 4,000), `urgency`,
+  `impact`, `state` (a raw value, 1 to 4 digits), `assignment_group` (a sys_id), `category`, `subcategory`; a value
+  cut is reported - cost if wrong: a field a team needs waits for a version 2.
+- Ruling (tasks 3 and 4): `close_code` is one line of at most 100 characters (the instance's code list isn't
+  documented); `close_notes` and a note are cut to 4,000 and reported; a note is a work note unless `comments` is
+  asked for - cost if wrong: none.
+- Ruling (task 5): a simulated change returns its sys_id, number `INC0000000` (a fixture), resolve the state it
+  would set, and what it would cut - cost if wrong: none.
