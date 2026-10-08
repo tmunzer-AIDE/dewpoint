@@ -82,23 +82,32 @@ class ProbeGrant:
 async def test_a_crossing_that_grants_many_claims(
     dev: WorkflowEnvironment, owner_sessionmaker, worker_sessionmaker, claims: int
 ) -> None:  # fmt: skip
-    """The plan's M2 measurement: a run grants `claims` claims it owns to a child in one crossing (a sub-flow's input,
-    a batch's items). #48 batched the grant's inserts; each claim is still fetched (its closure) and checked one at a
-    time, in the real activity, against its one-minute timeout. Printed: the crossing end to end, and the activity."""
+    """The plan's M2 measurement: a run passes `claims` handles it holds to its child in one crossing (a sub-flow's
+    input, a batch's items). #48 batched the grant's inserts; each claim is still fetched (its closure) and checked one
+    at a time, in the real activity, against its one-minute timeout. As a real crossing's are (the review of the M2
+    checkpoint, M3): output claims (two tables looked in), a tenth of them nesting a claim the value doesn't list (the
+    closure fetches it), all held by grant, not owned (the grant looked up each time). Printed: the crossing end to end,
+    and the activity alone. Measured on `e5769c5`: 1,100 claims 9.1 s, 5,500 39.8 s, 11,000 timed out at 60 s (about
+    7 to 8 ms a claim): a crossing of 10,000 such claims fails. Flat input claims owned by the granter took 1.9 ms."""
     ctx = await tenant(owner_sessionmaker)
-    t, run, child = str(ctx["t"]), uuid.uuid4(), uuid.uuid4()
+    t, owner, run, child = str(ctx["t"]), uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     store = DbRunStore(worker_sessionmaker, KEYS)
-    ids = [uuid.uuid4() for _ in range(claims)]
-    for at in range(0, claims, 1_000):
-        await store.write_inputs(t, [(NewClaim(c, {"v": n}, (), run, run), f"/xs/{n}")
-                                     for n, c in enumerate(ids[at : at + 1_000], at)])  # fmt: skip
-    value = {"xs": [ClaimRef(str(c)).to_json() for c in ids]}
+    nested = [uuid.uuid4() for _ in range(claims // 10)]
+    listed = [uuid.uuid4() for _ in range(claims)]
+    made = [NewClaim(c, {"v": n}, (), owner, owner) for n, c in enumerate(nested)]
+    made += [NewClaim(c, {"v": n, "inner": ClaimRef(str(nested[n // 10])).to_json()} if n % 10 == 0 else {"v": n}, (),
+                      owner, owner) for n, c in enumerate(listed)]  # fmt: skip
+    for at in range(0, len(made), 1_000):
+        await store.write(t, made[at : at + 1_000], kind="output", step_id=None, iteration_key=None)
+    every = [str(c.id) for c in made]
+    await store.grant(t, granted_by=str(owner), to=str(run), claim_ids=every, root_run_id=str(owner))  # held by grant
+    value = {"xs": [ClaimRef(str(c)).to_json() for c in listed]}
     queue = f"probe-grant-{uuid.uuid4()}"
     activities = engine_activities(store, [TESTKIT])
     async with Worker(dev.client, task_queue=queue, workflows=[ProbeGrant], activities=activities,
                       workflow_runner=UnsandboxedWorkflowRunner()):  # fmt: skip
         t0 = time.monotonic()
-        handle = await dev.client.start_workflow(ProbeGrant.run, GrantInput(str(child), value, str(run)),
+        handle = await dev.client.start_workflow(ProbeGrant.run, GrantInput(str(child), value, str(owner)),
                                                  id=run_workflow_id(t, str(run)), task_queue=queue)  # fmt: skip
         try:
             await handle.result()
@@ -114,5 +123,5 @@ async def test_a_crossing_that_grants_many_claims(
                               EventType.EVENT_TYPE_ACTIVITY_TASK_TIMED_OUT):  # fmt: skip
             completed = e.event_time.ToDatetime()
     activity_s = (completed - started).total_seconds() if started and completed else None
-    print(f"grant {claims}: {outcome}; crossing {took:.1f} s, activity {activity_s} s")
+    print(f"grant {claims} (+{len(nested)} nested): {outcome}; crossing {took:.1f} s, activity {activity_s} s")
     assert outcome == "granted"
