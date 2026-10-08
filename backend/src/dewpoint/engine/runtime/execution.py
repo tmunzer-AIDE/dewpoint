@@ -934,13 +934,14 @@ class Execution:
         scope: ScopeKey = (),
     ) -> resolve.CelTask:
         """Bind each view within the workflow task's budget (spec §5.6). Binding converts every value it binds, so
-        it's charged as they are (`Measure.nodes`), whether the expression then runs here or in `cel.evaluate`.
+        it's charged as they are (`Measure.nodes`), and the bytes measuring them serialized (`Measure.serialized`,
+        #18), whether the expression then runs here or in `cel.evaluate`.
         `inline` False: it goes to `cel.evaluate`, whatever its class."""
         bound: list[resolve.Bound] = []
         for v in views:
             await self._yield_point(None)
             b = resolve.bind_view(record, v)
-            self._yield.charge(nodes=b.measured.nodes)
+            self._yield.charge(nodes=b.measured.nodes, serialized=b.measured.serialized)
             bound.append(await self._bounded_bindings(b, owner, scope))
         local_profile = LOCAL_CEL_PROFILE if inline else None
         return resolve.cel_task(record, bound, local_profile=local_profile, version_profile=self.program.cel_profile)

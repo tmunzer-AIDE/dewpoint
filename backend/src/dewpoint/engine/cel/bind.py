@@ -9,7 +9,7 @@ in `cel.evaluate`, which resolves it and checks the types then (§4.2)."""
 
 import math
 from collections.abc import Collection, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from dewpoint.engine.canonical import canonical_json
@@ -174,6 +174,8 @@ class Measure:
     longest_string: int
     nodes: int  # every value bound, containers included: what binding them costs grows with this (spec §5.6)
     handles: bool = False  # a handle, or the marker, anywhere in them: they're never evaluated here (2b spec §4.2)
+    # what measuring them serialized: their JSON within the caps, nothing past them (#18), charged by its bytes
+    serialized: int = field(default=0, compare=False)
 
     @property
     def within_caps(self) -> bool:
@@ -220,7 +222,7 @@ def measure(bindings: Mapping[str, Any]) -> Measure:
     if seen > caps.TOTAL_JSON or strings > caps.STRING_BYTES or not _within(lists, maps):
         return Measure(seen, max(least, default=0), lists, maps, strings, nodes, handles)
     sizes = [len(canonical_json(v)) for v in bindings.values()]  # within the caps: a few times TOTAL_JSON at most
-    return Measure(sum(sizes), max(sizes, default=0), lists, maps, strings, nodes, handles)
+    return Measure(sum(sizes), max(sizes, default=0), lists, maps, strings, nodes, handles, serialized=sum(sizes))
 
 
 def _within(lists: int, maps: int) -> bool:

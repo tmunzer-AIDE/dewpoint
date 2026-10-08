@@ -17,6 +17,10 @@ YIELD_WORK = (
 )
 YIELD_EVALUATIONS = 130
 YIELD_NODES = 65_000  # the values the evaluations bind: converting them costs CPU their stored bounds don't count
+# The JSON measuring the views' bindings serialized (#18): a value within the caps, measured exactly for each view
+# that binds it, costs up to about 64 KB a view, which its few nodes don't count. Gate 7b measured 1.8 s a workflow
+# task at 10,000 views of one such value (macOS, 2.5 ns a byte); this is about 80 ms of it there
+YIELD_BOUND_BYTES = 32 * 1024 * 1024
 STARTUP_SHARE = 10  # an execution's first workflow task gets this fraction of each threshold: it also starts it
 YIELD_STRUCTURE = (
     200_000  # a workflow task's structural units (engine 2b spec §5.3): a snapshot's or a restore's parts,
@@ -46,6 +50,7 @@ class YieldBudget:
     work: int = 0
     evaluations: int = 0
     nodes: int = 0
+    serialized: int = 0  # the bytes measuring the views' bindings serialized (#18)
     sent: int = 0
     structure: int = 0  # structural units: a snapshot's or a restore's parts, steps started and taken (§5.3)
     share: int = 1  # each threshold is divided by it: STARTUP_SHARE in an execution's first workflow task
@@ -66,7 +71,11 @@ class YieldBudget:
             return self.structure > 0 and self.structure + structure > limit
         if self.evaluations == 0 and self.nodes == 0:
             return False
-        if self.evaluations >= YIELD_EVALUATIONS // self.share or self.nodes >= YIELD_NODES // self.share:
+        if (
+            self.evaluations >= YIELD_EVALUATIONS // self.share
+            or self.nodes >= YIELD_NODES // self.share
+            or self.serialized >= YIELD_BOUND_BYTES // self.share
+        ):
             return True
         return record is not None and (
             self.iterations + (record.iterations or 0) > YIELD_ITERATIONS // self.share
@@ -75,11 +84,18 @@ class YieldBudget:
         )
 
     def charge(
-        self, record: ExpressionRecord | None = None, *, nodes: int = 0, sent: int = 0, structure: int = 0
+        self,
+        record: ExpressionRecord | None = None,
+        *,
+        nodes: int = 0,
+        serialized: int = 0,
+        sent: int = 0,
+        structure: int = 0,
     ) -> None:
-        """A view bound (`nodes`: the values it bound), `record` evaluated locally, a payload of `sent` bytes, or
-        `structure` units."""
+        """A view bound (`nodes`: the values it bound; `serialized`: the bytes measuring them serialized), `record`
+        evaluated locally, a payload of `sent` bytes, or `structure` units."""
         self.nodes += nodes
+        self.serialized += serialized
         self.sent += sent
         self.structure += structure
         if record is not None:
@@ -97,5 +113,6 @@ class YieldBudget:
     def reset(self, *, startup: bool = False) -> None:
         """A new workflow task starts a fresh budget: a tenth of it (`STARTUP_SHARE`) in an execution's first task,
         which also loads and compiles the version, or restores a snapshot."""
-        self.iterations = self.bytes = self.work = self.evaluations = self.nodes = self.sent = self.structure = 0
+        self.iterations = self.bytes = self.work = self.evaluations = self.nodes = self.serialized = 0
+        self.sent = self.structure = 0
         self.share = STARTUP_SHARE if startup else 1

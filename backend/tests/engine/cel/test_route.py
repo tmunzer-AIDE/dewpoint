@@ -49,6 +49,17 @@ def test_the_yield_budget_charges_the_values_each_view_binds() -> None:
     assert budget.must_yield()  # the values bound reached the budget: the next view waits for the next task
 
 
+def test_the_yield_budget_charges_the_bytes_each_views_measure_serialized() -> None:
+    """#18 (gate 7b, measured): a value within the caps is measured exactly, a serialization of up to about 64 KB for
+    each view that binds it, which its few nodes don't account for. The bytes measuring serialized are charged too:
+    once a task has serialized YIELD_BOUND_BYTES, the next view waits for the next task."""
+    budget = route.YieldBudget()
+    budget.charge(nodes=6, serialized=route.YIELD_BOUND_BYTES - 1)
+    assert not budget.must_yield()
+    budget.charge(nodes=6, serialized=1)
+    assert budget.must_yield()
+
+
 def test_the_yield_thresholds_are_a_third_below_the_first_ones() -> None:
     """Spec §5.6: gate 7b's first run on Linux took three loads past 1 s per workflow task with 20,000 iterations,
     8 MiB, 4,000,000 work units, 200 evaluations and 100,000 bound values."""
