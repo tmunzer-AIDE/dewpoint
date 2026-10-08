@@ -32,6 +32,7 @@ dewpoint = "dewpoint.apps.cli.main:app"
 
 [project.entry-points."dewpoint.plugins"]
 flow = "dewpoint.plugins.flow:PLUGIN"
+google_chat = "dewpoint.plugins.google_chat:PLUGIN"
 mist = "dewpoint.plugins.mist:PLUGIN"
 slack = "dewpoint.plugins.slack:PLUGIN"
 teams = "dewpoint.plugins.teams:PLUGIN"

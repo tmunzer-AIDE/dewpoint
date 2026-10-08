@@ -1049,6 +1049,9 @@ Facts checked (official documentation, read 2026-10-08; never from memory):
   - 1 request a second a space, shared by all its webhooks; 429 past a quota (no `Retry-After` documented); errors
     are `google.rpc.Status` with 4xx or 5xx; the answer holds the message's `name` and `thread.name`;
   - `<users/all>` mentions everyone in a text message; no escape is documented; `<url|text>` is a link.
+  - text syntax (`format-messages`, read again 2026-10-08): Chat's own by default - bold `*x*`, links
+    `<url|text>`, mentions `<users/{user}>`; Markdown (`[text](url)`, `<chat-user …>`) only when the request sets
+    `markupSyntax` to Markdown; bare URLs are linked; no escape is documented.
 
 Tasks (test-first, in order):
 1. SDK 0.6.0: a connection type whose base URL is a secret field (`SecretUrl`), the URL's shape the secret field's own
@@ -1132,3 +1135,15 @@ Rulings:
   unknown and needs a person.
 - Ruling (task 4, Teams): the severity is a subtle line, as in Slack, not a container style: the styles' rendering in
   Teams isn't documented on the pages read - cost if wrong: the severity isn't coloured.
+- Ruling (task 5, Google Chat): the URL is the documented form exactly - `spaces/{space}/messages?key=…&token=…`, in
+  that order, no port nor other parameter; the space letters, digits, `-` and `_`; the key and token, whose
+  characters aren't documented, the URL's unreserved ones, `%` and `=` - cost if wrong: a URL Google issues with
+  another character is refused at creation until the class widens.
+- Ruling (task 5, Google Chat): text in Chat's own syntax (no `markupSyntax`, so Markdown never applies), the title
+  and labels bold; a link's `|` is percent-encoded so a URL never ends its link early - cost if wrong: a title's own
+  `*` or `_` may format it.
+- Ruling (task 5, Google Chat): the body is kept within 30,000 bytes as sent, under the documented 32,000, fitted in
+  Teams' levels, every cut or dropped value named - cost if wrong: a message near the limit loses detail.
+- Ruling (task 5, Google Chat): only a 200 is sent (Google answers the created message); a 4xx but 429 is
+  `google_chat.refused`, naming the status only, never the answer's message (it could quote anything); any other
+  answer is unknown - cost if wrong: as Slack's.
