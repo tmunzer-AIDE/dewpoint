@@ -8,7 +8,8 @@ request a second a space, shared by all its webhooks (`limits`), and the URL nam
 
 The message is text in Chat's own syntax (`format-messages`): the title bold, then the text, each field a bold label
 and its value, links as `<url|label>`, the severity a line. Run data's `<` and `>` become their full-width forms: no
-escape is documented, and `<users/all>` would notify the whole space, `<url|text>` make a link of its choosing. A
+escape is documented, and `<users/all>` would notify the whole space, `<url|text>` make a link of its choosing (a
+bare URL is still linked, to itself: `format-messages`). A
 message is at most 32,000 bytes; the body is kept within 30,000 bytes as sent, cutting the text, then field values,
 labels and links, each cut marked and reported.
 

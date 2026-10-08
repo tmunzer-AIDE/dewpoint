@@ -2,7 +2,8 @@
 """Google Chat (plugins-3 3c-1, D18): a connection type whose secret is a space's incoming-webhook URL (Google's
 documented form only), a quota scope a space (the URL's `spaces/{space}`, 1 a second), and
 `google_chat.send_message`, which posts the message as text in Chat's own syntax: run data's `<` and `>` become their
-full-width forms, so it never makes a link nor mentions anyone (`<users/all>`); within 30,000 bytes as sent (Google
+full-width forms, so it never mentions anyone (`<users/all>`) nor makes a link labelled other than its URL (a bare
+URL is still linked, to itself); within 30,000 bytes as sent (Google
 documents 32,000), cutting and marking what doesn't fit; a 200 is sent, a 4xx Google's refusal, anything else
 unknown."""
 
@@ -89,7 +90,7 @@ def test_the_body_is_chat_syntax_text() -> None:
 
 
 @pytest.mark.parametrize("raw", ["<users/all>", "<https://evil.example.com|Reset your password>", "a <b> c"])
-def test_run_data_never_links_nor_mentions(raw: str) -> None:
+def test_run_data_never_mentions_nor_makes_a_labelled_link(raw: str) -> None:
     body, _ = render(message(title=raw, text=raw, fields=[{"label": raw, "value": raw}],
                              links=[{"label": raw, "url": "https://wiki.example.com/x"}]))  # fmt: skip
     neutral = raw.replace("<", "＜").replace(">", "＞")

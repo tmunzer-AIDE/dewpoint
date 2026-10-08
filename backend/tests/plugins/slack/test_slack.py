@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Slack (plugins-3 3c-1, D18): a connection type whose secret is an incoming webhook's URL (its documented form only),
 one quota scope a tenant, and `slack.send_message`, which renders the message model as Block Kit within Slack's
-limits, escaping every value so run data never mentions `@here` or a channel nor makes a link, cutting and marking a
-value past a limit; 200 is sent, a 4xx Slack's refusal, anything else after sending unknown."""
+limits, escaping every value so run data never mentions `@here` or a channel nor makes a link labelled other than its
+URL (a bare URL may still link to itself), cutting and marking a value past a limit; a 200 `ok` is sent, a 4xx
+Slack's refusal, anything else after sending unknown."""
 
 import json
 from typing import Any
@@ -62,6 +63,7 @@ def test_every_value_is_escaped_in_verbatim_mrkdwn() -> None:
         assert raw not in flat
     assert "&lt;!here&gt; &amp; &lt;#C123&gt;" in flat and "a &gt; b" in flat
     assert "&lt;!channel&gt;" in payload["text"]  # the notification's fallback text too
+    assert "&lt;https://x.example.com|here&gt;" in payload["text"]  # no labelled link there either
     assert cut == []
 
 

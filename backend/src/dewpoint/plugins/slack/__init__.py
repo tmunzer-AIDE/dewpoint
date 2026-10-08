@@ -10,7 +10,10 @@ The message renders as Block Kit within Slack's documented limits (`reference/bl
 the text a section of at most 3,000 characters, fields in sections of at most 10, each at most 2,000, links as
 buttons whose text is at most 75, the severity a context line. Every value is escaped (`&`, `<`, `>`) and sent in
 `mrkdwn` objects with `verbatim: true` (`messaging/formatting-message-text`), so run data never mentions `@here` or a
-channel nor makes a link; a value past a limit is cut, before an escape rather than through one, and marked.
+channel nor makes a link labelled other than its own URL (`<url|label>`); a bare URL may still become a link to
+itself: Slack converts "Regular URLs" in the top-level `text`, the escaped fallback, unless `parse` is `none`, which
+isn't documented for incoming webhooks. A value past a limit is cut, before an escape rather than through one, and
+marked.
 
 A send is ambiguous (D20): a 200 with the body `ok` is sent; a 4xx is Slack's refusal (400 `invalid_payload`, 403
 `action_prohibited`, 404 `channel_not_found`, 410 `channel_is_archived`); a 429, a 5xx, another 200 or anything else
