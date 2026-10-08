@@ -21,6 +21,9 @@ from tests.plugins.mist.fakes import FakeConnection, FakeHttp, FakeStep, Reply
 KEY = "a" * 64
 SYS_ID = "9d385017c611228701d22104cc95c371"
 CONNECTION = "00000000-0000-0000-0000-000000000001"
+# A body nested deeper than the decoder's recursion limit: `json.loads` raises RecursionError, not ValueError (the
+# owner's review of 1eafe63).
+DEEP = b"[" * 20_000 + b"]" * 20_000
 
 
 @dataclass
@@ -180,6 +183,12 @@ async def test_a_created_answer_it_cant_read_fails_never_creating_again(body: An
     assert raised.value.code == "servicenow.created_unreadable"
 
 
+async def test_a_created_answer_too_deep_to_decode_fails_never_creating_again() -> None:
+    with pytest.raises(FatalError) as raised:
+        await run(create(), lambda sent: Reply(201, raw=DEEP))
+    assert raised.value.code == "servicenow.created_unreadable"
+
+
 async def reconcile(config: Any, script: Any) -> tuple[Any, FakeHttp]:
     conn, http = connection(script)
     out = await CreateIncident().reconcile(Step(conn, attempt=2), config)
@@ -239,6 +248,12 @@ async def test_a_matching_record_it_cant_read_is_retried(record: dict[str, Any])
 async def test_a_list_it_cant_read_is_retried(body: Any) -> None:
     with pytest.raises(RetryableError):
         await reconcile(create(), lambda sent: Reply(200, body))
+
+
+async def test_a_search_too_deep_to_decode_is_retried() -> None:
+    with pytest.raises(RetryableError) as raised:
+        await reconcile(create(), lambda sent: Reply(200, raw=DEEP))
+    assert raised.value.code == "servicenow.unexpected"
 
 
 @pytest.mark.parametrize(("status", "error"), [(401, FatalError), (403, FatalError), (500, RetryableError)])

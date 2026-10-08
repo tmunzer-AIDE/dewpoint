@@ -16,6 +16,9 @@ from tests.plugins.mist.fakes import FakeConnection, FakeHttp, FakeStep, Reply
 SYS_ID = "9d385017c611228701d22104cc95c371"
 CONNECTION = "00000000-0000-0000-0000-000000000001"
 RECORD = f"{TABLE}/{SYS_ID}"
+# A body nested deeper than the decoder's recursion limit: `json.loads` raises RecursionError, not ValueError (the
+# owner's review of 1eafe63).
+DEEP = b"[" * 20_000 + b"]" * 20_000
 
 
 def config(node: Any, **changes: Any) -> Any:
@@ -202,6 +205,16 @@ async def test_an_answer_for_another_record_or_none_is_unexpected(node: Any, bod
     value = config(UpdateIncident, urgency="1") if node is UpdateIncident else config(AddWorkNote, text="x")
     with pytest.raises(RetryableError) as raised:
         await run(node, value, lambda sent: Reply(200, body))
+    assert raised.value.code == "servicenow.unexpected"
+
+
+@pytest.mark.parametrize("node", [UpdateIncident, ResolveIncident, AddWorkNote])
+async def test_an_answer_too_deep_to_decode_is_unexpected(node: Any) -> None:
+    """Retried by update and resolve; the runtime makes a note's `outcome_unknown`, as any failure after its send."""
+    value = {UpdateIncident: lambda: config(UpdateIncident, urgency="1"), ResolveIncident: resolve,
+             AddWorkNote: lambda: config(AddWorkNote, text="x")}[node]()  # fmt: skip
+    with pytest.raises(RetryableError) as raised:
+        await run(node, value, lambda sent: Reply(200, raw=DEEP))
     assert raised.value.code == "servicenow.unexpected"
 
 

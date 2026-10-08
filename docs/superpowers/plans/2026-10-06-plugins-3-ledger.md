@@ -1872,3 +1872,19 @@ M3) and L7 (a ruling):
   owner's say and a developer instance with an API key).
 - Awaiting the owner: sign-off of this section's rulings (the first ones, tasks 2-5's, and the review's M2, M3, M4,
   L3, L6, L7; simulate's still departs from D13's exact request); the full suite; push and PR.
+
+A technical review of 1eafe63 (pasted by the owner, 2026-10-08): no High; one Medium, in M1's fix; no technical
+closure. Fixed test-first, its protection checked by removing it (`FIX2_SHA`):
+- M1 (continued): a 201 whose body nests deeper than the JSON decoder's limit raised `RecursionError`, not
+  `ValueError`: it escaped `_result()` and the create's handler, the worker took it for a retryable unexpected error,
+  and under a read restriction (the search empty) each retry created another incident (the review reproduced two
+  through RunGraph). Decoding now takes `ValueError` and `RecursionError` alike (`UNDECODABLE`), at both boundaries
+  (`_result()` and verify): such a 201 is `servicenow.created_unreadable`, fatal; a search, an update's or a resolve's
+  answer `servicenow.unexpected`, retried; a note's `outcome_unknown`; verify `unexpected_answer`. A unit test at each
+  boundary and a RunGraph regression (one POST, one incident, the step failed `servicenow.created_unreadable`); 4
+  mutants killed, the RunGraph test alone killing the create's.
+- Not changed: other plugins decode with `except ValueError` too (Mist's client, stream and verify), none
+  reconcilable, so there a deep body is an unexpected error retried or made `outcome_unknown` by the side-effect
+  rules, never a second effect; turning `RecursionError` into `ValueError` in the runtime's `HttpResponse.json()` would
+  cover every plugin, for the owner to decide.
+- A technical review only: no ruling sign-off or push authorization.

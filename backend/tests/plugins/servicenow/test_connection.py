@@ -99,7 +99,7 @@ async def test_verify_reads_one_incident() -> None:
     [(Reply(401), "invalid_key"), (Reply(403), "no_table_access"), (Reply(404), "unexpected_status"),
      (Reply(500), "unexpected_status"), (TransportError(), "unreachable"),
      (Reply(200, raw=b"<html>"), "unexpected_answer"), (Reply(200, {"result": {}}), "unexpected_answer"),
-     (Reply(200, ["x"]), "unexpected_answer")],
+     (Reply(200, ["x"]), "unexpected_answer"), (Reply(200, raw=b"[" * 20_000 + b"]" * 20_000), "unexpected_answer")],
 )  # fmt: skip
 async def test_verify_says_what_failed(reply: Reply | Exception, detail: str) -> None:
     result, _ = await verify(reply)

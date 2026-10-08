@@ -10,6 +10,8 @@ layer only):
   first asks for the step's `correlation_id` (`reconcile()`), finds the incident and creates none (its first wait cut
   from 60 s to 1 s here: the unit tests pin the schedule);
 - the note and the resolve name that incident through a ref; the resolve's state is checked;
+- a create answered 201 with a body too deep to decode, its incident hidden from the key's user's searches, fails
+  `servicenow.created_unreadable` without a retry: one incident (the owner's review of 1eafe63);
 - no step's row holds the key, and each request charged the key's quota scope, keyed by a MAC;
 - simulated, nothing is sent."""
 
@@ -19,6 +21,7 @@ import json
 import re
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import timedelta
 from typing import Any
@@ -62,12 +65,18 @@ def answer(writer: asyncio.StreamWriter, status: int, body: dict[str, Any]) -> N
                  + raw)  # fmt: skip
 
 
-class Instance:
-    """The Table API's incidents: the first create is stored, then its connection drops before any answer."""
+DEEP = b"[" * 20_000 + b"]" * 20_000  # json.loads raises RecursionError on it
 
-    def __init__(self) -> None:
+
+class Instance:
+    """The Table API's incidents: the first create is stored, then its connection drops before any answer. Or, `deep`:
+    each create is stored and answered 201 with a body too deep to decode, and a search sees nothing (a read
+    restriction on the key's user)."""
+
+    def __init__(self, *, deep: bool = False) -> None:
         self.incidents: dict[str, dict[str, Any]] = {}
         self.notes: list[str] = []
+        self.deep = deep
 
     async def handle(self, request: Request, writer: asyncio.StreamWriter) -> None:
         url = urlsplit(request.target)
@@ -78,10 +87,16 @@ class Instance:
             number = f"INC{len(self.incidents) + 1:07}"
             record = {**json.loads(request.body), "sys_id": uuid.uuid4().hex, "number": number, "state": "1"}
             self.incidents[record["sys_id"]] = record
-            if len(self.incidents) == 1:
+            if self.deep:
+                writer.write(b"HTTP/1.1 201 X\r\ncontent-type: application/json\r\ncontent-length: %d\r\n\r\n%s"
+                             % (len(DEEP), DEEP))  # fmt: skip
+            elif len(self.incidents) == 1:
                 writer.close()  # stored, and the answer lost
                 return
-            answer(writer, 201, {"result": record})
+            else:
+                answer(writer, 201, {"result": record})
+        elif request.method == "GET" and url.path == TABLE and self.deep:
+            answer(writer, 200, {"result": []})
         elif request.method == "GET" and url.path == TABLE:
             wanted = query["sysparm_query"].split("^", 1)[0].removeprefix("correlation_id=")
             answer(writer, 200, {"result": [r for r in self.incidents.values() if r.get("correlation_id") == wanted]})
@@ -103,9 +118,8 @@ def quick_retry(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(CreateIncident, "retry", replace(CreateIncident.retry, initial_interval=timedelta(seconds=1)))
 
 
-@pytest.fixture
-async def fake(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[Server, Instance]]:
-    instance = Instance()
+@asynccontextmanager
+async def serving(monkeypatch: pytest.MonkeyPatch, instance: Instance) -> AsyncIterator[tuple[Server, Instance]]:
     async with serve_http(instance.handle, tls_names=NAMES) as server:
         connect_tcp = httpcore.AnyIOBackend.connect_tcp
 
@@ -115,6 +129,18 @@ async def fake(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[Server, I
 
         monkeypatch.setattr(httpcore.AnyIOBackend, "connect_tcp", redirected)
         yield server, instance
+
+
+@pytest.fixture
+async def fake(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[Server, Instance]]:
+    async with serving(monkeypatch, Instance()) as served:
+        yield served
+
+
+@pytest.fixture
+async def hidden(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[Server, Instance]]:
+    async with serving(monkeypatch, Instance(deep=True)) as served:
+        yield served
 
 
 async def _published(owner: Any, api: Any, admin: Any, dispatch: Any, settings: Any) -> tuple[Any, uuid.UUID]:
@@ -199,3 +225,19 @@ async def test_a_simulated_incident_workflow_sends_nothing(
     _, ended = await _run(env, ctx, wf, dispatch_sessionmaker, worker_sessionmaker, api_settings, simulate=True)
     assert ended is not None and ended.status == "succeeded", ended
     assert server.requests == [] and instance.incidents == {}
+
+
+async def test_a_created_answer_too_deep_to_decode_creates_no_second_incident(
+    env: WorkflowEnvironment, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker,
+    worker_sessionmaker, api_settings, hidden,
+) -> None:  # fmt: skip
+    server, instance = hidden
+    ctx, wf = await _published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker,
+                               api_settings)  # fmt: skip
+    _, ended = await _run(env, ctx, wf, dispatch_sessionmaker, worker_sessionmaker, api_settings, simulate=False)
+    assert ended is not None and ended.status == "failed", ended
+    assert [r.method for r in server.requests] == ["POST"] and len(instance.incidents) == 1  # never created again
+    async with worker_sessionmaker() as s, s.begin():
+        await tenant_scope(s, ctx.tenant_id)
+        rows = (await s.execute(text("select node_key, status, error_code from run_steps"))).all()
+    assert [tuple(r) for r in rows] == [("create", "failed", "servicenow.created_unreadable")]

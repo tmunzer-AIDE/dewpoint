@@ -76,6 +76,9 @@ RETRY = RetryDefaults(max_attempts=4, initial_interval=timedelta(seconds=5), bac
 # way past the client's 30-second read (the review's M4): a search sooner could miss it, and create a second.
 RETRY_CREATE = RetryDefaults(max_attempts=4, initial_interval=timedelta(seconds=60), backoff=2.0,
                              max_interval=timedelta(minutes=4))  # fmt: skip
+# What decoding a body raises: ValueError, or RecursionError for one nested past the decoder's limit, which escaped as
+# an unexpected error and so was retried after a 201 (the owner's review of 1eafe63).
+UNDECODABLE = (ValueError, RecursionError)
 SIMULATED_ID, SIMULATED_NUMBER = "0" * 32, "INC0000000"  # a simulation's fixture: nothing was created
 REFUSALS = {
     400: ("servicenow.invalid_request", "ServiceNow refused the request as invalid."),
@@ -114,7 +117,7 @@ async def verify(ctx: CallContext, connection: Connection) -> VerifyResult:
     if answer.status_code == 200:
         try:
             body = answer.json()
-        except ValueError:
+        except UNDECODABLE:
             return VerifyResult(False, "unexpected_answer")
         listed = isinstance(body, dict) and isinstance(body.get("result"), list)
         return VerifyResult(True, "ok") if listed else VerifyResult(False, "unexpected_answer")
@@ -190,7 +193,7 @@ def _unreadable() -> RetryableError:
 def _result(answer: HttpResponse) -> Any:
     try:
         body = answer.json()
-    except ValueError:
+    except UNDECODABLE:
         raise _unreadable() from None
     return body.get("result") if isinstance(body, dict) else None
 
