@@ -46,7 +46,7 @@ HOOK = ConnectionType("demo", "Demo chat", NoConfig, HookSecret, host=SecretUrl(
 
 
 def test_the_sdk_is_0_7_0_or_later() -> None:
-    assert SDK_VERSION == "0.7.0"
+    assert SDK_VERSION == "0.8.0"
 
 
 def test_a_secret_url_type_is_data() -> None:

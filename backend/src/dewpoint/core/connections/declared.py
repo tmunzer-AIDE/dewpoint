@@ -152,12 +152,28 @@ class DeclaredType:
 
     def credentials(self, secret: Mapping[str, Any]) -> dict[str, str]:
         """The header the runtime sends (plugins-3 D4); the plugin never sees it."""
-        if self.auth is None:
+        self._known_auth()
+        if self.auth is None or self.auth.get("kind") != "header":
             return {}
         try:
             return {self.auth["header"]: fill(self.auth["template"], secret)}
         except (KeyError, ValueError):
             raise InvalidValueError(["auth"]) from None
+
+    def body_credentials(self, secret: Mapping[str, Any]) -> dict[str, str]:
+        """The JSON body field the runtime puts into every request (D4's `body_field`); the plugin never sees it."""
+        self._known_auth()
+        if self.auth is None or self.auth.get("kind") != "body_field":
+            return {}
+        value = secret.get(self.auth["secret"])
+        if not isinstance(value, str) or not value:
+            raise InvalidValueError([self.auth["secret"]])
+        return {self.auth["field"]: value}
+
+    def _known_auth(self) -> None:
+        """An auth kind the runtime doesn't know makes the type unusable, never sent without its credentials."""
+        if self.auth is not None and self.auth.get("kind") not in ("header", "body_field"):
+            raise InvalidValueError(["auth"])
 
     def scopes(self, config: Mapping[str, Any], secret: Mapping[str, Any], mac: Callable[[str], str]) -> list[Scope]:
         """Each quota scope a request charges (plugins-3 D9): its kind, the named config values, then a MAC of the
