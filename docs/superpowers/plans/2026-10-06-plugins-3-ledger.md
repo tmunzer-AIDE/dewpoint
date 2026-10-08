@@ -1891,3 +1891,6 @@ closure. Fixed test-first, its protection checked by removing it (`e5d3ff6e`):
 - A closure review of 9cf5f21 (pasted by the owner, 2026-10-08): M1 technically closed, no new findings; its RunGraph
   regression gives one POST and one incident, and removing either decoding fix brings the failure back. Technical
   closure only: no ruling sign-off or push authorization.
+
+The owner signed off this section's rulings (2026-10-08: "I'm good"), the review's M2, M3, M4, L3, L6 and L7 included,
+simulate's departure from D13's exact request too; and authorized the full suite, push and PR.
