@@ -57,6 +57,11 @@ async def _command(db: AsyncSession, query: str, **params: object) -> Any:
     return (await db.execute(text(f"SELECT {SHOWN} FROM operator_commands WHERE {query}"), params)).first()  # noqa: S608
 
 
+async def _mine(db: AsyncSession, actor_id: uuid.UUID, key: str) -> Any:
+    """The command this operator asked under `key` in the scoped tenant, or None."""
+    return await _command(db, "actor_id = :u AND idempotency_key = :k", u=actor_id, k=key)
+
+
 async def _tenant(db: AsyncSession, tenant_id: uuid.UUID) -> None:
     """A change's tenant, fenced as require() fences a member's write: its lifecycle lock, shared, in the request's
     transaction, before its status is read; refused unless it's active (an erasure's step 1, which takes the lock
@@ -82,7 +87,7 @@ async def ask(
 ) -> dict[str, object]:
     ensure_fresh_reauth(sess, settings)
     await _tenant(db, tenant_id)
-    mine = await _command(db, "actor_id = :u AND idempotency_key = :k", u=admin.id, k=body.idempotency_key)
+    mine = await _mine(db, admin.id, body.idempotency_key)
     if mine is not None:  # asked again: the same command, whatever became of it
         if (mine.kind, mine.item_id) != (body.kind, body.item_id):
             raise HTTPException(409, detail={"error": "idempotency_key_reused"})
@@ -107,7 +112,13 @@ async def ask(
         if getattr(e.orig, "sqlstate", None) == FENCED:
             raise HTTPException(409, detail={"error": "tenant_erased"}) from None
         raise
-    if made is None:  # one already pending for the item and kind (or the same key, just recorded by another request)
+    if made is None:  # the same key, recorded by a request that committed meanwhile; else one pending for the item
+        mine = await _mine(db, admin.id, body.idempotency_key)  # the insert waited for it: this statement sees it
+        if mine is not None:
+            if (mine.kind, mine.item_id) != (body.kind, body.item_id):
+                raise HTTPException(409, detail={"error": "idempotency_key_reused"})
+            response.status_code = 200
+            return _shown(mine)
         pending = await _command(db, "kind = :k AND item_id = :i AND status = 'pending'", k=body.kind, i=body.item_id)
         raise HTTPException(
             409, detail={"error": "command_pending", "command_id": str(pending.id) if pending else None}

@@ -193,3 +193,34 @@ async def test_a_tenant_being_erased_takes_no_command_and_no_release(app, owner_
         made = await admin.post(url(tenant, "commands"), json=asked("record_lost_run", item))
         freed = await admin.post(url(tenant, "held/release"), json={"kind": "cancel", "item_id": str(item)})
     assert [(r.status_code, r.json()) for r in (made, freed)] == [(409, {"error": "tenant_erasing"})] * 2
+
+
+async def test_two_requests_with_one_key_at_once_get_the_same_command(
+    app, owner_sessionmaker, api_settings, monkeypatch
+) -> None:  # fmt: skip
+    """The owner's ruling on the M3 checkpoint: a second request with the key whose first lookup ran before the first
+    request committed (simulated: its lookup misses) conflicts on insert, and still answers the same command, 200; a
+    key reused for another item is still `idempotency_key_reused`."""
+    from dewpoint.apps.api.routes import recovery
+
+    admin, _ = await admin_of(app, owner_sessionmaker, api_settings)
+    tenant, _ = await tenant_of(app, owner_sessionmaker, api_settings)
+    item, other = uuid.uuid4(), uuid.uuid4()
+    await reason(owner_sessionmaker, tenant, item)
+    await reason(owner_sessionmaker, tenant, other)
+    original, missed = recovery._mine, []
+
+    async def raced(*args: Any) -> Any:
+        if not missed:  # the request's first lookup, before the other committed
+            missed.append(True)
+            return None
+        return await original(*args)
+
+    async with admin:
+        first = await admin.post(url(tenant, "commands"), json=asked("record_lost_run", item))
+        monkeypatch.setattr(recovery, "_mine", raced)
+        again = await admin.post(url(tenant, "commands"), json=asked("record_lost_run", item))
+        missed.clear()
+        reused = await admin.post(url(tenant, "commands"), json=asked("record_lost_run", other))
+    assert (first.status_code, again.status_code, again.json()["id"]) == (202, 200, first.json()["id"])
+    assert (reused.status_code, reused.json()) == (409, {"error": "idempotency_key_reused"})
