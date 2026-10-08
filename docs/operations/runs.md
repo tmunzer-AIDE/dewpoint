@@ -268,12 +268,12 @@ over when it goes). It asks Temporal about each request at most once every 30 se
 
 ### Items that keep failing
 
-A request, event or sub-run that a pass can't settle because of an unexpected failure (a bug, or an answer no rule
-above classifies, such as Temporal refusing a cancel) is counted for that kind of work alone: dispatching it,
-reconciling it (by its request's phase: still `starting`, its run open, its slot held), sending its cancel, matching
-an event, or settling an orphaned sub-run. Each failure is logged by its type (`dispatch_failed`, `reconcile_failed`,
-`cancel_unsent`, `event_match_failed`), and the pass leaves the item 1, 2, 4, 8, 16, then 30 minutes before trying it
-again, going on with the others meanwhile.
+A request, event or sub-run that a pass can't settle because of an unexpected failure (a bug, or Temporal refusing
+this item, a cancel say) is counted for that kind of work alone: dispatching it, reconciling it (by its request's
+phase: still `starting`, its run open, its slot held), sending its cancel, matching an event, or settling an orphaned
+sub-run. Each failure is logged by its type (`dispatch_failed`, `reconcile_failed`, `cancel_unsent`,
+`event_match_failed`), and the pass leaves the item 1, 2, 4, 8, 16, then 30 minutes before trying it again, going on
+with the others meanwhile.
 
 The 7th failure in a row, about an hour after the first, **holds** the item. It's alerted on once, with the tenant,
 the item and the last error's type: `dispatch_held`, `reconcile_starting_held`, `reconcile_open_held`,
@@ -283,8 +283,10 @@ in every phase.
 
 What isn't counted keeps its own handling:
 
-- Temporal not answering, or too late to tell (`UNAVAILABLE`, `DEADLINE_EXCEEDED`, `RESOURCE_EXHAUSTED`,
-  `CANCELLED`), a `NOT_FOUND` from a namespace that doesn't answer, a timeout, and the database failing;
+- anything Temporal answers but a refusal of this item (`INVALID_ARGUMENT`, `FAILED_PRECONDITION`, `OUT_OF_RANGE`,
+  `ALREADY_EXISTS`, which count): not answering or too late to tell, its own fault or an authorizer's
+  (`PERMISSION_DENIED`, `UNAUTHENTICATED`), which would hold every item alike; a `NOT_FOUND` from a namespace that
+  doesn't answer; a timeout; and the database failing;
 - a refused start, which counts in its request's attempts, and an event's own failure, which counts in the event's.
 
 A hold for one kind never stops another's work on the same item: a request whose cancel is held still ends through

@@ -22,8 +22,12 @@ from tests.core.claims.test_service import a_tenant, statements
     [
         (RuntimeError("a bug"), True),
         (KeyError("a bug"), True),
-        (RPCError("refused", RPCStatusCode.INVALID_ARGUMENT, b""), True),
-        (RPCError("refused", RPCStatusCode.PERMISSION_DENIED, b""), True),
+        (RPCError("refused", RPCStatusCode.INVALID_ARGUMENT, b""), True),  # a refusal of this item's own
+        (RPCError("refused", RPCStatusCode.FAILED_PRECONDITION, b""), True),
+        (RPCError("denied", RPCStatusCode.PERMISSION_DENIED, b""), False),  # the platform's, not the item's (review I3)
+        (RPCError("unauthenticated", RPCStatusCode.UNAUTHENTICATED, b""), False),
+        (RPCError("internal", RPCStatusCode.INTERNAL, b""), False),
+        (RPCError("unknown", RPCStatusCode.UNKNOWN, b""), False),
         (RPCError("down", RPCStatusCode.UNAVAILABLE, b""), False),
         (RPCError("slow", RPCStatusCode.DEADLINE_EXCEEDED, b""), False),
         (RPCError("busy", RPCStatusCode.RESOURCE_EXHAUSTED, b""), False),

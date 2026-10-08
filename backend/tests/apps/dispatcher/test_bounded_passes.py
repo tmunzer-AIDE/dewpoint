@@ -177,12 +177,13 @@ async def test_a_success_clears_its_kinds_count_and_only_its_own(
 @pytest.mark.parametrize(
     ("error", "counted"),
     [
-        (RPCError("refused", RPCStatusCode.PERMISSION_DENIED, b""), True),
+        (RPCError("refused", RPCStatusCode.FAILED_PRECONDITION, b""), True),
         (RuntimeError("a bug"), True),
         (RPCError("down", RPCStatusCode.UNAVAILABLE, b""), False),
         (RPCError("gone, or the namespace isn't answering", RPCStatusCode.NOT_FOUND, b""), False),
+        (RPCError("an authorizer's fault", RPCStatusCode.PERMISSION_DENIED, b""), False),  # every cancel's alike
     ],
-    ids=["refused", "bug", "unanswered", "not_found_unconfirmed"],
+    ids=["refused", "bug", "unanswered", "not_found_unconfirmed", "platform_denied"],
 )
 async def test_a_cancel_that_fails_to_send_is_counted_unless_temporals_answer_is_uncertain(
     owner_sessionmaker, ingress_sessionmaker, dispatch_sessionmaker, stand_in, monkeypatch, error, counted
@@ -205,7 +206,7 @@ async def test_a_held_cancel_stays_requested_and_is_never_shown_sent(
 ) -> None:  # fmt: skip
     spec, work, client = stand_in
     _, item = await spec.made(owner_sessionmaker, ingress_sessionmaker, await tenant(owner_sessionmaker))
-    work.failing = RPCError("refused", RPCStatusCode.PERMISSION_DENIED, b"")
+    work.failing = RPCError("refused", RPCStatusCode.FAILED_PRECONDITION, b"")
     for _ in range(failures.BOUND + 1):
         await spec.once(dispatch_sessionmaker, client)
         await due(owner_sessionmaker, spec)

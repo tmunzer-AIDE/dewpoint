@@ -8,7 +8,8 @@ After a failure the item waits 1, 2, 4, 8, 16 and then 30 minutes; the 7th conse
 first, holds it, alerting once, until an operator releases it. A success clears its kind's count. What isn't a failure
 of the item is never counted: a database or network outage, an uncertain Temporal answer (each keeps its own handling),
 and a confirmed refusal or an event's own failure, which the item's attempts count. A failure's record keeps the
-error's type, never its text."""
+error's type, never its text. Of Temporal's answers, only a refusal of this item (an invalid argument, a failed
+precondition) counts: an authorizer's or its own fault would hold every item alike."""
 
 import uuid
 from collections.abc import Iterable
@@ -28,9 +29,10 @@ DISPATCH, CANCEL, MATCH, SUBRUN = "dispatch", "cancel", "match", "subrun"
 RECONCILE = {"starting": "reconcile_starting", "open": "reconcile_open", "slot": "reconcile_slot"}
 BOUND = 7
 DELAYS = tuple(timedelta(minutes=m) for m in (1, 2, 4, 8, 16, 30))  # after the 1st to the 6th
-# Temporal not answering, or answering too late to tell: whatever was asked may yet have happened
-UNCERTAIN = frozenset({RPCStatusCode.UNAVAILABLE, RPCStatusCode.DEADLINE_EXCEEDED, RPCStatusCode.RESOURCE_EXHAUSTED,
-                       RPCStatusCode.CANCELLED})  # fmt: skip
+# What Temporal says of this item alone: anything else it answers (not answering, too late, an authorizer's or its own
+# fault) is the platform's or uncertain, and holds no item (the fresh M3 review's I3)
+REFUSED = frozenset({RPCStatusCode.INVALID_ARGUMENT, RPCStatusCode.FAILED_PRECONDITION, RPCStatusCode.OUT_OF_RANGE,
+                     RPCStatusCode.ALREADY_EXISTS})  # fmt: skip
 
 _FAILED = text(
     "INSERT INTO work_failures AS f (tenant_id, kind, item_id, errors, last_error, due_at) "
@@ -44,10 +46,10 @@ _CLEARED = text("SELECT work_failures_clear(:k, :t, :i)")  # by tenant and item,
 
 
 def counted(e: BaseException) -> bool:
-    """Whether `e` is a failure of the item's own: a bug, or anything unclassified."""
+    """Whether `e` is a failure of the item's own: a bug, anything unclassified, or Temporal refusing this item."""
     if unavailable(e) or isinstance(e, TimeoutError):
         return False
-    return not (isinstance(e, RPCError) and e.status in UNCERTAIN)
+    return e.status in REFUSED if isinstance(e, RPCError) else True
 
 
 async def failed(
