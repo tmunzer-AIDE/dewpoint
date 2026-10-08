@@ -210,13 +210,18 @@ development machine, **not production capacity**:
   event admitted exactly one request a binding (8,000 of 8,000 at fan-out 20). **At fan-out 20 one dispatcher drains
   3.8 events a second, below the default endpoint and tenant rates of 10**: the rates are not yet set for it;
 - **events to runs, with a real Temporal** (`tests/probes/test_ingress_starts.py`: a CLI dev server, a versioned engine
-  worker, one dispatcher a cycle at a time, every other limit at its default, 2026-10-08): **a tenant's runs start
-  about 0.9 a second, whatever the fan-out**, since a dispatcher starts a tenant's oldest due request, one a cycle. At
-  fan-out 1, 40 events became 40 runs in 46 s (from an event's arrival to its run's start: 24 s at the median, 45 s at
-  most); at fan-out 20, 5 events became 100 runs in 110 s (56 s at the median, 109 s at most). A tenant sustains about
-  0.9 events a second at fan-out 1 and one every 22 seconds at fan-out 20: **the default rates of 10 events a second
-  are 11 to 220 times what its starts keep up with**. Past that, events are accepted and matched, and their requests
-  wait queued, each burst's last one longer. The rates come down, or the start path speeds up: the owner's decision;
+  worker, one dispatcher a cycle at a time, every other limit at its default, 200 short runs a case, 2026-10-09):
+  since a dispatcher takes a tenant's next due request in the same cycle once it has started one
+  ([runs](runs.md#the-dispatcher)), **a tenant's runs start about 8 to 11 a second**: 200 events became 200 runs in 25.5 s at fan-out 1 (7.9 a second;
+  from an event's arrival to its run's start, 15 s at the median, 24.5 s at most), 10 events 200 runs in 21 s at
+  fan-out 20 (9.5 a second), and 17.9 s (11.2 a second) with slots enough that only the dispatcher bounded them. Each
+  start costs the dispatcher about 35 ms, one at a time, so one dispatcher starts at most about 28 a second, for all
+  its tenants together, and about half that with its one-second sleep between cycles. Before, one a cycle, a tenant's
+  runs started about 0.9 a second whatever the fan-out (40 runs in 46 s at fan-out 1, 100 in 110 s at fan-out 20,
+  2026-10-08). **The default rates of 10 events a second aren't sustainable end to end**: at fan-out 1 a tenant alone
+  on its dispatcher keeps up with about 8 events a second; at fan-out 20, one every two seconds. Past that, events are
+  accepted and matched, and their requests wait queued, without bound: lower rates and a backlog policy are the
+  owner's decision;
 - **each limit on its own** (`buckets`, `quotas`), at its default: every rate bucket accepted what its burst and rate
   allow over the time taken, within one call (an endpoint's events 1,029 of 1,030; its bytes 15.5 of 16.0 MiB; a
   tenant's events 5,000 of 5,030, in calls of 100 events, so the 30 refilled never made a whole one; its bytes 76 of
