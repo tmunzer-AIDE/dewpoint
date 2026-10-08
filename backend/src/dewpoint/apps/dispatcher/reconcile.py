@@ -103,7 +103,6 @@ async def reconcile_once(
             )
         ).all()
     counts: Counter[str] = Counter()
-    done: list[tuple[uuid.UUID, uuid.UUID]] = []
     settled: list[tuple[uuid.UUID, uuid.UUID]] = []
     with budget.passing("reconcile") as admitted:
         for tenant_id, request_id, kind in admitted(picked, key=lambda row: row[1]):
@@ -121,11 +120,10 @@ async def reconcile_once(
                 await _checked_alone(sessionmaker, tenant_id, request_id)
                 await failures.failed(sessionmaker, tenant_id, failures.RECONCILE[kind], request_id, e)  # by phase
                 continue
-            done.append((tenant_id, request_id))
-            if happened != "unresolved":
+            if happened != "unresolved":  # an uncertain answer is neither: a bug's count goes on across it
                 settled.append((tenant_id, request_id))
             counts[happened] += 1
-    await failures.cleared(sessionmaker, failures.RECONCILE.values(), done)  # a phase settled: every phase's count
+    await failures.cleared(sessionmaker, failures.RECONCILE.values(), settled)  # a phase settled: every phase's count
     await recovery.resolved(sessionmaker, recovery.REQUEST, settled)  # Temporal answered: nothing left to recover
     admitted.reported(counts, full=len(picked) >= BATCH)
     return dict(counts)
@@ -354,7 +352,6 @@ async def reconcile_subruns(sessionmaker: async_sessionmaker[AsyncSession], clie
             )
         ).all()
     counts: Counter[str] = Counter()
-    done: list[tuple[uuid.UUID, uuid.UUID]] = []
     settled: list[tuple[uuid.UUID, uuid.UUID]] = []
     with budget.passing("subruns") as admitted:
         for tenant_id, run_id in admitted(picked, key=lambda row: row[1]):
@@ -367,11 +364,10 @@ async def reconcile_subruns(sessionmaker: async_sessionmaker[AsyncSession], clie
                 await _subrun_checked_alone(sessionmaker, tenant_id, run_id)
                 await failures.failed(sessionmaker, tenant_id, failures.SUBRUN, run_id, e)  # bounded (D10)
                 continue
-            done.append((tenant_id, run_id))
-            if happened != "unresolved":
+            if happened != "unresolved":  # an uncertain answer is neither: a bug's count goes on across it
                 settled.append((tenant_id, run_id))
             counts[happened] += 1
-    await failures.cleared(sessionmaker, [failures.SUBRUN], done)
+    await failures.cleared(sessionmaker, [failures.SUBRUN], settled)
     await recovery.resolved(sessionmaker, [recovery.SUBRUN_HISTORY_MISSING], settled)
     admitted.reported(counts, full=len(picked) >= BATCH)
     return dict(counts)

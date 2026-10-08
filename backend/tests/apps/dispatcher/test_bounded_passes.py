@@ -244,3 +244,22 @@ async def _workflow(owner: Any, request_id: uuid.UUID) -> dict[str, Any]:
                                 {"i": request_id})  # fmt: skip
         w, v = found.one()
     return {"w": w, "v": v}
+
+
+@pytest.mark.parametrize(
+    "stand_in", ["reconcile_starting", "reconcile_open", "reconcile_slot", "subrun"], indirect=True
+)
+async def test_an_uncertain_answer_leaves_the_items_count_as_it_was(
+    owner_sessionmaker, ingress_sessionmaker, dispatch_sessionmaker, stand_in
+) -> None:  # fmt: skip
+    """The owner's ruling on the M3 checkpoint: "unresolved" (Temporal not answering, or its history gone) is neither a
+    failure nor a success: a bug's consecutive count goes on across it, never starting over."""
+    spec, work, client = stand_in
+    tenant_id, item = await spec.made(owner_sessionmaker, ingress_sessionmaker, await tenant(owner_sessionmaker))
+    await sql(owner_sessionmaker, "insert into work_failures (tenant_id, kind, item_id, errors, last_error, due_at) "
+              "values (:t, :k, :i, 3, 'RuntimeError', now() - interval '1 second')", t=tenant_id, k=spec.kind,
+              i=item)  # fmt: skip
+    work.outcome = "unresolved"
+    await spec.once(dispatch_sessionmaker, client)
+    assert work.calls == 1
+    assert await count(owner_sessionmaker, spec.kind, item) == (3, False)
