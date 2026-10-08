@@ -318,7 +318,10 @@ A worker process opens at most 23 database connections: a pool of 5 with an over
 health check, the plugin calls' `LISTEN` and each call's own short transactions (its claim, its key lookup and
 sealing, its answer), and a pool of 8 for the plugin calls' guards, one per call in flight, each held across the whole
 call so that erasure can't start beneath it. A call never holds an activity's connection across its hook, but its
-short transactions share the activities' pool; their load there is unmeasured. Every other process opens at most 15
+short transactions share the activities' pool. Measured (`tests/probes/test_plugin_calls_pool.py`, a development
+machine, 2026-10-08): 30 activities projecting steps at once fill that pool alone (1,023 projections a second, 25 ms at
+the median, 67 at the 95th percentile); beside 8 plugin calls in flight they did 14% fewer (881 a second, 27 and 87
+ms). Every other process opens at most 15
 (a pool of 5 with an overflow of 10): each API process, each dispatcher, each ingress process, the retention process,
 and each CLI command while it runs. Size PostgreSQL's `max_connections` for their sum, plus headroom for migrations and
 operators: two workers, two API processes, a dispatcher, an ingress process and the retention process need at most
