@@ -10,9 +10,10 @@ the cutoff: an expired upload, and a schedule's tombstone once the sync recorded
 cutoff, and not counted: a tick's record of its own ids after 31 days (2b-4a M4; identifiers only, the erasure's firing
 inventory, kept while Temporal may keep its execution).
 
-One sweep runs at a time. Each batch counts what it deleted, in its own transaction, so a sweep that stops loses no
-count: resumed, it audits each active tenant once, with counts only, zero counts included. A sweep is recorded (start,
-end, success, lag), and its records go after 30 days. The cutoff is reckoned on the database's clock."""
+One sweep runs at a time; were two ever to, a tenant's batches still delete its trees and requests in turn, never in a
+deadlock. Each batch counts what it deleted, in its own transaction, so a sweep that stops loses no count: resumed, it
+audits each active tenant once, with counts only, zero counts included. A sweep is recorded (start, end, success, lag),
+and its records go after 30 days. The cutoff is reckoned on the database's clock."""
 
 import uuid
 from collections.abc import Awaitable, Callable
@@ -34,6 +35,7 @@ BATCH = 100
 KEPT = timedelta(days=30)  # a sweep's record, then it goes
 _LOCK = text("SELECT pg_try_advisory_lock(hashtextextended('dewpoint:retention', 0))")
 _UNLOCK = text("SELECT pg_advisory_unlock(hashtextextended('dewpoint:retention', 0))")
+_IN_TURN = text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))")
 PENDING_REQUESTS = ("queued", "starting")
 ENDED_REQUESTS = ("cancelled", "refused", "dead")
 
@@ -117,11 +119,20 @@ async def _after_choosing() -> None:
     """A test's hook: two batches may choose the same rows before either deletes them."""
 
 
+async def _in_turn(s: AsyncSession, tenant_id: uuid.UUID) -> None:
+    """What a batch chose, deleted only once no other batch is deleting the tenant's trees or requests: the later one
+    then deletes what is left. Without the sweep's lock (lost, or bypassed), two batches' plans may visit the rows both
+    delete in different orders (an index's, the heap's), and each hold a row the other waits for: a deadlock. The role
+    can't take row locks here (it can't update these tables): the turn is the transaction's advisory lock."""
+    await s.execute(_IN_TURN, {"k": f"dewpoint:retention:{tenant_id}"})
+
+
 async def _trees(s: AsyncSession, tenant_id: uuid.UUID, cutoff: datetime, n: int) -> tuple[int, int]:
     roots: list[uuid.UUID] = list((await s.execute(_ROOTS, {"cutoff": cutoff, "n": n})).scalars())
     if not roots:
         return 0, 0
     await _after_choosing()
+    await _in_turn(s, tenant_id)
     for table in _CLAIMS:
         await s.execute(text(f"DELETE FROM {table} WHERE root_run_id = ANY(:r)"), {"r": roots})  # noqa: S608
     # The request before its envelope (a restricted key), never one still pending: none is, as chosen.
@@ -137,6 +148,7 @@ async def _unstarted(s: AsyncSession, tenant_id: uuid.UUID, cutoff: datetime, n:
     if not ids:
         return 0, 0
     await _after_choosing()
+    await _in_turn(s, tenant_id)
     deleted = await s.execute(text("DELETE FROM run_requests WHERE id = ANY(:r) RETURNING id"), {"r": ids})
     count = len(deleted.all())
     for table in ("run_inputs", *_CLAIMS):  # admission's claims and its seeded secret index, rooted at the request

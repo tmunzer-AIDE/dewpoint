@@ -129,6 +129,94 @@ async def test_two_batches_choosing_the_same_rows_count_each_deletion_once(
     assert sum(getattr(s, kind) for s in swept) == 3
 
 
+# A connection's plan for a batch's first delete may scan an index (the rows in their ids' order, as a custom plan on a
+# table without statistics does) or the heap (as inserted, as the generic plan does): here each batch's is forced.
+BY_INDEX = {"enable_seqscan": "off", "enable_bitmapscan": "off"}
+BY_HEAP = {"enable_indexscan": "off", "enable_indexonlyscan": "off", "enable_bitmapscan": "off"}
+FIRST = {"runs": ("claim_grants", "root_run_id"), "requests": ("run_requests", "id")}  # what a batch deletes first
+
+
+async def _lock_waiters(owner: Any, names: tuple[str, ...]) -> int:
+    waiting = text("select count(*) from pg_stat_activity where application_name = any(:n) "
+                   "and wait_event_type = 'Lock'")  # fmt: skip
+    async with owner() as s:
+        return int((await s.execute(waiting, {"n": list(names)})).scalar_one())
+
+
+@pytest.mark.parametrize("kind", ["runs", "requests"])
+async def test_two_batches_whose_plans_take_the_same_rows_in_opposite_orders_both_finish(
+    monkeypatch, owner_sessionmaker, pg_url, _test_users, kind: str
+) -> None:
+    """PR #63's CI flake: without the sweep's lock, two batches that chose the same rows deleted them as their plans
+    visited them, one in its index's order, one in the heap's, each taking a row the other then waited for (a
+    deadlock). Here the orders are opposite and a third transaction holds the middle row until both batches wait: the
+    tenant's batches delete in turn, so both finish, and each deletion is counted once."""
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from dewpoint.core.db import make_sessionmaker, tenant_scope
+    from tests.conftest import _url_for
+
+    ctx = await tenant(owner_sessionmaker)
+    ids = sorted((uuid.uuid4() for _ in range(3)), reverse=True)  # inserted from the highest: the heap's order reversed
+    for i in ids:
+        if kind == "runs":
+            await tree(owner_sessionmaker, ctx, OLD, root=i)
+        else:
+            await request(owner_sessionmaker, ctx, "refused", OLD, request_id=i)
+    table, column = FIRST[kind]
+    engines = {
+        name: create_async_engine(
+            _url_for(pg_url, "dewpoint_retention"),
+            hide_parameters=True,
+            connect_args={"server_settings": {"application_name": name, **forced}},
+        )
+        for name, forced in (("retention-by-index", BY_INDEX), ("retention-by-heap", BY_HEAP))
+    }
+    makers = [make_sessionmaker(e) for e in engines.values()]
+    chosen, go = asyncio.Event(), asyncio.Event()
+    waiting = [0]
+
+    async def both_chose() -> None:
+        waiting[0] += 1
+        if waiting[0] == 2:
+            chosen.set()
+        await chosen.wait()
+        await go.wait()
+
+    monkeypatch.setattr(sweep, "_after_choosing", both_chose)
+    batches: list[asyncio.Task[sweep.Swept]] = []
+    try:
+        scans = []
+        for maker in makers:  # the premise: one plan scans the index, the other the heap
+            async with maker() as s, s.begin():
+                await tenant_scope(s, ctx["t"])
+                plan = (await s.execute(text(f"explain (format json) delete from {table} where {column} = any(:r)"),  # noqa: S608
+                                        {"r": ids})).scalar_one()  # fmt: skip
+                scans.append(plan[0]["Plan"]["Plans"][0]["Node Type"])
+        assert scans == ["Index Scan", "Seq Scan"]
+        async with owner_sessionmaker() as gate, gate.begin():
+            await gate.execute(text(f"select 1 from {table} where {column} = :m for update"), {"m": ids[1]})  # noqa: S608
+            batches += [asyncio.create_task(sweep.sweep_tenant(m, ctx["t"])) for m in makers]
+            await asyncio.wait_for(chosen.wait(), 10)
+            go.set()
+            for _ in range(500):  # until both batches wait: for the middle row, or one for the other
+                if await _lock_waiters(owner_sessionmaker, tuple(engines)) == 2:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("the batches didn't both wait")
+        swept = await asyncio.wait_for(asyncio.gather(*batches, return_exceptions=True), 20)  # both settled
+    finally:
+        go.set()
+        for b in batches:
+            b.cancel()
+        await asyncio.gather(*batches, return_exceptions=True)
+        for e in engines.values():
+            await e.dispose()
+    assert [type(s).__name__ for s in swept] == ["Swept", "Swept"], swept
+    assert sum(getattr(s, kind) for s in swept) == 3
+
+
 async def test_sweep_records_older_than_30_days_go(owner_sessionmaker, retention_sessionmaker) -> None:
     await sql(owner_sessionmaker, "insert into retention_sweeps (started_at, ended_at, succeeded, tenants, lag_s) "
               "values (now() - interval '31 days', now() - interval '31 days', true, 0, 0), "
