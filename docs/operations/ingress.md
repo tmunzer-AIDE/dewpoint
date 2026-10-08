@@ -202,8 +202,13 @@ development machine, **not production capacity**:
   matcher takes the endpoint's row and then the tenant's counter row `SKIP LOCKED`: one held elsewhere passes its event
   by (`busy` or `busy_tenant`, counted in the cycle's report), never waited on. A pass probes a busy endpoint or tenant
   once and passes its other events by, and the next pass's pick leaves out what the last found busy, so no run of busy
-  events, however long, starves the ones after it, and every other event keeps its tenant's order, oldest first. This
-  control is measured again before these numbers are replaced;
+  events, however long, starves the ones after it, and every other event keeps its tenant's order, oldest first;
+- **D9's acceptance** (`scaling`: one dispatcher, then two, each a process of its own, on 100 events each of four
+  independent tenants, 2026-10-08): a second dispatcher drains 1.75 times as fast at fan-out 1 (22.3 to 39.1 events a
+  second), 1.9 times at 5 (10.6 to 20.2) and 1.8 times at 20 (3.8 to 6.9). Every tenant's backlog drained sooner (at
+  fan-out 20, in 59 to 60 seconds against 105 to 108), none was left, the counters ended at zero pending, and each
+  event admitted exactly one request a binding (8,000 of 8,000 at fan-out 20). **At fan-out 20 one dispatcher drains
+  3.8 events a second, below the default endpoint and tenant rates of 10**: the rates are not yet set for it;
 - **each limit on its own** (`buckets`, `quotas`), at its default: every rate bucket accepted what its burst and rate
   allow over the time taken, within one call (an endpoint's events 1,029 of 1,030; its bytes 15.5 of 16.0 MiB; a
   tenant's events 5,000 of 5,030, in calls of 100 events, so the 30 refilled never made a whole one; its bytes 76 of

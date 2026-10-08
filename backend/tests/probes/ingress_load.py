@@ -17,7 +17,9 @@ with synthetic data only. From `backend/`:
 - `buckets`: each rate bucket (an endpoint's events and bytes, a tenant's events and bytes) at its default, on its own;
 - `quotas`: each pending and retained quota (events and bytes, an endpoint's and a tenant's) at its default, on its own;
 - `tenant-drain`: one tenant's endpoints drained together by one dispatcher or two (processes of their own), with two
-  tenants as the control: a tenant's default event rate stays below it.
+  tenants as the control: a tenant's default event rate stays below it;
+- `scaling`: D9's acceptance, one dispatcher and then two on equal backlogs of four independent tenants, at fan-outs
+  1, 5 and 20: the aggregate drain, each tenant's, what's left, the counters and the admissions.
 
 Numbers depend on the machine; record them with it."""
 
@@ -561,6 +563,59 @@ async def tenant_drain(db: Database) -> None:
         print(f"| {name} | {total} | {elapsed:.1f} s | {total / elapsed:.1f} |")
 
 
+SCALING_TENANTS, SCALING_EVENTS = 4, 100  # independent tenants, each with this backlog (D9: at least two)
+
+
+async def scaling(db: Database) -> None:
+    """D9's acceptance (the owner's ruling on the 2b-4 outline): one dispatcher and then two (each a process of its own,
+    its own loop), on equal backlogs of independent tenants, at fan-outs 1, 5 and 20 (proposed criteria: at least 1.5
+    times the aggregate drain; no tenant's backlog drained later than with one; none starved; the counters right;
+    each event admitted once a binding). A tenant's drain is the time from the dispatchers' start to its last event
+    matched, on the database's clock: its oldest event's age at worst. A fake Temporal, as `drain`."""
+    from sqlalchemy import text
+
+    from tests.apps.dispatcher.support import workers
+
+    owner = db.sessions()
+    await workers(owner)
+    print("| fan-out | dispatchers | events | elapsed | events/s | tenants' drains (s) | left | counters | admitted |")
+    print("|---|---|---|---|---|---|---|---|---|")
+    for fan_out in (1, 5, 20):
+        for dispatchers in (1, 2):
+            readies = [await _inbound(db, fan_out) for _ in range(SCALING_TENANTS)]
+            for ready in readies:
+                await _record(db, ready, SCALING_EVENTS, batch=50)
+            tenants = [r.tenant_id for r in readies]
+            async with owner() as s:
+                began = (await s.execute(text("select clock_timestamp()"))).scalar_one()
+            env = os.environ | {"PYTHONPATH": f"{BACKEND}/src:{BACKEND}"}
+            children = [subprocess.Popen([".venv/bin/python", "-m", "tests.probes.ingress_load", "dispatcher-loop",  # noqa: ASYNC220
+                                          db.role_url("dewpoint_dispatch")], cwd=BACKEND, env=env,
+                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                        for _ in range(dispatchers)]  # fmt: skip
+            spans = [tuple(float(v) for v in child.communicate()[0].split()[-2:]) for child in children]
+            elapsed = max(end for _, end in spans) - min(begin for begin, _ in spans)
+            async with owner() as s:
+                drains = (await s.execute(text(
+                    "select tenant_id, extract(epoch from max(ended_at) - :b) from inbound_events "
+                    "where tenant_id = any(:t) group by tenant_id"), {"b": began, "t": tenants})).all()  # fmt: skip
+                left = (await s.execute(text("select count(*) from inbound_events where tenant_id = any(:t) "
+                                             "and status = 'pending'"), {"t": tenants})).scalar_one()  # fmt: skip
+                counters = (await s.execute(text(
+                    "select coalesce(sum(pending_events), 0) + (select coalesce(sum(pending_events), 0) from "
+                    "webhook_endpoints where tenant_id = any(:t)) from tenant_event_counters "
+                    "where tenant_id = any(:t)"),
+                    {"t": tenants})).scalar_one()  # fmt: skip
+                admitted = (await s.execute(text(
+                    "select count(*), count(distinct (idempotency_key, workflow_id)) from run_requests "
+                    "where tenant_id = any(:t) and idempotency_key like 'evt:%'"), {"t": tenants})).one()  # fmt: skip
+            events = SCALING_TENANTS * SCALING_EVENTS
+            shown = ", ".join(f"{float(d):.1f}" for _, d in sorted(drains, key=lambda r: str(r[0])))
+            print(f"| {fan_out} | {dispatchers} | {events} | {elapsed:.1f} s | {events / elapsed:.1f} | {shown} | "
+                  f"{left} | {'0 pending' if counters == 0 else f'{counters} pending'} | "
+                  f"{admitted[0]} ({admitted[1]} distinct, {events * fan_out} expected) |")  # fmt: skip
+
+
 def replace_endpoint(ready: Any, endpoint_id: uuid.UUID) -> Any:
     return replace(ready, endpoint_id=endpoint_id)
 
@@ -601,7 +656,7 @@ async def dispatcher_loop(dispatch_url: str) -> None:
 
 PARTS: dict[str, Callable[[Database], Coroutine[Any, Any, None]]] = {
     "candidates": candidates, "ingress": ingress, "lock": lock, "drain": drain, "buckets": buckets, "quotas": quotas,
-    "tenant-drain": tenant_drain,
+    "tenant-drain": tenant_drain, "scaling": scaling,
 }  # fmt: skip
 
 
