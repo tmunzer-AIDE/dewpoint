@@ -74,3 +74,62 @@ async def test_views_of_a_large_value_within_the_caps_are_bound_within_a_byte_bu
         return await yield_timers(handle)
 
     assert await timers(1 << 20) >= await timers(1 << 40) + 5
+
+
+def issue_26(items: int) -> G:
+    """#26's reproduction: a filter whose every item binds the same plain string, past the local caps (so its views go
+    to `cel.evaluate`) and under the inline limit (so it stays plain)."""
+    g = G()
+    g.settings = {"input_schema": SCHEMA, "outputs": {"kept": ref("steps.f.output.count", default=-1),
+                                                      "code": ref("steps.f.error.code", default="none")}}  # fmt: skip
+    g.node("f", "flow.filter@1", {"items": list(range(items)), "predicate": cel("size(trigger.s) > item")},
+           on_error="continue")  # fmt: skip
+    return g
+
+
+async def request_bytes(handle: WorkflowHandle[Any, Any]) -> list[int]:
+    """Each `cel.evaluate` request's bytes, as the history holds them."""
+    return [
+        sum(len(p.data) for p in e.activity_task_scheduled_event_attributes.input.payloads)
+        async for e in handle.fetch_history_events()
+        if e.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED
+        and e.activity_task_scheduled_event_attributes.activity_type.name == "cel.evaluate"
+    ]
+
+
+@pytest.mark.parametrize("cache", [1000, 0], ids=["cached", "replaying every task"])
+async def test_issue_26s_shared_string_goes_to_the_evaluator_once_not_with_every_item(
+    env: WorkflowEnvironment, cache: int
+) -> None:  # fmt: skip
+    """#26: every binding set carried its own copy of the shared 65,500-character string, so 1,000 items sent about
+    64 MB, and Temporal terminated the run for its history's size (the time-skipping server doesn't: here the bytes
+    are measured). It's claimed once and every set carries its handle: 100 items send under 100 KB, not 6.5 MB, and
+    every item is evaluated; a replay of every task claims the same."""
+    store = MemoryStore()
+    async with workers(env.client, store, cache=cache):
+        handle = await start(env.client, store, issue_26(100), {"s": "x" * 65_500})
+        result = await asyncio.wait_for(handle.result(), 60)
+    assert (result.status, result.outputs) == ("succeeded", {"kept": 100, "code": "none"}), result
+    sent = await request_bytes(handle)
+    assert sent and sum(sent) < 100_000, sent
+
+
+@pytest.mark.parametrize(("value", "items"), [("x" * 200, 1_000), ("x" * 1_000, 20)], ids=["light", "few copies"])
+async def test_a_shared_value_stays_when_claiming_it_would_save_nothing(
+    env: WorkflowEnvironment, value: str, items: int
+) -> None:  # fmt: skip
+    """A shared value no heavier than its handle (`SHARED_MIN`), or whose copies add less than `SHARED_REPEAT`, stays
+    in every set: no claim is written."""
+    from dewpoint.engine.runtime.activities import CLAIMS_SPILL
+
+    store = MemoryStore()
+    g = issue_26(items)
+    g.settings["outputs"] = {"kept": ref("steps.f.output.count", default=-1)}
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {"s": value})
+        result = await asyncio.wait_for(handle.result(), 60)
+    assert result.status == "succeeded", result
+    spills = [e async for e in handle.fetch_history_events()
+              if e.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED
+              and e.activity_task_scheduled_event_attributes.activity_type.name == CLAIMS_SPILL]  # fmt: skip
+    assert spills == []

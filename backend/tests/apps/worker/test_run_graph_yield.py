@@ -40,14 +40,16 @@ class Recording(route.YieldBudget):
     """Records every charge under the workflow task it was made in (its history length). A replay makes the same
     charges again, for tasks already recorded: those aren't recorded twice."""
 
-    def charge(self, record: Any = None, *, nodes: int = 0, sent: int = 0, structure: int = 0) -> None:
+    def charge(
+        self, record: Any = None, *, nodes: int = 0, serialized: int = 0, sent: int = 0, structure: int = 0
+    ) -> None:
         if not workflow.unsafe.is_replaying():
             task = TASKS[workflow.info().get_current_history_length()]
             if nodes:
                 task.append(("bind", nodes))
             if record is not None:
                 task.append(("eval", record.work or 0))
-        super().charge(record, nodes=nodes, sent=sent, structure=structure)
+        super().charge(record, nodes=nodes, serialized=serialized, sent=sent, structure=structure)
 
 
 @pytest.fixture

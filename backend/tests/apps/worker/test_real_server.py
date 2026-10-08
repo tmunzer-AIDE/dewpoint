@@ -189,9 +189,15 @@ async def cel_requests(handle: WorkflowHandle[Any, Any]) -> list[int]:
     return out
 
 
-async def test_issue_15s_filter_splits_its_request_and_keeps_every_item(dev_env: WorkflowEnvironment) -> None:
+async def test_issue_15s_filter_splits_its_request_and_keeps_every_item(
+    dev_env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:  # fmt: skip
     """#15's reproduction: 1,500 items each binding a 3,000-character string made a 3 MB request, whose workflow task
-    retried until the run's deadline, or forever. It's split, and every item is evaluated."""
+    retried until the run's deadline, or forever. It's split, and every item is evaluated. Each set carries its own
+    copy here, as a value that isn't shared would be: a shared one is claimed once (#26)."""
+    from dewpoint.engine.runtime import execution
+
+    monkeypatch.setattr(execution, "SHARED_REPEAT", 1 << 62)
     client, store = dev_env.client, MemoryStore()
     g = G()
     g.settings = {"input_schema": strings("s"), "outputs": {"kept": cel("steps.f.output.count")}}
@@ -325,4 +331,17 @@ async def test_issue_18s_thousand_views_of_a_large_string_end_on_the_dev_server(
         handle = await start(client, store, issue_18(1_000), {"s": "x" * (1_800 * 1024)})
         result = await asyncio.wait_for(handle.result(), 120)
     assert (result.status, result.outputs) == ("succeeded", {"code": "input_too_large"}), result
+    assert await task_failures(handle) == []
+
+
+async def test_issue_26s_filter_over_a_large_plain_string_ends_on_the_dev_server(dev_env: WorkflowEnvironment) -> None:
+    """#26 at its real size on the dev server: 1,000 items each sending a copy of a 65,500-character string filled the
+    run's history until Temporal terminated it. It ends with the step's result, every item evaluated."""
+    from tests.apps.worker.test_run_graph_binding import issue_26
+
+    client, store = dev_env.client, MemoryStore()
+    async with serving(client, store):
+        handle = await start(client, store, issue_26(1_000), {"s": "x" * 65_500})
+        result = await asyncio.wait_for(handle.result(), 120)
+    assert (result.status, result.outputs) == ("succeeded", {"kept": 1_000, "code": "none"}), result
     assert await task_failures(handle) == []

@@ -49,8 +49,11 @@ async def requests(handle: WorkflowHandle[Any, Any]) -> list[int]:
 
 @pytest.fixture(autouse=True)
 def evaluator_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A build without local CEL: every expression goes to `cel.evaluate`."""
+    """A build without local CEL: every expression goes to `cel.evaluate`. And every set carries its own copy of the
+    values it binds, as values that aren't shared are sent: a shared one is claimed once (#26), and these tests size
+    the requests of copies."""
     monkeypatch.setattr(execution, "LOCAL_CEL_PROFILE", None)
+    monkeypatch.setattr(execution, "SHARED_REPEAT", 1 << 62)
 
 
 async def finished(
