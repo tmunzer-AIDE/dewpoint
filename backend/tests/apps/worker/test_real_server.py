@@ -35,11 +35,13 @@ from tests.support.plugins.testkit import TESTKIT
 
 
 @asynccontextmanager
-async def serving(client: Client, store: MemoryStore) -> AsyncIterator[None]:
-    """A build of this test's own, current: the dev server keeps the deployment's routing between tests."""
+async def serving(client: Client, store: MemoryStore, *, grace_s: float | None = None) -> AsyncIterator[None]:
+    """A build of this test's own, current: the dev server keeps the deployment's routing between tests. `grace_s`: how
+    long its stopping worker lets running attempts finish."""
     this = build("real")
     evaluator = Worker(client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(in_process, store)])
-    async with evaluator, engine_worker(client, store, [TESTKIT], settings(), build=this, identity=this):
+    grace = {} if grace_s is None else {"worker_shutdown_grace_s": grace_s}
+    async with evaluator, engine_worker(client, store, [TESTKIT], settings(**grace), build=this, identity=this):
         await set_current(client, this)
         yield
 
@@ -631,3 +633,49 @@ def test_issue_16s_acceptance_permits_only_a_recovered_force_close_by_the_server
     acceptance permits that alone, once a later task completed; any other failed task fails it, named with what
     arrived meanwhile (the events recorded after the failure, before the next task: kinds and code names only)."""
     assert unpermitted_task_failures(history) == found
+
+
+async def test_a_left_behind_runs_pending_units_are_cancelled_when_it_is_closed(
+    dev_env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:  # fmt: skip
+    """The owner's review of `8206a3e`: closed, a left-behind run skipped its drive loop's whole cleanup, its clock and
+    its outstanding units with it. It cancels them now, without awaiting (nothing it awaited could complete there), and
+    still acts on nothing in the active run: here a step's activity and a timer were outstanding."""
+    from temporalio import workflow
+
+    from dewpoint.engine.runtime import execution
+
+    client, stale_store, store = dev_env.client, MemoryStore(), MemoryStore()
+    stale_graph = graph().node("s", "testkit.slow@1", {"seconds": 600}).node("d", "flow.delay@1", {"duration_s": 3600})
+    async with serving(client, stale_store, grace_s=1):
+        stale = await start(client, stale_store, stale_graph, {})
+        await suspended(stale)
+    zombie = left_behind(run_id_of(stale), "RunGraph")
+    drive = zombie.cr_await  # the drive loop's own coroutine, where the run waits
+    units = {k: t for k, t in drive.cr_frame.f_locals["tasks"].items() if k[0] not in ("project", "cancelled")}
+    clock = drive.cr_frame.f_locals["clock"]
+    assert {k[0] for k in units} == {"step"} and len(units) == 2 and not clock.done(), units
+    raised: list[str] = []
+    real = execution.Execution._queue_settled
+
+    def settled(self: Any) -> Any:
+        if not raised and workflow.info().workflow_type == "RunGraph":
+            raised.append("closed")
+            try:
+                zombie.close()
+            except BaseException as e:  # noqa: BLE001
+                raised.append(type(e).__name__)
+        return real(self)
+
+    monkeypatch.setattr(execution.Execution, "_queue_settled", settled)
+    caplog.set_level(logging.WARNING)
+    async with serving(client, store):
+        handle = await start(
+            client, store, graph(v=ref("steps.e.output.value")).node("e", "testkit.echo@1", {"value": 1}), {}
+        )
+        result = await asyncio.wait_for(handle.result(), 60)
+    assert (result.status, result.outputs) == ("succeeded", {"v": 1}), result
+    cancelled = {"clock": clock.cancelling() > 0, "units": sorted(t.cancelling() > 0 for t in units.values())}
+    logged = [r.getMessage().split(" ", 1)[0] for r in caplog.records if "_internal_error" in r.getMessage()]
+    assert (raised, cancelled, logged) == (["closed"], {"clock": True, "units": [True, True]}, [])
+    await replays(handle)

@@ -452,9 +452,14 @@ class Execution:
         except GeneratorExit:
             # Closed, not cancelled: a stopping worker evicts none of the runs it cached, so this coroutine outlives
             # it, and whatever closes it later (the garbage collector) may do so while another run's workflow task is
-            # active on its thread, where a workflow call acts in that run. It ends here, acting on nothing: awaiting
-            # would have raised "coroutine ignored GeneratorExit", taken for a bug (the 2b-4b M2 suite's #16 failure).
+            # active on its thread, where a workflow call acts in that run. It cancels its own clock and units, which
+            # touches only this execution's tasks, and awaits nothing: awaiting would have raised "coroutine ignored
+            # GeneratorExit", taken for a bug (the 2b-4b M2 suite's #16 failure), and nothing awaited could complete.
             closing = True
+            clock.cancel()
+            for key, task in tasks.items():
+                if key[0] not in ("project", "cancelled"):
+                    task.cancel()
             raise
         finally:
             if not closing:
