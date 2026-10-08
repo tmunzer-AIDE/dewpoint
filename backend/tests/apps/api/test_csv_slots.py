@@ -120,3 +120,31 @@ async def test_a_rerun_keeping_its_input_takes_its_slot_before_reading_that_inpu
     done = await client.post(rerun_url, json={"mode": "live"}, headers={"Idempotency-Key": "again"})
     assert (done.status_code, read) == (202, ["input"]), done.text
     assert keyed_app.state.csv_slots.held_now == 0
+
+
+async def test_a_slot_is_held_until_the_requests_transaction_commits(
+    keyed_app, csv_ready, owner_sessionmaker, api_settings  # noqa: F811
+) -> None:  # fmt: skip
+    """The owner's ruling on the M3 checkpoint: the work it bounds goes on until the commit (the flush of the staged
+    file, the start's rows), so the slot is freed only after it."""
+    from sqlalchemy import event
+    from sqlalchemy.orm import Session
+
+    ctx, wf = csv_ready
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
+    keyed_app.state.csv_slots = CsvSlots(2)
+    seen: list[int] = []
+
+    def committed(_session: Any) -> None:
+        seen.append(keyed_app.state.csv_slots.held_now)
+
+    event.listen(Session, "after_commit", committed)
+    try:
+        upload = await uploaded(client, ctx, wf)
+        at_upload, seen[:] = list(seen), []
+        started = await client.post(runs_url(ctx, wf), json=csv_body(upload), headers={"Idempotency-Key": "held"})
+        assert started.status_code == 202, started.text
+    finally:
+        event.remove(Session, "after_commit", committed)
+    assert 1 in at_upload and 1 in seen  # the upload's commit, and the start's, inside their slot
+    assert keyed_app.state.csv_slots.held_now == 0

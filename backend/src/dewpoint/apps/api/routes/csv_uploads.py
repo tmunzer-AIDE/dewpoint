@@ -15,9 +15,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps import admission
-from dewpoint.apps.api.routes.run_requests import CSV_BUSY, get_csv_slots, get_keys, key_unusable
+from dewpoint.apps.api.routes.run_requests import csv_slot, get_keys, key_unusable, taken
 from dewpoint.apps.csv_input import CsvFileError, mapping_problems
-from dewpoint.apps.csv_slots import CsvBusyError
+from dewpoint.apps.csv_slots import Slot
 from dewpoint.apps.csv_uploads import byte_cap, declaration, save_default, stage
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.crypto.keys import KeySource
@@ -70,6 +70,7 @@ async def _read(request: Request, cap: int) -> bytes:
 async def upload_csv(
     workflow_id: uuid.UUID,
     request: Request,
+    slot: Slot = Depends(csv_slot, scope="function"),  # before the session: given back after its commit
     ctx: TenantContext = Depends(require(P.RUN_START)),
     db: AsyncSession = Depends(get_db, scope="function"),
     keys: KeySource = Depends(get_keys),
@@ -82,11 +83,8 @@ async def upload_csv(
     declared = request.headers.get("content-length", "")
     if declared.isdigit() and int(declared) > cap:
         raise HTTPException(413, detail=TOO_LARGE)
-    try:
-        with get_csv_slots(request).held():  # before its body is read: a parse at the caps holds ~90 MiB (2b-4b M3)
-            return await _staged(request, cap, db, keys, ctx, workflow_id, csv)
-    except CsvBusyError:
-        raise HTTPException(503, detail=CSV_BUSY, headers={"Retry-After": "1"}) from None
+    taken(slot)  # before its body is read: a parse at the caps holds ~90 MiB, through its commit (2b-4b M3)
+    return await _staged(request, cap, db, keys, ctx, workflow_id, csv)
 
 
 async def _staged(
