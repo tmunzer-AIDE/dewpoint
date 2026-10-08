@@ -258,27 +258,6 @@ over when it goes). It asks Temporal about each request at most once every 30 se
   `subrun_history_missing` is kept in `recovery_items` with its item, since when, and when it was last seen again. An
   item that resolves on its own (Temporal answers again, the start is verified, the run ends) loses its reasons. A
   start left `starting` is settled with an operator's command too.
-- **Recovering a sub-run whose history is gone by hand** (an exceptional recovery, as the database's owner, without an
-  audit entry: prefer the command):
-  1. Read the namespace the deployment recorded: `SELECT temporal_namespace FROM platform_settings;`.
-  2. Confirm Temporal has no execution under the sub-run's workflow id, `t:<tenant id>:run:<run id>`, in that
-     namespace: `temporal workflow describe --namespace <namespace> --workflow-id <workflow id>` answers `NotFound`.
-     Any other answer, or any doubt about the namespace: stop here.
-  3. Record its end in a transaction of its own, naming its tenant and its run, and see which row changed:
-
-     ```sql
-     BEGIN;
-     UPDATE runs SET status = 'failed', error_code = 'internal_error',
-                     error_message = 'Its history was gone before its end was recorded.', ended_at = now()
-     WHERE tenant_id = '<tenant id>' AND id = '<run id>' AND parent_run_id IS NOT NULL AND status = 'running'
-     RETURNING tenant_id, id, root_run_id, status, ended_at;
-     ```
-
-  4. Exactly one row must come back (`UPDATE 1`), the sub-run you named: then `COMMIT;`. Any other count: `ROLLBACK;`
-     and check the ids.
-
-  The reconciler stops asking about it, and its tree's retention, a key retirement's `open_runs` check and an erasure's
-  stage 50 go on.
 - **Cancels:** it sends each recorded cancel to Temporal, once.
 
 ### Items that keep failing
@@ -331,7 +310,7 @@ confirmed the loss (the namespace's retention, an erasure, a restore): required 
 | Command | Its reason | What it does once Temporal is asked |
 |---|---|---|
 | `record_lost_run` | `run_history_missing` | Absent: the run `failed` with `history_lost`, its steps still `running` closed `outcome_unconfirmed`, its slot released. |
-| `record_lost_subrun` | `subrun_history_missing` | Absent: the sub-run the same; it has no slot. |
+| `record_lost_subrun` | `subrun_history_missing` | Absent: the sub-run the same; it has no slot. Its tree's retention, a key retirement's `open_runs` check and an erasure's stage 50 then go on. |
 | `release_lost_slot` | `slot_history_missing` | Absent: the slot of a run whose row ended, released. |
 | `settle_ended` | `start_after_end`, `start_history_missing` | Terminal: the request `started`, and its run records the end Temporal reports if it has none. Absent, with evidence: the request `started`, its run's recorded end standing. |
 
