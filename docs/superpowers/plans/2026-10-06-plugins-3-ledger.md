@@ -1874,7 +1874,7 @@ M3) and L7 (a ruling):
   L3, L6, L7; simulate's still departs from D13's exact request); the full suite; push and PR.
 
 A technical review of 1eafe63 (pasted by the owner, 2026-10-08): no High; one Medium, in M1's fix; no technical
-closure. Fixed test-first, its protection checked by removing it (`FIX2_SHA`):
+closure. Fixed test-first, its protection checked by removing it (`e5d3ff6e`):
 - M1 (continued): a 201 whose body nests deeper than the JSON decoder's limit raised `RecursionError`, not
   `ValueError`: it escaped `_result()` and the create's handler, the worker took it for a retryable unexpected error,
   and under a read restriction (the search empty) each retry created another incident (the review reproduced two
