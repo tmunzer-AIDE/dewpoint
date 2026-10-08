@@ -312,3 +312,17 @@ async def test_issue_16s_run_too_large_to_carry_on_fails_never_its_task(
     assert result.status == "failed" and result.error is not None and result.error["code"] == SNAPSHOT_TOO_LARGE
     assert store.runs[run_id_of(handle)].error_code == SNAPSHOT_TOO_LARGE
     assert await continued_inputs(client, handle) == ([], [])
+
+
+async def test_issue_18s_thousand_views_of_a_large_string_end_on_the_dev_server(dev_env: WorkflowEnvironment) -> None:
+    """#18 at its real size on the dev server: 1,000 items each binding a 1.8 MiB string ended in a deadlocked workflow
+    task, retried, the run without a result. It ends with the step's result (`input_too_large`: the binding set alone
+    passes the request limit), no workflow task failed."""
+    from tests.apps.worker.test_run_graph_binding import issue_18
+
+    client, store = dev_env.client, MemoryStore()
+    async with serving(client, store):
+        handle = await start(client, store, issue_18(1_000), {"s": "x" * (1_800 * 1024)})
+        result = await asyncio.wait_for(handle.result(), 120)
+    assert (result.status, result.outputs) == ("succeeded", {"code": "input_too_large"}), result
+    assert await task_failures(handle) == []
