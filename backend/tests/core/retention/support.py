@@ -78,10 +78,12 @@ async def run(owner: Any, ctx: dict[str, Any], ago: timedelta | None, parent: uu
 
 
 async def tree(owner: Any, ctx: dict[str, Any], ago: timedelta | None, *, request_status: str | None = "started",
-               sub_ago: timedelta | None | str = "same") -> dict[str, uuid.UUID]:  # fmt: skip
-    """A run tree rooted in a run that ended `ago`: its request (`request_status`, or none, as a run from before
-    2b-2), a sub-run that ended with it (or `sub_ago`), a step of each, and claims of every kind on the tree."""
-    root = uuid.uuid4()
+               sub_ago: timedelta | None | str = "same",
+               root: uuid.UUID | None = None) -> dict[str, uuid.UUID]:  # fmt: skip
+    """A run tree rooted in a run (`root`, or a new one) that ended `ago`: its request (`request_status`, or none, as a
+    run from before 2b-2), a sub-run that ended with it (or `sub_ago`), a step of each, and claims of every kind on the
+    tree."""
+    root = root or uuid.uuid4()
     if request_status is not None:
         await request(owner, ctx, request_status, None, request_id=root)
     await run(owner, ctx, ago, run_id=root)
