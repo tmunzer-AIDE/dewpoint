@@ -1132,12 +1132,12 @@ class Execution:
         converter = workflow.payload_converter()
         handles: dict[int, Any] = {}
         for n, (key, value) in enumerate(candidates):
-            entry = {"id": str(uuid.uuid5(seed, str(n))), "value": value}
-            alone = SpillInput([entry], self.root_run_id, str(owner.id) if owner else None, iteration_key(scope))
+            claim = {"id": str(uuid.uuid5(seed, str(n))), "value": value}
+            alone = SpillInput([claim], self.root_run_id, str(owner.id) if owner else None, iteration_key(scope))
             if not fits(alone, converter):
                 continue  # one spill can't carry it whole: it stays, and a set binding it is refused as before
-            if await self._spill([entry], owner, scope) is None:
-                handles[key] = ClaimRef(entry["id"]).to_json()
+            if await self._spill([claim], owner, scope) is None:
+                handles[key] = ClaimRef(claim["id"]).to_json()
         if not handles:
             return task
 
