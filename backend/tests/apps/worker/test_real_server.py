@@ -345,3 +345,24 @@ async def test_issue_26s_filter_over_a_large_plain_string_ends_on_the_dev_server
         result = await asyncio.wait_for(handle.result(), 120)
     assert (result.status, result.outputs) == ("succeeded", {"kept": 1_000, "code": "none"}), result
     assert await task_failures(handle) == []
+
+
+async def test_a_fan_out_sharing_cant_shrink_fails_its_step_before_temporals_history_limit(
+    dev_env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:  # fmt: skip
+    """#26's backstop (D7: for other large fan-outs): #26's reproduction with every set carrying its own copy, as sets
+    whose values aren't shared do. About 64 MB of requests: Temporal terminated the run at its 50 MiB history limit
+    (after 30 requests). The step's requests stop once the run's history would pass `HISTORY_GUARD` (32 MiB): its
+    remaining items fail with `history_too_large`, the step with them, and the run ends, never terminated."""
+    from dewpoint.engine.runtime import execution
+    from tests.apps.worker.test_run_graph_binding import issue_26, request_bytes
+
+    monkeypatch.setattr(execution, "SHARED_REPEAT", 1 << 62)
+    client, store = dev_env.client, MemoryStore()
+    async with serving(client, store):
+        handle = await start(client, store, issue_26(1_000), {"s": "x" * 65_500})
+        result = await asyncio.wait_for(handle.result(), 120)
+    assert (result.status, result.outputs) == ("succeeded", {"kept": -1, "code": "history_too_large"}), result
+    sent = await request_bytes(handle)
+    print(f"backstop: {len(sent)} requests, {sum(sent):,} bytes sent")
+    assert sum(sent) <= execution.HISTORY_GUARD

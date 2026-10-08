@@ -532,7 +532,9 @@ its error class's either way.
 
 Step error codes include the plugin's own codes and `config_invalid`, `output_schema_violation` (an output holding the
 key `$claim` too), `unexpected_error`, `evaluation_error`, `type_mismatch`, `timeout`, `cel_profile_unavailable`,
-`input_too_large`, `item_cap_exceeded`, `iteration_cap_exceeded`, `node_type_unavailable` (the registry lists the node
+`input_too_large`, `history_too_large` (the step's requests to the CEL evaluator would take the run's history past
+32 MiB, under Temporal's limit, which would terminate the run: the rest are never sent), `item_cap_exceeded`,
+`iteration_cap_exceeded`, `node_type_unavailable` (the registry lists the node
 type, but no worker of this build runs it: install its plugin on the workers), `payload_too_large`,
 `claim_unavailable` (a claim the run may not read, that isn't there or that's nested deeper than 32 claims, or the
 step's output couldn't be stored as claims after the node ran: its effect happened, and its row says so),

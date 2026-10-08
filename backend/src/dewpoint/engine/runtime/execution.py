@@ -127,6 +127,11 @@ PROJECT_BYTES = 256 * 1024  # a projection's rows at most, as JSON: far below Te
 CEL_BATCH = 1_000  # binding sets per cel.evaluate request
 CEL_REQUEST_BYTES = 1_835_008  # a cel.evaluate request's JSON bytes, a margin under Temporal's 2 MiB limit (#15)
 REQUEST_TOO_LARGE = "The values this expression reads are too large to send to the CEL evaluator (over 1.75 MiB)."
+# What a run's history may hold before a step's CEL requests stop (#26's backstop, D7): Temporal terminates a run whose
+# history passes 50 MiB (its default, which the dev server enforced after 30 requests of 1.77 MB); this leaves room
+# for the rest of the execution to end, its continued run's input included
+HISTORY_GUARD = 32 * 1024 * 1024
+HISTORY_FULL = "The run's history can't hold more of this step's requests to the CEL evaluator (over 32 MiB)."
 FILTER_INLINE = 1_000  # a filter's items the workflow may evaluate itself; a larger list goes to cel.evaluate (spec §6)
 SUBFLOW_GRANT = 1_000  # a sub-flow's initial grant (spec §6)
 MAX_DEPTH = 5  # sub-flows nest at most this deep (spec §6; publish checks it too)
@@ -1016,6 +1021,11 @@ class Execution:
                 return out + [refused] * (count - start)
             chunk = resolve.CelTask(task.record, task.bindings[start:end], False)
             await self._yield_point(None, send=size)
+            if workflow.info().get_current_history_size() + self._task_budget().sent + size > HISTORY_GUARD:
+                # a fan-out sharing couldn't shrink (#26's backstop): its remaining sets are never sent, and the step
+                # fails cleanly, before Temporal would terminate the run for its history's size
+                refused = cel.Outcome(error=cel.HISTORY_TOO_LARGE, message=HISTORY_FULL)
+                return out + [refused] * (count - start)
             self._yield.charge(sent=size)
             try:
                 result = await workflow.execute_activity(

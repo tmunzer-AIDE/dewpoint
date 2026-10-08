@@ -64,4 +64,6 @@ Every evaluation ends in a value or a recorded outcome, never a retry: `timeout`
 connection drops, the answer is `busy`, or a reply breaks the protocol (it is never recorded as an outcome).
 
 A binding set too large to send within Temporal's payload limit (1.75 MiB, with a margin) is `input_too_large` too:
-the workflow never sends it.
+the workflow never sends it. A value several binding sets share (a filter's every item reading the same string) is
+sent once, as a claim the evaluator resolves, not with every set. And a step whose requests would take the run's
+history past 32 MiB (Temporal terminates a run at 50 MiB) sends no more: its remaining sets are `history_too_large`.
