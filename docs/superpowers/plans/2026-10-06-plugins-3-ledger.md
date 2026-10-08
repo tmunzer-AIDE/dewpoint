@@ -1261,3 +1261,5 @@ acceptance or push permission.
   and R4 change the promised behaviour rather than preserve it. A technical closure only: the revised null-body and
   link rulings, and every other 3c-1 ruling, still await the owner's sign-off; the creation-time vetting gap and the
   over-redaction note stay separate decisions.
+- The owner signed off this section's rulings, as amended and marked (2026-10-08), and authorized the full suite.
+  Push and PR are not authorized yet.
