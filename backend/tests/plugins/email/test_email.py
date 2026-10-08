@@ -18,6 +18,7 @@ from dewpoint.plugins.email import EMAIL, PLUGIN, SendMessage, render, verify
 from dewpoint.sdk import (
     AuthUnavailable,
     EgressRefused,
+    FatalError,
     MailRefused,
     NotSent,
     SideEffect,
@@ -139,7 +140,8 @@ async def test_a_send_goes_through_the_connection_to_its_recipients() -> None:
 @pytest.mark.parametrize(
     "to",
     [[], ["ops@example"], ["Ops <ops@example.com>"], ["ops@example.com\r\nRCPT TO:<x@example.com>"],
-     [f"u{i}@example.com" for i in range(51)]],
+     [f"u{i}@example.com" for i in range(51)], ["ops@example.com", "ops@example.com"],
+     ["=?utf-8?b?Q0VPIDxjZW9AY29ycC5leGFtcGxlPiw=?=@x.example.com"]],
 )  # fmt: skip
 def test_recipients_of_another_form_are_refused(to: list[str]) -> None:
     with pytest.raises(ValueError):
@@ -174,3 +176,37 @@ async def test_verify_probes_and_names_what_failed(error: Exception | None, deta
     conn = FakeMailConnection(smtp=FakeSmtp(error=error))
     result = await verify(None, conn)  # type: ignore[arg-type]
     assert (result.ok, result.detail) == (error is None, detail) and conn.smtp.probes == 1 and conn.smtp.sent == []
+
+
+def test_the_to_header_names_exactly_the_envelopes_recipients() -> None:
+    to = ["ops@example.com", "first.last+tag@mail.example.co.uk", "o'brien@example.com"]
+    got = parsed(render(message(), "alerts@example.com", None, to)[0])
+    assert [a.addr_spec for a in got["To"].addresses] == to
+
+
+def test_an_encoded_word_recipient_never_reaches_the_header_even_past_the_check() -> None:
+    """The To header is built from addresses, never parsed from a string a header would decode (the review's L3)."""
+    with pytest.raises(ValueError):
+        render(message(), "alerts@example.com", None, ["=?utf-8?b?Q0VPIDxjZW9AY29ycC5leGFtcGxlPiw=?=@x.example.com"])
+
+
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\x85", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e"])
+def test_every_line_break_in_a_title_becomes_a_space(separator: str) -> None:
+    for changes, subject in (({"title": f"a{separator}b"}, "a b"), ({"text": f"a{separator}b"}, "a")):  # first line
+        got = parsed(render(message(**changes), "alerts@example.com", f"n{separator}m", ["ops@example.com"])[0])
+        assert got["Subject"] == subject and got["From"].addresses[0].display_name == "n m"
+
+
+async def test_a_message_that_wont_render_fails_having_sent_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Any rendering failure is the node's own, before the connection sends anything: fatal, never unknown."""
+    import dewpoint.plugins.email as plugin
+
+    def broken(*args: Any) -> Any:
+        raise ValueError("header")
+
+    monkeypatch.setattr(plugin, "render", broken)
+    conn = FakeMailConnection()
+    config = SendMessage.Config.model_validate({"connection": str(conn.id), "text": "x", "to": ["ops@example.com"]})
+    with pytest.raises(FatalError) as raised:
+        await SendMessage().run(FakeStep(conn), config)  # type: ignore[arg-type]
+    assert raised.value.code == "email.invalid_message" and conn.smtp.sent == []

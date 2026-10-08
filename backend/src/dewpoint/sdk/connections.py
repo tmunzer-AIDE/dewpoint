@@ -26,11 +26,12 @@ PATH_RE = re.compile(r"^(/[A-Za-z0-9_~-][A-Za-z0-9._~-]{0,63}){1,16}$")  # segme
 FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # A mail address the runtime and plugins accept (plugins-3 D20): an ASCII dot-atom local part of at most 64 characters
 # at a domain of two or more labels, at most 254 characters in all (RFC 5321 §4.5.3.1, RFC 5322 §3.4.1); no quoted
-# local part, no address literal, no SMTPUTF8. Matched whole (`fullmatch`).
+# local part, no address literal, no SMTPUTF8, and no `=?` (a header would decode an RFC 2047 encoded word into names
+# the envelope never had: the 3c-2 review's L3). Matched whole (`fullmatch`).
 _ATEXT = r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]"
 _LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
-MAIL_ADDRESS = re.compile(
-    rf"(?=[^@]{{1,64}}@)(?=.{{3,254}}\Z){_ATEXT}+(?:\.{_ATEXT}+)*@{_LABEL}(?:\.{_LABEL})+"  # 254 bounds the domain too
+MAIL_ADDRESS = re.compile(  # the 254 bounds the domain too
+    rf"(?=[^@]{{1,64}}@)(?=.{{3,254}}\Z)(?![^@]*=\?){_ATEXT}+(?:\.{_ATEXT}+)*@{_LABEL}(?:\.{_LABEL})+"
 )
 SMTP_SECURITY = ("none", "starttls", "tls")
 SMTP_KEYS = frozenset({"host", "port", "security", "sender", "username", "password"})
@@ -175,7 +176,8 @@ def smtp_problems(name: str, smtp: Any, config_schema: Any, secret_schema: Any) 
     security = smtp["security"]
     prop = config.get(security) if isinstance(security, str) else None
     enum = prop.get("enum") if isinstance(prop, Mapping) else None
-    if prop is not None and (not isinstance(enum, list) or not enum or not set(enum) <= set(SMTP_SECURITY)):
+    known = isinstance(enum, list) and enum and all(isinstance(v, str) and v in SMTP_SECURITY for v in enum)
+    if prop is not None and not known:
         out.append(f"{where} security field {security!r} may only allow 'none', 'starttls', 'tls'")
     username, password = smtp["username"], smtp["password"]
     if (username is None) != (password is None):

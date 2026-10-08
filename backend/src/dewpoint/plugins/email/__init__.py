@@ -35,6 +35,7 @@ from dewpoint.sdk import (
     Connection,
     ConnectionType,
     EgressRefused,
+    FatalError,
     MailRefused,
     Node,
     Plugin,
@@ -139,7 +140,9 @@ EMAIL = ConnectionType(
 
 
 def _line(text: str) -> str:
-    return CONTROL.sub(" ", text).strip()
+    """One header line: every break `str.splitlines()` knows (U+2028 among them), then any control, as a space; a
+    header value holding one would be refused (the 3c-2 review's L6)."""
+    return CONTROL.sub(" ", " ".join(text.splitlines())).strip()
 
 
 def render(message: Message, sender: str, sender_name: str | None, to: list[str]) -> tuple[bytes, list[str]]:
@@ -159,7 +162,7 @@ def render(message: Message, sender: str, sender_name: str | None, to: list[str]
     parts.append(f"Severity: {message.severity.value}")
     mail = EmailMessage(policy=email.policy.SMTP)
     mail["From"] = Address(display_name=_line(sender_name or ""), addr_spec=sender)
-    mail["To"] = ", ".join(to)
+    mail["To"] = [Address(addr_spec=r) for r in to]  # the envelope's recipients exactly, never a parsed string
     mail["Subject"] = subject
     mail["Date"] = email.utils.format_datetime(datetime.now(UTC))
     mail["Message-ID"] = email.utils.make_msgid(domain=sender.rsplit("@", 1)[1].lower())  # never this host's name
@@ -177,7 +180,17 @@ class SendConfig(Message):
     def _recipients(cls, value: list[str]) -> list[str]:
         if not all(MAIL_ADDRESS.fullmatch(address) for address in value):
             raise ValueError("plain addresses, such as ops@example.com")
+        if len({address.lower() for address in value}) != len(value):
+            raise ValueError("each address once")
         return value
+
+
+def _rendered(config: "SendConfig", sender: str, name: str | None) -> tuple[bytes, list[str]]:
+    """The email, or the node's own failure before anything is sent: never an unknown outcome (the review's L6)."""
+    try:
+        return render(config, sender, name, config.to)
+    except (ValueError, TypeError):
+        raise FatalError("email.invalid_message", "The message can't be written as an email.") from None
 
 
 class SendOutput(BaseModel):
@@ -202,13 +215,13 @@ class SendMessage(Node):
     side_effect = SideEffect.AMBIGUOUS
 
     async def simulate(self, ctx: StepContext, config: SendConfig) -> SendOutput:
-        _, truncated = render(config, "alerts@example.invalid", None, config.to)  # the connection isn't opened
+        _, truncated = _rendered(config, "alerts@example.invalid", None)  # the connection isn't opened
         return SendOutput(sent=True, refused=[], truncated=truncated)
 
     async def run(self, ctx: StepContext, config: SendConfig) -> SendOutput:
         connection = await ctx.connection(config.connection)
         sender, name = connection.config["from_address"], connection.config.get("from_name")
-        raw, truncated = render(config, sender, name, config.to)
+        raw, truncated = _rendered(config, sender, name)
         refused = await connection.smtp.send(config.to, raw)
         return SendOutput(sent=True, refused=refused, truncated=truncated)
 

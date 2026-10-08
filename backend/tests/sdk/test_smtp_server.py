@@ -140,6 +140,8 @@ def _mail(change: Any) -> dict[str, Any]:
         (_mail(lambda t: t["smtp"].update(password="from_address")),
          "smtp password field 'from_address' isn't a secret field"),
         (_mail(lambda t: t["smtp"].update(port=7)), "smtp port field 7 isn't a required config field"),
+        (_mail(lambda t: t["config_schema"]["properties"]["security"].update(enum=[["tls"]])),
+         "may only allow 'none', 'starttls', 'tls'"),  # an unhashable item is reported, never raised
         (_mail(lambda t: t.update(auth={"kind": "header", "header": "X-Key", "template": "{password}"})),
          "an SMTP type has no HTTP host, auth header or stream"),
     ],
@@ -152,6 +154,7 @@ def test_an_smtp_type_is_checked_as_data(manifest: dict[str, Any], problem: str)
 @pytest.mark.parametrize(
     "address",
     ["ops@example.com", "first.last+tag@mail.example.co.uk", "o'brien@example.com", "a_b-c@ex-ample.com",
+     "a=b@example.com", "a?b@example.com",
      "x@" + "d" * 63 + ".com"],
 )  # fmt: skip
 def test_a_mail_address_is_ascii_dot_atom_at_a_domain(address: str) -> None:
@@ -163,7 +166,9 @@ def test_a_mail_address_is_ascii_dot_atom_at_a_domain(address: str) -> None:
     ["ops@example", "ops @example.com", '"q"@example.com', "ops@example.com\n", "<ops@example.com>", "ops@-ex.com",
      "ops@ex-.com", ".ops@example.com", "ops.@example.com", "o..ps@example.com", "ops@exa_mple.com", "opé@example.com",
      "ops@example.com,b@example.com", "ops@[127.0.0.1]", "l" * 65 + "@example.com", "x@" + "d" * 64 + ".com",
-     "x@" + ".".join(["d" * 63] * 4) + ".com", ""],
+     "x@" + ".".join(["d" * 63] * 4) + ".com", "",
+     "=?utf-8?b?Q0VPIDxjZW9AY29ycC5leGFtcGxlPiw=?=@x.example.com",  # an encoded word: a header would decode it
+     "a=?b@example.com"],
 )  # fmt: skip
 def test_any_other_address_is_refused(address: str) -> None:
     assert not MAIL_ADDRESS.fullmatch(address)

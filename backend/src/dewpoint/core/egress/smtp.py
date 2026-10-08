@@ -122,6 +122,8 @@ def _checked(target: SmtpTarget, recipients: Sequence[str] | None, message: byte
             raise InvalidRequestError("smtp")
         if not all(isinstance(r, str) and MAIL_ADDRESS.fullmatch(r) for r in recipients):
             raise InvalidRequestError("smtp")
+        if len({r.lower() for r in recipients}) != len(recipients):  # the review's L5: what was refused is by address
+            raise InvalidRequestError("smtp")
     if message is not None:
         if not isinstance(message, bytes) or not 0 < len(message) <= limits.max_message or b"\0" in message:
             raise InvalidRequestError("smtp")
@@ -276,13 +278,16 @@ class _Session:
             if code != 250:
                 raise _refusal("mail", code)
             refused: dict[str, int] = {}
+            accepted = 0
             for recipient in recipients:
                 code, _ = client.rcpt(recipient)
                 if code == 421:
                     raise _refusal("rcpt", code)
-                if code not in (250, 251):
+                if code in (250, 251):
+                    accepted += 1
+                else:
                     refused[recipient] = code
-            if len(refused) == len(recipients):  # nobody would get it: a transient refusal makes it worth a retry
+            if not accepted:  # nobody would get it: a transient refusal makes it worth a retry
                 codes = list(refused.values())
                 raise _refusal("rcpt", next((c for c in codes if 400 <= c < 500), codes[0]))
             code, _ = client.docmd("DATA")

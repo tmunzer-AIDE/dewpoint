@@ -15,7 +15,7 @@ import pytest
 
 from dewpoint.engine.registry.catalog import validate_plugin_manifest
 from dewpoint.plugins.syslog import BOM, LIMITS, PLUGIN, SYSLOG, SendMessage, frame, render
-from dewpoint.sdk import SideEffect
+from dewpoint.sdk import FatalError, SideEffect
 from dewpoint.sdk.messages import Message
 from tests.plugins.mist.fakes import FakeStep
 
@@ -178,3 +178,20 @@ async def test_simulating_renders_and_sends_nothing() -> None:
     value = SendMessage.Config.model_validate({"connection": str(conn.id), "text": "y" * 40_000})
     out = await SendMessage().simulate(step, value)  # type: ignore[arg-type]
     assert out.model_dump() == {"sent": True, "truncated": ["text"]} and step.opened == []
+
+
+@pytest.mark.parametrize("transport", ["udp", "tcp", "tls"])
+@pytest.mark.parametrize("fill", ["\U0001f600", "|", "\\", "="])
+def test_a_cef_line_never_exceeds_its_transports_size(transport: str, fill: str) -> None:
+    """The review's L4: a 600-emoji title made a UDP CEF line 2155 octets."""
+    line, cut = render(message(title=fill * 1000, text=fill * 40_000),
+                       config(format="cef", transport=transport, cef_event_class="e" * 300), NOW)  # fmt: skip
+    assert len(line) <= LIMITS[transport] and "title" in cut and "text" in cut
+    head = line.split(b" - - - ", 1)[1].decode().split("|msg=", 1)[0] + "|"  # the extension's pipes need no escaping
+    assert head.count("|") - head.count("\\|") == 7  # every header field's own pipe, none escaped away by a cut
+
+
+def test_an_event_class_too_long_for_udp_is_refused_before_sending() -> None:
+    with pytest.raises(FatalError) as raised:
+        render(message(), config(format="cef", transport="udp", cef_event_class="|" * 1023), NOW)
+    assert raised.value.code == "syslog.too_large"

@@ -201,6 +201,7 @@ async def test_no_server_means_nothing_was_sent() -> None:
         ([f"u{i}@example.com" for i in range(51)], MESSAGE, {}),
         (["ops@example.com\r\nRCPT TO:<x@evil.example.com>"], MESSAGE, {}),
         (["<ops@example.com>"], MESSAGE, {}),
+        (["ops@example.com", "ops@example.com"], MESSAGE, {}),  # a duplicate would muddle what was refused
         (["ops@example.com"], MESSAGE, {"sender": "alerts@example.com>\r\nRCPT TO:<x@evil.example.com"}),
         (["ops@example.com"], MESSAGE, {"host": "Mail.Test"}),
         (["ops@example.com"], MESSAGE, {"port": 0}),

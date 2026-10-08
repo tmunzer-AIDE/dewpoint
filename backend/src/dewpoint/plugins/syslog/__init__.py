@@ -19,14 +19,15 @@ Every send is ambiguous (D21): `sent` means the frame was handed over, never tha
 
 import re
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from dewpoint.sdk import ConnectionType, Node, Plugin, SideEffect, StepContext, connection_field
+from dewpoint.sdk import ConnectionType, FatalError, Node, Plugin, SideEffect, StepContext, connection_field
 from dewpoint.sdk.connections import HOST_RE
-from dewpoint.sdk.messages import Message, Severity, cut
+from dewpoint.sdk.messages import MARK, Message, Severity, cut
 
 VERSION = "1.0.0"
 BOM = b"\xef\xbb\xbf"
@@ -91,6 +92,24 @@ def _cef_value(text: str) -> str:
     return _flat(text).replace("\\", "\\\\").replace("=", "\\=")
 
 
+def _fitted(raw: str, max_chars: int, max_bytes: int, escape: Callable[[str], str]) -> tuple[str, bool]:
+    """`raw` escaped, within `max_chars` characters of it and `max_bytes` octets escaped: cut before an escape rather
+    than through one (a lone `\\` would escape the next field's pipe), and marked."""
+    flat = _flat(raw)
+    whole = escape(flat)
+    if len(flat) <= max_chars and len(whole.encode()) <= max_bytes:
+        return whole, False
+    kept: list[str] = []
+    size, budget = 0, max_bytes - len(MARK.encode())
+    for char in flat[: max(max_chars - 1, 0)]:
+        part = escape(char)
+        if size + len(part.encode()) > budget:
+            break
+        kept.append(part)
+        size += len(part.encode())
+    return "".join(kept) + MARK, True
+
+
 def _parts(message: Message, *, title: bool) -> str:
     parts = ([message.title] if title and message.title else []) + [message.text]
     parts += [f"{f.label}: {f.value}" for f in message.fields]
@@ -107,19 +126,19 @@ def render(message: Message, config: SyslogConfig, now: datetime) -> tuple[bytes
     budget = LIMITS[config.transport] - len(header)
     truncated: list[str] = []
     if config.format == "cef":
+        start = f"CEF:0|Dewpoint|Dewpoint|{VERSION}|{_cef_header(config.cef_event_class)}|"
+        end = f"|{CEF_SEVERITIES[message.severity]}|msg="
+        room = budget - len((start + end).encode())  # for the name and the message (the review's L4)
         named = message.title or message.text
-        name, name_cut = cut(_flat(named), CEF_NAME_MAX)
-        if name_cut:
-            truncated.append("title" if message.title else "text")
-        head = (f"CEF:0|Dewpoint|Dewpoint|{VERSION}|{_cef_header(config.cef_event_class)}|{_cef_header(name)}|"
-                f"{CEF_SEVERITIES[message.severity]}|msg=")  # fmt: skip
-        text, text_cut = cut(_parts(message, title=False), CEF_MSG_MAX)
-        value = _cef_value(text)
-        allowed = budget - len(head.encode())
-        body, bytes_cut = cut(value, allowed, unit="bytes")
-        if (text_cut or bytes_cut) and "text" not in truncated:
-            truncated.append("text")
-        return header + (head + body).encode(), truncated
+        text = _parts(message, title=False)
+        wanted = len(_cef_value(_flat(text)[:CEF_MSG_MAX]).encode())
+        name, name_cut = _fitted(named, CEF_NAME_MAX, max(room - wanted, room // 2), _cef_header)
+        body, body_cut = _fitted(text, CEF_MSG_MAX, room - len(name.encode()), _cef_value)
+        truncated += [n for n, was in (("title" if message.title else "text", name_cut), ("text", body_cut))
+                      if was and n not in truncated]  # fmt: skip
+        if room < 2 * len(MARK.encode()):  # within it, the name and the message always fit: each cut to what's left
+            raise FatalError("syslog.too_large", "The CEF event class leaves no room in the transport's size.")
+        return header + (start + name + end + body).encode(), truncated
     body, text_cut = cut(_parts(message, title=True), budget - len(BOM), unit="bytes")
     if text_cut:
         truncated.append("text")
