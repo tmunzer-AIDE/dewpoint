@@ -48,6 +48,13 @@ header's trusted end: right to left, past the proxies listed. Set `DEWPOINT_INGR
 proxies in front of ingress; anything wider lets a client choose its address, which the allowlist and the failure limit
 below rely on. An IPv6 client is limited by its /64.
 
+> **Behind a proxy, never leave `DEWPOINT_INGRESS_TRUSTED_PROXIES` empty.** Empty, ingress believes no
+> `X-Forwarded-For`, so every caller is the proxy: an allowlist naming your senders refuses them all, one naming the
+> proxy admits anyone who reaches it, and one sender's failures (a wrong secret, a body too large) count against the
+> proxy, so the failure limit refuses every other sender behind it too. Nothing then identifies the caller. The
+> Compose deployment sets it to the network `web` and ingress share; set it to your own proxies' addresses wherever
+> another proxy fronts ingress.
+
 ## Endpoints
 
 With `trigger.manage` (editors and up), under `/api/v1/t/{tenant}`; read with `workflow.view`:
