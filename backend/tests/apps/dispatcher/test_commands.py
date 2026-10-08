@@ -234,7 +234,7 @@ async def test_a_pass_carries_out_a_bounded_number_of_commands_oldest_first(
     ctx, admin = await tenant(owner_sessionmaker), await operator(owner_sessionmaker)
     made = [(await asked(owner_sessionmaker, ctx, "release_lost_slot", admin))[1] for _ in range(3)]
     monkeypatch.setattr(commands, "BATCH", 2)
-    assert await commands.commands_once(dispatch_sessionmaker, GONE) == {commands.SLOT_RELEASED: 2}
+    assert (await commands.commands_once(dispatch_sessionmaker, GONE)).get(commands.SLOT_RELEASED) == 2  # a full pick
     assert [(await decided(owner_sessionmaker, c))[0] for c in made] == ["applied", "applied", "pending"]
     assert await commands.commands_once(dispatch_sessionmaker, GONE) == {commands.SLOT_RELEASED: 1}
 
@@ -316,3 +316,26 @@ async def test_a_completed_execution_refuses_a_lost_history_command_and_an_unrea
     _, command = await asked(owner_sessionmaker, ctx, kind, admin, item=item)
     assert await commands.commands_once(dispatch_sessionmaker, client) == {outcome: 1}
     assert await decided(owner_sessionmaker, command) == ("refused", outcome, True)
+
+
+async def test_the_commands_pass_keeps_to_the_leaders_pass_budget(
+    owner_sessionmaker, dispatch_sessionmaker, monkeypatch
+) -> None:  # fmt: skip
+    """D16 (the owner's ruling on the M3 checkpoint): a pass takes no new command once it has run its budget, on a clock
+    of the test's own: each command takes 4 s of 10, so it carries out three of five, and the rest wait their turn."""
+    from dewpoint.apps.dispatcher import budget
+
+    ctx, admin = await tenant(owner_sessionmaker), await operator(owner_sessionmaker)
+    made = [(await asked(owner_sessionmaker, ctx, "release_lost_slot", admin))[1] for _ in range(5)]
+    now = [0.0]
+    monkeypatch.setattr(budget, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(budget, "PASS_S", 10.0)
+    original = commands._carried_out
+
+    async def slow(*args: Any, **kwargs: Any) -> Any:
+        now[0] += 4.0
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(commands, "_carried_out", slow)
+    assert (await commands.commands_once(dispatch_sessionmaker, GONE)).get(commands.SLOT_RELEASED) == 3
+    assert sorted([(await decided(owner_sessionmaker, c))[0] for c in made]) == ["applied"] * 3 + ["pending"] * 2

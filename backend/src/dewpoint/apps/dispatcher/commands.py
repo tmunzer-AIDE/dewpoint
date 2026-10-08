@@ -2,8 +2,8 @@
 """The operator's commands, carried out by the dispatcher's leader (the owner's rulings on the 2b-4b M3 design, rev 1
 and 2). A platform admin asks, through the API, for an item a pass left for recovery (its reason recorded in
 `recovery_items`) to be settled; the API records the command, pending, and the leader carries it out: the API has no
-Temporal client. Each pending command, oldest first and `BATCH` a pass, ids reaching it only through
-`pending_commands()`:
+Temporal client. Each pending command, oldest first and `BATCH` a pass within the leader's pass budget (D16), ids
+reaching it only through `pending_commands()`:
 
 1. is refused unless its operator is still an active platform admin, and its item's reason is still recorded since
    the time it was asked on (one that resolved, or resolved and recurred, makes the command stale);
@@ -36,7 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.client import Client
 from temporalio.service import RPCError, RPCStatusCode
 
-from dewpoint.apps.dispatcher import dispatch, reconcile
+from dewpoint.apps.dispatcher import budget, dispatch, reconcile
 from dewpoint.core.audit import service as audit
 from dewpoint.core.db import tenant_scope, unavailable
 from dewpoint.core.recovery import LOST
@@ -101,17 +101,19 @@ async def commands_once(sessionmaker: async_sessionmaker[AsyncSession], client: 
     async with sessionmaker() as s:
         picked = (await s.execute(_PENDING, {"n": BATCH})).all()
     counts: Counter[str] = Counter()
-    for tenant_id, command_id in picked:
-        try:
-            outcome = await _carried_out(sessionmaker, client, tenant_id, command_id)
-        except Exception as e:
-            log.error("operator_command_failed", command_id=str(command_id), error=type(e).__name__)
-            if unavailable(e) or isinstance(e, TimeoutError):  # the database (or the network) failing: next pass
-                counts["error"] += 1
-                continue
-            outcome = await _refused_alone(sessionmaker, tenant_id, command_id, INTERNAL_ERROR)
-        if outcome is not None:
-            counts[outcome] += 1
+    with budget.passing("commands") as admitted:  # the leader's pass budget (D16): a slow Temporal never holds it
+        for tenant_id, command_id in admitted(picked, key=lambda row: row[1]):
+            try:
+                outcome = await _carried_out(sessionmaker, client, tenant_id, command_id)
+            except Exception as e:
+                log.error("operator_command_failed", command_id=str(command_id), error=type(e).__name__)
+                if unavailable(e) or isinstance(e, TimeoutError):  # the database (or the network) failing: next pass
+                    counts["error"] += 1
+                    continue
+                outcome = await _refused_alone(sessionmaker, tenant_id, command_id, INTERNAL_ERROR)
+            if outcome is not None:
+                counts[outcome] += 1
+    admitted.reported(counts, full=len(picked) >= BATCH)
     return dict(counts)
 
 
