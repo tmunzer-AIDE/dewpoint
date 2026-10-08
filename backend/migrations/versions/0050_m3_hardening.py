@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """2b-4b M3's hardening (a provisional slot, on the lineage-reconciliation list with 0049).
 
-- **Matching pages past a busy prefix** (D9, the owner's correction): `event_candidates` takes a keyset cursor,
-  `(rank, received_at, event id)` of the last candidate a pass visited, and returns `rank` and `received_at` too, so
-  each pass goes on from where the last stopped and wraps around once a pick comes back short: an event behind any
-  number of busy ones is reached within a bounded number of passes. The one-argument form stays for a dispatcher of an
-  earlier build during a rollout. Still ids and ordering only, locking nothing.
+- **Matching pages past a busy prefix** (D9, the owner's correction; the fresh M3 review's I2): `event_candidates`
+  leaves out the endpoints and tenants the dispatcher's last pass found busy, so an event behind any number of busy
+  ones is reached by the next pass, by key rather than by position (a positional cursor over ranks the pass itself
+  shifts matched a tenant's events out of order). Every other event keeps its tenant's order, oldest first. The
+  one-argument form stays for a dispatcher of an earlier build during a rollout. Still ids and ordering only, locking
+  nothing.
 - **Bounded retry and recovery** (D10(1), the owner's rulings on the M3 design, rev 2), three tables of a tenant's:
   `work_failures`, an item's count of consecutive unexpected failures for one kind of work (a reconciliation's by its
   request's phase), its next try and its hold; `recovery_items`, an item a pass can't settle and why, since when;
@@ -137,23 +138,23 @@ $$""",
 CLEAR = [*_clear("work_failures", "kind"), *_clear("recovery_items", "reason")]
 
 CURSOR = [
-    """CREATE FUNCTION event_candidates(max_events integer, after_rank bigint, after_received timestamptz,
-                                 after_event uuid)
-RETURNS TABLE (tenant_id uuid, event_id uuid, endpoint_id uuid, rank bigint, received_at timestamptz)
+    """CREATE FUNCTION event_candidates(max_events integer, busy_endpoints uuid[], busy_tenants uuid[])
+RETURNS TABLE (tenant_id uuid, event_id uuid, endpoint_id uuid)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
-  SELECT ranked.tenant_id, ranked.id, ranked.endpoint_id, ranked.rank, ranked.received_at FROM (
+  SELECT ranked.tenant_id, ranked.id, ranked.endpoint_id FROM (
     SELECT e.tenant_id, e.id, e.endpoint_id, e.received_at,
            row_number() OVER (PARTITION BY e.tenant_id ORDER BY e.received_at, e.id) AS rank
       FROM public.inbound_events e
      WHERE e.status = 'pending' AND (e.next_attempt_at IS NULL OR e.next_attempt_at <= now())
+       AND NOT (e.endpoint_id = ANY(coalesce(busy_endpoints, '{}'::uuid[])))
+       AND NOT (e.tenant_id = ANY(coalesce(busy_tenants, '{}'::uuid[])))
        AND MATCH_SKIP
   ) ranked
-  WHERE after_rank IS NULL OR (ranked.rank, ranked.received_at, ranked.id) > (after_rank, after_received, after_event)
   ORDER BY ranked.rank, ranked.received_at, ranked.id
   LIMIT max_events
 $$""",
-    "REVOKE ALL ON FUNCTION event_candidates(integer, bigint, timestamptz, uuid) FROM PUBLIC",
-    "GRANT EXECUTE ON FUNCTION event_candidates(integer, bigint, timestamptz, uuid) TO dewpoint_dispatch",
+    "REVOKE ALL ON FUNCTION event_candidates(integer, uuid[], uuid[]) FROM PUBLIC",
+    "GRANT EXECUTE ON FUNCTION event_candidates(integer, uuid[], uuid[]) TO dewpoint_dispatch",
 ]
 CURSOR[0] = CURSOR[0].replace("MATCH_SKIP", _unless("'match'", "e.tenant_id", "e.id"))
 
@@ -318,8 +319,8 @@ def upgrade() -> None:
              done=exists("relation", "operator_commands"))  # fmt: skip
         for table in TABLES:
             step(conn, f"0050 {table} fenced", _fence(table), done=exists("trigger", f"{table}_fence", table))
-        step(conn, "0050 event_candidates cursor", *ungranted(*CURSOR),
-             done=exists("function", "event_candidates(integer, bigint, timestamptz, uuid)"))  # fmt: skip
+        step(conn, "0050 event_candidates past the busy", *ungranted(*CURSOR),
+             done=exists("function", "event_candidates(integer, uuid[], uuid[])"))  # fmt: skip
         step(conn, "0050 candidates skip failing items", *SKIPPING, *ungranted(*CLEAR),
              done=exists("function", "recovery_items_clear(text[], uuid[], uuid[])"))  # fmt: skip
         step(conn, "0050 the operator's functions", *ungranted(*OPERATOR),
@@ -337,4 +338,4 @@ def downgrade() -> None:
         op.execute(f"DROP FUNCTION {function}")
     for table in reversed(TABLES):
         op.drop_table(table)
-    op.execute("DROP FUNCTION event_candidates(integer, bigint, timestamptz, uuid)")
+    op.execute("DROP FUNCTION event_candidates(integer, uuid[], uuid[])")

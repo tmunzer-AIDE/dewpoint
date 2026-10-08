@@ -409,7 +409,7 @@ async def test_a_busy_tenant_counter_is_skipped_never_waited_on(
     async with owner_sessionmaker() as s, s.begin():
         await s.execute(text("select 1 from tenant_event_counters where tenant_id = :t for update"),
                         {"t": dev.tenant_id})  # fmt: skip
-        assert await asyncio.wait_for(matched(dispatch_sessionmaker, dev, event_id), 5) == matching.BUSY
+        assert await asyncio.wait_for(matched(dispatch_sessionmaker, dev, event_id), 5) == matching.BUSY_TENANT
     assert (await event_state(owner_sessionmaker, event_id))["status"] == "pending"
 
 
@@ -434,17 +434,41 @@ async def test_a_busy_prefix_of_any_length_never_starves_the_events_after_it(
     dev, owner_sessionmaker, ingress_sessionmaker, dispatch_sessionmaker
 ) -> None:  # fmt: skip
     """The owner's correction to D9: four batches' candidates aren't paging, since a busy prefix longer than them
-    starved every event after it, pass after pass. Each pass now goes on from where the last stopped (its rotation, a
-    cursor wrapping around once a pick comes back short). Nine events of a busy endpoint first, a pass of one, pages of
-    four: the tenth, another endpoint's, is tried by the third pass."""
+    starved every event after it, pass after pass. A pass probes a busy endpoint once and passes its other events by,
+    and the next pass's pick leaves out what the last found busy, however many events it holds. Nine events of a busy
+    endpoint first, a pass of one, pages of four: the tenth, another endpoint's, is tried by the second pass."""
     second = await endpoint(owner_sessionmaker, dev.tenant_id, dev.user_id)
     await send(ingress_sessionmaker, dev, *[ALARM | {"id": f"a-{n}"} for n in range(9)])
     [later] = await send(ingress_sessionmaker, dev, ALARM | {"id": "a-9"}, endpoint_id=second)
-    rotation, passes = matching.Rotation(), []
+    busy, passes = matching.Busy(), []
     async with owner_sessionmaker() as s, s.begin():
         await s.execute(text("select 1 from webhook_endpoints where id = :e for update"), {"e": dev.endpoint_id})
-        for _ in range(3):
+        for _ in range(2):
             passes.append(await asyncio.wait_for(matching.match_once(dispatch_sessionmaker, KEYS, matching.Verified(),
-                                                                     batch=1, rotation=rotation), 10))  # fmt: skip
-    assert [p.get(matching.BUSY, 0) for p in passes] == [4, 4, 1], passes
-    assert passes[2].get("unmatched") == 1 and (await event_state(owner_sessionmaker, later))["status"] == "unmatched"
+                                                                     batch=1, busy=busy), 10))  # fmt: skip
+    assert [(p.get(matching.BUSY, 0), p.get("unmatched", 0)) for p in passes] == [(4, 0), (0, 1)], passes
+    assert (await event_state(owner_sessionmaker, later))["status"] == "unmatched"
+
+
+async def test_a_tenants_backlog_is_matched_oldest_first_pass_after_pass(
+    dev, owner_sessionmaker, ingress_sessionmaker, dispatch_sessionmaker, monkeypatch
+) -> None:  # fmt: skip
+    """The fresh M3 review's I2: a backlog longer than a pass's batch, nothing busy, is matched in its order (received,
+    then id), every pass going on from the oldest left: never a later one before an earlier."""
+    await send(ingress_sessionmaker, dev, *[ALARM | {"id": f"a-{n}"} for n in range(60)])
+    await send(ingress_sessionmaker, dev, *[ALARM | {"id": f"b-{n}"} for n in range(60)])
+    order: list[uuid.UUID] = []
+    original = matching.match_event
+
+    async def recorded(*args: Any, event_id: uuid.UUID, **kwargs: Any) -> str:
+        order.append(event_id)
+        return await original(*args, event_id=event_id, **kwargs)
+
+    monkeypatch.setattr(matching, "match_event", recorded)
+    busy = matching.Busy()
+    for _ in range(3):
+        await matching.match_once(dispatch_sessionmaker, KEYS, matching.Verified(), batch=50, busy=busy)
+    async with owner_sessionmaker() as s:
+        oldest_first = text("select id from inbound_events where tenant_id = :t order by received_at, id")
+        expected = list((await s.execute(oldest_first, {"t": dev.tenant_id})).scalars())
+    assert order == expected

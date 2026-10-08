@@ -136,7 +136,7 @@ async def test_matching_skips_an_event_its_failures_leave(
     event = uuid.uuid4()
     await record(ingress_sessionmaker, endpoint_id, [(None, None, b"x")], ids=[event])
     await failing(owner_sessionmaker, t, kind, event, state)
-    found = await picked(dispatch_sessionmaker, "select event_id from event_candidates(100, null, null, null) "
+    found = await picked(dispatch_sessionmaker, "select event_id from event_candidates(100, null, null) "
                          "where tenant_id = :t", t=t)  # fmt: skip
     assert found == ([] if hidden else [event])
 

@@ -61,7 +61,7 @@ async def current_build(client: Client) -> str | None:
 async def cycle(
     sessionmaker: async_sessionmaker[AsyncSession], client: Client, keys: KeySource, settings: Settings, *,
     instance: uuid.UUID, reconciler: uuid.UUID, leader: Leader, rotation: Rotation, verified: Verified | None = None,
-    retention: evidence.Retention | None = None, pages: matching.Rotation | None = None,
+    retention: evidence.Retention | None = None, pages: matching.Busy | None = None,
 ) -> None:  # fmt: skip
     """One cycle: observe the current build, dispatch what's due, match inbound events, report; the leader also
     reconciles, sends cancels, carries out the operator's commands (2b-4b M3), keeps the Temporal Schedules in step
@@ -79,7 +79,7 @@ async def cycle(
     done = await dispatch_once(sessionmaker, client, keys, settings, build, rotation) if build else {}
     if build:
         matched = await match_once(sessionmaker, keys, verified if verified is not None else Verified(),
-                                   rotation=pages)  # fmt: skip
+                                   busy=pages)  # fmt: skip
         done.update({f"event_{k}": v for k, v in matched.items()})
     await report(sessionmaker, instance, build_id, {"current_build": bool(build), **done})
     if await leader.leading():
@@ -144,7 +144,7 @@ async def run(settings: Settings) -> None:
         instance = uuid.uuid4()
         reconciler, leader = uuid.uuid5(instance, "reconciler"), Leader(engine)
         log.info("dispatcher_started", instance=str(instance), build=this_build())
-        rotation, verified, retention, pages = Rotation(), Verified(), evidence.Retention(), matching.Rotation()
+        rotation, verified, retention, pages = Rotation(), Verified(), evidence.Retention(), matching.Busy()
 
         async def one() -> None:
             await cycle(sessionmaker, client, keys, settings, instance=instance, reconciler=reconciler, leader=leader,
