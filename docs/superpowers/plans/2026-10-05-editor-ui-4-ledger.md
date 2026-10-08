@@ -28,10 +28,13 @@ cover local work only: anything outward-facing (push, PR, issues) is confirmed i
 
 | Slot | Work |
 |---|---|
-| 0043 | B4b: `skipped` and `not_started` projection statuses |
-| 0044 | B8: draft and single-step simulation |
+| 0043 | Used on main (2b-4, `0043_fence_fails_closed`); it had been reserved for B4b, now 0048 |
+| 0044 | Used on main (`0044_orphan_backoff`); it had been reserved for B8, now 0049 |
 | 0045 | B7: per-attempt connection provenance, with sub-project 3 |
 | 0046 | B9: preview consumption and durable live-test execution |
+| 0047 | 4b: `runs_workflow_last` (ruling 72; merged in #60, chained after 0044: M36) |
+| 0048 | B4b: `skipped` and `not_started` projection statuses (the owner, 2026-10-08) |
+| 0049 | B8: draft and single-step simulation (the owner, 2026-10-08) |
 
 - One Alembic chain: before merging, the first unmerged migration's `down_revision` is reconciled with the actual head.
 - Deployed migrations are never rewritten; 0035–0042 are never altered.
@@ -1135,3 +1138,38 @@ M39. **The two corrections, and M38's wording withdrawn where it went too far.**
       required checks, `analyze (python)` and `analyze (javascript-typescript)`, which must run on #60's head.
     - Slots: 0048 (B4b) and 0049 (B8) are proposed replacements, not yet assigned; they wait for the owner's explicit
       assignment. 0045 (B7) and 0046 (B9) are unchanged.
+
+### Owner, after #60 merged (2026-10-08, in chat)
+
+"assign 0048 to B4b and 0049 to B8", and "M25 approved". #60 had merged green (441b854), with every check passing,
+both CodeQL analyses included. The slot table above now shows the assignment; 0045 and 0046 are unchanged.
+
+### M25, built (2026-10-08, branch fix/m25-sensitive-values from main 441b854)
+
+M40. **A value's schema problem is said without the value, and export refuses a sensitive literal** (M25, as the owner
+    ruled and approved).
+    - Both schema-error sites, `_schema_errors` (a step's literal config) and `_check_instance` (a literal value, and a
+      reference's default, against the field it fills), say `config.invalid` through `schema_messages.explain`. It
+      builds the message from the failing keyword and the schema's constraint, never from the value.
+      - For example: "Must be at most 3 characters long.", "Must be one of …", "Needs `token`.", and "Has a property
+        its schema doesn't allow: `extra`.". A property is named by its name, which is structure.
+      - A keyword without words of its own is named; the `false` schema says "Isn't allowed here."
+      - jsonschema reports a property-name failure under the inner keyword; its schema path says so, and so does the
+        message.
+    - Every `config.invalid` changes, sensitive field or not: no field shows a literal back. No test asserted
+      jsonschema's wording, and no recorded replay history holds a `config.invalid`.
+    - Two other messages were checked and quote no value: the workflow's own declared schemas (`settings.invalid_schema`
+      quotes the schema), and envelope syntax (fixed sentences, or a reference's own root name).
+    - Export applies the validator's own rule (`sensitive.literal`, from the same `check_draft` as `/validate`). The
+      draft is refused with `not_portable`, reason `sensitive_literal`, by step and field, beside any id problem: every
+      reason at once. The same field filled from the run's input exports.
+    - The frontend's export refusal says "it has a sensitive value written into a step (send)". There is no masking in
+      the browser: the server never sends the value.
+    - Tests, each watched failing first:
+      - the builder over 28 keyword cases with a sentinel string and number that never appear, a property named like a
+        keyword, the fallback, and jsonschema's own words quoting the value (the regression);
+      - each validator site's message, never the sentinel;
+      - the export refusal and its run-time-input counterpart;
+      - the frontend's words.
+    - The owner's ruling. - Messages say less than jsonschema did ("'ab' is too short" becomes "Must be at least 3
+      characters long."): the field, named beside each, shows where.
